@@ -4,7 +4,7 @@ Claude Code transcripts.
 
 from __future__ import annotations
 
-__version__ = "0.9.0"
+__version__ = "0.10.0"
 
 #: Bump when transcript-parsing logic changes in a way that could change
 #: results computed from a previously cached file.
