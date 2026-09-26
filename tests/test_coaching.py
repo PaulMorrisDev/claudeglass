@@ -407,6 +407,51 @@ def test_the_hook_runs_coaching_notes_with_capture_off(tmp_path):
     output = json.loads(out)["hookSpecificOutput"]
     assert output["hookEventName"] == "UserPromptSubmit"
     assert _kind(output["additionalContext"]) == "clear_context"
+    # A context hint depends on what the message is about, so it has no notice.
+    assert "systemMessage" not in json.loads(out)
+
+
+def test_a_prompting_hint_also_shows_you_a_notice_at_once(tmp_path):
+    config_dir = _config_dir(tmp_path)
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    now = datetime.now(timezone.utc)
+
+    def said(text, minutes):
+        return {**_prompt(text), "timestamp": _iso(now - timedelta(minutes=minutes))}
+
+    path = _transcript(tmp_path, [said("fix the header", 10), _undated(_reply(20_000)), said("still wrong", 5)])
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": "/w", "transcript_path": path,
+               "prompt": "the save button doesn't work either"}
+    rc, out, err = _run(config_dir, payload)
+    assert rc == 0 and err == ""
+    output = json.loads(out)
+    assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "fix_drip"
+    assert output["systemMessage"] == cat.COACHING_NOTICE["fix_drip"].format(count=3)
+    assert "save button" not in out
+
+
+def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_prompting_hints():
+    to_the_user = {"plan_fresh", "cache_cold", "clear_context", "fix_drip", "stop_loop", "vague_fix", "big_paste"}
+    for hint, text in cat.COACHING_TEXT.items():
+        assert (cat.TIP_LABEL in text) == (hint in to_the_user), hint
+    assert set(cat.COACHING_NOTICE) == {"fix_drip", "stop_loop", "vague_fix", "big_paste"}
+    assert CATALOGUE["coaching"]["notice"] == cat.COACHING_NOTICE
+    assert all(notice.startswith("⚠️ ClaudeGlass: ") for notice in cat.COACHING_NOTICE.values())
+    reminder = cat.note_text(["feedback_reminder"], "main")
+    assert f"{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}" in reminder
+
+
+def test_the_notice_takes_the_same_fields_as_the_note(tmp_path):
+    records = [_said("Refactor the store", 1_150), _stopped(1_100), _stopped(600), _stopped(60)]
+    path = _transcript(tmp_path, records)
+    payload = {"session_id": "s1", "cwd": "/w", "hook_event_name": "UserPromptSubmit", "transcript_path": path,
+               "prompt": "just rename it"}
+    note, notice = HOOK.coaching_for(payload, ON, CATALOGUE, _config_dir(tmp_path), now=NOW)
+    assert _kind(note) == "stop_loop" and notice == cat.COACHING_NOTICE["stop_loop"].format(count=3, minutes=20)
+    big = {**payload, "session_id": "s2", "prompt": "x" * 48_000,
+           "transcript_path": _transcript(tmp_path, [_said("hi", 200)], "big.jsonl")}
+    assert HOOK.coaching_for(big, ON, CATALOGUE, _config_dir(tmp_path), now=NOW)[1].startswith(
+        "⚠️ ClaudeGlass: this message is about 12k tokens")
 
 
 def test_a_capture_note_and_a_coaching_note_go_out_as_one(tmp_path):

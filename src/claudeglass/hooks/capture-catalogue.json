@@ -314,7 +314,7 @@
    "group": "feedback",
    "requires": [],
    "main_line": "",
-   "main_extra": "When you finish a piece of work the user asked for, add before your tag: Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
+   "main_extra": "When you finish a piece of work the user asked for, add this before your tag, after a blank line:\n> 💡 **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
    "extra_before_tag": true,
    "sub_line": "",
    "sub_extra": "",
@@ -407,15 +407,15 @@
    "rearm_factor": 1.5
   },
   "text": {
-   "cache_cold": "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context again: about {ctx} tokens at the cache-write price. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with one line saying so, and that /clear before a new task after a break avoids it. If it carries on the same work, don't mention it.",
-   "clear_context": "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with one line saying that /clear before a new task would have saved that. If it carries on the same work, don't mention it.",
-   "fix_drip": "The user has sent {count} short fix requests in a row, and each one re-reads the whole context. Before fixing it, check the rest of the work for the same kind of problem and fix those too. End your reply, before any tag, with one line suggesting they list every problem they can see in one message, with what they expected, or rewind with Esc Esc and restate the request if the approach itself is wrong.",
-   "stop_loop": "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change anything for this message, say in two or three lines what you'll do, and wait for a go-ahead if it's a large change. End that reply, before any tag, with one line saying that plan mode (Shift+Tab) agrees the approach before any work starts.",
-   "vague_fix": "The user says something is wrong but not what they saw or expected. If the context doesn't make the problem clear, ask one short question (what they saw, what they expected, or the error text) before changing anything. If it does, fix it and end your reply, before any tag, with one line saying that naming what they saw and expected, or pasting the error, gets a fix first time.",
-   "big_paste": "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a log, a file or command output, end your reply, before any tag, with one line suggesting they paste only the part that matters, or save it to a file and give the path so only what's needed is read.",
+   "cache_cold": "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context again: about {ctx} tokens at the cache-write price. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying so, and that /clear before a new task after a break avoids it. If it carries on the same work, don't mention it.",
+   "clear_context": "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying that /clear before a new task would have saved that. If it carries on the same work, don't mention it.",
+   "fix_drip": "The user has sent {count} short fix requests in a row, and each one re-reads the whole context. Before fixing it, check the rest of the work for the same kind of problem and fix those too. End your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting they list every problem they can see in one message, with what they expected, or rewind with Esc Esc and restate the request if the approach itself is wrong.",
+   "stop_loop": "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change anything for this message, say in two or three lines what you'll do, and wait for a go-ahead if it's a large change. End that reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying that plan mode (Shift+Tab) agrees the approach before any work starts.",
+   "vague_fix": "The user says something is wrong but not what they saw or expected. If the context doesn't make the problem clear, ask one short question (what they saw, what they expected, or the error text) before changing anything. If it does, fix it and end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying that naming what they saw and expected, or pasting the error, gets a fix first time.",
+   "big_paste": "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a log, a file or command output, end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting they paste only the part that matters, or save it to a file and give the path so only what's needed is read.",
    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
    "explore_reads": "You've made {reads} reads and searches for this message, about {tokens} tokens that every later reply reads again. If more searching is needed, hand it to an Explore agent: it searches in its own context and sends back a short summary.",
-   "plan_fresh": "This plan was approved with about {kept} tokens of planning in context, which every reply of the build reads again. Before you start building, tell the user in one line that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry about {kept} fewer tokens on each reply. Then carry on unless they stop you.",
+   "plan_fresh": "This plan was approved with about {kept} tokens of planning in context, which every reply of the build reads again. Before you start building, tell the user in a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry about {kept} fewer tokens on each reply. Then carry on unless they stop you.",
    "split_run": "This run has made about {replies} replies, and every reply reads all of the run again. In this user's past sessions, {agent} runs cost less when split about every {every_n} replies. If more than a step or two is left, finish the step you're on and end your report with a short note of what's done, what's left and the files involved, so a fresh agent can carry on from it."
   },
   "quiet_how": {
@@ -424,6 +424,12 @@
    "Grep": "narrow the pattern or the path, or ask for file names or counts only",
    "Glob": "narrow the pattern",
    "": "ask for less: a narrower query or a smaller page"
+  },
+  "notice": {
+   "fix_drip": "⚠️ ClaudeGlass: {count} fix requests in a row. One message listing every problem costs less than one at a time.",
+   "stop_loop": "⚠️ ClaudeGlass: you've stopped Claude {count} times in {minutes} minutes. Plan mode (Shift+Tab) agrees the approach before work starts.",
+   "vague_fix": "⚠️ ClaudeGlass: say what you saw and what you expected, or paste the error, to get a fix first time.",
+   "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. Paste only the part that matters, or give a file path."
   },
   "correction_pattern": "\\b(?:that'?s (?:wrong|not right|not what|incorrect|broken)|th(?:is|at) (?:is|was) (?:wrong|broken|incorrect|not (?:right|working|what))|it'?s (?:still )?(?:broken|wrong|not working|failing|incorrect)|(?:still|it still) (?:broken|failing|wrong|not working|doesn'?t work|fails)|(?:doesn'?t|does not|didn'?t|did not) work|not what (?:i|we) (?:asked|wanted|meant|said)|you (?:broke|missed|forgot|ignored|didn'?t (?:do|read|follow|check|run|fix))|why (?:did|didn'?t|would|are|is) you|(?:undo|revert|roll back) (?:that|this|it|the|your)|that broke|you'?ve broken|try again|redo (?:it|that|this)|wrong (?:file|approach|answer|place|branch|one))\\b",
   "correction_scan_chars": 200,

@@ -29,6 +29,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is kept or passed on. Each threshold can be changed in `config.toml`
   (see [coaching.md](docs/coaching.md)).
 
+### Changed
+
+- **Tips stand out in the conversation.** When a coaching note asks
+  Claude to tell you something, Claude now ends its reply with a quote
+  block starting **⚠️ ClaudeGlass tip:**, after a blank line, instead of
+  a plain line that was easy to miss. The four prompting hints also
+  show you a one-line notice the moment you send the message (the
+  hook's `systemMessage`, never sent to Claude, so it costs no tokens).
+  The /tl-feedback reminder gets the same look, with a 💡.
+
 ## [0.10.0] - 2026-09-26
 
 ### Added

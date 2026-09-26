@@ -111,6 +111,12 @@ def test_the_feedback_reminder_line_does_not_hide_a_tag_on_either_side():
     assert tag is not None and tag.task == "bugfix"  # tag then reminder
     tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n{reminder}\n[tl: task=bugfix]")
     assert tag is not None and tag.task == "bugfix"  # reminder then tag
+    # As a quote block with its label, as the note now asks.
+    labelled = f"{capture_catalogue.REMINDER_LABEL} {reminder}"
+    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n[tl: task=bugfix]\n\n{labelled}")
+    assert tag is not None and tag.task == "bugfix"
+    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n{labelled}\n[tl: task=bugfix]")
+    assert tag is not None and tag.task == "bugfix"
 
 
 def test_a_would_help_skill_keeps_its_name_only_when_the_transcript_knows_it():

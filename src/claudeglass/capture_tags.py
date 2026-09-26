@@ -66,9 +66,12 @@ SKILL_NAME_RE = re.compile(rf"^{SKILL_NAME_PATTERN}$")
 #: CAP-1: the feedback reminder line (``capture_catalogue.
 #: FEEDBACK_REMINDER_LINE``), stripped from a reply's tail before the
 #: trailing-tag match, so a tag still counts whether Claude wrote the
-#: reminder before or after it.
+#: reminder before or after it. It may carry its quote-block label
+#: (``capture_catalogue.REMINDER_LABEL``) or be a bare line, as older
+#: notes asked.
 _FEEDBACK_REMINDER_TAIL_RE = re.compile(
-    r"\n?[ \t]*[`*_]*" + re.escape(FEEDBACK_REMINDER_LINE) + r"[`*_]*[ \t]*$"
+    r"\n?[ \t]*(?:>[ \t]*)?(?:\U0001F4A1\uFE0F?[ \t]*)?(?:[*_]*ClaudeGlass:[*_]*[ \t]*)?[`*_]*"
+    + re.escape(FEEDBACK_REMINDER_LINE) + r"[`*_]*[ \t]*$"
 )
 
 #: Brief-start markers: up to two ``[retry: x]``/``[spawn: x]`` tags before

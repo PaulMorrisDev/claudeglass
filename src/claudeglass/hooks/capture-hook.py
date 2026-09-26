@@ -35,7 +35,9 @@ connect``):
   approved after a lot of planning, or a subagent run past the length
   its type's runs are best split at (``coaching.json``, from your own
   sessions). Your message is read only for its length and whether it
-  asks for a fix; its words never leave the hook. Each hint rests
+  asks for a fix; its words never leave the hook. The prompting hints
+  also show you a one-line notice at once (``systemMessage``, never sent
+  to Claude). Each hint rests
   for a while once shown (``coach-state.json``). They run at any capture
   level and in every session, but not in a project ``[capture]
   projects`` leaves out. A capture note and a coaching note for the same
@@ -867,21 +869,31 @@ def _split_hint(payload: dict, personal: dict, state: dict, now_ts: float) -> tu
 def coaching_note_for(
     payload: dict, config: dict, catalogue: dict, config_dir: Path, now: datetime | None = None, raw_len: int = 0
 ) -> str:
-    """The coaching note this hook call should add, or ``""``: at most one
-    hint, the first that applies and isn't resting (see :func:`_gate`),
-    in ``COACHING_HINTS`` order. Reads ``coaching.json`` and the
-    transcript; writes ``coach-state.json`` when a hint shows or a
-    subagent's run was counted."""
+    """The coaching note this hook call should add for Claude, or ``""``
+    (see :func:`coaching_for`)."""
+    return coaching_for(payload, config, catalogue, config_dir, now, raw_len)[0]
+
+
+def coaching_for(
+    payload: dict, config: dict, catalogue: dict, config_dir: Path, now: datetime | None = None, raw_len: int = 0
+) -> tuple[str, str]:
+    """``(note, notice)`` for this hook call: the coaching note to add for
+    Claude, and what to show you at once (Claude Code's ``systemMessage``;
+    only the prompting hints have one), each ``""`` when there's none. At
+    most one hint, the first that applies and isn't resting (see
+    :func:`_gate`), in ``COACHING_HINTS`` order. Reads ``coaching.json``
+    and the transcript; writes ``coach-state.json`` when a hint shows or
+    a subagent's run was counted."""
     if not _coaching_applies(payload, config):
-        return ""
+        return "", ""
     event = payload.get("hook_event_name")
     session_id = payload.get("session_id")
     if event not in ("PostToolUse", "UserPromptSubmit") or not isinstance(session_id, str) or not session_id:
-        return ""
+        return "", ""
     agent_type = str(payload.get("agent_type") or "")
     in_agent = bool(payload.get("agent_id"))
     if in_agent and agent_type in catalogue["skip_agent_types"]:
-        return ""
+        return "", ""
     coaching = catalogue["coaching"]
     now = now or datetime.now(timezone.utc)
     now_ts = now.timestamp()
@@ -917,10 +929,12 @@ def coaching_note_for(
         _stamp(state, session, kind, stake, now_ts)
         _write_json(state_path, state)
         hint = kind.split(":", 1)[0]
-        return f"{coaching['marker']}{coaching['version']} {hint}\n{coaching['text'][hint].format(**fields)}"
+        note = f"{coaching['marker']}{coaching['version']} {hint}\n{coaching['text'][hint].format(**fields)}"
+        notice = coaching.get("notice", {}).get(hint, "")
+        return note, notice.format(**fields) if notice else ""
     if counted:
         _write_json(state_path, state)
-    return ""
+    return "", ""
 
 
 def read_salt(config_dir: Path) -> bytes | None:
@@ -1046,17 +1060,22 @@ def _run(argv: list[str]) -> None:
             write_signal(config_dir, catalogue, record)
         return
     note = note_for(payload, config, catalogue, raw_len=len(raw))
-    tip = ""
+    tip = notice = ""
     if coach:
         try:
-            tip = coaching_note_for(payload, config, catalogue, config_dir, raw_len=len(raw))
+            tip, notice = coaching_for(payload, config, catalogue, config_dir, raw_len=len(raw))
         except Exception:  # noqa: BLE001 - a coaching fault must not cost the capture note
-            tip = ""
+            tip = notice = ""
     # One attachment for both: the capture note first, so its marker
     # opens it, and the parser splits the two at the coaching marker.
     text = "\n".join(part for part in (note, tip) if part)
+    output: dict = {}
     if text:
-        output = {"hookSpecificOutput": {"hookEventName": payload.get("hook_event_name"), "additionalContext": text}}
+        output["hookSpecificOutput"] = {"hookEventName": payload.get("hook_event_name"), "additionalContext": text}
+    if notice:
+        # Shown to you straight away; never sent to Claude.
+        output["systemMessage"] = notice
+    if output:
         sys.stdout.write(json.dumps(output))
 
 

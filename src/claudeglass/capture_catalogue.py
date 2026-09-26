@@ -124,6 +124,15 @@ SKILL_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}"
 #: way round.
 FEEDBACK_REMINDER_LINE = "Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work."
 
+#: How Claude sets a coaching tip or the reminder apart in its reply, so
+#: it stands out from the work in the terminal and the desktop app alike:
+#: after a blank line, a quote block opening with a sign and a bold
+#: label. A warning sign for a coaching tip, a light bulb for the
+#: reminder.
+TIP_LABEL = "> ⚠️ **ClaudeGlass tip:**"
+REMINDER_LABEL = "> 💡 **ClaudeGlass:**"
+_TIP_ASK = f'a blank line and then a quote block starting "{TIP_LABEL}"'
+
 
 # -- the metrics -----------------------------------------------------------
 
@@ -416,36 +425,37 @@ COACHING_TEXT = {
     "cache_cold": (
         "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context "
         "again: about {ctx} tokens at the cache-write price. If the user's message starts a task unrelated to the "
-        "work so far, end your reply, before any tag, with one line saying so, and that /clear before a new task "
-        "after a break avoids it. If it carries on the same work, don't mention it."
+        "work so far, end your reply, before any tag, with " + _TIP_ASK + " saying so, and that /clear before a "
+        "new task after a break avoids it. If it carries on the same work, don't mention it."
     ),
     "clear_context": (
         "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's "
-        "message starts a task unrelated to the work so far, end your reply, before any tag, with one line saying "
-        "that /clear before a new task would have saved that. If it carries on the same work, don't mention it."
+        "message starts a task unrelated to the work so far, end your reply, before any tag, with " + _TIP_ASK
+        + " saying that /clear before a new task would have saved that. If it carries on the same work, don't "
+        "mention it."
     ),
     "fix_drip": (
         "The user has sent {count} short fix requests in a row, and each one re-reads the whole context. Before "
         "fixing it, check the rest of the work for the same kind of problem and fix those too. End your reply, "
-        "before any tag, with one line suggesting they list every problem they can see in one message, with what "
-        "they expected, or rewind with Esc Esc and restate the request if the approach itself is wrong."
+        "before any tag, with " + _TIP_ASK + " suggesting they list every problem they can see in one message, "
+        "with what they expected, or rewind with Esc Esc and restate the request if the approach itself is wrong."
     ),
     "stop_loop": (
         "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change "
         "anything for this message, say in two or three lines what you'll do, and wait for a go-ahead if it's a "
-        "large change. End that reply, before any tag, with one line saying that plan mode (Shift+Tab) agrees the "
-        "approach before any work starts."
+        "large change. End that reply, before any tag, with " + _TIP_ASK + " saying that plan mode (Shift+Tab) "
+        "agrees the approach before any work starts."
     ),
     "vague_fix": (
         "The user says something is wrong but not what they saw or expected. If the context doesn't make the "
         "problem clear, ask one short question (what they saw, what they expected, or the error text) before "
-        "changing anything. If it does, fix it and end your reply, before any tag, with one line saying that "
-        "naming what they saw and expected, or pasting the error, gets a fix first time."
+        "changing anything. If it does, fix it and end your reply, before any tag, with " + _TIP_ASK + " saying "
+        "that naming what they saw and expected, or pasting the error, gets a fix first time."
     ),
     "big_paste": (
         "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a "
-        "log, a file or command output, end your reply, before any tag, with one line suggesting they paste only "
-        "the part that matters, or save it to a file and give the path so only what's needed is read."
+        "log, a file or command output, end your reply, before any tag, with " + _TIP_ASK + " suggesting they "
+        "paste only the part that matters, or save it to a file and give the path so only what's needed is read."
     ),
     "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
     "explore_reads": (
@@ -455,9 +465,9 @@ COACHING_TEXT = {
     ),
     "plan_fresh": (
         "This plan was approved with about {kept} tokens of planning in context, which every reply of the build "
-        "reads again. Before you start building, tell the user in one line that building it in a fresh session "
-        "(/clear, then ask Claude to carry out the saved plan) would carry about {kept} fewer tokens on each "
-        "reply. Then carry on unless they stop you."
+        "reads again. Before you start building, tell the user in a quote block starting \"" + TIP_LABEL + "\" "
+        "that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry "
+        "about {kept} fewer tokens on each reply. Then carry on unless they stop you."
     ),
     "split_run": (
         "This run has made about {replies} replies, and every reply reads all of the run again. In this user's "
@@ -465,6 +475,22 @@ COACHING_TEXT = {
         "two is left, finish the step you're on and end your report with a short note of what's done, what's "
         "left and the files involved, so a fresh agent can carry on from it."
     ),
+}
+
+#: What the hook shows you itself, the moment you send the message, for
+#: the prompting hints: Claude Code's hook ``systemMessage``, shown to
+#: you and never sent to Claude, so it costs no tokens. Claude's reply
+#: still ends with the tip, for an app that doesn't show hook messages.
+#: Same ``{placeholders}`` as :data:`COACHING_TEXT`.
+COACHING_NOTICE = {
+    "fix_drip": "⚠️ ClaudeGlass: {count} fix requests in a row. One message listing every problem costs less than "
+    "one at a time.",
+    "stop_loop": "⚠️ ClaudeGlass: you've stopped Claude {count} times in {minutes} minutes. Plan mode (Shift+Tab) "
+    "agrees the approach before work starts.",
+    "vague_fix": "⚠️ ClaudeGlass: say what you saw and what you expected, or paste the error, to get a fix first "
+    "time.",
+    "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. "
+    "Paste only the part that matters, or give a file path.",
 }
 
 #: ``quiet_output``'s ``{how}``, by tool; ``""`` for any other tool.
@@ -946,7 +972,7 @@ METRICS: tuple[Metric, ...] = (
         section="coaching",
         title="Coaching notes from Claude",
         what="Live hints for where the status line doesn't show, such as the desktop app. When one applies, a "
-        "hook adds a short note to Claude's context, and Claude acts on it or tells you in one line: a large "
+        "hook adds a short note to Claude's context, and Claude acts on it or tells you in a highlighted tip: a large "
         "tool output, many reads for one message, a subagent run past the point where your own history says "
         "splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired "
         "cache when you send a message. It also flags how you prompt: short fix requests one after another, a "
@@ -997,14 +1023,14 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback reminder from Claude",
-        what="Claude adds one line suggesting /tl-feedback when it finishes a piece of work.",
+        what="Claude adds a highlighted note suggesting /tl-feedback when it finishes a piece of work.",
         why="For people without the status line. Costs a few output tokens each time.",
         powers=("outcome",),
         hooks=("SessionStart",),
-        main_extra="When you finish a piece of work the user asked for, add before your tag: "
-        f"{FEEDBACK_REMINDER_LINE}",
+        main_extra="When you finish a piece of work the user asked for, add this before your tag, after a blank "
+        f"line:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
         extra_before_tag=True,
-        out_chars=80,
+        out_chars=103,
     ),
     Metric(
         id="dashboard_rating",
@@ -1508,6 +1534,7 @@ def export_json() -> dict:
             "thresholds": dict(COACHING_THRESHOLDS),
             "text": dict(COACHING_TEXT),
             "quiet_how": dict(COACHING_QUIET_HOW),
+            "notice": dict(COACHING_NOTICE),
             "correction_pattern": CORRECTION_PATTERN,
             "correction_scan_chars": CORRECTION_SCAN_CHARS,
             "fix_pattern": FIX_PATTERN,
@@ -1607,7 +1634,8 @@ def _metric_tag_line(metric: Metric) -> str:
         return f'No fixed key. The note asks for a line: "{metric.sub_extra}"'
     if metric.id == "coaching_notes":
         return (
-            "No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in one line. "
+            "No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in a "
+            "highlighted tip. "
             "Each hint and when it applies: [coaching.md](coaching.md)."
         )
     if metric.hooks:
