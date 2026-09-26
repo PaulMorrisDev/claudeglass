@@ -381,7 +381,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Coaching line (`coaching_line`)
 
 - **Level:** Live coaching, any level
-- **Captures:** A second status line with a live hint from your session. For example, a large context before a new task, a large last output, or many reads so far.
+- **Captures:** A second status line with a live hint from your session. For example, a large context before a new task, a large last output, many reads so far, or a run of short fix requests.
 - **Why:** Advice where you work, at the moment it applies. The status line is never sent to Claude.
 - **Tag:** No tag. Shown only in the status line; Claude is never asked, and it costs no tokens.
 - **Powers:** Clearing context, Tool output, Researching
@@ -389,7 +389,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Coaching notes from Claude (`coaching_notes`)
 
 - **Level:** Live coaching, any level
-- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or tells you in one line: a large tool output, many reads for one message, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired cache when you send a message.
+- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or tells you in one line: a large tool output, many reads for one message, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired cache when you send a message. It also flags how you prompt: short fix requests one after another, a vague correction, a huge paste, or stopping Claude again and again.
 - **Why:** Advice at the moment it applies, and Claude can often act on it itself. Each note costs a few dozen tokens for the rest of the session. Claude Code waits for the hook after each shell, read, search, web or MCP result and each message you send.
 - **Tag:** No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in one line. Each hint and when it applies: [coaching.md](coaching.md).
 - **Hook:** UserPromptSubmit, PostToolUse

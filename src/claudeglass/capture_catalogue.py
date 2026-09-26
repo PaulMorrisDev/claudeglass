@@ -322,9 +322,57 @@ COACHING_TOOLS = (*BIG_OUTPUT_TOOLS, "ExitPlanMode")
 #: Tools the ``explore_reads`` hint counts as reads and searches.
 COACHING_READ_TOOLS = ("Read", "Grep", "Glob")
 
-#: The live hints: after a tool result (the first four, most useful
-#: first when more than one applies) and when you send a message.
-COACHING_HINTS = ("plan_fresh", "split_run", "quiet_output", "explore_reads", "cache_cold", "clear_context")
+#: The live hints: after a tool result (the first four) and when you
+#: send a message (the rest), most useful first when more than one
+#: applies. ``fix_drip`` to ``big_paste`` are about how you prompt.
+COACHING_HINTS = (
+    "plan_fresh",
+    "split_run",
+    "quiet_output",
+    "explore_reads",
+    "fix_drip",
+    "stop_loop",
+    "vague_fix",
+    "big_paste",
+    "cache_cold",
+    "clear_context",
+)
+
+#: Phrases that mark a message as correcting Claude ("that's wrong",
+#: "still broken", "why did you", "undo that"), matched case-blind in a
+#: message's first :data:`CORRECTION_SCAN_CHARS` characters. The parser
+#: keeps only the yes/no (``Turn.human_correction``); the hook uses it
+#: for the prompting hints. A bare "no" is deliberately not a match:
+#: "no, go ahead" is as common as a correction.
+CORRECTION_PATTERN = (
+    r"\b(?:"
+    r"that'?s (?:wrong|not right|not what|incorrect|broken)"
+    r"|th(?:is|at) (?:is|was) (?:wrong|broken|incorrect|not (?:right|working|what))"
+    r"|it'?s (?:still )?(?:broken|wrong|not working|failing|incorrect)"
+    r"|(?:still|it still) (?:broken|failing|wrong|not working|doesn'?t work|fails)"
+    r"|(?:doesn'?t|does not|didn'?t|did not) work"
+    r"|not what (?:i|we) (?:asked|wanted|meant|said)"
+    r"|you (?:broke|missed|forgot|ignored|didn'?t (?:do|read|follow|check|run|fix))"
+    r"|why (?:did|didn'?t|would|are|is) you"
+    r"|(?:undo|revert|roll back) (?:that|this|it|the|your)"
+    r"|that broke|you'?ve broken|try again|redo (?:it|that|this)"
+    r"|wrong (?:file|approach|answer|place|branch|one)"
+    r")\b"
+)
+CORRECTION_SCAN_CHARS = 200
+
+#: Words that make a short message a request to fix something, on top of
+#: :data:`CORRECTION_PATTERN`: "fix this", "still an error", "broken
+#: again". Only the prompting hints use it, and only on short messages.
+FIX_PATTERN = r"\b(?:fix|fixed|broken|wrong|incorrect|still|again|bug|error|errors|failing|fails|crash(?:es|ed)?)\b"
+
+#: Anything that makes a correction specific: a path, a file name, a
+#: quote, code, a number, a line of an error, an image. Not an
+#: apostrophe: "it's wrong" is as vague as "wrong".
+SPECIFIC_PATTERN = r"[`\"/\\:#<>(){}\[\]=]|\w\.\w|\d"
+
+#: How Claude Code records that you stopped a reply (Esc).
+INTERRUPT_PREFIX = "[Request interrupted"
 
 #: When each hint applies, and how often it may repeat. Each can be
 #: changed in ``config.toml``'s ``[thresholds]`` as ``coaching_<key>``.
@@ -341,6 +389,20 @@ COACHING_THRESHOLDS = {
     #: fresh-session hint applies (``plan_handoff_min_dropped_tokens``'s
     #: default).
     "plan_fresh_tokens": 40_000,
+    #: This many short fix requests in a row get the batch-them hint...
+    "fix_drip_count": 3,
+    #: ...when each came within this long of the one after it.
+    "fix_window_minutes": 20,
+    #: A message longer than this isn't a short fix request.
+    "fix_chars": 300,
+    #: A fix request this short, naming nothing specific, is vague.
+    "vague_fix_chars": 80,
+    #: A message this many tokens long gets the big-paste hint.
+    "big_paste_tokens": 10_000,
+    #: Stopping Claude this many times...
+    "stop_loop_count": 3,
+    #: ...within this long gets the agree-the-approach hint.
+    "stop_window_minutes": 20,
     #: A hint that showed stays quiet this long in the same session...
     "cooldown_minutes": 30,
     #: ...unless what's at stake has grown this many times since.
@@ -361,6 +423,29 @@ COACHING_TEXT = {
         "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's "
         "message starts a task unrelated to the work so far, end your reply, before any tag, with one line saying "
         "that /clear before a new task would have saved that. If it carries on the same work, don't mention it."
+    ),
+    "fix_drip": (
+        "The user has sent {count} short fix requests in a row, and each one re-reads the whole context. Before "
+        "fixing it, check the rest of the work for the same kind of problem and fix those too. End your reply, "
+        "before any tag, with one line suggesting they list every problem they can see in one message, with what "
+        "they expected, or rewind with Esc Esc and restate the request if the approach itself is wrong."
+    ),
+    "stop_loop": (
+        "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change "
+        "anything for this message, say in two or three lines what you'll do, and wait for a go-ahead if it's a "
+        "large change. End that reply, before any tag, with one line saying that plan mode (Shift+Tab) agrees the "
+        "approach before any work starts."
+    ),
+    "vague_fix": (
+        "The user says something is wrong but not what they saw or expected. If the context doesn't make the "
+        "problem clear, ask one short question (what they saw, what they expected, or the error text) before "
+        "changing anything. If it does, fix it and end your reply, before any tag, with one line saying that "
+        "naming what they saw and expected, or pasting the error, gets a fix first time."
+    ),
+    "big_paste": (
+        "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a "
+        "log, a file or command output, end your reply, before any tag, with one line suggesting they paste only "
+        "the part that matters, or save it to a file and give the path so only what's needed is read."
     ),
     "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
     "explore_reads": (
@@ -851,7 +936,7 @@ METRICS: tuple[Metric, ...] = (
         section="coaching",
         title="Coaching line",
         what="A second status line with a live hint from your session. For example, a large context before "
-        "a new task, a large last output, or many reads so far.",
+        "a new task, a large last output, many reads so far, or a run of short fix requests.",
         why="Advice where you work, at the moment it applies. The status line is never sent to Claude.",
         powers=("context", "tool_output", "research"),
     ),
@@ -864,7 +949,8 @@ METRICS: tuple[Metric, ...] = (
         "hook adds a short note to Claude's context, and Claude acts on it or tells you in one line: a large "
         "tool output, many reads for one message, a subagent run past the point where your own history says "
         "splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired "
-        "cache when you send a message.",
+        "cache when you send a message. It also flags how you prompt: short fix requests one after another, a "
+        "vague correction, a huge paste, or stopping Claude again and again.",
         why="Advice at the moment it applies, and Claude can often act on it itself. Each note costs a few dozen "
         "tokens for the rest of the session. Claude Code waits for the hook after each shell, read, search, web "
         "or MCP result and each message you send.",
@@ -1422,6 +1508,11 @@ def export_json() -> dict:
             "thresholds": dict(COACHING_THRESHOLDS),
             "text": dict(COACHING_TEXT),
             "quiet_how": dict(COACHING_QUIET_HOW),
+            "correction_pattern": CORRECTION_PATTERN,
+            "correction_scan_chars": CORRECTION_SCAN_CHARS,
+            "fix_pattern": FIX_PATTERN,
+            "specific_pattern": SPECIFIC_PATTERN,
+            "interrupt_prefix": INTERRUPT_PREFIX,
         },
     }
 

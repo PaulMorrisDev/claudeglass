@@ -28,8 +28,8 @@ out.
 
 Each note starts `tl-coach v1 <hint>`, so ClaudeGlass can find it in your
 transcripts again and measure what it cost. A note never carries a path,
-a command or your words: only token counts, an idle time and an agent
-type's name.
+a command or your words: only token counts, an idle time, a count and an
+agent type's name.
 
 | Hint | When | What the note asks of Claude |
 |---|---|---|
@@ -37,13 +37,34 @@ type's name.
 | `split_run` | A subagent run passes the number of replies your own history says its type's runs are best split at (see [below](#your-own-split-points)). | If more than a step or two is left, finish the current step and end the report with what's done, what's left and the files involved, so a fresh agent can carry on. |
 | `quiet_output` | A tool result is about 8,000 tokens or more. A read already given a line limit is left alone. | Next time, ask for less: read only the lines needed, filter a command's output, narrow a search. |
 | `explore_reads` | The main session has made 8 reads and searches for one message. | If more searching is needed, hand it to an Explore agent, which searches in its own context and sends back a summary. |
+| `fix_drip` | You send your third short fix request in a row ("fix this", "still wrong"), each within 20 minutes of the last. A detailed message, or a longer gap, starts the count again. | Check the rest of the work for the same kind of problem and fix it too. Then suggest in one line that you list every problem in one message, with what you expected, or rewind with Esc Esc and restate the request if the approach is wrong. |
+| `stop_loop` | You've stopped Claude (Esc) three times in the last 20 minutes. | Before changing anything, say in two or three lines what it will do, and wait for a go-ahead on a large change. Then suggest plan mode (Shift+Tab), which agrees the approach before any work starts. |
+| `vague_fix` | A fix request of 80 characters or less that names nothing specific: no file, line, quote, error or image ("it's broken", "doesn't work"). | If the problem isn't clear from the context, ask one short question before changing anything. If it is, fix it and suggest in one line that saying what you saw and expected, or pasting the error, gets a fix first time. |
+| `big_paste` | You send a message of 10,000 tokens or more, such as a pasted log or file. | If most of it is a log, a file or output, suggest in one line pasting only the part that matters, or saving it to a file and giving the path. |
 | `cache_cold` | You send a message after the prompt cache expired (5 minutes idle, or an hour when the session uses the 1-hour cache), with at least 20,000 tokens of context. | If your message starts something unrelated, say in one line that the reply wrote the whole context again, and that `/clear` before a new task after a break avoids it. Otherwise say nothing. |
 | `clear_context` | You send a message with 100,000 tokens or more of context. | If your message starts something unrelated, say in one line that `/clear` first would have saved re-reading it all. Otherwise say nothing. |
 
 One note at most per tool result or message: the first hint in the table
-that applies. The first four come after a tool result, the last two when
-you send a message. `split_run` shows only inside the subagent; the rest
+that applies. The first four come after a tool result, the rest when you
+send a message. `split_run` shows only inside the subagent; the rest
 only in the main session, except `quiet_output`, which shows in both.
+`vague_fix` doesn't show during a run of fix requests `fix_drip` has
+already flagged.
+
+## How your messages are read
+
+The four prompting hints (`fix_drip` to `big_paste`) read the message
+you're sending and your earlier ones at the end of the transcript. They
+use only each message's length, its time, and whether its first 200
+characters hold a fix or correction word ("fix", "still", "wrong",
+"doesn't work", "that's not what I asked"). A fix request is 300
+characters or less; a longer one usually lists what's wrong, which is
+what the hint asks for. Slash commands, stopped replies and a
+subagent's messages don't count. Nothing about your words is kept or
+passed on: the note says only how many.
+
+The coaching line in the status line shows `fix_drip`, `stop_loop` and
+`big_paste` too, at their default thresholds.
 
 Once a hint has shown, it rests for 30 minutes in that session, unless
 what's at stake has grown one and a half times since (a context grown
@@ -79,6 +100,13 @@ table, and wins over the file:
 | `coaching_plan_fresh_tokens` | 40000 | Planning context kept after a plan before `plan_fresh` applies. |
 | `coaching_quiet_output_tokens` | 8000 | A tool result's size before `quiet_output` applies. |
 | `coaching_explore_reads` | 8 | Reads and searches for one message before `explore_reads` applies. |
+| `coaching_fix_drip_count` | 3 | Short fix requests in a row before `fix_drip` applies. |
+| `coaching_fix_window_minutes` | 20 | The longest gap between two fix requests in one run. |
+| `coaching_fix_chars` | 300 | The longest message that counts as a short fix request. |
+| `coaching_vague_fix_chars` | 80 | The longest fix request `vague_fix` looks at. |
+| `coaching_stop_loop_count` | 3 | Stopped replies before `stop_loop` applies. |
+| `coaching_stop_window_minutes` | 20 | How far back `stop_loop` counts them. |
+| `coaching_big_paste_tokens` | 10000 | A message's size before `big_paste` applies. |
 | `coaching_cold_min_tokens` | 20000 | The smallest context `cache_cold` mentions. |
 | `coaching_clear_context_tokens` | 100000 | Context before `clear_context` applies. |
 | `coaching_cooldown_minutes` | 30 | How long a hint rests once shown. |

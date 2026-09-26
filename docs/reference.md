@@ -228,7 +228,10 @@ run `/tl-feedback`. The first line doesn't change. A hint appears for:
 - a large context at the end of a turn;
 - a large last tool output;
 - many reads in one message;
-- a warm cache about to go cold.
+- a warm cache about to go cold;
+- three short fix requests in a row;
+- stopping Claude three times in 20 minutes;
+- a message of 10,000 tokens or more, such as a pasted log.
 
 On every refresh, Claude Code sends the status line a JSON payload. It
 reads:

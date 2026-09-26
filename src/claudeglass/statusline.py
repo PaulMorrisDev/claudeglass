@@ -268,7 +268,9 @@ and single-line. The second is either:
 - a live **coaching hint** (``coaching = ["coaching_line"]``) from
   :func:`coaching_hint`: a large context at the end of a turn (``/clear``
   before a new task), a large last tool output, many reads and searches
-  in the current message, or a warm cache about to go cold. Worked out
+  in the current message, a warm cache about to go cold, or a prompting
+  habit (short fix requests one after another, stopping Claude again
+  and again, a huge message). Worked out
   from the payload and the transcript's last :data:`_COACH_TAIL_BYTES`;
   amounts are tokens, since this hot path loads no pricing; or
 - the **feedback note** (``feedback = ["feedback_note"]``),
@@ -1838,6 +1840,87 @@ def _k(tokens: float) -> str:
     return f"{round(tokens / 1000.0)}k"
 
 
+#: Lines written as your message that you didn't type: a slash command
+#: and its output, a ``!`` shell command, a scheduled task, a background
+#: agent's report (as ``capture-hook.py`` skips them).
+_NOT_TYPED_PREFIXES = (
+    "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
+    "[SYSTEM NOTIFICATION",
+)
+
+
+def _line_text(d: dict) -> str:
+    message = d.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    return "\n".join(
+        b["text"] for b in content if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
+    ) if isinstance(content, list) else ""
+
+
+def _line_time(d: dict) -> datetime | None:
+    stamp = d.get("timestamp")
+    if not isinstance(stamp, str):
+        return None
+    try:
+        moment = datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _prompt_habits(tail: list[dict], ctx: int | None, now: datetime) -> list[tuple[float, str, str]]:
+    """How you've been prompting: a run of short fix requests
+    (``"fix_drip"``), stopping Claude again and again (``"stop_loop"``),
+    or a huge message (``"big_paste"``). The capture hook's coaching
+    notes use the same rules and default thresholds
+    (``capture_catalogue.COACHING_THRESHOLDS``). Stakes: half the context
+    for the first two (each extra message re-reads it), the message's
+    own size for the paste."""
+    main = [d for d in tail if d.get("type") == "user" and not d.get("isSidechain")]
+    if not any(_is_human_prompt(d) for d in main):
+        return []
+    # Imported here, not at the top: the patterns live with the hook's
+    # (see the FEEDBACK_NOTE import in :func:`second_line`).
+    from .capture_catalogue import (
+        COACHING_THRESHOLDS as th, CORRECTION_PATTERN, CORRECTION_SCAN_CHARS, FIX_PATTERN, INTERRUPT_PREFIX,
+    )
+
+    now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
+    hints: list[tuple[float, str, str]] = []
+    stop_window_s = th["stop_window_minutes"] * 60
+    stops = sum(
+        1 for d in main if _line_text(d).lstrip().startswith(INTERRUPT_PREFIX)
+        and (at := _line_time(d)) is not None and 0 <= (now - at).total_seconds() <= stop_window_s
+    )
+    if stops >= th["stop_loop_count"]:
+        hints.append(((ctx or 0) / 2, f"stopped {stops}x in {th['stop_window_minutes']}m: agree a plan first (Shift+Tab)", "stop_loop"))
+    typed = [
+        (text, _line_time(d)) for d in main
+        if _is_human_prompt(d) and not d.get("isCompactSummary")
+        and not (text := _line_text(d)).lstrip().startswith((INTERRUPT_PREFIX, *_NOT_TYPED_PREFIXES))
+    ]
+    if not typed:
+        return hints
+    fix_re = re.compile(FIX_PATTERN, re.IGNORECASE)
+    correction_re = re.compile(CORRECTION_PATTERN, re.IGNORECASE)
+    streak, after = 0, now
+    for text, at in reversed(typed):
+        head = text[:CORRECTION_SCAN_CHARS]
+        is_fix = len(text.strip()) <= th["fix_chars"] and (fix_re.search(head) or correction_re.search(head))
+        if not is_fix or at is None or (after - at).total_seconds() > th["fix_window_minutes"] * 60:
+            break
+        streak, after = streak + 1, at
+    if streak >= th["fix_drip_count"]:
+        hints.append(((ctx or 0) / 2, f"{streak} fixes in a row: list them all in one message", "fix_drip"))
+    last_text, last_at = typed[-1]
+    paste = len(last_text) / _CHARS_PER_TOKEN
+    if paste >= th["big_paste_tokens"] and last_at is not None and (now - last_at).total_seconds() <= 3600:
+        hints.append((paste, f"msg ~{_k(paste)}: paste less, or give a file path", "big_paste"))
+    return hints
+
+
 #: UX-5: every generated hint (not the feedback note, which is shown
 #: word for word -- see the module docstring) is capped here, well under
 #: :data:`_MAX_LINE_LEN`, so the templates below stay terse by
@@ -1865,10 +1948,14 @@ def coaching_hint(payload: dict, tail: list[dict], now: datetime) -> tuple[float
     - **many reads and searches** (``"explore_reads"``) in the current
       message: an Explore agent reads in its own context and sends back
       a summary.
+    - **how you're prompting** (``"fix_drip"``, ``"stop_loop"``,
+      ``"big_paste"``; :func:`_prompt_habits`): short fix requests one
+      after another, stopping Claude again and again, or a huge message.
 
     Stakes are rough token counts, only for picking one hint: the context
     for the cache, a quarter of it for ``/clear`` (it pays only if you
-    change task), the output's size, and the reads' result sizes.
+    change task), half of it for the prompting habits, the output's size,
+    and the reads' result sizes.
     """
     hints: list[tuple[float, str, str]] = []
     context_window = payload.get("context_window")
@@ -1907,6 +1994,7 @@ def coaching_hint(payload: dict, tail: list[dict], now: datetime) -> tuple[float
     if len(reads) >= _COACH_READS:
         read_tokens = sum(_result_chars(b) for b in results if str(b.get("tool_use_id")) in reads) / _CHARS_PER_TOKEN
         hints.append((read_tokens, f"{len(reads)} reads this msg: try an Explore agent instead", "explore_reads"))
+    hints.extend(_prompt_habits(tail, ctx, now))
 
     if not hints:
         return None

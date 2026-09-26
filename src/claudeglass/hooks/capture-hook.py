@@ -29,10 +29,13 @@ connect``):
 - ``UserPromptSubmit`` and ``PostToolUse`` (also matched to
   ``ExitPlanMode``) for coaching notes (``[capture] coaching`` has
   ``coaching_notes``): a short ``tl-coach`` note when a hint applies --
-  an expired cache or a large context when you send a message, a large
-  result, many reads for one message, a plan approved after a lot of
-  planning, or a subagent run past the length its type's runs are best
-  split at (``coaching.json``, from your own sessions). Each hint rests
+  an expired cache or a large context when you send a message, a run of
+  short fix requests, a vague correction, a huge paste, stopping Claude
+  again and again, a large result, many reads for one message, a plan
+  approved after a lot of planning, or a subagent run past the length
+  its type's runs are best split at (``coaching.json``, from your own
+  sessions). Your message is read only for its length and whether it
+  asks for a fix; its words never leave the hook. Each hint rests
   for a while once shown (``coach-state.json``). They run at any capture
   level and in every session, but not in a project ``[capture]
   projects`` leaves out. A capture note and a coaching note for the same
@@ -627,6 +630,103 @@ def _prompt_hints(records: list[dict], th: dict, now: datetime) -> list[tuple[st
     return out
 
 
+#: Lines written as your message that you didn't type: a slash command
+#: and its output, a shell command run with ``!``, a scheduled task, a
+#: background agent's report.
+_NOT_TYPED_PREFIXES = (
+    "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
+    "[SYSTEM NOTIFICATION",
+)
+
+
+def _text_of(record: dict) -> str:
+    """A ``user`` line's text; an image counts as ``[image]``."""
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts = []
+    for block in content:
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+        elif isinstance(block, dict) and block.get("type") == "image":
+            parts.append("[image]")
+    return "\n".join(parts)
+
+
+def _is_interrupt(record: dict, prefix: str) -> bool:
+    """A line saying you stopped a reply (Esc)."""
+    return (
+        record.get("type") == "user" and not record.get("isSidechain")
+        and _text_of(record).lstrip().startswith(prefix)
+    )
+
+
+def _typed(records: list[dict], prefix: str) -> list[tuple[str, datetime | None]]:
+    """The messages you typed, oldest first, with their times: no stopped
+    reply's marker, slash command, compaction summary or subagent line."""
+    out = []
+    for record in records:
+        if record.get("isSidechain") or record.get("isCompactSummary") or not _is_human_prompt(record):
+            continue
+        text = _text_of(record)
+        if text.lstrip().startswith((prefix, *_NOT_TYPED_PREFIXES)):
+            continue
+        out.append((text, _reply_time(record)))
+    return out
+
+
+def _practice_hints(prompt, records: list[dict], coaching: dict, th: dict, now: datetime) -> list[tuple[str, float, dict]]:
+    """``fix_drip``, ``stop_loop``, ``vague_fix`` and ``big_paste`` for the
+    message you just sent (``prompt``), as ``(kind, stake, fields)``.
+    Only lengths, counts and whether a pattern matched are used; your
+    words never leave this function."""
+    prefix = coaching["interrupt_prefix"]
+    window_s = th["stop_window_minutes"] * 60
+    stops = sum(
+        1 for r in records if _is_interrupt(r, prefix)
+        and (at := _reply_time(r)) is not None and 0 <= (now - at).total_seconds() <= window_s
+    )
+    stop = None
+    if stops >= th["stop_loop_count"]:
+        stop = ("stop_loop", stops, {"count": stops, "minutes": round(th["stop_window_minutes"])})
+    if not isinstance(prompt, str) or not prompt.strip():
+        return [stop] if stop else []
+    scan = int(coaching["correction_scan_chars"])
+    fix_re = re.compile(coaching["fix_pattern"], re.IGNORECASE)
+    correction_re = re.compile(coaching["correction_pattern"], re.IGNORECASE)
+
+    def is_fix(text: str) -> bool:
+        head = text[:scan]
+        return len(text.strip()) <= th["fix_chars"] and bool(fix_re.search(head) or correction_re.search(head))
+
+    earlier = _typed(records, prefix)
+    # Claude Code may already have written this message to the transcript.
+    if earlier and earlier[-1][0] == prompt and earlier[-1][1] is not None and (now - earlier[-1][1]).total_seconds() < 10:
+        earlier.pop()
+    streak = 0
+    if is_fix(prompt):
+        streak, after = 1, now
+        for text, at in reversed(earlier):
+            if not is_fix(text) or at is None or (after - at).total_seconds() > th["fix_window_minutes"] * 60:
+                break
+            streak, after = streak + 1, at
+    drip = vague = paste = None
+    if streak >= th["fix_drip_count"]:
+        drip = ("fix_drip", streak, {"count": streak})
+    elif (
+        streak and len(prompt.strip()) <= th["vague_fix_chars"]
+        and not re.search(coaching["specific_pattern"], prompt)
+    ):
+        vague = ("vague_fix", 1, {})
+    tokens = len(prompt) / _CHARS_PER_TOKEN
+    if tokens >= th["big_paste_tokens"]:
+        paste = ("big_paste", tokens, {"tokens": _k(tokens)})
+    return [hint for hint in (drip, stop, vague, paste) if hint]
+
+
 def _starting_context(path: str) -> int:
     """What a fresh session starts with: the first reply's context less
     your first message (``handoff.starting_context``)."""
@@ -795,7 +895,8 @@ def coaching_note_for(
     if event == "UserPromptSubmit":
         path = payload.get("transcript_path")
         if not in_agent and isinstance(path, str) and path:
-            candidates = _prompt_hints(_tail(path), th, now)
+            records = _tail(path)
+            candidates = [*_practice_hints(payload.get("prompt"), records, coaching, th, now), *_prompt_hints(records, th, now)]
     elif tool == "ExitPlanMode":
         if not in_agent and personal.get("plan_fresh", True) is not False:
             candidates = [_plan_hint(payload, th)]

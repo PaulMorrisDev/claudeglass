@@ -1487,6 +1487,39 @@ def test_the_biggest_hint_wins(tmp_path):
     assert hint is not None and hint[1].startswith("ctx 200k: new task?")
 
 
+def _said(text, minutes_ago, **extra):
+    stamp = (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return {**_prompt(text), "timestamp": stamp, **extra}
+
+
+def test_hint_short_fix_requests_in_a_row():
+    tail = [_said("Build the settings page", 60), _reply([_use("a")]), _said("fix the header", 15),
+            _said("<command-name>/cost</command-name>", 12), _said("[Request interrupted by user]", 11),
+            _said("still wrong", 10), _reply([_use("b")]), _said("doesn't work either", 1)]
+    hint = statusline.coaching_hint({"context_window": {"used_tokens": 60_000}}, tail, NOW)
+    assert hint == (30_000, "3 fixes in a row: list them all in one message", "fix_drip")
+    # A detailed message, or a long gap, starts a new run.
+    tail[2] = _said("fix the header: " + "it overlaps the menu. " * 20, 15)
+    assert statusline.coaching_hint({}, tail, NOW) is None
+    tail[2] = _said("fix the header", 45)
+    assert statusline.coaching_hint({}, tail, NOW) is None
+
+
+def test_hint_stopping_claude_again_and_again():
+    stop = "[Request interrupted by user]"
+    tail = [_said("Refactor the store", 30), _said(stop, 18), _said("no, keep the API", 17),
+            _said(stop, 9), _said("use the cache", 8), _said(stop, 1), _said(stop, 1, isSidechain=True)]
+    hint = statusline.coaching_hint({}, tail, NOW)
+    assert hint is not None and hint[1] == "stopped 3x in 20m: agree a plan first (Shift+Tab)" and hint[2] == "stop_loop"
+    assert statusline.coaching_hint({}, [tail[0], _said(stop, 25), *tail[2:5]], NOW) is None
+
+
+def test_hint_a_huge_message():
+    hint = statusline.coaching_hint({}, [_said("Why does this fail?\n" + "log line\n" * 5_000, 1)], NOW)
+    assert hint is not None and hint[1] == "msg ~11k: paste less, or give a file path" and hint[2] == "big_paste"
+    assert statusline.coaching_hint({}, [_said("log line\n" * 1_000, 1)], NOW) is None
+
+
 def test_a_hint_is_capped_at_the_ux5_budget_even_for_a_huge_number(tmp_path):
     tail = [_prompt(), _reply([{"type": "text", "text": "done"}], stop="end_turn")]
     hint = statusline.coaching_hint({"context_window": {"used_tokens": 123_456_789}}, tail, NOW)

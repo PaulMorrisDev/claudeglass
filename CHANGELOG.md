@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Warnings about how you prompt.** Coaching notes (`coaching_notes`)
+  gain four hints for habits that cost replies:
+  - `fix_drip`: a third short fix request in a row ("fix this", "still
+    wrong"). Claude checks the rest of the work for the same kind of
+    problem, then suggests listing every problem in one message, or
+    rewinding with Esc Esc if the approach is wrong.
+  - `stop_loop`: stopping Claude three times in 20 minutes. Claude says
+    what it will do before changing anything, and suggests plan mode.
+  - `vague_fix`: a short fix request that names nothing specific.
+    Claude asks what you saw if it can't tell, or suggests saying what
+    you saw and expected next time.
+  - `big_paste`: a message of 10,000 tokens or more. Claude suggests
+    pasting only the part that matters, or giving a file path.
+
+  The coaching line in the status line shows the first, second and
+  fourth too. Your messages are read only for their length, time and
+  whether they hold a fix or correction word; nothing about your words
+  is kept or passed on. Each threshold can be changed in `config.toml`
+  (see [coaching.md](docs/coaching.md)).
+
 ## [0.10.0] - 2026-09-26
 
 ### Added
