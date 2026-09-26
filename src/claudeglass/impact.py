@@ -148,7 +148,7 @@ def _transcript(result: TranscriptResult, pricing: Pricing) -> _Transcript:
     for turn in turns:
         resolved = pricing.resolve_model(turn.model)
         facts.cost += price_turn(turn, resolved).total
-        facts.turns += 1
+        facts.turns += not turn.is_synthetic
         facts.peak_context = max(
             facts.peak_context, turn.input_tokens + turn.cache_creation_tokens + turn.cache_read_tokens
         )

@@ -30,7 +30,7 @@ import { icon } from "./icons.js";
 import { pageLink, viewIntro } from "./links.js";
 import { renderSetupCard } from "./shell.js";
 import { chartError, holdChart } from "./charts.js";
-import { dailyChanges, renderChart, savingsLevers, sparkline, windowDays } from "./charts-types.js";
+import { dailyChanges, renderChart, savingsLevers, sparkline, tableObjects, windowDays } from "./charts-types.js";
 import { groupRecommendations, groupSavingUsd, groupTitle, listSaving } from "./page-actions.js";
 import { changesLink, renderChangeCards } from "./page-changes.js";
 
@@ -148,11 +148,11 @@ function summarySentence(facts) {
   var worth = facts.worth;
   var second;
   if (worth && saving) {
-    second = (worth === 1 ? "1 change is" : thousands(worth) + " changes are") + " worth making, and the ways to save come to at most " + saving.primary + ".";
+    second = (worth === 1 ? "1 change is" : thousands(worth) + " changes are") + " worth making, and all the ways to save together come to at most " + saving.primary + ".";
   } else if (worth) {
     second = worth === 1 ? "1 change is worth making." : thousands(worth) + " changes are worth making.";
   } else if (saving) {
-    second = "Nothing needs changing now, but the ways to save come to at most " + saving.primary + ".";
+    second = "Nothing needs changing now, but all the ways to save together come to at most " + saving.primary + ".";
   } else {
     second = "Nothing stands out to change.";
   }
@@ -214,28 +214,102 @@ function moneyTile(label, usd, opts) {
   });
 }
 
-// Actions whose saving a Savings lever already counts.
-// A fresh session after a plan, or a fresh subagent run, saves the same
-// carried context the auto-compact lever counts, so it isn't added on top.
+// Actions whose saving a Savings lever already counts. The auto-compact
+// window is the compaction lever's own finding, and a fresh session after
+// a plan, or a fresh subagent run, saves the same carried context, so
+// none of them is added on top. Nor is the tool-output action (the
+// tool-output lever) or wasted replies (their lever).
 var LEVER_RULES = {
   "model-tier": "model_swap",
   "model-tier-main": "model_swap",
+  "compaction-window": "compaction_sim",
+  "compaction-churn": "compaction_sim",
   "plan-handoff": "compaction_sim",
   "run-split": "compaction_sim",
+  "tool-output-carry": "carry",
+  "wasted-turns": "waste",
 };
 
-// The most the ways to save could come to: the four Savings levers, plus
-// any priced action no lever counts (lower effort, say). An action is an
-// item on Actions (groupRecommendations), counted once with all its
-// agent types. Every action's own saving is then at or below it.
-function availableSaving(levers, groups) {
-  var total = levers.reduce(function (sum, lever) {
-    return sum + (lever.usd > 0 ? lever.usd : 0);
-  }, 0);
-  groups.forEach(function (group) {
-    if (!LEVER_RULES[group.id]) total += groupSavingUsd(group);
+// The main session's agent type, as model_swap_by_agent_type and a
+// recommendation's agent_type name it.
+var MAIN_AGENT = "top-level";
+
+function usdOf(value) {
+  var number = typeof value === "number" ? value : parseFloat(value);
+  return isFinite(number) && number > 0 ? number : 0;
+}
+
+// What doing every way to save would come to: the four Savings levers,
+// and any priced action no lever counts (lower effort, say), counted once
+// as Actions lists it. They overlap, so they aren't added up. Each is a
+// share of the spend it comes from, taken from what the others leave: a
+// cheaper model prices the fewer tokens earlier summaries leave, so the
+// two multiply. A saving for one agent type comes from that type's spend
+// (the model lever per type; the summary lever from the main session);
+// any other from all of it. Each lever is a ceiling, so the whole is too,
+// and never more than the spend.
+function availableSaving(levers, groups, tables) {
+  var agents = tableObjects((tables || {}).model_swap_by_agent_type);
+  var items = [];
+  levers.forEach(function (lever) {
+    if (!(lever.usd > 0)) return;
+    if (lever.key === "model_swap" && agents.length) {
+      agents.forEach(function (row) {
+        if (usdOf(row.saving_usd)) items.push({ usd: usdOf(row.saving_usd), agent: row.agent_type });
+      });
+    } else {
+      items.push({ usd: lever.usd, agent: lever.key === "compaction_sim" ? MAIN_AGENT : null });
+    }
   });
-  return total;
+  groups.forEach(function (group) {
+    if (LEVER_RULES[group.id]) return;
+    var usd = groupSavingUsd(group);
+    var owners = group.members.map(function (rec) {
+      return rec.agent_type || null;
+    });
+    var single = owners.every(function (agent) {
+      return agent && agent === owners[0];
+    });
+    if (usd > 0) items.push({ usd: usd, agent: single ? owners[0] : null });
+  });
+  var spend = {};
+  agents.forEach(function (row) {
+    if (usdOf(row.observed_cost)) spend[row.agent_type] = usdOf(row.observed_cost);
+  });
+  return combinedSaving(items, spend);
+}
+
+// ``items`` ({usd, agent}) combined over ``spend`` (agent type -> cost):
+// each agent type keeps (1 - share) of its spend per saving, so the whole
+// comes to spend less what is kept. With no spend by agent type (no
+// report), the savings are simply added up.
+function combinedSaving(items, spend) {
+  var agents = Object.keys(spend);
+  var whole = agents.reduce(function (sum, agent) {
+    return sum + spend[agent];
+  }, 0);
+  if (!(whole > 0)) {
+    return items.reduce(function (sum, item) {
+      return sum + item.usd;
+    }, 0);
+  }
+  var kept = {};
+  agents.forEach(function (agent) {
+    kept[agent] = 1;
+  });
+  items.forEach(function (item) {
+    if (item.agent && spend[item.agent]) {
+      kept[item.agent] *= Math.max(0, 1 - item.usd / spend[item.agent]);
+      return;
+    }
+    var share = Math.max(0, 1 - item.usd / whole);
+    agents.forEach(function (agent) {
+      kept[agent] *= share;
+    });
+  });
+  return agents.reduce(function (sum, agent) {
+    return sum + spend[agent] * (1 - kept[agent]);
+  }, 0);
 }
 
 // Spend, what cache reads saved and the sessions, against the period
@@ -357,6 +431,7 @@ var CHECK_NAMES = {
   "tool-search": "MCP tool search",
   habits: "Work habits",
   quality: "Agent quality",
+  "cost-record": "ClaudeGlass's own figures",
 };
 
 // A row's state, in the icon and word Actions uses for it: fix (a rule
@@ -685,7 +760,8 @@ export function renderOverview(panel) {
       return;
     }
 
-    var levers = report ? savingsLevers(tablesOf(report)) : [];
+    var reportTables = report ? tablesOf(report) : {};
+    var levers = report ? savingsLevers(reportTables) : [];
     var facts = {
       summary: summary,
       previousSummary: previousBody && previousBody.ok === true ? previousBody.data : null,
@@ -693,7 +769,7 @@ export function renderOverview(panel) {
       phrase: previous ? previous.phrase : null,
     };
     facts.previousCost = facts.previousSummary ? facts.previousSummary.total_cost || 0 : null;
-    facts.saving = availableSaving(levers, groups);
+    facts.saving = availableSaving(levers, groups, reportTables);
     var tiles = renderTiles(tilesHost, facts, meta, dailyRows);
     addSpendTrend(tiles.spend, dailyRows);
     countTiles(tiles.counts);

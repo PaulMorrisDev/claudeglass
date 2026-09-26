@@ -170,6 +170,8 @@ def build_section(corpus: Corpus, pricing: Pricing, config: Config) -> Section:
                 breakdown = price_turn(turn, resolved)
                 tokens = _usage_tokens(turn)
                 model = turn.model or "<unknown>"
+                # Replies are counted without an estimated compaction
+                # call (``is_synthetic``); its tokens and cost are spend.
 
                 local_dt = None
                 parsed = _parse_ts(turn.ts)
@@ -178,23 +180,23 @@ def build_section(corpus: Corpus, pricing: Pricing, config: Config) -> Section:
 
                 if local_dt is not None:
                     day_cell = by_day.setdefault((_day_key(local_dt), model), _PeriodModelCell())
-                    day_cell.turns += 1
+                    day_cell.turns += not turn.is_synthetic
                     day_cell.tokens += tokens
                     day_cell.cost += breakdown.total
 
                     week_cell = by_week.setdefault((_week_key(local_dt), model), _PeriodModelCell())
-                    week_cell.turns += 1
+                    week_cell.turns += not turn.is_synthetic
                     week_cell.tokens += tokens
                     week_cell.cost += breakdown.total
 
                     month_cell = by_month.setdefault((_month_key(local_dt), model), _PeriodModelCell())
-                    month_cell.turns += 1
+                    month_cell.turns += not turn.is_synthetic
                     month_cell.tokens += tokens
                     month_cell.cost += breakdown.total
 
                 project_bucket["cost"] += breakdown.total
 
-                entry_bucket["turns"] += 1
+                entry_bucket["turns"] += not turn.is_synthetic
                 entry_bucket["tokens"] += tokens
                 entry_bucket["cost"] += breakdown.total
 
@@ -210,7 +212,7 @@ def build_section(corpus: Corpus, pricing: Pricing, config: Config) -> Section:
                         block_key, {"sessions": set(), "turns": 0, "tokens": 0, "cost": 0.0}
                     )
                     block_bucket["sessions"].add(bundle.session_id)
-                    block_bucket["turns"] += 1
+                    block_bucket["turns"] += not turn.is_synthetic
                     block_bucket["tokens"] += tokens
                     block_bucket["cost"] += breakdown.total
 

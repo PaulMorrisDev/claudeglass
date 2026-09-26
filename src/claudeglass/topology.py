@@ -55,19 +55,22 @@ _REDISCOVERY_WINDOW_TURNS = 10
 
 
 def _priced_turns(result: TranscriptResult) -> list[Turn]:
-    """Turns that actually got a ``turn_index`` (excludes synthetic and
-    missing-usage turns, which parse.py leaves at ``turn_index == 0``)."""
-    return [t for t in result.turns if t.turn_index > 0]
+    """The replies that actually got a ``turn_index`` (excludes synthetic
+    and missing-usage turns, which parse.py leaves at ``turn_index ==
+    0``). An estimated compaction call is priced but not a reply, so it
+    is left out here and counted only in :func:`_transcript_cost`."""
+    return [t for t in result.turns if t.turn_index > 0 and not t.is_synthetic]
 
 
 def _transcript_cost(result: TranscriptResult, rates_lookup: Pricing) -> float:
-    """Sum ``price_turn`` over every priced turn in one transcript.
+    """Sum ``price_turn`` over every priced turn in one transcript,
+    including an estimated compaction call (spend, not a reply).
 
     Deliberately duplicated in ``workflows.py`` rather than imported —
     see that module's docstring note on the same helper.
     """
     total = 0.0
-    for turn in _priced_turns(result):
+    for turn in (t for t in result.turns if t.turn_index > 0):
         resolved = rates_lookup.resolve_model(turn.model)
         total += price_turn(turn, resolved).total
     return total

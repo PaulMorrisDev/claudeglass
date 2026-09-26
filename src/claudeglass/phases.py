@@ -129,7 +129,8 @@ def classify_turn_phase(turn: Turn) -> str:
 
 def _priced_turns(result: TranscriptResult) -> list[Turn]:
     """Turns that actually got a ``turn_index`` (excludes synthetic and
-    missing-usage turns). Deliberately duplicated rather than imported --
+    missing-usage turns, but keeps an estimated compaction call, which is
+    spend -- see ``parse.py``). Deliberately duplicated rather than imported --
     see ``workflows.py``'s docstring note on this same one-line helper
     appearing in several WP8+ modules.
     """

@@ -34,6 +34,7 @@ REAL = FIXTURES / "real" / "session-a"
 #: Tables whose builder always emits exactly one row. The dashboard shows
 #: their lead columns as a strip of at most 4 tiles.
 ONE_ROW_TABLES = {
+    "cost_record_summary",
     "recache_summary",
     "recache_huge_context",
     "limits_summary",

@@ -12,7 +12,7 @@ subscription billing with usage-log readings), `sessions`, `recache`, `ttl`,
 `limits`, `carry`, `compaction_sim`, `plan_handoff`, `model_swap`, `waste`,
 `compactions`, `agent_startup`, `agents`, `run_split`, `hooks`, `quality`, `workstyle`, `habits`,
 `workflows`, `phases` (CLI only with `--phases`; the dashboard always has it), `config` (only when config
-snapshots exist), `context_budget`, `tool_search`, `capture`, `scorecard`, and
+snapshots exist), `context_budget`, `tool_search`, `capture`, `cost_record`, `scorecard`, and
 `baseline_comparison` (only with `--baseline`). `claudeglass
 report` prints it. This file groups sections by topic, so its order
 differs.
@@ -69,6 +69,7 @@ and it's still useful when you want one section by itself.
 | `context_budget` | Context budget | `context_budget.py` | an estimated breakdown of what a session's context window is spent on before any real work (system prompt and tools, skills, memory files, custom agents, MCP tools), plus ground truth where the statusline logged it |
 | `tool_search` | What tool search saves | `tool_search.py` | how many tool definitions MCP tool search kept out of each request, by MCP server, what that saved at each reply's own cache rate, and the net after the name list and the replies that only searched — see [`tool-search.md`](tool-search.md) |
 | `capture` | Capture | `habits.py` | what metrics capture has cost since it was turned on, measured from the transcripts, and what the habits and feedback that depend on it are worth a week — see [`capture.md`](capture.md) |
+| `cost_record` | Claude Code's own cost record | `reconcile.py` | whether ClaudeGlass's cost matches what Claude Code itself recorded for the same sessions, over the same span, with the known reasons they differ split out — on Data quality, and `claudeglass check cost-record` |
 | `scorecard` | Scorecard | `scorecard.py` | five 1-5 levels (cache efficiency, context hygiene, agent efficiency, config fit, data quality) plus an overall level (the minimum of the first four, never an average) |
 | `baseline_comparison` | Baseline comparison | `report.py` via `baseline.py` | before/after the last captured onboarding baseline, plus a per-mode breakdown — only present when `--baseline` resolves one (added unconditionally, even on the single-section subcommands) |
 
@@ -1401,6 +1402,30 @@ A cell reads `n<N` when that machine has fewer than `N` sessions for
 the row (default 5), and `-` when it has none. The section notes carry
 the "observed, not controlled" caveat.
 
+## `cost_record` (`reconcile.py`)
+
+Claude Code writes a running total of a session's cost (a `cost-state`
+line) now and then. For every session with one, this compares that
+total with ClaudeGlass's own pricing of the same session up to when the
+total was last written (`TranscriptMeta.cc_cost_as_of`; subagents
+included).
+
+- `cost_record_summary` — one `all` row: `sessions`, `cc_usd` (Claude
+  Code's own), `local_usd` (ClaudeGlass, same span), `difference_pct`,
+  then the known reasons: `stopped_usd` (replies stopped mid-stream,
+  which ClaudeGlass prices and Claude Code leaves out), `unlogged_usd`
+  (Claude Code's cost on models with no reply in any transcript, such as
+  a request for a session title) and `estimated_usd` (the estimated
+  compaction calls both sides count); `unexplained_pct` is what is left
+  once the first two are taken out, and `worst_unexplained_pct` the
+  largest share in one session.
+- `cost_record_sessions` — the 20 newest records: `session_id`, `as_of`,
+  `cc_usd`, `local_usd`, `difference_pct`, `unexplained_pct`.
+
+Empty when no session in the window has a record (only some Claude Code
+versions write one). On three real Claude Code 2.1.283 sessions, $66 in
+all, 0.01% was left unexplained.
+
 ## `baseline_comparison` (`report.py`)
 
 Only with `report --baseline <id>`: this window against a saved
@@ -1527,7 +1552,9 @@ include `lines`, `unparsable_lines`, `truncated_final_line`,
 sanitised type or `other` since `PARSER_VERSION` 20), `oversized_lines`,
 `trailing_events`, `replayed_lines`, `copied_lines` (lines of another
 session whose own file holds them too, skipped since `PARSER_VERSION`
-26), `timestamp_parse_failures`,
+26), `compaction_calls` / `compaction_calls_unsized` (compactions whose
+summary request was estimated and priced, and those left out, since
+`PARSER_VERSION` 27), `timestamp_parse_failures`,
 `agent_settings`, `modes`, `attachment_catch_all`, `limit_hits`,
 `limit_resumes`, `agents_terminated`,
 `pre_split_turns` (pre-split `cache_creation` reads normalised at parse

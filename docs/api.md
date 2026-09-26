@@ -889,8 +889,9 @@ been captured. `capture_status.summary` is the same one-line status
 
 One answer per way of saving tokens (`quick_actions.CHECKS`): models,
 effort, compaction, cache, tools, skills, claude-md, tool-output,
-hooks, tool-search, habits and quality. Each check always answers, including "nothing to
-do".
+hooks, tool-search, habits, quality and cost-record. Each check always answers, including "nothing to
+do". The last, cost-record, checks ClaudeGlass's own figures against the
+cost Claude Code records for a session.
 
 Query: the windowing params above.
 

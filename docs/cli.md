@@ -92,7 +92,8 @@ python -m claudeglass check models
 
 Leave the ID out for every check's one-line answer. Give one to see it
 in full: `models`, `effort`, `compaction`, `cache`, `tools`, `skills`,
-`claude-md`, `tool-output`, `hooks`, `tool-search`, `habits` or `quality`. The window comes
+`claude-md`, `tool-output`, `hooks`, `tool-search`, `habits`, `quality` or `cost-record`
+(whether ClaudeGlass's cost matches Claude Code's own record). The window comes
 from the global `--days`, `--since` and `--until`.
 
 ### `review`

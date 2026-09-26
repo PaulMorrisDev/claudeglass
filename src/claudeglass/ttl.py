@@ -38,7 +38,9 @@ build_section) is unchanged.
 ``turn_index`` to a turn that is both non-synthetic and carried a
 ``usage`` block, so a zero ``turn_index`` already encodes exactly
 "synthetic or usage-less" (see ``model.py``'s ``Turn.turn_index``
-docstring and ``test_synthetic.py``). Every function here filters on
+docstring and ``test_synthetic.py``). The one exception is an estimated
+compaction call (``Turn.estimated``): synthetic, but priced, with no
+``gap_s``, so every policy carries its observed split. Every function here filters on
 that instead of re-deriving the same skip condition from token totals.
 
 WP3 (RE-CACHE) is a parallel work package: it is what actually populates

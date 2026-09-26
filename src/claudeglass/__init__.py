@@ -190,7 +190,11 @@ __version__ = "0.9.0"
 #: (``Turn.deferred_tools_by_server``, ``deferred_list_chars``), and each
 #: transcript the size of every definition it loaded
 #: (``TranscriptResult.tool_definition_chars``); a pre-26 digest has none.
-PARSER_VERSION = 26
+#:
+#: Bumped to 27: each compaction adds an estimated turn for the request
+#: that wrote its summary (``Turn.estimated == "compaction"``), which
+#: Claude Code bills but never logs. A pre-27 digest left it out of spend.
+PARSER_VERSION = 27
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

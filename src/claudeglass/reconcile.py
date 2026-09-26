@@ -356,8 +356,31 @@ class ClaudeCodeCost:
     #: This tool's own per-turn pricing (``pricing.price_turn``) summed
     #: across the session's top-level transcript and every subagent
     #: transcript under it -- the same total the rest of this module
-    #: calls "local" cost.
+    #: calls "local" cost -- up to ``as_of`` when there is one.
     local_cost_usd: float = 0.0
+    #: Cost-record addition (``PARSER_VERSION`` 27): when Claude Code
+    #: wrote its total (``TranscriptMeta.cc_cost_as_of``). ``cost-state``
+    #: is written now and then, so the local side stops here too.
+    as_of: str | None = None
+    #: Claude Code's own cost by model id, and this tool's for the same
+    #: span, by the same ids where the rate card knows them.
+    cc_by_model: dict = field(default_factory=dict)
+    local_by_model: dict = field(default_factory=dict)
+    #: Known reasons the two differ, in USD. Replies stopped mid-stream:
+    #: the tokens were used and this tool prices them, but Claude Code
+    #: leaves them out. Estimated compaction calls: both count them, the
+    #: local side as an estimate. Claude Code's cost on models with no
+    #: reply in any transcript (a short request for a session title, say),
+    #: which no log records.
+    stopped_usd: float = 0.0
+    estimated_usd: float = 0.0
+    unlogged_usd: float = 0.0
+
+    @property
+    def unexplained_usd(self) -> float:
+        """Local minus Claude Code's own, once the stopped replies and the
+        unlogged requests are taken out of each side."""
+        return (self.local_cost_usd - self.stopped_usd) - (self.cc_cost_usd - self.unlogged_usd)
 
 
 def _local_cost_for_bundle(bundle: SessionBundle, pricing: Pricing) -> float:
@@ -371,6 +394,50 @@ def _local_cost_for_bundle(bundle: SessionBundle, pricing: Pricing) -> float:
             resolved = pricing.resolve_model(turn.model)
             total += price_turn(turn, resolved).total
     return total
+
+
+def _model_key(model: str, pricing: Pricing) -> str:
+    """The rate card's id for ``model``, so Claude Code's own names and a
+    transcript's line up; the name itself when the card doesn't know it."""
+    resolved = pricing.resolve_model(model)
+    return resolved.canonical_id if resolved is not None else model
+
+
+def _stopped_replies(result: TranscriptResult) -> set[int]:
+    """``id()`` of each reply stopped mid-stream: no ``stop_reason``, in a
+    transcript whose other replies record one (an older Claude Code
+    records none, and then nothing can be told)."""
+    replies = [t for t in _priced_turns(result) if not t.is_synthetic]
+    if not any(t.stop_reason for t in replies):
+        return set()
+    return {id(t) for t in replies if not t.stop_reason}
+
+
+def _local_breakdown(
+    bundle: SessionBundle, pricing: Pricing, until: datetime | None
+) -> tuple[dict[str, float], float, float]:
+    """This tool's cost for ``bundle`` up to ``until`` (every priced turn
+    when ``None``; a turn with no readable time is kept): by model key,
+    then the stopped replies' and estimated compaction calls' share."""
+    by_model: dict[str, float] = {}
+    stopped = estimated = 0.0
+    for tr in _transcripts_of(bundle):
+        stopped_ids = _stopped_replies(tr)
+        for turn in _priced_turns(tr):
+            at = _parse_ts(turn.ts)
+            if until is not None and at is not None:
+                if at.tzinfo is None:
+                    at = at.replace(tzinfo=timezone.utc)
+                if at > until:
+                    continue
+            cost = price_turn(turn, pricing.resolve_model(turn.model)).total
+            key = _model_key(turn.model, pricing)
+            by_model[key] = by_model.get(key, 0.0) + cost
+            if id(turn) in stopped_ids:
+                stopped += cost
+            if turn.estimated:
+                estimated += cost
+    return by_model, stopped, estimated
 
 
 def claude_code_reported_costs(corpus: Corpus, pricing: Pricing) -> list[ClaudeCodeCost]:
@@ -387,12 +454,26 @@ def claude_code_reported_costs(corpus: Corpus, pricing: Pricing) -> list[ClaudeC
         top = bundle.top
         if top is None or top.meta.cc_cost_usd is None:
             continue
+        until = _parse_ts(top.meta.cc_cost_as_of)
+        if until is not None and until.tzinfo is None:
+            until = until.replace(tzinfo=timezone.utc)
+        by_model, stopped, estimated = _local_breakdown(bundle, pricing, until)
+        cc_by_model: dict[str, float] = {}
+        for model, cost in (top.meta.cc_cost_by_model or {}).items():
+            key = _model_key(model, pricing)
+            cc_by_model[key] = cc_by_model.get(key, 0.0) + cost
         out.append(
             ClaudeCodeCost(
                 session_id=top.meta.session_id,
                 cc_cost_usd=top.meta.cc_cost_usd,
                 cc_has_unknown_model=top.meta.cc_cost_has_unknown_model,
-                local_cost_usd=_local_cost_for_bundle(bundle, pricing),
+                local_cost_usd=sum(by_model.values()),
+                as_of=top.meta.cc_cost_as_of,
+                cc_by_model=cc_by_model,
+                local_by_model=by_model,
+                stopped_usd=stopped,
+                estimated_usd=estimated,
+                unlogged_usd=sum(cost for key, cost in cc_by_model.items() if key not in by_model),
             )
         )
     return out
@@ -517,9 +598,9 @@ def build_cost_ground_truth_gap_table(gaps: list[CostGroundTruthGap], units: "Un
         "session has it, else the statusline's own SIG-4 ground truth); gap % is relative to Claude Code's "
         "own figure.",
         "Known reasons a correct local figure and Claude Code's own figure can still differ: an unknown "
-        "model is priced at zero locally; cost-state is a running total as of when the transcript last "
-        "wrote it, which can be mid-session; the statusline's own figure resets on /clear and may be "
-        "logged mid-session too.",
+        "model is priced at zero locally; a reply stopped mid-stream is priced locally but not by Claude "
+        "Code; the statusline's own figure resets on /clear and may be logged mid-session. A cost-state "
+        "total is compared only with the local replies up to when it was written.",
     ]
     if len(pct_values) >= _GAP_NOTE_MIN_SESSIONS:
         median_pct = statistics.median(pct_values)
@@ -548,6 +629,102 @@ def build_cost_ground_truth_gap_table(gaps: list[CostGroundTruthGap], units: "Un
         rows=[[g.session_id, g.source, g.cc_cost_usd, g.local_cost_usd, g.gap_usd, g.gap_pct] for g in rows],
         notes=notes,
     )
+
+
+def _recorded_at(ts: str | None) -> str:
+    """A ``cost-state`` time as ``2026-09-26 15:57 UTC``."""
+    at = _parse_ts(ts)
+    if at is None:
+        return ts or ""
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _pct_gap(part: float, whole: float) -> float | None:
+    """``part`` as a percentage of ``whole``; ``None`` when ``whole`` is 0."""
+    return 100.0 * part / whole if whole else None
+
+
+def build_cost_record_section(costs: list[ClaudeCodeCost]) -> Section:
+    """The ``cost_record`` section (Data quality): this tool's cost next to
+    Claude Code's own ``cost-state`` record, over the same span, for every
+    session that has one. One summary row (of zeros when no session has a
+    record), then a row per session, both with the known reasons split out
+    (see :class:`ClaudeCodeCost`)."""
+    rows = sorted(costs, key=lambda c: c.as_of or "", reverse=True)
+    cc = sum(c.cc_cost_usd for c in rows)
+    local = sum(c.local_cost_usd for c in rows)
+    unexplained = sum(c.unexplained_usd for c in rows)
+    worst = max((abs(_pct_gap(c.unexplained_usd, c.cc_cost_usd) or 0.0) for c in rows), default=None)
+    summary = Table(
+        name="cost_record_summary",
+        title="Against Claude Code's own record",
+        columns=[
+            Column(key="scope", label="Scope", kind="str"),
+            Column(key="sessions", label="Sessions", kind="int"),
+            Column(key="cc_usd", label="Claude Code's own cost", kind="money"),
+            Column(key="local_usd", label="ClaudeGlass, same span", kind="money"),
+            Column(key="difference_pct", label="Difference", kind="pct"),
+            Column(key="stopped_usd", label="Stopped replies", kind="money"),
+            Column(key="unlogged_usd", label="Requests no log shows", kind="money"),
+            Column(key="estimated_usd", label="Estimated summaries", kind="money"),
+            Column(key="unexplained_pct", label="Left unexplained", kind="pct"),
+            Column(key="worst_unexplained_pct", label="Most in one session", kind="pct"),
+        ],
+        rows=[
+            [
+                "all",
+                len(rows),
+                cc,
+                local,
+                _pct_gap(local - cc, cc),
+                sum(c.stopped_usd for c in rows),
+                sum(c.unlogged_usd for c in rows),
+                sum(c.estimated_usd for c in rows),
+                _pct_gap(unexplained, cc),
+                worst,
+            ]
+        ],
+    )
+    sessions = Table(
+        name="cost_record_sessions",
+        title="By session",
+        columns=[
+            Column(key="session_id", label="Session", kind="str"),
+            Column(key="as_of", label="Recorded", kind="str"),
+            Column(key="cc_usd", label="Claude Code's own cost", kind="money"),
+            Column(key="local_usd", label="ClaudeGlass, same span", kind="money"),
+            Column(key="difference_pct", label="Difference", kind="pct"),
+            Column(key="unexplained_pct", label="Left unexplained", kind="pct"),
+        ],
+        rows=[
+            [
+                c.session_id,
+                _recorded_at(c.as_of),
+                c.cc_cost_usd,
+                c.local_cost_usd,
+                _pct_gap(c.local_cost_usd - c.cc_cost_usd, c.cc_cost_usd),
+                _pct_gap(c.unexplained_usd, c.cc_cost_usd),
+            ]
+            for c in rows[:_COST_RECORD_SESSIONS]
+        ],
+    )
+    notes = [
+        "Claude Code writes what it thinks a session cost now and then, not at the end. So ClaudeGlass counts "
+        "only the replies up to when it last wrote.",
+        "A reply stopped mid-stream still used its tokens, and ClaudeGlass counts it. Claude Code leaves it out.",
+        "Claude Code also counts a few small requests no log shows, such as naming the session.",
+        "ClaudeGlass estimates each conversation summary's own request, which Claude Code bills but doesn't log.",
+        "What is left after those is \"Left unexplained\". Over 5% means ClaudeGlass's figures may be off.",
+    ]
+    if not rows:
+        notes = ["No session in this window has Claude Code's own cost record. Only some versions write one."]
+    return Section(key="cost_record", title="Claude Code's own cost record", tables=[summary, sessions], notes=notes)
+
+
+#: The most sessions ``cost_record_sessions`` lists, newest record first.
+_COST_RECORD_SESSIONS = 20
 
 
 def _collect_local_rows(corpus: Corpus, pricing: Pricing) -> list[dict]:

@@ -234,7 +234,7 @@ beside its title.
 | Setup › Settings | What are my settings, which layer set each one, and how does this window compare with my baseline? |
 | Setup › Profiles | Make a profile from a goal with an estimate of what it saves, compare it with my settings, and see what each change I made did. |
 | Setup › Capture | What does metrics capture cost so far, what would each level or metric add, and is it set up? |
-| Data quality | What did this tool install, what should I expect, and could every transcript be read and priced? |
+| Data quality | What did this tool install, what should I expect, could every transcript be read and priced, and does its cost match Claude Code's own record? |
 | Glossary › Terms | What does a term on the dashboard mean? |
 | Glossary › How costs work | How is each kind of token priced, and how does each change save me money? |
 

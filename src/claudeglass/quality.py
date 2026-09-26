@@ -358,7 +358,7 @@ def run_facts(
             if edited_at is not None:
                 run.edit_log.append((edited_at, target))
         if turn.turn_index > 0:
-            run.replies += 1
+            run.replies += not turn.is_synthetic
             run.output_tokens += turn.output_tokens
             run.thinking_tokens += turn.thinking_tokens or 0
             if pricing is not None:

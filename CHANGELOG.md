@@ -28,6 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   it is an estimate, and it says which servers were sized from their
   own tools. See [`docs/tool-search.md`](docs/tool-search.md). Every
   log is read again once to pick this up.
+- **Do ClaudeGlass's figures match Claude Code's own?** Claude Code
+  writes down what it thinks a session cost, now and then. A new section
+  on Data quality, and a new check (`claudeglass check cost-record`),
+  compare that with ClaudeGlass's cost for the same replies, and split
+  out the known reasons they differ: a reply stopped mid-stream (its
+  tokens were used, so ClaudeGlass counts it and Claude Code doesn't),
+  and small requests no log records, such as naming the session. The
+  check asks you to report it if more than 5% is left unexplained. On
+  three real sessions, $66 in all, 0.01% was left.
 
 ### Changed
 
@@ -69,6 +78,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The dashboard stopped updating a session you were still in.** A
+  transcript written to in the last minute was skipped until it went
+  quiet, so a session busy for hours showed the figures from when the
+  dashboard first read it: on a real cloud session, 3.5 hours and $15
+  behind. It is now read again at most once a minute while it keeps
+  changing; a 44 MB transcript takes under half a second.
+- **The Overview's ways to save could come to more than you spent.**
+  Its sentence added every way to save up, but they overlap: a cheaper
+  model prices the fewer tokens earlier summaries leave, so doing both
+  saves less than the two added. And the auto-compact action was counted
+  on top of the compaction saving it comes from. Each way to save is now
+  a share of the spend it comes from (its agent type's, or all of it),
+  taken from what the others leave, and an action a saving already
+  counts joins it once. On real sessions the sentence went from $107 of
+  $103 spent to $58. Each row keeps its own figure.
+- **A conversation summary's own request was left out of spend.**
+  Claude Code bills the request that writes a summary but logs only
+  that a summary happened. Each summary now adds an estimated request,
+  on the model of the reply before it: that reply's context read from
+  the cache once more (written again if the cache had expired), with
+  the summary as output. It counts in every spend total, but not as a
+  reply, and Conversation summaries shows what summaries cost. On a
+  real 780,000-token summary the estimate came within 2% of Claude
+  Code's own cost for it (about $0.33). Data quality counts summaries
+  estimated and any that couldn't be. Every log is read again once to
+  pick this up.
+- **The check against Claude Code's own cost found gaps that weren't
+  there.** It compared a whole session with Claude Code's last recorded
+  total, which can be hours old, so a session that went on showed
+  ClaudeGlass 5.6% over. It now stops where Claude Code's total stops.
 - **A session started with `/clear` in a web or mobile session was
   counted twice.** Claude Code writes the new session's lines to its own
   log and also into the earlier session's log, so every reply in it was

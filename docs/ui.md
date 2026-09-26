@@ -463,7 +463,13 @@ that order, each as a heading with a one-line answer beside it.
 1. **The summary sentence** (18px): what the window cost, the change on
    the period of the same length before, and what the changes worth
    making come to, in the billing mode ("you spent $2,663", or "you used
-   about 38% of your weekly usage limit"). The previous period comes
+   about 38% of your weekly usage limit"). The ways to save overlap, so
+   `availableSaving` doesn't add them up: each is a share of the spend it
+   comes from (an agent type's, from `model_swap_by_agent_type`, or all
+   of it), taken from what the others leave (`combinedSaving`). A cheaper
+   model prices the fewer tokens earlier summaries leave, so the two
+   multiply. An action a Savings lever already counts (`LEVER_RULES`) is
+   left out. The total is still "at most", and never above the spend. The previous period comes
    from `/api/summary?since=&until=`, so a change compares a summary
    with a summary. "All time" and "Since my last change" have none.
    Other forms cover no sessions in the window or project, no change
@@ -813,8 +819,11 @@ CLI commands instead.
 3. **Service health** (`/api/health`, `renderHealth`): status, version,
    "Code on disk" (the same as running, or when it changed and to which
    version), last scan, the watcher's counts and recent errors.
-4. Any report section no other view claims (`SECTION_PAGE_MAP`'s
-   fallback).
+4. **Claude Code's own cost record** (`cost_record`, mapped here): its
+   cost for each session against ClaudeGlass's for the same replies, with
+   the stopped replies and unlogged requests that explain part of any
+   difference, as `claudeglass check cost-record` reports it. Then any
+   report section no other view claims (`SECTION_PAGE_MAP`'s fallback).
 5. `/api/diagnostics`: whether the hook and the status line work, then
    the parse-quality counters, matching the CLI report's Diagnostics.
 

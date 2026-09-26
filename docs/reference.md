@@ -285,6 +285,9 @@ cache warmth across sessions.
 - **Files still being written.** A transcript changed in the last 60
   seconds counts as still in use. It's read with `errors="replace"`,
   never cached (`cache.py`), and a half-written last line is tolerated.
+  The dashboard reads one again at most once a minute while it keeps
+  changing (`watcher.LIVE_REPARSE_S`), so a session you're in the middle
+  of stays up to date.
 - **`CLAUDE_CONFIG_DIR`** moves the whole folder. When it's set, both the
   projects folder (`.../projects`) and this tool's own folder
   (`.../claudeglass`) are found under it instead of `~/.claude`.

@@ -19,7 +19,9 @@ under subscription billing with usage-log readings, see
 ``hooks``, ``quality``,
 ``workstyle``,
 ``workflows``, ``phases`` (only when ``phases=True``), ``config`` (only
-when snapshots are supplied), ``context_budget``, ``tool_search``, ``scorecard``,
+when snapshots are supplied), ``context_budget``, ``tool_search``, ``capture``,
+``cost_record`` (Claude Code's own cost record against this tool's, from
+``reconcile.py``), ``scorecard``,
 ``baseline_comparison``
 (v4 wiring round: ``carry``/``compaction_sim``/``model_swap``/``waste``
 are the four v4 analytics modules, wired in here immediately after
@@ -143,6 +145,7 @@ from . import (
     model_swap,
     quality,
     recache,
+    reconcile,
     run_split,
     scorecard,
     snapshots as snapshots_mod,
@@ -207,6 +210,7 @@ _SECTION_ORDER: tuple[str, ...] = (
     "context_budget",
     "tool_search",
     "capture",
+    "cost_record",
     "scorecard",
 )
 
@@ -257,7 +261,8 @@ def _default_waste_config_dir() -> Path:
 
 def _priced_turns(result: TranscriptResult) -> list[Turn]:
     """Turns that actually got a ``turn_index`` (excludes synthetic and
-    missing-usage turns). Deliberately duplicated rather than imported —
+    missing-usage turns, but keeps an estimated compaction call, which is
+    spend -- see ``parse.py``). Deliberately duplicated rather than imported —
     same one-line-helper convention ``workflows.py``/``phases.py``
     document in their own module docstrings.
     """
@@ -827,6 +832,8 @@ def _merge_diagnostics(acc: Diagnostics, d: Diagnostics) -> None:
     acc.trailing_events += d.trailing_events
     acc.replayed_lines += d.replayed_lines
     acc.copied_lines += d.copied_lines
+    acc.compaction_calls += d.compaction_calls
+    acc.compaction_calls_unsized += d.compaction_calls_unsized
     acc.timestamp_parse_failures += d.timestamp_parse_failures
     acc.pre_split_turns += d.pre_split_turns
     acc.limit_hits += d.limit_hits
@@ -1457,7 +1464,8 @@ def build_report(
                 breakdown = price_turn(turn, resolved)
                 pricing_coverage.add(turn, breakdown, resolved)
 
-                overview.priced_turns += 1
+                # An estimated compaction call is spend, not a reply.
+                overview.priced_turns += not turn.is_synthetic
                 overview.input_tokens += turn.input_tokens
                 overview.cache_creation_tokens += turn.cache_creation_tokens
                 overview.cache_read_tokens += turn.cache_read_tokens
@@ -1467,7 +1475,7 @@ def build_report(
 
                 model_key = turn.model or "<unknown>"
                 cell = overview.by_model.setdefault(model_key, _ModelCell())
-                cell.turns += 1
+                cell.turns += not turn.is_synthetic
                 cell.input_tokens += turn.input_tokens
                 cell.cache_creation_tokens += turn.cache_creation_tokens
                 cell.cache_read_tokens += turn.cache_read_tokens
@@ -1834,6 +1842,9 @@ def build_report(
 
     if _want("capture"):
         sections.append(habits.capture_section(corpus, pricing, config.capture, ratings=ratings, h=_habits_built))
+
+    if _want("cost_record"):
+        sections.append(reconcile.build_cost_record_section(reconcile.claude_code_reported_costs(corpus, pricing)))
 
     if _want("scorecard"):
         sections.append(_build_scorecard_section(rs, ls, ts, tp, cs, pricing_coverage, diagnostics, session_records, snapshots, config, scorecard_th, pricing))

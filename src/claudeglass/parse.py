@@ -52,6 +52,21 @@ each loaded definition's size by tool name
 (``TranscriptResult.tool_definition_chars``). ``tool_search.py`` prices
 what that kept out of each request.
 
+Compaction calls: Claude Code bills the request that writes a
+compaction's summary, but logs only the ``compact_boundary`` line, never
+the request as a reply. After the pass, each boundary gets one estimated
+turn (``Turn.estimated == "compaction"``) placed right after the reply
+before it, on that reply's model. It reads that reply's cached prefix
+(its cache read plus cache write) from the cache, or writes it again at
+the same lifetime when the cache would have expired by the time the
+compaction started (the boundary's time less ``durationMs``). What
+``preTokens`` counts beyond that prefix is plain input, and ``postTokens``
+is taken as the output: the summary, plus the few files Claude Code
+attaches again, so it can run a little high. A boundary with no earlier
+reply or no ``postTokens`` is left out and counted
+(``Diagnostics.compaction_calls_unsized``). On a real 780,000-token
+compaction this came within 2% of Claude Code's own ``cost-state``.
+
 ``gap_s`` is measured request-start to request-start: the interval between
 the *first* JSONL line's timestamp of one priced turn and the first line's
 timestamp of the previous priced turn, not (say) a turn's finalisation
@@ -1606,6 +1621,137 @@ def _has_own_file(folder: Path, session_id: str) -> bool:
         return False
 
 
+#: Cost record (see ``model.py``'s module docstring): a model id as Claude
+#: Code's ``cost-state`` names it; anything else is dropped.
+_MODEL_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:\[\]-]{0,63}")
+
+
+def _cost_by_model(model_usage) -> dict[str, float]:
+    """``cost-state``'s ``modelUsage`` as model id -> ``costUSD``."""
+    out: dict[str, float] = {}
+    if not isinstance(model_usage, dict):
+        return out
+    for model, usage in model_usage.items():
+        cost = usage.get("costUSD") if isinstance(usage, dict) else None
+        if (
+            isinstance(model, str)
+            and _MODEL_ID_RE.fullmatch(model)
+            and isinstance(cost, (int, float))
+            and not isinstance(cost, bool)
+            and cost >= 0
+        ):
+            out[model] = float(cost)
+    return out
+
+
+#: Compaction calls (see module docstring): the cache lifetimes a write
+#: can carry, in seconds.
+_ONE_HOUR_S = 3600.0
+_FIVE_MINUTES_S = 300.0
+
+
+def _utc(ts_raw: str | None) -> datetime | None:
+    """``_parse_ts``, read as UTC when the text carries no zone."""
+    parsed = _parse_ts(ts_raw or "")
+    if parsed is not None and parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def _count(value) -> int | None:
+    """A token count from ``compactMetadata``, or ``None``."""
+    if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        return value
+    return None
+
+
+def _cache_lifetime_s(replies: list[Turn]) -> float:
+    """The lifetime of the latest cache write among ``replies``, newest
+    first; five minutes when none of them recorded one."""
+    for reply in reversed(replies):
+        if reply.cc_1h:
+            return _ONE_HOUR_S
+        if reply.cc_5m:
+            return _FIVE_MINUTES_S
+    return _FIVE_MINUTES_S
+
+
+def _compaction_turn(replies: list[Turn], event: Event) -> Turn | None:
+    """The estimated request that wrote ``event``'s summary, sized from
+    the last of ``replies`` (see the module docstring), or ``None`` when
+    it can't be sized."""
+    output = _count(event.post_tokens)
+    if not replies or output is None:
+        return None
+    previous = replies[-1]
+    prefix = previous.cache_read_tokens + previous.cache_creation_tokens
+    pre = _count(event.pre_tokens)
+    new = max(pre - prefix, 0) if pre is not None else 0
+
+    previous_at = _utc(previous.ts)
+    end = _utc(event.ts)
+    started = None
+    if end is not None:
+        started = end.astimezone(timezone.utc) - timedelta(milliseconds=max(_count(event.duration_ms) or 0, 1))
+        if previous_at is not None and started < previous_at:
+            started = previous_at
+    lifetime = _cache_lifetime_s(replies)
+    warm = started is not None and previous_at is not None and (started - previous_at).total_seconds() <= lifetime
+    read, write = (prefix, 0) if warm else (0, prefix)
+    one_hour = write if lifetime == _ONE_HOUR_S else 0
+    ts = started.strftime("%Y-%m-%dT%H:%M:%S.") + f"{started.microsecond // 1000:03d}Z" if started else previous.ts
+    return Turn(
+        message_id=f"compaction-{ts}",
+        turn_index=1,
+        ts=ts,
+        model=previous.model,
+        service_tier=previous.service_tier,
+        is_synthetic=True,
+        effort=previous.effort,
+        input_tokens=new,
+        cache_creation_tokens=write,
+        cache_read_tokens=read,
+        output_tokens=output,
+        cc_5m=write - one_hour,
+        cc_1h=one_hour,
+        ctx=new + prefix,
+        preceding_tool="n/a",
+        inference_geo=previous.inference_geo,
+        speed=previous.speed,
+        estimated="compaction",
+    )
+
+
+def _with_compaction_calls(
+    turns: list[Turn], compactions: list[tuple[int, Event]], diagnostics: Diagnostics
+) -> list[Turn]:
+    """``turns`` with each compaction's estimated request inserted after
+    the reply before it, and ``turn_index`` renumbered over the priced
+    turns (see the module docstring)."""
+    if not compactions:
+        return turns
+    out: list[Turn] = []
+    position = 0
+    for before, event in compactions:
+        out.extend(turns[position:before])
+        position = max(position, before)
+        replies = [turn for turn in out if turn.turn_index > 0 and not turn.estimated]
+        estimate = _compaction_turn(replies, event)
+        if estimate is None:
+            diagnostics.compaction_calls_unsized += 1
+            continue
+        out.append(estimate)
+        diagnostics.compaction_calls += 1
+    out.extend(turns[position:])
+    index = 0
+    for i, turn in enumerate(out):
+        if turn.turn_index > 0:
+            index += 1
+            if turn.turn_index != index:
+                out[i] = replace(turn, turn_index=index)
+    return out
+
+
 def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult:
     """Parse one transcript JSONL file in a single streaming pass.
 
@@ -1640,6 +1786,12 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: the last one seen in file order is the most complete).
     cc_cost_usd: float | None = None
     cc_cost_has_unknown_model = False
+    #: Cost record: the latest line time seen so far, and that time and
+    #: the cost by model as of the last ``cost-state`` line.
+    latest_at: datetime | None = None
+    latest_ts: str | None = None
+    cc_cost_as_of: str | None = None
+    cc_cost_by_model: dict[str, float] = {}
     #: Batch C addition: first non-empty ``entrypoint``/``version`` field
     #: seen on any raw line, in file order. Every line type carries these
     #: (when present), not just assistant lines.
@@ -1690,6 +1842,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: Tool search (see module docstring): the deferred list and the
     #: definitions loaded from it so far.
     deferred_tools = _DeferredTools()
+    #: Compaction calls (see module docstring): each ``compact_boundary``
+    #: event, with how many turns come before it in ``turns`` once the
+    #: turn still open is finalised.
+    compactions: list[tuple[int, Event]] = []
 
     current: _PendingTurn | None = None
     current_key: str | None = None
@@ -1716,6 +1872,12 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             seen_uuids.add(uuid_val)
 
         line_type = d.get("type")
+
+        line_ts = d.get("timestamp")
+        if isinstance(line_ts, str) and line_ts:
+            line_at = _utc(line_ts)
+            if line_at is not None and (latest_at is None or line_at > latest_at):
+                latest_at, latest_ts = line_at, line_ts
 
         if first_entrypoint is None:
             entrypoint_raw = d.get("entrypoint")
@@ -1806,6 +1968,8 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             if isinstance(cost_raw, (int, float)) and not isinstance(cost_raw, bool):
                 cc_cost_usd = float(cost_raw)
                 cc_cost_has_unknown_model = bool(d.get("hasUnknownModelCost"))
+                cc_cost_as_of = latest_ts
+                cc_cost_by_model = _cost_by_model(d.get("modelUsage"))
         elif line_type == "attachment":
             attachment = d.get("attachment")
             if isinstance(attachment, dict) and attachment.get("type") == "skill_listing":
@@ -1831,6 +1995,8 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             continue
         if event.kind == EventKind.HOOK_OUTPUT and line_type == "attachment":
             _annotate_hook_event(event, d.get("attachment"), hook_context_queue)
+        if event.kind == EventKind.COMPACT_BOUNDARY:
+            compactions.append((len(turns) + (current is not None), event))
         events.append(event)
         events_since_current.append(event)
         if line_type == "attachment":
@@ -1888,6 +2054,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     diagnostics.truncated_final_line = line_stats.truncated_final_line
     diagnostics.oversized_lines = line_stats.oversized_lines
     diagnostics.distinct_turns = len(turns)
+    turns = _with_compaction_calls(turns, compactions, diagnostics)
 
     # Batch C addition: the transcript's own first turn with a model is
     # the authoritative provider signal (see module docstring), taking
@@ -1933,6 +2100,8 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         cap_injections=cap_injections,
         cc_cost_usd=cc_cost_usd,
         cc_cost_has_unknown_model=cc_cost_has_unknown_model,
+        cc_cost_as_of=cc_cost_as_of,
+        cc_cost_by_model=cc_cost_by_model,
     )
 
     # Parser-signals addition (SURV-6/7): only present when non-empty, so
@@ -1963,11 +2132,12 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
 #: ``uuid`` (dedup, in ``parse_transcript``'s main loop) and
 #: ``entrypoint``/``version`` (first-seen capture, also in the main loop,
 #: before any type dispatch) and ``sessionId`` (copied sessions, first of
-#: all). A type not listed here (every other
-#: ``events._IGNORABLE_TYPES`` member, plus the ``file-history-*``/
-#: ``artifact-*`` prefix families) is read no further than those five
-#: base keys -- ``classify_line`` returns ``None`` for them before even
-#: computing ``timestamp``/``message``.
+#: all) and ``timestamp`` (the cost record's cut-off, see ``model.py``).
+#: A type not listed here (every other ``events._IGNORABLE_TYPES`` member,
+#: plus the ``file-history-*``/``artifact-*`` prefix families) is read no
+#: further than those six base keys -- ``classify_line`` returns ``None``
+#: for them before even computing ``message``. ``cost-state`` is read in
+#: the main loop itself, for its totals.
 #:
 #: ``user``/``system``/``attachment``/``queue-operation`` all reach
 #: ``classify_line``, which unconditionally reads ``timestamp`` and
@@ -1977,7 +2147,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
 #: classify_line's later, type-unguarded ``origin`` read; ``system``
 #: (when its ``subtype`` matches none of the earlier checks) and ``user``
 #: can both fall through as far as that ``origin`` read, so both list it.
-_BASE_READ_KEYS = frozenset({"type", "uuid", "entrypoint", "version", "sessionId"})
+_BASE_READ_KEYS = frozenset({"type", "uuid", "entrypoint", "version", "sessionId", "timestamp"})
 
 READ_KEYS: dict[str, frozenset[str]] = {
     "assistant": _BASE_READ_KEYS
@@ -2028,6 +2198,7 @@ READ_KEYS: dict[str, frozenset[str]] = {
     "queue-operation": _BASE_READ_KEYS | frozenset({"timestamp", "message", "operation"}),
     "agent-setting": _BASE_READ_KEYS | frozenset({"agentSetting"}),
     "mode": _BASE_READ_KEYS | frozenset({"mode"}),
+    "cost-state": _BASE_READ_KEYS | frozenset({"totalCostUSD", "hasUnknownModelCost", "modelUsage"}),
 }
 
 

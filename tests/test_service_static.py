@@ -1647,16 +1647,25 @@ def test_the_first_run_tells_a_running_scan_from_an_empty_one() -> None:
 def test_available_saving_is_never_below_an_action_it_lists() -> None:
     """The model lever adds up every agent type's cheapest alternative
     (the model-tier action prices a subset of them), and a priced action
-    no lever counts is added on top, so "At most" holds (docs/ui.md)."""
+    no lever counts joins the total, so "At most" holds (docs/ui.md). An
+    action that is a lever's own finding joins it only once: the
+    auto-compact window once added $38 on top of the compaction lever's
+    $44, so the ways to save came to more than the spend."""
     levers = _function_source(_app_js(), "savingsLevers")
     assert "tables.model_swap_by_agent_type" in levers
     assert "model_swap_summary" not in levers
     available = _function_source(_app_js(), "availableSaving")
     # Priced actions are counted as Actions lists them, one group each.
     assert "groupSavingUsd(group)" in available
-    assert "!LEVER_RULES[group.id]" in available
+    assert "if (LEVER_RULES[group.id]) return;" in available
     assert "rec.saving_usd" in _function_source(_app_js(), "groupSavingUsd")
-    assert '"model-tier": "model_swap"' in _app_js()
+    for rule, lever in (
+        ("model-tier", "model_swap"),
+        ("compaction-window", "compaction_sim"),
+        ("tool-output-carry", "carry"),
+        ("wasted-turns", "waste"),
+    ):
+        assert f'"{rule}": "{lever}"' in _app_js(), rule
 
 
 def test_a_delta_of_three_times_or_more_reads_as_a_sentence() -> None:

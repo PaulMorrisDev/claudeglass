@@ -407,6 +407,29 @@ description or schema:
 - ``TranscriptResult.tool_definition_chars: dict = {}`` -- tool name ->
   characters of the full definition loaded for it.
 
+Compaction-call addition (``PARSER_VERSION`` 27). Claude Code bills the
+request that writes a compaction's summary but never logs it as a reply,
+so ``parse.py`` adds one estimated turn per ``compact_boundary``, right
+after the reply before it (see that module's docstring for the sizing):
+
+- ``Turn.estimated: str | None = None`` -- ``"compaction"`` on such a
+  turn, else ``None``. The turn is priced (``turn_index > 0``) and also
+  ``is_synthetic``, so every spend total counts it and every analysis of
+  replies leaves it out, the same way it leaves out a synthetic reply.
+- ``Diagnostics.compaction_calls: int = 0`` -- compactions priced this
+  way; ``Diagnostics.compaction_calls_unsized: int = 0`` -- compactions
+  left out because no earlier reply or summary size was recorded.
+
+Cost-record addition (``PARSER_VERSION`` 27). A ``cost-state`` line is a
+running total written now and then, not at the end, so a comparison has
+to stop where it stops (``reconcile.claude_code_reported_costs``):
+
+- ``TranscriptMeta.cc_cost_as_of: str | None = None`` -- the latest
+  timestamp of any line before the last ``cost-state`` line.
+- ``TranscriptMeta.cc_cost_by_model: dict = {}`` -- model id -> that
+  line's ``modelUsage[model].costUSD``. Model ids and numbers only; an id
+  outside the model-id alphabet is dropped.
+
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
 count, a closed word (with an "other" fallback) or a raw number off a
@@ -465,6 +488,7 @@ count, a closed word (with an "other" fallback) or a raw number off a
   ``agent-setting`` before it) since its value is read directly in
   ``parse.parse_transcript`` rather than carried as an ``Event``. No
   OTel, no per-model breakdown -- just the one total and its flag.
+  (``PARSER_VERSION`` 27 adds the breakdown and the cut-off below.)
 """
 
 from __future__ import annotations
@@ -775,6 +799,10 @@ class Turn:
     #: Tool-search addition: characters of the name list sent in place of
     #: those definitions.
     deferred_list_chars: int = 0
+    #: Compaction-call addition (see module docstring): ``"compaction"``
+    #: when this turn is the estimated request that wrote a compaction's
+    #: summary, not a reply Claude Code logged.
+    estimated: str | None = None
 
 
 @dataclass(slots=True)
@@ -823,6 +851,10 @@ class TranscriptMeta:
     #: ``cost-state`` line's own ``totalCostUSD``/``hasUnknownModelCost``.
     cc_cost_usd: float | None = None
     cc_cost_has_unknown_model: bool = False
+    #: Cost-record addition (see module docstring): when that total was
+    #: written, as the latest line time before it, and its cost by model.
+    cc_cost_as_of: str | None = None
+    cc_cost_by_model: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -852,6 +884,10 @@ class Diagnostics:
     #: ``PARSER_VERSION`` 26 (see module docstring): lines skipped because
     #: they belong to another session whose own file holds them too.
     copied_lines: int = 0
+    #: ``PARSER_VERSION`` 27 (see module docstring): compactions whose
+    #: summary request was estimated and priced, and those left out.
+    compaction_calls: int = 0
+    compaction_calls_unsized: int = 0
     #: Independent-review addition (see module docstring): a priced turn's
     #: timestamp was present but failed to parse.
     timestamp_parse_failures: int = 0

@@ -22,7 +22,7 @@ import pytest
 from claudeglass import PARSER_VERSION, config, signals
 from claudeglass.service.contracts import ServeOptions
 from claudeglass.service.store import Store
-from claudeglass.service.watcher import LIVE_FILE_WINDOW_S, FileWatcher
+from claudeglass.service.watcher import LIVE_FILE_WINDOW_S, LIVE_REPARSE_S, FileWatcher
 from claudeglass.tools import log_usage
 
 from helpers import assert_privacy, turn_line, write_jsonl
@@ -665,6 +665,37 @@ def test_live_file_is_skipped_then_reparsed_once_stable(tmp_path: Path, store: S
     assert stats3.files_skipped_live == 0
     daily_final = {(r["day"], r["model"]): r["turns"] for r in store.daily_usage(days=3650)}
     assert sum(daily_final.values()) == 3
+
+
+def test_a_file_that_never_goes_quiet_is_still_reparsed(tmp_path: Path, store: Store):
+    """A session written to more than once a minute is live on every tick.
+    Waiting for it to go quiet froze its figures for as long as it ran
+    (3.5 hours on a real cloud session), so it is parsed again once
+    LIVE_REPARSE_S has passed since its last parse, live or not."""
+    root = tmp_path / "projects"
+    path_a = _write_session(root, "proj-a", "sess-a1", _two_turns())
+    clock = _FakeClock(time.time())
+    watcher = FileWatcher(store, _options(tmp_path), now=clock)
+    assert watcher.run_once().files_parsed == 1
+    parsed_at = clock.value
+
+    def grow(turns: int) -> None:
+        lines = _two_turns() + [turn_line(timestamp=f"2026-09-18T12:{10 + i:02d}:00.000Z") for i in range(turns)]
+        write_jsonl(path_a, lines)
+        os.utime(path_a, (clock.value, clock.value))
+
+    # Written to every 20 seconds: live each tick, skipped until due.
+    for step in (1, 2):
+        clock.value = parsed_at + 20 * step
+        grow(step)
+        stats = watcher.run_once()
+        assert (stats.files_parsed, stats.files_skipped_live) == (0, 1)
+
+    clock.value = parsed_at + LIVE_REPARSE_S
+    grow(3)
+    stats = watcher.run_once()
+    assert (stats.files_parsed, stats.files_skipped_live) == (1, 0)
+    assert sum(r["turns"] for r in store.daily_usage(days=3650)) == 5
 
 
 def test_never_seen_live_file_is_parsed_immediately(tmp_path: Path, store: Store):

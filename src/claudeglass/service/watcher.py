@@ -98,6 +98,13 @@ from .store import GLOBAL_PROJECT_SLUG, Store, decode_digest_blob
 #: constant).
 LIVE_FILE_WINDOW_S = 60.0
 
+#: A live file that keeps changing is parsed again once this many seconds
+#: have passed since its last parse, live or not. Waiting for it to go
+#: quiet froze a session written to more than once a minute for as long
+#: as it ran (3.5 hours, $15 behind, on a real cloud session). A 44 MB
+#: transcript parses in under half a second.
+LIVE_REPARSE_S = 60.0
+
 #: S1-perf item 2: a tick whose :meth:`FileWatcher._collect_parse_candidates`
 #: pool is larger than this is worth the ``ProcessPoolExecutor`` start-up
 #: cost; a smaller tick (the common case once the corpus is warm -- most
@@ -241,7 +248,8 @@ def _build_turns_agg(result: TranscriptResult, pricing: Pricing) -> list[dict]:
         )
         resolved = pricing.resolve_model(turn.model)
         breakdown = price_turn(turn, resolved)
-        bucket["turns"] += 1
+        # An estimated compaction call is spend, not a reply.
+        bucket["turns"] += not turn.is_synthetic
         bucket["input_tokens"] += turn.input_tokens
         bucket["cache_creation_tokens"] += turn.cache_creation_tokens
         bucket["cache_read_tokens"] += turn.cache_read_tokens
@@ -356,6 +364,11 @@ class FileWatcher:
         #: outcome than the alternative of never getting a first parse at
         #: all until the file is touched again.
         self._pending_stabilize: set[str] = set()
+        #: ``{str(path): now}`` as of this process's last parse of each
+        #: transcript, so a live one that keeps changing is parsed again
+        #: every :data:`LIVE_REPARSE_S` (see :meth:`_live_due`). In-memory
+        #: only: after a restart a live file is due at once.
+        self._parsed_at: dict[str, float] = {}
 
         self._loaded_snapshots: list[snapshots_mod.Snapshot] = []
         self._snapshot_ids_by_ts: dict[str, int] = {}
@@ -651,7 +664,7 @@ class FileWatcher:
 
         if not changed and not forced:
             return parser_stale
-        if live and not never_seen and not forced:
+        if live and not never_seen and not forced and not self._live_due(path_str):
             return False
         return True
 
@@ -1012,10 +1025,13 @@ class FileWatcher:
           cache's own ``header["parser_version"]`` check in ``cache.py``
           for the matching on-disk-cache half of this).
         - New-or-changed, but live (mtime under
-          :data:`LIVE_FILE_WINDOW_S`) and already known from a previous
-          tick: skip parsing this tick (``files_skipped_live``), reuse
-          whatever is already stored — it will be seen as changed again
-          next tick (``known`` wasn't updated) and re-examined then.
+          :data:`LIVE_FILE_WINDOW_S`), already known from a previous
+          tick, and parsed less than :data:`LIVE_REPARSE_S` ago: skip
+          parsing this tick (``files_skipped_live``), reuse whatever is
+          already stored — it will be seen as changed again next tick
+          (``known`` wasn't updated) and re-examined then. Once that long
+          has passed it is parsed even though still live, so a session
+          that never goes quiet doesn't freeze.
         - New-or-changed and either not live, or live but never seen
           before: parse now. A live-and-never-seen file is also added to
           :attr:`_pending_stabilize` so a later tick re-parses it even if
@@ -1046,7 +1062,7 @@ class FileWatcher:
             # Fall through to parse: the file hasn't changed, but its
             # stored digest predates the current PARSER_VERSION.
 
-        elif live and not never_seen and not forced:
+        elif live and not never_seen and not forced and not self._live_due(path_str):
             stats.files_skipped_live += 1
             existing = self._load_existing(path_str, stats)
             if existing is not None:
@@ -1055,12 +1071,19 @@ class FileWatcher:
             # path before, but there's no digest to reuse.
 
         result = self._parse(path_str, meta, stats)
+        self._parsed_at[path_str] = self._now()
         if live:
             self._pending_stabilize.add(path_str)
         else:
             self._pending_stabilize.discard(path_str)
         stats.files_parsed += 1
         return result, True
+
+    def _live_due(self, path_str: str) -> bool:
+        """Whether a live file this process last parsed
+        :data:`LIVE_REPARSE_S` or more ago (or never) is due a parse."""
+        parsed_at = self._parsed_at.get(path_str)
+        return parsed_at is None or self._now() - parsed_at >= LIVE_REPARSE_S
 
     def _is_live(self, mtime_ns: int) -> bool:
         age_s = self._now() - (mtime_ns / 1_000_000_000)
@@ -1412,4 +1435,4 @@ class FileWatcher:
                 stats.error_messages = stats.error_messages + (f"prediction ingest error: {_error_summary(exc)}",)
 
 
-__all__ = ["FileWatcher", "LIVE_FILE_WINDOW_S"]
+__all__ = ["FileWatcher", "LIVE_FILE_WINDOW_S", "LIVE_REPARSE_S"]

@@ -51,7 +51,7 @@ def test_the_grouping_is_written_once_and_exported() -> None:
 def test_the_overview_counts_and_links_the_groups_actions_shows() -> None:
     render = _body("page-overview.js", "renderOverview")
     assert "var groups = groupRecommendations(recs);" in render
-    assert "facts.saving = availableSaving(levers, groups);" in render
+    assert "facts.saving = availableSaving(levers, groups, reportTables);" in render
     assert "facts.worth = rows" in render
     # "Anything wrong?": every check, with the Actions items its rules
     # raised on the same row; an item no check draws on is a row too.
@@ -88,8 +88,11 @@ def test_the_sidebar_count_is_the_inbox_count() -> None:
 def test_available_saving_counts_each_group_once() -> None:
     available = _body("page-overview.js", "availableSaving")
     assert "groups.forEach(" in available
-    assert "if (!LEVER_RULES[group.id]) total += groupSavingUsd(group);" in available
+    assert "if (LEVER_RULES[group.id]) return;" in available
+    assert "var usd = groupSavingUsd(group);" in available
     assert "rec.saving_usd" not in available
+    # The ways to save overlap, so they are combined, never added up.
+    assert "return combinedSaving(items, spend);" in available
     saving = _body("page-actions.js", "groupSavingUsd")
     assert "if (seen[key] ||" in saving
     assert "!(rec.saving_usd > 0)" in saving
@@ -213,3 +216,50 @@ def test_long_pages_fold_tables_nothing_points_at() -> None:
     raw = _body("page-spend.js", "renderCompactionsRaw")
     assert 'host = el("details", { class: "advanced-detail" });' in raw
     assert '" summary" : " summaries"' in raw
+
+
+# -- the ways to save, together -----------------------------------------------
+
+
+def _combined(items: list[dict], spend: dict[str, float]) -> float:
+    """``combinedSaving`` from page-overview.js, run in Node."""
+    import json
+    import shutil
+    import subprocess
+
+    import pytest
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node isn't installed")
+    script = (
+        _body("page-overview.js", "combinedSaving")
+        + f"\nprocess.stdout.write(String(combinedSaving({json.dumps(items)}, {json.dumps(spend)})));"
+    )
+    done = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30, check=True)
+    return float(done.stdout)
+
+
+def test_overlapping_savings_multiply_instead_of_adding_up() -> None:
+    """Two ways to save half of the same $100 save $75 together, not $100:
+    the second halves what the first leaves."""
+    items = [{"usd": 50, "agent": None}, {"usd": 50, "agent": None}]
+    assert abs(_combined(items, {"top-level": 100}) - 75) < 1e-9
+
+
+def test_a_saving_for_one_agent_type_comes_from_its_own_spend() -> None:
+    """Half the main session's $90, then a tenth of everything: the main
+    session keeps 90 x 0.5 x 0.9 and the subagent 10 x 0.9."""
+    items = [{"usd": 45, "agent": "top-level"}, {"usd": 10, "agent": None}]
+    total = _combined(items, {"top-level": 90, "Explore": 10})
+    assert abs(total - (90 * (1 - 0.5 * 0.9) + 10 * (1 - 0.9))) < 1e-9
+
+
+def test_the_ways_to_save_never_come_to_more_than_the_spend() -> None:
+    items = [{"usd": 80, "agent": None}, {"usd": 80, "agent": "top-level"}, {"usd": 500, "agent": None}]
+    assert _combined(items, {"top-level": 100}) <= 100
+
+
+def test_without_a_spend_by_agent_type_the_savings_are_added_up() -> None:
+    items = [{"usd": 3, "agent": None}, {"usd": 4, "agent": "top-level"}]
+    assert _combined(items, {}) == 7

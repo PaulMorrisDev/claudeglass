@@ -740,6 +740,51 @@ def _tool_search(ctx: Context) -> dict:
     return _result("ok", text, table=table)
 
 
+#: The most of a difference from Claude Code's own cost record, in %,
+#: that stopped replies and unlogged requests don't explain, before the
+#: cost-record check says ClaudeGlass's figures may be off.
+_COST_RECORD_LIMIT_PCT = 5.0
+
+
+def _cost_record(ctx: Context) -> dict:
+    tables = whatif._Tables(ctx.model)
+    summary = tables.rows("cost_record", "cost_record_summary")
+    row = summary[0] if summary else {}
+    sessions = int(round(whatif._num(row.get("sessions")) or 0))
+    if not sessions:
+        return _result(
+            "no_data",
+            f"No session {ctx.period} has Claude Code's own cost record to check against. Only some Claude Code "
+            "versions write one.",
+        )
+    difference = whatif._num(row.get("difference_pct")) or 0.0
+    unexplained = whatif._num(row.get("unexplained_pct")) or 0.0
+    worst = whatif._num(row.get("worst_unexplained_pct")) or 0.0
+    table = _table(
+        [("session", "Session"), ("recorded", "Recorded"), ("claude_code", "Claude Code's own"),
+         ("claudeglass", "ClaudeGlass"), ("left", "Left unexplained")],
+        [[str(r.get("session_id") or "")[:8], r.get("as_of"), _cell(ctx, r.get("cc_usd")),
+          _cell(ctx, r.get("local_usd")), f"{whatif._num(r.get('unexplained_pct')) or 0.0:+.1f}%"]
+         for r in tables.rows("cost_record", "cost_record_sessions")[:10]],
+    )
+    plural = "s" if sessions != 1 else ""
+    if abs(unexplained) > _COST_RECORD_LIMIT_PCT or worst > _COST_RECORD_LIMIT_PCT:
+        return _result(
+            "act",
+            f"ClaudeGlass's cost differs from Claude Code's own record by {unexplained:+.1f}% over {sessions:,} "
+            f"session{plural}, beyond what stopped replies and unlogged requests explain. Its figures may be off, "
+            "so please report it.",
+            table=table,
+        )
+    return _result(
+        "ok",
+        f"ClaudeGlass's cost is within {abs(difference):.1f}% of Claude Code's own record over {sessions:,} "
+        f"session{plural}. Once stopped replies and unlogged requests are taken out, {abs(unexplained):.1f}% is "
+        "left.",
+        table=table,
+    )
+
+
 _HABIT_RECS = {
     "batch-instructions", "long-tool-waits", "notification-invalidation", "agent-report-size", "spawn-task-prompt",
     "cache-read-dominance", "limit-pressure", "long-context-share", "subagent-volume", "discovery-share",
@@ -1183,6 +1228,9 @@ CHECKS: tuple[Check, ...] = (
           "Pauses, retries and long reports cost tokens that no setting can save.", _habits, tuple(sorted(_HABIT_RECS))),
     Check("quality", "Is any agent struggling?",
           "A cheaper model or a lower effort only saves money if the work still gets done.", _quality),
+    Check("cost-record", "Do ClaudeGlass's figures match Claude Code's own?",
+          "Claude Code writes down what it thinks each session cost. Where it does, ClaudeGlass checks its own "
+          "figures against it.", _cost_record),
 )
 CHECK_IDS = tuple(check.id for check in CHECKS)
 

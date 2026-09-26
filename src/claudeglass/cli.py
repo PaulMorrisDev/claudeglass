@@ -1264,7 +1264,8 @@ def _config_dir_args(config_dir: Path) -> str:
 
 def _priced_turns(result: TranscriptResult):
     """Turns that actually got a ``turn_index`` (excludes synthetic and
-    missing-usage turns). Deliberately duplicated rather than imported
+    missing-usage turns, but keeps an estimated compaction call, which is
+    spend -- see ``parse.py``). Deliberately duplicated rather than imported
     from ``report.py`` -- the same one-line-helper convention
     ``workflows.py``/``phases.py``/``report.py`` itself document.
     """

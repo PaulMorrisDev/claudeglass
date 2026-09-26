@@ -175,8 +175,10 @@ def _priced_turns(tr: TranscriptResult) -> list[Turn]:
     ``parse.py``'s ``turn_index`` convention (0 for synthetic/no-usage
     turns, 1-based otherwise). Compaction records and rediscovery windows
     are both about priced work, so unpriced turns are excluded from both.
+    So is an estimated compaction call (``Turn.estimated``): it is the
+    compaction itself, not a reply before or after it.
     """
-    return [t for t in tr.turns if t.turn_index > 0]
+    return [t for t in tr.turns if t.turn_index > 0 and not t.estimated]
 
 
 def _compaction_events(tr: TranscriptResult) -> list[Event]:
@@ -380,6 +382,11 @@ class CompactionStats:
     #: Main sessions a scheduled task started with no message of yours
     #: (``model.scheduled_main_session``), left out of every figure.
     scheduled_sessions: int = 0
+    #: The estimated request that wrote each summary (``Turn.estimated``,
+    #: see ``parse.py``): how many, and what they cost. They count in
+    #: spend; these figures only show that part of it.
+    summary_requests: int = 0
+    summary_request_cost: float = 0.0
 
     @classmethod
     def build(
@@ -415,6 +422,10 @@ class CompactionStats:
         priced = _priced_turns(tr)
         self.total_cache_creation += sum(t.cache_creation_tokens for t in priced)
         self.total_new_tokens += sum(new_tokens(t) for t in priced)
+        for turn in tr.turns:
+            if turn.estimated == "compaction":
+                self.summary_requests += 1
+                self.summary_request_cost += price_turn(turn, rates).total
 
         records = compaction_records_for_transcript(tr, rates, thresholds)
         if records:
@@ -614,6 +625,7 @@ def build_section(stats: CompactionStats) -> Section:
             ["Dropped tokens (share of cache_creation)", stats.dropped_share_of_cache_creation],
             ["Dropped tokens (share of new_tokens: input+cache_creation)", stats.dropped_share_of_new_tokens],
             ["Mean duration (ms)", stats.mean_duration_ms],
+            ["Summary requests (estimated, USD)", stats.summary_request_cost],
             ["Total post-compaction write cost (USD)", stats.total_post_compaction_write_cost],
             [
                 "Total post-compaction RE-CACHE-flagged write cost (USD)",
@@ -677,6 +689,9 @@ def build_section(stats: CompactionStats) -> Section:
         "Both totals, and the per-session write cost, leave out a summary "
         "whose next reply came more than 15 minutes later. That reply most "
         "likely belongs to a resumed session.",
+        "\"Cost of writing the summaries (estimated)\" is the request that wrote each summary. "
+        "Claude Code bills it but does not log it, so it is estimated. That is the context read "
+        "from the cache once more, with the summary as output. It counts in spend.",
     ]
     if stats.scheduled_sessions:
         notes.append(

@@ -76,7 +76,7 @@ def _transcript_cost(result: TranscriptResult, rates_lookup: Pricing) -> float:
     """
     total = 0.0
     for turn in result.turns:
-        if turn.turn_index == 0:  # synthetic or missing-usage, never priced
+        if turn.turn_index == 0:  # a synthetic reply or missing usage, never priced
             continue
         resolved = rates_lookup.resolve_model(turn.model)
         total += price_turn(turn, resolved).total

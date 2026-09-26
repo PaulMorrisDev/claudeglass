@@ -142,7 +142,7 @@ export var PAGES = [
     label: "Data quality",
     icon: "data",
     foot: true,
-    intro: "What ClaudeGlass installed and what to expect, how much of your data it could read, and anything it had to skip.",
+    intro: "What ClaudeGlass installed and what to expect, how much of your data it read, and whether its cost matches Claude Code's own.",
   },
   {
     id: "glossary",
@@ -313,6 +313,8 @@ export var SECTION_PAGE_MAP = {
   // The capture section's one table is report-only; the Capture segment
   // shows its own figures from /api/capture.
   capture: "setup/capture",
+  // Data quality: ClaudeGlass's cost against Claude Code's own record.
+  cost_record: "data",
 };
 
 // "section.table" -> view, for a table that lives somewhere other than

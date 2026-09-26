@@ -144,6 +144,8 @@ PLACEMENT: dict[str, str] = {
     # what tool search saves
     "tool_search_summary": "keep",
     "tool_search_by_server": "keep",
+    "cost_record_summary": "keep",
+    "cost_record_sessions": "keep",
     # quality signals
     "quality_by_agent": "keep",
     "quality_by_setup": "keep",
@@ -582,6 +584,17 @@ SECTION_COPY: dict[str, SectionCopy] = {
             read="Definitions that were never loaded are sized from the ones that were, so the saving is an "
             "estimate. A loaded definition counts as sent either way.",
             act="",
+        ),
+    ),
+    "cost_record": SectionCopy(
+        title="Claude Code's own cost record",
+        intro="Claude Code writes down what it thinks each session cost. Where it does, this checks ClaudeGlass's "
+        "own figures against it.",
+        help=Help(
+            shows="Claude Code's own cost for each session next to ClaudeGlass's, over the same span.",
+            read="Stopped replies and requests no log shows explain part of any difference. \"Left unexplained\" "
+            "is the rest.",
+            act="If more than 5% is left unexplained, ClaudeGlass's figures may be off, so please report it.",
         ),
     ),
     "model_swap": SectionCopy(
@@ -3357,8 +3370,8 @@ TABLE_COPY: dict[str, TableCopy] = {
     "compactions_summary": TableCopy(
         title="Conversation summaries at a glance",
         help=Help(
-            shows="How many sessions were summarised, how large the context was before and after, and the cache "
-            "write on the reply after each summary.",
+            shows="How many sessions were summarised, and how large the context was before and after. Also what "
+            "writing each summary cost, and the cache write on the reply after it.",
             read="Costs only count replies within 15 minutes of the summary. \"Rebuilt most of the cache\" is the "
             "part where the next reply read under a fifth of its context from the cache.",
             act="If summaries are frequent and large, split long tasks into separate sessions.",
@@ -3381,6 +3394,7 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Tokens removed, as a % of all new input and cache writes"
             ),
             "Mean duration (ms)": "Average time to summarise (milliseconds)",
+            "Summary requests (estimated, USD)": "Cost of writing the summaries (estimated)",
             "Total post-compaction write cost (USD)": "Cache write cost on the reply after a summary",
             "Total post-compaction RE-CACHE-flagged write cost (USD)": (
                 "Of that, replies that rebuilt most of the cache"
@@ -3398,6 +3412,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "Dropped tokens (share of cache_creation)": "pct",
             "Dropped tokens (share of new_tokens: input+cache_creation)": "pct",
             "Mean duration (ms)": "int",
+            "Summary requests (estimated, USD)": "money",
             "Total post-compaction write cost (USD)": "money",
             "Total post-compaction RE-CACHE-flagged write cost (USD)": "money",
         },
@@ -4022,6 +4037,59 @@ TABLE_COPY: dict[str, TableCopy] = {
         value_labels={"all replies": "All replies"},
         lead_columns=["net_usd", "kept_per_reply", "most_deferred", "search_replies"],
     ),
+    "cost_record_summary": TableCopy(
+        title="Against Claude Code's own record",
+        help=Help(
+            shows="Every session with Claude Code's own cost record, added up, and what explains the difference.",
+            read="ClaudeGlass counts only the replies up to when Claude Code last wrote its total.",
+            act="",
+        ),
+        columns={
+            "scope": ("Scope", "Which sessions the row covers."),
+            "sessions": ("Sessions", "Sessions with Claude Code's own cost record."),
+            "cc_usd": ("Claude Code's own cost", "What Claude Code recorded these sessions cost."),
+            "local_usd": ("ClaudeGlass, same span", "What ClaudeGlass prices the same replies at."),
+            "difference_pct": ("Difference", "ClaudeGlass's cost against Claude Code's, as a % of Claude Code's."),
+            "stopped_usd": (
+                "Stopped replies",
+                "Replies stopped mid-stream. They used tokens, so ClaudeGlass counts them; Claude Code doesn't.",
+            ),
+            "unlogged_usd": (
+                "Requests no log shows",
+                "Small requests Claude Code counts but no log records, such as naming the session.",
+            ),
+            "estimated_usd": (
+                "Estimated summaries",
+                "The request that writes each conversation summary. Claude Code bills it; ClaudeGlass estimates it.",
+            ),
+            "unexplained_pct": (
+                "Left unexplained",
+                "The difference once stopped replies and unlogged requests are taken out, as a % of Claude Code's.",
+            ),
+            "worst_unexplained_pct": ("Most in one session", "The largest share left unexplained in one session."),
+        },
+        value_labels={"all": "All sessions with a record"},
+        lead_columns=["cc_usd", "local_usd", "difference_pct", "unexplained_pct"],
+    ),
+    "cost_record_sessions": TableCopy(
+        title="By session",
+        help=Help(
+            shows="Each session with Claude Code's own cost record, newest first.",
+            read="\"Recorded\" is when Claude Code last wrote its total. Later replies aren't compared.",
+            act="",
+        ),
+        columns={
+            "session_id": ("Session", "The session."),
+            "as_of": ("Recorded", "When Claude Code last wrote the session's total."),
+            "cc_usd": ("Claude Code's own cost", "What Claude Code recorded the session cost."),
+            "local_usd": ("ClaudeGlass, same span", "What ClaudeGlass prices the same replies at."),
+            "difference_pct": ("Difference", "ClaudeGlass's cost against Claude Code's, as a % of Claude Code's."),
+            "unexplained_pct": (
+                "Left unexplained",
+                "The difference once stopped replies and unlogged requests are taken out.",
+            ),
+        },
+    ),
     "tool_search_by_server": TableCopy(
         title="By MCP server",
         help=Help(
@@ -4437,6 +4505,8 @@ DIAGNOSTIC_LABELS: dict[str, tuple[str, str]] = {
     "trailing_events": ("Events after the last reply", "Events logged after a session's last reply, so attached to none."),
     "replayed_lines": ("Lines copied from an earlier session", "Lines a resumed session repeated. Counted once."),
     "copied_lines": ("Lines copied from another session", "Lines another session's log also holds, as after /clear in a web or mobile session. Counted once, in their own session."),
+    "compaction_calls": ("Summaries estimated", "Conversation summaries whose own request was estimated and counted in spend. Claude Code bills that request but does not log it."),
+    "compaction_calls_unsized": ("Summaries left out", "Conversation summaries with no reply before them or no summary size, so their own request could not be estimated and is not in spend."),
     "timestamp_parse_failures": ("Unreadable timestamps", "Replies whose time could not be read. They are left out of time-based tables."),
     "agent_settings": ("Agent settings seen", "Agent settings recorded in the logs, with counts."),
     "modes": ("Permission modes seen", "Permission modes recorded in the logs, with counts."),

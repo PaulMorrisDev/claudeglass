@@ -195,7 +195,7 @@ def compute_tool_search(
     lookup = pricing.resolve_model
     for tr in results:
         for turn in tr.turns:
-            if turn.turn_index <= 0:
+            if turn.turn_index <= 0 or turn.is_synthetic:
                 continue
             stats.all_replies += 1
             if set(turn.tool_names) == {SEARCH_TOOL}:
