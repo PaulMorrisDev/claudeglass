@@ -16,7 +16,7 @@ Costs rise with depth, so capture comes in levels, each including every metric o
 | Free | Local signals from hooks that log to a file. Uses no Claude tokens. | – | – |
 | Essentials | Claude tags each piece of work: what kind it was, how clear the request was, how hard, how big, and when the task changed. Subagents say whether they finished. | ~219 tokens | ~108 tokens |
 | Standard | Adds what the request lacked, planning, skills, research, and each subagent's view of its model, rules and brief. | ~336 tokens | ~191 tokens |
-| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /tl-feedback survey, its reminder note, and Claude's one-line reminder to run it when a piece of work is done. | ~420 tokens | ~191 tokens |
+| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /tl-feedback survey, its reminder note, and Claude's one-line reminder to run it when a piece of work is done. | ~432 tokens | ~191 tokens |
 | Custom | Any other set of metrics, turned on one by one (`capture enable`/`capture disable`). | depends what's on | depends what's on |
 
 These are rough sizes — the note's characters divided by four, plus Claude Code's own hook-wrapper overhead (the system-reminder tags around it) — and don't include the tag Claude writes back (each metric below says roughly how many output tokens its own words cost). Setup › Capture replays your last 14 days of transcripts against each level before you turn it on, and once it's on, measures the real note and tag cost from what Claude Code actually recorded — read that number, not this one, when it matters.
@@ -64,7 +64,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 | Brief templates (`brief_templates`) | Live coaching, any level | – | Giving Claude information |
 | Feedback skill (`feedback_skill`) | Feedback, any level; switching to Deep turns it on | – | Cost per finished piece of work, Planning, Profiles per kind of task |
 | Feedback reminder in the status line (`feedback_note`) | Feedback, any level; switching to Deep turns it on | – | Cost per finished piece of work |
-| Feedback reminder from Claude (`feedback_reminder`) | Feedback, any level; switching to Deep turns it on | ~20 | Cost per finished piece of work |
+| Feedback reminder from Claude (`feedback_reminder`) | Feedback, any level; switching to Deep turns it on | ~26 | Cost per finished piece of work |
 | Rate sessions on the dashboard (`dashboard_rating`) | Feedback, any level | – | Cost per finished piece of work |
 
 ## Main session
@@ -381,7 +381,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Coaching line (`coaching_line`)
 
 - **Level:** Live coaching, any level
-- **Captures:** A second status line with a live hint from your session. For example, a large context before a new task, a large last output, or many reads so far.
+- **Captures:** A second status line with a live hint from your session. For example, a large context before a new task, a large last output, many reads so far, or a run of short fix requests.
 - **Why:** Advice where you work, at the moment it applies. The status line is never sent to Claude.
 - **Tag:** No tag. Shown only in the status line; Claude is never asked, and it costs no tokens.
 - **Powers:** Clearing context, Tool output, Researching
@@ -389,9 +389,9 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Coaching notes from Claude (`coaching_notes`)
 
 - **Level:** Live coaching, any level
-- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or tells you in one line: a large tool output, many reads for one message, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired cache when you send a message.
+- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or tells you in a highlighted tip: a large tool output, many reads for one message, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired cache when you send a message. It also flags how you prompt: short fix requests one after another, a vague correction, a huge paste, or stopping Claude again and again.
 - **Why:** Advice at the moment it applies, and Claude can often act on it itself. Each note costs a few dozen tokens for the rest of the session. Claude Code waits for the hook after each shell, read, search, web or MCP result and each message you send.
-- **Tag:** No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in one line. Each hint and when it applies: [coaching.md](coaching.md).
+- **Tag:** No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in a highlighted tip. Each hint and when it applies: [coaching.md](coaching.md).
 - **Hook:** UserPromptSubmit, PostToolUse
 - **Powers:** Clearing context, Tool output, Researching, Delegating to agents, Planning
 
@@ -424,10 +424,11 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Feedback reminder from Claude (`feedback_reminder`)
 
 - **Level:** Feedback, any level; switching to Deep turns it on
-- **Captures:** Claude adds one line suggesting /tl-feedback when it finishes a piece of work.
+- **Captures:** Claude adds a highlighted note suggesting /tl-feedback when it finishes a piece of work.
 - **Why:** For people without the status line. Costs a few output tokens each time.
-- **Tag:** No fixed key. The note asks for a line: "When you finish a piece of work the user asked for, add before your tag: Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work."
-- **Costs:** about 20 output tokens each time
+- **Tag:** No fixed key. The note asks for a line: "When you finish a piece of work the user asked for, add this before your tag, after a blank line:
+> 💡 **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work."
+- **Costs:** about 26 output tokens each time
 - **Hook:** SessionStart
 - **Powers:** Cost per finished piece of work
 

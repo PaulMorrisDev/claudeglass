@@ -60,7 +60,14 @@ import json
 import re
 from typing import Iterable, Sequence
 
-from .capture_catalogue import COACH_MARKER, COACHING_HINTS, HOOK_SCRIPT, NOTE_MARKER
+from .capture_catalogue import (
+    COACH_MARKER,
+    COACHING_HINTS,
+    CORRECTION_PATTERN,
+    CORRECTION_SCAN_CHARS,
+    HOOK_SCRIPT,
+    NOTE_MARKER,
+)
 from .capture_tags import parse_brief_markers, parse_note_codes
 from .model import Event, EventKind
 
@@ -825,28 +832,12 @@ _PASTE_MARKER = "[Pasted text"
 
 
 #: Quality-signals addition: phrases that mark a message as correcting
-#: Claude ("that's wrong", "still broken", "why did you", "undo that").
-#: Matched in the first :data:`_CORRECTION_SCAN_CHARS` characters only,
-#: and only the resulting yes/no is kept -- never the text. A bare "no"
-#: is deliberately not a match: "no, go ahead" is as common as a
-#: correction.
-_CORRECTION_RE = re.compile(
-    r"\b(?:"
-    r"that'?s (?:wrong|not right|not what|incorrect|broken)"
-    r"|th(?:is|at) (?:is|was) (?:wrong|broken|incorrect|not (?:right|working|what))"
-    r"|it'?s (?:still )?(?:broken|wrong|not working|failing|incorrect)"
-    r"|(?:still|it still) (?:broken|failing|wrong|not working|doesn'?t work|fails)"
-    r"|(?:doesn'?t|does not|didn'?t|did not) work"
-    r"|not what (?:i|we) (?:asked|wanted|meant|said)"
-    r"|you (?:broke|missed|forgot|ignored|didn'?t (?:do|read|follow|check|run|fix))"
-    r"|why (?:did|didn'?t|would|are|is) you"
-    r"|(?:undo|revert|roll back) (?:that|this|it|the|your)"
-    r"|that broke|you'?ve broken|try again|redo (?:it|that|this)"
-    r"|wrong (?:file|approach|answer|place|branch|one)"
-    r")\b",
-    re.IGNORECASE,
-)
-_CORRECTION_SCAN_CHARS = 200
+#: Claude (``capture_catalogue.CORRECTION_PATTERN``, shared with the
+#: capture hook's prompting hints). Matched in the first
+#: :data:`_CORRECTION_SCAN_CHARS` characters only, and only the resulting
+#: yes/no is kept -- never the text.
+_CORRECTION_RE = re.compile(CORRECTION_PATTERN, re.IGNORECASE)
+_CORRECTION_SCAN_CHARS = CORRECTION_SCAN_CHARS
 
 #: Quality-markers addition: a brief that starts "[retry: <reason>]" says
 #: the agent is being run again because its last run's work wasn't good

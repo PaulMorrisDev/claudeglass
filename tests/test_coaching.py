@@ -203,6 +203,104 @@ def test_a_small_plan_context_gets_no_hint(tmp_path):
     assert _coach(tmp_path, plan) == ""
 
 
+def _said(text: str, ago_s: float, *, blocks: bool = False) -> dict:
+    """A message you typed ``ago_s`` seconds before :data:`NOW`."""
+    content = [{"type": "text", "text": text}] if blocks else text
+    return {**_prompt(), "timestamp": _iso(NOW - timedelta(seconds=ago_s)), "message": {"role": "user", "content": content}}
+
+
+def _stopped(ago_s: float, *, blocks: bool = False, sidechain: bool = False) -> dict:
+    """The line Claude Code writes when you stop a reply with Esc."""
+    record = _said("[Request interrupted by user]", ago_s, blocks=blocks)
+    return {**record, "isSidechain": True} if sidechain else record
+
+
+def _send(tmp_path, records, prompt: str, *, session: str = "s1", config=ON, now=NOW, name: str = "") -> str:
+    path = _transcript(tmp_path, records, name or f"{session}.jsonl")
+    payload = {"hook_event_name": "UserPromptSubmit", "transcript_path": path, "prompt": prompt, "session_id": session}
+    return _coach(tmp_path, payload, config, now=now)
+
+
+def test_short_fix_requests_in_a_row_get_the_batch_them_hint(tmp_path):
+    records = [
+        _said("Build the settings page from the plan we agreed", 3_600), _reply(40_000, ago_s=3_000),
+        _said("fix the header, it overlaps", 900), _reply(41_000, ago_s=880),
+        _said("<command-name>/cost</command-name>", 700),
+        _stopped(650, blocks=True),
+        _said("that's still wrong", 600), _reply(42_000, ago_s=580),
+    ]
+    note = _send(tmp_path, records, "the save button doesn't work either")
+    assert _kind(note) == "fix_drip" and "sent 3 short fix requests in a row" in note
+    # The note carries counts, never your words.
+    assert "header" not in note and "save button" not in note
+    # A message Claude Code has already written to the transcript isn't counted twice.
+    written = [*records, _said("the save button doesn't work either", 2)]
+    assert "sent 3 short" in _send(tmp_path, written, "the save button doesn't work either", session="s2")
+
+
+def test_a_fix_request_after_a_detailed_message_or_a_long_gap_starts_a_new_run(tmp_path):
+    detailed = [
+        _said("fix the header", 900), _reply(40_000, ago_s=880),
+        _said("Here is everything still wrong: " + "the header overlaps the menu; " * 12, 600),
+        _reply(41_000, ago_s=580), _said("still broken", 300), _reply(42_000, ago_s=280),
+    ]
+    assert _kind(_send(tmp_path, detailed, "fix it")) != "fix_drip"
+    spaced = [_said("fix the header", 7_200), _reply(40_000, ago_s=7_000), _said("still broken", 300)]
+    assert _kind(_send(tmp_path, spaced, "fix it", session="s2")) != "fix_drip"
+    # Your own count wins.
+    fewer = {**ON, "thresholds": {"coaching_fix_drip_count": 2}}
+    assert _kind(_send(tmp_path, spaced, "fix it", session="s3", config=fewer)) == "fix_drip"
+
+
+def test_a_vague_correction_gets_the_say_what_you_saw_hint(tmp_path):
+    records = [_said("Add a dark mode toggle", 200), _reply(30_000, ago_s=100)]
+    for n, vague in enumerate(("it's still broken", "doesn't work", "fix it", "wrong")):
+        assert _kind(_send(tmp_path, records, vague, session=f"v{n}")) == "vague_fix", vague
+    for n, fine in enumerate((
+        "the toggle in settings.py still fails with KeyError",
+        "fix line 42",
+        "it's wrong: the toggle should say `Dark`",
+        "looks good, thanks",
+        "Now add a light mode toggle as well",
+    )):
+        assert _send(tmp_path, records, fine, session=f"f{n}") == "", fine
+
+
+def test_one_note_at_a_time_while_the_fixes_keep_coming(tmp_path):
+    records = [_said("fix the header", 600), _reply(30_000, ago_s=580), _said("still wrong", 300),
+               _reply(30_000, ago_s=280)]
+    assert _kind(_send(tmp_path, records, "fix it")) == "fix_drip"
+    # The run hint is resting; the next vague fix in the same run adds nothing.
+    more = [*records, _said("fix it", 200), _reply(30_000, ago_s=180)]
+    assert _send(tmp_path, more, "broken again", now=NOW + timedelta(seconds=30)) == ""
+
+
+def test_a_huge_paste_gets_the_paste_less_hint(tmp_path):
+    records = [_said("hi", 200), _reply(20_000, ago_s=100)]
+    note = _send(tmp_path, records, "Why does this fail?\n" + "log line\n" * 5_000)
+    assert _kind(note) == "big_paste" and "about 11k tokens" in note and "log line" not in note
+    assert _send(tmp_path, records, "Why does this fail?\n" + "log line\n" * 1_000, session="s2") == ""
+
+
+def test_stopping_claude_again_and_again_gets_the_agree_the_approach_hint(tmp_path):
+    records = [
+        _said("Refactor the store", 1_150), _stopped(1_100), _said("no, keep the API", 1_000),
+        _stopped(600, blocks=True), _said("use the cache instead", 500), _stopped(60),
+    ]
+    note = _send(tmp_path, records, "just rename it for now")
+    assert _kind(note) == "stop_loop" and "stopped you 3 times in the last 20 minutes" in note
+    # Stops before the window, or inside a subagent, don't count.
+    older = [*records[:2], _stopped(3_000), _stopped(60, sidechain=True), _stopped(60)]
+    assert _send(tmp_path, older, "just rename it for now", session="s2") == ""
+
+
+def test_a_prompt_hint_comes_before_the_context_hints(tmp_path):
+    records = [_said("fix the header", 600), _reply(150_000, ago_s=580, one_hour=True), _said("still wrong", 300),
+               _reply(150_000, ago_s=280, one_hour=True)]
+    assert _kind(_send(tmp_path, records, "fix it")) == "fix_drip"
+    assert _kind(_send(tmp_path, records, "fix it", now=NOW + timedelta(seconds=30))) == "clear_context"
+
+
 def _agent(tmp_path, records, agent_id="abc", *, nested: bool = False) -> tuple[str, Path]:
     session = _transcript(tmp_path, [_prompt(), _reply(20_000)], "sess.jsonl")
     folder = tmp_path / "sess" / "subagents"
@@ -309,6 +407,51 @@ def test_the_hook_runs_coaching_notes_with_capture_off(tmp_path):
     output = json.loads(out)["hookSpecificOutput"]
     assert output["hookEventName"] == "UserPromptSubmit"
     assert _kind(output["additionalContext"]) == "clear_context"
+    # A context hint depends on what the message is about, so it has no notice.
+    assert "systemMessage" not in json.loads(out)
+
+
+def test_a_prompting_hint_also_shows_you_a_notice_at_once(tmp_path):
+    config_dir = _config_dir(tmp_path)
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    now = datetime.now(timezone.utc)
+
+    def said(text, minutes):
+        return {**_prompt(text), "timestamp": _iso(now - timedelta(minutes=minutes))}
+
+    path = _transcript(tmp_path, [said("fix the header", 10), _undated(_reply(20_000)), said("still wrong", 5)])
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": "/w", "transcript_path": path,
+               "prompt": "the save button doesn't work either"}
+    rc, out, err = _run(config_dir, payload)
+    assert rc == 0 and err == ""
+    output = json.loads(out)
+    assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "fix_drip"
+    assert output["systemMessage"] == cat.COACHING_NOTICE["fix_drip"].format(count=3)
+    assert "save button" not in out
+
+
+def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_prompting_hints():
+    to_the_user = {"plan_fresh", "cache_cold", "clear_context", "fix_drip", "stop_loop", "vague_fix", "big_paste"}
+    for hint, text in cat.COACHING_TEXT.items():
+        assert (cat.TIP_LABEL in text) == (hint in to_the_user), hint
+    assert set(cat.COACHING_NOTICE) == {"fix_drip", "stop_loop", "vague_fix", "big_paste"}
+    assert CATALOGUE["coaching"]["notice"] == cat.COACHING_NOTICE
+    assert all(notice.startswith("⚠️ ClaudeGlass: ") for notice in cat.COACHING_NOTICE.values())
+    reminder = cat.note_text(["feedback_reminder"], "main")
+    assert f"{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}" in reminder
+
+
+def test_the_notice_takes_the_same_fields_as_the_note(tmp_path):
+    records = [_said("Refactor the store", 1_150), _stopped(1_100), _stopped(600), _stopped(60)]
+    path = _transcript(tmp_path, records)
+    payload = {"session_id": "s1", "cwd": "/w", "hook_event_name": "UserPromptSubmit", "transcript_path": path,
+               "prompt": "just rename it"}
+    note, notice = HOOK.coaching_for(payload, ON, CATALOGUE, _config_dir(tmp_path), now=NOW)
+    assert _kind(note) == "stop_loop" and notice == cat.COACHING_NOTICE["stop_loop"].format(count=3, minutes=20)
+    big = {**payload, "session_id": "s2", "prompt": "x" * 48_000,
+           "transcript_path": _transcript(tmp_path, [_said("hi", 200)], "big.jsonl")}
+    assert HOOK.coaching_for(big, ON, CATALOGUE, _config_dir(tmp_path), now=NOW)[1].startswith(
+        "⚠️ ClaudeGlass: this message is about 12k tokens")
 
 
 def test_a_capture_note_and_a_coaching_note_go_out_as_one(tmp_path):

@@ -339,6 +339,8 @@ def test_quick_actions_render_markdown_strips_tokens():
 _TAB_MENTION_ALLOWLIST = (
     "tab indentation is not supported",
     "turned part of it into a tab or newline",
+    # Claude Code's plan-mode key, not a dashboard tab.
+    "(Shift+Tab)",
 )
 _TAB_MENTION_RE = re.compile(r"\btabs?\b", re.IGNORECASE)
 
