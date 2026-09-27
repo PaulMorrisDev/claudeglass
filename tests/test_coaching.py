@@ -507,15 +507,21 @@ def test_a_long_subagent_run_gets_the_split_hint_at_your_split_point(tmp_path):
     assert _coach(tmp_path, call) == ""
     with open(agent_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(_reply(3_000, message_id="m3")) + "\n")
-    note = _coach(tmp_path, call)
-    assert _kind(note) == "split_run" and "about 3 replies" in note and "every 3 replies" in note
+    # You get a notice; the subagent gets nothing.
+    note, notice = HOOK.coaching_for({"session_id": "s1", "cwd": "/work/app", **call}, ON, CATALOGUE, config_dir, now=NOW)
+    assert note == "" and notice == cat.COACHING_NOTICE["split_run"].format(agent="general-purpose", replies=3, every_n=3)
     state = json.loads((config_dir / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
     assert state["agents"]["abc"]["replies"] == 3
+    # Once a run, however long it goes on.
+    with open(agent_path, "a", encoding="utf-8") as handle:
+        handle.writelines(json.dumps(_reply(3_000 + n, message_id=f"m{n}")) + "\n" for n in range(10, 20))
+    assert HOOK.coaching_for({"session_id": "s1", "cwd": "/work/app", **call}, ON, CATALOGUE, config_dir,
+                             now=NOW + timedelta(hours=2)) == ("", "")
     # A summary starts the count again.
     with open(agent_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n")
         handle.write(json.dumps(_reply(1_000, message_id="m4")) + "\n")
-    assert _coach(tmp_path, call, now=NOW + timedelta(hours=1)) == ""
+    assert _coach(tmp_path, call, now=NOW + timedelta(hours=3)) == ""
     assert json.loads((config_dir / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))["agents"]["abc"]["replies"] == 1
 
 
@@ -628,11 +634,35 @@ def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_promp
     }
     for hint, text in cat.COACHING_TEXT.items():
         assert (cat.TIP_LABEL in text) == (hint in to_the_user), hint
-    assert set(cat.COACHING_NOTICE) == {"repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix", "big_paste"}
+    assert set(cat.COACHING_NOTICE) == {
+        "repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix", "big_paste", "split_run",
+    }
+    # split_run tells the subagent nothing.
+    assert cat.COACHING_TEXT["split_run"] == ""
     assert CATALOGUE["coaching"]["notice"] == cat.COACHING_NOTICE
     assert all(notice.startswith("⚠️ ClaudeGlass: ") for notice in cat.COACHING_NOTICE.values())
     reminder = cat.note_text(["feedback_reminder"], "main")
     assert f"{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}" in reminder
+
+
+def test_the_prompting_hints_ask_only_for_a_tip_and_never_steer_the_work():
+    # They're about how the user prompts: planning first, asking first,
+    # waiting for a go-ahead or dropping an approach changed the work.
+    steering = re.compile(
+        r"before (?:changing|you change) anything|wait for a go-ahead|don't repeat|try a different way"
+        r"|ask one short question|set out in a few lines|carry on unless",
+        re.IGNORECASE,
+    )
+    for hint in ("repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix"):
+        text = cat.COACHING_TEXT[hint]
+        assert not steering.search(text), hint
+        assert "changes nothing about the work" in text and cat.TIP_LABEL in text, hint
+
+
+def test_the_feedback_reminder_is_asked_for_once_a_session():
+    for tagger in cat.TAGGERS:
+        note = cat.note_text(["feedback_reminder"], "main", tagger=tagger)
+        assert "first time in this session" in note and "never again" in note, tagger
 
 
 _EMOJI = re.compile("[←-⯿\U0001f000-\U0001faff️]")

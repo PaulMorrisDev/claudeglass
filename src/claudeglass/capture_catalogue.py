@@ -541,9 +541,16 @@ COACHING_THRESHOLDS = {
     "rearm_factor": 1.5,
 }
 
-#: What each hint asks of Claude. ``{placeholders}`` are filled from the
-#: session: token counts in thousands (``150k``), an idle time, a count.
-#: A note never carries a path, a command or your words.
+#: What the prompting hints say about the work itself: nothing. They're
+#: about how the user prompts, so Claude does the work as it would have
+#: and only adds the tip; telling it to plan first, ask first, wait for a
+#: go-ahead or change its approach steered the work itself.
+_AS_USUAL = "Handle the message exactly as you would have without this note: it changes nothing about the work."
+
+#: What each hint asks of Claude; ``""`` for one that only shows you a
+#: notice. ``{placeholders}`` are filled from the session: token counts
+#: in thousands (``150k``), an idle time, a count. A note never carries a
+#: path, a command or your words.
 COACHING_TEXT = {
     "cache_cold": (
         "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context "
@@ -559,34 +566,29 @@ COACHING_TEXT = {
     ),
     "drip_feed": (
         "The user has sent {count} small change requests in a row, one message each, and every message re-reads "
-        "the whole context. Make this change, then end your reply, before any tag, with " + _TIP_ASK + " "
-        "suggesting that working out everything the work still needs and sending it as one message gets it done "
-        "in one pass, for fewer tokens."
+        "the whole context. " + _AS_USUAL + " End your reply, before any tag, with " + _TIP_ASK + " suggesting that "
+        "working out everything the work still needs and sending it as one message gets it done in one pass, for "
+        "fewer tokens."
     ),
     "repeat_ask": (
-        "The user has sent much the same request again, so the last attempt probably missed what they wanted. "
-        "Don't repeat the same approach: say in one line what you think went wrong, then try a different way, or "
-        "ask one short question if you can't tell. End your reply, before any tag, with " + _TIP_ASK + " "
-        "suggesting that saying what was wrong with the last attempt gets a better next one than sending the "
-        "request again."
+        "The user has sent much the same request as one you answered earlier. " + _AS_USUAL + " End your reply, "
+        "before any tag, with " + _TIP_ASK + " suggesting that saying what was wrong with the last attempt gets a "
+        "better next one than sending the request again."
     ),
     "plan_first": (
-        "The user's message asks for about {steps} separate changes, outside plan mode. Before changing anything, "
-        "set out in a few lines how you'll go about it and in what order, then carry on unless they stop you. End "
-        "that reply, before any tag, with " + _TIP_ASK + " suggesting plan mode (Shift+Tab) for a job this size: "
-        "it agrees the approach before anything changes."
+        "The user's message asks for about {steps} separate changes, outside plan mode. " + _AS_USUAL + " End your "
+        "reply, before any tag, with " + _TIP_ASK + " suggesting plan mode (Shift+Tab) for a job this size: it "
+        "agrees the approach before anything changes."
     ),
     "stop_loop": (
-        "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change "
-        "anything for this message, say in two or three lines what you'll do, and wait for a go-ahead if it's a "
-        "large change. End that reply, before any tag, with " + _TIP_ASK + " saying that plan mode (Shift+Tab) "
-        "agrees the approach before any work starts."
+        "The user has stopped you {count} times in the last {minutes} minutes. " + _AS_USUAL + " End your reply, "
+        "before any tag, with " + _TIP_ASK + " saying that plan mode (Shift+Tab) agrees the approach before any "
+        "work starts."
     ),
     "vague_fix": (
-        "The user says something is wrong but not what they saw or expected. If the context doesn't make the "
-        "problem clear, ask one short question (what they saw, what they expected, or the error text) before "
-        "changing anything. If it does, fix it and end your reply, before any tag, with " + _TIP_ASK + " saying "
-        "that naming what they saw and expected, or pasting the error, gets a fix first time."
+        "The user says something is wrong but not what they saw or expected. " + _AS_USUAL + " End your reply, "
+        "before any tag, with " + _TIP_ASK + " saying that naming what they saw and expected, or pasting the "
+        "error, gets a fix first time."
     ),
     "big_paste": (
         "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a "
@@ -605,19 +607,18 @@ COACHING_TEXT = {
         "that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry "
         "about {kept} fewer tokens on each reply. Then carry on unless they stop you."
     ),
-    "split_run": (
-        "This run has made about {replies} replies, and every reply reads all of the run again. In this user's "
-        "past sessions, {agent} runs cost less when split about every {every_n} replies. If more than a step or "
-        "two is left, finish the step you're on and end your report with a short note of what's done, what's "
-        "left and the files involved, so a fresh agent can carry on from it."
-    ),
+    # Nothing reaches the subagent: told mid-run to stop and hand back,
+    # it either ignored the note (and reported it as a stray hook message)
+    # or would have handed back half-done work. You get the notice instead.
+    "split_run": "",
 }
 
-#: What the hook shows you itself, the moment you send the message, for
-#: the prompting hints: Claude Code's hook ``systemMessage``, shown to
-#: you and never sent to Claude, so it costs no tokens. Claude's reply
-#: still ends with the tip, for an app that doesn't show hook messages.
-#: Same ``{placeholders}`` as :data:`COACHING_TEXT`.
+#: What the hook shows you itself, never sent to Claude, so it costs no
+#: tokens: Claude Code's hook ``systemMessage``. The prompting hints show
+#: it the moment you send the message, and Claude's reply still ends with
+#: the tip, for an app that doesn't show hook messages. ``split_run``
+#: shows it once, when a subagent run passes its split point, and tells
+#: the subagent nothing. Same ``{placeholders}`` as :data:`COACHING_TEXT`.
 COACHING_NOTICE = {
     "drip_feed": "⚠️ ClaudeGlass: {count} small requests in a row, one message each. Work out everything that needs "
     "changing and send it as one prompt: it costs less.",
@@ -631,6 +632,9 @@ COACHING_NOTICE = {
     "time.",
     "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. "
     "Paste only the part that matters, or give a file path.",
+    "split_run": "⚠️ ClaudeGlass: this {agent} run has made about {replies} replies, and each one reads the whole run "
+    "again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next time, give "
+    "each agent a smaller piece of the work.",
 }
 
 #: ``quiet_output``'s ``{how}``, by tool; ``""`` for any other tool.
@@ -1168,15 +1172,17 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback reminder from Claude",
-        what="Claude adds a highlighted note suggesting /tl-feedback when it finishes a piece of work.",
-        why="For people without the status line. Costs a few output tokens each time.",
+        what="Claude adds a highlighted note suggesting /tl-feedback once a session, when it finishes its first "
+        "piece of work.",
+        why="For people without the status line, such as in the desktop app. Costs a few output tokens once a "
+        "session.",
         powers=("outcome",),
         hooks=("SessionStart",),
-        main_extra="When you finish a piece of work the user asked for, add this before your tag, after a blank "
-        f"line:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
+        main_extra="The first time in this session you finish a piece of work the user asked for, add this before "
+        f"your tag, after a blank line, and never again after that:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
         extra_before_tag=True,
-        main_extra_untagged="When you finish a piece of work the user asked for, end your reply with this, after a "
-        f"blank line:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
+        main_extra_untagged="The first time in this session you finish a piece of work the user asked for, end your "
+        f"reply with this, after a blank line, and never again after that:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
         out_chars=103,
     ),
     Metric(

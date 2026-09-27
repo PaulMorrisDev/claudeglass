@@ -32,14 +32,16 @@ connect``):
   an expired cache or a large context when you send a message, the same
   request again, small requests sent one at a time, a big task sent
   without a plan, a vague correction, a huge paste, stopping Claude
-  again and again, a large result, many reads for one message, a plan
-  approved after a lot of planning, or a subagent run past the length
-  its type's runs are best split at (``coaching.json``, from your own
-  sessions). Your message is read only for its length and whether it
-  asks for a fix; its words never leave the hook. The prompting hints
-  also show you a one-line notice at once (``systemMessage``, never sent
-  to Claude). Each hint rests
-  for a while once shown (``coach-state.json``). They run at any capture
+  again and again, a large result, many reads for one message, or a
+  plan approved after a lot of planning. The prompting hints only ask
+  Claude to end its reply with a tip, never to change how it works.
+  Your message is read only for its length and whether it asks for a
+  fix; its words never leave the hook. The prompting hints also show
+  you a one-line notice at once (``systemMessage``, never sent to
+  Claude), and a subagent run past the length its type's runs are best
+  split at (``coaching.json``, from your own sessions) shows you one
+  too, once, and tells the subagent nothing. Each hint rests for a
+  while once shown (``coach-state.json``). They run at any capture
   level and in every session, but not in a project ``[capture]
   projects`` leaves out. A capture note and a coaching note for the same
   call go out as one note, the capture note first.
@@ -1032,7 +1034,8 @@ def _count_replies(path: Path, row: dict) -> int:
 def _split_hint(payload: dict, personal: dict, state: dict, now_ts: float) -> tuple[str, float, dict] | None:
     """``split_run``: a subagent whose type's long runs cost you less split
     (``coaching.json``'s ``split_run``, from the run-split tip), past
-    that many replies."""
+    that many replies, once a run. It shows you a notice and tells the
+    subagent nothing."""
     splits = personal.get("split_run")
     agent_type = str(payload.get("agent_type") or "")
     every_n = _number(splits.get(agent_type)) if isinstance(splits, dict) else None
@@ -1048,7 +1051,7 @@ def _split_hint(payload: dict, personal: dict, state: dict, now_ts: float) -> tu
     row = agents.setdefault(str(payload["agent_id"]), {})
     row["touched_at"] = now_ts
     replies = _count_replies(path, row)
-    if replies < every_n:
+    if replies < every_n or row.get("told"):
         return None
     return f"split_run:{payload['agent_id']}", replies, {"replies": replies, "agent": agent_type, "every_n": int(every_n)}
 
@@ -1119,9 +1122,13 @@ def coaching_for(
         if not _gate(state, session, kind, stake, now_ts, th):
             continue
         _stamp(state, session, kind, stake, now_ts)
-        _write_json(state_path, state)
         hint = kind.split(":", 1)[0]
-        note = f"{coaching['marker']}{coaching['version']} {hint}\n{coaching['text'][hint].format(**fields)}"
+        if hint == "split_run":
+            # One notice a run: it's for you, and saying it again adds nothing.
+            state["agents"][str(payload["agent_id"])]["told"] = True
+        _write_json(state_path, state)
+        text = coaching["text"].get(hint) or ""
+        note = f"{coaching['marker']}{coaching['version']} {hint}\n{text.format(**fields)}" if text else ""
         notice = coaching.get("notice", {}).get(hint, "")
         return note, notice.format(**fields) if notice else ""
     if counted:
