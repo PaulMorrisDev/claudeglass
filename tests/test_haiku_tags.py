@@ -103,11 +103,15 @@ def test_the_note_asks_claude_for_no_tag_while_haiku_writes_them(level):
     # The hook builds the same text, and subagents' notes don't change.
     assert HOOK.build_note(CATALOGUE, ids, "main", tagger="haiku") == note
     assert cat.note_text(ids, "subagent", tagger="haiku") == cat.note_text(ids, "subagent")
-    # What Haiku is told: the key lines the note would have carried.
+    # What Haiku is told: a line for each key the note would have asked
+    # for, spelled out where the plain line read differently.
     judge = cat.judge_text(ids)
     assert HOOK.build_judge_prompt(CATALOGUE, ids) == judge
     for key in cat.tagged_keys(ids):
-        assert cat.METRICS_BY_ID[key].main_line in judge
+        assert cat.JUDGE_LINES.get(key, cat.METRICS_BY_ID[key].main_line) in judge
+    assert set(cat.JUDGE_LINES) <= set(cat.tagged_keys(cat.level_includes("deep")))
+    for key, line in cat.JUDGE_LINES.items():
+        assert line.startswith(f"{key}: {'|'.join(cat.TAG_VOCAB[key])}")
 
 
 def test_the_reminder_line_says_end_your_reply_when_there_is_no_tag():
@@ -155,22 +159,25 @@ def test_the_large_result_note_goes_only_to_subagents_while_haiku_tags():
 
 
 def test_the_excerpt_says_what_happened_in_the_turn(tmp_path):
-    job = HOOK.judge_job(_stop(_turn(tmp_path)), HAIKU, CATALOGUE)
+    job = HOOK.judge_job(_stop(_turn(tmp_path), cwd="/w"), HAIKU, CATALOGUE)
     excerpt = job["excerpt"]
     assert 'The user\'s message before this one: "Add a calculator module"' in excerpt
+    assert 'The end of Claude\'s reply to it: "Added."' in excerpt
     assert 'The user\'s message: "add() returns the wrong sum, fix it"' in excerpt
     assert "Messages the user sent before it in this session: 1." in excerpt
-    assert "2 model calls; 340 output tokens; tools: Bash 1, Edit 1; files changed: 1; tool errors: 1." in excerpt
+    # Changed files are named from the project folder.
+    assert "2 model calls; 340 output tokens; tools: Bash 1, Edit 1; files changed: 1 (calc.py); tool errors: 1." in excerpt
     # Only a command's first line; none of its output.
     assert "Shell commands: `pytest -q tests/test_calc.py`." in excerpt and "echo done" not in excerpt
     assert "1 failed" not in excerpt
-    assert "Skills run: none." in excerpt and "Plan: none written or approved in this session." in excerpt
+    assert "Skills run: none." in excerpt and "Tests run: chosen tests." in excerpt
+    assert "Plan mode: not used in this session." in excerpt
     assert excerpt.endswith('The end of Claude\'s final reply: "Fixed add(); the tests pass now."')
     # The tag belongs to Claude's last reply; the keys are the level's.
-    assert job["reply"] == json.loads(Path(job_path := tmp_path / "s.jsonl").read_text().splitlines()[-1])["message"]["id"]
+    assert job["reply"] == json.loads((tmp_path / "s.jsonl").read_text().splitlines()[-1])["message"]["id"]
     assert job["keys"] == list(cat.tagged_keys(STANDARD)) and job["system"] == cat.judge_text(STANDARD)
-    assert job["facts"] == {"plan": "none", "skills": 0}
-    assert job_path.is_file()
+    assert job["facts"] == {"plan_now": False, "plan_before": False, "skills": 0, "files": 1, "commands": 1,
+                            "earlier": 1, "tests": "targeted", "docs_only": False}
 
 
 def test_the_excerpt_cuts_long_messages_and_notes_plans_and_skills(tmp_path):
@@ -185,11 +192,63 @@ def test_the_excerpt_cuts_long_messages_and_notes_plans_and_skills(tmp_path):
     message = next(line for line in job["excerpt"].splitlines() if line.startswith("The user's message:"))
     assert len(message) < cat.JUDGE_LIMITS["prompt"] + 60 and "[...]" in message
     assert "Skills run: tl-brief." in job["excerpt"]
-    assert "Plan: Claude wrote a plan in this turn" in job["excerpt"]
+    assert "Plan mode: Claude wrote a plan in this turn." in job["excerpt"]
     assert job["excerpt"].endswith('"Plan ready."')
-    assert job["facts"] == {"plan": "made", "skills": 1}
+    assert job["facts"]["plan_now"] and job["facts"]["skills"] == 1 and job["facts"]["earlier"] == 0
     later = _turn(tmp_path, earlier_plan=True)
-    assert "Plan: the user approved a plan earlier" in HOOK.judge_job(_stop(later), HAIKU, CATALOGUE)["excerpt"]
+    assert "Plan mode: the user approved a plan earlier" in HOOK.judge_job(_stop(later), HAIKU, CATALOGUE)["excerpt"]
+
+
+def test_plan_modes_plan_file_counts_as_a_plan_and_isnt_a_changed_file(tmp_path):
+    # Headless plan mode has no ExitPlanMode: the plan goes to a file.
+    path = _transcript(tmp_path, [
+        user_str_line("Plan the JSON export", timestamp=_at(0), permissionMode="plan"),
+        turn_line(timestamp=_at(1), content=[
+            tool_use_block("Write", "w", {"file_path": "/home/me/.claude/plans/json-export.md", "content": "1."}),
+            {"type": "text", "text": "The plan is in the plan file."}]),
+    ])
+    job = HOOK.judge_job(_stop(path, permission_mode="plan"), HAIKU, CATALOGUE)
+    assert job["facts"]["plan_now"] and job["facts"]["files"] == 0
+    assert "Plan mode: Claude wrote a plan in this turn." in job["excerpt"] and "files changed: 0;" in job["excerpt"]
+
+
+def test_a_change_to_documentation_only_is_docs_work(tmp_path):
+    path = _transcript(tmp_path, [
+        user_str_line("Fix the typo in README.md", timestamp=_at(0)),
+        turn_line(timestamp=_at(1), content=[tool_use_block("Edit", "e", {"file_path": "/w/README.md"}),
+                                             {"type": "text", "text": "Fixed."}]),
+    ])
+    job = HOOK.judge_job(_stop(path, cwd="/w"), HAIKU, CATALOGUE)
+    assert job["facts"]["docs_only"] and "files changed: 1 (README.md)" in job["excerpt"]
+    assert HOOK.grounded("task=bugfix check=run", job["facts"]) == "task=docs check=run"
+
+
+@pytest.mark.parametrize(
+    "command, scope",
+    [
+        ("python -m pytest -q", "full"),
+        ("pytest tests/test_store.py -q", "targeted"),
+        ("python -m pytest -q -k remove", "targeted"),
+        ("cd /w && python -m pytest -q 2>&1 | tail -5", "full"),
+        ("FOO=1 timeout 60 uv run pytest -x", "full"),
+        ("npm test", "full"),
+        ("npm run test -- --testPathPattern=cart", "targeted"),
+        ("npx jest src/cart.spec.js", "targeted"),
+        ("go test ./...", "full"),
+        ("go test ./pkg/cart", "targeted"),
+        ("cargo test parse_", "targeted"),
+        ("cargo test --release", "full"),
+        ("python3 -m unittest tests.test_store", "targeted"),
+        ("make test", "full"),
+        # Not a test run: the runner's name elsewhere in a command.
+        ("grep -r pytest .", ""),
+        ("echo pytest", ""),
+        ("git commit -m 'run pytest'", ""),
+        ("python -m inventory.cli list stock.csv", ""),
+    ],
+)
+def test_which_commands_run_tests(command, scope):
+    assert HOOK._test_scope(command) == scope
 
 
 @pytest.mark.parametrize(
@@ -230,12 +289,20 @@ def test_only_known_keys_and_words_are_kept():
 
 
 def test_what_the_transcript_settles_beats_haikus_guess():
-    none = {"plan": "none", "skills": 0}
-    assert HOOK.grounded("task=bugfix plan=following skill=helped", none) == "task=bugfix plan=none skill=none"
-    assert HOOK.grounded("plan=none skill=would-help", {"plan": "made", "skills": 0}) == "plan=made skill=would-help"
-    after = {"plan": "", "skills": 1}
-    assert HOOK.grounded("plan=made skill=helped", after) == "plan=following skill=helped"
+    first = {"plan_now": False, "plan_before": False, "skills": 0, "files": 1, "commands": 1, "earlier": 0,
+             "tests": "full", "docs_only": False}
+    assert HOOK.grounded("task=bugfix plan=following skill=helped check=run shift=fix prior=needed", first) == (
+        "task=bugfix plan=following skill=none check=full prior=none"
+    )
+    assert HOOK.grounded("shift=new plan=none", first) == "shift=new plan=none"
+    assert HOOK.grounded("plan=none", {**first, "plan_now": True}) == "plan=made"
+    after = {**first, "plan_before": True, "skills": 1, "earlier": 2, "tests": ""}
+    assert HOOK.grounded("plan=made skill=helped check=run shift=build", after) == (
+        "plan=following skill=helped check=run shift=build"
+    )
     assert HOOK.grounded("plan=deviated", after) == "plan=deviated" and HOOK.grounded("plan=none", after) == "plan=none"
+    # Nothing changed: nothing to check.
+    assert HOOK.grounded("check=manual", {**after, "files": 0}) == "check=none"
 
 
 def test_the_worker_logs_the_words_and_the_cost_never_the_excerpt(tmp_path):
@@ -249,7 +316,7 @@ def test_the_worker_logs_the_words_and_the_cost_never_the_excerpt(tmp_path):
     record = HOOK.run_judge(tmp_path / "cg", CATALOGUE, job, ask=ask)
     assert asked[0][1] == "haiku" and asked[0][2] == tmp_path / "cg"
     assert record == {
-        "ts": job["ts"], "reply": job["reply"], "tl": "task=bugfix brief=clear plan=none skill=none",
+        "ts": job["ts"], "reply": job["reply"], "tl": "task=bugfix brief=clear plan=made skill=none",
         "usd": 0.0014, "in": 1200, "out": 30, "model": "claude-haiku-4-5-20251001",
     }
     text = (tmp_path / "cg" / cat.JUDGE_DIR / f"{job['ts'][:7]}.jsonl").read_text(encoding="utf-8")

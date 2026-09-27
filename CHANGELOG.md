@@ -64,12 +64,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the end of its reply. The worker asks Claude Haiku for the tag
   through your own Claude Code login, with no tools, settings or saved
   session. Only the tag's words are kept, in `<config-dir>/tags/`, with
-  what the call cost (about $0.0015 a turn, measured). What the
-  transcript settles, such as no plan or no skill run, overrides
-  Haiku's guess. The tags reach every view that reads Claude's, and
-  `capture status` says how many turns Haiku tagged, what it cost and
-  why any got none. Subagent reports are still tagged by Claude.
-  `capture tagger claude` switches back.
+  what the call cost (about $0.002 a turn, measured). What the
+  transcript settles overrides Haiku's guess: a plan-mode plan, no file
+  changed, a test run, only documentation changed, no skill run. The
+  tags reach every view that reads Claude's, and `capture status` says
+  how many turns Haiku tagged, what it cost and why any got none.
+  Subagent reports are still tagged by Claude. `capture tagger claude`
+  switches back.
+- **How well the tags come out, measured.** `scripts/eval-tagger.py`
+  records scripted Claude Code sessions with known right answers and
+  scores each judge against them. On 12 sessions held out from tuning,
+  Haiku gets 90% of the words right, against 85% for Claude's own
+  tags. Thinking adds 3 points for 3.4 times the cost and 7 times the
+  wait, so Haiku runs without it. The results, and what the first run
+  found wrong, are in [docs/tagger-eval.md](docs/tagger-eval.md).
 
 ### Changed
 

@@ -338,14 +338,18 @@ JUDGE_TIMEOUT_S = 60
 JUDGE_THINKING_TOKENS = 0
 
 #: About what one Haiku call costs, in USD, for estimates before any
-#: has run: about 1,300 tokens read (Claude Code's own frame, the
-#: instructions and the excerpt) and 25 written, at Haiku's list price.
-JUDGE_USD_PER_CALL = 0.0015
+#: has run: about 1,700 tokens read (Claude Code's own frame, the
+#: instructions and the excerpt) and 35 written, at Haiku's list price,
+#: as measured by scripts/eval-tagger.py.
+JUDGE_USD_PER_CALL = 0.002
 
 #: What the excerpt Haiku reads holds at most, in characters: your
-#: message, your message before it, the end of Claude's final reply and
-#: each shell command; and how many commands.
-JUDGE_LIMITS = {"prompt": 2000, "previous": 300, "reply": 1500, "command": 100, "commands": 6}
+#: message, your message before it and the end of Claude's reply to that,
+#: the end of Claude's final reply and each shell command; and how many
+#: commands and changed files it names.
+JUDGE_LIMITS = {
+    "prompt": 2000, "previous": 300, "previous_reply": 600, "reply": 1500, "command": 100, "commands": 6, "files": 8,
+}
 
 #: Why a turn got no Haiku tag, as its line in :data:`JUDGE_DIR` says:
 #: no ``claude`` command on the hook's path, Haiku took too long, the call
@@ -361,8 +365,9 @@ JUDGE_INTRO = (
 #: The last line of what Haiku is told, in place of the note's
 #: ``SKIP_KEY_LINE``: it sees an excerpt, not the work.
 JUDGE_RULE = (
-    "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Leave out a key that "
-    "doesn't fit this kind of work, or that you can't judge."
+    "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that "
+    "applies. Leave one out only when it doesn't fit this work (found outside research or a search; shift on "
+    "a first message) or the excerpt can't tell at all."
 )
 
 #: The hook script that adds capture notes, and the catalogue it reads,
@@ -1574,15 +1579,44 @@ def tagged_keys(ids) -> tuple[str, ...]:
     return tuple(m.id for m in METRICS if m.id in wanted and m.main_line)
 
 
+#: Key lines Haiku gets in place of the note's, spelling out each word:
+#: it sees an excerpt, not the work, and ``scripts/eval-tagger.py`` found
+#: these keys read differently without them (running the tests read as
+#: ``check=run``, a README typo fix as ``task=bugfix``). The rest are
+#: the note's own lines.
+JUDGE_LINES = {
+    "task": f"task: {'|'.join(TAG_VOCAB['task'])} (the kind of work asked for: docs = documentation or comments "
+    "only; ops = CI, build, deploy or configuration; test = tests only; research = finding something out; "
+    "review = judging existing work; debug = finding a fault's cause; chat = no work asked for)",
+    "brief": "brief: clear|partial|vague (how complete the request was: clear = what to change and what done looks "
+    "like; partial = the goal without the details; vague = neither)",
+    "shift": "shift: new|build|grew|redo|fix, only after an earlier message (new = an unrelated task; build = a "
+    "next step on top of the last task; grew = more asked of the same task; redo = the same task done another "
+    "way; fix = fixing a fault in the last work)",
+    "size": "size: xs|s|m|l|xl (how big the work was: xs = a line or two, or only an answer; s = a small change; "
+    "m = a feature with its tests; l = many files; xl = a large change)",
+    "plan": "plan: none|made|following|deviated (none = no plan; made = Claude wrote one this turn, as a plan "
+    "file or as steps in its reply; following = Claude carried out one written earlier; deviated = Claude "
+    "departed from one written earlier)",
+    "prior": "prior: needed|some|none (how much the work relied on the earlier conversation: needed = the "
+    "message only makes sense with it; some = it helped; none = a fresh request)",
+    "check": "check: targeted|full|build|run|manual|none (how Claude verified its change: targeted = ran the "
+    "tests for the part changed; full = ran the whole test suite; build = only built or type-checked; run = "
+    "ran the program itself to see it work; manual = only read it back; none = no check, or nothing changed)",
+}
+
+
 def judge_text(ids) -> str:
     """What Haiku is told when it writes the main session's tags
-    (``tagger = "haiku"``): the same key lines Claude's note would carry;
-    ``""`` when none of ``ids`` asks for a key. ``hooks/capture-hook.py``
-    builds the same text (``build_judge_prompt``)."""
+    (``tagger = "haiku"``): a line for each key the note would ask
+    Claude for (:data:`JUDGE_LINES`, else the note's own); ``""`` when
+    none of ``ids`` asks for a key. ``hooks/capture-hook.py`` builds the
+    same text (``build_judge_prompt``)."""
     keys = set(tagged_keys(ids))
     if not keys:
         return ""
-    return "\n".join([JUDGE_INTRO, *(m.main_line for m in METRICS if m.id in keys), JUDGE_RULE])
+    lines = [JUDGE_LINES.get(m.id, m.main_line) for m in METRICS if m.id in keys]
+    return "\n".join([JUDGE_INTRO, *lines, JUDGE_RULE])
 
 
 def tool_note_text(metric_id: str) -> str:
@@ -1704,6 +1738,7 @@ def export_json() -> dict:
             "limits": dict(JUDGE_LIMITS),
             "intro": JUDGE_INTRO,
             "rule": JUDGE_RULE,
+            "lines": dict(JUDGE_LINES),
             "vocab": {key: list(words) for key, words in TAG_VOCAB.items()},
             "list_keys": sorted(LIST_KEYS),
         },
@@ -2010,29 +2045,38 @@ def render_markdown() -> str:
     p(
         "- When a turn of the main session ends, the hook's `Stop` entry reads the end of the transcript, hands "
         "a short excerpt to a worker process of its own, and returns at once. The excerpt holds your message "
-        f"(up to {JUDGE_LIMITS['prompt']:,} characters) and the one before it, how many you sent before, what "
-        "Claude did (model calls, output tokens, tools used, files changed, the first line of up to "
-        f"{JUDGE_LIMITS['commands']} shell commands, skills, subagents, tool errors, any plan) and the end of its "
-        f"final reply (up to {JUDGE_LIMITS['reply']:,} characters). Tool output is never in it."
+        f"(up to {JUDGE_LIMITS['prompt']:,} characters), your message before it and the end of Claude's reply "
+        "to that, how many you sent before, what Claude did (model calls, output tokens, tools used, the files "
+        f"it changed, the first line of up to {JUDGE_LIMITS['commands']} shell commands, whether they ran tests, "
+        "skills, subagents, tool errors, any plan-mode plan) and the end of its final reply (up to "
+        f"{JUDGE_LIMITS['reply']:,} characters). Tool output is never in it."
     )
     p(
         f"- The worker runs `claude -p --model {JUDGE_MODEL}` with no tools, settings, MCP servers or saved "
-        "session, through your own Claude Code login, with the excerpt on stdin. Haiku gets the key lines "
-        f"Claude's note would have carried, after \"{JUDGE_INTRO}\" and before \"{JUDGE_RULE}\" It loads no "
+        "session, through your own Claude Code login, with the excerpt on stdin, and no thinking. Haiku gets a "
+        "line for each key Claude's note would have asked for, with each word spelled out, after "
+        f"\"{JUDGE_INTRO}\" and before \"{JUDGE_RULE}\" It loads no "
         "settings file, so your hooks don't run inside it; a login that needs an `apiKeyHelper` from "
         "settings.json fails there, and `capture status` says so."
     )
     p(
         f"- Only the tag's words are kept, checked against the same vocabularies, in `<config-dir>/{JUDGE_DIR}/"
         "YYYY-MM.jsonl`, with the reply's id and what the call cost. What the transcript settles overrides "
-        "Haiku: no plan is `plan=none`, one written that turn is `plan=made`, and no skill run is never "
-        "`skill=helped`. A turn that got no tag says why: "
+        "Haiku: a plan-mode plan written that turn is `plan=made`; no skill run is never `skill=helped`; no "
+        "file changed is `check=none`, and a test run is `check=targeted` or `full` by whether it picked tests; "
+        "only documentation changed is `task=docs`; and a first message has no `shift` but `new`. A turn that "
+        "got no tag says why: "
         + ", ".join(f"`{e}`" for e in JUDGE_ERRORS)
         + ". `capture status` counts both."
     )
     p(
-        f"- Each call costs about ${JUDGE_USD_PER_CALL:.4f} (about 1,200 tokens read, 30 written), counted as "
+        f"- Each call costs about ${JUDGE_USD_PER_CALL:.4f} (about 1,700 tokens read, 35 written), counted as "
         "capture's cost. On a subscription it counts toward your usage like any other Haiku use."
+    )
+    p(
+        "- How well it works is measured by `scripts/eval-tagger.py`: recorded sessions with known right "
+        "answers, judged by Haiku with and without thinking and by Sonnet, against Claude's own tags. "
+        "[tagger-eval.md](tagger-eval.md) has the results."
     )
     p(
         "- The `Stop` entry runs in the foreground, since `claude -p` exits without waiting for a background "

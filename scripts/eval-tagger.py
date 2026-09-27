@@ -267,7 +267,13 @@ def _job(scenario_id: str) -> tuple[dict, dict]:
     records = _records(SESSIONS / f"{scenario_id}.jsonl")
     clean = _untagged(records)
     mode = next((r.get("permissionMode") for r in reversed(records) if r.get("permissionMode")), "default")
-    payload = {"hook_event_name": "Stop", "session_id": scenario_id, "cwd": "/work",
+    # The recording's project folder, from the paths its tools touched.
+    paths = [
+        b["input"].get("file_path") or "" for r in records if r.get("type") == "assistant"
+        for b in r["message"].get("content") or [] if b.get("type") == "tool_use"
+    ]
+    cwd = next((p[:p.index("/work/") + 5] for p in paths if "/work/" in p), "/work")
+    payload = {"hook_event_name": "Stop", "session_id": scenario_id, "cwd": cwd,
                "last_assistant_message": _final_text(clean), "permission_mode": mode}
     facts: dict = {}
     excerpt, reply = HOOK.judge_excerpt(clean, payload, CATALOGUE, True, facts)
@@ -311,7 +317,10 @@ def cmd_judge(args) -> int:
     if unknown:
         print(f"unknown config {', '.join(unknown)}; known: {', '.join(CONFIGS)}")
         return 2
-    scenarios = [s for s in _scenarios(args.only) if (SESSIONS / f"{s['id']}.jsonl").is_file()]
+    scenarios = [
+        s for s in _scenarios(args.only)
+        if (SESSIONS / f"{s['id']}.jsonl").is_file() and (not args.set or s.get("set", "tuning") == args.set)
+    ]
     if not scenarios:
         print("no recorded sessions: run 'record' first")
         return 2
@@ -377,10 +386,37 @@ def _majority(values: list) -> str | None:
 
 def score(results: dict, scenarios: dict) -> str:
     configs = list(results["configs"])
-    rows = results["scenarios"]
+    everything = results["scenarios"]
     lines = [f"# Tagger eval, {results['when']} (hook: {results.get('hook', 'current')})", "",
-             f"{len(rows)} scenarios, {results['repeats']} runs each per judge. Accuracy is against the known "
+             f"{len(everything)} scenarios, {results['repeats']} runs each per judge. Accuracy is against the known "
              "answers in scenarios.json, over every scored key of every run.", ""]
+    sets = {}
+    for sid in everything:
+        sets.setdefault(scenarios[sid].get("set", "tuning"), []).append(sid)
+    if len(sets) > 1:
+        lines += ["## By set", "", "The judge's instructions were tuned on the tuning set; the held-out set was "
+                  "written afterwards and never used to tune them.", "",
+                  "| Judge | " + " | ".join(f"{name} ({len(ids)})" for name, ids in sets.items()) + " |",
+                  "|---" * (len(sets) + 1) + "|"]
+        for config in [*configs, None]:
+            cells = []
+            for ids in sets.values():
+                right = total = 0
+                for sid in ids:
+                    row = everything[sid]
+                    tags = [row["claude"]] if config is None else [
+                        r["tag"] for r in row["runs"][config] if r and "error" not in r
+                    ]
+                    for tag in tags:
+                        got = words(tag)
+                        for key, options in expected_for(scenarios[sid], row).items():
+                            total += 1
+                            right += accepts(options, got.get(key))
+                cells.append(_pct(right, total))
+            name = config or "Claude's own tags"
+            lines.append(f"| {name} | " + " | ".join(cells) + " |")
+        lines.append("")
+    rows = everything
 
     def tally(pick) -> tuple[Counter, Counter]:
         right, total = Counter(), Counter()
@@ -490,6 +526,7 @@ def main(argv=None) -> int:
     judge.add_argument("--repeats", type=int, default=3)
     judge.add_argument("--jobs", type=int, default=6)
     judge.add_argument("--only", nargs="*", default=())
+    judge.add_argument("--set", choices=("tuning", "holdout"), help="only the scenarios of this set")
     judge.add_argument("--hook", help="judge with this copy of capture-hook.py (its catalogue beside it)")
     scored = sub.add_parser("score", help="the report (spends nothing)")
     scored.add_argument("results", nargs="?")

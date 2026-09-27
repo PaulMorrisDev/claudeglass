@@ -411,12 +411,23 @@
   "limits": {
    "prompt": 2000,
    "previous": 300,
+   "previous_reply": 600,
    "reply": 1500,
    "command": 100,
-   "commands": 6
+   "commands": 6,
+   "files": 8
   },
   "intro": "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words. In them, \"you\" means Claude:",
-  "rule": "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Leave out a key that doesn't fit this kind of work, or that you can't judge.",
+  "rule": "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (found outside research or a search; shift on a first message) or the excerpt can't tell at all.",
+  "lines": {
+   "task": "task: feature|bugfix|refactor|debug|docs|review|test|research|plan|ops|chat (the kind of work asked for: docs = documentation or comments only; ops = CI, build, deploy or configuration; test = tests only; research = finding something out; review = judging existing work; debug = finding a fault's cause; chat = no work asked for)",
+   "brief": "brief: clear|partial|vague (how complete the request was: clear = what to change and what done looks like; partial = the goal without the details; vague = neither)",
+   "shift": "shift: new|build|grew|redo|fix, only after an earlier message (new = an unrelated task; build = a next step on top of the last task; grew = more asked of the same task; redo = the same task done another way; fix = fixing a fault in the last work)",
+   "size": "size: xs|s|m|l|xl (how big the work was: xs = a line or two, or only an answer; s = a small change; m = a feature with its tests; l = many files; xl = a large change)",
+   "plan": "plan: none|made|following|deviated (none = no plan; made = Claude wrote one this turn, as a plan file or as steps in its reply; following = Claude carried out one written earlier; deviated = Claude departed from one written earlier)",
+   "prior": "prior: needed|some|none (how much the work relied on the earlier conversation: needed = the message only makes sense with it; some = it helped; none = a fresh request)",
+   "check": "check: targeted|full|build|run|manual|none (how Claude verified its change: targeted = ran the tests for the part changed; full = ran the whole test suite; build = only built or type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check, or nothing changed)"
+  },
   "vocab": {
    "task": [
     "feature",

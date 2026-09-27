@@ -309,10 +309,14 @@ def build_judge_prompt(catalogue: dict, ids) -> str:
     """What Haiku is told when it writes the tags; ``""`` when none of
     ``ids`` asks for a key. Same text as ``capture_catalogue.judge_text``."""
     wanted = set(ids)
-    lines = [m["main_line"] for m in catalogue["metrics"] if m["id"] in wanted and m["main_line"]]
+    judge = catalogue["judge"]
+    lines = [
+        judge["lines"].get(m["id"], m["main_line"])
+        for m in catalogue["metrics"] if m["id"] in wanted and m["main_line"]
+    ]
     if not lines:
         return ""
-    return "\n".join([catalogue["judge"]["intro"], *lines, catalogue["judge"]["rule"]])
+    return "\n".join([judge["intro"], *lines, judge["rule"]])
 
 
 def build_tool_note(catalogue: dict, metric_id: str) -> str:
@@ -1113,6 +1117,51 @@ _AGENT_TOOLS = ("Agent", "Task")
 _JUDGE_TOOL_NAMES = 10
 
 _TL_RE = re.compile(r"\[tl:([^\[\]\n]{0,400})\]", re.IGNORECASE)
+
+#: A shell command that runs tests, by its runner at the start of one of
+#: the command's parts (after any VAR=value, timeout or uv/poetry run):
+#: pytest, Python's unittest, tox or nox, npm/yarn/pnpm/bun test, jest,
+#: vitest, mocha, go, cargo or dotnet test, mvn or gradle test, rspec,
+#: phpunit, make test. The group is its arguments.
+_TEST_RUNNER_RE = re.compile(
+    r"^(?:\w+=\S*\s+)*(?:timeout\s+\S+\s+|(?:uv|poetry|pipenv)\s+run\s+|npx\s+|bunx\s+)*"
+    r"(?:pytest|py\.test|python3?\s+-m\s+(?:pytest|unittest)|tox|nox"
+    r"|(?:npm|yarn|pnpm|bun)(?:\s+run)?\s+test|jest|vitest|mocha"
+    r"|go\s+test|cargo\s+test|dotnet\s+test|mvnw?\s+test|(?:\./)?gradlew?\s+test|rspec|phpunit|make\s+test)"
+    r"(?=\s|$)(.*)"
+)
+_COMMAND_PARTS_RE = re.compile(r"&&|\|\||;|\|")
+#: What in a test command's arguments picks particular tests: a test file
+#: or folder, a ``file::test`` id, a name filter, or (go, cargo) a package
+#: or test name.
+_TEST_TARGET_RE = re.compile(
+    r"(?:^|\s)(?:-k\b|-t\b|--testNamePattern|--testPathPattern|-run\b|--grep\b|\S*::\S+"
+    r"|\S*tests?/\S*|\S*test_\S+|\S+_test\.\w+|\S+\.(?:test|spec)\.\w+|\S*spec/\S*)"
+)
+_BARE_ARG_RE = re.compile(r"(?:^|\s)(?!-)(?!\./\.\.\.(?:\s|$))[\w./:-]+")
+
+
+def _test_scope(command: str) -> str:
+    """``"targeted"`` when ``command`` runs chosen tests, ``"full"`` when
+    it runs a whole suite, ``""`` when it runs none."""
+    scope = ""
+    for part in _COMMAND_PARTS_RE.split(command):
+        match = _TEST_RUNNER_RE.match(part.strip())
+        if match is None:
+            continue
+        args = re.sub(r"\s+\d?>\S*", " ", match.group(1))  # redirections aren't targets
+        chosen = _TEST_TARGET_RE.search(args) or (
+            part.strip().split()[0] in ("go", "cargo") and _BARE_ARG_RE.search(args)
+        )
+        if chosen:
+            return "targeted"
+        scope = "full"
+    return scope
+
+
+#: Files whose change alone makes the work documentation.
+_DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
+
 _SKILL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
 _MODEL_RE = re.compile(r"[a-z0-9.-]{1,64}")
 
@@ -1155,18 +1204,45 @@ def _judge_records(path: str, prefix: str) -> tuple[list[dict], bool]:
     return records, size <= _JUDGE_TAIL_BYTES
 
 
+def _is_plan_file(path) -> bool:
+    """A plan Claude Code's plan mode writes, under ``.claude/plans/``."""
+    return isinstance(path, str) and "/.claude/plans/" in path.replace("\\", "/")
+
+
+def _shown_path(path: str, cwd) -> str:
+    """``path`` as the excerpt names it: from the project folder when it's
+    inside it, else its last two parts."""
+    path = path.replace("\\", "/")
+    root = cwd.replace("\\", "/").rstrip("/") + "/" if isinstance(cwd, str) and cwd else ""
+    if root and path.startswith(root):
+        return path[len(root):]
+    return "/".join(path.split("/")[-2:])
+
+
+def _last_text(records: list[dict]) -> str:
+    for record in reversed(records):
+        if record.get("type") != "assistant":
+            continue
+        for block in reversed(_blocks(record)):
+            if isinstance(block, dict) and block.get("type") == "text" and str(block.get("text") or "").strip():
+                return block["text"]
+    return ""
+
+
 def judge_excerpt(
     records: list[dict], payload: dict, catalogue: dict, whole: bool = True, facts: dict | None = None
 ) -> tuple[str, str]:
     """What Haiku reads about the turn that just ended, and the id of
-    Claude's reply its tag belongs to: your message (and the one before
-    it), how many you sent before, what Claude did (model calls, output,
-    tools, files changed, shell commands, skills, subagents, errors, a
-    plan) and the end of its final reply. ``("", "")`` without a message
-    of yours with a reply after it in ``records``. ``facts``, when given,
-    gets what the transcript settles for :func:`grounded`: ``plan``
-    (``"none"``, ``"made"`` or ``""`` after an earlier plan) and
-    ``skills`` (how many ran)."""
+    Claude's reply its tag belongs to: your message (and, before it, your
+    previous message and the end of Claude's reply to it), how many you
+    sent before, what Claude did (model calls, output, tools, the files it
+    changed, shell commands, skills, subagents, errors, a plan) and the
+    end of its final reply. ``("", "")`` without a message of yours with a
+    reply after it in ``records``. ``facts``, when given, gets what the
+    transcript settles for :func:`grounded`: ``plan_now`` (a plan written
+    this turn, by ExitPlanMode or as plan mode's plan file),
+    ``plan_before`` (one earlier), and how many ``skills`` ran, ``files``
+    changed, shell ``commands`` ran and messages came ``earlier``."""
     prefix = catalogue["coaching"]["interrupt_prefix"]
     edit_tools = set(catalogue["coaching"]["edit_tools"])
     limits = catalogue["judge"]["limits"]
@@ -1178,9 +1254,10 @@ def judge_excerpt(
     reply = ""
     output: dict[str, int] = {}
     tools: dict[str, int] = {}
-    files: set = set()
+    files: dict[str, None] = {}
     commands: list[str] = []
     skills: list[str] = []
+    tests: dict[str, None] = {}
     agents = errors = 0
     plan_now = False
     said = ""
@@ -1206,41 +1283,57 @@ def judge_excerpt(
             name = block["name"]
             tools[name] = tools.get(name, 0) + 1
             given = block.get("input") if isinstance(block.get("input"), dict) else {}
-            if name in edit_tools:
-                files.add(str(given.get("file_path") or given.get("notebook_path") or ""))
-            elif name == "Bash" and isinstance(given.get("command"), str) and len(commands) < limits["commands"]:
+            target = given.get("file_path") or given.get("notebook_path")
+            if name == "ExitPlanMode" or (name in edit_tools and _is_plan_file(target)):
+                plan_now = True
+            elif name in edit_tools and isinstance(target, str) and target:
+                files[_shown_path(target, payload.get("cwd"))] = None
+            elif name == "Bash" and isinstance(given.get("command"), str):
                 first = given["command"].strip().split("\n")[0]
-                if first:
+                if first and len(commands) < limits["commands"]:
                     commands.append(_cut(first, limits["command"]))
+                for line in given["command"].split("\n"):
+                    scope = _test_scope(line)
+                    if scope:
+                        tests[scope] = None
             elif name == "Skill" and isinstance(given.get("skill"), str) and _SKILL_RE.fullmatch(given["skill"]):
                 skills.append(given["skill"])
             elif name in _AGENT_TOOLS:
                 agents += 1
-            elif name == "ExitPlanMode":
-                plan_now = True
     if not reply:
         return "", ""
     plan_before = any(
-        isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") == "ExitPlanMode"
+        isinstance(b, dict) and b.get("type") == "tool_use" and (
+            b.get("name") == "ExitPlanMode"
+            or (b.get("name") in edit_tools and _is_plan_file((b.get("input") or {}).get("file_path")))
+        )
         for r in main[:start] if r.get("type") == "assistant" for b in _blocks(r)
     )
+    earlier = len(typed) - 1
+    # Run a chosen test anywhere and the check was targeted.
+    test_scope = "targeted" if "targeted" in tests else "full" if tests else ""
+    docs_only = bool(files) and all(name.lower().endswith(_DOC_SUFFIXES) for name in files)
     if facts is not None:
-        facts["plan"] = "made" if plan_now else "" if plan_before else "none"
-        facts["skills"] = len(skills)
+        facts.update(plan_now=plan_now, plan_before=plan_before, skills=len(skills), files=len(files),
+                     commands=len(commands), earlier=earlier, tests=test_scope, docs_only=docs_only)
     last = payload.get("last_assistant_message")
     final = last if isinstance(last, str) and last.strip() else said
-    earlier = len(typed) - 1
     lines = []
     if earlier:
         lines.append(f'The user\'s message before this one: "{_cut(_text_of(main[typed[-2]]), limits["previous"])}"')
+        answer = _last_text(main[typed[-2] + 1:start])
+        if answer:
+            lines.append(f'The end of Claude\'s reply to it: "{_end(answer, limits["previous_reply"])}"')
     lines.append(f'The user\'s message: "{_cut(_text_of(main[start]), limits["prompt"])}"')
     lines.append(f"Messages the user sent before it in this session: {earlier}{'' if whole else ' or more'}.")
     named = sorted(tools.items(), key=lambda item: (-item[1], item[0]))[:_JUDGE_TOOL_NAMES]
+    changed = list(files)
+    shown = ", ".join(changed[:limits["files"]]) + (" and more" if len(changed) > limits["files"] else "")
     did = [
         f"{len(output)} model call{'s' if len(output) != 1 else ''}",
         f"{sum(output.values()):,} output tokens",
         "tools: " + (", ".join(f"{name} {count}" for name, count in named) if named else "none"),
-        f"files changed: {len(files)}",
+        f"files changed: {len(changed)}" + (f" ({shown})" if changed else ""),
         f"tool errors: {errors}",
     ]
     if agents:
@@ -1249,14 +1342,17 @@ def judge_excerpt(
     # Said even when there were none: Haiku otherwise guesses.
     lines.append("Shell commands: " + ("; ".join(f"`{c}`" for c in commands) if commands else "none") + ".")
     lines.append("Skills run: " + (", ".join(dict.fromkeys(skills)) if skills else "none") + ".")
+    lines.append(
+        "Tests run: " + {"targeted": "chosen tests", "full": "the whole test suite", "": "none"}[test_scope] + "."
+    )
     if plan_now:
-        lines.append("Plan: Claude wrote a plan in this turn and asked the user to approve it.")
+        lines.append("Plan mode: Claude wrote a plan in this turn.")
     elif plan_before:
-        lines.append("Plan: the user approved a plan earlier in this session.")
+        lines.append("Plan mode: the user approved a plan earlier in this session.")
     elif payload.get("permission_mode") == "plan":
-        lines.append("Plan: the session is in plan mode; no plan written yet.")
+        lines.append("Plan mode: on, no plan written yet.")
     else:
-        lines.append("Plan: none written or approved in this session.")
+        lines.append("Plan mode: not used in this session.")
     lines.append(f'The end of Claude\'s final reply: "{_end(final, limits["reply"])}"')
     return "\n".join(lines), reply
 
@@ -1293,20 +1389,34 @@ def judge_tag(text, keys, judge: dict) -> str:
 
 def grounded(words: str, facts: dict | None) -> str:
     """``words`` (``task=bugfix plan=made ...``) with what the transcript
-    settles put right: ``plan`` is ``none`` without a plan and ``made``
-    when Claude wrote one this turn; after an earlier plan it can't be
-    ``made`` (it reads ``following``), and the rest is Haiku's to judge.
-    ``skill`` can't be ``helped`` or ``unneeded`` when no skill ran."""
+    settles put right: ``plan`` is ``made`` when Claude wrote a plan in
+    plan mode this turn, and can't be ``made`` after one written earlier
+    (it reads ``following``); ``skill`` can't be ``helped`` or
+    ``unneeded`` when no skill ran; ``check`` is ``none`` when Claude
+    changed no file, and ``targeted`` or ``full`` when it ran chosen
+    tests or a whole suite; ``task`` is ``docs`` when only documentation
+    files changed; and a first message has no ``shift`` but ``new``, and
+    no ``prior`` but ``none``."""
     if not facts or not words:
         return words
     out = []
     for word in words.split():
         key, _, value = word.partition("=")
-        if key == "plan" and facts.get("plan"):
-            value = facts["plan"]
-        elif key == "plan" and value == "made":
+        if key == "plan" and facts.get("plan_now"):
+            value = "made"
+        elif key == "plan" and facts.get("plan_before") and value == "made":
             value = "following"
         elif key == "skill" and not facts.get("skills") and value in ("helped", "unneeded"):
+            value = "none"
+        elif key == "check" and not facts.get("files"):
+            value = "none"
+        elif key == "check" and facts.get("tests"):
+            value = facts["tests"]
+        elif key == "task" and facts.get("docs_only") and value in ("bugfix", "feature", "refactor"):
+            value = "docs"
+        elif key == "shift" and facts.get("earlier") == 0 and value != "new":
+            continue
+        elif key == "prior" and facts.get("earlier") == 0:
             value = "none"
         out.append(f"{key}={value}")
     return " ".join(out)
