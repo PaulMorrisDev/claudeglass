@@ -376,9 +376,12 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
   files Claude Code has already written, and never calls Claude itself.
   Metrics capture is the one opt-in exception, and it's off by default.
   While it's on, Claude spends a few tokens in your own sessions,
-  reading a short note and writing a tag. If you let Claude Haiku write
-  the tags instead (`claudeglass capture tagger haiku`), the capture
-  hook runs your `claude` command once per turn to ask it. See
+  reading a short note and writing a tag, and the capture hook runs
+  your `claude` command to ask Claude Haiku about each finished subagent
+  run (the subagent itself is asked for nothing). If you let Haiku write
+  the main session's tags too (`claudeglass capture tagger haiku`), it
+  asks after each turn as well. Scripts that run `claude -p` get nothing
+  added. See
   [`docs/capture.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/capture.md).
 - **It changes nothing on its own.** `init` offers two optional
   additions, and shows each one and asks first:
@@ -420,10 +423,10 @@ it completely, see [Uninstalling](#uninstalling).
 - **What metrics capture adds.** It's off by default. When it's on, it
   adds a short note to your Claude Code sessions, and that note goes to
   Anthropic with the rest of the session. Claude's tags come back in its
-  replies, and this tool reads them from your transcripts. If Claude
-  Haiku writes the tags instead, a short excerpt of each turn also goes
-  to Haiku through your own Claude Code login, and only the tag's words
-  are kept, in a local file.
+  replies, and this tool reads them from your transcripts. A short
+  excerpt of each finished subagent run (and, if Claude Haiku writes the
+  tags, of each turn) also goes to Haiku through your own Claude Code
+  login, and only the words it answers with are kept, in a local file.
 
 [`SECURITY.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/SECURITY.md) is the full checklist for a security
 review, with the tests that back each point.
@@ -530,7 +533,7 @@ The dashboard's Glossary page uses the same words, term for term.
 - **Quality signal**: A sign of whether the work went well, not only what it cost: tool calls that failed, agent runs that didn't finish, your corrections. Compared across models and efforts, and before and after each change you make.
 - **Metrics capture**: An opt-in feature, off by default: Claude adds a one-line tag saying what a piece of work was and how it went. It costs tokens while it's on. `init`'s last questions and `claudeglass capture` turn it on, change what it asks for, or turn it off.
 - **Capture level**: How much metrics capture asks for: `off`, `free`, `essentials`, `standard` or `deep`, each adding more of it. Set at `init` or with `claudeglass capture level`.
-- **Tag**: The one-line, closed-vocabulary note metrics capture has Claude add to a reply, such as `[tl: task=bugfix brief=clear]` or `[result: done fit=right]`. Only words from a fixed list are kept; nothing Claude writes in its own words is.
+- **Tag**: The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as `[tl: task=bugfix brief=clear]`. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is.
 - **Prompt cycle**: One message of yours and everything Claude did to answer it, subagents at any depth included. The unit metrics capture and the Work habits page measure by.
 - **Work habits**: The page (and report section) that turns prompt cycles into habits worth trying, with a rough saving for each. Each shows where its evidence came from: reported by Claude, inferred from the transcript, or your own feedback.
 - **Feedback skill**: `/tl-feedback`, a skill you can add and run after a piece of work. It asks whether the work delivered, what slowed it, whether it was worth the tokens, and what would have helped. Works at any capture level, even off; picking `deep` turns it on, with its reminders.

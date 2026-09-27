@@ -16,6 +16,7 @@ from claudeglass.pricing import load_pricing
 from claudeglass.units import Units
 
 from helpers import (
+    old_agent_note_text,
     attachment_line,
     elasticity_with_slope,
     queue_operation_line,
@@ -56,7 +57,7 @@ def _agent(tmp_path, lines, agent_id="abc", agent_type="Explore"):
 def _note(second: int, ids, *, agent_type: str = "") -> dict:
     """A SubagentStart note (SEC-P2): a ``[result: ...]`` only counts
     when its own transcript has seen one asking for it."""
-    text = catalogue.note_text(ids, "subagent", agent_type)
+    text = old_agent_note_text(ids, agent_type)
     wrapped = f"<system-reminder>\nSubagentStart hook additional context: {text}\n</system-reminder>"
     line = attachment_line("hook_additional_context", rendered=wrapped, content=[text], hookName="SubagentStart",
                            hookEvent="SubagentStart", toolUseID="SubagentStart")

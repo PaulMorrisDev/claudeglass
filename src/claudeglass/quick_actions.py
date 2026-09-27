@@ -920,19 +920,19 @@ def _capture_on(tables) -> bool:
 
 
 def _capture_fix(ctx: Context, tables) -> dict | None:
-    """Metrics capture at Essentials, offered when agents ran in this
-    window, none wrote a ``[result: ...]`` marker, capture is off and
-    CLAUDE.md doesn't ask for the markers itself. While capture is on, the
-    prompt that removes the older :data:`quality.MARKER_HEADING` section
-    from CLAUDE.md instead: capture asks for the same markers."""
+    """The prompt that removes the older :data:`quality.MARKER_HEADING`
+    section from CLAUDE.md, whenever it's there: it asks every subagent to
+    tag its own report, which broke answers that had to be exact. Else
+    metrics capture at Essentials, offered when agents ran in this window,
+    none has a ``[result: ...]`` word and capture is off."""
     claude_md = discovery.claude_root() / "CLAUDE.md"
     try:
         has_section = quality.MARKER_HEADING in claude_md.read_text(encoding="utf-8", errors="replace")
     except OSError:
         has_section = False
-    if _capture_on(tables):
-        return _remove_markers_fix() if has_section else None
     if has_section:
+        return _remove_markers_fix()
+    if _capture_on(tables):
         return None
     markers = {r.get("marker"): r for r in tables.rows("quality", "quality_markers")}
     result = markers.get("[result: ...]") or {}
@@ -940,25 +940,26 @@ def _capture_fix(ctx: Context, tables) -> dict | None:
         return None
     metrics = capture_catalogue.level_metrics("essentials")
     main = round(len(capture_catalogue.note_text(metrics, "main")) / carry._CHARS_PER_TOKEN_APPROX)
-    sub = round(len(capture_catalogue.note_text(metrics, "subagent")) / carry._CHARS_PER_TOKEN_APPROX)
     return {
         "key": None,
         "agent": None,
         "title": "Turn on metrics capture",
         "explainer": [
             ["What this adds", "Metrics capture at its Essentials level. A hook adds a short note at each session "
-             "and subagent start asking Claude to end its reply to each of your messages with a one-line tag (the "
-             "kind of task, how clear the ask was, how hard the work was, whether it changed course), a subagent "
-             "to end its report with [result: done], [result: partial] or [result: blocked], and a rerun to say "
-             "why it was run again. This tool keeps only those words, never the text around them."],
+             "start asking Claude to end its reply to each of your messages with a one-line tag (the kind of task, "
+             "how clear the ask was, how hard the work was, whether it changed course). A subagent is asked for "
+             "nothing: when one finishes, Claude Haiku reads its brief and the end of its report and says whether "
+             "it finished and, for a rerun, why it was run again. This tool keeps only those words, never the text "
+             "around them."],
             ["Why", "Without them this check guesses: a retry on a larger model counts against the cheaper one even "
              "when the brief was the problem, and an agent that stopped half-done looks finished. With them, "
              "retries and unfinished runs are counted from what Claude said, and {{page:habits}} can rank "
              "habits by kind of task."],
-            ["What it costs", f"A note of about {main} tokens at each session start and about {sub} at each "
-             "subagent start, read from the prompt cache after the first reply, and about 15 output tokens per "
-             "message. {{page:setup/capture}} estimates it from your own recent sessions before you turn it on, and the "
-             "banner shows what it has cost while it's on."],
+            ["What it costs", f"A note of about {main} tokens at each session start, read from the prompt cache "
+             "after the first reply, about 15 output tokens per message, and a Claude Haiku call of about "
+             f"${capture_catalogue.JUDGE_USD_PER_CALL:.3f} per subagent run. " "{{page:setup/capture}} estimates it "
+             "from your own recent sessions before you turn it on, and the banner shows what it has cost while it's "
+             "on."],
             ["Where and who it affects", "~/.claude/settings.json gets the hook entries (the command shows the "
              "change and asks first); this tool's own config.toml holds the level. Every session, in every "
              "project, until you turn it off; {{page:setup/capture}} can sample sessions or set an end date."],
@@ -983,8 +984,10 @@ def _remove_markers_fix() -> dict:
         "explainer": [
             ["What this changes", "Removes the \"" + quality.MARKER_HEADING + "\" section from ~/.claude/CLAUDE.md, "
              "keeping everything else."],
-            ["Why", "Metrics capture asks Claude for the same [retry: ...] and [result: ...] markers, and only while "
-             "it's on. With the section in place Claude is asked twice, and still asked after capture is off."],
+            ["Why", "It asks every subagent to end its report with [result: ...] and every rerun's brief to start "
+             "with [retry: ...]. A subagent asked for JSON only added the marker after it, breaking the answer, "
+             "and the session that started it took the line for an injected instruction. Metrics capture now gets "
+             "the same answers from Claude Haiku after each run, without asking the agent anything."],
             ["What it saves", f"About {tokens} tokens of CLAUDE.md on every session and most subagents, read from "
              "the prompt cache after the first reply."],
             ["Where and who it affects", "~/.claude/CLAUDE.md: every session, in every project."],

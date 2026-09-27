@@ -158,6 +158,7 @@ function roughLine(rough) {
   if (rough.reply_tag) parts.push("about " + rough.reply_tag + " tokens of tag per reply");
   if (rough.report_tag) parts.push("about " + rough.report_tag + " per agent report");
   if (rough.tool_note) parts.push("about " + rough.tool_note + " after each large or web tool result");
+  if (rough.agent_judge) parts.push("a Claude Haiku call after each agent run (the agent is asked for nothing)");
   return parts.length ? "Roughly " + parts.join("; ") + "." : "";
 }
 
@@ -204,7 +205,7 @@ function renderCaptureData(data, container) {
     } else {
       nowBlock.appendChild(
         emptyState(
-          "No captured sessions yet: the note is added to sessions and subagents started after capture was turned on.",
+          "No captured sessions yet: capture covers sessions, and their subagent runs, started after capture was turned on.",
           null,
           "Start a new Claude Code session to see the first figures here."
         )

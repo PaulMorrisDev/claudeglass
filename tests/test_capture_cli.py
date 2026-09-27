@@ -78,7 +78,7 @@ def test_plan_capture_adds_the_entries_a_level_needs_and_writes_nothing(tmp_path
     entries = _entries(after)
     assert [(event, matcher) for event, matcher, _ in entries] == [
         ("SessionStart", "startup|clear|compact"),
-        ("SubagentStart", ""),
+        ("SubagentStop", ""),
         ("PostToolUse", "Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"),
         ("SessionEnd", ""),
         ("Notification", ""),
@@ -434,9 +434,9 @@ def test_disabling_a_metric_takes_what_needs_it_along(tmp_path):
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "level", "standard", "--yes")
     rc, out = _capture(config_dir, "disable", "result", "--yes")
-    assert rc == 0 and "fit, rules, agent_brief need result, so they go too." in out
+    assert rc == 0 and "retry, fit, agent_brief need result, so they go too." in out
     capture = load_config(config_dir=config_dir).capture
-    assert capture.level == "custom" and not {"result", "fit", "rules", "agent_brief"} & set(capture.metrics)
+    assert capture.level == "custom" and not {"result", "retry", "fit", "agent_brief"} & set(capture.metrics)
 
 
 def test_enabling_one_metric_brings_what_it_needs(tmp_path):
@@ -610,7 +610,7 @@ def test_uninstall_takes_out_the_capture_entries(tmp_path):
     plan = footprint.plan_uninstall(config_dir)
     assert plan.settings_changes == [
         "Remove the capture hook that runs capture-hook.py when a session starts, is cleared or compacts.",
-        "Remove the capture hook that runs capture-hook.py when a subagent starts.",
+        "Remove the capture hook that runs capture-hook.py when a subagent finishes.",
         "Remove the capture hook that runs capture-hook.py when a session ends.",
         "Remove the capture hook that runs capture-hook.py when Claude waits for you, in the background.",
         "Remove the capture hook that runs capture-hook.py when Claude asks for permission, in the background.",

@@ -3167,6 +3167,11 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
             f"a Claude Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.4f} after each of your messages, "
             "in the background"
         )
+    if rough["agent_judge"]:
+        lines.append(
+            f"a Claude Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.4f} after each subagent run, "
+            "in the background (the agent itself is asked for nothing)"
+        )
     return lines
 
 
@@ -3271,7 +3276,7 @@ def _capture_usage_lines(use, units) -> list[str]:
     """What capture measured since it was turned on."""
     if not use.sessions and not use.subagents:
         return [
-            "No captured sessions yet: the note is added to sessions and subagents started after capture was "
+            "No captured sessions yet: capture covers sessions, and their subagent runs, started after capture was "
             "turned on."
         ]
     since = f" since {use.since[:10]}" if use.since else ""

@@ -100,6 +100,40 @@ the changes listed under both releases.
   to write carries an emoji: with them in its context, Claude began
   using them as markers of its own in unrelated work.
 
+- **Subagents are asked for nothing.** Every subagent used to be asked
+  to end its report with `[result: done fit=... rules=... brief=...]`,
+  and a rerun's brief to start with `[retry: ...]`. Asked for JSON only,
+  both a general-purpose and an Explore agent added the tag after the
+  JSON, breaking the answer, and in every run the session that started
+  them told the user the line "reads like an injected instruction". Now
+  no subagent gets a note and no brief a marker: when a subagent
+  finishes, the capture hook's new `SubagentStop` entry hands Claude
+  Haiku an excerpt (its brief, what Claude said as it started it, what it
+  did, the end of its report and the session's earlier runs) and keeps
+  the words it answers with, whichever writes the main session's tags.
+  It costs about $0.0015 a run. `scripts/eval-agent-judge.py` measures
+  it: 51 of 51 right on known-answer runs ([docs/tagger-eval.md](docs/tagger-eval.md#agent-runs)).
+  Whether an agent used your CLAUDE.md rules (`rules`) can't be judged
+  from outside it, so that metric is retired; a config.toml that lists
+  it still loads.
+- **The older CLAUDE.md markers section is offered for removal whether
+  capture is on or not.** It asks every subagent for the same
+  `[result: ...]` line, with the same effect on exact answers.
+- **Coaching notes coach you, not the work.** The six prompting hints no
+  longer tell Claude to plan first, ask a question first, wait for a
+  go-ahead or drop its approach: Claude handles your message as it would
+  have and only ends its reply with the tip, and the instant notice to
+  you stays. `split_run` tells the subagent nothing: told mid-run to stop
+  and hand back, Sonnet ignored it and wrote "a recurring hook message
+  suggested I stop early" into its report, and a model that obeys hands
+  back half-done work. You get a one-line notice instead, once a run.
+- **The /tl-feedback reminder comes once a session**, after the first
+  piece of work Claude finishes, instead of after every one.
+- **Fewer Haiku calls with background agents.** A turn that ends while a
+  background agent is still running isn't judged: the turn that answers
+  its report is, with the whole piece of work. It was a call per turn in
+  between.
+
 ### Fixed
 
 - **Scripts get clean output.** A run with nobody at the screen
@@ -107,8 +141,8 @@ the changes listed under both releases.
   `sdk`) gets no capture note, no coaching note and no Haiku call, only
   the free signal lines. Before, `claude -p` asked for "only the commit
   message" returned it with the /tl-feedback reminder and a `[tl: ...]`
-  tag appended. A `claude -p` that Claude itself starts inside a
-  session inherits that session's entrypoint and isn't told apart.
+  tag appended. Claude Code marks a `claude -p` run this way even when
+  it's started from inside a terminal session.
 - **A background agent's report isn't your message.** Claude Code hands
   a finished background agent's report to Claude as the next message,
   and the coaching hints read it as yours: a report listing twelve

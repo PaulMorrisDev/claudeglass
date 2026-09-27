@@ -14,13 +14,18 @@ connect``):
 
 - ``SessionStart`` (matcher ``startup|clear|compact``): the main
   session's note. A resumed session already has it, so ``resume`` is not
-  matched. A SessionStart inside a subagent (after it compacts) gets the
-  subagent note: it carries an ``agent_id``, and if a Claude Code
-  version leaves that out, a transcript under a ``subagents`` folder
-  counts as one too.
-- ``SubagentStart``: the subagent note, at every depth.
-- ``PostToolUse``: a one-line note after a large tool result or a web
-  result, for the Deep level. An async hook's ``additionalContext``
+  matched. A SessionStart inside a subagent (after it compacts) gets
+  nothing: it carries an ``agent_id``, and if a Claude Code version
+  leaves that out, a transcript under a ``subagents`` folder counts as
+  one too. A subagent is never asked for anything (``SubagentStart``,
+  which older settings may still run this on, adds nothing either).
+- ``SubagentStop``, for the agent metrics: the finished run's brief,
+  what it did, the end of its report and the session's earlier agent
+  runs become a short excerpt for Claude Haiku, as ``Stop`` does below
+  for the main session, and its words land in the same tag files. The
+  agent's report is left exactly as it was.
+- ``PostToolUse``: a one-line note after a large tool result, for the
+  Deep level, in the main session while Claude writes the tags. An async hook's ``additionalContext``
   does reach Claude (docs/en/hooks.md), but only on the next
   conversation turn -- a full reply late for a note about the result
   Claude just saw -- so this entry runs in the foreground instead,
@@ -269,12 +274,11 @@ def build_note(catalogue: dict, ids, scope: str, agent_type: str = "", tagger: s
     none of ``ids`` asks anything there. While Haiku writes the tags
     (``tagger``), the main note asks for no tag. Same text as
     ``capture_catalogue.note_text``."""
-    if scope == "subagent" and agent_type in catalogue["skip_agent_types"]:
+    if scope == "subagent":
+        # A subagent is asked for nothing: Haiku judges its run afterwards.
         return ""
     wanted = set(ids)
     enabled = [m for m in catalogue["metrics"] if m["id"] in wanted]
-    if scope == "subagent" and agent_type in catalogue["no_rules_agent_types"]:
-        enabled = [m for m in enabled if m["id"] not in ("rules", "agent_brief")]
     main = scope == "main"
     untagged = main and tagger == "haiku"
     lines = ["" if untagged else m["main_line"] if main else m["sub_line"] for m in enabled]
@@ -403,9 +407,9 @@ def note_for(payload: dict, config: dict, catalogue: dict, now: datetime | None 
         return build_note(catalogue, ids, scope, agent_type, tagger_of(capture))
     if event == "PostToolUse":
         threshold = catalogue["big_output_tokens"] * _CHARS_PER_TOKEN
-        # While Haiku writes the tags, the main session ends its replies
-        # with none for the note's word to go in: subagents still get it.
-        untagged = tagger_of(capture) == "haiku" and not payload.get("agent_id")
+        # A subagent's report carries no tag for the note's word to go in,
+        # and nor does the main session's reply while Haiku writes the tags.
+        untagged = tagger_of(capture) == "haiku" or bool(payload.get("agent_id"))
         if "big_output" in ids and raw_len >= threshold and not untagged:
             return build_tool_note(catalogue, "big_output")
     return ""
@@ -1390,15 +1394,16 @@ def judge_excerpt(
     return "\n".join(lines), reply
 
 
-def judge_tag(text, keys, judge: dict) -> str:
+def judge_tag(text, keys, judge: dict, vocab: dict | None = None) -> str:
     """The ``key=word`` pairs of the last ``[tl: ...]`` in ``text`` whose
-    key is one of ``keys`` and whose words are known ones, as the tag
-    file keeps them (``task=bugfix brief=clear``); ``""`` without any. A
-    skill name after ``would-help:`` is dropped."""
+    key is one of ``keys`` and whose words are known ones (in ``vocab``,
+    by default the main session's), as the tag file keeps them
+    (``task=bugfix brief=clear``); ``""`` without any. A skill name after
+    ``would-help:`` is dropped."""
     matches = _TL_RE.findall(text) if isinstance(text, str) else []
     if not matches:
         return ""
-    vocab = judge["vocab"]
+    vocab = vocab or judge["vocab"]
     list_keys = set(judge["list_keys"])
     wanted = set(keys)
     found: dict[str, str] = {}
@@ -1455,15 +1460,27 @@ def grounded(words: str, facts: dict | None) -> str:
     return " ".join(out)
 
 
+def _agents_running(payload: dict) -> bool:
+    """Whether a background agent of this session is still running as the
+    turn ends: its report comes back as the next message, and the turn
+    that answers it is judged with the whole piece of work. A background
+    shell (a dev server, say) doesn't count."""
+    tasks = payload.get("background_tasks")
+    return isinstance(tasks, list) and any(
+        isinstance(t, dict) and t.get("type") == "subagent" and t.get("status") == "running" for t in tasks
+    )
+
+
 def judge_job(payload: dict, config: dict, catalogue: dict, now: datetime | None = None) -> dict | None:
     """What the worker needs to ask Haiku for this turn's tag, or ``None``:
     not a ``Stop`` of the main session, Haiku doesn't write the tags,
-    capture doesn't apply here, a Stop asked again, the call Haiku itself
-    runs in, or nothing to tag."""
+    capture doesn't apply here, a Stop asked again, a background agent
+    still running (the turn after its report is judged instead), the call
+    Haiku itself runs in, or nothing to tag."""
     judge = catalogue["judge"]
     if payload.get("hook_event_name") != "Stop" or os.environ.get(judge["env"]):
         return None
-    if payload.get("stop_hook_active") or _in_subagent(payload):
+    if payload.get("stop_hook_active") or _in_subagent(payload) or _agents_running(payload):
         return None
     now = now or datetime.now(timezone.utc)
     capture = _capture_for(payload, config, now)
@@ -1487,6 +1504,234 @@ def judge_job(payload: dict, config: dict, catalogue: dict, now: datetime | None
         "system": system,
         "excerpt": excerpt,
         "facts": facts,
+    }
+
+
+# -- Haiku judges agent runs ----------------------------------------------------
+
+#: How much of an agent's transcript is read: its end, for what it did
+#: and its report, and its start, for its brief when the file is longer.
+_AGENT_TAIL_BYTES = 4 * 1024 * 1024
+_AGENT_HEAD_BYTES = 256 * 1024
+
+_TASK_ID_RE = re.compile(r"<task-id>\s*([A-Za-z0-9_-]{1,64})\s*</task-id>")
+_TASK_RESULT_RE = re.compile(r"<result>(.*?)</result>", re.DOTALL)
+
+
+def build_agent_judge_prompt(catalogue: dict, ids) -> str:
+    """What Haiku is told when it judges an agent run; ``""`` when none of
+    ``ids`` is an agent metric. Same text as
+    ``capture_catalogue.agent_judge_text``."""
+    agent = catalogue["judge"]["agent"]
+    wanted = set(ids)
+    lines = [m["sub_line"] for m in catalogue["metrics"] if m["id"] in wanted and m["id"] in agent["keys"]]
+    if not lines:
+        return ""
+    return "\n".join([agent["intro"], *lines, agent["rule"]])
+
+
+def _result_text(content) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b["text"] for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return ""
+
+
+def _session_runs(records: list[dict], current: str, brief: str) -> tuple[list[dict], str]:
+    """The session's agent runs started before run ``current`` (an agent
+    id, whose brief is ``brief``), oldest first, each with its ``type``,
+    ``brief`` and ``report``; and what Claude said just before starting
+    ``current``, where it usually says why (as when it runs an agent
+    again). A run started in the same reply as ``current`` ran beside it,
+    not before it, and is left out. Read from the main transcript: the
+    Agent calls, a finished run's result, and a background run's report
+    in the task notification that brought it back."""
+    main = [r for r in records if not r.get("isSidechain")]
+    calls: dict[str, dict] = {}  # tool_use id -> the call
+    said = ""
+    for index, record in enumerate(main):
+        if record.get("type") == "user" and _is_human_prompt(record) and not _text_of(record).lstrip().startswith(
+            _NOT_TYPED_PREFIXES
+        ):
+            said = ""
+        if record.get("type") != "assistant":
+            continue
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        for block in _blocks(record):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                said = block["text"]
+            elif block.get("type") == "tool_use" and block.get("name") in _AGENT_TOOLS:
+                given = block.get("input") if isinstance(block.get("input"), dict) else {}
+                calls[str(block.get("id"))] = {
+                    "index": index, "message": str(message.get("id") or index), "said": said,
+                    "type": str(given.get("subagent_type") or "general-purpose"), "brief": str(given.get("prompt") or ""),
+                }
+    by_agent: dict[str, str] = {}  # agent id -> tool_use id
+    for record in main:
+        result = record.get("toolUseResult")
+        if record.get("type") != "user":
+            continue
+        if isinstance(result, dict) and isinstance(result.get("agentId"), str):
+            use = next((str(b.get("tool_use_id")) for b in _blocks(record)
+                        if isinstance(b, dict) and b.get("type") == "tool_result"), "")
+            if use in calls:
+                by_agent[result["agentId"]] = use
+                if result.get("status") == "completed":
+                    calls[use]["report"] = _result_text(result.get("content"))
+            continue
+        text = _text_of(record)
+        if text.lstrip().startswith("<task-notification"):
+            found = _TASK_ID_RE.search(text)
+            report = _TASK_RESULT_RE.search(text)
+            use = by_agent.get(found.group(1)) if found else None
+            if use and report:
+                calls[use]["report"] = report.group(1)
+    mine = by_agent.get(current) or next(
+        (use for use, call in reversed(calls.items()) if brief.strip() and call["brief"].strip() == brief.strip()), ""
+    )
+    if not mine:
+        return [], ""
+    me = calls[mine]
+    earlier = [
+        call for use, call in calls.items()
+        if use != mine and call["index"] < me["index"] and call["message"] != me["message"] and call["brief"]
+    ]
+    return earlier, me["said"]
+
+
+def agent_excerpt(
+    records: list[dict], payload: dict, catalogue: dict, earlier: list[dict], started_with: str = ""
+) -> tuple[str, str]:
+    """What Haiku reads about a finished agent run, and the id of its last
+    reply: its type and model, its brief, what the session said as it
+    started it (``started_with``), what it did (model calls, output, tools, the
+    files it changed, shell commands, errors), the end of its report, and
+    the ``earlier`` runs of the session. ``("", "")`` without a brief and
+    a reply."""
+    limits = catalogue["judge"]["agent"]["limits"]
+    edit_tools = set(catalogue["coaching"]["edit_tools"])
+    brief = next((_text_of(r) for r in records if r.get("type") == "user" and _is_human_prompt(r)), "")
+    reply = model = said = ""
+    output: dict[str, int] = {}
+    tools: dict[str, int] = {}
+    files: dict[str, None] = {}
+    commands: list[str] = []
+    errors = 0
+    for record in records:
+        if record.get("type") == "user":
+            for block in _blocks(record):
+                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                    errors += 1
+            continue
+        if record.get("type") != "assistant" or _is_synthetic(record):
+            continue
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        reply = str(message.get("id") or record.get("requestId") or record.get("uuid") or reply)
+        model = str(message.get("model") or model)
+        output[reply] = max(output.get(reply, 0), int(_number(_usage(record).get("output_tokens")) or 0))
+        for block in _blocks(record):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                said = block["text"]
+            if block.get("type") != "tool_use" or not isinstance(block.get("name"), str):
+                continue
+            name = block["name"]
+            tools[name] = tools.get(name, 0) + 1
+            given = block.get("input") if isinstance(block.get("input"), dict) else {}
+            target = given.get("file_path") or given.get("notebook_path")
+            if name in edit_tools and isinstance(target, str) and target:
+                files[_shown_path(target, payload.get("cwd"))] = None
+            elif name == "Bash" and isinstance(given.get("command"), str):
+                first = given["command"].strip().split("\n")[0]
+                if first and len(commands) < limits["commands"]:
+                    commands.append(_cut(first, limits["command"]))
+    if not brief.strip() or not reply:
+        return "", ""
+    last = payload.get("last_assistant_message")
+    report = last if isinstance(last, str) and last.strip() else said
+    agent_type = str(payload.get("agent_type") or "") or "general-purpose"
+    named = sorted(tools.items(), key=lambda item: (-item[1], item[0]))[:_JUDGE_TOOL_NAMES]
+    changed = list(files)
+    shown = ", ".join(changed[:limits["files"]]) + (" and more" if len(changed) > limits["files"] else "")
+    did = [
+        f"{len(output)} model call{'s' if len(output) != 1 else ''}",
+        f"{sum(output.values()):,} output tokens",
+        "tools: " + (", ".join(f"{name} {count}" for name, count in named) if named else "none"),
+        f"files changed: {len(changed)}" + (f" ({shown})" if changed else ""),
+        f"tool errors: {errors}",
+    ]
+    lines = [
+        f"Agent type: {agent_type}" + (f", on {model}" if _MODEL_RE.fullmatch(model) else "") + ".",
+        f'Its brief: "{_cut(brief, limits["brief"])}"',
+    ]
+    if started_with.strip():
+        lines.append(
+            f'What the session said as it started this run: "{_end(started_with, limits["earlier_report"])}"'
+        )
+    lines += [
+        "What it did: " + "; ".join(did) + ".",
+        "Shell commands: " + ("; ".join(f"`{c}`" for c in commands) if commands else "none") + ".",
+        f'The end of its report: "{_end(report, limits["report"])}"',
+    ]
+    shown_runs = earlier[-limits["earlier"]:]
+    if shown_runs:
+        lines.append("Earlier agent runs in this session, oldest first:")
+        for n, run in enumerate(shown_runs, 1):
+            ended = _end(run["report"], limits["earlier_report"]) if run.get("report") else "(no report)"
+            lines.append(
+                f'{n}. {run.get("type") or "agent"}. Brief: "{_cut(run["brief"], limits["earlier_brief"])}" '
+                f'Report ended: "{ended}"'
+            )
+    else:
+        lines.append("Earlier agent runs in this session: none.")
+    return "\n".join(lines), reply
+
+
+def agent_judge_job(payload: dict, config: dict, catalogue: dict, now: datetime | None = None) -> dict | None:
+    """What the worker needs to ask Haiku about a finished agent run, or
+    ``None``: not a ``SubagentStop``, no agent metric on, capture doesn't
+    apply here, a stop asked again, an agent that sets up Claude Code
+    itself, the call Haiku itself runs in, or nothing to judge."""
+    judge = catalogue["judge"]
+    if payload.get("hook_event_name") != "SubagentStop" or os.environ.get(judge["env"]):
+        return None
+    if payload.get("stop_hook_active") or str(payload.get("agent_type") or "") in catalogue["skip_agent_types"]:
+        return None
+    now = now or datetime.now(timezone.utc)
+    capture = _capture_for(payload, config, now)
+    if capture is None:
+        return None
+    ids = active_ids(catalogue, capture)
+    system = build_agent_judge_prompt(catalogue, ids)
+    given = payload.get("agent_transcript_path")
+    path = Path(given) if isinstance(given, str) and given else _agent_transcript(payload)
+    if not system or path is None or not path.is_file():
+        return None
+    records = _tail(str(path), _AGENT_TAIL_BYTES)
+    if path.stat().st_size > _AGENT_TAIL_BYTES:
+        records = [*_head(str(path), _AGENT_HEAD_BYTES)[:1], *records]
+    session = payload.get("transcript_path")
+    main = _tail(session) if isinstance(session, str) and session else []
+    current = str(payload.get("agent_id") or "")
+    brief = next((_text_of(r) for r in records if r.get("type") == "user" and _is_human_prompt(r)), "")
+    earlier, started_with = _session_runs(main, current, brief)
+    excerpt, reply = agent_excerpt(records, payload, catalogue, earlier, started_with)
+    if not excerpt:
+        return None
+    wanted = set(ids)
+    keys = [key for metric_id, metric_keys in judge["agent"]["keys"].items() if metric_id in wanted
+            for key in metric_keys]
+    return {
+        "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "kind": "agent",
+        "reply": reply,
+        "keys": keys,
+        "system": system,
+        "excerpt": excerpt,
     }
 
 
@@ -1558,6 +1803,7 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None) -> dict:
     import subprocess
 
     judge = catalogue["judge"]
+    agent = job.get("kind") == "agent"
     record: dict = {"ts": job["ts"], "reply": job["reply"]}
     try:
         answer = (ask or ask_haiku)(job, judge, config_dir)
@@ -1568,9 +1814,14 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None) -> dict:
     except (OSError, ValueError):
         record["err"] = "failed"
     else:
-        tag = grounded(judge_tag(answer.get("result"), job["keys"], judge), job.get("facts"))
+        if agent:
+            tag = judge_tag(answer.get("result"), job["keys"], judge, judge["agent"]["vocab"])
+            # "retry=none" only says the run was no retry.
+            tag = " ".join(word for word in tag.split() if word != "retry=none")
+        else:
+            tag = grounded(judge_tag(answer.get("result"), job["keys"], judge), job.get("facts"))
         if tag:
-            record["tl"] = tag
+            record["agent" if agent else "tl"] = tag
         else:
             record["err"] = "no_tag"
         usage = answer.get("usage") if isinstance(answer.get("usage"), dict) else {}
@@ -1687,8 +1938,8 @@ def write_signal(config_dir: Path, catalogue: dict, record: dict) -> None:
 #: with nobody at the screen: ``claude -p`` (``sdk-cli``) and the Agent
 #: SDK (``sdk-ts``, ``sdk-py``). A script reads what such a run prints, so
 #: it gets no note, no coaching and no Haiku call: only the free signal
-#: lines. A ``claude -p`` that Claude starts inside a session inherits
-#: that session's entrypoint, so it isn't told apart.
+#: lines. Claude Code sets ``sdk-cli`` for ``claude -p`` even when it is
+#: started from inside a terminal session, where the variable says ``cli``.
 _HEADLESS_ENTRYPOINT = "sdk"
 
 
@@ -1741,6 +1992,11 @@ def _run(argv: list[str]) -> None:
             spawn_judge(config_dir, job)
         return
     if unattended:
+        return
+    if payload.get("hook_event_name") == "SubagentStop":
+        job = agent_judge_job(payload, config, catalogue)
+        if job:
+            spawn_judge(config_dir, job)
         return
     note = note_for(payload, config, catalogue, raw_len=len(raw))
     tip = notice = ""

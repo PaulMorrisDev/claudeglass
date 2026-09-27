@@ -193,6 +193,31 @@ cached or not, the model reads the same prompt.
   enough to show large gaps (75% against 90%), not to rank judges a
   point or two apart.
 
+## Agent runs
+
+Since 0.11.0 no subagent is asked for a tag: Haiku judges each finished
+run from an excerpt (see [capture.md](capture.md#agent-runs)).
+`scripts/eval-agent-judge.py` builds known-answer runs with the hook's
+own `agent_excerpt` and asks Haiku about each three times: runs that
+finished, finished part of the work, or were blocked; a vague brief; a
+rerun on a stronger model and one for a missing tool; and two runs that
+followed an earlier one without redoing it.
+
+| Key | Right |
+|---|---|
+| `result` (done, partial, blocked) | 21 of 21 |
+| `brief` (clear, vague) | 6 of 6 |
+| `retry` (model, tools, or none) | 24 of 24 |
+| All | 51 of 51 |
+
+`retry` first read "only when this run redoes an earlier run": Haiku then
+left it out of a rerun for a missing tool 2 times in 3. Asked for it
+every time, with `none` as an answer (dropped before it's kept), it
+named both reruns every time and still called no follow-on run a retry.
+One case stays out: a sequence you script yourself ("start an agent with
+a vague brief, then one with a precise brief") reads as your plan, not a
+rerun, and Haiku says `none`.
+
 ## Run it again
 
 It spends real tokens, so it never runs in CI. Judging all 38 sessions
@@ -205,3 +230,5 @@ with the three judges costs about $1 and takes about 3 minutes.
 
 Run it after changing the excerpt, the key lines or the corrections, and
 compare the held-out column with this page.
+
+    python scripts/eval-agent-judge.py                       # the agent runs, about $0.08

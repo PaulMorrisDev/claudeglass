@@ -34,7 +34,6 @@
    "skill",
    "found",
    "fit",
-   "rules",
    "agent_brief",
    "session_end",
    "waits",
@@ -54,7 +53,6 @@
    "skill",
    "found",
    "fit",
-   "rules",
    "agent_brief",
    "prior",
    "check",
@@ -140,20 +138,22 @@
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "done: you finished the task; partial: some of it; blocked: you could not go on",
+   "sub_line": "result: done|partial|blocked (done = the agent finished what its brief asked; partial = some of it; blocked = it could not go on, such as a missing file, tool or permission)",
    "sub_extra": "",
    "tool_note": ""
   },
   {
    "id": "retry",
    "group": "essentials",
-   "requires": [],
+   "requires": [
+    "result"
+   ],
    "main_line": "",
-   "main_extra": "When you start an agent again because its last run fell short, begin the brief with [retry: model|brief|tools|scope|other].",
+   "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "",
-   "sub_extra": "Re-running an agent? Begin its brief with [retry: model|brief|tools|scope|other].",
+   "sub_line": "retry: none|model|brief|tools|scope|other (is this run a second try at what an earlier run listed below was meant to deliver, because that run fell short? none = no, or there is no earlier run; model = it needed a stronger model; brief = the earlier brief was too vague or lacked something; tools = the earlier agent lacked a tool or a permission; scope = the task was cut too wide or changed; other)",
+   "sub_extra": "",
    "tool_note": ""
   },
   {
@@ -214,21 +214,7 @@
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "fit: smaller|right|larger (could a smaller model have done this task, or did it need a larger one)",
-   "sub_extra": "",
-   "tool_note": ""
-  },
-  {
-   "id": "rules",
-   "group": "standard",
-   "requires": [
-    "result"
-   ],
-   "main_line": "",
-   "main_extra": "",
-   "extra_before_tag": false,
-   "main_extra_untagged": "",
-   "sub_line": "rules: used|unused (did you use the CLAUDE.md or memory instructions you were given)",
+   "sub_line": "fit: smaller|right|larger (smaller = a smaller, cheaper model could plainly have done this: simple lookups or mechanical edits; right = it suited the model it ran on; larger = the agent struggled in a way a stronger model would not have)",
    "sub_extra": "",
    "tool_note": ""
   },
@@ -242,7 +228,7 @@
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "brief: clear|partial|vague (how complete your brief was); missing: files,goal,scope,done or none (what it lacked)",
+   "sub_line": "brief: clear|partial|vague (how complete the brief was: clear = what to do and what to hand back; partial = the goal without the details; vague = neither); missing: files,goal,scope,done or none (what the brief lacked that the agent had to find or guess; a comma list)",
    "sub_extra": "",
    "tool_note": ""
   },
@@ -535,7 +521,68 @@
   },
   "list_keys": [
    "missing"
-  ]
+  ],
+  "agent": {
+   "intro": "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt of it: the brief the agent was given, what it did, the end of its report and the session's earlier agent runs. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words:",
+   "rule": "Judge only from the excerpt. Give every key; leave one out only when the excerpt can't tell at all.",
+   "limits": {
+    "brief": 2000,
+    "report": 1500,
+    "earlier": 4,
+    "earlier_brief": 200,
+    "earlier_report": 200,
+    "command": 100,
+    "commands": 6,
+    "files": 8
+   },
+   "keys": {
+    "result": [
+     "result"
+    ],
+    "retry": [
+     "retry"
+    ],
+    "fit": [
+     "fit"
+    ],
+    "agent_brief": [
+     "brief",
+     "missing"
+    ]
+   },
+   "vocab": {
+    "result": [
+     "done",
+     "partial",
+     "blocked"
+    ],
+    "fit": [
+     "smaller",
+     "right",
+     "larger"
+    ],
+    "brief": [
+     "clear",
+     "partial",
+     "vague"
+    ],
+    "missing": [
+     "files",
+     "goal",
+     "scope",
+     "done",
+     "none"
+    ],
+    "retry": [
+     "none",
+     "model",
+     "brief",
+     "tools",
+     "scope",
+     "other"
+    ]
+   }
+  }
  },
  "coaching": {
   "marker": "tl-coach v",

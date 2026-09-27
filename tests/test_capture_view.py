@@ -250,7 +250,7 @@ def test_hook_problems_are_counted_never_quoted():
 
 
 def test_missing_hook_marks_the_metrics_that_need_it():
-    spec = HookSpec(catalogue.HOOK_SCRIPT, "SubagentStart")
+    spec = HookSpec(catalogue.HOOK_SCRIPT, "SubagentStop")
     health = CaptureHookHealth(settings_path=Path("settings.json"), needed=(spec,), missing=(spec,))
     rows = _rows(capture_view.view(_on(), units=API, hooks=health))
     assert rows["result"]["needs_hook"] is True

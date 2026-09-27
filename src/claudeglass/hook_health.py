@@ -96,6 +96,7 @@ class HookSpec:
         when = {
             "SessionStart": "when a session starts, is cleared or compacts",
             "SubagentStart": "when a subagent starts",
+            "SubagentStop": "when a subagent finishes",
             "UserPromptSubmit": "when you send a message",
             "PostToolUse": "after "
             + ("web results" if tools - {"ExitPlanMode"} <= set(capture_catalogue.WEB_TOOLS) else "shell, read, search, web and MCP results")

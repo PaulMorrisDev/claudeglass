@@ -461,7 +461,7 @@ def test_quality_offers_metrics_capture_when_agents_ran_and_none_wrote_a_marker(
     assert "capture off" in explainer["How to undo it"]
 
 
-@pytest.mark.parametrize("already", ["written", "in_claude_md", "no_agents", "capture_on"])
+@pytest.mark.parametrize("already", ["written", "no_agents", "capture_on"])
 def test_quality_does_not_offer_metrics_capture_again(tmp_path, already):
     markers = [{"marker": "[result: ...]", "runs": 3 if already == "written" else 0,
                 "of_runs": 0 if already == "no_agents" else 40}]
@@ -469,16 +469,20 @@ def test_quality_does_not_offer_metrics_capture_again(tmp_path, already):
     if already == "capture_on":
         model.sections.append(_capture_table("Essentials"))
     ctx = _ctx(tmp_path, model=model)
-    if already == "in_claude_md":
-        _claude_md(f"# Rules\n\n{quality.MARKER_LINES}\n")
     assert qa.run("quality", ctx)["fixes"] == []
 
 
-def test_quality_offers_to_remove_the_older_markers_section_while_capture_is_on(tmp_path):
+@pytest.mark.parametrize("capture_on", [True, False])
+def test_quality_offers_to_remove_the_older_markers_section_whether_capture_is_on_or_not(tmp_path, capture_on):
+    # It asks every subagent to tag its report, which broke answers that had
+    # to be exact: it goes whatever capture is doing.
     model = _quality_model([{**_AGENT, "unfinished_pct": 3.0, "turn_limit_pct": 0.0}], markers=_NO_MARKERS)
-    model.sections.append(_capture_table("Standard"))
+    if capture_on:
+        model.sections.append(_capture_table("Standard"))
     _claude_md(f"# Rules\n\n{quality.MARKER_LINES}\n")
     [fix] = qa.run("quality", _ctx(tmp_path, model=model))["fixes"]
+    assert fix["title"] == "Remove the older markers section from CLAUDE.md"
+    assert "JSON only" in dict(fix["explainer"])["Why"]
     assert set(fix) == FIX_KEYS and fix["command"] is None
     assert quality.MARKER_HEADING in fix["prompt"] and "Show me the diff before saving" in fix["prompt"]
     assert fix["prompt"].endswith(PROMPT_RESTART)
