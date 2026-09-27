@@ -92,11 +92,13 @@ the changes listed under both releases.
   only once.
 - **Tips stand out in the conversation.** When a coaching note asks
   Claude to tell you something, Claude now ends its reply with a quote
-  block starting **⚠️ ClaudeGlass tip:**, after a blank line, instead of
+  block starting **ClaudeGlass tip:**, after a blank line, instead of
   a plain line that was easy to miss. The six prompting hints also
   show you a one-line notice the moment you send the message (the
   hook's `systemMessage`, never sent to Claude, so it costs no tokens).
-  The /tl-feedback reminder gets the same look, with a 💡.
+  The /tl-feedback reminder gets the same look. Nothing Claude is asked
+  to write carries an emoji: with them in its context, Claude began
+  using them as markers of its own in unrelated work.
 
 ## [0.10.0] - 2026-09-26
 

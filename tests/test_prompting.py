@@ -61,7 +61,7 @@ def test_the_parser_keeps_counts_and_flags_about_each_message_and_reply(tmp_path
     big = "Add a login page, a settings page, email alerts and an admin screen, and move the DB to Postgres."
     result = _parse(tmp_path, [
         _said(big, 0, permissionMode="default"), _reply(1, say="Which database version do you use?"),
-        _said("it's broken", 2), _reply(3, say="Fixed.\n\n> ⚠️ **ClaudeGlass tip:** Say what you saw."),
+        _said("it's broken", 2), _reply(3, say="Fixed.\n\n> **ClaudeGlass tip:** Say what you saw."),
         _said("thanks!", 4), _reply(5),
         _said("Add a login page with email and a password field", 6, permissionMode="plan"), _reply(7),
         _said("add a login page with email and a password field", 8), _reply(9),

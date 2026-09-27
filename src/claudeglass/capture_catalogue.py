@@ -126,11 +126,13 @@ FEEDBACK_REMINDER_LINE = "Finished? Run /tl-feedback: a few ticks make your savi
 
 #: How Claude sets a coaching tip or the reminder apart in its reply, so
 #: it stands out from the work in the terminal and the desktop app alike:
-#: after a blank line, a quote block opening with a sign and a bold
-#: label. A warning sign for a coaching tip, a light bulb for the
-#: reminder.
-TIP_LABEL = "> ⚠️ **ClaudeGlass tip:**"
-REMINDER_LABEL = "> 💡 **ClaudeGlass:**"
+#: after a blank line, a quote block opening with a bold label. No emoji:
+#: Claude copies what its context shows, and with a ⚠️ and a 💡 in these
+#: labels it began using them as markers of its own, in work that had
+#: nothing to do with ClaudeGlass. The notices shown only to you
+#: (:data:`COACHING_NOTICE`) never reach Claude, so they keep theirs.
+TIP_LABEL = "> **ClaudeGlass tip:**"
+REMINDER_LABEL = "> **ClaudeGlass:**"
 _TIP_ASK = f'a blank line and then a quote block starting "{TIP_LABEL}"'
 
 

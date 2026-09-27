@@ -55,10 +55,10 @@ only in the main session, except `quiet_output`, which shows in both.
 ## How a tip looks
 
 When a hint asks Claude to tell you something, Claude ends its reply,
-after a blank line, with a quote block starting **⚠️ ClaudeGlass tip:**,
+after a blank line, with a quote block starting **ClaudeGlass tip:**,
 so it stands apart from the work in the terminal and in the desktop app:
 
-> ⚠️ **ClaudeGlass tip:** That's 3 small changes in a row, each its
+> **ClaudeGlass tip:** That's 3 small changes in a row, each its
 > own message, and each one re-reads the whole session. Working out
 > everything the page still needs and sending it as one message gets
 > it done in one pass.
@@ -77,8 +77,13 @@ well. The other hints have no notice: whether `cache_cold` or
 `clear_context` matters depends on what your message asks, which only
 Claude can tell.
 
-The /tl-feedback reminder (`feedback_reminder`) has the same look, with
-a 💡 in place of the ⚠️.
+The /tl-feedback reminder (`feedback_reminder`) has the same look,
+labelled **ClaudeGlass:**.
+
+Nothing ClaudeGlass asks Claude to write carries an emoji. Claude copies
+what its context shows: with a ⚠️ and a 💡 in these labels, it began
+using them as markers of its own in unrelated work. The notice above is
+shown only to you and never reaches Claude, so it keeps its ⚠️.
 
 ## How your messages are read
 

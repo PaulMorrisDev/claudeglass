@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -576,6 +577,26 @@ def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_promp
     assert all(notice.startswith("⚠️ ClaudeGlass: ") for notice in cat.COACHING_NOTICE.values())
     reminder = cat.note_text(["feedback_reminder"], "main")
     assert f"{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}" in reminder
+
+
+_EMOJI = re.compile("[←-⯿\U0001f000-\U0001faff️]")
+
+
+def test_nothing_claude_reads_carries_an_emoji():
+    # Claude copies what its context shows: with a ⚠️ and a 💡 in the tip
+    # and reminder labels, it began using them as its own markers in
+    # unrelated work. The notices shown only to you never reach it.
+    everything = {*cat.LEVEL_METRIC_IDS, *cat.FEEDBACK_IDS, *cat.COACHING_IDS}
+    texts = {f"coaching {hint}": text for hint, text in cat.COACHING_TEXT.items()}
+    for scope, agent_type in (("main", ""), ("subagent", "general-purpose"), ("subagent", "Explore")):
+        for tagger in cat.TAGGERS:
+            texts[f"{scope} note ({tagger})"] = cat.note_text(everything, scope, agent_type, tagger)
+    texts["judge"] = cat.judge_text(everything)
+    for metric in cat.METRICS:
+        texts[f"{metric.id} tool note"] = cat.tool_note_text(metric.id)
+    for name, text in texts.items():
+        assert not _EMOJI.search(text), name
+    assert all(_EMOJI.search(notice) for notice in cat.COACHING_NOTICE.values())
 
 
 def test_the_notice_takes_the_same_fields_as_the_note(tmp_path):
