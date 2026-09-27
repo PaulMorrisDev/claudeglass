@@ -1515,6 +1515,14 @@ def test_hint_small_requests_one_at_a_time():
     assert statusline.coaching_hint({}, [*tail[:8], _said("thanks!", 1)], NOW) is None
 
 
+def test_hint_the_same_request_again():
+    tail = [_said("Make the save button bigger and move it to the right", 12), _reply([_use("a", "Edit")], ts=_at(11)),
+            _said("make the save button bigger and move it right", 1)]
+    hint = statusline.coaching_hint({"context_window": {"used_tokens": 40_000}}, tail, NOW)
+    assert hint == (20_000, "same ask again: say what was wrong with the last try", "repeat_ask")
+    assert statusline.coaching_hint({}, [*tail[:2], _said("now add a cancel button next to it", 1)], NOW) is None
+
+
 def test_hint_stopping_claude_again_and_again():
     stop = "[Request interrupted by user]"
     tail = [_said("Refactor the store", 30), _said(stop, 18), _said("no, keep the API", 17),

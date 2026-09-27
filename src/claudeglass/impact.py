@@ -32,7 +32,11 @@ saving or a rise. ``label_key`` carries the closed verdict:
 
 A change to metrics capture is measured by what capture itself adds
 per session (its notes and tags, in tokens) and how many of your
-messages Claude tagged.
+messages Claude tagged. A change to live coaching (``[capture]
+coaching``) is measured by the prompting habits it warns about
+(:mod:`prompting`), per 100 of your messages, and the share of your
+messages that were small requests sent one at a time, as well as what
+its notes add.
 
 Each change is also checked for quality (:mod:`quality`): the runs of the
 agent it changed (or the main session, for any other setting) before and
@@ -51,7 +55,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import capture as capture_mod
 from . import classify as classify_mod
-from . import quality, recache
+from . import prompting, quality, recache
 from .change_points import ChangePoint, applies_to
 from .model import EventKind, TranscriptResult, scheduled_main_session
 from .pricing import Pricing, price_turn
@@ -126,6 +130,10 @@ class SessionFacts:
     #: Your messages, and how many of them Claude tagged.
     messages: int = 0
     tagged: int = 0
+    #: How-you-prompt habits (``prompting``) and the messages that were
+    #: small requests sent one at a time, for a change to coaching.
+    habits: int = 0
+    drip_messages: int = 0
     #: (agent type, facts) per subagent spawn.
     spawns: list[tuple[str, _Transcript]] = field(default_factory=list)
     #: Quality counts per transcript: the main session and each spawn.
@@ -168,6 +176,7 @@ def session_facts(corpus, pricing: Pricing) -> list[SessionFacts]:
     manual per-session override or timezone-sensitive mode evidence, not
     the signal EST-P3 stratifies on."""
     out: list[SessionFacts] = []
+    prices = prompting._Prices(pricing)
     for bundle in corpus.sessions:
         top = bundle.top
         if top is None:
@@ -176,6 +185,8 @@ def session_facts(corpus, pricing: Pricing) -> list[SessionFacts]:
         if start is None:
             continue
         cycles = capture_mod.prompt_cycles(top)
+        habit_facts = prompting.session_prompting(bundle, prices)
+        habits, drip, _messages = prompting.habit_rates(habit_facts) if habit_facts else (0, 0, 0)
         task, _tagged = classify_mod.reported_task(top)
         classification = classify_mod.classify_session(
             top, bundle.subs, {}, None, workflows=len(bundle.workflows), entrypoint=top.meta.entrypoint
@@ -195,6 +206,8 @@ def session_facts(corpus, pricing: Pricing) -> list[SessionFacts]:
                 runs=quality.session_runs(bundle, pricing),
                 messages=len(cycles),
                 tagged=sum(1 for cycle in cycles if cycle.tag is not None),
+                habits=habits,
+                drip_messages=drip,
                 project=snapshots_mod.snapshot_project_key(bundle.slug) if bundle.slug else "",
             )
         )
@@ -278,6 +291,10 @@ def _pairs(measure: Measure, sessions: list[SessionFacts]) -> list[tuple[float, 
         ]
     if measure.key == "tagged_share":
         return [(100.0 * s.tagged, float(s.messages)) for s in sessions]
+    if measure.key == "prompting_habits":
+        return [(100.0 * s.habits, float(s.messages)) for s in sessions]
+    if measure.key == "drip_share":
+        return [(100.0 * s.drip_messages, float(s.messages)) for s in sessions]
     return []  # pragma: no cover
 
 
@@ -356,6 +373,8 @@ _PEAK = Measure("peak_context", "Largest context per session", "tokens")
 _STARTUP = Measure("startup_tokens", "Context at the start of a session", "tokens")
 _CAPTURE = Measure("capture_tokens", "Metrics capture notes and tags per session", "tokens")
 _TAGGED = Measure("tagged_share", "Messages Claude tagged", "pct")
+_HABITS = Measure("prompting_habits", "Prompting habits per 100 of your messages", "count")
+_DRIP = Measure("drip_share", "Messages that were small requests sent one at a time", "pct")
 
 
 def measures_for(point: ChangePoint) -> list[Measure]:
@@ -373,7 +392,12 @@ def measures_for(point: ChangePoint) -> list[Measure]:
         if label.startswith("agents."):
             parts = label.split(".")
             agent, key = (parts[1], parts[-1]) if len(parts) >= 3 else ("", key)
-        if key.startswith("capture."):
+        if key == "capture.coaching":
+            # Coaching warns about how you prompt: did it change?
+            add(_HABITS)
+            add(_DRIP)
+            add(_CAPTURE)
+        elif key.startswith("capture."):
             add(_CAPTURE)
             add(_TAGGED)
         elif agent:

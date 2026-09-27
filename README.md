@@ -60,7 +60,10 @@ answered from your own sessions:
   keeping unused tool definitions out, server by server.
 - **"Are my habits costing me?"** Work habits turns each of your
   requests, and everything Claude did for it, into habits worth
-  changing, with a rough saving for each.
+  changing, with a rough saving for each. How you prompt counts the
+  prompting habits that cost extra replies, such as small requests sent
+  one at a time or the same request sent again, and what each cost.
+  Coaching notes warn you about them as you type.
 - **"Did my change work?"** It records your settings as each session
   starts, and compares the sessions before a change with those after
   it: Your changes shows each one's effect, how sure it is, and what it

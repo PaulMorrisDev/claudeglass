@@ -185,6 +185,26 @@ def _captured(days: float, chars: int, messages: int, tagged: int) -> SessionFac
     )
 
 
+def test_a_coaching_change_is_measured_by_the_prompting_habits_it_warns_about():
+    point = ChangePoint(CHANGE, "capture", "Turned coaching notes on", keys=["capture.coaching"])
+    assert [m.key for m in impact.measures_for(point)] == [
+        "prompting_habits", "drip_share", "capture_tokens", "cost_per_session",
+    ]
+
+    def session(days, habits, drip, messages=10):
+        facts = _captured(days, 0, messages, 0)
+        facts.habits, facts.drip_messages = habits, drip
+        return facts
+
+    before = [session(-d, 3, 4) for d in (1, 2, 3)]
+    after = [session(d, 1, 0) for d in (0.1, 0.2, 0.3)]
+    assert impact._value(impact._HABITS, before) == (30.0, 3)
+    assert impact._value(impact._DRIP, after) == (0.0, 3)
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    habits_row = result["measures"][0]
+    assert habits_row["label"] == "Prompting habits per 100 of your messages" and habits_row["better"] == "lower"
+
+
 def test_a_capture_change_is_measured_by_what_capture_adds_and_how_much_was_tagged():
     point = ChangePoint(CHANGE, "capture", "Turned metrics capture on: Essentials", keys=["capture.level"])
     assert [m.key for m in impact.measures_for(point)] == ["capture_tokens", "tagged_share", "cost_per_session"]

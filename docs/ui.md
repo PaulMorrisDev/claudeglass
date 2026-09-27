@@ -535,7 +535,9 @@ that?"
    (`before_value` and `after_value`), the change as a signed percent,
    and the ratio test's reading coloured by the measure's `better`
    (Lower is good news for a cost; the share of messages tagged has no
-   better side and reads neutral). Then **Saved so far** from
+   better side and reads neutral). Turning coaching notes on is measured
+   by the prompting habits it warns about, per 100 of your messages, and
+   the share of messages that were small requests sent one at a time. Then **Saved so far** from
    `without.saved_usd` ("Cost more so far" when it's negative) with how
    it was priced, a row per setting when several changed at once, the
    quality verdicts with every signal folded, and the command that
@@ -749,7 +751,13 @@ trying** as cards (saving a week, what your sessions show, an example to
 copy, how often it was seen, its source, confidence, a weekly pace line
 and how the saving is worked out); the brief templates with Copy
 buttons; **Kinds of task**; the other breakdowns under More tables; and
-the notes. Nothing here changes a setting.
+the notes. Then the `prompting` section, **How you prompt**
+(`renderPromptingSection`): a card per prompting habit seen (small
+requests sent one at a time, the same request again, stopping Claude
+again and again, big tasks without a plan, vague corrections, huge
+pastes) with what it cost, what to try instead, how often it happened
+per 100 messages and a by-week line; then, once there are coaching
+notes, **Tips Claude showed**. Nothing here changes a setting.
 
 ### Setup › Settings
 

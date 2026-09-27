@@ -371,6 +371,15 @@ def _config_points(config_dir: Path) -> list[tuple[datetime | None, ChangePoint]
 
 def _capture_label(record: dict) -> str:
     changed = record.get("changed") if isinstance(record.get("changed"), dict) else {}
+    coaching = changed.get("coaching") if isinstance(changed.get("coaching"), dict) else None
+    if coaching is not None and set(changed) == {"coaching"}:
+        old = coaching.get("from") if isinstance(coaching.get("from"), list) else []
+        new = coaching.get("to") if isinstance(coaching.get("to"), list) else []
+        if "coaching_notes" in new and "coaching_notes" not in old:
+            return "Turned coaching notes on"
+        if "coaching_notes" in old and "coaching_notes" not in new:
+            return "Turned coaching notes off"
+        return "Changed live coaching"
     level = str(record.get("level") or "off")
     title = capture_catalogue.LEVEL_TITLES.get(level, level)
     old = changed.get("level", {}).get("from") if isinstance(changed.get("level"), dict) else None

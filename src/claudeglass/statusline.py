@@ -1913,8 +1913,9 @@ def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict
 
 def _prompt_habits(tail: list[dict], ctx: int | None, now: datetime) -> list[tuple[float, str, str]]:
     """How you've been prompting: small requests sent one at a time
-    (``"drip_feed"``), stopping Claude again and again (``"stop_loop"``),
-    or a huge message (``"big_paste"``). The capture hook's coaching
+    (``"drip_feed"``), the same request again (``"repeat_ask"``),
+    stopping Claude again and again (``"stop_loop"``), or a huge message
+    (``"big_paste"``). The capture hook's coaching
     notes use the same rules and default thresholds
     (``capture_catalogue.COACHING_THRESHOLDS``). Stakes: half the context
     for the first two (each extra message re-reads it), the message's
@@ -1962,6 +1963,21 @@ def _prompt_habits(tail: list[dict], ctx: int | None, now: datetime) -> list[tup
             count += 1
     if count >= th["drip_count"]:
         hints.append(((ctx or 0) / 2, f"{count} small asks in a row: plan them as one prompt", "drip_feed"))
+    # The same request again (as the hook's ``repeat_ask``).
+    from .prompt_shape import is_ack, similarity, words
+
+    mine = words(current["text"])
+    repeat_window = th["repeat_window_minutes"] * 60
+    if (
+        len(mine) >= th["repeat_min_words"] and not is_ack(current["text"]) and current["at"] is not None
+        and (now - current["at"]).total_seconds() <= repeat_window
+        and any(
+            ex["at"] is not None and 0 <= (current["at"] - ex["at"]).total_seconds() <= repeat_window
+            and similarity(mine, words(ex["text"])) >= th["repeat_similarity"]
+            for ex in typed[:-1]
+        )
+    ):
+        hints.append(((ctx or 0) / 2, "same ask again: say what was wrong with the last try", "repeat_ask"))
     last_text, last_at = current["text"], current["at"]
     paste = len(last_text) / _CHARS_PER_TOKEN
     if paste >= th["big_paste_tokens"] and last_at is not None and (now - last_at).total_seconds() <= 3600:
@@ -1996,9 +2012,10 @@ def coaching_hint(payload: dict, tail: list[dict], now: datetime) -> tuple[float
     - **many reads and searches** (``"explore_reads"``) in the current
       message: an Explore agent reads in its own context and sends back
       a summary.
-    - **how you're prompting** (``"drip_feed"``, ``"stop_loop"``,
-      ``"big_paste"``; :func:`_prompt_habits`): small requests sent one
-      at a time, stopping Claude again and again, or a huge message.
+    - **how you're prompting** (``"drip_feed"``, ``"repeat_ask"``,
+      ``"stop_loop"``, ``"big_paste"``; :func:`_prompt_habits`): small
+      requests sent one at a time, the same request again, stopping
+      Claude again and again, or a huge message.
 
     Stakes are rough token counts, only for picking one hint: the context
     for the cache, a quarter of it for ``/clear`` (it pays only if you

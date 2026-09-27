@@ -156,6 +156,8 @@ PLACEMENT: dict[str, str] = {
     "quality_markers": "advanced",
     # work habits and metrics capture
     "habits_digest": "keep",
+    "prompting_habits": "keep",
+    "prompting_tips": "keep",
     "habits_playbook": "keep",
     "habits_by_task": "keep",
     "habits_briefs": "advanced",
@@ -343,6 +345,18 @@ SECTION_COPY: dict[str, SectionCopy] = {
             "included. Evidence is labelled inferred, reported by Claude or your feedback.",
             act="Try the top habit for a week and watch its trend. Metrics capture ({{page:setup/capture}}) and "
             "feedback fill in the rest of the tables.",
+        ),
+    ),
+    "prompting": SectionCopy(
+        title="How you prompt",
+        intro="Habits in how you send messages that cost extra replies, how often they happened, and what they cost.",
+        help=Help(
+            shows="Each habit the coaching notes warn about as you type, counted in your sessions whether or not "
+            "the notes were on.",
+            read="Each cost is rough, with what it counts alongside. By week is how often it happened per message, "
+            "the worst week as 100. A dash is a week with too few messages.",
+            act="Pick the costliest habit and try its alternative for a week. Coaching notes "
+            "({{page:setup/capture}}) warn you the moment it happens.",
         ),
     ),
     "capture": SectionCopy(
@@ -780,6 +794,65 @@ TABLE_COPY: dict[str, TableCopy] = {
             "adopted": "money",
             "cost_per_met": "money",
             "tagged": "pct",
+        },
+    ),
+    "prompting_habits": TableCopy(
+        title="How you prompt",
+        help=Help(
+            shows="Each habit seen in this window, the costliest first.",
+            read="A small request counts when it was short, sent soon after Claude's reply, and answered with a "
+            "file change. The words don't matter. Costs are at list price.",
+            act="",
+        ),
+        columns={
+            "habit": ("Habit", "The habit."),
+            "times": ("Times", "How many times it happened."),
+            "per_100": ("Per 100 messages", "How often it happened for every 100 messages you sent."),
+            "cost": ("What it cost", "A rough figure for what it cost, as \"Worked out from\" says. Blank for "
+                     "a big task, whose cost can't be told apart from the work."),
+            "basis": ("Worked out from", "What the cost counts."),
+            "trend": ("Trend", "Whether it's happening less or more over recent weeks."),
+            "weeks": ("By week", "How often it happened per message, by week, the worst week as 100."),
+            "try": ("Try instead", "What to do instead."),
+        },
+        value_labels={
+            "drip_feed": "Small requests sent one at a time",
+            "repeat_ask": "The same request again",
+            "stop_loop": "Stopping Claude again and again",
+            "plan_first": "Big tasks without a plan",
+            "vague_fix": "Vague corrections",
+            "big_paste": "Huge pastes",
+            "falling": "Improving",
+            "rising": "Getting worse",
+            "steady": "Steady",
+            "new": "Too early to say",
+        },
+        lead_columns=["habit", "times", "per_100", "cost", "trend", "try"],
+    ),
+    "prompting_tips": TableCopy(
+        title="Tips Claude showed",
+        help=Help(
+            shows="For each coaching hint that asks Claude to pass a tip on, how often it did.",
+            read="The cache and context hints ask for a tip only when your message starts something new, so "
+            "fewer of those show.",
+            act="",
+        ),
+        columns={
+            "hint": ("Hint", "The coaching hint."),
+            "notes": ("Notes", "How many times the hint's note was added."),
+            "shown": ("Tip shown", "How many of those replies ended with a ClaudeGlass tip."),
+            "shown_pct": ("Shown", "The share of notes that ended with a tip."),
+        },
+        value_labels={
+            "plan_fresh": "Fresh session after a plan",
+            "repeat_ask": "The same request again",
+            "drip_feed": "Small requests sent one at a time",
+            "stop_loop": "Stopping Claude again and again",
+            "plan_first": "Big task without a plan",
+            "vague_fix": "Vague correction",
+            "big_paste": "Huge paste",
+            "cache_cold": "Cache gone cold",
+            "clear_context": "Large context",
         },
     ),
     "habits_playbook": TableCopy(

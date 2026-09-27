@@ -29,8 +29,9 @@ connect``):
 - ``UserPromptSubmit`` and ``PostToolUse`` (also matched to
   ``ExitPlanMode``) for coaching notes (``[capture] coaching`` has
   ``coaching_notes``): a short ``tl-coach`` note when a hint applies --
-  an expired cache or a large context when you send a message, small
-  requests sent one at a time, a vague correction, a huge paste, stopping Claude
+  an expired cache or a large context when you send a message, the same
+  request again, small requests sent one at a time, a big task sent
+  without a plan, a vague correction, a huge paste, stopping Claude
   again and again, a large result, many reads for one message, a plan
   approved after a lot of planning, or a subagent run past the length
   its type's runs are best split at (``coaching.json``, from your own
@@ -710,6 +711,40 @@ def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict]
     return out, {"replied_at": replied_at, "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:]}
 
 
+#: How much of a message is read for its steps (``prompt_shape.STEP_SCAN_CHARS``).
+_STEP_SCAN_CHARS = 8_000
+_WORD_RE = re.compile(r"[a-z0-9']+")
+_PLAN_WORD_RE = re.compile(r"\bplan\b", re.IGNORECASE)
+
+
+def _request_steps(text: str, coaching: dict) -> int:
+    """How many separate changes ``text`` asks for: the most of its list
+    lines, its change verbs, and the items of one sentence that starts
+    with a change verb (``prompt_shape.request_steps``, which a test holds
+    this to)."""
+    text = text[:_STEP_SCAN_CHARS]
+    action_re = re.compile(coaching["action_pattern"], re.IGNORECASE)
+    separator_re = re.compile(coaching["item_separator_pattern"], re.IGNORECASE)
+    items = len(re.findall(coaching["list_item_pattern"], text))
+    actions = len(action_re.findall(text))
+    listed = 0
+    for sentence in re.split(coaching["sentence_end_pattern"], text):
+        sentence = sentence.strip()
+        if sentence and action_re.match(sentence):
+            listed = max(listed, 1 + len(separator_re.findall(sentence)))
+    return max(items, actions, listed)
+
+
+def _words(text: str) -> frozenset:
+    return frozenset(_WORD_RE.findall(text.lower()))
+
+
+def _similarity(a: frozenset, b: frozenset) -> float:
+    """The share of words two messages have in common (``prompt_shape.similarity``)."""
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
+
+
 def _drip_count(earlier: list[dict], prompt: str, gap, answer: bool, ack_re, th: dict) -> int:
     """How many small requests in a row ``prompt`` makes: it and the
     messages before it, each short and sent within ``drip_window_minutes``
@@ -733,11 +768,14 @@ def _drip_count(earlier: list[dict], prompt: str, gap, answer: bool, ack_re, th:
     return count
 
 
-def _practice_hints(prompt, records: list[dict], coaching: dict, th: dict, now: datetime) -> list[tuple[str, float, dict]]:
-    """``drip_feed``, ``stop_loop``, ``vague_fix`` and ``big_paste`` for the
-    message you just sent (``prompt``), as ``(kind, stake, fields)``.
-    Only lengths, times, what Claude did and whether a pattern matched
-    are used; your words never leave this function."""
+def _practice_hints(
+    prompt, records: list[dict], coaching: dict, th: dict, now: datetime, mode=None
+) -> list[tuple[str, float, dict]]:
+    """``repeat_ask``, ``drip_feed``, ``stop_loop``, ``plan_first``,
+    ``vague_fix`` and ``big_paste`` for the message you just sent
+    (``prompt``, in permission ``mode``), as ``(kind, stake, fields)``, in
+    that order. Only lengths, times, counts, what Claude did and whether
+    a pattern matched are used; your words never leave this function."""
     prefix = coaching["interrupt_prefix"]
     window_s = th["stop_window_minutes"] * 60
     stops = sum(
@@ -762,7 +800,16 @@ def _practice_hints(prompt, records: list[dict], coaching: dict, th: dict, now: 
     count = _drip_count(
         earlier, prompt, gap, now_state["answer"], re.compile(coaching["ack_pattern"], re.IGNORECASE), th
     )
-    drip = vague = paste = None
+    repeat = drip = plan = vague = paste = None
+    mine = _words(prompt)
+    if len(mine) >= th["repeat_min_words"] and not re.fullmatch(coaching["ack_pattern"], prompt.strip(), re.IGNORECASE):
+        window = th["repeat_window_minutes"] * 60
+        if any(
+            ex["at"] is not None and 0 <= (now - ex["at"]).total_seconds() <= window
+            and _similarity(mine, _words(ex["text"])) >= th["repeat_similarity"]
+            for ex in earlier
+        ):
+            repeat = ("repeat_ask", 1, {})
     if count >= th["drip_count"]:
         drip = ("drip_feed", count, {"count": count})
     else:
@@ -776,7 +823,17 @@ def _practice_hints(prompt, records: list[dict], coaching: dict, th: dict, now: 
     tokens = len(prompt) / _CHARS_PER_TOKEN
     if tokens >= th["big_paste_tokens"]:
         paste = ("big_paste", tokens, {"tokens": _k(tokens)})
-    return [hint for hint in (drip, stop, vague, paste) if hint]
+    elif isinstance(mode, str) and mode and mode != "plan" and len(prompt.strip()) >= th["plan_min_chars"]:
+        # Building a plan already approved, or a message about a plan,
+        # doesn't need another.
+        planned = any(
+            isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "ExitPlanMode"
+            for r in records if r.get("type") == "assistant" for block in _blocks(r)
+        )
+        steps = _request_steps(prompt, coaching)
+        if steps >= th["plan_steps"] and not planned and not _PLAN_WORD_RE.search(prompt):
+            plan = ("plan_first", steps, {"steps": steps})
+    return [hint for hint in (repeat, drip, stop, plan, vague, paste) if hint]
 
 
 def _starting_context(path: str) -> int:
@@ -958,7 +1015,10 @@ def coaching_for(
         path = payload.get("transcript_path")
         if not in_agent and isinstance(path, str) and path:
             records = _tail(path)
-            candidates = [*_practice_hints(payload.get("prompt"), records, coaching, th, now), *_prompt_hints(records, th, now)]
+            candidates = [
+                *_practice_hints(payload.get("prompt"), records, coaching, th, now, payload.get("permission_mode")),
+                *_prompt_hints(records, th, now),
+            ]
     elif tool == "ExitPlanMode":
         if not in_agent and personal.get("plan_fresh", True) is not False:
             candidates = [_plan_hint(payload, th)]

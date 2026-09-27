@@ -179,7 +179,9 @@ from pathlib import Path
 from . import capture_tags
 from . import events as events_mod
 from . import jsonl
+from . import prompt_shape
 from . import shell_writes
+from .capture_catalogue import COACHING_THRESHOLDS
 from .model import (
     PROMPT_FLAGS,
     CaptureTag,
@@ -723,6 +725,9 @@ class _PendingTurn:
     #: last text block, parsed for tags when the turn is finalised and
     #: then dropped (see model.py's ``Turn.result_marker``/``Turn.cap``).
     last_text_tail: str | None = None
+    #: Prompting-habits addition: the reply's last text block holds a
+    #: ClaudeGlass tip (``Turn.coach_tip``).
+    last_text_tip: bool = False
     #: Metrics-capture addition (see model.py's ``Turn.agent_result_chars``/
     #: ``Turn.plan_stats``).
     agent_result_chars: dict[str, int] = field(default_factory=dict)
@@ -843,6 +848,7 @@ def _merge_content_blocks(
             # The reply's last text block decides: a marker further up
             # was quoted, not reported.
             pending.last_text_tail = block["text"][-_TAG_TAIL_CHARS:]
+            pending.last_text_tip = _TIP_TEXT in block["text"]
             continue
         if not isinstance(block, dict) or block.get("type") != "tool_use":
             continue
@@ -1474,6 +1480,10 @@ def _finalize_turn(
     # Metrics-capture addition (see model.py's module docstring).
     spawn_marker: str | None = None
     flags: set[str] = set()
+    # Prompting-habits addition (see model.py's module docstring).
+    prompt_steps = 0
+    prompt_plan_mode = human_vague = human_repeat = False
+    human_acks: list[bool] = []
     cap_note_chars = 0
     hook_context_chars: dict[str, int] = {}
     commands_run: list[str] = []
@@ -1507,6 +1517,11 @@ def _finalize_turn(
         retry_marker = pending_event.detail.get("retry") or retry_marker
         spawn_marker = pending_event.detail.get("spawn") or spawn_marker
         flags.update(pending_event.detail.get("flags") or ())
+        prompt_steps = max(prompt_steps, int(pending_event.detail.get("steps") or 0))
+        prompt_plan_mode = prompt_plan_mode or bool(pending_event.detail.get("plan_mode"))
+        human_vague = human_vague or bool(pending_event.detail.get("vague"))
+        human_repeat = human_repeat or bool(pending_event.detail.get("repeat"))
+        human_acks.append(bool(pending_event.detail.get("ack")))
 
     cap: CaptureTag | None = None
     result_marker: str | None = None
@@ -1600,8 +1615,45 @@ def _finalize_turn(
         hook_resends=dict(pending.hook_resends),
         deferred_tools_by_server=dict(pending.deferred_tools_by_server),
         deferred_list_chars=pending.deferred_list_chars,
+        prompt_steps=prompt_steps,
+        prompt_plan_mode=prompt_plan_mode,
+        human_vague=human_vague,
+        human_ack=bool(human_acks) and all(human_acks),
+        human_repeat=human_repeat,
+        reply_asked="?" in (pending.last_text_tail or "").rstrip()[-_QUESTION_TAIL_CHARS:],
+        coach_tip=pending.last_text_tip,
     )
     return turn, new_prev_ts, new_priced_count
+
+
+#: The same-request check (``Turn.human_repeat``) and the "How you
+#: prompt" counts use the coaching hints' thresholds.
+_REPEAT_MIN_WORDS = int(COACHING_THRESHOLDS["repeat_min_words"])
+_REPEAT_SIMILARITY = float(COACHING_THRESHOLDS["repeat_similarity"])
+_REPEAT_WINDOW_S = float(COACHING_THRESHOLDS["repeat_window_minutes"]) * 60
+#: How far back from the end of a reply a question mark counts as asking
+#: you something (``Turn.reply_asked``).
+_QUESTION_TAIL_CHARS = 300
+#: What marks a ClaudeGlass tip in a reply (``capture_catalogue.TIP_LABEL``
+#: less its quote mark, sign and bold, which Claude may drop).
+_TIP_TEXT = "ClaudeGlass tip:"
+
+
+def _mark_repeat(event, texts: list[str], recent: list[tuple]) -> None:
+    """Sets ``event.detail["repeat"]`` when this message is much the same
+    as one read earlier within the window, then remembers it (``recent``
+    holds its time and words, in memory only)."""
+    mine = prompt_shape.words("\n".join(t for t in texts if t))
+    if len(mine) < _REPEAT_MIN_WORDS:
+        return
+    at = _parse_ts(event.ts) if event.ts else None
+    if at is not None and any(
+        0 <= (at - then).total_seconds() <= _REPEAT_WINDOW_S and prompt_shape.similarity(mine, theirs) >= _REPEAT_SIMILARITY
+        for then, theirs in recent
+    ):
+        event.detail["repeat"] = True
+    if at is not None:
+        recent.append((at, mine))
 
 
 #: A session id safe to use as a file name: Claude Code's are UUIDs. A
@@ -1780,6 +1832,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: and the human-prompt path (a HUMAN_TEXT event's own
     #: ``detail["unsized_blocks"]``, folded in once that event is built).
     unsized_blocks: dict[str, int] = {}
+    #: (time, words) of the messages read so far, for the same-request
+    #: check; dropped when this function returns.
+    recent_messages: list[tuple] = []
     unknown_line_types: dict[str, int] = {}
     #: Parser-signals addition (SURV-5): the last ``cost-state`` line's
     #: own ``totalCostUSD``/``hasUnknownModelCost`` (a running total, so
@@ -2018,6 +2073,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             # tool_result path (_tool_result_length) uses.
             for block_type, count in (event.detail.get("unsized_blocks") or {}).items():
                 unsized_blocks[block_type] = unsized_blocks.get(block_type, 0) + count
+            # Prompting-habits addition (see model.py's module docstring):
+            # the same request again, compared in memory only.
+            if not event.detail.get("command") and not event.detail.get("ack"):
+                _mark_repeat(event, events_mod.human_texts(d), recent_messages)
         if event.kind == EventKind.ATTACHMENT:
             subkind = event.subkind or ""
             diagnostics.attachment_catch_all[subkind] = (

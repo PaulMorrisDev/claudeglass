@@ -338,6 +338,75 @@ def test_stopping_claude_again_and_again_gets_the_agree_the_approach_hint(tmp_pa
     assert _send(tmp_path, older, "just rename it for now", session="s2") == ""
 
 
+_BIG_TASK = (
+    "Add a login page with email and password, a settings page where people change their name, email alerts "
+    "when a report is ready, and an admin screen that lists every account."
+)
+
+
+def test_a_big_task_outside_plan_mode_gets_the_plan_first_hint(tmp_path):
+    records = [*_START]
+    note = _coach(tmp_path, {**_prompt_payload(_transcript(tmp_path, records)), "prompt": _BIG_TASK,
+                             "permission_mode": "default"})
+    assert _kind(note) == "plan_first" and "separate changes, outside plan mode" in note and "login" not in note
+    listed = "Please do these:\n1. add a login page\n2. add a settings page\n3. email alerts\n4. an admin screen\n" + (
+        "Keep the existing styles and tests passing throughout, and don't touch the database schema."
+    )
+    note = _coach(tmp_path, {**_prompt_payload(_transcript(tmp_path, records, "l.jsonl")), "prompt": listed,
+                             "permission_mode": "acceptEdits", "session_id": "s2"})
+    assert _kind(note) == "plan_first"
+
+
+def test_the_plan_first_hint_stays_out_of_the_way(tmp_path):
+    path = _transcript(tmp_path, [*_START])
+
+    def send(prompt, mode, session, records_path=path):
+        payload = {**_prompt_payload(records_path), "prompt": prompt, "session_id": session}
+        return _coach(tmp_path, {**payload, "permission_mode": mode} if mode else payload)
+
+    # Already in plan mode, or no mode reported.
+    assert send(_BIG_TASK, "plan", "a") == ""
+    assert send(_BIG_TASK, None, "b") == ""
+    # A message about a plan, or building one already approved.
+    assert send("Carry out the plan: " + _BIG_TASK, "default", "c") == ""
+    approved = _transcript(tmp_path, [*_START, _reply(30_000, ago_s=100, one_hour=True, content=[
+        {"type": "tool_use", "id": "toolu_p", "name": "ExitPlanMode", "input": {}}])], "approved.jsonl")
+    assert send(_BIG_TASK, "default", "d", approved) == ""
+    # A short request, or one asking for fewer changes.
+    assert send("Add login, settings, alerts and an admin screen", "default", "e") == ""
+    one_change = (
+        "Make the header sticky so it stays at the top when the page scrolls, and keep its shadow the same as it is "
+        "today on the settings page and on the dashboard."
+    )
+    assert send(one_change, "default", "f") == ""
+
+
+def test_sending_the_same_request_again_gets_the_say_what_was_wrong_hint(tmp_path):
+    records = [*_START, _said("Make the save button bigger and move it to the right", 600), _changed(580)]
+    note = _send(tmp_path, records, "make the save button bigger and move it right")
+    assert _kind(note) == "repeat_ask" and "button" not in note
+    # A different request, an old one, or a short one isn't a repeat.
+    assert "repeat_ask" not in _send(tmp_path, records, "now add a cancel button next to it", session="s2")
+    old = [*_START[:1], _said("Make the save button bigger and move it to the right", 7_000), _changed(6_900)]
+    assert "repeat_ask" not in _send(tmp_path, old, "make the save button bigger and move it right", session="s3")
+    short = [*_START, _said("do it", 600), _changed(580)]
+    assert "repeat_ask" not in _send(tmp_path, short, "do it", session="s4")
+
+
+def test_the_hook_counts_steps_and_likeness_as_the_package_does():
+    from claudeglass import prompt_shape
+
+    samples = [
+        _BIG_TASK, "Create page.html: a simple settings page with a heading, a name field and a save button.",
+        "1. add a\n2. add b\n- c\n* d", "Why does the build fail?", "Add tests. Then rename the store and bump it.",
+    ]
+    for text in samples:
+        assert HOOK._request_steps(text, CATALOGUE["coaching"]) == prompt_shape.request_steps(text), text
+    a, b = "make the save button bigger please", "Make the save button bigger"
+    assert HOOK._similarity(HOOK._words(a), HOOK._words(b)) == prompt_shape.similarity(
+        prompt_shape.words(a), prompt_shape.words(b))
+
+
 def test_a_prompt_hint_comes_before_the_context_hints(tmp_path):
     records = [*_START, _said("fix the header", 600), _changed(580, 150_000), _said("still wrong", 300),
                _changed(280, 150_000)]
@@ -480,10 +549,13 @@ def test_a_prompting_hint_also_shows_you_a_notice_at_once(tmp_path):
 
 
 def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_prompting_hints():
-    to_the_user = {"plan_fresh", "cache_cold", "clear_context", "drip_feed", "stop_loop", "vague_fix", "big_paste"}
+    to_the_user = {
+        "plan_fresh", "cache_cold", "clear_context", "repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix",
+        "big_paste",
+    }
     for hint, text in cat.COACHING_TEXT.items():
         assert (cat.TIP_LABEL in text) == (hint in to_the_user), hint
-    assert set(cat.COACHING_NOTICE) == {"drip_feed", "stop_loop", "vague_fix", "big_paste"}
+    assert set(cat.COACHING_NOTICE) == {"repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix", "big_paste"}
     assert CATALOGUE["coaching"]["notice"] == cat.COACHING_NOTICE
     assert all(notice.startswith("⚠️ ClaudeGlass: ") for notice in cat.COACHING_NOTICE.values())
     reminder = cat.note_text(["feedback_reminder"], "main")

@@ -430,6 +430,28 @@ to stop where it stops (``reconcile.claude_code_reported_costs``):
   line's ``modelUsage[model].costUSD``. Model ids and numbers only; an id
   outside the model-id alphabet is dropped.
 
+Prompting-habits addition (``PARSER_VERSION`` 28). What the "How you
+prompt" section (``prompting.py``) and the coaching hints' after-the-fact
+counts need about each message you typed and each reply, worked out by
+``prompt_shape`` while the line is read. Counts and yes/no only; never
+the words:
+
+- ``Turn.prompt_steps: int = 0`` -- how many separate changes the
+  preceding message asked for (``prompt_shape.request_steps``), when two
+  or more; 0 when it mentions a plan, since it's following one.
+- ``Turn.prompt_plan_mode: bool = False`` -- it was sent in plan mode
+  (its line's ``permissionMode``).
+- ``Turn.human_vague: bool = False`` -- it was a short fix request that
+  names nothing specific (``prompt_shape.is_vague_fix``).
+- ``Turn.human_ack: bool = False`` -- it only acknowledged ("thanks").
+- ``Turn.human_repeat: bool = False`` -- it was much the same request as
+  one you sent earlier in the same transcript, within the
+  ``repeat_window_minutes`` threshold (compared in memory while parsing).
+- ``Turn.reply_asked: bool = False`` -- this reply's last words hold a
+  question mark, so your next message answers it.
+- ``Turn.coach_tip: bool = False`` -- this reply showed a ClaudeGlass tip
+  (``capture_catalogue.TIP_LABEL``).
+
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
 count, a closed word (with an "other" fallback) or a raw number off a
@@ -803,6 +825,17 @@ class Turn:
     #: when this turn is the estimated request that wrote a compaction's
     #: summary, not a reply Claude Code logged.
     estimated: str | None = None
+    #: Prompting-habits addition (see module docstring): what the
+    #: preceding message asked for and how, as counts and flags.
+    prompt_steps: int = 0
+    prompt_plan_mode: bool = False
+    human_vague: bool = False
+    human_ack: bool = False
+    human_repeat: bool = False
+    #: Prompting-habits addition: this reply ended on a question, and
+    #: whether it showed a ClaudeGlass tip.
+    reply_asked: bool = False
+    coach_tip: bool = False
 
 
 @dataclass(slots=True)

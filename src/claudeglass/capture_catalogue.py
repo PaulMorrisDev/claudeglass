@@ -333,14 +333,16 @@ COACHING_READ_TOOLS = ("Read", "Grep", "Glob")
 
 #: The live hints: after a tool result (the first four) and when you
 #: send a message (the rest), most useful first when more than one
-#: applies. ``drip_feed`` to ``big_paste`` are about how you prompt.
+#: applies. ``repeat_ask`` to ``big_paste`` are about how you prompt.
 COACHING_HINTS = (
     "plan_fresh",
     "split_run",
     "quiet_output",
     "explore_reads",
+    "repeat_ask",
     "drip_feed",
     "stop_loop",
+    "plan_first",
     "vague_fix",
     "big_paste",
     "cache_cold",
@@ -398,6 +400,23 @@ INTERRUPT_PREFIX = "[Request interrupted"
 _ACK_WORDS = r"thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no"
 ACK_PATTERN = rf"(?:{_ACK_WORDS})(?:[\s!.,]+(?:{_ACK_WORDS}))*[\s!.,]*"
 
+#: A line of a list in a message: "1. ...", "2) ...", "- ...", "* ...".
+LIST_ITEM_PATTERN = r"(?m)^[ \t]*(?:\d{1,2}[.)]|[-*\u2022])[ \t]+\S"
+
+#: A sentence that asks for a change, and the items it lists ("Add login,
+#: a settings page and an admin screen"): a verb that asks for a change
+#: at the start of a sentence or after "and", "then", "also" or a comma.
+ACTION_PATTERN = (
+    r"(?:^|[.;:!?\n,]|\band\b|\bthen\b|\balso\b)\s*(?:please\s+)?(?:add|create|build|implement|make|move|"
+    r"migrate|refactor|rename|remove|delete|update|change|replace|write|fix|set up|convert|integrate|split|merge|"
+    r"extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support)\b"
+)
+#: What separates the items of one listing sentence.
+ITEM_SEPARATOR_PATTERN = r",\s*and\b|,|;|\band\b"
+#: Where one sentence ends: a full stop, "!" or "?" before a space or the
+#: end (not the one in "page.html"), or a line break.
+SENTENCE_END_PATTERN = r"[.!?]+(?=\s|$)|\n+"
+
 #: Tools that change a file. A message Claude answered with one of these
 #: asked for a change, whatever its words (``drip_feed``).
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
@@ -428,6 +447,17 @@ COACHING_THRESHOLDS = {
     "vague_fix_chars": 80,
     #: A message this many tokens long gets the big-paste hint.
     "big_paste_tokens": 10_000,
+    #: A request asking for this many separate changes, outside plan mode,
+    #: gets the plan-first hint...
+    "plan_steps": 4,
+    #: ...when it's at least this long.
+    "plan_min_chars": 150,
+    #: A message sharing this much of its words with one you sent...
+    "repeat_similarity": 0.8,
+    #: ...within this long, is the same request again...
+    "repeat_window_minutes": 60,
+    #: ...when it has at least this many different words.
+    "repeat_min_words": 4,
     #: Stopping Claude this many times...
     "stop_loop_count": 3,
     #: ...within this long gets the agree-the-approach hint.
@@ -459,6 +489,19 @@ COACHING_TEXT = {
         "the whole context. Make this change, then end your reply, before any tag, with " + _TIP_ASK + " "
         "suggesting that working out everything the work still needs and sending it as one message gets it done "
         "in one pass, for fewer tokens."
+    ),
+    "repeat_ask": (
+        "The user has sent much the same request again, so the last attempt probably missed what they wanted. "
+        "Don't repeat the same approach: say in one line what you think went wrong, then try a different way, or "
+        "ask one short question if you can't tell. End your reply, before any tag, with " + _TIP_ASK + " "
+        "suggesting that saying what was wrong with the last attempt gets a better next one than sending the "
+        "request again."
+    ),
+    "plan_first": (
+        "The user's message asks for about {steps} separate changes, outside plan mode. Before changing anything, "
+        "set out in a few lines how you'll go about it and in what order, then carry on unless they stop you. End "
+        "that reply, before any tag, with " + _TIP_ASK + " suggesting plan mode (Shift+Tab) for a job this size: "
+        "it agrees the approach before anything changes."
     ),
     "stop_loop": (
         "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change "
@@ -505,6 +548,10 @@ COACHING_TEXT = {
 COACHING_NOTICE = {
     "drip_feed": "⚠️ ClaudeGlass: {count} small requests in a row, one message each. Work out everything that needs "
     "changing and send it as one prompt: it costs less.",
+    "repeat_ask": "⚠️ ClaudeGlass: that's much the same request as before. Saying what was wrong with the last "
+    "attempt helps more than sending it again.",
+    "plan_first": "⚠️ ClaudeGlass: a {steps}-step request outside plan mode. Plan mode (Shift+Tab) agrees the "
+    "approach before anything changes.",
     "stop_loop": "⚠️ ClaudeGlass: you've stopped Claude {count} times in {minutes} minutes. Plan mode (Shift+Tab) "
     "agrees the approach before work starts.",
     "vague_fix": "⚠️ ClaudeGlass: say what you saw and what you expected, or paste the error, to get a fix first "
@@ -995,7 +1042,8 @@ METRICS: tuple[Metric, ...] = (
         "hook adds a short note to Claude's context, and Claude acts on it or tells you in a highlighted tip: a large "
         "tool output, many reads for one message, a subagent run past the point where your own history says "
         "splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired "
-        "cache when you send a message. It also flags how you prompt: small requests sent one at a time, a "
+        "cache when you send a message. It also flags how you prompt: the same request again, a big task "
+        "without a plan, small requests sent one at a time, a "
         "vague correction, a huge paste, or stopping Claude again and again.",
         why="Advice at the moment it applies, and Claude can often act on it itself. Each note costs a few dozen "
         "tokens for the rest of the session. Claude Code waits for the hook after each shell, read, search, web "
@@ -1562,6 +1610,10 @@ def export_json() -> dict:
             "interrupt_prefix": INTERRUPT_PREFIX,
             "edit_tools": list(EDIT_TOOLS),
             "ack_pattern": ACK_PATTERN,
+            "list_item_pattern": LIST_ITEM_PATTERN,
+            "action_pattern": ACTION_PATTERN,
+            "item_separator_pattern": ITEM_SEPARATOR_PATTERN,
+            "sentence_end_pattern": SENTENCE_END_PATTERN,
         },
     }
 

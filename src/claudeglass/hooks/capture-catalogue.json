@@ -401,6 +401,11 @@
    "drip_chars": 300,
    "vague_fix_chars": 80,
    "big_paste_tokens": 10000,
+   "plan_steps": 4,
+   "plan_min_chars": 150,
+   "repeat_similarity": 0.8,
+   "repeat_window_minutes": 60,
+   "repeat_min_words": 4,
    "stop_loop_count": 3,
    "stop_window_minutes": 20,
    "cooldown_minutes": 30,
@@ -410,6 +415,8 @@
    "cache_cold": "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context again: about {ctx} tokens at the cache-write price. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying so, and that /clear before a new task after a break avoids it. If it carries on the same work, don't mention it.",
    "clear_context": "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying that /clear before a new task would have saved that. If it carries on the same work, don't mention it.",
    "drip_feed": "The user has sent {count} small change requests in a row, one message each, and every message re-reads the whole context. Make this change, then end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting that working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
+   "repeat_ask": "The user has sent much the same request again, so the last attempt probably missed what they wanted. Don't repeat the same approach: say in one line what you think went wrong, then try a different way, or ask one short question if you can't tell. End your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting that saying what was wrong with the last attempt gets a better next one than sending the request again.",
+   "plan_first": "The user's message asks for about {steps} separate changes, outside plan mode. Before changing anything, set out in a few lines how you'll go about it and in what order, then carry on unless they stop you. End that reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting plan mode (Shift+Tab) for a job this size: it agrees the approach before anything changes.",
    "stop_loop": "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change anything for this message, say in two or three lines what you'll do, and wait for a go-ahead if it's a large change. End that reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying that plan mode (Shift+Tab) agrees the approach before any work starts.",
    "vague_fix": "The user says something is wrong but not what they saw or expected. If the context doesn't make the problem clear, ask one short question (what they saw, what they expected, or the error text) before changing anything. If it does, fix it and end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying that naming what they saw and expected, or pasting the error, gets a fix first time.",
    "big_paste": "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a log, a file or command output, end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting they paste only the part that matters, or save it to a file and give the path so only what's needed is read.",
@@ -427,6 +434,8 @@
   },
   "notice": {
    "drip_feed": "⚠️ ClaudeGlass: {count} small requests in a row, one message each. Work out everything that needs changing and send it as one prompt: it costs less.",
+   "repeat_ask": "⚠️ ClaudeGlass: that's much the same request as before. Saying what was wrong with the last attempt helps more than sending it again.",
+   "plan_first": "⚠️ ClaudeGlass: a {steps}-step request outside plan mode. Plan mode (Shift+Tab) agrees the approach before anything changes.",
    "stop_loop": "⚠️ ClaudeGlass: you've stopped Claude {count} times in {minutes} minutes. Plan mode (Shift+Tab) agrees the approach before work starts.",
    "vague_fix": "⚠️ ClaudeGlass: say what you saw and what you expected, or paste the error, to get a fix first time.",
    "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. Paste only the part that matters, or give a file path."
@@ -442,6 +451,10 @@
    "MultiEdit",
    "NotebookEdit"
   ],
-  "ack_pattern": "(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no)(?:[\\s!.,]+(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no))*[\\s!.,]*"
+  "ack_pattern": "(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no)(?:[\\s!.,]+(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no))*[\\s!.,]*",
+  "list_item_pattern": "(?m)^[ \\t]*(?:\\d{1,2}[.)]|[-*\\u2022])[ \\t]+\\S",
+  "action_pattern": "(?:^|[.;:!?\\n,]|\\band\\b|\\bthen\\b|\\balso\\b)\\s*(?:please\\s+)?(?:add|create|build|implement|make|move|migrate|refactor|rename|remove|delete|update|change|replace|write|fix|set up|convert|integrate|split|merge|extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support)\\b",
+  "item_separator_pattern": ",\\s*and\\b|,|;|\\band\\b",
+  "sentence_end_pattern": "[.!?]+(?=\\s|$)|\\n+"
  }
 }

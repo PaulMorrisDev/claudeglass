@@ -10,7 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Warnings about how you prompt.** Coaching notes (`coaching_notes`)
-  gain four hints for habits that cost replies:
+  gain six hints for habits that cost replies:
+  - `repeat_ask`: much the same request sent again within the hour.
+    Claude tries a different way or asks what went wrong, and suggests
+    saying what was wrong next time.
+  - `plan_first`: a request for four or more separate changes sent
+    outside plan mode. Claude sets out its approach before changing
+    anything, and suggests plan mode.
   - `drip_feed`: a third small request in a row, each its own message
     ("make the button bigger", "now move the logo", "and the footer
     too"). It goes by what happened, not the words: short messages sent
@@ -26,19 +32,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `big_paste`: a message of 10,000 tokens or more. Claude suggests
     pasting only the part that matters, or giving a file path.
 
-  The coaching line in the status line shows the first, second and
-  fourth too. Your messages are read only for their length, their time
-  and whether Claude changed files after them (`vague_fix` also looks
-  for a fix or correction word); nothing about your words is kept or
-  passed on. Each threshold can be changed in `config.toml` (see
-  [coaching.md](docs/coaching.md)).
+  The coaching line in the status line shows the same request again,
+  small requests, stopping Claude and huge pastes too. Your messages
+  are read only for their length, their time, what Claude did after
+  them, how many changes they ask for and which words two of them
+  share (`vague_fix` also looks for a fix or correction word); nothing
+  about your words is kept or passed on. Each threshold can be changed
+  in `config.toml` (see [coaching.md](docs/coaching.md)).
+
+- **How you prompt, on Work habits.** The same six habits, counted in
+  all your sessions whether or not coaching notes were on: how often
+  each happened per 100 messages, what it cost, its trend by week and
+  what to try instead. Once there are coaching notes, it also says how
+  often Claude passed each hint's tip on. Turning coaching notes on is a
+  change on Your changes, measured by these habits before and after.
+  The parser now records, for each message, how many changes it asked
+  for, whether it was sent in plan mode, and whether it was vague, a
+  thank-you or a repeat; and for each reply, whether it asked you
+  something or showed a tip. Counts and flags only, never your words
+  (`PARSER_VERSION` 28, so every transcript is read again once).
 
 ### Changed
 
 - **Tips stand out in the conversation.** When a coaching note asks
   Claude to tell you something, Claude now ends its reply with a quote
   block starting **⚠️ ClaudeGlass tip:**, after a blank line, instead of
-  a plain line that was easy to miss. The four prompting hints also
+  a plain line that was easy to miss. The six prompting hints also
   show you a one-line notice the moment you send the message (the
   hook's `systemMessage`, never sent to Claude, so it costs no tokens).
   The /tl-feedback reminder gets the same look, with a 💡.
