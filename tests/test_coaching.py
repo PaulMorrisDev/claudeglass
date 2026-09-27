@@ -437,7 +437,7 @@ def test_sending_a_request_again_after_an_api_error_is_not_a_repeat_or_a_stop(tm
     + "".join(f"- mod{n}.py: added the docstrings\n" for n in range(12)) + "</result>\n</task-notification>",
     "<task-notification>\n<result>" + "a long report " * 4_000 + "</result>\n</task-notification>",
     "<scheduled-task>Check the build and fix whatever broke, then add tests, update docs and bump it</scheduled-task>",
-])
+], ids=["agent report listing files", "long agent report", "scheduled task"])  # short: Windows caps env vars
 def test_a_message_you_didnt_type_gets_no_prompting_or_context_hint(tmp_path, prompt):
     # A background agent's report comes back as the next message: it isn't
     # yours, however long or list-shaped it is, and even in a big context.
