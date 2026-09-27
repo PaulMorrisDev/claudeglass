@@ -10,6 +10,7 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from importlib import resources
@@ -41,13 +42,14 @@ def _config(config_dir: Path, body: str) -> Path:
     return config_dir
 
 
-def _run(config_dir: Path, payload, *, script: Path = SCRIPT) -> tuple[int, str, str]:
+def _run(config_dir: Path, payload, *, script: Path = SCRIPT, env: dict | None = None) -> tuple[int, str, str]:
     data = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
     done = subprocess.run(
         [sys.executable, str(script), "--config-dir", str(config_dir)],
         input=data,
         capture_output=True,
         timeout=30,
+        env=env,
     )
     return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
 
@@ -249,6 +251,26 @@ def test_the_feedback_reminder_needs_capture_on(tmp_path):
     assert "/tl-feedback" in _note(free, _start())
     off = _config(tmp_path / "off", '[capture]\nlevel = "off"\nfeedback = ["feedback_reminder"]\n')
     assert _note(off, _start()) == ""
+
+
+def test_a_run_with_nobody_at_the_screen_gets_no_note_but_still_logs_signals(tmp_path):
+    # claude -p and the Agent SDK: a script reads what the run prints, so
+    # nothing may be added to it. The free signal lines still count.
+    config_dir = _config(tmp_path / "cg", '[capture]\nlevel = "deep"\ncoaching = ["coaching_notes"]\n')
+    (config_dir / "salt").write_bytes(b"s" * 32)
+    for entrypoint in ("sdk-cli", "sdk-ts", "sdk-py"):
+        env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": entrypoint}
+        for payload in (_start(), _subagent(), {**_start(), "hook_event_name": "UserPromptSubmit", "prompt": "hi"},
+                        {**_start(), "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": "x" * 40_000}):
+            assert _run(config_dir, payload, env=env) == (0, "", ""), (entrypoint, payload["hook_event_name"])
+        rc, out, _ = _run(config_dir, {**_start(), "hook_event_name": "SessionEnd", "reason": "other"}, env=env)
+        assert rc == 0 and out == ""
+    assert len(list((config_dir / "signals").glob("*.jsonl"))) == 1
+    # The terminal and the desktop app still get the note.
+    for entrypoint in ("cli", "claude-desktop"):
+        env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": entrypoint}
+        rc, out, _ = _run(config_dir, _start(), env=env)
+        assert rc == 0 and json.loads(out)["hookSpecificOutput"]["additionalContext"].startswith(cat.NOTE_MARKER)
 
 
 @pytest.mark.parametrize("payload", [b"", b"not json", b"[1, 2]", b"\xff\xfe"])

@@ -1953,7 +1953,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
 
         if line_type == "assistant":
             diagnostics.assistant_lines += 1
-            if recent_messages:
+            # An API error, an overload or a usage limit in a reply's place
+            # doesn't answer a message: sending it again isn't a repeat.
+            reply = d.get("message") if isinstance(d.get("message"), dict) else {}
+            if recent_messages and not (reply.get("model") == "<synthetic>" or d.get("isApiErrorMessage")):
                 recent_messages[-1]["answered"] = True
             key = _turn_key(d)
             if current is not None and key == current_key:

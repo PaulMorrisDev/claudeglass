@@ -100,6 +100,32 @@ the changes listed under both releases.
   to write carries an emoji: with them in its context, Claude began
   using them as markers of its own in unrelated work.
 
+### Fixed
+
+- **Scripts get clean output.** A run with nobody at the screen
+  (`claude -p`, or the Agent SDK: `CLAUDE_CODE_ENTRYPOINT` starting
+  `sdk`) gets no capture note, no coaching note and no Haiku call, only
+  the free signal lines. Before, `claude -p` asked for "only the commit
+  message" returned it with the /tl-feedback reminder and a `[tl: ...]`
+  tag appended. A `claude -p` that Claude itself starts inside a
+  session inherits that session's entrypoint and isn't told apart.
+- **A background agent's report isn't your message.** Claude Code hands
+  a finished background agent's report to Claude as the next message,
+  and the coaching hints read it as yours: a report listing twelve
+  edited files told Claude "the user's message asks for about 12
+  separate changes" and to set out a plan first, and a long report got
+  the pasted-too-much tip. Reports, scheduled tasks and command output
+  now get no prompting or context hint.
+- **Sending a message again after an API error isn't a repeat.** A
+  reply that ended in an API error, an overload or a usage limit no
+  longer counts as an attempt, so resending the message no longer tells
+  Claude to drop an approach that never ran (`repeat_ask`), and a run of
+  failures isn't counted as you stopping Claude (`stop_loop`). The
+  status line and the "How you prompt" counts follow the same rule.
+- **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
+  quieter flag or a filter that keeps every error line, so a trimmed
+  test run can't hide the failure.
+
 ## [0.10.0] - 2026-09-26
 
 ### Added

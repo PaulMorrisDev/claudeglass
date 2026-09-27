@@ -18,7 +18,9 @@ claudeglass capture enable coaching_notes
 
 or on the dashboard's Setup › Capture page. They run at any capture
 level, including off, and in every session, but not in a project that
-`[capture] projects` or `exclude_projects` leaves out. Like every
+`[capture] projects` or `exclude_projects` leaves out, and never in a
+run with nobody at the screen (`claude -p` or the Agent SDK), whose
+output a script reads. Like every
 capture change, the settings.json entries the hook needs are shown and
 added only after you say yes. `capture disable coaching_notes` turns
 them off; `capture remove` turns them off too, and takes the entries
@@ -35,9 +37,9 @@ agent type's name.
 |---|---|---|
 | `plan_fresh` | You approve a plan, and building it in a fresh session would drop at least 40,000 tokens of planning context. | Tell you in a tip that `/clear`, then asking Claude to carry out the saved plan, would carry that much less on every reply of the build. Then carry on. |
 | `split_run` | A subagent run passes the number of replies your own history says its type's runs are best split at (see [below](#your-own-split-points)). | If more than a step or two is left, finish the current step and end the report with what's done, what's left and the files involved, so a fresh agent can carry on. |
-| `quiet_output` | A tool result is about 8,000 tokens or more. A read already given a line limit is left alone. | Next time, ask for less: read only the lines needed, filter a command's output, narrow a search. |
+| `quiet_output` | A tool result is about 8,000 tokens or more. A read already given a line limit is left alone. | Next time, ask for less: read only the lines needed, use a quieter flag or a filter that keeps every error line (not a bare `head` or `tail`), narrow a search. |
 | `explore_reads` | The main session has made 8 reads and searches for one message. | If more searching is needed, hand it to an Explore agent, which searches in its own context and sends back a summary. |
-| `repeat_ask` | You send much the same request as one Claude answered in the last hour (80% of its words in common, at least 4 different words). A message you stopped before any reply and sent again isn't a repeat. | Don't repeat the same approach: say in one line what probably went wrong and try differently, or ask one question. Then suggest in a tip that saying what was wrong gets a better next attempt than resending. |
+| `repeat_ask` | You send much the same request as one Claude answered in the last hour (80% of its words in common, at least 4 different words). A message you stopped before any reply and sent again isn't a repeat, and nor is one sent again after an API error, an overload or a usage limit ended its reply. | Don't repeat the same approach: say in one line what probably went wrong and try differently, or ask one question. Then suggest in a tip that saying what was wrong gets a better next attempt than resending. |
 | `drip_feed` | You send your third small request in a row: short messages, each sent within 20 minutes of Claude's reply, the earlier ones each answered with a file change ("make the button bigger", "now move the logo", "and the footer too"). The words don't matter. A detailed message, a reply that changed nothing, or a longer gap starts the count again. | Make the change, then suggest in a tip that working out everything the work still needs and sending it as one message gets it done in one pass. |
 | `stop_loop` | You've stopped Claude (Esc) three times in the last 20 minutes, during a reply or before it started. | Before changing anything, say in two or three lines what it will do, and wait for a go-ahead on a large change. Then suggest plan mode (Shift+Tab), which agrees the approach before any work starts. |
 | `plan_first` | You send a request for 4 or more separate changes, 150 characters or longer, outside plan mode, before any plan was approved in the session. A message that mentions a plan is left alone. | Before changing anything, set out in a few lines how it will go about it and in what order, then carry on. Then suggest plan mode (Shift+Tab) for a job that size. |
@@ -51,6 +53,9 @@ that applies. The first four come after a tool result, the rest when you
 send a message. `split_run` shows only inside the subagent; the rest
 only in the main session, except `quiet_output`, which shows in both.
 `vague_fix` doesn't show during a run `drip_feed` has already flagged.
+A message you didn't type gets no hint: a background agent's report
+(which Claude Code hands to Claude as the next message), a scheduled
+task, a slash command's output.
 
 ## How a tip looks
 

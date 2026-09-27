@@ -410,6 +410,62 @@ def test_a_message_resent_after_esc_before_any_reply_is_not_a_repeat_but_a_stop(
     assert "stop_loop" not in _send(tmp_path, marked, "just rename it", session="s3")
 
 
+def _failed(ago_s: float) -> dict:
+    """What Claude Code writes when a reply dies on an API error."""
+    return {
+        "type": "assistant", "timestamp": _iso(NOW - timedelta(seconds=ago_s)), "isApiErrorMessage": True,
+        "message": {"id": f"msg_f{ago_s}", "model": "<synthetic>", "role": "assistant",
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                    "content": [{"type": "text", "text": "API Error: 529 Overloaded"}]},
+    }
+
+
+def test_sending_a_request_again_after_an_api_error_is_not_a_repeat_or_a_stop(tmp_path):
+    ask = "Refactor the payment retry logic in billing/retry.py to use exponential backoff"
+    records = [*_START, _said(ask, 600), _failed(598)]
+    assert _send(tmp_path, records, ask) == ""
+    # Three failures in a row aren't three stops either.
+    failures = [*_START, _said(ask, 600), _failed(598), _said(ask, 500), _failed(498), _said(ask, 400), _failed(398)]
+    assert _send(tmp_path, failures, ask, session="s2") == ""
+    # A reply that got through and was sent again still is a repeat.
+    answered = [*_START, _said(ask, 600), _failed(598), _said(ask, 500), _changed(480)]
+    assert _kind(_send(tmp_path, answered, ask, session="s3")) == "repeat_ask"
+
+
+@pytest.mark.parametrize("prompt", [
+    "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n<result>Done.\n"
+    + "".join(f"- mod{n}.py: added the docstrings\n" for n in range(12)) + "</result>\n</task-notification>",
+    "<task-notification>\n<result>" + "a long report " * 4_000 + "</result>\n</task-notification>",
+    "<scheduled-task>Check the build and fix whatever broke, then add tests, update docs and bump it</scheduled-task>",
+])
+def test_a_message_you_didnt_type_gets_no_prompting_or_context_hint(tmp_path, prompt):
+    # A background agent's report comes back as the next message: it isn't
+    # yours, however long or list-shaped it is, and even in a big context.
+    records = [*_START, _said("fix the header", 600), _changed(580, 150_000), _said("still wrong", 300),
+               _changed(280, 150_000)]
+    path = _transcript(tmp_path, records)
+    payload = {"hook_event_name": "UserPromptSubmit", "transcript_path": path, "prompt": prompt,
+               "permission_mode": "default"}
+    assert HOOK.coaching_for({"session_id": "s1", "cwd": "/w", **payload}, ON, CATALOGUE, _config_dir(tmp_path),
+                             now=NOW) == ("", "")
+    # The same list typed by you still gets its hint.
+    typed = "Add these: " + "".join(f"\n- add a check to mod{n}.py" for n in range(6))
+    note = _coach(tmp_path, {**payload, "prompt": typed, "session_id": "s2"})
+    assert note and _kind(note) != ""
+
+
+def test_the_status_line_and_the_parser_skip_a_failed_reply_too(tmp_path):
+    from claudeglass import statusline
+
+    ask = "Refactor the payment retry logic in billing/retry.py to use exponential backoff"
+    tail = [*_START, _said(ask, 600), _failed(598), _said(ask, 500), _failed(498), _said(ask, 400), _failed(398),
+            _said(ask, 5)]
+    assert not [k for *_, k in statusline._prompt_habits(tail, 30_000, NOW) if k in ("repeat_ask", "stop_loop")]
+    path = Path(_transcript(tmp_path, tail, "parsed.jsonl"))
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    assert not any(e.detail.get("repeat") for e in result.events if e.kind.name == "HUMAN_TEXT")
+
+
 def test_the_hook_counts_steps_and_likeness_as_the_package_does():
     from claudeglass import prompt_shape
 

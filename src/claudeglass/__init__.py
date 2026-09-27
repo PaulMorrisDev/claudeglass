@@ -200,7 +200,11 @@ __version__ = "0.11.0"
 #: ``human_ack``/``human_repeat``) and whether its reply ended on a
 #: question or showed a ClaudeGlass tip (``reply_asked``/``coach_tip``).
 #: A pre-28 digest has none of them.
-PARSER_VERSION = 28
+#:
+#: Bumped to 29: a message whose reply was an API error, an overload or a
+#: usage limit isn't an answered attempt, so sending it again isn't
+#: ``human_repeat``. A pre-29 digest counted those resends as repeats.
+PARSER_VERSION = 29
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

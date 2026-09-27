@@ -53,6 +53,11 @@ def _isolated_claude_config_dir(tmp_path_factory, monkeypatch):
     # short form keeps every other test's expected text the same here and
     # on CI. tests/test_invocation.py checks the detection itself.
     monkeypatch.setenv("CLAUDEGLASS_COMMAND", "claudeglass")
+    # The capture hook adds nothing to a ``claude -p`` run (its entrypoint
+    # starts with "sdk"), and a hook run as a subprocess inherits this
+    # process's environment: tests run from inside such a run would
+    # otherwise see no notes at all.
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
 
 
 @pytest.fixture(autouse=True)

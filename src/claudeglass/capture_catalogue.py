@@ -636,7 +636,8 @@ COACHING_NOTICE = {
 #: ``quiet_output``'s ``{how}``, by tool; ``""`` for any other tool.
 COACHING_QUIET_HOW = {
     "Read": "read only the lines you need, with an offset and a limit",
-    "Bash": "cut the command's output down first: a filter, head or tail, or a quieter flag",
+    # No bare head or tail: they can cut off the one error that matters.
+    "Bash": "cut the command's output down first: a quieter flag, or a filter that keeps every error and failure line",
     "Grep": "narrow the pattern or the path, or ask for file names or counts only",
     "Glob": "narrow the pattern",
     "": "ask for less: a narrower query or a smaller page",

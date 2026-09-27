@@ -75,7 +75,12 @@ Coaching notes aside, it adds nothing when capture is off, past its
 ``until`` time, outside the sampled share of sessions (a hash of the
 session id, so a session's subagents follow it), or in a project left
 out by ``[capture] projects`` or ``exclude_projects``, and logs nothing
-then either. It uses only the standard library, and always exits 0
+then either. A run with nobody at the screen (``claude -p`` or the Agent
+SDK: ``CLAUDE_CODE_ENTRYPOINT`` starts with ``sdk``) gets no note, no
+coaching and no Haiku call, since a script reads what it prints; its
+signal lines are still logged. A message you didn't type (a background
+agent's report, a scheduled task, a command's output) gets no prompting
+or context hint. It uses only the standard library, and always exits 0
 without printing anything on an error, so it can never block or break a
 session.
 """
@@ -594,6 +599,13 @@ def _blocks(record: dict) -> list:
     return content if isinstance(content, list) else []
 
 
+def _is_synthetic(record: dict) -> bool:
+    """A line Claude Code wrote in place of a reply: an API error, an
+    overload or a usage limit (``parse``'s ``is_synthetic``)."""
+    message = record.get("message")
+    return bool(record.get("isApiErrorMessage")) or (isinstance(message, dict) and message.get("model") == "<synthetic>")
+
+
 def _is_human_prompt(record: dict) -> bool:
     """A message you typed: a ``user`` line that isn't meta and carries no
     tool result (``statusline._is_human_prompt``)."""
@@ -718,15 +730,21 @@ def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict]
     (``answer``), whether Claude replied to it at all (``answered``: one
     it didn't reply to before another was sent was stopped before any
     reply, and Claude Code put it back to edit) and whether Claude changed
-    a file in reply to it (``edited``); and, as the second item,
-    ``replied_at`` and ``answer`` for a message sent now. A stopped reply's
-    marker, a slash command, a compaction summary or a subagent's line
-    isn't a message."""
+    a file in reply to it (``edited``), or whether its reply failed
+    (``failed``: an API error, an overload or a usage limit came back
+    instead, so it was neither answered nor stopped); and, as the second
+    item, ``replied_at`` and ``answer`` for a message sent now. A stopped
+    reply's marker, a slash command, a compaction summary or a subagent's
+    line isn't a message."""
     out: list[dict] = []
     replied_at = None
     said = ""
     for record in records:
         if record.get("isSidechain"):
+            continue
+        if record.get("type") == "assistant" and _is_synthetic(record):
+            if out:
+                out[-1]["failed"] = True
             continue
         if record.get("type") == "assistant":
             replied_at = _reply_time(record) or replied_at
@@ -751,7 +769,7 @@ def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict]
             continue
         at = _reply_time(record)
         out.append({
-            "text": text, "at": at, "edited": False, "answered": False, "stopped": False,
+            "text": text, "at": at, "edited": False, "answered": False, "stopped": False, "failed": False,
             "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
             "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
         })
@@ -845,12 +863,18 @@ def _practice_hints(
     # A stop mid-reply leaves a marker line; a stop before any reply only
     # leaves a message Claude never answered.
     stops = sum(1 for r in records if _is_interrupt(r, prefix) and recent(_reply_time(r)))
-    stops += sum(1 for ex in earlier if not ex["answered"] and not ex["stopped"] and recent(ex["at"]))
+    stops += sum(
+        1 for ex in earlier if not ex["answered"] and not ex["stopped"] and not ex["failed"] and recent(ex["at"])
+    )
     stop = None
     if stops >= th["stop_loop_count"]:
         stop = ("stop_loop", stops, {"count": stops, "minutes": round(th["stop_window_minutes"])})
     if not isinstance(prompt, str) or not prompt.strip():
         return [stop] if stop else []
+    if prompt.lstrip().startswith(_NOT_TYPED_PREFIXES):
+        # A background agent's report, a scheduled task or a command's
+        # output arriving as the next message: nothing you wrote.
+        return []
     count = _drip_count(
         earlier, prompt, gap, now_state["answer"], re.compile(coaching["ack_pattern"], re.IGNORECASE), th
     )
@@ -1069,7 +1093,9 @@ def coaching_for(
     tool = str(payload.get("tool_name") or "")
     if event == "UserPromptSubmit":
         path = payload.get("transcript_path")
-        if not in_agent and isinstance(path, str) and path:
+        prompt = payload.get("prompt")
+        typed = not (isinstance(prompt, str) and prompt.lstrip().startswith(_NOT_TYPED_PREFIXES))
+        if not in_agent and typed and isinstance(path, str) and path:
             records = _tail(path)
             candidates = [
                 *_practice_hints(payload.get("prompt"), records, coaching, th, now, payload.get("permission_mode")),
@@ -1650,6 +1676,20 @@ def write_signal(config_dir: Path, catalogue: dict, record: dict) -> None:
         handle.write(json.dumps(record, separators=(",", ":")) + "\n")
 
 
+#: Claude Code's ``CLAUDE_CODE_ENTRYPOINT`` starts with this for a run
+#: with nobody at the screen: ``claude -p`` (``sdk-cli``) and the Agent
+#: SDK (``sdk-ts``, ``sdk-py``). A script reads what such a run prints, so
+#: it gets no note, no coaching and no Haiku call: only the free signal
+#: lines. A ``claude -p`` that Claude starts inside a session inherits
+#: that session's entrypoint, so it isn't told apart.
+_HEADLESS_ENTRYPOINT = "sdk"
+
+
+def headless() -> bool:
+    """Whether this hook call comes from a run with nobody at the screen."""
+    return os.environ.get("CLAUDE_CODE_ENTRYPOINT", "").startswith(_HEADLESS_ENTRYPOINT)
+
+
 def _run(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="capture-hook.py")
     parser.add_argument("--config-dir", default=None)
@@ -1684,13 +1724,16 @@ def _run(argv: list[str]) -> None:
     if not isinstance(payload, dict):
         return
     catalogue = load_catalogue()
+    unattended = headless()
     if payload.get("hook_event_name") in catalogue["signal_events"]:
         record = signal_for(payload, config, catalogue, read_salt(config_dir))
         if record:
             write_signal(config_dir, catalogue, record)
-        job = judge_job(payload, config, catalogue)
+        job = None if unattended else judge_job(payload, config, catalogue)
         if job:
             spawn_judge(config_dir, job)
+        return
+    if unattended:
         return
     note = note_for(payload, config, catalogue, raw_len=len(raw))
     tip = notice = ""
