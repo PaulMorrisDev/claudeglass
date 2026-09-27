@@ -1523,6 +1523,15 @@ def test_hint_the_same_request_again():
     assert statusline.coaching_hint({}, [*tail[:2], _said("now add a cancel button next to it", 1)], NOW) is None
 
 
+def test_hint_a_resent_message_is_not_the_same_ask_again():
+    sqlite = "No, use SQLite instead of JSON for the store, with the same class and docstrings."
+    tail = [_said("Write a store module with JSON persistence", 12), _reply([_use("a", "Write")], ts=_at(11)),
+            _said("[Request interrupted by user]", 10), _said(sqlite, 9), _said(sqlite, 8), _said(sqlite, 1)]
+    hint = statusline.coaching_hint({"context_window": {"used_tokens": 40_000}}, tail, NOW)
+    # One marker and two messages stopped before any reply: three stops, no repeat.
+    assert hint is not None and hint[2] == "stop_loop" and hint[1].startswith("stopped 3x")
+
+
 def test_hint_stopping_claude_again_and_again():
     stop = "[Request interrupted by user]"
     tail = [_said("Refactor the store", 30), _said(stop, 18), _said("no, keep the API", 17),

@@ -393,6 +393,22 @@ def test_sending_the_same_request_again_gets_the_say_what_was_wrong_hint(tmp_pat
     assert "repeat_ask" not in _send(tmp_path, short, "do it", session="s4")
 
 
+def test_a_message_resent_after_esc_before_any_reply_is_not_a_repeat_but_a_stop(tmp_path):
+    # Esc before any reply leaves no stop marker: only the message Claude
+    # never answered, sent again.
+    sqlite = "Use SQLite instead of JSON for the store, with the same class and docstrings"
+    records = [*_START, _said(sqlite, 300), _said(sqlite, 200)]
+    assert "repeat_ask" not in _send(tmp_path, records, sqlite)
+    stops = [*_START, _said("refactor the store", 900), _changed(880), _stopped(870, blocks=True),
+             _said("keep the API", 600), _said("keep the API as it is", 500)]
+    note = _send(tmp_path, stops, "use the cache instead of the API", session="s2")
+    assert _kind(note) == "stop_loop" and "stopped you 3 times" in note
+    # A stop that left a marker isn't counted twice.
+    marked = [*_START, _said("refactor the store", 900), _changed(895), _stopped(890), _said("keep the API", 600),
+              _changed(595), _stopped(590), _said("use the cache", 400), _changed(380)]
+    assert "stop_loop" not in _send(tmp_path, marked, "just rename it", session="s3")
+
+
 def test_the_hook_counts_steps_and_likeness_as_the_package_does():
     from claudeglass import prompt_shape
 

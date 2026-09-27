@@ -105,6 +105,12 @@ def _words(value) -> str:
         return "not set"
     if isinstance(value, bool):
         return "on" if value else "off"
+    if isinstance(value, (list, tuple)):
+        # A capture list ([capture] coaching, feedback): its metrics' names.
+        names = [
+            capture_catalogue.METRICS_BY_ID[v].title if v in capture_catalogue.METRICS_BY_ID else str(v) for v in value
+        ]
+        return ", ".join(names) if names else "none"
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     if isinstance(value, int):

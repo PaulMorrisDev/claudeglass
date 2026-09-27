@@ -1504,6 +1504,9 @@ def _finalize_turn(
             continue
         if pending_event.kind != EventKind.HUMAN_TEXT:
             continue
+        if pending_event.detail.get("replaced"):
+            # Sent again before any reply: the copy that was answered counts.
+            continue
         chars = pending_event.size_chars or 0
         human_prompt_chars = chars if human_prompt_chars is None else human_prompt_chars + chars
         # A skill you ran with a slash is your message too (see events.py).
@@ -1639,21 +1642,25 @@ _QUESTION_TAIL_CHARS = 300
 _TIP_TEXT = "ClaudeGlass tip:"
 
 
-def _mark_repeat(event, texts: list[str], recent: list[tuple]) -> None:
-    """Sets ``event.detail["repeat"]`` when this message is much the same
-    as one read earlier within the window, then remembers it (``recent``
-    holds its time and words, in memory only)."""
-    mine = prompt_shape.words("\n".join(t for t in texts if t))
-    if len(mine) < _REPEAT_MIN_WORDS:
-        return
+def _note_message(event, texts: list[str], parent, recent: list[dict]) -> None:
+    """Marks a message you sent again before Claude answered the first
+    copy (you pressed Esc before any reply, so Claude Code put it back to
+    edit): the earlier copy's event gets ``detail["replaced"]``. Then sets
+    ``event.detail["repeat"]`` when this message is much the same as one
+    Claude answered within the window (a copy you resent isn't an
+    attempt), and remembers it. Words are kept in memory only."""
+    previous = recent[-1] if recent else None
+    if previous is not None and not previous["answered"] and parent is not None and previous["parent"] == parent:
+        previous["event"].detail["replaced"] = True
     at = _parse_ts(event.ts) if event.ts else None
-    if at is not None and any(
-        0 <= (at - then).total_seconds() <= _REPEAT_WINDOW_S and prompt_shape.similarity(mine, theirs) >= _REPEAT_SIMILARITY
-        for then, theirs in recent
+    mine = prompt_shape.words("\n".join(t for t in texts if t))
+    if at is not None and not event.detail.get("ack") and len(mine) >= _REPEAT_MIN_WORDS and any(
+        m["answered"] and m["at"] is not None and 0 <= (at - m["at"]).total_seconds() <= _REPEAT_WINDOW_S
+        and prompt_shape.similarity(mine, m["words"]) >= _REPEAT_SIMILARITY
+        for m in recent
     ):
         event.detail["repeat"] = True
-    if at is not None:
-        recent.append((at, mine))
+    recent.append({"at": at, "words": mine, "parent": parent, "answered": False, "event": event})
 
 
 #: A session id safe to use as a file name: Claude Code's are UUIDs. A
@@ -1832,9 +1839,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: and the human-prompt path (a HUMAN_TEXT event's own
     #: ``detail["unsized_blocks"]``, folded in once that event is built).
     unsized_blocks: dict[str, int] = {}
-    #: (time, words) of the messages read so far, for the same-request
-    #: check; dropped when this function returns.
-    recent_messages: list[tuple] = []
+    #: The messages read so far (time, words, parent, whether Claude
+    #: answered, the event), for the same-request and resent-message
+    #: checks; dropped when this function returns.
+    recent_messages: list[dict] = []
     unknown_line_types: dict[str, int] = {}
     #: Parser-signals addition (SURV-5): the last ``cost-state`` line's
     #: own ``totalCostUSD``/``hasUnknownModelCost`` (a running total, so
@@ -1945,6 +1953,8 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
 
         if line_type == "assistant":
             diagnostics.assistant_lines += 1
+            if recent_messages:
+                recent_messages[-1]["answered"] = True
             key = _turn_key(d)
             if current is not None and key == current_key:
                 _merge_into_pending(current, d, tool_use_names, blocked_calls)
@@ -2074,9 +2084,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             for block_type, count in (event.detail.get("unsized_blocks") or {}).items():
                 unsized_blocks[block_type] = unsized_blocks.get(block_type, 0) + count
             # Prompting-habits addition (see model.py's module docstring):
-            # the same request again, compared in memory only.
-            if not event.detail.get("command") and not event.detail.get("ack"):
-                _mark_repeat(event, events_mod.human_texts(d), recent_messages)
+            # a resent message, and the same request again, compared in
+            # memory only.
+            if not event.detail.get("command"):
+                _note_message(event, events_mod.human_texts(d), d.get("parentUuid"), recent_messages)
         if event.kind == EventKind.ATTACHMENT:
             subkind = event.subkind or ""
             diagnostics.attachment_catch_all[subkind] = (
@@ -2235,6 +2246,7 @@ READ_KEYS: dict[str, frozenset[str]] = {
             "isMeta",
             "promptSource",
             "permissionMode",
+            "parentUuid",
         }
     ),
     "system": _BASE_READ_KEYS

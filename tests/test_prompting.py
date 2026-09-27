@@ -78,6 +78,33 @@ def test_the_parser_keeps_counts_and_flags_about_each_message_and_reply(tmp_path
                for e in human)
 
 
+def test_a_message_resent_after_esc_before_any_reply_is_one_message_and_a_stop(tmp_path):
+    # As a real interactive session writes it: Esc before any reply puts the
+    # message back to edit; the resend has the same parent line.
+    first = _said("Use SQLite instead of JSON for the store, with the same class", 2, parentUuid="p1")
+    again = _said("Use SQLite instead of JSON for the store, with the same class", 3, parentUuid="p1")
+    result = _parse(tmp_path, [*_START, first, again, _reply(4, edit=True)])
+    humans = [e for e in result.events if e.kind.name == "HUMAN_TEXT"]
+    assert humans[1].detail.get("replaced") and not humans[2].detail.get("replaced")
+    # Not a repeat of itself, and its length counted once.
+    turn = result.turns[1]
+    assert not turn.human_repeat and turn.human_prompt_chars == len(first["message"]["content"])
+    session = prompting.session_prompting(NS(top=result, session_id="s"), prompting._Prices(PRICING))
+    assert "repeat_ask" not in session.counts()
+
+
+def test_stops_before_any_reply_count_towards_a_stop_loop(tmp_path):
+    session = _session(tmp_path, [
+        *_START,
+        _said("refactor the store", 2, parentUuid="a"), _said("refactor the store module", 3, parentUuid="a"),
+        _reply(4, edit=True), _stop(5),
+        _said("keep the API", 6, parentUuid="b"), _said("keep the API as it is", 7, parentUuid="b"),
+        _reply(8, edit=True),
+    ])
+    # One stop mid-reply, two before any reply: three in 20 minutes.
+    assert session.counts()["stop_loop"] == 1
+
+
 def test_a_message_about_a_plan_has_no_step_count(tmp_path):
     result = _parse(tmp_path, [_said("Carry out the plan: add login, settings, alerts and an admin screen.", 0),
                                _reply(1)])

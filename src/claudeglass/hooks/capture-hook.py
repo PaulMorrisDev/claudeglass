@@ -676,10 +676,13 @@ def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict]
     """The messages you typed, oldest first, each with its time
     (``at``), the seconds since Claude's reply before it (``gap``),
     whether that reply ended on a question, so the message answers it
-    (``answer``), and whether Claude changed a file in reply to it
-    (``edited``); and, as the second item, ``replied_at`` and
-    ``answer`` for a message sent now. A stopped reply's marker, a slash
-    command, a compaction summary or a subagent's line isn't a message."""
+    (``answer``), whether Claude replied to it at all (``answered``: one
+    it didn't reply to before another was sent was stopped before any
+    reply, and Claude Code put it back to edit) and whether Claude changed
+    a file in reply to it (``edited``); and, as the second item,
+    ``replied_at`` and ``answer`` for a message sent now. A stopped reply's
+    marker, a slash command, a compaction summary or a subagent's line
+    isn't a message."""
     out: list[dict] = []
     replied_at = None
     said = ""
@@ -688,6 +691,8 @@ def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict]
             continue
         if record.get("type") == "assistant":
             replied_at = _reply_time(record) or replied_at
+            if out:
+                out[-1]["answered"] = True
             for block in _blocks(record):
                 if not isinstance(block, dict):
                     continue
@@ -699,11 +704,15 @@ def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict]
         if record.get("isCompactSummary") or not _is_human_prompt(record):
             continue
         text = _text_of(record)
-        if text.lstrip().startswith((prefix, *_NOT_TYPED_PREFIXES)):
+        if text.lstrip().startswith(prefix):
+            if out:
+                out[-1]["stopped"] = True
+            continue
+        if text.lstrip().startswith(_NOT_TYPED_PREFIXES):
             continue
         at = _reply_time(record)
         out.append({
-            "text": text, "at": at, "edited": False,
+            "text": text, "at": at, "edited": False, "answered": False, "stopped": False,
             "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
             "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
         })
@@ -749,8 +758,9 @@ def _drip_count(earlier: list[dict], prompt: str, gap, answer: bool, ack_re, th:
     """How many small requests in a row ``prompt`` makes: it and the
     messages before it, each short and sent within ``drip_window_minutes``
     of Claude's reply, the earlier ones each answered with a file change.
-    Words don't matter. An answer to Claude's question is skipped, and a
-    bare "thanks" or "ok" sent now counts for nothing."""
+    Words don't matter. An answer to Claude's question, or a message
+    stopped before any reply and sent again, is skipped, and a bare
+    "thanks" or "ok" sent now counts for nothing."""
     window = th["drip_window_minutes"] * 60
 
     def small(text: str) -> bool:
@@ -760,7 +770,7 @@ def _drip_count(earlier: list[dict], prompt: str, gap, answer: bool, ack_re, th:
         return 0
     count = 1
     for ex in reversed(earlier):
-        if ex["answer"]:
+        if ex["answer"] or not ex["answered"]:
             continue
         if not (small(ex["text"]) and ex["edited"] and ex["gap"] is not None and ex["gap"] <= window):
             break
@@ -778,25 +788,30 @@ def _practice_hints(
     a pattern matched are used; your words never leave this function."""
     prefix = coaching["interrupt_prefix"]
     window_s = th["stop_window_minutes"] * 60
-    stops = sum(
-        1 for r in records if _is_interrupt(r, prefix)
-        and (at := _reply_time(r)) is not None and 0 <= (now - at).total_seconds() <= window_s
-    )
+    earlier, now_state = _exchanges(records, prefix, coaching["edit_tools"])
+    gap = None
+    if isinstance(prompt, str):
+        # Claude Code may already have written this message to the transcript.
+        last = earlier[-1] if earlier else None
+        if last and last["text"] == prompt and last["at"] is not None and (now - last["at"]).total_seconds() < 10:
+            earlier.pop()
+            now_state = {"replied_at": None, "answer": last["answer"]}
+            gap = last["gap"]
+        elif now_state["replied_at"] is not None:
+            gap = (now - now_state["replied_at"]).total_seconds()
+
+    def recent(at) -> bool:
+        return at is not None and 0 <= (now - at).total_seconds() <= window_s
+
+    # A stop mid-reply leaves a marker line; a stop before any reply only
+    # leaves a message Claude never answered.
+    stops = sum(1 for r in records if _is_interrupt(r, prefix) and recent(_reply_time(r)))
+    stops += sum(1 for ex in earlier if not ex["answered"] and not ex["stopped"] and recent(ex["at"]))
     stop = None
     if stops >= th["stop_loop_count"]:
         stop = ("stop_loop", stops, {"count": stops, "minutes": round(th["stop_window_minutes"])})
     if not isinstance(prompt, str) or not prompt.strip():
         return [stop] if stop else []
-    earlier, now_state = _exchanges(records, prefix, coaching["edit_tools"])
-    # Claude Code may already have written this message to the transcript.
-    last = earlier[-1] if earlier else None
-    if last and last["text"] == prompt and last["at"] is not None and (now - last["at"]).total_seconds() < 10:
-        earlier.pop()
-        now_state = {"replied_at": None, "answer": last["answer"]}
-        gap = last["gap"]
-    else:
-        replied_at = now_state["replied_at"]
-        gap = (now - replied_at).total_seconds() if replied_at is not None else None
     count = _drip_count(
         earlier, prompt, gap, now_state["answer"], re.compile(coaching["ack_pattern"], re.IGNORECASE), th
     )
@@ -804,8 +819,10 @@ def _practice_hints(
     mine = _words(prompt)
     if len(mine) >= th["repeat_min_words"] and not re.fullmatch(coaching["ack_pattern"], prompt.strip(), re.IGNORECASE):
         window = th["repeat_window_minutes"] * 60
+        # Only a message Claude answered was an attempt: one stopped
+        # before any reply and sent again is the same attempt.
         if any(
-            ex["at"] is not None and 0 <= (now - ex["at"]).total_seconds() <= window
+            ex["answered"] and ex["at"] is not None and 0 <= (now - ex["at"]).total_seconds() <= window
             and _similarity(mine, _words(ex["text"])) >= th["repeat_similarity"]
             for ex in earlier
         ):

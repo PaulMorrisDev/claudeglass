@@ -37,9 +37,9 @@ agent type's name.
 | `split_run` | A subagent run passes the number of replies your own history says its type's runs are best split at (see [below](#your-own-split-points)). | If more than a step or two is left, finish the current step and end the report with what's done, what's left and the files involved, so a fresh agent can carry on. |
 | `quiet_output` | A tool result is about 8,000 tokens or more. A read already given a line limit is left alone. | Next time, ask for less: read only the lines needed, filter a command's output, narrow a search. |
 | `explore_reads` | The main session has made 8 reads and searches for one message. | If more searching is needed, hand it to an Explore agent, which searches in its own context and sends back a summary. |
-| `repeat_ask` | You send much the same request as one you sent in the last hour (80% of its words in common, at least 4 different words). | Don't repeat the same approach: say in one line what probably went wrong and try differently, or ask one question. Then suggest in a tip that saying what was wrong gets a better next attempt than resending. |
+| `repeat_ask` | You send much the same request as one Claude answered in the last hour (80% of its words in common, at least 4 different words). A message you stopped before any reply and sent again isn't a repeat. | Don't repeat the same approach: say in one line what probably went wrong and try differently, or ask one question. Then suggest in a tip that saying what was wrong gets a better next attempt than resending. |
 | `drip_feed` | You send your third small request in a row: short messages, each sent within 20 minutes of Claude's reply, the earlier ones each answered with a file change ("make the button bigger", "now move the logo", "and the footer too"). The words don't matter. A detailed message, a reply that changed nothing, or a longer gap starts the count again. | Make the change, then suggest in a tip that working out everything the work still needs and sending it as one message gets it done in one pass. |
-| `stop_loop` | You've stopped Claude (Esc) three times in the last 20 minutes. | Before changing anything, say in two or three lines what it will do, and wait for a go-ahead on a large change. Then suggest plan mode (Shift+Tab), which agrees the approach before any work starts. |
+| `stop_loop` | You've stopped Claude (Esc) three times in the last 20 minutes, during a reply or before it started. | Before changing anything, say in two or three lines what it will do, and wait for a go-ahead on a large change. Then suggest plan mode (Shift+Tab), which agrees the approach before any work starts. |
 | `plan_first` | You send a request for 4 or more separate changes, 150 characters or longer, outside plan mode, before any plan was approved in the session. A message that mentions a plan is left alone. | Before changing anything, set out in a few lines how it will go about it and in what order, then carry on. Then suggest plan mode (Shift+Tab) for a job that size. |
 | `vague_fix` | A fix request of 80 characters or less that names nothing specific: no file, line, quote, error or image, and not what it should be instead ("it's broken", "doesn't work", but not "it should say Hi"). | If the problem isn't clear from the context, ask one short question before changing anything. If it is, fix it and suggest in a tip that saying what you saw and expected, or pasting the error, gets a fix first time. |
 | `big_paste` | You send a message of 10,000 tokens or more, such as a pasted log or file. | If most of it is a log, a file or output, suggest in a tip pasting only the part that matters, or saving it to a file and giving the path. |
@@ -93,7 +93,11 @@ you're sending and your earlier ones at the end of the transcript.
   words hold a "?") is skipped, and a bare "thanks" or "ok" isn't a
   request. A session's first message never counts: it starts the work.
 - `repeat_ask` compares the words of your message with those of your
-  earlier ones, in memory, as it runs; nothing about them is kept.
+  earlier ones Claude answered, in memory, as it runs; nothing about
+  them is kept.
+- `stop_loop` counts the line Claude Code writes when you stop a reply,
+  and a message Claude never answered before you sent the next: Esc
+  before any reply writes no line, it puts your message back to edit.
 - `plan_first` counts the separate changes a message asks for: its list
   lines, its change verbs ("add", "move", "rename" and the like) and the
   items of one sentence that starts with one ("Add login, a settings

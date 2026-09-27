@@ -11,7 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Warnings about how you prompt.** Coaching notes (`coaching_notes`)
   gain six hints for habits that cost replies:
-  - `repeat_ask`: much the same request sent again within the hour.
+  - `repeat_ask`: much the same request as one Claude answered, sent
+    again within the hour (not a message you stopped and resent).
     Claude tries a different way or asks what went wrong, and suggests
     saying what was wrong next time.
   - `plan_first`: a request for four or more separate changes sent
@@ -23,8 +24,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     soon after Claude's reply, each answered with a file change. Claude
     suggests working out everything the work needs and sending it as
     one message.
-  - `stop_loop`: stopping Claude three times in 20 minutes. Claude says
-    what it will do before changing anything, and suggests plan mode.
+  - `stop_loop`: stopping Claude three times in 20 minutes, during a
+    reply or before it started. Claude says what it will do before
+    changing anything, and suggests plan mode.
   - `vague_fix`: a short fix request that names nothing specific and
     doesn't say what it should be instead. Claude asks what you saw if
     it can't tell, or suggests saying what you saw and expected next
@@ -49,11 +51,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The parser now records, for each message, how many changes it asked
   for, whether it was sent in plan mode, and whether it was vague, a
   thank-you or a repeat; and for each reply, whether it asked you
-  something or showed a tip. Counts and flags only, never your words
+  something or showed a tip; a message you stopped before any reply and
+  sent again counts once. Counts and flags only, never your words
   (`PARSER_VERSION` 28, so every transcript is read again once).
 
 ### Changed
 
+- **Your changes names capture lists.** A change to `[capture]
+  coaching` or `feedback` reads "none → Coaching notes from Claude",
+  not the raw list, and a card waiting for more sessions says how many
+  only once.
 - **Tips stand out in the conversation.** When a coaching note asks
   Claude to tell you something, Claude now ends its reply with a quote
   block starting **⚠️ ClaudeGlass tip:**, after a blank line, instead of

@@ -14,7 +14,8 @@ fields; see ``model.py``) -- counts and flags, never your words:
   message, a reply that changed nothing or a longer wait ends the run.
 - ``repeat_ask``: much the same request as one sent earlier.
 - ``stop_loop``: ``stop_loop_count`` stopped replies within
-  ``stop_window_minutes``.
+  ``stop_window_minutes``, counting a message stopped before any reply
+  and sent again.
 - ``plan_first``: a request for ``plan_steps`` or more separate changes,
   ``plan_min_chars`` or longer, sent outside plan mode before any plan
   was approved in that session.
@@ -293,10 +294,17 @@ def occurrences(messages: list[Message], stops: list[tuple[datetime, float]]) ->
 
 def _stops(top, prices: _Prices) -> list[tuple[datetime, float]]:
     """Each stopped reply's time and the cost of the replies it cut short:
-    those since your message before it."""
+    those since your message before it. Stopping before any reply leaves
+    no interrupt line, only a message you sent again (``detail
+    ["replaced"]``): that counts as a stop that cost nothing."""
     turns = capture_mod._priced(top)
     out = []
     for event in top.events:
+        if event.kind == EventKind.HUMAN_TEXT and event.detail.get("replaced"):
+            at = _moment(event.ts)
+            if at is not None:
+                out.append((at, 0.0))
+            continue
         if event.kind != EventKind.INTERRUPT:
             continue
         at = _moment(event.ts)

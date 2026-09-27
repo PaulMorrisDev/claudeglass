@@ -445,8 +445,12 @@ the words:
   names nothing specific (``prompt_shape.is_vague_fix``).
 - ``Turn.human_ack: bool = False`` -- it only acknowledged ("thanks").
 - ``Turn.human_repeat: bool = False`` -- it was much the same request as
-  one you sent earlier in the same transcript, within the
+  one Claude answered earlier in the same transcript, within the
   ``repeat_window_minutes`` threshold (compared in memory while parsing).
+- ``Event.detail["replaced"]`` -- on a message you sent again before
+  Claude answered it (you pressed Esc before any reply, and Claude Code
+  put it back to edit; the new copy has the same parent line). Its turn
+  counts the copy that was answered, not both.
 - ``Turn.reply_asked: bool = False`` -- this reply's last words hold a
   question mark, so your next message answers it.
 - ``Turn.coach_tip: bool = False`` -- this reply showed a ClaudeGlass tip

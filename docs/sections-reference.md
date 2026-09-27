@@ -985,7 +985,9 @@ it counts whether or not coaching notes were on.
   worst week as 100, `-` for a week with fewer than three messages) and
   `try` (what to do instead). Costs: `drip_feed` is what each message after the first in a
   run paid to take in the context; `repeat_ask` the reply before the
-  repeat; `stop_loop` the replies you stopped; `vague_fix` the reply,
+  repeat; `stop_loop` the replies you stopped (a message stopped before
+  any reply and sent again counts as a stop that cost nothing);
+  `vague_fix` the reply,
   when it had to ask what was wrong; `big_paste` carrying the pasted text
   (a cache write, then a cache read by each later reply until a summary).
 - `prompting_tips` — only once there are coaching notes: one row per hint

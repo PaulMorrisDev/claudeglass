@@ -169,6 +169,7 @@ def test_turning_coaching_notes_on_and_off_is_named_as_such(tmp_path):
     points = change_points.change_points(tmp_path)
     assert [p.label for p in points] == ["Turned coaching notes on", "Changed live coaching", "Turned coaching notes off"]
     assert points[0].keys == ["capture.coaching"]
+    assert points[0].to_dict()["summary"] == "capture.coaching: none → Coaching notes from Claude"
 
 
 def test_a_broken_capture_log_line_is_skipped(tmp_path):

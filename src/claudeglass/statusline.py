@@ -1879,7 +1879,9 @@ def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict
     """Your typed messages, oldest first, as ``capture-hook.py``'s
     ``_exchanges`` reads them: ``text``, ``at``, ``gap`` (seconds since
     Claude's reply before it), ``answer`` (that reply ended on a
-    question) and ``edited`` (Claude changed a file in reply to it)."""
+    question), ``answered`` (Claude replied at all), ``stopped`` (a stop
+    marker followed it) and ``edited`` (Claude changed a file in reply
+    to it)."""
     out: list[dict] = []
     replied_at = None
     said = ""
@@ -1888,6 +1890,8 @@ def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict
             continue
         if d.get("type") == "assistant":
             replied_at = _line_time(d) or replied_at
+            if out:
+                out[-1]["answered"] = True
             for block in _content_blocks(d):
                 if not isinstance(block, dict):
                     continue
@@ -1899,11 +1903,15 @@ def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict
         if d.get("isCompactSummary") or not _is_human_prompt(d):
             continue
         text = _line_text(d)
-        if text.lstrip().startswith((interrupt_prefix, *_NOT_TYPED_PREFIXES)):
+        if text.lstrip().startswith(interrupt_prefix):
+            if out:
+                out[-1]["stopped"] = True
+            continue
+        if text.lstrip().startswith(_NOT_TYPED_PREFIXES):
             continue
         at = _line_time(d)
         out.append({
-            "text": text, "at": at, "edited": False,
+            "text": text, "at": at, "edited": False, "answered": False, "stopped": False,
             "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
             "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
         })
@@ -1929,14 +1937,20 @@ def _prompt_habits(tail: list[dict], ctx: int | None, now: datetime) -> list[tup
     now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
     hints: list[tuple[float, str, str]] = []
     stop_window_s = th["stop_window_minutes"] * 60
+    typed = _exchanges(tail, INTERRUPT_PREFIX, EDIT_TOOLS)
+
+    def recent(at) -> bool:
+        return at is not None and 0 <= (now - at).total_seconds() <= stop_window_s
+
+    # A stop mid-reply leaves a marker line; a stop before any reply only
+    # an earlier message Claude never answered (the last is still going).
     stops = sum(
         1 for d in tail if d.get("type") == "user" and not d.get("isSidechain")
-        and _line_text(d).lstrip().startswith(INTERRUPT_PREFIX)
-        and (at := _line_time(d)) is not None and 0 <= (now - at).total_seconds() <= stop_window_s
+        and _line_text(d).lstrip().startswith(INTERRUPT_PREFIX) and recent(_line_time(d))
     )
+    stops += sum(1 for ex in typed[:-1] if not ex["answered"] and not ex["stopped"] and recent(ex["at"]))
     if stops >= th["stop_loop_count"]:
         hints.append(((ctx or 0) / 2, f"stopped {stops}x in {th['stop_window_minutes']}m: agree a plan first (Shift+Tab)", "stop_loop"))
-    typed = _exchanges(tail, INTERRUPT_PREFIX, EDIT_TOOLS)
     if not typed:
         return hints
     # The last message is the one being worked on: it counts if it's
@@ -1956,7 +1970,7 @@ def _prompt_habits(tail: list[dict], ctx: int | None, now: datetime) -> list[tup
     ):
         count = 1
         for ex in reversed(typed[:-1]):
-            if ex["answer"]:
+            if ex["answer"] or not ex["answered"]:
                 continue
             if not (small(ex["text"]) and ex["edited"] and ex["gap"] is not None and ex["gap"] <= window):
                 break
@@ -1972,7 +1986,7 @@ def _prompt_habits(tail: list[dict], ctx: int | None, now: datetime) -> list[tup
         len(mine) >= th["repeat_min_words"] and not is_ack(current["text"]) and current["at"] is not None
         and (now - current["at"]).total_seconds() <= repeat_window
         and any(
-            ex["at"] is not None and 0 <= (current["at"] - ex["at"]).total_seconds() <= repeat_window
+            ex["answered"] and ex["at"] is not None and 0 <= (current["at"] - ex["at"]).total_seconds() <= repeat_window
             and similarity(mine, words(ex["text"])) >= th["repeat_similarity"]
             for ex in typed[:-1]
         )
