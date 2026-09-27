@@ -381,7 +381,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Coaching line (`coaching_line`)
 
 - **Level:** Live coaching, any level
-- **Captures:** A second status line with a live hint from your session. For example, a large context before a new task, a large last output, many reads so far, or a run of short fix requests.
+- **Captures:** A second status line with a live hint from your session. For example, a large context before a new task, a large last output, many reads so far, or small requests sent one at a time.
 - **Why:** Advice where you work, at the moment it applies. The status line is never sent to Claude.
 - **Tag:** No tag. Shown only in the status line; Claude is never asked, and it costs no tokens.
 - **Powers:** Clearing context, Tool output, Researching
@@ -389,7 +389,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Coaching notes from Claude (`coaching_notes`)
 
 - **Level:** Live coaching, any level
-- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or tells you in a highlighted tip: a large tool output, many reads for one message, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired cache when you send a message. It also flags how you prompt: short fix requests one after another, a vague correction, a huge paste, or stopping Claude again and again.
+- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or tells you in a highlighted tip: a large tool output, many reads for one message, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired cache when you send a message. It also flags how you prompt: the same request again, a big task without a plan, small requests sent one at a time, a vague correction, a huge paste, or stopping Claude again and again.
 - **Why:** Advice at the moment it applies, and Claude can often act on it itself. Each note costs a few dozen tokens for the rest of the session. Claude Code waits for the hook after each shell, read, search, web or MCP result and each message you send.
 - **Tag:** No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in a highlighted tip. Each hint and when it applies: [coaching.md](coaching.md).
 - **Hook:** UserPromptSubmit, PostToolUse
@@ -458,6 +458,18 @@ The `/tl-feedback` skill ends with its own line: `[tl-fb: outcome=met|partly|mis
 
 If Claude writes more than one tag, the last one wins, key by key.
 
+## Who writes the tags
+
+By default Claude writes the `[tl: ...]` tag itself, at the end of its final reply to each of your messages. `claudeglass capture tagger haiku` (or "Tags written by" on Setup › Capture) hands that to Claude Haiku instead, and `capture tagger claude` hands it back:
+
+- The session note no longer carries the tag list, and replies end as they would anyway. At Standard the note drops from ~336 to ~73 tokens.
+- When a turn of the main session ends, the hook's `Stop` entry reads the end of the transcript, hands a short excerpt to a worker process of its own, and returns at once. The excerpt holds your message (up to 2,000 characters), your message before it and the end of Claude's reply to that, how many you sent before, what Claude did (model calls, output tokens, tools used, the files it changed, the first line of up to 6 shell commands, whether they ran tests, skills, subagents, tool errors, any plan-mode plan) and the end of its final reply (up to 1,500 characters). Tool output is never in it.
+- The worker runs `claude -p --model haiku` with no tools, settings, MCP servers or saved session, through your own Claude Code login, with the excerpt on stdin, and no thinking. Haiku gets a line for each key Claude's note would have asked for, with each word spelled out, after "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words. In them, "you" means Claude:" and before "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (found outside research or a search; shift on a first message) or the excerpt can't tell at all." It loads no settings file, so your hooks don't run inside it; a login that needs an `apiKeyHelper` from settings.json fails there, and `capture status` says so.
+- Only the tag's words are kept, checked against the same vocabularies, in `<config-dir>/tags/YYYY-MM.jsonl`, with the reply's id and what the call cost. What the transcript settles overrides Haiku: a plan-mode plan written that turn is `plan=made`; no skill run is never `skill=helped`; no file changed is `check=none`, and a test run is `check=targeted` or `full` by whether it picked tests; only documentation changed is `task=docs`; and a first message has no `shift` but `new`. A turn that got no tag says why: `no_cli`, `timeout`, `failed`, `no_tag`. `capture status` counts both.
+- Each call costs about $0.0020 (about 1,700 tokens read, 35 written), counted as capture's cost. On a subscription it counts toward your usage like any other Haiku use.
+- How well it works is measured by `scripts/eval-tagger.py`: recorded sessions with known right answers, judged by Haiku with and without thinking and by Sonnet, against Claude's own tags. [tagger-eval.md](tagger-eval.md) has the results.
+- The `Stop` entry runs in the foreground, since `claude -p` exits without waiting for a background hook, but only for as long as it takes to read the transcript's end. Subagent reports and brief markers are still Claude's to write. Deep's note after a large result goes only to subagents, as the main session's replies carry no tag for its word.
+
 ## Privacy
 
 Claude writes closed vocabularies only. Every `[tl: ...]`, `[result: ...]`, `[retry: ...]`, `[spawn: ...]` and `[tl-fb: ...]` word is checked against the lists on this page; anything else — an unknown word, a key outside those lists, free text, a path — is dropped by the parser and never stored. The one exception that can carry a name is `skill=would-help:<name>`, and only when `<name>` matches a skill this transcript actually listed or invoked in the window; any other name is cut down to a bare `would-help`.
@@ -468,11 +480,12 @@ Free local signals never involve Claude at all: a hook logs the session id (hash
 
 ## Turning it on, off or removing it
 
-The hook script and its catalogue (`capture-hook.py`, `capture-catalogue.json`) live side by side under `<config-dir>/hooks/`. Only `capture on` and `capture connect` ever change `~/.claude/settings.json` — and only after showing the diff and asking first, unless you pass `--yes`. Every other change writes only this tool's own `config.toml`.
+The hook script and its catalogue (`capture-hook.py`, `capture-catalogue.json`) live side by side under `<config-dir>/hooks/`. Only `capture on`, `capture tagger` and `capture connect` ever change `~/.claude/settings.json` — and only after showing the diff and asking first, unless you pass `--yes`. Every other change writes only this tool's own `config.toml`.
 
 - `claudeglass capture status` — the level, what's on, since when, and the cost measured so far. While big_output or web is on, it also prints Deep's actual measured wait (median and p90, over the last 7 days). It also flags any hook — ClaudeGlass's own or one of yours — that failed on most of its calls over the last 14 days, naming it (event name only, never a matcher or tool name), where to find it in `settings.json`, the trade-off, and the undo; this is only ever a printed prompt, never an automatic change.
 - `claudeglass capture on [--level LEVEL] [--for DURATION | --until DATE | --no-limit] [--sample N] [--yes] [--dry-run]` — turn it on (default level: Essentials).
 - `claudeglass capture level LEVEL` — change the level.
+- `claudeglass capture tagger claude|haiku` — who writes the main session's tags (see [Who writes the tags](#who-writes-the-tags)).
 
 A fresh switch from off to on — at `init`, `capture on`/`level`, or the Capture page — gets a 14-day time-box by default, so turning it on doesn't mean it runs unattended forever: it switches itself back off on its own unless you say otherwise. `--for DURATION` (a number and `h`, `d` or `w`, e.g. `30d`) or `--until DATE` picks another length or end date; `--no-limit` turns the time-box off entirely, so capture runs until you switch it off yourself. `init` has the same three choices as `--capture-for DURATION`, `--capture-level LEVEL --capture-no-limit`, or (interactively, or under `--non-interactive` with neither given) the default. Changing the level of capture that's already on leaves an existing time-box (or the lack of one) exactly as it is — the default only ever applies to a fresh switch-on.
 - `claudeglass capture enable METRIC...` / `capture disable METRIC...` — turn individual metrics on or off; the level becomes Custom once the set no longer matches a preset.
@@ -481,5 +494,5 @@ A fresh switch from off to on — at `init`, `capture on`/`level`, or the Captur
 - `claudeglass capture remove` — switch off and take those hook entries back out.
 - `claudeglass capture feedback on|off` — the `/tl-feedback` skill and its status-line reminder.
 - `claudeglass capture brief on|off` — the `/tl-brief` skill.
-- `claudeglass capture prune [--dry-run]` — delete signal files and `capture-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's unset); `serve`'s watcher already runs this same cleanup on every tick, so this is for anyone not running it.
+- `claudeglass capture prune [--dry-run]` — delete signal files, Claude Haiku's tag files and `capture-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's unset); `serve`'s watcher already runs this same cleanup on every tick, so this is for anyone not running it.
 - `claudeglass changes` and `claudeglass uninstall` also cover metrics capture: they list everything it installed and can remove all of it — hooks, skills and signal files included.

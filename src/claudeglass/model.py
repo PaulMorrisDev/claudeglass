@@ -322,7 +322,10 @@ a flag, never text:
   ``brief``, ``missing``) ending this turn's last text block. Unknown keys
   and words are dropped; ``skill_name`` survives only when it names a
   skill the transcript listed or used. ``chars`` is the tag's own length,
-  for pricing the output it cost.
+  for pricing the output it cost. While Claude Haiku writes the tags
+  (``[capture] tagger = "haiku"``), the parser finds none; ``haiku_tags``
+  sets ``cap`` on the tagged reply's turn after the parse instead, with
+  ``judged`` set and ``judge_usd`` what the call cost.
 - ``Turn.cap_note_chars: int = 0`` -- characters of capture notes (a
   ``hook_additional_context`` attachment carrying ``tl-cap v``) put in
   front of the model just before this turn, measured from ``rendered``.
@@ -429,6 +432,32 @@ to stop where it stops (``reconcile.claude_code_reported_costs``):
 - ``TranscriptMeta.cc_cost_by_model: dict = {}`` -- model id -> that
   line's ``modelUsage[model].costUSD``. Model ids and numbers only; an id
   outside the model-id alphabet is dropped.
+
+Prompting-habits addition (``PARSER_VERSION`` 28). What the "How you
+prompt" section (``prompting.py``) and the coaching hints' after-the-fact
+counts need about each message you typed and each reply, worked out by
+``prompt_shape`` while the line is read. Counts and yes/no only; never
+the words:
+
+- ``Turn.prompt_steps: int = 0`` -- how many separate changes the
+  preceding message asked for (``prompt_shape.request_steps``), when two
+  or more; 0 when it mentions a plan, since it's following one.
+- ``Turn.prompt_plan_mode: bool = False`` -- it was sent in plan mode
+  (its line's ``permissionMode``).
+- ``Turn.human_vague: bool = False`` -- it was a short fix request that
+  names nothing specific (``prompt_shape.is_vague_fix``).
+- ``Turn.human_ack: bool = False`` -- it only acknowledged ("thanks").
+- ``Turn.human_repeat: bool = False`` -- it was much the same request as
+  one Claude answered earlier in the same transcript, within the
+  ``repeat_window_minutes`` threshold (compared in memory while parsing).
+- ``Event.detail["replaced"]`` -- on a message you sent again before
+  Claude answered it (you pressed Esc before any reply, and Claude Code
+  put it back to edit; the new copy has the same parent line). Its turn
+  counts the copy that was answered, not both.
+- ``Turn.reply_asked: bool = False`` -- this reply's last words hold a
+  question mark, so your next message answers it.
+- ``Turn.coach_tip: bool = False`` -- this reply showed a ClaudeGlass tip
+  (``capture_catalogue.TIP_LABEL``).
 
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
@@ -594,6 +623,11 @@ class CaptureTag:
     has_tl: bool = False
     #: Length of the tag text, for pricing the output it cost.
     chars: int = 0
+    #: Claude Haiku wrote it after the turn (``[capture] tagger =
+    #: "haiku"``, ``haiku_tags.py``), not Claude in its reply, and what
+    #: that call cost, in USD. Its ``chars`` are 0: no reply carried it.
+    judged: bool = False
+    judge_usd: float = 0.0
 
 
 @dataclass(slots=True)
@@ -803,6 +837,17 @@ class Turn:
     #: when this turn is the estimated request that wrote a compaction's
     #: summary, not a reply Claude Code logged.
     estimated: str | None = None
+    #: Prompting-habits addition (see module docstring): what the
+    #: preceding message asked for and how, as counts and flags.
+    prompt_steps: int = 0
+    prompt_plan_mode: bool = False
+    human_vague: bool = False
+    human_ack: bool = False
+    human_repeat: bool = False
+    #: Prompting-habits addition: this reply ended on a question, and
+    #: whether it showed a ClaudeGlass tip.
+    reply_asked: bool = False
+    coach_tip: bool = False
 
 
 @dataclass(slots=True)

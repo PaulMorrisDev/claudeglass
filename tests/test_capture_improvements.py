@@ -415,7 +415,8 @@ def test_human_text_event_size_chars_and_detail_populated():
     line = user_str_line("please fix the bug", origin={"kind": "human"})
     event = events.classify_line(line)
     assert event.size_chars == len("please fix the bug")
-    assert event.detail == {"has_paste": False, "correction": False}
+    # A short fix request naming nothing specific is a vague one.
+    assert event.detail == {"has_paste": False, "correction": False, "vague": True}
 
 
 def test_human_text_event_detects_paste_marker_without_origin():

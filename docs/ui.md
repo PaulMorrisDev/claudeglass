@@ -535,7 +535,9 @@ that?"
    (`before_value` and `after_value`), the change as a signed percent,
    and the ratio test's reading coloured by the measure's `better`
    (Lower is good news for a cost; the share of messages tagged has no
-   better side and reads neutral). Then **Saved so far** from
+   better side and reads neutral). Turning coaching notes on is measured
+   by the prompting habits it warns about, per 100 of your messages, and
+   the share of messages that were small requests sent one at a time. Then **Saved so far** from
    `without.saved_usd` ("Cost more so far" when it's negative) with how
    it was priced, a row per setting when several changed at once, the
    quality verdicts with every signal folded, and the command that
@@ -749,7 +751,13 @@ trying** as cards (saving a week, what your sessions show, an example to
 copy, how often it was seen, its source, confidence, a weekly pace line
 and how the saving is worked out); the brief templates with Copy
 buttons; **Kinds of task**; the other breakdowns under More tables; and
-the notes. Nothing here changes a setting.
+the notes. Then the `prompting` section, **How you prompt**
+(`renderPromptingSection`): a card per prompting habit seen (small
+requests sent one at a time, the same request again, stopping Claude
+again and again, big tasks without a plan, vague corrections, huge
+pastes) with what it cost, what to try instead, how often it happened
+per 100 messages and a by-week line; then, once there are coaching
+notes, **Tips Claude showed**. Nothing here changes a setting.
 
 ### Setup › Settings
 
@@ -789,8 +797,15 @@ cost?" The same for every window.
 far, how often Claude tagged); its weekly cost against what depends on
 it (`roi`); a warning with `capture connect` when a hook entry is
 missing; the level cards (Off, Free, Essentials, Standard, Deep, Custom)
-with weekly estimates; sampling and end time; and every metric grouped
-by where it is captured.
+with weekly estimates; sampling, who writes the tags, and end time; and
+every metric grouped by where it is captured.
+
+"Tags written by" picks Claude (at the end of its replies) or Claude
+Haiku (asked after each turn, `[capture] tagger`; see
+[capture.md](capture.md#who-writes-the-tags)). Picking Haiku asks first,
+saying what the hook sends and what it keeps. While Haiku writes them,
+the tag line says "Claude Haiku tagged" and "Claude Haiku's calls" is a
+row of its own in where the tokens went.
 
 The end-time menu's first entry is the end already set ("In 12 days:
 2026-10-07 09:00 UTC", or "Ended: ..."). A choice saves the moment it is

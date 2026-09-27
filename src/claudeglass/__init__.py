@@ -194,7 +194,13 @@ __version__ = "0.10.0"
 #: Bumped to 27: each compaction adds an estimated turn for the request
 #: that wrote its summary (``Turn.estimated == "compaction"``), which
 #: Claude Code bills but never logs. A pre-27 digest left it out of spend.
-PARSER_VERSION = 27
+#:
+#: Bumped to 28: each turn records what the message before it asked for
+#: (``Turn.prompt_steps``/``prompt_plan_mode``/``human_vague``/
+#: ``human_ack``/``human_repeat``) and whether its reply ended on a
+#: question or showed a ClaudeGlass tip (``reply_asked``/``coach_tip``).
+#: A pre-28 digest has none of them.
+PARSER_VERSION = 28
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

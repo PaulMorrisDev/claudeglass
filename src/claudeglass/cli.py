@@ -36,7 +36,7 @@ from zoneinfo import available_timezones
 from . import __version__, baseline as baseline_mod, capture_catalogue, capture_view, classify, discovery, installer as installer_mod
 from . import invocation, onboarding, setup_flow
 from . import pages
-from . import helptext, hook_health, probe as probe_mod, recache, signals as signals_mod, snapshots
+from . import haiku_tags, helptext, hook_health, probe as probe_mod, recache, signals as signals_mod, snapshots
 from . import statusline as statusline_mod
 from .fixes import RESTART_NOTE
 from .cache import DigestCache
@@ -665,7 +665,8 @@ def _add_uninstall_args(sub: argparse.ArgumentParser) -> None:
 
 #: ``capture``'s actions; "status" is the default.
 CAPTURE_ACTIONS = (
-    "status", "on", "off", "level", "enable", "disable", "connect", "remove", "feedback", "brief", "prune", "refresh"
+    "status", "on", "off", "level", "enable", "disable", "connect", "remove", "feedback", "brief", "tagger", "prune",
+    "refresh",
 )
 
 #: ``capture <action> on|off`` -> the skill it adds or removes, what the
@@ -690,6 +691,8 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         "the chosen metrics need to settings.json); remove (switch off and take the entries out); "
         "feedback on|off (the /tl-feedback skill and its status-line reminder); "
         "brief on|off (the /tl-brief skill, which checks a request against its checklist); "
+        "tagger claude|haiku (who writes the tags: Claude, at the end of its replies, or Claude Haiku, asked "
+        "after each turn); "
         "prune (delete signal files, capture-log.jsonl records and usage-log.csv rows older than "
         f"retention_days, or {SIGNAL_RETENTION_DEFAULT_DAYS} days by default); "
         "refresh (work out the coaching notes' split points from your last 30 days now; the dashboard's "
@@ -700,7 +703,7 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         nargs="*",
         metavar="VALUE",
         help="the level for 'level'; metric ids for 'enable' and 'disable' (see 'claudeglass capture status'); "
-        "on or off for 'feedback' and 'brief'",
+        "on or off for 'feedback' and 'brief'; claude or haiku for 'tagger'",
     )
     sub.add_argument(
         "--level",
@@ -1413,6 +1416,8 @@ def _load_corpus_for_args(
         exclude_projects=config.exclude_projects,
         salt=salt,
     )
+    # The tags Claude Haiku wrote, while it writes them ([capture] tagger).
+    haiku_tags.apply(corpus, config_dir)
     # Fix R21: --quiet was accepted by argparse (mutually exclusive with
     # --verbose) but never actually consulted anywhere -- a silent no-op
     # flag. The CLI's argparse wiring already keeps a human from passing
@@ -3142,9 +3147,10 @@ def _capture_until(args: argparse.Namespace, now: datetime) -> str | None:
     return (now + timedelta(hours=hours)).isoformat(timespec="seconds")
 
 
-def _capture_cost_lines(ids) -> list[str]:
-    """Plain lines on what ``ids`` add to Claude's context and replies."""
-    rough = capture_catalogue.rough_tokens(ids)
+def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> list[str]:
+    """Plain lines on what ``ids`` add to Claude's context and replies,
+    and the Haiku call per message while Haiku writes the tags."""
+    rough = capture_catalogue.rough_tokens(ids, tagger)
     lines = []
     if rough["session_note"]:
         lines.append(f"about {rough['session_note']} tokens of note when a session starts, is cleared or compacts")
@@ -3156,6 +3162,11 @@ def _capture_cost_lines(ids) -> list[str]:
         lines.append(f"about {rough['report_tag']} tokens of tag at the end of each subagent report")
     if rough["tool_note"]:
         lines.append(f"about {rough['tool_note']} tokens of note after each large or web tool result")
+    if tagger == "haiku" and capture_catalogue.tagged_keys(ids):
+        lines.append(
+            f"a Claude Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.4f} after each of your messages, "
+            "in the background"
+        )
     return lines
 
 
@@ -3272,11 +3283,12 @@ def _capture_usage_lines(use, units) -> list[str]:
     ]
     if use.coverage is not None:
         reports = (
-            f" and {format_cell(use.report_coverage, 'pct')} of agent reports"
+            f" and Claude {format_cell(use.report_coverage, 'pct')} of agent reports"
             if use.report_coverage is not None
             else ""
         )
-        lines.append(f"  Claude tagged {format_cell(use.coverage, 'pct')} of your messages{reports}")
+        who = "Claude Haiku" if use.judged else "Claude"
+        lines.append(f"  {who} tagged {format_cell(use.coverage, 'pct')} of your messages{reports}")
     return lines
 
 
@@ -3548,14 +3560,49 @@ def _capture_prune(
         )
         return 0
     signals_removed = signals_mod.prune(config_dir, days, now=now)
+    tags_removed = haiku_tags.prune(config_dir, days, now=now)
     log_removed = prune_capture_log(config_dir, days, now=now)
     usage_log_path = log_usage_mod.default_usage_log_path(config_dir)
     usage_rows_removed = log_usage_mod.prune_usage_log(usage_log_path, days, now=now)
+    tags = f", {tags_removed} Claude Haiku tag file(s)" if tags_removed else ""
     stdout.write(
-        f"Pruned {signals_removed} signal file(s), {log_removed} capture-log record(s) and "
+        f"Pruned {signals_removed} signal file(s){tags}, {log_removed} capture-log record(s) and "
         f"{usage_rows_removed} usage-log row(s) older than {days} days.\n"
     )
     return 0
+
+
+#: Why a turn got no tag from Claude Haiku, in words.
+_HAIKU_ERRORS = {
+    "no_cli": "no claude command on the hook's path",
+    "timeout": "Haiku took too long",
+    "failed": "the call failed",
+    "no_tag": "its answer had no tag",
+}
+
+
+def _haiku_lines(capture: CaptureConfig, config_dir: Path) -> list[str]:
+    """What Claude Haiku has done since capture was turned on, while it
+    writes the tags: turns asked about, tags written, why any got none,
+    and what the calls cost."""
+    since = datetime.fromisoformat(capture.enabled_at) if capture.enabled_at else None
+    done = haiku_tags.summary(config_dir, since=since)
+    if not done.calls:
+        return [
+            "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
+            "change, once the hook's Stop entry is in settings.json."
+        ]
+    per_call = f" (${done.usd_per_call:.4f} a call)" if done.usd_per_call is not None else ""
+    lines = [
+        f"Claude Haiku tagged {done.tagged} of the {_plural(done.calls, 'turn')} it was asked about: "
+        f"${done.usd:.4f}{per_call}, {format_cell(done.tokens_in, 'tokens')} tokens read"
+    ]
+    if done.errors:
+        lines.append(
+            "  No tag for "
+            + ", ".join(f"{count} ({_HAIKU_ERRORS.get(kind, kind)})" for kind, count in sorted(done.errors.items()))
+        )
+    return lines
 
 
 def _capture_status(
@@ -3584,13 +3631,16 @@ def _capture_status(
         stdout.write(f"  {group}: {', '.join(members)}\n")
     if capture.coaching:
         stdout.write(f"  coaching: {', '.join(capture.coaching)}\n")
-    cost = _capture_cost_lines(ids)
+    cost = _capture_cost_lines(ids, capture.tagger)
     if cost:
         stdout.write("Rough size:\n")
         for line in cost:
             stdout.write(f"  - {line}\n")
     elif capture.is_on:
         stdout.write("It adds nothing to Claude's context at this level.\n")
+    if capture.haiku_tags:
+        for line in _haiku_lines(capture, config_dir):
+            stdout.write(f"{line}\n")
     if args is not None and config is not None:
         for line in _capture_measured(capture, args=args, config=config, config_dir=config_dir):
             stdout.write(f"{line}\n")
@@ -3743,10 +3793,14 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 ]
             else:
                 changes["coaching"] = [i for i in current.coaching if i != "brief_templates"]
+        elif action == "tagger":
+            if len(args.values) != 1 or args.values[0] not in capture_catalogue.TAGGERS:
+                raise ValueError(f"'capture tagger' needs one of: {', '.join(capture_catalogue.TAGGERS)}")
+            changes["tagger"] = args.values[0]
         until = _capture_until(args, now)
-        if until is not None and action not in ("off", "remove", *_SKILL_SWITCHES):
+        if until is not None and action not in ("off", "remove", "tagger", *_SKILL_SWITCHES):
             changes["until"] = until
-        if args.sample is not None and action not in ("off", "remove", *_SKILL_SWITCHES):
+        if args.sample is not None and action not in ("off", "remove", "tagger", *_SKILL_SWITCHES):
             changes["sample"] = args.sample
     except ValueError as exc:
         stdout.write(f"{exc}\n")
@@ -3804,13 +3858,16 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         coaching_added = preview.coaching_notes_on and not current.coaching_notes_on
         if coaching_added:
             stdout.write(f"\n{capture_view.COACHING_NOTES_ON}\n")
+        haiku_added = preview.haiku_tags and not current.haiku_tags
+        if preview.tagger != current.tagger:
+            stdout.write(f"\n{capture_view.TAGGER_TEXT[preview.tagger]}\n")
         if costly:
             stdout.write(
                 "\nThis makes Claude use more of your tokens. It adds " + ", ".join(costly) + ", and Claude then "
                 "reads a short note and ends its replies with a one-line tag such as [tl: task=bugfix brief=clear].\n"
                 "At this setting, roughly:\n"
             )
-            for line in _capture_cost_lines(preview.active_metrics()):
+            for line in _capture_cost_lines(preview.active_metrics(), preview.tagger):
                 stdout.write(f"  - {line}\n")
             if preview.sample < 100:
                 stdout.write(f"  (in {preview.sample}% of sessions)\n")
@@ -3818,7 +3875,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         if args.dry_run:
             stdout.write("Dry run: config.toml left unchanged.\n")
         else:
-            if (costly or coaching_added) and not args.yes:
+            if (costly or coaching_added or haiku_added) and not args.yes:
                 stdout.write("Go ahead? (y/n) [n]: ")
                 stdout.flush()
                 if (stdin.readline() or "").strip().lower() not in ("y", "yes"):

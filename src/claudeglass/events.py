@@ -60,9 +60,11 @@ import json
 import re
 from typing import Iterable, Sequence
 
+from . import prompt_shape
 from .capture_catalogue import (
     COACH_MARKER,
     COACHING_HINTS,
+    COACHING_THRESHOLDS,
     CORRECTION_PATTERN,
     CORRECTION_SCAN_CHARS,
     HOOK_SCRIPT,
@@ -967,16 +969,7 @@ def _human_text_detail(d: dict, str_content: str | None) -> tuple[int, dict]:
     signals) ``correction``, whether the message looks like it corrects
     Claude. Flags only -- never the text."""
     human_chars, has_paste, unsized_counts = _human_text_metrics(d, str_content)
-    if str_content is not None:
-        texts = [str_content]
-    else:
-        message = d.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        texts = [
-            block.get("text")
-            for block in (content if isinstance(content, list) else ())
-            if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
-        ]
+    texts = human_texts(d)
     detail: dict = {"has_paste": has_paste, "correction": _looks_like_correction(texts)}
     if unsized_counts:
         detail["unsized_blocks"] = unsized_counts
@@ -996,7 +989,35 @@ def _human_text_detail(d: dict, str_content: str | None) -> tuple[int, dict]:
         command = _COMMAND_NAME_RE.search(str_content)
         if command:
             detail["command"] = command.group(1)
+    else:
+        # Prompting-habits addition (see model.py's module docstring):
+        # counts and flags only.
+        text = "\n".join(t for t in texts if t)
+        steps = prompt_shape.request_steps(text)
+        if steps >= 2 and not prompt_shape.mentions_plan(text):
+            detail["steps"] = steps
+        if prompt_shape.is_vague_fix(text, int(COACHING_THRESHOLDS["vague_fix_chars"])):
+            detail["vague"] = True
+        if text.strip() and prompt_shape.is_ack(text):
+            detail["ack"] = True
+    if d.get("permissionMode") == "plan":
+        detail["plan_mode"] = True
     return human_chars, detail
+
+
+def human_texts(d: dict) -> list[str]:
+    """The text blocks of a ``user`` line you typed, for reading its shape
+    while the line is parsed. Never stored."""
+    str_content = _user_str_content(d)
+    if str_content is not None:
+        return [str_content]
+    message = d.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return [
+        block.get("text")
+        for block in (content if isinstance(content, list) else ())
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+    ]
 
 
 #: Usage-limits addition (see module docstring): the six known synthetic

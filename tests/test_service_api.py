@@ -2777,6 +2777,18 @@ def test_post_capture_saves_the_level_and_names_the_hooks_it_needs(server):
     assert payload["data"]["changed"] is False
 
 
+def test_post_capture_can_hand_the_tags_to_haiku(server):
+    resp, payload = server.post_json("/api/capture", {"level": "essentials", "tagger": "haiku"})
+    assert resp.status == 200
+    data = payload["data"]
+    assert data["config"]["tagger"] == "haiku" and "tags by Haiku" in data["config"]["describe"]
+    assert 'tagger = "haiku"' in _config_text(server)
+    # The page's yes/no says what goes where.
+    assert "your own Claude Code login" in data["tagger_text"]["haiku"]
+    # The Stop entry that asks Haiku is among the hooks it needs.
+    assert "Stop" in data["hooks"]["missing_events"]
+
+
 def test_post_capture_turning_on_with_no_until_gets_the_default_time_box(server):
     # CAP-8: the dashboard's level picker posts only {"level": ...} when
     # turning capture on (its own "until" control only renders once
@@ -2837,6 +2849,7 @@ def test_post_capture_picks_metrics_sampling_end_and_feedback(server):
         {"until": "2001-01-01"},
         {"until": "next week"},
         {"feedback": ["task"]},
+        {"tagger": "gpt"},
     ],
 )
 def test_post_capture_refuses_bad_bodies(server, body):

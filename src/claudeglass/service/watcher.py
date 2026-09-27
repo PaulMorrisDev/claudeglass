@@ -25,7 +25,8 @@ Each :meth:`FileWatcher.run_once` tick:
    skipped (see ``FileWatcher._session_fingerprint``).
 4. Removes rows for files no longer on disk (``Store.remove_missing``),
    prunes old sessions when ``options.retention_days`` is set, and always
-   prunes old capture signal files (``signals.prune``), old
+   prunes old capture signal files (``signals.prune``) and Claude Haiku's
+   tag files (``haiku_tags.prune``), old
    ``capture-log.jsonl`` records (``config.prune_capture_log``) and old
    ``usage-log.csv`` rows (SIG-5: ``log_usage.prune_usage_log``) -- at
    ``options.retention_days`` when set, else
@@ -85,6 +86,7 @@ from ..parse import parse_transcript
 from ..pricing import Pricing, PricingError, load_pricing, price_turn
 from ..profiles import catalogue as profile_catalogue, schema as profile_schema
 from ..report import _dominant_transcript_model, _extract_workstyle_features
+from .. import haiku_tags
 from .. import signals as signals_mod
 from .. import snapshots as snapshots_mod
 from ..tools import log_usage as log_usage_mod
@@ -621,6 +623,7 @@ class FileWatcher:
         # back to the safe default rather than pruning everything.
         signal_retention = self.options.retention_days or config_mod.SIGNAL_RETENTION_DEFAULT_DAYS
         signals_mod.prune(self.options.config_dir, signal_retention)
+        haiku_tags.prune(self.options.config_dir, signal_retention)
         config_mod.prune_capture_log(self.options.config_dir, signal_retention)
 
         # SIG-5: usage-log.csv is written unconditionally on every

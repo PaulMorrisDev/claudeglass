@@ -221,40 +221,81 @@ def _send(tmp_path, records, prompt: str, *, session: str = "s1", config=ON, now
     return _coach(tmp_path, payload, config, now=now)
 
 
-def test_short_fix_requests_in_a_row_get_the_batch_them_hint(tmp_path):
+def _changed(ago_s: float, ctx: int = 30_000, *, say: str = "Done.", tool: str = "Edit", **kw) -> dict:
+    """Claude's reply to a message: it changed a file, then said ``say``.
+    On the 1-hour cache, so a reply minutes old isn't cold."""
+    content = [{"type": "tool_use", "id": f"toolu_e{ago_s}", "name": tool, "input": {}}, {"type": "text", "text": say}]
+    return _reply(ctx, ago_s=ago_s, content=content, message_id=f"msg_e{ago_s}", **{"one_hour": True, **kw})
+
+
+#: A session's first message and Claude's work on it: the start of the
+#: work, before any follow-up (the first message never counts as one).
+_START = [_said("Build the settings page: " + "a form, a save button, a header, a footer. " * 8, 1_150),
+          _changed(1_100)]
+
+
+def test_small_requests_one_at_a_time_get_the_plan_it_as_one_prompt_hint(tmp_path):
+    # No "fix" anywhere: what counts is that each short message got a file change.
     records = [
-        _said("Build the settings page from the plan we agreed", 3_600), _reply(40_000, ago_s=3_000),
-        _said("fix the header, it overlaps", 900), _reply(41_000, ago_s=880),
+        _said("Build the settings page from the plan we agreed: " + "a form, a save button, a header. " * 10, 1_500),
+        _changed(1_000),
+        _said("make the save button bigger", 900), _changed(880, tool="Write"),
         _said("<command-name>/cost</command-name>", 700),
         _stopped(650, blocks=True),
-        _said("that's still wrong", 600), _reply(42_000, ago_s=580),
+        _said("now move the logo to the left", 600), _changed(580, tool="MultiEdit"),
     ]
-    note = _send(tmp_path, records, "the save button doesn't work either")
-    assert _kind(note) == "fix_drip" and "sent 3 short fix requests in a row" in note
+    note = _send(tmp_path, records, "and the footer text should be grey")
+    assert _kind(note) == "drip_feed" and "sent 3 small change requests in a row" in note
     # The note carries counts, never your words.
-    assert "header" not in note and "save button" not in note
+    assert "footer" not in note and "logo" not in note
     # A message Claude Code has already written to the transcript isn't counted twice.
-    written = [*records, _said("the save button doesn't work either", 2)]
-    assert "sent 3 short" in _send(tmp_path, written, "the save button doesn't work either", session="s2")
+    written = [*records, _said("and the footer text should be grey", 2)]
+    assert "sent 3 small" in _send(tmp_path, written, "and the footer text should be grey", session="s2")
 
 
-def test_a_fix_request_after_a_detailed_message_or_a_long_gap_starts_a_new_run(tmp_path):
-    detailed = [
-        _said("fix the header", 900), _reply(40_000, ago_s=880),
-        _said("Here is everything still wrong: " + "the header overlaps the menu; " * 12, 600),
-        _reply(41_000, ago_s=580), _said("still broken", 300), _reply(42_000, ago_s=280),
-    ]
-    assert _kind(_send(tmp_path, detailed, "fix it")) != "fix_drip"
-    spaced = [_said("fix the header", 7_200), _reply(40_000, ago_s=7_000), _said("still broken", 300)]
-    assert _kind(_send(tmp_path, spaced, "fix it", session="s2")) != "fix_drip"
+def test_a_run_needs_file_changes_short_messages_and_quick_follow_ups(tmp_path):
+    def run(first_reply, middle="now move the logo to the left", gap_s=20):
+        return [*_START, _said("make the save button bigger", 900), first_reply,
+                _said(middle, 600), _changed(600 - gap_s)]
+
+    assert _kind(_send(tmp_path, run(_changed(880)), "and the footer too")) == "drip_feed"
+    # A reply that changed nothing (Claude only answered) breaks the run.
+    assert _send(tmp_path, run(_reply(30_000, ago_s=880, one_hour=True)), "and the footer too", session="s2") == ""
+    # So does a detailed message that plans several changes at once.
+    detailed = run(_changed(880), middle="Now: " + "move the logo left, grey footer, wider form; " * 8)
+    assert _send(tmp_path, detailed, "and the footer too", session="s3") == ""
+    # And a message sent long after Claude's last reply.
+    spaced = [_said("Build the settings page: " + "a form and a header. " * 20, 9_000), _changed(8_900),
+              _said("make the save button bigger", 8_800), _changed(8_700), _said("now the logo", 8_600),
+              _changed(8_500)]
+    # (Two hours on, the cache has gone cold, which is its own hint.)
+    assert _kind(_send(tmp_path, spaced, "and the footer too", session="s4")) == "cache_cold"
     # Your own count wins.
-    fewer = {**ON, "thresholds": {"coaching_fix_drip_count": 2}}
-    assert _kind(_send(tmp_path, spaced, "fix it", session="s3", config=fewer)) == "fix_drip"
+    two = [*_START, _said("make the save button bigger", 900), _changed(880)]
+    assert _send(tmp_path, two, "and the footer too", session="s5") == ""
+    fewer = {**ON, "thresholds": {"coaching_drip_count": 2}}
+    assert _kind(_send(tmp_path, two, "and the footer too", session="s6", config=fewer)) == "drip_feed"
+
+
+def test_answers_to_claudes_questions_and_thanks_are_not_requests(tmp_path):
+    asked = [
+        *_START, _said("make the save button bigger", 900), _changed(880),
+        _said("now move the logo", 600), _changed(580, say="Moved it. Left or right of the title?"),
+    ]
+    # Answering Claude's question isn't another request...
+    assert _send(tmp_path, asked, "left of the title") == ""
+    # ...and doesn't break a run either.
+    answered = [*asked, _said("left of the title", 400), _changed(380)]
+    assert _kind(_send(tmp_path, answered, "and the footer too", session="s2")) == "drip_feed"
+    done = [*_START, _said("make the save button bigger", 900), _changed(880), _said("now move the logo", 600),
+            _changed(580)]
+    for n, thanks in enumerate(("thanks", "ok, looks good!", "perfect, thank you")):
+        assert _send(tmp_path, done, thanks, session=f"t{n}") == "", thanks
 
 
 def test_a_vague_correction_gets_the_say_what_you_saw_hint(tmp_path):
     records = [_said("Add a dark mode toggle", 200), _reply(30_000, ago_s=100)]
-    for n, vague in enumerate(("it's still broken", "doesn't work", "fix it", "wrong")):
+    for n, vague in enumerate(("it's still broken", "doesn't work", "fix it", "wrong", "still broken, it should work", "wrong, make it right")):
         assert _kind(_send(tmp_path, records, vague, session=f"v{n}")) == "vague_fix", vague
     for n, fine in enumerate((
         "the toggle in settings.py still fails with KeyError",
@@ -262,16 +303,19 @@ def test_a_vague_correction_gets_the_say_what_you_saw_hint(tmp_path):
         "it's wrong: the toggle should say `Dark`",
         "looks good, thanks",
         "Now add a light mode toggle as well",
+        # Saying what it should be instead is specific enough.
+        "fix the greeting, it should say Hi",
+        "wrong colour, make it red",
+        "change the toggle to blue",
     )):
         assert _send(tmp_path, records, fine, session=f"f{n}") == "", fine
 
 
-def test_one_note_at_a_time_while_the_fixes_keep_coming(tmp_path):
-    records = [_said("fix the header", 600), _reply(30_000, ago_s=580), _said("still wrong", 300),
-               _reply(30_000, ago_s=280)]
-    assert _kind(_send(tmp_path, records, "fix it")) == "fix_drip"
+def test_one_note_at_a_time_while_the_small_requests_keep_coming(tmp_path):
+    records = [*_START, _said("fix the header", 600), _changed(580), _said("still wrong", 300), _changed(280)]
+    assert _kind(_send(tmp_path, records, "fix it")) == "drip_feed"
     # The run hint is resting; the next vague fix in the same run adds nothing.
-    more = [*records, _said("fix it", 200), _reply(30_000, ago_s=180)]
+    more = [*records, _said("fix it", 200), _changed(180)]
     assert _send(tmp_path, more, "broken again", now=NOW + timedelta(seconds=30)) == ""
 
 
@@ -294,10 +338,95 @@ def test_stopping_claude_again_and_again_gets_the_agree_the_approach_hint(tmp_pa
     assert _send(tmp_path, older, "just rename it for now", session="s2") == ""
 
 
+_BIG_TASK = (
+    "Add a login page with email and password, a settings page where people change their name, email alerts "
+    "when a report is ready, and an admin screen that lists every account."
+)
+
+
+def test_a_big_task_outside_plan_mode_gets_the_plan_first_hint(tmp_path):
+    records = [*_START]
+    note = _coach(tmp_path, {**_prompt_payload(_transcript(tmp_path, records)), "prompt": _BIG_TASK,
+                             "permission_mode": "default"})
+    assert _kind(note) == "plan_first" and "separate changes, outside plan mode" in note and "login" not in note
+    listed = "Please do these:\n1. add a login page\n2. add a settings page\n3. email alerts\n4. an admin screen\n" + (
+        "Keep the existing styles and tests passing throughout, and don't touch the database schema."
+    )
+    note = _coach(tmp_path, {**_prompt_payload(_transcript(tmp_path, records, "l.jsonl")), "prompt": listed,
+                             "permission_mode": "acceptEdits", "session_id": "s2"})
+    assert _kind(note) == "plan_first"
+
+
+def test_the_plan_first_hint_stays_out_of_the_way(tmp_path):
+    path = _transcript(tmp_path, [*_START])
+
+    def send(prompt, mode, session, records_path=path):
+        payload = {**_prompt_payload(records_path), "prompt": prompt, "session_id": session}
+        return _coach(tmp_path, {**payload, "permission_mode": mode} if mode else payload)
+
+    # Already in plan mode, or no mode reported.
+    assert send(_BIG_TASK, "plan", "a") == ""
+    assert send(_BIG_TASK, None, "b") == ""
+    # A message about a plan, or building one already approved.
+    assert send("Carry out the plan: " + _BIG_TASK, "default", "c") == ""
+    approved = _transcript(tmp_path, [*_START, _reply(30_000, ago_s=100, one_hour=True, content=[
+        {"type": "tool_use", "id": "toolu_p", "name": "ExitPlanMode", "input": {}}])], "approved.jsonl")
+    assert send(_BIG_TASK, "default", "d", approved) == ""
+    # A short request, or one asking for fewer changes.
+    assert send("Add login, settings, alerts and an admin screen", "default", "e") == ""
+    one_change = (
+        "Make the header sticky so it stays at the top when the page scrolls, and keep its shadow the same as it is "
+        "today on the settings page and on the dashboard."
+    )
+    assert send(one_change, "default", "f") == ""
+
+
+def test_sending_the_same_request_again_gets_the_say_what_was_wrong_hint(tmp_path):
+    records = [*_START, _said("Make the save button bigger and move it to the right", 600), _changed(580)]
+    note = _send(tmp_path, records, "make the save button bigger and move it right")
+    assert _kind(note) == "repeat_ask" and "button" not in note
+    # A different request, an old one, or a short one isn't a repeat.
+    assert "repeat_ask" not in _send(tmp_path, records, "now add a cancel button next to it", session="s2")
+    old = [*_START[:1], _said("Make the save button bigger and move it to the right", 7_000), _changed(6_900)]
+    assert "repeat_ask" not in _send(tmp_path, old, "make the save button bigger and move it right", session="s3")
+    short = [*_START, _said("do it", 600), _changed(580)]
+    assert "repeat_ask" not in _send(tmp_path, short, "do it", session="s4")
+
+
+def test_a_message_resent_after_esc_before_any_reply_is_not_a_repeat_but_a_stop(tmp_path):
+    # Esc before any reply leaves no stop marker: only the message Claude
+    # never answered, sent again.
+    sqlite = "Use SQLite instead of JSON for the store, with the same class and docstrings"
+    records = [*_START, _said(sqlite, 300), _said(sqlite, 200)]
+    assert "repeat_ask" not in _send(tmp_path, records, sqlite)
+    stops = [*_START, _said("refactor the store", 900), _changed(880), _stopped(870, blocks=True),
+             _said("keep the API", 600), _said("keep the API as it is", 500)]
+    note = _send(tmp_path, stops, "use the cache instead of the API", session="s2")
+    assert _kind(note) == "stop_loop" and "stopped you 3 times" in note
+    # A stop that left a marker isn't counted twice.
+    marked = [*_START, _said("refactor the store", 900), _changed(895), _stopped(890), _said("keep the API", 600),
+              _changed(595), _stopped(590), _said("use the cache", 400), _changed(380)]
+    assert "stop_loop" not in _send(tmp_path, marked, "just rename it", session="s3")
+
+
+def test_the_hook_counts_steps_and_likeness_as_the_package_does():
+    from claudeglass import prompt_shape
+
+    samples = [
+        _BIG_TASK, "Create page.html: a simple settings page with a heading, a name field and a save button.",
+        "1. add a\n2. add b\n- c\n* d", "Why does the build fail?", "Add tests. Then rename the store and bump it.",
+    ]
+    for text in samples:
+        assert HOOK._request_steps(text, CATALOGUE["coaching"]) == prompt_shape.request_steps(text), text
+    a, b = "make the save button bigger please", "Make the save button bigger"
+    assert HOOK._similarity(HOOK._words(a), HOOK._words(b)) == prompt_shape.similarity(
+        prompt_shape.words(a), prompt_shape.words(b))
+
+
 def test_a_prompt_hint_comes_before_the_context_hints(tmp_path):
-    records = [_said("fix the header", 600), _reply(150_000, ago_s=580, one_hour=True), _said("still wrong", 300),
-               _reply(150_000, ago_s=280, one_hour=True)]
-    assert _kind(_send(tmp_path, records, "fix it")) == "fix_drip"
+    records = [*_START, _said("fix the header", 600), _changed(580, 150_000), _said("still wrong", 300),
+               _changed(280, 150_000)]
+    assert _kind(_send(tmp_path, records, "fix it")) == "drip_feed"
     assert _kind(_send(tmp_path, records, "fix it", now=NOW + timedelta(seconds=30))) == "clear_context"
 
 
@@ -419,22 +548,30 @@ def test_a_prompting_hint_also_shows_you_a_notice_at_once(tmp_path):
     def said(text, minutes):
         return {**_prompt(text), "timestamp": _iso(now - timedelta(minutes=minutes))}
 
-    path = _transcript(tmp_path, [said("fix the header", 10), _undated(_reply(20_000)), said("still wrong", 5)])
-    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": "/w", "transcript_path": path,
-               "prompt": "the save button doesn't work either"}
+    def changed(minutes):
+        # Timed on the real clock, with the 1-hour cache so it isn't cold.
+        return {**_changed(0, 20_000, one_hour=True), "timestamp": _iso(now - timedelta(minutes=minutes))}
+
+    records = [said("Build the settings page: " + "a form and a header. " * 20, 15), changed(14),
+               said("make the save button bigger", 10), changed(9), said("now move the logo", 5), changed(4)]
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": "/w",
+               "transcript_path": _transcript(tmp_path, records), "prompt": "and the footer text too"}
     rc, out, err = _run(config_dir, payload)
     assert rc == 0 and err == ""
     output = json.loads(out)
-    assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "fix_drip"
-    assert output["systemMessage"] == cat.COACHING_NOTICE["fix_drip"].format(count=3)
-    assert "save button" not in out
+    assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "drip_feed"
+    assert output["systemMessage"] == cat.COACHING_NOTICE["drip_feed"].format(count=3)
+    assert "footer" not in out
 
 
 def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_prompting_hints():
-    to_the_user = {"plan_fresh", "cache_cold", "clear_context", "fix_drip", "stop_loop", "vague_fix", "big_paste"}
+    to_the_user = {
+        "plan_fresh", "cache_cold", "clear_context", "repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix",
+        "big_paste",
+    }
     for hint, text in cat.COACHING_TEXT.items():
         assert (cat.TIP_LABEL in text) == (hint in to_the_user), hint
-    assert set(cat.COACHING_NOTICE) == {"fix_drip", "stop_loop", "vague_fix", "big_paste"}
+    assert set(cat.COACHING_NOTICE) == {"repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix", "big_paste"}
     assert CATALOGUE["coaching"]["notice"] == cat.COACHING_NOTICE
     assert all(notice.startswith("⚠️ ClaudeGlass: ") for notice in cat.COACHING_NOTICE.values())
     reminder = cat.note_text(["feedback_reminder"], "main")

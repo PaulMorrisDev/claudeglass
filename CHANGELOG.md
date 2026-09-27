@@ -10,31 +10,85 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **Warnings about how you prompt.** Coaching notes (`coaching_notes`)
-  gain four hints for habits that cost replies:
-  - `fix_drip`: a third short fix request in a row ("fix this", "still
-    wrong"). Claude checks the rest of the work for the same kind of
-    problem, then suggests listing every problem in one message, or
-    rewinding with Esc Esc if the approach is wrong.
-  - `stop_loop`: stopping Claude three times in 20 minutes. Claude says
-    what it will do before changing anything, and suggests plan mode.
-  - `vague_fix`: a short fix request that names nothing specific.
-    Claude asks what you saw if it can't tell, or suggests saying what
-    you saw and expected next time.
+  gain six hints for habits that cost replies:
+  - `repeat_ask`: much the same request as one Claude answered, sent
+    again within the hour (not a message you stopped and resent).
+    Claude tries a different way or asks what went wrong, and suggests
+    saying what was wrong next time.
+  - `plan_first`: a request for four or more separate changes sent
+    outside plan mode. Claude sets out its approach before changing
+    anything, and suggests plan mode.
+  - `drip_feed`: a third small request in a row, each its own message
+    ("make the button bigger", "now move the logo", "and the footer
+    too"). It goes by what happened, not the words: short messages sent
+    soon after Claude's reply, each answered with a file change. Claude
+    suggests working out everything the work needs and sending it as
+    one message.
+  - `stop_loop`: stopping Claude three times in 20 minutes, during a
+    reply or before it started. Claude says what it will do before
+    changing anything, and suggests plan mode.
+  - `vague_fix`: a short fix request that names nothing specific and
+    doesn't say what it should be instead. Claude asks what you saw if
+    it can't tell, or suggests saying what you saw and expected next
+    time.
   - `big_paste`: a message of 10,000 tokens or more. Claude suggests
     pasting only the part that matters, or giving a file path.
 
-  The coaching line in the status line shows the first, second and
-  fourth too. Your messages are read only for their length, time and
-  whether they hold a fix or correction word; nothing about your words
-  is kept or passed on. Each threshold can be changed in `config.toml`
-  (see [coaching.md](docs/coaching.md)).
+  The coaching line in the status line shows the same request again,
+  small requests, stopping Claude and huge pastes too. Your messages
+  are read only for their length, their time, what Claude did after
+  them, how many changes they ask for and which words two of them
+  share (`vague_fix` also looks for a fix or correction word); nothing
+  about your words is kept or passed on. Each threshold can be changed
+  in `config.toml` (see [coaching.md](docs/coaching.md)).
+
+- **How you prompt, on Work habits.** The same six habits, counted in
+  all your sessions whether or not coaching notes were on: how often
+  each happened per 100 messages, what it cost, its trend by week and
+  what to try instead. Once there are coaching notes, it also says how
+  often Claude passed each hint's tip on. Turning coaching notes on is a
+  change on Your changes, measured by these habits before and after.
+  The parser now records, for each message, how many changes it asked
+  for, whether it was sent in plan mode, and whether it was vague, a
+  thank-you or a repeat; and for each reply, whether it asked you
+  something or showed a tip; a message you stopped before any reply and
+  sent again counts once. Counts and flags only, never your words
+  (`PARSER_VERSION` 28, so every transcript is read again once).
+- **Claude Haiku can write the tags.** `claudeglass capture tagger
+  haiku` (or "Tags written by" on Setup › Capture) takes the
+  `[tl: ...]` tag out of Claude's replies and the tag list out of the
+  session note (at Standard, ~336 tokens of note becomes ~73). When a
+  turn ends, the hook's `Stop` entry hands a short excerpt of it to a
+  worker of its own and returns at once. The excerpt holds your
+  message, what Claude did (tools, files changed, commands, any plan)
+  and the end of its reply. The worker asks Claude Haiku for the tag
+  through your own Claude Code login, with no tools, settings or saved
+  session. Only the tag's words are kept, in `<config-dir>/tags/`, with
+  what the call cost (about $0.002 a turn, measured). What the
+  transcript settles overrides Haiku's guess: a plan-mode plan, no file
+  changed, a test run, only documentation changed, no skill run. The
+  tags reach every view that reads Claude's, and `capture status` says
+  how many turns Haiku tagged, what it cost and why any got none.
+  Subagent reports are still tagged by Claude. `capture tagger claude`
+  switches back.
+- **How well the tags come out, measured.** `scripts/eval-tagger.py`
+  records scripted Claude Code sessions with known right answers and
+  scores each judge against them. On 12 sessions held out from tuning,
+  Haiku gets 90% of the words right, against 85% for Claude's own
+  tags. Thinking adds 3 points for 3.4 times the cost and 7 times the
+  wait, so Haiku runs without it. The results, and what the first run
+  found wrong, are in [docs/tagger-eval.md](docs/tagger-eval.md).
 
 ### Changed
 
+- **Your changes names capture lists.** A change to `[capture]
+  coaching` or `feedback` reads "none → Coaching notes from Claude",
+  not the raw list, and a card waiting for more sessions says how many
+  only once.
 - **Tips stand out in the conversation.** When a coaching note asks
   Claude to tell you something, Claude now ends its reply with a quote
   block starting **⚠️ ClaudeGlass tip:**, after a blank line, instead of
-  a plain line that was easy to miss. The four prompting hints also
+  a plain line that was easy to miss. The six prompting hints also
   show you a one-line notice the moment you send the message (the
   hook's `systemMessage`, never sent to Claude, so it costs no tokens).
   The /tl-feedback reminder gets the same look, with a 💡.

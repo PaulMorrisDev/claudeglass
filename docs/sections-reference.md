@@ -11,7 +11,7 @@ in this order: `overview`, `usage`, `elasticity` (only under
 subscription billing with usage-log readings), `sessions`, `recache`, `ttl`,
 `limits`, `carry`, `compaction_sim`, `plan_handoff`, `model_swap`, `waste`,
 `compactions`, `agent_startup`, `agents`, `run_split`, `hooks`, `quality`, `workstyle`, `habits`,
-`workflows`, `phases` (CLI only with `--phases`; the dashboard always has it), `config` (only when config
+`prompting`, `workflows`, `phases` (CLI only with `--phases`; the dashboard always has it), `config` (only when config
 snapshots exist), `context_budget`, `tool_search`, `capture`, `cost_record`, `scorecard`, and
 `baseline_comparison` (only with `--baseline`). `claudeglass
 report` prints it. This file groups sections by topic, so its order
@@ -63,6 +63,7 @@ and it's still useful when you want one section by itself.
 | `quality` | Quality signals | `quality.py` | whether the work went well: agent runs that didn't finish or likely ran out of turns, failed tool calls and shell commands, denials, corrections, edits redone, per agent type and per model and effort, with a significance test — see [`concepts.md`](concepts.md#7-quality-signals) |
 | `workstyle` | Workstyle | `workstyle.py` | one archetype per session/corpus: `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
 | `habits` | Work habits | `habits.py` | the "Weekly pace" digest, habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/tl-feedback`) cost per piece of work that met its goal |
+| `prompting` | How you prompt | `prompting.py` | how often each prompting habit the coaching notes warn about happened (small requests sent one at a time, the same request again, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
 | `workflows` | Workflows | `workflows.py` | per-run agent count, phase count, duration and cost from `<session>/workflows/wf_*.json` |
 | `phases` | Phases | `phases.py` | cost split across DISCOVERY (read/search only), IMPLEMENTATION (real edits or an ordinary shell command), VERIFICATION (a test/build tool, or a scratch-file edit), OTHER — in the CLI's report only when `--phases` is given; the dashboard always builds it |
 | `config` | Config | `report.py` via `snapshots.py` | one diff table per config key that changed across the window's snapshots (capped at 20 keys) — only present when `snapshot-config` snapshots exist for the window |
@@ -964,6 +965,34 @@ capture is off or no feedback has been given.
   on this archetype so an overseer session is never told to "stop
   spawning agents" and a chat-only session is never told about subagent
   TTLs — see [Recommendations](#recommendations-recommendpy) below.
+
+## `prompting` (`prompting.py`)
+
+Counted from what the parser keeps about each message you typed and each
+reply (`Turn.prompt_steps`, `prompt_plan_mode`, `human_vague`,
+`human_ack`, `human_repeat`, `reply_asked`, `coach_tip`): counts and
+flags, never your words. Each habit uses the live coaching hint's own
+rule and default threshold (`capture_catalogue.COACHING_THRESHOLDS`), so
+it counts whether or not coaching notes were on.
+
+- `prompting_habits` — one row per habit seen in the window, the costliest
+  first: `habit` (`drip_feed`, `repeat_ask`, `stop_loop`, `plan_first`,
+  `vague_fix`, `big_paste`), `times`, `per_100` (per 100 of your
+  messages), `cost` (list-price USD; empty for `plan_first`), `basis`
+  (what the cost counts), `trend` (`falling`, `rising` or `steady` over
+  the last eight weeks, or `new` with fewer than three weeks of three
+  messages or more to go on), `weeks` (the rate per message by week, the
+  worst week as 100, `-` for a week with fewer than three messages) and
+  `try` (what to do instead). Costs: `drip_feed` is what each message after the first in a
+  run paid to take in the context; `repeat_ask` the reply before the
+  repeat; `stop_loop` the replies you stopped (a message stopped before
+  any reply and sent again counts as a stop that cost nothing);
+  `vague_fix` the reply,
+  when it had to ask what was wrong; `big_paste` carrying the pasted text
+  (a cache write, then a cache read by each later reply until a summary).
+- `prompting_tips` — only once there are coaching notes: one row per hint
+  whose note asks Claude to pass a tip on, with `notes`, `shown` (replies
+  to that message that ended with a ClaudeGlass tip) and `shown_pct`.
 
 ## `workflows` (`workflows.py`)
 

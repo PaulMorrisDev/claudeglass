@@ -24,6 +24,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from .. import haiku_tags
 from .contracts import ServeOptions
 
 #: How often (seconds) the job checks whether last month's report is
@@ -93,7 +94,9 @@ class MonthlyReportJob:
                 project_dirs=project_dirs,
                 month=month,
                 out_dir=self.out_dir,
-                load_corpus=lambda dirs: load_corpus(dirs, cache=cache, exclude_projects=exclude, salt=salt),
+                load_corpus=lambda dirs: _with_haiku_tags(
+                    load_corpus(dirs, cache=cache, exclude_projects=exclude, salt=salt), config_dir
+                ),
                 note=lambda text: self._log(f"{_LOG_PREFIX}: {text}"),
             )
         except Exception as exc:  # noqa: BLE001 -- a background job must never take serve down
@@ -123,6 +126,12 @@ class MonthlyReportJob:
         if self._thread is not None:
             self._thread.join(timeout)
             self._thread = None
+
+
+def _with_haiku_tags(corpus, config_dir):
+    """``corpus`` with the tags Claude Haiku wrote put on their replies."""
+    haiku_tags.apply(corpus, config_dir)
+    return corpus
 
 
 __all__ = ["MonthlyReportJob", "CHECK_INTERVAL_S"]

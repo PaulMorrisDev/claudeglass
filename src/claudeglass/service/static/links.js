@@ -306,6 +306,7 @@ export var SECTION_PAGE_MAP = {
   tool_search: "agents/context",
   hooks: "agents/hooks",
   habits: "habits",
+  prompting: "habits",
   // Setup. Settings draws the config section's tables once, from
   // /api/config-diff?auto_keys=1, and skips the section itself.
   config: "setup/settings",

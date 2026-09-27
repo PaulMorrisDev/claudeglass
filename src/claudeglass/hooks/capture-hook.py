@@ -29,8 +29,9 @@ connect``):
 - ``UserPromptSubmit`` and ``PostToolUse`` (also matched to
   ``ExitPlanMode``) for coaching notes (``[capture] coaching`` has
   ``coaching_notes``): a short ``tl-coach`` note when a hint applies --
-  an expired cache or a large context when you send a message, a run of
-  short fix requests, a vague correction, a huge paste, stopping Claude
+  an expired cache or a large context when you send a message, the same
+  request again, small requests sent one at a time, a big task sent
+  without a plan, a vague correction, a huge paste, stopping Claude
   again and again, a large result, many reads for one message, a plan
   approved after a lot of planning, or a subagent run past the length
   its type's runs are best split at (``coaching.json``, from your own
@@ -54,6 +55,17 @@ connect``):
   so only a sample of its calls is logged (:data:`_TURN_SAMPLE_PCT`);
   ``StopFailure`` is rare enough that every one is kept. Nothing is
   logged until ClaudeGlass has made its salt.
+- ``Stop``, while Claude Haiku writes the tags (``[capture] tagger =
+  "haiku"``, when the session note asks Claude for none): the end of the
+  main session's transcript becomes a short excerpt of the turn (your
+  message, what Claude did, the end of its reply; never a tool's
+  output), handed to a worker (this script with ``--judge``) that
+  outlives the call, so the hook returns at once. The worker runs
+  ``claude -p --model haiku`` with no tools, settings, MCP servers or
+  saved session, the excerpt on stdin, and appends the tag's checked
+  words, the reply's id and the call's cost to
+  ``<config-dir>/tags/YYYY-MM.jsonl``. This entry runs in the
+  foreground: ``claude -p`` exits without waiting for a background hook.
 
 What the note says comes from ``capture-catalogue.json`` next to this
 script, written from ``claudeglass.capture_catalogue``;
@@ -245,9 +257,10 @@ def active_ids(catalogue: dict, capture: dict) -> tuple[str, ...]:
     return ids + tuple(i for i in catalogue["feedback_ids"] if i in feedback)
 
 
-def build_note(catalogue: dict, ids, scope: str, agent_type: str = "") -> str:
+def build_note(catalogue: dict, ids, scope: str, agent_type: str = "", tagger: str = "claude") -> str:
     """The note for ``scope`` (``"main"`` or ``"subagent"``); ``""`` when
-    none of ``ids`` asks anything there. Same text as
+    none of ``ids`` asks anything there. While Haiku writes the tags
+    (``tagger``), the main note asks for no tag. Same text as
     ``capture_catalogue.note_text``."""
     if scope == "subagent" and agent_type in catalogue["skip_agent_types"]:
         return ""
@@ -256,8 +269,12 @@ def build_note(catalogue: dict, ids, scope: str, agent_type: str = "") -> str:
     if scope == "subagent" and agent_type in catalogue["no_rules_agent_types"]:
         enabled = [m for m in enabled if m["id"] not in ("rules", "agent_brief")]
     main = scope == "main"
-    lines = [m["main_line"] if main else m["sub_line"] for m in enabled]
-    extras = [m["main_extra"] if main else m["sub_extra"] for m in enabled]
+    untagged = main and tagger == "haiku"
+    lines = ["" if untagged else m["main_line"] if main else m["sub_line"] for m in enabled]
+    extras = [
+        (m.get("main_extra_untagged") or m["main_extra"]) if untagged else m["main_extra"] if main else m["sub_extra"]
+        for m in enabled
+    ]
     codes = [m["id"] for m, line, x in zip(enabled, lines, extras) if line or x]
     if not codes:
         return ""
@@ -281,6 +298,25 @@ def build_note(catalogue: dict, ids, scope: str, agent_type: str = "") -> str:
             out.append(text["skip_key_line"])
     out += after_tag
     return "\n".join(out)
+
+
+def tagger_of(capture: dict) -> str:
+    """Who writes the main session's tags: ``"haiku"`` or ``"claude"``."""
+    return "haiku" if capture.get("tagger") == "haiku" else "claude"
+
+
+def build_judge_prompt(catalogue: dict, ids) -> str:
+    """What Haiku is told when it writes the tags; ``""`` when none of
+    ``ids`` asks for a key. Same text as ``capture_catalogue.judge_text``."""
+    wanted = set(ids)
+    judge = catalogue["judge"]
+    lines = [
+        judge["lines"].get(m["id"], m["main_line"])
+        for m in catalogue["metrics"] if m["id"] in wanted and m["main_line"]
+    ]
+    if not lines:
+        return ""
+    return "\n".join([judge["intro"], *lines, judge["rule"]])
 
 
 def build_tool_note(catalogue: dict, metric_id: str) -> str:
@@ -356,10 +392,14 @@ def note_for(payload: dict, config: dict, catalogue: dict, now: datetime | None 
     if event == "SessionStart":
         if payload.get("source") == "resume":
             return ""
-        return build_note(catalogue, ids, "subagent" if _in_subagent(payload) else "main", agent_type)
+        scope = "subagent" if _in_subagent(payload) else "main"
+        return build_note(catalogue, ids, scope, agent_type, tagger_of(capture))
     if event == "PostToolUse":
         threshold = catalogue["big_output_tokens"] * _CHARS_PER_TOKEN
-        if "big_output" in ids and raw_len >= threshold:
+        # While Haiku writes the tags, the main session ends its replies
+        # with none for the note's word to go in: subagents still get it.
+        untagged = tagger_of(capture) == "haiku" and not payload.get("agent_id")
+        if "big_output" in ids and raw_len >= threshold and not untagged:
             return build_tool_note(catalogue, "big_output")
     return ""
 
@@ -666,67 +706,190 @@ def _is_interrupt(record: dict, prefix: str) -> bool:
     )
 
 
-def _typed(records: list[dict], prefix: str) -> list[tuple[str, datetime | None]]:
-    """The messages you typed, oldest first, with their times: no stopped
-    reply's marker, slash command, compaction summary or subagent line."""
-    out = []
+#: How far back from the end of Claude's last words a question mark
+#: makes your next message an answer to it, not a new request.
+_QUESTION_TAIL_CHARS = 300
+
+
+def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict], dict]:
+    """The messages you typed, oldest first, each with its time
+    (``at``), the seconds since Claude's reply before it (``gap``),
+    whether that reply ended on a question, so the message answers it
+    (``answer``), whether Claude replied to it at all (``answered``: one
+    it didn't reply to before another was sent was stopped before any
+    reply, and Claude Code put it back to edit) and whether Claude changed
+    a file in reply to it (``edited``); and, as the second item,
+    ``replied_at`` and ``answer`` for a message sent now. A stopped reply's
+    marker, a slash command, a compaction summary or a subagent's line
+    isn't a message."""
+    out: list[dict] = []
+    replied_at = None
+    said = ""
     for record in records:
-        if record.get("isSidechain") or record.get("isCompactSummary") or not _is_human_prompt(record):
+        if record.get("isSidechain"):
+            continue
+        if record.get("type") == "assistant":
+            replied_at = _reply_time(record) or replied_at
+            if out:
+                out[-1]["answered"] = True
+            for block in _blocks(record):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                    said = block["text"]
+                elif block.get("type") == "tool_use" and block.get("name") in edit_tools and out:
+                    out[-1]["edited"] = True
+            continue
+        if record.get("isCompactSummary") or not _is_human_prompt(record):
             continue
         text = _text_of(record)
-        if text.lstrip().startswith((prefix, *_NOT_TYPED_PREFIXES)):
+        if text.lstrip().startswith(prefix):
+            if out:
+                out[-1]["stopped"] = True
             continue
-        out.append((text, _reply_time(record)))
-    return out
+        if text.lstrip().startswith(_NOT_TYPED_PREFIXES):
+            continue
+        at = _reply_time(record)
+        out.append({
+            "text": text, "at": at, "edited": False, "answered": False, "stopped": False,
+            "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
+            "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
+        })
+        said = ""
+    return out, {"replied_at": replied_at, "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:]}
 
 
-def _practice_hints(prompt, records: list[dict], coaching: dict, th: dict, now: datetime) -> list[tuple[str, float, dict]]:
-    """``fix_drip``, ``stop_loop``, ``vague_fix`` and ``big_paste`` for the
-    message you just sent (``prompt``), as ``(kind, stake, fields)``.
-    Only lengths, counts and whether a pattern matched are used; your
-    words never leave this function."""
+#: How much of a message is read for its steps (``prompt_shape.STEP_SCAN_CHARS``).
+_STEP_SCAN_CHARS = 8_000
+_WORD_RE = re.compile(r"[a-z0-9']+")
+_PLAN_WORD_RE = re.compile(r"\bplan\b", re.IGNORECASE)
+
+
+def _request_steps(text: str, coaching: dict) -> int:
+    """How many separate changes ``text`` asks for: the most of its list
+    lines, its change verbs, and the items of one sentence that starts
+    with a change verb (``prompt_shape.request_steps``, which a test holds
+    this to)."""
+    text = text[:_STEP_SCAN_CHARS]
+    action_re = re.compile(coaching["action_pattern"], re.IGNORECASE)
+    separator_re = re.compile(coaching["item_separator_pattern"], re.IGNORECASE)
+    items = len(re.findall(coaching["list_item_pattern"], text))
+    actions = len(action_re.findall(text))
+    listed = 0
+    for sentence in re.split(coaching["sentence_end_pattern"], text):
+        sentence = sentence.strip()
+        if sentence and action_re.match(sentence):
+            listed = max(listed, 1 + len(separator_re.findall(sentence)))
+    return max(items, actions, listed)
+
+
+def _words(text: str) -> frozenset:
+    return frozenset(_WORD_RE.findall(text.lower()))
+
+
+def _similarity(a: frozenset, b: frozenset) -> float:
+    """The share of words two messages have in common (``prompt_shape.similarity``)."""
+    union = a | b
+    return len(a & b) / len(union) if union else 0.0
+
+
+def _drip_count(earlier: list[dict], prompt: str, gap, answer: bool, ack_re, th: dict) -> int:
+    """How many small requests in a row ``prompt`` makes: it and the
+    messages before it, each short and sent within ``drip_window_minutes``
+    of Claude's reply, the earlier ones each answered with a file change.
+    Words don't matter. An answer to Claude's question, or a message
+    stopped before any reply and sent again, is skipped, and a bare
+    "thanks" or "ok" sent now counts for nothing."""
+    window = th["drip_window_minutes"] * 60
+
+    def small(text: str) -> bool:
+        return len(text.strip()) <= th["drip_chars"]
+
+    if not small(prompt) or answer or gap is None or gap > window or ack_re.fullmatch(prompt.strip()):
+        return 0
+    count = 1
+    for ex in reversed(earlier):
+        if ex["answer"] or not ex["answered"]:
+            continue
+        if not (small(ex["text"]) and ex["edited"] and ex["gap"] is not None and ex["gap"] <= window):
+            break
+        count += 1
+    return count
+
+
+def _practice_hints(
+    prompt, records: list[dict], coaching: dict, th: dict, now: datetime, mode=None
+) -> list[tuple[str, float, dict]]:
+    """``repeat_ask``, ``drip_feed``, ``stop_loop``, ``plan_first``,
+    ``vague_fix`` and ``big_paste`` for the message you just sent
+    (``prompt``, in permission ``mode``), as ``(kind, stake, fields)``, in
+    that order. Only lengths, times, counts, what Claude did and whether
+    a pattern matched are used; your words never leave this function."""
     prefix = coaching["interrupt_prefix"]
     window_s = th["stop_window_minutes"] * 60
-    stops = sum(
-        1 for r in records if _is_interrupt(r, prefix)
-        and (at := _reply_time(r)) is not None and 0 <= (now - at).total_seconds() <= window_s
-    )
+    earlier, now_state = _exchanges(records, prefix, coaching["edit_tools"])
+    gap = None
+    if isinstance(prompt, str):
+        # Claude Code may already have written this message to the transcript.
+        last = earlier[-1] if earlier else None
+        if last and last["text"] == prompt and last["at"] is not None and (now - last["at"]).total_seconds() < 10:
+            earlier.pop()
+            now_state = {"replied_at": None, "answer": last["answer"]}
+            gap = last["gap"]
+        elif now_state["replied_at"] is not None:
+            gap = (now - now_state["replied_at"]).total_seconds()
+
+    def recent(at) -> bool:
+        return at is not None and 0 <= (now - at).total_seconds() <= window_s
+
+    # A stop mid-reply leaves a marker line; a stop before any reply only
+    # leaves a message Claude never answered.
+    stops = sum(1 for r in records if _is_interrupt(r, prefix) and recent(_reply_time(r)))
+    stops += sum(1 for ex in earlier if not ex["answered"] and not ex["stopped"] and recent(ex["at"]))
     stop = None
     if stops >= th["stop_loop_count"]:
         stop = ("stop_loop", stops, {"count": stops, "minutes": round(th["stop_window_minutes"])})
     if not isinstance(prompt, str) or not prompt.strip():
         return [stop] if stop else []
-    scan = int(coaching["correction_scan_chars"])
-    fix_re = re.compile(coaching["fix_pattern"], re.IGNORECASE)
-    correction_re = re.compile(coaching["correction_pattern"], re.IGNORECASE)
-
-    def is_fix(text: str) -> bool:
-        head = text[:scan]
-        return len(text.strip()) <= th["fix_chars"] and bool(fix_re.search(head) or correction_re.search(head))
-
-    earlier = _typed(records, prefix)
-    # Claude Code may already have written this message to the transcript.
-    if earlier and earlier[-1][0] == prompt and earlier[-1][1] is not None and (now - earlier[-1][1]).total_seconds() < 10:
-        earlier.pop()
-    streak = 0
-    if is_fix(prompt):
-        streak, after = 1, now
-        for text, at in reversed(earlier):
-            if not is_fix(text) or at is None or (after - at).total_seconds() > th["fix_window_minutes"] * 60:
-                break
-            streak, after = streak + 1, at
-    drip = vague = paste = None
-    if streak >= th["fix_drip_count"]:
-        drip = ("fix_drip", streak, {"count": streak})
-    elif (
-        streak and len(prompt.strip()) <= th["vague_fix_chars"]
-        and not re.search(coaching["specific_pattern"], prompt)
-    ):
-        vague = ("vague_fix", 1, {})
+    count = _drip_count(
+        earlier, prompt, gap, now_state["answer"], re.compile(coaching["ack_pattern"], re.IGNORECASE), th
+    )
+    repeat = drip = plan = vague = paste = None
+    mine = _words(prompt)
+    if len(mine) >= th["repeat_min_words"] and not re.fullmatch(coaching["ack_pattern"], prompt.strip(), re.IGNORECASE):
+        window = th["repeat_window_minutes"] * 60
+        # Only a message Claude answered was an attempt: one stopped
+        # before any reply and sent again is the same attempt.
+        if any(
+            ex["answered"] and ex["at"] is not None and 0 <= (now - ex["at"]).total_seconds() <= window
+            and _similarity(mine, _words(ex["text"])) >= th["repeat_similarity"]
+            for ex in earlier
+        ):
+            repeat = ("repeat_ask", 1, {})
+    if count >= th["drip_count"]:
+        drip = ("drip_feed", count, {"count": count})
+    else:
+        scan = int(coaching["correction_scan_chars"])
+        head = prompt[:scan]
+        asks_fix = re.search(coaching["fix_pattern"], head, re.IGNORECASE) or re.search(
+            coaching["correction_pattern"], head, re.IGNORECASE
+        )
+        if asks_fix and len(prompt.strip()) <= th["vague_fix_chars"] and not re.search(coaching["specific_pattern"], prompt):
+            vague = ("vague_fix", 1, {})
     tokens = len(prompt) / _CHARS_PER_TOKEN
     if tokens >= th["big_paste_tokens"]:
         paste = ("big_paste", tokens, {"tokens": _k(tokens)})
-    return [hint for hint in (drip, stop, vague, paste) if hint]
+    elif isinstance(mode, str) and mode and mode != "plan" and len(prompt.strip()) >= th["plan_min_chars"]:
+        # Building a plan already approved, or a message about a plan,
+        # doesn't need another.
+        planned = any(
+            isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "ExitPlanMode"
+            for r in records if r.get("type") == "assistant" for block in _blocks(r)
+        )
+        steps = _request_steps(prompt, coaching)
+        if steps >= th["plan_steps"] and not planned and not _PLAN_WORD_RE.search(prompt):
+            plan = ("plan_first", steps, {"steps": steps})
+    return [hint for hint in (repeat, drip, stop, plan, vague, paste) if hint]
 
 
 def _starting_context(path: str) -> int:
@@ -908,7 +1071,10 @@ def coaching_for(
         path = payload.get("transcript_path")
         if not in_agent and isinstance(path, str) and path:
             records = _tail(path)
-            candidates = [*_practice_hints(payload.get("prompt"), records, coaching, th, now), *_prompt_hints(records, th, now)]
+            candidates = [
+                *_practice_hints(payload.get("prompt"), records, coaching, th, now, payload.get("permission_mode")),
+                *_prompt_hints(records, th, now),
+            ]
     elif tool == "ExitPlanMode":
         if not in_agent and personal.get("plan_fresh", True) is not False:
             candidates = [_plan_hint(payload, th)]
@@ -935,6 +1101,463 @@ def coaching_for(
     if counted:
         _write_json(state_path, state)
     return "", ""
+
+
+# -- Haiku writes the tags ------------------------------------------------------
+
+#: How much of a transcript's end the excerpt is read from, and how much
+#: when that holds no message of yours (a long turn).
+_JUDGE_TAIL_BYTES = 512 * 1024
+_JUDGE_LONG_TAIL_BYTES = 4 * 1024 * 1024
+
+#: The tools that start a subagent.
+_AGENT_TOOLS = ("Agent", "Task")
+
+#: The most tool names the excerpt lists.
+_JUDGE_TOOL_NAMES = 10
+
+_TL_RE = re.compile(r"\[tl:([^\[\]\n]{0,400})\]", re.IGNORECASE)
+
+#: A shell command that runs tests, by its runner at the start of one of
+#: the command's parts (after any VAR=value, timeout or uv/poetry run):
+#: pytest, Python's unittest, tox or nox, npm/yarn/pnpm/bun test, jest,
+#: vitest, mocha, go, cargo or dotnet test, mvn or gradle test, rspec,
+#: phpunit, make test. The group is its arguments.
+_TEST_RUNNER_RE = re.compile(
+    r"^(?:\w+=\S*\s+)*(?:timeout\s+\S+\s+|(?:uv|poetry|pipenv)\s+run\s+|npx\s+|bunx\s+)*"
+    r"(?:pytest|py\.test|python3?\s+-m\s+(?:pytest|unittest)|tox|nox"
+    r"|(?:npm|yarn|pnpm|bun)(?:\s+run)?\s+test|jest|vitest|mocha"
+    r"|go\s+test|cargo\s+test|dotnet\s+test|mvnw?\s+test|(?:\./)?gradlew?\s+test|rspec|phpunit|make\s+test)"
+    r"(?=\s|$)(.*)"
+)
+_COMMAND_PARTS_RE = re.compile(r"&&|\|\||;|\|")
+#: What in a test command's arguments picks particular tests: a test file
+#: or folder, a ``file::test`` id, a name filter, or (go, cargo) a package
+#: or test name.
+_TEST_TARGET_RE = re.compile(
+    r"(?:^|\s)(?:-k\b|-t\b|--testNamePattern|--testPathPattern|-run\b|--grep\b|\S*::\S+"
+    r"|\S*tests?/\S*|\S*test_\S+|\S+_test\.\w+|\S+\.(?:test|spec)\.\w+|\S*spec/\S*)"
+)
+_BARE_ARG_RE = re.compile(r"(?:^|\s)(?!-)(?!\./\.\.\.(?:\s|$))[\w./:-]+")
+
+
+def _test_scope(command: str) -> str:
+    """``"targeted"`` when ``command`` runs chosen tests, ``"full"`` when
+    it runs a whole suite, ``""`` when it runs none."""
+    scope = ""
+    for part in _COMMAND_PARTS_RE.split(command):
+        match = _TEST_RUNNER_RE.match(part.strip())
+        if match is None:
+            continue
+        args = re.sub(r"\s+\d?>\S*", " ", match.group(1))  # redirections aren't targets
+        chosen = _TEST_TARGET_RE.search(args) or (
+            part.strip().split()[0] in ("go", "cargo") and _BARE_ARG_RE.search(args)
+        )
+        if chosen:
+            return "targeted"
+        scope = "full"
+    return scope
+
+
+#: Files whose change alone makes the work documentation.
+_DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
+
+_SKILL_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}")
+_MODEL_RE = re.compile(r"[a-z0-9.-]{1,64}")
+
+
+def _typed(record: dict, prefix: str) -> bool:
+    """A message you typed: not a stopped reply's marker, a slash
+    command's lines, a summary or a subagent's line."""
+    if record.get("isSidechain") or record.get("isCompactSummary") or not _is_human_prompt(record):
+        return False
+    text = _text_of(record).lstrip()
+    return not text.startswith(prefix) and not text.startswith(_NOT_TYPED_PREFIXES)
+
+
+def _cut(text: str, limit: int) -> str:
+    """``text`` on one line, at most about ``limit`` characters: its start
+    and end when longer."""
+    flat = " ".join(text.split())
+    if len(flat) <= limit:
+        return flat
+    head = limit * 3 // 4
+    return f"{flat[:head]} [...] {flat[-(limit - head):]}"
+
+
+def _end(text: str, limit: int) -> str:
+    """The last ``limit`` characters of ``text``, on one line."""
+    flat = " ".join(text.split())
+    return flat if len(flat) <= limit else f"[...] {flat[-limit:]}"
+
+
+def _judge_records(path: str, prefix: str) -> tuple[list[dict], bool]:
+    """The end of the transcript, from far enough back to hold your last
+    message when it can, and whether that is the whole file."""
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return [], False
+    records = _tail(path, _JUDGE_TAIL_BYTES)
+    if size > _JUDGE_TAIL_BYTES and not any(_typed(r, prefix) for r in records):
+        return _tail(path, _JUDGE_LONG_TAIL_BYTES), size <= _JUDGE_LONG_TAIL_BYTES
+    return records, size <= _JUDGE_TAIL_BYTES
+
+
+def _is_plan_file(path) -> bool:
+    """A plan Claude Code's plan mode writes, under ``.claude/plans/``."""
+    return isinstance(path, str) and "/.claude/plans/" in path.replace("\\", "/")
+
+
+def _shown_path(path: str, cwd) -> str:
+    """``path`` as the excerpt names it: from the project folder when it's
+    inside it, else its last two parts."""
+    path = path.replace("\\", "/")
+    root = cwd.replace("\\", "/").rstrip("/") + "/" if isinstance(cwd, str) and cwd else ""
+    if root and path.startswith(root):
+        return path[len(root):]
+    return "/".join(path.split("/")[-2:])
+
+
+def _last_text(records: list[dict]) -> str:
+    for record in reversed(records):
+        if record.get("type") != "assistant":
+            continue
+        for block in reversed(_blocks(record)):
+            if isinstance(block, dict) and block.get("type") == "text" and str(block.get("text") or "").strip():
+                return block["text"]
+    return ""
+
+
+def judge_excerpt(
+    records: list[dict], payload: dict, catalogue: dict, whole: bool = True, facts: dict | None = None
+) -> tuple[str, str]:
+    """What Haiku reads about the turn that just ended, and the id of
+    Claude's reply its tag belongs to: your message (and, before it, your
+    previous message and the end of Claude's reply to it), how many you
+    sent before, what Claude did (model calls, output, tools, the files it
+    changed, shell commands, skills, subagents, errors, a plan) and the
+    end of its final reply. ``("", "")`` without a message of yours with a
+    reply after it in ``records``. ``facts``, when given, gets what the
+    transcript settles for :func:`grounded`: ``plan_now`` (a plan written
+    this turn, by ExitPlanMode or as plan mode's plan file),
+    ``plan_before`` (one earlier), and how many ``skills`` ran, ``files``
+    changed, shell ``commands`` ran and messages came ``earlier``."""
+    prefix = catalogue["coaching"]["interrupt_prefix"]
+    edit_tools = set(catalogue["coaching"]["edit_tools"])
+    limits = catalogue["judge"]["limits"]
+    main = [r for r in records if not r.get("isSidechain")]
+    typed = [i for i, r in enumerate(main) if _typed(r, prefix)]
+    if not typed:
+        return "", ""
+    start = typed[-1]
+    reply = ""
+    output: dict[str, int] = {}
+    tools: dict[str, int] = {}
+    files: dict[str, None] = {}
+    commands: list[str] = []
+    skills: list[str] = []
+    tests: dict[str, None] = {}
+    agents = errors = 0
+    plan_now = False
+    said = ""
+    for record in main[start + 1:]:
+        if record.get("type") == "user":
+            for block in _blocks(record):
+                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                    errors += 1
+            continue
+        if record.get("type") != "assistant":
+            continue
+        message = record.get("message") if isinstance(record.get("message"), dict) else {}
+        reply = str(message.get("id") or record.get("requestId") or record.get("uuid") or reply)
+        tokens = int(_number(_usage(record).get("output_tokens")) or 0)
+        output[reply] = max(output.get(reply, 0), tokens)
+        for block in _blocks(record):
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                said = block["text"]
+            if block.get("type") != "tool_use" or not isinstance(block.get("name"), str):
+                continue
+            name = block["name"]
+            tools[name] = tools.get(name, 0) + 1
+            given = block.get("input") if isinstance(block.get("input"), dict) else {}
+            target = given.get("file_path") or given.get("notebook_path")
+            if name == "ExitPlanMode" or (name in edit_tools and _is_plan_file(target)):
+                plan_now = True
+            elif name in edit_tools and isinstance(target, str) and target:
+                files[_shown_path(target, payload.get("cwd"))] = None
+            elif name == "Bash" and isinstance(given.get("command"), str):
+                first = given["command"].strip().split("\n")[0]
+                if first and len(commands) < limits["commands"]:
+                    commands.append(_cut(first, limits["command"]))
+                for line in given["command"].split("\n"):
+                    scope = _test_scope(line)
+                    if scope:
+                        tests[scope] = None
+            elif name == "Skill" and isinstance(given.get("skill"), str) and _SKILL_RE.fullmatch(given["skill"]):
+                skills.append(given["skill"])
+            elif name in _AGENT_TOOLS:
+                agents += 1
+    if not reply:
+        return "", ""
+    plan_before = any(
+        isinstance(b, dict) and b.get("type") == "tool_use" and (
+            b.get("name") == "ExitPlanMode"
+            or (b.get("name") in edit_tools and _is_plan_file((b.get("input") or {}).get("file_path")))
+        )
+        for r in main[:start] if r.get("type") == "assistant" for b in _blocks(r)
+    )
+    earlier = len(typed) - 1
+    # Run a chosen test anywhere and the check was targeted.
+    test_scope = "targeted" if "targeted" in tests else "full" if tests else ""
+    docs_only = bool(files) and all(name.lower().endswith(_DOC_SUFFIXES) for name in files)
+    if facts is not None:
+        facts.update(plan_now=plan_now, plan_before=plan_before, skills=len(skills), files=len(files),
+                     commands=len(commands), earlier=earlier, tests=test_scope, docs_only=docs_only)
+    last = payload.get("last_assistant_message")
+    final = last if isinstance(last, str) and last.strip() else said
+    lines = []
+    if earlier:
+        lines.append(f'The user\'s message before this one: "{_cut(_text_of(main[typed[-2]]), limits["previous"])}"')
+        answer = _last_text(main[typed[-2] + 1:start])
+        if answer:
+            lines.append(f'The end of Claude\'s reply to it: "{_end(answer, limits["previous_reply"])}"')
+    lines.append(f'The user\'s message: "{_cut(_text_of(main[start]), limits["prompt"])}"')
+    lines.append(f"Messages the user sent before it in this session: {earlier}{'' if whole else ' or more'}.")
+    named = sorted(tools.items(), key=lambda item: (-item[1], item[0]))[:_JUDGE_TOOL_NAMES]
+    changed = list(files)
+    shown = ", ".join(changed[:limits["files"]]) + (" and more" if len(changed) > limits["files"] else "")
+    did = [
+        f"{len(output)} model call{'s' if len(output) != 1 else ''}",
+        f"{sum(output.values()):,} output tokens",
+        "tools: " + (", ".join(f"{name} {count}" for name, count in named) if named else "none"),
+        f"files changed: {len(changed)}" + (f" ({shown})" if changed else ""),
+        f"tool errors: {errors}",
+    ]
+    if agents:
+        did.append(f"subagents started: {agents}")
+    lines.append("What Claude did: " + "; ".join(did) + ".")
+    # Said even when there were none: Haiku otherwise guesses.
+    lines.append("Shell commands: " + ("; ".join(f"`{c}`" for c in commands) if commands else "none") + ".")
+    lines.append("Skills run: " + (", ".join(dict.fromkeys(skills)) if skills else "none") + ".")
+    lines.append(
+        "Tests run: " + {"targeted": "chosen tests", "full": "the whole test suite", "": "none"}[test_scope] + "."
+    )
+    if plan_now:
+        lines.append("Plan mode: Claude wrote a plan in this turn.")
+    elif plan_before:
+        lines.append("Plan mode: the user approved a plan earlier in this session.")
+    elif payload.get("permission_mode") == "plan":
+        lines.append("Plan mode: on, no plan written yet.")
+    else:
+        lines.append("Plan mode: not used in this session.")
+    lines.append(f'The end of Claude\'s final reply: "{_end(final, limits["reply"])}"')
+    return "\n".join(lines), reply
+
+
+def judge_tag(text, keys, judge: dict) -> str:
+    """The ``key=word`` pairs of the last ``[tl: ...]`` in ``text`` whose
+    key is one of ``keys`` and whose words are known ones, as the tag
+    file keeps them (``task=bugfix brief=clear``); ``""`` without any. A
+    skill name after ``would-help:`` is dropped."""
+    matches = _TL_RE.findall(text) if isinstance(text, str) else []
+    if not matches:
+        return ""
+    vocab = judge["vocab"]
+    list_keys = set(judge["list_keys"])
+    wanted = set(keys)
+    found: dict[str, str] = {}
+    for word in matches[-1].split():
+        key, sep, value = word.partition("=")
+        key = key.lower()
+        value = value.strip("`*_.,;").lower()
+        if not sep or key not in wanted or key in found or key not in vocab:
+            continue
+        if key in list_keys:
+            words = [w for w in dict.fromkeys(value.split(",")) if w in vocab[key]]
+            if words:
+                found[key] = ",".join(words)
+            continue
+        if key == "skill":
+            value = value.partition(":")[0]
+        if value in vocab[key]:
+            found[key] = value
+    return " ".join(f"{key}={value}" for key, value in found.items())
+
+
+def grounded(words: str, facts: dict | None) -> str:
+    """``words`` (``task=bugfix plan=made ...``) with what the transcript
+    settles put right: ``plan`` is ``made`` when Claude wrote a plan in
+    plan mode this turn, and can't be ``made`` after one written earlier
+    (it reads ``following``); ``skill`` can't be ``helped`` or
+    ``unneeded`` when no skill ran; ``check`` is ``none`` when Claude
+    changed no file, and ``targeted`` or ``full`` when it ran chosen
+    tests or a whole suite; ``task`` is ``docs`` when only documentation
+    files changed; and a first message has no ``shift`` but ``new``, and
+    no ``prior`` but ``none``."""
+    if not facts or not words:
+        return words
+    out = []
+    for word in words.split():
+        key, _, value = word.partition("=")
+        if key == "plan" and facts.get("plan_now"):
+            value = "made"
+        elif key == "plan" and facts.get("plan_before") and value == "made":
+            value = "following"
+        elif key == "skill" and not facts.get("skills") and value in ("helped", "unneeded"):
+            value = "none"
+        elif key == "check" and not facts.get("files"):
+            value = "none"
+        elif key == "check" and facts.get("tests"):
+            value = facts["tests"]
+        elif key == "task" and facts.get("docs_only") and value in ("bugfix", "feature", "refactor"):
+            value = "docs"
+        elif key == "shift" and facts.get("earlier") == 0 and value != "new":
+            continue
+        elif key == "prior" and facts.get("earlier") == 0:
+            value = "none"
+        out.append(f"{key}={value}")
+    return " ".join(out)
+
+
+def judge_job(payload: dict, config: dict, catalogue: dict, now: datetime | None = None) -> dict | None:
+    """What the worker needs to ask Haiku for this turn's tag, or ``None``:
+    not a ``Stop`` of the main session, Haiku doesn't write the tags,
+    capture doesn't apply here, a Stop asked again, the call Haiku itself
+    runs in, or nothing to tag."""
+    judge = catalogue["judge"]
+    if payload.get("hook_event_name") != "Stop" or os.environ.get(judge["env"]):
+        return None
+    if payload.get("stop_hook_active") or _in_subagent(payload):
+        return None
+    now = now or datetime.now(timezone.utc)
+    capture = _capture_for(payload, config, now)
+    if capture is None or tagger_of(capture) != "haiku":
+        return None
+    ids = active_ids(catalogue, capture)
+    system = build_judge_prompt(catalogue, ids)
+    path = payload.get("transcript_path")
+    if not system or not isinstance(path, str):
+        return None
+    records, whole = _judge_records(path, catalogue["coaching"]["interrupt_prefix"])
+    facts: dict = {}
+    excerpt, reply = judge_excerpt(records, payload, catalogue, whole, facts)
+    if not excerpt:
+        return None
+    wanted = set(ids)
+    return {
+        "ts": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "reply": reply,
+        "keys": [m["id"] for m in catalogue["metrics"] if m["id"] in wanted and m["main_line"]],
+        "system": system,
+        "excerpt": excerpt,
+        "facts": facts,
+    }
+
+
+def spawn_judge(config_dir: Path, job: dict) -> None:
+    """Hand ``job`` to a worker (this script with ``--judge``) that
+    outlives this call, so the Stop hook returns at once and Haiku's
+    answer still lands when Claude Code has moved on or, run with ``-p``,
+    exited."""
+    import subprocess
+
+    options: dict = {"stdin": subprocess.PIPE, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if os.name == "nt":
+        options["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        options["start_new_session"] = True
+    # -I -S as the hook itself runs: no user site or PYTHON* settings.
+    command = [sys.executable, "-I", "-S", str(Path(__file__).resolve()), "--judge", "--config-dir", str(config_dir)]
+    worker = subprocess.Popen(command, **options)
+    worker.stdin.write(json.dumps(job).encode("utf-8"))
+    worker.stdin.close()
+
+
+def _claude_command() -> str | None:
+    import shutil
+
+    found = shutil.which("claude")
+    if found:
+        return found
+    fallback = os.environ.get("CLAUDE_CODE_EXECPATH")
+    return fallback if fallback and os.path.isfile(fallback) else None
+
+
+def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
+    """Claude Code's JSON answer to ``job``, from ``claude -p`` on Haiku
+    with no tools, settings, MCP servers or saved session: the excerpt on
+    stdin (never on the command line, where other users could read it),
+    the instructions as the system prompt. Raises ``FileNotFoundError``
+    without a ``claude`` command, ``subprocess.TimeoutExpired``, or
+    ``ValueError`` when the call fails."""
+    import subprocess
+
+    command = _claude_command()
+    if command is None:
+        raise FileNotFoundError("claude")
+    env = dict(os.environ)
+    env[judge["env"]] = "1"
+    env["MAX_THINKING_TOKENS"] = str(int(judge.get("thinking_tokens") or 0))
+    env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
+    args = [
+        command, "-p", "--model", judge["model"], "--tools", "", "--setting-sources", "", "--strict-mcp-config",
+        "--no-session-persistence", "--output-format", "json", "--system-prompt", job["system"],
+    ]
+    extra: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+    done = subprocess.run(
+        args, input=job["excerpt"].encode("utf-8"), capture_output=True, timeout=judge["timeout_s"], env=env,
+        cwd=str(cwd) if cwd is not None and cwd.is_dir() else None, **extra,
+    )
+    answer = json.loads(done.stdout.decode("utf-8", errors="replace") or "null")
+    if done.returncode != 0 or not isinstance(answer, dict) or answer.get("is_error"):
+        raise ValueError("failed")
+    return answer
+
+
+def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None) -> dict:
+    """Ask Haiku for ``job``'s tag (``ask``: :func:`ask_haiku`) and log
+    the answer, or why there is none, in this month's tag file: the
+    line written. Only the tag's words, the reply's id and what the call
+    cost are kept."""
+    import subprocess
+
+    judge = catalogue["judge"]
+    record: dict = {"ts": job["ts"], "reply": job["reply"]}
+    try:
+        answer = (ask or ask_haiku)(job, judge, config_dir)
+    except FileNotFoundError:
+        record["err"] = "no_cli"
+    except subprocess.TimeoutExpired:
+        record["err"] = "timeout"
+    except (OSError, ValueError):
+        record["err"] = "failed"
+    else:
+        tag = grounded(judge_tag(answer.get("result"), job["keys"], judge), job.get("facts"))
+        if tag:
+            record["tl"] = tag
+        else:
+            record["err"] = "no_tag"
+        usage = answer.get("usage") if isinstance(answer.get("usage"), dict) else {}
+        cost = _number(answer.get("total_cost_usd"))
+        if cost is not None and 0 <= cost < 10:
+            record["usd"] = round(cost, 6)
+        record["in"] = int(sum(
+            _number(usage.get(k)) or 0
+            for k in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
+        ))
+        record["out"] = int(_number(usage.get("output_tokens")) or 0)
+        models = answer.get("modelUsage")
+        model = next(iter(models), "") if isinstance(models, dict) else ""
+        if isinstance(model, str) and _MODEL_RE.fullmatch(model):
+            record["model"] = model
+    folder = config_dir / judge["dir"]
+    folder.mkdir(parents=True, exist_ok=True)
+    with open(folder / f"{record['ts'][:7]}.jsonl", "a", encoding="utf-8", newline="\n") as handle:
+        handle.write(json.dumps(record, separators=(",", ":")) + "\n")
+    return record
 
 
 def read_salt(config_dir: Path) -> bytes | None:
@@ -1030,6 +1653,8 @@ def write_signal(config_dir: Path, catalogue: dict, record: dict) -> None:
 def _run(argv: list[str]) -> None:
     parser = argparse.ArgumentParser(prog="capture-hook.py")
     parser.add_argument("--config-dir", default=None)
+    # The worker spawn_judge starts: ask Haiku for one turn's tag.
+    parser.add_argument("--judge", action="store_true")
     args = parser.parse_args(argv)
     # Claude Code sends UTF-8 whatever the console's code page is. Read
     # to the end no matter what: leaving stdin unread on an early return
@@ -1042,6 +1667,11 @@ def _run(argv: list[str]) -> None:
     # large -- payload, and load_catalogue()'s own file read, for the
     # common case, without changing what a call that IS captured sees.
     config_dir = resolve_config_dir(args.config_dir)
+    if args.judge:
+        job = json.loads(raw)
+        if isinstance(job, dict):
+            run_judge(config_dir, load_catalogue(), job)
+        return
     try:
         config = load_config(config_dir)
     except (OSError, ValueError):
@@ -1058,6 +1688,9 @@ def _run(argv: list[str]) -> None:
         record = signal_for(payload, config, catalogue, read_salt(config_dir))
         if record:
             write_signal(config_dir, catalogue, record)
+        job = judge_job(payload, config, catalogue)
+        if job:
+            spawn_judge(config_dir, job)
         return
     note = note_for(payload, config, catalogue, raw_len=len(raw))
     tip = notice = ""

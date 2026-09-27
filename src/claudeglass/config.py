@@ -160,6 +160,10 @@ class CaptureConfig:
     #: Live coaching toggles switched on
     #: (``capture_catalogue.COACHING_IDS``).
     coaching: list[str] = field(default_factory=list)
+    #: Who writes the main session's ``[tl: ...]`` tags, one of
+    #: ``capture_catalogue.TAGGERS``: Claude, at the end of its replies, or
+    #: Claude Haiku, asked by the hook after each turn.
+    tagger: str = capture_catalogue.DEFAULT_TAGGER
     #: ISO-8601 time capture was last switched on, or ``""`` while off.
     enabled_at: str = ""
 
@@ -175,11 +179,19 @@ class CaptureConfig:
     def hook_metrics(self) -> tuple[str, ...]:
         """What the capture hook's settings.json entries are for: the
         metrics on, plus the coaching toggles that run through the hook
-        (``coaching_notes``), whatever the level."""
+        (``coaching_notes``), whatever the level, and
+        ``capture_catalogue.HAIKU_TAGGER_HOOK`` while Haiku writes the
+        tags."""
         hooked = tuple(
             i for i in capture_catalogue.COACHING_IDS if i in self.coaching and capture_catalogue.METRICS_BY_ID[i].hooks
         )
-        return self.active_metrics() + hooked
+        haiku = (capture_catalogue.HAIKU_TAGGER_HOOK,) if self.haiku_tags else ()
+        return self.active_metrics() + hooked + haiku
+
+    @property
+    def haiku_tags(self) -> bool:
+        """Whether Haiku writes the main session's tags."""
+        return self.tagger == "haiku"
 
     @property
     def coaching_notes_on(self) -> bool:
@@ -563,6 +575,12 @@ def _build_capture_config(table: dict, path: Path) -> CaptureConfig:
             raise ConfigError(f"config file {path}: 'capture.projects' has a bad pattern {pattern!r} ({exc})") from exc
     capture.feedback = _capture_list(table, "feedback", path, capture_catalogue.FEEDBACK_IDS)
     capture.coaching = _capture_list(table, "coaching", path, capture_catalogue.COACHING_IDS)
+    tagger = table.get("tagger", capture.tagger)
+    if not isinstance(tagger, str) or tagger not in capture_catalogue.TAGGERS:
+        raise ConfigError(
+            f"config file {path}: 'capture.tagger' must be one of {list(capture_catalogue.TAGGERS)}, got {tagger!r}"
+        )
+    capture.tagger = tagger
     return capture
 
 
@@ -1005,6 +1023,7 @@ def _capture_table(capture: CaptureConfig) -> dict:
         "projects": list(capture.projects),
         "feedback": list(capture.feedback),
         "coaching": list(capture.coaching),
+        "tagger": capture.tagger,
         "enabled_at": capture.enabled_at,
     }
 
@@ -1041,6 +1060,7 @@ def set_capture(
     projects: list[str] | None = None,
     feedback: list[str] | None = None,
     coaching: list[str] | None = None,
+    tagger: str | None = None,
     now: datetime | None = None,
     dry_run: bool = False,
 ) -> CaptureConfig:
@@ -1095,6 +1115,8 @@ def set_capture(
         )
     if coaching is not None:
         table["coaching"] = _in_catalogue_order(coaching, capture_catalogue.COACHING_IDS)
+    if tagger is not None:
+        table["tagger"] = tagger
     moment = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     stamp = moment.isoformat(timespec="seconds")
     if table["level"] == "off":

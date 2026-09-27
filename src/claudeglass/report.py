@@ -17,7 +17,8 @@ under subscription billing with usage-log readings, see
 ``ttl``, ``limits``, ``carry``, ``compaction_sim``, ``plan_handoff``,
 ``model_swap``, ``waste``, ``compactions``, ``agent_startup``, ``agents``, ``run_split``,
 ``hooks``, ``quality``,
-``workstyle``,
+``workstyle``, ``habits``, ``prompting`` (how you prompt, from
+``prompting.py``),
 ``workflows``, ``phases`` (only when ``phases=True``), ``config`` (only
 when snapshots are supplied), ``context_budget``, ``tool_search``, ``capture``,
 ``cost_record`` (Claude Code's own cost record against this tool's, from
@@ -143,6 +144,7 @@ from . import (
     hook_costs,
     limits,
     model_swap,
+    prompting,
     quality,
     recache,
     reconcile,
@@ -204,6 +206,7 @@ _SECTION_ORDER: tuple[str, ...] = (
     "quality",
     "workstyle",
     "habits",
+    "prompting",
     "workflows",
     "phases",
     "config",
@@ -1773,6 +1776,9 @@ def build_report(
             effort_share_threshold_pct=_effort_mismatch_share_threshold(config),
         )
         sections.append(habits.section_from(_habits_built, model_swap=model_swap_stats))
+
+    if _want("prompting"):
+        sections.append(prompting.build_section(prompting.collect(corpus, pricing)))
 
     if _want("workflows"):
         sections.append(workflows.build_section(all_workflow_runs))

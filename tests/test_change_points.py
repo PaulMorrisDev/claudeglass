@@ -157,6 +157,21 @@ def test_each_capture_change_is_a_change_point(tmp_path):
     assert change_points.latest(tmp_path).label == "Turned metrics capture off"
 
 
+def test_turning_coaching_notes_on_and_off_is_named_as_such(tmp_path):
+    from datetime import datetime, timezone
+
+    from claudeglass import config as config_mod
+
+    config_mod.set_capture(tmp_path, coaching=["coaching_notes"], now=datetime(2026, 9, 1, 9, tzinfo=timezone.utc))
+    config_mod.set_capture(tmp_path, coaching=["coaching_notes", "coaching_line"],
+                           now=datetime(2026, 9, 2, 9, tzinfo=timezone.utc))
+    config_mod.set_capture(tmp_path, coaching=[], now=datetime(2026, 9, 3, 9, tzinfo=timezone.utc))
+    points = change_points.change_points(tmp_path)
+    assert [p.label for p in points] == ["Turned coaching notes on", "Changed live coaching", "Turned coaching notes off"]
+    assert points[0].keys == ["capture.coaching"]
+    assert points[0].to_dict()["summary"] == "capture.coaching: none → Coaching notes from Claude"
+
+
 def test_a_broken_capture_log_line_is_skipped(tmp_path):
     (tmp_path / "capture-log.jsonl").write_text(
         'not json\n{"ts": "2026-09-01T09:00:00+00:00", "level": "free", "changed": {}}\n'

@@ -14,7 +14,8 @@ import { habitSparkline } from "./charts-types.js";
 // ======================================================================
 // Work habits: the habits section's "This week" digest as tiles,
 // the playbook as cards with a by-week sparkline and the example to
-// copy, brief templates with Copy buttons, then its other tables.
+// copy, brief templates with Copy buttons, then its other tables; then
+// How you prompt (the prompting section) as a card per habit.
 // ======================================================================
 
 export function renderHabits(panel) {
@@ -30,7 +31,8 @@ export function renderHabits(panel) {
       return;
     }
     var section = findSection(result.report, "habits");
-    if (!section) {
+    var prompting = findSection(result.report, "prompting");
+    if (!section && !prompting) {
       container.appendChild(
         emptyState(
           "No work-habit figures for this window: none of its sessions had enough messages to compare.",
@@ -40,12 +42,69 @@ export function renderHabits(panel) {
       );
       return;
     }
-    // The section's "How to read this" sits at the end of the page's intro.
-    var intro = panel.querySelector(".view-intro");
-    var sectionHelp = helpButton(section.help, section.title || "Work habits");
-    if (intro && sectionHelp) intro.appendChild(sectionHelp);
-    renderHabitsSection(section, container);
+    if (section) {
+      // The section's "How to read this" sits at the end of the page's intro.
+      var intro = panel.querySelector(".view-intro");
+      var sectionHelp = helpButton(section.help, section.title || "Work habits");
+      if (intro && sectionHelp) intro.appendChild(sectionHelp);
+      renderHabitsSection(section, container);
+    }
+    if (prompting) renderPromptingSection(prompting, container);
   });
+}
+
+// How you prompt: a card per habit seen (how often, what it cost, its
+// trend by week, what to try instead), then the tips Claude showed.
+function renderPromptingSection(section, container) {
+  var tables = section.tables || [];
+  var habitsTable = tables.filter(function (table) {
+    return table.name === "prompting_habits";
+  })[0];
+  var block = el("section", { class: "report-section", "data-section": "prompting" });
+  block.appendChild(headRow(el("h2", { class: "section-title", text: section.title }), section.help, section.title));
+  if (section.intro) block.appendChild(el("p", { class: "section-intro", text: section.intro }));
+  container.appendChild(block);
+  var rows = habitsTable ? tableRowsAsObjects(habitsTable) : [];
+  if (!rows.length) {
+    block.appendChild(
+      emptyState("None of these habits turned up in this window.", null, "Coaching notes warn you the moment one does.")
+    );
+  } else {
+    var cards = el("div", { class: "habit-cards" });
+    rows.forEach(function (row) {
+      cards.appendChild(promptingCard(habitsTable, row));
+    });
+    block.appendChild(cards);
+  }
+  var rest = tables.filter(function (table) {
+    return table.name !== "prompting_habits";
+  });
+  renderPlacedTables(block, rest, state.currency, "habits");
+}
+
+function promptingCard(table, row) {
+  var title = String(labelFor(table, row.habit));
+  var card = el("article", { class: "habit-card", "data-habit": row.habit });
+  card.appendChild(el("div", { class: "card-head" }, [el("h3", { text: title })]));
+  var cost = row.cost === null || row.cost === undefined ? "Not priced" : moneyText(row.cost, { prefix: "About " });
+  card.appendChild(el("p", { class: "habit-saving", text: cost }));
+  var seen = new Set();
+  if (row.try) {
+    card.appendChild(el("p", { class: "habit-try", text: "Try instead:" }));
+    card.appendChild(el("p", null, prose(row.try, seen)));
+  }
+  var meta = [
+    "Seen " + formatCell(row.times, "int", state.currency),
+    // One decimal is plenty for a rate per 100 messages: "2.6", "12".
+    Number(row.per_100).toFixed(1).replace(/\.0$/, "") + " per 100 messages",
+    "trend " + String(labelFor(table, row.trend) || "").toLowerCase(),
+  ];
+  var metaLine = el("p", { class: "profile-card-meta", text: meta.join(" · ") });
+  var spark = habitSparkline(row.weeks, "By week, " + labelFor(table, row.trend) + ": " + row.weeks);
+  if (spark) metaLine.appendChild(spark);
+  card.appendChild(metaLine);
+  if (row.basis) card.appendChild(el("p", { class: "cell-hint" }, prose("Cost worked out from " + row.basis + ".", seen)));
+  return card;
 }
 
 function tableRowsAsObjects(table) {

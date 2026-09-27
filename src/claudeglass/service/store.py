@@ -276,8 +276,11 @@ class Store:
     block the watcher's writes.
     """
 
-    def __init__(self, path: str | Path) -> None:
+    def __init__(self, path: str | Path, config_dir: str | Path | None = None) -> None:
         self.path = str(path)
+        #: The data folder, for what lives beside the store (the tags
+        #: Claude Haiku wrote, ``haiku_tags``); ``None`` in tests.
+        self.config_dir = Path(config_dir) if config_dir is not None else None
         self._local = threading.local()
 
     # -- connection lifecycle ------------------------------------------

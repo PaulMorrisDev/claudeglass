@@ -60,7 +60,10 @@ answered from your own sessions:
   keeping unused tool definitions out, server by server.
 - **"Are my habits costing me?"** Work habits turns each of your
   requests, and everything Claude did for it, into habits worth
-  changing, with a rough saving for each.
+  changing, with a rough saving for each. How you prompt counts the
+  prompting habits that cost extra replies, such as small requests sent
+  one at a time or the same request sent again, and what each cost.
+  Coaching notes warn you about them as you type.
 - **"Did my change work?"** It records your settings as each session
   starts, and compares the sessions before a change with those after
   it: Your changes shows each one's effect, how sure it is, and what it
@@ -373,7 +376,9 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
   files Claude Code has already written, and never calls Claude itself.
   Metrics capture is the one opt-in exception, and it's off by default.
   While it's on, Claude spends a few tokens in your own sessions,
-  reading a short note and writing a tag. See
+  reading a short note and writing a tag. If you let Claude Haiku write
+  the tags instead (`claudeglass capture tagger haiku`), the capture
+  hook runs your `claude` command once per turn to ask it. See
   [`docs/capture.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/capture.md).
 - **It changes nothing on its own.** `init` offers two optional
   additions, and shows each one and asks first:
@@ -415,7 +420,10 @@ it completely, see [Uninstalling](#uninstalling).
 - **What metrics capture adds.** It's off by default. When it's on, it
   adds a short note to your Claude Code sessions, and that note goes to
   Anthropic with the rest of the session. Claude's tags come back in its
-  replies, and this tool reads them from your transcripts.
+  replies, and this tool reads them from your transcripts. If Claude
+  Haiku writes the tags instead, a short excerpt of each turn also goes
+  to Haiku through your own Claude Code login, and only the tag's words
+  are kept, in a local file.
 
 [`SECURITY.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/SECURITY.md) is the full checklist for a security
 review, with the tests that back each point.

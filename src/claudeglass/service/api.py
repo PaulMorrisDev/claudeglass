@@ -1402,8 +1402,11 @@ def make_handler(
         """``set_capture`` arguments from a POST body, or a reason it's
         refused."""
         if not isinstance(body, dict) or not body:
-            return None, "request body must be a JSON object with one or more of: level, metrics, sample, until, feedback, coaching"
-        allowed = ("level", "metrics", "sample", "until", "feedback", "coaching")
+            return None, (
+                "request body must be a JSON object with one or more of: level, metrics, sample, until, feedback, "
+                "coaching, tagger"
+            )
+        allowed = ("level", "metrics", "sample", "until", "feedback", "coaching", "tagger")
         unknown = sorted(set(body) - set(allowed))
         if unknown:
             return None, f"unknown key {', '.join(unknown)}; allowed: {', '.join(allowed)}"
@@ -1447,6 +1450,10 @@ def make_handler(
                 if stop <= datetime.now(timezone.utc):
                     return None, "'until' is in the past"
             changes["until"] = until
+        if "tagger" in body:
+            if body["tagger"] not in capture_catalogue.TAGGERS:
+                return None, f"'tagger' must be one of: {', '.join(capture_catalogue.TAGGERS)}"
+            changes["tagger"] = body["tagger"]
         return changes, None
 
     def route_capture_post(store, query, body):
