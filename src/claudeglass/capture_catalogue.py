@@ -333,13 +333,13 @@ COACHING_READ_TOOLS = ("Read", "Grep", "Glob")
 
 #: The live hints: after a tool result (the first four) and when you
 #: send a message (the rest), most useful first when more than one
-#: applies. ``fix_drip`` to ``big_paste`` are about how you prompt.
+#: applies. ``drip_feed`` to ``big_paste`` are about how you prompt.
 COACHING_HINTS = (
     "plan_fresh",
     "split_run",
     "quiet_output",
     "explore_reads",
-    "fix_drip",
+    "drip_feed",
     "stop_loop",
     "vague_fix",
     "big_paste",
@@ -372,7 +372,8 @@ CORRECTION_SCAN_CHARS = 200
 
 #: Words that make a short message a request to fix something, on top of
 #: :data:`CORRECTION_PATTERN`: "fix this", "still an error", "broken
-#: again". Only the prompting hints use it, and only on short messages.
+#: again". Only ``vague_fix`` uses it; ``drip_feed`` goes by what Claude
+#: did, not by your words.
 FIX_PATTERN = r"\b(?:fix|fixed|broken|wrong|incorrect|still|again|bug|error|errors|failing|fails|crash(?:es|ed)?)\b"
 
 #: Anything that makes a correction specific: a path, a file name, a
@@ -392,6 +393,15 @@ SPECIFIC_PATTERN = (
 #: How Claude Code records that you stopped a reply (Esc).
 INTERRUPT_PREFIX = "[Request interrupted"
 
+#: A message that only acknowledges ("thanks", "ok", "looks good"): sent
+#: after a change, it isn't another request.
+_ACK_WORDS = r"thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no"
+ACK_PATTERN = rf"(?:{_ACK_WORDS})(?:[\s!.,]+(?:{_ACK_WORDS}))*[\s!.,]*"
+
+#: Tools that change a file. A message Claude answered with one of these
+#: asked for a change, whatever its words (``drip_feed``).
+EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
+
 #: When each hint applies, and how often it may repeat. Each can be
 #: changed in ``config.toml``'s ``[thresholds]`` as ``coaching_<key>``.
 COACHING_THRESHOLDS = {
@@ -407,12 +417,13 @@ COACHING_THRESHOLDS = {
     #: fresh-session hint applies (``plan_handoff_min_dropped_tokens``'s
     #: default).
     "plan_fresh_tokens": 40_000,
-    #: This many short fix requests in a row get the batch-them hint...
-    "fix_drip_count": 3,
-    #: ...when each came within this long of the one after it.
-    "fix_window_minutes": 20,
-    #: A message longer than this isn't a short fix request.
-    "fix_chars": 300,
+    #: This many small requests in a row, each of which Claude answered by
+    #: changing files, get the plan-it-as-one-prompt hint...
+    "drip_count": 3,
+    #: ...when each was sent within this long of Claude's reply before it.
+    "drip_window_minutes": 20,
+    #: A message longer than this isn't a small request.
+    "drip_chars": 300,
     #: A fix request this short, naming nothing specific, is vague.
     "vague_fix_chars": 80,
     #: A message this many tokens long gets the big-paste hint.
@@ -443,11 +454,11 @@ COACHING_TEXT = {
         + " saying that /clear before a new task would have saved that. If it carries on the same work, don't "
         "mention it."
     ),
-    "fix_drip": (
-        "The user has sent {count} short fix requests in a row, and each one re-reads the whole context. Before "
-        "fixing it, check the rest of the work for the same kind of problem and fix those too. End your reply, "
-        "before any tag, with " + _TIP_ASK + " suggesting they list every problem they can see in one message, "
-        "with what they expected, or rewind with Esc Esc and restate the request if the approach itself is wrong."
+    "drip_feed": (
+        "The user has sent {count} small change requests in a row, one message each, and every message re-reads "
+        "the whole context. Make this change, then end your reply, before any tag, with " + _TIP_ASK + " "
+        "suggesting that working out everything the work still needs and sending it as one message gets it done "
+        "in one pass, for fewer tokens."
     ),
     "stop_loop": (
         "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change "
@@ -492,8 +503,8 @@ COACHING_TEXT = {
 #: still ends with the tip, for an app that doesn't show hook messages.
 #: Same ``{placeholders}`` as :data:`COACHING_TEXT`.
 COACHING_NOTICE = {
-    "fix_drip": "⚠️ ClaudeGlass: {count} fix requests in a row. One message listing every problem costs less than "
-    "one at a time.",
+    "drip_feed": "⚠️ ClaudeGlass: {count} small requests in a row, one message each. Work out everything that needs "
+    "changing and send it as one prompt: it costs less.",
     "stop_loop": "⚠️ ClaudeGlass: you've stopped Claude {count} times in {minutes} minutes. Plan mode (Shift+Tab) "
     "agrees the approach before work starts.",
     "vague_fix": "⚠️ ClaudeGlass: say what you saw and what you expected, or paste the error, to get a fix first "
@@ -971,7 +982,7 @@ METRICS: tuple[Metric, ...] = (
         section="coaching",
         title="Coaching line",
         what="A second status line with a live hint from your session. For example, a large context before "
-        "a new task, a large last output, many reads so far, or a run of short fix requests.",
+        "a new task, a large last output, many reads so far, or small requests sent one at a time.",
         why="Advice where you work, at the moment it applies. The status line is never sent to Claude.",
         powers=("context", "tool_output", "research"),
     ),
@@ -984,7 +995,7 @@ METRICS: tuple[Metric, ...] = (
         "hook adds a short note to Claude's context, and Claude acts on it or tells you in a highlighted tip: a large "
         "tool output, many reads for one message, a subagent run past the point where your own history says "
         "splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired "
-        "cache when you send a message. It also flags how you prompt: short fix requests one after another, a "
+        "cache when you send a message. It also flags how you prompt: small requests sent one at a time, a "
         "vague correction, a huge paste, or stopping Claude again and again.",
         why="Advice at the moment it applies, and Claude can often act on it itself. Each note costs a few dozen "
         "tokens for the rest of the session. Claude Code waits for the hook after each shell, read, search, web "
@@ -1549,6 +1560,8 @@ def export_json() -> dict:
             "fix_pattern": FIX_PATTERN,
             "specific_pattern": SPECIFIC_PATTERN,
             "interrupt_prefix": INTERRUPT_PREFIX,
+            "edit_tools": list(EDIT_TOOLS),
+            "ack_pattern": ACK_PATTERN,
         },
     }
 

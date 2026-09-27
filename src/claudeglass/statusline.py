@@ -269,7 +269,7 @@ and single-line. The second is either:
   :func:`coaching_hint`: a large context at the end of a turn (``/clear``
   before a new task), a large last tool output, many reads and searches
   in the current message, a warm cache about to go cold, or a prompting
-  habit (short fix requests one after another, stopping Claude again
+  habit (small requests sent one at a time, stopping Claude again
   and again, a huge message). Worked out
   from the payload and the transcript's last :data:`_COACH_TAIL_BYTES`;
   amounts are tokens, since this hot path loads no pricing; or
@@ -1870,51 +1870,99 @@ def _line_time(d: dict) -> datetime | None:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
+#: How far back from the end of Claude's last words a question mark
+#: makes your next message an answer to it (as ``capture-hook.py``).
+_QUESTION_TAIL_CHARS = 300
+
+
+def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict]:
+    """Your typed messages, oldest first, as ``capture-hook.py``'s
+    ``_exchanges`` reads them: ``text``, ``at``, ``gap`` (seconds since
+    Claude's reply before it), ``answer`` (that reply ended on a
+    question) and ``edited`` (Claude changed a file in reply to it)."""
+    out: list[dict] = []
+    replied_at = None
+    said = ""
+    for d in tail:
+        if d.get("isSidechain"):
+            continue
+        if d.get("type") == "assistant":
+            replied_at = _line_time(d) or replied_at
+            for block in _content_blocks(d):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                    said = block["text"]
+                elif block.get("type") == "tool_use" and block.get("name") in edit_tools and out:
+                    out[-1]["edited"] = True
+            continue
+        if d.get("isCompactSummary") or not _is_human_prompt(d):
+            continue
+        text = _line_text(d)
+        if text.lstrip().startswith((interrupt_prefix, *_NOT_TYPED_PREFIXES)):
+            continue
+        at = _line_time(d)
+        out.append({
+            "text": text, "at": at, "edited": False,
+            "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
+            "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
+        })
+        said = ""
+    return out
+
+
 def _prompt_habits(tail: list[dict], ctx: int | None, now: datetime) -> list[tuple[float, str, str]]:
-    """How you've been prompting: a run of short fix requests
-    (``"fix_drip"``), stopping Claude again and again (``"stop_loop"``),
+    """How you've been prompting: small requests sent one at a time
+    (``"drip_feed"``), stopping Claude again and again (``"stop_loop"``),
     or a huge message (``"big_paste"``). The capture hook's coaching
     notes use the same rules and default thresholds
     (``capture_catalogue.COACHING_THRESHOLDS``). Stakes: half the context
     for the first two (each extra message re-reads it), the message's
     own size for the paste."""
-    main = [d for d in tail if d.get("type") == "user" and not d.get("isSidechain")]
-    if not any(_is_human_prompt(d) for d in main):
+    if not any(_is_human_prompt(d) for d in tail if not d.get("isSidechain")):
         return []
     # Imported here, not at the top: the patterns live with the hook's
     # (see the FEEDBACK_NOTE import in :func:`second_line`).
-    from .capture_catalogue import (
-        COACHING_THRESHOLDS as th, CORRECTION_PATTERN, CORRECTION_SCAN_CHARS, FIX_PATTERN, INTERRUPT_PREFIX,
-    )
+    from .capture_catalogue import ACK_PATTERN, COACHING_THRESHOLDS as th, EDIT_TOOLS, INTERRUPT_PREFIX
 
     now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
     hints: list[tuple[float, str, str]] = []
     stop_window_s = th["stop_window_minutes"] * 60
     stops = sum(
-        1 for d in main if _line_text(d).lstrip().startswith(INTERRUPT_PREFIX)
+        1 for d in tail if d.get("type") == "user" and not d.get("isSidechain")
+        and _line_text(d).lstrip().startswith(INTERRUPT_PREFIX)
         and (at := _line_time(d)) is not None and 0 <= (now - at).total_seconds() <= stop_window_s
     )
     if stops >= th["stop_loop_count"]:
         hints.append(((ctx or 0) / 2, f"stopped {stops}x in {th['stop_window_minutes']}m: agree a plan first (Shift+Tab)", "stop_loop"))
-    typed = [
-        (text, _line_time(d)) for d in main
-        if _is_human_prompt(d) and not d.get("isCompactSummary")
-        and not (text := _line_text(d)).lstrip().startswith((INTERRUPT_PREFIX, *_NOT_TYPED_PREFIXES))
-    ]
+    typed = _exchanges(tail, INTERRUPT_PREFIX, EDIT_TOOLS)
     if not typed:
         return hints
-    fix_re = re.compile(FIX_PATTERN, re.IGNORECASE)
-    correction_re = re.compile(CORRECTION_PATTERN, re.IGNORECASE)
-    streak, after = 0, now
-    for text, at in reversed(typed):
-        head = text[:CORRECTION_SCAN_CHARS]
-        is_fix = len(text.strip()) <= th["fix_chars"] and (fix_re.search(head) or correction_re.search(head))
-        if not is_fix or at is None or (after - at).total_seconds() > th["fix_window_minutes"] * 60:
-            break
-        streak, after = streak + 1, at
-    if streak >= th["fix_drip_count"]:
-        hints.append(((ctx or 0) / 2, f"{streak} fixes in a row: list them all in one message", "fix_drip"))
-    last_text, last_at = typed[-1]
+    # The last message is the one being worked on: it counts if it's
+    # small, recent and not an answer; each before it must also have
+    # been answered with a file change (as the hook's ``_drip_count``).
+    window = th["drip_window_minutes"] * 60
+    current = typed[-1]
+
+    def small(text: str) -> bool:
+        return len(text.strip()) <= th["drip_chars"]
+
+    count = 0
+    if (
+        small(current["text"]) and not current["answer"] and current["gap"] is not None
+        and current["gap"] <= window and current["at"] is not None and (now - current["at"]).total_seconds() <= window
+        and not re.fullmatch(ACK_PATTERN, current["text"].strip(), re.IGNORECASE)
+    ):
+        count = 1
+        for ex in reversed(typed[:-1]):
+            if ex["answer"]:
+                continue
+            if not (small(ex["text"]) and ex["edited"] and ex["gap"] is not None and ex["gap"] <= window):
+                break
+            count += 1
+    if count >= th["drip_count"]:
+        hints.append(((ctx or 0) / 2, f"{count} small asks in a row: plan them as one prompt", "drip_feed"))
+    last_text, last_at = current["text"], current["at"]
     paste = len(last_text) / _CHARS_PER_TOKEN
     if paste >= th["big_paste_tokens"] and last_at is not None and (now - last_at).total_seconds() <= 3600:
         hints.append((paste, f"msg ~{_k(paste)}: paste less, or give a file path", "big_paste"))
@@ -1948,9 +1996,9 @@ def coaching_hint(payload: dict, tail: list[dict], now: datetime) -> tuple[float
     - **many reads and searches** (``"explore_reads"``) in the current
       message: an Explore agent reads in its own context and sends back
       a summary.
-    - **how you're prompting** (``"fix_drip"``, ``"stop_loop"``,
-      ``"big_paste"``; :func:`_prompt_habits`): short fix requests one
-      after another, stopping Claude again and again, or a huge message.
+    - **how you're prompting** (``"drip_feed"``, ``"stop_loop"``,
+      ``"big_paste"``; :func:`_prompt_habits`): small requests sent one
+      at a time, stopping Claude again and again, or a huge message.
 
     Stakes are rough token counts, only for picking one hint: the context
     for the cache, a quarter of it for ``/clear`` (it pays only if you

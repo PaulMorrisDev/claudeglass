@@ -1492,17 +1492,27 @@ def _said(text, minutes_ago, **extra):
     return {**_prompt(text), "timestamp": stamp, **extra}
 
 
-def test_hint_short_fix_requests_in_a_row():
-    tail = [_said("Build the settings page", 60), _reply([_use("a")]), _said("fix the header", 15),
+def _at(minutes_ago):
+    return (NOW - timedelta(minutes=minutes_ago)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_hint_small_requests_one_at_a_time():
+    # Words don't matter: each short follow-up got a file change.
+    tail = [_said("Build the settings page with a form and a header", 30), _reply([_use("a", "Write")], ts=_at(29)),
+            _said("make the save button bigger", 15), _reply([_use("b", "Edit")], ts=_at(14)),
             _said("<command-name>/cost</command-name>", 12), _said("[Request interrupted by user]", 11),
-            _said("still wrong", 10), _reply([_use("b")]), _said("doesn't work either", 1)]
+            _said("now move the logo left", 10), _reply([_use("c", "Edit")], ts=_at(9)),
+            _said("and the footer text too", 1)]
     hint = statusline.coaching_hint({"context_window": {"used_tokens": 60_000}}, tail, NOW)
-    assert hint == (30_000, "3 fixes in a row: list them all in one message", "fix_drip")
-    # A detailed message, or a long gap, starts a new run.
-    tail[2] = _said("fix the header: " + "it overlaps the menu. " * 20, 15)
-    assert statusline.coaching_hint({}, tail, NOW) is None
-    tail[2] = _said("fix the header", 45)
-    assert statusline.coaching_hint({}, tail, NOW) is None
+    assert hint == (30_000, "3 small asks in a row: plan them as one prompt", "drip_feed")
+    # A reply that changed no file breaks the run...
+    no_edit = [*tail[:7], _reply([_use("c", "Bash")], ts=_at(9)), tail[8]]
+    assert statusline.coaching_hint({}, no_edit, NOW) is None
+    # ...and so does a detailed message planning several changes at once.
+    detailed = [*tail[:6], _said("Now: " + "move the logo left, grey footer, wider form; " * 8, 10), *tail[7:]]
+    assert statusline.coaching_hint({}, detailed, NOW) is None
+    # A thank-you isn't another request.
+    assert statusline.coaching_hint({}, [*tail[:8], _said("thanks!", 1)], NOW) is None
 
 
 def test_hint_stopping_claude_again_and_again():

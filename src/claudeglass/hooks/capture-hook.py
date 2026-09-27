@@ -29,8 +29,8 @@ connect``):
 - ``UserPromptSubmit`` and ``PostToolUse`` (also matched to
   ``ExitPlanMode``) for coaching notes (``[capture] coaching`` has
   ``coaching_notes``): a short ``tl-coach`` note when a hint applies --
-  an expired cache or a large context when you send a message, a run of
-  short fix requests, a vague correction, a huge paste, stopping Claude
+  an expired cache or a large context when you send a message, small
+  requests sent one at a time, a vague correction, a huge paste, stopping Claude
   again and again, a large result, many reads for one message, a plan
   approved after a lot of planning, or a subagent run past the length
   its type's runs are best split at (``coaching.json``, from your own
@@ -666,25 +666,78 @@ def _is_interrupt(record: dict, prefix: str) -> bool:
     )
 
 
-def _typed(records: list[dict], prefix: str) -> list[tuple[str, datetime | None]]:
-    """The messages you typed, oldest first, with their times: no stopped
-    reply's marker, slash command, compaction summary or subagent line."""
-    out = []
+#: How far back from the end of Claude's last words a question mark
+#: makes your next message an answer to it, not a new request.
+_QUESTION_TAIL_CHARS = 300
+
+
+def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict], dict]:
+    """The messages you typed, oldest first, each with its time
+    (``at``), the seconds since Claude's reply before it (``gap``),
+    whether that reply ended on a question, so the message answers it
+    (``answer``), and whether Claude changed a file in reply to it
+    (``edited``); and, as the second item, ``replied_at`` and
+    ``answer`` for a message sent now. A stopped reply's marker, a slash
+    command, a compaction summary or a subagent's line isn't a message."""
+    out: list[dict] = []
+    replied_at = None
+    said = ""
     for record in records:
-        if record.get("isSidechain") or record.get("isCompactSummary") or not _is_human_prompt(record):
+        if record.get("isSidechain"):
+            continue
+        if record.get("type") == "assistant":
+            replied_at = _reply_time(record) or replied_at
+            for block in _blocks(record):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
+                    said = block["text"]
+                elif block.get("type") == "tool_use" and block.get("name") in edit_tools and out:
+                    out[-1]["edited"] = True
+            continue
+        if record.get("isCompactSummary") or not _is_human_prompt(record):
             continue
         text = _text_of(record)
         if text.lstrip().startswith((prefix, *_NOT_TYPED_PREFIXES)):
             continue
-        out.append((text, _reply_time(record)))
-    return out
+        at = _reply_time(record)
+        out.append({
+            "text": text, "at": at, "edited": False,
+            "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
+            "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
+        })
+        said = ""
+    return out, {"replied_at": replied_at, "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:]}
+
+
+def _drip_count(earlier: list[dict], prompt: str, gap, answer: bool, ack_re, th: dict) -> int:
+    """How many small requests in a row ``prompt`` makes: it and the
+    messages before it, each short and sent within ``drip_window_minutes``
+    of Claude's reply, the earlier ones each answered with a file change.
+    Words don't matter. An answer to Claude's question is skipped, and a
+    bare "thanks" or "ok" sent now counts for nothing."""
+    window = th["drip_window_minutes"] * 60
+
+    def small(text: str) -> bool:
+        return len(text.strip()) <= th["drip_chars"]
+
+    if not small(prompt) or answer or gap is None or gap > window or ack_re.fullmatch(prompt.strip()):
+        return 0
+    count = 1
+    for ex in reversed(earlier):
+        if ex["answer"]:
+            continue
+        if not (small(ex["text"]) and ex["edited"] and ex["gap"] is not None and ex["gap"] <= window):
+            break
+        count += 1
+    return count
 
 
 def _practice_hints(prompt, records: list[dict], coaching: dict, th: dict, now: datetime) -> list[tuple[str, float, dict]]:
-    """``fix_drip``, ``stop_loop``, ``vague_fix`` and ``big_paste`` for the
+    """``drip_feed``, ``stop_loop``, ``vague_fix`` and ``big_paste`` for the
     message you just sent (``prompt``), as ``(kind, stake, fields)``.
-    Only lengths, counts and whether a pattern matched are used; your
-    words never leave this function."""
+    Only lengths, times, what Claude did and whether a pattern matched
+    are used; your words never leave this function."""
     prefix = coaching["interrupt_prefix"]
     window_s = th["stop_window_minutes"] * 60
     stops = sum(
@@ -696,33 +749,30 @@ def _practice_hints(prompt, records: list[dict], coaching: dict, th: dict, now: 
         stop = ("stop_loop", stops, {"count": stops, "minutes": round(th["stop_window_minutes"])})
     if not isinstance(prompt, str) or not prompt.strip():
         return [stop] if stop else []
-    scan = int(coaching["correction_scan_chars"])
-    fix_re = re.compile(coaching["fix_pattern"], re.IGNORECASE)
-    correction_re = re.compile(coaching["correction_pattern"], re.IGNORECASE)
-
-    def is_fix(text: str) -> bool:
-        head = text[:scan]
-        return len(text.strip()) <= th["fix_chars"] and bool(fix_re.search(head) or correction_re.search(head))
-
-    earlier = _typed(records, prefix)
+    earlier, now_state = _exchanges(records, prefix, coaching["edit_tools"])
     # Claude Code may already have written this message to the transcript.
-    if earlier and earlier[-1][0] == prompt and earlier[-1][1] is not None and (now - earlier[-1][1]).total_seconds() < 10:
+    last = earlier[-1] if earlier else None
+    if last and last["text"] == prompt and last["at"] is not None and (now - last["at"]).total_seconds() < 10:
         earlier.pop()
-    streak = 0
-    if is_fix(prompt):
-        streak, after = 1, now
-        for text, at in reversed(earlier):
-            if not is_fix(text) or at is None or (after - at).total_seconds() > th["fix_window_minutes"] * 60:
-                break
-            streak, after = streak + 1, at
+        now_state = {"replied_at": None, "answer": last["answer"]}
+        gap = last["gap"]
+    else:
+        replied_at = now_state["replied_at"]
+        gap = (now - replied_at).total_seconds() if replied_at is not None else None
+    count = _drip_count(
+        earlier, prompt, gap, now_state["answer"], re.compile(coaching["ack_pattern"], re.IGNORECASE), th
+    )
     drip = vague = paste = None
-    if streak >= th["fix_drip_count"]:
-        drip = ("fix_drip", streak, {"count": streak})
-    elif (
-        streak and len(prompt.strip()) <= th["vague_fix_chars"]
-        and not re.search(coaching["specific_pattern"], prompt)
-    ):
-        vague = ("vague_fix", 1, {})
+    if count >= th["drip_count"]:
+        drip = ("drip_feed", count, {"count": count})
+    else:
+        scan = int(coaching["correction_scan_chars"])
+        head = prompt[:scan]
+        asks_fix = re.search(coaching["fix_pattern"], head, re.IGNORECASE) or re.search(
+            coaching["correction_pattern"], head, re.IGNORECASE
+        )
+        if asks_fix and len(prompt.strip()) <= th["vague_fix_chars"] and not re.search(coaching["specific_pattern"], prompt):
+            vague = ("vague_fix", 1, {})
     tokens = len(prompt) / _CHARS_PER_TOKEN
     if tokens >= th["big_paste_tokens"]:
         paste = ("big_paste", tokens, {"tokens": _k(tokens)})

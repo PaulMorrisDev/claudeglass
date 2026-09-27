@@ -11,24 +11,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Warnings about how you prompt.** Coaching notes (`coaching_notes`)
   gain four hints for habits that cost replies:
-  - `fix_drip`: a third short fix request in a row ("fix this", "still
-    wrong"). Claude checks the rest of the work for the same kind of
-    problem, then suggests listing every problem in one message, or
-    rewinding with Esc Esc if the approach is wrong.
+  - `drip_feed`: a third small request in a row, each its own message
+    ("make the button bigger", "now move the logo", "and the footer
+    too"). It goes by what happened, not the words: short messages sent
+    soon after Claude's reply, each answered with a file change. Claude
+    suggests working out everything the work needs and sending it as
+    one message.
   - `stop_loop`: stopping Claude three times in 20 minutes. Claude says
     what it will do before changing anything, and suggests plan mode.
   - `vague_fix`: a short fix request that names nothing specific and
-    doesn't say what it should be instead.
-    Claude asks what you saw if it can't tell, or suggests saying what
-    you saw and expected next time.
+    doesn't say what it should be instead. Claude asks what you saw if
+    it can't tell, or suggests saying what you saw and expected next
+    time.
   - `big_paste`: a message of 10,000 tokens or more. Claude suggests
     pasting only the part that matters, or giving a file path.
 
   The coaching line in the status line shows the first, second and
-  fourth too. Your messages are read only for their length, time and
-  whether they hold a fix or correction word; nothing about your words
-  is kept or passed on. Each threshold can be changed in `config.toml`
-  (see [coaching.md](docs/coaching.md)).
+  fourth too. Your messages are read only for their length, their time
+  and whether Claude changed files after them (`vague_fix` also looks
+  for a fix or correction word); nothing about your words is kept or
+  passed on. Each threshold can be changed in `config.toml` (see
+  [coaching.md](docs/coaching.md)).
 
 ### Changed
 

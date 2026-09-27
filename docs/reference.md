@@ -229,7 +229,7 @@ run `/tl-feedback`. The first line doesn't change. A hint appears for:
 - a large last tool output;
 - many reads in one message;
 - a warm cache about to go cold;
-- three short fix requests in a row;
+- three small requests in a row, each its own message;
 - stopping Claude three times in 20 minutes;
 - a message of 10,000 tokens or more, such as a pasted log.
 
