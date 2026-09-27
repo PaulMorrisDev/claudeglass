@@ -1768,10 +1768,13 @@ def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
     """Claude Code's JSON answer to ``job``, from ``claude -p`` on Haiku
     with no tools, settings, MCP servers or saved session: the excerpt on
     stdin (never on the command line, where other users could read it),
-    the instructions as the system prompt. Raises ``FileNotFoundError``
-    without a ``claude`` command, ``subprocess.TimeoutExpired``, or
-    ``ValueError`` when the call fails."""
+    the instructions as the system prompt, from a file. On the command
+    line they would pass through cmd.exe wherever ``claude`` is npm's
+    ``claude.cmd``, which reads their ``|`` and line breaks as its own.
+    Raises ``FileNotFoundError`` without a ``claude`` command,
+    ``subprocess.TimeoutExpired``, or ``ValueError`` when the call fails."""
     import subprocess
+    import tempfile
 
     command = _claude_command()
     if command is None:
@@ -1780,15 +1783,25 @@ def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
     env[judge["env"]] = "1"
     env["MAX_THINKING_TOKENS"] = str(int(judge.get("thinking_tokens") or 0))
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
-    args = [
-        command, "-p", "--model", judge["model"], "--tools", "", "--setting-sources", "", "--strict-mcp-config",
-        "--no-session-persistence", "--output-format", "json", "--system-prompt", job["system"],
-    ]
-    extra: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
-    done = subprocess.run(
-        args, input=job["excerpt"].encode("utf-8"), capture_output=True, timeout=judge["timeout_s"], env=env,
-        cwd=str(cwd) if cwd is not None and cwd.is_dir() else None, **extra,
-    )
+    folder = str(cwd) if cwd is not None and cwd.is_dir() else None
+    handle, prompt_file = tempfile.mkstemp(prefix=".judge-", suffix=".txt", dir=folder)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8", newline="\n") as out:
+            out.write(job["system"])
+        args = [
+            command, "-p", "--model", judge["model"], "--tools", "", "--setting-sources", "", "--strict-mcp-config",
+            "--no-session-persistence", "--output-format", "json", "--system-prompt-file", prompt_file,
+        ]
+        extra: dict = {"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}
+        done = subprocess.run(
+            args, input=job["excerpt"].encode("utf-8"), capture_output=True, timeout=judge["timeout_s"], env=env,
+            cwd=folder, **extra,
+        )
+    finally:
+        try:
+            os.unlink(prompt_file)
+        except OSError:
+            pass
     answer = json.loads(done.stdout.decode("utf-8", errors="replace") or "null")
     if done.returncode != 0 or not isinstance(answer, dict) or answer.get("is_error"):
         raise ValueError("failed")

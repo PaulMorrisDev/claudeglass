@@ -175,6 +175,10 @@ the changes listed under both releases.
 - **`capture off` says when a leftover hook still runs after every tool
   call** (about 50 ms each, after a Deep level or coaching notes), and
   that `capture remove` takes the entries out.
+- **Haiku reads its instructions from a file.** They went on the
+  command line, and where `claude` is npm's `claude.cmd` on Windows,
+  cmd.exe takes their `|` and line breaks for its own. The file is in
+  the data folder and deleted as soon as the call ends.
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.

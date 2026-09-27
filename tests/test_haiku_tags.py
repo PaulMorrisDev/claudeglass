@@ -592,6 +592,8 @@ def test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude(tmp_path):
     fake.write_text(
         "#!/bin/sh\n"
         f'printf "%s\\n" "$*" > "{seen}.args"\n'
+        f'for a in "$@"; do [ -n "$want" ] && cp "$a" "{seen}.prompt"; want=""; '
+        '[ "$a" = "--system-prompt-file" ] && want=1; done\n'
         f'cat > "{seen}.stdin"\n'
         f'env | grep -c "^{cat.JUDGE_ENV}=1" > "{seen}.env"\n'
         "echo '{\"result\": \"[tl: task=bugfix brief=clear]\", \"total_cost_usd\": 0.0013, "
@@ -623,6 +625,11 @@ def test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude(tmp_path):
     assert "-p --model haiku --tools  --setting-sources  --strict-mcp-config --no-session-persistence" in args
     # The excerpt went in on stdin, never on the command line.
     assert "wrong sum" in Path(f"{seen}.stdin").read_text(encoding="utf-8") and "wrong sum" not in args
+    # Nor the instructions, whose | and line breaks cmd.exe would take for
+    # its own where claude is a .cmd: they're a file, gone once it's read.
+    assert "--system-prompt-file " in args and cat.JUDGE_INTRO not in args
+    assert Path(f"{seen}.prompt").read_text(encoding="utf-8") == cat.judge_text(cat.level_metrics("essentials"))
+    assert not list((tmp_path / "cg").glob(".judge-*"))
     assert Path(f"{seen}.env").read_text(encoding="utf-8").strip() == "1"
 
 

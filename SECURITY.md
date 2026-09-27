@@ -354,7 +354,9 @@ tool's output. It hands the excerpt to a worker (the same script with
 `--judge`) and returns. The worker runs `claude -p --model haiku --tools ""
 --setting-sources "" --strict-mcp-config --no-session-persistence
 --output-format json`, the excerpt on stdin (never on the command line,
-where other local users could see it), with `CLAUDEGLASS_JUDGE=1` set so
+where other local users could see it) and the instructions (this tool's
+own fixed text) in a short-lived file in `<config-dir>`, deleted once the
+call ends, with `CLAUDEGLASS_JUDGE=1` set so
 the hook does nothing inside that call. That is Claude Code itself, with
 your own login and your own provider settings: the excerpt goes where
 the rest of the session already went, and this tool reads no API key or
