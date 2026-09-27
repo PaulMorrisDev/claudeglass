@@ -889,20 +889,23 @@ def estimate(past: History, ids, sample: int = 100, tagger: str = catalogue.DEFA
     reply = reply + _TAG_FRAME_CHARS if reply else 0
     report = sum(m.out_chars for m in enabled if m.sub_line)
     report = report + _TAG_FRAME_CHARS if report else 0
-    # A brief's [spawn:]/[retry:] words, per subagent; the feedback
-    # reminder's line, at most once per message of yours.
+    # A brief's [spawn:]/[retry:] words, per subagent (none now); the
+    # feedback reminder's line, once a session: its share of the per-reply
+    # carry is sessions over messages.
     brief = sum(m.out_chars for m in enabled if (m.main_extra or m.sub_extra) and m.group != "feedback")
     reminder = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
+    once = past.sessions / past.cycles if past.cycles else 0.0
     cost = (
         main * past.main_note
         + sub * past.sub_note
         + no_rules * past.sub_note_no_rules
-        + (reply + reminder) * past.reply_tag
+        + reply * past.reply_tag
+        + reminder * past.reply_tag * once
         + report * past.report_tag
         + brief * past.brief_tag
     )
     note_tokens = main * past.main_notes + max(sub, no_rules) * past.sub_notes
-    tag_tokens = (reply + reminder) * past.cycles + report * past.subagents + brief * past.subagents
+    tag_tokens = reply * past.cycles + reminder * past.sessions + report * past.subagents + brief * past.subagents
     if haiku:
         cost += past.cycles * catalogue.JUDGE_USD_PER_CALL
     if agents:

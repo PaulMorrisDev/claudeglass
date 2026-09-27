@@ -472,13 +472,17 @@ def test_enough_data_counts_answers_against_each_target():
     assert capture.enough_target("no-such-metric") == 0
 
 
-def test_estimate_prices_the_feedback_reminder_once_per_message():
-    past = capture.History(days=14, cycles=10, subagents=3, main_notes=2, main_note=1e-6, reply_tag=2e-6, brief_tag=5e-6)
+def test_estimate_prices_the_feedback_reminder_once_per_session():
+    past = capture.History(days=14, sessions=2, cycles=10, subagents=3, main_notes=2, main_note=1e-6, reply_tag=2e-6,
+                           brief_tag=5e-6)
     est = capture.estimate(past, ("feedback_reminder",))
     note = len(catalogue.note_text(("feedback_reminder",), "main")) + capture._WRAP["SessionStart"]
     out = catalogue.METRICS_BY_ID["feedback_reminder"].out_chars
-    assert est.cost == pytest.approx(note * 1e-6 + out * 2e-6)
-    assert est.tag_tokens == round(out * 10 / 4)
+    # 2 sessions of 10 messages: 2 reminders, each carried like a reply's tag.
+    assert est.cost == pytest.approx(note * 1e-6 + out * 2e-6 * 2 / 10)
+    assert est.tag_tokens == round(out * 2 / 4)
+    rough = catalogue.rough_tokens(("task", "feedback_reminder"))
+    assert rough["reminder"] == round(out / 4) and rough["reply_tag"] == round((13 + 6) / 4)
 
 
 # -- weekly_cost --------------------------------------------------------------------

@@ -1851,18 +1851,19 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     the note at each session start, clear or compaction
     (``session_note``); at each subagent start (``subagent_note``) and
     per subagent report (``report_tag``), both now always 0, as an agent
-    is asked for nothing; the tag Claude writes per reply (``reply_tag``);
-    the note after a large or web tool result (``tool_note``). Amounts measured from transcripts replace these once
-    capture has run. While Claude Haiku writes the tags (``tagger``), the
-    reply carries none: ``reply_tag`` is only the reminder line, if on."""
+    is asked for nothing; the tag Claude writes per reply (``reply_tag``),
+    none while Claude Haiku writes the tags (``tagger``); the /tl-feedback
+    reminder Claude adds once a session (``reminder``); the note after a
+    large or web tool result (``tool_note``). Amounts measured from
+    transcripts replace these once capture has run."""
     enabled = [METRICS_BY_ID[i] for i in ids if i in METRICS_BY_ID]
     main, sub = note_text(ids, "main", tagger=tagger), note_text(ids, "subagent")
+    # The /tl-feedback reminder comes once a session, not with every reply.
+    reminder = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
     if tagger == "haiku" and any(m.main_line for m in enabled):
-        # No tag: only the reminder line ends a reply.
-        reply = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
-        frame = 0
+        reply = frame = 0  # no tag at all
     else:
-        reply = sum(m.out_chars for m in enabled if m.main_line or m.main_extra)
+        reply = sum(m.out_chars for m in enabled if m.main_line or (m.main_extra and m.group != "feedback"))
         frame = _TAG_FRAME_CHARS
     report = sum(m.out_chars for m in enabled if m.sub_line or m.sub_extra)
     tool = max(
@@ -1875,6 +1876,7 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
         "reply_tag": round((reply + frame) / 4) if reply else 0,
         "report_tag": round(report / 4),
         "tool_note": round((tool + NOTE_WRAP_CHARS + len("PostToolUse")) / 4) if tool else 0,
+        "reminder": round(reminder / 4),
         # Not tokens of Claude's: 1 when each agent run gets a Haiku call.
         "agent_judge": 1 if agent_metric_ids(ids) else 0,
     }

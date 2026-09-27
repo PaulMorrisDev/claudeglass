@@ -3161,6 +3161,8 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
         lines.append(f"about {rough['subagent_note']} tokens of note when a subagent starts")
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
+    if rough["reminder"]:
+        lines.append(f"about {rough['reminder']} tokens once a session, for the /tl-feedback reminder")
     if rough["report_tag"]:
         lines.append(f"about {rough['report_tag']} tokens of tag at the end of each subagent report")
     if rough["tool_note"]:
