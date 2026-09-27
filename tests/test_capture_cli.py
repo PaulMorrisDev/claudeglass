@@ -468,7 +468,7 @@ def test_a_symlinked_settings_file_stays_a_symlink(tmp_path):
     assert "hooks" in json.loads(dotfiles.read_text(encoding="utf-8"))
     assert dotfiles.stat().st_mode & 0o777 == 0o600
     rc, _ = _capture(config_dir, "remove", "--yes")
-    assert (config_dir.parent / "settings.json").is_symlink()
+    assert rc == 0 and (config_dir.parent / "settings.json").is_symlink()
     assert json.loads(dotfiles.read_text(encoding="utf-8")) == {"model": "opus"}
 
 

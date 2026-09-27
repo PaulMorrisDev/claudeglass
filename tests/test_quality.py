@@ -9,7 +9,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture_catalogue as catalogue, events, parse, quality
+from claudeglass import events, parse, quality
 from claudeglass.model import EventKind, TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
