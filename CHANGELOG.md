@@ -129,6 +129,10 @@ the changes listed under both releases.
   back half-done work. You get a one-line notice instead, once a run.
 - **The /tl-feedback reminder comes once a session**, after the first
   piece of work Claude finishes, instead of after every one.
+- **After upgrading, run `claudeglass capture connect`** if capture is
+  on: agent runs need the new `SubagentStop` entry, and the old
+  `SubagentStart` one is taken out. `capture status` says when it's
+  needed.
 - **Fewer Haiku calls with background agents.** A turn that ends while a
   background agent is still running isn't judged: the turn that answers
   its report is, with the whole piece of work. It was a call per turn in
@@ -156,6 +160,21 @@ the changes listed under both releases.
   Claude to drop an approach that never ran (`repeat_ask`), and a run of
   failures isn't counted as you stopping Claude (`stop_loop`). The
   status line and the "How you prompt" counts follow the same rule.
+- **`apply` asks before it writes.** It explained the change and wrote
+  it at once, even at user scope, where a profile such as
+  `interactive-chat` sets the effort level for every project. It now
+  prints the diff and asks; `--yes` skips the question.
+- **A settings edit made while a question waits is never lost.** Every
+  command that changes `settings.json` (capture, init, uninstall,
+  update, apply) worked out the new file before asking and wrote it
+  after, so a permission Claude Code saved in the meantime ("don't ask
+  again") was overwritten. Now nothing is written if the file changed,
+  and the message says to run the command again. The write is atomic,
+  keeps the file's permissions, and a symlinked `settings.json` (kept in
+  a dotfiles folder, say) stays a symlink.
+- **`capture off` says when a leftover hook still runs after every tool
+  call** (about 50 ms each, after a Deep level or coaching notes), and
+  that `capture remove` takes the entries out.
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.

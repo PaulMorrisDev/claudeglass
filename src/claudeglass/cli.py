@@ -876,6 +876,9 @@ def _add_apply_args(sub: argparse.ArgumentParser) -> None:
         dest="list_backups",
         help="list previous applies (timestamp, profile, scope) and exit",
     )
+    sub.add_argument(
+        "--yes", action="store_true", help="make the change without asking (the diff is still printed)"
+    )
 
 
 def _add_claude_root_arg(sub: argparse.ArgumentParser) -> None:
@@ -3919,10 +3922,15 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 "Coaching notes stay on: they don't depend on the capture level. "
                 "'claudeglass capture disable coaching_notes' turns them off.\n"
             )
-        elif hook_health.check_capture((), claude_root=claude_root, config_dir=config_dir).extra:
+        elif (left := hook_health.check_capture((), claude_root=claude_root, config_dir=config_dir).extra):
+            every_tool = any(spec.event == "PostToolUse" for spec in left)
             stdout.write(
-                "The capture hooks stay in settings.json and add nothing while capture is off. "
-                "'claudeglass capture remove' takes them out.\n"
+                "The capture hooks stay in settings.json and add nothing while capture is off"
+                + (
+                    ", though one still starts Python for about 50 ms after every shell command, read and search"
+                    if every_tool else ""
+                )
+                + ". 'claudeglass capture remove' takes them out.\n"
             )
         return 0
     if action == "remove" and skill_on:
@@ -4001,7 +4009,7 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
         elif _ask("   Remove these entries? settings.json is backed up first.", assume_yes=args.yes):
             try:
                 backup = footprint.remove_settings_entries(plan)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 problems += 1
                 print(f"   Could not remove them: {exc}\n")
             else:
@@ -4577,7 +4585,22 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         print("Already overridden by a higher-precedence layer (writing won't change what Claude Code uses):")
         for note in plan.overridden:
             print(f"  # {note}")
-    result = apply_mod.execute(plan, config_dir=config_dir)
+    if not plan.diff_text:
+        print("No changes to apply.")
+        return 0
+    # It changes how Claude works (a model, an effort level, a context
+    # setting), at user scope for every project: shown and asked, as
+    # every settings.json change this tool makes is.
+    print()
+    print(plan.diff_text)
+    if not _ask("Apply these changes? Each file is backed up first.", assume_yes=args.yes):
+        print("Nothing changed. Run the same command with --yes to apply it without asking.")
+        return 1
+    try:
+        result = apply_mod.execute(plan, config_dir=config_dir)
+    except apply_mod.ApplyError as exc:
+        print(f"claudeglass {command}: {exc}", file=sys.stderr)
+        return 1
     print(f"Applied {plan.profile_id} ({scope}).")
     for path in result.written:
         print(f"  wrote {path}")

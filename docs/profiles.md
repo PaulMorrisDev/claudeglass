@@ -614,7 +614,7 @@ python -m claudeglass apply --set KEY=VALUE [--set ...] [--agent NAME]
                                              [--scope user|project-local|repo]
                                              [--project-dir PATH]
                                              [--dry-run] [--launch]
-                                             [--allow-tracked] [--force]
+                                             [--allow-tracked] [--force] [--yes]
                                              [--revert TS [--ignore-changes]] [--list-backups]
 ```
 
@@ -624,7 +624,8 @@ For example:
 # Preview the exact diff, nothing written:
 python -m claudeglass apply interactive-chat --dry-run
 
-# Apply it to the current project (writes .claude/settings.local.json):
+# Apply it to the current project (writes .claude/settings.local.json,
+# after showing the diff and asking; --yes skips the question):
 python -m claudeglass apply interactive-chat --project-dir .
 
 # Undo it, naming the timestamp the apply printed:

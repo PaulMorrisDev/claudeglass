@@ -596,7 +596,8 @@ def repair(health: HookHealth, *, now: datetime | None = None) -> Path:
     if health.command is None or health.fixed_command is None:
         raise ValueError("nothing to repair")
     now = now or datetime.now(timezone.utc)
-    settings = json.loads(health.settings_path.read_text(encoding="utf-8"))
+    before = health.settings_path.read_text(encoding="utf-8")
+    settings = json.loads(before)
     replaced = 0
     for event in list(settings.get("hooks", {})):
         for _matcher, entry in _event_entries(settings, event):
@@ -606,8 +607,8 @@ def repair(health: HookHealth, *, now: datetime | None = None) -> Path:
     if replaced == 0:
         raise ValueError("the hook command changed since it was checked")
     backup = backup_path(health.settings_path, now)
-    shutil.copy2(health.settings_path, backup)
-    health.settings_path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    shutil.copy2(_settings_target(health.settings_path), backup)
+    replace_settings(health.settings_path, json.dumps(settings, indent=2, ensure_ascii=False) + "\n", before)
     return backup
 
 
@@ -695,6 +696,10 @@ class ConnectPlan:
     diff: str
     #: The whole file after the change; ``None`` when nothing changes.
     new_text: str | None
+    #: The file as the change was worked out from (``""`` when there was
+    #: none); ``None`` when not known. :func:`connect` writes nothing if
+    #: it no longer holds this.
+    old_text: str | None = None
 
 
 def plan_connect(
@@ -805,7 +810,7 @@ def _finish_plan(path: Path, before: str, settings: dict, changes: list[str]) ->
             tofile="settings.json (after)",
         )
     )
-    return ConnectPlan(path, changes, diff, after)
+    return ConnectPlan(path, changes, diff, after, before)
 
 
 def _entry_spec(event: str, matcher: str, entry: dict) -> HookSpec | None:
@@ -1130,19 +1135,76 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
     return []
 
 
+class SettingsChanged(ValueError):
+    """settings.json changed between working out an edit and writing it."""
+
+    def __init__(self, path: Path):
+        super().__init__(
+            f"{path} changed while this was waiting (Claude Code writes it too, when you allow a tool for good, "
+            "say), so nothing was written. Run the command again to work the change out from the file as it is now."
+        )
+
+
+def _settings_target(path: Path) -> Path:
+    """The file to write for ``path``: a symlinked settings.json (kept in
+    a dotfiles folder, say) is written through, never replaced by a
+    plain file."""
+    return path.resolve() if path.is_symlink() else path
+
+
+def _current_text(path: Path) -> str:
+    try:
+        return _settings_target(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def check_unchanged(path: Path, old_text: str | None) -> None:
+    """Raise :class:`SettingsChanged` when ``path`` no longer holds
+    ``old_text`` (``""``: no file); ``None`` checks nothing."""
+    if old_text is not None and _current_text(path) != old_text:
+        raise SettingsChanged(path)
+
+
+def replace_settings(path: Path, new_text: str, old_text: str | None = None) -> None:
+    """Write ``new_text`` to ``path`` in one step: a temp file beside it,
+    then ``os.replace``, keeping the file's permissions, so a reader never
+    sees half a file. Raises :class:`SettingsChanged`, writing nothing,
+    when the file no longer holds ``old_text`` (what the edit was worked
+    out from): an edit planned before a yes/no question must never undo
+    one Claude Code made while it waited."""
+    check_unchanged(path, old_text)
+    target = _settings_target(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(new_text, encoding="utf-8")
+        if target.exists():
+            shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def connect(plan: ConnectPlan, *, now: datetime | None = None) -> Path | None:
     """Write ``plan`` after backing up the current file to
     ``settings.json.bak-<UTC timestamp>``. Returns the backup path, or
-    ``None`` when there was no file to back up."""
+    ``None`` when there was no file to back up. Raises
+    :class:`SettingsChanged`, writing nothing, when the file changed since
+    the plan was worked out."""
     if plan.new_text is None:
         raise ValueError("nothing to change")
+    check_unchanged(plan.settings_path, plan.old_text)
     now = now or datetime.now(timezone.utc)
     backup = None
     if plan.settings_path.exists():
         backup = backup_path(plan.settings_path, now)
-        shutil.copy2(plan.settings_path, backup)
-    plan.settings_path.parent.mkdir(parents=True, exist_ok=True)
-    plan.settings_path.write_text(plan.new_text, encoding="utf-8")
+        shutil.copy2(_settings_target(plan.settings_path), backup)
+    replace_settings(plan.settings_path, plan.new_text, plan.old_text)
     return backup
 
 

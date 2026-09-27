@@ -229,7 +229,7 @@ def test_cmd_apply_user_scope_resolves_claude_root_independently_of_config_dir(t
     profile_path = tmp_path / "sample.toml"
     _write_profile_toml(profile_path, settings={"effortLevel": "high"})
 
-    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir)])
+    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir), "--yes"])
     assert exit_code == 0
 
     settings_path = claude_root / "settings.json"
@@ -249,7 +249,7 @@ def test_cmd_apply_user_scope_agent_patch_finds_claude_root_agents_file(tmp_path
     profile_path = tmp_path / "sample.toml"
     _write_profile_toml(profile_path, agents={"reviewer": {"model": "sonnet"}})
 
-    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir)])
+    exit_code = cli.main(["apply", str(profile_path), "--config-dir", str(config_dir), "--yes"])
     assert exit_code == 0
     assert "model: sonnet" in (agents_dir / "reviewer.md").read_text(encoding="utf-8")
 
@@ -261,7 +261,7 @@ def test_cmd_apply_claude_root_flag_overrides_default(tmp_path):
     _write_profile_toml(profile_path, settings={"effortLevel": "high"})
 
     exit_code = cli.main(
-        ["apply", str(profile_path), "--config-dir", str(config_dir), "--claude-root", str(explicit_root)]
+        ["apply", str(profile_path), "--config-dir", str(config_dir), "--claude-root", str(explicit_root), "--yes"]
     )
     assert exit_code == 0
     assert (explicit_root / "settings.json").is_file()
@@ -1707,7 +1707,8 @@ def test_cmd_apply_set_explains_the_change_then_reverts(tmp_path, capsys):
     claude_root.mkdir()
     settings = claude_root / "settings.json"
     settings.write_text('{"effortLevel": "high"}', encoding="utf-8")
-    base = ["apply", "--set", "effortLevel=medium", "--config-dir", str(config_dir), "--claude-root", str(claude_root)]
+    base = ["apply", "--set", "effortLevel=medium", "--config-dir", str(config_dir), "--claude-root", str(claude_root),
+            "--yes"]
 
     assert cli.main([*base, "--dry-run"]) == 0
     out = capsys.readouterr().out
@@ -1729,6 +1730,63 @@ def test_cmd_apply_set_explains_the_change_then_reverts(tmp_path, capsys):
     assert json.loads(settings.read_text(encoding="utf-8")) == {"effortLevel": "high"}
 
 
+def test_cmd_apply_shows_the_change_and_asks_first(tmp_path, capsys, monkeypatch):
+    # It changes how Claude works for every project: never without a yes.
+    claude_root = tmp_path / "claude"
+    config_dir = tmp_path / "tl"
+    claude_root.mkdir()
+    settings = claude_root / "settings.json"
+    settings.write_text('{"effortLevel": "high"}', encoding="utf-8")
+    command = ["apply", "--set", "effortLevel=medium", "--config-dir", str(config_dir), "--claude-root", str(claude_root)]
+    for answer in ("n\n", ""):  # no, or nobody there to answer
+        monkeypatch.setattr(sys, "stdin", io.StringIO(answer))
+        assert cli.main(command) == 1
+        out = capsys.readouterr().out
+        assert '"effortLevel": "medium"' in out and "Apply these changes?" in out and "Nothing changed" in out
+        assert json.loads(settings.read_text(encoding="utf-8")) == {"effortLevel": "high"}
+    monkeypatch.setattr(sys, "stdin", io.StringIO("y\n"))
+    assert cli.main(command) == 0
+    assert json.loads(settings.read_text(encoding="utf-8")) == {"effortLevel": "medium"}
+
+
+def test_cmd_apply_never_overwrites_a_file_changed_while_it_asked(tmp_path, capsys, monkeypatch):
+    claude_root = tmp_path / "claude"
+    config_dir = tmp_path / "tl"
+    claude_root.mkdir()
+    settings = claude_root / "settings.json"
+    settings.write_text('{"effortLevel": "high"}', encoding="utf-8")
+
+    class Answer(io.StringIO):
+        def readline(self, *args):
+            # Claude Code allows a tool for good while the question waits.
+            settings.write_text('{"effortLevel": "high", "permissions": {"allow": ["Bash(npm test)"]}}', encoding="utf-8")
+            return "y\n"
+
+    monkeypatch.setattr(sys, "stdin", Answer())
+    command = ["apply", "--set", "effortLevel=medium", "--config-dir", str(config_dir), "--claude-root", str(claude_root)]
+    assert cli.main(command) == 1
+    assert "run the command again" in capsys.readouterr().err
+    assert json.loads(settings.read_text(encoding="utf-8"))["permissions"] == {"allow": ["Bash(npm test)"]}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need extra rights on Windows")
+def test_cmd_apply_writes_through_a_symlinked_settings_file(tmp_path):
+    claude_root = tmp_path / "claude"
+    config_dir = tmp_path / "tl"
+    claude_root.mkdir()
+    dotfiles = tmp_path / "dotfiles" / "claude-settings.json"
+    dotfiles.parent.mkdir()
+    dotfiles.write_text('{"effortLevel": "high"}', encoding="utf-8")
+    dotfiles.chmod(0o600)
+    (claude_root / "settings.json").symlink_to(dotfiles)
+    command = ["apply", "--set", "effortLevel=medium", "--config-dir", str(config_dir), "--claude-root",
+               str(claude_root), "--yes"]
+    assert cli.main(command) == 0
+    assert (claude_root / "settings.json").is_symlink()
+    assert json.loads(dotfiles.read_text(encoding="utf-8")) == {"effortLevel": "medium"}
+    assert dotfiles.stat().st_mode & 0o777 == 0o600
+
+
 def test_cmd_apply_set_merges_a_skill_override_by_name(tmp_path, capsys):
     claude_root = tmp_path / "claude"
     config_dir = tmp_path / "tl"
@@ -1741,7 +1799,7 @@ def test_cmd_apply_set_merges_a_skill_override_by_name(tmp_path, capsys):
     ]
     assert cli.main([*command, "--dry-run"]) == 0
     assert "skillOverrides" in capsys.readouterr().out
-    assert cli.main(command) == 0
+    assert cli.main([*command, "--yes"]) == 0
     assert json.loads(settings.read_text(encoding="utf-8"))["skillOverrides"] == {
         "pdf": "off",
         "impeccable:impeccable": "name-only",
@@ -1771,7 +1829,7 @@ def test_cmd_apply_set_env_writes_the_settings_env_block(tmp_path, capsys):
     assert "export" not in out.lower()
     assert json.loads(settings.read_text(encoding="utf-8")) == {"env": {"SOME_OTHER_VAR": "keep-me"}}
 
-    assert cli.main(command) == 0
+    assert cli.main([*command, "--yes"]) == 0
     assert json.loads(settings.read_text(encoding="utf-8")) == {
         "env": {"SOME_OTHER_VAR": "keep-me", "ENABLE_TOOL_SEARCH": "true"}
     }

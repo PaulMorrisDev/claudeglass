@@ -510,6 +510,9 @@ class UninstallPlan:
     settings_changes: list[str] = field(default_factory=list)
     settings_diff: str = ""
     new_settings_text: str | None = None
+    #: settings.json as the plan was worked out from (``""``: no file);
+    #: nothing is written if it changed since.
+    old_settings_text: str | None = None
     #: Applied changes still in place, newest first.
     applied: list[apply_mod.BackupInfo] = field(default_factory=list)
     data_dir: Path | None = None
@@ -569,6 +572,7 @@ def plan_uninstall(config_dir: str | Path, *, claude_root: str | Path | None = N
     if plan.settings_changes:
         after = json.dumps(after_settings, indent=2, ensure_ascii=False) + "\n"
         plan.new_settings_text = after
+        plan.old_settings_text = before
         plan.settings_diff = "".join(
             difflib.unified_diff(
                 before.splitlines(keepends=True),
@@ -585,10 +589,11 @@ def remove_settings_entries(plan: UninstallPlan, *, now: datetime | None = None)
     ``settings.json.bak-<UTC timestamp>``. Returns the backup path."""
     if plan.new_settings_text is None:
         raise ValueError("nothing to remove")
+    hook_health.check_unchanged(plan.settings_path, plan.old_settings_text)
     now = now or datetime.now(timezone.utc)
     backup = hook_health.backup_path(plan.settings_path, now)
-    shutil.copy2(plan.settings_path, backup)
-    plan.settings_path.write_text(plan.new_settings_text, encoding="utf-8")
+    shutil.copy2(plan.settings_path.resolve(), backup)
+    hook_health.replace_settings(plan.settings_path, plan.new_settings_text, plan.old_settings_text)
     return backup
 
 
