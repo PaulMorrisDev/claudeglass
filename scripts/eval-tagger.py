@@ -19,9 +19,10 @@ Three steps, each spending no more than it says:
         Builds the hook's excerpt of each scenario's last turn (with
         Claude's own tag taken out of the reply) and asks each judge
         configuration for the tag, --repeats times, the way the hook does
-        (capture-hook.py's ask_haiku). Writes the raw answers to
-        scripts/tagger-eval/results/<time>.json. Spends a little: about
-        $0.0015 a Haiku call.
+        (capture-hook.py's ask_haiku). Each call gets a line of its own,
+        so no run reads another's cache and costs are what real use pays.
+        Writes the raw answers to scripts/tagger-eval/results/<time>.json.
+        Spends a little: about $0.002 a Haiku call, $0.009 a Sonnet one.
 
     python scripts/eval-tagger.py score [RESULTS] [--out FILE]
         The report, from the newest results file by default: accuracy per
@@ -290,6 +291,11 @@ def _job(scenario_id: str) -> tuple[dict, dict]:
 
 def _ask(job: dict, config: dict) -> dict:
     judge = {**CATALOGUE["judge"], "model": config["model"], "thinking_tokens": config["thinking_tokens"]}
+    # A line unique to this call, so it can't read another run's cache
+    # (Claude Code caches the whole prompt, an hour at a time): in real
+    # use every excerpt is new, and the cost column should say what that
+    # costs.
+    job = {**job, "excerpt": f"{job['excerpt']}\n(Call {uuid.uuid4().hex[:12]}.)"}
     started = time.monotonic()
     try:
         answer = HOOK.ask_haiku(job, judge)

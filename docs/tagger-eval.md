@@ -51,7 +51,7 @@ On the 26 tuning sessions:
 |---|---|---|---|---|
 | Haiku | 84% | 77% | $0.0016 | 1.7 |
 | Haiku, thinking | 87% | 72% | $0.0053 | 10.3 |
-| Sonnet | 90% | 94% | $0.0045 | 2.3 |
+| Sonnet | 90% | 94% | $0.0093* | 2.3 |
 | Claude's own tags | 89% | – | – | – |
 
 Most misses were the same for every judge, Claude included. That meant
@@ -97,7 +97,7 @@ they came from what the judge was shown and told, not from the model:
 |---|---|---|---|---|---|
 | **Haiku** | **96%** | **90%** | 83% | $0.0019 | 1.7 |
 | Haiku, thinking | 96% | 93% | 82% | $0.0064 | 12.2 |
-| Sonnet | 98% | 94% | 92% | $0.0009–0.011 | 2.4 |
+| Sonnet | 98% | 94% | 92% | $0.0093* | 2.4 |
 | Claude's own tags | 89% | 85% | – | – | – |
 
 On the held-out set, the same sessions judged with the hook as first
@@ -139,9 +139,33 @@ The first run is where thinking looked worth it (+3 on tuning, +8 on
 held out). The gap closed once the excerpt carried the facts Haiku had
 been guessing.
 
-Sonnet is the most accurate and the most consistent. It costs about the
-same as Haiku when its prompt cache is warm, and up to 6 times as much
-when it isn't. For turns minutes apart, the cache is often cold.
+Sonnet is the most accurate and the most consistent, but it costs about
+5 times as much as Haiku.
+
+## What a call really costs
+
+\* The eval's own Sonnet cost figures came out lower, between $0.0009 and
+$0.011 a call. They were cheaper than real use would be, because the
+eval's repeat runs read one another's cache. Measured one call at a time,
+each with a new excerpt as in real use:
+
+| Model | Read | Written to cache | Read from cache | $ a call |
+|---|---|---|---|---|
+| Haiku | 1,681 tokens | – | – | $0.0019 |
+| Sonnet | – | 2,234 tokens (1-hour cache) | none | $0.0093 |
+
+- **Sonnet.** Claude Code writes the whole prompt to a 1-hour cache, at
+  twice the input price: the fixed instructions plus the new excerpt,
+  about 2,200 tokens. The next turn, with the same instructions and a new
+  excerpt, read nothing back from it (0 tokens, measured twice), so every
+  call pays the write.
+- **Haiku.** The prompt is under Haiku's 4,096-token caching minimum, so
+  it's never cached. It pays the plain input price, and costs the same
+  every call.
+
+`scripts/eval-tagger.py` now adds a line unique to each call, so its cost
+column matches real use. The eval's accuracy figures are unaffected:
+cached or not, the model reads the same prompt.
 
 ## What's still wrong
 
