@@ -1390,7 +1390,7 @@ def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
         raise FileNotFoundError("claude")
     env = dict(os.environ)
     env[judge["env"]] = "1"
-    env["MAX_THINKING_TOKENS"] = "0"
+    env["MAX_THINKING_TOKENS"] = str(int(judge.get("thinking_tokens") or 0))
     env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] = "1"
     args = [
         command, "-p", "--model", judge["model"], "--tools", "", "--setting-sources", "", "--strict-mcp-config",

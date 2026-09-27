@@ -333,6 +333,10 @@ JUDGE_ENV = "CLAUDEGLASS_JUDGE"
 #: Seconds the hook waits for Haiku before giving up on a turn.
 JUDGE_TIMEOUT_S = 60
 
+#: Haiku's thinking budget, in tokens (``MAX_THINKING_TOKENS``); 0 is
+#: no thinking. ``scripts/eval-tagger.py`` measures what it changes.
+JUDGE_THINKING_TOKENS = 0
+
 #: About what one Haiku call costs, in USD, for estimates before any
 #: has run: about 1,300 tokens read (Claude Code's own frame, the
 #: instructions and the excerpt) and 25 written, at Haiku's list price.
@@ -1696,6 +1700,7 @@ def export_json() -> dict:
             "dir": JUDGE_DIR,
             "env": JUDGE_ENV,
             "timeout_s": JUDGE_TIMEOUT_S,
+            "thinking_tokens": JUDGE_THINKING_TOKENS,
             "limits": dict(JUDGE_LIMITS),
             "intro": JUDGE_INTRO,
             "rule": JUDGE_RULE,

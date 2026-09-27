@@ -1,0 +1,163 @@
+{
+  "about": "Scripted Claude Code sessions in project/ for scripts/eval-tagger.py. Each scenario's last turn is judged. 'expect' gives the right words for that turn: a list of acceptable values, null meaning the key should be left out; for the 'missing' list key, '~a|b' means not 'none' and naming at least one of a, b. A key not in 'expect' isn't scored. 'skill': 'auto' is worked out from the session: helped or unneeded when a skill ran, else none, would-help or left out.",
+  "scenarios": [
+    {
+      "id": "bugfix_clear",
+      "turns": ["total_value() in inventory/store.py ignores the quantity; it should add up price * quantity. Fix it and run the tests with python -m pytest -q."],
+      "expect": {"task": ["bugfix"], "brief": ["clear"], "shift": [null, "new"], "level": ["easy"], "size": ["xs", "s"], "missing": ["none", null], "plan": ["none", null], "check": ["targeted", "full"], "prior": ["none", null], "found": [null], "skill": "auto"}
+    },
+    {
+      "id": "bugfix_vague",
+      "turns": ["the totals are wrong, sort it out"],
+      "expect": {"task": ["bugfix", "debug"], "brief": ["vague"], "missing": ["~files|repro|done|goal"], "plan": ["none", null], "prior": ["none", null], "found": [null]}
+    },
+    {
+      "id": "docs_typo",
+      "turns": ["Fix the typo in README.md: \"recieve\" should be \"receive\"."],
+      "expect": {"task": ["docs"], "brief": ["clear"], "level": ["easy"], "size": ["xs"], "missing": ["none", null], "plan": ["none", null], "check": ["none", "manual", null], "found": [null], "skill": "auto"}
+    },
+    {
+      "id": "research_found",
+      "turns": ["How does report.py format money amounts? Just explain, don't change anything."],
+      "expect": {"task": ["research"], "brief": ["clear"], "found": ["yes"], "level": ["easy"], "size": ["xs", "s"], "plan": ["none", null], "check": ["none", null], "shift": [null, "new"]}
+    },
+    {
+      "id": "research_not_found",
+      "turns": ["Where does this project send emails to customers? Don't change anything."],
+      "expect": {"task": ["research"], "found": ["no"], "plan": ["none", null], "check": ["none", null], "level": ["easy"]}
+    },
+    {
+      "id": "refactor",
+      "turns": ["In inventory/utils.py the three parse_* functions repeat the same strip-and-check-empty code. Pull it into one helper, keep the behaviour the same, and run the tests with python -m pytest -q."],
+      "expect": {"task": ["refactor"], "brief": ["clear"], "level": ["easy", "normal"], "size": ["xs", "s"], "missing": ["none", null], "plan": ["none", null], "check": ["targeted", "full"], "found": [null]}
+    },
+    {
+      "id": "feature_clear",
+      "turns": ["Add Store.remove_item(name, quantity) to inventory/store.py: lower the quantity, delete the item when it reaches zero, and raise KeyError for an unknown name. Add tests for it in tests/test_store.py and run them with python -m pytest -q."],
+      "expect": {"task": ["feature"], "brief": ["clear"], "level": ["easy", "normal"], "size": ["s", "m"], "missing": ["none", null], "plan": ["none", null], "check": ["targeted", "full"], "found": [null]}
+    },
+    {
+      "id": "feature_partial",
+      "turns": ["Add discounts to the store."],
+      "expect": {"task": ["feature"], "brief": ["partial", "vague"], "missing": ["~goal|constraints|done|scope"], "found": [null]}
+    },
+    {
+      "id": "shift_build",
+      "turns": [
+        "Add Store.remove_item(name, quantity) to inventory/store.py: lower the quantity, delete the item when it reaches zero, and raise KeyError for an unknown name. Add tests for it in tests/test_store.py and run them with python -m pytest -q.",
+        "Now add a `remove NAME QUANTITY FILE` command to inventory/cli.py that uses remove_item and writes the file back."
+      ],
+      "expect": {"task": ["feature"], "shift": ["build"], "prior": ["some", "needed"], "plan": ["none", null], "found": [null]}
+    },
+    {
+      "id": "shift_grew",
+      "turns": [
+        "Add Store.remove_item(name, quantity) to inventory/store.py: lower the quantity, delete the item when it reaches zero, and raise KeyError for an unknown name. Add tests for it in tests/test_store.py and run them with python -m pytest -q.",
+        "Also make remove_item refuse to take away more than is in stock: raise ValueError then, and test that too."
+      ],
+      "expect": {"task": ["feature"], "shift": ["grew"], "prior": ["some", "needed"], "plan": ["none", null], "found": [null]}
+    },
+    {
+      "id": "shift_redo",
+      "turns": [
+        "Add Store.remove_item(name, quantity) to inventory/store.py: lower the quantity, delete the item when it reaches zero, and raise KeyError for an unknown name. Add tests for it in tests/test_store.py and run them with python -m pytest -q.",
+        "Let's do remove_item differently: don't delete the item at zero, keep it with quantity 0, and change the tests to match."
+      ],
+      "expect": {"task": ["feature", "refactor"], "shift": ["redo"], "prior": ["some", "needed"], "plan": ["none", null], "found": [null]}
+    },
+    {
+      "id": "shift_fix",
+      "turns": [
+        "Add Store.remove_item(name, quantity) to inventory/store.py: lower the quantity, delete the item when it reaches zero, and raise KeyError for an unknown name. Add tests for it in tests/test_store.py and run them with python -m pytest -q.",
+        "remove_item breaks when I pass the name in a different case, like 'Apple' for 'apple'. Fix that."
+      ],
+      "expect": {"task": ["bugfix"], "shift": ["fix"], "prior": ["some", "needed"], "plan": ["none", null], "found": [null]}
+    },
+    {
+      "id": "shift_new",
+      "turns": [
+        "total_value() in inventory/store.py ignores the quantity; it should add up price * quantity. Fix it and run the tests with python -m pytest -q.",
+        "Unrelated: change the Install section of README.md to say pip install -e ."
+      ],
+      "expect": {"task": ["docs"], "shift": ["new"], "prior": ["none", null], "brief": ["clear"], "size": ["xs"], "level": ["easy"], "plan": ["none", null], "found": [null]}
+    },
+    {
+      "id": "prior_needed",
+      "turns": [
+        "total_value() in inventory/store.py ignores the quantity; it should add up price * quantity. Fix it and run the tests with python -m pytest -q.",
+        "Check report.py for the same kind of mistake and fix it there too if you find one."
+      ],
+      "expect": {"prior": ["needed", "some"], "plan": ["none", null]}
+    },
+    {
+      "id": "plan_text",
+      "turns": ["Write a short step-by-step plan for adding CSV export of the report to inventory/report.py. Don't write any code yet."],
+      "expect": {"task": ["plan"], "plan": ["made"], "check": ["none", null], "found": [null], "size": ["xs", "s"]}
+    },
+    {
+      "id": "plan_mode",
+      "mode": "plan",
+      "turns": ["Plan how to add JSON save and load for the Store."],
+      "expect": {"task": ["plan"], "plan": ["made"], "check": ["none", null], "found": [null]}
+    },
+    {
+      "id": "plan_following",
+      "turns": [
+        "Write a short step-by-step plan for adding CSV export of the report to inventory/report.py. Don't write any code yet.",
+        "Good plan. Go ahead and implement it, then run the tests with python -m pytest -q."
+      ],
+      "expect": {"task": ["feature"], "plan": ["following"], "shift": ["build"], "prior": ["needed", "some"], "found": [null]}
+    },
+    {
+      "id": "plan_deviated",
+      "turns": [
+        "Write a short step-by-step plan for adding CSV export of the report to inventory/report.py, using Python's csv module. Don't write any code yet.",
+        "Implement it, but don't use the csv module after all: build the lines by hand with commas."
+      ],
+      "expect": {"task": ["feature"], "plan": ["deviated"], "prior": ["needed", "some"], "found": [null]}
+    },
+    {
+      "id": "debug_cause",
+      "turns": ["Why does `python -m inventory.cli list stock.csv` show no items? Find the cause and tell me; don't fix it yet."],
+      "expect": {"task": ["debug"], "brief": ["clear"], "found": ["yes", null], "plan": ["none", null], "level": ["easy"]}
+    },
+    {
+      "id": "write_tests",
+      "turns": ["Add tests for format_report in tests/test_report.py: one for an empty store and one for a store with two items. Run them with python -m pytest -q."],
+      "expect": {"task": ["test"], "brief": ["clear"], "check": ["targeted", "full"], "plan": ["none", null], "found": [null]}
+    },
+    {
+      "id": "ops_ci",
+      "turns": ["Add a GitHub Actions workflow that runs python -m pytest on every push."],
+      "expect": {"task": ["ops"], "plan": ["none", null], "found": [null]}
+    },
+    {
+      "id": "review_only",
+      "turns": ["Review inventory/store.py for bugs and style problems. List them; don't change anything."],
+      "expect": {"task": ["review"], "brief": ["clear"], "check": ["none", null], "plan": ["none", null]}
+    },
+    {
+      "id": "chat_thanks",
+      "turns": [
+        "Fix the typo in README.md: \"recieve\" should be \"receive\".",
+        "thanks, that's all for now"
+      ],
+      "expect": {"task": ["chat"], "size": ["xs", null], "plan": ["none", null], "check": ["none", null], "found": [null], "missing": ["none", null]}
+    },
+    {
+      "id": "skill_changelog",
+      "turns": ["Add a CHANGELOG.md entry saying total_value() now counts the quantity."],
+      "expect": {"task": ["docs"], "brief": ["clear"], "size": ["xs"], "skill": "auto", "plan": ["none", null], "found": [null]}
+    },
+    {
+      "id": "hard_persistence",
+      "turns": ["Make the store persist to a JSON file: add Store.save(path) and Store.load(path) with a schema version field. Loading must also accept the old v1 format, which is a plain list of [name, price, quantity] rows. Add tests for both formats and run them with python -m pytest -q."],
+      "expect": {"task": ["feature"], "brief": ["clear"], "level": ["normal", "hard"], "size": ["m", "l"], "check": ["targeted", "full"], "plan": ["none", "made", null], "found": [null]}
+    },
+    {
+      "id": "vague_faster",
+      "turns": ["make it faster"],
+      "expect": {"brief": ["vague"], "missing": ["~goal|done|scope|files|constraints"], "found": [null]}
+    }
+  ]
+}

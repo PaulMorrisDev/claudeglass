@@ -407,6 +407,7 @@
   "dir": "tags",
   "env": "CLAUDEGLASS_JUDGE",
   "timeout_s": 60,
+  "thinking_tokens": 0,
   "limits": {
    "prompt": 2000,
    "previous": 300,
