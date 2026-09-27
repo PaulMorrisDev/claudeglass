@@ -376,9 +376,18 @@ CORRECTION_SCAN_CHARS = 200
 FIX_PATTERN = r"\b(?:fix|fixed|broken|wrong|incorrect|still|again|bug|error|errors|failing|fails|crash(?:es|ed)?)\b"
 
 #: Anything that makes a correction specific: a path, a file name, a
-#: quote, code, a number, a line of an error, an image. Not an
-#: apostrophe: "it's wrong" is as vague as "wrong".
-SPECIFIC_PATTERN = r"[`\"/\\:#<>(){}\[\]=]|\w\.\w|\d"
+#: quote, code, a number, a line of an error, an image, or what it
+#: should be instead ("it should say Hi", "make it red", "change it to
+#: blue"). Not an apostrophe: "it's wrong" is as vague as "wrong"; nor
+#: "it should work" or "make it right", which say nothing new.
+SPECIFIC_PATTERN = (
+    r"[`\"/\\:#<>(){}\[\]=]|\w\.\w|\d"
+    r"|(?i:\b(?:should|must|needs? to|supposed to|meant to)\s+(?:say|show|read|print|return|display|be|use|have"
+    r"|look|go)\s+(?!(?:working|fixed|right|correct|better|ok|okay|fine|done|good)\b)\w+"
+    r"|\bmake (?:it|this|that|them) (?!(?:work|right|better|correct)\b)\w+"
+    r"|\b(?:change|set|turn|rename)\b[^.!?]{0,40}\bto\b"
+    r"|\b(?:expected|instead|rather than)\b)"
+)
 
 #: How Claude Code records that you stopped a reply (Esc).
 INTERRUPT_PREFIX = "[Request interrupted"

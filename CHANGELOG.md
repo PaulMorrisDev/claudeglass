@@ -17,7 +17,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     rewinding with Esc Esc if the approach is wrong.
   - `stop_loop`: stopping Claude three times in 20 minutes. Claude says
     what it will do before changing anything, and suggests plan mode.
-  - `vague_fix`: a short fix request that names nothing specific.
+  - `vague_fix`: a short fix request that names nothing specific and
+    doesn't say what it should be instead.
     Claude asks what you saw if it can't tell, or suggests saying what
     you saw and expected next time.
   - `big_paste`: a message of 10,000 tokens or more. Claude suggests

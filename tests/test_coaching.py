@@ -254,7 +254,7 @@ def test_a_fix_request_after_a_detailed_message_or_a_long_gap_starts_a_new_run(t
 
 def test_a_vague_correction_gets_the_say_what_you_saw_hint(tmp_path):
     records = [_said("Add a dark mode toggle", 200), _reply(30_000, ago_s=100)]
-    for n, vague in enumerate(("it's still broken", "doesn't work", "fix it", "wrong")):
+    for n, vague in enumerate(("it's still broken", "doesn't work", "fix it", "wrong", "still broken, it should work", "wrong, make it right")):
         assert _kind(_send(tmp_path, records, vague, session=f"v{n}")) == "vague_fix", vague
     for n, fine in enumerate((
         "the toggle in settings.py still fails with KeyError",
@@ -262,6 +262,10 @@ def test_a_vague_correction_gets_the_say_what_you_saw_hint(tmp_path):
         "it's wrong: the toggle should say `Dark`",
         "looks good, thanks",
         "Now add a light mode toggle as well",
+        # Saying what it should be instead is specific enough.
+        "fix the greeting, it should say Hi",
+        "wrong colour, make it red",
+        "change the toggle to blue",
     )):
         assert _send(tmp_path, records, fine, session=f"f{n}") == "", fine
 
