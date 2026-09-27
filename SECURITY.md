@@ -7,7 +7,11 @@ version (see "No outbound network calls" below). It uses
 none of your tokens by default, and none at all unless you opt in to
 the optional **metrics capture** feature (see below), which has Claude
 itself read a short note and write a one-line tag inside your own
-Claude Code session — this tool still never calls Claude directly. This
+Claude Code session — this tool still never calls Claude directly. The
+one exception is also opt-in: if you let Claude Haiku write those tags
+instead (`capture tagger haiku`), the capture hook runs the `claude`
+command you already use, once per turn, to ask Haiku for them (see
+"Claude Haiku as the tagger" below). This
 document is a sign-off checklist for a corporate security review,
 written to be verifiable against the code rather than taken on trust.
 
@@ -78,7 +82,9 @@ least once: `hooks/capture-hook.py`, `hooks/capture-catalogue.json`
 (a copy of the packaged metric catalogue the hook reads),
 `capture-log.jsonl` (one JSON line per `[capture]` change — the level,
 sample, `until` etc. you set, never anything from a transcript) and
-`signals/YYYY-MM.jsonl` (see "Metrics capture" below), and, once
+`signals/YYYY-MM.jsonl` (see "Metrics capture" below), and, while
+Claude Haiku writes the tags, `tags/YYYY-MM.jsonl` (see "Claude Haiku as
+the tagger" under "Metrics capture"), and, once
 coaching notes have been turned on, `coaching.json` (agent-type names
 and split points) and `coach-state.json` (see "Coaching notes" under
 "Metrics capture"). The only other
@@ -332,6 +338,35 @@ older than a day are dropped. `coaching.json` holds agent-type names
 and numbers. Neither ever leaves `<config-dir>`. See
 [docs/coaching.md](docs/coaching.md).
 
+**Claude Haiku as the tagger.** Off by default: `capture tagger haiku`
+(or "Tags written by" on Setup › Capture, after a yes) turns it on, and
+`capture tagger claude` back off. The session note then asks Claude for
+no tag. When a turn of the main session ends, the capture hook's `Stop`
+entry builds a short excerpt of it from the transcript's end: your
+message (up to 2,000 characters) and the one before (300), how many you
+sent before, what Claude did (model calls, output tokens, tool names and
+counts, how many files it changed, the first line of up to six shell
+commands, skill names, subagent and tool-error counts, whether there was
+a plan) and the last 1,500 characters of Claude's final reply. Never a
+tool's output. It hands the excerpt to a worker (the same script with
+`--judge`) and returns. The worker runs `claude -p --model haiku --tools ""
+--setting-sources "" --strict-mcp-config --no-session-persistence
+--output-format json`, the excerpt on stdin (never on the command line,
+where other local users could see it), with `CLAUDEGLASS_JUDGE=1` set so
+the hook does nothing inside that call. That is Claude Code itself, with
+your own login and your own provider settings: the excerpt goes where
+the rest of the session already went, and this tool reads no API key or
+credential. Only the tag's words are kept, each checked against the
+closed vocabularies (a skill name after `would-help:` is dropped), in
+`<config-dir>/tags/YYYY-MM.jsonl`, with the time, the reply's API message
+id, and the call's cost, token counts and model name. `haiku_tags.load`
+checks every line again before a report uses it. The files are pruned on
+the same retention as the signals. `tests/test_haiku_tags.py`
+(`test_the_worker_logs_the_words_and_the_cost_never_the_excerpt`,
+`test_the_loader_checks_every_line_again`,
+`test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude`)
+covers this.
+
 **No free text is ever kept.** `capture_tags.py` reads only the last
 `TAIL_SCAN_CHARS` (480) characters of a reply, only when the tags are
 the very last thing in it, and checks every key and value against the
@@ -427,7 +462,11 @@ output.
 The tool never calls Claude, Anthropic or any other remote service on
 its own, and uses none of your tokens unless you turn on metrics
 capture, which spends tokens inside your own Claude Code session (never
-a call this tool makes itself) — see "Metrics capture" above.
+a call this tool makes itself) — see "Metrics capture" above. While
+Claude Haiku writes the tags, the capture hook starts the `claude`
+command once per turn; the call is Claude Code's, with your own login,
+and the hook imports no networking module (see "Claude Haiku as the
+tagger" above).
 
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:

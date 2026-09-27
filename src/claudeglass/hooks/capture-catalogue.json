@@ -79,6 +79,7 @@
    "main_line": "task: feature|bugfix|refactor|debug|docs|review|test|research|plan|ops|chat (the kind of work asked for)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -90,6 +91,7 @@
    "main_line": "brief: clear|partial|vague (how complete the request was)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -101,6 +103,7 @@
    "main_line": "level: easy|normal|hard (how hard the work was)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -112,6 +115,7 @@
    "main_line": "shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the last one; the scope grew; redoing earlier work; fixing a fault in it)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -123,6 +127,7 @@
    "main_line": "size: xs|s|m|l|xl (how big the work was)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -134,6 +139,7 @@
    "main_line": "",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "done: you finished the task; partial: some of it; blocked: you could not go on",
    "sub_extra": "",
    "tool_note": ""
@@ -145,6 +151,7 @@
    "main_line": "",
    "main_extra": "When you start an agent again because its last run fell short, begin the brief with [retry: model|brief|tools|scope|other].",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "Re-running an agent? Begin its brief with [retry: model|brief|tools|scope|other].",
    "tool_note": ""
@@ -156,6 +163,7 @@
    "main_line": "missing: files,goal,constraints,done,repro,scope or none (what the request lacked that you had to find or guess; a comma list)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -167,6 +175,7 @@
    "main_line": "plan: none|made|following|deviated (no plan; you wrote one; you worked to one; you departed from it)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -178,6 +187,7 @@
    "main_line": "skill: helped|unneeded|would-help|none (whether a skill you ran helped; would-help:<name> if one of the listed skills would have)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -189,6 +199,7 @@
    "main_line": "found: yes|partial|no (for research or search work: whether you found what was asked)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -202,6 +213,7 @@
    "main_line": "",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "fit: smaller|right|larger (could a smaller model have done this task, or did it need a larger one)",
    "sub_extra": "",
    "tool_note": ""
@@ -215,6 +227,7 @@
    "main_line": "",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "rules: used|unused (did you use the CLAUDE.md or memory instructions you were given)",
    "sub_extra": "",
    "tool_note": ""
@@ -228,6 +241,7 @@
    "main_line": "",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "brief: clear|partial|vague (how complete your brief was); missing: files,goal,scope,done or none (what it lacked)",
    "sub_extra": "",
    "tool_note": ""
@@ -239,6 +253,7 @@
    "main_line": "prior: needed|some|none (how much of the earlier conversation this work needed)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -250,6 +265,7 @@
    "main_line": "check: targeted|full|build|run|manual|none (how you verified the change)",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -261,6 +277,7 @@
    "main_line": "",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": "That tool result was large. Add out=needed|part|unneeded (how much of it you needed) to the tag that ends your final reply."
@@ -272,6 +289,7 @@
    "main_line": "",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -283,6 +301,7 @@
    "main_line": "",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -294,6 +313,7 @@
    "main_line": "",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -305,6 +325,7 @@
    "main_line": "",
    "main_extra": "",
    "extra_before_tag": false,
+   "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -316,6 +337,7 @@
    "main_line": "",
    "main_extra": "When you finish a piece of work the user asked for, add this before your tag, after a blank line:\n> 💡 **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
    "extra_before_tag": true,
+   "main_extra_untagged": "When you finish a piece of work the user asked for, end your reply with this, after a blank line:\n> 💡 **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -380,6 +402,129 @@
   "unknown"
  ],
  "signals_dir": "signals",
+ "judge": {
+  "model": "haiku",
+  "dir": "tags",
+  "env": "CLAUDEGLASS_JUDGE",
+  "timeout_s": 60,
+  "limits": {
+   "prompt": 2000,
+   "previous": 300,
+   "reply": 1500,
+   "command": 100,
+   "commands": 6
+  },
+  "intro": "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words. In them, \"you\" means Claude:",
+  "rule": "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Leave out a key that doesn't fit this kind of work, or that you can't judge.",
+  "vocab": {
+   "task": [
+    "feature",
+    "bugfix",
+    "refactor",
+    "debug",
+    "docs",
+    "review",
+    "test",
+    "research",
+    "plan",
+    "ops",
+    "chat"
+   ],
+   "brief": [
+    "clear",
+    "partial",
+    "vague"
+   ],
+   "level": [
+    "easy",
+    "normal",
+    "hard"
+   ],
+   "shift": [
+    "new",
+    "build",
+    "grew",
+    "redo",
+    "fix"
+   ],
+   "size": [
+    "xs",
+    "s",
+    "m",
+    "l",
+    "xl"
+   ],
+   "missing": [
+    "files",
+    "goal",
+    "constraints",
+    "done",
+    "repro",
+    "scope",
+    "none"
+   ],
+   "plan": [
+    "none",
+    "made",
+    "following",
+    "deviated"
+   ],
+   "skill": [
+    "helped",
+    "unneeded",
+    "would-help",
+    "none"
+   ],
+   "found": [
+    "yes",
+    "partial",
+    "no"
+   ],
+   "fit": [
+    "smaller",
+    "right",
+    "larger"
+   ],
+   "rules": [
+    "used",
+    "unused"
+   ],
+   "prior": [
+    "needed",
+    "some",
+    "none"
+   ],
+   "detour": [
+    "none",
+    "dead-end",
+    "reread",
+    "overbuilt",
+    "env",
+    "flaky"
+   ],
+   "check": [
+    "targeted",
+    "full",
+    "build",
+    "run",
+    "manual",
+    "none"
+   ],
+   "out": [
+    "needed",
+    "part",
+    "unneeded"
+   ],
+   "useful": [
+    "yes",
+    "part",
+    "no"
+   ]
+  },
+  "list_keys": [
+   "missing"
+  ]
+ },
  "coaching": {
   "marker": "tl-coach v",
   "version": 1,

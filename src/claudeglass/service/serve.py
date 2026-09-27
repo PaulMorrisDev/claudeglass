@@ -195,7 +195,7 @@ def _run_locked(options: ServeOptions, store_path: Path, lock: StoreLock, *, onc
     # connected (no <config_dir>/hooks folder yet).
     hook_health.refresh_hook_files(options.config_dir)
 
-    store = Store(store_path)
+    store = Store(store_path, config_dir=options.config_dir)
     store.open()
 
     # Local import: service.watcher is a sibling work package's module

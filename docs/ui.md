@@ -797,8 +797,15 @@ cost?" The same for every window.
 far, how often Claude tagged); its weekly cost against what depends on
 it (`roi`); a warning with `capture connect` when a hook entry is
 missing; the level cards (Off, Free, Essentials, Standard, Deep, Custom)
-with weekly estimates; sampling and end time; and every metric grouped
-by where it is captured.
+with weekly estimates; sampling, who writes the tags, and end time; and
+every metric grouped by where it is captured.
+
+"Tags written by" picks Claude (at the end of its replies) or Claude
+Haiku (asked after each turn, `[capture] tagger`; see
+[capture.md](capture.md#who-writes-the-tags)). Picking Haiku asks first,
+saying what the hook sends and what it keeps. While Haiku writes them,
+the tag line says "Claude Haiku tagged" and "Claude Haiku's calls" is a
+row of its own in where the tokens went.
 
 The end-time menu's first entry is the end already set ("In 12 days:
 2026-10-07 09:00 UTC", or "Ended: ..."). A choice saves the moment it is

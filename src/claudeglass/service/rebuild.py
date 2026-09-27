@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import json
 
+from .. import haiku_tags
 from ..cache import result_from_jsonable
 from ..corpus import Corpus, SessionBundle, _session_sort_key
 from ..discovery import _resolve_window, ts_in_window
@@ -231,7 +232,7 @@ def corpus_from_store(
 
     bundles.sort(key=_session_sort_key)
 
-    return Corpus(
+    corpus = Corpus(
         sessions=bundles,
         total_files=total_files,
         total_bytes=total_bytes,
@@ -239,6 +240,10 @@ def corpus_from_store(
         cache_misses=0,
         elapsed_s=0.0,
     )
+    # The tags Claude Haiku wrote ([capture] tagger), kept beside the
+    # store rather than in it: they land after the turn was parsed.
+    haiku_tags.apply(corpus, store.config_dir)
+    return corpus
 
 
 __all__ = ["corpus_from_store"]

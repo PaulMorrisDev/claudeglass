@@ -322,7 +322,10 @@ a flag, never text:
   ``brief``, ``missing``) ending this turn's last text block. Unknown keys
   and words are dropped; ``skill_name`` survives only when it names a
   skill the transcript listed or used. ``chars`` is the tag's own length,
-  for pricing the output it cost.
+  for pricing the output it cost. While Claude Haiku writes the tags
+  (``[capture] tagger = "haiku"``), the parser finds none; ``haiku_tags``
+  sets ``cap`` on the tagged reply's turn after the parse instead, with
+  ``judged`` set and ``judge_usd`` what the call cost.
 - ``Turn.cap_note_chars: int = 0`` -- characters of capture notes (a
   ``hook_additional_context`` attachment carrying ``tl-cap v``) put in
   front of the model just before this turn, measured from ``rendered``.
@@ -620,6 +623,11 @@ class CaptureTag:
     has_tl: bool = False
     #: Length of the tag text, for pricing the output it cost.
     chars: int = 0
+    #: Claude Haiku wrote it after the turn (``[capture] tagger =
+    #: "haiku"``, ``haiku_tags.py``), not Claude in its reply, and what
+    #: that call cost, in USD. Its ``chars`` are 0: no reply carried it.
+    judged: bool = False
+    judge_usd: float = 0.0
 
 
 @dataclass(slots=True)

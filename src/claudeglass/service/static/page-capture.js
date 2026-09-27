@@ -181,12 +181,13 @@ function renderCaptureData(data, container) {
         "About " + thousands(measured.note_tokens) + " tokens of note and " + thousands(measured.tag_tokens) + " tokens of tag: " + billed(measured) + (measured.share_text ? ", " + measured.share_text + " of what those sessions cost." : "."),
       ];
       if (measured.coverage_text) {
-        lines.push("Claude tagged " + measured.coverage_text + " of your messages" + (measured.report_coverage_pct !== null ? " and " + formatCell(measured.report_coverage_pct, "pct") + " of agent reports." : "."));
+        var tagger = config.tagger === "haiku" ? "Claude Haiku" : "Claude";
+        lines.push(tagger + " tagged " + measured.coverage_text + " of your messages" + (measured.report_coverage_pct !== null ? " and Claude " + formatCell(measured.report_coverage_pct, "pct") + " of agent reports." : "."));
       }
       nowBlock.appendChild(el("ul", { class: "notes" }, lines.map(function (line) {
         return el("li", { text: line });
       })));
-      var scopeNames = { main: "Main session", subagent: "Subagents", tool: "After tool results", brief: "Agent briefs" };
+      var scopeNames = { main: "Main session", subagent: "Subagents", tool: "After tool results", brief: "Agent briefs", haiku: "Claude Haiku's calls" };
       var scopeRows = Object.keys(measured.scopes || {}).map(function (key) {
         var scope = measured.scopes[key];
         return [scopeNames[key] || key, thousands(scope.note_tokens), thousands(scope.tag_tokens), billed(scope)];
@@ -356,6 +357,27 @@ function renderCaptureControls(data, container) {
   form.appendChild(el("label", { for: sampleId, text: "Sessions captured" }));
   form.appendChild(sample);
   form.appendChild(el("p", { class: "notes", text: "A session is in or out for its whole life, and its subagents with it. Fewer sessions cost less and still give a fair picture over time." }));
+
+  var taggerId = "capture-tagger";
+  var tagger = el("select", { id: taggerId });
+  tagger.appendChild(el("option", { value: "claude", text: "Claude, at the end of its replies" }));
+  tagger.appendChild(el("option", { value: "haiku", text: "Claude Haiku, after each turn" }));
+  tagger.value = config.tagger || "claude";
+  tagger.addEventListener("change", function () {
+    var value = tagger.value;
+    var send = function () {
+      postCapture({ tagger: value }, container, "Saved: " + (value === "haiku" ? "Claude Haiku" : "Claude") + " writes the tags in new sessions.");
+    };
+    if (value === "haiku") {
+      confirmCapture("Let Claude Haiku write the tags?", [(data.tagger_text || {}).haiku], send);
+      tagger.value = config.tagger || "claude";
+    } else {
+      send();
+    }
+  });
+  form.appendChild(el("label", { for: taggerId, text: "Tags written by" }));
+  form.appendChild(tagger);
+  form.appendChild(el("p", { class: "notes", text: "Claude Haiku keeps the tags out of Claude's replies and context. After each turn, a hook sends it a short excerpt, through your own Claude Code login. Only the tag's words are kept. Subagent reports are still tagged by Claude." }));
 
   var endId = "capture-end";
   var end = el("select", { id: endId });

@@ -106,13 +106,23 @@ class Cycle:
             changes = {
                 f.name: getattr(tag, f.name)
                 for f in fields(tag)
-                if f.name not in ("has_tl", "chars") and getattr(tag, f.name) not in (None, ())
+                if f.name not in _TAG_COST_FIELDS and getattr(tag, f.name) not in (None, ())
             }
             if changes:
                 merged = replace(merged, **changes)
         # has_tl is true if any of them wrote a [tl: ...]; chars sums
-        # what every tag actually cost to write.
-        return replace(merged, has_tl=True, chars=sum(t.chars for t in tags))
+        # what every tag actually cost to write, judge_usd what Haiku's did.
+        return replace(
+            merged,
+            has_tl=True,
+            chars=sum(t.chars for t in tags),
+            judged=any(t.judged for t in tags),
+            judge_usd=sum(t.judge_usd for t in tags),
+        )
+
+
+#: ``CaptureTag`` fields about the tag itself, not what it says.
+_TAG_COST_FIELDS = ("has_tl", "chars", "judged", "judge_usd")
 
 
 def _priced(result: TranscriptResult) -> list[Turn]:
@@ -257,9 +267,10 @@ class CaptureUsage:
     sessions: int = 0
     subagents: int = 0
     notes: int = 0
-    #: ``main``, ``subagent``, ``tool`` (notes after tool results) and
+    #: ``main``, ``subagent``, ``tool`` (notes after tool results),
     #: ``brief`` (the ``[spawn: ...]``/``[retry: ...]`` words a brief
-    #: starts with).
+    #: starts with) and ``haiku`` (Claude Haiku's calls, while it writes
+    #: the tags: their whole cost, as ``tag_cost``).
     scopes: dict[str, ScopeUse] = field(default_factory=dict)
     #: metric id -> USD, the note and tag cost split by each metric's share.
     by_metric: dict[str, float] = field(default_factory=dict)
@@ -273,6 +284,8 @@ class CaptureUsage:
     tagged_cycles: int = 0
     reports: int = 0
     tagged_reports: int = 0
+    #: Tags Claude Haiku wrote (``[capture] tagger = "haiku"``).
+    judged: int = 0
     #: /tl-feedback runs, what they cost (every turn of each), and how
     #: many ended with answers rather than a declined question.
     feedback_runs: int = 0
@@ -479,6 +492,15 @@ def _add_tags(use: CaptureUsage, result: TranscriptResult, carry: _Carry, pricin
         moment = _parse_ts(turn.ts)
         if since is not None and (moment is None or moment < since):
             continue
+        if turn.cap is not None and turn.cap.judged:
+            # Haiku's call is the whole cost: no reply carried the tag.
+            use.judged += 1
+            use._add("haiku", tag_cost=turn.cap.judge_usd, day=_day(turn.ts))
+            weights = _tag_weights(turn, subagent)
+            use._split(weights, turn.cap.judge_usd)
+            for metric_id in weights:
+                use._count(metric_id)
+            continue
         chars = turn.cap.chars if turn.cap is not None else 0
         if subagent and turn.result_marker and (turn.cap is None or not turn.cap.chars):
             chars = len(f"[result: {turn.result_marker}]")
@@ -587,7 +609,11 @@ def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
     start = _start(since)
     for bundle in corpus.sessions:
         top = bundle.top
-        captured_top = top is not None and top.meta.cap_injections > 0
+        # A session Haiku tagged counts even when its note asked Claude
+        # for nothing (no retry or reminder line): there was none.
+        captured_top = top is not None and (
+            top.meta.cap_injections > 0 or any(t.cap is not None and t.cap.judged for t in top.turns)
+        )
         subs = [sub for sub in bundle.subs if captured_top or sub.meta.cap_injections > 0]
         rated = top is not None and _add_feedback_runs(use, top, bundle.subs, pricing, start)
         if rated and not captured_top:
@@ -825,21 +851,26 @@ class Estimate:
         return 100.0 * self.cost / self.spend if self.spend > 0 else None
 
 
-def _note_chars(ids, scope: str, agent_type: str = "") -> int:
-    text = catalogue.note_text(ids, scope, agent_type)
+def _note_chars(ids, scope: str, agent_type: str = "", tagger: str = catalogue.DEFAULT_TAGGER) -> int:
+    text = catalogue.note_text(ids, scope, agent_type, tagger)
     return len(text) + _WRAP["SessionStart" if scope == "main" else "SubagentStart"] if text else 0
 
 
-def estimate(past: History, ids, sample: int = 100) -> Estimate:
+def estimate(past: History, ids, sample: int = 100, tagger: str = catalogue.DEFAULT_TAGGER) -> Estimate:
     """What the metrics in ``ids`` would have cost over ``past``, with
-    ``sample`` percent of sessions captured."""
+    ``sample`` percent of sessions captured. While Claude Haiku writes the
+    tags (``tagger``), the main note carries no tag list and replies no
+    tag; a Haiku call per message of yours
+    (:data:`~claudeglass.capture_catalogue.JUDGE_USD_PER_CALL`) takes
+    their place."""
     ids = tuple(ids)
     wanted = set(ids)
-    main = _note_chars(ids, "main")
+    haiku = tagger == "haiku" and bool(catalogue.tagged_keys(ids))
+    main = _note_chars(ids, "main", tagger=tagger)
     sub = _note_chars(ids, "subagent", "general-purpose")
     no_rules = _note_chars(ids, "subagent", "Explore")
     enabled = [catalogue.METRICS_BY_ID[i] for i in ids if i in catalogue.METRICS_BY_ID]
-    reply = sum(m.out_chars for m in enabled if m.main_line)
+    reply = 0 if haiku else sum(m.out_chars for m in enabled if m.main_line)
     reply = reply + _TAG_FRAME_CHARS if reply else 0
     report = sum(m.out_chars for m in enabled if m.sub_line)
     report = report + _TAG_FRAME_CHARS if report else 0
@@ -857,6 +888,8 @@ def estimate(past: History, ids, sample: int = 100) -> Estimate:
     )
     note_tokens = main * past.main_notes + max(sub, no_rules) * past.sub_notes
     tag_tokens = (reply + reminder) * past.cycles + report * past.subagents + brief * past.subagents
+    if haiku:
+        cost += past.cycles * catalogue.JUDGE_USD_PER_CALL
     for metric_id, count, note, tag in (
         ("big_output", past.big_outputs, past.big_output_note, past.big_output_tag),
         ("web", past.web_results, past.web_note, past.web_tag),
@@ -881,19 +914,21 @@ def estimate(past: History, ids, sample: int = 100) -> Estimate:
     )
 
 
-def level_estimates(past: History, sample: int = 100) -> dict[str, Estimate]:
+def level_estimates(past: History, sample: int = 100, tagger: str = catalogue.DEFAULT_TAGGER) -> dict[str, Estimate]:
     """:func:`estimate` for each level from Free to Deep, with everything
     picking it turns on (:func:`~claudeglass.capture_catalogue.level_includes`)."""
-    return {level: estimate(past, catalogue.level_includes(level), sample) for level in catalogue.LEVELS[1:]}
+    return {
+        level: estimate(past, catalogue.level_includes(level), sample, tagger) for level in catalogue.LEVELS[1:]
+    }
 
 
-def metric_estimates(past: History, ids, sample: int = 100) -> dict[str, float]:
+def metric_estimates(past: History, ids, sample: int = 100, tagger: str = catalogue.DEFAULT_TAGGER) -> dict[str, float]:
     """What each metric in ``ids`` adds to them, in USD over the replayed
     days: the estimate with it minus the estimate without it (and
     without what needs it). Its share of the note's fixed lines is
     included, so the parts don't sum exactly to the whole."""
     ids = tuple(ids)
-    whole = estimate(past, ids, sample).cost
+    whole = estimate(past, ids, sample, tagger).cost
     out = {}
     for metric_id in ids:
         if metric_id not in catalogue.METRICS_BY_ID:
@@ -901,7 +936,7 @@ def metric_estimates(past: History, ids, sample: int = 100) -> dict[str, float]:
         without = tuple(
             i for i in ids if i != metric_id and metric_id not in catalogue.METRICS_BY_ID[i].requires
         )
-        out[metric_id] = max(0.0, whole - estimate(past, without, sample).cost)
+        out[metric_id] = max(0.0, whole - estimate(past, without, sample, tagger).cost)
     return out
 
 

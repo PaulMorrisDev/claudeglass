@@ -54,6 +54,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   something or showed a tip; a message you stopped before any reply and
   sent again counts once. Counts and flags only, never your words
   (`PARSER_VERSION` 28, so every transcript is read again once).
+- **Claude Haiku can write the tags.** `claudeglass capture tagger
+  haiku` (or "Tags written by" on Setup › Capture) takes the
+  `[tl: ...]` tag out of Claude's replies and the tag list out of the
+  session note (at Standard, ~336 tokens of note becomes ~73). When a
+  turn ends, the hook's `Stop` entry hands a short excerpt of it to a
+  worker of its own and returns at once. The excerpt holds your
+  message, what Claude did (tools, files changed, commands, any plan)
+  and the end of its reply. The worker asks Claude Haiku for the tag
+  through your own Claude Code login, with no tools, settings or saved
+  session. Only the tag's words are kept, in `<config-dir>/tags/`, with
+  what the call cost (about $0.0015 a turn, measured). What the
+  transcript settles, such as no plan or no skill run, overrides
+  Haiku's guess. The tags reach every view that reads Claude's, and
+  `capture status` says how many turns Haiku tagged, what it cost and
+  why any got none. Subagent reports are still tagged by Claude.
+  `capture tagger claude` switches back.
 
 ### Changed
 

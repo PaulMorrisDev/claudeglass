@@ -386,6 +386,9 @@ def _capture_label(record: dict) -> str:
         if "coaching_notes" in old and "coaching_notes" not in new:
             return "Turned coaching notes off"
         return "Changed live coaching"
+    tagger = changed.get("tagger") if isinstance(changed.get("tagger"), dict) else None
+    if tagger is not None and set(changed) == {"tagger"}:
+        return "Claude Haiku writes the tags" if tagger.get("to") == "haiku" else "Claude writes the tags again"
     level = str(record.get("level") or "off")
     title = capture_catalogue.LEVEL_TITLES.get(level, level)
     old = changed.get("level", {}).get("from") if isinstance(changed.get("level"), dict) else None

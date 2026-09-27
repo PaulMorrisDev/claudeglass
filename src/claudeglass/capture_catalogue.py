@@ -299,6 +299,68 @@ STOP_FAILURE_ERRORS = (
 #: month (``YYYY-MM.jsonl``).
 SIGNALS_DIR = "signals"
 
+
+# -- who writes the reply tags --------------------------------------------------
+
+#: Who writes the main session's ``[tl: ...]`` tag (``[capture] tagger``):
+#: Claude, at the end of its final reply to each message (the default), or
+#: Claude Haiku, which the hook asks after each turn, in the background,
+#: with a short excerpt of it (:func:`judge_text`). With ``haiku`` the
+#: session note asks for no tag, so replies end as they would anyway and
+#: the session carries no tag list; the words land in :data:`JUDGE_DIR`
+#: instead. Subagent reports and brief markers are Claude's to write
+#: either way.
+TAGGERS = ("claude", "haiku")
+DEFAULT_TAGGER = "claude"
+
+#: What ``CaptureConfig.hook_metrics`` adds while Haiku writes the tags,
+#: so the hooks installed include the ``Stop`` entry that asks it.
+HAIKU_TAGGER_HOOK = "haiku_tagger"
+
+#: The model the hook asks, as ``claude --model`` takes it.
+JUDGE_MODEL = "haiku"
+
+#: Folder under the data folder that holds Haiku's tags, one file per
+#: month (``YYYY-MM.jsonl``): the time, the salted session hash, the id
+#: of the reply tagged, the tag's words and what the call cost. Never the
+#: excerpt or anything else Haiku wrote.
+JUDGE_DIR = "tags"
+
+#: Set for the ``claude -p`` call the hook makes, so the hook does
+#: nothing should that call run it.
+JUDGE_ENV = "CLAUDEGLASS_JUDGE"
+
+#: Seconds the hook waits for Haiku before giving up on a turn.
+JUDGE_TIMEOUT_S = 60
+
+#: About what one Haiku call costs, in USD, for estimates before any
+#: has run: about 1,300 tokens read (Claude Code's own frame, the
+#: instructions and the excerpt) and 25 written, at Haiku's list price.
+JUDGE_USD_PER_CALL = 0.0015
+
+#: What the excerpt Haiku reads holds at most, in characters: your
+#: message, your message before it, the end of Claude's final reply and
+#: each shell command; and how many commands.
+JUDGE_LIMITS = {"prompt": 2000, "previous": 300, "reply": 1500, "command": 100, "commands": 6}
+
+#: Why a turn got no Haiku tag, as its line in :data:`JUDGE_DIR` says:
+#: no ``claude`` command on the hook's path, Haiku took too long, the call
+#: failed, or its answer held no tag.
+JUDGE_ERRORS = ("no_cli", "timeout", "failed", "no_tag")
+
+JUDGE_INTRO = (
+    "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage "
+    "analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final "
+    "reply. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words. In "
+    'them, "you" means Claude:'
+)
+#: The last line of what Haiku is told, in place of the note's
+#: ``SKIP_KEY_LINE``: it sees an excerpt, not the work.
+JUDGE_RULE = (
+    "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Leave out a key that "
+    "doesn't fit this kind of work, or that you can't judge."
+)
+
 #: The hook script that adds capture notes, and the catalogue it reads,
 #: installed side by side under ``<config-dir>/hooks/``.
 HOOK_SCRIPT = "capture-hook.py"
@@ -605,6 +667,9 @@ class Metric:
     #: reply with something, which would otherwise compete with the tag
     #: instruction for "the last thing in the reply".
     extra_before_tag: bool = False
+    #: ``main_extra`` for a note that asks for no tag (Haiku writes the
+    #: tags), when its wording mentions the tag; empty to use ``main_extra``.
+    main_extra_untagged: str = ""
     #: The note a PostToolUse hook adds after a matching tool result.
     tool_note: str = ""
     #: Other metrics it can't work without (a subagent's extras ride on
@@ -1098,6 +1163,8 @@ METRICS: tuple[Metric, ...] = (
         main_extra="When you finish a piece of work the user asked for, add this before your tag, after a blank "
         f"line:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
         extra_before_tag=True,
+        main_extra_untagged="When you finish a piece of work the user asked for, end your reply with this, after a "
+        f"blank line:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
         out_chars=103,
     ),
     Metric(
@@ -1449,10 +1516,11 @@ def active_metrics(level: str, metrics=(), feedback=()) -> tuple[str, ...]:
     return ids + tuple(i for i in FEEDBACK_IDS if i in set(feedback))
 
 
-def note_text(ids, scope: str, agent_type: str = "") -> str:
+def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGER) -> str:
     """The note the hook adds for ``scope`` (``"main"`` at session start,
     ``"subagent"`` at agent start) with the metrics in ``ids`` switched
-    on; ``""`` when none of them asks anything there.
+    on; ``""`` when none of them asks anything there. While Haiku writes
+    the tags (``tagger``), the main note asks for no ``[tl: ...]`` tag.
 
     ``hooks/capture-hook.py`` builds the same text from
     ``capture-catalogue.json`` (:func:`export_json`); a test holds the two
@@ -1465,8 +1533,12 @@ def note_text(ids, scope: str, agent_type: str = "") -> str:
     if scope == "subagent" and agent_type in NO_RULES_AGENT_TYPES:
         enabled = [m for m in enabled if m.id not in ("rules", "agent_brief")]
     main = scope == "main"
-    lines = [(m.main_line if main else m.sub_line) for m in enabled]
-    extras = [(m.main_extra if main else m.sub_extra) for m in enabled]
+    untagged = main and tagger == "haiku"
+    lines = ["" if untagged else m.main_line if main else m.sub_line for m in enabled]
+    extras = [
+        (m.main_extra_untagged or m.main_extra) if untagged else m.main_extra if main else m.sub_extra
+        for m in enabled
+    ]
     codes = [m.id for m, line, x in zip(enabled, lines, extras) if line or x]
     if not codes:
         return ""
@@ -1489,6 +1561,24 @@ def note_text(ids, scope: str, agent_type: str = "") -> str:
             out.append(SKIP_KEY_LINE)
     out += after_tag
     return "\n".join(out)
+
+
+def tagged_keys(ids) -> tuple[str, ...]:
+    """The ``[tl: ...]`` keys the metrics in ``ids`` ask for, in
+    catalogue order."""
+    wanted = set(ids)
+    return tuple(m.id for m in METRICS if m.id in wanted and m.main_line)
+
+
+def judge_text(ids) -> str:
+    """What Haiku is told when it writes the main session's tags
+    (``tagger = "haiku"``): the same key lines Claude's note would carry;
+    ``""`` when none of ``ids`` asks for a key. ``hooks/capture-hook.py``
+    builds the same text (``build_judge_prompt``)."""
+    keys = set(tagged_keys(ids))
+    if not keys:
+        return ""
+    return "\n".join([JUDGE_INTRO, *(m.main_line for m in METRICS if m.id in keys), JUDGE_RULE])
 
 
 def tool_note_text(metric_id: str) -> str:
@@ -1531,9 +1621,14 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     (``coaching_notes``) add the message you send and approved plans to
     that, in one PostToolUse entry shared with the tool note. SessionEnd
     runs as the session closes, when nothing waits on it; the other
-    signals run in the background."""
+    signals run in the background. While Haiku writes the tags
+    (:data:`HAIKU_TAGGER_HOOK` in ``ids``), ``Stop`` runs in the
+    foreground, shared with ``turn_signals``: it only hands the turn to a
+    worker of its own and returns, and ``claude -p`` exits without waiting
+    for a background hook, which would drop the turn."""
     wanted = set(ids)
-    main = any(m.id in wanted and (m.main_line or m.main_extra) for m in METRICS)
+    haiku = HAIKU_TAGGER_HOOK in wanted and bool(tagged_keys(wanted))
+    main = any(m.id in wanted and ((m.main_line and not haiku) or m.main_extra) for m in METRICS)
     sub = any(m.id in wanted and (m.sub_line or m.sub_extra) for m in METRICS)
     coach = "coaching_notes" in wanted
     specs: list[tuple[str, str, str, bool]] = []
@@ -1548,7 +1643,9 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
         specs.append((HOOK_SCRIPT, "PostToolUse", "|".join(dict.fromkeys(tools)), False))
     for event in SIGNAL_EVENTS:
         if SIGNAL_EVENTS[event] in wanted:
-            specs.append((HOOK_SCRIPT, event, "", event != "SessionEnd"))
+            specs.append((HOOK_SCRIPT, event, "", event != "SessionEnd" and not (haiku and event == "Stop")))
+    if haiku and not any(spec[1] == "Stop" for spec in specs):
+        specs.append((HOOK_SCRIPT, "Stop", "", False))
     return tuple(specs)
 
 
@@ -1569,6 +1666,7 @@ def export_json() -> dict:
                 "main_line": m.main_line,
                 "main_extra": m.main_extra,
                 "extra_before_tag": m.extra_before_tag,
+                "main_extra_untagged": m.main_extra_untagged,
                 "sub_line": m.sub_line,
                 "sub_extra": m.sub_extra,
                 "tool_note": m.tool_note,
@@ -1593,6 +1691,17 @@ def export_json() -> dict:
         "turn_states": list(TURN_STATES),
         "stop_failure_errors": list(STOP_FAILURE_ERRORS),
         "signals_dir": SIGNALS_DIR,
+        "judge": {
+            "model": JUDGE_MODEL,
+            "dir": JUDGE_DIR,
+            "env": JUDGE_ENV,
+            "timeout_s": JUDGE_TIMEOUT_S,
+            "limits": dict(JUDGE_LIMITS),
+            "intro": JUDGE_INTRO,
+            "rule": JUDGE_RULE,
+            "vocab": {key: list(words) for key, words in TAG_VOCAB.items()},
+            "list_keys": sorted(LIST_KEYS),
+        },
         "coaching": {
             "marker": COACH_MARKER,
             "version": COACH_VERSION,
@@ -1633,17 +1742,24 @@ def asks_claude(metric_id: str) -> bool:
     return bool(m and (m.main_line or m.sub_line or m.main_extra or m.sub_extra or m.tool_note))
 
 
-def rough_tokens(ids) -> dict[str, int]:
+def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     """Rough sizes in tokens (characters / 4) for the metrics in ``ids``:
     the note at each session start, clear or compaction
     (``session_note``) and at each subagent start (``subagent_note``);
     the tag Claude writes per reply (``reply_tag``) and per subagent
     report (``report_tag``); the note after a large or web tool result
     (``tool_note``). Amounts measured from transcripts replace these once
-    capture has run."""
+    capture has run. While Claude Haiku writes the tags (``tagger``), the
+    reply carries none: ``reply_tag`` is only the reminder line, if on."""
     enabled = [METRICS_BY_ID[i] for i in ids if i in METRICS_BY_ID]
-    main, sub = note_text(ids, "main"), note_text(ids, "subagent")
-    reply = sum(m.out_chars for m in enabled if m.main_line or m.main_extra)
+    main, sub = note_text(ids, "main", tagger=tagger), note_text(ids, "subagent")
+    if tagger == "haiku" and any(m.main_line for m in enabled):
+        # No tag: only the reminder line ends a reply.
+        reply = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
+        frame = 0
+    else:
+        reply = sum(m.out_chars for m in enabled if m.main_line or m.main_extra)
+        frame = _TAG_FRAME_CHARS
     report = sum(m.out_chars for m in enabled if m.sub_line or m.sub_extra)
     tool = max(
         (len(tool_note_text(m.id)) + tool_suffix_chars(m.id) for m in enabled if m.tool_note),
@@ -1652,7 +1768,7 @@ def rough_tokens(ids) -> dict[str, int]:
     return {
         "session_note": round((len(main) + NOTE_WRAP_CHARS + len("SessionStart")) / 4) if main else 0,
         "subagent_note": round((len(sub) + NOTE_WRAP_CHARS + len("SubagentStart")) / 4) if sub else 0,
-        "reply_tag": round((reply + _TAG_FRAME_CHARS) / 4) if reply else 0,
+        "reply_tag": round((reply + frame) / 4) if reply else 0,
         "report_tag": round(report / 4),
         "tool_note": round((tool + NOTE_WRAP_CHARS + len("PostToolUse")) / 4) if tool else 0,
     }
@@ -1871,6 +1987,56 @@ def render_markdown() -> str:
     p("If Claude writes more than one tag, the last one wins, key by key.")
     p("")
 
+    # -- Who writes the tags ---------------------------------------------------
+    p("## Who writes the tags")
+    p("")
+    standard = level_includes("standard")
+    p(
+        "By default Claude writes the `[tl: ...]` tag itself, at the end of its final reply to each of your "
+        "messages. `claudeglass capture tagger haiku` (or \"Tags written by\" on Setup › Capture) hands that to "
+        "Claude Haiku instead, and `capture tagger claude` hands it back:"
+    )
+    p("")
+    p(
+        "- The session note no longer carries the tag list, and replies end as they would anyway. At Standard "
+        f"the note drops from ~{rough_tokens(standard)['session_note']} to "
+        f"~{rough_tokens(standard, 'haiku')['session_note']} tokens."
+    )
+    p(
+        "- When a turn of the main session ends, the hook's `Stop` entry reads the end of the transcript, hands "
+        "a short excerpt to a worker process of its own, and returns at once. The excerpt holds your message "
+        f"(up to {JUDGE_LIMITS['prompt']:,} characters) and the one before it, how many you sent before, what "
+        "Claude did (model calls, output tokens, tools used, files changed, the first line of up to "
+        f"{JUDGE_LIMITS['commands']} shell commands, skills, subagents, tool errors, any plan) and the end of its "
+        f"final reply (up to {JUDGE_LIMITS['reply']:,} characters). Tool output is never in it."
+    )
+    p(
+        f"- The worker runs `claude -p --model {JUDGE_MODEL}` with no tools, settings, MCP servers or saved "
+        "session, through your own Claude Code login, with the excerpt on stdin. Haiku gets the key lines "
+        f"Claude's note would have carried, after \"{JUDGE_INTRO}\" and before \"{JUDGE_RULE}\" It loads no "
+        "settings file, so your hooks don't run inside it; a login that needs an `apiKeyHelper` from "
+        "settings.json fails there, and `capture status` says so."
+    )
+    p(
+        f"- Only the tag's words are kept, checked against the same vocabularies, in `<config-dir>/{JUDGE_DIR}/"
+        "YYYY-MM.jsonl`, with the reply's id and what the call cost. What the transcript settles overrides "
+        "Haiku: no plan is `plan=none`, one written that turn is `plan=made`, and no skill run is never "
+        "`skill=helped`. A turn that got no tag says why: "
+        + ", ".join(f"`{e}`" for e in JUDGE_ERRORS)
+        + ". `capture status` counts both."
+    )
+    p(
+        f"- Each call costs about ${JUDGE_USD_PER_CALL:.4f} (about 1,200 tokens read, 30 written), counted as "
+        "capture's cost. On a subscription it counts toward your usage like any other Haiku use."
+    )
+    p(
+        "- The `Stop` entry runs in the foreground, since `claude -p` exits without waiting for a background "
+        "hook, but only for as long as it takes to read the transcript's end. Subagent reports and brief markers "
+        "are still Claude's to write. Deep's note after a large result goes only to subagents, as the main "
+        "session's replies carry no tag for its word."
+    )
+    p("")
+
     # -- Privacy ------------------------------------------------------------
     p("## Privacy")
     p("")
@@ -1904,7 +2070,7 @@ def render_markdown() -> str:
     p("")
     p(
         f"The hook script and its catalogue (`{HOOK_SCRIPT}`, `{CATALOGUE_FILE}`) live side by side under "
-        "`<config-dir>/hooks/`. Only `capture on` and `capture connect` ever change "
+        "`<config-dir>/hooks/`. Only `capture on`, `capture tagger` and `capture connect` ever change "
         "`~/.claude/settings.json` — and only after showing the diff and asking first, unless you pass "
         "`--yes`. Every other change writes only this tool's own `config.toml`."
     )
@@ -1922,6 +2088,10 @@ def render_markdown() -> str:
         "[--sample N] [--yes] [--dry-run]` — turn it on (default level: Essentials)."
     )
     p("- `claudeglass capture level LEVEL` — change the level.")
+    p(
+        "- `claudeglass capture tagger claude|haiku` — who writes the main session's tags "
+        "(see [Who writes the tags](#who-writes-the-tags))."
+    )
     p("")
     p(
         f"A fresh switch from off to on — at `init`, `capture on`/`level`, or the Capture page — gets a "
@@ -1947,8 +2117,8 @@ def render_markdown() -> str:
     p("- `claudeglass capture feedback on|off` — the `/tl-feedback` skill and its status-line reminder.")
     p("- `claudeglass capture brief on|off` — the `/tl-brief` skill.")
     p(
-        "- `claudeglass capture prune [--dry-run]` — delete signal files and `capture-log.jsonl` "
-        "records past your configured retention (`retention_days` in `config.toml`, or a default when it's "
+        "- `claudeglass capture prune [--dry-run]` — delete signal files, Claude Haiku's tag files and "
+        "`capture-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's "
         "unset); `serve`'s watcher already runs this same cleanup on every tick, so this is for anyone not "
         "running it."
     )

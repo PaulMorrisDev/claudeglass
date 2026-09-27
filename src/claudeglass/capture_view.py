@@ -87,6 +87,18 @@ COACHING_NOTES_ON = (
     "'claudeglass capture status' shows how many there were and what they cost."
 )
 
+#: Said when the tagger changes (``capture tagger``): who writes the tags
+#: now, what that sends where, and what it costs.
+TAGGER_TEXT = {
+    "haiku": "Claude Haiku now writes the tags. After each of your messages is answered, the hook sends Haiku a "
+    "short excerpt, through your own Claude Code login. It holds your message, what Claude did and the end of its "
+    "reply. Only the tag's words are kept, in a local file. Claude's replies no longer end with a tag, and the "
+    f"session no longer carries the tag list. Each call costs about ${catalogue.JUDGE_USD_PER_CALL:.4f} of Haiku, "
+    "in the background, so you never wait for it. It takes effect in new sessions.",
+    "claude": "Claude now writes the tags again, at the end of its final reply to each of your messages. "
+    "It takes effect in new sessions.",
+}
+
 #: Below this percentage of your messages tagged, once there are
 #: :data:`LOW_COVERAGE_MIN_CYCLES` of them, the banner says Claude is
 #: skipping tags.
@@ -124,6 +136,8 @@ def describe(capture: CaptureConfig) -> str:
         parts.append(f"until {capture.until[:16].replace('T', ' ')}")
     if capture.sample < 100:
         parts.append(f"{capture.sample}% of sessions")
+    if capture.haiku_tags:
+        parts.append("tags by Haiku")
     return parts[0] + (f" ({', '.join(parts[1:])})" if len(parts) > 1 else "")
 
 
@@ -144,6 +158,7 @@ def config_block(capture: CaptureConfig, now: datetime | None = None) -> dict:
         "metrics": list(capture.active_metrics()),
         "feedback": list(capture.feedback),
         "coaching": list(capture.coaching),
+        "tagger": capture.tagger,
         "projects_limited": bool(capture.projects),
     }
 
@@ -223,7 +238,9 @@ def _estimate_block(est, units) -> dict:
 
 
 def _levels(capture: CaptureConfig, past, units) -> list[dict]:
-    estimates = capture_mod.level_estimates(past, capture.sample) if past is not None and past.sessions else {}
+    estimates = (
+        capture_mod.level_estimates(past, capture.sample, capture.tagger) if past is not None and past.sessions else {}
+    )
     out = []
     for level in catalogue.LEVELS:
         ids = catalogue.level_includes(level)
@@ -238,12 +255,16 @@ def _levels(capture: CaptureConfig, past, units) -> list[dict]:
                 "metrics": list(ids),
                 "asks_claude": any(catalogue.asks_claude(i) for i in ids),
                 "current": capture.level == level,
-                "rough": catalogue.rough_tokens(ids),
+                "rough": catalogue.rough_tokens(ids, capture.tagger),
                 "estimate": _estimate_block(est, units) if est is not None and est.cost > 0 else None,
             }
         )
     custom_ids = catalogue.with_requirements(capture.metrics) if capture.level == catalogue.CUSTOM_LEVEL else ()
-    custom = capture_mod.estimate(past, custom_ids, capture.sample) if custom_ids and past is not None and past.sessions else None
+    custom = (
+        capture_mod.estimate(past, custom_ids, capture.sample, capture.tagger)
+        if custom_ids and past is not None and past.sessions
+        else None
+    )
     out.append(
         {
             "id": catalogue.CUSTOM_LEVEL,
@@ -253,25 +274,28 @@ def _levels(capture: CaptureConfig, past, units) -> list[dict]:
             "metrics": list(custom_ids),
             "asks_claude": any(catalogue.asks_claude(i) for i in custom_ids),
             "current": capture.level == catalogue.CUSTOM_LEVEL,
-            "rough": catalogue.rough_tokens(custom_ids),
+            "rough": catalogue.rough_tokens(custom_ids, capture.tagger),
             "estimate": _estimate_block(custom, units) if custom is not None and custom.cost > 0 else None,
         }
     )
     return out
 
 
-def _marginal(past, active: tuple[str, ...], metric_id: str, sample: int) -> float:
+def _marginal(past, active: tuple[str, ...], metric_id: str, sample: int, tagger: str = catalogue.DEFAULT_TAGGER) -> float:
     """USD over the replayed days that ``metric_id`` adds to ``active``
     (or saves, when it is already on)."""
+    def cost(ids) -> float:
+        return capture_mod.estimate(past, ids, sample, tagger).cost
+
     if metric_id in active:
         without = tuple(
             i for i in active if i != metric_id and metric_id not in catalogue.METRICS_BY_ID[i].requires
         )
-        return capture_mod.estimate(past, active, sample).cost - capture_mod.estimate(past, without, sample).cost
+        return cost(active) - cost(without)
     with_it = catalogue.with_requirements(active + (metric_id,)) + tuple(
         i for i in active + (metric_id,) if i in catalogue.FEEDBACK_IDS
     )
-    return capture_mod.estimate(past, with_it, sample).cost - capture_mod.estimate(past, active, sample).cost
+    return cost(with_it) - cost(active)
 
 
 def _kind(metric) -> str:
@@ -307,7 +331,7 @@ def _metric_row(
     asks = catalogue.asks_claude(metric.id)
     estimate = None
     if asks and past is not None and past.sessions:
-        usd = max(0.0, _marginal(past, active, metric.id, capture.sample)) * 7 / past.days if past.days else 0.0
+        usd = max(0.0, _marginal(past, active, metric.id, capture.sample, capture.tagger)) * 7 / past.days if past.days else 0.0
         estimate = _money(units, usd, "a week")
     actual = None
     actual_label = "Since it was turned on"
@@ -410,6 +434,7 @@ def _measured(use, units) -> dict | None:
         "coverage_text": _pct(use.coverage),
         "reports": use.reports,
         "tagged_reports": use.tagged_reports,
+        "judged": use.judged,
         "report_coverage_pct": use.report_coverage,
         "scopes": {
             scope: {"note_tokens": s.note_tokens, "tag_tokens": s.tag_tokens, **_money(units, s.cost)}
@@ -645,6 +670,7 @@ def view(
     return {
         "config": config,
         "warning": WARNING,
+        "tagger_text": dict(TAGGER_TEXT),
         "samples": list(CAPTURE_SAMPLES),
         "levels": levels,
         "sections": [s for s in sections if s["metrics"]],

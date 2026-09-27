@@ -376,7 +376,9 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
   files Claude Code has already written, and never calls Claude itself.
   Metrics capture is the one opt-in exception, and it's off by default.
   While it's on, Claude spends a few tokens in your own sessions,
-  reading a short note and writing a tag. See
+  reading a short note and writing a tag. If you let Claude Haiku write
+  the tags instead (`claudeglass capture tagger haiku`), the capture
+  hook runs your `claude` command once per turn to ask it. See
   [`docs/capture.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/capture.md).
 - **It changes nothing on its own.** `init` offers two optional
   additions, and shows each one and asks first:
@@ -418,7 +420,10 @@ it completely, see [Uninstalling](#uninstalling).
 - **What metrics capture adds.** It's off by default. When it's on, it
   adds a short note to your Claude Code sessions, and that note goes to
   Anthropic with the rest of the session. Claude's tags come back in its
-  replies, and this tool reads them from your transcripts.
+  replies, and this tool reads them from your transcripts. If Claude
+  Haiku writes the tags instead, a short excerpt of each turn also goes
+  to Haiku through your own Claude Code login, and only the tag's words
+  are kept, in a local file.
 
 [`SECURITY.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/SECURITY.md) is the full checklist for a security
 review, with the tests that back each point.
