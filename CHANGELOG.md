@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-27
+
+0.10.0 was tagged but never reached PyPI, so upgrading from 0.9.0 brings
+the changes listed under both releases.
+
 ### Added
 
 - **Warnings about how you prompt.** Coaching notes (`coaching_notes`)
