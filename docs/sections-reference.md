@@ -1437,12 +1437,17 @@ Claude Code writes a running total of a session's cost (a `cost-state`
 line) now and then. For every session with one, this compares that
 total with ClaudeGlass's own pricing of the same session up to when the
 total was last written (`TranscriptMeta.cc_cost_as_of`; subagents
-included).
+included), from when the Claude Code process it counts started
+(`TranscriptMeta.cc_cost_since`: a resumed session's total leaves out
+the replies before the resume). A total of zero with no model in it is
+a blank record, not a cost, and is skipped.
 
 - `cost_record_summary` — one `all` row: `sessions`, `cc_usd` (Claude
   Code's own), `local_usd` (ClaudeGlass, same span), `difference_pct`,
-  then the known reasons: `stopped_usd` (replies stopped mid-stream,
-  which ClaudeGlass prices and Claude Code leaves out), `unlogged_usd`
+  then the known reasons: `stopped_usd` (replies stopped mid-stream
+  before calling a tool, which ClaudeGlass prices and Claude Code leaves
+  out; a subagent's reply logged mid-stream while its tool runs is
+  billed, so it isn't one), `unlogged_usd`
   (Claude Code's cost on models with no reply in any transcript, such as
   a request for a session title) and `estimated_usd` (the estimated
   compaction calls both sides count); `unexplained_pct` is what is left

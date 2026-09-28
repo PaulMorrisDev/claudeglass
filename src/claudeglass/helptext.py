@@ -4119,7 +4119,8 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="Against Claude Code's own record",
         help=Help(
             shows="Every session with Claude Code's own cost record, added up, and what explains the difference.",
-            read="ClaudeGlass counts only the replies up to when Claude Code last wrote its total.",
+            read="ClaudeGlass counts only the replies up to when Claude Code last wrote its total. After a resume, "
+            "Claude Code's total starts again, so only the replies since then count.",
             act="",
         ),
         columns={
@@ -4130,7 +4131,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "difference_pct": ("Difference", "ClaudeGlass's cost against Claude Code's, as a % of Claude Code's."),
             "stopped_usd": (
                 "Stopped replies",
-                "Replies stopped mid-stream. They used tokens, so ClaudeGlass counts them; Claude Code doesn't.",
+                "Replies stopped mid-stream before calling a tool. They used tokens, so ClaudeGlass counts them; "
+                "Claude Code doesn't.",
             ),
             "unlogged_usd": (
                 "Requests no log shows",

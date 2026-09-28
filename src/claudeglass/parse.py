@@ -1703,6 +1703,17 @@ def _cost_by_model(model_usage) -> dict[str, float]:
     return out
 
 
+def _epoch_ms_iso(value) -> str | None:
+    """``cost-state``'s ``startTime`` (milliseconds since the epoch) as an
+    ISO time, or ``None`` when it isn't one."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 #: Compaction calls (see module docstring): the cache lifetimes a write
 #: can carry, in seconds.
 _ONE_HOUR_S = 3600.0
@@ -1855,6 +1866,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     latest_ts: str | None = None
     cc_cost_as_of: str | None = None
     cc_cost_by_model: dict[str, float] = {}
+    cc_cost_since: str | None = None
     #: Batch C addition: first non-empty ``entrypoint``/``version`` field
     #: seen on any raw line, in file order. Every line type carries these
     #: (when present), not just assistant lines.
@@ -2032,12 +2044,18 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             # Parser-signals addition (SURV-5): numbers only, no OTel --
             # feeds reconcile.claude_code_reported_costs (see that
             # module's own docstring).
+            # A zero total with no model in it is a blank record Claude
+            # Code writes on some sessions, not a cost of nothing: taken
+            # as the total, it made local pricing look hundreds of
+            # percent too high.
             cost_raw = d.get("totalCostUSD")
-            if isinstance(cost_raw, (int, float)) and not isinstance(cost_raw, bool):
+            blank = cost_raw == 0 and not d.get("modelUsage")
+            if isinstance(cost_raw, (int, float)) and not isinstance(cost_raw, bool) and not blank:
                 cc_cost_usd = float(cost_raw)
                 cc_cost_has_unknown_model = bool(d.get("hasUnknownModelCost"))
                 cc_cost_as_of = latest_ts
                 cc_cost_by_model = _cost_by_model(d.get("modelUsage"))
+                cc_cost_since = _epoch_ms_iso(d.get("startTime"))
         elif line_type == "attachment":
             attachment = d.get("attachment")
             if isinstance(attachment, dict) and attachment.get("type") == "skill_listing":
@@ -2175,6 +2193,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         cc_cost_has_unknown_model=cc_cost_has_unknown_model,
         cc_cost_as_of=cc_cost_as_of,
         cc_cost_by_model=cc_cost_by_model,
+        cc_cost_since=cc_cost_since,
     )
 
     # Parser-signals addition (SURV-6/7): only present when non-empty, so
@@ -2272,7 +2291,7 @@ READ_KEYS: dict[str, frozenset[str]] = {
     "queue-operation": _BASE_READ_KEYS | frozenset({"timestamp", "message", "operation"}),
     "agent-setting": _BASE_READ_KEYS | frozenset({"agentSetting"}),
     "mode": _BASE_READ_KEYS | frozenset({"mode"}),
-    "cost-state": _BASE_READ_KEYS | frozenset({"totalCostUSD", "hasUnknownModelCost", "modelUsage"}),
+    "cost-state": _BASE_READ_KEYS | frozenset({"totalCostUSD", "hasUnknownModelCost", "modelUsage", "startTime"}),
 }
 
 

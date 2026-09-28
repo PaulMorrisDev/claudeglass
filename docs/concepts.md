@@ -55,16 +55,20 @@ of request don't fit that exactly:
   `postTokens` as the output. It counts in spend and tokens, not as a
   reply. `postTokens` includes a few files Claude Code attaches again,
   so the output can run a little high.
-- **A reply stopped mid-stream** (you pressed Esc, say). The tokens it
-  read and wrote so far were used, so ClaudeGlass prices what the
-  transcript records. Claude Code's own running total leaves it out.
+- **A reply stopped mid-stream** (you pressed Esc, say) before it
+  called a tool. The tokens it read and wrote so far were used, so
+  ClaudeGlass prices what the transcript records. Claude Code's own
+  running total leaves it out. A subagent's reply is often logged
+  mid-stream while the tool it asked for runs; that one is billed.
 - **Small requests no log records**, such as the one that names a
   session. Claude Code counts them; no transcript shows them, so
   ClaudeGlass can't.
 
 Where Claude Code writes its own running total (a `cost-state` line),
 Data quality compares the two over the same span and splits these out
-(`claudeglass check cost-record`). On three real Claude Code 2.1.283
+(`claudeglass check cost-record`). The total counts from when that
+Claude Code process started, so for a resumed session the comparison
+starts at the resume. On three real Claude Code 2.1.283
 sessions — 659 replies and one 780,000-token summary, $66 in all —
 token counts matched Claude Code's to the token and 0.01% of cost was
 left unexplained.

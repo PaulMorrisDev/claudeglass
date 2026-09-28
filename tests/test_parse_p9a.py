@@ -117,6 +117,22 @@ def test_cost_state_populates_meta_fields(tmp_path: Path):
     assert result.meta.cc_cost_has_unknown_model is True
 
 
+def test_a_blank_cost_state_is_not_claude_codes_cost(tmp_path: Path):
+    """Claude Code writes ``totalCostUSD: 0`` with an empty ``modelUsage``
+    on some sessions: that is no record, not a cost of nothing, and it
+    doesn't replace a real total seen before it."""
+    blank = ignorable_line("cost-state", totalCostUSD=0, totalAPIDuration=0, modelUsage={}, hasUnknownModelCost=False)
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, [turn_line(message_id="msg_1"), blank])
+    assert parse_transcript(path, TranscriptMeta(path=str(path))).meta.cc_cost_usd is None
+
+    real = ignorable_line("cost-state", totalCostUSD=2.5, modelUsage={"claude-opus-5-5": {"costUSD": 2.5}})
+    write_jsonl(path, [turn_line(message_id="msg_1"), real, turn_line(message_id="msg_2"), blank])
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    assert result.meta.cc_cost_usd == 2.5
+    assert result.meta.cc_cost_by_model == {"claude-opus-5-5": 2.5}
+
+
 def test_cost_state_defaults_to_none_when_absent(tmp_path: Path):
     lines = [turn_line(message_id="msg_1")]
     path = tmp_path / "session.jsonl"

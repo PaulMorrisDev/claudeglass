@@ -179,6 +179,23 @@ the changes listed under both releases.
   command line, and where `claude` is npm's `claude.cmd` on Windows,
   cmd.exe takes their `|` and line breaks for its own. The file is in
   the data folder and deleted as soon as the call ends.
+- **Claude Code's own cost record compares like with like.** Three
+  things made `check cost-record` ask for a report when the figures
+  matched to within 1%:
+  - Claude Code writes a blank record on some sessions, a total of $0
+    with no model in it, and it was taken as the session's cost (one
+    real project read +273%). It's skipped now.
+  - A subagent's reply is often logged before its stream ends, with no
+    stop reason, while the tool it asked for runs. It counted as
+    stopped and was taken out of ClaudeGlass's side, though Claude Code
+    bills it ($13 of 298 replies in one real session, which read -6%).
+    Only a reply that called no tool counts as stopped.
+  - A resumed session's total counts from the resume, and ClaudeGlass
+    compared it with every reply since the session began (+63% on one
+    real session). The comparison now starts at the record's
+    `startTime`.
+
+  `PARSER_VERSION` 30, so every transcript is read again once.
 - **A workflow agent is judged by its answer.** A workflow script's
   agent hands its result back through the `StructuredOutput` tool, and
   its last words are only a line about handing it in; Haiku got those

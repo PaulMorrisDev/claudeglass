@@ -21,7 +21,7 @@ from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing, price_turn
 from claudeglass.units import Units
 
-from helpers import turn_line, user_str_line, write_jsonl
+from helpers import tool_use_block, turn_line, user_str_line, write_jsonl
 
 SESSION = "7e5fd47d-1816-569f-9241-e02958cf9196"
 SONNET = "claude-sonnet-5"
@@ -116,6 +116,41 @@ def test_no_reply_counts_as_stopped_when_the_log_records_no_stop_reasons(tmp_pat
         _reply("msg_2", "2026-09-26T10:00:10.000Z", stop_reason=None, sessionId=SESSION),
         _cost_state(0.01, {SONNET: 0.01}),
     ]
+    corpus = load_corpus([_write(tmp_path, lines)])
+
+    [cost] = reconcile.claude_code_reported_costs(corpus, load_pricing())
+
+    assert cost.stopped_usd == 0.0
+
+
+def test_a_resumed_sessions_total_is_compared_from_the_resume(tmp_path: Path):
+    """``startTime`` is when the process whose total it is started: after
+    a resume, the replies before it are in no total Claude Code wrote."""
+    state = _cost_state(0.01, {SONNET: 0.01})
+    state["startTime"] = 1790416830000  # 2026-09-26T10:00:30Z
+    lines = [
+        _reply("msg_1", "2026-09-26T10:00:05.000Z", input_tokens=1000, output_tokens=500, sessionId=SESSION),
+        _reply("msg_2", "2026-09-26T10:01:00.000Z", input_tokens=4000, output_tokens=800, sessionId=SESSION),
+        state,
+    ]
+    folder = _write(tmp_path, lines)
+    path = folder / f"{SESSION}.jsonl"
+
+    meta = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id=SESSION)).meta
+    [cost] = reconcile.claude_code_reported_costs(load_corpus([folder]), load_pricing())
+
+    assert meta.cc_cost_since == "2026-09-26T10:00:30Z"
+    assert cost.since == "2026-09-26T10:00:30Z"
+    assert cost.local_cost_usd == pytest.approx(_sonnet_cost(input_tokens=4000, output_tokens=800))
+
+
+def test_a_reply_that_called_a_tool_was_not_stopped(tmp_path: Path):
+    """A subagent's reply is often logged mid-stream, with no
+    ``stop_reason``, while the tool it asked for already runs; Claude Code
+    bills it, so it isn't taken out of ClaudeGlass's side."""
+    called = _reply("msg_2", "2026-09-26T10:00:10.000Z", stop_reason=None, input_tokens=2000, output_tokens=3,
+                    content=[tool_use_block("Read", "toolu_1", {"file_path": "a.py"})], sessionId=SESSION)
+    lines = [_reply("msg_1", "2026-09-26T10:00:05.000Z", sessionId=SESSION), called, _cost_state(0.01, {SONNET: 0.01})]
     corpus = load_corpus([_write(tmp_path, lines)])
 
     [cost] = reconcile.claude_code_reported_costs(corpus, load_pricing())

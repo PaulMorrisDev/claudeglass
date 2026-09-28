@@ -432,6 +432,10 @@ to stop where it stops (``reconcile.claude_code_reported_costs``):
 - ``TranscriptMeta.cc_cost_by_model: dict = {}`` -- model id -> that
   line's ``modelUsage[model].costUSD``. Model ids and numbers only; an id
   outside the model-id alphabet is dropped.
+- ``TranscriptMeta.cc_cost_since: str | None = None`` (``PARSER_VERSION``
+  30) -- that line's ``startTime`` as an ISO time: when the Claude Code
+  process whose total it is started. A resumed session's total counts
+  from its resume, not from the session's first line.
 
 Prompting-habits addition (``PARSER_VERSION`` 28). What the "How you
 prompt" section (``prompting.py``) and the coaching hints' after-the-fact
@@ -900,6 +904,8 @@ class TranscriptMeta:
     #: written, as the latest line time before it, and its cost by model.
     cc_cost_as_of: str | None = None
     cc_cost_by_model: dict = field(default_factory=dict)
+    #: When the process that total counts from started (``startTime``).
+    cc_cost_since: str | None = None
 
 
 @dataclass(slots=True)

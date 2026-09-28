@@ -204,7 +204,13 @@ __version__ = "0.11.0"
 #: Bumped to 29: a message whose reply was an API error, an overload or a
 #: usage limit isn't an answered attempt, so sending it again isn't
 #: ``human_repeat``. A pre-29 digest counted those resends as repeats.
-PARSER_VERSION = 29
+#:
+#: Bumped to 30: a ``cost-state`` line with a zero total and no model in
+#: ``modelUsage`` is a blank record, not Claude Code's cost, so it no
+#: longer sets ``TranscriptMeta.cc_cost_usd``, and its ``startTime`` is
+#: kept (``cc_cost_since``). A pre-30 digest compared those sessions'
+#: local pricing against $0.
+PARSER_VERSION = 30
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract
