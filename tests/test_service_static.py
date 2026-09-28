@@ -2643,6 +2643,15 @@ def test_recommendations_and_checks_open_from_the_address() -> None:
     assert "missingNote(" in _function_source(app_js, "renderQuickActions")
 
 
+def test_an_overview_row_counts_its_other_findings_as_findings() -> None:
+    """The Hooks row read "backlog-reminder.ps1 and model-pin-guard.ps1
+    (and 2 more)", as if two more hooks failed; the two were other
+    findings of the same check."""
+    overview = _function_source(_app_js(), "checklistRow")
+    assert 'countWord(others, "more finding", "more findings")' in overview
+    assert '" more)"' not in overview
+
+
 # -- Phase 9: the Spend and Cache pages --------------------------------------
 
 

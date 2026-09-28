@@ -283,6 +283,10 @@ the changes listed under both releases.
   whose file has gone can't be read again, so its failures name no tool;
   one failure that does name a tool is enough to judge the hook on its
   tools.
+- **An Overview row no longer miscounts what it lists.** The Hooks row
+  read "backlog-reminder.ps1 and model-pin-guard.ps1 (and 2 more)", as
+  if two more hooks were failing. The two were other findings of the
+  same check, so it now says "(and 2 more findings)".
 - **Turning coaching notes on or off is clearer.** On Setup › Capture,
   the Off level said "Nothing is captured and no tokens are used", but
   coaching notes and feedback have their own switches and keep running
