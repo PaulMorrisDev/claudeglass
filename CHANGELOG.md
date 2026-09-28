@@ -179,6 +179,12 @@ the changes listed under both releases.
   command line, and where `claude` is npm's `claude.cmd` on Windows,
   cmd.exe takes their `|` and line breaks for its own. The file is in
   the data folder and deleted as soon as the call ends.
+- **A workflow agent is judged by its answer.** A workflow script's
+  agent hands its result back through the `StructuredOutput` tool, and
+  its last words are only a line about handing it in; Haiku got those
+  as its report. It now gets the start of the answer
+  itself, and the brief no longer starts with the harness's
+  "[Workflow harness — computed task]" line.
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.

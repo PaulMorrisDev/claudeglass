@@ -2171,10 +2171,13 @@ def render_markdown() -> str:
     p("")
     p(
         "- When a subagent finishes, the hook's `SubagentStop` entry reads its transcript and hands an excerpt "
-        f"to the same worker as above: its type, its brief (up to {AGENT_JUDGE_LIMITS['brief']:,} characters), "
+        f"to the same worker as above: its type, its brief (up to {AGENT_JUDGE_LIMITS['brief']:,} characters, "
+        "without the line a workflow script's harness puts before a brief it computed), "
         "what it did (model calls, tools used, the files it changed, the first line of up to "
         f"{AGENT_JUDGE_LIMITS['commands']} shell commands, tool errors), the end of its report (up to "
-        f"{AGENT_JUDGE_LIMITS['report']:,} characters) and up to {AGENT_JUDGE_LIMITS['earlier']} earlier agent "
+        f"{AGENT_JUDGE_LIMITS['report']:,} characters), or the start of the answer it handed back as structured "
+        "output when that came last, as a workflow agent's does, and up to "
+        f"{AGENT_JUDGE_LIMITS['earlier']} earlier agent "
         "runs of the session (their type and the start of their brief and the end of their report), so Haiku "
         "can tell a re-run. Tool output is never in it."
     )

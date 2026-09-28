@@ -1516,6 +1516,12 @@ _AGENT_HEAD_BYTES = 256 * 1024
 
 _TASK_ID_RE = re.compile(r"<task-id>\s*([A-Za-z0-9_-]{1,64})\s*</task-id>")
 _TASK_RESULT_RE = re.compile(r"<result>(.*?)</result>", re.DOTALL)
+#: Tools whose call is the agent's answer (``quality._ANSWER_TOOLS``): a
+#: workflow agent hands its result back through one, not in a reply.
+_ANSWER_TOOLS = frozenset({"StructuredOutput"})
+#: The line a workflow script's harness puts before the brief it
+#: computed, which says who wrote it, not what to do.
+_HARNESS_FRAME_RE = re.compile(r"\A\s*\[Workflow harness[^\]\n]*\][^\n]*\n")
 
 
 def build_agent_judge_prompt(catalogue: dict, ids) -> str:
@@ -1608,13 +1614,16 @@ def agent_excerpt(
     """What Haiku reads about a finished agent run, and the id of its last
     reply: its type and model, its brief, what the session said as it
     started it (``started_with``), what it did (model calls, output, tools, the
-    files it changed, shell commands, errors), the end of its report, and
-    the ``earlier`` runs of the session. ``("", "")`` without a brief and
-    a reply."""
+    files it changed, shell commands, errors), the end of its report, or
+    the answer it handed back through an answer tool when that came last,
+    and the ``earlier`` runs of the session. ``("", "")`` without a brief
+    and a reply."""
     limits = catalogue["judge"]["agent"]["limits"]
     edit_tools = set(catalogue["coaching"]["edit_tools"])
     brief = next((_text_of(r) for r in records if r.get("type") == "user" and _is_human_prompt(r)), "")
+    brief = _HARNESS_FRAME_RE.sub("", brief, count=1)
     reply = model = said = ""
+    answered = False
     output: dict[str, int] = {}
     tools: dict[str, int] = {}
     files: dict[str, None] = {}
@@ -1636,12 +1645,14 @@ def agent_excerpt(
             if not isinstance(block, dict):
                 continue
             if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
-                said = block["text"]
+                said, answered = block["text"], False
             if block.get("type") != "tool_use" or not isinstance(block.get("name"), str):
                 continue
             name = block["name"]
             tools[name] = tools.get(name, 0) + 1
             given = block.get("input") if isinstance(block.get("input"), dict) else {}
+            if name in _ANSWER_TOOLS:
+                said, answered = json.dumps(given, ensure_ascii=False), True
             target = given.get("file_path") or given.get("notebook_path")
             if name in edit_tools and isinstance(target, str) and target:
                 files[_shown_path(target, payload.get("cwd"))] = None
@@ -1652,7 +1663,7 @@ def agent_excerpt(
     if not brief.strip() or not reply:
         return "", ""
     last = payload.get("last_assistant_message")
-    report = last if isinstance(last, str) and last.strip() else said
+    report = last if isinstance(last, str) and last.strip() and not answered else said
     agent_type = str(payload.get("agent_type") or "") or "general-purpose"
     named = sorted(tools.items(), key=lambda item: (-item[1], item[0]))[:_JUDGE_TOOL_NAMES]
     changed = list(files)
@@ -1675,7 +1686,8 @@ def agent_excerpt(
     lines += [
         "What it did: " + "; ".join(did) + ".",
         "Shell commands: " + ("; ".join(f"`{c}`" for c in commands) if commands else "none") + ".",
-        f'The end of its report: "{_end(report, limits["report"])}"',
+        f'Its answer, handed back as structured output: "{_cut(report, limits["report"])}"' if answered
+        else f'The end of its report: "{_end(report, limits["report"])}"',
     ]
     shown_runs = earlier[-limits["earlier"]:]
     if shown_runs:

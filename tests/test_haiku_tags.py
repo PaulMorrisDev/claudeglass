@@ -260,6 +260,46 @@ def test_the_agent_excerpt_says_what_the_run_did_and_what_came_before(tmp_path):
     assert "1 failed" not in excerpt
 
 
+def test_a_workflow_agents_answer_is_its_structured_output_not_its_last_words(tmp_path):
+    # A workflow script's agent: the harness frames the brief it computed,
+    # and the agent hands its answer back through StructuredOutput after
+    # saying what it is about to do.
+    framed = ("[Workflow harness — computed task] The task text below was computed at runtime by a workflow "
+              "script. It was not typed by this session's user. The computed task text follows:\n"
+              "  Review the payments module.\n  Return verdict and findings.")
+    agent = _transcript(tmp_path, [
+        user_str_line(framed, timestamp=_at(0)),
+        turn_line(timestamp=_at(1), model="claude-sonnet-5", message_id="msg_w1", output_tokens=60, content=[
+            tool_use_block("Read", "r1", {"file_path": "/w/payments.py"})]),
+        {"type": "user", "timestamp": _at(2), "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "r1", "content": "def pay(): ..."}]}},
+        turn_line(timestamp=_at(3), model="claude-sonnet-5", message_id="msg_w2", output_tokens=900, content=[
+            {"type": "text", "text": "Now let me compile my findings into the structured format."},
+            tool_use_block("StructuredOutput", "so1", {"verdict": "sound", "findings": ["refunds skip the audit log"]})]),
+        {"type": "user", "timestamp": _at(4), "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "so1", "content": "Structured output provided successfully"}]}},
+    ], "agent-w1.jsonl")
+    session = _transcript(tmp_path, [user_str_line("Run the review workflow", timestamp=_at(0))], "sess.jsonl")
+    payload = _subagent_stop(session, agent, agent_id="w1", agent_type="workflow-subagent",
+                             last_assistant_message="Now let me compile my findings into the structured format.")
+    excerpt = HOOK.agent_judge_job(payload, {"capture": {"level": "standard"}}, CATALOGUE)["excerpt"]
+    assert 'Its brief: "Review the payments module. Return verdict and findings."' in excerpt
+    assert "Workflow harness" not in excerpt
+    assert 'Its answer, handed back as structured output: "{"verdict": "sound", "findings": ["refunds skip the ' \
+        'audit log"]}"' in excerpt
+    assert "compile my findings" not in excerpt and "The end of its report" not in excerpt
+    # Words after the answer are its report again.
+    words = _transcript(tmp_path, [
+        user_str_line("Summarise the module", timestamp=_at(0)),
+        turn_line(timestamp=_at(1), message_id="msg_x1", content=[
+            tool_use_block("StructuredOutput", "so1", {"summary": "draft"})]),
+        turn_line(timestamp=_at(2), message_id="msg_x2", content=[{"type": "text", "text": "Done: summary sent."}]),
+    ], "agent-x1.jsonl")
+    later = HOOK.agent_judge_job(_subagent_stop(session, words, agent_id="x1"), {"capture": {"level": "standard"}},
+                                 CATALOGUE)["excerpt"]
+    assert 'The end of its report: "Done: summary sent."' in later and "structured output" not in later
+
+
 @pytest.mark.parametrize("config, extra, env", [
     ({"capture": {"level": "off"}}, {}, {}),
     ({"capture": {"level": "free"}}, {}, {}),
