@@ -60,12 +60,16 @@ before it, on that reply's model. It reads that reply's cached prefix
 (its cache read plus cache write) from the cache, or writes it again at
 the same lifetime when the cache would have expired by the time the
 compaction started (the boundary's time less ``durationMs``). What
-``preTokens`` counts beyond that prefix is plain input, and ``postTokens``
-is taken as the output: the summary, plus the few files Claude Code
-attaches again, so it can run a little high. A boundary with no earlier
-reply or no ``postTokens`` is left out and counted
-(``Diagnostics.compaction_calls_unsized``). On a real 780,000-token
-compaction this came within 2% of Claude Code's own ``cost-state``.
+``preTokens`` counts beyond that prefix is plain input. The output is
+twice the summary Claude Code keeps (the summary line after the
+boundary, at four characters a token): the request writes an analysis
+first and Claude Code drops it. It never exceeds ``postTokens``, which
+counts the summary plus the messages and files Claude Code carries
+over, and is ``postTokens`` when no summary follows. A boundary with no
+earlier reply, or with neither, is left out and counted
+(``Diagnostics.compaction_calls_unsized``). Over 15 sessions with a
+``cost-state`` line this came within $1 of Claude Code's own figure on
+14; ``postTokens`` alone ran $36 high across them.
 
 ``gap_s`` is measured request-start to request-start: the interval between
 the *first* JSONL line's timestamp of one priced turn and the first line's
@@ -1718,6 +1722,12 @@ def _epoch_ms_iso(value) -> str | None:
 #: can carry, in seconds.
 _ONE_HOUR_S = 3600.0
 _FIVE_MINUTES_S = 300.0
+_CHARS_PER_TOKEN_APPROX = 4
+#: The compaction request writes an analysis, then the summary; Claude
+#: Code keeps only the summary. Output taken as twice the kept summary
+#: came closest to Claude Code's own ``cost-state`` over 15 sessions
+#: (14 within $1); ``postTokens`` ran $36 high across them.
+_COMPACTION_OUTPUT_PER_SUMMARY = 2
 
 
 def _utc(ts_raw: str | None) -> datetime | None:
@@ -1746,11 +1756,14 @@ def _cache_lifetime_s(replies: list[Turn]) -> float:
     return _FIVE_MINUTES_S
 
 
-def _compaction_turn(replies: list[Turn], event: Event) -> Turn | None:
+def _compaction_turn(replies: list[Turn], event: Event, summary_chars: int | None) -> Turn | None:
     """The estimated request that wrote ``event``'s summary, sized from
-    the last of ``replies`` (see the module docstring), or ``None`` when
-    it can't be sized."""
+    the last of ``replies`` and the summary's own length (see the module
+    docstring), or ``None`` when it can't be sized."""
     output = _count(event.post_tokens)
+    if summary_chars:
+        written = round(_COMPACTION_OUTPUT_PER_SUMMARY * summary_chars / _CHARS_PER_TOKEN_APPROX)
+        output = written if output is None else min(output, written)
     if not replies or output is None:
         return None
     previous = replies[-1]
@@ -1793,7 +1806,7 @@ def _compaction_turn(replies: list[Turn], event: Event) -> Turn | None:
 
 
 def _with_compaction_calls(
-    turns: list[Turn], compactions: list[tuple[int, Event]], diagnostics: Diagnostics
+    turns: list[Turn], compactions: list[tuple[int, Event, int | None]], diagnostics: Diagnostics
 ) -> list[Turn]:
     """``turns`` with each compaction's estimated request inserted after
     the reply before it, and ``turn_index`` renumbered over the priced
@@ -1802,11 +1815,11 @@ def _with_compaction_calls(
         return turns
     out: list[Turn] = []
     position = 0
-    for before, event in compactions:
+    for before, event, summary_chars in compactions:
         out.extend(turns[position:before])
         position = max(position, before)
         replies = [turn for turn in out if turn.turn_index > 0 and not turn.estimated]
-        estimate = _compaction_turn(replies, event)
+        estimate = _compaction_turn(replies, event, summary_chars)
         if estimate is None:
             diagnostics.compaction_calls_unsized += 1
             continue
@@ -1919,8 +1932,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     deferred_tools = _DeferredTools()
     #: Compaction calls (see module docstring): each ``compact_boundary``
     #: event, with how many turns come before it in ``turns`` once the
-    #: turn still open is finalised.
-    compactions: list[tuple[int, Event]] = []
+    #: turn still open is finalised, and the length of the summary that
+    #: follows it (``None`` until one does).
+    compactions: list[tuple[int, Event, int | None]] = []
 
     current: _PendingTurn | None = None
     current_key: str | None = None
@@ -2082,7 +2096,13 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         if event.kind == EventKind.HOOK_OUTPUT and line_type == "attachment":
             _annotate_hook_event(event, d.get("attachment"), hook_context_queue)
         if event.kind == EventKind.COMPACT_BOUNDARY:
-            compactions.append((len(turns) + (current is not None), event))
+            compactions.append((len(turns) + (current is not None), event, None))
+        elif event.kind == EventKind.COMPACT_SUMMARY and compactions:
+            # Only the summary written right after a boundary, before any
+            # reply, is that compaction's.
+            before, boundary, summary_chars = compactions[-1]
+            if summary_chars is None and before == len(turns) + (current is not None):
+                compactions[-1] = (before, boundary, event.size_chars)
         events.append(event)
         events_since_current.append(event)
         if line_type == "attachment":

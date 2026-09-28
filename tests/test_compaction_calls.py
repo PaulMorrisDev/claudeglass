@@ -38,15 +38,29 @@ def _parse(tmp_path: Path, lines: list[dict]):
     return parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="session"))
 
 
-def _session(before_ts: str = "2026-09-26T13:27:23.053Z", boundary_ts: str = "2026-09-26T13:28:40.321Z", **boundary) -> list[dict]:
+def _summary(chars: int, timestamp: str = "2026-09-26T13:28:40.330Z") -> dict:
+    """The summary line Claude Code writes after a boundary, ``chars``
+    long."""
+    opening = "This session is being continued from a previous conversation. "
+    return user_str_line(opening + "x" * (chars - len(opening)), timestamp=timestamp, isCompactSummary=True)
+
+
+def _session(
+    before_ts: str = "2026-09-26T13:27:23.053Z",
+    boundary_ts: str = "2026-09-26T13:28:40.321Z",
+    summary: int | None = None,
+    **boundary,
+) -> list[dict]:
     """A reply that read 780,762 tokens from the cache and wrote 1,511
-    (one-hour lifetime), an automatic compaction, then the next reply."""
+    (one-hour lifetime), an automatic compaction (followed by a
+    ``summary``-character summary when given), then the next reply."""
     return [
         user_str_line("start", timestamp="2026-09-26T13:20:00.000Z"),
         _reply("msg_before", before_ts, cache_read_input_tokens=780762, cache_creation_input_tokens=1511,
                ephemeral_1h_input_tokens=1511, output_tokens=1042),
         user_str_line("next", timestamp="2026-09-26T13:27:31.815Z"),
         _boundary(boundary_ts, **boundary),
+        *([_summary(summary)] if summary is not None else []),
         _reply("msg_after", "2026-09-26T13:28:42.010Z", cache_read_input_tokens=26692, cache_creation_input_tokens=37767,
                ephemeral_1h_input_tokens=37767, output_tokens=194),
     ]
@@ -144,6 +158,37 @@ def test_a_compaction_with_no_summary_size_is_left_out_and_counted(tmp_path: Pat
 
     assert [turn.estimated for turn in result.turns] == [None, None]
     assert result.diagnostics.compaction_calls_unsized == 1
+
+
+def test_the_output_is_twice_the_summary_claude_code_keeps(tmp_path: Path):
+    # 12,000 characters is 3,000 tokens; the request wrote an analysis of
+    # about the same size first, which Claude Code drops.
+    estimate = _parse(tmp_path, _session(summary=12000)).turns[1]
+
+    assert estimate.output_tokens == 6000
+    assert estimate.cache_read_tokens == 782273
+
+
+def test_the_output_never_exceeds_post_tokens(tmp_path: Path):
+    estimate = _parse(tmp_path, _session(summary=40000)).turns[1]
+
+    assert estimate.output_tokens == 8577
+
+
+def test_a_summary_sizes_a_compaction_with_no_post_tokens(tmp_path: Path):
+    result = _parse(tmp_path, _session(summary=12000, postTokens=None))
+
+    assert result.turns[1].output_tokens == 6000
+    assert result.diagnostics.compaction_calls == 1
+    assert result.diagnostics.compaction_calls_unsized == 0
+
+
+def test_a_continuation_after_the_next_reply_is_not_the_compactions_summary(tmp_path: Path):
+    lines = [*_session(), _summary(12000, timestamp="2026-09-26T13:30:00.000Z")]
+
+    estimate = _parse(tmp_path, lines).turns[1]
+
+    assert estimate.output_tokens == 8577
 
 
 def test_the_estimate_is_never_read_as_a_re_cache(tmp_path: Path):

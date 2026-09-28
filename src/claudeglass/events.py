@@ -1283,7 +1283,11 @@ def classify_line(d: dict) -> Event | None:
         d.get("isCompactSummary")
         or (str_content is not None and str_content.startswith("This session is being continued"))
     ):
-        return Event(kind=EventKind.COMPACT_SUMMARY, subkind=None, ts=ts)
+        # Sized for parse.py's compaction-call estimate: the summary's
+        # own length, never its text.
+        return Event(
+            kind=EventKind.COMPACT_SUMMARY, subkind=None, ts=ts, size_chars=_human_text_metrics(d, str_content)[0]
+        )
 
     # 3. API_ERROR
     if line_type == "system" and d.get("subtype") == "api_error":

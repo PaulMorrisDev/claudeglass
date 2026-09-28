@@ -211,7 +211,12 @@ __version__ = "0.11.0"
 #: kept (``cc_cost_since``). A pre-30 digest compared those sessions'
 #: local pricing against $0. A message that opens with a question word
 #: is no longer ``human_vague``.
-PARSER_VERSION = 30
+#:
+#: Bumped to 31: an estimated compaction call's output is twice the
+#: summary Claude Code keeps, capped at ``postTokens`` (a
+#: ``COMPACT_SUMMARY`` event now carries ``size_chars``). A pre-31 digest
+#: priced every compaction's output at ``postTokens``.
+PARSER_VERSION = 31
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

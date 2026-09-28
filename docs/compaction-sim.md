@@ -50,7 +50,10 @@ is shaped like this corpus's real ones:
 - **What it costs**:
   1. The **summary request**, which the transcript never logs: the
      triggering reply's context, read and written the way that reply's
-     was, with the summary as its output.
+     was, with the median output of this corpus's real summary requests
+     as its output. The parser estimates each at about twice the summary
+     Claude Code keeps, since the request writes an analysis first; with
+     none, the summary size stands in.
   2. The **reply after it**, re-caching its whole new context: the
      share of the starting context real compactions still read from
      cache (the system prompt and tools; median across real ones, 0
@@ -200,8 +203,9 @@ Printed verbatim in the report section's own notes (`ASSUMPTIONS`):
   small windows several times over.)
 - A candidate window fires at the window less this corpus's median
   trigger reserve (0 default).
-- A simulated compaction charges the summary request and the reply after
-  it re-caching its whole context, reading the corpus's median cached
+- A simulated compaction charges the summary request (the median real
+  summary request's output, or the summary size when there is none) and
+  the reply after it re-caching its whole context, reading the corpus's median cached
   share of the starting context (0 default) and writing the rest.
 - Files re-read after a summary are not charged by the sweep; the rule
   corrects for them.

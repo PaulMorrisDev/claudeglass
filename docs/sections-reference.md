@@ -450,10 +450,10 @@ A simulated compaction fires at the window less this corpus's own
 trigger reserve (median `window − preTokens` across real auto
 compactions under a known window), and resets context to the session's
 own starting context plus a summary of this corpus's median `postTokens`.
-It charges the summary request (never logged in the transcript) and the
-reply after it re-caching its whole context, with the share of the
-starting context real compactions still read from cache read, not
-written. Files re-read after a summary aren't charged by the sweep. A
+It charges the summary request (never logged in the transcript, output
+at the median of the real ones the parser estimated) and the reply after
+it re-caching its whole context, with the share of the starting context
+real compactions still read from cache read, not written. Files re-read after a summary aren't charged by the sweep. A
 real, already-observed compaction is kept as-is under every candidate
 window rather than re-simulated, so a window above the one a session ran
 at costs what it did: raising the window can't be tested. Main sessions a

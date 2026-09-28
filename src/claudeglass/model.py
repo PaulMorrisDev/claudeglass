@@ -422,6 +422,8 @@ after the reply before it (see that module's docstring for the sizing):
 - ``Diagnostics.compaction_calls: int = 0`` -- compactions priced this
   way; ``Diagnostics.compaction_calls_unsized: int = 0`` -- compactions
   left out because no earlier reply or summary size was recorded.
+- ``Event.size_chars`` on a ``COMPACT_SUMMARY`` event (``PARSER_VERSION``
+  31) -- the summary's length, which sizes that compaction's output.
 
 Cost-record addition (``PARSER_VERSION`` 27). A ``cost-state`` line is a
 running total written now and then, not at the end, so a comparison has

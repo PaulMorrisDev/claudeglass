@@ -253,6 +253,15 @@ the changes listed under both releases.
   judged an agent run, it said "Claude Haiku tagged" your messages when
   Claude writes those tags. It now goes by `[capture] tagger`, as the
   dashboard does.
+- **A compaction's summary is priced closer to what Claude Code bills.**
+  Its output was taken as `postTokens`, which also counts the messages
+  Claude Code carries over, so sessions with many compactions read high
+  ($36 over 15 real sessions against Claude Code's own cost record).
+  It's now twice the summary Claude Code keeps, since the request writes
+  an analysis first and Claude Code drops it: 14 of those sessions came
+  within $1. The compaction window what-if prices each simulated summary
+  the same way, at the median of your real ones. `PARSER_VERSION` 31, so
+  every transcript is read again once.
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.
