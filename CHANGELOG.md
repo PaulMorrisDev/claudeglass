@@ -242,6 +242,13 @@ the changes listed under both releases.
   install records. `update` now checks both folders first and says to run
   it from a terminal opened as administrator. When pip fails anyway, the
   message names any install records it left behind.
+- **A deleted transcript no longer breaks the report.** The dashboard
+  keeps a session after Claude Code deletes its file, but the skills
+  roll-up re-read the file of a session that made no tool calls itself.
+  Once one was deleted, Overview's "Anything wrong?", "Did your changes
+  work?" and every page built on the report said `unexpected error
+  (FileNotFoundError)`. Such a session's skill turns now count without
+  the file.
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.

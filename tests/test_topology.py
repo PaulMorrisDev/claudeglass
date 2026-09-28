@@ -367,6 +367,25 @@ def test_skill_rollup_falls_back_to_raw_scan_when_turns_carry_no_tool_use_ids(tm
     assert acc.report_proxy_values == [400, 150]
 
 
+def test_skill_rollup_still_counts_a_session_whose_file_was_deleted(tmp_path):
+    """The store keeps a session after Claude Code deletes its file, so the
+    raw-file fallback can find nothing to read: the skill turns still count,
+    and nothing is joined to the agents they started, rather than the whole
+    report failing."""
+    import dataclasses
+
+    top, subs, pricing = _build_scenario(tmp_path)
+    top.turns = [dataclasses.replace(t, tool_use_ids=(), agent_result_chars={}) for t in top.turns]
+    top.meta.path = str(tmp_path / "deleted.jsonl")
+
+    stats = TopologyStats()
+    stats.add_session("sess-1", top, subs, pricing)
+
+    acc = stats.skills["grill-me"]
+    assert acc.invocations == 1
+    assert acc.direct_spawns == 0
+
+
 # -- (d) chains: depth histogram, cost/spawn, stopped_by_user -----------
 
 
