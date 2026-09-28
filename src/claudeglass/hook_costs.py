@@ -164,10 +164,9 @@ class HookRow:
     last_failed_ts: str = ""
     failed_projects: set[str] = field(default_factory=set)
     #: The tools its failures ran for (``mcp`` for any MCP tool); see
-    #: ``tool_less`` for a failure that names none (``Stop``,
+    #: :attr:`tool_less` for a hook whose failures name none (``Stop``,
     #: ``SessionStart``...).
     failed_tools: set[str] = field(default_factory=set)
-    tool_less: bool = False
     #: The hook events of the failures that name no tool.
     failed_events: set[str] = field(default_factory=set)
     #: What it could have failed on in its projects, up to its last
@@ -200,6 +199,14 @@ class HookRow:
     def stopped(self, thresholds: HookThresholds | None = None) -> bool:
         """Whether it has stopped failing: see :attr:`HookThresholds.quiet_failures`."""
         return bool(self.failed) and self.expected_since >= (thresholds or _DEFAULT_THRESHOLDS).quiet_failures
+
+    @property
+    def tool_less(self) -> bool:
+        """Whether none of its failures named a tool. One that did makes
+        it a tool hook even if others didn't: those come from a
+        transcript read before PARSER_VERSION 32 whose file is gone, so
+        the store can't read it again."""
+        return not self.failed_tools
 
     @property
     def expected_since(self) -> float:
@@ -282,7 +289,6 @@ def _events(tr: TranscriptResult, stats: HookStats, project: str) -> None:
             if isinstance(tool, str) and tool:
                 row.failed_tools.add(tool)
             else:
-                row.tool_less = True
                 row.failed_events.add(bucket if isinstance(bucket, str) else "other")
         elif event.subkind == "hook_blocking_error":
             row.stop_blocks += 1

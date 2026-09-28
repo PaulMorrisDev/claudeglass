@@ -274,12 +274,15 @@ the changes listed under both releases.
   for a `SessionStart` hook the sessions and summaries. If at least 5
   more failures should have followed at its old rate and none did, it
   has stopped failing. It then drops out of the fix, and the table says
-  so beside when it last failed (now a time, not a day). On that data 9
-  of the 12 stopped; the other 3 haven't run enough since to tell.
+  so beside when it last failed (now a time, not a day). On that data 10
+  of the 12 stopped; the other 2 haven't run enough since to tell.
   `capture status` leaves a hook that stopped failing out of its warning
   the same way.
   `PARSER_VERSION` 32 keeps the tool a failed tool hook ran for (any MCP
-  tool as `mcp`), so every transcript is read again once.
+  tool as `mcp`), so every transcript is read again once. A transcript
+  whose file has gone can't be read again, so its failures name no tool;
+  one failure that does name a tool is enough to judge the hook on its
+  tools.
 - **Turning coaching notes on or off is clearer.** On Setup › Capture,
   the Off level said "Nothing is captured and no tokens are used", but
   coaching notes and feedback have their own switches and keep running

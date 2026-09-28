@@ -531,6 +531,17 @@ def test_a_hook_that_has_not_run_enough_since_is_still_a_card_saying_when_it_las
     )
 
 
+def test_failures_read_before_tools_were_kept_do_not_hide_that_it_stopped():
+    # A transcript read before PARSER_VERSION 32, whose file has gone,
+    # keeps failures that name no tool.
+    turns, events = _bash_failures(20)
+    old = _result([], [_failed(ts="2026-09-19T10:00:00Z"), _failed(ts="2026-09-19T10:01:00Z")], "s0")
+    row = compute_hook_costs([old, _result(turns + _bash_calls_later(5), events)], PRICING).hooks["guard.ps1"]
+    assert not row.tool_less
+    assert (row.failed, row.chances_before, row.chances_since) == (22, 20, 5)
+    assert row.stopped()
+
+
 def test_a_session_start_hook_counts_the_sessions_and_summaries_since():
     failing = [
         _result([_turn(1, ts=f"2026-09-20T0{i}:00:05Z")], [_failed(ts=f"2026-09-20T0{i}:00:00Z", hook="SessionStart")],
