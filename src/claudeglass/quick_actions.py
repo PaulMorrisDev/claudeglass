@@ -40,6 +40,10 @@ class Context:
     #: Recommendations ignored on the dashboard (``ignores.py``): the
     #: drafted fixes leave their changes out.
     skip_keys: frozenset = frozenset()
+    #: The project folders the report was limited to, or ``None`` when it
+    #: saw every project: a skill Claude never used there is hidden in
+    #: that project only (``skills_review``).
+    only: tuple[Path, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,8 +281,9 @@ def _models_left_out(ctx: Context, rows: list[dict]) -> list[dict]:
         key = (agent, goals._alias(best))
         if key in worse:
             setup = worse[key]
+            some = " on some signals" if setup.get("setup_verdict") == "mixed" else ""
             reason = (
-                f"on {setup.get('model')} at effort {setup.get('effort')} it did worse than on "
+                f"on {setup.get('model')} at effort {setup.get('effort')} it did worse{some} than on "
                 f"{setup.get('compared_model')} at effort {setup.get('compared_effort')}: {setup.get('difference')}"
             )
         elif key in retried:
@@ -446,7 +451,7 @@ def _skills(ctx: Context) -> dict:
     from . import skills_review
 
     data = skills_review.review(
-        ctx.config_dir, getattr(ctx.model, "context_files", None) or {}, ctx.units, ctx.period,
+        ctx.config_dir, getattr(ctx.model, "context_files", None) or {}, ctx.units, ctx.period, only=ctx.only,
     )
     rows = data["skills"]
     if not any(r["status"] != "not listed" for r in rows):
@@ -470,10 +475,12 @@ def _skills(ctx: Context) -> dict:
     tips += _skill_timing_tips(ctx)
     if not unused:
         return _result("ok", f"Claude used every listed skill it can do without {ctx.period}.", tips=tips)
+    limited = data["limited_text"]
     return _result(
         "act",
         f"{len(unused)} skills were listed to Claude at every session and subagent start but never used "
-        f"{ctx.period}. Hiding them from Claude keeps them available to you as /name.",
+        f"{ctx.period}. Hiding them from Claude keeps them available to you as /name."
+        + (f" {limited}" if limited else ""),
         table=table,
         fixes=data["fixes"]
         + [fix for r in unused[:5] for fix in r["fixes"]]

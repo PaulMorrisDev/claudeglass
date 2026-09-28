@@ -107,7 +107,10 @@ python -m claudeglass review claude-md
 python -m claudeglass review skills
 ```
 
-The window comes from the global flags.
+The window comes from the global flags. Without `--all-projects`, only
+one project's sessions are read, so a skill Claude never used is hidden
+in that project's `.claude/settings.local.json`, not for every project.
+`check skills` does the same.
 
 ### `serve`
 

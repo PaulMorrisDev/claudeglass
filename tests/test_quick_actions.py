@@ -158,6 +158,17 @@ def test_skills_check_keeps_a_skill_a_claude_code_tool_loads_out_of_the_hide_lis
     assert tip["title"] == "artifact-capabilities: needed by the Artifact tool"
 
 
+def test_skills_check_of_one_project_hides_skills_there_only(tmp_path):
+    skills = [{"name": name, "listing_tokens": 40, "listed": {"main": 5}, "listing_cost_usd": 0.5}
+              for name in ("keybindings-help", "loop")]
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={"skills": skills}, recommendations=[]))
+    ctx.only = (tmp_path,)
+    result = qa.run("skills", ctx)
+    assert "in that project only (.claude/settings.local.json)" in result["summary"]
+    assert all("--scope project-local --project-dir ." in fix["command"] for fix in result["fixes"])
+    assert not any("--scope user" in fix["command"] for fix in result["fixes"])
+
+
 def test_models_check_offers_a_fix_per_cheaper_model_with_a_dry_run_command(tmp_path):
     result = qa.run("models", _ctx(tmp_path, effective_agents={"Explore": {}}))
     assert result["status"] == "act"
@@ -357,6 +368,21 @@ def test_models_check_does_not_suggest_a_model_the_agent_did_worse_on(tmp_path):
     [tip] = result["tips"]
     assert tip["title"] == "Explore: haiku not suggested"
     assert "it did worse than on claude-sonnet-5" in tip["text"]
+
+
+def test_models_check_does_not_suggest_a_model_with_mixed_results(tmp_path):
+    """Worse on some signals and better on others is no reason to
+    switch: runs on the cheaper model that didn't finish aren't made up
+    for by fewer failed tool calls."""
+    model = _full_model()
+    model.sections.append(NS(key="quality", tables=[
+        _table("quality_by_setup", [{**_MIXED, "agent_type": "Explore"}]),
+    ]))
+    result = qa.run("models", _ctx(tmp_path, model=model))
+    assert [fix["agent"] for fix in result["fixes"]] == [None]
+    [tip] = result["tips"]
+    assert tip["title"] == "Explore: haiku not suggested"
+    assert "it did worse on some signals than on claude-sonnet-5" in tip["text"]
 
 
 def test_a_project_agents_fix_edits_the_projects_agent_file(tmp_path):

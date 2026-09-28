@@ -217,6 +217,24 @@ the changes listed under both releases.
   as its report. It now gets the start of the answer
   itself, and the brief no longer starts with the harness's
   "[Workflow harness — computed task]" line.
+- **A model with mixed results isn't suggested.** The quality check
+  found tenant-security-reviewer's runs on Sonnet clearly worse on some
+  signals (none finished, against 2.4% on Opus) and better on others,
+  and called it "mixed: no reason to switch". The Models check still
+  offered Sonnet to save 60%. A mixed result now keeps that model out
+  of the Models check, the model-tier card and the Profiles models goal,
+  as a worse one always did, and the tip says it "did worse on some
+  signals".
+- **A skills review of one project hides skills in that project only.**
+  Without `--all-projects` (and on the dashboard, with a project
+  picked), only that project's sessions are read, yet a skill Claude
+  never used there was hidden in `~/.claude/settings.json`, for every
+  project. The hides now go in the project's
+  `.claude/settings.local.json`. A skill of your own in
+  `~/.claude/skills` isn't offered the `SKILL.md` edit, which would
+  reach every project. The project's settings files count when deciding
+  a skill is already hidden. Limited to several projects, nothing is
+  offered for hiding.
 - **`update` stops before pip when pip could only fail part way.** On a
   Windows Python whose packages folder anyone can write but whose
   `Scripts` folder only an administrator can, pip removed the old copy,

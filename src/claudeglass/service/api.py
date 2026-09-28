@@ -2284,8 +2284,16 @@ def make_handler(
                 model.context_files or {},
                 _report_units(model),
                 _period_text(*window, name=query.get("window")),
+                only=_project_folders(project),
             )
         )
+
+    def _project_folders(project):
+        """The folders a ``project`` filter stands for (``skills_review``),
+        or ``None`` with no filter."""
+        from .. import skills_review
+
+        return skills_review.project_folders_for(Path(options.config_dir).parent, project) if project else None
 
     def _current_settings() -> tuple[dict, dict, bool]:
         """The latest snapshot's effective settings as in force, every project's agent
@@ -2450,6 +2458,7 @@ def make_handler(
             effective=effective,
             effective_agents=effective_agents,
             skip_keys=_ignored_keys(model, query),
+            only=_project_folders(project),
         )
 
     def route_quick_actions(store, query, body):

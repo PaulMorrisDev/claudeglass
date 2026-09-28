@@ -755,9 +755,12 @@ test and privacy are in [concepts](concepts.md#7-quality-signals).
   out, and so are main sessions a scheduled or looped task started with
   no message of yours, `Run.scheduled`): the main shares and per-run
   measures, the setup compared with (the one that agent used most), a
-  verdict (`only`, `baseline`, `worse`, `possibly_worse`, `better`,
-  `possibly_better`, `no_clear_difference`, `too_little_data`,
-  `not_comparable`) and the difference in words. `not_comparable` means
+  verdict (`only`, `baseline`, `worse`, `mixed`, `possibly_worse`,
+  `better`, `possibly_better`, `no_clear_difference`, `too_little_data`,
+  `not_comparable`) and the difference in words. `mixed` is clearly worse
+  on some signals and clearly better on others. `quality.worse_models`
+  keeps a `worse` or `mixed` setup's model out of the model suggestions
+  for that agent. `not_comparable` means
   the two setups' mean replies per run are more than
   `quality.COMPARABLE_SIZE` (5) times apart, so no test is run. Setups
   ran at different times on possibly different work. The retried share

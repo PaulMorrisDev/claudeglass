@@ -1677,13 +1677,24 @@ def _cmd_review(args: argparse.Namespace) -> int:
         period = _period_phrase(window)
         context = model.context_files or {}
         if args.what == "skills":
-            print(skills_review.render_markdown(skills_review.review(config_dir, context, units, period)))
+            only = _report_only(args, model, config_dir)
+            print(skills_review.render_markdown(skills_review.review(config_dir, context, units, period, only=only)))
         else:
             review = claude_md_review.build_review(config_dir, context)
             print(claude_md_review.render_markdown(review, units, period))
         return 0
 
     return _cmd_report_like(args, {"overview"}, emit=emit)
+
+
+def _report_only(args: argparse.Namespace, model, config_dir) -> tuple[Path, ...] | None:
+    """The project folders a report was limited to (``--project``, or
+    the folder it was run in), or ``None`` for ``--all-projects``."""
+    from . import skills_review
+
+    if args.all_projects:
+        return None
+    return skills_review.project_folders_for(Path(config_dir).parent, model.meta.projects)
 
 
 def _period_phrase(window: str) -> str:
@@ -1711,6 +1722,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
             config_dir=Path(config_dir),
             effective=snapshots.effective_config_in_force(snapshot) if snapshot is not None else {},
             effective_agents=agents if isinstance(agents, dict) else {},
+            only=_report_only(args, model, config_dir),
         )
         if args.id:
             print(quick_actions.render_markdown(quick_actions.run(args.id, ctx)))

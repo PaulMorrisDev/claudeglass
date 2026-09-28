@@ -445,9 +445,14 @@ def test_worse_models_names_each_agent_and_model_family_that_did_worse():
         # The same model at another effort: about effort, not the model.
         {"agent_type": "Explore", "model": "claude-haiku-4-5", "setup_verdict": "worse",
          "compared_model": "claude-haiku-4-5-20251001"},
+        # Worse on some signals is no reason to switch to it either.
         {"agent_type": "Plan", "model": "claude-sonnet-5", "setup_verdict": "mixed", "compared_model": "claude-opus-5"},
+        {"agent_type": "Explore", "model": "claude-sonnet-5", "setup_verdict": "possibly_worse",
+         "compared_model": "claude-opus-5"},
     ]
-    assert set(quality.worse_models(rows)) == {("claude-implementer", "haiku"), ("top-level", "sonnet")}
+    assert set(quality.worse_models(rows)) == {
+        ("claude-implementer", "haiku"), ("top-level", "sonnet"), ("Plan", "sonnet"),
+    }
 
 
 def test_section_tables_and_columns():
