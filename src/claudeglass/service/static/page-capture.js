@@ -156,7 +156,7 @@ function roughLine(rough) {
   if (rough.session_note) parts.push("about " + rough.session_note + " tokens of note when a session starts, is cleared or compacts");
   if (rough.subagent_note) parts.push("about " + rough.subagent_note + " when a subagent starts");
   if (rough.reply_tag) parts.push("about " + rough.reply_tag + " tokens of tag per reply");
-  if (rough.reminder) parts.push("about " + rough.reminder + " tokens once a session for the /tl-feedback reminder");
+  if (rough.reminder) parts.push("about " + rough.reminder + " tokens once a session for the /cl-feedback reminder");
   if (rough.report_tag) parts.push("about " + rough.report_tag + " per agent report");
   if (rough.tool_note) parts.push("about " + rough.tool_note + " after each large or web tool result");
   if (rough.agent_judge) parts.push("a Claude Haiku call after each agent run (the agent is asked for nothing)");

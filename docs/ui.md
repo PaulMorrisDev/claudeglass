@@ -434,7 +434,7 @@ when there is something to act on: the end time has passed, a hook
 entry is missing, no notes have been seen, Claude tags too few messages,
 enough has been collected to lower the level, or capture's weekly cost
 can be weighed against what depends on it. It also carries the
-`/tl-feedback` reminder while that item is on, and the `capture feedback
+`/cl-feedback` reminder while that item is on, and the `capture feedback
 on` or `capture brief on` command while a skill's file needs installing.
 It leads with a headline ("Metrics capture: Essentials · since <date> ·
 N tokens · <amount> (x% of spend) · tagged on P% of messages") and links

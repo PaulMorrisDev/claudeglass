@@ -321,9 +321,9 @@
    "group": "feedback",
    "requires": [],
    "main_line": "",
-   "main_extra": "The first time in this session you finish a piece of work the user asked for, add this before your tag, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
+   "main_extra": "The first time in this session you finish a piece of work the user asked for, add this before your tag, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cl-feedback: a few ticks make your savings tips fit how you work.",
    "extra_before_tag": true,
-   "main_extra_untagged": "The first time in this session you finish a piece of work the user asked for, end your reply with this, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
+   "main_extra_untagged": "The first time in this session you finish a piece of work the user asked for, end your reply with this, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cl-feedback: a few ticks make your savings tips fit how you work.",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""

@@ -113,7 +113,7 @@ change before making it:
   made only after a yes (or `--yes`/`--connect`/answering yes to
   `init`'s question), with the same `settings.json.bak-<UTC time>` copy
   first. `feedback on|off` and `brief on|off` instead add or remove
-  `~/.claude/skills/tl-feedback/SKILL.md` or `.../tl-brief/SKILL.md`
+  `~/.claude/skills/cl-feedback/SKILL.md` or `.../cl-brief/SKILL.md`
   (`--claude-root`'s folder, not `<config-dir>`) — the file (or diff, on
   an update) is shown in full and written only after a yes; a
   `SKILL.md` this tool didn't write is left alone rather than
@@ -130,7 +130,7 @@ change before making it:
   [docs/deploy.md](docs/deploy.md).
 - **`uninstall`**: removes this tool's hooks (including the capture
   ones) and statusline from `settings.json` (after the same `.bak-`
-  copy), removes the `/tl-feedback`/`/tl-brief` skill files (each shown
+  copy), removes the `/cl-feedback`/`/cl-brief` skill files (each shown
   and asked separately), removes the logon service, and, only with the
   matching flags, reverts applied changes (`--revert-changes`) and
   deletes `<config-dir>` (`--delete-data`, which also removes the
@@ -408,7 +408,7 @@ its own words — an unknown key, an unknown word, a value that doesn't
 match — is dropped, never stored. The one exception is
 `skill=would-help:<name>`, and even that survives only when `<name>`
 matches a skill the same transcript already listed or invoked, not
-whatever string Claude wrote. `/tl-feedback` itself has no free-text
+whatever string Claude wrote. `/cl-feedback` itself has no free-text
 field to scrub in the first place: all four of its questions (outcome,
 what slowed it, worth, what would have helped) are answered by ticking
 from a closed list of options — the same lists `POST
@@ -461,7 +461,7 @@ they print.
 **Files.** See "What is written, and where" above for
 `hooks/capture-hook.py`, `hooks/capture-catalogue.json`,
 `capture-log.jsonl` and `signals/`, and the `capture` bullet there for
-how the settings.json hook entries and the `tl-feedback`/`tl-brief`
+how the settings.json hook entries and the `cl-feedback`/`cl-brief`
 skill files under `~/.claude/skills/` are added (diff or full text,
 asked, backed up) and removed.
 
@@ -613,7 +613,7 @@ recommendation or profile gives you a prompt to paste into Claude Code
 (which asks your permission before editing anything under `.claude`)
 and a `claudeglass apply ... --dry-run` command to run yourself.
 The service's few write routes touch only its own files: session tags
-(`mode`/`purpose`) and your `/tl-feedback` rating (`POST
+(`mode`/`purpose`) and your `/cl-feedback` rating (`POST
 /api/sessions/<id>/feedback` — the same closed checkbox vocabulary the
 skill itself writes, `capture_catalogue.FEEDBACK_VOCAB`; an unknown
 field or value is `400`, and nothing ticked clears a rating) in the

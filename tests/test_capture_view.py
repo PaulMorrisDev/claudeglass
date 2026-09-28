@@ -349,7 +349,7 @@ def test_a_missing_brief_skill_is_a_row_note_and_a_banner_note():
     data = capture_view.view(config, brief_skill="missing")
     row = _rows(data)["brief_templates"]
     assert row["needs_install"] is True
-    assert row["install_note"] == capture_view.BRIEF_SKILL_STATES["missing"] == "The /tl-brief skill isn't installed"
+    assert row["install_note"] == capture_view.BRIEF_SKILL_STATES["missing"] == "The /cl-brief skill isn't installed"
     assert row["install_command"] == capture_view.BRIEF_COMMAND == "claudeglass capture brief on"
     assert data["banner"]["notes"] == [capture_view.BRIEF_SKILL_NOTES["missing"]]
     assert data["commands"]["brief"] == capture_view.BRIEF_COMMAND

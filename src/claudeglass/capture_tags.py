@@ -11,7 +11,7 @@ Two places carry them:
   -- is never counted.
 - **The start of a brief.** ``[retry: brief]`` and ``[spawn: isolate]``
   open the brief handed to an agent, in either order.
-- **Your feedback.** ``/tl-feedback`` ends with ``[tl-fb: outcome=met
+- **Your feedback.** ``/cl-feedback`` ends with ``[tl-fb: outcome=met
   slow=none ...]`` on a line of its own, followed by a thank-you line.
   The answers to its AskUserQuestion call are read too, by matching the
   labels you ticked, for when the line is missing.
@@ -98,7 +98,7 @@ _FEEDBACK_SETS = {key: frozenset(words) for key, words in FEEDBACK_VOCAB.items()
 _FEEDBACK_BY_HEADER = {q.header: q for q in ALL_FEEDBACK_QUESTIONS}
 _FEEDBACK_LABELS = {q.key: {label: word for word, label, _ in q.options} for q in ALL_FEEDBACK_QUESTIONS}
 
-#: The AskUserQuestion headers /tl-feedback asks with.
+#: The AskUserQuestion headers /cl-feedback asks with.
 FEEDBACK_HEADERS = frozenset(_FEEDBACK_BY_HEADER)
 
 
@@ -176,7 +176,7 @@ def _feedback(values: dict, source: str) -> Feedback:
 
 
 def merge_feedback(earlier: Feedback, later: Feedback) -> Feedback:
-    """Two answers of the same kind in one /tl-feedback run, as one: the
+    """Two answers of the same kind in one /cl-feedback run, as one: the
     handoff question comes back from a second AskUserQuestion call. A
     later answer wins where both answered."""
     values = {
@@ -208,7 +208,7 @@ def parse_feedback_tag(text: str) -> Feedback | None:
 
 
 def feedback_from_answers(result) -> Feedback | None:
-    """/tl-feedback's answers from an AskUserQuestion ``toolUseResult``
+    """/cl-feedback's answers from an AskUserQuestion ``toolUseResult``
     (``{"questions": [...], "answers": {question text: answer}}``), or
     ``None`` when it asked none of the feedback questions. An answer is
     a label, a list of labels, or labels joined with commas; anything that
@@ -243,7 +243,7 @@ def feedback_from_answers(result) -> Feedback | None:
 
 
 def asks_for_feedback(tool_input) -> bool:
-    """Whether an AskUserQuestion call's input asks /tl-feedback's
+    """Whether an AskUserQuestion call's input asks /cl-feedback's
     questions."""
     questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
     return isinstance(questions, list) and any(

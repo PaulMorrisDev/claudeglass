@@ -363,7 +363,7 @@ a flag, never text:
 Feedback addition (``PARSER_VERSION`` 16):
 
 - ``Feedback`` / ``Turn.feedback: Feedback | None = None`` -- your
-  /tl-feedback answers: outcome, what slowed the work, whether it was
+  /cl-feedback answers: outcome, what slowed the work, whether it was
   worth the tokens and what would have helped, as words from
   ``capture_catalogue.FEEDBACK_VOCAB``. Read from the skill's
   ``[tl-fb: ...]`` line ending this turn's reply (``source`` "tag"), or
@@ -640,7 +640,7 @@ class CaptureTag:
 
 @dataclass(slots=True)
 class Feedback:
-    """Your /tl-feedback answers (see the module docstring). Every value is
+    """Your /cl-feedback answers (see the module docstring). Every value is
     a word from ``capture_catalogue.FEEDBACK_VOCAB``."""
 
     outcome: str | None = None
@@ -823,7 +823,7 @@ class Turn:
     #: Metrics-capture addition (see module docstring): slash commands
     #: (and skills) you ran just before this turn, by name.
     commands_run: tuple[str, ...] = ()
-    #: Feedback addition (see module docstring): your /tl-feedback answers.
+    #: Feedback addition (see module docstring): your /cl-feedback answers.
     feedback: Feedback | None = None
     #: Your-hooks addition (see module docstring): hook label -> characters
     #: of context your hooks added just before this turn.

@@ -122,7 +122,7 @@ SKILL_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}"
 #: and ``capture_tags`` strips it from a reply's tail before matching the
 #: trailing tag, so it doesn't matter if Claude writes them the other
 #: way round.
-FEEDBACK_REMINDER_LINE = "Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work."
+FEEDBACK_REMINDER_LINE = "Finished? Run /cl-feedback: a few ticks make your savings tips fit how you work."
 
 #: How Claude sets a coaching tip or the reminder apart in its reply, so
 #: it stands out from the work in the terminal and the desktop app alike:
@@ -175,7 +175,7 @@ LEVEL_SUMMARIES = {
     "standard": "Adds what the request lacked, planning, skills, research, "
     "and Haiku's view of each agent run's model and brief.",
     "deep": "Adds how much earlier context was needed, how the change was checked, and a "
-    "short rating after large tool outputs. Also turns on the /tl-feedback survey, its reminder note, "
+    "short rating after large tool outputs. Also turns on the /cl-feedback survey, its reminder note, "
     "and Claude's one-line reminder to run it when a piece of work is done.",
 }
 
@@ -1170,7 +1170,7 @@ METRICS: tuple[Metric, ...] = (
         section="coaching",
         title="Brief templates",
         what="Checklists per kind of task, built from what your own requests tend to lack, on "
-        "Work habits to copy. Turned on, it also adds a /tl-brief skill you run with a request: Claude "
+        "Work habits to copy. Turned on, it also adds a /cl-brief skill you run with a request: Claude "
         "checks it against its checklist and asks once for anything missing.",
         why="Better first messages, so Claude spends less finding things out.",
         powers=("information",),
@@ -1181,7 +1181,7 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback skill",
-        what="A /tl-feedback skill you run after a piece of work. It asks four checkbox questions: the "
+        what="A /cl-feedback skill you run after a piece of work. It asks four checkbox questions: the "
         "outcome, what slowed it, whether it was worth the tokens, and what would have helped. After an "
         "approved plan it asks a fifth: whether the build could have started fresh from the plan.",
         why="Cost per piece of work that met its goal, which outranks what Claude reports about itself. "
@@ -1194,7 +1194,7 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback reminder in the status line",
-        what="A second status line reminding you to run /tl-feedback, and the same line on the dashboard "
+        what="A second status line reminding you to run /cl-feedback, and the same line on the dashboard "
         "banner.",
         why="A reminder that costs nothing: the status line is never sent to Claude.",
         powers=("outcome",),
@@ -1204,7 +1204,7 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback reminder from Claude",
-        what="Claude adds a highlighted note suggesting /tl-feedback once a session, when it finishes its first "
+        what="Claude adds a highlighted note suggesting /cl-feedback once a session, when it finishes its first "
         "piece of work.",
         why="For people without the status line, such as in the desktop app. Costs a few output tokens once a "
         "session.",
@@ -1236,7 +1236,7 @@ LEVEL_METRIC_IDS = tuple(m.id for m in METRICS if m.group in LEVEL_GROUPS)
 FEEDBACK_IDS = tuple(m.id for m in METRICS if m.group == "feedback")
 COACHING_IDS = tuple(m.id for m in METRICS if m.group == "coaching")
 #: The feedback items a switch into Deep turns on as well
-#: (``config.set_capture``): the /tl-feedback survey, its reminder note,
+#: (``config.set_capture``): the /cl-feedback survey, its reminder note,
 #: and Claude's one-line reminder to run it. Deep is the level for
 #: someone who wants the fullest picture, and outcomes from the survey
 #: outrank what Claude reports about itself. Leaving Deep keeps them;
@@ -1256,14 +1256,14 @@ RETIRED_METRIC_IDS: tuple[str, ...] = ("detour", "web", "spawn", "rules")
 
 #: The persistent feedback note (``feedback_note``): the status line's
 #: second line and the dashboard banner show it word for word.
-FEEDBACK_NOTE = "Finished a piece of work? Run /tl-feedback: a few ticks make your savings tips fit how you work."
+FEEDBACK_NOTE = "Finished a piece of work? Run /cl-feedback: a few ticks make your savings tips fit how you work."
 
 
-# -- the /tl-feedback questions --------------------------------------------
+# -- the /cl-feedback questions --------------------------------------------
 
-#: The feedback skill: the user runs it as ``/tl-feedback``, from
-#: ``~/.claude/skills/tl-feedback/SKILL.md``.
-FEEDBACK_SKILL = "tl-feedback"
+#: The feedback skill: the user runs it as ``/cl-feedback``, from
+#: ``~/.claude/skills/cl-feedback/SKILL.md``.
+FEEDBACK_SKILL = "cl-feedback"
 
 #: ``[tl-fb: ...]``: the tag the skill ends with, carrying the answers.
 FEEDBACK_TAG = "tl-fb"
@@ -1271,7 +1271,7 @@ FEEDBACK_TAG = "tl-fb"
 
 @dataclass(frozen=True, slots=True)
 class FeedbackQuestion:
-    """One /tl-feedback question, asked with AskUserQuestion and offered
+    """One /cl-feedback question, asked with AskUserQuestion and offered
     as checkboxes on the dashboard's Sessions tab."""
 
     #: The ``[tl-fb: ...]`` key its answer is written under.
@@ -1370,7 +1370,7 @@ RATING_VOCAB: dict[str, tuple[str, ...]] = {q.key: FEEDBACK_VOCAB[q.key] for q i
 
 
 def feedback_skill_text() -> str:
-    """``SKILL.md`` for ``/tl-feedback``. ``disable-model-invocation``
+    """``SKILL.md`` for ``/cl-feedback``. ``disable-model-invocation``
     keeps its description out of Claude's context until the user runs
     it, and it names no model: switching model mid-session would rebuild
     the whole prompt cache, which costs more than the skill saves."""
@@ -1430,11 +1430,20 @@ def feedback_skill_text() -> str:
     return "\n".join(lines)
 
 
-# -- the /tl-brief checklists -----------------------------------------------
+# -- the /cl-brief checklists -----------------------------------------------
 
-#: The brief skill: the user runs it as ``/tl-brief <request>``, from
-#: ``~/.claude/skills/tl-brief/SKILL.md``.
-BRIEF_SKILL = "tl-brief"
+#: The brief skill: the user runs it as ``/cl-brief <request>``, from
+#: ``~/.claude/skills/cl-brief/SKILL.md``.
+BRIEF_SKILL = "cl-brief"
+
+#: The names the two skills had until 0.12.0 (``tl`` for token-lens, this
+#: tool's first name) -> their names now. A copy of ours still under an
+#: old name is renamed by ``update --finish`` or ``capture <switch> on``.
+RENAMED_SKILLS = {"tl-feedback": FEEDBACK_SKILL, "tl-brief": BRIEF_SKILL}
+
+#: ``/cl-feedback`` under either name: transcripts from before 0.12.0 ran
+#: it as ``/tl-feedback``.
+FEEDBACK_SKILL_NAMES = frozenset({FEEDBACK_SKILL, "tl-feedback"})
 
 #: A checklist line -> ``(label, template line)``. The keys are the
 #: ``missing`` words (``none`` aside), plus ``report`` for research.
@@ -1467,9 +1476,9 @@ BRIEF_CHECKLISTS: dict[str, tuple[str, ...]] = {
 
 
 def brief_skill_text() -> str:
-    """``SKILL.md`` for ``/tl-brief``: check a request against its kind of
+    """``SKILL.md`` for ``/cl-brief``: check a request against its kind of
     task's checklist and ask once for what is missing, or start. Like
-    ``/tl-feedback`` it is user-invoked only and names no model."""
+    ``/cl-feedback`` it is user-invoked only and names no model."""
     lines = [
         "---",
         f"name: {BRIEF_SKILL}",
@@ -1479,7 +1488,7 @@ def brief_skill_text() -> str:
         "---",
         "",
         "The user wants their request checked before the work starts, for ClaudeGlass, so less is spent "
-        "finding things out. The request is the text after /tl-brief; when there is none, it is the user's "
+        "finding things out. The request is the text after /cl-brief; when there is none, it is the user's "
         "previous message.",
         "",
         "1. Decide which kind of task it is: " + ", ".join(BRIEF_CHECKLISTS) + ".",
@@ -1860,13 +1869,13 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     (``session_note``); at each subagent start (``subagent_note``) and
     per subagent report (``report_tag``), both now always 0, as an agent
     is asked for nothing; the tag Claude writes per reply (``reply_tag``),
-    none while Claude Haiku writes the tags (``tagger``); the /tl-feedback
+    none while Claude Haiku writes the tags (``tagger``); the /cl-feedback
     reminder Claude adds once a session (``reminder``); the note after a
     large or web tool result (``tool_note``). Amounts measured from
     transcripts replace these once capture has run."""
     enabled = [METRICS_BY_ID[i] for i in ids if i in METRICS_BY_ID]
     main, sub = note_text(ids, "main", tagger=tagger), note_text(ids, "subagent")
-    # The /tl-feedback reminder comes once a session, not with every reply.
+    # The /cl-feedback reminder comes once a session, not with every reply.
     reminder = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
     if tagger == "haiku" and any(m.main_line for m in enabled):
         reply = frame = 0  # no tag at all
@@ -1953,7 +1962,7 @@ def _metric_tag_line(metric: Metric) -> str:
         return "No tag. A hook records it directly; Claude is never asked."
     if metric.id == "brief_templates":
         return (
-            "No tag. The checklists are on Work habits, and /tl-brief runs only when you type it; like any "
+            "No tag. The checklists are on Work habits, and /cl-brief runs only when you type it; like any "
             "skill, its name and description are listed to Claude at each session start."
         )
     if metric.group == "coaching":
@@ -2108,7 +2117,7 @@ def render_markdown() -> str:
         "marker; both are still read."
     )
     p("")
-    p(f"The `/tl-feedback` skill ends with its own line: `{_feedback_tag_words()}`.")
+    p(f"The `/cl-feedback` skill ends with its own line: `{_feedback_tag_words()}`.")
     p("")
     p("If Claude writes more than one tag, the last one wins, key by key.")
     p("")
@@ -2293,8 +2302,8 @@ def render_markdown() -> str:
         "chosen need."
     )
     p("- `claudeglass capture remove` — switch off and take those hook entries back out.")
-    p("- `claudeglass capture feedback on|off` — the `/tl-feedback` skill and its status-line reminder.")
-    p("- `claudeglass capture brief on|off` — the `/tl-brief` skill.")
+    p("- `claudeglass capture feedback on|off` — the `/cl-feedback` skill and its status-line reminder.")
+    p("- `claudeglass capture brief on|off` — the `/cl-brief` skill.")
     p(
         "- `claudeglass capture prune [--dry-run]` — delete signal files, Claude Haiku's tag files and "
         "`capture-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's "

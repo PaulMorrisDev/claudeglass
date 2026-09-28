@@ -21,7 +21,7 @@ the `service/` package, or SQLite — a baseline is one JSON file under
 `config.toml`/`sessions.toml`. `onboarding.py` installs nothing, and
 never writes `settings.json` except to repair a broken hook command you
 agreed to fix (step 3). The changes outside `<config_dir>` — connecting
-to Claude Code, the `/tl-feedback` skill and the logon task — are
+to Claude Code, the `/cl-feedback` skill and the logon task — are
 `setup_flow.py`'s, made only after the review. The commands they write
 come in from `cli.py` (`_setup_flow_inputs`), so neither module imports
 `cli.py`.
@@ -38,7 +38,7 @@ In short, `init` asks four things:
    plus a status line if you have none;
 3. whether to start the dashboard when you log on;
 4. optionally, whether to turn on sharper tips: metrics capture at
-   Essentials for 14 days, plus the `/tl-feedback` skill.
+   Essentials for 14 days, plus the `/cl-feedback` skill.
 
 Then it lists every change in one review, `Ready to set up:`, and asks
 `Go ahead? (d shows the exact changes) [Y/n/d]`. `d` prints the
@@ -149,12 +149,12 @@ python -m claudeglass init [--advanced] [--answers FILE] [--non-interactive] [--
      per-session note and per-reply tag, from
      `capture_catalogue.rough_tokens`), and that it switches itself off
      after `DEFAULT_CAPTURE_TIMEBOX_DAYS` (14) days. Yes turns on
-     Essentials with that time-box, and the `/tl-feedback` skill. With
+     Essentials with that time-box, and the `/cl-feedback` skill. With
      Essentials already on, the default is yes, and no turns it off and
      takes its hooks out. Capture already on at another level isn't
      asked about: a re-run never changes a level you chose, and the
      review says `..., unchanged.` The per-reply reminder to run
-     `/tl-feedback` stays a Deep-only extra, so Essentials stays cheap;
+     `/cl-feedback` stays a Deep-only extra, so Essentials stays cheap;
      the summary mentions the skill instead.
    - Under `--advanced` or `--non-interactive`, or with a level from
      `--capture-level` or the answers file, the full
@@ -164,7 +164,7 @@ python -m claudeglass init [--advanced] [--answers FILE] [--non-interactive] [--
    saved and how amounts will show; each `settings.json` addition in
    plain words (the capture hook entries counted, not listed), with the
    organisation-policy warning when a managed `settings.json` stops
-   hooks running; the `/tl-feedback` skill; the logon task; and
+   hooks running; the `/cl-feedback` skill; the logon task; and
    `Then read this project's history for a first baseline.` when there
    is some. `Go ahead? (d shows the exact changes) [Y/n/d]`: `d` shows
    the `settings.json` diff, the skill's path and the logon task's
@@ -205,7 +205,7 @@ python -m claudeglass init [--advanced] [--answers FILE] [--non-interactive] [--
       When `<config_dir>` is not the default `<Claude folder>/claudeglass`,
       both commands end with `--config-dir "<config_dir>"`, so the hook
       and the statusline write where the CLI and dashboard read.
-   4. The `/tl-feedback` skill, written or removed.
+   4. The `/cl-feedback` skill, written or removed.
    5. The logon task: the plan `install-service` registers
       (`installer.plan_service_install`), installed without its own
       output (`installer.install(quiet=True)`), then
@@ -227,7 +227,7 @@ python -m claudeglass init [--advanced] [--answers FILE] [--non-interactive] [--
    `claudeglass status` prints it): each part `Done`, `Waiting`,
    `Off` or `Needs attention`, with a fix, then `Everything's set up.`
    or `N things need attention.`, what to open next, a reminder to run
-   `/tl-feedback` after a piece of work when the skill is in, the
+   `/cl-feedback` after a piece of work when the skill is in, the
    restart note when `settings.json` changed, and
    `Check your setup any time: claudeglass status`.
 
@@ -281,7 +281,7 @@ later with `claudeglass capture connect`.
 
 **Feedback** (`onboarding.ask_feedback`, through `cli.py`'s
 `_init_feedback_choice`), whatever the capture level (including off):
-whether to add the `/tl-feedback` skill — run it after a piece of work
+whether to add the `/cl-feedback` skill — run it after a piece of work
 to tick four quick questions (did it deliver, what slowed it, was it
 worth the tokens, what would have helped; after an approved plan, a
 fifth: could the build have started fresh from the plan) and get a
@@ -309,7 +309,7 @@ skill.
 | `capture_window` | `--advanced` | How many days to collect data before the first baseline | `config.capture_window` (default 7) |
 | `capture_level` | `--advanced` | Metrics capture level: off, free, essentials, standard, deep (asked after the token-use warning and each level's estimate; by default, the sharper-tips question stands in for it) | `[capture] level` |
 | `capture_no_limit` | `--advanced` | Turn off that time limit (capture then runs until you switch it off) — only asked when a level other than off is chosen | `[capture] until` |
-| `feedback` | `--advanced` | Add the /tl-feedback skill? (whatever the capture level; by default, sharper tips adds it) | `[capture] feedback` |
+| `feedback` | `--advanced` | Add the /cl-feedback skill? (whatever the capture level; by default, sharper tips adds it) | `[capture] feedback` |
 | `extra_projects_roots` | `--advanced` | Asked once per WSL folder `init` finds that `config.toml` doesn't list yet: Claude Code also runs in WSL: <distro>; include those sessions? (default yes). Without `--advanced`, and under `--non-interactive` (with a note), they're added. An answers-file list replaces the whole setting | `config.extra_projects_roots` |
 
 `config.capture_started` is set to the current UTC timestamp by the
@@ -434,7 +434,7 @@ exact count. Below that share, `catalogue.suggest()` is called
 normally, with `shape="plan-then-build"` when at least half the main
 sessions approved a plan and built it in the same session
 (`habits.habits_by_shape`); the reason then cites those sessions and
-any `/tl-feedback` handoff answers (see
+any `/cl-feedback` handoff answers (see
 [docs/profiles.md](profiles.md)).
 
 The baseline never applies the suggested profile. The report names the

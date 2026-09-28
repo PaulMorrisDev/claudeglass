@@ -12,7 +12,7 @@ them to ``<config_dir>/coaching.json`` for the hook to read:
   one you ignored on the dashboard, get the hint.
 - **plan_fresh**: whether the fresh-session hint after an approved plan is
   on. Off when you ignored the ``plan-handoff`` tip, or when most of your
-  /tl-feedback answers say the builds after a plan relied on the
+  /cl-feedback answers say the builds after a plan relied on the
   discussion before it (``handoff._feedback_on_plans``): a fresh start
   would have lost what they needed. On otherwise, the hook's default.
 - **thresholds.plan_fresh_tokens**: the planning context a plan must keep

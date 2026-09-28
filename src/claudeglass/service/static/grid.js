@@ -1210,7 +1210,7 @@ var TOTAL_KEY = /^(all|total)$/i;
 // [what happened, why or what next].
 var EMPTY_TEXT = {
   context_budget_statusline: ["No status line readings in this window.", "This table fills once the status line logger is installed and has logged a session."],
-  habits_outcomes: ["No feedback on your work in this window.", "Answer /tl-feedback, or rate a session on {{page:spend/sessions}}, to fill this table."],
+  habits_outcomes: ["No feedback on your work in this window.", "Answer /cl-feedback, or rate a session on {{page:spend/sessions}}, to fill this table."],
   habits_by_shape: ["No main sessions with a message of yours in this window.", "A longer window may include some."],
 };
 

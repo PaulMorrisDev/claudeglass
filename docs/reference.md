@@ -223,7 +223,7 @@ Those items are `feedback = ["feedback_note"]` or
 `coaching = ["coaching_line"]` in `[capture]`, set from **Setup ›
 Capture** or `python -m claudeglass capture enable`. The second
 line shows a live hint when one applies, and otherwise the reminder to
-run `/tl-feedback`. The first line doesn't change. A hint appears for:
+run `/cl-feedback`. The first line doesn't change. A hint appears for:
 
 - a large context at the end of a turn;
 - a large last tool output;

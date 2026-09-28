@@ -16,7 +16,7 @@ Costs rise with depth, so capture comes in levels, each including every metric o
 | Free | Local signals from hooks that log to a file. Uses no Claude tokens. | – | – |
 | Essentials | Claude tags each piece of work: what kind it was, how clear the request was, how hard, how big, and when the task changed. Claude Haiku judges whether each agent run finished, and why one was run again. | ~186 tokens | ~$0.002 |
 | Standard | Adds what the request lacked, planning, skills, research, and Haiku's view of each agent run's model and brief. | ~304 tokens | ~$0.002 |
-| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /tl-feedback survey, its reminder note, and Claude's one-line reminder to run it when a piece of work is done. | ~412 tokens | ~$0.002 |
+| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /cl-feedback survey, its reminder note, and Claude's one-line reminder to run it when a piece of work is done. | ~412 tokens | ~$0.002 |
 | Custom | Any other set of metrics, turned on one by one (`capture enable`/`capture disable`). | depends what's on | depends what's on |
 
 These are rough sizes — the note's characters divided by four, plus Claude Code's own hook-wrapper overhead (the system-reminder tags around it) — and don't include the tag Claude writes back (each metric below says roughly how many output tokens its own words cost). Setup › Capture replays your last 14 days of transcripts against each level before you turn it on, and once it's on, measures the real note and tag cost from what Claude Code actually recorded — read that number, not this one, when it matters.
@@ -383,9 +383,9 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Brief templates (`brief_templates`)
 
 - **Level:** Live coaching, any level
-- **Captures:** Checklists per kind of task, built from what your own requests tend to lack, on Work habits to copy. Turned on, it also adds a /tl-brief skill you run with a request: Claude checks it against its checklist and asks once for anything missing.
+- **Captures:** Checklists per kind of task, built from what your own requests tend to lack, on Work habits to copy. Turned on, it also adds a /cl-brief skill you run with a request: Claude checks it against its checklist and asks once for anything missing.
 - **Why:** Better first messages, so Claude spends less finding things out.
-- **Tag:** No tag. The checklists are on Work habits, and /tl-brief runs only when you type it; like any skill, its name and description are listed to Claude at each session start.
+- **Tag:** No tag. The checklists are on Work habits, and /cl-brief runs only when you type it; like any skill, its name and description are listed to Claude at each session start.
 - **Powers:** Giving Claude information
 
 ## Your feedback
@@ -393,7 +393,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Feedback skill (`feedback_skill`)
 
 - **Level:** Feedback, any level; switching to Deep turns it on
-- **Captures:** A /tl-feedback skill you run after a piece of work. It asks four checkbox questions: the outcome, what slowed it, whether it was worth the tokens, and what would have helped. After an approved plan it asks a fifth: whether the build could have started fresh from the plan.
+- **Captures:** A /cl-feedback skill you run after a piece of work. It asks four checkbox questions: the outcome, what slowed it, whether it was worth the tokens, and what would have helped. After an approved plan it asks a fifth: whether the build could have started fresh from the plan.
 - **Why:** Cost per piece of work that met its goal, which outranks what Claude reports about itself. The plan answer tells the fresh-session tip and the suggested profile how you work.
 - **Tag:** `[tl-fb: outcome=met|partly|missed|stopped slow=unclear,rework,tools,none worth=yes|fair|no helped=context,plan,smaller,none handoff=yes|partly|no]`
 - **Powers:** Cost per finished piece of work, Planning, Profiles per kind of task
@@ -401,7 +401,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Feedback reminder in the status line (`feedback_note`)
 
 - **Level:** Feedback, any level; switching to Deep turns it on
-- **Captures:** A second status line reminding you to run /tl-feedback, and the same line on the dashboard banner.
+- **Captures:** A second status line reminding you to run /cl-feedback, and the same line on the dashboard banner.
 - **Why:** A reminder that costs nothing: the status line is never sent to Claude.
 - **Tag:** No tag. Nothing is asked of Claude; see "Captures" above for how it is kept.
 - **Powers:** Cost per finished piece of work
@@ -409,10 +409,10 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Feedback reminder from Claude (`feedback_reminder`)
 
 - **Level:** Feedback, any level; switching to Deep turns it on
-- **Captures:** Claude adds a highlighted note suggesting /tl-feedback once a session, when it finishes its first piece of work.
+- **Captures:** Claude adds a highlighted note suggesting /cl-feedback once a session, when it finishes its first piece of work.
 - **Why:** For people without the status line, such as in the desktop app. Costs a few output tokens once a session.
 - **Tag:** No fixed key. The note asks for a line: "The first time in this session you finish a piece of work the user asked for, add this before your tag, after a blank line, and never again after that:
-> **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work."
+> **ClaudeGlass:** Finished? Run /cl-feedback: a few ticks make your savings tips fit how you work."
 - **Costs:** about 26 output tokens each time
 - **Hook:** SessionStart
 - **Powers:** Cost per finished piece of work
@@ -437,7 +437,7 @@ Every note (`capture-hook.py` builds the same text from `capture-catalogue.json`
 
 A subagent gets no note, and a brief carries no marker: see [Agent runs](#agent-runs). Transcripts from before ClaudeGlass 0.11.0 may hold a subagent's own `[result: ...]` tag or a `[retry: ...]` brief marker; both are still read.
 
-The `/tl-feedback` skill ends with its own line: `[tl-fb: outcome=met|partly|missed|stopped slow=unclear,rework,tools,none worth=yes|fair|no helped=context,plan,smaller,none handoff=yes|partly|no]`.
+The `/cl-feedback` skill ends with its own line: `[tl-fb: outcome=met|partly|missed|stopped slow=unclear,rework,tools,none worth=yes|fair|no helped=context,plan,smaller,none handoff=yes|partly|no]`.
 
 If Claude writes more than one tag, the last one wins, key by key.
 
@@ -484,7 +484,7 @@ A fresh switch from off to on — at `init`, `capture on`/`level`, or the Captur
 - `claudeglass capture off` — stop the notes and tags at once, without touching settings.json.
 - `claudeglass capture connect` — add the settings.json hook entries the metrics you've chosen need.
 - `claudeglass capture remove` — switch off and take those hook entries back out.
-- `claudeglass capture feedback on|off` — the `/tl-feedback` skill and its status-line reminder.
-- `claudeglass capture brief on|off` — the `/tl-brief` skill.
+- `claudeglass capture feedback on|off` — the `/cl-feedback` skill and its status-line reminder.
+- `claudeglass capture brief on|off` — the `/cl-brief` skill.
 - `claudeglass capture prune [--dry-run]` — delete signal files, Claude Haiku's tag files and `capture-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's unset); `serve`'s watcher already runs this same cleanup on every tick, so this is for anyone not running it.
 - `claudeglass changes` and `claudeglass uninstall` also cover metrics capture: they list everything it installed and can remove all of it — hooks, skills and signal files included.

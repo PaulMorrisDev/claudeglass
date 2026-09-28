@@ -805,7 +805,7 @@ def test_privacy_feedback_tag_never_carries_unknown_keys_or_free_text(tmp_path: 
 
 
 def test_privacy_feedback_answers_drop_free_text_other(tmp_path: Path):
-    # SEC-P1/SECURITY.md: /tl-feedback's four questions are checkbox-only
+    # SEC-P1/SECURITY.md: /cl-feedback's four questions are checkbox-only
     # on the dashboard, but AskUserQuestion always offers a free-text
     # "Other" option -- feedback_from_answers must drop anything that
     # isn't one of the question's own closed labels, never store what

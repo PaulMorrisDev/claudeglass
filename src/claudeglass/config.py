@@ -1035,7 +1035,7 @@ def _in_catalogue_order(chosen: list[str], known: tuple[str, ...]) -> list[str]:
     return [i for i in known if i in wanted] + [i for i in dict.fromkeys(chosen) if i not in known]
 
 
-#: What turning the ``/tl-feedback`` survey on turns on (``capture
+#: What turning the ``/cl-feedback`` survey on turns on (``capture
 #: feedback on``, ``init``), and what turning it off turns off: the skill
 #: and the reminders to run it. The dashboard rating stays as set.
 FEEDBACK_ON = ("feedback_skill", "feedback_note")
@@ -1043,7 +1043,7 @@ FEEDBACK_OFF = ("feedback_skill", "feedback_note", "feedback_reminder")
 
 
 def feedback_ids(current: list[str], on: bool) -> list[str]:
-    """``[capture] feedback`` with the ``/tl-feedback`` skill and its
+    """``[capture] feedback`` with the ``/cl-feedback`` skill and its
     notes switched on or off (:data:`FEEDBACK_ON`/:data:`FEEDBACK_OFF`)."""
     if on:
         return list(current) + [i for i in FEEDBACK_ON if i not in current]

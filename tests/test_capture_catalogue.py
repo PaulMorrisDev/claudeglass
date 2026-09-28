@@ -167,7 +167,7 @@ def test_free_signals_and_feedback_toggles_alone_add_no_subagent_note():
     assert cat.note_text(cat.level_metrics("free"), "subagent") == ""
     assert cat.note_text(["feedback_reminder"], "subagent") == ""
     reminder = cat.note_text(["feedback_reminder"], "main")
-    assert "/tl-feedback" in reminder and "[tl:" not in reminder
+    assert "/cl-feedback" in reminder and "[tl:" not in reminder
 
 
 def test_no_agent_gets_a_note_at_any_level():
@@ -329,13 +329,13 @@ def test_the_session_note_offers_fix_for_a_fault_in_earlier_work_and_the_parser_
     assert (tag.task, tag.shift) == ("bugfix", "fix")
 
 
-# -- the /tl-brief skill -----------------------------------------------------
+# -- the /cl-brief skill -----------------------------------------------------
 
 
 def test_the_brief_skill_is_user_invoked_names_no_model_and_holds_every_checklist():
     text = cat.brief_skill_text()
     front, body = text.split("---\n", 2)[1:]
-    assert "name: tl-brief" in front and "disable-model-invocation: true" in front
+    assert "name: cl-brief" in front and "disable-model-invocation: true" in front
     assert "ClaudeGlass" in front and "model:" not in front
     for task, keys in cat.BRIEF_CHECKLISTS.items():
         assert f"   - {task}: " + ", ".join(cat.BRIEF_LINES[k][0] for k in keys) in body

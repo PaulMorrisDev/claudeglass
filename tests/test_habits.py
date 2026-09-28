@@ -318,7 +318,7 @@ def test_every_table_is_there_even_with_nothing_to_show():
 def test_untagged_unrated_work_says_how_to_get_more():
     notes = habits.section_from(Habits(cycles=[_cycle()])).notes
     assert any("turn on metrics capture" in n.lower() for n in notes)
-    assert any("run /tl-feedback" in n for n in notes)
+    assert any("run /cl-feedback" in n for n in notes)
 
 
 def test_span_weeks_does_not_stretch_a_single_day_into_a_fake_weekly_rate():
@@ -627,7 +627,7 @@ def _asked(questions) -> list[dict]:
 
 def _plan_session(tmp_path, name: str, *, edit: bool = True, handoff: str | None = "Yes", worth: str = "Too costly"):
     """A main session that explores, has a plan approved, then (with
-    ``edit``) edits a file; then a /tl-feedback run answering both calls."""
+    ``edit``) edits a file; then a /cl-feedback run answering both calls."""
     lines = [
         user_str_line("plan the login change", origin={"kind": "human"}, timestamp=_ts(0)),
         turn_line(model=MODEL, timestamp=_ts(1), cache_read_input_tokens=10_000, input_tokens=10),
@@ -647,7 +647,7 @@ def _plan_session(tmp_path, name: str, *, edit: bool = True, handoff: str | None
     core = _asked(catalogue.FEEDBACK_QUESTIONS)
     answers = {catalogue.FEEDBACK_QUESTIONS[0].question: "Yes", catalogue.FEEDBACK_QUESTIONS[2].question: worth}
     lines += [
-        user_str_line("<command-message>tl-feedback</command-message>\n<command-name>/tl-feedback</command-name>",
+        user_str_line("<command-message>cl-feedback</command-message>\n<command-name>/cl-feedback</command-name>",
                       timestamp=_ts(10)),
         user_block_line([{"type": "text", "text": catalogue.feedback_skill_text()}], isMeta=True, timestamp=_ts(10)),
         _reply(11, tool_use_block("AskUserQuestion", "tu_q", {"questions": core})),
@@ -1098,7 +1098,7 @@ def test_self_report_calibration_ignores_outcomes_sourced_from_claudes_own_tag()
     # SEC-P1: a `[tl-fb: ...]` tag is Claude's own report of the
     # outcome, not yours, so it must not feed the calibration that
     # checks Claude's reports against your feedback -- only "answers"
-    # (/tl-feedback's question) and "rating" (the dashboard) count.
+    # (/cl-feedback's question) and "rating" (the dashboard) count.
     easy, normal = CaptureTag(level="easy"), CaptureTag(level="normal")
 
     def _cycles(source: str) -> list:

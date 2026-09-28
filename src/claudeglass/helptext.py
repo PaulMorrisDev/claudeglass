@@ -954,7 +954,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="A checklist per kind of task, built from what your own asks most often left out.",
             read="Without metrics capture these are starting points; with it, the lines your asks miss most "
             "come first.",
-            act="Copy the template into your message and fill it in. The optional /tl-brief skill gives Claude "
+            act="Copy the template into your message and fill it in. The optional /cl-brief skill gives Claude "
             "the same checklists: claudeglass capture brief on.",
         ),
         columns={
@@ -1098,9 +1098,9 @@ TABLE_COPY: dict[str, TableCopy] = {
     "habits_outcomes": TableCopy(
         title="Did the work meet its goal?",
         help=Help(
-            shows="The pieces of work you gave feedback on, with /tl-feedback or a rating on {{page:spend/sessions}}, "
+            shows="The pieces of work you gave feedback on, with /cl-feedback or a rating on {{page:spend/sessions}}, "
             "by outcome.",
-            read="A /tl-feedback answer rates the messages since the last one; a rating covers the whole "
+            read="A /cl-feedback answer rates the messages since the last one; a rating covers the whole "
             "session. Misses that cost much more than work that met its goal are worth a look.",
             act="Slowed most by and Would have helped most say what to change first.",
         ),
@@ -1124,7 +1124,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="Your main sessions by whether you approved a plan and then built it in the same session. "
             "Your feedback on each kind of session sits beside it.",
             read="Planning kept is the context from before the plan that the build carried. The last three "
-            "columns count your /tl-feedback answers on whether the build could have started from the plan "
+            "columns count your /cl-feedback answers on whether the build could have started from the plan "
             "alone.",
             act="If most of your sessions plan and build and the plan was enough, start the build in a fresh "
             "session. If the build needed the discussion, write fuller plans first.",
@@ -1256,7 +1256,7 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="What metrics capture cost",
         help=Help(
             shows="What metrics capture cost since it was turned on, measured from the transcripts. That covers the "
-            "notes that ask Claude for tags, the tags Claude wrote and /tl-feedback runs, with a weekly rate. It also "
+            "notes that ask Claude for tags, the tags Claude wrote and /cl-feedback runs, with a weekly rate. It also "
             "shows what that buys you: the habits worth trying whose evidence needs capture or your feedback.",
             read="Share is out of what the captured sessions cost. Coverage is how many messages carried the tag "
             "they were asked for, and how many agent runs Claude Haiku judged. What it's worth only counts habits "

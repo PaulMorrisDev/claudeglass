@@ -402,7 +402,7 @@ def _evidence(label: str, value, section_key: str, table_name: str, row_key) -> 
     return (label, value, f"{section_key}.{table_name}", row_key)
 
 
-#: /tl-feedback handoff answers (or rated pieces) needed before your
+#: /cl-feedback handoff answers (or rated pieces) needed before your
 #: feedback changes the card.
 MIN_FEEDBACK_ANSWERS = 3
 
@@ -418,7 +418,7 @@ def _cells(table: Table | None, row_key: str) -> dict:
 
 
 def _feedback_on_plans(report: ReportModel) -> dict:
-    """What your /tl-feedback answers said about sessions you planned and
+    """What your /cl-feedback answers said about sessions you planned and
     built in (``habits_by_shape``'s ``plan_build`` row): ``yes``,
     ``partly`` and ``no`` handoff counts, and the rated pieces and the
     share too costly."""
@@ -441,7 +441,7 @@ def _rule_plan_handoff(report: ReportModel, th: HandoffThresholds) -> list[Recom
     starting it fresh would have saved at least ``min_saving_share_pct``
     of main-session cost. ``advice`` words the saving.
 
-    Your /tl-feedback answers change the card once there are at least
+    Your /cl-feedback answers change the card once there are at least
     :data:`MIN_FEEDBACK_ANSWERS`: when more than half say the build
     relied on the earlier discussion, it suggests writing fuller plans
     first; when more than half say the plan was enough, it cites them;

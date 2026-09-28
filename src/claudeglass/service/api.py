@@ -1296,7 +1296,7 @@ def make_handler(
 
     def _capture_feedback(config):
         """``capture.feedback_usage`` over the replayed days: your
-        /tl-feedback runs, whatever the capture level."""
+        /cl-feedback runs, whatever the capture level."""
         from .. import capture as capture_mod
         from . import rebuild
 
@@ -1795,7 +1795,7 @@ def make_handler(
         return _ok({"session_id": session_id, "tags": store.tags(session_id)})
 
     def route_set_feedback(store, query, body):
-        """Your rating of a session (the /tl-feedback questions as
+        """Your rating of a session (the /cl-feedback questions as
         checkboxes): words from ``capture_catalogue.RATING_VOCAB`` only.
         Nothing ticked clears it."""
         session_id = query.get("id", "")
