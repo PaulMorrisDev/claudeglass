@@ -268,7 +268,8 @@ function renderSkills(data, container) {
       text:
         rows.length + " skills listed, " + thousands(data.listing_tokens) + " tokens at each start" +
         (data.listing_cost_text ? ", " + data.listing_cost_text : "") + ". " +
-        (data.unused ? data.unused + " were never used." : "Every listed skill was used."),
+        (data.unused ? data.unused + " were never used." : "Every listed skill was used.") +
+        (data.limited_text ? " " + data.limited_text : ""),
     })
   );
   // The changes for the whole listing, folded: each opens to its prompt.

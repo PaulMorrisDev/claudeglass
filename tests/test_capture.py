@@ -23,6 +23,7 @@ from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 
 from helpers import (
+    old_agent_note_text,
     attachment_line,
     system_line,
     tool_result_block,
@@ -65,7 +66,9 @@ def _reply(second: int, *blocks, text: str = "ok", **kw) -> dict:
 
 
 def _note(second: int, ids, *, hook: str = "SessionStart", agent_type: str = "") -> dict:
-    text = catalogue.note_text(ids, "main" if hook == "SessionStart" else "subagent", agent_type)
+    # An agent's note is one from before 0.11.0: older transcripts hold it,
+    # and are still priced.
+    text = catalogue.note_text(ids, "main") if hook == "SessionStart" else old_agent_note_text(ids, agent_type)
     wrapped = f"<system-reminder>\n{hook} hook additional context: {text}\n</system-reminder>"
     line = attachment_line("hook_additional_context", rendered=wrapped, content=[text], hookName=hook,
                            hookEvent=hook, toolUseID=hook)
@@ -449,30 +452,37 @@ def test_metric_estimates_price_what_each_metric_adds(tmp_path, pricing):
     parts = capture.metric_estimates(past, ids)
     assert set(parts) == set(ids)
     assert parts["session_end"] == 0.0
-    assert parts["task"] > 0 and parts["fit"] > 0
-    # Leaving out result also leaves out the subagent extras that need it.
+    assert parts["task"] > 0
+    # Agent runs cost a Haiku call each, whichever agent metrics are on:
+    # leaving out result leaves out the rest that need it, and the call;
+    # leaving out one of the rest saves nothing.
     needs_result = [i for i in ids if "result" in catalogue.METRICS_BY_ID[i].requires]
-    assert needs_result
-    assert parts["result"] >= max(parts[i] for i in needs_result)
+    assert needs_result and all(parts[i] == 0.0 for i in needs_result)
+    assert past.subagents and parts["result"] == pytest.approx(past.subagents * catalogue.JUDGE_USD_PER_CALL)
 
 
 def test_enough_data_counts_answers_against_each_target():
     use = capture.CaptureUsage(answers={"task": 12})
     assert capture.enough_data(use, "task") == (12, capture.ENOUGH["main"])
     assert capture.enough_data(use, "fit") == (0, capture.ENOUGH["subagent"])
-    assert capture.enough_data(use, "retry") == (0, capture.ENOUGH["brief"])
+    # Judged per agent run, as the rest of an agent's words are.
+    assert capture.enough_data(use, "retry") == (0, capture.ENOUGH["subagent"])
     assert capture.enough_data(use, "big_output") == (0, capture.ENOUGH["tool"])
     assert capture.enough_data(use, "waits", signal_sessions=5) == (5, capture.ENOUGH["signal"])
     assert capture.enough_target("no-such-metric") == 0
 
 
-def test_estimate_prices_the_feedback_reminder_once_per_message():
-    past = capture.History(days=14, cycles=10, subagents=3, main_notes=2, main_note=1e-6, reply_tag=2e-6, brief_tag=5e-6)
+def test_estimate_prices_the_feedback_reminder_once_per_session():
+    past = capture.History(days=14, sessions=2, cycles=10, subagents=3, main_notes=2, main_note=1e-6, reply_tag=2e-6,
+                           brief_tag=5e-6)
     est = capture.estimate(past, ("feedback_reminder",))
     note = len(catalogue.note_text(("feedback_reminder",), "main")) + capture._WRAP["SessionStart"]
     out = catalogue.METRICS_BY_ID["feedback_reminder"].out_chars
-    assert est.cost == pytest.approx(note * 1e-6 + out * 2e-6)
-    assert est.tag_tokens == round(out * 10 / 4)
+    # 2 sessions of 10 messages: 2 reminders, each carried like a reply's tag.
+    assert est.cost == pytest.approx(note * 1e-6 + out * 2e-6 * 2 / 10)
+    assert est.tag_tokens == round(out * 2 / 4)
+    rough = catalogue.rough_tokens(("task", "feedback_reminder"))
+    assert rough["reminder"] == round(out / 4) and rough["reply_tag"] == round((13 + 6) / 4)
 
 
 # -- weekly_cost --------------------------------------------------------------------

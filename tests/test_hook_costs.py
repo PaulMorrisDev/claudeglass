@@ -114,8 +114,28 @@ def test_a_failed_run_keeps_its_label_cause_and_relative_flag_never_the_command(
         "script": "index-first-guard.ps1",
         "relative": True,
         "cause": "not-found",
+        "tool": "Read",
     }
     assert_privacy(result)
+
+
+@pytest.mark.parametrize(
+    ("hook_name", "tool"),
+    [("PreToolUse:Bash", "Bash"), ("PostToolUse:mcp__acme-crm__lookup", "mcp"), ("Stop", None), ("PreToolUse", None)],
+)
+def test_a_failed_tool_hook_keeps_a_built_in_tool_never_an_mcp_tools_name(tmp_path: Path, hook_name, tool):
+    result = _parse(
+        tmp_path,
+        [
+            attachment_line(
+                "hook_non_blocking_error", hookName=hook_name, command=RELATIVE, stderr=NOT_FOUND, exitCode=1
+            ),
+            turn_line(),
+        ],
+    )
+    [event] = _hook_events(result)
+    assert event.detail.get("tool") == tool
+    assert "acme" not in repr(result)
 
 
 def test_a_windows_variable_in_the_command_is_flagged_not_relative(tmp_path: Path):
@@ -307,18 +327,46 @@ def _turn(i: int, **overrides) -> model.Turn:
 
 
 def _failed(
-    label="guard.ps1", *, relative=True, unexpanded=False, ts="2026-09-20T10:00:00Z", duration=300
+    label="guard.ps1",
+    *,
+    relative=True,
+    unexpanded=False,
+    ts="2026-09-20T10:00:00Z",
+    duration=300,
+    hook="PreToolUse",
+    tool=None,
 ) -> model.Event:
-    detail = {"hookName": "PreToolUse", "durationMs": duration, "script": label, "cause": "not-found"}
+    detail = {"hookName": hook, "durationMs": duration, "script": label, "cause": "not-found"}
     if relative:
         detail["relative"] = True
     if unexpanded:
         detail["unexpanded"] = True
+    if tool:
+        detail["tool"] = tool
     return model.Event(kind=EventKind.HOOK_OUTPUT, subkind="hook_non_blocking_error", ts=ts, detail=detail)
 
 
-def _result(turns, events=(), session_id="s1") -> TranscriptResult:
-    return TranscriptResult(meta=TranscriptMeta(session_id=session_id), turns=list(turns), events=list(events))
+def _result(turns, events=(), session_id="s1", *, project="", kind="top-level") -> TranscriptResult:
+    return TranscriptResult(
+        meta=TranscriptMeta(session_id=session_id, project_slug=project, kind=kind),
+        turns=list(turns),
+        events=list(events),
+    )
+
+
+def _bash_failures(n: int, label="guard.ps1") -> tuple[list, list]:
+    """``n`` Bash calls, each failing ``label``, from 2026-09-20 10:01."""
+    turns = [_turn(i, ts=f"2026-09-20T10:{i:02d}:00Z", tool_calls_by_tool={"Bash": 1}) for i in range(1, n + 1)]
+    events = [_failed(label, ts=f"2026-09-20T10:{i:02d}:01Z", tool="Bash") for i in range(1, n + 1)]
+    return turns, events
+
+
+def _bash_calls_later(n: int, start=100) -> list:
+    """``n`` Bash calls on 2026-09-21, with Reads that don't count."""
+    return [
+        _turn(start + i, ts=f"2026-09-21T10:{i:02d}:00Z", tool_calls_by_tool={"Bash": 1, "Read": 3})
+        for i in range(1, n + 1)
+    ]
 
 
 def test_context_is_priced_from_the_reply_it_lands_before_until_a_summary():
@@ -359,14 +407,14 @@ def test_a_block_costs_its_share_of_the_next_reply():
     assert row.resent_usd == pytest.approx(row.block_usd)
 
 
-def test_failed_runs_count_sessions_last_day_and_waiting():
+def test_failed_runs_count_sessions_last_failure_and_waiting():
     events_a = [_failed(ts="2026-09-18T10:00:00Z"), _failed(ts="2026-09-20T10:00:00Z")]
     events_b = [_failed(ts="2026-09-19T10:00:00Z", duration=200)]
     stats = compute_hook_costs(
         [_result([_turn(1)], events_a, "s1"), _result([_turn(1)], events_b, "s2")], PRICING
     )
     row = stats.hooks["guard.ps1"]
-    assert (row.failed, len(row.failed_sessions), row.last_failed) == (3, 2, "2026-09-20")
+    assert (row.failed, len(row.failed_sessions), row.last_failed) == (3, 2, "2026-09-20 10:00 UTC")
     assert row.failed_wait_ms == 800
     section = build_section(stats)
     summary, by_script = section.tables
@@ -450,3 +498,77 @@ def test_thresholds_read_their_prefixed_config_keys():
     th = HookThresholds.from_config({"hooks_min_failures": "3", "hooks_resend_share_pct": 80, "min_failures": 99})
     assert (th.min_failures, th.resend_share_pct) == (3, 80.0)
     assert RULES[0](ReportModel(), th) == []
+
+
+# -- stopped failing ------------------------------------------------------------
+
+
+def _hook_row(report: ReportModel, label="guard.ps1") -> dict:
+    by_script = report.sections[0].tables[1]
+    rows = [dict(zip([c.key for c in by_script.columns], row)) for row in by_script.rows]
+    return next(r for r in rows if r["hook"] == label)
+
+
+def test_a_tool_hook_that_stopped_failing_is_not_a_card():
+    # It failed on every Bash call, then 5 more ran clean: at its old
+    # rate 5 should have failed.
+    turns, events = _bash_failures(20)
+    report = _report([_result(turns + _bash_calls_later(5), events)])
+    row = _hook_row(report)
+    assert (row["last_failed"], row["stopped"]) == ("2026-09-20 10:20 UTC", "yes")
+    assert _rules(report) == []
+
+
+def test_a_hook_that_has_not_run_enough_since_is_still_a_card_saying_when_it_last_failed():
+    turns, events = _bash_failures(20)
+    report = _report([_result(turns + _bash_calls_later(4), events)])
+    assert _hook_row(report)["stopped"] == "no"
+    [rec] = _rules(report)
+    assert rec.why == (
+        "A hook that fails doesn't do its job. guard.ps1 failed in 1 sessions, most recently at 2026-09-20 10:20 UTC: "
+        "script not found (relative path). If you've fixed it since, this goes once it has run enough times "
+        "without failing."
+    )
+
+
+def test_failures_read_before_tools_were_kept_do_not_hide_that_it_stopped():
+    # A transcript read before PARSER_VERSION 32, whose file has gone,
+    # keeps failures that name no tool.
+    turns, events = _bash_failures(20)
+    old = _result([], [_failed(ts="2026-09-19T10:00:00Z"), _failed(ts="2026-09-19T10:01:00Z")], "s0")
+    row = compute_hook_costs([old, _result(turns + _bash_calls_later(5), events)], PRICING).hooks["guard.ps1"]
+    assert not row.tool_less
+    assert (row.failed, row.chances_before, row.chances_since) == (22, 20, 5)
+    assert row.stopped()
+
+
+def test_a_session_start_hook_counts_the_sessions_and_summaries_since():
+    failing = [
+        _result([_turn(1, ts=f"2026-09-20T0{i}:00:05Z")], [_failed(ts=f"2026-09-20T0{i}:00:00Z", hook="SessionStart")],
+                f"old{i}")
+        for i in range(1, 4)
+    ]
+    summary = model.Event(kind=EventKind.COMPACT_BOUNDARY, ts="2026-09-21T09:30:00Z")
+    later = [_result([_turn(1, ts=f"2026-09-21T0{i}:00:05Z")], [summary] if i == 1 else [], f"new{i}")
+             for i in range(1, 5)]
+    stats = compute_hook_costs(failing + later, PRICING)
+    row = stats.hooks["guard.ps1"]
+    # 3 starts, each failing; since, 4 starts and 1 summary ran clean.
+    assert (row.chances_before, row.chances_since) == (3, 5)
+    assert row.stopped()
+
+
+def test_a_subagent_counts_in_its_sessions_project_and_other_projects_do_not():
+    turns, events = _bash_failures(20)
+    results = [
+        _result([], session_id="s1", project="shop"),
+        _result(turns, events, "s1", kind="subagent"),
+        _result(_bash_calls_later(3), session_id="s2", project="shop"),
+        _result(_bash_calls_later(9), session_id="s3", project="blog"),
+    ]
+    row = compute_hook_costs(results, PRICING).hooks["guard.ps1"]
+    assert row.failed_projects == {"shop"}
+    assert (row.chances_before, row.chances_since) == (20, 3)
+    assert not row.stopped()
+    assert row.stopped(HookThresholds(quiet_failures=3))
+

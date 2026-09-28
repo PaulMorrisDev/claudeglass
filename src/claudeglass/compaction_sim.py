@@ -26,7 +26,8 @@ this module measures that reserve from real auto compactions in sessions
 whose configured window is known. Each compaction:
 
 - **Costs** the summary request (not logged in the transcript: the
-  context read once more, with the summary as its output) and the reply
+  context read once more, with the median real summary request's output
+  as its own) and the reply
   after it, which re-caches its whole context: the part of the session's
   starting context that stays cached (system prompt, tools) is read, the
   rest (CLAUDE.md, skills listing, the summary) is written again.
@@ -172,7 +173,9 @@ ASSUMPTIONS: list[str] = [
     "and the context at each real automatic summary. It comes from "
     "sessions whose window setting is known, and is 0 when there are none",
     "a simulated summary charges for the summary request: the context "
-    "read again and the summary as output, at the triggering reply's own "
+    "read again and your median real summary request's output (about "
+    "twice the summary, as it writes an analysis first; the summary "
+    "itself when there is none), at the triggering reply's own "
     "cache split. It also charges the cache rebuild on the reply after it. "
     "Your median share of the starting context still cached after a real "
     "summary is priced as a cache read. The rest is written at the "
@@ -462,6 +465,18 @@ def _corpus_summary_tokens(results: list[TranscriptResult], th: CompactionSimThr
     return float(statistics.median(sizes)), False
 
 
+def _corpus_summary_output_tokens(results: list[TranscriptResult], summary_tokens: float) -> tuple[float, bool]:
+    """``(tokens, is_default)`` -- what the request that writes a summary
+    outputs: the median of the real ones ``parse.py`` estimated in
+    ``results`` (about twice the summary kept, since it writes an
+    analysis first), or ``summary_tokens`` (flagged) when there are
+    none."""
+    sizes = [turn.output_tokens for tr in results for turn in tr.turns if turn.estimated == "compaction"]
+    if not sizes:
+        return summary_tokens, True
+    return float(statistics.median(sizes)), False
+
+
 def _corpus_trigger_reserve(
     results: list[TranscriptResult], snapshot_windows: dict[str, int | None], th: CompactionSimThresholds
 ) -> tuple[float, bool]:
@@ -553,6 +568,7 @@ class _Shape:
     summary_tokens: float = 20_000.0
     trigger_reserve: float = 0.0
     cached_prefix_share: float = 0.0
+    summary_output_tokens: float = 20_000.0
 
 
 class _PricedTurn:
@@ -610,11 +626,12 @@ def _shrunk_cost(turn: Turn, rates: RatesArg, dropped: float, output_tokens: int
     return price_turn(shrunk, rates).total  # type: ignore[arg-type]
 
 
-def _summary_request_cost(turn: Turn, rates: RatesArg, dropped: float, summary_tokens: float) -> float:
+def _summary_request_cost(turn: Turn, rates: RatesArg, dropped: float, output_tokens: float) -> float:
     """The summary request a compaction sends and the transcript never
     logs: the triggering turn's own (already shrunk) context, read and
-    written the way that turn's was, with the summary as its output."""
-    return _shrunk_cost(turn, rates, dropped, int(round(summary_tokens)))
+    written the way that turn's was, with ``output_tokens`` as its
+    output."""
+    return _shrunk_cost(turn, rates, dropped, int(round(output_tokens)))
 
 
 def _recached_reply_cost(turn: Turn, rates: RatesArg, new_ctx: float, cached_prefix: float) -> float:
@@ -698,7 +715,7 @@ def _replay_transcript(
         else:
             sim_ctx = max(0.0, turn.ctx - dropped)
             if trigger is not None and sim_ctx > trigger and new_ctx < sim_ctx:
-                cost += _summary_request_cost(turn, rates, dropped, shape.summary_tokens)
+                cost += _summary_request_cost(turn, rates, dropped, shape.summary_output_tokens)
                 cost += _recached_reply_cost(turn, rates, new_ctx, cached_prefix)
                 compactions += 1
                 dropped = turn.ctx - new_ctx
@@ -1038,17 +1055,19 @@ def simulate_compaction_windows(
     summary, summary_is_default = _corpus_summary_tokens(results, th)
     reserve, reserve_is_default = _corpus_trigger_reserve(results, snapshot_windows, th)
     share, share_is_default = _corpus_cached_prefix_share(results, th)
+    output, output_is_default = _corpus_summary_output_tokens(results, summary)
     defaults = frozenset(
         name
         for name, is_default in (
             ("summary_tokens", summary_is_default),
             ("trigger_reserve", reserve_is_default),
             ("cached_prefix_share", share_is_default),
+            ("summary_output_tokens", output_is_default),
         )
         if is_default
     )
     allowance, allowance_is_default = _corpus_rediscovery_allowance(results, lookup, th)
-    stats = CompactionSimStats(_Shape(summary, reserve, share), defaults, allowance, allowance_is_default)
+    stats = CompactionSimStats(_Shape(summary, reserve, share, output), defaults, allowance, allowance_is_default)
     for tr in results:
         snapshot_window = snapshot_windows.get(tr.meta.session_id)
         stats.add_transcript(tr, lookup, snapshot_window, th)
@@ -1073,7 +1092,8 @@ def replay_cost(
     summary, _ = _corpus_summary_tokens(results, th)
     reserve, _ = _corpus_trigger_reserve(results, {}, th)
     share, _ = _corpus_cached_prefix_share(results, th)
-    shape = _Shape(summary, reserve, share)
+    output, _ = _corpus_summary_output_tokens(results, summary)
+    shape = _Shape(summary, reserve, share, output)
     total = 0.0
     for tr in results:
         priced = _priced_turns(tr.turns)
@@ -1233,6 +1253,14 @@ def build_section(
             " (default, as no real conversation summary was found)."
             if "summary_tokens" in stats.defaults
             else " (the median size of the real summaries in these sessions)."
+        )
+    )
+    notes.append(
+        f"Written to make each summary: {shape.summary_output_tokens:,.0f} tokens"
+        + (
+            " (the summary size, as no real summary request was estimated)."
+            if "summary_output_tokens" in stats.defaults
+            else " (the median of the real summary requests in these sessions: about twice the summary kept)."
         )
     )
     notes.append(

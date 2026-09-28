@@ -343,9 +343,9 @@ def test_repair_keeps_arguments_after_the_script(tmp_path, monkeypatch):
 # -- SURV-HE: count_hook_errors / HookErrorHealth ----------------------------
 
 
-def _hook_event(subkind: str, hook_name: str | None = "PreToolUse") -> Event:
+def _hook_event(subkind: str, hook_name: str | None = "PreToolUse", ts: str | None = None) -> Event:
     detail = {} if hook_name is None else {"hookName": hook_name}
-    return Event(kind=EventKind.HOOK_OUTPUT, subkind=subkind, detail=detail)
+    return Event(kind=EventKind.HOOK_OUTPUT, subkind=subkind, ts=ts, detail=detail)
 
 
 def _result(*events: Event) -> TranscriptResult:
@@ -439,6 +439,30 @@ def test_recommendation_names_the_hook_and_failure_share_over_the_threshold():
     assert "~/.claude/settings.json" in text
     assert "project's .claude/settings.json and .claude/settings.local.json" in text
     assert "plugins" in text
+    assert "last failure" not in text
+
+
+def test_recommendation_says_when_the_hook_last_failed():
+    # A hook fixed mid-window still fails "100%" until its old failures
+    # age out; the time of the last one shows whether it has stopped.
+    results = [
+        _result(*[_hook_event("hook_non_blocking_error", ts=f"2026-09-28T07:{minute:02d}:27.460Z") for minute in range(20, 40)]),
+        _result(_hook_event("hook_non_blocking_error", ts="2026-09-27T23:59:00.000Z")),
+    ]
+    health = hook_health.count_hook_errors(results)
+
+    assert health.stats[0].last_error_ts == "2026-09-28T07:39:27.460Z"
+    assert "The last failure was at 2026-09-28 07:39 UTC" in health.recommendation()
+
+
+def test_a_hook_that_stopped_failing_leaves_the_tally():
+    fixed = _hook_event("hook_non_blocking_error")
+    fixed.detail["script"] = "guard.ps1"
+    broken = _hook_event("hook_non_blocking_error")
+    broken.detail["script"] = "other.ps1"
+    results = [_result(*[fixed] * 30, broken, _hook_event("hook_success"))]
+    [stat] = hook_health.count_hook_errors(results, stopped=["guard.ps1"]).stats
+    assert (stat.calls, stat.errors) == (2, 1)
 
 
 # -- CAP-9/F10: measure_deep_wait / DeepWaitStats ----------------------------

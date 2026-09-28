@@ -78,7 +78,7 @@ def test_plan_capture_adds_the_entries_a_level_needs_and_writes_nothing(tmp_path
     entries = _entries(after)
     assert [(event, matcher) for event, matcher, _ in entries] == [
         ("SessionStart", "startup|clear|compact"),
-        ("SubagentStart", ""),
+        ("SubagentStop", ""),
         ("PostToolUse", "Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"),
         ("SessionEnd", ""),
         ("Notification", ""),
@@ -430,13 +430,55 @@ def test_levels_up_and_down_sync_the_entries(tmp_path):
     assert [e for e, _, _ in _entries(_settings(config_dir))] == [spec.event for spec in ESSENTIALS]
 
 
+def test_a_settings_edit_made_while_the_question_waits_is_never_lost(tmp_path):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    settings_path = config_dir.parent / "settings.json"
+
+    allowed: list[str] = []
+
+    class Answer(io.StringIO):
+        def readline(self, *args):
+            # Claude Code allows a tool for good while each question waits.
+            allowed.append(f"Bash(npm run task{len(allowed)})")
+            settings_path.write_text(json.dumps({"model": "opus", "permissions": {"allow": list(allowed)}}),
+                                     encoding="utf-8")
+            return "y\n"
+
+    args = cli._make_parser().parse_args(["capture", "on", "--config-dir", str(config_dir)])
+    out = io.StringIO()
+    cli._cmd_capture(args, stdin=Answer(), stdout=out, now=NOW)
+    assert "changed while this was waiting" in out.getvalue()
+    assert _settings(config_dir) == {"model": "opus", "permissions": {"allow": allowed}}
+    # Asked again, it works the change out from the file as it is now.
+    rc, _ = _capture(config_dir, "connect", "--yes")
+    assert rc == 0 and _settings(config_dir)["permissions"] == {"allow": allowed}
+    assert _settings(config_dir)["hooks"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlinks need extra rights on Windows")
+def test_a_symlinked_settings_file_stays_a_symlink(tmp_path):
+    config_dir = _claude(tmp_path)
+    dotfiles = tmp_path / "dotfiles" / "claude-settings.json"
+    dotfiles.parent.mkdir()
+    dotfiles.write_text('{"model": "opus"}', encoding="utf-8")
+    dotfiles.chmod(0o600)
+    (config_dir.parent / "settings.json").symlink_to(dotfiles)
+    rc, _ = _capture(config_dir, "on", "--yes")
+    assert rc == 0 and (config_dir.parent / "settings.json").is_symlink()
+    assert "hooks" in json.loads(dotfiles.read_text(encoding="utf-8"))
+    assert dotfiles.stat().st_mode & 0o777 == 0o600
+    rc, _ = _capture(config_dir, "remove", "--yes")
+    assert rc == 0 and (config_dir.parent / "settings.json").is_symlink()
+    assert json.loads(dotfiles.read_text(encoding="utf-8")) == {"model": "opus"}
+
+
 def test_disabling_a_metric_takes_what_needs_it_along(tmp_path):
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "level", "standard", "--yes")
     rc, out = _capture(config_dir, "disable", "result", "--yes")
-    assert rc == 0 and "fit, rules, agent_brief need result, so they go too." in out
+    assert rc == 0 and "retry, fit, agent_brief need result, so they go too." in out
     capture = load_config(config_dir=config_dir).capture
-    assert capture.level == "custom" and not {"result", "fit", "rules", "agent_brief"} & set(capture.metrics)
+    assert capture.level == "custom" and not {"result", "retry", "fit", "agent_brief"} & set(capture.metrics)
 
 
 def test_enabling_one_metric_brings_what_it_needs(tmp_path):
@@ -529,12 +571,21 @@ def test_changing_level_while_already_on_does_not_impose_a_surprise_time_box(tmp
     assert load_config(config_dir=config_dir).capture.until == ""
 
 
+def test_off_after_deep_says_what_the_entry_left_after_each_tool_costs(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "level", "deep", "--yes")
+    rc, out = _capture(config_dir, "off")
+    assert rc == 0 and "50 ms after every shell command, read and search" in out and "capture remove" in out
+
+
 def test_off_keeps_the_entries_and_remove_takes_them_out(tmp_path):
     mine = {"type": "command", "command": "echo mine"}
     config_dir = _claude(tmp_path, {"hooks": {"Stop": [{"hooks": [mine]}]}})
     _capture(config_dir, "on", "--yes")
     rc, out = _capture(config_dir, "off")
     assert rc == 0 and "add nothing while capture is off" in out and "capture remove" in out
+    # Essentials leaves no entry that runs after each tool call.
+    assert "50 ms" not in out
     assert load_config(config_dir=config_dir).capture == CaptureConfig(level="off")
     assert len(_entries(_settings(config_dir))) == len(ESSENTIALS) + 1  # and the Stop entry of their own
     rc, out = _capture(config_dir, "remove", "--dry-run")
@@ -610,7 +661,7 @@ def test_uninstall_takes_out_the_capture_entries(tmp_path):
     plan = footprint.plan_uninstall(config_dir)
     assert plan.settings_changes == [
         "Remove the capture hook that runs capture-hook.py when a session starts, is cleared or compacts.",
-        "Remove the capture hook that runs capture-hook.py when a subagent starts.",
+        "Remove the capture hook that runs capture-hook.py when a subagent finishes.",
         "Remove the capture hook that runs capture-hook.py when a session ends.",
         "Remove the capture hook that runs capture-hook.py when Claude waits for you, in the background.",
         "Remove the capture hook that runs capture-hook.py when Claude asks for permission, in the background.",
@@ -692,6 +743,19 @@ def test_status_while_on_shows_what_it_measured(tmp_path):
     assert f"Measured since {(start - timedelta(hours=1)).date().isoformat()}: 1 session and 0 subagents captured" in out
     assert "tokens of note and" in out and "of what those sessions cost" in out
     assert "Claude tagged 100.0% of your messages" in out
+
+
+def test_status_names_claude_as_the_tagger_when_haiku_only_judged_agent_runs():
+    """Claude Haiku judges agent runs whoever tags the main session's
+    replies, so its judgements don't make it the tagger."""
+    from claudeglass.capture import CaptureUsage
+    from claudeglass.units import Units
+
+    use = CaptureUsage(sessions=1, subagents=1, cycles=2, tagged_cycles=2, reports=1, tagged_reports=1, judged=1)
+    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=False)
+    assert "  Claude tagged 100.0% of your messages; Claude Haiku judged 100.0% of agent runs" in lines
+    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=True)
+    assert "  Claude Haiku tagged 100.0% of your messages; Claude Haiku judged 100.0% of agent runs" in lines
 
 
 def test_status_while_on_before_any_captured_session_says_so(tmp_path):

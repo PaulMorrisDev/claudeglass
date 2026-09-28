@@ -1,6 +1,6 @@
 /* claudeglass service UI: page-setup.js
  *
- * The Setup page's Settings and Profiles, with what each change did.
+ * The Setup page's Settings and Profiles.
  */
 
 import { clear, cli, el, state } from "./core.js";

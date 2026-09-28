@@ -12,7 +12,8 @@ Contract (Appendix A6, refined by the WP7 brief):
 
 - Reads the SessionStart hook JSON from stdin: ``session_id``, ``cwd``,
   ``transcript_path``, ``source``. Stdin may be empty or malformed; both are
-  tolerated (treated as ``{}``).
+  tolerated (treated as ``{}``). The project read is ``CLAUDE_PROJECT_DIR``
+  when Claude Code sets it, not ``cwd`` (see :func:`_project_dir`).
 - Resolves the config (claudeglass) directory: ``--config-dir`` wins and
   IS that directory directly; else ``<CLAUDE_CONFIG_DIR or ~/.claude>/
   claudeglass`` (see :func:`resolve_config_dir`; ``settings.json``/
@@ -739,6 +740,25 @@ def _content_hash(snapshot: dict) -> str:
 
 
 # -- schema 2: project slug --------------------------------------------------
+
+
+def _project_dir(cwd: str | None) -> str | None:
+    """The folder the session started in: ``CLAUDE_PROJECT_DIR``, which
+    Claude Code sets for every hook. Stdin's ``cwd`` is the shell's folder
+    now, and a session that ran ``cd`` into a worktree or a subfolder
+    before compacting would record that folder's agents and settings as
+    another project's (a worktree's committed agent files read as the
+    project's own). Inside the project folder, ``cwd``'s own spelling of
+    it is kept (Windows paths differ in case), so the project slug stays
+    the one earlier snapshots used. ``cwd`` when the variable isn't set."""
+    project = (os.environ.get("CLAUDE_PROJECT_DIR") or "").rstrip("\\/")
+    if not project:
+        return cwd
+    if cwd:
+        folded, root = os.path.normcase(cwd), os.path.normcase(project)
+        if folded == root or folded.startswith(root.rstrip(os.sep) + os.sep):
+            return cwd[: len(project)]
+    return project
 
 
 def _project_slug(cwd: str) -> str:
@@ -1620,7 +1640,7 @@ def build_snapshot(
     session_id = stdin_data.get("session_id")
     transcript_path = stdin_data.get("transcript_path")
     source = stdin_data.get("source")
-    cwd = cwd_override or stdin_data.get("cwd") or os.getcwd()
+    cwd = cwd_override or _project_dir(stdin_data.get("cwd")) or os.getcwd()
     cwd_path = Path(cwd)
     claude_root = resolve_claude_root()
 
@@ -2051,7 +2071,7 @@ def _run(args: argparse.Namespace) -> None:
 
     snapshot_and_get_path(
         config_dir,
-        args.cwd or stdin_data.get("cwd"),
+        args.cwd or _project_dir(stdin_data.get("cwd")),
         min_interval=args.min_interval,
         stdin_data=stdin_data,
         managed_path=args.managed_path,

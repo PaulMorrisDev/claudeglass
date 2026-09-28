@@ -23,6 +23,7 @@ from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 
 from helpers import (
+    old_agent_note_text,
     assert_privacy,
     attachment_line,
     tool_result_block,
@@ -550,7 +551,7 @@ def _reply(second: int, *blocks, text: str = "ok") -> dict:
 
 
 def _note(second: int, ids, *, hook: str = "SessionStart", agent_type: str = "") -> dict:
-    text = catalogue.note_text(ids, "main" if hook == "SessionStart" else "subagent", agent_type)
+    text = catalogue.note_text(ids, "main") if hook == "SessionStart" else old_agent_note_text(ids, agent_type)
     wrapped = f"<system-reminder>\n{hook} hook additional context: {text}\n</system-reminder>"
     line = attachment_line("hook_additional_context", rendered=wrapped, content=[text], hookName=hook,
                            hookEvent=hook, toolUseID=hook)

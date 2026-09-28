@@ -47,7 +47,12 @@ def test_every_metric_says_what_it_captures_why_and_what_it_feeds():
 def test_metrics_claude_writes_have_a_tag_and_a_note_and_the_rest_have_neither():
     for m in cat.METRICS:
         asks = bool(m.main_line or m.sub_line or m.main_extra or m.sub_extra or m.tool_note)
-        if m.group in ("essentials", "standard", "deep"):
+        if m.id in cat.AGENT_JUDGE_KEYS:
+            # Judged by Haiku once the run is done: nothing asked of the agent,
+            # nothing it writes.
+            assert m.sub_line and not (m.tag or m.main_line or m.main_extra or m.sub_extra), m.id
+            assert m.hooks == ("SubagentStop",) and m.out_chars == 0, m.id
+        elif m.group in ("essentials", "standard", "deep"):
             assert asks and m.tag and m.hooks and m.out_chars > 0, m.id
         elif m.id == "feedback_reminder":
             assert asks and m.hooks == ("SessionStart",)
@@ -68,17 +73,20 @@ def _words_in(line: str) -> set[str]:
 def test_each_note_line_lists_only_words_the_parser_keeps_and_main_lines_list_them_all():
     for m in cat.METRICS:
         for scope, line in (("main", m.main_line), ("sub", m.sub_line)):
-            if not line or m.id == "result":
+            if not line:
                 continue
+            # An agent line is what Haiku reads; its words are the agent vocabulary.
+            vocab = cat.AGENT_JUDGE_VOCAB if scope == "sub" else cat.TAG_VOCAB
             for key, words, or_none in re.findall(r"(?:^|; )([a-z]+): ([a-z|,-]+)( or none)?", line):
-                assert key in cat.TAG_VOCAB, (m.id, key)
+                assert key in vocab, (m.id, key)
                 listed = set(re.split(r"[|,]", words.strip(","))) | ({"none"} if or_none else set())
-                assert listed <= set(cat.TAG_VOCAB[key]), (m.id, key)
-                if scope == "main":
-                    assert listed == set(cat.TAG_VOCAB[key]), (m.id, key)
-    result = cat.METRICS_BY_ID["result"]
-    assert set(cat.RESULT_WORDS) <= _words_in(result.sub_line)
-    assert "[retry: " + "|".join(cat.RETRY_REASONS) + "]" in cat.METRICS_BY_ID["retry"].main_extra
+                assert listed == set(vocab[key]), (m.id, key)
+    # Every key Haiku answers for an agent metric has its line, and every
+    # word it may take is one the parser keeps.
+    for metric_id, keys in cat.AGENT_JUDGE_KEYS.items():
+        for key in keys:
+            assert f"{key}: " in cat.METRICS_BY_ID[metric_id].sub_line, (metric_id, key)
+    assert set(cat.AGENT_JUDGE_VOCAB["missing"]) <= set(cat.TAG_VOCAB["missing"])
     assert "out=" + "|".join(cat.TAG_VOCAB["out"]) in cat.METRICS_BY_ID["big_output"].tool_note
 
 
@@ -120,7 +128,11 @@ def test_a_subset_is_custom_and_a_subagent_extra_brings_result():
     assert cat.level_of(["task", "size"]) == "custom"
     assert cat.with_requirements(["fit", "task"]) == ("task", "result", "fit")
     assert cat.with_requirements(["coaching_line", "nope"]) == ()
-    assert cat.active_metrics("custom", ["rules"], ["feedback_reminder"]) == ("result", "rules", "feedback_reminder")
+    assert cat.active_metrics("custom", ["agent_brief"], ["feedback_reminder"]) == (
+        "result", "agent_brief", "feedback_reminder"
+    )
+    # A retired metric in an older config.toml is dropped, not asked for.
+    assert cat.active_metrics("custom", ["rules", "fit"]) == ("result", "fit")
     assert cat.active_metrics("essentials", ["size"]) == cat.level_metrics("essentials")
 
 
@@ -132,7 +144,7 @@ def test_notes_stay_within_their_token_budget(level):
 
 
 def test_notes_are_worded_as_facts_and_requests_not_orders():
-    texts = [cat.note_text(cat.level_metrics("deep") + cat.FEEDBACK_IDS, s) for s in ("main", "subagent")]
+    texts = [cat.note_text(cat.level_metrics("deep") + cat.FEEDBACK_IDS, "main")]
     texts += [cat.tool_note_text(i) for i in ("big_output",)]
     for text in texts:
         assert not re.search(r"\b(must|IMPORTANT|ALWAYS|NEVER|CRITICAL)\b", text), text
@@ -146,8 +158,8 @@ def test_the_note_marker_names_exactly_the_metrics_it_asks_for():
     version, codes = capture_tags.parse_note_codes(main)
     assert version == cat.NOTE_VERSION
     assert set(codes) == {m.id for m in cat.METRICS if m.id in ids and (m.main_line or m.main_extra)}
-    _, sub_codes = capture_tags.parse_note_codes(cat.note_text(ids, "subagent"))
-    assert set(sub_codes) == {"result", "retry", "fit", "rules", "agent_brief"}
+    # An agent is asked for nothing.
+    assert cat.note_text(ids, "subagent") == ""
 
 
 def test_free_signals_and_feedback_toggles_alone_add_no_subagent_note():
@@ -158,17 +170,10 @@ def test_free_signals_and_feedback_toggles_alone_add_no_subagent_note():
     assert "/tl-feedback" in reminder and "[tl:" not in reminder
 
 
-def test_setup_agents_get_no_note_and_explore_is_not_asked_about_rules():
-    ids = cat.level_metrics("standard")
-    assert cat.note_text(ids, "subagent", "statusline-setup") == ""
-    explore = cat.note_text(ids, "subagent", "Explore")
-    assert "fit:" in explore and "rules:" not in explore and "missing:" not in explore
-    assert "rules:" in cat.note_text(ids, "subagent", "general-purpose")
-
-
-def test_a_subagent_tag_shape_follows_whether_it_has_extra_keys():
-    assert "[result: done|partial|blocked]," in cat.note_text(cat.level_metrics("essentials"), "subagent")
-    assert "key=word" in cat.note_text(cat.level_metrics("standard"), "subagent")
+def test_no_agent_gets_a_note_at_any_level():
+    for level in cat.LEVELS:
+        for agent_type in ("general-purpose", "Explore", "Plan", "statusline-setup", ""):
+            assert cat.note_text(cat.level_includes(level), "subagent", agent_type) == ""
 
 
 def test_hook_entries_follow_the_metrics():
@@ -184,13 +189,13 @@ def test_hook_entries_follow_the_metrics():
     assert cat.hook_specs(["turn_signals"]) == signals[3:]
     assert cat.hook_specs(cat.level_metrics("essentials")) == (
         ("capture-hook.py", "SessionStart", "startup|clear|compact", False),
-        ("capture-hook.py", "SubagentStart", "", False),
+        ("capture-hook.py", "SubagentStop", "", False),
     ) + signals
     assert cat.hook_specs(cat.level_metrics("deep"))[2] == (
         "capture-hook.py", "PostToolUse", "Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*", False,
     )
     assert cat.hook_specs(["web"]) == ()
-    assert cat.hook_specs(["result"]) == (("capture-hook.py", "SubagentStart", "", False),)
+    assert cat.hook_specs(["result"]) == (("capture-hook.py", "SubagentStop", "", False),)
 
 
 def test_only_signals_the_transcripts_lack_get_a_hook():
@@ -268,7 +273,9 @@ def test_the_levels_table_note_sizes_match_rough_tokens(level):
     sizes = cat.rough_tokens(cat.level_includes(level))
     row = next(line for line in text.splitlines() if line.startswith(f"| {cat.LEVEL_TITLES[level]} |"))
     assert f"~{sizes['session_note']} tokens" in row, row
-    assert f"~{sizes['subagent_note']} tokens" in row, row
+    # No agent gets a note: the last column is Haiku's call per agent run.
+    assert sizes["subagent_note"] == 0
+    assert row.rstrip().endswith(f"~${cat.JUDGE_USD_PER_CALL:.3f} |"), row
 
 
 # -- round trip: what the note asks for is what the parser reads ----------
@@ -306,7 +313,7 @@ def test_the_session_note_is_recognised_in_a_transcript(tmp_path):
         turn_line(content=[{"type": "text", "text": "Fixed.\n[tl: task=bugfix brief=clear level=easy]"}]),
     ])
     result = parse_transcript(path, TranscriptMeta(path=str(path)))
-    assert result.meta.cap_metrics == ("task", "brief", "level", "shift", "size", "retry")
+    assert result.meta.cap_metrics == ("task", "brief", "level", "shift", "size")
     assert result.turns[0].cap_note_chars == len(wrapped)
     assert result.turns[0].cap.task == "bugfix"
 

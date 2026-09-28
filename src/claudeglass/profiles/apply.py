@@ -106,6 +106,7 @@ import hashlib
 import json
 import os
 import subprocess
+import shutil
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -266,11 +267,17 @@ def _atomic_write_bytes(path: Path, data: bytes) -> None:
     same directory (same pattern as ``cache.DigestCache.put``), so a
     crash mid-write never leaves a half-written target for the next
     reader. Creates ``path``'s parent directories first."""
+    # A symlinked settings.json (kept in a dotfiles folder, say) is
+    # written through, never replaced by a plain file, and a file keeps
+    # its permissions.
+    path = path.resolve() if path.is_symlink() else path
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=".tmp-", suffix=path.suffix or ".tmp")
     try:
         with os.fdopen(fd, "wb") as fh:
             fh.write(data)
+        if path.exists():
+            shutil.copymode(path, tmp_name)
         os.replace(tmp_name, path)
     except BaseException:
         try:
@@ -868,6 +875,14 @@ def execute(plan: ApplyPlan, *, config_dir: str | Path) -> ApplyResult:
     config_dir = Path(config_dir)
     if plan.blocked:
         raise ApplyError(list(plan.blocked))
+    # Asked before writing: a file changed while the question waited
+    # (Claude Code writes settings.json too) is never overwritten.
+    changed = [str(action.path) for action in plan.actions if _read_bytes_or_none(action.path) != action.old_bytes]
+    if changed:
+        raise ApplyError([
+            f"{path} changed after this change was worked out, so nothing was written; run the command again"
+            for path in changed
+        ])
 
     # _TS_FORMAT only has second resolution, so two applies within the
     # same UTC second (a real risk for scripted/back-to-back applies,

@@ -5,13 +5,16 @@ Code writes; it never calls Claude or any other remote service. The one
 command that goes online is `update`, which runs pip to download a new
 version (see "No outbound network calls" below). It uses
 none of your tokens by default, and none at all unless you opt in to
-the optional **metrics capture** feature (see below), which has Claude
-itself read a short note and write a one-line tag inside your own
-Claude Code session — this tool still never calls Claude directly. The
-one exception is also opt-in: if you let Claude Haiku write those tags
-instead (`capture tagger haiku`), the capture hook runs the `claude`
-command you already use, once per turn, to ask Haiku for them (see
-"Claude Haiku as the tagger" below). This
+the optional **metrics capture** feature or its coaching notes (see
+below). Capture has Claude itself read a short note and write a
+one-line tag inside your own Claude Code session, and coaching notes add
+a short note when a hint applies — this tool still never calls Claude
+directly. The
+one exception is part of the same opt-in: the capture hook runs the
+`claude` command you already use to ask Claude Haiku about each finished
+agent run, and, if you let Haiku write the main session's tags too
+(`capture tagger haiku`), about each turn (see "Claude Haiku as the
+tagger" and "Agent runs" below). This
 document is a sign-off checklist for a corporate security review,
 written to be verifiable against the code rather than taken on trust.
 
@@ -314,9 +317,9 @@ turning it back on needs no re-asking of the settings.json/skill
 questions. `capture remove` takes the hook entries back out.
 
 **It uses your tokens, and only while it's on.** Each metric it adds
-makes Claude read one short note and end its reply (or a subagent's
-final report) with one line of closed-vocabulary tags, e.g. `[tl:
-task=bugfix brief=clear]`; `init` and `capture on` print a token-cost
+makes Claude read one short note and end its reply with one line of
+closed-vocabulary tags, e.g. `[tl: task=bugfix brief=clear]`; a subagent
+is asked for nothing; `init` and `capture on` print a token-cost
 estimate from your own history before you confirm it (see
 [docs/onboarding.md](docs/onboarding.md) for the exact wording). With
 capture and coaching notes off, none of this happens — Claude Code runs
@@ -331,7 +334,8 @@ type's name — never a path, command or anything you wrote. To decide,
 the hook reads the last 256 KB of the session's transcript (the first
 512 KB for the plan hint's starting size, and a subagent's own
 transcript for the split hint), counting sizes and tool names only;
-nothing it reads is kept. `coach-state.json` holds, per session, when
+nothing it reads is kept. The split hint only shows you a notice; the
+subagent is never told anything. `coach-state.json` holds, per session, when
 each hint last showed, keyed by the same salted session hash as the
 signals, and per subagent run a byte offset and reply count; entries
 older than a day are dropped. `coaching.json` holds agent-type names
@@ -352,7 +356,9 @@ tool's output. It hands the excerpt to a worker (the same script with
 `--judge`) and returns. The worker runs `claude -p --model haiku --tools ""
 --setting-sources "" --strict-mcp-config --no-session-persistence
 --output-format json`, the excerpt on stdin (never on the command line,
-where other local users could see it), with `CLAUDEGLASS_JUDGE=1` set so
+where other local users could see it) and the instructions (this tool's
+own fixed text) in a short-lived file in `<config-dir>`, deleted once the
+call ends, with `CLAUDEGLASS_JUDGE=1` set so
 the hook does nothing inside that call. That is Claude Code itself, with
 your own login and your own provider settings: the excerpt goes where
 the rest of the session already went, and this tool reads no API key or
@@ -365,6 +371,33 @@ the same retention as the signals. `tests/test_haiku_tags.py`
 (`test_the_worker_logs_the_words_and_the_cost_never_the_excerpt`,
 `test_the_loader_checks_every_line_again`,
 `test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude`)
+covers this.
+
+**Agent runs.** With any agent metric on (`result`, `retry`, `fit`,
+`agent_brief`, from Essentials up), no subagent is asked for anything and
+no brief carries a marker. When a subagent finishes, the capture hook's
+`SubagentStop` entry builds a short excerpt from its transcript and the
+session's: its type and model, its brief (up to 2,000 characters), the
+last 300 characters Claude wrote before starting it, what it did (model
+calls, output tokens, tool names and counts, the files it changed, the
+first line of up to six shell commands, tool-error count), the last
+1,500 characters of its report, and up to four earlier agent runs (their
+type, the first 200 characters of their brief and the last 200 of their
+report). Never a tool's output. The same worker asks Haiku as above, and
+only the checked words (`result`, `retry`, `fit`, `brief`, `missing`)
+are kept in the same tag files, with the id of the agent's last reply.
+Agents that set up Claude Code itself are skipped. `tests/test_haiku_tags.py`
+(`test_the_agent_excerpt_says_what_the_run_did_and_what_came_before`,
+`test_the_worker_logs_an_agent_runs_words_under_their_own_key`,
+`test_the_subagent_stop_hook_hands_the_run_to_a_worker`) covers this.
+
+**Scripts and the Agent SDK.** A run with nobody at the screen
+(`claude -p` or the Agent SDK: Claude Code sets `CLAUDE_CODE_ENTRYPOINT`
+to `sdk-cli`, `sdk-ts` or `sdk-py`) gets no note, no coaching and no
+Haiku call from the capture hook, whatever capture is set to, since a
+script reads what it prints; its signal lines are still logged.
+`tests/test_capture_hook.py`
+(`test_a_run_with_nobody_at_the_screen_gets_no_note_but_still_logs_signals`)
 covers this.
 
 **No free text is ever kept.** `capture_tags.py` reads only the last
@@ -461,12 +494,13 @@ output.
 
 The tool never calls Claude, Anthropic or any other remote service on
 its own, and uses none of your tokens unless you turn on metrics
-capture, which spends tokens inside your own Claude Code session (never
-a call this tool makes itself) — see "Metrics capture" above. While
-Claude Haiku writes the tags, the capture hook starts the `claude`
-command once per turn; the call is Claude Code's, with your own login,
+capture or coaching notes, which spend tokens inside your own Claude
+Code session (never a call this tool makes itself) — see "Metrics
+capture" above. From Essentials up, the capture hook starts the `claude`
+command once per finished agent run, and, while Claude Haiku writes the
+tags, once per turn; the call is Claude Code's, with your own login,
 and the hook imports no networking module (see "Claude Haiku as the
-tagger" above).
+tagger" and "Agent runs" above).
 
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:

@@ -8,8 +8,10 @@ on a resume, and never fail or print on bad input.
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime, timezone
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 from importlib import resources
@@ -41,13 +43,14 @@ def _config(config_dir: Path, body: str) -> Path:
     return config_dir
 
 
-def _run(config_dir: Path, payload, *, script: Path = SCRIPT) -> tuple[int, str, str]:
+def _run(config_dir: Path, payload, *, script: Path = SCRIPT, env: dict | None = None) -> tuple[int, str, str]:
     data = payload if isinstance(payload, bytes) else json.dumps(payload).encode("utf-8")
     done = subprocess.run(
         [sys.executable, str(script), "--config-dir", str(config_dir)],
         input=data,
         capture_output=True,
         timeout=30,
+        env=env,
     )
     return done.returncode, done.stdout.decode("utf-8"), done.stderr.decode("utf-8")
 
@@ -129,55 +132,43 @@ def test_a_session_start_gets_the_main_note_and_a_resume_gets_none(tmp_path):
     assert _note(config_dir, _start(source="resume")) == ""
 
 
-def test_subagents_get_their_own_note_at_any_depth(tmp_path):
-    config_dir = _config(tmp_path, '[capture]\nlevel = "standard"\n')
-    ids = cat.level_metrics("standard")
-    assert _note(config_dir, _subagent()) == cat.note_text(ids, "subagent")
-    assert _note(config_dir, _subagent(agent_type="Explore")) == cat.note_text(ids, "subagent", "Explore")
-    assert _note(config_dir, _subagent(agent_type="statusline-setup")) == ""
+def test_a_subagent_is_asked_for_nothing_at_any_depth(tmp_path):
+    # Haiku judges agent runs afterwards: a subagent asked to end its report
+    # with a tag broke a JSON-only answer with it.
+    config_dir = _config(tmp_path, '[capture]\nlevel = "deep"\n')
+    for agent_type in ("general-purpose", "Explore", "Plan", "statusline-setup"):
+        assert _note(config_dir, _subagent(agent_type=agent_type)) == ""
+    big = {**_subagent(), "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": "x" * 40_000}
+    assert _note(config_dir, big) == ""
 
 
-def test_a_subagent_that_compacts_gets_the_subagent_note_again(tmp_path):
+def test_a_subagent_that_compacts_gets_nothing_and_the_main_session_its_note(tmp_path):
     config_dir = _config(tmp_path, '[capture]\nlevel = "essentials"\n')
-    compacted = _start(source="compact", agent_id="a1", agent_type="general-purpose")
-    assert _note(config_dir, compacted) == cat.note_text(cat.level_metrics("essentials"), "subagent")
+    assert _note(config_dir, _start(source="compact", agent_id="a1", agent_type="general-purpose")) == ""
     # Claude Code sends no agent fields for a subagent's compaction; its
-    # transcript path gives it away.
-    for path in ("/home/u/.claude/projects/p/s1/subagents/agent-a1.jsonl", r"C:\Users\u\.claude\projects\p\s1\subagents\agent-a1.jsonl"):
-        assert _note(config_dir, _start(source="compact", transcript_path=path)) == cat.note_text(
-            cat.level_metrics("essentials"), "subagent"
-        )
-    main = _start(source="compact", transcript_path="/home/u/.claude/projects/p/s1.jsonl")
-    assert _note(config_dir, main) == cat.note_text(cat.level_metrics("essentials"), "main")
-
-
-def test_a_workflow_nested_subagent_that_compacts_gets_the_subagent_note(tmp_path):
-    """SURV-2: a workflow run's own agents sit one level deeper than an
-    ordinary subagent (``subagents/workflows/<run_id>/agent-<hex>.jsonl``,
-    see ``discovery.py``'s module docstring) -- its transcript's
-    immediate parent is the run id, not literally ``subagents``, so
-    ``_in_subagent`` must walk every ancestor, not just the immediate
-    parent, to still recognise it.
-    """
-    config_dir = _config(tmp_path, '[capture]\nlevel = "essentials"\n')
+    # transcript path gives it away, at any depth (SURV-2: a workflow's own
+    # agents sit a level deeper, under the run's id), or its file name alone.
     for path in (
+        "/home/u/.claude/projects/p/s1/subagents/agent-a1.jsonl",
+        r"C:\Users\u\.claude\projects\p\s1\subagents\agent-a1.jsonl",
         "/home/u/.claude/projects/p/s1/subagents/workflows/wf_1/agent-a1.jsonl",
         r"C:\Users\u\.claude\projects\p\s1\subagents\workflows\wf_1\agent-a1.jsonl",
+        "/home/u/.claude/projects/p/s1/somewhere/agent-a1.jsonl",
     ):
-        assert _note(config_dir, _start(source="compact", transcript_path=path)) == cat.note_text(
-            cat.level_metrics("essentials"), "subagent"
-        )
-    # The agent-*.jsonl filename alone is also enough, regardless of
-    # which folder it sits under.
-    odd_shape = _start(source="compact", transcript_path="/home/u/.claude/projects/p/s1/somewhere/agent-a1.jsonl")
-    assert _note(config_dir, odd_shape) == cat.note_text(cat.level_metrics("essentials"), "subagent")
+        assert _note(config_dir, _start(source="compact", transcript_path=path)) == "", path
+    main = _start(source="compact", transcript_path="/home/u/.claude/projects/p/s1.jsonl")
+    assert _note(config_dir, main) == cat.note_text(cat.level_metrics("essentials"), "main")
 
 
 def test_sampling_keeps_a_session_in_or_out_for_its_whole_length(tmp_path):
     config_dir = _config(tmp_path, '[capture]\nlevel = "essentials"\nsample = 10\n')
     inside, outside = _session_id(10, inside=True), _session_id(10, inside=False)
-    assert _note(config_dir, _start(inside)) and _note(config_dir, _subagent(inside))
-    assert _note(config_dir, _start(outside)) == "" and _note(config_dir, _subagent(outside)) == ""
+    assert _note(config_dir, _start(inside))
+    assert _note(config_dir, _start(outside)) == ""
+    # Its agent runs follow it: judged only inside the sample.
+    config = {"capture": {"level": "essentials", "sample": 10}}
+    assert HOOK._capture_for({**_subagent(inside), "cwd": "/w"}, config, datetime.now(timezone.utc)) is not None
+    assert HOOK._capture_for({**_subagent(outside), "cwd": "/w"}, config, datetime.now(timezone.utc)) is None
 
 
 def test_a_skipped_project_gets_nothing(tmp_path):
@@ -189,6 +180,26 @@ def test_a_skipped_project_gets_nothing(tmp_path):
     assert _note(skip, _start(cwd="/work/app"))
     left_out = _config(tmp_path / "left", 'exclude_projects = ["scratch"]\n\n[capture]\nlevel = "essentials"\n')
     assert _note(left_out, _start(cwd="/tmp/scratch")) == ""
+
+
+def test_the_project_is_the_folder_the_session_started_in(monkeypatch):
+    """The payload's ``cwd`` follows the shell: a session that ran ``cd``
+    into a worktree or another folder is still its project's session."""
+    config = {"capture": {"level": "essentials", "projects": ["client-a"]}}
+    now = datetime.now(timezone.utc)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/work/client-a")
+    assert HOOK._capture_for(_start(cwd="/tmp/elsewhere"), config, now) is not None
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/work/personal")
+    assert HOOK._capture_for(_start(cwd="/work/client-a/.claude/worktrees/w1"), config, now) is None
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR")
+    assert HOOK._capture_for(_start(cwd="/work/client-a/api"), config, now) is not None
+
+
+def test_the_project_keeps_the_payloads_spelling_inside_it(monkeypatch):
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", os.path.normcase("/work/App"))
+    assert HOOK.project_dir({"cwd": "/work/App/sub"}) == "/work/App"
+    assert HOOK.project_dir({"cwd": "/work/Apple"}) == os.path.normcase("/work/App")
+    assert HOOK.project_dir({}) == os.path.normcase("/work/App")
 
 
 def test_a_bad_pattern_is_skipped_and_the_rest_still_apply(tmp_path):
@@ -251,6 +262,26 @@ def test_the_feedback_reminder_needs_capture_on(tmp_path):
     assert _note(off, _start()) == ""
 
 
+def test_a_run_with_nobody_at_the_screen_gets_no_note_but_still_logs_signals(tmp_path):
+    # claude -p and the Agent SDK: a script reads what the run prints, so
+    # nothing may be added to it. The free signal lines still count.
+    config_dir = _config(tmp_path / "cg", '[capture]\nlevel = "deep"\ncoaching = ["coaching_notes"]\n')
+    (config_dir / "salt").write_bytes(b"s" * 32)
+    for entrypoint in ("sdk-cli", "sdk-ts", "sdk-py"):
+        env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": entrypoint}
+        for payload in (_start(), _subagent(), {**_start(), "hook_event_name": "UserPromptSubmit", "prompt": "hi"},
+                        {**_start(), "hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_response": "x" * 40_000}):
+            assert _run(config_dir, payload, env=env) == (0, "", ""), (entrypoint, payload["hook_event_name"])
+        rc, out, _ = _run(config_dir, {**_start(), "hook_event_name": "SessionEnd", "reason": "other"}, env=env)
+        assert rc == 0 and out == ""
+    assert len(list((config_dir / "signals").glob("*.jsonl"))) == 1
+    # The terminal and the desktop app still get the note.
+    for entrypoint in ("cli", "claude-desktop"):
+        env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": entrypoint}
+        rc, out, _ = _run(config_dir, _start(), env=env)
+        assert rc == 0 and json.loads(out)["hookSpecificOutput"]["additionalContext"].startswith(cat.NOTE_MARKER)
+
+
 @pytest.mark.parametrize("payload", [b"", b"not json", b"[1, 2]", b"\xff\xfe"])
 def test_bad_input_prints_nothing_and_exits_zero(tmp_path, payload):
     config_dir = _config(tmp_path, '[capture]\nlevel = "essentials"\n')
@@ -286,6 +317,11 @@ def test_a_real_session_start_note_is_read_back():
     assert result.meta.cap_metrics == ("task", "brief", "level", "shift", "retry")
     assert [turn.cap_note_chars for turn in result.turns] == [len(rendered)]
     assert (result.turns[0].cap.task, result.turns[0].cap.level) == ("research", "easy")
-    # Recorded before Essentials carried size, and before 0.9.0 renamed the
-    # tool: the note for the metrics it names, under the old name.
-    assert rendered.replace("Token Lens", "ClaudeGlass") == f"<system-reminder>\nSessionStart hook additional context: {cat.note_text(result.meta.cap_metrics, 'main')}\n</system-reminder>"
+    # Recorded before Essentials carried size, before 0.9.0 renamed the
+    # tool, and before 0.11.0 moved retry from the brief to Haiku: today's
+    # note for the metrics it names, plus the retry line it had then.
+    old = rendered.replace("Token Lens", "ClaudeGlass").replace("shift,retry", "shift").splitlines()
+    retry_line = "When you start an agent again because its last run fell short, begin the brief with [retry: model|brief|tools|scope|other]."
+    assert old.pop(-2) == retry_line
+    now = f"<system-reminder>\nSessionStart hook additional context: {cat.note_text(result.meta.cap_metrics, 'main')}\n</system-reminder>"
+    assert old == now.splitlines()

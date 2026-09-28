@@ -12,7 +12,18 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from claudeglass import __version__, cli, hook_health, installer, upgrade
+
+_writable = cli._writable
+
+
+@pytest.fixture(autouse=True)
+def _folders_writable(monkeypatch):
+    """The test run's own Python may have a Scripts folder only an
+    administrator can change; ``update`` must not stop over that here."""
+    monkeypatch.setattr(cli, "_writable", lambda folder: True)
 
 
 def _args(*extra):
@@ -75,11 +86,43 @@ def test_update_passes_its_flags_on_to_finish(tmp_path, capsys):
     assert cli._make_parser().parse_args(finish[3:]).finish
 
 
-def test_update_stops_when_pip_fails(capsys):
+def test_update_stops_when_pip_fails(capsys, monkeypatch):
     runner = _Runner(pip_rc=1)
     assert cli._cmd_update(_args(), runner=runner) == 1
     assert len(runner.calls) == 1
-    assert "Nothing else was changed" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "hook entries were left as they were" in err and "install records" not in err
+    # pip's rollback can leave the old record beside the new one.
+    monkeypatch.setattr(cli, "_install_records", lambda: ["0.10.0", "0.11.0"])
+    assert cli._cmd_update(_args(), runner=_Runner(pip_rc=1)) == 1
+    assert "It left 2 install records (0.10.0, 0.11.0)" in capsys.readouterr().err
+
+
+def test_update_stops_before_pip_when_it_could_only_fail_part_way(capsys, monkeypatch, tmp_path):
+    """A Python whose packages folder can be written but whose Scripts
+    folder only an administrator can change: pip removed the old copy,
+    failed on claudeglass.exe and rolled back only part of it."""
+    packages, scripts = tmp_path / "site-packages", tmp_path / "Scripts"
+    packages.mkdir()
+    scripts.mkdir()
+    import sysconfig
+
+    monkeypatch.setattr(sysconfig, "get_path", lambda name: str({"purelib": packages, "scripts": scripts}[name]))
+    monkeypatch.setattr(cli, "_writable", lambda folder: folder == str(packages))
+    runner = _Runner()
+    assert cli._cmd_update(_args(), runner=runner) == 1
+    assert runner.calls == []
+    err = capsys.readouterr().err
+    assert str(scripts) in err and "administrator" in err and "Nothing was changed" in err
+    # Neither writable: pip installs for the user instead, so it goes ahead.
+    monkeypatch.setattr(cli, "_writable", lambda folder: False)
+    assert cli._cmd_update(_args(), runner=runner) == 0
+    assert runner.calls
+
+
+def test_writable_tries_one_file_and_leaves_nothing(tmp_path):
+    assert _writable(str(tmp_path)) and list(tmp_path.iterdir()) == []
+    assert not _writable(str(tmp_path / "missing"))
 
 
 def test_update_from_a_local_folder(capsys):

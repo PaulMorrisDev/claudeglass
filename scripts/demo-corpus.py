@@ -5,7 +5,7 @@ Usage::
 
     python scripts/demo-corpus.py OUT_DIR [--days 30] [--seed 7] [--now ISO8601]
 
-Writes two folders under ``OUT_DIR``, neither of which touches your real
+Writes three folders under ``OUT_DIR``, none of which touches your real
 ``~/.claude``:
 
 - ``projects/``: three made-up projects (``C--work-acme-shop``,
@@ -19,16 +19,23 @@ Writes two folders under ``OUT_DIR``, neither of which touches your real
   ``usage-log.csv`` whose weekly and 5-hour readings rise with the list
   price of the turns in between, so the dashboard can show amounts as a
   share of plan limits.
+- ``claude/``: a Claude Code folder connected the way ``init`` leaves
+  it, with the snapshot hook and status line in its ``settings.json``
+  and one settings snapshot in ``config/snapshots/``, so the dashboard
+  shows a finished setup.
 
-Every prompt, file name and number is made up; the output is the same
+Every prompt, file name and number is made up; apart from the one
+snapshot's time and the Python the hook names, the output is the same
 for the same ``--seed`` and ``--now``. Point a scratch dashboard at it::
 
     python -m claudeglass serve --port 8792 \\
         --projects-root OUT_DIR/projects --config-dir OUT_DIR/config \\
         --store OUT_DIR/service.db
 
-Set ``CLAUDEGLASS_COMMAND=python -m claudeglass`` where it
-runs, so the commands on the page don't show your Python's full path.
+Set ``CLAUDE_CONFIG_DIR=OUT_DIR/claude`` where it runs, so the
+dashboard reads the demo's Claude Code settings instead of yours, and
+``CLAUDEGLASS_COMMAND=python -m claudeglass``, so the commands on the
+page don't show your Python's full path.
 The README's images are ``#/overview?w=30`` at 1280x800, and the top
 card on ``#/actions/recommendations?w=30`` cropped from its title to
 the end of its prompt, each with the colour scheme set to dark and then
@@ -43,7 +50,9 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import os
 import random
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -449,6 +458,39 @@ def build_usage_log(config_dir: Path, projects_root: Path, *, now: datetime, rng
     return len(rows)
 
 
+def connect_claude(claude_root: Path, config_dir: Path) -> None:
+    """Connect ``claude_root`` the way ``init`` does, so the dashboard
+    shows a finished setup rather than a "Setup isn't finished" warning:
+    the snapshot hook and status line in its ``settings.json``, and one
+    settings snapshot, taken by the hook itself as a session starts. The
+    hook runs with only the variables Claude Code would give it, so none
+    of this machine's own settings or variable names get in."""
+    from claudeglass import cli, hook_health, statusline
+
+    hook = cli._load_snapshot_hook_module()
+    script = hook.install_hook(config_dir)
+    extra_args = f' --config-dir "{config_dir.resolve()}"'
+    plan = hook_health.plan_connect(
+        config_dir,
+        hook_command=hook.hook_command(script=script, extra_args=extra_args),
+        statusline_command=statusline.install_command(extra_args=extra_args),
+        claude_root=claude_root,
+    )
+    hook_health.connect(plan)
+    cwd = str(Path("C:/work/acme-shop"))
+    env = {"CLAUDE_CONFIG_DIR": str(claude_root), "CLAUDE_PROJECT_DIR": cwd}
+    if "SYSTEMROOT" in os.environ:
+        env["SYSTEMROOT"] = os.environ["SYSTEMROOT"]
+    payload = {"hook_event_name": "SessionStart", "session_id": "demo-connect", "cwd": cwd, "source": "startup"}
+    subprocess.run(
+        [sys.executable, "-I", "-S", str(script), "--config-dir", str(config_dir)],
+        input=json.dumps(payload),
+        text=True,
+        env=env,
+        check=True,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("out", type=Path, help="folder to write projects/ and config/ into")
@@ -464,7 +506,8 @@ def main(argv: list[str] | None = None) -> int:
 
     projects_root = args.out / "projects"
     config_dir = args.out / "config"
-    for folder in (projects_root, config_dir):
+    claude_root = args.out / "claude"
+    for folder in (projects_root, config_dir, claude_root):
         if folder.exists() and any(folder.iterdir()):
             parser.error(f"{folder} isn't empty; pick a new OUT_DIR")
         folder.mkdir(parents=True, exist_ok=True)
@@ -472,8 +515,10 @@ def main(argv: list[str] | None = None) -> int:
     sessions = build_projects(projects_root, days=args.days, now=now, rng=rng)
     (config_dir / "config.toml").write_text('billing = "subscription"\n', encoding="utf-8")
     rows = build_usage_log(config_dir, projects_root, now=now, rng=rng)
+    connect_claude(claude_root, config_dir)
     print(f"{len(sessions)} sessions in {projects_root}")
     print(f"{rows} usage-limit readings in {config_dir / 'usage-log.csv'}")
+    print(f"Claude Code settings, connected, in {claude_root}")
     return 0
 
 

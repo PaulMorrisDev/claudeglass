@@ -333,6 +333,33 @@ def test_the_cached_share_of_the_starting_context_is_measured_from_real_compacti
     assert not {"summary_tokens", "cached_prefix_share"} & stats.defaults
 
 
+def test_a_simulated_summary_request_outputs_what_the_real_ones_did():
+    """The parser estimated the real summary request at 12,000 output
+    tokens (twice the summary it kept), under the 30,000 tokens the
+    summary left behind: a simulated request outputs 12,000 too."""
+    tr = _fidelity_transcript()
+    estimate = _turn(turn_index=4, ts="2026-09-18T12:02:00.000Z", ctx=195_000, cache_read_tokens=190_000,
+                     input_tokens=5_000, output_tokens=12_000, is_synthetic=True, estimated="compaction")
+    tr.turns[3:3] = [estimate]
+    stats = simulate_compaction_windows([tr], SONNET_RATES, {})
+    assert stats.shape.summary_tokens == 30_000
+    assert stats.shape.summary_output_tokens == 12_000
+    assert "summary_output_tokens" not in stats.defaults
+
+    without = simulate_compaction_windows([_fidelity_transcript()], SONNET_RATES, {})
+    assert without.shape.summary_output_tokens == without.shape.summary_tokens
+    assert "summary_output_tokens" in without.defaults
+
+
+def test_each_simulated_summary_request_is_priced_at_the_summary_output():
+    turns = _plateau_transcript()
+    real = _replay_transcript(turns, PRICING.resolve_model, 200_000, _Shape(summary_output_tokens=5_000), {})
+    summary_sized = _replay_transcript(turns, PRICING.resolve_model, 200_000, _Shape(), {})
+
+    assert real.compactions == summary_sized.compactions == 1
+    assert summary_sized.cost - real.cost == pytest.approx(15_000 * SONNET_RATES.rates.output / 1e6)
+
+
 def test_every_candidate_window_present_and_ordered():
     turns = _synthetic_20_turn_transcript()
     tr = _top_level_transcript("sess-synthetic", turns)

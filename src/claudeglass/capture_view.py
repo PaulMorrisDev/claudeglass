@@ -23,6 +23,7 @@ from . import capture_catalogue as catalogue
 from . import habits
 from .config import CAPTURE_SAMPLES, CaptureConfig
 from .render.tables import format_cell
+from .units import NO_LIMIT_SHARE_HINT
 
 #: The cost warning, shown before anything that makes Claude use more
 #: tokens (the init question and ``capture on`` say the same).
@@ -76,6 +77,12 @@ STATUSLINE_NOTES = {
     "coaching_line": "Your status line isn't ClaudeGlass's, so this line won't show. "
     "'claudeglass init --connect' offers to set the status line up. Where there's no status line, "
     "such as the desktop app, coaching notes bring the same hints into the conversation.",
+}
+
+#: What a metric costs when it uses tokens without Claude being asked to
+#: write anything for it, in place of the Capture page's "No tokens."
+COST_NOTES = {
+    "coaching_notes": "About 50 to 120 tokens a note, only when a hint applies.",
 }
 
 #: Said when ``coaching_notes`` is turned on, before the yes/no: what the
@@ -374,6 +381,7 @@ def _metric_row(
         "install_note": install[1].get(skill_now) if needs_install else None,
         "install_command": install[2] if needs_install else None,
         "statusline_note": STATUSLINE_NOTES[metric.id] if no_statusline else None,
+        "cost_note": COST_NOTES.get(metric.id),
         "estimate": estimate,
         "actual": actual,
         "actual_label": actual_label,
@@ -467,8 +475,14 @@ def _roi(weekly_cost: float | None, dependent_value: float | None, units) -> dic
     # the phrased amount is just a dollar figure. Both amounts also carry
     # "about " via Amount.phrase, which dedupes against a subscription's
     # own "about" rather than doubling it (_banner/page-capture.js's ROI note
-    # doesn't repeat "about" itself, relying on this).
-    period = "a week" if units is None or units.billing_mode != "subscription" else ""
+    # doesn't repeat "about" itself, relying on this). A subscription with
+    # no usage-limit readings is phrased in list-price dollars instead,
+    # which need "a week" like API billing's, or they read as a total.
+    share = units is not None and units.billing_mode == "subscription"
+    if share:
+        amount = units.money(weekly_cost)
+        share = amount is not None and amount.basis != NO_LIMIT_SHARE_HINT
+    period = "" if share else "a week"
     return {
         "cost": _money(units, weekly_cost, period, prefix="about "),
         "value": _money(units, dependent_value, period, prefix="about ") if dependent_value is not None else None,

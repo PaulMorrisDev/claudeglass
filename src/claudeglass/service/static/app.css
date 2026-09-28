@@ -142,7 +142,9 @@
   --weight-regular: 400;
   --weight-medium: 500;
   --weight-semibold: 600;
-  --measure: 72ch;
+  /* Prose runs the width of its panel: a 72-character cap left wide
+     empty space beside text and broke sentences early. */
+  --measure: none;
 
   /* Space: a 4px base. */
   --space-1: 2px;
@@ -1559,7 +1561,7 @@ details.disclosure[open] > summary {
 /* The page leads with a sentence, not a hero number. */
 .view .overview-summary,
 .overview-summary {
-  max-width: 72ch;
+  max-width: var(--measure);
   margin: 0 0 var(--space-7);
   color: var(--ink-1);
   font-size: var(--text-xl);
@@ -1723,7 +1725,7 @@ details.disclosure[open] > summary {
 .setup-list {
   display: grid;
   gap: var(--space-5);
-  max-width: 72ch;
+  max-width: var(--measure);
   margin: var(--space-3) 0;
   padding: 0;
   list-style: none;
@@ -1820,12 +1822,15 @@ details.disclosure[open] > summary {
   justify-self: start;
 }
 
+/* The check's name, then its finding on the same line: text that
+   wraps, not a flex item that drops whole under the name. */
 .view .check-row-title,
 .check-row-title {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0 var(--space-3);
   margin: 0;
+}
+
+.check-row-title > strong {
+  margin-right: var(--space-3);
 }
 
 .view .check-row-detail,
@@ -1912,7 +1917,7 @@ details.disclosure[open] > summary {
 }
 
 .overview-promise {
-  max-width: 72ch;
+  max-width: var(--measure);
   margin: 0;
   padding-left: var(--space-7);
 }
@@ -2733,7 +2738,7 @@ span.severity-mark {
 /* -- impact and setup ---------------------------------------------------------------- */
 
 .expectations li {
-  max-width: 80ch;
+  max-width: var(--measure);
   margin-bottom: var(--space-2);
 }
 
@@ -2850,13 +2855,13 @@ span.severity-mark {
 }
 
 .view .capture-metric-what {
-  max-width: 80ch;
+  max-width: var(--measure);
   margin: var(--space-1) 0 0;
   color: var(--ink-2);
 }
 
 .view .capture-metric-cost {
-  max-width: 80ch;
+  max-width: var(--measure);
   margin: var(--space-1) 0 0;
   font-size: var(--text-md);
 }
@@ -4626,7 +4631,7 @@ td.nowrap,
 }
 
 .chart-summary {
-  max-width: 72ch;
+  max-width: var(--measure);
   margin: var(--space-2) 0 0;
   color: var(--ink-2);
   font-size: var(--text-md);
@@ -4883,7 +4888,7 @@ td.nowrap,
 }
 
 .chart-note {
-  max-width: 72ch;
+  max-width: var(--measure);
   margin: var(--space-5) 0 0;
   color: var(--ink-3);
   font-size: var(--text-sm);
@@ -5236,7 +5241,7 @@ td.nowrap,
    stacked in order. panel() already borders, spaces and heads each
    card; this only sets the rhythm of its own sentences and the weight
    of its "what to do" link. Card text is plain <p>s, so it already
-   picks up .view p's reading-width cap. */
+   picks up .view p's width (--measure). */
 .cost-card .panel-body {
   display: flex;
   flex-direction: column;

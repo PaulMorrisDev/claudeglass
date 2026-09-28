@@ -21,7 +21,8 @@ Two things this module reads only lengths/counts/ids of, never content:
   JSONL for the same join, is kept only as a fallback for a
   ``TranscriptResult`` parsed before that field existed (``subs``/``top``
   loaded from an on-disk cache written by an older schema version, say) —
-  see ``_add_skill_rollup``.
+  see ``_add_skill_rollup``. A file deleted since leaves that join empty
+  rather than failing the report.
 - The skill roll-up's "spawned cost" is the transitive closure of every
   agent reachable from a skill's invoking turns via that tool_use_id join
   (direct spawns) and then ``parent_agent_id`` (further agents those
@@ -412,13 +413,17 @@ class TopologyStats:
         self, top: TranscriptResult, subs: list[TranscriptResult], rates_lookup: Pricing
     ) -> None:
         tool_use_index = _tool_use_index_from_turns(top)
-        if not tool_use_index:
+        if not tool_use_index and top.meta.path:
             # Fallback for a TranscriptResult parsed before Turn.tool_use_ids
             # existed (or a transcript that genuinely made no tool calls at
             # top level, where the raw re-scan is equally empty and cheap).
-            if not top.meta.path:
-                return
-            tool_use_index = index_tool_use_ids(top.meta.path)
+            try:
+                tool_use_index = index_tool_use_ids(top.meta.path)
+            except OSError:
+                # The store keeps a session after its file is deleted
+                # (missing_since): its skill turns still count, only
+                # without the join to the agents they started.
+                pass
 
         children_by_parent: dict[str, list[TranscriptResult]] = {}
         for sub in subs:

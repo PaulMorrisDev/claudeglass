@@ -34,7 +34,6 @@
    "skill",
    "found",
    "fit",
-   "rules",
    "agent_brief",
    "session_end",
    "waits",
@@ -54,7 +53,6 @@
    "skill",
    "found",
    "fit",
-   "rules",
    "agent_brief",
    "prior",
    "check",
@@ -140,20 +138,22 @@
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "done: you finished the task; partial: some of it; blocked: you could not go on",
+   "sub_line": "result: done|partial|blocked (done = the agent finished what its brief asked; partial = some of it; blocked = it could not go on, such as a missing file, tool or permission)",
    "sub_extra": "",
    "tool_note": ""
   },
   {
    "id": "retry",
    "group": "essentials",
-   "requires": [],
+   "requires": [
+    "result"
+   ],
    "main_line": "",
-   "main_extra": "When you start an agent again because its last run fell short, begin the brief with [retry: model|brief|tools|scope|other].",
+   "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "",
-   "sub_extra": "Re-running an agent? Begin its brief with [retry: model|brief|tools|scope|other].",
+   "sub_line": "retry: none|model|brief|tools|scope|other (is this run a second try at what an earlier run listed below was meant to deliver, because that run fell short? none = no, or there is no earlier run; model = it needed a stronger model; brief = the earlier brief was too vague or lacked something; tools = the earlier agent lacked a tool or a permission; scope = the task was cut too wide or changed; other)",
+   "sub_extra": "",
    "tool_note": ""
   },
   {
@@ -214,21 +214,7 @@
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "fit: smaller|right|larger (could a smaller model have done this task, or did it need a larger one)",
-   "sub_extra": "",
-   "tool_note": ""
-  },
-  {
-   "id": "rules",
-   "group": "standard",
-   "requires": [
-    "result"
-   ],
-   "main_line": "",
-   "main_extra": "",
-   "extra_before_tag": false,
-   "main_extra_untagged": "",
-   "sub_line": "rules: used|unused (did you use the CLAUDE.md or memory instructions you were given)",
+   "sub_line": "fit: smaller|right|larger (smaller = a smaller, cheaper model could plainly have done this: simple lookups or mechanical edits; right = it suited the model it ran on; larger = the agent struggled in a way a stronger model would not have)",
    "sub_extra": "",
    "tool_note": ""
   },
@@ -242,7 +228,7 @@
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "brief: clear|partial|vague (how complete your brief was); missing: files,goal,scope,done or none (what it lacked)",
+   "sub_line": "brief: clear|partial|vague (how complete the brief was: clear = what to do and what to hand back; partial = the goal without the details; vague = neither); missing: files,goal,scope,done or none (what the brief lacked that the agent had to find or guess; a comma list)",
    "sub_extra": "",
    "tool_note": ""
   },
@@ -335,9 +321,9 @@
    "group": "feedback",
    "requires": [],
    "main_line": "",
-   "main_extra": "When you finish a piece of work the user asked for, add this before your tag, after a blank line:\n> 💡 **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
+   "main_extra": "The first time in this session you finish a piece of work the user asked for, add this before your tag, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
    "extra_before_tag": true,
-   "main_extra_untagged": "When you finish a piece of work the user asked for, end your reply with this, after a blank line:\n> 💡 **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
+   "main_extra_untagged": "The first time in this session you finish a piece of work the user asked for, end your reply with this, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /tl-feedback: a few ticks make your savings tips fit how you work.",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -535,7 +521,68 @@
   },
   "list_keys": [
    "missing"
-  ]
+  ],
+  "agent": {
+   "intro": "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt of it: the brief the agent was given, what it did, the end of its report and the session's earlier agent runs. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words:",
+   "rule": "Judge only from the excerpt. Give every key; leave one out only when the excerpt can't tell at all.",
+   "limits": {
+    "brief": 2000,
+    "report": 1500,
+    "earlier": 4,
+    "earlier_brief": 200,
+    "earlier_report": 200,
+    "command": 100,
+    "commands": 6,
+    "files": 8
+   },
+   "keys": {
+    "result": [
+     "result"
+    ],
+    "retry": [
+     "retry"
+    ],
+    "fit": [
+     "fit"
+    ],
+    "agent_brief": [
+     "brief",
+     "missing"
+    ]
+   },
+   "vocab": {
+    "result": [
+     "done",
+     "partial",
+     "blocked"
+    ],
+    "fit": [
+     "smaller",
+     "right",
+     "larger"
+    ],
+    "brief": [
+     "clear",
+     "partial",
+     "vague"
+    ],
+    "missing": [
+     "files",
+     "goal",
+     "scope",
+     "done",
+     "none"
+    ],
+    "retry": [
+     "none",
+     "model",
+     "brief",
+     "tools",
+     "scope",
+     "other"
+    ]
+   }
+  }
  },
  "coaching": {
   "marker": "tl-coach v",
@@ -569,22 +616,22 @@
    "rearm_factor": 1.5
   },
   "text": {
-   "cache_cold": "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context again: about {ctx} tokens at the cache-write price. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying so, and that /clear before a new task after a break avoids it. If it carries on the same work, don't mention it.",
-   "clear_context": "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying that /clear before a new task would have saved that. If it carries on the same work, don't mention it.",
-   "drip_feed": "The user has sent {count} small change requests in a row, one message each, and every message re-reads the whole context. Make this change, then end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting that working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
-   "repeat_ask": "The user has sent much the same request again, so the last attempt probably missed what they wanted. Don't repeat the same approach: say in one line what you think went wrong, then try a different way, or ask one short question if you can't tell. End your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting that saying what was wrong with the last attempt gets a better next one than sending the request again.",
-   "plan_first": "The user's message asks for about {steps} separate changes, outside plan mode. Before changing anything, set out in a few lines how you'll go about it and in what order, then carry on unless they stop you. End that reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting plan mode (Shift+Tab) for a job this size: it agrees the approach before anything changes.",
-   "stop_loop": "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change anything for this message, say in two or three lines what you'll do, and wait for a go-ahead if it's a large change. End that reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying that plan mode (Shift+Tab) agrees the approach before any work starts.",
-   "vague_fix": "The user says something is wrong but not what they saw or expected. If the context doesn't make the problem clear, ask one short question (what they saw, what they expected, or the error text) before changing anything. If it does, fix it and end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" saying that naming what they saw and expected, or pasting the error, gets a fix first time.",
-   "big_paste": "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a log, a file or command output, end your reply, before any tag, with a blank line and then a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" suggesting they paste only the part that matters, or save it to a file and give the path so only what's needed is read.",
+   "cache_cold": "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context again: about {ctx} tokens at the cache-write price. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying so, and that /clear before a new task after a break avoids it. If it carries on the same work, don't mention it.",
+   "clear_context": "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that /clear before a new task would have saved that. If it carries on the same work, don't mention it.",
+   "drip_feed": "The user has sent {count} small change requests in a row, one message each, and every message re-reads the whole context. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting that working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
+   "repeat_ask": "The user has sent much the same request as one you answered earlier. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting that saying what was wrong with the last attempt gets a better next one than sending the request again.",
+   "plan_first": "The user's message asks for about {steps} separate changes, outside plan mode. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting plan mode (Shift+Tab) for a job this size: it agrees the approach before anything changes.",
+   "stop_loop": "The user has stopped you {count} times in the last {minutes} minutes. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that plan mode (Shift+Tab) agrees the approach before any work starts.",
+   "vague_fix": "The user says something is wrong but not what they saw or expected. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that naming what they saw and expected, or pasting the error, gets a fix first time.",
+   "big_paste": "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a log, a file or command output, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting they paste only the part that matters, or save it to a file and give the path so only what's needed is read.",
    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
    "explore_reads": "You've made {reads} reads and searches for this message, about {tokens} tokens that every later reply reads again. If more searching is needed, hand it to an Explore agent: it searches in its own context and sends back a short summary.",
-   "plan_fresh": "This plan was approved with about {kept} tokens of planning in context, which every reply of the build reads again. Before you start building, tell the user in a quote block starting \"> ⚠️ **ClaudeGlass tip:**\" that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry about {kept} fewer tokens on each reply. Then carry on unless they stop you.",
-   "split_run": "This run has made about {replies} replies, and every reply reads all of the run again. In this user's past sessions, {agent} runs cost less when split about every {every_n} replies. If more than a step or two is left, finish the step you're on and end your report with a short note of what's done, what's left and the files involved, so a fresh agent can carry on from it."
+   "plan_fresh": "This plan was approved with about {kept} tokens of planning in context, which every reply of the build reads again. Before you start building, tell the user in a quote block starting \"> **ClaudeGlass tip:**\" that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry about {kept} fewer tokens on each reply. Then carry on unless they stop you.",
+   "split_run": ""
   },
   "quiet_how": {
    "Read": "read only the lines you need, with an offset and a limit",
-   "Bash": "cut the command's output down first: a filter, head or tail, or a quieter flag",
+   "Bash": "cut the command's output down first: a quieter flag, or a filter that keeps every error and failure line",
    "Grep": "narrow the pattern or the path, or ask for file names or counts only",
    "Glob": "narrow the pattern",
    "": "ask for less: a narrower query or a smaller page"
@@ -595,11 +642,13 @@
    "plan_first": "⚠️ ClaudeGlass: a {steps}-step request outside plan mode. Plan mode (Shift+Tab) agrees the approach before anything changes.",
    "stop_loop": "⚠️ ClaudeGlass: you've stopped Claude {count} times in {minutes} minutes. Plan mode (Shift+Tab) agrees the approach before work starts.",
    "vague_fix": "⚠️ ClaudeGlass: say what you saw and what you expected, or paste the error, to get a fix first time.",
-   "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. Paste only the part that matters, or give a file path."
+   "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. Paste only the part that matters, or give a file path.",
+   "split_run": "⚠️ ClaudeGlass: this {agent} run has made about {replies} replies, and each one reads the whole run again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next time, give each agent a smaller piece of the work."
   },
   "correction_pattern": "\\b(?:that'?s (?:wrong|not right|not what|incorrect|broken)|th(?:is|at) (?:is|was) (?:wrong|broken|incorrect|not (?:right|working|what))|it'?s (?:still )?(?:broken|wrong|not working|failing|incorrect)|(?:still|it still) (?:broken|failing|wrong|not working|doesn'?t work|fails)|(?:doesn'?t|does not|didn'?t|did not) work|not what (?:i|we) (?:asked|wanted|meant|said)|you (?:broke|missed|forgot|ignored|didn'?t (?:do|read|follow|check|run|fix))|why (?:did|didn'?t|would|are|is) you|(?:undo|revert|roll back) (?:that|this|it|the|your)|that broke|you'?ve broken|try again|redo (?:it|that|this)|wrong (?:file|approach|answer|place|branch|one))\\b",
   "correction_scan_chars": 200,
   "fix_pattern": "\\b(?:fix|fixed|broken|wrong|incorrect|still|again|bug|error|errors|failing|fails|crash(?:es|ed)?)\\b",
+  "question_pattern": "\\s*(?:what|which|who|whom|whose|where|when|how)\\b",
   "specific_pattern": "[`\\\"/\\\\:#<>(){}\\[\\]=]|\\w\\.\\w|\\d|(?i:\\b(?:should|must|needs? to|supposed to|meant to)\\s+(?:say|show|read|print|return|display|be|use|have|look|go)\\s+(?!(?:working|fixed|right|correct|better|ok|okay|fine|done|good)\\b)\\w+|\\bmake (?:it|this|that|them) (?!(?:work|right|better|correct)\\b)\\w+|\\b(?:change|set|turn|rename)\\b[^.!?]{0,40}\\bto\\b|\\b(?:expected|instead|rather than)\\b)",
   "interrupt_prefix": "[Request interrupted",
   "edit_tools": [

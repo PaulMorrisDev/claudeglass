@@ -450,10 +450,10 @@ A simulated compaction fires at the window less this corpus's own
 trigger reserve (median `window − preTokens` across real auto
 compactions under a known window), and resets context to the session's
 own starting context plus a summary of this corpus's median `postTokens`.
-It charges the summary request (never logged in the transcript) and the
-reply after it re-caching its whole context, with the share of the
-starting context real compactions still read from cache read, not
-written. Files re-read after a summary aren't charged by the sweep. A
+It charges the summary request (never logged in the transcript, output
+at the median of the real ones the parser estimated) and the reply after
+it re-caching its whole context, with the share of the starting context
+real compactions still read from cache read, not written. Files re-read after a summary aren't charged by the sweep. A
 real, already-observed compaction is kept as-is under every candidate
 window rather than re-simulated, so a window above the one a session ran
 at costs what it did: raising the window can't be tested. Main sessions a
@@ -722,7 +722,9 @@ script's file name, never by its command or path.
   failed (`script not found`, `timed out` or `error`, plus
   `(relative path)` or `(%VAR% not expanded)` when a script not found is
   named by one), sessions it
-  failed in, the last day it failed, runs seen working, calls blocked,
+  failed in, when it last failed (UTC), whether it has stopped failing
+  (`yes`, `no`, or blank for a hook that never failed; see
+  [`hooks.md`](hooks.md#what-it-measures)), runs seen working, calls blocked,
   sent again unchanged, cost of blocks, times it added context, context
   added, the cost of keeping it, and time waited.
 
@@ -755,9 +757,12 @@ test and privacy are in [concepts](concepts.md#7-quality-signals).
   out, and so are main sessions a scheduled or looped task started with
   no message of yours, `Run.scheduled`): the main shares and per-run
   measures, the setup compared with (the one that agent used most), a
-  verdict (`only`, `baseline`, `worse`, `possibly_worse`, `better`,
-  `possibly_better`, `no_clear_difference`, `too_little_data`,
-  `not_comparable`) and the difference in words. `not_comparable` means
+  verdict (`only`, `baseline`, `worse`, `mixed`, `possibly_worse`,
+  `better`, `possibly_better`, `no_clear_difference`, `too_little_data`,
+  `not_comparable`) and the difference in words. `mixed` is clearly worse
+  on some signals and clearly better on others. `quality.worse_models`
+  keeps a `worse` or `mixed` setup's model out of the model suggestions
+  for that agent. `not_comparable` means
   the two setups' mean replies per run are more than
   `quality.COMPARABLE_SIZE` (5) times apart, so no test is run. Setups
   ran at different times on possibly different work. The retried share
@@ -1437,12 +1442,17 @@ Claude Code writes a running total of a session's cost (a `cost-state`
 line) now and then. For every session with one, this compares that
 total with ClaudeGlass's own pricing of the same session up to when the
 total was last written (`TranscriptMeta.cc_cost_as_of`; subagents
-included).
+included), from when the Claude Code process it counts started
+(`TranscriptMeta.cc_cost_since`: a resumed session's total leaves out
+the replies before the resume). A total of zero with no model in it is
+a blank record, not a cost, and is skipped.
 
 - `cost_record_summary` — one `all` row: `sessions`, `cc_usd` (Claude
   Code's own), `local_usd` (ClaudeGlass, same span), `difference_pct`,
-  then the known reasons: `stopped_usd` (replies stopped mid-stream,
-  which ClaudeGlass prices and Claude Code leaves out), `unlogged_usd`
+  then the known reasons: `stopped_usd` (replies stopped mid-stream
+  before calling a tool, which ClaudeGlass prices and Claude Code leaves
+  out; a subagent's reply logged mid-stream while its tool runs is
+  billed, so it isn't one), `unlogged_usd`
   (Claude Code's cost on models with no reply in any transcript, such as
   a request for a session title) and `estimated_usd` (the estimated
   compaction calls both sides count); `unexplained_pct` is what is left

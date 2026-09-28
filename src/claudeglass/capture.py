@@ -284,7 +284,9 @@ class CaptureUsage:
     tagged_cycles: int = 0
     reports: int = 0
     tagged_reports: int = 0
-    #: Tags Claude Haiku wrote (``[capture] tagger = "haiku"``).
+    #: Turns Claude Haiku tagged: the main session's replies while it
+    #: writes the tags (``[capture] tagger = "haiku"``), and every agent
+    #: run it judged, whoever writes them.
     judged: int = 0
     #: /tl-feedback runs, what they cost (every turn of each), and how
     #: many ended with answers rather than a declined question.
@@ -386,9 +388,11 @@ def _tag_weights(turn: Turn, subagent: bool) -> dict[str, float]:
             # older transcript but has no catalogue entry to weigh it by.
             metric = catalogue.METRICS_BY_ID.get(metric_id)
             if value not in (None, ()) and metric is not None:
-                weights[metric_id] = metric.out_chars
+                # An agent metric Haiku judges costs Claude nothing to write:
+                # its share of Haiku's call is even.
+                weights[metric_id] = metric.out_chars or 1
     if subagent and turn.result_marker:
-        weights["result"] = catalogue.METRICS_BY_ID["result"].out_chars
+        weights["result"] = catalogue.METRICS_BY_ID["result"].out_chars or 1
     return weights
 
 
@@ -529,8 +533,14 @@ def _add_brief_markers(use: CaptureUsage, sub: TranscriptResult, spawner: Turn |
     moment = _parse_ts(first.ts)
     if since is not None and (moment is None or moment < since):
         return
+    # A retry Haiku judged was never written into the brief: its cost is
+    # Haiku's call, counted with the run's other words.
+    judged = any(turn.cap is not None and turn.cap.judged for turn in sub.turns)
     for metric_id, word in (("spawn", first.spawn_marker), ("retry", first.retry_marker)):
         if not word:
+            continue
+        if judged:
+            use._count(metric_id)
             continue
         chars = len(f"[{metric_id}: {word}]") + 1
         cost = chars * _output_usd_per_char(spawner or first, pricing)
@@ -614,7 +624,10 @@ def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
         captured_top = top is not None and (
             top.meta.cap_injections > 0 or any(t.cap is not None and t.cap.judged for t in top.turns)
         )
-        subs = [sub for sub in bundle.subs if captured_top or sub.meta.cap_injections > 0]
+        subs = [
+            sub for sub in bundle.subs
+            if captured_top or sub.meta.cap_injections > 0 or any(t.cap is not None and t.cap.judged for t in sub.turns)
+        ]
         rated = top is not None and _add_feedback_runs(use, top, bundle.subs, pricing, start)
         if rated and not captured_top:
             # Its spend, so capture's share stays a share of what the
@@ -862,10 +875,14 @@ def estimate(past: History, ids, sample: int = 100, tagger: str = catalogue.DEFA
     tags (``tagger``), the main note carries no tag list and replies no
     tag; a Haiku call per message of yours
     (:data:`~claudeglass.capture_catalogue.JUDGE_USD_PER_CALL`) takes
-    their place."""
+    their place. The agent metrics are a Haiku call per agent run,
+    whoever writes the tags."""
     ids = tuple(ids)
     wanted = set(ids)
     haiku = tagger == "haiku" and bool(catalogue.tagged_keys(ids))
+    # Agent runs are judged by Haiku whoever writes the main session's
+    # tags: a call per run, and nothing asked of the agent.
+    agents = bool(catalogue.agent_metric_ids(ids))
     main = _note_chars(ids, "main", tagger=tagger)
     sub = _note_chars(ids, "subagent", "general-purpose")
     no_rules = _note_chars(ids, "subagent", "Explore")
@@ -874,22 +891,27 @@ def estimate(past: History, ids, sample: int = 100, tagger: str = catalogue.DEFA
     reply = reply + _TAG_FRAME_CHARS if reply else 0
     report = sum(m.out_chars for m in enabled if m.sub_line)
     report = report + _TAG_FRAME_CHARS if report else 0
-    # A brief's [spawn:]/[retry:] words, per subagent; the feedback
-    # reminder's line, at most once per message of yours.
+    # A brief's [spawn:]/[retry:] words, per subagent (none now); the
+    # feedback reminder's line, once a session: its share of the per-reply
+    # carry is sessions over messages.
     brief = sum(m.out_chars for m in enabled if (m.main_extra or m.sub_extra) and m.group != "feedback")
     reminder = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
+    once = past.sessions / past.cycles if past.cycles else 0.0
     cost = (
         main * past.main_note
         + sub * past.sub_note
         + no_rules * past.sub_note_no_rules
-        + (reply + reminder) * past.reply_tag
+        + reply * past.reply_tag
+        + reminder * past.reply_tag * once
         + report * past.report_tag
         + brief * past.brief_tag
     )
     note_tokens = main * past.main_notes + max(sub, no_rules) * past.sub_notes
-    tag_tokens = (reply + reminder) * past.cycles + report * past.subagents + brief * past.subagents
+    tag_tokens = reply * past.cycles + reminder * past.sessions + report * past.subagents + brief * past.subagents
     if haiku:
         cost += past.cycles * catalogue.JUDGE_USD_PER_CALL
+    if agents:
+        cost += past.subagents * catalogue.JUDGE_USD_PER_CALL
     for metric_id, count, note, tag in (
         ("big_output", past.big_outputs, past.big_output_note, past.big_output_tag),
         ("web", past.web_results, past.web_note, past.web_tag),

@@ -10,11 +10,18 @@ then sent the same call again unchanged).
 The model, per hook label:
 
 - **Failed runs.** ``hook_non_blocking_error`` records, with the sessions
-  they fell in, the last day one happened, the most common cause and
+  they fell in, when the last one happened, the most common cause and
   whether the command names its script by a relative path (which only
   resolves when Claude Code runs the hook from the project root) or
   through a Windows ``%VAR%`` variable (which the hook's shell leaves as
   it is).
+- **Stopped failing.** A hook fixed mid-window keeps its old failures
+  until they age out, so each failing hook is judged on what came after
+  its last failure, in the projects it failed in: the calls to the tools
+  it failed on (a tool hook's clean runs leave no record), or its own
+  recorded runs (other events record their clean runs). At the rate it
+  used to fail, if at least ``quiet_failures`` more failures should have
+  followed and none did, it has stopped failing.
 - **Runs seen working.** Successful runs Claude Code recorded, plus calls
   and stops the hook blocked. A tool hook that ran cleanly and let the
   call through leaves no record, so this undercounts those.
@@ -40,11 +47,13 @@ from __future__ import annotations
 
 from bisect import bisect_right
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Callable
 
 from .capture_catalogue import HOOK_SCRIPT
 from .carry import boundary_turn_indices, carry_end_index, carry_rate_prefix
 from .model import Column, EventKind, Recommendation, ReportModel, Section, Table, TranscriptResult
+from .parse import BUILT_IN_TOOLS, tool_server
 from .pricing import Pricing, price_turn
 
 #: Characters per token, the approximation used throughout this report
@@ -91,6 +100,10 @@ class HookThresholds:
     #: ...and whose context cost at least this much to keep (USD, list
     #: price).
     min_context_usd: float = 1.0
+    #: A failing hook has stopped failing when, at the rate it used to
+    #: fail, at least this many more failures should have followed its
+    #: last one (none did: it was the last).
+    quiet_failures: float = 5.0
     #: How many hooks ``hooks_by_script`` lists.
     top_n: int = 20
 
@@ -109,6 +122,7 @@ class HookThresholds:
             ("resend_share_pct", float),
             ("min_contexts", int),
             ("min_context_usd", float),
+            ("quiet_failures", float),
             ("top_n", int),
         ):
             key = f"hooks_{name}"
@@ -126,6 +140,8 @@ class HookThresholds:
             f"{self.resend_share_pct:.0f}% or more of them sent again unchanged.",
             f"The hook-context tip needs a hook that added context at least {self.min_contexts} times, "
             f"costing at least ${self.min_context_usd:,.2f} to keep.",
+            f"A hook has stopped failing when, at the rate it used to fail, {self.quiet_failures:g} or more "
+            "failures should have followed its last one.",
             f"The hooks table lists the top {self.top_n}.",
         ]
 
@@ -144,7 +160,19 @@ class HookRow:
     relative: bool = False
     unexpanded: bool = False
     failed_sessions: set[str] = field(default_factory=set)
-    last_failed: str = ""
+    #: The latest failure's timestamp, as the transcript wrote it.
+    last_failed_ts: str = ""
+    failed_projects: set[str] = field(default_factory=set)
+    #: The tools its failures ran for (``mcp`` for any MCP tool); see
+    #: :attr:`tool_less` for a hook whose failures name none (``Stop``,
+    #: ``SessionStart``...).
+    failed_tools: set[str] = field(default_factory=set)
+    #: The hook events of the failures that name no tool.
+    failed_events: set[str] = field(default_factory=set)
+    #: What it could have failed on in its projects, up to its last
+    #: failure and after it (see :func:`_since`).
+    chances_before: int = 0
+    chances_since: int = 0
     worked: int = 0
     blocks: int = 0
     stop_blocks: int = 0
@@ -162,6 +190,31 @@ class HookRow:
         if not self.causes:
             return ""
         return max(sorted(self.causes), key=lambda c: self.causes[c])
+
+    @property
+    def last_failed(self) -> str:
+        """The latest failure as ``2026-09-28 07:38 UTC``, or ``""``."""
+        return _utc_minute(self.last_failed_ts)
+
+    def stopped(self, thresholds: HookThresholds | None = None) -> bool:
+        """Whether it has stopped failing: see :attr:`HookThresholds.quiet_failures`."""
+        return bool(self.failed) and self.expected_since >= (thresholds or _DEFAULT_THRESHOLDS).quiet_failures
+
+    @property
+    def tool_less(self) -> bool:
+        """Whether none of its failures named a tool. One that did makes
+        it a tool hook even if others didn't: those come from a
+        transcript read before PARSER_VERSION 32 whose file is gone, so
+        the store can't read it again."""
+        return not self.failed_tools
+
+    @property
+    def expected_since(self) -> float:
+        """The failures that should have followed its last one, at the
+        rate it failed up to then."""
+        if not self.failed or not self.chances_since:
+            return 0.0
+        return self.failed / max(self.chances_before, self.failed) * self.chances_since
 
     @property
     def resent_usd(self) -> float:
@@ -190,7 +243,19 @@ class HookStats:
         )
 
 
-def _events(tr: TranscriptResult, stats: HookStats) -> None:
+def _utc_minute(ts: str) -> str:
+    try:
+        at = datetime.fromisoformat(ts.replace("Z", "+00:00")) if ts else None
+    except ValueError:
+        return ts[:10]
+    if at is None:
+        return ""
+    if at.tzinfo is None:
+        at = at.replace(tzinfo=timezone.utc)
+    return at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+
+def _events(tr: TranscriptResult, stats: HookStats, project: str) -> None:
     for event in tr.events:
         if event.kind != EventKind.HOOK_OUTPUT or event.subkind not in _RUN_SUBKINDS:
             continue
@@ -217,9 +282,14 @@ def _events(tr: TranscriptResult, stats: HookStats) -> None:
             row.causes[cause] = row.causes.get(cause, 0) + 1
             if tr.meta.session_id:
                 row.failed_sessions.add(tr.meta.session_id)
-            day = (event.ts or "")[:10]
-            if day > row.last_failed:
-                row.last_failed = day
+            row.failed_projects.add(project)
+            if (event.ts or "") > row.last_failed_ts:
+                row.last_failed_ts = event.ts or ""
+            tool = event.detail.get("tool")
+            if isinstance(tool, str) and tool:
+                row.failed_tools.add(tool)
+            else:
+                row.failed_events.add(bucket if isinstance(bucket, str) else "other")
         elif event.subkind == "hook_blocking_error":
             row.stop_blocks += 1
             row.worked += 1
@@ -274,15 +344,85 @@ def _turns(tr: TranscriptResult, lookup, stats: HookStats) -> None:
             row.carry_usd += tokens * rate_sum
 
 
+def _since(tr: TranscriptResult, stats: HookStats, project: str) -> None:
+    """Count each failing hook's chances to fail before and after its
+    last failure, in the projects it failed in. A tool hook's clean runs
+    leave no record, so its chances are the calls to the tools it failed
+    on. Neither does a SessionStart hook's, so its chances are the
+    sessions that start and the summaries (each starts the session
+    again). Any other hook's are its own recorded runs."""
+    rows = [
+        h for h in stats.hooks.values()
+        if h.failed and h.last_failed_ts and project in h.failed_projects
+    ]
+    if not rows:
+        return
+    for row in rows:
+        if row.tool_less:
+            continue
+        for turn in tr.turns:
+            calls = sum(
+                n for name, n in turn.tool_calls_by_tool.items()
+                if name in row.failed_tools or ("mcp" in row.failed_tools and tool_server(name) != BUILT_IN_TOOLS)
+            )
+            if not calls or not turn.ts:
+                continue
+            if turn.ts > row.last_failed_ts:
+                row.chances_since += calls
+            else:
+                row.chances_before += calls
+    starts = [h for h in rows if h.tool_less and h.failed_events == {"SessionStart"}]
+    if starts:
+        times = [e.ts for e in tr.events if e.kind == EventKind.COMPACT_BOUNDARY and e.ts]
+        if tr.meta.kind == "top-level":
+            # Its earliest record: the start, as its own SessionStart
+            # hooks ran, comes before the first reply.
+            times.append(min([t.ts for t in tr.turns if t.ts] + [e.ts for e in tr.events if e.ts], default=""))
+        for row in starts:
+            for ts in times:
+                if not ts:
+                    continue
+                if ts > row.last_failed_ts:
+                    row.chances_since += 1
+                else:
+                    row.chances_before += 1
+    by_label = {h.label: h for h in rows if h.tool_less and h.failed_events != {"SessionStart"}}
+    if not by_label:
+        return
+    for event in tr.events:
+        if event.kind != EventKind.HOOK_OUTPUT or event.subkind not in _RUN_SUBKINDS or not event.ts:
+            continue
+        row = by_label.get(event.detail.get("script"))
+        if row is None:
+            continue
+        if event.ts > row.last_failed_ts:
+            row.chances_since += 1
+        else:
+            row.chances_before += 1
+
+
+def failure_stats(results: list[TranscriptResult]) -> HookStats:
+    """Each hook's runs, failures and what came after its last failure,
+    with nothing priced: all :meth:`HookRow.stopped` needs. ``capture
+    status``'s failing-hook warning reads it too."""
+    stats = HookStats()
+    # A subagent's transcript names no project: its session's does.
+    projects = {tr.meta.session_id: tr.meta.project_slug for tr in results if tr.meta.project_slug}
+    for tr in results:
+        _events(tr, stats, tr.meta.project_slug or projects.get(tr.meta.session_id, ""))
+    for tr in results:
+        _since(tr, stats, tr.meta.project_slug or projects.get(tr.meta.session_id, ""))
+    return stats
+
+
 def compute_hook_costs(
     results: list[TranscriptResult], pricing: Pricing, thresholds: HookThresholds | None = None
 ) -> HookStats:
     """The hook figures over ``results`` (every transcript in the window,
     main sessions and agents alike: a hook runs in both)."""
     lookup = pricing.resolve_model
-    stats = HookStats()
+    stats = failure_stats(results)
     for tr in results:
-        _events(tr, stats)
         _turns(tr, lookup, stats)
     return stats
 
@@ -345,6 +485,7 @@ def build_section(stats: HookStats, thresholds: HookThresholds | None = None) ->
             Column(key="cause", label="Why it failed", kind="str"),
             Column(key="failed_sessions", label="Sessions it failed in", kind="int"),
             Column(key="last_failed", label="Last failed", kind="str"),
+            Column(key="stopped", label="Stopped failing?", kind="str"),
             Column(key="worked", label="Runs seen working", kind="int"),
             Column(key="blocks", label="Calls blocked", kind="int"),
             Column(key="resent", label="Sent again unchanged", kind="int"),
@@ -362,6 +503,7 @@ def build_section(stats: HookStats, thresholds: HookThresholds | None = None) ->
                 _cause_text(h),
                 len(h.failed_sessions),
                 h.last_failed,
+                ("yes" if h.stopped(th) else "no") if h.failed else "",
                 h.worked,
                 h.blocks,
                 h.resent,
@@ -421,9 +563,12 @@ def _names(labels: list[str]) -> str:
 
 
 def _rule_hook_failures(report: ReportModel, th: HookThresholds) -> list[Recommendation]:
-    """``hook-failures``: hooks with at least ``min_failures`` failed runs.
-    One card for all of them; the action follows the top hook's cause."""
-    failing = [r for r in _rows(report) if _num(r.get("failed")) >= th.min_failures]
+    """``hook-failures``: hooks with at least ``min_failures`` failed runs
+    that haven't stopped failing. One card for all of them; the action
+    follows the top hook's cause."""
+    failing = [
+        r for r in _rows(report) if _num(r.get("failed")) >= th.min_failures and r.get("stopped") != "yes"
+    ]
     if not failing:
         return []
     failing.sort(key=lambda r: -_num(r.get("failed")))
@@ -438,12 +583,14 @@ def _rule_hook_failures(report: ReportModel, th: HookThresholds) -> list[Recomme
     sessions = int(_num(top.get("failed_sessions")))
     why = (
         f"A hook that fails doesn't do its job. {labels[0]} failed in {sessions:,} sessions"
-        + (f", most recently on {top['last_failed']}" if top.get("last_failed") else "")
+        + (f", most recently at {top['last_failed']}" if top.get("last_failed") else "")
         + (f": {cause}." if cause else ".")
     )
     worked = int(_num(top.get("worked")))
     if worked:
         why += f" It worked {worked:,} times, so it fails only some of the time."
+    if top.get("last_failed"):
+        why += " If you've fixed it since, this goes once it has run enough times without failing."
     if "not expanded" in cause:
         action = (
             "Its command uses a Windows %VAR% variable, which the shell Claude Code runs hooks in leaves as it is. "

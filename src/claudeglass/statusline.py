@@ -1787,6 +1787,13 @@ def _content_blocks(d: dict) -> list:
     return content if isinstance(content, list) else []
 
 
+def _is_synthetic(d: dict) -> bool:
+    """A line Claude Code wrote in place of a reply: an API error, an
+    overload or a usage limit (as ``capture-hook.py``'s)."""
+    message = d.get("message")
+    return bool(d.get("isApiErrorMessage")) or (isinstance(message, dict) and message.get("model") == "<synthetic>")
+
+
 def _is_human_prompt(d: dict) -> bool:
     """A message you typed: a ``user`` line that isn't meta and carries no
     tool result."""
@@ -1845,7 +1852,7 @@ def _k(tokens: float) -> str:
 #: agent's report (as ``capture-hook.py`` skips them).
 _NOT_TYPED_PREFIXES = (
     "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
-    "[SYSTEM NOTIFICATION",
+    "[SYSTEM NOTIFICATION", "<agent-message", "Another Claude session sent a message",
 )
 
 
@@ -1880,13 +1887,18 @@ def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict
     ``_exchanges`` reads them: ``text``, ``at``, ``gap`` (seconds since
     Claude's reply before it), ``answer`` (that reply ended on a
     question), ``answered`` (Claude replied at all), ``stopped`` (a stop
-    marker followed it) and ``edited`` (Claude changed a file in reply
-    to it)."""
+    marker followed it), ``failed`` (an API error, an overload or a usage
+    limit came back instead of a reply) and ``edited`` (Claude changed a
+    file in reply to it)."""
     out: list[dict] = []
     replied_at = None
     said = ""
     for d in tail:
         if d.get("isSidechain"):
+            continue
+        if d.get("type") == "assistant" and _is_synthetic(d):
+            if out:
+                out[-1]["failed"] = True
             continue
         if d.get("type") == "assistant":
             replied_at = _line_time(d) or replied_at
@@ -1911,7 +1923,7 @@ def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict
             continue
         at = _line_time(d)
         out.append({
-            "text": text, "at": at, "edited": False, "answered": False, "stopped": False,
+            "text": text, "at": at, "edited": False, "answered": False, "stopped": False, "failed": False,
             "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
             "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
         })
@@ -1948,7 +1960,9 @@ def _prompt_habits(tail: list[dict], ctx: int | None, now: datetime) -> list[tup
         1 for d in tail if d.get("type") == "user" and not d.get("isSidechain")
         and _line_text(d).lstrip().startswith(INTERRUPT_PREFIX) and recent(_line_time(d))
     )
-    stops += sum(1 for ex in typed[:-1] if not ex["answered"] and not ex["stopped"] and recent(ex["at"]))
+    stops += sum(
+        1 for ex in typed[:-1] if not ex["answered"] and not ex["stopped"] and not ex["failed"] and recent(ex["at"])
+    )
     if stops >= th["stop_loop_count"]:
         hints.append(((ctx or 0) / 2, f"stopped {stops}x in {th['stop_window_minutes']}m: agree a plan first (Shift+Tab)", "stop_loop"))
     if not typed:

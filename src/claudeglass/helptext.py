@@ -1258,8 +1258,9 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="What metrics capture cost since it was turned on, measured from the transcripts. That covers the "
             "notes that ask Claude for tags, the tags Claude wrote and /tl-feedback runs, with a weekly rate. It also "
             "shows what that buys you: the habits worth trying whose evidence needs capture or your feedback.",
-            read="Share is out of what the captured sessions cost. Coverage is how many messages and agent reports "
-            "carried the tag they were asked for. What it's worth only counts habits whose evidence is reported by "
+            read="Share is out of what the captured sessions cost. Coverage is how many messages carried the tag "
+            "they were asked for, and how many agent runs Claude Haiku judged. What it's worth only counts habits "
+            "whose evidence is reported by "
             "Claude or your feedback, not everything the report finds. When nothing measured yet depends on either, "
             "it says so instead of showing a zero.",
             act="{{page:setup/capture}} turns metrics on and off, one by one or by level. Once what it's worth "
@@ -1277,7 +1278,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "cost": "Cost",
             "share": "Share of spend",
             "coverage": "Messages tagged",
-            "report_coverage": "Agent reports tagged",
+            "report_coverage": "Agent runs judged",
             "feedback_runs": "Feedback runs",
             "feedback_cost": "Feedback cost",
             "weekly_cost": "Cost a week",
@@ -1312,8 +1313,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "unfinished_pct": (
                 "Didn't finish",
                 "Subagent runs that reported failure, were stopped, ended early or were cut off before they answered, "
-                "out of the runs where that is known. Ending a reply with [result: partial] or [result: blocked] "
-                "counts too.",
+                "out of the runs where that is known. A run judged partly done or blocked counts too. Claude Haiku "
+                "judges runs while metrics capture is on; an older run may carry its own [result: ...] marker.",
             ),
             "turn_limit_pct": (
                 "Likely out of turns",
@@ -1324,7 +1325,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "retried_pct": (
                 "Retried on a larger model",
                 "Subagent runs that were run again on a larger model, out of the runs that edited files or were "
-                "retried. The rerun edited the same files within two hours, or its brief started [retry: model]. It "
+                "retried. The rerun edited the same files within two hours, or was judged a retry for the model. It "
                 "means the cheaper model wasn't enough for that work.",
             ),
             "tool_errors_pct": (
@@ -1384,13 +1385,13 @@ TABLE_COPY: dict[str, TableCopy] = {
             "unfinished_pct": (
                 "Didn't finish",
                 "Subagent runs that reported failure, were stopped, ended early or were cut off before they answered, "
-                "out of the runs where that is known. Ending a reply with [result: partial] or [result: blocked] "
-                "counts too.",
+                "out of the runs where that is known. A run judged partly done or blocked counts too. Claude Haiku "
+                "judges runs while metrics capture is on; an older run may carry its own [result: ...] marker.",
             ),
             "retried_pct": (
                 "Retried on a larger model",
                 "Subagent runs that were run again on a larger model, out of the runs that edited files or were "
-                "retried. The rerun edited the same files within two hours, or its brief started [retry: model]. It "
+                "retried. The rerun edited the same files within two hours, or was judged a retry for the model. It "
                 "means the cheaper model wasn't enough for that work.",
             ),
             "tool_errors_pct": (
@@ -1447,11 +1448,11 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Each agent and model where the same agent was run again on a larger model soon after one of its "
             "runs ended. The rerun edited the same files: a sign the cheaper model wasn't enough for that work.",
-            read="Unless the retry's brief says why ([retry: ...], see Why agents were run again), one retry is a "
-            "sign, not proof. Several, or a large share of the runs, is a pattern. A different agent or the main "
-            "session editing the files afterwards isn't counted, unless its brief said [retry: model]. A reviewer "
-            "after a writer is often the plan. A retry whose brief said the brief, tools or something else was the "
-            "problem is never counted.",
+            read="Unless the retry was judged with a reason (see Why agents were run again), one retry is a sign, "
+            "not proof. Several, or a large share of the runs, is a pattern. A different agent or the main session "
+            "editing the files afterwards isn't counted, unless it was judged a retry for the model. A reviewer "
+            "after a writer is often the plan. A retry judged to be about the brief, tools or something else is "
+            "never counted.",
             act="Once a tenth of an agent's runs on a model were retried on a larger one, that model isn't "
             "suggested for that agent. If its agent file is on that model and it happened twice or more, Quick "
             "actions offers to move it back up.",
@@ -1468,7 +1469,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "retried_pct": ("Share retried", "Retried runs out of the runs that edited files."),
             "said_model": (
                 "Retries that said the model wasn't enough",
-                "Of the retried runs, those whose retry began its brief with [retry: model].",
+                "Of the retried runs, those whose retry was judged to be for the model.",
             ),
             "files_edited_again": (
                 "Files edited again",
@@ -1483,9 +1484,10 @@ TABLE_COPY: dict[str, TableCopy] = {
     "quality_retry_reasons": TableCopy(
         title="Why agents were run again",
         help=Help(
-            shows="Each agent and model whose runs were started again with a brief that said why. The reasons are "
-            "[retry: model], [retry: brief], [retry: tools], [retry: scope] or [retry: other]. Claude writes these "
-            "when metrics capture or CLAUDE.md asks it to (Quick actions, \"Is any agent struggling?\").",
+            shows="Each agent and model whose runs were started again for a known reason: the model, the brief, "
+            "the tools, the scope or something else. While metrics capture is on, Claude Haiku judges each run "
+            "against the session's earlier ones. An older session may carry a [retry: ...] marker at the start of "
+            "a brief.",
             read="Only retries that said why are here, on any model. A retry is matched to the agent run that ended "
             "last before it started, within two hours. It prefers a run whose files it edited, then one of the same "
             "agent type.",
@@ -1593,21 +1595,25 @@ TABLE_COPY: dict[str, TableCopy] = {
             "retried": (
                 "Retried on a larger model",
                 "Subagent runs after which the same agent was run again on a larger model and edited the same files. "
-                "A larger model started with a brief that said [retry: model] counts too.",
+                "A larger model started as a retry judged to be for the model counts too.",
             ),
             "terminated_early": (
                 "Ended early",
                 "Subagent runs Claude Code ended early, for example at a rate limit.",
             ),
             "never_replied": ("Never replied", "Runs with no model reply at all. Counted as cut off."),
-            "said_done": ("Said done", "Subagent runs whose last reply ended [result: done]."),
+            "said_done": (
+                "Judged done",
+                "Subagent runs judged done: by Claude Haiku while metrics capture is on, or by the run's own "
+                "[result: done] marker in an older session.",
+            ),
             "said_partial": (
-                "Said partly done",
-                "Subagent runs whose last reply ended [result: partial]. Counted as didn't finish.",
+                "Judged partly done",
+                "Subagent runs judged partly done. Counted as didn't finish.",
             ),
             "said_blocked": (
-                "Said blocked",
-                "Subagent runs whose last reply ended [result: blocked]. Counted as didn't finish.",
+                "Judged blocked",
+                "Subagent runs judged blocked. Counted as didn't finish.",
             ),
         },
         value_labels={"(main session)": "Main session", "(all subagents)": "All subagents"},
@@ -4050,7 +4056,12 @@ TABLE_COPY: dict[str, TableCopy] = {
             "failed": ("Failed runs", "Runs that ended in an error."),
             "cause": ("Why it failed", "The most common reason, read from the error. Relative path: the script path is relative."),
             "failed_sessions": ("Sessions it failed in", "Sessions with at least one failed run."),
-            "last_failed": ("Last failed", "The day of its most recent failed run."),
+            "last_failed": ("Last failed", "When its most recent failed run happened, in UTC."),
+            "stopped": (
+                "Stopped failing?",
+                "Yes when, at its old failure rate, at least 5 more runs since its last failure should have failed. "
+                "None did. No when it hasn't run enough since to tell.",
+            ),
             "worked": ("Runs seen working", "Recorded runs that worked, including the calls and stops it blocked."),
             "blocks": ("Calls blocked", "Tool calls it stopped before they ran."),
             "resent": ("Sent again unchanged", "Blocked calls Claude then sent again with the same input."),
@@ -4114,7 +4125,8 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="Against Claude Code's own record",
         help=Help(
             shows="Every session with Claude Code's own cost record, added up, and what explains the difference.",
-            read="ClaudeGlass counts only the replies up to when Claude Code last wrote its total.",
+            read="ClaudeGlass counts only the replies up to when Claude Code last wrote its total. After a resume, "
+            "Claude Code's total starts again, so only the replies since then count.",
             act="",
         ),
         columns={
@@ -4125,7 +4137,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "difference_pct": ("Difference", "ClaudeGlass's cost against Claude Code's, as a % of Claude Code's."),
             "stopped_usd": (
                 "Stopped replies",
-                "Replies stopped mid-stream. They used tokens, so ClaudeGlass counts them; Claude Code doesn't.",
+                "Replies stopped mid-stream before calling a tool. They used tokens, so ClaudeGlass counts them; "
+                "Claude Code doesn't.",
             ),
             "unlogged_usd": (
                 "Requests no log shows",

@@ -124,8 +124,8 @@ def test_raising_the_level_keeps_the_first_on_stamp(tmp_path):
 
 
 def test_metrics_one_by_one_become_custom_or_the_preset_they_match(tmp_path):
-    custom = set_capture(tmp_path, metrics=["task", "rules"], now=NOW)
-    assert custom.level == "custom" and custom.metrics == ["task", "result", "rules"]
+    custom = set_capture(tmp_path, metrics=["task", "agent_brief"], now=NOW)
+    assert custom.level == "custom" and custom.metrics == ["task", "result", "agent_brief"]
     preset = set_capture(tmp_path, metrics=list(capture_catalogue.level_metrics("standard")), now=NOW)
     assert preset.level == "standard" and preset.metrics == []
     assert set_capture(tmp_path, metrics=[], now=NOW).level == "off"

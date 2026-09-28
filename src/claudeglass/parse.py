@@ -60,12 +60,16 @@ before it, on that reply's model. It reads that reply's cached prefix
 (its cache read plus cache write) from the cache, or writes it again at
 the same lifetime when the cache would have expired by the time the
 compaction started (the boundary's time less ``durationMs``). What
-``preTokens`` counts beyond that prefix is plain input, and ``postTokens``
-is taken as the output: the summary, plus the few files Claude Code
-attaches again, so it can run a little high. A boundary with no earlier
-reply or no ``postTokens`` is left out and counted
-(``Diagnostics.compaction_calls_unsized``). On a real 780,000-token
-compaction this came within 2% of Claude Code's own ``cost-state``.
+``preTokens`` counts beyond that prefix is plain input. The output is
+twice the summary Claude Code keeps (the summary line after the
+boundary, at four characters a token): the request writes an analysis
+first and Claude Code drops it. It never exceeds ``postTokens``, which
+counts the summary plus the messages and files Claude Code carries
+over, and is ``postTokens`` when no summary follows. A boundary with no
+earlier reply, or with neither, is left out and counted
+(``Diagnostics.compaction_calls_unsized``). Over 15 sessions with a
+``cost-state`` line this came within $1 of Claude Code's own figure on
+14; ``postTokens`` alone ran $36 high across them.
 
 ``gap_s`` is measured request-start to request-start: the interval between
 the *first* JSONL line's timestamp of one priced turn and the first line's
@@ -1215,6 +1219,23 @@ def _hook_error_cause(attachment: dict) -> str:
     return "failed"
 
 
+#: Hook events whose name carries the tool the hook ran for
+#: (``PreToolUse:Bash``).
+_HOOK_TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse", "PostToolUseFailure"})
+
+
+def _hook_tool(attachment: dict) -> str | None:
+    """The tool a tool hook ran for, from its ``hookName``: one of Claude
+    Code's own by name, any MCP tool as ``mcp`` (its name would say which
+    servers someone has, see ``events._HOOK_EVENT_NAMES``), else
+    ``None``."""
+    name = attachment.get("hookName")
+    event, _, tool = name.partition(":") if isinstance(name, str) else ("", "", "")
+    if event not in _HOOK_TOOL_EVENTS or not _TOOL_NAME_RE.match(tool):
+        return None
+    return tool if tool_server(tool) == BUILT_IN_TOOLS else "mcp"
+
+
 def _annotate_hook_event(event: Event, attachment, context_queue: dict[tuple[str, str], list[str]]) -> None:
     """Add the hook's label (and, for an error, why it failed) to a hook
     event's ``detail``. Context a hook adds arrives as its own attachment
@@ -1252,6 +1273,9 @@ def _annotate_hook_event(event: Event, attachment, context_queue: dict[tuple[str
         event.detail["unexpanded"] = True
     if event.subkind == "hook_non_blocking_error":
         event.detail["cause"] = _hook_error_cause(attachment)
+        tool = _hook_tool(attachment)
+        if tool:
+            event.detail["tool"] = tool
     stdout = attachment.get("stdout")
     if event.subkind == "hook_success" and isinstance(stdout, str) and stdout.strip():
         plain = not stdout.lstrip().startswith("{")
@@ -1703,10 +1727,27 @@ def _cost_by_model(model_usage) -> dict[str, float]:
     return out
 
 
+def _epoch_ms_iso(value) -> str | None:
+    """``cost-state``'s ``startTime`` (milliseconds since the epoch) as an
+    ISO time, or ``None`` when it isn't one."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool) or value <= 0:
+        return None
+    try:
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
 #: Compaction calls (see module docstring): the cache lifetimes a write
 #: can carry, in seconds.
 _ONE_HOUR_S = 3600.0
 _FIVE_MINUTES_S = 300.0
+_CHARS_PER_TOKEN_APPROX = 4
+#: The compaction request writes an analysis, then the summary; Claude
+#: Code keeps only the summary. Output taken as twice the kept summary
+#: came closest to Claude Code's own ``cost-state`` over 15 sessions
+#: (14 within $1); ``postTokens`` ran $36 high across them.
+_COMPACTION_OUTPUT_PER_SUMMARY = 2
 
 
 def _utc(ts_raw: str | None) -> datetime | None:
@@ -1735,11 +1776,14 @@ def _cache_lifetime_s(replies: list[Turn]) -> float:
     return _FIVE_MINUTES_S
 
 
-def _compaction_turn(replies: list[Turn], event: Event) -> Turn | None:
+def _compaction_turn(replies: list[Turn], event: Event, summary_chars: int | None) -> Turn | None:
     """The estimated request that wrote ``event``'s summary, sized from
-    the last of ``replies`` (see the module docstring), or ``None`` when
-    it can't be sized."""
+    the last of ``replies`` and the summary's own length (see the module
+    docstring), or ``None`` when it can't be sized."""
     output = _count(event.post_tokens)
+    if summary_chars:
+        written = round(_COMPACTION_OUTPUT_PER_SUMMARY * summary_chars / _CHARS_PER_TOKEN_APPROX)
+        output = written if output is None else min(output, written)
     if not replies or output is None:
         return None
     previous = replies[-1]
@@ -1782,7 +1826,7 @@ def _compaction_turn(replies: list[Turn], event: Event) -> Turn | None:
 
 
 def _with_compaction_calls(
-    turns: list[Turn], compactions: list[tuple[int, Event]], diagnostics: Diagnostics
+    turns: list[Turn], compactions: list[tuple[int, Event, int | None]], diagnostics: Diagnostics
 ) -> list[Turn]:
     """``turns`` with each compaction's estimated request inserted after
     the reply before it, and ``turn_index`` renumbered over the priced
@@ -1791,11 +1835,11 @@ def _with_compaction_calls(
         return turns
     out: list[Turn] = []
     position = 0
-    for before, event in compactions:
+    for before, event, summary_chars in compactions:
         out.extend(turns[position:before])
         position = max(position, before)
         replies = [turn for turn in out if turn.turn_index > 0 and not turn.estimated]
-        estimate = _compaction_turn(replies, event)
+        estimate = _compaction_turn(replies, event, summary_chars)
         if estimate is None:
             diagnostics.compaction_calls_unsized += 1
             continue
@@ -1855,6 +1899,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     latest_ts: str | None = None
     cc_cost_as_of: str | None = None
     cc_cost_by_model: dict[str, float] = {}
+    cc_cost_since: str | None = None
     #: Batch C addition: first non-empty ``entrypoint``/``version`` field
     #: seen on any raw line, in file order. Every line type carries these
     #: (when present), not just assistant lines.
@@ -1907,8 +1952,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     deferred_tools = _DeferredTools()
     #: Compaction calls (see module docstring): each ``compact_boundary``
     #: event, with how many turns come before it in ``turns`` once the
-    #: turn still open is finalised.
-    compactions: list[tuple[int, Event]] = []
+    #: turn still open is finalised, and the length of the summary that
+    #: follows it (``None`` until one does).
+    compactions: list[tuple[int, Event, int | None]] = []
 
     current: _PendingTurn | None = None
     current_key: str | None = None
@@ -1953,7 +1999,10 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
 
         if line_type == "assistant":
             diagnostics.assistant_lines += 1
-            if recent_messages:
+            # An API error, an overload or a usage limit in a reply's place
+            # doesn't answer a message: sending it again isn't a repeat.
+            reply = d.get("message") if isinstance(d.get("message"), dict) else {}
+            if recent_messages and not (reply.get("model") == "<synthetic>" or d.get("isApiErrorMessage")):
                 recent_messages[-1]["answered"] = True
             key = _turn_key(d)
             if current is not None and key == current_key:
@@ -2029,12 +2078,18 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             # Parser-signals addition (SURV-5): numbers only, no OTel --
             # feeds reconcile.claude_code_reported_costs (see that
             # module's own docstring).
+            # A zero total with no model in it is a blank record Claude
+            # Code writes on some sessions, not a cost of nothing: taken
+            # as the total, it made local pricing look hundreds of
+            # percent too high.
             cost_raw = d.get("totalCostUSD")
-            if isinstance(cost_raw, (int, float)) and not isinstance(cost_raw, bool):
+            blank = cost_raw == 0 and not d.get("modelUsage")
+            if isinstance(cost_raw, (int, float)) and not isinstance(cost_raw, bool) and not blank:
                 cc_cost_usd = float(cost_raw)
                 cc_cost_has_unknown_model = bool(d.get("hasUnknownModelCost"))
                 cc_cost_as_of = latest_ts
                 cc_cost_by_model = _cost_by_model(d.get("modelUsage"))
+                cc_cost_since = _epoch_ms_iso(d.get("startTime"))
         elif line_type == "attachment":
             attachment = d.get("attachment")
             if isinstance(attachment, dict) and attachment.get("type") == "skill_listing":
@@ -2061,7 +2116,13 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         if event.kind == EventKind.HOOK_OUTPUT and line_type == "attachment":
             _annotate_hook_event(event, d.get("attachment"), hook_context_queue)
         if event.kind == EventKind.COMPACT_BOUNDARY:
-            compactions.append((len(turns) + (current is not None), event))
+            compactions.append((len(turns) + (current is not None), event, None))
+        elif event.kind == EventKind.COMPACT_SUMMARY and compactions:
+            # Only the summary written right after a boundary, before any
+            # reply, is that compaction's.
+            before, boundary, summary_chars = compactions[-1]
+            if summary_chars is None and before == len(turns) + (current is not None):
+                compactions[-1] = (before, boundary, event.size_chars)
         events.append(event)
         events_since_current.append(event)
         if line_type == "attachment":
@@ -2172,6 +2233,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         cc_cost_has_unknown_model=cc_cost_has_unknown_model,
         cc_cost_as_of=cc_cost_as_of,
         cc_cost_by_model=cc_cost_by_model,
+        cc_cost_since=cc_cost_since,
     )
 
     # Parser-signals addition (SURV-6/7): only present when non-empty, so
@@ -2269,7 +2331,7 @@ READ_KEYS: dict[str, frozenset[str]] = {
     "queue-operation": _BASE_READ_KEYS | frozenset({"timestamp", "message", "operation"}),
     "agent-setting": _BASE_READ_KEYS | frozenset({"agentSetting"}),
     "mode": _BASE_READ_KEYS | frozenset({"mode"}),
-    "cost-state": _BASE_READ_KEYS | frozenset({"totalCostUSD", "hasUnknownModelCost", "modelUsage"}),
+    "cost-state": _BASE_READ_KEYS | frozenset({"totalCostUSD", "hasUnknownModelCost", "modelUsage", "startTime"}),
 }
 
 

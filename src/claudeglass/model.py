@@ -386,7 +386,9 @@ whole command:
   script by a relative path, which works only from the project root) and,
   from ``PARSER_VERSION`` 23, ``unexpanded`` (only when ``True``: the
   command uses a Windows ``%VAR%`` variable, which the shell a hook runs
-  in leaves as it is).
+  in leaves as it is). From ``PARSER_VERSION`` 32, a failed run of a
+  tool hook also gains ``tool``: the tool it ran for when that is one of
+  Claude Code's own (``Bash``), else ``mcp``, never an MCP tool's name.
 - ``Turn.hook_context_chars: dict = {}`` -- label -> characters of
   context your hooks added just before this turn (``hook_additional_
   context``). ClaudeGlass's own capture note stays in ``cap_note_chars``.
@@ -422,6 +424,8 @@ after the reply before it (see that module's docstring for the sizing):
 - ``Diagnostics.compaction_calls: int = 0`` -- compactions priced this
   way; ``Diagnostics.compaction_calls_unsized: int = 0`` -- compactions
   left out because no earlier reply or summary size was recorded.
+- ``Event.size_chars`` on a ``COMPACT_SUMMARY`` event (``PARSER_VERSION``
+  31) -- the summary's length, which sizes that compaction's output.
 
 Cost-record addition (``PARSER_VERSION`` 27). A ``cost-state`` line is a
 running total written now and then, not at the end, so a comparison has
@@ -432,6 +436,10 @@ to stop where it stops (``reconcile.claude_code_reported_costs``):
 - ``TranscriptMeta.cc_cost_by_model: dict = {}`` -- model id -> that
   line's ``modelUsage[model].costUSD``. Model ids and numbers only; an id
   outside the model-id alphabet is dropped.
+- ``TranscriptMeta.cc_cost_since: str | None = None`` (``PARSER_VERSION``
+  30) -- that line's ``startTime`` as an ISO time: when the Claude Code
+  process whose total it is started. A resumed session's total counts
+  from its resume, not from the session's first line.
 
 Prompting-habits addition (``PARSER_VERSION`` 28). What the "How you
 prompt" section (``prompting.py``) and the coaching hints' after-the-fact
@@ -900,6 +908,8 @@ class TranscriptMeta:
     #: written, as the latest line time before it, and its cost by model.
     cc_cost_as_of: str | None = None
     cc_cost_by_model: dict = field(default_factory=dict)
+    #: When the process that total counts from started (``startTime``).
+    cc_cost_since: str | None = None
 
 
 @dataclass(slots=True)

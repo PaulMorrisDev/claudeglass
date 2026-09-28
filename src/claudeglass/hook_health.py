@@ -96,6 +96,7 @@ class HookSpec:
         when = {
             "SessionStart": "when a session starts, is cleared or compacts",
             "SubagentStart": "when a subagent starts",
+            "SubagentStop": "when a subagent finishes",
             "UserPromptSubmit": "when you send a message",
             "PostToolUse": "after "
             + ("web results" if tools - {"ExitPlanMode"} <= set(capture_catalogue.WEB_TOOLS) else "shell, read, search, web and MCP results")
@@ -595,7 +596,8 @@ def repair(health: HookHealth, *, now: datetime | None = None) -> Path:
     if health.command is None or health.fixed_command is None:
         raise ValueError("nothing to repair")
     now = now or datetime.now(timezone.utc)
-    settings = json.loads(health.settings_path.read_text(encoding="utf-8"))
+    before = health.settings_path.read_text(encoding="utf-8")
+    settings = json.loads(before)
     replaced = 0
     for event in list(settings.get("hooks", {})):
         for _matcher, entry in _event_entries(settings, event):
@@ -605,8 +607,8 @@ def repair(health: HookHealth, *, now: datetime | None = None) -> Path:
     if replaced == 0:
         raise ValueError("the hook command changed since it was checked")
     backup = backup_path(health.settings_path, now)
-    shutil.copy2(health.settings_path, backup)
-    health.settings_path.write_text(json.dumps(settings, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    shutil.copy2(_settings_target(health.settings_path), backup)
+    replace_settings(health.settings_path, json.dumps(settings, indent=2, ensure_ascii=False) + "\n", before)
     return backup
 
 
@@ -694,6 +696,10 @@ class ConnectPlan:
     diff: str
     #: The whole file after the change; ``None`` when nothing changes.
     new_text: str | None
+    #: The file as the change was worked out from (``""`` when there was
+    #: none); ``None`` when not known. :func:`connect` writes nothing if
+    #: it no longer holds this.
+    old_text: str | None = None
 
 
 def plan_connect(
@@ -804,7 +810,7 @@ def _finish_plan(path: Path, before: str, settings: dict, changes: list[str]) ->
             tofile="settings.json (after)",
         )
     )
-    return ConnectPlan(path, changes, diff, after)
+    return ConnectPlan(path, changes, diff, after, before)
 
 
 def _entry_spec(event: str, matcher: str, entry: dict) -> HookSpec | None:
@@ -1129,19 +1135,76 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
     return []
 
 
+class SettingsChanged(ValueError):
+    """settings.json changed between working out an edit and writing it."""
+
+    def __init__(self, path: Path):
+        super().__init__(
+            f"{path} changed while this was waiting (Claude Code writes it too, when you allow a tool for good, "
+            "say), so nothing was written. Run the command again to work the change out from the file as it is now."
+        )
+
+
+def _settings_target(path: Path) -> Path:
+    """The file to write for ``path``: a symlinked settings.json (kept in
+    a dotfiles folder, say) is written through, never replaced by a
+    plain file."""
+    return path.resolve() if path.is_symlink() else path
+
+
+def _current_text(path: Path) -> str:
+    try:
+        return _settings_target(path).read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return ""
+
+
+def check_unchanged(path: Path, old_text: str | None) -> None:
+    """Raise :class:`SettingsChanged` when ``path`` no longer holds
+    ``old_text`` (``""``: no file); ``None`` checks nothing."""
+    if old_text is not None and _current_text(path) != old_text:
+        raise SettingsChanged(path)
+
+
+def replace_settings(path: Path, new_text: str, old_text: str | None = None) -> None:
+    """Write ``new_text`` to ``path`` in one step: a temp file beside it,
+    then ``os.replace``, keeping the file's permissions, so a reader never
+    sees half a file. Raises :class:`SettingsChanged`, writing nothing,
+    when the file no longer holds ``old_text`` (what the edit was worked
+    out from): an edit planned before a yes/no question must never undo
+    one Claude Code made while it waited."""
+    check_unchanged(path, old_text)
+    target = _settings_target(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name(f".{target.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(new_text, encoding="utf-8")
+        if target.exists():
+            shutil.copymode(target, tmp)
+        os.replace(tmp, target)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def connect(plan: ConnectPlan, *, now: datetime | None = None) -> Path | None:
     """Write ``plan`` after backing up the current file to
     ``settings.json.bak-<UTC timestamp>``. Returns the backup path, or
-    ``None`` when there was no file to back up."""
+    ``None`` when there was no file to back up. Raises
+    :class:`SettingsChanged`, writing nothing, when the file changed since
+    the plan was worked out."""
     if plan.new_text is None:
         raise ValueError("nothing to change")
+    check_unchanged(plan.settings_path, plan.old_text)
     now = now or datetime.now(timezone.utc)
     backup = None
     if plan.settings_path.exists():
         backup = backup_path(plan.settings_path, now)
-        shutil.copy2(plan.settings_path, backup)
-    plan.settings_path.parent.mkdir(parents=True, exist_ok=True)
-    plan.settings_path.write_text(plan.new_text, encoding="utf-8")
+        shutil.copy2(_settings_target(plan.settings_path), backup)
+    replace_settings(plan.settings_path, plan.new_text, plan.old_text)
     return backup
 
 
@@ -1174,6 +1237,8 @@ class HookErrorStat:
     hook_name: str
     calls: int = 0
     errors: int = 0
+    #: The latest failure's timestamp, as the transcript wrote it.
+    last_error_ts: str | None = None
 
     @property
     def error_rate(self) -> float:
@@ -1210,6 +1275,16 @@ class HookErrorHealth:
         if worst is None or worst.error_rate < _RECOMMEND_ERROR_RATE:
             return None
         pct = round(worst.error_rate * 100)
+        # A hook fixed mid-window keeps its old failures until they age
+        # out, so say when the last one was.
+        last = ""
+        try:
+            at = datetime.fromisoformat(worst.last_error_ts.replace("Z", "+00:00")) if worst.last_error_ts else None
+        except ValueError:
+            at = None
+        if at is not None and at.tzinfo is not None:
+            when = at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            last = f"The last failure was at {when}; if you fixed it since, this clears as the window moves on. "
         # Claude Code writes a hook_success attachment only for some passing
         # runs (one real corpus: 2 PreToolUse successes against 38,840
         # non-blocking errors), so the share is of *recorded* runs and can
@@ -1218,7 +1293,7 @@ class HookErrorHealth:
         return (
             f"Your {worst.hook_name} hook(s) failed (non-blocking) {worst.errors} times this window, "
             f"{pct}% of the {worst.calls} runs Claude Code recorded (it doesn't record every run that "
-            f"passes, so the real share can be lower). To find which one, check hooks.{worst.hook_name} in "
+            f"passes, so the real share can be lower). {last}To find which one, check hooks.{worst.hook_name} in "
             "~/.claude/settings.json, in each project's .claude/settings.json and .claude/settings.local.json, "
             "and in your enabled plugins. Trade-off: every failing "
             "call still adds that hook's own latency before the tool runs, and a hook failing this often can "
@@ -1228,14 +1303,19 @@ class HookErrorHealth:
         )
 
 
-def count_hook_errors(results: Iterable[TranscriptResult]) -> HookErrorHealth:
+def count_hook_errors(results: Iterable[TranscriptResult], stopped: Iterable[str] = ()) -> HookErrorHealth:
     """Tally ``HOOK_OUTPUT`` events across ``results`` (already-parsed
     transcripts -- this module never reads or parses one itself, matching
     :func:`check_capture`'s own "cheap, no transcript read here"
     contract; the caller does the parsing, e.g. via ``corpus.load_corpus``)
     by hook event name (never the matcher/tool-name suffix -- see
     ``events._hook_name_bucket``'s docstring for why).
+
+    ``stopped`` names hooks (by label) that have stopped failing
+    (``hook_costs.HookRow.stopped``): their old failures are left out, so
+    a fixed hook doesn't keep the warning up until they age out.
     """
+    quiet = frozenset(stopped)
     tally: dict[str, HookErrorStat] = {}
     for result in results:
         for event in result.events:
@@ -1244,10 +1324,14 @@ def count_hook_errors(results: Iterable[TranscriptResult]) -> HookErrorHealth:
             name = event.detail.get("hookName")
             if not isinstance(name, str):
                 continue
+            if event.subkind == "hook_non_blocking_error" and event.detail.get("script") in quiet:
+                continue
             stat = tally.setdefault(name, HookErrorStat(hook_name=name))
             stat.calls += 1
             if event.subkind == "hook_non_blocking_error":
                 stat.errors += 1
+                if event.ts and (stat.last_error_ts is None or event.ts > stat.last_error_ts):
+                    stat.last_error_ts = event.ts
     return HookErrorHealth(stats=tuple(tally[name] for name in sorted(tally)))
 
 

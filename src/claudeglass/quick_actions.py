@@ -40,6 +40,10 @@ class Context:
     #: Recommendations ignored on the dashboard (``ignores.py``): the
     #: drafted fixes leave their changes out.
     skip_keys: frozenset = frozenset()
+    #: The project folders the report was limited to, or ``None`` when it
+    #: saw every project: a skill Claude never used there is hidden in
+    #: that project only (``skills_review``).
+    only: tuple[Path, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -277,8 +281,9 @@ def _models_left_out(ctx: Context, rows: list[dict]) -> list[dict]:
         key = (agent, goals._alias(best))
         if key in worse:
             setup = worse[key]
+            some = " on some signals" if setup.get("setup_verdict") == "mixed" else ""
             reason = (
-                f"on {setup.get('model')} at effort {setup.get('effort')} it did worse than on "
+                f"on {setup.get('model')} at effort {setup.get('effort')} it did worse{some} than on "
                 f"{setup.get('compared_model')} at effort {setup.get('compared_effort')}: {setup.get('difference')}"
             )
         elif key in retried:
@@ -446,7 +451,7 @@ def _skills(ctx: Context) -> dict:
     from . import skills_review
 
     data = skills_review.review(
-        ctx.config_dir, getattr(ctx.model, "context_files", None) or {}, ctx.units, ctx.period,
+        ctx.config_dir, getattr(ctx.model, "context_files", None) or {}, ctx.units, ctx.period, only=ctx.only,
     )
     rows = data["skills"]
     if not any(r["status"] != "not listed" for r in rows):
@@ -470,10 +475,12 @@ def _skills(ctx: Context) -> dict:
     tips += _skill_timing_tips(ctx)
     if not unused:
         return _result("ok", f"Claude used every listed skill it can do without {ctx.period}.", tips=tips)
+    limited = data["limited_text"]
     return _result(
         "act",
         f"{len(unused)} skills were listed to Claude at every session and subagent start but never used "
-        f"{ctx.period}. Hiding them from Claude keeps them available to you as /name.",
+        f"{ctx.period}. Hiding them from Claude keeps them available to you as /name."
+        + (f" {limited}" if limited else ""),
         table=table,
         fixes=data["fixes"]
         + [fix for r in unused[:5] for fix in r["fixes"]]
@@ -678,23 +685,48 @@ def _hooks(ctx: Context) -> dict:
     def count(row, key) -> int:
         return int(whatif._num(row.get(key)) or 0)
 
+    def last_failed(row) -> str:
+        last = str(row.get("last_failed") or "")
+        return f"{last} (stopped failing)" if last and row.get("stopped") == "yes" else last
+
     table = _table(
-        [("hook", "Hook"), ("failed", "Failed runs"), ("cause", "Why it failed"), ("blocks", "Calls blocked"),
-         ("resent", "Sent again unchanged"), ("context", "Context added"), ("cost", "Cost of its context and blocks")],
+        [("hook", "Hook"), ("failed", "Failed runs"), ("cause", "Why it failed"), ("last_failed", "Last failed"),
+         ("blocks", "Calls blocked"), ("resent", "Sent again unchanged"), ("context", "Context added"),
+         ("cost", "Cost of its context and blocks")],
         [[r.get("hook"), f"{count(r, 'failed'):,}", str(r.get("cause") or "")[:1].upper() + str(r.get("cause") or "")[1:],
-          f"{count(r, 'blocks'):,}", f"{count(r, 'resent'):,}", f"{count(r, 'context_tokens'):,} tokens",
+          last_failed(r), f"{count(r, 'blocks'):,}", f"{count(r, 'resent'):,}", f"{count(r, 'context_tokens'):,} tokens",
           _cell(ctx, (whatif._num(r.get("carry_usd")) or 0) + (whatif._num(r.get("block_usd")) or 0))]
          for r in rows[:10]],
     )
+    # A hook fixed mid-window keeps its old failures until they age out;
+    # hook_costs judges whether it has stopped failing since.
+    stopped = [r for r in rows if count(r, "failed") and r.get("stopped") == "yes"]
+    failing = [r for r in rows if count(r, "failed") and r.get("stopped") != "yes"]
+    latest = max((str(r.get("last_failed") or "") for r in stopped), default="")
     recs = _recommendations(ctx, _HOOK_RECS)
     if not recs:
-        return _result("ok", "Your hooks work, and none costs much in kept context or blocked calls.", table=table)
-    failing = [r for r in rows if count(r, "failed")]
+        if len(stopped) == 1:
+            summary = (
+                f"Your hooks work: {stopped[0].get('hook')}, which failed earlier in this window, stopped failing "
+                f"after {latest}, and none costs much in kept context or blocked calls."
+            )
+        elif stopped:
+            summary = (
+                f"Your hooks work: the {len(stopped)} that failed earlier in this window stopped failing after "
+                f"{latest}, and none costs much in kept context or blocked calls."
+            )
+        else:
+            summary = "Your hooks work, and none costs much in kept context or blocked calls."
+        return _result("ok", summary, table=table)
     if any(rec.id == "hook-failures" for rec in recs):
         summary = (
             f"{len(failing)} of your hooks failed {sum(count(r, 'failed') for r in failing):,} times, so they didn't "
             "do their job."
         )
+        if len(stopped) == 1:
+            summary += f" {stopped[0].get('hook')} stopped failing after {latest}."
+        elif stopped:
+            summary += f" Another {len(stopped)} stopped failing after {latest}."
     else:
         summary = "Some of your hooks cost more than they need to, in kept context or in replies spent on blocks."
     return _result("act", summary, table=table, fixes=_rec_fixes(recs))
@@ -920,19 +952,19 @@ def _capture_on(tables) -> bool:
 
 
 def _capture_fix(ctx: Context, tables) -> dict | None:
-    """Metrics capture at Essentials, offered when agents ran in this
-    window, none wrote a ``[result: ...]`` marker, capture is off and
-    CLAUDE.md doesn't ask for the markers itself. While capture is on, the
-    prompt that removes the older :data:`quality.MARKER_HEADING` section
-    from CLAUDE.md instead: capture asks for the same markers."""
+    """The prompt that removes the older :data:`quality.MARKER_HEADING`
+    section from CLAUDE.md, whenever it's there: it asks every subagent to
+    tag its own report, which broke answers that had to be exact. Else
+    metrics capture at Essentials, offered when agents ran in this window,
+    none has a ``[result: ...]`` word and capture is off."""
     claude_md = discovery.claude_root() / "CLAUDE.md"
     try:
         has_section = quality.MARKER_HEADING in claude_md.read_text(encoding="utf-8", errors="replace")
     except OSError:
         has_section = False
-    if _capture_on(tables):
-        return _remove_markers_fix() if has_section else None
     if has_section:
+        return _remove_markers_fix()
+    if _capture_on(tables):
         return None
     markers = {r.get("marker"): r for r in tables.rows("quality", "quality_markers")}
     result = markers.get("[result: ...]") or {}
@@ -940,25 +972,26 @@ def _capture_fix(ctx: Context, tables) -> dict | None:
         return None
     metrics = capture_catalogue.level_metrics("essentials")
     main = round(len(capture_catalogue.note_text(metrics, "main")) / carry._CHARS_PER_TOKEN_APPROX)
-    sub = round(len(capture_catalogue.note_text(metrics, "subagent")) / carry._CHARS_PER_TOKEN_APPROX)
     return {
         "key": None,
         "agent": None,
         "title": "Turn on metrics capture",
         "explainer": [
             ["What this adds", "Metrics capture at its Essentials level. A hook adds a short note at each session "
-             "and subagent start asking Claude to end its reply to each of your messages with a one-line tag (the "
-             "kind of task, how clear the ask was, how hard the work was, whether it changed course), a subagent "
-             "to end its report with [result: done], [result: partial] or [result: blocked], and a rerun to say "
-             "why it was run again. This tool keeps only those words, never the text around them."],
+             "start asking Claude to end its reply to each of your messages with a one-line tag (the kind of task, "
+             "how clear the ask was, how hard the work was, whether it changed course). A subagent is asked for "
+             "nothing: when one finishes, Claude Haiku reads its brief and the end of its report and says whether "
+             "it finished and, for a rerun, why it was run again. This tool keeps only those words, never the text "
+             "around them."],
             ["Why", "Without them this check guesses: a retry on a larger model counts against the cheaper one even "
              "when the brief was the problem, and an agent that stopped half-done looks finished. With them, "
              "retries and unfinished runs are counted from what Claude said, and {{page:habits}} can rank "
              "habits by kind of task."],
-            ["What it costs", f"A note of about {main} tokens at each session start and about {sub} at each "
-             "subagent start, read from the prompt cache after the first reply, and about 15 output tokens per "
-             "message. {{page:setup/capture}} estimates it from your own recent sessions before you turn it on, and the "
-             "banner shows what it has cost while it's on."],
+            ["What it costs", f"A note of about {main} tokens at each session start, read from the prompt cache "
+             "after the first reply, about 15 output tokens per message, and a Claude Haiku call of about "
+             f"${capture_catalogue.JUDGE_USD_PER_CALL:.3f} per subagent run. " "{{page:setup/capture}} estimates it "
+             "from your own recent sessions before you turn it on, and the banner shows what it has cost while it's "
+             "on."],
             ["Where and who it affects", "~/.claude/settings.json gets the hook entries (the command shows the "
              "change and asks first); this tool's own config.toml holds the level. Every session, in every "
              "project, until you turn it off; {{page:setup/capture}} can sample sessions or set an end date."],
@@ -983,8 +1016,10 @@ def _remove_markers_fix() -> dict:
         "explainer": [
             ["What this changes", "Removes the \"" + quality.MARKER_HEADING + "\" section from ~/.claude/CLAUDE.md, "
              "keeping everything else."],
-            ["Why", "Metrics capture asks Claude for the same [retry: ...] and [result: ...] markers, and only while "
-             "it's on. With the section in place Claude is asked twice, and still asked after capture is off."],
+            ["Why", "It asks every subagent to end its report with [result: ...] and every rerun's brief to start "
+             "with [retry: ...]. A subagent asked for JSON only added the marker after it, breaking the answer, "
+             "and the session that started it took the line for an injected instruction. Metrics capture now gets "
+             "the same answers from Claude Haiku after each run, without asking the agent anything."],
             ["What it saves", f"About {tokens} tokens of CLAUDE.md on every session and most subagents, read from "
              "the prompt cache after the first reply."],
             ["Where and who it affects", "~/.claude/CLAUDE.md: every session, in every project."],

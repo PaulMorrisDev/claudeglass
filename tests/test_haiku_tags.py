@@ -97,12 +97,14 @@ def test_the_note_asks_claude_for_no_tag_while_haiku_writes_them(level):
     ids = cat.level_includes(level)
     note = cat.note_text(ids, "main", tagger="haiku")
     assert "[tl:" not in note and cat.MAIN_TAG_INTRO not in note
-    assert note.splitlines()[0] == f"{cat.NOTE_MARKER}{cat.NOTE_VERSION} retry" + (
-        ",feedback_reminder" if level == "deep" else ""
-    )
-    # The hook builds the same text, and subagents' notes don't change.
+    # Nothing left to ask at the start but the reminder, where it's on.
+    if level == "deep":
+        assert note.splitlines()[0] == f"{cat.NOTE_MARKER}{cat.NOTE_VERSION} feedback_reminder"
+    else:
+        assert note == ""
+    # The hook builds the same text, and a subagent is asked for nothing.
     assert HOOK.build_note(CATALOGUE, ids, "main", tagger="haiku") == note
-    assert cat.note_text(ids, "subagent", tagger="haiku") == cat.note_text(ids, "subagent")
+    assert cat.note_text(ids, "subagent", tagger="haiku") == cat.note_text(ids, "subagent") == ""
     # What Haiku is told: a line for each key the note would have asked
     # for, spelled out where the plain line read differently.
     judge = cat.judge_text(ids)
@@ -146,13 +148,273 @@ def test_the_config_knows_who_writes_the_tags(tmp_path):
         load_config(config_dir=tmp_path)
 
 
-def test_the_large_result_note_goes_only_to_subagents_while_haiku_tags():
+def test_the_large_result_note_goes_only_to_a_main_session_claude_tags():
     config = {"capture": {"level": "deep", "tagger": "haiku"}}
     big = {"hook_event_name": "PostToolUse", "session_id": "s1", "cwd": "/w", "tool_name": "Bash"}
     raw = cat.BIG_OUTPUT_TOKENS * 4
     assert HOOK.note_for(big, config, CATALOGUE, raw_len=raw) == ""
-    assert HOOK.note_for({**big, "agent_id": "a1"}, config, CATALOGUE, raw_len=raw)
     assert HOOK.note_for(big, {"capture": {"level": "deep"}}, CATALOGUE, raw_len=raw)
+    # A subagent's report carries no tag for the word, whoever tags.
+    for tagger in ("claude", "haiku"):
+        assert HOOK.note_for({**big, "agent_id": "a1"}, {"capture": {"level": "deep", "tagger": tagger}}, CATALOGUE,
+                             raw_len=raw) == ""
+
+
+# -- agent runs -------------------------------------------------------------------
+
+
+def test_agent_runs_are_judged_whoever_writes_the_tags():
+    for ids in (cat.level_metrics("essentials"), STANDARD, STANDARD + (cat.HAIKU_TAGGER_HOOK,)):
+        specs = cat.hook_specs(ids)
+        # In the foreground, as Stop is for Haiku, and never at agent start.
+        assert (cat.HOOK_SCRIPT, "SubagentStop", "", False) in specs
+        assert not any(spec[1] == "SubagentStart" for spec in specs)
+    assert not any(spec[1] == "SubagentStop" for spec in cat.hook_specs(("task", "session_end")))
+    text = cat.agent_judge_text(STANDARD)
+    assert text == HOOK.build_agent_judge_prompt(CATALOGUE, STANDARD)
+    assert text.startswith(cat.AGENT_JUDGE_INTRO) and text.endswith(cat.AGENT_JUDGE_RULE)
+    for metric_id in ("result", "retry", "fit", "agent_brief"):
+        assert cat.METRICS_BY_ID[metric_id].sub_line in text
+    # Whether an agent used your rules can't be told from outside it.
+    assert "rules" in cat.RETIRED_METRIC_IDS and "rules" not in cat.METRICS_BY_ID
+    assert cat.agent_judge_text(("task",)) == ""
+
+
+def _agent_run(tmp_path, *, report="Added docstrings to mod1.py and mod2.py; mod3.py is still to do.") -> tuple[Path, Path]:
+    """A session that ran one agent to the end and one in the background,
+    then started ``agent-a3``, which edited two files, ran a test that
+    failed, and reported."""
+    folder = tmp_path / "sess" / "subagents"
+    folder.mkdir(parents=True)
+    agent = _transcript(folder, [
+        user_str_line("Add a one-line docstring to every function in mod1.py, mod2.py and mod3.py.", timestamp=_at(20)),
+        turn_line(timestamp=_at(21), model="claude-sonnet-5", message_id="msg_a1", output_tokens=80, content=[
+            tool_use_block("Edit", "e1", {"file_path": "/w/mod1.py"}),
+            tool_use_block("Edit", "e2", {"file_path": "/w/mod2.py"}),
+            tool_use_block("Bash", "b1", {"command": "pytest -q tests/test_mod.py\necho ok"})]),
+        {"type": "user", "timestamp": _at(22), "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "b1", "content": "1 failed", "is_error": True}]}},
+        turn_line(timestamp=_at(23), model="claude-sonnet-5", message_id="msg_a2", output_tokens=40,
+                  content=[{"type": "text", "text": report}]),
+    ], "agent-a3.jsonl")
+    brief = "Add a one-line docstring to every function in mod1.py, mod2.py and mod3.py."
+    session = _transcript(tmp_path, [
+        user_str_line("Document the mod files", timestamp=_at(0)),
+        turn_line(timestamp=_at(1), message_id="m1", content=[
+            tool_use_block("Agent", "tA", {"prompt": "Add docstrings to mod1.py, mod2.py and mod3.py"})]),
+        {"type": "user", "timestamp": _at(5), "toolUseResult": {
+            "status": "completed", "agentId": "a1", "agentType": "general-purpose",
+            "prompt": "Add docstrings to mod1.py, mod2.py and mod3.py", "content": [
+                {"type": "text", "text": "I couldn't finish: mod2.py needs a decision on the API."}]},
+         "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tA", "content": "x"}]}},
+        turn_line(timestamp=_at(6), message_id="m2", content=[
+            tool_use_block("Agent", "tB", {"subagent_type": "Explore", "prompt": "Find the mod files"})]),
+        {"type": "user", "timestamp": _at(6), "toolUseResult": {
+            "status": "async_launched", "agentId": "a2", "prompt": "Find the mod files"},
+         "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tB", "content": "x"}]}},
+        user_str_line("<task-notification>\n<task-id>a2</task-id>\n<status>completed</status>\n<result>mod1.py, "
+                      "mod2.py and mod3.py</result>\n</task-notification>", timestamp=_at(8)),
+        # Claude says why, then starts this run and, beside it, another.
+        turn_line(timestamp=_at(18), message_id="m3", content=[
+            {"type": "text", "text": "The first run stopped at mod2.py; running it again with the API decided."},
+            tool_use_block("Agent", "tC", {"prompt": brief}),
+            tool_use_block("Agent", "tD", {"subagent_type": "Plan", "prompt": "Plan the README section"})]),
+        {"type": "user", "timestamp": _at(19), "toolUseResult": {
+            "status": "async_launched", "agentId": "a3", "prompt": brief},
+         "message": {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tC", "content": "x"}]}},
+        # A run started after it is never "earlier".
+        turn_line(timestamp=_at(30), message_id="m4", content=[tool_use_block("Agent", "tE", {"prompt": "Later work"})]),
+    ], "sess.jsonl")
+    return session, agent
+
+
+def _subagent_stop(session: Path, agent: Path, **extra) -> dict:
+    return {"hook_event_name": "SubagentStop", "session_id": "s1", "cwd": "/w", "transcript_path": str(session),
+            "agent_id": "a3", "agent_type": "general-purpose", "agent_transcript_path": str(agent),
+            "stop_hook_active": False, **extra}
+
+
+def test_the_agent_excerpt_says_what_the_run_did_and_what_came_before(tmp_path):
+    session, agent = _agent_run(tmp_path)
+    job = HOOK.agent_judge_job(_subagent_stop(session, agent), {"capture": {"level": "standard"}}, CATALOGUE)
+    assert job["kind"] == "agent" and job["reply"] == "msg_a2"
+    assert job["keys"] == ["result", "retry", "fit", "brief", "missing"]
+    assert job["system"] == cat.agent_judge_text(STANDARD)
+    excerpt = job["excerpt"]
+    assert "Agent type: general-purpose, on claude-sonnet-5." in excerpt
+    assert 'Its brief: "Add a one-line docstring to every function in mod1.py, mod2.py and mod3.py."' in excerpt
+    assert "files changed: 2 (mod1.py, mod2.py)" in excerpt and "tool errors: 1" in excerpt
+    assert "`pytest -q tests/test_mod.py`" in excerpt and "echo ok" not in excerpt
+    assert excerpt.count("mod3.py is still to do") == 1
+    # Why the session started it, in Claude's words.
+    assert 'What the session said as it started this run: "The first run stopped at mod2.py; running it again ' \
+        'with the API decided."' in excerpt
+    # The earlier runs, oldest first, the background one's report from its
+    # notification; never the run being judged, one started beside it, or
+    # one started after it.
+    assert '1. general-purpose. Brief: "Add docstrings to mod1.py, mod2.py and mod3.py" Report ended: ' \
+        '"I couldn\'t finish: mod2.py needs a decision on the API."' in excerpt
+    assert '2. Explore. Brief: "Find the mod files" Report ended: "mod1.py, mod2.py and mod3.py"' in excerpt
+    assert "\n3. " not in excerpt and "README" not in excerpt and "Later work" not in excerpt
+    # Tool output is never in it.
+    assert "1 failed" not in excerpt
+
+
+def test_a_workflow_agents_answer_is_its_structured_output_not_its_last_words(tmp_path):
+    # A workflow script's agent: the harness frames the brief it computed,
+    # and the agent hands its answer back through StructuredOutput after
+    # saying what it is about to do.
+    framed = ("[Workflow harness — computed task] The task text below was computed at runtime by a workflow "
+              "script. It was not typed by this session's user. The computed task text follows:\n"
+              "  Review the payments module.\n  Return verdict and findings.")
+    agent = _transcript(tmp_path, [
+        user_str_line(framed, timestamp=_at(0)),
+        turn_line(timestamp=_at(1), model="claude-sonnet-5", message_id="msg_w1", output_tokens=60, content=[
+            tool_use_block("Read", "r1", {"file_path": "/w/payments.py"})]),
+        {"type": "user", "timestamp": _at(2), "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "r1", "content": "def pay(): ..."}]}},
+        turn_line(timestamp=_at(3), model="claude-sonnet-5", message_id="msg_w2", output_tokens=900, content=[
+            {"type": "text", "text": "Now let me compile my findings into the structured format."},
+            tool_use_block("StructuredOutput", "so1", {"verdict": "sound", "findings": ["refunds skip the audit log"]})]),
+        {"type": "user", "timestamp": _at(4), "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "so1", "content": "Structured output provided successfully"}]}},
+    ], "agent-w1.jsonl")
+    session = _transcript(tmp_path, [user_str_line("Run the review workflow", timestamp=_at(0))], "sess.jsonl")
+    payload = _subagent_stop(session, agent, agent_id="w1", agent_type="workflow-subagent",
+                             last_assistant_message="Now let me compile my findings into the structured format.")
+    excerpt = HOOK.agent_judge_job(payload, {"capture": {"level": "standard"}}, CATALOGUE)["excerpt"]
+    assert 'Its brief: "Review the payments module. Return verdict and findings."' in excerpt
+    assert "Workflow harness" not in excerpt
+    assert 'Its answer, handed back as structured output: "{"verdict": "sound", "findings": ["refunds skip the ' \
+        'audit log"]}"' in excerpt
+    assert "compile my findings" not in excerpt and "The end of its report" not in excerpt
+    # Words after the answer are its report again.
+    words = _transcript(tmp_path, [
+        user_str_line("Summarise the module", timestamp=_at(0)),
+        turn_line(timestamp=_at(1), message_id="msg_x1", content=[
+            tool_use_block("StructuredOutput", "so1", {"summary": "draft"})]),
+        turn_line(timestamp=_at(2), message_id="msg_x2", content=[{"type": "text", "text": "Done: summary sent."}]),
+    ], "agent-x1.jsonl")
+    later = HOOK.agent_judge_job(_subagent_stop(session, words, agent_id="x1"), {"capture": {"level": "standard"}},
+                                 CATALOGUE)["excerpt"]
+    assert 'The end of its report: "Done: summary sent."' in later and "structured output" not in later
+
+
+@pytest.mark.parametrize("config, extra, env", [
+    ({"capture": {"level": "off"}}, {}, {}),
+    ({"capture": {"level": "free"}}, {}, {}),
+    ({"capture": {"level": "standard"}}, {"stop_hook_active": True}, {}),
+    ({"capture": {"level": "standard"}}, {"agent_type": "statusline-setup"}, {}),
+    ({"capture": {"level": "standard"}}, {"hook_event_name": "Stop"}, {}),
+    ({"capture": {"level": "standard"}}, {}, {cat.JUDGE_ENV: "1"}),
+])
+def test_no_agent_job_when_there_is_nothing_to_judge(tmp_path, monkeypatch, config, extra, env):
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    session, agent = _agent_run(tmp_path)
+    assert HOOK.agent_judge_job(_subagent_stop(session, agent, **extra), config, CATALOGUE) is None
+
+
+def test_the_worker_logs_an_agent_runs_words_under_their_own_key(tmp_path):
+    session, agent = _agent_run(tmp_path)
+    job = HOOK.agent_judge_job(_subagent_stop(session, agent), {"capture": {"level": "standard"}}, CATALOGUE)
+
+    def ask(*_args):
+        return _answer("[tl: result=partial retry=brief fit=right brief=vague missing=files,constraints rules=used "
+                       "task=docs]")
+
+    # "none" only says the run was no retry: it isn't kept.
+    none = HOOK.run_judge(tmp_path / "other", CATALOGUE, job, ask=lambda *_: _answer("[tl: result=done retry=none]"))
+    assert none["agent"] == "result=done"
+
+    record = HOOK.run_judge(tmp_path / "cg", CATALOGUE, job, ask=ask)
+    # Only the agent's own keys and words: no rules, no main-session key,
+    # and the main session's list words it doesn't take.
+    assert record["agent"] == "result=partial retry=brief fit=right brief=vague missing=files" and "tl" not in record
+    loaded = haiku_tags.load(tmp_path / "cg")
+    assert [(j.kind, j.result, j.retry, j.tag.fit, j.tag.brief, j.tag.missing) for j in loaded] == [
+        ("agent", "partial", "brief", "right", "vague", ("files",))
+    ]
+
+
+def test_an_agent_runs_words_land_on_the_run_and_never_over_its_own(tmp_path):
+    session, agent = _agent_run(tmp_path)
+    top = parse_transcript(session, TranscriptMeta(path=str(session)))
+    sub = parse_transcript(agent, TranscriptMeta(path=str(agent), kind="subagent", agent_type="general-purpose"))
+    # An agent that tagged its own report, as agents did before 0.11.0.
+    old_note = "tl-cap v1 result\n" + cat.NOTE_INTRO + "\nEnd your final report with one line, [result: done|partial|blocked]."
+    note = attachment_line(
+        "hook_additional_context", content=[old_note], hookName="SubagentStart", hookEvent="SubagentStart",
+        rendered=f"<system-reminder>\nSubagentStart hook additional context: {old_note}\n</system-reminder>",
+    )
+    note["timestamp"] = _at(30)
+    own_path = _transcript(tmp_path, [
+        note,
+        user_str_line("Check it", timestamp=_at(30)),
+        turn_line(timestamp=_at(31), message_id="msg_o1", content=[{"type": "text", "text": "Checked.\n[result: done]"}]),
+    ], "agent-old.jsonl")
+    own = parse_transcript(own_path, TranscriptMeta(path=str(own_path), kind="subagent"))
+    config_dir = tmp_path / "cg"
+    _tag_file(
+        config_dir,
+        {"ts": "2026-09-27T10:00:30Z", "reply": "msg_a2", "agent": "result=partial retry=brief fit=right brief=vague "
+         "missing=files", "usd": 0.0021},
+        {"ts": "2026-09-27T10:00:40Z", "reply": "msg_o1", "agent": "result=blocked"},
+    )
+    corpus = NS(sessions=[NS(top=top, subs=[sub, own], session_id="s")])
+    assert haiku_tags.apply(corpus, config_dir) == 1
+    last, first = sub.turns[-1], sub.turns[0]
+    assert last.result_marker == "partial" and last.cap.judged and last.cap.judge_usd == 0.0021
+    assert (last.cap.fit, last.cap.brief, last.cap.missing) == ("right", "vague", ("files",))
+    assert first.retry_marker == "brief"
+    assert own.turns[-1].result_marker == "done" and not (own.turns[-1].cap and own.turns[-1].cap.judged)
+    # Capture counts the run, prices Haiku's call and nothing Claude wrote.
+    use = capture.usage(corpus, load_pricing())
+    assert use.subagents == 2 and use.reports == 2 and use.tagged_reports == 2
+    assert use.scopes["haiku"].tag_cost == pytest.approx(0.0021)
+    assert use.answers["result"] == 2 and use.answers["retry"] == 1 and use.answers["fit"] == 1
+    assert "brief" not in use.scopes  # the retry word was never written into a brief
+
+
+def test_estimates_add_a_haiku_call_per_agent_run():
+    past = capture.History(days=7, sessions=2, cycles=40, subagents=10, main_notes=2, main_note=1e-6, reply_tag=1e-6)
+    main_only = capture.estimate(past, ("task",))
+    with_agents = capture.estimate(past, ("task", "result"))
+    assert with_agents.cost == pytest.approx(main_only.cost + 10 * cat.JUDGE_USD_PER_CALL)
+    # Nothing asked of the agent: no note and no report tag.
+    assert with_agents.note_tokens == main_only.note_tokens and with_agents.tag_tokens == main_only.tag_tokens
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a fake claude command is a shell script")
+def test_the_subagent_stop_hook_hands_the_run_to_a_worker(tmp_path):
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "claude"
+    fake.write_text(
+        "#!/bin/sh\ncat > /dev/null\n"
+        "echo '{\"result\": \"[tl: result=done fit=smaller brief=clear missing=none]\", \"total_cost_usd\": 0.002}'\n",
+        encoding="utf-8",
+    )
+    fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
+    config_dir = tmp_path / "cg"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "standard"\n', encoding="utf-8")
+    session, agent = _agent_run(tmp_path)
+    env = {**os.environ, "PATH": f"{bin_dir}{os.pathsep}{os.environ['PATH']}"}
+    env.pop(cat.JUDGE_ENV, None)
+    done = subprocess.run(
+        [sys.executable, str(SCRIPT), "--config-dir", str(config_dir)],
+        input=json.dumps(_subagent_stop(session, agent)).encode("utf-8"), capture_output=True, timeout=30, env=env,
+    )
+    # Nothing printed: the agent's report reaches the session as it was.
+    assert done.returncode == 0 and done.stdout == b"" and done.stderr == b""
+    tags = config_dir / cat.JUDGE_DIR
+    for _ in range(100):
+        if tags.is_dir() and any(tags.iterdir()):
+            break
+        time.sleep(0.1)
+    line = json.loads(next(tags.iterdir()).read_text(encoding="utf-8"))
+    assert line["reply"] == "msg_a2" and line["agent"] == "result=done fit=smaller brief=clear missing=none"
 
 
 # -- the excerpt -----------------------------------------------------------------
@@ -268,6 +530,19 @@ def test_no_job_when_haiku_has_nothing_to_do(tmp_path, monkeypatch, config, extr
     assert HOOK.judge_job(_stop(_turn(tmp_path), **extra), config, CATALOGUE) is None
 
 
+def test_a_turn_waits_for_its_background_agents(tmp_path):
+    # Their reports come back as the next message, and the turn that
+    # answers them is judged with the whole piece of work: one call, not
+    # one per turn in between.
+    path = _turn(tmp_path)
+    agent = {"id": "a1", "type": "subagent", "status": "running", "description": "Find the files"}
+    assert HOOK.judge_job(_stop(path, background_tasks=[agent]), HAIKU, CATALOGUE) is None
+    assert HOOK.judge_job(_stop(path, background_tasks=[{**agent, "status": "completed"}]), HAIKU, CATALOGUE)
+    # A background shell, such as a dev server, never holds it up.
+    server = {"id": "b1", "type": "shell", "status": "running", "description": "npm run dev"}
+    assert HOOK.judge_job(_stop(path, background_tasks=[server]), HAIKU, CATALOGUE)
+
+
 def test_no_job_without_a_message_of_yours(tmp_path):
     path = _transcript(tmp_path, [turn_line(timestamp=_at(1), content=[{"type": "text", "text": "Hi."}])])
     assert HOOK.judge_job(_stop(path), HAIKU, CATALOGUE) is None
@@ -328,6 +603,7 @@ def test_the_worker_logs_the_words_and_the_cost_never_the_excerpt(tmp_path):
     "error, word",
     [
         (FileNotFoundError("claude"), "no_cli"),
+        (HOOK.NoLogin(), "no_login"),
         (subprocess.TimeoutExpired("claude", 60), "timeout"),
         (ValueError("failed"), "failed"),
         (None, "no_tag"),
@@ -345,6 +621,41 @@ def test_a_turn_without_a_tag_says_why(tmp_path, error, word):
     assert record["err"] == word and "tl" not in record
 
 
+def test_an_agent_run_that_got_no_words_is_still_an_agent_run(tmp_path):
+    """It was logged with no ``agent`` key and read back as a main
+    session's turn, so ``capture status`` counted it among the turns."""
+    job = {"kind": "agent", "ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "keys": ["result"]}
+
+    def ask(*_args):
+        raise HOOK.NoLogin()
+
+    record = HOOK.run_judge(tmp_path, CATALOGUE, job, ask=ask)
+    assert record == {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "", "err": "no_login"}
+    [judged] = haiku_tags.load(tmp_path)
+    assert (judged.kind, judged.tag, judged.error) == ("agent", None, "no_login")
+
+
+@pytest.mark.parametrize(
+    "result, raised",
+    [
+        # What claude -p answers with no working login (2.1.280 on Windows,
+        # and the older wording), and an error that is something else.
+        ("Failed to authenticate: OAuth session expired and could not be refreshed", "NoLogin"),
+        ("Not logged in · Please run /login", "NoLogin"),
+        ("API Error: 529 Overloaded", "ValueError"),
+    ],
+)
+def test_a_claude_command_with_no_login_is_told_apart(tmp_path, monkeypatch, result, raised):
+    """The desktop app keeps its own login, so the ``claude`` command the
+    hook finds can have none; that is worth saying, not "the call failed"."""
+    answer = json.dumps({"type": "result", "is_error": True, "result": result, "total_cost_usd": 0})
+    monkeypatch.setattr(HOOK, "_claude_command", lambda: "claude")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: NS(returncode=1, stdout=answer.encode("utf-8")))
+    job = HOOK.judge_job(_stop(_turn(tmp_path)), HAIKU, CATALOGUE)
+    with pytest.raises(HOOK.NoLogin if raised == "NoLogin" else ValueError):
+        HOOK.ask_haiku(job, CATALOGUE["judge"], tmp_path)
+
+
 @pytest.mark.skipif(os.name == "nt", reason="a fake claude command is a shell script")
 def test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude(tmp_path):
     """The whole path, as Claude Code runs it: the hook returns at once,
@@ -357,6 +668,8 @@ def test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude(tmp_path):
     fake.write_text(
         "#!/bin/sh\n"
         f'printf "%s\\n" "$*" > "{seen}.args"\n'
+        f'for a in "$@"; do [ -n "$want" ] && cp "$a" "{seen}.prompt"; want=""; '
+        '[ "$a" = "--system-prompt-file" ] && want=1; done\n'
         f'cat > "{seen}.stdin"\n'
         f'env | grep -c "^{cat.JUDGE_ENV}=1" > "{seen}.env"\n'
         "echo '{\"result\": \"[tl: task=bugfix brief=clear]\", \"total_cost_usd\": 0.0013, "
@@ -388,6 +701,11 @@ def test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude(tmp_path):
     assert "-p --model haiku --tools  --setting-sources  --strict-mcp-config --no-session-persistence" in args
     # The excerpt went in on stdin, never on the command line.
     assert "wrong sum" in Path(f"{seen}.stdin").read_text(encoding="utf-8") and "wrong sum" not in args
+    # Nor the instructions, whose | and line breaks cmd.exe would take for
+    # its own where claude is a .cmd: they're a file, gone once it's read.
+    assert "--system-prompt-file " in args and cat.JUDGE_INTRO not in args
+    assert Path(f"{seen}.prompt").read_text(encoding="utf-8") == cat.judge_text(cat.level_metrics("essentials"))
+    assert not list((tmp_path / "cg").glob(".judge-*"))
     assert Path(f"{seen}.env").read_text(encoding="utf-8").strip() == "1"
 
 
@@ -552,6 +870,24 @@ def test_capture_status_says_what_haiku_did(claude_dir):
     rc, out = _capture(claude_dir, "status")
     assert "Claude Haiku tagged 1 of the 2 turns it was asked about: $0.0014 ($0.0014 a call)" in out
     assert "No tag for 1 (no claude command on the hook's path)" in out
+
+
+def test_capture_status_says_how_agent_runs_were_judged_whoever_writes_the_tags(claude_dir):
+    """Agent runs are Haiku's to judge while Claude writes the main tags
+    too, so their calls, cost and failures show either way."""
+    set_capture(claude_dir, level="essentials", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    rc, out = _capture(claude_dir, "status")
+    assert "hasn't judged an agent run yet" in out and "hasn't tagged a turn yet" not in out
+    _tag_file(
+        claude_dir,
+        {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "result=done", "usd": 0.0015, "in": 1500},
+        {"ts": "2026-09-27T10:01:00Z", "reply": "msg_2", "agent": "", "err": "no_login"},
+        {"ts": "2026-09-27T10:02:00Z", "reply": "msg_3", "agent": "", "err": "no_login"},
+    )
+    rc, out = _capture(claude_dir, "status")
+    assert "Claude Haiku judged 1 of the 3 agent runs it was asked about: $0.0015 ($0.0015 a call)" in out
+    assert "No verdict for 2 (the claude command isn't signed in: run 'claude auth login')" in out
+    assert "turns it was asked about" not in out
 
 
 def test_your_changes_names_a_tagger_change():

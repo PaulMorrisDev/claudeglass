@@ -126,11 +126,13 @@ FEEDBACK_REMINDER_LINE = "Finished? Run /tl-feedback: a few ticks make your savi
 
 #: How Claude sets a coaching tip or the reminder apart in its reply, so
 #: it stands out from the work in the terminal and the desktop app alike:
-#: after a blank line, a quote block opening with a sign and a bold
-#: label. A warning sign for a coaching tip, a light bulb for the
-#: reminder.
-TIP_LABEL = "> ⚠️ **ClaudeGlass tip:**"
-REMINDER_LABEL = "> 💡 **ClaudeGlass:**"
+#: after a blank line, a quote block opening with a bold label. No emoji:
+#: Claude copies what its context shows, and with a ⚠️ and a 💡 in these
+#: labels it began using them as markers of its own, in work that had
+#: nothing to do with ClaudeGlass. The notices shown only to you
+#: (:data:`COACHING_NOTICE`) never reach Claude, so they keep theirs.
+TIP_LABEL = "> **ClaudeGlass tip:**"
+REMINDER_LABEL = "> **ClaudeGlass:**"
 _TIP_ASK = f'a blank line and then a quote block starting "{TIP_LABEL}"'
 
 
@@ -164,12 +166,14 @@ LEVEL_TITLES = {
 
 #: What each level adds, for the init question and the Capture page.
 LEVEL_SUMMARIES = {
-    "off": "Nothing is captured and no tokens are used.",
+    "off": "No metrics are captured and no tokens are used for them. Live coaching and feedback have their "
+    "own switches and keep working while capture is off.",
     "free": "Local signals from hooks that log to a file. Uses no Claude tokens.",
     "essentials": "Claude tags each piece of work: what kind it was, how clear the request was, how hard, "
-    "how big, and when the task changed. Subagents say whether they finished.",
+    "how big, and when the task changed. Claude Haiku judges whether each agent run finished, and why one was "
+    "run again.",
     "standard": "Adds what the request lacked, planning, skills, research, "
-    "and each subagent's view of its model, rules and brief.",
+    "and Haiku's view of each agent run's model and brief.",
     "deep": "Adds how much earlier context was needed, how the change was checked, and a "
     "short rating after large tool outputs. Also turns on the /tl-feedback survey, its reminder note, "
     "and Claude's one-line reminder to run it when a piece of work is done.",
@@ -308,8 +312,9 @@ SIGNALS_DIR = "signals"
 #: with a short excerpt of it (:func:`judge_text`). With ``haiku`` the
 #: session note asks for no tag, so replies end as they would anyway and
 #: the session carries no tag list; the words land in :data:`JUDGE_DIR`
-#: instead. Subagent reports and brief markers are Claude's to write
-#: either way.
+#: instead. Agent runs are Haiku's to judge either way
+#: (:func:`agent_judge_text`): a subagent is never asked for a tag, and a
+#: brief never carries a marker.
 TAGGERS = ("claude", "haiku")
 DEFAULT_TAGGER = "claude"
 
@@ -352,9 +357,9 @@ JUDGE_LIMITS = {
 }
 
 #: Why a turn got no Haiku tag, as its line in :data:`JUDGE_DIR` says:
-#: no ``claude`` command on the hook's path, Haiku took too long, the call
-#: failed, or its answer held no tag.
-JUDGE_ERRORS = ("no_cli", "timeout", "failed", "no_tag")
+#: no ``claude`` command on the hook's path, it isn't signed in, Haiku took
+#: too long, the call failed otherwise, or its answer held no tag.
+JUDGE_ERRORS = ("no_cli", "no_login", "timeout", "failed", "no_tag")
 
 JUDGE_INTRO = (
     "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage "
@@ -369,6 +374,42 @@ JUDGE_RULE = (
     "applies. Leave one out only when it doesn't fit this work (found outside research or a search; shift on "
     "a first message) or the excerpt can't tell at all."
 )
+
+#: What Haiku is told when it judges a finished agent run (the agent
+#: metrics: ``result``, ``fit``, ``agent_brief``, ``retry``). A subagent
+#: asked to end its report with a tag added it after a JSON-only answer,
+#: breaking it, and the main session took the line for an injected
+#: instruction; so no agent is asked for anything, and the capture hook's
+#: ``SubagentStop`` entry hands Haiku an excerpt of the run instead.
+AGENT_JUDGE_INTRO = (
+    "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt "
+    "of it: the brief the agent was given, what it did, the end of its report and the session's earlier agent "
+    "runs. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words:"
+)
+AGENT_JUDGE_RULE = "Judge only from the excerpt. Give every key; leave one out only when the excerpt can't tell at all."
+
+#: What the agent excerpt holds at most, in characters: the brief, the
+#: end of the report, each earlier run's brief and report end, and each
+#: shell command; and how many earlier runs, commands and changed files
+#: it names.
+AGENT_JUDGE_LIMITS = {
+    "brief": 2000, "report": 1500, "earlier": 4, "earlier_brief": 200, "earlier_report": 200, "command": 100,
+    "commands": 6, "files": 8,
+}
+
+#: The agent metrics, each with the ``[tl: ...]`` keys Haiku answers for
+#: it, in the order it is asked.
+AGENT_JUDGE_KEYS = {"result": ("result",), "retry": ("retry",), "fit": ("fit",), "agent_brief": ("brief", "missing")}
+
+#: The words each of those keys takes.
+AGENT_JUDGE_VOCAB = {
+    "result": RESULT_WORDS,
+    "fit": TAG_VOCAB["fit"],
+    "brief": TAG_VOCAB["brief"],
+    "missing": ("files", "goal", "scope", "done", "none"),
+    # "none" is how Haiku says a run is no retry; it is never kept.
+    "retry": ("none", *RETRY_REASONS),
+}
 
 #: The hook script that adds capture notes, and the catalogue it reads,
 #: installed side by side under ``<config-dir>/hooks/``.
@@ -448,6 +489,12 @@ CORRECTION_SCAN_CHARS = 200
 #: again". Only ``vague_fix`` uses it; ``drip_feed`` goes by what Claude
 #: did, not by your words.
 FIX_PATTERN = r"\b(?:fix|fixed|broken|wrong|incorrect|still|again|bug|error|errors|failing|fails|crash(?:es|ed)?)\b"
+
+#: A message that opens with a question word asks about fixes ("what
+#: problems can you fix", "how do I fix the build"), not for one, so
+#: ``vague_fix`` leaves it alone. Not "why": "why is it still broken" is
+#: the complaint the hint is for.
+QUESTION_PATTERN = r"\s*(?:what|which|who|whom|whose|where|when|how)\b"
 
 #: Anything that makes a correction specific: a path, a file name, a
 #: quote, code, a number, a line of an error, an image, or what it
@@ -539,9 +586,16 @@ COACHING_THRESHOLDS = {
     "rearm_factor": 1.5,
 }
 
-#: What each hint asks of Claude. ``{placeholders}`` are filled from the
-#: session: token counts in thousands (``150k``), an idle time, a count.
-#: A note never carries a path, a command or your words.
+#: What the prompting hints say about the work itself: nothing. They're
+#: about how the user prompts, so Claude does the work as it would have
+#: and only adds the tip; telling it to plan first, ask first, wait for a
+#: go-ahead or change its approach steered the work itself.
+_AS_USUAL = "Handle the message exactly as you would have without this note: it changes nothing about the work."
+
+#: What each hint asks of Claude; ``""`` for one that only shows you a
+#: notice. ``{placeholders}`` are filled from the session: token counts
+#: in thousands (``150k``), an idle time, a count. A note never carries a
+#: path, a command or your words.
 COACHING_TEXT = {
     "cache_cold": (
         "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context "
@@ -557,34 +611,29 @@ COACHING_TEXT = {
     ),
     "drip_feed": (
         "The user has sent {count} small change requests in a row, one message each, and every message re-reads "
-        "the whole context. Make this change, then end your reply, before any tag, with " + _TIP_ASK + " "
-        "suggesting that working out everything the work still needs and sending it as one message gets it done "
-        "in one pass, for fewer tokens."
+        "the whole context. " + _AS_USUAL + " End your reply, before any tag, with " + _TIP_ASK + " suggesting that "
+        "working out everything the work still needs and sending it as one message gets it done in one pass, for "
+        "fewer tokens."
     ),
     "repeat_ask": (
-        "The user has sent much the same request again, so the last attempt probably missed what they wanted. "
-        "Don't repeat the same approach: say in one line what you think went wrong, then try a different way, or "
-        "ask one short question if you can't tell. End your reply, before any tag, with " + _TIP_ASK + " "
-        "suggesting that saying what was wrong with the last attempt gets a better next one than sending the "
-        "request again."
+        "The user has sent much the same request as one you answered earlier. " + _AS_USUAL + " End your reply, "
+        "before any tag, with " + _TIP_ASK + " suggesting that saying what was wrong with the last attempt gets a "
+        "better next one than sending the request again."
     ),
     "plan_first": (
-        "The user's message asks for about {steps} separate changes, outside plan mode. Before changing anything, "
-        "set out in a few lines how you'll go about it and in what order, then carry on unless they stop you. End "
-        "that reply, before any tag, with " + _TIP_ASK + " suggesting plan mode (Shift+Tab) for a job this size: "
-        "it agrees the approach before anything changes."
+        "The user's message asks for about {steps} separate changes, outside plan mode. " + _AS_USUAL + " End your "
+        "reply, before any tag, with " + _TIP_ASK + " suggesting plan mode (Shift+Tab) for a job this size: it "
+        "agrees the approach before anything changes."
     ),
     "stop_loop": (
-        "The user has stopped you {count} times in the last {minutes} minutes to change course. Before you change "
-        "anything for this message, say in two or three lines what you'll do, and wait for a go-ahead if it's a "
-        "large change. End that reply, before any tag, with " + _TIP_ASK + " saying that plan mode (Shift+Tab) "
-        "agrees the approach before any work starts."
+        "The user has stopped you {count} times in the last {minutes} minutes. " + _AS_USUAL + " End your reply, "
+        "before any tag, with " + _TIP_ASK + " saying that plan mode (Shift+Tab) agrees the approach before any "
+        "work starts."
     ),
     "vague_fix": (
-        "The user says something is wrong but not what they saw or expected. If the context doesn't make the "
-        "problem clear, ask one short question (what they saw, what they expected, or the error text) before "
-        "changing anything. If it does, fix it and end your reply, before any tag, with " + _TIP_ASK + " saying "
-        "that naming what they saw and expected, or pasting the error, gets a fix first time."
+        "The user says something is wrong but not what they saw or expected. " + _AS_USUAL + " End your reply, "
+        "before any tag, with " + _TIP_ASK + " saying that naming what they saw and expected, or pasting the "
+        "error, gets a fix first time."
     ),
     "big_paste": (
         "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a "
@@ -603,19 +652,18 @@ COACHING_TEXT = {
         "that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry "
         "about {kept} fewer tokens on each reply. Then carry on unless they stop you."
     ),
-    "split_run": (
-        "This run has made about {replies} replies, and every reply reads all of the run again. In this user's "
-        "past sessions, {agent} runs cost less when split about every {every_n} replies. If more than a step or "
-        "two is left, finish the step you're on and end your report with a short note of what's done, what's "
-        "left and the files involved, so a fresh agent can carry on from it."
-    ),
+    # Nothing reaches the subagent: told mid-run to stop and hand back,
+    # it either ignored the note (and reported it as a stray hook message)
+    # or would have handed back half-done work. You get the notice instead.
+    "split_run": "",
 }
 
-#: What the hook shows you itself, the moment you send the message, for
-#: the prompting hints: Claude Code's hook ``systemMessage``, shown to
-#: you and never sent to Claude, so it costs no tokens. Claude's reply
-#: still ends with the tip, for an app that doesn't show hook messages.
-#: Same ``{placeholders}`` as :data:`COACHING_TEXT`.
+#: What the hook shows you itself, never sent to Claude, so it costs no
+#: tokens: Claude Code's hook ``systemMessage``. The prompting hints show
+#: it the moment you send the message, and Claude's reply still ends with
+#: the tip, for an app that doesn't show hook messages. ``split_run``
+#: shows it once, when a subagent run passes its split point, and tells
+#: the subagent nothing. Same ``{placeholders}`` as :data:`COACHING_TEXT`.
 COACHING_NOTICE = {
     "drip_feed": "⚠️ ClaudeGlass: {count} small requests in a row, one message each. Work out everything that needs "
     "changing and send it as one prompt: it costs less.",
@@ -629,12 +677,16 @@ COACHING_NOTICE = {
     "time.",
     "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. "
     "Paste only the part that matters, or give a file path.",
+    "split_run": "⚠️ ClaudeGlass: this {agent} run has made about {replies} replies, and each one reads the whole run "
+    "again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next time, give "
+    "each agent a smaller piece of the work.",
 }
 
 #: ``quiet_output``'s ``{how}``, by tool; ``""`` for any other tool.
 COACHING_QUIET_HOW = {
     "Read": "read only the lines you need, with an offset and a limit",
-    "Bash": "cut the command's output down first: a filter, head or tail, or a quieter flag",
+    # No bare head or tail: they can cut off the one error that matters.
+    "Bash": "cut the command's output down first: a quieter flag, or a filter that keeps every error and failure line",
     "Grep": "narrow the pattern or the path, or ask for file names or counts only",
     "Glob": "narrow the pattern",
     "": "ask for less: a narrower query or a smaller page",
@@ -665,7 +717,8 @@ class Metric:
     #: Hook events it needs in Claude Code's settings.json.
     hooks: tuple[str, ...] = ()
     #: The line explaining its key in the main session's ``[tl: ...]``
-    #: tag, and in a subagent's ``[result: ...]`` tag.
+    #: tag; and, for an agent metric, the line Haiku gets for its keys
+    #: when it judges an agent run (:func:`agent_judge_text`).
     main_line: str = ""
     sub_line: str = ""
     #: A line of its own in the main or subagent note.
@@ -770,31 +823,33 @@ METRICS: tuple[Metric, ...] = (
         group="essentials",
         section="subagents",
         title="Did the agent finish",
-        what="Each subagent's own account of whether it finished its task, finished part of it, or was "
-        "blocked.",
+        what="Whether each subagent finished its task, finished part of it, or was blocked, judged by Claude "
+        "Haiku from its brief and the end of its report once it's done.",
         why="Which agents and models deliver, and which get re-run.",
         powers=("delegation", "models", "outcome"),
-        tag="[result: done|partial|blocked]",
-        hooks=("SubagentStart",),
-        sub_line="done: you finished the task; partial: some of it; blocked: you could not go on",
-        out_chars=15,
+        hooks=("SubagentStop",),
+        sub_line="result: done|partial|blocked (done = the agent finished what its brief asked; partial = some "
+        "of it; blocked = it could not go on, such as a missing file, tool or permission)",
     ),
     Metric(
         id="retry",
         group="essentials",
         section="subagents",
         title="Why an agent was run again",
-        what="When Claude starts an agent again because its last run fell short, the reason: model, brief, "
-        "tools, scope or other.",
+        what="When an agent run redoes an earlier one in the session that fell short, the reason: model, "
+        "brief, tools, scope or other, judged by Claude Haiku from the two runs.",
         why="Why agents are re-run, and a guard that stops ClaudeGlass suggesting a cheaper model for work "
         "that needed a stronger one.",
         powers=("delegation", "models"),
-        tag="[retry: model|brief|tools|scope|other]",
-        hooks=("SessionStart", "SubagentStart"),
-        main_extra="When you start an agent again because its last run fell short, begin the brief with "
-        "[retry: model|brief|tools|scope|other].",
-        sub_extra="Re-running an agent? Begin its brief with [retry: model|brief|tools|scope|other].",
-        out_chars=2,
+        hooks=("SubagentStop",),
+        # A choice that includes none: asked for the key only when it
+        # applied, Haiku left it out of plain retries (a tools retry 1 time
+        # in 3); scripts/eval-agent-judge.py measures it (docs/tagger-eval.md).
+        sub_line="retry: none|model|brief|tools|scope|other (is this run a second try at what an earlier run listed "
+        "below was meant to deliver, because that run fell short? none = no, or there is no earlier run; model = it "
+        "needed a stronger model; brief = the earlier brief was too vague or lacked something; tools = the earlier "
+        "agent lacked a tool or a permission; scope = the task was cut too wide or changed; other)",
+        requires=("result",),
     ),
     # -- Standard ---------------------------------------------------------
     Metric(
@@ -860,46 +915,30 @@ METRICS: tuple[Metric, ...] = (
         group="standard",
         section="subagents",
         title="Agent model fit",
-        what="Each subagent's view of whether a smaller model would have done its task, or it needed a "
-        "larger one.",
+        what="Whether a smaller model would have done each subagent's task, or it needed a larger one, judged "
+        "by Claude Haiku once the run is done.",
         why="Agent model tuning. Used only to rule a cheaper model out, never to recommend one.",
         powers=("models", "delegation"),
-        tag="fit=smaller|right|larger",
-        hooks=("SubagentStart",),
-        sub_line="fit: smaller|right|larger (could a smaller model have done this task, or did it need a "
-        "larger one)",
+        hooks=("SubagentStop",),
+        sub_line="fit: smaller|right|larger (smaller = a smaller, cheaper model could plainly have done this: "
+        "simple lookups or mechanical edits; right = it suited the model it ran on; larger = the agent "
+        "struggled in a way a stronger model would not have)",
         requires=("result",),
-        out_chars=10,
-    ),
-    Metric(
-        id="rules",
-        group="standard",
-        section="subagents",
-        title="Agent used your rules",
-        what="Whether each subagent used the CLAUDE.md and memory instructions it was given.",
-        why="Which agents could start without your CLAUDE.md files, saving their start-up tokens.",
-        powers=("delegation",),
-        tag="rules=used|unused",
-        hooks=("SubagentStart",),
-        sub_line="rules: used|unused (did you use the CLAUDE.md or memory instructions you were given)",
-        requires=("result",),
-        out_chars=10,
     ),
     Metric(
         id="agent_brief",
         group="standard",
         section="subagents",
         title="Agent brief quality",
-        what="Each subagent's view of how complete its brief was, and what it lacked: files, goal, scope or "
-        "what done means.",
+        what="How complete each subagent's brief was, and what it lacked: files, goal, scope or what done "
+        "means, judged by Claude Haiku from the brief and the run.",
         why="Brief quality per agent type, and better agent definitions and brief templates.",
         powers=("delegation", "information"),
-        tag="brief=clear|partial|vague missing=files,goal,scope,done|none",
-        hooks=("SubagentStart",),
-        sub_line="brief: clear|partial|vague (how complete your brief was); missing: files,goal,scope,done or "
-        "none (what it lacked)",
+        hooks=("SubagentStop",),
+        sub_line="brief: clear|partial|vague (how complete the brief was: clear = what to do and what to hand "
+        "back; partial = the goal without the details; vague = neither); missing: files,goal,scope,done or none "
+        "(what the brief lacked that the agent had to find or guess; a comma list)",
         requires=("result",),
-        out_chars=24,
     ),
     # -- Deep -------------------------------------------------------------
     Metric(
@@ -1119,8 +1158,8 @@ METRICS: tuple[Metric, ...] = (
         "cache when you send a message. It also flags how you prompt: the same request again, a big task "
         "without a plan, small requests sent one at a time, a "
         "vague correction, a huge paste, or stopping Claude again and again.",
-        why="Advice at the moment it applies, and Claude can often act on it itself. Each note costs a few dozen "
-        "tokens for the rest of the session. Claude Code waits for the hook after each shell, read, search, web "
+        why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
+        "120 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each shell, read, search, web "
         "or MCP result and each message you send.",
         powers=("context", "tool_output", "research", "delegation", "planning"),
         hooks=("UserPromptSubmit", "PostToolUse"),
@@ -1165,15 +1204,17 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback reminder from Claude",
-        what="Claude adds a highlighted note suggesting /tl-feedback when it finishes a piece of work.",
-        why="For people without the status line. Costs a few output tokens each time.",
+        what="Claude adds a highlighted note suggesting /tl-feedback once a session, when it finishes its first "
+        "piece of work.",
+        why="For people without the status line, such as in the desktop app. Costs a few output tokens once a "
+        "session.",
         powers=("outcome",),
         hooks=("SessionStart",),
-        main_extra="When you finish a piece of work the user asked for, add this before your tag, after a blank "
-        f"line:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
+        main_extra="The first time in this session you finish a piece of work the user asked for, add this before "
+        f"your tag, after a blank line, and never again after that:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
         extra_before_tag=True,
-        main_extra_untagged="When you finish a piece of work the user asked for, end your reply with this, after a "
-        f"blank line:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
+        main_extra_untagged="The first time in this session you finish a piece of work the user asked for, end your "
+        f"reply with this, after a blank line, and never again after that:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
         out_chars=103,
     ),
     Metric(
@@ -1211,7 +1252,7 @@ DEEP_FEEDBACK_IDS = ("feedback_skill", "feedback_note", "feedback_reminder")
 #: ever asking Claude for them again. Their words stay in
 #: :data:`TAG_VOCAB` (``detour``, ``useful``) and :data:`SPAWN_REASONS` so
 #: a transcript recorded before the retirement still parses.
-RETIRED_METRIC_IDS: tuple[str, ...] = ("detour", "web", "spawn")
+RETIRED_METRIC_IDS: tuple[str, ...] = ("detour", "web", "spawn", "rules")
 
 #: The persistent feedback note (``feedback_note``): the status line's
 #: second line and the dashboard banner show it word for word.
@@ -1535,7 +1576,9 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
     ``capture-catalogue.json`` (:func:`export_json`); a test holds the two
     to the same output.
     """
-    if scope == "subagent" and agent_type in SKIP_AGENT_TYPES:
+    if scope == "subagent":
+        # A subagent is asked for nothing: Haiku judges its run afterwards
+        # (agent_judge_text), so its report is exactly what it would be.
         return ""
     wanted = set(ids)
     enabled = [m for m in METRICS if m.id in wanted]
@@ -1619,6 +1662,24 @@ def judge_text(ids) -> str:
     return "\n".join([JUDGE_INTRO, *lines, JUDGE_RULE])
 
 
+def agent_metric_ids(ids) -> tuple[str, ...]:
+    """The agent metrics among ``ids`` (:data:`AGENT_JUDGE_KEYS`), in
+    catalogue order."""
+    wanted = set(ids)
+    return tuple(m.id for m in METRICS if m.id in wanted and m.id in AGENT_JUDGE_KEYS)
+
+
+def agent_judge_text(ids) -> str:
+    """What Haiku is told when it judges a finished agent run: a line for
+    each agent metric in ``ids``; ``""`` when there's none.
+    ``hooks/capture-hook.py`` builds the same text
+    (``build_agent_judge_prompt``)."""
+    lines = [METRICS_BY_ID[metric_id].sub_line for metric_id in agent_metric_ids(ids)]
+    if not lines:
+        return ""
+    return "\n".join([AGENT_JUDGE_INTRO, *lines, AGENT_JUDGE_RULE])
+
+
 def tool_note_text(metric_id: str) -> str:
     """The note a PostToolUse hook adds after a large result
     (``big_output``) or a web result (``web``)."""
@@ -1667,13 +1728,16 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     wanted = set(ids)
     haiku = HAIKU_TAGGER_HOOK in wanted and bool(tagged_keys(wanted))
     main = any(m.id in wanted and ((m.main_line and not haiku) or m.main_extra) for m in METRICS)
-    sub = any(m.id in wanted and (m.sub_line or m.sub_extra) for m in METRICS)
+    agents = bool(agent_metric_ids(wanted))
     coach = "coaching_notes" in wanted
     specs: list[tuple[str, str, str, bool]] = []
     if main:
         specs.append((HOOK_SCRIPT, "SessionStart", SESSION_START_MATCHER, False))
-    if sub:
-        specs.append((HOOK_SCRIPT, "SubagentStart", "", False))
+    if agents:
+        # In the foreground, as Stop is for Haiku: it only hands the run to
+        # a worker and returns, and claude -p exits without waiting for a
+        # background hook.
+        specs.append((HOOK_SCRIPT, "SubagentStop", "", False))
     if coach:
         specs.append((HOOK_SCRIPT, "UserPromptSubmit", "", False))
     tools = (*(BIG_OUTPUT_TOOLS if "big_output" in wanted else ()), *(COACHING_TOOLS if coach else ()))
@@ -1741,6 +1805,13 @@ def export_json() -> dict:
             "lines": dict(JUDGE_LINES),
             "vocab": {key: list(words) for key, words in TAG_VOCAB.items()},
             "list_keys": sorted(LIST_KEYS),
+            "agent": {
+                "intro": AGENT_JUDGE_INTRO,
+                "rule": AGENT_JUDGE_RULE,
+                "limits": dict(AGENT_JUDGE_LIMITS),
+                "keys": {metric_id: list(keys) for metric_id, keys in AGENT_JUDGE_KEYS.items()},
+                "vocab": {key: list(words) for key, words in AGENT_JUDGE_VOCAB.items()},
+            },
         },
         "coaching": {
             "marker": COACH_MARKER,
@@ -1755,6 +1826,7 @@ def export_json() -> dict:
             "correction_pattern": CORRECTION_PATTERN,
             "correction_scan_chars": CORRECTION_SCAN_CHARS,
             "fix_pattern": FIX_PATTERN,
+            "question_pattern": QUESTION_PATTERN,
             "specific_pattern": SPECIFIC_PATTERN,
             "interrupt_prefix": INTERRUPT_PREFIX,
             "edit_tools": list(EDIT_TOOLS),
@@ -1785,20 +1857,21 @@ def asks_claude(metric_id: str) -> bool:
 def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     """Rough sizes in tokens (characters / 4) for the metrics in ``ids``:
     the note at each session start, clear or compaction
-    (``session_note``) and at each subagent start (``subagent_note``);
-    the tag Claude writes per reply (``reply_tag``) and per subagent
-    report (``report_tag``); the note after a large or web tool result
-    (``tool_note``). Amounts measured from transcripts replace these once
-    capture has run. While Claude Haiku writes the tags (``tagger``), the
-    reply carries none: ``reply_tag`` is only the reminder line, if on."""
+    (``session_note``); at each subagent start (``subagent_note``) and
+    per subagent report (``report_tag``), both now always 0, as an agent
+    is asked for nothing; the tag Claude writes per reply (``reply_tag``),
+    none while Claude Haiku writes the tags (``tagger``); the /tl-feedback
+    reminder Claude adds once a session (``reminder``); the note after a
+    large or web tool result (``tool_note``). Amounts measured from
+    transcripts replace these once capture has run."""
     enabled = [METRICS_BY_ID[i] for i in ids if i in METRICS_BY_ID]
     main, sub = note_text(ids, "main", tagger=tagger), note_text(ids, "subagent")
+    # The /tl-feedback reminder comes once a session, not with every reply.
+    reminder = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
     if tagger == "haiku" and any(m.main_line for m in enabled):
-        # No tag: only the reminder line ends a reply.
-        reply = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
-        frame = 0
+        reply = frame = 0  # no tag at all
     else:
-        reply = sum(m.out_chars for m in enabled if m.main_line or m.main_extra)
+        reply = sum(m.out_chars for m in enabled if m.main_line or (m.main_extra and m.group != "feedback"))
         frame = _TAG_FRAME_CHARS
     report = sum(m.out_chars for m in enabled if m.sub_line or m.sub_extra)
     tool = max(
@@ -1811,6 +1884,9 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
         "reply_tag": round((reply + frame) / 4) if reply else 0,
         "report_tag": round(report / 4),
         "tool_note": round((tool + NOTE_WRAP_CHARS + len("PostToolUse")) / 4) if tool else 0,
+        "reminder": round(reminder / 4),
+        # Not tokens of Claude's: 1 when each agent run gets a Haiku call.
+        "agent_judge": 1 if agent_metric_ids(ids) else 0,
     }
 
 
@@ -1862,6 +1938,11 @@ def _metric_tag_line(metric: Metric) -> str:
         return f'No fixed key. The note asks for a line: "{metric.main_extra}"'
     if metric.sub_extra:
         return f'No fixed key. The note asks for a line: "{metric.sub_extra}"'
+    if metric.id in AGENT_JUDGE_KEYS:
+        return (
+            "No tag. The agent is asked for nothing; Claude Haiku judges its run once it's done (see "
+            f"[Agent runs](#agent-runs)): \"{metric.sub_line}\""
+        )
     if metric.id == "coaching_notes":
         return (
             "No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in a "
@@ -1870,6 +1951,11 @@ def _metric_tag_line(metric: Metric) -> str:
         )
     if metric.hooks:
         return "No tag. A hook records it directly; Claude is never asked."
+    if metric.id == "brief_templates":
+        return (
+            "No tag. The checklists are on Work habits, and /tl-brief runs only when you type it; like any "
+            "skill, its name and description are listed to Claude at each session start."
+        )
     if metric.group == "coaching":
         return "No tag. Shown only in the status line; Claude is never asked, and it costs no tokens."
     if metric.group == "feedback":
@@ -1894,22 +1980,26 @@ def render_markdown() -> str:
     p("# Metrics capture")
     p("")
     p(
-        "Metrics capture is **opt-in**. Off by default, and off costs nothing: no hook runs, no tag is asked "
-        "for, no token is spent on it."
+        "Metrics capture is **opt-in**. Off by default, and off costs nothing: no tag is asked for, Claude "
+        "Haiku is never asked, and no token is spent on it. Live coaching and your feedback have their own "
+        "switches, and keep working while capture is off."
     )
     p("")
     p(
-        f"Turned on, a hook (`{HOOK_SCRIPT}`) adds a short note to each session and subagent start, and asks "
-        "Claude to end its replies with one line such as `[tl: task=bugfix brief=partial level=normal]`. A "
-        "subagent ends its own report the same way, starting `[result: done|partial|blocked]`. The tag always "
-        "sits at the end of the reply you already read — nothing is hidden — and nothing free-text is ever "
-        "asked for: every word comes from a closed vocabulary (see [Privacy](#privacy) below)."
+        f"Turned on, a hook (`{HOOK_SCRIPT}`) adds a short note to each session start, and asks Claude to end "
+        "its replies with one line such as `[tl: task=bugfix brief=partial level=normal]` (or Claude Haiku "
+        "writes it, see [Who writes the tags](#who-writes-the-tags)). A subagent is asked for nothing: its brief "
+        "and its report are exactly what they would be, and Claude Haiku judges the run once it's done (see "
+        "[Agent runs](#agent-runs)). The tag always sits at the end of the reply you already read — nothing is "
+        "hidden — and nothing free-text is ever asked for: every word comes from a closed vocabulary (see "
+        "[Privacy](#privacy) below)."
     )
     p("")
     p(
         "It costs tokens. The note is written to the prompt cache once, then read from it on every later "
-        "reply of that session; the tag itself is a handful of output tokens on every reply and every "
-        "subagent report. [Levels](#levels) below gives rough sizes; once capture is on, Setup › Capture "
+        "reply of that session; the tag itself is a handful of output tokens on every reply, and each agent "
+        f"run judged is a Haiku call of about ${JUDGE_USD_PER_CALL:.3f}. [Levels](#levels) below gives rough "
+        "sizes; once capture is on, Setup › Capture "
         "measures the real cost from your own transcripts, and a banner on every page shows the "
         "running total."
     )
@@ -1921,11 +2011,11 @@ def render_markdown() -> str:
     p(
         "Costs rise with depth, so capture comes in levels, each including every metric of the levels "
         "before it. The note is added once at each session's start, `/clear` or compaction (a resumed "
-        "session already carries the note from its start, so it is not asked again), and once at each "
-        "subagent's start, however deep the agent is nested."
+        "session already carries the note from its start, so it is not asked again). Agent runs get no note; "
+        "a level with agent metrics adds a Haiku call per agent run instead, however deep the agent is nested."
     )
     p("")
-    p("| Level | What it adds | Note at session start | Note per subagent start |")
+    p("| Level | What it adds | Note at session start | Haiku per agent run |")
     p("|---|---|---|---|")
     for level in LEVELS:
         ids = level_includes(level)
@@ -1936,7 +2026,7 @@ def render_markdown() -> str:
         # 201/107 for Essentials against a checked-in 182/88 here).
         sizes = rough_tokens(ids)
         main_cell = f"~{sizes['session_note']} tokens" if sizes["session_note"] else "–"
-        sub_cell = f"~{sizes['subagent_note']} tokens" if sizes["subagent_note"] else "–"
+        sub_cell = f"~${JUDGE_USD_PER_CALL:.3f}" if agent_metric_ids(ids) else "–"
         p(f"| {LEVEL_TITLES[level]} | {LEVEL_SUMMARIES[level]} | {main_cell} | {sub_cell} |")
     p(
         f"| {LEVEL_TITLES[CUSTOM_LEVEL]} | Any other set of metrics, turned on one by one (`capture enable`/"
@@ -2013,13 +2103,9 @@ def render_markdown() -> str:
     p(f'...and, in the main session, closes with: "{SKIP_KEY_LINE}"')
     p("")
     p(
-        f"A subagent's note asks for `{SUB_TAG}` when nothing else needs a key of its own, or "
-        f"`{SUB_TAG_WITH_KEYS}` once Standard's extra keys are on: \"{SUB_TAG_INTRO.format(tag=SUB_TAG_WITH_KEYS)}\""
-    )
-    p("")
-    p(
-        "Starting an agent again after its last run fell short is marked at the start of its brief instead "
-        f"of the end of a report: `{METRICS_BY_ID['retry'].tag}`."
+        "A subagent gets no note, and a brief carries no marker: see [Agent runs](#agent-runs). Transcripts "
+        "from before ClaudeGlass 0.11.0 may hold a subagent's own `[result: ...]` tag or a `[retry: ...]` brief "
+        "marker; both are still read."
     )
     p("")
     p(f"The `/tl-feedback` skill ends with its own line: `{_feedback_tag_words()}`.")
@@ -2080,9 +2166,50 @@ def render_markdown() -> str:
     )
     p(
         "- The `Stop` entry runs in the foreground, since `claude -p` exits without waiting for a background "
-        "hook, but only for as long as it takes to read the transcript's end. Subagent reports and brief markers "
-        "are still Claude's to write. Deep's note after a large result goes only to subagents, as the main "
-        "session's replies carry no tag for its word."
+        "hook, but only for as long as it takes to read the transcript's end. Deep's note after a large result "
+        "isn't added, as no reply carries a tag for its word. Agent runs are Haiku's to judge whichever writes "
+        "the main session's tags."
+    )
+    p("")
+
+    # -- Agent runs ---------------------------------------------------------
+    p("## Agent runs")
+    p("")
+    p(
+        "A subagent is never asked for a tag, and a brief never carries a marker. Asked to end its report with "
+        "`[result: ...]`, a subagent added it after an answer that had to be JSON only, breaking it, and the "
+        "session that started it took the line for an injected instruction. So the agent metrics ("
+        + ", ".join(f"`{metric_id}`" for metric_id in AGENT_JUDGE_KEYS)
+        + ") are judged afterwards instead:"
+    )
+    p("")
+    p(
+        "- When a subagent finishes, the hook's `SubagentStop` entry reads its transcript and hands an excerpt "
+        f"to the same worker as above: its type, its brief (up to {AGENT_JUDGE_LIMITS['brief']:,} characters, "
+        "without the line a workflow script's harness puts before a brief it computed), "
+        "what it did (model calls, tools used, the files it changed, the first line of up to "
+        f"{AGENT_JUDGE_LIMITS['commands']} shell commands, tool errors), the end of its report (up to "
+        f"{AGENT_JUDGE_LIMITS['report']:,} characters), or the start of the answer it handed back as structured "
+        "output when that came last, as a workflow agent's does, and up to "
+        f"{AGENT_JUDGE_LIMITS['earlier']} earlier agent "
+        "runs of the session (their type and the start of their brief and the end of their report), so Haiku "
+        "can tell a re-run. Tool output is never in it."
+    )
+    p(
+        f"- Haiku is told \"{AGENT_JUDGE_INTRO}\", a line for each agent metric that is on, and \"{AGENT_JUDGE_RULE}\""
+    )
+    p(
+        f"- Its words land in `<config-dir>/{JUDGE_DIR}/YYYY-MM.jsonl` beside the main session's, with the id of "
+        "the agent's last reply, and are read as if the agent had written them. Each call costs about "
+        f"${JUDGE_USD_PER_CALL:.3f}. Agents that set up Claude Code itself ("
+        + ", ".join(f"`{t}`" for t in SKIP_AGENT_TYPES)
+        + ") are skipped. `capture status` says how many runs were judged, what the calls cost and why any "
+        "got no verdict (a `claude` command that isn't signed in, say: the desktop app keeps its own login), "
+        "whoever writes the main session's tags."
+    )
+    p(
+        "- Whether an agent used your CLAUDE.md rules (`rules`) can't be told from outside the agent, so it is "
+        "no longer measured."
     )
     p("")
 
@@ -2090,8 +2217,9 @@ def render_markdown() -> str:
     p("## Privacy")
     p("")
     p(
-        "Claude writes closed vocabularies only. Every `[tl: ...]`, `[result: ...]`, `[retry: ...]`, "
-        "`[spawn: ...]` and `[tl-fb: ...]` word is checked against the lists on this page; anything else — "
+        "Claude and Haiku write closed vocabularies only. Every `[tl: ...]` and `[tl-fb: ...]` word, and every "
+        "`[result: ...]`, `[retry: ...]` and `[spawn: ...]` word in an older transcript, is checked against the "
+        "lists on this page; anything else — "
         "an unknown word, a key outside those lists, free text, a path — is dropped by the parser and never "
         "stored. The one exception that can carry a name is `skill=would-help:<name>`, and only when "
         "`<name>` matches a skill this transcript actually listed or invoked in the window; any other name "
@@ -2119,9 +2247,11 @@ def render_markdown() -> str:
     p("")
     p(
         f"The hook script and its catalogue (`{HOOK_SCRIPT}`, `{CATALOGUE_FILE}`) live side by side under "
-        "`<config-dir>/hooks/`. Only `capture on`, `capture tagger` and `capture connect` ever change "
-        "`~/.claude/settings.json` — and only after showing the diff and asking first, unless you pass "
-        "`--yes`. Every other change writes only this tool's own `config.toml`."
+        "`<config-dir>/hooks/`. A change that needs different hook entries (`capture on`, `level`, `enable`, "
+        "`disable`, `tagger` or `connect`) also changes `~/.claude/settings.json`, and `capture remove` takes "
+        "the entries out — each only after showing the diff and asking first, unless you pass `--yes`. "
+        "`capture off` leaves the entries, which add nothing while it's off, and every other change writes "
+        "only this tool's own `config.toml`."
     )
     p("")
     p(
@@ -2129,8 +2259,8 @@ def render_markdown() -> str:
         "far. While big_output or web is on, it also prints Deep's actual measured wait (median and p90, "
         "over the last 7 days). It also flags any hook — ClaudeGlass's own or one of yours — that failed on "
         "most of its calls over the last 14 days, naming it (event name only, never a matcher or tool name), "
-        "where to find it in `settings.json`, the trade-off, and the undo; this is only ever a printed "
-        "prompt, never an automatic change."
+        "when it last failed, where to find it in `settings.json`, the trade-off, and the undo; this is only "
+        "ever a printed prompt, never an automatic change. A hook that has stopped failing since is left out."
     )
     p(
         "- `claudeglass capture on [--level LEVEL] [--for DURATION | --until DATE | --no-limit] "

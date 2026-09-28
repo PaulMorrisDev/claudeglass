@@ -971,13 +971,17 @@ def setup_verdict(rows: list[dict]) -> str:
 def worse_models(setup_rows: Iterable[dict]) -> dict[tuple[str, str], dict]:
     """``{(agent, model family): row}`` for each ``quality_by_setup`` row
     whose setup did clearly worse than the agent's most-used one on a
-    different model, so the models check doesn't suggest that model to
-    that agent. The main session is ``"top-level"``, as in the model-swap
+    different model, on every signal with a direction or only some
+    ("mixed": runs that didn't finish, say, though fewer tool calls
+    failed), so the models check doesn't suggest that model to that
+    agent. The main session is ``"top-level"``, as in the model-swap
     table."""
     out: dict[tuple[str, str], dict] = {}
     for row in setup_rows:
         family = _model_family(str(row.get("model") or ""))
-        if row.get("setup_verdict") != "worse" or family == _model_family(str(row.get("compared_model") or "")):
+        if row.get("setup_verdict") not in ("worse", "mixed") or family == _model_family(
+            str(row.get("compared_model") or "")
+        ):
             continue
         agent = "top-level" if row.get("agent_type") == MAIN else row.get("agent_type")
         out.setdefault((agent, family), row)

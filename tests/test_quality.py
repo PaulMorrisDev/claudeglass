@@ -9,13 +9,14 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture_catalogue as catalogue, events, parse, quality
+from claudeglass import events, parse, quality
 from claudeglass.model import EventKind, TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 from claudeglass.units import Units
 
 from helpers import (
+    old_agent_note_text,
     attachment_line,
     elasticity_with_slope,
     queue_operation_line,
@@ -56,7 +57,7 @@ def _agent(tmp_path, lines, agent_id="abc", agent_type="Explore"):
 def _note(second: int, ids, *, agent_type: str = "") -> dict:
     """A SubagentStart note (SEC-P2): a ``[result: ...]`` only counts
     when its own transcript has seen one asking for it."""
-    text = catalogue.note_text(ids, "subagent", agent_type)
+    text = old_agent_note_text(ids, agent_type)
     wrapped = f"<system-reminder>\nSubagentStart hook additional context: {text}\n</system-reminder>"
     line = attachment_line("hook_additional_context", rendered=wrapped, content=[text], hookName="SubagentStart",
                            hookEvent="SubagentStart", toolUseID="SubagentStart")
@@ -444,9 +445,14 @@ def test_worse_models_names_each_agent_and_model_family_that_did_worse():
         # The same model at another effort: about effort, not the model.
         {"agent_type": "Explore", "model": "claude-haiku-4-5", "setup_verdict": "worse",
          "compared_model": "claude-haiku-4-5-20251001"},
+        # Worse on some signals is no reason to switch to it either.
         {"agent_type": "Plan", "model": "claude-sonnet-5", "setup_verdict": "mixed", "compared_model": "claude-opus-5"},
+        {"agent_type": "Explore", "model": "claude-sonnet-5", "setup_verdict": "possibly_worse",
+         "compared_model": "claude-opus-5"},
     ]
-    assert set(quality.worse_models(rows)) == {("claude-implementer", "haiku"), ("top-level", "sonnet")}
+    assert set(quality.worse_models(rows)) == {
+        ("claude-implementer", "haiku"), ("top-level", "sonnet"), ("Plan", "sonnet"),
+    }
 
 
 def test_section_tables_and_columns():

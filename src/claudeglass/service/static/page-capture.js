@@ -156,8 +156,10 @@ function roughLine(rough) {
   if (rough.session_note) parts.push("about " + rough.session_note + " tokens of note when a session starts, is cleared or compacts");
   if (rough.subagent_note) parts.push("about " + rough.subagent_note + " when a subagent starts");
   if (rough.reply_tag) parts.push("about " + rough.reply_tag + " tokens of tag per reply");
+  if (rough.reminder) parts.push("about " + rough.reminder + " tokens once a session for the /tl-feedback reminder");
   if (rough.report_tag) parts.push("about " + rough.report_tag + " per agent report");
   if (rough.tool_note) parts.push("about " + rough.tool_note + " after each large or web tool result");
+  if (rough.agent_judge) parts.push("a Claude Haiku call after each agent run (the agent is asked for nothing)");
   return parts.length ? "Roughly " + parts.join("; ") + "." : "";
 }
 
@@ -182,7 +184,7 @@ function renderCaptureData(data, container) {
       ];
       if (measured.coverage_text) {
         var tagger = config.tagger === "haiku" ? "Claude Haiku" : "Claude";
-        lines.push(tagger + " tagged " + measured.coverage_text + " of your messages" + (measured.report_coverage_pct !== null ? " and Claude " + formatCell(measured.report_coverage_pct, "pct") + " of agent reports." : "."));
+        lines.push(tagger + " tagged " + measured.coverage_text + " of your messages" + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs." : "."));
       }
       nowBlock.appendChild(el("ul", { class: "notes" }, lines.map(function (line) {
         return el("li", { text: line });
@@ -204,7 +206,7 @@ function renderCaptureData(data, container) {
     } else {
       nowBlock.appendChild(
         emptyState(
-          "No captured sessions yet: the note is added to sessions and subagents started after capture was turned on.",
+          "No captured sessions yet: capture covers sessions, and their subagent runs, started after capture was turned on.",
           null,
           "Start a new Claude Code session to see the first figures here."
         )
@@ -377,7 +379,7 @@ function renderCaptureControls(data, container) {
   });
   form.appendChild(el("label", { for: taggerId, text: "Tags written by" }));
   form.appendChild(tagger);
-  form.appendChild(el("p", { class: "notes", text: "Claude Haiku keeps the tags out of Claude's replies and context. After each turn, a hook sends it a short excerpt, through your own Claude Code login. Only the tag's words are kept. Subagent reports are still tagged by Claude." }));
+  form.appendChild(el("p", { class: "notes", text: "Claude Haiku keeps the tags out of Claude's replies and context. After each turn, a hook sends it a short excerpt, through your own Claude Code login. Only the tag's words are kept. Agent runs are Claude Haiku's to judge either way." }));
 
   var endId = "capture-end";
   var end = el("select", { id: endId });
@@ -444,7 +446,7 @@ function renderMetricRow(row, data, container) {
   // What it costs and how far along it is stay in view; why it helps
   // and what Claude writes are one click away.
   var cost;
-  if (!row.asks_claude) cost = row.kind === "free" ? "No Claude tokens: a hook logs it to a local file." : "No tokens.";
+  if (!row.asks_claude) cost = row.cost_note || (row.kind === "free" ? "No Claude tokens: a hook logs it to a local file." : "No tokens.");
   else if (row.estimate) cost = (row.on ? "Saves about " : "Adds about ") + billed(row.estimate, "a week") + (row.on ? " if switched off." : ".");
   if (row.actual) cost = (cost ? cost + " " : "") + (row.actual_label || "Since it was turned on") + ": " + billed(row.actual) + ".";
   var status = [];

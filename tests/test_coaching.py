@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timedelta, timezone
@@ -18,7 +19,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture, capture_catalogue as cat, cli, coaching, hook_health, ignores, installer, parse
+from claudeglass import capture, capture_catalogue as cat, cli, coaching, hook_health, ignores, installer, parse, prompt_shape
 from claudeglass.config import load_config
 from claudeglass.model import Recommendation, TranscriptMeta
 from claudeglass.parse import parse_transcript
@@ -295,8 +296,11 @@ def test_answers_to_claudes_questions_and_thanks_are_not_requests(tmp_path):
 
 def test_a_vague_correction_gets_the_say_what_you_saw_hint(tmp_path):
     records = [_said("Add a dark mode toggle", 200), _reply(30_000, ago_s=100)]
-    for n, vague in enumerate(("it's still broken", "doesn't work", "fix it", "wrong", "still broken, it should work", "wrong, make it right")):
+    vagues = ("it's still broken", "doesn't work", "fix it", "wrong", "still broken, it should work", "wrong, make it right",
+              "why is it still broken?")
+    for n, vague in enumerate(vagues):
         assert _kind(_send(tmp_path, records, vague, session=f"v{n}")) == "vague_fix", vague
+        assert prompt_shape.is_vague_fix(vague, 80), vague
     for n, fine in enumerate((
         "the toggle in settings.py still fails with KeyError",
         "fix line 42",
@@ -307,8 +311,12 @@ def test_a_vague_correction_gets_the_say_what_you_saw_hint(tmp_path):
         "fix the greeting, it should say Hi",
         "wrong colour, make it red",
         "change the toggle to blue",
+        # A question about fixes asks for an answer, not a fix.
+        "What problems can you fix now you are on my machine",
+        "how do I fix the build?",
     )):
         assert _send(tmp_path, records, fine, session=f"f{n}") == "", fine
+        assert not prompt_shape.is_vague_fix(fine, 80), fine
 
 
 def test_one_note_at_a_time_while_the_small_requests_keep_coming(tmp_path):
@@ -409,6 +417,64 @@ def test_a_message_resent_after_esc_before_any_reply_is_not_a_repeat_but_a_stop(
     assert "stop_loop" not in _send(tmp_path, marked, "just rename it", session="s3")
 
 
+def _failed(ago_s: float) -> dict:
+    """What Claude Code writes when a reply dies on an API error."""
+    return {
+        "type": "assistant", "timestamp": _iso(NOW - timedelta(seconds=ago_s)), "isApiErrorMessage": True,
+        "message": {"id": f"msg_f{ago_s}", "model": "<synthetic>", "role": "assistant",
+                    "usage": {"input_tokens": 0, "output_tokens": 0},
+                    "content": [{"type": "text", "text": "API Error: 529 Overloaded"}]},
+    }
+
+
+def test_sending_a_request_again_after_an_api_error_is_not_a_repeat_or_a_stop(tmp_path):
+    ask = "Refactor the payment retry logic in billing/retry.py to use exponential backoff"
+    records = [*_START, _said(ask, 600), _failed(598)]
+    assert _send(tmp_path, records, ask) == ""
+    # Three failures in a row aren't three stops either.
+    failures = [*_START, _said(ask, 600), _failed(598), _said(ask, 500), _failed(498), _said(ask, 400), _failed(398)]
+    assert _send(tmp_path, failures, ask, session="s2") == ""
+    # A reply that got through and was sent again still is a repeat.
+    answered = [*_START, _said(ask, 600), _failed(598), _said(ask, 500), _changed(480)]
+    assert _kind(_send(tmp_path, answered, ask, session="s3")) == "repeat_ask"
+
+
+@pytest.mark.parametrize("prompt", [
+    "<task-notification>\n<task-id>a1</task-id>\n<status>completed</status>\n<result>Done.\n"
+    + "".join(f"- mod{n}.py: added the docstrings\n" for n in range(12)) + "</result>\n</task-notification>",
+    "<task-notification>\n<result>" + "a long report " * 4_000 + "</result>\n</task-notification>",
+    "<scheduled-task>Check the build and fix whatever broke, then add tests, update docs and bump it</scheduled-task>",
+    'Another Claude session sent a message:\n<agent-message from="a57b4a7d930e32da8">\n[Subagent hand-back] '
+    + "".join(f"\n  - fix {n}: changed mod{n}.py and added a test" for n in range(12)) + "\n</agent-message>",
+], ids=["agent report listing files", "long agent report", "scheduled task", "subagent hand-back"])  # short: Windows caps env vars
+def test_a_message_you_didnt_type_gets_no_prompting_or_context_hint(tmp_path, prompt):
+    # A background agent's report comes back as the next message: it isn't
+    # yours, however long or list-shaped it is, and even in a big context.
+    records = [*_START, _said("fix the header", 600), _changed(580, 150_000), _said("still wrong", 300),
+               _changed(280, 150_000)]
+    path = _transcript(tmp_path, records)
+    payload = {"hook_event_name": "UserPromptSubmit", "transcript_path": path, "prompt": prompt,
+               "permission_mode": "default"}
+    assert HOOK.coaching_for({"session_id": "s1", "cwd": "/w", **payload}, ON, CATALOGUE, _config_dir(tmp_path),
+                             now=NOW) == ("", "")
+    # The same list typed by you still gets its hint.
+    typed = "Add these: " + "".join(f"\n- add a check to mod{n}.py" for n in range(6))
+    note = _coach(tmp_path, {**payload, "prompt": typed, "session_id": "s2"})
+    assert note and _kind(note) != ""
+
+
+def test_the_status_line_and_the_parser_skip_a_failed_reply_too(tmp_path):
+    from claudeglass import statusline
+
+    ask = "Refactor the payment retry logic in billing/retry.py to use exponential backoff"
+    tail = [*_START, _said(ask, 600), _failed(598), _said(ask, 500), _failed(498), _said(ask, 400), _failed(398),
+            _said(ask, 5)]
+    assert not [k for *_, k in statusline._prompt_habits(tail, 30_000, NOW) if k in ("repeat_ask", "stop_loop")]
+    path = Path(_transcript(tmp_path, tail, "parsed.jsonl"))
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    assert not any(e.detail.get("repeat") for e in result.events if e.kind.name == "HUMAN_TEXT")
+
+
 def test_the_hook_counts_steps_and_likeness_as_the_package_does():
     from claudeglass import prompt_shape
 
@@ -450,15 +516,21 @@ def test_a_long_subagent_run_gets_the_split_hint_at_your_split_point(tmp_path):
     assert _coach(tmp_path, call) == ""
     with open(agent_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps(_reply(3_000, message_id="m3")) + "\n")
-    note = _coach(tmp_path, call)
-    assert _kind(note) == "split_run" and "about 3 replies" in note and "every 3 replies" in note
+    # You get a notice; the subagent gets nothing.
+    note, notice = HOOK.coaching_for({"session_id": "s1", "cwd": "/work/app", **call}, ON, CATALOGUE, config_dir, now=NOW)
+    assert note == "" and notice == cat.COACHING_NOTICE["split_run"].format(agent="general-purpose", replies=3, every_n=3)
     state = json.loads((config_dir / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
     assert state["agents"]["abc"]["replies"] == 3
+    # Once a run, however long it goes on.
+    with open(agent_path, "a", encoding="utf-8") as handle:
+        handle.writelines(json.dumps(_reply(3_000 + n, message_id=f"m{n}")) + "\n" for n in range(10, 20))
+    assert HOOK.coaching_for({"session_id": "s1", "cwd": "/work/app", **call}, ON, CATALOGUE, config_dir,
+                             now=NOW + timedelta(hours=2)) == ("", "")
     # A summary starts the count again.
     with open(agent_path, "a", encoding="utf-8") as handle:
         handle.write(json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n")
         handle.write(json.dumps(_reply(1_000, message_id="m4")) + "\n")
-    assert _coach(tmp_path, call, now=NOW + timedelta(hours=1)) == ""
+    assert _coach(tmp_path, call, now=NOW + timedelta(hours=3)) == ""
     assert json.loads((config_dir / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))["agents"]["abc"]["replies"] == 1
 
 
@@ -571,11 +643,55 @@ def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_promp
     }
     for hint, text in cat.COACHING_TEXT.items():
         assert (cat.TIP_LABEL in text) == (hint in to_the_user), hint
-    assert set(cat.COACHING_NOTICE) == {"repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix", "big_paste"}
+    assert set(cat.COACHING_NOTICE) == {
+        "repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix", "big_paste", "split_run",
+    }
+    # split_run tells the subagent nothing.
+    assert cat.COACHING_TEXT["split_run"] == ""
     assert CATALOGUE["coaching"]["notice"] == cat.COACHING_NOTICE
     assert all(notice.startswith("⚠️ ClaudeGlass: ") for notice in cat.COACHING_NOTICE.values())
     reminder = cat.note_text(["feedback_reminder"], "main")
     assert f"{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}" in reminder
+
+
+def test_the_prompting_hints_ask_only_for_a_tip_and_never_steer_the_work():
+    # They're about how the user prompts: planning first, asking first,
+    # waiting for a go-ahead or dropping an approach changed the work.
+    steering = re.compile(
+        r"before (?:changing|you change) anything|wait for a go-ahead|don't repeat|try a different way"
+        r"|ask one short question|set out in a few lines|carry on unless",
+        re.IGNORECASE,
+    )
+    for hint in ("repeat_ask", "drip_feed", "stop_loop", "plan_first", "vague_fix"):
+        text = cat.COACHING_TEXT[hint]
+        assert not steering.search(text), hint
+        assert "changes nothing about the work" in text and cat.TIP_LABEL in text, hint
+
+
+def test_the_feedback_reminder_is_asked_for_once_a_session():
+    for tagger in cat.TAGGERS:
+        note = cat.note_text(["feedback_reminder"], "main", tagger=tagger)
+        assert "first time in this session" in note and "never again" in note, tagger
+
+
+_EMOJI = re.compile("[←-⯿\U0001f000-\U0001faff️]")
+
+
+def test_nothing_claude_reads_carries_an_emoji():
+    # Claude copies what its context shows: with a ⚠️ and a 💡 in the tip
+    # and reminder labels, it began using them as its own markers in
+    # unrelated work. The notices shown only to you never reach it.
+    everything = {*cat.LEVEL_METRIC_IDS, *cat.FEEDBACK_IDS, *cat.COACHING_IDS}
+    texts = {f"coaching {hint}": text for hint, text in cat.COACHING_TEXT.items()}
+    for scope, agent_type in (("main", ""), ("subagent", "general-purpose"), ("subagent", "Explore")):
+        for tagger in cat.TAGGERS:
+            texts[f"{scope} note ({tagger})"] = cat.note_text(everything, scope, agent_type, tagger)
+    texts["judge"] = cat.judge_text(everything)
+    for metric in cat.METRICS:
+        texts[f"{metric.id} tool note"] = cat.tool_note_text(metric.id)
+    for name, text in texts.items():
+        assert not _EMOJI.search(text), name
+    assert all(_EMOJI.search(notice) for notice in cat.COACHING_NOTICE.values())
 
 
 def test_the_notice_takes_the_same_fields_as_the_note(tmp_path):

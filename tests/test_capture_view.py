@@ -224,6 +224,18 @@ def test_roi_banner_has_no_bare_dollar_or_doubled_about_or_doubled_weekly_under_
     assert "usage limit a week" not in note.lower()
 
 
+def test_roi_in_list_price_dollars_under_a_subscription_is_still_a_week():
+    """A subscription with no usage-limit readings (the status line never
+    ran) phrases amounts in list-price dollars: without "a week" the ROI
+    read as a total beside the banner's own total since capture began."""
+    subscription = Units(billing_mode="subscription")
+    data = capture_view.view(_on(), units=subscription, use=_use(), weekly_cost=2.0, dependent_value=5.0)
+    assert (
+        "Capture cost about 2.00 USD list-price equivalent a week; suggestions that rely on it are worth "
+        "about 5.00 USD list-price equivalent a week." in data["banner"]["notes"]
+    )
+
+
 def test_on_with_no_notes_seen_says_the_hook_may_be_blocked():
     use = capture.CaptureUsage(since="2026-09-20T10:00:00+00:00")
     data = capture_view.view(_on(), units=API, use=use, started_since=5)
@@ -250,7 +262,7 @@ def test_hook_problems_are_counted_never_quoted():
 
 
 def test_missing_hook_marks_the_metrics_that_need_it():
-    spec = HookSpec(catalogue.HOOK_SCRIPT, "SubagentStart")
+    spec = HookSpec(catalogue.HOOK_SCRIPT, "SubagentStop")
     health = CaptureHookHealth(settings_path=Path("settings.json"), needed=(spec,), missing=(spec,))
     rows = _rows(capture_view.view(_on(), units=API, hooks=health))
     assert rows["result"]["needs_hook"] is True
@@ -371,3 +383,12 @@ def test_status_line_toggles_say_when_the_status_line_is_someone_elses():
     for statusline in (True, None):
         rows = _rows(capture_view.view(config, statusline=statusline))
         assert rows["feedback_note"]["statusline_note"] is None and rows["coaching_line"]["statusline_note"] is None
+
+
+def test_coaching_notes_say_what_a_note_costs_not_no_tokens():
+    """Coaching notes ask Claude for nothing, yet each note is read: the
+    Capture page said "No tokens." beside what the notes had cost."""
+    rows = _rows(capture_view.view(CaptureConfig(coaching=["coaching_notes", "coaching_line"])))
+    assert rows["coaching_notes"]["asks_claude"] is False
+    assert rows["coaching_notes"]["cost_note"] == "About 50 to 120 tokens a note, only when a hint applies."
+    assert rows["coaching_line"]["cost_note"] is None

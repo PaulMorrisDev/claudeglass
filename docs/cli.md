@@ -107,7 +107,10 @@ python -m claudeglass review claude-md
 python -m claudeglass review skills
 ```
 
-The window comes from the global flags.
+The window comes from the global flags. Without `--all-projects`, only
+one project's sessions are read, so a skill Claude never used is hidden
+in that project's `.claude/settings.local.json`, not for every project.
+`check skills` does the same.
 
 ### `serve`
 
@@ -282,8 +285,10 @@ one. Run it again once the capture window has enough data.
 ### `apply`
 
 Writes a profile, or one setting, into Claude Code's `settings.json` or
-an agent file, with a backup and an undo. The dashboard never runs this;
-its recommendation cards show the command for you to run.
+an agent file, with a backup and an undo. It explains each change, prints
+the diff and asks before writing; a file that changes while it asks (Claude
+Code writes `settings.json` too) is never overwritten. The dashboard never
+runs this; its recommendation cards show the command for you to run.
 [`profiles.md`](profiles.md#applying-a-profile) covers scopes, backups
 and what it refuses to do.
 
@@ -308,6 +313,7 @@ python -m claudeglass apply --revert 20260919T100252Z
 | `--revert TS` | Undo an earlier apply, named by the timestamp it printed. Refused if the file was edited since |
 | `--ignore-changes` | With `--revert`: restore the backup anyway |
 | `--list-backups` | List earlier applies and exit |
+| `--yes` | Write without asking. The diff is still printed. Without it, and with nobody to answer (a script), nothing is written |
 
 Restart Claude Code after a change. It reads some settings, such as the
 model and effort level, only when a session starts. A restart makes sure

@@ -504,7 +504,10 @@ function checklistRow(row) {
   var check = row.check;
   var lead = row.groups[0];
   var name = check ? CHECK_NAMES[check.id] || check.question : "Other";
-  var finding = lead ? groupTitle(lead) + (row.groups.length > 1 ? " (and " + (row.groups.length - 1) + " more)" : "") : firstSentence(check && check.summary);
+  // "more findings", not "more": a title that lists hooks or agents
+  // would read "(and 2 more)" as two more of those.
+  var others = row.groups.length - 1;
+  var finding = lead ? groupTitle(lead) + (others > 0 ? " (and " + countWord(others, "more finding", "more findings") + ")" : "") : firstSentence(check && check.summary);
   var text = el("div", { class: "check-row-text" }, [el("p", { class: "check-row-title" }, [el("strong", { text: name }), el("span", { text: finding })])]);
   if (row.state === "fix" || row.state === "look") {
     var saving = lead ? listSaving(lead) : "";

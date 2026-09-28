@@ -356,19 +356,23 @@ class ClaudeCodeCost:
     #: This tool's own per-turn pricing (``pricing.price_turn``) summed
     #: across the session's top-level transcript and every subagent
     #: transcript under it -- the same total the rest of this module
-    #: calls "local" cost -- up to ``as_of`` when there is one.
+    #: calls "local" cost -- from ``since`` up to ``as_of`` when there are.
     local_cost_usd: float = 0.0
     #: Cost-record addition (``PARSER_VERSION`` 27): when Claude Code
     #: wrote its total (``TranscriptMeta.cc_cost_as_of``). ``cost-state``
     #: is written now and then, so the local side stops here too.
     as_of: str | None = None
+    #: When the Claude Code process that total counts from started
+    #: (``TranscriptMeta.cc_cost_since``): a resumed session's total leaves
+    #: out every reply before the resume, so the local side does too.
+    since: str | None = None
     #: Claude Code's own cost by model id, and this tool's for the same
     #: span, by the same ids where the rate card knows them.
     cc_by_model: dict = field(default_factory=dict)
     local_by_model: dict = field(default_factory=dict)
-    #: Known reasons the two differ, in USD. Replies stopped mid-stream:
-    #: the tokens were used and this tool prices them, but Claude Code
-    #: leaves them out. Estimated compaction calls: both count them, the
+    #: Known reasons the two differ, in USD. Replies stopped mid-stream
+    #: before calling a tool: the tokens were used and this tool prices
+    #: them, but Claude Code leaves them out. Estimated compaction calls: both count them, the
     #: local side as an estimate. Claude Code's cost on models with no
     #: reply in any transcript (a short request for a session title, say),
     #: which no log records.
@@ -406,29 +410,32 @@ def _model_key(model: str, pricing: Pricing) -> str:
 def _stopped_replies(result: TranscriptResult) -> set[int]:
     """``id()`` of each reply stopped mid-stream: no ``stop_reason``, in a
     transcript whose other replies record one (an older Claude Code
-    records none, and then nothing can be told)."""
+    records none, and then nothing can be told), and no tool called. A
+    subagent's reply is often logged before its stream ends, with no
+    ``stop_reason``, while the tool it asked for already runs: Claude
+    Code bills that one (one real session held 298, $13)."""
     replies = [t for t in _priced_turns(result) if not t.is_synthetic]
     if not any(t.stop_reason for t in replies):
         return set()
-    return {id(t) for t in replies if not t.stop_reason}
+    return {id(t) for t in replies if not t.stop_reason and not t.tool_use_ids}
 
 
 def _local_breakdown(
-    bundle: SessionBundle, pricing: Pricing, until: datetime | None
+    bundle: SessionBundle, pricing: Pricing, until: datetime | None, since: datetime | None = None
 ) -> tuple[dict[str, float], float, float]:
-    """This tool's cost for ``bundle`` up to ``until`` (every priced turn
-    when ``None``; a turn with no readable time is kept): by model key,
-    then the stopped replies' and estimated compaction calls' share."""
+    """This tool's cost for ``bundle`` from ``since`` up to ``until`` (no
+    bound when ``None``; a turn with no readable time is kept): by model
+    key, then the stopped replies' and estimated compaction calls' share."""
     by_model: dict[str, float] = {}
     stopped = estimated = 0.0
     for tr in _transcripts_of(bundle):
         stopped_ids = _stopped_replies(tr)
         for turn in _priced_turns(tr):
             at = _parse_ts(turn.ts)
-            if until is not None and at is not None:
+            if at is not None:
                 if at.tzinfo is None:
                     at = at.replace(tzinfo=timezone.utc)
-                if at > until:
+                if (until is not None and at > until) or (since is not None and at < since):
                     continue
             cost = price_turn(turn, pricing.resolve_model(turn.model)).total
             key = _model_key(turn.model, pricing)
@@ -457,7 +464,10 @@ def claude_code_reported_costs(corpus: Corpus, pricing: Pricing) -> list[ClaudeC
         until = _parse_ts(top.meta.cc_cost_as_of)
         if until is not None and until.tzinfo is None:
             until = until.replace(tzinfo=timezone.utc)
-        by_model, stopped, estimated = _local_breakdown(bundle, pricing, until)
+        # A resumed session's total counts from the resume: the replies
+        # before it belong to an earlier process's total, never written.
+        since = _parse_ts(top.meta.cc_cost_since)
+        by_model, stopped, estimated = _local_breakdown(bundle, pricing, until, since)
         cc_by_model: dict[str, float] = {}
         for model, cost in (top.meta.cc_cost_by_model or {}).items():
             key = _model_key(model, pricing)
@@ -469,6 +479,7 @@ def claude_code_reported_costs(corpus: Corpus, pricing: Pricing) -> list[ClaudeC
                 cc_has_unknown_model=top.meta.cc_cost_has_unknown_model,
                 local_cost_usd=sum(by_model.values()),
                 as_of=top.meta.cc_cost_as_of,
+                since=top.meta.cc_cost_since,
                 cc_by_model=cc_by_model,
                 local_by_model=by_model,
                 stopped_usd=stopped,

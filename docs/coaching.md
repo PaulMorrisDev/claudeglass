@@ -18,7 +18,9 @@ claudeglass capture enable coaching_notes
 
 or on the dashboard's Setup › Capture page. They run at any capture
 level, including off, and in every session, but not in a project that
-`[capture] projects` or `exclude_projects` leaves out. Like every
+`[capture] projects` or `exclude_projects` leaves out, and never in a
+run with nobody at the screen (`claude -p` or the Agent SDK), whose
+output a script reads. Like every
 capture change, the settings.json entries the hook needs are shown and
 added only after you say yes. `capture disable coaching_notes` turns
 them off; `capture remove` turns them off too, and takes the entries
@@ -34,31 +36,38 @@ agent type's name.
 | Hint | When | What the note asks of Claude |
 |---|---|---|
 | `plan_fresh` | You approve a plan, and building it in a fresh session would drop at least 40,000 tokens of planning context. | Tell you in a tip that `/clear`, then asking Claude to carry out the saved plan, would carry that much less on every reply of the build. Then carry on. |
-| `split_run` | A subagent run passes the number of replies your own history says its type's runs are best split at (see [below](#your-own-split-points)). | If more than a step or two is left, finish the current step and end the report with what's done, what's left and the files involved, so a fresh agent can carry on. |
-| `quiet_output` | A tool result is about 8,000 tokens or more. A read already given a line limit is left alone. | Next time, ask for less: read only the lines needed, filter a command's output, narrow a search. |
+| `split_run` | A subagent run passes the number of replies your own history says its type's runs are best split at (see [below](#your-own-split-points)). | Nothing: the subagent is never told. You get a one-line notice, once a run, that runs of that type cost you less when split, so next time you can give each agent a smaller piece of the work. |
+| `quiet_output` | A tool result is about 8,000 tokens or more. A read already given a line limit is left alone. | Next time, ask for less: read only the lines needed, use a quieter flag or a filter that keeps every error line (not a bare `head` or `tail`), narrow a search. |
 | `explore_reads` | The main session has made 8 reads and searches for one message. | If more searching is needed, hand it to an Explore agent, which searches in its own context and sends back a summary. |
-| `repeat_ask` | You send much the same request as one Claude answered in the last hour (80% of its words in common, at least 4 different words). A message you stopped before any reply and sent again isn't a repeat. | Don't repeat the same approach: say in one line what probably went wrong and try differently, or ask one question. Then suggest in a tip that saying what was wrong gets a better next attempt than resending. |
-| `drip_feed` | You send your third small request in a row: short messages, each sent within 20 minutes of Claude's reply, the earlier ones each answered with a file change ("make the button bigger", "now move the logo", "and the footer too"). The words don't matter. A detailed message, a reply that changed nothing, or a longer gap starts the count again. | Make the change, then suggest in a tip that working out everything the work still needs and sending it as one message gets it done in one pass. |
-| `stop_loop` | You've stopped Claude (Esc) three times in the last 20 minutes, during a reply or before it started. | Before changing anything, say in two or three lines what it will do, and wait for a go-ahead on a large change. Then suggest plan mode (Shift+Tab), which agrees the approach before any work starts. |
-| `plan_first` | You send a request for 4 or more separate changes, 150 characters or longer, outside plan mode, before any plan was approved in the session. A message that mentions a plan is left alone. | Before changing anything, set out in a few lines how it will go about it and in what order, then carry on. Then suggest plan mode (Shift+Tab) for a job that size. |
-| `vague_fix` | A fix request of 80 characters or less that names nothing specific: no file, line, quote, error or image, and not what it should be instead ("it's broken", "doesn't work", but not "it should say Hi"). | If the problem isn't clear from the context, ask one short question before changing anything. If it is, fix it and suggest in a tip that saying what you saw and expected, or pasting the error, gets a fix first time. |
+| `repeat_ask` | You send much the same request as one Claude answered in the last hour (80% of its words in common, at least 4 different words). A message you stopped before any reply and sent again isn't a repeat, and nor is one sent again after an API error, an overload or a usage limit ended its reply. | Nothing about the work. End the reply with a tip that saying what was wrong gets a better next attempt than resending. |
+| `drip_feed` | You send your third small request in a row: short messages, each sent within 20 minutes of Claude's reply, the earlier ones each answered with a file change ("make the button bigger", "now move the logo", "and the footer too"). The words don't matter. A detailed message, a reply that changed nothing, or a longer gap starts the count again. | Nothing about the work. End the reply with a tip that working out everything the work still needs and sending it as one message gets it done in one pass. |
+| `stop_loop` | You've stopped Claude (Esc) three times in the last 20 minutes, during a reply or before it started. | Nothing about the work. End the reply with a tip suggesting plan mode (Shift+Tab), which agrees the approach before any work starts. |
+| `plan_first` | You send a request for 4 or more separate changes, 150 characters or longer, outside plan mode, before any plan was approved in the session. A message that mentions a plan is left alone. | Nothing about the work. End the reply with a tip suggesting plan mode (Shift+Tab) for a job that size. |
+| `vague_fix` | A fix request of 80 characters or less that names nothing specific: no file, line, quote, error or image, and not what it should be instead ("it's broken", "doesn't work", but not "it should say Hi"). | Nothing about the work. End the reply with a tip that saying what you saw and expected, or pasting the error, gets a fix first time. |
 | `big_paste` | You send a message of 10,000 tokens or more, such as a pasted log or file. | If most of it is a log, a file or output, suggest in a tip pasting only the part that matters, or saving it to a file and giving the path. |
 | `cache_cold` | You send a message after the prompt cache expired (5 minutes idle, or an hour when the session uses the 1-hour cache), with at least 20,000 tokens of context. | If your message starts something unrelated, say in a tip that the reply wrote the whole context again, and that `/clear` before a new task after a break avoids it. Otherwise say nothing. |
 | `clear_context` | You send a message with 100,000 tokens or more of context. | If your message starts something unrelated, say in a tip that `/clear` first would have saved re-reading it all. Otherwise say nothing. |
 
 One note at most per tool result or message: the first hint in the table
 that applies. The first four come after a tool result, the rest when you
-send a message. `split_run` shows only inside the subagent; the rest
-only in the main session, except `quiet_output`, which shows in both.
+send a message. `split_run` comes from inside a subagent run but only
+shows you a notice; the rest show only in the main session, except
+`quiet_output`, which shows in both. The prompting hints (`repeat_ask`
+to `big_paste`) are about how you prompt, not about the work, so they
+never change what Claude does: it handles the message as it would have
+and only ends its reply with the tip.
 `vague_fix` doesn't show during a run `drip_feed` has already flagged.
+A message you didn't type gets no hint: a background agent's report
+(which Claude Code hands to Claude as the next message), a scheduled
+task, a slash command's output.
 
 ## How a tip looks
 
 When a hint asks Claude to tell you something, Claude ends its reply,
-after a blank line, with a quote block starting **⚠️ ClaudeGlass tip:**,
+after a blank line, with a quote block starting **ClaudeGlass tip:**,
 so it stands apart from the work in the terminal and in the desktop app:
 
-> ⚠️ **ClaudeGlass tip:** That's 3 small changes in a row, each its
+> **ClaudeGlass tip:** That's 3 small changes in a row, each its
 > own message, and each one re-reads the whole session. Working out
 > everything the page still needs and sending it as one message gets
 > it done in one pass.
@@ -77,8 +86,13 @@ well. The other hints have no notice: whether `cache_cold` or
 `clear_context` matters depends on what your message asks, which only
 Claude can tell.
 
-The /tl-feedback reminder (`feedback_reminder`) has the same look, with
-a 💡 in place of the ⚠️.
+The /tl-feedback reminder (`feedback_reminder`) has the same look,
+labelled **ClaudeGlass:**.
+
+Nothing ClaudeGlass asks Claude to write carries an emoji. Claude copies
+what its context shows: with a ⚠️ and a 💡 in these labels, it began
+using them as markers of its own in unrelated work. The notice above is
+shown only to you and never reaches Claude, so it keeps its ⚠️.
 
 ## How your messages are read
 
@@ -105,7 +119,9 @@ you're sending and your earlier ones at the end of the transcript.
   doesn't tell the hook which permission mode you're in.
 - `vague_fix` looks for a fix or correction word in the first 200
   characters ("fix", "still", "wrong", "doesn't work", "that's not what
-  I asked").
+  I asked"). A message that opens with a question word other than "why"
+  ("what can you fix?", "how do I fix the build?") asks about fixes, not
+  for one, and doesn't count.
 
 Slash commands, stopped replies and a subagent's messages don't count.
 Nothing about your words is kept or passed on: the note says only how
@@ -116,7 +132,7 @@ The coaching line in the status line shows `drip_feed`, `repeat_ask`,
 
 ## After the fact
 
-Work habits › **How you prompt** counts the same six habits in all your
+**How you prompt**, on Work habits, counts the same six habits in all your
 sessions, whether or not coaching notes were on, with what each cost,
 its trend by week and what to try instead. Once there are coaching
 notes, **Tips Claude showed** says how often Claude passed each hint's
@@ -125,7 +141,7 @@ measured by these habits per 100 of your messages before and after.
 
 Once a hint has shown, it rests for 30 minutes in that session, unless
 what's at stake has grown one and a half times since (a context grown
-from 100,000 to 150,000 tokens, say). `split_run` rests per run.
+from 100,000 to 150,000 tokens, say). `split_run` shows once a run.
 
 ## Your own split points
 

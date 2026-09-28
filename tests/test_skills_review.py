@@ -112,6 +112,41 @@ def test_unused_skills_get_a_hide_fix_with_a_merge_prompt_and_dry_run_command(tm
     assert "skillOverrides=" in hide_all["command"] and "grill-me:user-invocable-only" in hide_all["command"]
 
 
+def test_a_review_of_one_project_hides_skills_in_that_project_only(tmp_path):
+    """Its sessions are all it saw, and a skill Claude never used there
+    may be used in another project."""
+    config_dir, project = _setup(tmp_path)
+    (project / ".claude" / "settings.local.json").write_text(
+        json.dumps({"skillOverrides": {"qa-round": "off"}}), encoding="utf-8"
+    )
+    rows = [_usage("grill-me", listed=5), _usage("dataviz", listed=5), _usage("qa-round", listed=5)]
+    data = skills_review.review(config_dir, {"skills": rows}, UNITS, PERIOD, projects=[project], only=(project,))
+    by_name = {row["name"]: row for row in data["skills"]}
+    assert by_name["qa-round"]["hidden"] == "skillOverrides sets it to off"
+    hide = by_name["dataviz"]["fixes"][0]
+    assert "--set skillOverrides=dataviz:user-invocable-only --scope project-local --project-dir ." in hide["command"]
+    assert ".claude/settings.local.json" in hide["prompt"]
+    # Your own skill's file is read in every project: no frontmatter route.
+    assert [fix["title"] for fix in by_name["grill-me"]["fixes"]] == ["Hide it from Claude, keep it in your / menu"]
+    [hide_all] = data["fixes"]
+    assert "--scope project-local" in hide_all["command"]
+    assert "hidden in that project only" in skills_review.render_markdown(data)
+
+    # Several projects, or one whose folder isn't known: nothing to hide.
+    data = skills_review.review(config_dir, {"skills": rows}, UNITS, PERIOD, projects=[project], only=())
+    assert data["fixes"] == [] and all(row["fixes"] == [] for row in data["skills"])
+    assert data["limited_text"].startswith("Only some projects were read")
+    # Every project: your user settings, as before.
+    data = skills_review.review(config_dir, {"skills": rows}, UNITS, PERIOD, projects=[project])
+    assert data["limited_text"] == "" and "--scope user" in data["fixes"][0]["command"]
+
+
+def test_a_project_slug_is_found_by_the_folder_its_sessions_ran_in(tmp_path):
+    config_dir, project = _setup(tmp_path)
+    write_jsonl(config_dir.parent / "projects" / "C--repo" / "s2.jsonl", [{"type": "user", "cwd": str(project)}])
+    assert skills_review.project_folders_for(config_dir.parent, ["C--repo", "C--gone"]) == (project,)
+
+
 def test_long_description_of_a_used_skill_gets_a_shorten_prompt(tmp_path):
     data = _review(tmp_path, [_usage("grill-me", listed=5, invoked=1, tokens=250)])
     row = next(row for row in data["skills"] if row["name"] == "grill-me")

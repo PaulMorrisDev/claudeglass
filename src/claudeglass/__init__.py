@@ -4,7 +4,7 @@ Claude Code transcripts.
 
 from __future__ import annotations
 
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 #: Bump when transcript-parsing logic changes in a way that could change
 #: results computed from a previously cached file.
@@ -200,7 +200,28 @@ __version__ = "0.10.0"
 #: ``human_ack``/``human_repeat``) and whether its reply ended on a
 #: question or showed a ClaudeGlass tip (``reply_asked``/``coach_tip``).
 #: A pre-28 digest has none of them.
-PARSER_VERSION = 28
+#:
+#: Bumped to 29: a message whose reply was an API error, an overload or a
+#: usage limit isn't an answered attempt, so sending it again isn't
+#: ``human_repeat``. A pre-29 digest counted those resends as repeats.
+#:
+#: Bumped to 30: a ``cost-state`` line with a zero total and no model in
+#: ``modelUsage`` is a blank record, not Claude Code's cost, so it no
+#: longer sets ``TranscriptMeta.cc_cost_usd``, and its ``startTime`` is
+#: kept (``cc_cost_since``). A pre-30 digest compared those sessions'
+#: local pricing against $0. A message that opens with a question word
+#: is no longer ``human_vague``.
+#:
+#: Bumped to 31: an estimated compaction call's output is twice the
+#: summary Claude Code keeps, capped at ``postTokens`` (a
+#: ``COMPACT_SUMMARY`` event now carries ``size_chars``). A pre-31 digest
+#: priced every compaction's output at ``postTokens``.
+#:
+#: Bumped to 32: a tool hook's failed run keeps the tool it ran for
+#: (``detail["tool"]``: a built-in tool's name, else ``mcp``), so the
+#: hooks section can tell a hook that has stopped failing from one that
+#: hasn't run since.
+PARSER_VERSION = 32
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

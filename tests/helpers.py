@@ -485,3 +485,26 @@ def assert_privacy_deep(obj) -> None:
 
     _walk(obj, "root", "")
     assert violations == [], violations
+
+
+#: The metrics an agent's note named before 0.11.0, when agents tagged their
+#: own reports; Explore and Plan agents weren't asked about rules or briefs.
+_OLD_AGENT_CODES = ("result", "retry", "fit", "rules", "agent_brief")
+
+
+def old_agent_note_text(ids, agent_type: str = "") -> str:
+    """The note an agent got before 0.11.0 for the metrics in ``ids``, as
+    older transcripts hold it: what the parser reads is its marker's
+    codes. ``""`` when none of them is an agent metric, as then."""
+    from claudeglass import capture_catalogue
+
+    skip = ("rules", "agent_brief") if agent_type in ("Explore", "Plan") else ()
+    codes = [code for code in _OLD_AGENT_CODES if code in set(ids) and code not in skip]
+    if not codes or agent_type in capture_catalogue.SKIP_AGENT_TYPES:
+        return ""
+    return (
+        f"{capture_catalogue.NOTE_MARKER}{capture_catalogue.NOTE_VERSION} {','.join(codes)}\n"
+        f"{capture_catalogue.NOTE_INTRO}\n"
+        "End your final report with one line, [result: done|partial|blocked key=word ...], using only these words:"
+    )
+

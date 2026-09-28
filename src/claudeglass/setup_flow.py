@@ -302,7 +302,8 @@ def _tips_question(current: CaptureConfig, *, now: datetime, stdin, stdout) -> t
         "\nSharper tips (optional)\n"
         "Claude ends each reply with a short tag saying what kind of work it was, such as "
         "[tl: task=bugfix brief=clear], so the tips fit how you work. That costs about "
-        f"{cost['session_note']} tokens when a session starts and {cost['reply_tag']} per reply, and it switches "
+        f"{cost['session_note']} tokens when a session starts and {cost['reply_tag']} per reply, plus a Claude "
+        f"Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.3f} after each subagent run, and it switches "
         f"itself off after {days} days. It also adds the /tl-feedback skill, for rating a piece of work when it's "
         "done.\n"
     )

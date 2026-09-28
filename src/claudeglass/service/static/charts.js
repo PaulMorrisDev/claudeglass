@@ -41,6 +41,9 @@ export var CHART_SPECS = {
     alt: {
       sessions: "Replies sent {span} cost {total}. With their earlier replies, the window's sessions cost {sessionsTotal}. The busiest day was {peakDay}, at {peak}.",
       firstDay: "Replies sent {span} cost {total}. That counts all of the first day, from midnight UTC; the sessions in this window cost {sessionsTotal}. The busiest day was {peakDay}, at {peak}.",
+      oneDay: "Replies sent {span} cost {total}.",
+      oneDaySessions: "Replies sent {span} cost {total}. With their earlier replies, the window's sessions cost {sessionsTotal}.",
+      oneDayFirstDay: "Replies sent {span} cost {total}. That counts the whole day from midnight UTC, not only this window; the sessions in this window cost {sessionsTotal}.",
     },
   },
   "savings-levers": {

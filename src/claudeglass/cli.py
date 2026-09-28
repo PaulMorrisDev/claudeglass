@@ -876,6 +876,9 @@ def _add_apply_args(sub: argparse.ArgumentParser) -> None:
         dest="list_backups",
         help="list previous applies (timestamp, profile, scope) and exit",
     )
+    sub.add_argument(
+        "--yes", action="store_true", help="make the change without asking (the diff is still printed)"
+    )
 
 
 def _add_claude_root_arg(sub: argparse.ArgumentParser) -> None:
@@ -1674,13 +1677,24 @@ def _cmd_review(args: argparse.Namespace) -> int:
         period = _period_phrase(window)
         context = model.context_files or {}
         if args.what == "skills":
-            print(skills_review.render_markdown(skills_review.review(config_dir, context, units, period)))
+            only = _report_only(args, model, config_dir)
+            print(skills_review.render_markdown(skills_review.review(config_dir, context, units, period, only=only)))
         else:
             review = claude_md_review.build_review(config_dir, context)
             print(claude_md_review.render_markdown(review, units, period))
         return 0
 
     return _cmd_report_like(args, {"overview"}, emit=emit)
+
+
+def _report_only(args: argparse.Namespace, model, config_dir) -> tuple[Path, ...] | None:
+    """The project folders a report was limited to (``--project``, or
+    the folder it was run in), or ``None`` for ``--all-projects``."""
+    from . import skills_review
+
+    if args.all_projects:
+        return None
+    return skills_review.project_folders_for(Path(config_dir).parent, model.meta.projects)
 
 
 def _period_phrase(window: str) -> str:
@@ -1708,6 +1722,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
             config_dir=Path(config_dir),
             effective=snapshots.effective_config_in_force(snapshot) if snapshot is not None else {},
             effective_agents=agents if isinstance(agents, dict) else {},
+            only=_report_only(args, model, config_dir),
         )
         if args.id:
             print(quick_actions.render_markdown(quick_actions.run(args.id, ctx)))
@@ -2785,6 +2800,16 @@ def _cmd_update(args: argparse.Namespace, *, runner=None) -> int:
         )
         return 2
 
+    blocked = _unwritable_scripts_folder()
+    if blocked is not None:
+        print(
+            f"claudeglass update: this Python's packages folder can be written, but not {blocked}, where pip puts "
+            "the claudeglass command, so pip would fail part way through and leave a half-removed copy. Run the "
+            "update from a terminal opened as administrator. Nothing was changed.",
+            file=sys.stderr,
+        )
+        return 1
+
     install = [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-deps", args.source]
     finish = [sys.executable, "-m", "claudeglass", "update", "--finish", *_update_finish_args(args)]
     print(f"claudeglass update: this is version {__version__}.")
@@ -2798,9 +2823,16 @@ def _cmd_update(args: argparse.Namespace, *, runner=None) -> int:
         return 0
 
     if runner(install).returncode != 0:
+        records = _install_records()
+        left = (
+            f" It left {len(records)} install records ({', '.join(records)}) in this Python's packages folder, so "
+            "'pip show claudeglass' may name the wrong version until an update succeeds."
+            if len(records) > 1
+            else ""
+        )
         print(
-            "claudeglass update: pip could not install the new version (its message is above). "
-            "Nothing else was changed.",
+            "claudeglass update: pip could not install the new version (its message is above). The dashboard and "
+            f"Claude Code's hook entries were left as they were.{left}",
             file=sys.stderr,
         )
         return 1
@@ -2814,6 +2846,55 @@ def _cmd_update(args: argparse.Namespace, *, runner=None) -> int:
     print("2. Finish with the new version:\n   " + invocation.shell_line(finish))
     sys.stdout.flush()
     return runner(finish).returncode
+
+
+def _writable(folder: str) -> bool:
+    """Whether a file can be made in ``folder``: Windows' folder
+    permissions aren't what ``os.access`` reads, so it tries one. Not
+    with ``tempfile``, which on Windows believes ``os.access`` and tries
+    new names until it runs out."""
+    import secrets
+
+    probe = os.path.join(folder, f".claudeglass-{secrets.token_hex(8)}.tmp")
+    try:
+        os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except OSError:
+        return False
+    try:
+        os.remove(probe)
+    except OSError:
+        pass
+    return True
+
+
+def _unwritable_scripts_folder() -> str | None:
+    """The folder pip puts the ``claudeglass`` command in, when this
+    Python's packages folder can be written and it can't (an install
+    whose Scripts folder only an administrator can change): pip removes
+    the old copy, fails on the command and rolls back only part of it.
+    With neither writable, pip installs for your user instead, which
+    works."""
+    import sysconfig
+
+    scripts, packages = sysconfig.get_path("scripts"), sysconfig.get_path("purelib")
+    if not (scripts and os.path.isdir(scripts) and packages and os.path.isdir(packages)):
+        return None
+    if not _writable(packages) or _writable(scripts):
+        return None
+    return scripts
+
+
+def _install_records() -> list[str]:
+    """The version in each of this tool's install records in this
+    Python's packages folder: more than one after a failed pip install."""
+    import sysconfig
+    from importlib import metadata
+
+    try:
+        found = metadata.distributions(name="claudeglass", path=[sysconfig.get_path("purelib")])
+        return sorted(dist.version for dist in found)
+    except Exception:  # only ever adds a note to a message
+        return []
 
 
 def _update_finish_args(args: argparse.Namespace) -> list[str]:
@@ -3158,6 +3239,8 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
         lines.append(f"about {rough['subagent_note']} tokens of note when a subagent starts")
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
+    if rough["reminder"]:
+        lines.append(f"about {rough['reminder']} tokens once a session, for the /tl-feedback reminder")
     if rough["report_tag"]:
         lines.append(f"about {rough['report_tag']} tokens of tag at the end of each subagent report")
     if rough["tool_note"]:
@@ -3166,6 +3249,11 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
         lines.append(
             f"a Claude Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.4f} after each of your messages, "
             "in the background"
+        )
+    if rough["agent_judge"]:
+        lines.append(
+            f"a Claude Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.4f} after each subagent run, "
+            "in the background (the agent itself is asked for nothing)"
         )
     return lines
 
@@ -3218,8 +3306,13 @@ def _scan_hook_errors(args: argparse.Namespace, config: Config, config_dir: Path
     :data:`CAPTURE_HISTORY_DAYS` days -- every hook Claude Code ran, not
     only metrics capture's own, so this runs whether or not capture is
     on."""
+    from . import hook_costs
+
     corpus = _capture_corpus(args, config, config_dir, days=CAPTURE_HISTORY_DAYS)
-    return hook_health.count_hook_errors(_flatten_corpus(corpus))
+    results = _flatten_corpus(corpus)
+    thresholds = hook_costs.HookThresholds.from_config(config.thresholds)
+    stopped = [h.label for h in hook_costs.failure_stats(results).hooks.values() if h.stopped(thresholds)]
+    return hook_health.count_hook_errors(results, stopped=stopped)
 
 
 #: "This week" for :func:`_measure_deep_wait` -- independent of
@@ -3267,11 +3360,13 @@ def _capture_estimate_lines(past, units, sample: int = 100) -> list[str]:
     return lines
 
 
-def _capture_usage_lines(use, units) -> list[str]:
-    """What capture measured since it was turned on."""
+def _capture_usage_lines(use, units, *, haiku: bool) -> list[str]:
+    """What capture measured since it was turned on. ``haiku`` is whether
+    Claude Haiku writes the main session's tags: it judges agent runs
+    either way, so a judged turn doesn't say who tagged your messages."""
     if not use.sessions and not use.subagents:
         return [
-            "No captured sessions yet: the note is added to sessions and subagents started after capture was "
+            "No captured sessions yet: capture covers sessions, and their subagent runs, started after capture was "
             "turned on."
         ]
     since = f" since {use.since[:10]}" if use.since else ""
@@ -3283,11 +3378,11 @@ def _capture_usage_lines(use, units) -> list[str]:
     ]
     if use.coverage is not None:
         reports = (
-            f" and Claude {format_cell(use.report_coverage, 'pct')} of agent reports"
+            f"; Claude Haiku judged {format_cell(use.report_coverage, 'pct')} of agent runs"
             if use.report_coverage is not None
             else ""
         )
-        who = "Claude Haiku" if use.judged else "Claude"
+        who = "Claude Haiku" if haiku else "Claude"
         lines.append(f"  {who} tagged {format_cell(use.coverage, 'pct')} of your messages{reports}")
     return lines
 
@@ -3575,6 +3670,7 @@ def _capture_prune(
 #: Why a turn got no tag from Claude Haiku, in words.
 _HAIKU_ERRORS = {
     "no_cli": "no claude command on the hook's path",
+    "no_login": "the claude command isn't signed in: run 'claude auth login'",
     "timeout": "Haiku took too long",
     "failed": "the call failed",
     "no_tag": "its answer had no tag",
@@ -3582,24 +3678,42 @@ _HAIKU_ERRORS = {
 
 
 def _haiku_lines(capture: CaptureConfig, config_dir: Path) -> list[str]:
-    """What Claude Haiku has done since capture was turned on, while it
-    writes the tags: turns asked about, tags written, why any got none,
-    and what the calls cost."""
+    """What Claude Haiku has done since capture was turned on: the main
+    session's turns while it writes the tags, and the agent runs it
+    judges whoever does. How many it was asked about, how many it
+    tagged, why any got none, and what the calls cost."""
     since = datetime.fromisoformat(capture.enabled_at) if capture.enabled_at else None
-    done = haiku_tags.summary(config_dir, since=since)
-    if not done.calls:
-        return [
-            "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
-            "change, once the hook's Stop entry is in settings.json."
-        ]
+    lines: list[str] = []
+    if capture.haiku_tags:
+        done = haiku_tags.summary(config_dir, since=since, kind="main")
+        if done.calls:
+            lines += _haiku_done_lines(done, "tagged", "turn", "No tag")
+        else:
+            lines.append(
+                "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
+                "change, once the hook's Stop entry is in settings.json."
+            )
+    if capture.is_on and capture_catalogue.agent_metric_ids(capture.active_metrics()):
+        done = haiku_tags.summary(config_dir, since=since, kind="agent")
+        if done.calls:
+            lines += _haiku_done_lines(done, "judged", "agent run", "No verdict")
+        else:
+            lines.append(
+                "Claude Haiku hasn't judged an agent run yet: it judges each subagent as it finishes, once the "
+                "hook's SubagentStop entry is in settings.json."
+            )
+    return lines
+
+
+def _haiku_done_lines(done: haiku_tags.Summary, verb: str, what: str, none: str) -> list[str]:
     per_call = f" (${done.usd_per_call:.4f} a call)" if done.usd_per_call is not None else ""
     lines = [
-        f"Claude Haiku tagged {done.tagged} of the {_plural(done.calls, 'turn')} it was asked about: "
+        f"Claude Haiku {verb} {done.tagged} of the {_plural(done.calls, what)} it was asked about: "
         f"${done.usd:.4f}{per_call}, {format_cell(done.tokens_in, 'tokens')} tokens read"
     ]
     if done.errors:
         lines.append(
-            "  No tag for "
+            f"  {none} for "
             + ", ".join(f"{count} ({_HAIKU_ERRORS.get(kind, kind)})" for kind, count in sorted(done.errors.items()))
         )
     return lines
@@ -3638,9 +3752,8 @@ def _capture_status(
             stdout.write(f"  - {line}\n")
     elif capture.is_on:
         stdout.write("It adds nothing to Claude's context at this level.\n")
-    if capture.haiku_tags:
-        for line in _haiku_lines(capture, config_dir):
-            stdout.write(f"{line}\n")
+    for line in _haiku_lines(capture, config_dir):
+        stdout.write(f"{line}\n")
     if args is not None and config is not None:
         for line in _capture_measured(capture, args=args, config=config, config_dir=config_dir):
             stdout.write(f"{line}\n")
@@ -3711,7 +3824,9 @@ def _capture_measured(capture: CaptureConfig, *, args, config: Config, config_di
     if capture.is_on:
         corpus = _capture_corpus(args, config, config_dir, since=capture.enabled_at)
         units = _report_units(corpus, rates, config, config_dir)
-        return _capture_usage_lines(capture_mod.usage(corpus, rates, since=capture.enabled_at), units)
+        return _capture_usage_lines(
+            capture_mod.usage(corpus, rates, since=capture.enabled_at), units, haiku=capture.haiku_tags
+        )
     past, units = _capture_history(args, config, config_dir)
     return _capture_estimate_lines(past, units) if past is not None else []
 
@@ -3914,10 +4029,15 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
                 "Coaching notes stay on: they don't depend on the capture level. "
                 "'claudeglass capture disable coaching_notes' turns them off.\n"
             )
-        elif hook_health.check_capture((), claude_root=claude_root, config_dir=config_dir).extra:
+        elif (left := hook_health.check_capture((), claude_root=claude_root, config_dir=config_dir).extra):
+            every_tool = any(spec.event == "PostToolUse" for spec in left)
             stdout.write(
-                "The capture hooks stay in settings.json and add nothing while capture is off. "
-                "'claudeglass capture remove' takes them out.\n"
+                "The capture hooks stay in settings.json and add nothing while capture is off"
+                + (
+                    ", though one still starts Python for about 50 ms after every shell command, read and search"
+                    if every_tool else ""
+                )
+                + ". 'claudeglass capture remove' takes them out.\n"
             )
         return 0
     if action == "remove" and skill_on:
@@ -3996,7 +4116,7 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
         elif _ask("   Remove these entries? settings.json is backed up first.", assume_yes=args.yes):
             try:
                 backup = footprint.remove_settings_entries(plan)
-            except OSError as exc:
+            except (OSError, ValueError) as exc:
                 problems += 1
                 print(f"   Could not remove them: {exc}\n")
             else:
@@ -4572,7 +4692,22 @@ def _cmd_apply(args: argparse.Namespace) -> int:
         print("Already overridden by a higher-precedence layer (writing won't change what Claude Code uses):")
         for note in plan.overridden:
             print(f"  # {note}")
-    result = apply_mod.execute(plan, config_dir=config_dir)
+    if not plan.diff_text:
+        print("No changes to apply.")
+        return 0
+    # It changes how Claude works (a model, an effort level, a context
+    # setting), at user scope for every project: shown and asked, as
+    # every settings.json change this tool makes is.
+    print()
+    print(plan.diff_text)
+    if not _ask("Apply these changes? Each file is backed up first.", assume_yes=args.yes):
+        print("Nothing changed. Run the same command with --yes to apply it without asking.")
+        return 1
+    try:
+        result = apply_mod.execute(plan, config_dir=config_dir)
+    except apply_mod.ApplyError as exc:
+        print(f"claudeglass {command}: {exc}", file=sys.stderr)
+        return 1
     print(f"Applied {plan.profile_id} ({scope}).")
     for path in result.written:
         print(f"  wrote {path}")

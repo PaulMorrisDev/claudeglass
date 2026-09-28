@@ -520,6 +520,11 @@ def test_capture_group_opens_for_a_metric_that_needs_you() -> None:
     assert "if (row.statusline_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
 
 
+def test_a_metric_row_says_what_it_costs_before_no_tokens() -> None:
+    row = _function_source(_app_js(), "renderMetricRow")
+    assert "if (!row.asks_claude) cost = row.cost_note || (" in row
+
+
 def test_a_change_marker_leads_to_its_change_on_your_changes() -> None:
     """Phase 10 review (fedd805 gaps): a change marker on a daily spend
     chart, or on Your changes' timeline, opens Your changes with ?day=,
@@ -2636,6 +2641,15 @@ def test_recommendations_and_checks_open_from_the_address() -> None:
     # An id this window doesn't have says so, instead of opening nothing.
     assert "missingNote(" in _function_source(app_js, "renderRecommendations")
     assert "missingNote(" in _function_source(app_js, "renderQuickActions")
+
+
+def test_an_overview_row_counts_its_other_findings_as_findings() -> None:
+    """The Hooks row read "backlog-reminder.ps1 and model-pin-guard.ps1
+    (and 2 more)", as if two more hooks failed; the two were other
+    findings of the same check."""
+    overview = _function_source(_app_js(), "checklistRow")
+    assert 'countWord(others, "more finding", "more findings")' in overview
+    assert '" more)"' not in overview
 
 
 # -- Phase 9: the Spend and Cache pages --------------------------------------

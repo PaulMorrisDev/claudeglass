@@ -158,6 +158,17 @@ def test_skills_check_keeps_a_skill_a_claude_code_tool_loads_out_of_the_hide_lis
     assert tip["title"] == "artifact-capabilities: needed by the Artifact tool"
 
 
+def test_skills_check_of_one_project_hides_skills_there_only(tmp_path):
+    skills = [{"name": name, "listing_tokens": 40, "listed": {"main": 5}, "listing_cost_usd": 0.5}
+              for name in ("keybindings-help", "loop")]
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={"skills": skills}, recommendations=[]))
+    ctx.only = (tmp_path,)
+    result = qa.run("skills", ctx)
+    assert "in that project only (.claude/settings.local.json)" in result["summary"]
+    assert all("--scope project-local --project-dir ." in fix["command"] for fix in result["fixes"])
+    assert not any("--scope user" in fix["command"] for fix in result["fixes"])
+
+
 def test_models_check_offers_a_fix_per_cheaper_model_with_a_dry_run_command(tmp_path):
     result = qa.run("models", _ctx(tmp_path, effective_agents={"Explore": {}}))
     assert result["status"] == "act"
@@ -359,6 +370,21 @@ def test_models_check_does_not_suggest_a_model_the_agent_did_worse_on(tmp_path):
     assert "it did worse than on claude-sonnet-5" in tip["text"]
 
 
+def test_models_check_does_not_suggest_a_model_with_mixed_results(tmp_path):
+    """Worse on some signals and better on others is no reason to
+    switch: runs on the cheaper model that didn't finish aren't made up
+    for by fewer failed tool calls."""
+    model = _full_model()
+    model.sections.append(NS(key="quality", tables=[
+        _table("quality_by_setup", [{**_MIXED, "agent_type": "Explore"}]),
+    ]))
+    result = qa.run("models", _ctx(tmp_path, model=model))
+    assert [fix["agent"] for fix in result["fixes"]] == [None]
+    [tip] = result["tips"]
+    assert tip["title"] == "Explore: haiku not suggested"
+    assert "it did worse on some signals than on claude-sonnet-5" in tip["text"]
+
+
 def test_a_project_agents_fix_edits_the_projects_agent_file(tmp_path):
     ctx = _ctx(tmp_path, model=_quality_model([{**_AGENT, "unfinished_pct": 3.0}], [_WORSE]),
                effective_agents={"claude-implementer": {"source": "project", "model": "haiku"}})
@@ -461,7 +487,7 @@ def test_quality_offers_metrics_capture_when_agents_ran_and_none_wrote_a_marker(
     assert "capture off" in explainer["How to undo it"]
 
 
-@pytest.mark.parametrize("already", ["written", "in_claude_md", "no_agents", "capture_on"])
+@pytest.mark.parametrize("already", ["written", "no_agents", "capture_on"])
 def test_quality_does_not_offer_metrics_capture_again(tmp_path, already):
     markers = [{"marker": "[result: ...]", "runs": 3 if already == "written" else 0,
                 "of_runs": 0 if already == "no_agents" else 40}]
@@ -469,16 +495,20 @@ def test_quality_does_not_offer_metrics_capture_again(tmp_path, already):
     if already == "capture_on":
         model.sections.append(_capture_table("Essentials"))
     ctx = _ctx(tmp_path, model=model)
-    if already == "in_claude_md":
-        _claude_md(f"# Rules\n\n{quality.MARKER_LINES}\n")
     assert qa.run("quality", ctx)["fixes"] == []
 
 
-def test_quality_offers_to_remove_the_older_markers_section_while_capture_is_on(tmp_path):
+@pytest.mark.parametrize("capture_on", [True, False])
+def test_quality_offers_to_remove_the_older_markers_section_whether_capture_is_on_or_not(tmp_path, capture_on):
+    # It asks every subagent to tag its report, which broke answers that had
+    # to be exact: it goes whatever capture is doing.
     model = _quality_model([{**_AGENT, "unfinished_pct": 3.0, "turn_limit_pct": 0.0}], markers=_NO_MARKERS)
-    model.sections.append(_capture_table("Standard"))
+    if capture_on:
+        model.sections.append(_capture_table("Standard"))
     _claude_md(f"# Rules\n\n{quality.MARKER_LINES}\n")
     [fix] = qa.run("quality", _ctx(tmp_path, model=model))["fixes"]
+    assert fix["title"] == "Remove the older markers section from CLAUDE.md"
+    assert "JSON only" in dict(fix["explainer"])["Why"]
     assert set(fix) == FIX_KEYS and fix["command"] is None
     assert quality.MARKER_HEADING in fix["prompt"] and "Show me the diff before saving" in fix["prompt"]
     assert fix["prompt"].endswith(PROMPT_RESTART)
@@ -608,3 +638,43 @@ def test_models_check_leaves_out_an_agent_claude_said_needed_a_larger_model(tmp_
     [tip] = result["tips"]
     assert tip["title"] == "Explore: haiku not suggested"
     assert tip["text"].endswith("but Claude said 2 of its runs needed a larger model.")
+
+
+def _hooks_report(results):
+    from claudeglass.hook_costs import RULES, HookThresholds, build_section, compute_hook_costs
+    from claudeglass.model import ReportModel
+    from claudeglass.pricing import load_pricing
+
+    report = ReportModel(sections=[build_section(compute_hook_costs(results, load_pricing()))])
+    report.recommendations = [rec for rule in RULES for rec in rule(report, HookThresholds())]
+    return report
+
+
+def test_hooks_check_leaves_a_hook_that_stopped_failing_out_of_the_fix(tmp_path):
+    from test_hook_costs import _bash_calls_later, _bash_failures, _failed, _result
+
+    turns, events = _bash_failures(20)
+    events += [_failed("other.ps1", ts="2026-09-21T11:00:00Z", hook="Stop") for _ in range(12)]
+    result = qa.run("hooks", _ctx(tmp_path, model=_hooks_report([_result(turns + _bash_calls_later(5), events)])))
+    assert result["status"] == "act"
+    assert result["summary"] == (
+        "1 of your hooks failed 12 times, so they didn't do their job. guard.ps1 stopped failing after "
+        "2026-09-20 10:20 UTC."
+    )
+    cells = {row[0]: row[3] for row in result["table"]["rows"]}
+    assert cells == {"guard.ps1": "2026-09-20 10:20 UTC (stopped failing)", "other.ps1": "2026-09-21 11:00 UTC"}
+    [fix] = result["fixes"]
+    assert "guard.ps1" not in fix["title"]
+
+
+def test_hooks_check_is_fine_once_every_failing_hook_stopped(tmp_path):
+    from test_hook_costs import _bash_calls_later, _bash_failures, _result
+
+    turns, events = _bash_failures(20)
+    result = qa.run("hooks", _ctx(tmp_path, model=_hooks_report([_result(turns + _bash_calls_later(5), events)])))
+    assert result["status"] == "ok"
+    assert result["summary"] == (
+        "Your hooks work: guard.ps1, which failed earlier in this window, stopped failing after 2026-09-20 10:20 UTC, "
+        "and none costs much in kept context or blocked calls."
+    )
+

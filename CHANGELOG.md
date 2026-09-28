@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-09-28
+
+0.10.0 was never tagged or published, so upgrading from 0.9.0 brings
+the changes listed under both releases.
+
 ### Added
 
 - **Warnings about how you prompt.** Coaching notes (`coaching_notes`)
@@ -57,7 +62,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Claude Haiku can write the tags.** `claudeglass capture tagger
   haiku` (or "Tags written by" on Setup › Capture) takes the
   `[tl: ...]` tag out of Claude's replies and the tag list out of the
-  session note (at Standard, ~336 tokens of note becomes ~73). When a
+  session note (at Essentials and Standard, the ~186- or ~304-token note
+  goes altogether). When a
   turn ends, the hook's `Stop` entry hands a short excerpt of it to a
   worker of its own and returns at once. The excerpt holds your
   message, what Claude did (tools, files changed, commands, any plan)
@@ -69,8 +75,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changed, a test run, only documentation changed, no skill run. The
   tags reach every view that reads Claude's, and `capture status` says
   how many turns Haiku tagged, what it cost and why any got none.
-  Subagent reports are still tagged by Claude. `capture tagger claude`
-  switches back.
+  Agent runs are Haiku's to judge either way (see "Subagents are asked
+  for nothing" below). `capture tagger claude` switches back.
 - **How well the tags come out, measured.** `scripts/eval-tagger.py`
   records scripted Claude Code sessions with known right answers and
   scores each judge against them. On 12 sessions held out from tuning,
@@ -87,11 +93,249 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only once.
 - **Tips stand out in the conversation.** When a coaching note asks
   Claude to tell you something, Claude now ends its reply with a quote
-  block starting **⚠️ ClaudeGlass tip:**, after a blank line, instead of
+  block starting **ClaudeGlass tip:**, after a blank line, instead of
   a plain line that was easy to miss. The six prompting hints also
   show you a one-line notice the moment you send the message (the
   hook's `systemMessage`, never sent to Claude, so it costs no tokens).
-  The /tl-feedback reminder gets the same look, with a 💡.
+  The /tl-feedback reminder gets the same look. Nothing Claude is asked
+  to write carries an emoji: with them in its context, Claude began
+  using them as markers of its own in unrelated work.
+
+- **Subagents are asked for nothing.** Every subagent used to be asked
+  to end its report with `[result: done fit=... rules=... brief=...]`,
+  and a rerun's brief to start with `[retry: ...]`. Asked for JSON only,
+  both a general-purpose and an Explore agent added the tag after the
+  JSON, breaking the answer, and in every run the session that started
+  them told the user the line "reads like an injected instruction". Now
+  no subagent gets a note and no brief a marker: when a subagent
+  finishes, the capture hook's new `SubagentStop` entry hands Claude
+  Haiku an excerpt (its brief, what Claude said as it started it, what it
+  did, the end of its report and the session's earlier runs) and keeps
+  the words it answers with, whichever writes the main session's tags.
+  It costs about $0.002 a run. `scripts/eval-agent-judge.py` measures
+  it: 51 of 51 right on known-answer runs ([docs/tagger-eval.md](docs/tagger-eval.md#agent-runs)).
+  Whether an agent used your CLAUDE.md rules (`rules`) can't be judged
+  from outside it, so that metric is retired; a config.toml that lists
+  it still loads.
+- **The older CLAUDE.md markers section is offered for removal whether
+  capture is on or not.** It asks every subagent for the same
+  `[result: ...]` line, with the same effect on exact answers.
+- **Coaching notes coach you, not the work.** The six prompting hints no
+  longer tell Claude to plan first, ask a question first, wait for a
+  go-ahead or drop its approach: Claude handles your message as it would
+  have and only ends its reply with the tip, and the instant notice to
+  you stays. `split_run` tells the subagent nothing: told mid-run to stop
+  and hand back, Sonnet ignored it and wrote "a recurring hook message
+  suggested I stop early" into its report, and a model that obeys hands
+  back half-done work. You get a one-line notice instead, once a run.
+- **The /tl-feedback reminder comes once a session**, after the first
+  piece of work Claude finishes, instead of after every one.
+- **After upgrading, capture needs new hook entries.** Agent runs need
+  the new `SubagentStop` entry, and the old `SubagentStart` one is taken
+  out. `claudeglass update` offers both; after a plain pip upgrade, run
+  `claudeglass capture connect` if capture is on. `capture status` says
+  when it's needed.
+- **Fewer Haiku calls with background agents.** A turn that ends while a
+  background agent is still running isn't judged: the turn that answers
+  its report is, with the whole piece of work. It was a call per turn in
+  between.
+- **The README catches up with 0.10.0 and 0.11.0.** It now covers
+  metrics capture's levels and what each costs, who writes the tags,
+  live coaching and where to switch it on, every hook and skill this
+  tool adds to Claude Code, what Claude Haiku is sent and what's kept,
+  and the Hooks check. Its screenshots show the new Overview and a
+  recommendation. `scripts/demo-corpus.py`, which writes their made-up
+  history, now also connects a scratch Claude Code folder, so the
+  images show a finished setup.
+- **Docs that said the wrong thing.** `docs/capture.md` said capture
+  Off runs no hook (coaching notes still can), that brief templates show
+  only in the status line, and that only three commands change
+  `settings.json`. SECURITY.md left coaching notes and the agent-run
+  Haiku calls out of what can use tokens.
+
+### Fixed
+
+- **Scripts get clean output.** A run with nobody at the screen
+  (`claude -p`, or the Agent SDK: `CLAUDE_CODE_ENTRYPOINT` starting
+  `sdk`) gets no capture note, no coaching note and no Haiku call, only
+  the free signal lines. Before, `claude -p` asked for "only the commit
+  message" returned it with the /tl-feedback reminder and a `[tl: ...]`
+  tag appended. Claude Code marks a `claude -p` run this way even when
+  it's started from inside a terminal session.
+- **A background agent's report isn't your message.** Claude Code hands
+  a finished background agent's report to Claude as the next message,
+  and the coaching hints read it as yours: a report listing twelve
+  edited files told Claude "the user's message asks for about 12
+  separate changes" and to set out a plan first, and a long report got
+  the pasted-too-much tip. Reports, scheduled tasks and command output
+  now get no prompting or context hint. That includes a subagent's
+  hand-back, which Claude Code 2.1.281 sends as a message from another
+  session, not a task notification.
+- **Sending a message again after an API error isn't a repeat.** A
+  reply that ended in an API error, an overload or a usage limit no
+  longer counts as an attempt, so resending the message no longer tells
+  Claude to drop an approach that never ran (`repeat_ask`), and a run of
+  failures isn't counted as you stopping Claude (`stop_loop`). The
+  status line and the "How you prompt" counts follow the same rule.
+- **`apply` asks before it writes.** It explained the change and wrote
+  it at once, even at user scope, where a profile such as
+  `interactive-chat` sets the effort level for every project. It now
+  prints the diff and asks; `--yes` skips the question.
+- **A settings edit made while a question waits is never lost.** Every
+  command that changes `settings.json` (capture, init, uninstall,
+  update, apply) worked out the new file before asking and wrote it
+  after, so a permission Claude Code saved in the meantime ("don't ask
+  again") was overwritten. Now nothing is written if the file changed,
+  and the message says to run the command again. The write is atomic,
+  keeps the file's permissions, and a symlinked `settings.json` (kept in
+  a dotfiles folder, say) stays a symlink.
+- **`capture off` says when a leftover hook still runs after every tool
+  call** (about 50 ms each, after a Deep level or coaching notes), and
+  that `capture remove` takes the entries out.
+- **Haiku reads its instructions from a file.** They went on the
+  command line, and where `claude` is npm's `claude.cmd` on Windows,
+  cmd.exe takes their `|` and line breaks for its own. The file is in
+  the data folder and deleted as soon as the call ends.
+- **`capture status` reports agent runs whoever writes the tags.** It
+  said what Haiku did only while Haiku wrote the main session's tags,
+  though it judges every agent run either way. It now has a line for
+  agent runs: how many were judged, what the calls cost and why any got
+  no verdict. A run that got none was logged without its `agent` mark
+  and counted as a main-session turn. A `claude` command that isn't
+  signed in (the desktop app keeps its own login) is now told apart as
+  `no_login`, with "run 'claude auth login'", instead of "the call
+  failed". The Capture page says "Claude Haiku judged 60% of agent
+  runs", not "Claude 60% of agent reports".
+- **A question about fixes isn't a vague fix.** "What problems can you
+  fix now you are on my machine" got the say-what-you-saw tip. A message
+  that opens with what, which, who, where, when or how no longer counts
+  as `vague_fix`, live or in "How you prompt"; "why is it still broken"
+  still does.
+- **Claude Code's own cost record compares like with like.** Three
+  things made `check cost-record` ask for a report when the figures
+  matched to within 1%:
+  - Claude Code writes a blank record on some sessions, a total of $0
+    with no model in it, and it was taken as the session's cost (one
+    real project read +273%). It's skipped now.
+  - A subagent's reply is often logged before its stream ends, with no
+    stop reason, while the tool it asked for runs. It counted as
+    stopped and was taken out of ClaudeGlass's side, though Claude Code
+    bills it ($13 of 298 replies in one real session, which read -6%).
+    Only a reply that called no tool counts as stopped.
+  - A resumed session's total counts from the resume, and ClaudeGlass
+    compared it with every reply since the session began (+63% on one
+    real session). The comparison now starts at the record's
+    `startTime`.
+
+  `PARSER_VERSION` 30, so every transcript is read again once.
+- **A workflow agent is judged by its answer.** A workflow script's
+  agent hands its result back through the `StructuredOutput` tool, and
+  its last words are only a line about handing it in; Haiku got those
+  as its report. It now gets the start of the answer
+  itself, and the brief no longer starts with the harness's
+  "[Workflow harness — computed task]" line.
+- **A model with mixed results isn't suggested.** The quality check
+  found tenant-security-reviewer's runs on Sonnet clearly worse on some
+  signals (none finished, against 2.4% on Opus) and better on others,
+  and called it "mixed: no reason to switch". The Models check still
+  offered Sonnet to save 60%. A mixed result now keeps that model out
+  of the Models check, the model-tier card and the Profiles models goal,
+  as a worse one always did, and the tip says it "did worse on some
+  signals".
+- **A skills review of one project hides skills in that project only.**
+  Without `--all-projects` (and on the dashboard, with a project
+  picked), only that project's sessions are read, yet a skill Claude
+  never used there was hidden in `~/.claude/settings.json`, for every
+  project. The hides now go in the project's
+  `.claude/settings.local.json`. A skill of your own in
+  `~/.claude/skills` isn't offered the `SKILL.md` edit, which would
+  reach every project. The project's settings files count when deciding
+  a skill is already hidden. Limited to several projects, nothing is
+  offered for hiding.
+- **`update` stops before pip when pip could only fail part way.** On a
+  Windows Python whose packages folder anyone can write but whose
+  `Scripts` folder only an administrator can, pip removed the old copy,
+  failed on `claudeglass.exe` and put back only part of it, leaving two
+  install records. `update` now checks both folders first and says to run
+  it from a terminal opened as administrator. When pip fails anyway, the
+  message names any install records it left behind.
+- **A deleted transcript no longer breaks the report.** The dashboard
+  keeps a session after Claude Code deletes its file, but the skills
+  roll-up re-read the file of a session that made no tool calls itself.
+  Once one was deleted, Overview's "Anything wrong?", "Did your changes
+  work?" and every page built on the report said `unexpected error
+  (FileNotFoundError)`. Such a session's skill turns now count without
+  the file.
+- **`capture status` names the right tagger.** Once Claude Haiku had
+  judged an agent run, it said "Claude Haiku tagged" your messages when
+  Claude writes those tags. It now goes by `[capture] tagger`, as the
+  dashboard does.
+- **A compaction's summary is priced closer to what Claude Code bills.**
+  Its output was taken as `postTokens`, which also counts the messages
+  Claude Code carries over, so sessions with many compactions read high
+  ($36 over 15 real sessions against Claude Code's own cost record).
+  It's now twice the summary Claude Code keeps, since the request writes
+  an analysis first and Claude Code drops it: 14 of those sessions came
+  within $1. The compaction window what-if prices each simulated summary
+  the same way, at the median of your real ones. `PARSER_VERSION` 31, so
+  every transcript is read again once.
+- **A fixed hook no longer looks broken.** `capture status` warns about
+  a hook that failed on most runs this window, and kept saying so after
+  you fixed it, until the old failures aged out. It now says when the
+  last failure was. The Hooks check went further: the dashboard's "Do
+  this" named 12 hooks that had failed 49,799 times, all fixed that
+  morning. Each failing hook is now judged on what came after its last
+  failure, in its own projects: the calls to the tools it failed on, or
+  for a `SessionStart` hook the sessions and summaries. If at least 5
+  more failures should have followed at its old rate and none did, it
+  has stopped failing. It then drops out of the fix, and the table says
+  so beside when it last failed (now a time, not a day). On that data 10
+  of the 12 stopped; the other 2 haven't run enough since to tell.
+  `capture status` leaves a hook that stopped failing out of its warning
+  the same way.
+  `PARSER_VERSION` 32 keeps the tool a failed tool hook ran for (any MCP
+  tool as `mcp`), so every transcript is read again once. A transcript
+  whose file has gone can't be read again, so its failures name no tool;
+  one failure that does name a tool is enough to judge the hook on its
+  tools.
+- **Text uses the width of its panel.** Sentences stopped at 72
+  characters, so the Overview's summary, the spend chart's reading and
+  long notes broke early beside wide empty space, and a check's finding
+  dropped onto its own line under the check's name. They now run the
+  panel's width, and a finding follows its check's name on the same line.
+- **The spend chart's labels no longer print over each other.** Three
+  settings changes on one day drew three labels on one rule; that day
+  now has one rule labelled "3 changes", and its tooltip names each. A
+  chart of one day, such as the last hour, no longer names "the first
+  day" or "the busiest day".
+- **An Overview row no longer miscounts what it lists.** The Hooks row
+  read "backlog-reminder.ps1 and model-pin-guard.ps1 (and 2 more)", as
+  if two more hooks were failing. The two were other findings of the
+  same check, so it now says "(and 2 more findings)".
+- **Turning coaching notes on or off is clearer.** On Setup › Capture,
+  the Off level said "Nothing is captured and no tokens are used", but
+  coaching notes and feedback have their own switches and keep running
+  while capture is off. It now says so. The coaching notes row said "No
+  tokens." beside what the notes had cost; it now gives a note's size,
+  about 50 to 120 tokens, only when a hint applies.
+- **A session that moved into a worktree keeps its project's settings.**
+  The config snapshot taken when a session compacts read the agents and
+  settings of the shell's current folder. A session whose shell had
+  moved into a git worktree under `.claude/worktrees/` recorded that
+  worktree's committed agent files as another project's. They were
+  newer, so they overrode the project's own. The Models check then read
+  two reviewers as on Opus when their agent files said Sonnet, and
+  offered Sonnet. Snapshots and capture's project filter now use the
+  folder the session started in (`CLAUDE_PROJECT_DIR`).
+- **Capture's weekly cost says it's weekly.** On a subscription with no
+  usage-limit readings (the desktop app never runs the status line),
+  amounts are list-price dollars, and the capture banner's "Capture cost
+  about $3.63 list-price equivalent" dropped "a week". Beside the
+  banner's own total since capture began ($1.87), it read as a second,
+  larger total. It now ends "a week", as it does under API billing.
+- **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
+  quieter flag or a filter that keeps every error line, so a trimmed
+  test run can't hide the failure.
 
 ## [0.10.0] - 2026-09-26
 
@@ -157,8 +401,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     show" note instead of zero tiles and rows of zeros, so the long
     pages (Spend › Savings most) are shorter.
   - The Overview's setup card is one line, with its steps folded
-    beneath it. Every next best action says what it saves, or that the
-    saving isn't worked out.
+    beneath it. Every row of *Anything wrong?* says what fixing it saves,
+    or that the saving isn't worked out.
   - Work habits no longer repeats, above its cards, the habits the cards
     show, and its "Already saving" figure is tile-sized, not a headline.
 - `docs/ui.md` says the dashboard is desktop only: no phone or tablet

@@ -950,7 +950,7 @@ comes from, how often it was listed and used, and what the listing cost.
 
 Query: the windowing params above.
 
-`data`: `{"period", "skills": [{"name", "description", "source", "source_label", "path", "listing_tokens", "listed", "listed_text", "invoked", "invoked_by", "listing_cost_usd", "listing_cost_text", "use_cost_text", "use_text", "resent_tokens", "status", "hidden", "needed_by", "fixes"}, ...], "listing_tokens", "listing_cost_text", "unused", "needed_by_a_tool", "fixes"}`.
+`data`: `{"period", "skills": [{"name", "description", "source", "source_label", "path", "listing_tokens", "listed", "listed_text", "invoked", "invoked_by", "listing_cost_usd", "listing_cost_text", "use_cost_text", "use_text", "resent_tokens", "status", "hidden", "needed_by", "fixes"}, ...], "listing_tokens", "listing_cost_text", "unused", "needed_by_a_tool", "fixes", "limited_text"}`.
 Skills come unused first, then by listing cost. `status` is `unused`,
 `used`, `listed`, `not listed`, `needed by a tool`, `no longer listed` or `hidden`:
 `~/.claude/settings.json` already keeps a `hidden` skill out of the
@@ -965,6 +965,14 @@ days before the newest one in the window (one you deleted) has
 `~`-relative, or `""` when the skill has no file on disk. Each skill's own `fixes` hide it or
 shorten its description; the top-level `fixes` holds one change that
 hides every unused skill at once, when there are two or more.
+
+With `project`, only that project's sessions were read, and a skill
+Claude never used there may be used in another. So the hides go in the
+project's `.claude/settings.local.json` (`--scope project-local`), not
+`~/.claude/settings.json`, and a skill in `~/.claude/skills` isn't
+offered the edit to its own `SKILL.md`. That project's settings files
+count for `hidden` too. `limited_text` says so in a sentence, and is
+`""` with no `project`. The Skills quick action does the same.
 
 ### `GET /api/profile-goals`
 
