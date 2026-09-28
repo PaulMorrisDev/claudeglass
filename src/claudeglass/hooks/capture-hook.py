@@ -194,6 +194,25 @@ def load_config(config_dir: Path) -> dict:
     return tomllib.loads(text)
 
 
+def project_dir(payload: dict) -> str | None:
+    """The folder the session started in: ``CLAUDE_PROJECT_DIR``, which
+    Claude Code sets for every hook, else the payload's ``cwd``. ``cwd`` is
+    the shell's folder now, so a session that ran ``cd`` into a worktree
+    would otherwise be filtered as that worktree's project. Inside the
+    project folder, ``cwd``'s own spelling of it is kept (Windows paths
+    differ in case), so the slug matches the one ``cwd`` gave."""
+    cwd = payload.get("cwd")
+    cwd = cwd if isinstance(cwd, str) and cwd else None
+    project = (os.environ.get("CLAUDE_PROJECT_DIR") or "").rstrip("\\/")
+    if not project:
+        return cwd
+    if cwd:
+        folded, root = os.path.normcase(cwd), os.path.normcase(project)
+        if folded == root or folded.startswith(root.rstrip(os.sep) + os.sep):
+            return cwd[: len(project)]
+    return project
+
+
 def slug_for(cwd: str) -> str:
     project_dir_name = os.environ.get("CLAUDE_CODE_PROJECT_DIR_NAME")
     if project_dir_name:
@@ -378,8 +397,8 @@ def _capture_for(payload: dict, config: dict, now: datetime) -> dict | None:
             return None
     if not sampled_in(str(payload.get("session_id") or ""), int(capture.get("sample", 100))):
         return None
-    cwd = payload.get("cwd")
-    if isinstance(cwd, str) and cwd:
+    cwd = project_dir(payload)
+    if cwd:
         exclude = config.get("exclude_projects", [])
         if not project_allowed(slug_for(cwd), capture.get("projects", []), exclude if isinstance(exclude, list) else []):
             return None
@@ -447,8 +466,8 @@ def _coaching_applies(payload: dict, config: dict) -> bool:
     if not coaching_on(config):
         return False
     capture = config["capture"]
-    cwd = payload.get("cwd")
-    if isinstance(cwd, str) and cwd:
+    cwd = project_dir(payload)
+    if cwd:
         exclude = config.get("exclude_projects", [])
         projects = capture.get("projects", [])
         return project_allowed(

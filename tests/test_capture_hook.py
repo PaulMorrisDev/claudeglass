@@ -182,6 +182,26 @@ def test_a_skipped_project_gets_nothing(tmp_path):
     assert _note(left_out, _start(cwd="/tmp/scratch")) == ""
 
 
+def test_the_project_is_the_folder_the_session_started_in(monkeypatch):
+    """The payload's ``cwd`` follows the shell: a session that ran ``cd``
+    into a worktree or another folder is still its project's session."""
+    config = {"capture": {"level": "essentials", "projects": ["client-a"]}}
+    now = datetime.now(timezone.utc)
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/work/client-a")
+    assert HOOK._capture_for(_start(cwd="/tmp/elsewhere"), config, now) is not None
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", "/work/personal")
+    assert HOOK._capture_for(_start(cwd="/work/client-a/.claude/worktrees/w1"), config, now) is None
+    monkeypatch.delenv("CLAUDE_PROJECT_DIR")
+    assert HOOK._capture_for(_start(cwd="/work/client-a/api"), config, now) is not None
+
+
+def test_the_project_keeps_the_payloads_spelling_inside_it(monkeypatch):
+    monkeypatch.setenv("CLAUDE_PROJECT_DIR", os.path.normcase("/work/App"))
+    assert HOOK.project_dir({"cwd": "/work/App/sub"}) == "/work/App"
+    assert HOOK.project_dir({"cwd": "/work/Apple"}) == os.path.normcase("/work/App")
+    assert HOOK.project_dir({}) == os.path.normcase("/work/App")
+
+
 def test_a_bad_pattern_is_skipped_and_the_rest_still_apply(tmp_path):
     """SEC-P5: ``config.toml`` isn't only ever written by ClaudeGlass's own
     validated ``write_config_values`` -- it can be hand-edited, or come

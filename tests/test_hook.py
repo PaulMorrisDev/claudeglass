@@ -910,6 +910,28 @@ def test_project_slug_honours_project_dir_name_env_override(home, project):
     assert snapshot["project_slug"] == hook._redact_slug("my-fixed-slug")
 
 
+def test_the_project_is_claude_project_dir_not_the_shells_folder(home, project):
+    """A session whose shell ran ``cd`` into a worktree before compacting
+    sends that folder as ``cwd``. The snapshot must still read the
+    project's own agents, not the worktree's committed copies."""
+    hook = _load_hook_module()
+    config_dir = home / ".claude" / "claudeglass"
+    worktree = project / ".claude" / "worktrees" / "w1"
+    for folder, model in ((project, "sonnet"), (worktree, "opus")):
+        (folder / ".claude" / "agents").mkdir(parents=True)
+        (folder / ".claude" / "agents" / "reviewer.md").write_text(
+            f"---\nname: reviewer\ndescription: Reviews.\nmodel: {model}\n---\n", encoding="utf-8"
+        )
+    stdin = json.dumps({"session_id": "s", "cwd": str(worktree), "source": "compact"})
+    result = _run_hook(
+        config_dir=config_dir, cwd=None, stdin_text=stdin, extra_env={"CLAUDE_PROJECT_DIR": str(project)}
+    )
+    assert result.returncode == 0, result.stderr
+    snapshot = _latest_snapshot(config_dir)
+    assert snapshot["effective_agents"]["reviewer"]["model"] == "sonnet"
+    assert snapshot["project_slug"] == hook._redact_slug(hook._project_slug(str(project)))
+
+
 # -- schema 2: settings layers / effective config / provenance --------------
 
 

@@ -266,6 +266,15 @@ the changes listed under both releases.
   a hook that failed on most runs this window, and kept saying so after
   you fixed it, until the old failures aged out. It now says when the
   last failure was.
+- **A session that moved into a worktree keeps its project's settings.**
+  The config snapshot taken when a session compacts read the agents and
+  settings of the shell's current folder. A session whose shell had
+  moved into a git worktree under `.claude/worktrees/` recorded that
+  worktree's committed agent files as another project's. They were
+  newer, so they overrode the project's own. The Models check then read
+  two reviewers as on Opus when their agent files said Sonnet, and
+  offered Sonnet. Snapshots and capture's project filter now use the
+  folder the session started in (`CLAUDE_PROJECT_DIR`).
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.
