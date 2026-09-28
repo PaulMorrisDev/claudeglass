@@ -8,9 +8,13 @@ writes that rebuilt expired context, summaries per session, the context
 at session start, and, for a change to one agent, that agent's cost and
 start-up context per spawn. "Before" is the sessions started in the
 :data:`LOOKBACK_DAYS` before the change (and after the change before
-it); "after" is those started from the change until the next one. A
-change made in one project (``ChangePoint.project``) is judged on that
-project's sessions only, and only changes that apply there bound it.
+it); "after" is those started from the change until the next one. Two
+changes with fewer than :data:`MIN_SESSIONS` sessions between them
+share their before and after rather than cut each other's to too few
+for good: too few sessions ran with one and not the other to judge
+either alone, so each is read with the other. A change made in one
+project (``ChangePoint.project``) is judged on that project's sessions
+only, and only changes that apply there bound it.
 
 Sessions differ in size and kind of work, so a difference is a signal,
 not proof; with fewer than :data:`MIN_SESSIONS` on either side there is
@@ -69,7 +73,8 @@ LOOKBACK_DAYS = 14
 #: A change smaller than this (either way) reads as "about the same".
 NOISE_PCT = 5.0
 #: Changes this close together (one apply writing several files, say)
-#: share their before and after instead of cutting each other's short.
+#: share their before and after instead of cutting each other's short,
+#: as do changes with fewer than MIN_SESSIONS sessions between them.
 TOGETHER = timedelta(minutes=10)
 #: Two-sided significance threshold for the ratio test (see module docstring).
 ALPHA = quality.ALPHA
@@ -555,14 +560,35 @@ def _overlap(a: ChangePoint, b: ChangePoint) -> bool:
     return not a.project or not b.project or a.project == b.project
 
 
-def neighbours(points: list[ChangePoint], point: ChangePoint) -> tuple[ChangePoint | None, ChangePoint | None]:
-    """The nearest earlier and later change outside :data:`TOGETHER` of
-    ``point`` that applies in a project in common with it: the changes
-    that bound its before and after."""
+def _apart(earlier: ChangePoint, later: ChangePoint, sessions: list[SessionFacts] | None) -> bool:
+    """Whether two changes are far enough apart to judge each on its own:
+    more than :data:`TOGETHER` apart and, given ``sessions``, with at
+    least :data:`MIN_SESSIONS` sessions they both apply to started in
+    between. With fewer, cutting one's after and the other's before at
+    each other would leave both too few sessions for good (nothing new
+    can start in between), so they share their before and after instead."""
+    if later.ts - earlier.ts <= TOGETHER:
+        return False
+    if sessions is None:
+        return True
+    between = sum(
+        1
+        for s in sessions
+        if earlier.ts <= s.start < later.ts and applies_to(earlier, s.project) and applies_to(later, s.project)
+    )
+    return between >= MIN_SESSIONS
+
+
+def neighbours(
+    points: list[ChangePoint], point: ChangePoint, sessions: list[SessionFacts] | None = None
+) -> tuple[ChangePoint | None, ChangePoint | None]:
+    """The nearest earlier and later change that applies in a project in
+    common with ``point`` and is :func:`_apart` from it: the changes that
+    bound its before and after."""
     earlier = [p for p in points if p.ts < point.ts and _overlap(p, point)]
     later = [p for p in points if p.ts > point.ts and _overlap(p, point)]
-    previous = next((p for p in reversed(earlier) if point.ts - p.ts > TOGETHER), None)
-    following = next((p for p in later if p.ts - point.ts > TOGETHER), None)
+    previous = next((p for p in reversed(earlier) if _apart(p, point, sessions)), None)
+    following = next((p for p in later if _apart(point, p, sessions)), None)
     return previous, following
 
 
@@ -604,7 +630,10 @@ def _verdict(rows: list[dict], before: int, after: int, enough: bool) -> str:
                 f"Too few sessions since the change to compare yet: {after} so far. "
                 f"Check back after {MIN_SESSIONS}."
             )
-        return f"Too few sessions before the change to compare: {before}."
+        return (
+            f"Too few sessions before the change to compare: {before} of the {MIN_SESSIONS} needed. "
+            "Only sessions started before it count here."
+        )
     lead = next((row for row in rows if row["change_pct"] is not None), None)
     if lead is None:
         return "No data on the measures this change should move."
@@ -621,11 +650,12 @@ def impact(
     points: list[ChangePoint], sessions: list[SessionFacts], units: Units, *, limit: int = 10, without=None
 ) -> list[dict]:
     """Newest change first, at most ``limit``. A change made within
-    :data:`TOGETHER` of another doesn't bound its before or after.
+    :data:`TOGETHER` of another, or with fewer than :data:`MIN_SESSIONS`
+    sessions between them, doesn't bound its before or after.
     ``without`` is passed to :func:`compare`."""
     out = []
     for point in reversed(points):
-        previous, following = neighbours(points, point)
+        previous, following = neighbours(points, point, sessions)
         out.append(compare(point, sessions, units, previous=previous, following=following, without=without))
         if len(out) >= limit:
             break

@@ -25,7 +25,9 @@ Method, in full (see also ``docs/backtest.md``):
    :func:`impact.compare`'s own windowing: up to :data:`impact.LOOKBACK_DAYS`
    before the change (or back to the previous change point in the same
    project's chain, if that's sooner), and from the change until the
-   *next* change point after it (or now, if there isn't one yet).
+   *next* change point after it (or now, if there isn't one yet). A
+   change point with fewer than :data:`impact.MIN_SESSIONS` sessions
+   between it and this one doesn't bound either (:func:`impact.neighbours`).
 3. **Measure.** The dollar quantity a prediction estimated is always
    either the whole session's cost (a main-session-level setting) or one
    agent's cost per spawn (an agent-scoped setting) -- the same two
@@ -213,7 +215,7 @@ def judge_predictions(
             continue
         # impact's own bounds and project, so a back-tested window and an
         # impact comparison of the same change never disagree.
-        previous, following = impact.neighbours(points, point)
+        previous, following = impact.neighbours(points, point, sessions)
         before, after = impact.sides(point, sessions, previous=previous, following=following, now=now)
         exact = _exact_saving(prediction, point, before, after, bundles, pricing)
         result = _judge_row(prediction, before, after, units, exact)
