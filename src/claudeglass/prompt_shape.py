@@ -21,6 +21,7 @@ from .capture_catalogue import (
     FIX_PATTERN,
     ITEM_SEPARATOR_PATTERN,
     LIST_ITEM_PATTERN,
+    QUESTION_PATTERN,
     SENTENCE_END_PATTERN,
     SPECIFIC_PATTERN,
 )
@@ -38,6 +39,7 @@ _ACK_RE = re.compile(ACK_PATTERN, re.IGNORECASE)
 _FIX_RE = re.compile(FIX_PATTERN, re.IGNORECASE)
 _CORRECTION_RE = re.compile(CORRECTION_PATTERN, re.IGNORECASE)
 _SPECIFIC_RE = re.compile(SPECIFIC_PATTERN)
+_QUESTION_RE = re.compile(QUESTION_PATTERN, re.IGNORECASE)
 
 
 def request_steps(text: str) -> int:
@@ -83,7 +85,13 @@ def is_ack(text: str) -> bool:
 
 def is_vague_fix(text: str, max_chars: int) -> bool:
     """A fix request of ``max_chars`` or less that names nothing specific
-    and doesn't say what it should be instead ("it's broken")."""
+    and doesn't say what it should be instead ("it's broken"), and isn't
+    a question about fixes ("what can you fix?")."""
     head = text[:CORRECTION_SCAN_CHARS]
     asks_fix = _FIX_RE.search(head) or _CORRECTION_RE.search(head)
-    return bool(asks_fix) and len(text.strip()) <= max_chars and not _SPECIFIC_RE.search(text)
+    return (
+        bool(asks_fix)
+        and len(text.strip()) <= max_chars
+        and not _SPECIFIC_RE.search(text)
+        and not _QUESTION_RE.match(text)
+    )

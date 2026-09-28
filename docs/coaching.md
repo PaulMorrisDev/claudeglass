@@ -119,7 +119,9 @@ you're sending and your earlier ones at the end of the transcript.
   doesn't tell the hook which permission mode you're in.
 - `vague_fix` looks for a fix or correction word in the first 200
   characters ("fix", "still", "wrong", "doesn't work", "that's not what
-  I asked").
+  I asked"). A message that opens with a question word other than "why"
+  ("what can you fix?", "how do I fix the build?") asks about fixes, not
+  for one, and doesn't count.
 
 Slash commands, stopped replies and a subagent's messages don't count.
 Nothing about your words is kept or passed on: the note says only how

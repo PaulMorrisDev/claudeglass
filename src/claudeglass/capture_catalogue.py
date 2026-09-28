@@ -489,6 +489,12 @@ CORRECTION_SCAN_CHARS = 200
 #: did, not by your words.
 FIX_PATTERN = r"\b(?:fix|fixed|broken|wrong|incorrect|still|again|bug|error|errors|failing|fails|crash(?:es|ed)?)\b"
 
+#: A message that opens with a question word asks about fixes ("what
+#: problems can you fix", "how do I fix the build"), not for one, so
+#: ``vague_fix`` leaves it alone. Not "why": "why is it still broken" is
+#: the complaint the hint is for.
+QUESTION_PATTERN = r"\s*(?:what|which|who|whom|whose|where|when|how)\b"
+
 #: Anything that makes a correction specific: a path, a file name, a
 #: quote, code, a number, a line of an error, an image, or what it
 #: should be instead ("it should say Hi", "make it red", "change it to
@@ -1819,6 +1825,7 @@ def export_json() -> dict:
             "correction_pattern": CORRECTION_PATTERN,
             "correction_scan_chars": CORRECTION_SCAN_CHARS,
             "fix_pattern": FIX_PATTERN,
+            "question_pattern": QUESTION_PATTERN,
             "specific_pattern": SPECIFIC_PATTERN,
             "interrupt_prefix": INTERRUPT_PREFIX,
             "edit_tools": list(EDIT_TOOLS),

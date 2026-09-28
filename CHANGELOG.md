@@ -179,6 +179,11 @@ the changes listed under both releases.
   command line, and where `claude` is npm's `claude.cmd` on Windows,
   cmd.exe takes their `|` and line breaks for its own. The file is in
   the data folder and deleted as soon as the call ends.
+- **A question about fixes isn't a vague fix.** "What problems can you
+  fix now you are on my machine" got the say-what-you-saw tip. A message
+  that opens with what, which, who, where, when or how no longer counts
+  as `vague_fix`, live or in "How you prompt"; "why is it still broken"
+  still does.
 - **Claude Code's own cost record compares like with like.** Three
   things made `check cost-record` ask for a report when the figures
   matched to within 1%:

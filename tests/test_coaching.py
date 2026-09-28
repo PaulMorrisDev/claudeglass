@@ -19,7 +19,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture, capture_catalogue as cat, cli, coaching, hook_health, ignores, installer, parse
+from claudeglass import capture, capture_catalogue as cat, cli, coaching, hook_health, ignores, installer, parse, prompt_shape
 from claudeglass.config import load_config
 from claudeglass.model import Recommendation, TranscriptMeta
 from claudeglass.parse import parse_transcript
@@ -296,8 +296,11 @@ def test_answers_to_claudes_questions_and_thanks_are_not_requests(tmp_path):
 
 def test_a_vague_correction_gets_the_say_what_you_saw_hint(tmp_path):
     records = [_said("Add a dark mode toggle", 200), _reply(30_000, ago_s=100)]
-    for n, vague in enumerate(("it's still broken", "doesn't work", "fix it", "wrong", "still broken, it should work", "wrong, make it right")):
+    vagues = ("it's still broken", "doesn't work", "fix it", "wrong", "still broken, it should work", "wrong, make it right",
+              "why is it still broken?")
+    for n, vague in enumerate(vagues):
         assert _kind(_send(tmp_path, records, vague, session=f"v{n}")) == "vague_fix", vague
+        assert prompt_shape.is_vague_fix(vague, 80), vague
     for n, fine in enumerate((
         "the toggle in settings.py still fails with KeyError",
         "fix line 42",
@@ -308,8 +311,12 @@ def test_a_vague_correction_gets_the_say_what_you_saw_hint(tmp_path):
         "fix the greeting, it should say Hi",
         "wrong colour, make it red",
         "change the toggle to blue",
+        # A question about fixes asks for an answer, not a fix.
+        "What problems can you fix now you are on my machine",
+        "how do I fix the build?",
     )):
         assert _send(tmp_path, records, fine, session=f"f{n}") == "", fine
+        assert not prompt_shape.is_vague_fix(fine, 80), fine
 
 
 def test_one_note_at_a_time_while_the_small_requests_keep_coming(tmp_path):

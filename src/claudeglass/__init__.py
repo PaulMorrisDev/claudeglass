@@ -209,7 +209,8 @@ __version__ = "0.11.0"
 #: ``modelUsage`` is a blank record, not Claude Code's cost, so it no
 #: longer sets ``TranscriptMeta.cc_cost_usd``, and its ``startTime`` is
 #: kept (``cc_cost_since``). A pre-30 digest compared those sessions'
-#: local pricing against $0.
+#: local pricing against $0. A message that opens with a question word
+#: is no longer ``human_vague``.
 PARSER_VERSION = 30
 
 #: Bump when the model.py contract changes in a way that invalidates the

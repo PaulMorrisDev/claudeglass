@@ -904,7 +904,12 @@ def _practice_hints(
         asks_fix = re.search(coaching["fix_pattern"], head, re.IGNORECASE) or re.search(
             coaching["correction_pattern"], head, re.IGNORECASE
         )
-        if asks_fix and len(prompt.strip()) <= th["vague_fix_chars"] and not re.search(coaching["specific_pattern"], prompt):
+        if (
+            asks_fix
+            and len(prompt.strip()) <= th["vague_fix_chars"]
+            and not re.search(coaching["specific_pattern"], prompt)
+            and not re.match(coaching["question_pattern"], prompt, re.IGNORECASE)
+        ):
             vague = ("vague_fix", 1, {})
     tokens = len(prompt) / _CHARS_PER_TOKEN
     if tokens >= th["big_paste_tokens"]:
