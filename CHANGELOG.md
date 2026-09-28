@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-28
+
+### Changed
+
+- **`/tl-feedback` is now `/cl-feedback`, and `/tl-brief` is now
+  `/cl-brief`.** The `tl` was left over from this tool's first name.
+  `update` renames the copy in Claude Code's skills folder after
+  asking, and so do `capture feedback on` and `capture brief on`;
+  `capture status` and Setup say when a skill is still under its old
+  name. Feedback you gave through `/tl-feedback` still counts. The tags
+  Claude writes (`[tl: ...]`, `[tl-fb: ...]`) keep their names, so
+  sessions from before and after read the same.
+- **`update` brings this tool's skills up to date.** A `/cl-feedback`
+  or `/cl-brief` skill written by an earlier version is shown as a diff
+  and rewritten after a yes, as Setup already said the next update
+  would. A skill this tool didn't write is left alone.
+
 ### Fixed
 
 - **Two changes made close together stayed "Too early to tell" for

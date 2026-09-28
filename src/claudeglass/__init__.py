@@ -4,7 +4,7 @@ Claude Code transcripts.
 
 from __future__ import annotations
 
-__version__ = "0.11.0"
+__version__ = "0.12.0"
 
 #: Bump when transcript-parsing logic changes in a way that could change
 #: results computed from a previously cached file.
@@ -99,7 +99,7 @@ __version__ = "0.11.0"
 #: to the model) were counted as hook context; and task notifications
 #: weren't sized, so a background agent's report had no size.
 #:
-#: Bumped to 16 by the feedback batch: parse.py reads your /tl-feedback
+#: Bumped to 16 by the feedback batch: parse.py reads your /cl-feedback
 #: answers (``Turn.feedback``) from the skill's ``[tl-fb: ...]`` line or,
 #: failing that, from the AskUserQuestion result itself. ``commands_run``
 #: now names skills you ran with a slash too: they are written
@@ -108,7 +108,7 @@ __version__ = "0.11.0"
 #: Bumped to 17 by the P2 capture-integrity batch: capture_tags.py now
 #: strips the exact reminder sentence before the tail match (a tag glued
 #: to a reminder no longer swallows it); a ``[tl-fb: ...]`` line only
-#: counts when the cycle's first turn actually ran ``/tl-feedback``, a
+#: counts when the cycle's first turn actually ran ``/cl-feedback``, a
 #: forged one is ignored; a captured tag key is kept only when the
 #: session's note said to ask for it (``cap_injections > 0`` and the key
 #: is a requested metric); ``reported_task`` counts once per cycle, not
