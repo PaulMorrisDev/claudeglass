@@ -395,20 +395,29 @@ def _since(tr: TranscriptResult, stats: HookStats, project: str) -> None:
             row.chances_before += 1
 
 
+def failure_stats(results: list[TranscriptResult]) -> HookStats:
+    """Each hook's runs, failures and what came after its last failure,
+    with nothing priced: all :meth:`HookRow.stopped` needs. ``capture
+    status``'s failing-hook warning reads it too."""
+    stats = HookStats()
+    # A subagent's transcript names no project: its session's does.
+    projects = {tr.meta.session_id: tr.meta.project_slug for tr in results if tr.meta.project_slug}
+    for tr in results:
+        _events(tr, stats, tr.meta.project_slug or projects.get(tr.meta.session_id, ""))
+    for tr in results:
+        _since(tr, stats, tr.meta.project_slug or projects.get(tr.meta.session_id, ""))
+    return stats
+
+
 def compute_hook_costs(
     results: list[TranscriptResult], pricing: Pricing, thresholds: HookThresholds | None = None
 ) -> HookStats:
     """The hook figures over ``results`` (every transcript in the window,
     main sessions and agents alike: a hook runs in both)."""
     lookup = pricing.resolve_model
-    stats = HookStats()
-    # A subagent's transcript names no project: its session's does.
-    projects = {tr.meta.session_id: tr.meta.project_slug for tr in results if tr.meta.project_slug}
+    stats = failure_stats(results)
     for tr in results:
-        _events(tr, stats, tr.meta.project_slug or projects.get(tr.meta.session_id, ""))
         _turns(tr, lookup, stats)
-    for tr in results:
-        _since(tr, stats, tr.meta.project_slug or projects.get(tr.meta.session_id, ""))
     return stats
 
 

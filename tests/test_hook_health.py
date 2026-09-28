@@ -455,6 +455,16 @@ def test_recommendation_says_when_the_hook_last_failed():
     assert "The last failure was at 2026-09-28 07:39 UTC" in health.recommendation()
 
 
+def test_a_hook_that_stopped_failing_leaves_the_tally():
+    fixed = _hook_event("hook_non_blocking_error")
+    fixed.detail["script"] = "guard.ps1"
+    broken = _hook_event("hook_non_blocking_error")
+    broken.detail["script"] = "other.ps1"
+    results = [_result(*[fixed] * 30, broken, _hook_event("hook_success"))]
+    [stat] = hook_health.count_hook_errors(results, stopped=["guard.ps1"]).stats
+    assert (stat.calls, stat.errors) == (2, 1)
+
+
 # -- CAP-9/F10: measure_deep_wait / DeepWaitStats ----------------------------
 
 

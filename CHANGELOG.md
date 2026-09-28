@@ -276,6 +276,8 @@ the changes listed under both releases.
   has stopped failing. It then drops out of the fix, and the table says
   so beside when it last failed (now a time, not a day). On that data 9
   of the 12 stopped; the other 3 haven't run enough since to tell.
+  `capture status` leaves a hook that stopped failing out of its warning
+  the same way.
   `PARSER_VERSION` 32 keeps the tool a failed tool hook ran for (any MCP
   tool as `mcp`), so every transcript is read again once.
 - **Turning coaching notes on or off is clearer.** On Setup › Capture,

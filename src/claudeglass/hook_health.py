@@ -1303,14 +1303,19 @@ class HookErrorHealth:
         )
 
 
-def count_hook_errors(results: Iterable[TranscriptResult]) -> HookErrorHealth:
+def count_hook_errors(results: Iterable[TranscriptResult], stopped: Iterable[str] = ()) -> HookErrorHealth:
     """Tally ``HOOK_OUTPUT`` events across ``results`` (already-parsed
     transcripts -- this module never reads or parses one itself, matching
     :func:`check_capture`'s own "cheap, no transcript read here"
     contract; the caller does the parsing, e.g. via ``corpus.load_corpus``)
     by hook event name (never the matcher/tool-name suffix -- see
     ``events._hook_name_bucket``'s docstring for why).
+
+    ``stopped`` names hooks (by label) that have stopped failing
+    (``hook_costs.HookRow.stopped``): their old failures are left out, so
+    a fixed hook doesn't keep the warning up until they age out.
     """
+    quiet = frozenset(stopped)
     tally: dict[str, HookErrorStat] = {}
     for result in results:
         for event in result.events:
@@ -1318,6 +1323,8 @@ def count_hook_errors(results: Iterable[TranscriptResult]) -> HookErrorHealth:
                 continue
             name = event.detail.get("hookName")
             if not isinstance(name, str):
+                continue
+            if event.subkind == "hook_non_blocking_error" and event.detail.get("script") in quiet:
                 continue
             stat = tally.setdefault(name, HookErrorStat(hook_name=name))
             stat.calls += 1

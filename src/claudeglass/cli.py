@@ -3306,8 +3306,13 @@ def _scan_hook_errors(args: argparse.Namespace, config: Config, config_dir: Path
     :data:`CAPTURE_HISTORY_DAYS` days -- every hook Claude Code ran, not
     only metrics capture's own, so this runs whether or not capture is
     on."""
+    from . import hook_costs
+
     corpus = _capture_corpus(args, config, config_dir, days=CAPTURE_HISTORY_DAYS)
-    return hook_health.count_hook_errors(_flatten_corpus(corpus))
+    results = _flatten_corpus(corpus)
+    thresholds = hook_costs.HookThresholds.from_config(config.thresholds)
+    stopped = [h.label for h in hook_costs.failure_stats(results).hooks.values() if h.stopped(thresholds)]
+    return hook_health.count_hook_errors(results, stopped=stopped)
 
 
 #: "This week" for :func:`_measure_deep_wait` -- independent of
