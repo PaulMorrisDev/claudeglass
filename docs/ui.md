@@ -150,8 +150,10 @@ Each has a local fallback with metric overrides ("Inter Fallback" is
 Arial at 107.12%), so the swap on load doesn't move the layout. Body
 text is 14px on 1.55, with Inter's `cv11` and `ss01` and optical sizing.
 Table numbers use `tnum` and `zero`, so digits line up. Titles use
-`text-wrap: balance`, prose `pretty`, and prose stops at 72 characters
-(`--measure`). Weights are 400, 500 and 600 only.
+`text-wrap: balance` and prose `pretty`. Prose runs the width of its
+panel (`--measure` is `none`): a 72-character cap left wide empty space
+beside text on a desktop screen and broke sentences early. Weights are
+400, 500 and 600 only.
 
 | Token | Size | Where |
 |---|---|---|
@@ -1060,7 +1062,10 @@ Every chart has the same parts, top to bottom:
 
 On daily spend, today's column is marked "so far" in the margin above
 the plot, over the change labels; each change label sits right of its
-rule, else left, else is cut to fit, so labels never overlap.
+rule, else left, else is cut to fit, so labels never overlap. A day
+with several changes has one rule labelled "3 changes", and its tooltip
+names each. A chart of one day reads without the busiest day or "the
+first day".
 
 Money axes use `moneyAxis`, the chart mirror of `Units.money`: "% of
 your weekly usage limit", "list-price $", or plain "$" on the API. Token

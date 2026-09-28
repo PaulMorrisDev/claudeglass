@@ -104,18 +104,23 @@ def test_available_saving_counts_each_group_once() -> None:
 def test_daily_spend_says_why_its_total_differs_from_spend() -> None:
     spec = _chart_specs()["daily-spend"]
     assert spec["summary"].startswith("Replies sent {span} cost {total}.")
-    assert set(spec["alt"]) == {"sessions", "firstDay"}
-    for text in spec["alt"].values():
+    assert set(spec["alt"]) == {"sessions", "firstDay", "oneDay", "oneDaySessions", "oneDayFirstDay"}
+    for key, text in spec["alt"].items():
         assert text.startswith("Replies sent {span} cost {total}.")
-        assert "{sessionsTotal}" in text
-    assert "earlier replies" in spec["alt"]["sessions"]
+        assert ("{sessionsTotal}" in text) == (key != "oneDay")
+    assert "earlier replies" in spec["alt"]["sessions"] and "earlier replies" in spec["alt"]["oneDaySessions"]
     assert "counts all of the first day" in spec["alt"]["firstDay"]
+    # One day has no busiest day and no first day of several.
+    for key in ("oneDay", "oneDaySessions", "oneDayFirstDay"):
+        assert "busiest" not in spec["alt"][key] and "first day" not in spec["alt"][key]
+    assert "not only this window" in spec["alt"]["oneDayFirstDay"]
     for text in [spec["summary"], *spec["alt"].values()]:
         assert "$" not in text and "USD" not in text
     columns = _body("charts-types.js", "stackedColumns")
     # Only when the two read differently, in the billing mode's own words.
     assert "moneyText(sessionsUsd) !== moneyText(grand) ? moneyText(sessionsUsd) : null" in columns
-    assert 'variant: sessionsTotal ? (sessionsUsd > grand ? "sessions" : "firstDay") : null' in columns
+    assert 'var variant = sessionsTotal ? (sessionsUsd > grand ? "sessions" : "firstDay") : null;' in columns
+    assert 'if (days.length === 1) variant = { sessions: "oneDaySessions", firstDay: "oneDayFirstDay" }[variant] || "oneDay";' in columns
     assert "sessionsTotal: sessionsTotal," in columns
     assert "span: spanText(days)," in columns
     tiles = _body("page-overview.js", "renderTiles")
@@ -171,6 +176,9 @@ def test_change_labels_keep_clear_of_each_other_and_the_edge() -> None:
     columns = _body("charts-types.js", "stackedColumns")
     assert "placeRuleLabel(label, change.label, cx, ruleXs, labelSpans, labelBounds);" in columns
     assert "return a.cx - b.cx;" in columns
+    # A day's changes share one rule: their labels printed over each other.
+    assert 'group.label = single ? group.changes[0].label : group.changes.length + " changes";' in columns
+    assert "var ruleXs = ruleDays.map(" in columns
     place = _body("charts-types.js", "placeRuleLabel")
     assert "getComputedTextLength" in place
     assert '.attr("text-anchor", right ? "start" : "end")' in place

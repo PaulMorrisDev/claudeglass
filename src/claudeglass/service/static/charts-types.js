@@ -420,14 +420,36 @@ function stackedColumns(ctx, data) {
   var ruleLinks = ctx.layer("rule-links", { links: true });
   rules.selectAll("*").remove();
   ruleLinks.selectAll("*").remove();
-  var ruleXs = changes.map(function (change) {
-    return Math.round(x(change.day) + x.bandwidth() / 2) + 0.5;
+  // A day's changes share one rule and one label: they sit on the same
+  // column, where their labels printed over each other, and all open
+  // that day on Your changes. The day's tooltip names each.
+  var ruleDays = [];
+  changes.forEach(function (change) {
+    var group = ruleDays.find(function (g) {
+      return g.day === change.day;
+    });
+    if (!group) ruleDays.push((group = { day: change.day, changes: [] }));
+    group.changes.push(change);
+  });
+  ruleDays.forEach(function (group) {
+    var single = group.changes.length === 1;
+    var opener = group.changes.find(function (change) {
+      return change.open;
+    });
+    group.label = single ? group.changes[0].label : group.changes.length + " changes";
+    group.open = opener ? opener.open : null;
+    group.aria = single
+      ? group.label + ", changed on " + dayLabel(group.day, true) + ": see what it did"
+      : group.label + " on " + dayLabel(group.day, true) + ": see what they did";
+  });
+  var ruleXs = ruleDays.map(function (group) {
+    return Math.round(x(group.day) + x.bandwidth() / 2) + 0.5;
   });
   var labelSpans = [];
   var labelBounds = [-ctx.margin.left + 4, inner.w + ctx.margin.right - 2];
-  changes
-    .map(function (change, i) {
-      return { change: change, cx: ruleXs[i] };
+  ruleDays
+    .map(function (group, i) {
+      return { change: group, cx: ruleXs[i] };
     })
     .sort(function (a, b) {
       return a.cx - b.cx;
@@ -448,7 +470,7 @@ function stackedColumns(ctx, data) {
         .classed("is-openable", true)
         .attr("tabindex", 0)
         .attr("role", "link")
-        .attr("aria-label", change.label + ", changed on " + dayLabel(change.day, true) + ": see what it did")
+        .attr("aria-label", change.aria)
         .on("click", change.open)
         .on("keydown", function (event) {
           if (event.key !== "Enter" && event.key !== " ") return;
@@ -504,8 +526,11 @@ function stackedColumns(ctx, data) {
   // began before the window (days run midnight to midnight UTC).
   var sessionsUsd = data && typeof data.sessionsTotal === "number" && data.sessionsTotal > 0 ? data.sessionsTotal : null;
   var sessionsTotal = sessionsUsd !== null && moneyText(sessionsUsd) !== moneyText(grand) ? moneyText(sessionsUsd) : null;
+  var variant = sessionsTotal ? (sessionsUsd > grand ? "sessions" : "firstDay") : null;
+  // One day: no busiest day to name, and no first day of several.
+  if (days.length === 1) variant = { sessions: "oneDaySessions", firstDay: "oneDayFirstDay" }[variant] || "oneDay";
   return {
-    variant: sessionsTotal ? (sessionsUsd > grand ? "sessions" : "firstDay") : null,
+    variant: variant,
     facts: {
       total: moneyText(grand),
       span: spanText(days),

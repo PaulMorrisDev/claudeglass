@@ -283,6 +283,16 @@ the changes listed under both releases.
   whose file has gone can't be read again, so its failures name no tool;
   one failure that does name a tool is enough to judge the hook on its
   tools.
+- **Text uses the width of its panel.** Sentences stopped at 72
+  characters, so the Overview's summary, the spend chart's reading and
+  long notes broke early beside wide empty space, and a check's finding
+  dropped onto its own line under the check's name. They now run the
+  panel's width, and a finding follows its check's name on the same line.
+- **The spend chart's labels no longer print over each other.** Three
+  settings changes on one day drew three labels on one rule; that day
+  now has one rule labelled "3 changes", and its tooltip names each. A
+  chart of one day, such as the last hour, no longer names "the first
+  day" or "the busiest day".
 - **An Overview row no longer miscounts what it lists.** The Hooks row
   read "backlog-reminder.ps1 and model-pin-guard.ps1 (and 2 more)", as
   if two more hooks were failing. The two were other findings of the
