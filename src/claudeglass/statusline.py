@@ -1852,7 +1852,7 @@ def _k(tokens: float) -> str:
 #: agent's report (as ``capture-hook.py`` skips them).
 _NOT_TYPED_PREFIXES = (
     "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
-    "[SYSTEM NOTIFICATION",
+    "[SYSTEM NOTIFICATION", "<agent-message", "Another Claude session sent a message",
 )
 
 

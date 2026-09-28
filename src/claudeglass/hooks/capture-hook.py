@@ -711,10 +711,11 @@ def _prompt_hints(records: list[dict], th: dict, now: datetime) -> list[tuple[st
 
 #: Lines written as your message that you didn't type: a slash command
 #: and its output, a shell command run with ``!``, a scheduled task, a
-#: background agent's report.
+#: background agent's report (a task notification, or a subagent's
+#: hand-back sent as a message from another session).
 _NOT_TYPED_PREFIXES = (
     "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
-    "[SYSTEM NOTIFICATION",
+    "[SYSTEM NOTIFICATION", "<agent-message", "Another Claude session sent a message",
 )
 
 

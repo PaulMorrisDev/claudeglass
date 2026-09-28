@@ -153,7 +153,9 @@ the changes listed under both releases.
   edited files told Claude "the user's message asks for about 12
   separate changes" and to set out a plan first, and a long report got
   the pasted-too-much tip. Reports, scheduled tasks and command output
-  now get no prompting or context hint.
+  now get no prompting or context hint. That includes a subagent's
+  hand-back, which Claude Code 2.1.281 sends as a message from another
+  session, not a task notification.
 - **Sending a message again after an API error isn't a repeat.** A
   reply that ended in an API error, an overload or a usage limit no
   longer counts as an attempt, so resending the message no longer tells
