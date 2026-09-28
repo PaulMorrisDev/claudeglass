@@ -224,6 +224,18 @@ def test_roi_banner_has_no_bare_dollar_or_doubled_about_or_doubled_weekly_under_
     assert "usage limit a week" not in note.lower()
 
 
+def test_roi_in_list_price_dollars_under_a_subscription_is_still_a_week():
+    """A subscription with no usage-limit readings (the status line never
+    ran) phrases amounts in list-price dollars: without "a week" the ROI
+    read as a total beside the banner's own total since capture began."""
+    subscription = Units(billing_mode="subscription")
+    data = capture_view.view(_on(), units=subscription, use=_use(), weekly_cost=2.0, dependent_value=5.0)
+    assert (
+        "Capture cost about 2.00 USD list-price equivalent a week; suggestions that rely on it are worth "
+        "about 5.00 USD list-price equivalent a week." in data["banner"]["notes"]
+    )
+
+
 def test_on_with_no_notes_seen_says_the_hook_may_be_blocked():
     use = capture.CaptureUsage(since="2026-09-20T10:00:00+00:00")
     data = capture_view.view(_on(), units=API, use=use, started_since=5)

@@ -277,6 +277,12 @@ the changes listed under both releases.
   two reviewers as on Opus when their agent files said Sonnet, and
   offered Sonnet. Snapshots and capture's project filter now use the
   folder the session started in (`CLAUDE_PROJECT_DIR`).
+- **Capture's weekly cost says it's weekly.** On a subscription with no
+  usage-limit readings (the desktop app never runs the status line),
+  amounts are list-price dollars, and the capture banner's "Capture cost
+  about $3.63 list-price equivalent" dropped "a week". Beside the
+  banner's own total since capture began ($1.87), it read as a second,
+  larger total. It now ends "a week", as it does under API billing.
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.
