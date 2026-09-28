@@ -106,7 +106,7 @@ _TOP_KEYS = (
     "type", "uuid", "parentUuid", "isSidechain", "isMeta", "isCompactSummary", "timestamp", "requestId",
     "permissionMode", "promptId",
 )
-_TAG_RE = re.compile(r"`?\[(?:tl|result):[^\[\]\n]{0,400}\]`?")
+_TAG_RE = re.compile(r"`?\[(?:cg|tl|result):[^\[\]\n]{0,400}\]`?")
 
 
 def _scenarios(only=()) -> list[dict]:

@@ -870,7 +870,7 @@ function init() {
   resolveRoute();
   refreshActionsBadge();
   // The shell answers from here (docs/ui.md, "Performance").
-  performance.mark("tl-shell-ready");
+  performance.mark("cg-shell-ready");
 }
 
 // VIEW_KEYS and VIEW_RENDERERS must name the same views: a page added to

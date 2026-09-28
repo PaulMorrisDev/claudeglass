@@ -11,7 +11,7 @@ for the billing mode):
   is output its writer paid for at that turn's own rate, fast mode and
   data residency included (``pricing.effective_rates``). It also says
   how often Claude tagged what it was asked to (coverage), and how much
-  of each metric has been collected. A /cl-feedback run is priced whole
+  of each metric has been collected. A /cg-feedback run is priced whole
   (every turn of the cycle it ran in), in any session, captured or not:
   the skill works at every level.
 - :func:`history` replays your own recent sessions to price one
@@ -23,7 +23,7 @@ A *prompt cycle* (:func:`prompt_cycles`) is one message of yours and
 everything Claude did about it: the turn after a human message up to
 the next one, with the subagents those turns started, at any depth.
 
-:func:`feedback_spans` ties each /cl-feedback answer to the work it
+:func:`feedback_spans` ties each /cg-feedback answer to the work it
 rates: the cycles since the previous feedback (answered or declined),
 or since the session started.
 """
@@ -49,7 +49,7 @@ HISTORY_DAYS = 14
 #: What Claude Code adds around a hook note, by hook event.
 _WRAP = {event: catalogue.NOTE_WRAP_CHARS + len(event) for event in ("SessionStart", "SubagentStart", "PostToolUse")}
 
-#: Characters of "[tl: " and "]" around a reply tag, and the line break
+#: Characters of "[cg: " and "]" around a reply tag, and the line break
 #: before it.
 _TAG_FRAME_CHARS = 7
 
@@ -92,7 +92,7 @@ class Cycle:
 
     @property
     def tag(self):
-        """Every ``[tl: ...]`` tag in the cycle, merged key by key: for
+        """Every ``[cg: ...]`` tag in the cycle, merged key by key: for
         each field, the last turn to answer it wins that field, even
         when an earlier or a later tag in the same cycle (a retry, a
         correction) left it unset (CAP-10 -- this used to keep only the
@@ -110,7 +110,7 @@ class Cycle:
             }
             if changes:
                 merged = replace(merged, **changes)
-        # has_tl is true if any of them wrote a [tl: ...]; chars sums
+        # has_tl is true if any of them wrote a [cg: ...]; chars sums
         # what every tag actually cost to write, judge_usd what Haiku's did.
         return replace(
             merged,
@@ -155,7 +155,7 @@ def prompt_cycles(top: TranscriptResult, subs=()) -> list[Cycle]:
 
 #: Which of a cycle's feedback wins: the answers read from the skill's
 #: question, then its own tag, then a declined question. Answers outrank
-#: the tag (SEC-P1): a `[tl-fb: ...]` line is free text Claude could
+#: the tag (SEC-P1): a `[cg-fb: ...]` line is free text Claude could
 #: write in any reply, but the AskUserQuestion call its answers come from
 #: is not.
 _FEEDBACK_RANK = {"answers": 3, "tag": 2, "skipped": 1}
@@ -163,10 +163,10 @@ _FEEDBACK_RANK = {"answers": 3, "tag": 2, "skipped": 1}
 
 @dataclass(slots=True)
 class FeedbackSpan:
-    """One /cl-feedback answer and the work it rates."""
+    """One /cg-feedback answer and the work it rates."""
 
     feedback: Feedback
-    #: The cycle /cl-feedback ran in.
+    #: The cycle /cg-feedback ran in.
     run: Cycle
     #: The cycles it rates: those since the previous feedback, or since
     #: the session started. Empty when you ran it first thing.
@@ -174,8 +174,8 @@ class FeedbackSpan:
 
 
 def cycle_feedback(cycle: Cycle) -> Feedback | None:
-    """The feedback given in ``cycle``, or ``None``. A ``[tl-fb: ...]``
-    tag counts only in a genuine /cl-feedback run (SEC-P1): elsewhere it
+    """The feedback given in ``cycle``, or ``None``. A ``[cg-fb: ...]``
+    tag counts only in a genuine /cg-feedback run (SEC-P1): elsewhere it
     could be forged or quoted reply text, so it's dropped. Answers of the
     best kind are merged: the handoff question's come from a second
     AskUserQuestion call, on a later turn."""
@@ -194,16 +194,16 @@ def cycle_feedback(cycle: Cycle) -> Feedback | None:
 
 
 def is_feedback_run(cycle: Cycle) -> bool:
-    """Whether ``cycle`` is a /cl-feedback run: you ran the skill in its
+    """Whether ``cycle`` is a /cg-feedback run: you ran the skill in its
     first turn. SEC-P1: this alone decides it -- it no longer also asks
-    whether feedback was found, which let a forged ``[tl-fb: ...]`` tag
+    whether feedback was found, which let a forged ``[cg-fb: ...]`` tag
     manufacture a "feedback run" to hide behind."""
     return any(not catalogue.FEEDBACK_SKILL_NAMES.isdisjoint(turn.commands_run) for turn in cycle.turns[:1])
 
 
 def _excluded_from_coverage(cycle: Cycle, all_turns: list[Turn]) -> bool:
     """CAP-10: a cycle coverage can't fairly judge by whether it ended
-    with a ``[tl: ...]`` tag -- a /cl-feedback run (it answers /tl-
+    with a ``[cg: ...]`` tag -- a /cg-feedback run (it answers /cg-
     feedback's own question, not the one an ordinary reply reports on),
     one whose last turn hit ``max_tokens`` before it could write its
     tag, or one cut off by an interruption before Claude could finish."""
@@ -288,7 +288,7 @@ class CaptureUsage:
     #: writes the tags (``[capture] tagger = "haiku"``), and every agent
     #: run it judged, whoever writes them.
     judged: int = 0
-    #: /cl-feedback runs, what they cost (every turn of each), and how
+    #: /cg-feedback runs, what they cost (every turn of each), and how
     #: many ended with answers rather than a declined question.
     feedback_runs: int = 0
     feedback_cost: float = 0.0
@@ -569,7 +569,7 @@ def _cycle_cost(cycle: Cycle, pricing) -> float:
 
 
 def _add_feedback_runs(use: CaptureUsage, top: TranscriptResult, subs, pricing, since) -> bool:
-    """Price this session's /cl-feedback runs; ``True`` when it had any."""
+    """Price this session's /cg-feedback runs; ``True`` when it had any."""
     found = False
     for cycle in prompt_cycles(top, subs):
         if not is_feedback_run(cycle):
@@ -600,7 +600,7 @@ def _start(since: str):
 
 
 def feedback_usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
-    """Only the /cl-feedback runs in ``corpus`` from ``since`` on: what
+    """Only the /cg-feedback runs in ``corpus`` from ``since`` on: what
     they cost and how many were answered. For the Capture tab, which
     shows them whatever the capture level."""
     use = CaptureUsage(since=since)
@@ -614,7 +614,7 @@ def feedback_usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureU
 def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
     """What capture cost across ``corpus`` from ``since`` (an ISO time)
     on. A session counts once its main transcript carries a capture note;
-    its subagents count with it. /cl-feedback runs count in any session."""
+    its subagents count with it. /cg-feedback runs count in any session."""
     use = CaptureUsage(since=since)
     start = _start(since)
     for bundle in corpus.sessions:
@@ -797,7 +797,7 @@ def history(corpus, pricing: Pricing | None, days: int = 14) -> History:
                 carry, sub_ends, turns[-1].ts
             )
             # The brief marker ([spawn: ...]/[retry: ...]) isn't a
-            # [tl:]/[result:] tag -- it's words inside the spawning tool
+            # [cg:]/[result:] tag -- it's words inside the spawning tool
             # call's own prompt, not carried through capture.usage()'s
             # own accounting either (_add_brief_markers), so it stays at
             # its own output cost here too.

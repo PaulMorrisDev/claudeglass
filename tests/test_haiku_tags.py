@@ -84,7 +84,7 @@ def _stop(path: Path, **extra) -> dict:
             "last_assistant_message": "Fixed add(); the tests pass now.", **extra}
 
 
-def _answer(result="[tl: task=bugfix brief=clear level=easy]", usd=0.0014):
+def _answer(result="[cg: task=bugfix brief=clear level=easy]", usd=0.0014):
     return {"result": result, "total_cost_usd": usd, "usage": {"input_tokens": 1200, "output_tokens": 30},
             "modelUsage": {"claude-haiku-4-5-20251001": {}}}
 
@@ -96,7 +96,7 @@ def _answer(result="[tl: task=bugfix brief=clear level=easy]", usd=0.0014):
 def test_the_note_asks_claude_for_no_tag_while_haiku_writes_them(level):
     ids = cat.level_includes(level)
     note = cat.note_text(ids, "main", tagger="haiku")
-    assert "[tl:" not in note and cat.MAIN_TAG_INTRO not in note
+    assert "[cg:" not in note and cat.MAIN_TAG_INTRO not in note
     # Nothing left to ask at the start but the reminder, where it's on.
     if level == "deep":
         assert note.splitlines()[0] == f"{cat.NOTE_MARKER}{cat.NOTE_VERSION} feedback_reminder"
@@ -320,11 +320,11 @@ def test_the_worker_logs_an_agent_runs_words_under_their_own_key(tmp_path):
     job = HOOK.agent_judge_job(_subagent_stop(session, agent), {"capture": {"level": "standard"}}, CATALOGUE)
 
     def ask(*_args):
-        return _answer("[tl: result=partial retry=brief fit=right brief=vague missing=files,constraints rules=used "
+        return _answer("[cg: result=partial retry=brief fit=right brief=vague missing=files,constraints rules=used "
                        "task=docs]")
 
     # "none" only says the run was no retry: it isn't kept.
-    none = HOOK.run_judge(tmp_path / "other", CATALOGUE, job, ask=lambda *_: _answer("[tl: result=done retry=none]"))
+    none = HOOK.run_judge(tmp_path / "other", CATALOGUE, job, ask=lambda *_: _answer("[cg: result=done retry=none]"))
     assert none["agent"] == "result=done"
 
     record = HOOK.run_judge(tmp_path / "cg", CATALOGUE, job, ask=ask)
@@ -342,7 +342,7 @@ def test_an_agent_runs_words_land_on_the_run_and_never_over_its_own(tmp_path):
     top = parse_transcript(session, TranscriptMeta(path=str(session)))
     sub = parse_transcript(agent, TranscriptMeta(path=str(agent), kind="subagent", agent_type="general-purpose"))
     # An agent that tagged its own report, as agents did before 0.11.0.
-    old_note = "tl-cap v1 result\n" + cat.NOTE_INTRO + "\nEnd your final report with one line, [result: done|partial|blocked]."
+    old_note = "cg-cap v1 result\n" + cat.NOTE_INTRO + "\nEnd your final report with one line, [result: done|partial|blocked]."
     note = attachment_line(
         "hook_additional_context", content=[old_note], hookName="SubagentStart", hookEvent="SubagentStart",
         rendered=f"<system-reminder>\nSubagentStart hook additional context: {old_note}\n</system-reminder>",
@@ -392,7 +392,7 @@ def test_the_subagent_stop_hook_hands_the_run_to_a_worker(tmp_path):
     fake = bin_dir / "claude"
     fake.write_text(
         "#!/bin/sh\ncat > /dev/null\n"
-        "echo '{\"result\": \"[tl: result=done fit=smaller brief=clear missing=none]\", \"total_cost_usd\": 0.002}'\n",
+        "echo '{\"result\": \"[cg: result=done fit=smaller brief=clear missing=none]\", \"total_cost_usd\": 0.002}'\n",
         encoding="utf-8",
     )
     fake.chmod(fake.stat().st_mode | stat.S_IXUSR)
@@ -447,13 +447,13 @@ def test_the_excerpt_cuts_long_messages_and_notes_plans_and_skills(tmp_path):
     path = _transcript(tmp_path, [
         user_str_line(long, timestamp=_at(0)),
         turn_line(timestamp=_at(1), content=[tool_use_block("ExitPlanMode", "p", {"plan": "x"}),
-                                             tool_use_block("Skill", "k", {"skill": "cl-brief"}),
+                                             tool_use_block("Skill", "k", {"skill": "cg-brief"}),
                                              {"type": "text", "text": "Plan ready."}]),
     ])
     job = HOOK.judge_job(_stop(path, last_assistant_message=""), HAIKU, CATALOGUE)
     message = next(line for line in job["excerpt"].splitlines() if line.startswith("The user's message:"))
     assert len(message) < cat.JUDGE_LIMITS["prompt"] + 60 and "[...]" in message
-    assert "Skills run: cl-brief." in job["excerpt"]
+    assert "Skills run: cg-brief." in job["excerpt"]
     assert "Plan mode: Claude wrote a plan in this turn." in job["excerpt"]
     assert job["excerpt"].endswith('"Plan ready."')
     assert job["facts"]["plan_now"] and job["facts"]["skills"] == 1 and job["facts"]["earlier"] == 0
@@ -555,7 +555,7 @@ def test_only_known_keys_and_words_are_kept():
     keys = cat.tagged_keys(STANDARD)
     judge = CATALOGUE["judge"]
     text = (
-        "Sure! [tl: task=bugfix brief=CLEAR level=impossible missing=files,goal,nonsense skill=would-help:secret "
+        "Sure! [cg: task=bugfix brief=CLEAR level=impossible missing=files,goal,nonsense skill=would-help:secret "
         "check=full note=hello task=docs]"
     )
     assert HOOK.judge_tag(text, keys, judge) == "task=bugfix brief=clear missing=files,goal skill=would-help"
@@ -586,7 +586,7 @@ def test_the_worker_logs_the_words_and_the_cost_never_the_excerpt(tmp_path):
 
     def ask(job_, judge, cwd):
         asked.append((job_["excerpt"], judge["model"], cwd))
-        return _answer("[tl: task=bugfix brief=clear plan=made skill=helped]")
+        return _answer("[cg: task=bugfix brief=clear plan=made skill=helped]")
 
     record = HOOK.run_judge(tmp_path / "cg", CATALOGUE, job, ask=ask)
     assert asked[0][1] == "haiku" and asked[0][2] == tmp_path / "cg"
@@ -672,7 +672,7 @@ def test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude(tmp_path):
         '[ "$a" = "--system-prompt-file" ] && want=1; done\n'
         f'cat > "{seen}.stdin"\n'
         f'env | grep -c "^{cat.JUDGE_ENV}=1" > "{seen}.env"\n'
-        "echo '{\"result\": \"[tl: task=bugfix brief=clear]\", \"total_cost_usd\": 0.0013, "
+        "echo '{\"result\": \"[cg: task=bugfix brief=clear]\", \"total_cost_usd\": 0.0013, "
         "\"usage\": {\"input_tokens\": 900, \"output_tokens\": 12}}'\n",
         encoding="utf-8",
     )
@@ -756,7 +756,7 @@ def test_tags_land_on_their_replies_and_never_over_claudes_own(tmp_path):
     tagged = _transcript(tmp_path, [
         note,
         user_str_line("hi", timestamp=_at(0)),
-        turn_line(timestamp=_at(1), content=[{"type": "text", "text": "Hello.\n[tl: task=chat]"}]),
+        turn_line(timestamp=_at(1), content=[{"type": "text", "text": "Hello.\n[cg: task=chat]"}]),
     ], "t.jsonl")
     own = parse_transcript(tagged, TranscriptMeta(path=str(tagged)))
     assert own.turns[-1].cap.task == "chat"

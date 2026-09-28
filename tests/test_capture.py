@@ -131,8 +131,8 @@ def test_the_last_tag_in_a_cycle_is_the_one_that_counts(tmp_path):
     top = _top(tmp_path, [
         _note(0, ["task"]),
         _ask(1),
-        _reply(2, text="Looking.\n[tl: task=debug]"),
-        _reply(3, text="Found it.\n[tl: task=bugfix]"),
+        _reply(2, text="Looking.\n[cg: task=debug]"),
+        _reply(3, text="Found it.\n[cg: task=bugfix]"),
         _ask(4),
         _reply(5, text="untagged"),
     ])
@@ -147,8 +147,8 @@ def test_a_cycles_tags_merge_key_by_key(tmp_path):
     top = _top(tmp_path, [
         _note(0, ["task", "level", "shift"]),
         _ask(1),
-        _reply(2, text="Looking.\n[tl: task=debug level=hard]"),
-        _reply(3, text="Found it.\n[tl: task=bugfix shift=redo]"),
+        _reply(2, text="Looking.\n[cg: task=debug level=hard]"),
+        _reply(3, text="Found it.\n[cg: task=bugfix shift=redo]"),
     ])
     [cycle] = capture.prompt_cycles(top)
     turn2, turn3 = top.turns[0], top.turns[1]
@@ -170,7 +170,7 @@ def _captured_session(tmp_path, *, speed=None):
         note,
         _ask(1, "hi"),
         _reply(2, tool_use_block("Agent", "toolu_A", {"prompt": "[spawn: isolate] check it"}),
-               {"type": "text", "text": "Started.\n[tl: task=bugfix brief=clear]"}, speed=speed),
+               {"type": "text", "text": "Started.\n[cg: task=bugfix brief=clear]"}, speed=speed),
         user_block_line([tool_result_block("toolu_A", "Done.")], timestamp=_ts(6)),
         _ask(7, "more"),
         _reply(8),
@@ -196,7 +196,7 @@ def test_usage_prices_notes_until_the_compaction_and_tags_at_the_writer_rate(tmp
     main = use.scopes["main"]
     assert main.note_cost == pytest.approx(note_chars * (WRITE + READ))
     assert main.note_tokens == round(note_chars / 4)
-    tag = len("[tl: task=bugfix brief=clear]") + 1
+    tag = len("[cg: task=bugfix brief=clear]") + 1
     # CAP-2: the tag is Claude's own output on turn 1 (OUT), then sits in
     # context and is cache-written once more into turn 2's prompt (WRITE);
     # the compaction before turn 3 drops it before it is ever read back.
@@ -233,11 +233,11 @@ def test_a_note_after_a_compact_boundary_is_priced_and_counted_separately(tmp_pa
     top = _top(tmp_path, [
         before,
         _ask(1),
-        _reply(2, text="Looking.\n[tl: task=debug]"),
+        _reply(2, text="Looking.\n[cg: task=debug]"),
         system_line("compact_boundary", timestamp=_ts(3)),
         after,
         _ask(5),
-        _reply(6, text="Done.\n[tl: task=bugfix]"),
+        _reply(6, text="Done.\n[cg: task=bugfix]"),
     ])
     use = capture.usage(_corpus(top), pricing)
     assert use.notes == 2
@@ -267,7 +267,7 @@ def test_fast_mode_doubles_what_the_fast_turn_wrote_and_carried(tmp_path, pricin
     # The tag's own output doubles (turn 1 ran fast), but turn 2 -- the
     # turn that carries it forward into its prompt -- did not, so that
     # carry-write portion stays at the normal rate.
-    assert use.scopes["main"].tag_cost == pytest.approx((len("[tl: task=bugfix brief=clear]") + 1) * (2 * OUT + WRITE))
+    assert use.scopes["main"].tag_cost == pytest.approx((len("[cg: task=bugfix brief=clear]") + 1) * (2 * OUT + WRITE))
     assert use.scopes["brief"].tag_cost == pytest.approx((len("[spawn: isolate]") + 1) * 2 * OUT)
 
 
@@ -280,24 +280,24 @@ def test_usage_since_leaves_out_what_came_before(tmp_path, pricing):
 
 
 def test_sessions_without_a_capture_note_are_not_counted(tmp_path, pricing):
-    top = _top(tmp_path, [_ask(0), _reply(1, text="Done.\n[tl: task=bugfix]")])
+    top = _top(tmp_path, [_ask(0), _reply(1, text="Done.\n[cg: task=bugfix]")])
     use = capture.usage(_corpus(top), pricing)
     assert (use.sessions, use.cycles, use.cost, use.coverage, use.share) == (0, 0, 0.0, None, None)
 
 
 def test_a_feedback_run_cycle_is_left_out_of_the_coverage_denominator(tmp_path, pricing):
-    # CAP-10: a /cl-feedback run answers /cl-feedback's own question, not
+    # CAP-10: a /cg-feedback run answers /cg-feedback's own question, not
     # the one an ordinary reply reports on -- it shouldn't count against
-    # coverage just because it never wrote a [tl: ...] task tag either.
+    # coverage just because it never wrote a [cg: ...] task tag either.
     top = _top(tmp_path, [
         _note(0, ["task"]),
         user_str_line(
-            "<command-message>cl-feedback</command-message>\n<command-name>/cl-feedback</command-name>",
+            "<command-message>cg-feedback</command-message>\n<command-name>/cg-feedback</command-name>",
             timestamp=_ts(1),
         ),
         _reply(2, text="Thanks: ClaudeGlass will use this for your savings tips."),
         _ask(3),
-        _reply(4, text="Done.\n[tl: task=bugfix]"),
+        _reply(4, text="Done.\n[cg: task=bugfix]"),
     ])
     use = capture.usage(_corpus(top), pricing)
     assert (use.cycles, use.tagged_cycles) == (1, 1)
@@ -313,7 +313,7 @@ def test_a_max_tokens_cycle_is_left_out_of_the_coverage_denominator(tmp_path, pr
         _ask(1),
         cut_off,
         _ask(3),
-        _reply(4, text="Done.\n[tl: task=bugfix]"),
+        _reply(4, text="Done.\n[cg: task=bugfix]"),
     ])
     use = capture.usage(_corpus(top), pricing)
     assert (use.cycles, use.tagged_cycles) == (1, 1)
@@ -328,7 +328,7 @@ def test_an_interrupted_cycle_is_left_out_of_the_coverage_denominator(tmp_path, 
         _reply(2, text="cut off mid-thought"),
         user_str_line("[Request interrupted by user]", timestamp=_ts(3)),
         _ask(4, "try again"),
-        _reply(5, text="Done.\n[tl: task=bugfix]"),
+        _reply(5, text="Done.\n[cg: task=bugfix]"),
     ])
     use = capture.usage(_corpus(top), pricing)
     assert (use.cycles, use.tagged_cycles) == (1, 1)
@@ -348,7 +348,7 @@ def test_a_tool_note_counts_in_the_tool_scope(tmp_path, pricing):
         _reply(2, tool_use_block("Bash", "toolu_1", {"command": "make"})),
         user_block_line([tool_result_block("toolu_1", "x" * 40_000)], timestamp=_ts(3)),
         tool_note,
-        _reply(4, text="Built.\n[tl: task=ops out=part]"),
+        _reply(4, text="Built.\n[cg: task=ops out=part]"),
     ])
     use = capture.usage(_corpus(top), pricing)
     assert use.scopes["tool"].note_cost == pytest.approx(_chars(tool_note) * WRITE)
@@ -396,7 +396,7 @@ def test_history_prices_one_character_in_each_place(tmp_path, pricing):
     # so neither has a later turn to carry into -- unchanged from output
     # cost alone.
     assert past.report_tag == pytest.approx(2 * OUT)
-    # The brief marker isn't a [tl:]/[result:] tag -- it stays priced at
+    # The brief marker isn't a [cg:]/[result:] tag -- it stays priced at
     # output cost alone here too, same as the real usage() path's own
     # _add_brief_markers.
     assert past.brief_tag == pytest.approx(2 * OUT)

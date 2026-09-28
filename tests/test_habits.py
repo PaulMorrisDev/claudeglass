@@ -318,7 +318,7 @@ def test_every_table_is_there_even_with_nothing_to_show():
 def test_untagged_unrated_work_says_how_to_get_more():
     notes = habits.section_from(Habits(cycles=[_cycle()])).notes
     assert any("turn on metrics capture" in n.lower() for n in notes)
-    assert any("run /cl-feedback" in n for n in notes)
+    assert any("run /cg-feedback" in n for n in notes)
 
 
 def test_span_weeks_does_not_stretch_a_single_day_into_a_fake_weekly_rate():
@@ -568,11 +568,11 @@ def _tagged_session(tmp_path, *, captured: bool = True, shift: str = "redo"):
     top_lines = [
         user_str_line("fix the login bug", origin={"kind": "human"}, timestamp=_ts(0)),
         _reply(1, tool_use_block("Agent", "toolu_A", {"prompt": "find where the cookie is set"}),
-               {"type": "text", "text": "Looking.\n[tl: task=bugfix brief=vague level=hard]"}),
+               {"type": "text", "text": "Looking.\n[cg: task=bugfix brief=vague level=hard]"}),
         user_block_line([tool_result_block("toolu_A", "src/auth.py")], timestamp=_ts(5)),
-        _reply(6, text="Fixed.\n[tl: task=bugfix brief=vague level=hard]"),
+        _reply(6, text="Fixed.\n[cg: task=bugfix brief=vague level=hard]"),
         user_str_line("do it again properly", origin={"kind": "human"}, timestamp=_ts(10)),
-        _reply(11, text=f"Redone.\n[tl: task=bugfix shift={shift}]"),
+        _reply(11, text=f"Redone.\n[cg: task=bugfix shift={shift}]"),
     ]
     if captured:
         top_lines.insert(0, _note(0, ["task", "brief", "level", "shift"]))
@@ -627,7 +627,7 @@ def _asked(questions) -> list[dict]:
 
 def _plan_session(tmp_path, name: str, *, edit: bool = True, handoff: str | None = "Yes", worth: str = "Too costly"):
     """A main session that explores, has a plan approved, then (with
-    ``edit``) edits a file; then a /cl-feedback run answering both calls."""
+    ``edit``) edits a file; then a /cg-feedback run answering both calls."""
     lines = [
         user_str_line("plan the login change", origin={"kind": "human"}, timestamp=_ts(0)),
         turn_line(model=MODEL, timestamp=_ts(1), cache_read_input_tokens=10_000, input_tokens=10),
@@ -647,7 +647,7 @@ def _plan_session(tmp_path, name: str, *, edit: bool = True, handoff: str | None
     core = _asked(catalogue.FEEDBACK_QUESTIONS)
     answers = {catalogue.FEEDBACK_QUESTIONS[0].question: "Yes", catalogue.FEEDBACK_QUESTIONS[2].question: worth}
     lines += [
-        user_str_line("<command-message>cl-feedback</command-message>\n<command-name>/cl-feedback</command-name>",
+        user_str_line("<command-message>cg-feedback</command-message>\n<command-name>/cg-feedback</command-name>",
                       timestamp=_ts(10)),
         user_block_line([{"type": "text", "text": catalogue.feedback_skill_text()}], isMeta=True, timestamp=_ts(10)),
         _reply(11, tool_use_block("AskUserQuestion", "tu_q", {"questions": core})),
@@ -824,11 +824,11 @@ def _tagged_session_with_attempted_leaks(tmp_path):
         ),
         _reply(
             1,
-            text="Looking.\n[tl: task=bugfix brief=vague level=hard "
+            text="Looking.\n[cg: task=bugfix brief=vague level=hard "
             "missing=files,/etc/passwd skill=would-help:not-a-real-skill]",
         ),
         user_str_line("do it again properly", origin={"kind": "human"}, timestamp=_ts(10)),
-        _reply(11, text="Redone.\n[tl: task=bugfix shift=redo]"),
+        _reply(11, text="Redone.\n[cg: task=bugfix shift=redo]"),
     ], kind="top-level")
     sub = _parse(tmp_path, "agent-a1.jsonl", [
         user_str_line("find where the cookie is set", timestamp=_ts(2)),
@@ -1095,10 +1095,10 @@ def test_self_report_calibration_flags_easy_work_that_misses_more_than_normal():
 
 
 def test_self_report_calibration_ignores_outcomes_sourced_from_claudes_own_tag():
-    # SEC-P1: a `[tl-fb: ...]` tag is Claude's own report of the
+    # SEC-P1: a `[cg-fb: ...]` tag is Claude's own report of the
     # outcome, not yours, so it must not feed the calibration that
     # checks Claude's reports against your feedback -- only "answers"
-    # (/cl-feedback's question) and "rating" (the dashboard) count.
+    # (/cg-feedback's question) and "rating" (the dashboard) count.
     easy, normal = CaptureTag(level="easy"), CaptureTag(level="normal")
 
     def _cycles(source: str) -> list:

@@ -420,7 +420,7 @@ if `<id>` is unknown.
 from Spend › Sessions (`{"outcome", "slow", "worth", "helped",
 "set_at"}`, words only; `null` when unrated). While the dashboard
 rating is switched on (`[capture] feedback` holds `dashboard_rating`),
-`data` also carries `feedback_questions`: the `/cl-feedback` questions
+`data` also carries `feedback_questions`: the `/cg-feedback` questions
 to rate it with, each `{"key", "question", "multi", "options": [{"word",
 "label"}]}`.
 
@@ -1165,7 +1165,7 @@ one is built in the background.
   `hooks`, `requires`, `on`, `toggle` (`false` for metrics that are
   always measured), `asks_claude`, `needs_hook` (on, but its hook
   entry is missing), `needs_install` with `install_note` and
-  `install_command` (the `/cl-feedback` skill is on but its file is
+  `install_command` (the `/cg-feedback` skill is on but its file is
   missing, out of date or someone else's: the dashboard never writes
   Claude Code's folder, so it names the CLI command), `statusline_note`
   (a status-line toggle is on but Claude Code's status line isn't this
@@ -1208,7 +1208,7 @@ one is built in the background.
   over the last `days` days), `ratings` (sessions rated on the
   dashboard, `null` while that is off), `questions` (as in
   `GET /api/session/<id>`'s `feedback_questions`) and `brief_skill`
-  (the `/cl-brief` skill's file, in the same words as `skill`, or
+  (the `/cg-brief` skill's file, in the same words as `skill`, or
   `null` while brief templates are off).
 - `commands`: the `status`, `connect`, `feedback` and `brief` CLI
   commands.
@@ -1324,7 +1324,7 @@ tag set after the write).
 
 ### `POST /api/sessions/<id>/feedback`
 
-Your rating of a session: the `/cl-feedback` questions as checkboxes,
+Your rating of a session: the `/cg-feedback` questions as checkboxes,
 kept in this tool's own store (the `session_feedback` table), so it
 costs no tokens. The session drawer on Spend › Sessions shows the form
 while the dashboard rating is switched on; the route itself works either

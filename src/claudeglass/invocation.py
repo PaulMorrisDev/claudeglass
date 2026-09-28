@@ -46,7 +46,7 @@ from . import installer
 #: note and command in the package is written with.
 SHORT = "claudeglass"
 
-#: Overrides the detected command, word for word (for example ``tl`` for
+#: Overrides the detected command, word for word (for example ``cg`` for
 #: a shell alias, or a path the detection can't see).
 ENV_VAR = "CLAUDEGLASS_COMMAND"
 

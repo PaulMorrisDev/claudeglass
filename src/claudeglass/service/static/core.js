@@ -89,7 +89,7 @@ export function storageRemove(key) {
 export var CLI_COMMAND = readCliCommand();
 
 function readCliCommand() {
-  var meta = typeof document !== "undefined" ? document.querySelector('meta[name="tl-command"]') : null;
+  var meta = typeof document !== "undefined" ? document.querySelector('meta[name="cg-command"]') : null;
   return (meta && meta.getAttribute("content")) || "claudeglass";
 }
 

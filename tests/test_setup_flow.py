@@ -48,7 +48,7 @@ def _settings(config_dir) -> dict:
 
 
 def _skill(config_dir):
-    return config_dir.parent / "skills" / "cl-feedback" / "SKILL.md"
+    return config_dir.parent / "skills" / "cg-feedback" / "SKILL.md"
 
 
 def _run(config_dir, *argv, stdin="", sleep=None, clock=None) -> tuple[int, str]:
@@ -88,7 +88,7 @@ def test_the_default_path_asks_four_questions_then_sets_everything_up(tmp_path):
     # Nothing --advanced asks.
     assert "Time zone" not in out and "Metrics capture level:" not in out
     assert "How you pay: a plan (Pro, Max, Team or Enterprise)" in out
-    assert "Sharper tips (metrics capture): turn on Essentials until 2026-10-09, and add the /cl-feedback skill." in out
+    assert "Sharper tips (metrics capture): turn on Essentials until 2026-10-09, and add the /cg-feedback skill." in out
     assert re.search(r"Add \d+ capture hook entries: Claude Code runs capture-hook.py", out)
 
     config = load_config(config_dir)
@@ -99,7 +99,7 @@ def test_the_default_path_asks_four_questions_then_sets_everything_up(tmp_path):
     assert _skill(config_dir).read_text(encoding="utf-8") == cat.feedback_skill_text()
     assert hook_health.check(config_dir, claude_root=config_dir.parent).command is not None
     assert (config_dir / "hooks" / "snapshot-config.py").is_file()
-    assert "After a piece of work, run /cl-feedback in Claude Code." in out
+    assert "After a piece of work, run /cg-feedback in Claude Code." in out
     assert RESTART_NOTE in out
     assert not (config_dir / "projects").exists()
 
@@ -154,7 +154,7 @@ def test_dry_run_shows_everything_and_writes_nothing(tmp_path):
     assert rc == 0, out
     assert "Dry run: nothing was written." in out
     assert "SessionStart" in out and "install-service:" in out
-    assert "The /cl-feedback skill: writes" in out
+    assert "The /cg-feedback skill: writes" in out
     # The real snapshot hook installer never ran: no hooks folder, no
     # config.toml, no salt, no digest cache.
     assert list(config_dir.iterdir()) == []
@@ -186,7 +186,7 @@ def test_a_rerun_keeps_deep_and_adds_its_hooks_when_connecting(tmp_path):
         hook_health.capture_specs(cat.level_metrics("deep"))
     )
     # Deep turned the survey on, so its skill comes too.
-    assert "The /cl-feedback skill: add it." in out and _skill(config_dir).is_file()
+    assert "The /cg-feedback skill: add it." in out and _skill(config_dir).is_file()
 
 
 def test_a_rerun_skips_what_is_done_and_no_to_tips_turns_essentials_off(tmp_path):
@@ -211,7 +211,7 @@ def test_advanced_asks_every_question_and_writes_the_project_file(tmp_path):
     rc, out = _run(config_dir, "--advanced", "--no-service", stdin="1\n" + "\n" * 6 + "n\n\n\n\n")
     assert rc == 0, out
     _in_order(out, "Choose 1 or 2:", "More settings (--advanced)", "Time zone", "Connect? [Y/n]:",
-              "Metrics capture level:", "Add the /cl-feedback skill?", "Ready to set up:")
+              "Metrics capture level:", "Add the /cg-feedback skill?", "Ready to set up:")
     slug = discovery.slug_for(str(tmp_path / "work" / "my-proj"))
     assert (config_dir / "projects" / f"{slug}.toml").is_file()
 

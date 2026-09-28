@@ -160,7 +160,7 @@ class CaptureConfig:
     #: Live coaching toggles switched on
     #: (``capture_catalogue.COACHING_IDS``).
     coaching: list[str] = field(default_factory=list)
-    #: Who writes the main session's ``[tl: ...]`` tags, one of
+    #: Who writes the main session's ``[cg: ...]`` tags, one of
     #: ``capture_catalogue.TAGGERS``: Claude, at the end of its replies, or
     #: Claude Haiku, asked by the hook after each turn.
     tagger: str = capture_catalogue.DEFAULT_TAGGER
@@ -1035,7 +1035,7 @@ def _in_catalogue_order(chosen: list[str], known: tuple[str, ...]) -> list[str]:
     return [i for i in known if i in wanted] + [i for i in dict.fromkeys(chosen) if i not in known]
 
 
-#: What turning the ``/cl-feedback`` survey on turns on (``capture
+#: What turning the ``/cg-feedback`` survey on turns on (``capture
 #: feedback on``, ``init``), and what turning it off turns off: the skill
 #: and the reminders to run it. The dashboard rating stays as set.
 FEEDBACK_ON = ("feedback_skill", "feedback_note")
@@ -1043,7 +1043,7 @@ FEEDBACK_OFF = ("feedback_skill", "feedback_note", "feedback_reminder")
 
 
 def feedback_ids(current: list[str], on: bool) -> list[str]:
-    """``[capture] feedback`` with the ``/cl-feedback`` skill and its
+    """``[capture] feedback`` with the ``/cg-feedback`` skill and its
     notes switched on or off (:data:`FEEDBACK_ON`/:data:`FEEDBACK_OFF`)."""
     if on:
         return list(current) + [i for i in FEEDBACK_ON if i not in current]

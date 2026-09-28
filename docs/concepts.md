@@ -477,7 +477,7 @@ floor.
 
 Metrics capture is an opt-in feature: while it's on, a hook adds a short
 note to each session and subagent start, and Claude ends its replies
-with a one-line tag (`[tl: task=bugfix brief=partial level=normal]`; a
+with a one-line tag (`[cg: task=bugfix brief=partial level=normal]`; a
 subagent's report ends `[result: done]` plus whatever extra words its
 level asks for). It costs tokens, and levels trade depth of insight for
 that cost: Free (local signals only, no Claude tokens), Essentials,
@@ -508,7 +508,7 @@ answers it, and every subagent that message started, at any depth, up to
 (not including) the turn that answers your next message.
 
 **Coverage.** The share of prompt cycles whose final reply carried a
-`[tl: ...]` tag (`CaptureUsage.coverage`), and separately the share of
+`[cg: ...]` tag (`CaptureUsage.coverage`), and separately the share of
 agent reports that carried `[result: ...]` (`report_coverage`). Low
 coverage means Claude is skipping the tag more often than writing it
 wrong, so a habit built on few tagged cycles is shown with that caveat.
@@ -542,7 +542,7 @@ choices with the measured cost attached.
 `habits.py` turns the same prompt cycles and subagent runs — whatever
 metrics capture reported on them, what the parser measures without
 asking (a message naming a file, a command failing repeatedly, a skill
-loaded late...), and your own `/cl-feedback` answers and dashboard
+loaded late...), and your own `/cg-feedback` answers and dashboard
 ratings — into ranked habits: an estimated saving, how sure it is, and
 whether you've already picked it up. Every table is always present in a
 report, empty (with a note saying why) when capture is off or nothing's

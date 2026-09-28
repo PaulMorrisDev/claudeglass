@@ -3,7 +3,7 @@
 Metrics capture is opt-in. While it is on, a small hook adds a short note
 to each session and subagent start (see ``hooks/capture-hook.py``) asking
 Claude to end its replies with a one-line tag, for example
-``[tl: task=bugfix brief=partial level=normal]``. ClaudeGlass reads the tags
+``[cg: task=bugfix brief=partial level=normal]``. ClaudeGlass reads the tags
 back out of the transcripts to explain what the work was, not only what it
 cost.
 
@@ -27,13 +27,17 @@ from dataclasses import dataclass
 
 #: The marker every capture note carries, followed by the note format
 #: version and the codes of the metrics it asks for
-#: (``tl-cap v1 task,brief,level``). The parser finds capture notes by it.
-NOTE_MARKER = "tl-cap v"
+#: (``cg-cap v1 task,brief,level``). The parser finds capture notes by it.
+NOTE_MARKER = "cg-cap v"
+#: The marker notes carried until 0.12.1 (``tl`` for claude-token-lens,
+#: this tool's name until 0.9.0), as did every tag and marker below. The
+#: parser reads both, so sessions from before read the same.
+OLD_NOTE_MARKER = "tl-cap v"
 
 #: Current note format version.
 NOTE_VERSION = 1
 
-#: ``[tl: ...]`` keys (and the ``[result: ...]`` extras) -> the words each
+#: ``[cg: ...]`` keys (and the ``[result: ...]`` extras) -> the words each
 #: may take. A key whose value is a comma list (``missing=files,goal``) is
 #: in :data:`LIST_KEYS`.
 TAG_VOCAB: dict[str, tuple[str, ...]] = {
@@ -118,11 +122,11 @@ SPAWN_REASONS = ("parallel", "isolate", "cheaper", "specialist", "review")
 SKILL_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}"
 
 #: The line Claude writes when ``feedback_reminder`` is on (below), word
-#: for word. The note asks for it *before* the ``[tl: ...]`` tag (CAP-1),
+#: for word. The note asks for it *before* the ``[cg: ...]`` tag (CAP-1),
 #: and ``capture_tags`` strips it from a reply's tail before matching the
 #: trailing tag, so it doesn't matter if Claude writes them the other
 #: way round.
-FEEDBACK_REMINDER_LINE = "Finished? Run /cl-feedback: a few ticks make your savings tips fit how you work."
+FEEDBACK_REMINDER_LINE = "Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work."
 
 #: How Claude sets a coaching tip or the reminder apart in its reply, so
 #: it stands out from the work in the terminal and the desktop app alike:
@@ -175,7 +179,7 @@ LEVEL_SUMMARIES = {
     "standard": "Adds what the request lacked, planning, skills, research, "
     "and Haiku's view of each agent run's model and brief.",
     "deep": "Adds how much earlier context was needed, how the change was checked, and a "
-    "short rating after large tool outputs. Also turns on the /cl-feedback survey, its reminder note, "
+    "short rating after large tool outputs. Also turns on the /cg-feedback survey, its reminder note, "
     "and Claude's one-line reminder to run it when a piece of work is done.",
 }
 
@@ -306,7 +310,7 @@ SIGNALS_DIR = "signals"
 
 # -- who writes the reply tags --------------------------------------------------
 
-#: Who writes the main session's ``[tl: ...]`` tag (``[capture] tagger``):
+#: Who writes the main session's ``[cg: ...]`` tag (``[capture] tagger``):
 #: Claude, at the end of its final reply to each message (the default), or
 #: Claude Haiku, which the hook asks after each turn, in the background,
 #: with a short excerpt of it (:func:`judge_text`). With ``haiku`` the
@@ -364,7 +368,7 @@ JUDGE_ERRORS = ("no_cli", "no_login", "timeout", "failed", "no_tag")
 JUDGE_INTRO = (
     "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage "
     "analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final "
-    "reply. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words. In "
+    "reply. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words. In "
     'them, "you" means Claude:'
 )
 #: The last line of what Haiku is told, in place of the note's
@@ -384,7 +388,7 @@ JUDGE_RULE = (
 AGENT_JUDGE_INTRO = (
     "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt "
     "of it: the brief the agent was given, what it did, the end of its report and the session's earlier agent "
-    "runs. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words:"
+    "runs. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words:"
 )
 AGENT_JUDGE_RULE = "Judge only from the excerpt. Give every key; leave one out only when the excerpt can't tell at all."
 
@@ -397,7 +401,7 @@ AGENT_JUDGE_LIMITS = {
     "commands": 6, "files": 8,
 }
 
-#: The agent metrics, each with the ``[tl: ...]`` keys Haiku answers for
+#: The agent metrics, each with the ``[cg: ...]`` keys Haiku answers for
 #: it, in the order it is asked.
 AGENT_JUDGE_KEYS = {"result": ("result",), "retry": ("retry",), "fit": ("fit",), "agent_brief": ("brief", "missing")}
 
@@ -420,11 +424,13 @@ CATALOGUE_FILE = "capture-catalogue.json"
 # -- coaching notes ------------------------------------------------------------
 
 #: The marker every coaching note (``coaching_notes``) carries, then its
-#: format version and the hint's kind (``tl-coach v1 quiet_output``). The
+#: format version and the hint's kind (``cg-coach v1 quiet_output``). The
 #: parser finds coaching notes by it. It differs from :data:`NOTE_MARKER`
 #: so a coaching note never makes a session count as captured, whose
 #: replies are then expected to carry tags.
-COACH_MARKER = "tl-coach v"
+COACH_MARKER = "cg-coach v"
+#: The marker coaching notes carried until 0.12.1.
+OLD_COACH_MARKER = "tl-coach v"
 COACH_VERSION = 1
 
 #: Your own split points and plan habit, worked out from your recent
@@ -716,7 +722,7 @@ class Metric:
     tag: str = ""
     #: Hook events it needs in Claude Code's settings.json.
     hooks: tuple[str, ...] = ()
-    #: The line explaining its key in the main session's ``[tl: ...]``
+    #: The line explaining its key in the main session's ``[cg: ...]``
     #: tag; and, for an agent metric, the line Haiku gets for its keys
     #: when it judges an agent run (:func:`agent_judge_text`).
     main_line: str = ""
@@ -724,7 +730,7 @@ class Metric:
     #: A line of its own in the main or subagent note.
     main_extra: str = ""
     sub_extra: str = ""
-    #: Put ``main_extra`` before the ``[tl: ...]`` tag block instead of
+    #: Put ``main_extra`` before the ``[cg: ...]`` tag block instead of
     #: after it (CAP-1): for an extra that itself tells Claude to end its
     #: reply with something, which would otherwise compete with the tag
     #: instruction for "the last thing in the reply".
@@ -1170,7 +1176,7 @@ METRICS: tuple[Metric, ...] = (
         section="coaching",
         title="Brief templates",
         what="Checklists per kind of task, built from what your own requests tend to lack, on "
-        "Work habits to copy. Turned on, it also adds a /cl-brief skill you run with a request: Claude "
+        "Work habits to copy. Turned on, it also adds a /cg-brief skill you run with a request: Claude "
         "checks it against its checklist and asks once for anything missing.",
         why="Better first messages, so Claude spends less finding things out.",
         powers=("information",),
@@ -1181,20 +1187,20 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback skill",
-        what="A /cl-feedback skill you run after a piece of work. It asks four checkbox questions: the "
+        what="A /cg-feedback skill you run after a piece of work. It asks four checkbox questions: the "
         "outcome, what slowed it, whether it was worth the tokens, and what would have helped. After an "
         "approved plan it asks a fifth: whether the build could have started fresh from the plan.",
         why="Cost per piece of work that met its goal, which outranks what Claude reports about itself. "
         "The plan answer tells the fresh-session tip and the suggested profile how you work.",
         powers=("outcome", "planning", "profiles"),
-        tag="[tl-fb: outcome=… slow=… worth=… helped=… handoff=…]",
+        tag="[cg-fb: outcome=… slow=… worth=… helped=… handoff=…]",
     ),
     Metric(
         id="feedback_note",
         group="feedback",
         section="feedback",
         title="Feedback reminder in the status line",
-        what="A second status line reminding you to run /cl-feedback, and the same line on the dashboard "
+        what="A second status line reminding you to run /cg-feedback, and the same line on the dashboard "
         "banner.",
         why="A reminder that costs nothing: the status line is never sent to Claude.",
         powers=("outcome",),
@@ -1204,7 +1210,7 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback reminder from Claude",
-        what="Claude adds a highlighted note suggesting /cl-feedback once a session, when it finishes its first "
+        what="Claude adds a highlighted note suggesting /cg-feedback once a session, when it finishes its first "
         "piece of work.",
         why="For people without the status line, such as in the desktop app. Costs a few output tokens once a "
         "session.",
@@ -1236,7 +1242,7 @@ LEVEL_METRIC_IDS = tuple(m.id for m in METRICS if m.group in LEVEL_GROUPS)
 FEEDBACK_IDS = tuple(m.id for m in METRICS if m.group == "feedback")
 COACHING_IDS = tuple(m.id for m in METRICS if m.group == "coaching")
 #: The feedback items a switch into Deep turns on as well
-#: (``config.set_capture``): the /cl-feedback survey, its reminder note,
+#: (``config.set_capture``): the /cg-feedback survey, its reminder note,
 #: and Claude's one-line reminder to run it. Deep is the level for
 #: someone who wants the fullest picture, and outcomes from the survey
 #: outrank what Claude reports about itself. Leaving Deep keeps them;
@@ -1256,25 +1262,27 @@ RETIRED_METRIC_IDS: tuple[str, ...] = ("detour", "web", "spawn", "rules")
 
 #: The persistent feedback note (``feedback_note``): the status line's
 #: second line and the dashboard banner show it word for word.
-FEEDBACK_NOTE = "Finished a piece of work? Run /cl-feedback: a few ticks make your savings tips fit how you work."
+FEEDBACK_NOTE = "Finished a piece of work? Run /cg-feedback: a few ticks make your savings tips fit how you work."
 
 
-# -- the /cl-feedback questions --------------------------------------------
+# -- the /cg-feedback questions --------------------------------------------
 
-#: The feedback skill: the user runs it as ``/cl-feedback``, from
-#: ``~/.claude/skills/cl-feedback/SKILL.md``.
-FEEDBACK_SKILL = "cl-feedback"
+#: The feedback skill: the user runs it as ``/cg-feedback``, from
+#: ``~/.claude/skills/cg-feedback/SKILL.md``.
+FEEDBACK_SKILL = "cg-feedback"
 
-#: ``[tl-fb: ...]``: the tag the skill ends with, carrying the answers.
-FEEDBACK_TAG = "tl-fb"
+#: ``[cg-fb: ...]``: the tag the skill ends with, carrying the answers.
+FEEDBACK_TAG = "cg-fb"
+#: The tag's name until 0.12.1.
+OLD_FEEDBACK_TAG = "tl-fb"
 
 
 @dataclass(frozen=True, slots=True)
 class FeedbackQuestion:
-    """One /cl-feedback question, asked with AskUserQuestion and offered
+    """One /cg-feedback question, asked with AskUserQuestion and offered
     as checkboxes on the dashboard's Sessions tab."""
 
-    #: The ``[tl-fb: ...]`` key its answer is written under.
+    #: The ``[cg-fb: ...]`` key its answer is written under.
     key: str
     #: AskUserQuestion's chip label: at most 12 characters, starting "TL"
     #: so the answers can be told apart from any other question.
@@ -1355,13 +1363,13 @@ HANDOFF_QUESTION = FeedbackQuestion(
     ),
 )
 
-#: Every question a ``[tl-fb: ...]`` tag or an answer may carry.
+#: Every question a ``[cg-fb: ...]`` tag or an answer may carry.
 ALL_FEEDBACK_QUESTIONS: tuple[FeedbackQuestion, ...] = FEEDBACK_QUESTIONS + (HANDOFF_QUESTION,)
 
-#: ``[tl-fb: ...]`` key -> the words its answer may take.
+#: ``[cg-fb: ...]`` key -> the words its answer may take.
 FEEDBACK_VOCAB: dict[str, tuple[str, ...]] = {q.key: tuple(o[0] for o in q.options) for q in ALL_FEEDBACK_QUESTIONS}
 
-#: ``[tl-fb: ...]`` keys whose value is a comma list of words.
+#: ``[cg-fb: ...]`` keys whose value is a comma list of words.
 FEEDBACK_LIST_KEYS = frozenset(q.key for q in ALL_FEEDBACK_QUESTIONS if q.multi)
 
 #: The words a dashboard rating (the Sessions tab's checkboxes) may
@@ -1370,7 +1378,7 @@ RATING_VOCAB: dict[str, tuple[str, ...]] = {q.key: FEEDBACK_VOCAB[q.key] for q i
 
 
 def feedback_skill_text() -> str:
-    """``SKILL.md`` for ``/cl-feedback``. ``disable-model-invocation``
+    """``SKILL.md`` for ``/cg-feedback``. ``disable-model-invocation``
     keeps its description out of Claude's context until the user runs
     it, and it names no model: switching model mid-session would rebuild
     the whole prompt cache, which costs more than the skill saves."""
@@ -1430,20 +1438,26 @@ def feedback_skill_text() -> str:
     return "\n".join(lines)
 
 
-# -- the /cl-brief checklists -----------------------------------------------
+# -- the /cg-brief checklists -----------------------------------------------
 
-#: The brief skill: the user runs it as ``/cl-brief <request>``, from
-#: ``~/.claude/skills/cl-brief/SKILL.md``.
-BRIEF_SKILL = "cl-brief"
+#: The brief skill: the user runs it as ``/cg-brief <request>``, from
+#: ``~/.claude/skills/cg-brief/SKILL.md``.
+BRIEF_SKILL = "cg-brief"
 
-#: The names the two skills had until 0.12.0 (``tl`` for token-lens, this
-#: tool's first name) -> their names now. A copy of ours still under an
-#: old name is renamed by ``update --finish`` or ``capture <switch> on``.
-RENAMED_SKILLS = {"tl-feedback": FEEDBACK_SKILL, "tl-brief": BRIEF_SKILL}
+#: The names the two skills had before -> their names now: ``tl-`` (for
+#: claude-token-lens, this tool's name until 0.9.0) until 0.12.0, and
+#: ``cl-`` in 0.12.0 by mistake. A copy of ours still under an old name is renamed by
+#: ``update --finish`` or ``capture <switch> on``.
+RENAMED_SKILLS = {
+    "tl-feedback": FEEDBACK_SKILL,
+    "cl-feedback": FEEDBACK_SKILL,
+    "tl-brief": BRIEF_SKILL,
+    "cl-brief": BRIEF_SKILL,
+}
 
-#: ``/cl-feedback`` under either name: transcripts from before 0.12.0 ran
-#: it as ``/tl-feedback``.
-FEEDBACK_SKILL_NAMES = frozenset({FEEDBACK_SKILL, "tl-feedback"})
+#: ``/cg-feedback`` under any of its names: transcripts from before
+#: 0.12.1 ran it as ``/tl-feedback`` or ``/cl-feedback``.
+FEEDBACK_SKILL_NAMES = frozenset({FEEDBACK_SKILL, *(o for o, n in RENAMED_SKILLS.items() if n == FEEDBACK_SKILL)})
 
 #: A checklist line -> ``(label, template line)``. The keys are the
 #: ``missing`` words (``none`` aside), plus ``report`` for research.
@@ -1476,9 +1490,9 @@ BRIEF_CHECKLISTS: dict[str, tuple[str, ...]] = {
 
 
 def brief_skill_text() -> str:
-    """``SKILL.md`` for ``/cl-brief``: check a request against its kind of
+    """``SKILL.md`` for ``/cg-brief``: check a request against its kind of
     task's checklist and ask once for what is missing, or start. Like
-    ``/cl-feedback`` it is user-invoked only and names no model."""
+    ``/cg-feedback`` it is user-invoked only and names no model."""
     lines = [
         "---",
         f"name: {BRIEF_SKILL}",
@@ -1488,7 +1502,7 @@ def brief_skill_text() -> str:
         "---",
         "",
         "The user wants their request checked before the work starts, for ClaudeGlass, so less is spent "
-        "finding things out. The request is the text after /cl-brief; when there is none, it is the user's "
+        "finding things out. The request is the text after /cg-brief; when there is none, it is the user's "
         "previous message.",
         "",
         "1. Decide which kind of task it is: " + ", ".join(BRIEF_CHECKLISTS) + ".",
@@ -1520,7 +1534,7 @@ def brief_skill_text() -> str:
 #: ``[result: ...]`` shape (:data:`SUB_TAG` or :data:`SUB_TAG_WITH_KEYS`).
 NOTE_INTRO = "The user turned on ClaudeGlass metrics capture, to see where their tokens go."
 MAIN_TAG_INTRO = (
-    "End your final reply to each user message with one line, [tl: key=word ...], using only these keys and words:"
+    "End your final reply to each user message with one line, [cg: key=word ...], using only these keys and words:"
 )
 SUB_TAG_INTRO = "End your final report with one line, {tag}, using only these words:"
 SUB_TAG = "[result: done|partial|blocked]"
@@ -1579,7 +1593,7 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
     """The note the hook adds for ``scope`` (``"main"`` at session start,
     ``"subagent"`` at agent start) with the metrics in ``ids`` switched
     on; ``""`` when none of them asks anything there. While Haiku writes
-    the tags (``tagger``), the main note asks for no ``[tl: ...]`` tag.
+    the tags (``tagger``), the main note asks for no ``[cg: ...]`` tag.
 
     ``hooks/capture-hook.py`` builds the same text from
     ``capture-catalogue.json`` (:func:`export_json`); a test holds the two
@@ -1625,7 +1639,7 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
 
 
 def tagged_keys(ids) -> tuple[str, ...]:
-    """The ``[tl: ...]`` keys the metrics in ``ids`` ask for, in
+    """The ``[cg: ...]`` keys the metrics in ``ids`` ask for, in
     catalogue order."""
     wanted = set(ids)
     return tuple(m.id for m in METRICS if m.id in wanted and m.main_line)
@@ -1852,7 +1866,7 @@ def export_json() -> dict:
 #: and "<event> hook additional context: ", less the event name itself.
 NOTE_WRAP_CHARS = 63
 
-#: Characters the "[tl: " and "]" around a reply tag add.
+#: Characters the "[cg: " and "]" around a reply tag add.
 _TAG_FRAME_CHARS = 6
 
 
@@ -1869,13 +1883,13 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     (``session_note``); at each subagent start (``subagent_note``) and
     per subagent report (``report_tag``), both now always 0, as an agent
     is asked for nothing; the tag Claude writes per reply (``reply_tag``),
-    none while Claude Haiku writes the tags (``tagger``); the /cl-feedback
+    none while Claude Haiku writes the tags (``tagger``); the /cg-feedback
     reminder Claude adds once a session (``reminder``); the note after a
     large or web tool result (``tool_note``). Amounts measured from
     transcripts replace these once capture has run."""
     enabled = [METRICS_BY_ID[i] for i in ids if i in METRICS_BY_ID]
     main, sub = note_text(ids, "main", tagger=tagger), note_text(ids, "subagent")
-    # The /cl-feedback reminder comes once a session, not with every reply.
+    # The /cg-feedback reminder comes once a session, not with every reply.
     reminder = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
     if tagger == "haiku" and any(m.main_line for m in enabled):
         reply = frame = 0  # no tag at all
@@ -1924,7 +1938,7 @@ def _metric_group_label(metric: Metric) -> str:
 
 
 def _feedback_tag_words() -> str:
-    """The full ``[tl-fb: ...]`` tag with every question's whole
+    """The full ``[cg-fb: ...]`` tag with every question's whole
     vocabulary spelled out. ``Metric.tag`` shortens this with an
     ellipsis for the Capture page's table; the doc's "exact words"
     promise needs the real thing, so :func:`render_markdown` builds it
@@ -1962,7 +1976,7 @@ def _metric_tag_line(metric: Metric) -> str:
         return "No tag. A hook records it directly; Claude is never asked."
     if metric.id == "brief_templates":
         return (
-            "No tag. The checklists are on Work habits, and /cl-brief runs only when you type it; like any "
+            "No tag. The checklists are on Work habits, and /cg-brief runs only when you type it; like any "
             "skill, its name and description are listed to Claude at each session start."
         )
     if metric.group == "coaching":
@@ -1996,7 +2010,7 @@ def render_markdown() -> str:
     p("")
     p(
         f"Turned on, a hook (`{HOOK_SCRIPT}`) adds a short note to each session start, and asks Claude to end "
-        "its replies with one line such as `[tl: task=bugfix brief=partial level=normal]` (or Claude Haiku "
+        "its replies with one line such as `[cg: task=bugfix brief=partial level=normal]` (or Claude Haiku "
         "writes it, see [Who writes the tags](#who-writes-the-tags)). A subagent is asked for nothing: its brief "
         "and its report are exactly what they would be, and Claude Haiku judges the run once it's done (see "
         "[Agent runs](#agent-runs)). The tag always sits at the end of the reply you already read — nothing is "
@@ -2117,7 +2131,7 @@ def render_markdown() -> str:
         "marker; both are still read."
     )
     p("")
-    p(f"The `/cl-feedback` skill ends with its own line: `{_feedback_tag_words()}`.")
+    p(f"The `/cg-feedback` skill ends with its own line: `{_feedback_tag_words()}`.")
     p("")
     p("If Claude writes more than one tag, the last one wins, key by key.")
     p("")
@@ -2127,7 +2141,7 @@ def render_markdown() -> str:
     p("")
     standard = level_includes("standard")
     p(
-        "By default Claude writes the `[tl: ...]` tag itself, at the end of its final reply to each of your "
+        "By default Claude writes the `[cg: ...]` tag itself, at the end of its final reply to each of your "
         "messages. `claudeglass capture tagger haiku` (or \"Tags written by\" on Setup › Capture) hands that to "
         "Claude Haiku instead, and `capture tagger claude` hands it back:"
     )
@@ -2226,7 +2240,7 @@ def render_markdown() -> str:
     p("## Privacy")
     p("")
     p(
-        "Claude and Haiku write closed vocabularies only. Every `[tl: ...]` and `[tl-fb: ...]` word, and every "
+        "Claude and Haiku write closed vocabularies only. Every `[cg: ...]` and `[cg-fb: ...]` word, and every "
         "`[result: ...]`, `[retry: ...]` and `[spawn: ...]` word in an older transcript, is checked against the "
         "lists on this page; anything else — "
         "an unknown word, a key outside those lists, free text, a path — is dropped by the parser and never "
@@ -2302,8 +2316,8 @@ def render_markdown() -> str:
         "chosen need."
     )
     p("- `claudeglass capture remove` — switch off and take those hook entries back out.")
-    p("- `claudeglass capture feedback on|off` — the `/cl-feedback` skill and its status-line reminder.")
-    p("- `claudeglass capture brief on|off` — the `/cl-brief` skill.")
+    p("- `claudeglass capture feedback on|off` — the `/cg-feedback` skill and its status-line reminder.")
+    p("- `claudeglass capture brief on|off` — the `/cg-brief` skill.")
     p(
         "- `claudeglass capture prune [--dry-run]` — delete signal files, Claude Haiku's tag files and "
         "`capture-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's "

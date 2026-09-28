@@ -335,7 +335,7 @@ def test_harder_work_after_a_change_doesnt_read_as_the_change_costing_more(tmp_p
 def test_session_facts_reads_how_hard_and_how_big_from_capture_tags(tmp_path):
     from helpers import attachment_line, user_str_line
 
-    note_text = "ClaudeGlass metrics capture (tl-cap v1 task,level,size): ..."
+    note_text = "ClaudeGlass metrics capture (cg-cap v1 task,level,size): ..."
     note = attachment_line(
         "hook_additional_context",
         rendered=f"<system-reminder>\nSessionStart hook additional context: {note_text}\n</system-reminder>",
@@ -345,7 +345,7 @@ def test_session_facts_reads_how_hard_and_how_big_from_capture_tags(tmp_path):
     lines = [note]
     for n, tag in enumerate(("task=feature level=hard size=l", "task=feature level=hard size=m", "task=feature level=hard size=l")):
         lines.append(user_str_line("go on", origin={"kind": "human"}, timestamp=f"2026-09-18T12:00:{2 * n:02d}.000Z"))
-        lines.append(turn_line(content=[{"type": "text", "text": f"Done.\n[tl: {tag}]"}], timestamp=f"2026-09-18T12:00:{2 * n + 1:02d}.000Z"))
+        lines.append(turn_line(content=[{"type": "text", "text": f"Done.\n[cg: {tag}]"}], timestamp=f"2026-09-18T12:00:{2 * n + 1:02d}.000Z"))
     project_dir = tmp_path / "proj"
     project_dir.mkdir()
     write_jsonl(project_dir / "s.jsonl", lines)

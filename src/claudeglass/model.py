@@ -318,7 +318,7 @@ how tags are read). Every value is a word from a closed list, a count or
 a flag, never text:
 
 - ``CaptureTag`` / ``Turn.cap: CaptureTag | None = None`` -- the
-  ``[tl: ...]`` tag (and the ``[result: ...]`` extras ``fit``, ``rules``,
+  ``[cg: ...]`` tag (and the ``[result: ...]`` extras ``fit``, ``rules``,
   ``brief``, ``missing``) ending this turn's last text block. Unknown keys
   and words are dropped; ``skill_name`` survives only when it names a
   skill the transcript listed or used. ``chars`` is the tag's own length,
@@ -327,9 +327,9 @@ a flag, never text:
   sets ``cap`` on the tagged reply's turn after the parse instead, with
   ``judged`` set and ``judge_usd`` what the call cost.
 - ``Turn.cap_note_chars: int = 0`` -- characters of capture notes (a
-  ``hook_additional_context`` attachment carrying ``tl-cap v``) put in
+  ``hook_additional_context`` attachment carrying ``cg-cap v``) put in
   front of the model just before this turn, measured from ``rendered``.
-  From ``PARSER_VERSION`` 25 it counts coaching notes (``tl-coach v``)
+  From ``PARSER_VERSION`` 25 it counts coaching notes (``cg-coach v``)
   too: an ``Event`` of subkind ``coaching_note`` whose ``detail`` holds
   ``v``, ``kind`` (a ``capture_catalogue.COACHING_HINTS`` word or
   "other") and ``hook``; a capture note sharing an attachment with one
@@ -363,10 +363,10 @@ a flag, never text:
 Feedback addition (``PARSER_VERSION`` 16):
 
 - ``Feedback`` / ``Turn.feedback: Feedback | None = None`` -- your
-  /cl-feedback answers: outcome, what slowed the work, whether it was
+  /cg-feedback answers: outcome, what slowed the work, whether it was
   worth the tokens and what would have helped, as words from
   ``capture_catalogue.FEEDBACK_VOCAB``. Read from the skill's
-  ``[tl-fb: ...]`` line ending this turn's reply (``source`` "tag"), or
+  ``[cg-fb: ...]`` line ending this turn's reply (``source`` "tag"), or
   from the answers to its AskUserQuestion call made in this turn
   ("answers"); "skipped" when you declined the questions. Labels
   are matched to words, so free-text "Other" answers are never kept.
@@ -627,7 +627,7 @@ class CaptureTag:
     check: str | None = None
     out: str | None = None
     useful: str | None = None
-    #: A ``[tl: ...]`` tag was written, not only a ``[result: ...]``.
+    #: A ``[cg: ...]`` tag was written, not only a ``[result: ...]``.
     has_tl: bool = False
     #: Length of the tag text, for pricing the output it cost.
     chars: int = 0
@@ -640,7 +640,7 @@ class CaptureTag:
 
 @dataclass(slots=True)
 class Feedback:
-    """Your /cl-feedback answers (see the module docstring). Every value is
+    """Your /cg-feedback answers (see the module docstring). Every value is
     a word from ``capture_catalogue.FEEDBACK_VOCAB``."""
 
     outcome: str | None = None
@@ -823,7 +823,7 @@ class Turn:
     #: Metrics-capture addition (see module docstring): slash commands
     #: (and skills) you ran just before this turn, by name.
     commands_run: tuple[str, ...] = ()
-    #: Feedback addition (see module docstring): your /cl-feedback answers.
+    #: Feedback addition (see module docstring): your /cg-feedback answers.
     feedback: Feedback | None = None
     #: Your-hooks addition (see module docstring): hook label -> characters
     #: of context your hooks added just before this turn.

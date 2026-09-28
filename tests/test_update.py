@@ -298,21 +298,22 @@ def test_finish_repoints_a_statusline_that_runs_another_python(tmp_path):
     assert "The previous settings.json is at" in out
 
 
-def test_finish_renames_a_skill_under_its_old_name_and_refreshes_an_old_one(tmp_path):
+@pytest.mark.parametrize("name", ["tl-feedback", "cl-feedback"])
+def test_finish_renames_a_skill_under_an_earlier_name_and_refreshes_an_old_one(tmp_path, name):
     skills = tmp_path / "claude" / "skills"
-    old = skills / "tl-feedback" / "SKILL.md"
+    old = skills / name / "SKILL.md"
     old.parent.mkdir(parents=True)
-    old_text = capture_catalogue.feedback_skill_text().replace("name: cl-feedback\n", "name: tl-feedback\n")
+    old_text = capture_catalogue.feedback_skill_text().replace("name: cg-feedback\n", f"name: {name}\n")
     old.write_text(old_text, encoding="utf-8")
-    brief = skills / "cl-brief" / "SKILL.md"
+    brief = skills / "cg-brief" / "SKILL.md"
     brief.parent.mkdir(parents=True)
     brief.write_text(capture_catalogue.brief_skill_text() + "An earlier version's line.\n", encoding="utf-8")
     rc, out = _Finish(tmp_path).run("--dry-run")
-    assert "/tl-feedback is now called /cl-feedback" in out and "This updates the /cl-brief skill" in out
-    assert old.read_text(encoding="utf-8") == old_text and not (skills / "cl-feedback").exists()
+    assert f"/{name} is now called /cg-feedback" in out and "This updates the /cg-brief skill" in out
+    assert old.read_text(encoding="utf-8") == old_text and not (skills / "cg-feedback").exists()
     rc, out = _Finish(tmp_path).run("--yes")
     assert rc == 0 and "Up to date" not in out
-    assert (skills / "cl-feedback" / "SKILL.md").read_text(encoding="utf-8") == capture_catalogue.feedback_skill_text()
+    assert (skills / "cg-feedback" / "SKILL.md").read_text(encoding="utf-8") == capture_catalogue.feedback_skill_text()
     assert not old.parent.exists()
     assert brief.read_text(encoding="utf-8") == capture_catalogue.brief_skill_text()
     rc, out = _Finish(tmp_path).run()
@@ -324,7 +325,7 @@ def test_finish_leaves_a_skill_it_did_not_write_alone(tmp_path):
     mine.parent.mkdir(parents=True)
     mine.write_text("---\nname: tl-feedback\n---\nmine\n", encoding="utf-8")
     rc, out = _Finish(tmp_path).run("--yes")
-    assert "Up to date" in out and mine.exists() and not (tmp_path / "claude" / "skills" / "cl-feedback").exists()
+    assert "Up to date" in out and mine.exists() and not (tmp_path / "claude" / "skills" / "cg-feedback").exists()
 
 
 def test_finish_leaves_the_statusline_on_no(tmp_path):

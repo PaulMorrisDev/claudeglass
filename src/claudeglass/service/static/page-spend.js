@@ -278,7 +278,7 @@ function buildSessionRating(container, session) {
   var saved = session.feedback || {};
   var form = el("fieldset", { class: "session-rating" });
   form.appendChild(el("legend", { text: "Rate this session" }));
-  form.appendChild(el("p", { class: "notes", text: "The /cl-feedback questions as checkboxes. Kept in ClaudeGlass's own store, so it costs no tokens." }));
+  form.appendChild(el("p", { class: "notes", text: "The /cg-feedback questions as checkboxes. Kept in ClaudeGlass's own store, so it costs no tokens." }));
   var inputs = {};
   session.feedback_questions.forEach(function (q) {
     var group = el("div", { class: "rating-question", role: "group", "aria-label": q.question });

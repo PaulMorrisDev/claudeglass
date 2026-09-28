@@ -3033,8 +3033,8 @@ def test_capture_shows_feedback_counts_and_the_skill_install_note(server):
     assert skill["needs_install"] is True and skill["install_command"] == "claudeglass capture feedback on"
     assert skill["actual_label"] == "Over the last 14 days"
     assert rows["dashboard_rating"]["answers"] == 1 and rows["dashboard_rating"]["target"] == 10
-    assert skill["install_note"] == "The /cl-feedback skill isn't installed"
-    assert "The /cl-feedback skill isn't installed: claudeglass capture feedback on" in data["banner"]["notes"]
+    assert skill["install_note"] == "The /cg-feedback skill isn't installed"
+    assert "The /cg-feedback skill isn't installed: claudeglass capture feedback on" in data["banner"]["notes"]
     # No status line of this tool's in the (fake) settings.json.
     assert rows["feedback_note"]["statusline_note"].startswith("Your status line isn't ClaudeGlass's")
 

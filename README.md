@@ -150,12 +150,12 @@ It asks up to four questions:
 3. **Start the dashboard when you log on.** Say yes. It starts straight
    away, and again every time you log on.
 4. **Sharper tips**, optional and off unless you say yes. Claude ends
-   each reply with a short tag, such as `[tl: task=bugfix brief=clear]`,
+   each reply with a short tag, such as `[cg: task=bugfix brief=clear]`,
    so the tips fit how you work. This turns on
    [metrics capture](#metrics-capture) at its Essentials level: about
    186 tokens when a session starts and 14 per reply, plus a Claude
    Haiku call of about $0.002 after each subagent run. It switches
-   itself off after 14 days. It also adds the `/cl-feedback` skill, for
+   itself off after 14 days. It also adds the `/cg-feedback` skill, for
    rating a piece of work when it's done.
 
 Then it lists every change and asks once: **Go ahead? [Y/n/d]**. Type
@@ -246,7 +246,7 @@ beside its title.
 | Agents & context › Quality | Is my subagents' work going well (failed tool calls, runs that don't finish, runs a larger model had to redo, per model and effort), and how do I split the work? |
 | Agents & context › Context | What does each CLAUDE.md file and skill cost, who is it sent to, and what can be trimmed, moved or hidden? |
 | Agents & context › Hooks | Does each hook I set up work, when did a failing one last fail, and what do its failures, blocked calls and added context cost? |
-| Work habits | What habits are costing tokens, which prompting habits cost extra replies, which tips did Claude pass on, and what would `/cl-feedback` and brief templates add? |
+| Work habits | What habits are costing tokens, which prompting habits cost extra replies, which tips did Claude pass on, and what would `/cg-feedback` and brief templates add? |
 | Setup › Settings | What are my settings, which layer set each one, and how does this window compare with my baseline? |
 | Setup › Profiles | Make a profile from a goal with an estimate of what it saves, compare it with my settings, and see the best setup for each kind of task. |
 | Setup › Capture | What does metrics capture cost so far, what would each level or metric add, is it set up, and which live coaching is on? |
@@ -344,9 +344,9 @@ That one command:
 - brings the hooks and status line this tool added to Claude Code's
   `settings.json` up to date, metrics capture's included. It shows each
   change and asks first, and backs up `settings.json` before any change;
-- brings the `/cl-feedback` and `/cl-brief` skills it added up to date,
-  and renames them from `/tl-feedback` and `/tl-brief`, their names
-  before 0.12.0, asking first;
+- brings the `/cg-feedback` and `/cg-brief` skills it added up to date,
+  and renames them from their earlier names (`/tl-feedback` or
+  `/cl-feedback`, `/tl-brief` or `/cl-brief`), asking first;
 - finds copies installed for other Pythons, and offers to remove the
   ones nothing uses any more.
 
@@ -417,8 +417,8 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 | A status line that logs your usage-limit readings, if you have none. Claude Code runs it only in a terminal, not in the desktop app. | `init`, when you connect | None |
 | The capture hook (`capture-hook.py`) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep. | [Metrics capture](#metrics-capture) | See its levels |
 | The same hook on UserPromptSubmit, and on PostToolUse after shell, read, search, web and MCP tools and an approved plan. | [Coaching notes](#live-coaching) | About 50 to 120 tokens a note, only when a hint applies |
-| The `/cl-feedback` skill, for rating a piece of work when it's done. | `init`'s sharper tips, `capture feedback on`, or the Deep level | Its name and description, listed at each session start |
-| The `/cl-brief` skill, which checks a request against its checklist. | `capture brief on` | Its name and description, listed at each session start |
+| The `/cg-feedback` skill, for rating a piece of work when it's done. | `init`'s sharper tips, `capture feedback on`, or the Deep level | Its name and description, listed at each session start |
+| The `/cg-brief` skill, which checks a request against its checklist. | `capture brief on` | Its name and description, listed at each session start |
 
 To see everything it installed, run `python -m claudeglass changes`
 or open the Data quality page; both say how to undo each item.
@@ -437,7 +437,7 @@ one before it:
 | Free | Signals from hooks, logged to a local file. | – | – | – |
 | Essentials | A tag on each piece of work: what kind it was, how clear the request was, how hard and how big. Haiku judges whether each subagent run finished, and why one was run again. | ~186 tokens | ~14 tokens | ~$0.002 |
 | Standard | What the request lacked, planning, skills and research, and Haiku's view of each subagent's model and brief. | ~304 tokens | ~24 tokens | ~$0.002 |
-| Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cl-feedback` and its reminders. | ~412 tokens | ~30 tokens | ~$0.002 |
+| Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` and its reminders. | ~412 tokens | ~30 tokens | ~$0.002 |
 
 The note is written to the prompt cache once, then read from it on each
 later reply. Capture switches itself off 14 days after you turn it on:
@@ -472,7 +472,7 @@ and they work at any capture level, Off included:
 - **Coaching line** (`coaching_line`). The same kind of hint in the
   status line, in a terminal. It costs no tokens.
 - **Brief templates** (`capture brief on`). Checklists per kind of task
-  on Work habits, and the `/cl-brief` skill, which checks a request
+  on Work habits, and the `/cg-brief` skill, which checks a request
   against its checklist and asks once for anything missing.
 
 For example, `python -m claudeglass capture enable coaching_notes`
@@ -624,11 +624,11 @@ The dashboard's Glossary page uses the same words, term for term.
 - **Quality signal**: A sign of whether the work went well, not only what it cost: tool calls that failed, agent runs that didn't finish, your corrections. Compared across models and efforts, and before and after each change you make.
 - **Metrics capture**: An opt-in feature, off by default: a one-line tag, written by Claude or Claude Haiku, saying what the work was and how it went. It costs tokens while it's on. `init`'s last questions and `claudeglass capture` turn it on, change what it asks for, or turn it off.
 - **Capture level**: How much metrics capture asks for: `off`, `free`, `essentials`, `standard` or `deep`, each adding more of it. Set at `init` or with `claudeglass capture level`.
-- **Tag**: The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as `[tl: task=bugfix brief=clear]`. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is.
+- **Tag**: The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as `[cg: task=bugfix brief=clear]`. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is.
 - **Prompt cycle**: One message of yours and everything Claude did to answer it, subagents at any depth included. The unit metrics capture and the Work habits page measure by.
 - **Work habits**: The page (and report section) that turns prompt cycles into habits worth trying, with a rough saving for each. Each shows where its evidence came from: reported by Claude, inferred from the transcript, or your own feedback.
-- **Feedback skill**: `/cl-feedback`, a skill you can add and run after a piece of work. It asks whether the work delivered, what slowed it, whether it was worth the tokens, and what would have helped. Works at any capture level, even off; picking `deep` turns it on, with its reminders.
-- **Brief templates**: Checklists per kind of task on the Work habits page, built from what your own requests tend to lack. Turned on, it also adds a `/cl-brief` skill that checks a request against its checklist and asks once for anything missing before Claude starts.
+- **Feedback skill**: `/cg-feedback`, a skill you can add and run after a piece of work. It asks whether the work delivered, what slowed it, whether it was worth the tokens, and what would have helped. Works at any capture level, even off; picking `deep` turns it on, with its reminders.
+- **Brief templates**: Checklists per kind of task on the Work habits page, built from what your own requests tend to lack. Turned on, it also adds a `/cg-brief` skill that checks a request against its checklist and asks once for anything missing before Claude starts.
 - **Sampling**: Running metrics capture in only a share of sessions (100, 50, 25 or 10 percent, `[capture] sample`) to spend fewer tokens on it. Picked at random, per session.
 - **Time-box**: The date metrics capture switches itself back off. By default it's 14 days after you turn a level on, whether at `init`, with `capture on` or `level`, or on the Capture page. So turning it on never means it runs unattended forever. `--for` or `--capture-for` sets another length, and `--no-limit` or `--capture-no-limit` turns the limit off. You can also say so when asked.
 

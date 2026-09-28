@@ -1,6 +1,6 @@
 {
  "version": 1,
- "marker": "tl-cap v",
+ "marker": "cg-cap v",
  "levels": {
   "free": [
    "session_end",
@@ -321,9 +321,9 @@
    "group": "feedback",
    "requires": [],
    "main_line": "",
-   "main_extra": "The first time in this session you finish a piece of work the user asked for, add this before your tag, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cl-feedback: a few ticks make your savings tips fit how you work.",
+   "main_extra": "The first time in this session you finish a piece of work the user asked for, add this before your tag, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work.",
    "extra_before_tag": true,
-   "main_extra_untagged": "The first time in this session you finish a piece of work the user asked for, end your reply with this, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cl-feedback: a few ticks make your savings tips fit how you work.",
+   "main_extra_untagged": "The first time in this session you finish a piece of work the user asked for, end your reply with this, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work.",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -331,7 +331,7 @@
  ],
  "text": {
   "intro": "The user turned on ClaudeGlass metrics capture, to see where their tokens go.",
-  "main_tag_intro": "End your final reply to each user message with one line, [tl: key=word ...], using only these keys and words:",
+  "main_tag_intro": "End your final reply to each user message with one line, [cg: key=word ...], using only these keys and words:",
   "sub_tag_intro": "End your final report with one line, {tag}, using only these words:",
   "sub_tag": "[result: done|partial|blocked]",
   "sub_tag_with_keys": "[result: done|partial|blocked key=word ...]",
@@ -403,7 +403,7 @@
    "commands": 6,
    "files": 8
   },
-  "intro": "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words. In them, \"you\" means Claude:",
+  "intro": "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words. In them, \"you\" means Claude:",
   "rule": "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (found outside research or a search; shift on a first message) or the excerpt can't tell at all.",
   "lines": {
    "task": "task: feature|bugfix|refactor|debug|docs|review|test|research|plan|ops|chat (the kind of work asked for: docs = documentation or comments only; ops = CI, build, deploy or configuration; test = tests only; research = finding something out; review = judging existing work; debug = finding a fault's cause; chat = no work asked for)",
@@ -523,7 +523,7 @@
    "missing"
   ],
   "agent": {
-   "intro": "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt of it: the brief the agent was given, what it did, the end of its report and the session's earlier agent runs. Answer with one line and nothing else, [tl: key=word ...], using only these keys and words:",
+   "intro": "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt of it: the brief the agent was given, what it did, the end of its report and the session's earlier agent runs. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words:",
    "rule": "Judge only from the excerpt. Give every key; leave one out only when the excerpt can't tell at all.",
    "limits": {
     "brief": 2000,
@@ -585,7 +585,7 @@
   }
  },
  "coaching": {
-  "marker": "tl-coach v",
+  "marker": "cg-coach v",
   "version": 1,
   "file": "coaching.json",
   "state_file": "coach-state.json",

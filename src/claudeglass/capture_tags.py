@@ -2,7 +2,7 @@
 
 Two places carry them:
 
-- **The end of a reply.** ``[tl: task=bugfix brief=partial ...]`` ends the
+- **The end of a reply.** ``[cg: task=bugfix brief=partial ...]`` ends the
   final reply to each of your messages in the main session, and a
   subagent's final report ends ``[result: done fit=right rules=used]``.
   Only the reply's last :data:`TAIL_SCAN_CHARS` characters are read, and
@@ -11,7 +11,7 @@ Two places carry them:
   -- is never counted.
 - **The start of a brief.** ``[retry: brief]`` and ``[spawn: isolate]``
   open the brief handed to an agent, in either order.
-- **Your feedback.** ``/cl-feedback`` ends with ``[tl-fb: outcome=met
+- **Your feedback.** ``/cg-feedback`` ends with ``[cg-fb: outcome=met
   slow=none ...]`` on a line of its own, followed by a thank-you line.
   The answers to its AskUserQuestion call are read too, by matching the
   labels you ticked, for when the line is missing.
@@ -36,6 +36,7 @@ from .capture_catalogue import (
     FEEDBACK_TAG,
     FEEDBACK_VOCAB,
     LIST_KEYS,
+    OLD_FEEDBACK_TAG,
     RESULT_WORDS,
     RETRY_REASONS,
     SKILL_NAME_PATTERN,
@@ -44,18 +45,18 @@ from .capture_catalogue import (
 )
 from .model import CaptureTag, Feedback
 
-#: How much of a reply's end is searched for tags. A full Deep ``[tl:]`` tag
+#: How much of a reply's end is searched for tags. A full Deep ``[cg:]`` tag
 #: is about 220 characters; a ``[result:]`` tag can sit next to it.
 TAIL_SCAN_CHARS = 480
 
 #: One or more tags ending the text, each on one line, with only
 #: whitespace or markdown (backticks, emphasis, a full stop) between and
-#: after them.
+#: after them. ``[tl: ...]`` is the reply tag's name until 0.12.1.
 _TRAILING_TAGS_RE = re.compile(
-    r"(?:\[(?:tl|result):[^\[\]\n]{0,300}\][`*_.\s]*){1,3}$",
+    r"(?:\[(?:cg|tl|result):[^\[\]\n]{0,300}\][`*_.\s]*){1,3}$",
     re.IGNORECASE,
 )
-_ONE_TAG_RE = re.compile(r"\[(tl|result):([^\[\]\n]{0,300})\]", re.IGNORECASE)
+_ONE_TAG_RE = re.compile(r"\[(cg|tl|result):([^\[\]\n]{0,300})\]", re.IGNORECASE)
 
 #: A skill name shaped the way Claude Code names skills (SEC-P3): used
 #: both to validate a tag's own ``skill=would-help:<name>`` claim here
@@ -79,18 +80,19 @@ _FEEDBACK_REMINDER_TAIL_RE = re.compile(
 _BRIEF_PREFIX_RE = re.compile(r"^\s*(?:`?\[(?:retry|spawn):\s*[A-Za-z-]+\s*\]`?\s*){1,2}", re.IGNORECASE)
 _BRIEF_MARKER_RE = re.compile(r"\[(retry|spawn):\s*([A-Za-z-]+)\s*\]", re.IGNORECASE)
 
-#: A capture note's marker: ``tl-cap v1`` then the metric codes, comma
-#: separated (see ``capture_catalogue.NOTE_MARKER``).
-_NOTE_RE = re.compile(r"tl-cap v(\d{1,3})(?: ([a-z_,]{0,400}))?")
+#: A capture note's marker: ``cg-cap v1`` then the metric codes, comma
+#: separated (see ``capture_catalogue.NOTE_MARKER``); ``tl-cap`` until
+#: 0.12.1.
+_NOTE_RE = re.compile(r"(?:cg|tl)-cap v(\d{1,3})(?: ([a-z_,]{0,400}))?")
 _CODE_RE = re.compile(r"^[a-z_]{1,24}$")
 
 _VOCAB_SETS = {key: frozenset(words) for key, words in TAG_VOCAB.items()}
 
-#: ``[tl-fb: ...]`` on a line of its own, optionally in backticks or
-#: emphasis. Unlike the reply tags it needn't end the reply: the skill
-#: writes a thank-you line after it.
+#: ``[cg-fb: ...]`` (``[tl-fb: ...]`` until 0.12.1) on a line of its own,
+#: optionally in backticks or emphasis. Unlike the reply tags it needn't
+#: end the reply: the skill writes a thank-you line after it.
 _FEEDBACK_TAG_RE = re.compile(
-    r"^[ \t`*_]*\[" + re.escape(FEEDBACK_TAG) + r":([^\[\]\n]{0,200})\][`*_.]*[ \t]*$",
+    r"^[ \t`*_]*\[(?:" + re.escape(FEEDBACK_TAG) + "|" + re.escape(OLD_FEEDBACK_TAG) + r"):([^\[\]\n]{0,200})\][`*_.]*[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _FEEDBACK_SETS = {key: frozenset(words) for key, words in FEEDBACK_VOCAB.items()}
@@ -98,7 +100,7 @@ _FEEDBACK_SETS = {key: frozenset(words) for key, words in FEEDBACK_VOCAB.items()
 _FEEDBACK_BY_HEADER = {q.header: q for q in ALL_FEEDBACK_QUESTIONS}
 _FEEDBACK_LABELS = {q.key: {label: word for word, label, _ in q.options} for q in ALL_FEEDBACK_QUESTIONS}
 
-#: The AskUserQuestion headers /cl-feedback asks with.
+#: The AskUserQuestion headers /cg-feedback asks with.
 FEEDBACK_HEADERS = frozenset(_FEEDBACK_BY_HEADER)
 
 
@@ -176,7 +178,7 @@ def _feedback(values: dict, source: str) -> Feedback:
 
 
 def merge_feedback(earlier: Feedback, later: Feedback) -> Feedback:
-    """Two answers of the same kind in one /cl-feedback run, as one: the
+    """Two answers of the same kind in one /cg-feedback run, as one: the
     handoff question comes back from a second AskUserQuestion call. A
     later answer wins where both answered."""
     values = {
@@ -186,10 +188,10 @@ def merge_feedback(earlier: Feedback, later: Feedback) -> Feedback:
 
 
 def parse_feedback_tag(text: str) -> Feedback | None:
-    """The ``[tl-fb: ...]`` line in the end of ``text`` (the last one when
+    """The ``[cg-fb: ...]`` line in the end of ``text`` (the last one when
     there are several), or ``None`` without one. Unknown keys and words
     are dropped."""
-    if not text or FEEDBACK_TAG not in text.lower():
+    if not text or (FEEDBACK_TAG not in text.lower() and OLD_FEEDBACK_TAG not in text.lower()):
         return None
     matches = _FEEDBACK_TAG_RE.findall(text[-TAIL_SCAN_CHARS:])
     if not matches:
@@ -208,7 +210,7 @@ def parse_feedback_tag(text: str) -> Feedback | None:
 
 
 def feedback_from_answers(result) -> Feedback | None:
-    """/cl-feedback's answers from an AskUserQuestion ``toolUseResult``
+    """/cg-feedback's answers from an AskUserQuestion ``toolUseResult``
     (``{"questions": [...], "answers": {question text: answer}}``), or
     ``None`` when it asked none of the feedback questions. An answer is
     a label, a list of labels, or labels joined with commas; anything that
@@ -243,7 +245,7 @@ def feedback_from_answers(result) -> Feedback | None:
 
 
 def asks_for_feedback(tool_input) -> bool:
-    """Whether an AskUserQuestion call's input asks /cl-feedback's
+    """Whether an AskUserQuestion call's input asks /cg-feedback's
     questions."""
     questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
     return isinstance(questions, list) and any(
@@ -272,7 +274,7 @@ def parse_brief_markers(text: str) -> tuple[str | None, str | None]:
 
 def parse_note_codes(text: str) -> tuple[int | None, tuple[str, ...]]:
     """The format version and metric codes of a capture note's
-    ``tl-cap v1 task,brief`` marker; ``(None, ())`` without one."""
+    ``cg-cap v1 task,brief`` marker; ``(None, ())`` without one."""
     match = _NOTE_RE.search(text)
     if match is None:
         return None, ()
@@ -310,7 +312,7 @@ def filter_tag(
     closing the gap where a tag Claude wrote unprompted (habit, an
     example it saw, a copied transcript) would otherwise be trusted
     just because it parses. Keys only the other scope is ever asked for
-    go too, and a subagent's ``[tl: ...]`` doesn't count as a tag (it is
+    go too, and a subagent's ``[cg: ...]`` doesn't count as a tag (it is
     only ever asked for ``[result: ...]``): a subagent writing a
     main-session tag out of habit would otherwise set the task or level
     of the whole prompt cycle it ran in.
@@ -334,7 +336,7 @@ def filter_tag(
             cap = replace(cap, **foreign)
         if not any(metric_id in requested for metric_id in fields.values()):
             # No metric this tag could answer was ever requested: even a
-            # well-formed [tl:]/[result:] here is unearned.
+            # well-formed [cg:]/[result:] here is unearned.
             cap = None if result_marker is None else replace(
                 cap, has_tl=False, chars=0, **{name: (() if name == "missing" else None) for name in fields}
             )

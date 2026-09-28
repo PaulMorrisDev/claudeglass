@@ -147,7 +147,7 @@ python -m claudeglass serve
 Sets the tool up. It asks four things: how you pay, whether to connect
 to Claude Code, whether to start the dashboard at logon, and whether to
 turn on sharper tips (metrics capture at Essentials for 14 days, plus
-the `/cl-feedback` skill). Then it lists every change in one review and
+the `/cg-feedback` skill). Then it lists every change in one review and
 asks `Go ahead? [Y/n/d]`, where `d` shows the exact changes. After a yes
 it writes `config.toml`, makes the changes, records a first baseline
 for this project, and ends with a summary of what works.
@@ -172,7 +172,7 @@ python -m claudeglass init
 | `--capture-level LEVEL` | Answer the metrics capture question: `off`, `free`, `essentials`, `standard` or `deep`. Capture uses tokens |
 | `--capture-for DURATION` | Switch capture off by itself after this long, such as `30d`, instead of after 14 days |
 | `--capture-no-limit` | Let capture run until you switch it off |
-| `--feedback {on,off}` | Answer the `/cl-feedback` question |
+| `--feedback {on,off}` | Answer the `/cg-feedback` question |
 
 Running `init` again is safe. Your answers are the defaults, what is
 already done is skipped, and it keeps your capture window. Check the
@@ -189,9 +189,9 @@ Installs the newest version with pip, then hands over to the new copy
   after a yes;
 - brings this tool's hook and status line entries in Claude Code's
   `settings.json` up to date, showing each change and asking first;
-- brings the `/cl-feedback` and `/cl-brief` skills it added up to date,
-  and renames them from `/tl-feedback` and `/tl-brief`, their names
-  before 0.12.0, asking first;
+- brings the `/cg-feedback` and `/cg-brief` skills it added up to date,
+  and renames them from their earlier names (`/tl-feedback` or
+  `/cl-feedback`, `/tl-brief` or `/cl-brief`), asking first;
 - finds copies installed for other Pythons and offers to remove the
   ones nothing uses any more.
 
@@ -239,7 +239,7 @@ remove.
 
 Checks that the setup works. Each part reads as Done, Waiting, Off or
 Needs attention: how you pay, the connection to Claude Code, the
-dashboard at logon, sharper tips (metrics capture), the `/cl-feedback`
+dashboard at logon, sharper tips (metrics capture), the `/cg-feedback`
 skill and the usage-limit readings. A part that needs attention names
 the command that fixes it. It exits 1 only when an essential part (how
 you pay, the connection, the dashboard, or capture you turned on) needs
@@ -256,8 +256,8 @@ that undoes it. Takes `--claude-root PATH`, as for `init`.
 
 Takes it all back out. It removes the SessionStart hook, any metrics
 capture hooks and the status line from `settings.json`, showing the diff
-and backing the file up first. It offers to remove the `/cl-feedback`
-and `/cl-brief` skills, and removes the logon service.
+and backing the file up first. It offers to remove the `/cg-feedback`
+and `/cg-brief` skills, and removes the logon service.
 
 ```powershell
 python -m claudeglass uninstall --revert-changes --delete-data --dry-run
@@ -344,8 +344,8 @@ python -m claudeglass capture on --level essentials --for 7d
 | `enable METRIC...`, `disable METRIC...` | Turn single metrics on or off. `capture status` lists their ids |
 | `connect` | Add the hook entries the chosen metrics need to `settings.json`, after showing the diff |
 | `remove` | Switch capture off and take the hook entries out, after showing the diff |
-| `feedback on\|off` | Add or remove the `/cl-feedback` skill and its status-line reminder |
-| `brief on\|off` | Add or remove the `/cl-brief` skill, which asks for what a request is missing before Claude starts |
+| `feedback on\|off` | Add or remove the `/cg-feedback` skill and its status-line reminder |
+| `brief on\|off` | Add or remove the `/cg-brief` skill, which asks for what a request is missing before Claude starts |
 | `refresh` | Work out your coaching-note split points (`coaching.json`) from your last 30 days now, as the dashboard's service does once a day. `--dry-run` prints them without writing. See [`coaching.md`](coaching.md) |
 | `prune` | Delete signal files, capture log records and usage log rows older than `retention_days`, or 180 days. A running `serve` already does this on every poll |
 

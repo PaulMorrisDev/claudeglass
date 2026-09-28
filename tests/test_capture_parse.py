@@ -51,29 +51,29 @@ def _note(text: str, *, hook: str = "SessionStart", rendered: bool = True, **kw)
     )
 
 
-# -- the [tl: ...] and [result: ...] tags --------------------------------------
+# -- the [cg: ...] and [result: ...] tags --------------------------------------
 
 
 def test_a_tag_ending_the_reply_is_read_into_closed_words():
     tag, result = capture_tags.parse_reply_tags(
-        "Fixed it.\n\n[tl: task=bugfix brief=partial level=normal shift=build missing=files,done]"
+        "Fixed it.\n\n[cg: task=bugfix brief=partial level=normal shift=build missing=files,done]"
     )
     assert result is None
     assert (tag.task, tag.brief, tag.level, tag.shift, tag.missing) == (
         "bugfix", "partial", "normal", "build", ("files", "done")
     )
-    assert tag.has_tl and tag.chars == len("[tl: task=bugfix brief=partial level=normal shift=build missing=files,done]")
+    assert tag.has_tl and tag.chars == len("[cg: task=bugfix brief=partial level=normal shift=build missing=files,done]")
 
 
 @pytest.mark.parametrize("word", ["new", "build", "grew", "redo", "fix"])
 def test_every_shift_word_is_kept_including_fix_for_a_fault_in_earlier_work(word):
-    tag, _ = capture_tags.parse_reply_tags(f"Done.\n\n[tl: task=bugfix shift={word}]")
+    tag, _ = capture_tags.parse_reply_tags(f"Done.\n\n[cg: task=bugfix shift={word}]")
     assert (tag.task, tag.shift) == ("bugfix", word)
 
 
 @pytest.mark.parametrize("text", [
-    "Write [tl: task=bugfix] at the end of each reply, like that. Then carry on.",  # quoted mid-reply
-    "[tl: task=bugfix]\nand then more text after it",  # not the last thing
+    "Write [cg: task=bugfix] at the end of each reply, like that. Then carry on.",  # quoted mid-reply
+    "[cg: task=bugfix]\nand then more text after it",  # not the last thing
     "no tag at all",
     "",
 ])
@@ -83,7 +83,7 @@ def test_a_tag_that_is_not_the_end_of_the_reply_is_ignored(text):
 
 def test_unknown_keys_words_and_paths_are_dropped():
     tag, _ = capture_tags.parse_reply_tags(
-        "ok [tl: task=C:\\Users\\me\\secret.py brief=clear secret=hunter2 level=impossible missing=files,/etc/passwd]"
+        "ok [cg: task=C:\\Users\\me\\secret.py brief=clear secret=hunter2 level=impossible missing=files,/etc/passwd]"
     )
     assert tag == CaptureTag(brief="clear", missing=("files",), has_tl=True, chars=tag.chars)
     assert "secret" not in repr(tag) and "Users" not in repr(tag)
@@ -91,7 +91,7 @@ def test_unknown_keys_words_and_paths_are_dropped():
 
 def test_a_result_tag_carries_the_subagent_extras_and_can_share_a_line_with_a_tl_tag():
     tag, result = capture_tags.parse_reply_tags(
-        "Done.\n`[result: done fit=smaller rules=unused brief=vague missing=goal]` [tl: task=research]"
+        "Done.\n`[result: done fit=smaller rules=unused brief=vague missing=goal]` [cg: task=research]"
     )
     assert result == "done"
     assert (tag.fit, tag.rules, tag.brief, tag.missing, tag.task) == ("smaller", "unused", "vague", ("goal",), "research")
@@ -107,24 +107,24 @@ def test_the_feedback_reminder_line_does_not_hide_a_tag_on_either_side():
     # CAP-1: the note now asks for the reminder line before the tag, but
     # the parser tolerates either order.
     reminder = capture_catalogue.FEEDBACK_REMINDER_LINE
-    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n[tl: task=bugfix]\n{reminder}")
+    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n[cg: task=bugfix]\n{reminder}")
     assert tag is not None and tag.task == "bugfix"  # tag then reminder
-    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n{reminder}\n[tl: task=bugfix]")
+    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n{reminder}\n[cg: task=bugfix]")
     assert tag is not None and tag.task == "bugfix"  # reminder then tag
     # As a quote block with its label, as the note now asks.
     labelled = f"{capture_catalogue.REMINDER_LABEL} {reminder}"
-    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n[tl: task=bugfix]\n\n{labelled}")
+    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n[cg: task=bugfix]\n\n{labelled}")
     assert tag is not None and tag.task == "bugfix"
-    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n{labelled}\n[tl: task=bugfix]")
+    tag, _ = capture_tags.parse_reply_tags(f"Fixed it.\n\n{labelled}\n[cg: task=bugfix]")
     assert tag is not None and tag.task == "bugfix"
 
 
 def test_a_would_help_skill_keeps_its_name_only_when_the_transcript_knows_it():
-    tag, _ = capture_tags.parse_reply_tags("x [tl: skill=would-help:grill-me]", {"grill-me"})
+    tag, _ = capture_tags.parse_reply_tags("x [cg: skill=would-help:grill-me]", {"grill-me"})
     assert (tag.skill, tag.skill_name) == ("would-help", "grill-me")
-    tag, _ = capture_tags.parse_reply_tags("x [tl: skill=would-help:private-thing]", {"grill-me"})
+    tag, _ = capture_tags.parse_reply_tags("x [cg: skill=would-help:private-thing]", {"grill-me"})
     assert (tag.skill, tag.skill_name) == ("would-help", None)
-    tag, _ = capture_tags.parse_reply_tags("x [tl: skill=helped:grill-me]", {"grill-me"})
+    tag, _ = capture_tags.parse_reply_tags("x [cg: skill=helped:grill-me]", {"grill-me"})
     assert tag.skill is None
 
 
@@ -151,10 +151,10 @@ def test_every_vocabulary_word_is_short_and_plain():
 
 def test_the_reply_tag_and_brief_markers_land_on_the_turns(tmp_path):
     result = _parse(tmp_path, [
-        _note("ClaudeGlass metrics capture (tl-cap v1 task,level,skill): ..."),
+        _note("ClaudeGlass metrics capture (cg-cap v1 task,level,skill): ..."),
         attachment_line("skill_listing", rendered="- grill-me: x", names=["grill-me"]),
         user_str_line("[spawn: specialist] [retry: scope] fix the flaky test in tests/test_x.py", origin={"kind": "human"}),
-        _reply("Fixed.\n[tl: task=test level=hard skill=would-help:grill-me]"),
+        _reply("Fixed.\n[cg: task=test level=hard skill=would-help:grill-me]"),
     ])
     turn = result.turns[0]
     assert (turn.spawn_marker, turn.retry_marker) == ("specialist", "scope")
@@ -174,17 +174,17 @@ def test_a_malformed_skill_name_never_reaches_skills_invoked(tmp_path):
 
 def test_a_skill_call_that_errors_cannot_self_authorise_a_later_tag(tmp_path):
     # SEC-P3: a Skill call becomes provisional evidence (skill_names)
-    # for a *later* reply's `[tl: skill=would-help:...]` claim -- but
+    # for a *later* reply's `[cg: skill=would-help:...]` claim -- but
     # only while it stands. One that comes back with is_error: true is
     # taken back before it ever reaches Turn.skills_invoked, so it can't
     # self-authorise the very claim about the skill it tried and failed.
     result = _parse(tmp_path, [
-        _note("ClaudeGlass metrics capture (tl-cap v1 skill): ..."),
+        _note("ClaudeGlass metrics capture (cg-cap v1 skill): ..."),
         turn_line(content=[
             tool_use_block("Skill", "tu1", {"skill": "grill-me"}),
         ]),
         user_block_line([tool_result_block("tu1", "denied", is_error=True)]),
-        _reply("Never mind.\n[tl: skill=would-help:grill-me]"),
+        _reply("Never mind.\n[cg: skill=would-help:grill-me]"),
     ])
     assert result.turns[0].skills_invoked == ()
     reply = result.turns[-1]
@@ -196,12 +196,12 @@ def test_a_skill_call_that_succeeds_can_authorise_a_later_tag(tmp_path):
     # Positive control for the previous test: a genuinely successful
     # call is real evidence, and still validates a later claim about it.
     result = _parse(tmp_path, [
-        _note("ClaudeGlass metrics capture (tl-cap v1 skill): ..."),
+        _note("ClaudeGlass metrics capture (cg-cap v1 skill): ..."),
         turn_line(content=[
             tool_use_block("Skill", "tu1", {"skill": "grill-me"}),
         ]),
         user_block_line([tool_result_block("tu1", "done")]),
-        _reply("Never mind.\n[tl: skill=would-help:grill-me]"),
+        _reply("Never mind.\n[cg: skill=would-help:grill-me]"),
     ])
     assert result.turns[0].skills_invoked == ("grill-me",)
     reply = result.turns[-1]
@@ -212,7 +212,7 @@ def test_the_last_text_block_decides(tmp_path):
     result = _parse(tmp_path, [
         user_str_line("go", origin={"kind": "human"}),
         turn_line(content=[
-            {"type": "text", "text": "[tl: task=docs]"},
+            {"type": "text", "text": "[cg: task=docs]"},
             {"type": "text", "text": "Actually, one more thing."},
         ]),
     ])
@@ -223,7 +223,7 @@ def test_the_last_text_block_decides(tmp_path):
 
 
 def test_a_capture_note_is_its_own_hook_output_sized_from_rendered(tmp_path):
-    text = "ClaudeGlass metrics capture (tl-cap v1 task,brief,level): end each final reply with one line ..."
+    text = "ClaudeGlass metrics capture (cg-cap v1 task,brief,level): end each final reply with one line ..."
     line = _note(text)
     event = events.classify_line(line)
     assert (event.kind, event.subkind) == (EventKind.HOOK_OUTPUT, "capture_note")
@@ -231,8 +231,22 @@ def test_a_capture_note_is_its_own_hook_output_sized_from_rendered(tmp_path):
     assert event.detail == {"v": 1, "codes": ["task", "brief", "level"], "hook": "SessionStart"}
 
 
+def test_sessions_from_before_0_12_1_read_the_same():
+    # Until 0.12.1 every tag and marker began tl (claude-token-lens), not cg.
+    old, _ = capture_tags.parse_reply_tags("Done.\n\n[tl: task=bugfix brief=clear]")
+    new, _ = capture_tags.parse_reply_tags("Done.\n\n[cg: task=bugfix brief=clear]")
+    assert old == new and old.task == "bugfix"
+    assert capture_tags.parse_note_codes("(tl-cap v1 task,brief)") == (1, ("task", "brief"))
+    feedback = capture_tags.parse_feedback_tag("Thanks.\n[tl-fb: outcome=met worth=yes]\n")
+    assert feedback is not None and feedback == capture_tags.parse_feedback_tag("[cg-fb: outcome=met worth=yes]")
+    note = events.classify_line(_note("ClaudeGlass metrics capture (tl-cap v1 task): ..."))
+    assert (note.subkind, note.detail["codes"]) == ("capture_note", ["task"])
+    coach = events.classify_line(_note("tl-coach v1 quiet_output\nThat result was large."))
+    assert (coach.subkind, coach.detail["kind"]) == ("coaching_note", "quiet_output")
+
+
 def test_a_capture_note_without_rendered_adds_the_wrapper_it_is_shown_in():
-    text = "ClaudeGlass metrics capture (tl-cap v1 task): ..."
+    text = "ClaudeGlass metrics capture (cg-cap v1 task): ..."
     with_rendered = events.classify_line(_note(text, hook="SubagentStart"))
     without = events.classify_line(_note(text, hook="SubagentStart", rendered=False))
     assert without.size_chars == with_rendered.size_chars
@@ -274,8 +288,8 @@ def test_a_hook_system_message_takes_no_context():
 
 
 def test_note_chars_land_on_the_next_turn_and_the_meta_counts_notes(tmp_path):
-    first = _note("ClaudeGlass metrics capture (tl-cap v1 task,brief): ...")
-    again = _note("ClaudeGlass metrics capture (tl-cap v1 task,brief,size): ...")
+    first = _note("ClaudeGlass metrics capture (cg-cap v1 task,brief): ...")
+    again = _note("ClaudeGlass metrics capture (cg-cap v1 task,brief,size): ...")
     result = _parse(tmp_path, [
         first,
         user_str_line("hi", origin={"kind": "human"}),
@@ -383,11 +397,11 @@ def test_a_task_notification_is_sized(tmp_path):
 
 def test_the_new_fields_survive_the_digest_cache(tmp_path):
     result = _parse(tmp_path, [
-        _note("ClaudeGlass metrics capture (tl-cap v1 task,missing): ..."),
+        _note("ClaudeGlass metrics capture (cg-cap v1 task,missing): ..."),
         user_str_line("[spawn: isolate] do it in src/a.py", origin={"kind": "human"}),
         turn_line(content=[tool_use_block("ExitPlanMode", "tu_p", {"plan": "1. a\n2. b"})]),
         user_block_line([tool_result_block("tu_p", "ok")]),
-        _reply("Done.\n[result: done fit=right missing=files,goal] [tl: task=feature]"),
+        _reply("Done.\n[result: done fit=right missing=files,goal] [cg: task=feature]"),
     ])
     decoded = cache.result_from_jsonable(json.loads(json.dumps(cache.encode_result(result))))
     assert decoded.turns == result.turns
@@ -402,9 +416,9 @@ def test_the_new_fields_survive_the_digest_cache(tmp_path):
 
 def test_a_subagent_s_main_session_tag_is_not_trusted():
     # Seen live: an Explore agent asked for result,retry,fit wrote a full
-    # [tl: ...] tag beside its [result: ...].
+    # [cg: ...] tag beside its [result: ...].
     cap, marker = capture_tags.parse_reply_tags(
-        "Done.\n\n[tl: task=research brief=clear level=normal size=l missing=none plan=none "
+        "Done.\n\n[cg: task=research brief=clear level=normal size=l missing=none plan=none "
         "skill=unneeded found=yes prior=needed check=none] [result: done fit=right out=part]"
     )
     kept, marker = capture_tags.filter_tag(cap, marker, requested={"result", "retry", "fit"}, subagent=True)
@@ -421,7 +435,7 @@ def test_a_subagent_keeps_out_when_a_large_output_note_asked_for_it():
 
 
 def test_a_main_session_tag_drops_subagent_only_keys():
-    cap, marker = capture_tags.parse_reply_tags("Fixed. [tl: task=bugfix fit=right rules=used]")
+    cap, marker = capture_tags.parse_reply_tags("Fixed. [cg: task=bugfix fit=right rules=used]")
     kept, _ = capture_tags.filter_tag(cap, marker, requested={"task"}, subagent=False)
     assert kept.task == "bugfix" and kept.has_tl is True
     assert kept.fit is None and kept.rules is None

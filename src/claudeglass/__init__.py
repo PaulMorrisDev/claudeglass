@@ -4,7 +4,7 @@ Claude Code transcripts.
 
 from __future__ import annotations
 
-__version__ = "0.12.0"
+__version__ = "0.12.1"
 
 #: Bump when transcript-parsing logic changes in a way that could change
 #: results computed from a previously cached file.
@@ -99,16 +99,16 @@ __version__ = "0.12.0"
 #: to the model) were counted as hook context; and task notifications
 #: weren't sized, so a background agent's report had no size.
 #:
-#: Bumped to 16 by the feedback batch: parse.py reads your /cl-feedback
-#: answers (``Turn.feedback``) from the skill's ``[tl-fb: ...]`` line or,
+#: Bumped to 16 by the feedback batch: parse.py reads your /cg-feedback
+#: answers (``Turn.feedback``) from the skill's ``[cg-fb: ...]`` line or,
 #: failing that, from the AskUserQuestion result itself. ``commands_run``
 #: now names skills you ran with a slash too: they are written
 #: ``<command-message>`` first, as your message, and were missed.
 #:
 #: Bumped to 17 by the P2 capture-integrity batch: capture_tags.py now
 #: strips the exact reminder sentence before the tail match (a tag glued
-#: to a reminder no longer swallows it); a ``[tl-fb: ...]`` line only
-#: counts when the cycle's first turn actually ran ``/cl-feedback``, a
+#: to a reminder no longer swallows it); a ``[cg-fb: ...]`` line only
+#: counts when the cycle's first turn actually ran ``/cg-feedback``, a
 #: forged one is ignored; a captured tag key is kept only when the
 #: session's note said to ask for it (``cap_injections > 0`` and the key
 #: is a requested metric); ``reported_task`` counts once per cycle, not
@@ -153,7 +153,7 @@ __version__ = "0.12.0"
 #: the raw keys, so every transcript is re-parsed once to drop them.
 #:
 #: Bumped to 21: ``capture_tags.filter_tag`` now drops tag keys only the
-#: other scope is asked for, and a subagent's ``[tl: ...]`` no longer
+#: other scope is asked for, and a subagent's ``[cg: ...]`` no longer
 #: counts as a tag (it could set a whole prompt cycle's task or level);
 #: a subagent's ``out=`` is kept when a large-output note asked for it.
 #: A cached pre-21 digest still holds the unfiltered tags.
@@ -174,7 +174,7 @@ __version__ = "0.12.0"
 #: pre-24 digest (the parse cache's and the service store's alike) still
 #: holds the old kind.
 #:
-#: Bumped to 25: a coaching note (``tl-coach v``, the capture hook's live
+#: Bumped to 25: a coaching note (``cg-coach v``, the capture hook's live
 #: hints) is its own ``coaching_note`` event, and counts to
 #: ``Turn.cap_note_chars`` but not to ``cap_injections``; a capture note
 #: sharing an attachment with one keeps the coaching part apart

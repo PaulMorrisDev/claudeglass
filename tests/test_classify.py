@@ -807,9 +807,9 @@ def test_build_section_notes_report_configured_overnight_window():
 def _tagged_top(tmp_path, *tasks, session_id="s-tagged"):
     from helpers import attachment_line, user_str_line
 
-    # SEC-P2: a `[tl: ...]` tag only counts once a capture note has been
+    # SEC-P2: a `[cg: ...]` tag only counts once a capture note has been
     # seen and the metric it answers was requested -- "task" here.
-    note_text = "ClaudeGlass metrics capture (tl-cap v1 task): ..."
+    note_text = "ClaudeGlass metrics capture (cg-cap v1 task): ..."
     note = attachment_line(
         "hook_additional_context",
         rendered=f"<system-reminder>\nSessionStart hook additional context: {note_text}\n</system-reminder>",
@@ -820,7 +820,7 @@ def _tagged_top(tmp_path, *tasks, session_id="s-tagged"):
     for n, task in enumerate(tasks):
         ts = f"2026-09-18T12:00:{2 * n:02d}.000Z"
         lines.append(user_str_line("go on", origin={"kind": "human"}, timestamp=ts))
-        tag = f"[tl: task={task}]" if task else "no tag"
+        tag = f"[cg: task={task}]" if task else "no tag"
         lines.append(turn_line(content=[{"type": "text", "text": f"Done.\n{tag}"}],
                                timestamp=f"2026-09-18T12:00:{2 * n + 1:02d}.000Z"))
     path = tmp_path / f"{session_id}.jsonl"

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-09-28
+
+### Changed
+
+- **`/cl-feedback` and `/cl-brief` are now `/cg-feedback` and
+  `/cg-brief`**, `cg` for ClaudeGlass: 0.12.0's `cl` was a mistake.
+  `update` renames either skill from its 0.12.0 name, or from
+  `/tl-feedback` and `/tl-brief` when coming from 0.11.0 or older,
+  after asking. Feedback given under any of the three names counts.
+- **The tags and markers begin `cg` too.** Claude now ends replies with
+  `[cg: ...]` and the feedback skill with `[cg-fb: ...]`, and the notes
+  the hooks add say `cg-cap` and `cg-coach`. Sessions tagged `[tl: ...]`
+  read the same as before, as does a session started before the update
+  that still carries the old notes.
+
 ## [0.12.0] - 2026-09-28
 
 ### Changed
