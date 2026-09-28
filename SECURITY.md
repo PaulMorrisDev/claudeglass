@@ -5,9 +5,11 @@ Code writes; it never calls Claude or any other remote service. The one
 command that goes online is `update`, which runs pip to download a new
 version (see "No outbound network calls" below). It uses
 none of your tokens by default, and none at all unless you opt in to
-the optional **metrics capture** feature (see below), which has Claude
-itself read a short note and write a one-line tag inside your own
-Claude Code session — this tool still never calls Claude directly. The
+the optional **metrics capture** feature or its coaching notes (see
+below). Capture has Claude itself read a short note and write a
+one-line tag inside your own Claude Code session, and coaching notes add
+a short note when a hint applies — this tool still never calls Claude
+directly. The
 one exception is part of the same opt-in: the capture hook runs the
 `claude` command you already use to ask Claude Haiku about each finished
 agent run, and, if you let Haiku write the main session's tags too
@@ -492,12 +494,13 @@ output.
 
 The tool never calls Claude, Anthropic or any other remote service on
 its own, and uses none of your tokens unless you turn on metrics
-capture, which spends tokens inside your own Claude Code session (never
-a call this tool makes itself) — see "Metrics capture" above. While
-Claude Haiku writes the tags, the capture hook starts the `claude`
-command once per turn; the call is Claude Code's, with your own login,
+capture or coaching notes, which spend tokens inside your own Claude
+Code session (never a call this tool makes itself) — see "Metrics
+capture" above. From Essentials up, the capture hook starts the `claude`
+command once per finished agent run, and, while Claude Haiku writes the
+tags, once per turn; the call is Claude Code's, with your own login,
 and the hook imports no networking module (see "Claude Haiku as the
-tagger" above).
+tagger" and "Agent runs" above).
 
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:

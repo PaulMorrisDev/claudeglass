@@ -132,7 +132,7 @@ The coaching line in the status line shows `drip_feed`, `repeat_ask`,
 
 ## After the fact
 
-Work habits › **How you prompt** counts the same six habits in all your
+**How you prompt**, on Work habits, counts the same six habits in all your
 sessions, whether or not coaching notes were on, with what each cost,
 its trend by week and what to try instead. Once there are coaching
 notes, **Tips Claude showed** says how often Claude passed each hint's

@@ -1158,8 +1158,8 @@ METRICS: tuple[Metric, ...] = (
         "cache when you send a message. It also flags how you prompt: the same request again, a big task "
         "without a plan, small requests sent one at a time, a "
         "vague correction, a huge paste, or stopping Claude again and again.",
-        why="Advice at the moment it applies, and Claude can often act on it itself. Each note costs a few dozen "
-        "tokens for the rest of the session. Claude Code waits for the hook after each shell, read, search, web "
+        why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
+        "120 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each shell, read, search, web "
         "or MCP result and each message you send.",
         powers=("context", "tool_output", "research", "delegation", "planning"),
         hooks=("UserPromptSubmit", "PostToolUse"),
@@ -1951,6 +1951,11 @@ def _metric_tag_line(metric: Metric) -> str:
         )
     if metric.hooks:
         return "No tag. A hook records it directly; Claude is never asked."
+    if metric.id == "brief_templates":
+        return (
+            "No tag. The checklists are on Work habits, and /tl-brief runs only when you type it; like any "
+            "skill, its name and description are listed to Claude at each session start."
+        )
     if metric.group == "coaching":
         return "No tag. Shown only in the status line; Claude is never asked, and it costs no tokens."
     if metric.group == "feedback":
@@ -1975,8 +1980,9 @@ def render_markdown() -> str:
     p("# Metrics capture")
     p("")
     p(
-        "Metrics capture is **opt-in**. Off by default, and off costs nothing: no hook runs, no tag is asked "
-        "for, no token is spent on it."
+        "Metrics capture is **opt-in**. Off by default, and off costs nothing: no tag is asked for, Claude "
+        "Haiku is never asked, and no token is spent on it. Live coaching and your feedback have their own "
+        "switches, and keep working while capture is off."
     )
     p("")
     p(
@@ -2241,9 +2247,11 @@ def render_markdown() -> str:
     p("")
     p(
         f"The hook script and its catalogue (`{HOOK_SCRIPT}`, `{CATALOGUE_FILE}`) live side by side under "
-        "`<config-dir>/hooks/`. Only `capture on`, `capture tagger` and `capture connect` ever change "
-        "`~/.claude/settings.json` — and only after showing the diff and asking first, unless you pass "
-        "`--yes`. Every other change writes only this tool's own `config.toml`."
+        "`<config-dir>/hooks/`. A change that needs different hook entries (`capture on`, `level`, `enable`, "
+        "`disable`, `tagger` or `connect`) also changes `~/.claude/settings.json`, and `capture remove` takes "
+        "the entries out — each only after showing the diff and asking first, unless you pass `--yes`. "
+        "`capture off` leaves the entries, which add nothing while it's off, and every other change writes "
+        "only this tool's own `config.toml`."
     )
     p("")
     p(
@@ -2251,8 +2259,8 @@ def render_markdown() -> str:
         "far. While big_output or web is on, it also prints Deep's actual measured wait (median and p90, "
         "over the last 7 days). It also flags any hook — ClaudeGlass's own or one of yours — that failed on "
         "most of its calls over the last 14 days, naming it (event name only, never a matcher or tool name), "
-        "where to find it in `settings.json`, the trade-off, and the undo; this is only ever a printed "
-        "prompt, never an automatic change."
+        "when it last failed, where to find it in `settings.json`, the trade-off, and the undo; this is only "
+        "ever a printed prompt, never an automatic change. A hook that has stopped failing since is left out."
     )
     p(
         "- `claudeglass capture on [--level LEVEL] [--for DURATION | --until DATE | --no-limit] "

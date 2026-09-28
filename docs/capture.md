@@ -1,6 +1,6 @@
 # Metrics capture
 
-Metrics capture is **opt-in**. Off by default, and off costs nothing: no hook runs, no tag is asked for, no token is spent on it.
+Metrics capture is **opt-in**. Off by default, and off costs nothing: no tag is asked for, Claude Haiku is never asked, and no token is spent on it. Live coaching and your feedback have their own switches, and keep working while capture is off.
 
 Turned on, a hook (`capture-hook.py`) adds a short note to each session start, and asks Claude to end its replies with one line such as `[tl: task=bugfix brief=partial level=normal]` (or Claude Haiku writes it, see [Who writes the tags](#who-writes-the-tags)). A subagent is asked for nothing: its brief and its report are exactly what they would be, and Claude Haiku judges the run once it's done (see [Agent runs](#agent-runs)). The tag always sits at the end of the reply you already read — nothing is hidden — and nothing free-text is ever asked for: every word comes from a closed vocabulary (see [Privacy](#privacy) below).
 
@@ -375,7 +375,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 
 - **Level:** Live coaching, any level
 - **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or tells you in a highlighted tip: a large tool output, many reads for one message, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired cache when you send a message. It also flags how you prompt: the same request again, a big task without a plan, small requests sent one at a time, a vague correction, a huge paste, or stopping Claude again and again.
-- **Why:** Advice at the moment it applies, and Claude can often act on it itself. Each note costs a few dozen tokens for the rest of the session. Claude Code waits for the hook after each shell, read, search, web or MCP result and each message you send.
+- **Why:** Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to 120 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each shell, read, search, web or MCP result and each message you send.
 - **Tag:** No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in a highlighted tip. Each hint and when it applies: [coaching.md](coaching.md).
 - **Hook:** UserPromptSubmit, PostToolUse
 - **Powers:** Clearing context, Tool output, Researching, Delegating to agents, Planning
@@ -385,7 +385,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 - **Level:** Live coaching, any level
 - **Captures:** Checklists per kind of task, built from what your own requests tend to lack, on Work habits to copy. Turned on, it also adds a /tl-brief skill you run with a request: Claude checks it against its checklist and asks once for anything missing.
 - **Why:** Better first messages, so Claude spends less finding things out.
-- **Tag:** No tag. Shown only in the status line; Claude is never asked, and it costs no tokens.
+- **Tag:** No tag. The checklists are on Work habits, and /tl-brief runs only when you type it; like any skill, its name and description are listed to Claude at each session start.
 - **Powers:** Giving Claude information
 
 ## Your feedback
@@ -472,9 +472,9 @@ Free local signals never involve Claude at all: a hook logs the session id (hash
 
 ## Turning it on, off or removing it
 
-The hook script and its catalogue (`capture-hook.py`, `capture-catalogue.json`) live side by side under `<config-dir>/hooks/`. Only `capture on`, `capture tagger` and `capture connect` ever change `~/.claude/settings.json` — and only after showing the diff and asking first, unless you pass `--yes`. Every other change writes only this tool's own `config.toml`.
+The hook script and its catalogue (`capture-hook.py`, `capture-catalogue.json`) live side by side under `<config-dir>/hooks/`. A change that needs different hook entries (`capture on`, `level`, `enable`, `disable`, `tagger` or `connect`) also changes `~/.claude/settings.json`, and `capture remove` takes the entries out — each only after showing the diff and asking first, unless you pass `--yes`. `capture off` leaves the entries, which add nothing while it's off, and every other change writes only this tool's own `config.toml`.
 
-- `claudeglass capture status` — the level, what's on, since when, and the cost measured so far. While big_output or web is on, it also prints Deep's actual measured wait (median and p90, over the last 7 days). It also flags any hook — ClaudeGlass's own or one of yours — that failed on most of its calls over the last 14 days, naming it (event name only, never a matcher or tool name), where to find it in `settings.json`, the trade-off, and the undo; this is only ever a printed prompt, never an automatic change.
+- `claudeglass capture status` — the level, what's on, since when, and the cost measured so far. While big_output or web is on, it also prints Deep's actual measured wait (median and p90, over the last 7 days). It also flags any hook — ClaudeGlass's own or one of yours — that failed on most of its calls over the last 14 days, naming it (event name only, never a matcher or tool name), when it last failed, where to find it in `settings.json`, the trade-off, and the undo; this is only ever a printed prompt, never an automatic change. A hook that has stopped failing since is left out.
 - `claudeglass capture on [--level LEVEL] [--for DURATION | --until DATE | --no-limit] [--sample N] [--yes] [--dry-run]` — turn it on (default level: Essentials).
 - `claudeglass capture level LEVEL` — change the level.
 - `claudeglass capture tagger claude|haiku` — who writes the main session's tags (see [Who writes the tags](#who-writes-the-tags)).
