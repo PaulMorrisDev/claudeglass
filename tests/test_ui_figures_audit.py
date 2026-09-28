@@ -244,7 +244,10 @@ def _combined(items: list[dict], spend: dict[str, float]) -> float:
         _body("page-overview.js", "combinedSaving")
         + f"\nprocess.stdout.write(String(combinedSaving({json.dumps(items)}, {json.dumps(spend)})));"
     )
-    done = subprocess.run([node, "-e", script], capture_output=True, text=True, timeout=30, check=True)
+    # A cold Node on a busy Windows runner has taken over 30 s to start.
+    done = subprocess.run(
+        [node, "-e", script], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, check=True
+    )
     return float(done.stdout)
 
 
