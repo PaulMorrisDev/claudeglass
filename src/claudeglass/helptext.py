@@ -4056,7 +4056,12 @@ TABLE_COPY: dict[str, TableCopy] = {
             "failed": ("Failed runs", "Runs that ended in an error."),
             "cause": ("Why it failed", "The most common reason, read from the error. Relative path: the script path is relative."),
             "failed_sessions": ("Sessions it failed in", "Sessions with at least one failed run."),
-            "last_failed": ("Last failed", "The day of its most recent failed run."),
+            "last_failed": ("Last failed", "When its most recent failed run happened, in UTC."),
+            "stopped": (
+                "Stopped failing?",
+                "Yes when, at its old failure rate, at least 5 more runs since its last failure should have failed. "
+                "None did. No when it hasn't run enough since to tell.",
+            ),
             "worked": ("Runs seen working", "Recorded runs that worked, including the calls and stops it blocked."),
             "blocks": ("Calls blocked", "Tool calls it stopped before they ran."),
             "resent": ("Sent again unchanged", "Blocked calls Claude then sent again with the same input."),

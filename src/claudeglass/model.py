@@ -386,7 +386,9 @@ whole command:
   script by a relative path, which works only from the project root) and,
   from ``PARSER_VERSION`` 23, ``unexpanded`` (only when ``True``: the
   command uses a Windows ``%VAR%`` variable, which the shell a hook runs
-  in leaves as it is).
+  in leaves as it is). From ``PARSER_VERSION`` 32, a failed run of a
+  tool hook also gains ``tool``: the tool it ran for when that is one of
+  Claude Code's own (``Bash``), else ``mcp``, never an MCP tool's name.
 - ``Turn.hook_context_chars: dict = {}`` -- label -> characters of
   context your hooks added just before this turn (``hook_additional_
   context``). ClaudeGlass's own capture note stays in ``cap_note_chars``.

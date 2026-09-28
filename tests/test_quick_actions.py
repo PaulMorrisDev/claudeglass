@@ -638,3 +638,43 @@ def test_models_check_leaves_out_an_agent_claude_said_needed_a_larger_model(tmp_
     [tip] = result["tips"]
     assert tip["title"] == "Explore: haiku not suggested"
     assert tip["text"].endswith("but Claude said 2 of its runs needed a larger model.")
+
+
+def _hooks_report(results):
+    from claudeglass.hook_costs import RULES, HookThresholds, build_section, compute_hook_costs
+    from claudeglass.model import ReportModel
+    from claudeglass.pricing import load_pricing
+
+    report = ReportModel(sections=[build_section(compute_hook_costs(results, load_pricing()))])
+    report.recommendations = [rec for rule in RULES for rec in rule(report, HookThresholds())]
+    return report
+
+
+def test_hooks_check_leaves_a_hook_that_stopped_failing_out_of_the_fix(tmp_path):
+    from test_hook_costs import _bash_calls_later, _bash_failures, _failed, _result
+
+    turns, events = _bash_failures(20)
+    events += [_failed("other.ps1", ts="2026-09-21T11:00:00Z", hook="Stop") for _ in range(12)]
+    result = qa.run("hooks", _ctx(tmp_path, model=_hooks_report([_result(turns + _bash_calls_later(5), events)])))
+    assert result["status"] == "act"
+    assert result["summary"] == (
+        "1 of your hooks failed 12 times, so they didn't do their job. guard.ps1 stopped failing after "
+        "2026-09-20 10:20 UTC."
+    )
+    cells = {row[0]: row[3] for row in result["table"]["rows"]}
+    assert cells == {"guard.ps1": "2026-09-20 10:20 UTC (stopped failing)", "other.ps1": "2026-09-21 11:00 UTC"}
+    [fix] = result["fixes"]
+    assert "guard.ps1" not in fix["title"]
+
+
+def test_hooks_check_is_fine_once_every_failing_hook_stopped(tmp_path):
+    from test_hook_costs import _bash_calls_later, _bash_failures, _result
+
+    turns, events = _bash_failures(20)
+    result = qa.run("hooks", _ctx(tmp_path, model=_hooks_report([_result(turns + _bash_calls_later(5), events)])))
+    assert result["status"] == "ok"
+    assert result["summary"] == (
+        "Your hooks work: guard.ps1, which failed earlier in this window, stopped failing after 2026-09-20 10:20 UTC, "
+        "and none costs much in kept context or blocked calls."
+    )
+

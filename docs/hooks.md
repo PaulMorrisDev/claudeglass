@@ -20,8 +20,8 @@ recommendations suggest a fix when one is large enough.
 ## What it reads
 
 `parse.py` keeps a few facts per hook record (see `model.py`'s
-"Your-hooks addition", `PARSER_VERSION` 22 and 23). It never keeps a command,
-its output or a full path.
+"Your-hooks addition", `PARSER_VERSION` 22, 23 and 32). It never keeps a
+command, its output or a full path.
 
 - **The hook's label.** The file name of the script its command runs
   (`session-digest.ps1`), or the command's first 40 characters with any
@@ -35,6 +35,8 @@ its output or a full path.
   hooks guide recommends `"${CLAUDE_PROJECT_DIR}/.claude/hooks/<script>"`.
   A path inside quotes is read from the opening quote, so a space or tab
   in it doesn't split it.
+- **The tool a failed tool hook ran for**, when it is one of Claude
+  Code's own (`Bash`); any MCP tool is kept as `mcp`, never by name.
 - **Whether the command uses a `%VAR%` variable.** Claude Code runs hooks
   in bash or PowerShell, and neither expands a Windows `%USERPROFILE%`,
   so the path stays as written and the script isn't found.
@@ -52,9 +54,20 @@ its output or a full path.
 Per hook, over every transcript in the window (main sessions and
 subagents alike):
 
-- **Failed runs**, the sessions they fell in, the last day one happened,
-  the most common cause, and whether the path is relative or uses a
-  `%VAR%` variable.
+- **Failed runs**, the sessions they fell in, when the last one happened
+  (UTC), the most common cause, and whether the path is relative or uses
+  a `%VAR%` variable.
+- **Stopped failing.** A hook fixed partway through the window keeps its
+  old failures until they age out, so each failing hook is judged on
+  what came after its last failure, in the projects it failed in (a
+  subagent counts in its session's project). A tool hook's clean runs
+  leave no record, so its chances to fail are the calls to the tools it
+  failed on (any MCP tool counts as one); a `SessionStart` hook's are
+  the sessions that start and the summaries; any other hook's are its
+  own recorded runs. If, at the rate it failed up to then, at least
+  `hooks_quiet_failures` (default 5) more failures should have followed
+  and none did, it has stopped failing: the table says so and the
+  failing-hooks card leaves it out.
 - **Runs seen working**: successful runs, plus calls and stops the hook
   blocked. Claude Code records a tool hook's run only when it fails,
   blocks or adds context, so a hook's clean runs are undercounted.
@@ -87,8 +100,9 @@ Actions › Checks asks "Do your hooks work, and what do they cost?".
 None of them changes a setting. Each gives a prompt to hand Claude.
 
 - **`hook-failures`** (severity `action`) when a hook failed at least
-  `hooks_min_failures` (default 10) times. One card names every such
-  hook; its action follows the top hook's cause. For a script not found
+  `hooks_min_failures` (default 10) times and hasn't stopped failing
+  (below). One card names every such hook; its action follows the top
+  hook's cause, and it says when that hook last failed. For a script not found
   by a relative path, it suggests starting the path with
   `${CLAUDE_PROJECT_DIR}`; for one behind a `%VAR%` variable, `$HOME`
   and forward slashes. No saving is claimed: the cost is the hook

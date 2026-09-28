@@ -216,7 +216,12 @@ __version__ = "0.11.0"
 #: summary Claude Code keeps, capped at ``postTokens`` (a
 #: ``COMPACT_SUMMARY`` event now carries ``size_chars``). A pre-31 digest
 #: priced every compaction's output at ``postTokens``.
-PARSER_VERSION = 31
+#:
+#: Bumped to 32: a tool hook's failed run keeps the tool it ran for
+#: (``detail["tool"]``: a built-in tool's name, else ``mcp``), so the
+#: hooks section can tell a hook that has stopped failing from one that
+#: hasn't run since.
+PARSER_VERSION = 32
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

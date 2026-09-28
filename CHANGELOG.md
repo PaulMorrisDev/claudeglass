@@ -267,7 +267,17 @@ the changes listed under both releases.
 - **A fixed hook no longer looks broken.** `capture status` warns about
   a hook that failed on most runs this window, and kept saying so after
   you fixed it, until the old failures aged out. It now says when the
-  last failure was.
+  last failure was. The Hooks check went further: the dashboard's "Do
+  this" named 12 hooks that had failed 49,799 times, all fixed that
+  morning. Each failing hook is now judged on what came after its last
+  failure, in its own projects: the calls to the tools it failed on, or
+  for a `SessionStart` hook the sessions and summaries. If at least 5
+  more failures should have followed at its old rate and none did, it
+  has stopped failing. It then drops out of the fix, and the table says
+  so beside when it last failed (now a time, not a day). On that data 9
+  of the 12 stopped; the other 3 haven't run enough since to tell.
+  `PARSER_VERSION` 32 keeps the tool a failed tool hook ran for (any MCP
+  tool as `mcp`), so every transcript is read again once.
 - **Turning coaching notes on or off is clearer.** On Setup › Capture,
   the Off level said "Nothing is captured and no tokens are used", but
   coaching notes and feedback have their own switches and keep running

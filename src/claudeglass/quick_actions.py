@@ -685,23 +685,48 @@ def _hooks(ctx: Context) -> dict:
     def count(row, key) -> int:
         return int(whatif._num(row.get(key)) or 0)
 
+    def last_failed(row) -> str:
+        last = str(row.get("last_failed") or "")
+        return f"{last} (stopped failing)" if last and row.get("stopped") == "yes" else last
+
     table = _table(
-        [("hook", "Hook"), ("failed", "Failed runs"), ("cause", "Why it failed"), ("blocks", "Calls blocked"),
-         ("resent", "Sent again unchanged"), ("context", "Context added"), ("cost", "Cost of its context and blocks")],
+        [("hook", "Hook"), ("failed", "Failed runs"), ("cause", "Why it failed"), ("last_failed", "Last failed"),
+         ("blocks", "Calls blocked"), ("resent", "Sent again unchanged"), ("context", "Context added"),
+         ("cost", "Cost of its context and blocks")],
         [[r.get("hook"), f"{count(r, 'failed'):,}", str(r.get("cause") or "")[:1].upper() + str(r.get("cause") or "")[1:],
-          f"{count(r, 'blocks'):,}", f"{count(r, 'resent'):,}", f"{count(r, 'context_tokens'):,} tokens",
+          last_failed(r), f"{count(r, 'blocks'):,}", f"{count(r, 'resent'):,}", f"{count(r, 'context_tokens'):,} tokens",
           _cell(ctx, (whatif._num(r.get("carry_usd")) or 0) + (whatif._num(r.get("block_usd")) or 0))]
          for r in rows[:10]],
     )
+    # A hook fixed mid-window keeps its old failures until they age out;
+    # hook_costs judges whether it has stopped failing since.
+    stopped = [r for r in rows if count(r, "failed") and r.get("stopped") == "yes"]
+    failing = [r for r in rows if count(r, "failed") and r.get("stopped") != "yes"]
+    latest = max((str(r.get("last_failed") or "") for r in stopped), default="")
     recs = _recommendations(ctx, _HOOK_RECS)
     if not recs:
-        return _result("ok", "Your hooks work, and none costs much in kept context or blocked calls.", table=table)
-    failing = [r for r in rows if count(r, "failed")]
+        if len(stopped) == 1:
+            summary = (
+                f"Your hooks work: {stopped[0].get('hook')}, which failed earlier in this window, stopped failing "
+                f"after {latest}, and none costs much in kept context or blocked calls."
+            )
+        elif stopped:
+            summary = (
+                f"Your hooks work: the {len(stopped)} that failed earlier in this window stopped failing after "
+                f"{latest}, and none costs much in kept context or blocked calls."
+            )
+        else:
+            summary = "Your hooks work, and none costs much in kept context or blocked calls."
+        return _result("ok", summary, table=table)
     if any(rec.id == "hook-failures" for rec in recs):
         summary = (
             f"{len(failing)} of your hooks failed {sum(count(r, 'failed') for r in failing):,} times, so they didn't "
             "do their job."
         )
+        if len(stopped) == 1:
+            summary += f" {stopped[0].get('hook')} stopped failing after {latest}."
+        elif stopped:
+            summary += f" Another {len(stopped)} stopped failing after {latest}."
     else:
         summary = "Some of your hooks cost more than they need to, in kept context or in replies spent on blocks."
     return _result("act", summary, table=table, fixes=_rec_fixes(recs))

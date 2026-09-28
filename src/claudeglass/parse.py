@@ -1219,6 +1219,23 @@ def _hook_error_cause(attachment: dict) -> str:
     return "failed"
 
 
+#: Hook events whose name carries the tool the hook ran for
+#: (``PreToolUse:Bash``).
+_HOOK_TOOL_EVENTS = frozenset({"PreToolUse", "PostToolUse", "PostToolUseFailure"})
+
+
+def _hook_tool(attachment: dict) -> str | None:
+    """The tool a tool hook ran for, from its ``hookName``: one of Claude
+    Code's own by name, any MCP tool as ``mcp`` (its name would say which
+    servers someone has, see ``events._HOOK_EVENT_NAMES``), else
+    ``None``."""
+    name = attachment.get("hookName")
+    event, _, tool = name.partition(":") if isinstance(name, str) else ("", "", "")
+    if event not in _HOOK_TOOL_EVENTS or not _TOOL_NAME_RE.match(tool):
+        return None
+    return tool if tool_server(tool) == BUILT_IN_TOOLS else "mcp"
+
+
 def _annotate_hook_event(event: Event, attachment, context_queue: dict[tuple[str, str], list[str]]) -> None:
     """Add the hook's label (and, for an error, why it failed) to a hook
     event's ``detail``. Context a hook adds arrives as its own attachment
@@ -1256,6 +1273,9 @@ def _annotate_hook_event(event: Event, attachment, context_queue: dict[tuple[str
         event.detail["unexpanded"] = True
     if event.subkind == "hook_non_blocking_error":
         event.detail["cause"] = _hook_error_cause(attachment)
+        tool = _hook_tool(attachment)
+        if tool:
+            event.detail["tool"] = tool
     stdout = attachment.get("stdout")
     if event.subkind == "hook_success" and isinstance(stdout, str) and stdout.strip():
         plain = not stdout.lstrip().startswith("{")

@@ -722,7 +722,9 @@ script's file name, never by its command or path.
   failed (`script not found`, `timed out` or `error`, plus
   `(relative path)` or `(%VAR% not expanded)` when a script not found is
   named by one), sessions it
-  failed in, the last day it failed, runs seen working, calls blocked,
+  failed in, when it last failed (UTC), whether it has stopped failing
+  (`yes`, `no`, or blank for a hook that never failed; see
+  [`hooks.md`](hooks.md#what-it-measures)), runs seen working, calls blocked,
   sent again unchanged, cost of blocks, times it added context, context
   added, the cost of keeping it, and time waited.
 
