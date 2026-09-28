@@ -262,6 +262,10 @@ the changes listed under both releases.
   within $1. The compaction window what-if prices each simulated summary
   the same way, at the median of your real ones. `PARSER_VERSION` 31, so
   every transcript is read again once.
+- **A fixed hook no longer looks broken.** `capture status` warns about
+  a hook that failed on most runs this window, and kept saying so after
+  you fixed it, until the old failures aged out. It now says when the
+  last failure was.
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.

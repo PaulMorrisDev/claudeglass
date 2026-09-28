@@ -1237,6 +1237,8 @@ class HookErrorStat:
     hook_name: str
     calls: int = 0
     errors: int = 0
+    #: The latest failure's timestamp, as the transcript wrote it.
+    last_error_ts: str | None = None
 
     @property
     def error_rate(self) -> float:
@@ -1273,6 +1275,16 @@ class HookErrorHealth:
         if worst is None or worst.error_rate < _RECOMMEND_ERROR_RATE:
             return None
         pct = round(worst.error_rate * 100)
+        # A hook fixed mid-window keeps its old failures until they age
+        # out, so say when the last one was.
+        last = ""
+        try:
+            at = datetime.fromisoformat(worst.last_error_ts.replace("Z", "+00:00")) if worst.last_error_ts else None
+        except ValueError:
+            at = None
+        if at is not None and at.tzinfo is not None:
+            when = at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            last = f"The last failure was at {when}; if you fixed it since, this clears as the window moves on. "
         # Claude Code writes a hook_success attachment only for some passing
         # runs (one real corpus: 2 PreToolUse successes against 38,840
         # non-blocking errors), so the share is of *recorded* runs and can
@@ -1281,7 +1293,7 @@ class HookErrorHealth:
         return (
             f"Your {worst.hook_name} hook(s) failed (non-blocking) {worst.errors} times this window, "
             f"{pct}% of the {worst.calls} runs Claude Code recorded (it doesn't record every run that "
-            f"passes, so the real share can be lower). To find which one, check hooks.{worst.hook_name} in "
+            f"passes, so the real share can be lower). {last}To find which one, check hooks.{worst.hook_name} in "
             "~/.claude/settings.json, in each project's .claude/settings.json and .claude/settings.local.json, "
             "and in your enabled plugins. Trade-off: every failing "
             "call still adds that hook's own latency before the tool runs, and a hook failing this often can "
@@ -1311,6 +1323,8 @@ def count_hook_errors(results: Iterable[TranscriptResult]) -> HookErrorHealth:
             stat.calls += 1
             if event.subkind == "hook_non_blocking_error":
                 stat.errors += 1
+                if event.ts and (stat.last_error_ts is None or event.ts > stat.last_error_ts):
+                    stat.last_error_ts = event.ts
     return HookErrorHealth(stats=tuple(tally[name] for name in sorted(tally)))
 
 
