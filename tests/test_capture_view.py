@@ -383,3 +383,12 @@ def test_status_line_toggles_say_when_the_status_line_is_someone_elses():
     for statusline in (True, None):
         rows = _rows(capture_view.view(config, statusline=statusline))
         assert rows["feedback_note"]["statusline_note"] is None and rows["coaching_line"]["statusline_note"] is None
+
+
+def test_coaching_notes_say_what_a_note_costs_not_no_tokens():
+    """Coaching notes ask Claude for nothing, yet each note is read: the
+    Capture page said "No tokens." beside what the notes had cost."""
+    rows = _rows(capture_view.view(CaptureConfig(coaching=["coaching_notes", "coaching_line"])))
+    assert rows["coaching_notes"]["asks_claude"] is False
+    assert rows["coaching_notes"]["cost_note"] == "About 50 to 120 tokens a note, only when a hint applies."
+    assert rows["coaching_line"]["cost_note"] is None

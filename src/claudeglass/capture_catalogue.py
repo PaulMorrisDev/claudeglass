@@ -166,7 +166,8 @@ LEVEL_TITLES = {
 
 #: What each level adds, for the init question and the Capture page.
 LEVEL_SUMMARIES = {
-    "off": "Nothing is captured and no tokens are used.",
+    "off": "No metrics are captured and no tokens are used for them. Live coaching and feedback have their "
+    "own switches and keep working while capture is off.",
     "free": "Local signals from hooks that log to a file. Uses no Claude tokens.",
     "essentials": "Claude tags each piece of work: what kind it was, how clear the request was, how hard, "
     "how big, and when the task changed. Claude Haiku judges whether each agent run finished, and why one was "

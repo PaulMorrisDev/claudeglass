@@ -268,6 +268,12 @@ the changes listed under both releases.
   a hook that failed on most runs this window, and kept saying so after
   you fixed it, until the old failures aged out. It now says when the
   last failure was.
+- **Turning coaching notes on or off is clearer.** On Setup › Capture,
+  the Off level said "Nothing is captured and no tokens are used", but
+  coaching notes and feedback have their own switches and keep running
+  while capture is off. It now says so. The coaching notes row said "No
+  tokens." beside what the notes had cost; it now gives a note's size,
+  about 50 to 120 tokens, only when a hint applies.
 - **A session that moved into a worktree keeps its project's settings.**
   The config snapshot taken when a session compacts read the agents and
   settings of the shell's current folder. A session whose shell had

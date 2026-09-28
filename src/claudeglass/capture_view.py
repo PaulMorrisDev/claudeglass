@@ -79,6 +79,12 @@ STATUSLINE_NOTES = {
     "such as the desktop app, coaching notes bring the same hints into the conversation.",
 }
 
+#: What a metric costs when it uses tokens without Claude being asked to
+#: write anything for it, in place of the Capture page's "No tokens."
+COST_NOTES = {
+    "coaching_notes": "About 50 to 120 tokens a note, only when a hint applies.",
+}
+
 #: Said when ``coaching_notes`` is turned on, before the yes/no: what the
 #: notes are, when they come and what they cost.
 COACHING_NOTES_ON = (
@@ -375,6 +381,7 @@ def _metric_row(
         "install_note": install[1].get(skill_now) if needs_install else None,
         "install_command": install[2] if needs_install else None,
         "statusline_note": STATUSLINE_NOTES[metric.id] if no_statusline else None,
+        "cost_note": COST_NOTES.get(metric.id),
         "estimate": estimate,
         "actual": actual,
         "actual_label": actual_label,

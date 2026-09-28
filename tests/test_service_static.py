@@ -520,6 +520,11 @@ def test_capture_group_opens_for_a_metric_that_needs_you() -> None:
     assert "if (row.statusline_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
 
 
+def test_a_metric_row_says_what_it_costs_before_no_tokens() -> None:
+    row = _function_source(_app_js(), "renderMetricRow")
+    assert "if (!row.asks_claude) cost = row.cost_note || (" in row
+
+
 def test_a_change_marker_leads_to_its_change_on_your_changes() -> None:
     """Phase 10 review (fedd805 gaps): a change marker on a daily spend
     chart, or on Your changes' timeline, opens Your changes with ?day=,

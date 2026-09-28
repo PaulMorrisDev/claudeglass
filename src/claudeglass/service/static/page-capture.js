@@ -446,7 +446,7 @@ function renderMetricRow(row, data, container) {
   // What it costs and how far along it is stay in view; why it helps
   // and what Claude writes are one click away.
   var cost;
-  if (!row.asks_claude) cost = row.kind === "free" ? "No Claude tokens: a hook logs it to a local file." : "No tokens.";
+  if (!row.asks_claude) cost = row.cost_note || (row.kind === "free" ? "No Claude tokens: a hook logs it to a local file." : "No tokens.");
   else if (row.estimate) cost = (row.on ? "Saves about " : "Adds about ") + billed(row.estimate, "a week") + (row.on ? " if switched off." : ".");
   if (row.actual) cost = (cost ? cost + " " : "") + (row.actual_label || "Since it was turned on") + ": " + billed(row.actual) + ".";
   var status = [];

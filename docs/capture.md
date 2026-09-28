@@ -12,7 +12,7 @@ Costs rise with depth, so capture comes in levels, each including every metric o
 
 | Level | What it adds | Note at session start | Haiku per agent run |
 |---|---|---|---|
-| Off | Nothing is captured and no tokens are used. | – | – |
+| Off | No metrics are captured and no tokens are used for them. Live coaching and feedback have their own switches and keep working while capture is off. | – | – |
 | Free | Local signals from hooks that log to a file. Uses no Claude tokens. | – | – |
 | Essentials | Claude tags each piece of work: what kind it was, how clear the request was, how hard, how big, and when the task changed. Claude Haiku judges whether each agent run finished, and why one was run again. | ~186 tokens | ~$0.002 |
 | Standard | Adds what the request lacked, planning, skills, research, and Haiku's view of each agent run's model and brief. | ~304 tokens | ~$0.002 |
