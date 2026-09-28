@@ -40,25 +40,28 @@ BRIEF_COMMAND = "claudeglass capture brief on"
 
 
 def _skill_words(name: str, command: str) -> tuple[dict[str, str], dict[str, str]]:
+    old = next((o for o, n in catalogue.RENAMED_SKILLS.items() if n == name), name)
     states = {
         "missing": f"The /{name} skill isn't installed",
         "outdated": f"The /{name} skill is out of date",
+        "renamed": f"The /{name} skill is still called /{old}",
         "foreign": f"Another skill named {name} is in the way: move it elsewhere first",
     }
     notes = {
         "missing": f"{states['missing']}: {command}",
         "outdated": f"{states['outdated']}: {command}",
+        "renamed": f"{states['renamed']}: {command}",
         "foreign": f"Another skill named {name} is in the way: move it elsewhere, then run {command}",
     }
     return states, notes
 
 
-#: What to say when the /tl-feedback skill is on but its file isn't right
+#: What to say when the /cl-feedback skill is on but its file isn't right
 #: (``footprint.feedback_skill_state``), and the same with the command,
 #: for the banner and ``capture status``. The dashboard never writes it:
 #: it lives in Claude Code's own folder.
 SKILL_STATES, SKILL_NOTES = _skill_words(catalogue.FEEDBACK_SKILL, FEEDBACK_COMMAND)
-#: The same for the /tl-brief skill (brief templates).
+#: The same for the /cl-brief skill (brief templates).
 BRIEF_SKILL_STATES, BRIEF_SKILL_NOTES = _skill_words(catalogue.BRIEF_SKILL, BRIEF_COMMAND)
 
 #: A metric that installs a skill -> (its state's key in the feedback
@@ -638,8 +641,8 @@ def view(
     ``started_since`` is how many sessions started since then.
     ``feedback_use`` is ``capture.feedback_usage`` over the last
     :data:`capture.HISTORY_DAYS` days, ``skill`` the
-    ``footprint.feedback_skill_state`` of the /tl-feedback skill,
-    ``brief_skill`` that of the /tl-brief skill and
+    ``footprint.feedback_skill_state`` of the /cl-feedback skill,
+    ``brief_skill`` that of the /cl-brief skill and
     ``ratings`` how many sessions you rated on the dashboard (each only
     while its toggle is on). ``coaching_use`` is
     ``capture.coaching_usage`` over the same days, while coaching notes

@@ -257,7 +257,7 @@ def test_a_large_tool_result_gets_a_one_line_note_at_deep(tmp_path):
 
 def test_the_feedback_reminder_needs_capture_on(tmp_path):
     free = _config(tmp_path / "free", '[capture]\nlevel = "free"\nfeedback = ["feedback_reminder"]\n')
-    assert "/tl-feedback" in _note(free, _start())
+    assert "/cl-feedback" in _note(free, _start())
     off = _config(tmp_path / "off", '[capture]\nlevel = "off"\nfeedback = ["feedback_reminder"]\n')
     assert _note(off, _start()) == ""
 

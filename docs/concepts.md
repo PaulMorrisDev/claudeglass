@@ -542,7 +542,7 @@ choices with the measured cost attached.
 `habits.py` turns the same prompt cycles and subagent runs — whatever
 metrics capture reported on them, what the parser measures without
 asking (a message naming a file, a command failing repeatedly, a skill
-loaded late...), and your own `/tl-feedback` answers and dashboard
+loaded late...), and your own `/cl-feedback` answers and dashboard
 ratings — into ranked habits: an estimated saving, how sure it is, and
 whether you've already picked it up. Every table is always present in a
 report, empty (with a note saying why) when capture is off or nothing's

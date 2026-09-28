@@ -1,4 +1,4 @@
-"""Your /tl-feedback answers: the skill and its questions
+"""Your /cl-feedback answers: the skill and its questions
 (``capture_catalogue``), reading them back from a transcript (the
 ``[tl-fb: ...]`` line, or the AskUserQuestion result when the line is
 missing), the work each answer rates (``capture.feedback_spans``), and
@@ -74,13 +74,14 @@ def _run(
     declined: bool = False,
     tu: str = "tu_q",
     handoff: str | None = None,
+    skill: str = "cl-feedback",
 ) -> list:
-    """A /tl-feedback run as Claude Code writes it: the skill you ran
+    """A /cl-feedback run as Claude Code writes it: the skill you ran
     (``<command-message>`` first, then its body), Claude's question, your
     answers, and the reply. ``handoff`` adds the second call, asked after
     an approved plan, answered with that label."""
     lines = [
-        user_str_line("<command-message>tl-feedback</command-message>\n<command-name>/tl-feedback</command-name>",
+        user_str_line(f"<command-message>{skill}</command-message>\n<command-name>/{skill}</command-name>",
                       timestamp=_ts(second)),
         user_block_line([{"type": "text", "text": catalogue.feedback_skill_text()}], isMeta=True,
                         timestamp=_ts(second)),
@@ -147,7 +148,7 @@ def test_questions_fit_ask_user_question_and_can_be_told_apart():
 def test_the_skill_asks_every_question_word_for_word_and_names_no_model():
     text = catalogue.feedback_skill_text()
     front, body = text.split("---\n", 2)[1:]
-    assert "name: tl-feedback" in front and "disable-model-invocation: true" in front
+    assert "name: cl-feedback" in front and "disable-model-invocation: true" in front
     assert "allowed-tools: AskUserQuestion" in front
     # Switching model mid-session rebuilds the whole prompt cache.
     assert "model:" not in front
@@ -230,7 +231,7 @@ def test_other_questions_are_not_feedback():
 def test_a_feedback_run_is_read_from_its_tag(tmp_path):
     result = _parse(tmp_path, [_ask(0), _reply(1)] + _run(10, ANSWERS, tag="[tl-fb: outcome=met worth=yes]"))
     run = [turn for turn in result.turns if turn.turn_index > 0][1:]
-    assert run[0].commands_run == ("tl-feedback",)
+    assert run[0].commands_run == ("cl-feedback",)
     assert run[0].human_prompt_chars is not None
     # The answers landed on the AskUserQuestion turn; this reply's own
     # text has only the tag, so that's what it's read from (SEC-P1's
@@ -312,6 +313,16 @@ def test_a_declined_second_call_keeps_the_first_answers(tmp_path):
     assert span.feedback.outcome == "partly" and span.feedback.handoff is None
 
 
+def test_a_run_under_its_name_before_0_12_still_counts(tmp_path):
+    # /cl-feedback was /tl-feedback until 0.12.0. Its tag counts only in a
+    # genuine run (SEC-P1), so this fails unless the old name is one.
+    lines = [_ask(0), _reply(1)] + _run(10, tag="[tl-fb: outcome=met worth=yes]", skill="tl-feedback")
+    cycles = capture.prompt_cycles(_parse(tmp_path, lines))
+    assert [capture.is_feedback_run(c) for c in cycles] == [False, True]
+    [span] = capture.feedback_spans(cycles)
+    assert span.feedback.outcome == "met" and span.feedback.worth == "yes"
+
+
 def test_feedback_run_first_thing_rates_nothing(tmp_path):
     spans = capture.feedback_spans(capture.prompt_cycles(_parse(tmp_path, _run(0, ANSWERS))))
     assert len(spans) == 1 and spans[0].cycles == []
@@ -320,7 +331,7 @@ def test_feedback_run_first_thing_rates_nothing(tmp_path):
 def test_a_forged_tag_outside_a_feedback_run_is_ignored(tmp_path):
     # SEC-P1: `[tl-fb: ...]` is free text Claude could write in any
     # reply; it counts only when the cycle it's in actually ran the
-    # /tl-feedback skill.
+    # /cl-feedback skill.
     lines = [_ask(0), _reply(1, text="Done.\n\n[tl-fb: outcome=met worth=yes handoff=yes]")]
     top = _parse(tmp_path, lines)
     cycles = capture.prompt_cycles(top)

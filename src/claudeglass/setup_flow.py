@@ -4,7 +4,7 @@ changes in order and a summary of what works.
 The default path asks four things: how you pay, whether to connect to
 Claude Code, whether to start the dashboard at logon and, optionally,
 whether to turn on sharper tips (metrics capture at Essentials, plus the
-``/tl-feedback`` skill). ``--advanced`` also asks every other question
+``/cl-feedback`` skill). ``--advanced`` also asks every other question
 :func:`onboarding.gather_answers` knows, and the full capture and
 feedback questions. ``--non-interactive`` asks nothing: ``--answers`` and
 the flags decide, and a ``(derived)`` line says what was assumed.
@@ -294,7 +294,7 @@ def _service(opts: Options, tools: Tools, setup: _Setup, *, stdin, stdout, notes
 
 def _tips_question(current: CaptureConfig, *, now: datetime, stdin, stdout) -> tuple[tuple[str, str | None] | None, bool | None]:
     """Question 4, sharper tips: Essentials for the default time-box, plus
-    the ``/tl-feedback`` skill. Returns ``(capture, feedback)`` changes."""
+    the ``/cl-feedback`` skill. Returns ``(capture, feedback)`` changes."""
     essentials_on = current.level == "essentials" and not current.expired(now)
     cost = capture_catalogue.rough_tokens(capture_catalogue.level_includes("essentials"))
     days = capture_catalogue.DEFAULT_CAPTURE_TIMEBOX_DAYS
@@ -304,7 +304,7 @@ def _tips_question(current: CaptureConfig, *, now: datetime, stdin, stdout) -> t
         "[tl: task=bugfix brief=clear], so the tips fit how you work. That costs about "
         f"{cost['session_note']} tokens when a session starts and {cost['reply_tag']} per reply, plus a Claude "
         f"Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.3f} after each subagent run, and it switches "
-        f"itself off after {days} days. It also adds the /tl-feedback skill, for rating a piece of work when it's "
+        f"itself off after {days} days. It also adds the /cl-feedback skill, for rating a piece of work when it's "
         "done.\n"
     )
     yes = _yes_no("Turn on sharper tips?", essentials_on, stdin=stdin, stdout=stdout)
@@ -361,9 +361,9 @@ def _tips_line(before: CaptureConfig, after: CaptureConfig, setup: _Setup, uncon
         title = capture_catalogue.LEVEL_TITLES.get(after.level, after.level)
         parts.append(f"turn on {title} " + (f"until {after.until[:10]}" if after.until else "with no end date"))
     if setup.feedback is True:
-        parts.append("add the /tl-feedback skill")
+        parts.append("add the /cl-feedback skill")
     elif setup.feedback is False:
-        parts.append("turn off the /tl-feedback survey")
+        parts.append("turn off the /cl-feedback survey")
     return f"{_TIPS}: {', and '.join(parts)}."
 
 
@@ -517,24 +517,26 @@ def _capture_after(opts: Options, setup: _Setup, current: CaptureConfig, now: da
 
 
 def _skill(opts: Options, setup: _Setup, before: CaptureConfig, after: CaptureConfig, may_touch: bool) -> str | None:
-    """Whether to write or remove the ``/tl-feedback`` skill (sets
+    """Whether to write or remove the ``/cl-feedback`` skill (sets
     ``setup.skill``); returns a review line when it isn't done."""
     want = "feedback_skill" in after.feedback
     state = footprint.feedback_skill_state(opts.claude_root)
-    if want and state in ("missing", "outdated"):
+    if want and state in ("missing", "outdated", "renamed"):
         if not may_touch:
-            return "The /tl-feedback skill: add it with 'claudeglass capture feedback on'."
+            return "The /cl-feedback skill: add it with 'claudeglass capture feedback on'."
         setup.skill = "write"
         if setup.feedback is not True:
-            return "The /tl-feedback skill: " + ("update it." if state == "outdated" else "add it.")
+            return "The /cl-feedback skill: " + {"outdated": "update it.", "renamed": "rename it from /tl-feedback."}.get(
+                state, "add it."
+            )
     elif want and state == "foreign":
         where = footprint.home_label(footprint.feedback_skill_path(opts.claude_root))
-        return f"The /tl-feedback skill: {where} is a skill this tool didn't write, so it's left alone."
-    elif not want and "feedback_skill" in before.feedback and state in ("installed", "outdated"):
+        return f"The /cl-feedback skill: {where} is a skill this tool didn't write, so it's left alone."
+    elif not want and "feedback_skill" in before.feedback and state in ("installed", "outdated", "renamed"):
         if not may_touch:
-            return "The /tl-feedback skill: remove it with 'claudeglass capture feedback off'."
+            return "The /cl-feedback skill: remove it with 'claudeglass capture feedback off'."
         setup.skill = "remove"
-        return "The /tl-feedback skill: remove it."
+        return "The /cl-feedback skill: remove it."
     return None
 
 
@@ -570,7 +572,7 @@ def _details(setup: _Setup, opts: Options, stdout: IO[str]) -> None:
         shown = True
     if setup.skill is not None:
         where = footprint.home_label(footprint.feedback_skill_path(opts.claude_root))
-        stdout.write(f"\nThe /tl-feedback skill: {'writes' if setup.skill == 'write' else 'removes'} {where}\n")
+        stdout.write(f"\nThe /cl-feedback skill: {'writes' if setup.skill == 'write' else 'removes'} {where}\n")
         shown = True
     if setup.service is not None:
         plan = setup.service
@@ -663,12 +665,21 @@ def _apply(setup: _Setup, opts: Options, tools: Tools, *, stdout, now, sleep, cl
                     + "\n"
                 )
 
-    if setup.skill == "write":
+    # Our copy still under its name from before 0.12.0 is renamed, or
+    # removed with it.
+    old_skill = footprint.old_skill(capture_catalogue.FEEDBACK_SKILL, opts.claude_root)
+    if setup.skill == "write" and old_skill:
+        footprint.rename_skill(old_skill, capture_catalogue.FEEDBACK_SKILL, opts.claude_root)
+        stdout.write(f"Renamed the /{old_skill} skill to /cl-feedback.\n")
+    elif setup.skill == "write":
         footprint.write_feedback_skill(opts.claude_root)
-        stdout.write("Added the /tl-feedback skill.\n")
+        stdout.write("Added the /cl-feedback skill.\n")
     elif setup.skill == "remove":
-        footprint.remove_feedback_skill(opts.claude_root)
-        stdout.write("Removed the /tl-feedback skill.\n")
+        if footprint.feedback_skill_state(opts.claude_root) in ("installed", "outdated"):
+            footprint.remove_feedback_skill(opts.claude_root)
+        if old_skill:
+            footprint.remove_skill(old_skill, opts.claude_root)
+        stdout.write("Removed the /cl-feedback skill.\n")
 
     if setup.service is not None:
         stdout.write("Starting the dashboard... ")
@@ -731,7 +742,7 @@ def _summary(opts: Options, setup: _Setup, *, changed: bool, stdout: IO[str], no
             f"Next: run 'claudeglass serve', then open {installer.DEFAULT_URL} to see where your tokens go.\n"
         )
     if footprint.feedback_skill_state(opts.claude_root) == "installed":
-        stdout.write("After a piece of work, run /tl-feedback in Claude Code.\n")
+        stdout.write("After a piece of work, run /cl-feedback in Claude Code.\n")
     if changed:
         stdout.write(f"{RESTART_NOTE}\n")
     stdout.write("Check your setup any time: claudeglass status\n")

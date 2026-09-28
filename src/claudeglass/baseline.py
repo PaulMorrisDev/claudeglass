@@ -263,7 +263,7 @@ def _plan_build(model: ReportModel) -> dict | None:
     """Main sessions that approved a plan and built it in the same
     session (the Work habits section's ``habits_by_shape``, ``plan_build``
     row): ``sessions``, ``total`` main sessions, ``share`` (percent) and
-    the /tl-feedback handoff answers. ``None`` without that row."""
+    the /cl-feedback handoff answers. ``None`` without that row."""
     table = _table(model, "habits", "habits_by_shape")
     if table is None:
         return None
@@ -361,7 +361,7 @@ def _suggested_profile(
         answers = plan_build["yes"] + plan_build["partly"] + plan_build["no"]
         if answers:
             evidence += (
-                f"; your /tl-feedback said the plan alone was enough for {plan_build['yes']} of {answers} builds"
+                f"; your /cl-feedback said the plan alone was enough for {plan_build['yes']} of {answers} builds"
             )
         evidence += " -- "
     profile_id = catalogue.suggest(archetype, purposes, tasks or (), shape)

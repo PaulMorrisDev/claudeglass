@@ -672,8 +672,8 @@ CAPTURE_ACTIONS = (
 #: ``capture <action> on|off`` -> the skill it adds or removes, what the
 #: change is called, and what it turns on.
 _SKILL_SWITCHES = {
-    "feedback": (capture_catalogue.FEEDBACK_SKILL, "Feedback", "the /tl-feedback skill and its status-line reminder"),
-    "brief": (capture_catalogue.BRIEF_SKILL, "Brief templates", "the /tl-brief skill"),
+    "feedback": (capture_catalogue.FEEDBACK_SKILL, "Feedback", "the /cl-feedback skill and its status-line reminder"),
+    "brief": (capture_catalogue.BRIEF_SKILL, "Brief templates", "the /cl-brief skill"),
 }
 
 
@@ -689,8 +689,8 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         choices=CAPTURE_ACTIONS,
         help="status (default); on; off; level LEVEL; enable/disable METRIC...; connect (add the hook entries "
         "the chosen metrics need to settings.json); remove (switch off and take the entries out); "
-        "feedback on|off (the /tl-feedback skill and its status-line reminder); "
-        "brief on|off (the /tl-brief skill, which checks a request against its checklist); "
+        "feedback on|off (the /cl-feedback skill and its status-line reminder); "
+        "brief on|off (the /cl-brief skill, which checks a request against its checklist); "
         "tagger claude|haiku (who writes the tags: Claude, at the end of its replies, or Claude Haiku, asked "
         "after each turn); "
         "prune (delete signal files, capture-log.jsonl records and usage-log.csv rows older than "
@@ -970,7 +970,7 @@ def _add_init_args(sub: argparse.ArgumentParser) -> None:
         "--feedback",
         choices=("on", "off"),
         default=None,
-        help="answer the feedback question without asking: add the /tl-feedback skill and its status-line "
+        help="answer the feedback question without asking: add the /cl-feedback skill and its status-line "
         "reminder (on), or not (off)",
     )
     sub.add_argument(
@@ -2639,7 +2639,7 @@ def _init_feedback_choice(
     args: argparse.Namespace, *, config_dir: Path, claude_root: Path, stdin, stdout
 ) -> tuple[bool, bool, list[str]] | None:
     """``init``'s feedback question (:func:`onboarding.ask_feedback`):
-    the ``/tl-feedback`` skill and its status-line reminder, asked or
+    the ``/cl-feedback`` skill and its status-line reminder, asked or
     taken from ``--feedback`` and the answers file. Returns ``(on,
     was_on, derived notes)``, or ``None`` when there's nothing to decide
     (said on ``stdout``). Feedback on in config.toml without its skill
@@ -2657,12 +2657,12 @@ def _init_feedback_choice(
         from . import footprint
 
         if footprint.read_feedback_skill(claude_root) == capture_catalogue.feedback_skill_text():
-            stdout.write("\nThe /tl-feedback skill is on. 'claudeglass capture feedback off' turns it off.\n")
+            stdout.write("\nThe /cl-feedback skill is on. 'claudeglass capture feedback off' turns it off.\n")
             return None
         # On in config.toml without its skill file: picking Deep just
         # turned it on (config.set_capture), or the file went missing.
         stdout.write(
-            "\nThe /tl-feedback survey is on"
+            "\nThe /cl-feedback survey is on"
             + (", as part of Deep" if current.level == "deep" else "")
             + ". 'claudeglass capture feedback off' turns it off.\n"
         )
@@ -2943,7 +2943,9 @@ def _cmd_update_finish(
     3. Bring Claude Code's settings.json up to date: a SessionStart hook
        command that can't run, the entries capture needs, and this tool's
        statusline when it runs another Python. Each change is shown and
-       made after a yes; settings.json is backed up first.
+       made after a yes; settings.json is backed up first. This tool's
+       skills too: one still under its name from before 0.12.0 is
+       renamed, one an earlier version wrote is rewritten.
     4. Name copies of this tool installed for other Pythons and, once the
        dashboard runs the new version and nothing else needs them, remove
        them after a yes.
@@ -3085,8 +3087,24 @@ def _cmd_update_finish(
                 stdout.write(f"Could not change settings.json: {exc}\n")
         elif not args.dry_run:
             stdout.write("Left unchanged.\n")
+    from . import footprint
+
+    for skill in footprint.SKILL_TEXTS:
+        # A copy of ours under its old name, or in an earlier version's
+        # words; one that isn't there, or isn't ours, is left to 'capture'.
+        if footprint.skill_state(skill, claude_root) in ("renamed", "outdated"):
+            changed_any = True
+            _capture_skill_step(
+                True,
+                claude_root=claude_root,
+                dry_run=args.dry_run,
+                assume_yes=args.yes,
+                stdin=stdin,
+                stdout=stdout,
+                skill=skill,
+            )
     if not changed_any:
-        stdout.write("Up to date: the hooks and statusline this tool added run as they should.\n")
+        stdout.write("Up to date: the hooks, statusline and skills this tool added run as they should.\n")
 
     # -- copies for other Pythons ----------------------------------------------
     copies = copies_fn([ran_from])
@@ -3240,7 +3258,7 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
     if rough["reminder"]:
-        lines.append(f"about {rough['reminder']} tokens once a session, for the /tl-feedback reminder")
+        lines.append(f"about {rough['reminder']} tokens once a session, for the /cl-feedback reminder")
     if rough["report_tag"]:
         lines.append(f"about {rough['report_tag']} tokens of tag at the end of each subagent report")
     if rough["tool_note"]:
@@ -3558,17 +3576,19 @@ def _capture_skill_step(
     skill: str = capture_catalogue.FEEDBACK_SKILL,
 ) -> bool:
     """Make the skill (``<claude-root>/skills/<skill>/SKILL.md``: by
-    default ``/tl-feedback``, or ``/tl-brief``) there or not, as ``want``
+    default ``/cl-feedback``, or ``/cl-brief``) there or not, as ``want``
     says: show the file to add, the diff, or the file to remove, and make
-    the change after a yes. A ``SKILL.md`` there that this tool didn't
-    write is left alone. Returns False when a change was needed but not
-    made."""
+    the change after a yes. Our copy still under its name from before
+    0.12.0 (``/tl-feedback``) is renamed, or removed with it. A
+    ``SKILL.md`` there that this tool didn't write is left alone. Returns
+    False when a change was needed but not made."""
     from . import footprint
 
     action = next(a for a, (name, _t, _w) in _SKILL_SWITCHES.items() if name == skill)
     path = footprint.skill_path(skill, claude_root)
     now_text = footprint.read_skill(skill, claude_root)
     ours = now_text is not None and footprint.is_own_skill(skill, now_text)
+    old = footprint.old_skill(skill, claude_root)
     text = footprint.SKILL_TEXTS[skill]()
     if want:
         later = f"claudeglass capture {action} on"
@@ -3581,7 +3601,13 @@ def _capture_skill_step(
                 f"'{later}'.\n"
             )
             return False
-        if now_text is None:
+        if now_text is None and old is not None:
+            stdout.write(
+                f"\n/{old} is now called /{skill}. This moves it from {footprint.skill_path(old, claude_root)} to "
+                f"{path}, in this version's words.\n"
+            )
+            question = "Rename it?"
+        elif now_text is None:
             stdout.write(f"\nThis adds the /{skill} skill, {path}:\n\n")
             stdout.write("".join(f"    {line}\n" if line else "\n" for line in text.splitlines()) + "\n")
             question = "Add it?"
@@ -3600,9 +3626,11 @@ def _capture_skill_step(
             question = "Update it?"
     else:
         later = f"claudeglass capture {action} off"
-        if not ours:
+        gone = [name for name, mine in ((skill, ours), (old, old is not None)) if mine]
+        if not gone:
             return True
-        stdout.write(f"\nThis removes the /{skill} skill, {path}.\n")
+        for name in gone:
+            stdout.write(f"\nThis removes the /{name} skill, {footprint.skill_path(name, claude_root)}.\n")
         question = "Remove it?"
     if dry_run:
         stdout.write(f"Dry run: the skill is left as it is. Run '{later}' to make the change.\n")
@@ -3614,10 +3642,13 @@ def _capture_skill_step(
             stdout.write(f"Left as it is. Run '{later}' to make the change later.\n")
             return False
     try:
-        if want:
+        if want and now_text is None and old is not None:
+            footprint.rename_skill(old, skill, claude_root)
+        elif want:
             footprint.write_skill(skill, claude_root)
         else:
-            footprint.remove_skill(skill, claude_root)
+            for name in gone:
+                footprint.remove_skill(name, claude_root)
     except OSError as exc:
         stdout.write(f"Could not change {path}: {exc}\n")
         return False
@@ -3843,10 +3874,10 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     need, the diff is shown and made after a yes (``connect`` does only
     this step). ``off`` switches capture off and leaves the entries,
     which add nothing while it is off; ``remove`` switches it off and
-    takes them out. ``feedback on|off`` turns the ``/tl-feedback`` skill
+    takes them out. ``feedback on|off`` turns the ``/cl-feedback`` skill
     and its reminders on or off and adds or removes the skill file, after
     showing it and asking; enabling or disabling ``feedback_skill`` does
-    the same. ``brief on|off`` does that for the ``/tl-brief`` skill (the
+    the same. ``brief on|off`` does that for the ``/cl-brief`` skill (the
     ``brief_templates`` toggle). ``prune`` deletes signal files,
     ``capture-log.jsonl`` records and ``usage-log.csv`` rows older than
     ``retention_days`` (or
@@ -3961,7 +3992,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             stdout.write(f"Metrics capture: {capture_view.describe(current)} -> {capture_view.describe(preview)}\n")
         if any(i not in current.feedback for i in preview.feedback) and preview.level == "deep":
             stdout.write(
-                "Deep also turns on the /tl-feedback survey, its reminder note, and Claude's one-line reminder "
+                "Deep also turns on the /cl-feedback survey, its reminder note, and Claude's one-line reminder "
                 "to run it. 'claudeglass capture feedback off' turns them off.\n"
             )
         if action == "disable":
@@ -4042,12 +4073,12 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         return 0
     if action == "remove" and skill_on:
         stdout.write(
-            "The /tl-feedback skill stays: it works with capture off. "
+            "The /cl-feedback skill stays: it works with capture off. "
             "'claudeglass capture feedback off' removes it.\n"
         )
     if action == "remove" and brief_on:
         stdout.write(
-            "The /tl-brief skill stays: it works with capture off. "
+            "The /cl-brief skill stays: it works with capture off. "
             "'claudeglass capture brief off' removes it.\n"
         )
     wanted = () if action == "remove" else hook_health.capture_specs(preview.hook_metrics())
@@ -4127,6 +4158,7 @@ def _cmd_uninstall(args: argparse.Namespace) -> int:
     for name, skill_file in (
         (capture_catalogue.FEEDBACK_SKILL, plan.feedback_skill),
         (capture_catalogue.BRIEF_SKILL, plan.brief_skill),
+        *plan.old_skills.items(),
     ):
         if skill_file is None:
             continue

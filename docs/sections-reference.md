@@ -62,7 +62,7 @@ and it's still useful when you want one section by itself.
 | `hooks` | Your hooks | `hook_costs.py` | whether each hook you set up works (failed runs and why, relative script paths), what the context it adds costs to keep, what the calls it blocks cost and how often Claude sent them again unchanged, and time waited — see [`hooks.md`](hooks.md) |
 | `quality` | Quality signals | `quality.py` | whether the work went well: agent runs that didn't finish or likely ran out of turns, failed tool calls and shell commands, denials, corrections, edits redone, per agent type and per model and effort, with a significance test — see [`concepts.md`](concepts.md#7-quality-signals) |
 | `workstyle` | Workstyle | `workstyle.py` | one archetype per session/corpus: `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
-| `habits` | Work habits | `habits.py` | the "Weekly pace" digest, habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/tl-feedback`) cost per piece of work that met its goal |
+| `habits` | Work habits | `habits.py` | the "Weekly pace" digest, habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/cl-feedback`) cost per piece of work that met its goal |
 | `prompting` | How you prompt | `prompting.py` | how often each prompting habit the coaching notes warn about happened (small requests sent one at a time, the same request again, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
 | `workflows` | Workflows | `workflows.py` | per-run agent count, phase count, duration and cost from `<session>/workflows/wf_*.json` |
 | `phases` | Phases | `phases.py` | cost split across DISCOVERY (read/search only), IMPLEMENTATION (real edits or an ordinary shell command), VERIFICATION (a test/build tool, or a scratch-file edit), OTHER — in the CLI's report only when `--phases` is given; the dashboard always builds it |
@@ -849,7 +849,7 @@ capture is off or no feedback has been given.
 - `habits_brief_templates` — per kind of task (the defaults while
   nothing is tagged): the checklist, why those lines (the one most
   often missing from your asks, or a starting point), and the template
-  to copy. The `/tl-brief` skill (`capture brief on`) asks for the same
+  to copy. The `/cl-brief` skill (`capture brief on`) asks for the same
   lines, from `capture_catalogue.BRIEF_CHECKLISTS`.
 - `habits_agents` — per agent type (and `top-level` for how hard the main
   session's work was): runs, cost, typical report size, the share
@@ -888,14 +888,14 @@ capture is off or no feedback has been given.
 - `habits_outcomes` — per outcome you gave (`met`, `partly`, `missed`,
   ...): pieces of work, messages, cost, per piece, the most common kind
   of task, what slowed it most, what would have helped most, and where
-  the answers came from (`/tl-feedback` or a dashboard rating).
+  the answers came from (`/cl-feedback` or a dashboard rating).
 - `habits_by_shape` — main sessions by shape (`handoff.plan_shape`):
   `plan_build` (a plan approved with `ExitPlanMode`, then files edited in
   the same session), `plan_only` (approved, nothing edited after it) and
   `no_plan`. Per shape: sessions, their share, the average cost, the
   median planning context a fresh start would have dropped
   (`handoff.plan_carried`), the pieces of work rated, the share that met
-  its goal, the shares worth it and too costly, and the /tl-feedback
+  its goal, the shares worth it and too costly, and the /cl-feedback
   handoff answers (`yes`, `partly`, `no`). The `plan-handoff` card and
   the suggested profile read it.
 - `habits_self_report` — Claude's own reports against your feedback: per
@@ -916,7 +916,7 @@ capture is off or no feedback has been given.
 - `habits_skills` — per skill: runs by you, loads by Claude, loads after
   three or more replies and what had been spent before them, and what
   the tags said (helped, wasn't needed, would have helped). The
-  `/tl-feedback` skill is left out.
+  `/cl-feedback` skill is left out.
 - `habits_tool_output` — per tool with outputs over the large-output
   threshold: how many, their tokens and what carrying them cost; then a
   `loops` row for commands that failed three or more times within one
@@ -927,7 +927,7 @@ capture is off or no feedback has been given.
 - `capture_usage` — what metrics capture cost while it was on, measured
   from the transcripts (`capture.usage`): the level, since when, note
   and tag tokens, cost and share of spend, how often Claude tagged its
-  replies and its agent reports, and the `/tl-feedback` runs and their
+  replies and its agent reports, and the `/cl-feedback` runs and their
   cost; `sessions_with_notes` (main sessions that carried a capture
   note) and `after_compact_notes`/`after_compact_cost` (SURV-3: notes
   landing at or after a real compact boundary, priced at the fuller

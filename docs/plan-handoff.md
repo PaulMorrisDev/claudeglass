@@ -79,7 +79,7 @@ the "split large asks into planned steps" habit the same way.
 
 ## Your feedback
 
-After a piece of work in which you approved a plan, `/tl-feedback` asks
+After a piece of work in which you approved a plan, `/cl-feedback` asks
 a fifth question in a second call: "Could the build have started in a
 fresh session from just the plan?" (`yes`, `partly`, `no`; the tag's
 `handoff` key). `habits.habits_by_shape` counts the answers on sessions

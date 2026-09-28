@@ -286,13 +286,13 @@ def test_sessions_without_a_capture_note_are_not_counted(tmp_path, pricing):
 
 
 def test_a_feedback_run_cycle_is_left_out_of_the_coverage_denominator(tmp_path, pricing):
-    # CAP-10: a /tl-feedback run answers /tl-feedback's own question, not
+    # CAP-10: a /cl-feedback run answers /cl-feedback's own question, not
     # the one an ordinary reply reports on -- it shouldn't count against
     # coverage just because it never wrote a [tl: ...] task tag either.
     top = _top(tmp_path, [
         _note(0, ["task"]),
         user_str_line(
-            "<command-message>tl-feedback</command-message>\n<command-name>/tl-feedback</command-name>",
+            "<command-message>cl-feedback</command-message>\n<command-name>/cl-feedback</command-name>",
             timestamp=_ts(1),
         ),
         _reply(2, text="Thanks: ClaudeGlass will use this for your savings tips."),

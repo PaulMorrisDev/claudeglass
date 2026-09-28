@@ -3,7 +3,7 @@ worth trying (the ``habits`` report section and the Work habits tab).
 
 Everything is worked out per *prompt cycle* (``capture.prompt_cycles``):
 one message of yours and all the work that answered it, subagents at any
-depth included. /tl-feedback runs are left out: they rate the work, they
+depth included. /cl-feedback runs are left out: they rate the work, they
 aren't part of it.
 
 Every playbook item says where its evidence came from, so you know how
@@ -16,7 +16,7 @@ far to trust it:
 - ``inferred``: what the transcripts show without asking anyone: what
   your messages contained, tool output sizes, reads, retries, loops,
   context size, permission prompts.
-- ``your feedback``: /tl-feedback answers and your ratings on the
+- ``your feedback``: /cl-feedback answers and your ratings on the
   dashboard. They outrank the rest.
 
 Savings are list-price USD over the report window, and the playbook
@@ -264,7 +264,7 @@ WHERE = {
         "The effort level in settings.json, or the effort field in an agent's own file. /effort raises it "
         "for a single task without changing the setting."
     ),
-    "outcome_misses": "Nowhere in Claude Code's config. This is reviewing your own /tl-feedback answers and messages.",
+    "outcome_misses": "Nowhere in Claude Code's config. This is reviewing your own /cl-feedback answers and messages.",
 }
 
 #: UX-8: the cost of trying each habit -- what you give up, or risk, by
@@ -376,7 +376,7 @@ UNDO = {
 }
 
 #: A ``missing`` word -> what to add to a brief, for the templates (the
-#: /tl-brief skill holds the same lines).
+#: /cl-brief skill holds the same lines).
 MISSING_LINES = {k: v for k, v in catalogue.BRIEF_LINES.items() if k != "report"}
 _REPORT_LINE = catalogue.BRIEF_LINES["report"]
 
@@ -535,7 +535,7 @@ class CycleFact:
     output_cost: float = 0.0
     thinking_cost: float = 0.0
     #: Your feedback on the work this message belongs to, and where it
-    #: came from: "answers" for /tl-feedback's question answers, "tag"
+    #: came from: "answers" for /cl-feedback's question answers, "tag"
     #: for its `[tl-fb: ...]` line (a genuine run only -- SEC-P1), or
     #: "rating" for the dashboard. Self-report calibration trusts only
     #: "answers" and "rating": a "tag" is Claude's own report of the
@@ -575,7 +575,7 @@ class AgentFact:
 @dataclass(slots=True)
 class Piece:
     """A piece of work you gave feedback on: the messages one
-    /tl-feedback answer rates, or a session you rated on the dashboard."""
+    /cl-feedback answer rates, or a session you rated on the dashboard."""
 
     outcome: str
     cost: float
@@ -587,7 +587,7 @@ class Piece:
     #: ``handoff.plan_shape`` of the messages it covers.
     shape: str = "no_plan"
     worth: str | None = None
-    #: The /tl-feedback handoff answer, asked after an approved plan.
+    #: The /cl-feedback handoff answer, asked after an approved plan.
     handoff: str | None = None
 
 
@@ -1529,7 +1529,7 @@ def _item_effort_fit(h: Habits) -> Item | None:
 
 def _item_outcome_misses(h: Habits) -> Item | None:
     # P4 leftover: a piece that missed its goal or was stopped still has
-    # a known full cost (Piece.cost, your own /tl-feedback rating), so
+    # a known full cost (Piece.cost, your own /cl-feedback rating), so
     # unlike skill_unneeded there is a defensible floor -- half of it,
     # the same conservative fraction split_large/paste_errors/etc. use
     # for a redo or a block tied to a real cost figure, not an invented
@@ -2682,7 +2682,7 @@ def _skills_table(h: Habits) -> Table:
     rows = [
         [name, e["by_you"], e["by_claude"], e["late"], _mean(e["before"]), e["helped"], e["unneeded"], e["would_help"]]
         for name, e in sorted(stats.items(), key=lambda kv: -(kv[1]["by_you"] + kv[1]["by_claude"] + kv[1]["would_help"]))
-        if name != catalogue.FEEDBACK_SKILL
+        if name not in catalogue.FEEDBACK_SKILL_NAMES
     ]
     return Table(
         name="habits_skills",
@@ -2759,7 +2759,7 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
         )
     if h.cycles and not h.pieces:
         notes.append(
-            "No feedback yet: rate sessions on {{page:spend/sessions}} or run /tl-feedback to see cost per piece of "
+            "No feedback yet: rate sessions on {{page:spend/sessions}} or run /cl-feedback to see cost per piece of "
             "work that met its goal."
         )
     return Section(

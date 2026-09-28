@@ -500,7 +500,7 @@ def test_feedback_toggles_are_switched_on_their_own_list(tmp_path):
 def test_level_deep_turns_on_the_feedback_survey_and_writes_its_skill(tmp_path):
     config_dir = _claude(tmp_path, {})
     rc, out = _capture(config_dir, "level", "deep", "--yes")
-    assert rc == 0 and "Deep also turns on the /tl-feedback survey" in out
+    assert rc == 0 and "Deep also turns on the /cl-feedback survey" in out
     assert "feedback_reminder" in out  # priced with the rest of what Deep adds
     assert _skill(config_dir).read_text(encoding="utf-8") == cat.feedback_skill_text()
     assert load_config(config_dir=config_dir).capture.feedback == list(cat.DEEP_FEEDBACK_IDS)
@@ -513,7 +513,7 @@ def test_level_deep_turns_on_the_feedback_survey_and_writes_its_skill(tmp_path):
 def test_level_deep_dry_run_shows_the_skill_and_writes_nothing(tmp_path):
     config_dir = _claude(tmp_path, {})
     rc, out = _capture(config_dir, "on", "--level", "deep", "--dry-run")
-    assert "Deep also turns on the /tl-feedback survey" in out
+    assert "Deep also turns on the /cl-feedback survey" in out
     assert "Dry run: config.toml left unchanged." in out and "Dry run: the skill is left as it is." in out
     assert not _skill(config_dir).exists() and not (config_dir / "config.toml").exists()
 
@@ -1097,26 +1097,26 @@ def test_init_asks_about_capture_before_writing_anything(tmp_path, monkeypatch, 
     assert load_config(config_dir).capture.level == "essentials"
 
 
-# -- feedback: the /tl-feedback skill --------------------------------------------
+# -- feedback: the /cl-feedback skill --------------------------------------------
 
 
 def _skill(config_dir):
-    return config_dir.parent / "skills" / "tl-feedback" / "SKILL.md"
+    return config_dir.parent / "skills" / "cl-feedback" / "SKILL.md"
 
 
 def test_feedback_on_shows_the_skill_and_writes_it_after_a_yes(tmp_path):
     config_dir = _claude(tmp_path, {})
     rc, out = _capture(config_dir, "feedback", "on", stdin="y\n")
     assert rc == 0 and "Nothing is added to Claude's context until you run the skill." in out
-    assert f"This adds the /tl-feedback skill, {_skill(config_dir)}:" in out
-    assert "    name: tl-feedback" in out and "Add it? (y/n) [n]:" in out
+    assert f"This adds the /cl-feedback skill, {_skill(config_dir)}:" in out
+    assert "    name: cl-feedback" in out and "Add it? (y/n) [n]:" in out
     assert _skill(config_dir).read_text(encoding="utf-8") == cat.feedback_skill_text()
     capture = load_config(config_dir=config_dir).capture
     assert capture.feedback == ["feedback_skill", "feedback_note"] and capture.level == "off"
     # settings.json is never touched: the skill needs no hook.
     assert _settings(config_dir) == {}
     rc, out = _capture(config_dir, "feedback", "on")
-    assert "Feedback is already on." in out and "The /tl-feedback skill is in place" in out
+    assert "Feedback is already on." in out and "The /cl-feedback skill is in place" in out
 
 
 def test_feedback_on_dry_run_and_a_no_write_no_skill(tmp_path):
@@ -1128,7 +1128,7 @@ def test_feedback_on_dry_run_and_a_no_write_no_skill(tmp_path):
     assert "Left as it is. Run 'claudeglass capture feedback on'" in out
     assert not _skill(config_dir).exists()
     rc, out = _capture(config_dir, "status")
-    assert "The /tl-feedback skill isn't installed: claudeglass capture feedback on" in out
+    assert "The /cl-feedback skill isn't installed: claudeglass capture feedback on" in out
 
 
 def test_an_old_skill_is_shown_as_a_diff_and_someone_elses_is_left_alone(tmp_path):
@@ -1138,13 +1138,13 @@ def test_an_old_skill_is_shown_as_a_diff_and_someone_elses_is_left_alone(tmp_pat
     skill.write_text(cat.feedback_skill_text().replace("four quick", "three quick"), encoding="utf-8")
     assert "out of date" in _capture(config_dir, "status")[1]
     rc, out = _capture(config_dir, "feedback", "on", "--yes")
-    assert "This updates the /tl-feedback skill" in out and "-description:" in out
+    assert "This updates the /cl-feedback skill" in out and "-description:" in out
     assert skill.read_text(encoding="utf-8") == cat.feedback_skill_text()
-    skill.write_text("---\nname: tl-feedback\n---\nmine\n", encoding="utf-8")
+    skill.write_text("---\nname: cl-feedback\n---\nmine\n", encoding="utf-8")
     rc, out = _capture(config_dir, "feedback", "on", "--yes")
     assert "holds a skill this tool didn't write, so it is left alone" in out
     rc, out = _capture(config_dir, "feedback", "off", "--yes")
-    assert skill.read_text(encoding="utf-8") == "---\nname: tl-feedback\n---\nmine\n"
+    assert skill.read_text(encoding="utf-8") == "---\nname: cl-feedback\n---\nmine\n"
 
 
 def test_feedback_off_removes_the_skill_and_its_reminders_but_not_the_rating(tmp_path):
@@ -1152,7 +1152,7 @@ def test_feedback_off_removes_the_skill_and_its_reminders_but_not_the_rating(tmp
     _capture(config_dir, "enable", "dashboard_rating", "feedback_reminder", "--yes")
     _capture(config_dir, "feedback", "on", "--yes")
     rc, out = _capture(config_dir, "feedback", "off", stdin="y\n")
-    assert "This removes the /tl-feedback skill" in out and "Removed." in out
+    assert "This removes the /cl-feedback skill" in out and "Removed." in out
     assert not _skill(config_dir).exists() and not _skill(config_dir).parent.exists()
     assert load_config(config_dir=config_dir).capture.feedback == ["dashboard_rating"]
 
@@ -1170,7 +1170,7 @@ def test_remove_keeps_the_skill_and_says_how_to_take_it_out(tmp_path):
     _capture(config_dir, "on", "--yes")
     _capture(config_dir, "feedback", "on", "--yes")
     rc, out = _capture(config_dir, "remove", "--yes")
-    assert "The /tl-feedback skill stays: it works with capture off." in out
+    assert "The /cl-feedback skill stays: it works with capture off." in out
     assert _skill(config_dir).is_file()
 
 
@@ -1192,33 +1192,71 @@ def test_the_skill_is_listed_and_taken_out_by_uninstall(tmp_path, monkeypatch, c
     assert plan.feedback_skill == _skill(config_dir)
     rc = cli.main(["uninstall", "--yes", "--config-dir", str(config_dir)])
     out = capsys.readouterr().out
-    assert "The /tl-feedback skill:" in out and "Removed." in out
+    assert "The /cl-feedback skill:" in out and "Removed." in out
     assert not _skill(config_dir).exists()
 
 
-# -- brief templates: the /tl-brief skill ----------------------------------------
+def _old_skill(config_dir, old="tl-feedback"):
+    """Our skill as 0.11.0 wrote it, under its name from then."""
+    new = cat.RENAMED_SKILLS[old]
+    path = config_dir.parent / "skills" / old / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    text = footprint.SKILL_TEXTS[new]().replace(f"name: {new}\n", f"name: {old}\n")
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def test_the_skill_under_its_name_before_0_12_is_renamed_or_removed_with_it(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    old = _old_skill(config_dir)
+    _capture(config_dir, "feedback", "on", stdin="n\n")
+    rc, out = _capture(config_dir, "status")
+    assert "The /cl-feedback skill is still called /tl-feedback: claudeglass capture feedback on" in out
+    rc, out = _capture(config_dir, "feedback", "on", stdin="y\n")
+    assert f"/tl-feedback is now called /cl-feedback. This moves it from {old} to {_skill(config_dir)}" in out
+    assert "Rename it? (y/n) [n]:" in out
+    assert _skill(config_dir).read_text(encoding="utf-8") == cat.feedback_skill_text()
+    assert not old.parent.exists()
+    _old_skill(config_dir)
+    rc, out = _capture(config_dir, "feedback", "off", "--yes")
+    assert "This removes the /cl-feedback skill" in out and "This removes the /tl-feedback skill" in out
+    assert not _skill(config_dir).exists() and not old.exists()
+
+
+def test_the_skill_under_its_name_before_0_12_is_listed_and_taken_out_by_uninstall(tmp_path, monkeypatch, capsys):
+    config_dir = _claude(tmp_path, {})
+    old = _old_skill(config_dir, "tl-brief")
+    item = {i.key: i for i in footprint.inventory(config_dir, service_registered=False)}["brief_skill"]
+    assert item.status == "installed" and "tl-brief" in item.where
+    assert footprint.plan_uninstall(config_dir).old_skills == {"tl-brief": old}
+    cli.main(["uninstall", "--yes", "--config-dir", str(config_dir)])
+    assert "The /tl-brief skill:" in capsys.readouterr().out
+    assert not old.exists()
+
+
+# -- brief templates: the /cl-brief skill ----------------------------------------
 
 
 def _brief_skill(config_dir):
-    return config_dir.parent / "skills" / "tl-brief" / "SKILL.md"
+    return config_dir.parent / "skills" / "cl-brief" / "SKILL.md"
 
 
 def test_brief_on_dry_run_writes_nothing_and_a_yes_writes_the_skill(tmp_path):
     config_dir = _claude(tmp_path, {})
     rc, out = _capture(config_dir, "brief", "on", "--dry-run")
-    assert rc == 0 and "Brief templates: the /tl-brief skill on." in out
+    assert rc == 0 and "Brief templates: the /cl-brief skill on." in out
     assert "Dry run: config.toml left unchanged." in out and "Dry run: the skill is left as it is." in out
-    assert "    name: tl-brief" in out
+    assert "    name: cl-brief" in out
     assert not _brief_skill(config_dir).exists() and not (config_dir / "config.toml").exists()
     rc, out = _capture(config_dir, "brief", "on", stdin="y\n")
-    assert f"This adds the /tl-brief skill, {_brief_skill(config_dir)}:" in out
-    assert "Run /tl-brief in Claude Code followed by your request" in out
+    assert f"This adds the /cl-brief skill, {_brief_skill(config_dir)}:" in out
+    assert "Run /cl-brief in Claude Code followed by your request" in out
     assert _brief_skill(config_dir).read_text(encoding="utf-8") == cat.brief_skill_text()
     capture = load_config(config_dir=config_dir).capture
     assert capture.coaching == ["brief_templates"] and capture.level == "off" and capture.feedback == []
     assert _settings(config_dir) == {}
     rc, out = _capture(config_dir, "brief", "on")
-    assert "Brief templates are already on." in out and "The /tl-brief skill is in place" in out
+    assert "Brief templates are already on." in out and "The /cl-brief skill is in place" in out
 
 
 def test_brief_off_removes_only_the_brief_skill(tmp_path):
@@ -1228,7 +1266,7 @@ def test_brief_off_removes_only_the_brief_skill(tmp_path):
     rc, out = _capture(config_dir, "brief", "off", stdin="n\n")
     assert "Left as it is. Run 'claudeglass capture brief off'" in out and _brief_skill(config_dir).is_file()
     rc, out = _capture(config_dir, "brief", "off", "--yes")
-    assert "This removes the /tl-brief skill" in out and not _brief_skill(config_dir).parent.exists()
+    assert "This removes the /cl-brief skill" in out and not _brief_skill(config_dir).parent.exists()
     assert _skill(config_dir).is_file()
     capture = load_config(config_dir=config_dir).capture
     assert capture.coaching == [] and capture.feedback == ["feedback_skill", "feedback_note"]
@@ -1239,22 +1277,22 @@ def test_enabling_brief_templates_installs_the_skill_and_status_says_when_it_is_
     _capture(config_dir, "enable", "brief_templates", "--yes")
     assert _brief_skill(config_dir).is_file()
     _brief_skill(config_dir).unlink()
-    assert "The /tl-brief skill isn't installed: claudeglass capture brief on" in _capture(config_dir, "status")[1]
+    assert "The /cl-brief skill isn't installed: claudeglass capture brief on" in _capture(config_dir, "status")[1]
     _capture(config_dir, "connect", "--yes")
     assert _brief_skill(config_dir).is_file()
     _capture(config_dir, "disable", "brief_templates", "--yes")
     assert not _brief_skill(config_dir).exists()
 
 
-def test_someone_elses_tl_brief_is_left_alone(tmp_path):
+def test_someone_elses_cl_brief_is_left_alone(tmp_path):
     config_dir = _claude(tmp_path, {})
     skill = _brief_skill(config_dir)
     skill.parent.mkdir(parents=True)
-    skill.write_text("---\nname: tl-brief\n---\nmine\n", encoding="utf-8")
+    skill.write_text("---\nname: cl-brief\n---\nmine\n", encoding="utf-8")
     rc, out = _capture(config_dir, "brief", "on", "--yes")
     assert "holds a skill this tool didn't write, so it is left alone" in out
     _capture(config_dir, "brief", "off", "--yes")
-    assert skill.read_text(encoding="utf-8") == "---\nname: tl-brief\n---\nmine\n"
+    assert skill.read_text(encoding="utf-8") == "---\nname: cl-brief\n---\nmine\n"
     assert footprint.plan_uninstall(config_dir).brief_skill is None
 
 
@@ -1274,19 +1312,19 @@ def test_the_brief_skill_is_listed_and_taken_out_by_uninstall(tmp_path, monkeypa
     assert footprint.plan_uninstall(config_dir).brief_skill == _brief_skill(config_dir)
     cli.main(["uninstall", "--yes", "--config-dir", str(config_dir)])
     out = capsys.readouterr().out
-    assert "The /tl-brief skill:" in out and not _brief_skill(config_dir).exists()
+    assert "The /cl-brief skill:" in out and not _brief_skill(config_dir).exists()
 
 def test_init_at_deep_skips_the_feedback_question_and_adds_the_skill(tmp_path):
     config_dir = _claude(tmp_path, {})
     out = _init(config_dir, "--non-interactive", "--no-install", "--capture-level", "deep")
     assert load_config(config_dir).capture.feedback == list(cat.DEEP_FEEDBACK_IDS)
     assert "Feedback after a piece of work" not in out
-    assert "The /tl-feedback skill: add it with 'claudeglass capture feedback on'." in out
+    assert "The /cl-feedback skill: add it with 'claudeglass capture feedback on'." in out
     assert not _skill(config_dir).exists()
     out = _init(config_dir, "--non-interactive", "--connect")
-    assert "The /tl-feedback survey is on, as part of Deep." in out
+    assert "The /cl-feedback survey is on, as part of Deep." in out
     assert _skill(config_dir).read_text(encoding="utf-8") == cat.feedback_skill_text()
-    assert "The /tl-feedback skill is on." in _init(config_dir, "--non-interactive")
+    assert "The /cl-feedback skill is on." in _init(config_dir, "--non-interactive")
 
 
 def test_init_offers_the_skill_and_writes_it_after_a_yes(tmp_path):
@@ -1294,12 +1332,12 @@ def test_init_offers_the_skill_and_writes_it_after_a_yes(tmp_path):
     # Connect: no; capture left off; feedback: yes; go ahead.
     out = _init(config_dir, stdin="n\n\ny\n")
     assert "Feedback after a piece of work (optional)" in out and "It works at any capture level" in out
-    assert "Add the /tl-feedback skill? (y/n) [n]:" in out and "Add it?" not in out
-    assert "Sharper tips (metrics capture): add the /tl-feedback skill." in out
+    assert "Add the /cl-feedback skill? (y/n) [n]:" in out and "Add it?" not in out
+    assert "Sharper tips (metrics capture): add the /cl-feedback skill." in out
     assert _skill(config_dir).is_file()
     assert load_config(config_dir).capture.feedback == ["feedback_skill", "feedback_note"]
     out = _init(config_dir, stdin="n\n\n")
-    assert "The /tl-feedback skill is on." in out and _skill(config_dir).is_file()
+    assert "The /cl-feedback skill is on." in out and _skill(config_dir).is_file()
 
 
 def test_init_feedback_no_and_non_interactive_leave_it_off(tmp_path):
@@ -1314,7 +1352,7 @@ def test_init_feedback_no_and_non_interactive_leave_it_off(tmp_path):
 def test_init_feedback_flag_without_connecting_prints_the_command(tmp_path):
     config_dir = _claude(tmp_path, {})
     out = _init(config_dir, "--non-interactive", "--no-install", "--feedback", "on")
-    assert "The /tl-feedback skill: add it with 'claudeglass capture feedback on'." in out
+    assert "The /cl-feedback skill: add it with 'claudeglass capture feedback on'." in out
     assert not _skill(config_dir).exists()
     assert load_config(config_dir).capture.feedback == ["feedback_skill", "feedback_note"]
 
@@ -1322,7 +1360,7 @@ def test_init_feedback_flag_without_connecting_prints_the_command(tmp_path):
 def test_init_feedback_answers_file_with_connect_writes_without_asking(tmp_path):
     config_dir = _claude(tmp_path, {})
     out = _init(config_dir, "--non-interactive", "--connect", answers={"feedback": True})
-    assert _skill(config_dir).is_file() and "Add the /tl-feedback skill?" not in out
+    assert _skill(config_dir).is_file() and "Add the /cl-feedback skill?" not in out
     out = _init(config_dir, "--non-interactive", "--connect", "--feedback", "off")
     assert "Saved to config.toml: feedback off." in out and not _skill(config_dir).exists()
 
@@ -1335,7 +1373,7 @@ def test_init_asks_about_feedback_after_capture(tmp_path, monkeypatch, capsys):
     out = capsys.readouterr().out
     assert rc == 0
     assert out.index("Metrics capture (optional)") < out.index("Ready to set up:")
-    assert out.index("The /tl-feedback skill: add it with 'claudeglass capture feedback on'.") > out.index(
+    assert out.index("The /cl-feedback skill: add it with 'claudeglass capture feedback on'.") > out.index(
         "Ready to set up:"
     )
 

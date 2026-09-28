@@ -241,11 +241,11 @@ def _capture(config_dir: Path, claude_root, capture: CaptureConfig, now: datetim
 
 
 def _feedback_skill(claude_root, capture: CaptureConfig) -> SetupItem:
-    label = "/tl-feedback skill"
+    label = "/cl-feedback skill"
     state = footprint.feedback_skill_state(claude_root)
     wanted = bool(capture.feedback) and capture.is_on
     if state == "installed":
-        return SetupItem("skill", label, "ok", "Run /tl-feedback in Claude Code after a piece of work.")
+        return SetupItem("skill", label, "ok", "Run /cl-feedback in Claude Code after a piece of work.")
     if state == "foreign":
         return SetupItem(
             "skill",
@@ -257,6 +257,10 @@ def _feedback_skill(claude_root, capture: CaptureConfig) -> SetupItem:
     if state == "outdated":
         return SetupItem(
             "skill", label, "waiting", "An older copy: the next update refreshes it.", capture_view.FEEDBACK_COMMAND
+        )
+    if state == "renamed":
+        return SetupItem(
+            "skill", label, "waiting", "Still called /tl-feedback, its name before 0.12.0.", capture_view.FEEDBACK_COMMAND
         )
     if wanted:
         return SetupItem("skill", label, "problem", "Feedback is on, but the skill isn't installed.", capture_view.FEEDBACK_COMMAND)

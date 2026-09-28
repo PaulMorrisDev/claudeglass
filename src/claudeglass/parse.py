@@ -737,7 +737,7 @@ class _PendingTurn:
     agent_result_chars: dict[str, int] = field(default_factory=dict)
     plan_stats: PlanStats | None = None
     #: Feedback addition (see model.py's ``Turn.feedback``): this turn's
-    #: AskUserQuestion calls that ask /tl-feedback's questions, and what
+    #: AskUserQuestion calls that ask /cl-feedback's questions, and what
     #: their answers said.
     feedback_asks: list[str] = field(default_factory=list)
     feedback: Feedback | None = None
@@ -1556,7 +1556,7 @@ def _finalize_turn(
     if pending.last_text_tail:
         known_skills = set(skill_names or ()) | set(pending.skill_calls_by_tool_use.values())
         cap, result_marker = capture_tags.parse_reply_tags(pending.last_text_tail, known_skills)
-        # SEC-P1: the answers to /tl-feedback's own question (or a
+        # SEC-P1: the answers to /cl-feedback's own question (or a
         # declined question) beat a `[tl-fb: ...]` tag -- Claude could
         # forge that tag in any reply, but not the AskUserQuestion call
         # its answers are read from.

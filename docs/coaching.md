@@ -86,7 +86,7 @@ well. The other hints have no notice: whether `cache_cold` or
 `clear_context` matters depends on what your message asks, which only
 Claude can tell.
 
-The /tl-feedback reminder (`feedback_reminder`) has the same look,
+The /cl-feedback reminder (`feedback_reminder`) has the same look,
 labelled **ClaudeGlass:**.
 
 Nothing ClaudeGlass asks Claude to write carries an emoji. Claude copies
@@ -155,7 +155,7 @@ to read:
   split, at the interval it found best. An agent type whose tip you
   ignored on the dashboard doesn't get it.
 - **The plan hint.** On unless you ignored the
-  [plan-handoff tip](plan-handoff.md), or most of your /tl-feedback
+  [plan-handoff tip](plan-handoff.md), or most of your /cl-feedback
   answers say your builds relied on the discussion before the plan. Its
   threshold is the tip's own, `plan_handoff_min_dropped_tokens`.
 

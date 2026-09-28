@@ -346,7 +346,7 @@ the archetype as below.
 (`catalogue.SHAPE_PROFILES`). `baseline` passes `"plan-then-build"` when
 at least half the main sessions approved a plan and built it in the
 same session (`habits.habits_by_shape`'s `plan_build` row), and its
-reason cites those sessions and any `/tl-feedback` handoff answers.
+reason cites those sessions and any `/cl-feedback` handoff answers.
 The shape comes after a structural purpose and before the tasks: a
 plan-then-build corpus's tasks (`feature`, `bugfix`) would otherwise
 lead to `implementation-heavy`, which hands the build to a cheaper

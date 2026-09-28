@@ -447,13 +447,13 @@ def test_the_excerpt_cuts_long_messages_and_notes_plans_and_skills(tmp_path):
     path = _transcript(tmp_path, [
         user_str_line(long, timestamp=_at(0)),
         turn_line(timestamp=_at(1), content=[tool_use_block("ExitPlanMode", "p", {"plan": "x"}),
-                                             tool_use_block("Skill", "k", {"skill": "tl-brief"}),
+                                             tool_use_block("Skill", "k", {"skill": "cl-brief"}),
                                              {"type": "text", "text": "Plan ready."}]),
     ])
     job = HOOK.judge_job(_stop(path, last_assistant_message=""), HAIKU, CATALOGUE)
     message = next(line for line in job["excerpt"].splitlines() if line.startswith("The user's message:"))
     assert len(message) < cat.JUDGE_LIMITS["prompt"] + 60 and "[...]" in message
-    assert "Skills run: tl-brief." in job["excerpt"]
+    assert "Skills run: cl-brief." in job["excerpt"]
     assert "Plan mode: Claude wrote a plan in this turn." in job["excerpt"]
     assert job["excerpt"].endswith('"Plan ready."')
     assert job["facts"]["plan_now"] and job["facts"]["skills"] == 1 and job["facts"]["earlier"] == 0

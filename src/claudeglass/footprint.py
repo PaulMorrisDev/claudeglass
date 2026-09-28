@@ -8,7 +8,7 @@ uninstall`` and the Data quality tab (``GET /api/setup``):
   ``settings.json`` (``hook_health.settings_path``: ``--claude-root``,
   else ``$CLAUDE_CONFIG_DIR``, else ``~/.claude``);
 - the metrics-capture hook entries, when capture was connected;
-- the ``/tl-feedback`` skill (``<claude-root>/skills/tl-feedback``), when
+- the ``/cl-feedback`` skill (``<claude-root>/skills/cl-feedback``), when
   feedback was turned on;
 - the logon service (``install-service`` or ``init``);
 - each change ``apply`` made to your Claude Code settings or agent files
@@ -217,8 +217,8 @@ def _uses_tokens(capture: CaptureConfig) -> bool:
 
 
 #: The skills this tool can write into Claude Code's skills folder, and
-#: what each ``SKILL.md`` holds: ``/tl-feedback`` (``capture feedback on``)
-#: and ``/tl-brief`` (``capture brief on``).
+#: what each ``SKILL.md`` holds: ``/cl-feedback`` (``capture feedback on``)
+#: and ``/cl-brief`` (``capture brief on``).
 SKILL_TEXTS = {
     capture_catalogue.FEEDBACK_SKILL: capture_catalogue.feedback_skill_text,
     capture_catalogue.BRIEF_SKILL: capture_catalogue.brief_skill_text,
@@ -245,12 +245,25 @@ def read_skill(name: str, claude_root: str | Path | None = None) -> str | None:
         return None
 
 
+def old_skill(name: str, claude_root: str | Path | None = None) -> str | None:
+    """The name ``name`` had until 0.12.0 (``tl-feedback`` for
+    ``cl-feedback``), when this tool's copy is still there under it."""
+    for old, new in capture_catalogue.RENAMED_SKILLS.items():
+        if new == name:
+            text = read_skill(old, claude_root)
+            if text is not None and is_own_skill(old, text):
+                return old
+    return None
+
+
 def skill_state(name: str, claude_root: str | Path | None = None) -> str:
     """``installed`` (this version), ``outdated`` (an earlier one),
-    ``foreign`` (a SKILL.md there this tool didn't write) or ``missing``."""
+    ``renamed`` (none, but ours is still under its old name: see
+    :func:`old_skill`), ``foreign`` (a SKILL.md there this tool didn't
+    write) or ``missing``."""
     text = read_skill(name, claude_root)
     if text is None:
-        return "missing"
+        return "renamed" if old_skill(name, claude_root) else "missing"
     if not is_own_skill(name, text):
         return "foreign"
     return "installed" if text == SKILL_TEXTS[name]() else "outdated"
@@ -277,33 +290,40 @@ def remove_skill(name: str, claude_root: str | Path | None = None) -> Path:
     return path
 
 
+def rename_skill(old: str, new: str, claude_root: str | Path | None = None) -> Path:
+    """Write the skill under its new name, then delete the old one."""
+    path = write_skill(new, claude_root)
+    remove_skill(old, claude_root)
+    return path
+
+
 def feedback_skill_path(claude_root: str | Path | None = None) -> Path:
-    """Where ``capture feedback on`` writes the ``/tl-feedback`` skill."""
+    """Where ``capture feedback on`` writes the ``/cl-feedback`` skill."""
     return skill_path(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
 def is_own_feedback_skill(text: str) -> bool:
-    """Whether a ``SKILL.md`` is the ``/tl-feedback`` this tool writes."""
+    """Whether a ``SKILL.md`` is the ``/cl-feedback`` this tool writes."""
     return is_own_skill(capture_catalogue.FEEDBACK_SKILL, text)
 
 
 def read_feedback_skill(claude_root: str | Path | None = None) -> str | None:
-    """The ``/tl-feedback`` ``SKILL.md`` as it is now, or ``None``."""
+    """The ``/cl-feedback`` ``SKILL.md`` as it is now, or ``None``."""
     return read_skill(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
 def feedback_skill_state(claude_root: str | Path | None = None) -> str:
-    """:func:`skill_state` of ``/tl-feedback``."""
+    """:func:`skill_state` of ``/cl-feedback``."""
     return skill_state(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
 def write_feedback_skill(claude_root: str | Path | None = None) -> Path:
-    """Write the ``/tl-feedback`` skill."""
+    """Write the ``/cl-feedback`` skill."""
     return write_skill(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
 def remove_feedback_skill(claude_root: str | Path | None = None) -> Path:
-    """Delete the ``/tl-feedback`` skill."""
+    """Delete the ``/cl-feedback`` skill."""
     return remove_skill(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
@@ -386,13 +406,16 @@ def inventory(
         )
     skill_text = read_feedback_skill(claude_root)
     own_skill = skill_text is not None and is_own_feedback_skill(skill_text)
+    # Still under its name from before 0.12.0: installed all the same.
+    old_feedback = None if own_skill else old_skill(capture_catalogue.FEEDBACK_SKILL, claude_root)
+    own_skill = own_skill or old_feedback is not None
     if own_skill or "feedback_skill" in capture.feedback:
         items.append(
             FootprintItem(
                 key="feedback_skill",
-                title="The /tl-feedback skill",
+                title="The /cl-feedback skill",
                 status="installed" if own_skill else "not installed",
-                where=home_label(feedback_skill_path(claude_root)),
+                where=home_label(skill_path(old_feedback, claude_root) if old_feedback else feedback_skill_path(claude_root)),
                 what_it_does=(
                     "A skill you run after a piece of work: four checkbox questions (five after an approved plan) "
                     "whose answers ClaudeGlass reads from the transcript, so its suggestions fit how you work. "
@@ -408,13 +431,15 @@ def inventory(
     brief_name = capture_catalogue.BRIEF_SKILL
     brief_text = read_skill(brief_name, claude_root)
     own_brief = brief_text is not None and is_own_skill(brief_name, brief_text)
+    old_brief = None if own_brief else old_skill(brief_name, claude_root)
+    own_brief = own_brief or old_brief is not None
     if own_brief or "brief_templates" in capture.coaching:
         items.append(
             FootprintItem(
                 key="brief_skill",
-                title="The /tl-brief skill",
+                title="The /cl-brief skill",
                 status="installed" if own_brief else "not installed",
-                where=home_label(skill_path(brief_name, claude_root)),
+                where=home_label(skill_path(old_brief or brief_name, claude_root)),
                 what_it_does=(
                     "A skill you run with a request: Claude checks it against a short checklist for its kind of "
                     "task and asks once for anything missing. Claude never runs it by itself."
@@ -516,10 +541,13 @@ class UninstallPlan:
     #: Applied changes still in place, newest first.
     applied: list[apply_mod.BackupInfo] = field(default_factory=list)
     data_dir: Path | None = None
-    #: The ``/tl-feedback`` skill this tool wrote, when it is there.
+    #: The ``/cl-feedback`` skill this tool wrote, when it is there.
     feedback_skill: Path | None = None
-    #: The ``/tl-brief`` skill this tool wrote, when it is there.
+    #: The ``/cl-brief`` skill this tool wrote, when it is there.
     brief_skill: Path | None = None
+    #: Either skill under its name from before 0.12.0 (``/tl-feedback``,
+    #: ``/tl-brief``), when this tool's copy is still there: old name -> path.
+    old_skills: dict[str, Path] = field(default_factory=dict)
 
 
 def plan_uninstall(config_dir: str | Path, *, claude_root: str | Path | None = None) -> UninstallPlan:
@@ -535,6 +563,10 @@ def plan_uninstall(config_dir: str | Path, *, claude_root: str | Path | None = N
     brief_text = read_skill(capture_catalogue.BRIEF_SKILL, claude_root)
     if brief_text is not None and is_own_skill(capture_catalogue.BRIEF_SKILL, brief_text):
         plan.brief_skill = skill_path(capture_catalogue.BRIEF_SKILL, claude_root)
+    for old in capture_catalogue.RENAMED_SKILLS:
+        old_text = read_skill(old, claude_root)
+        if old_text is not None and is_own_skill(old, old_text):
+            plan.old_skills[old] = skill_path(old, claude_root)
     if settings is None:
         return plan
 
@@ -624,12 +656,14 @@ __all__ = [
     "is_own_feedback_skill",
     "is_own_skill",
     "is_own_statusline",
+    "old_skill",
     "plan_uninstall",
     "read_feedback_skill",
     "read_skill",
     "remove_feedback_skill",
     "remove_skill",
     "remove_settings_entries",
+    "rename_skill",
     "write_feedback_skill",
     "write_skill",
 ]
