@@ -2788,6 +2788,16 @@ def _cmd_update(args: argparse.Namespace, *, runner=None) -> int:
         )
         return 2
 
+    blocked = _unwritable_scripts_folder()
+    if blocked is not None:
+        print(
+            f"claudeglass update: this Python's packages folder can be written, but not {blocked}, where pip puts "
+            "the claudeglass command, so pip would fail part way through and leave a half-removed copy. Run the "
+            "update from a terminal opened as administrator. Nothing was changed.",
+            file=sys.stderr,
+        )
+        return 1
+
     install = [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", "--no-deps", args.source]
     finish = [sys.executable, "-m", "claudeglass", "update", "--finish", *_update_finish_args(args)]
     print(f"claudeglass update: this is version {__version__}.")
@@ -2801,9 +2811,16 @@ def _cmd_update(args: argparse.Namespace, *, runner=None) -> int:
         return 0
 
     if runner(install).returncode != 0:
+        records = _install_records()
+        left = (
+            f" It left {len(records)} install records ({', '.join(records)}) in this Python's packages folder, so "
+            "'pip show claudeglass' may name the wrong version until an update succeeds."
+            if len(records) > 1
+            else ""
+        )
         print(
-            "claudeglass update: pip could not install the new version (its message is above). "
-            "Nothing else was changed.",
+            "claudeglass update: pip could not install the new version (its message is above). The dashboard and "
+            f"Claude Code's hook entries were left as they were.{left}",
             file=sys.stderr,
         )
         return 1
@@ -2817,6 +2834,55 @@ def _cmd_update(args: argparse.Namespace, *, runner=None) -> int:
     print("2. Finish with the new version:\n   " + invocation.shell_line(finish))
     sys.stdout.flush()
     return runner(finish).returncode
+
+
+def _writable(folder: str) -> bool:
+    """Whether a file can be made in ``folder``: Windows' folder
+    permissions aren't what ``os.access`` reads, so it tries one. Not
+    with ``tempfile``, which on Windows believes ``os.access`` and tries
+    new names until it runs out."""
+    import secrets
+
+    probe = os.path.join(folder, f".claudeglass-{secrets.token_hex(8)}.tmp")
+    try:
+        os.close(os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+    except OSError:
+        return False
+    try:
+        os.remove(probe)
+    except OSError:
+        pass
+    return True
+
+
+def _unwritable_scripts_folder() -> str | None:
+    """The folder pip puts the ``claudeglass`` command in, when this
+    Python's packages folder can be written and it can't (an install
+    whose Scripts folder only an administrator can change): pip removes
+    the old copy, fails on the command and rolls back only part of it.
+    With neither writable, pip installs for your user instead, which
+    works."""
+    import sysconfig
+
+    scripts, packages = sysconfig.get_path("scripts"), sysconfig.get_path("purelib")
+    if not (scripts and os.path.isdir(scripts) and packages and os.path.isdir(packages)):
+        return None
+    if not _writable(packages) or _writable(scripts):
+        return None
+    return scripts
+
+
+def _install_records() -> list[str]:
+    """The version in each of this tool's install records in this
+    Python's packages folder: more than one after a failed pip install."""
+    import sysconfig
+    from importlib import metadata
+
+    try:
+        found = metadata.distributions(name="claudeglass", path=[sysconfig.get_path("purelib")])
+        return sorted(dist.version for dist in found)
+    except Exception:  # only ever adds a note to a message
+        return []
 
 
 def _update_finish_args(args: argparse.Namespace) -> list[str]:

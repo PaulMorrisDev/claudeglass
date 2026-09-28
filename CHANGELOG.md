@@ -217,6 +217,13 @@ the changes listed under both releases.
   as its report. It now gets the start of the answer
   itself, and the brief no longer starts with the harness's
   "[Workflow harness — computed task]" line.
+- **`update` stops before pip when pip could only fail part way.** On a
+  Windows Python whose packages folder anyone can write but whose
+  `Scripts` folder only an administrator can, pip removed the old copy,
+  failed on `claudeglass.exe` and put back only part of it, leaving two
+  install records. `update` now checks both folders first and says to run
+  it from a terminal opened as administrator. When pip fails anyway, the
+  message names any install records it left behind.
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.
