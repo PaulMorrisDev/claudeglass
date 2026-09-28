@@ -249,6 +249,10 @@ the changes listed under both releases.
   work?" and every page built on the report said `unexpected error
   (FileNotFoundError)`. Such a session's skill turns now count without
   the file.
+- **`capture status` names the right tagger.** Once Claude Haiku had
+  judged an agent run, it said "Claude Haiku tagged" your messages when
+  Claude writes those tags. It now goes by `[capture] tagger`, as the
+  dashboard does.
 - **`quiet_output` no longer suggests `head` or `tail`.** It suggests a
   quieter flag or a filter that keeps every error line, so a trimmed
   test run can't hide the failure.

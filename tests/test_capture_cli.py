@@ -745,6 +745,19 @@ def test_status_while_on_shows_what_it_measured(tmp_path):
     assert "Claude tagged 100.0% of your messages" in out
 
 
+def test_status_names_claude_as_the_tagger_when_haiku_only_judged_agent_runs():
+    """Claude Haiku judges agent runs whoever tags the main session's
+    replies, so its judgements don't make it the tagger."""
+    from claudeglass.capture import CaptureUsage
+    from claudeglass.units import Units
+
+    use = CaptureUsage(sessions=1, subagents=1, cycles=2, tagged_cycles=2, reports=1, tagged_reports=1, judged=1)
+    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=False)
+    assert "  Claude tagged 100.0% of your messages; Claude Haiku judged 100.0% of agent runs" in lines
+    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=True)
+    assert "  Claude Haiku tagged 100.0% of your messages; Claude Haiku judged 100.0% of agent runs" in lines
+
+
 def test_status_while_on_before_any_captured_session_says_so(tmp_path):
     config_dir = _claude(tmp_path, {})
     _session(config_dir, days_ago=2)

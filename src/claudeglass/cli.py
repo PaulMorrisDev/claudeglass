@@ -3355,8 +3355,10 @@ def _capture_estimate_lines(past, units, sample: int = 100) -> list[str]:
     return lines
 
 
-def _capture_usage_lines(use, units) -> list[str]:
-    """What capture measured since it was turned on."""
+def _capture_usage_lines(use, units, *, haiku: bool) -> list[str]:
+    """What capture measured since it was turned on. ``haiku`` is whether
+    Claude Haiku writes the main session's tags: it judges agent runs
+    either way, so a judged turn doesn't say who tagged your messages."""
     if not use.sessions and not use.subagents:
         return [
             "No captured sessions yet: capture covers sessions, and their subagent runs, started after capture was "
@@ -3375,7 +3377,7 @@ def _capture_usage_lines(use, units) -> list[str]:
             if use.report_coverage is not None
             else ""
         )
-        who = "Claude Haiku" if use.judged else "Claude"
+        who = "Claude Haiku" if haiku else "Claude"
         lines.append(f"  {who} tagged {format_cell(use.coverage, 'pct')} of your messages{reports}")
     return lines
 
@@ -3817,7 +3819,9 @@ def _capture_measured(capture: CaptureConfig, *, args, config: Config, config_di
     if capture.is_on:
         corpus = _capture_corpus(args, config, config_dir, since=capture.enabled_at)
         units = _report_units(corpus, rates, config, config_dir)
-        return _capture_usage_lines(capture_mod.usage(corpus, rates, since=capture.enabled_at), units)
+        return _capture_usage_lines(
+            capture_mod.usage(corpus, rates, since=capture.enabled_at), units, haiku=capture.haiku_tags
+        )
     past, units = _capture_history(args, config, config_dir)
     return _capture_estimate_lines(past, units) if past is not None else []
 

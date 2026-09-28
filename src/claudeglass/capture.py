@@ -284,7 +284,9 @@ class CaptureUsage:
     tagged_cycles: int = 0
     reports: int = 0
     tagged_reports: int = 0
-    #: Tags Claude Haiku wrote (``[capture] tagger = "haiku"``).
+    #: Turns Claude Haiku tagged: the main session's replies while it
+    #: writes the tags (``[capture] tagger = "haiku"``), and every agent
+    #: run it judged, whoever writes them.
     judged: int = 0
     #: /tl-feedback runs, what they cost (every turn of each), and how
     #: many ended with answers rather than a declined question.
