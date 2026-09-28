@@ -3,20 +3,20 @@ worth trying (the ``habits`` report section and the Work habits tab).
 
 Everything is worked out per *prompt cycle* (``capture.prompt_cycles``):
 one message of yours and all the work that answered it, subagents at any
-depth included. /cl-feedback runs are left out: they rate the work, they
+depth included. /cg-feedback runs are left out: they rate the work, they
 aren't part of it.
 
 Every playbook item says where its evidence came from, so you know how
 far to trust it:
 
 - ``reported``: what Claude said about the work in a metrics-capture tag
-  (``[tl: task=... brief=... level=...]``, ``[result: ... fit=... rules=...]``,
+  (``[cg: task=... brief=... level=...]``, ``[result: ... fit=... rules=...]``,
   ``[retry: ...]``). Claude judging its own work is low-trust, which is
   why ``fit`` only ever holds a cheaper model back.
 - ``inferred``: what the transcripts show without asking anyone: what
   your messages contained, tool output sizes, reads, retries, loops,
   context size, permission prompts.
-- ``your feedback``: /cl-feedback answers and your ratings on the
+- ``your feedback``: /cg-feedback answers and your ratings on the
   dashboard. They outrank the rest.
 
 Savings are list-price USD over the report window, and the playbook
@@ -264,7 +264,7 @@ WHERE = {
         "The effort level in settings.json, or the effort field in an agent's own file. /effort raises it "
         "for a single task without changing the setting."
     ),
-    "outcome_misses": "Nowhere in Claude Code's config. This is reviewing your own /cl-feedback answers and messages.",
+    "outcome_misses": "Nowhere in Claude Code's config. This is reviewing your own /cg-feedback answers and messages.",
 }
 
 #: UX-8: the cost of trying each habit -- what you give up, or risk, by
@@ -376,7 +376,7 @@ UNDO = {
 }
 
 #: A ``missing`` word -> what to add to a brief, for the templates (the
-#: /cl-brief skill holds the same lines).
+#: /cg-brief skill holds the same lines).
 MISSING_LINES = {k: v for k, v in catalogue.BRIEF_LINES.items() if k != "report"}
 _REPORT_LINE = catalogue.BRIEF_LINES["report"]
 
@@ -535,8 +535,8 @@ class CycleFact:
     output_cost: float = 0.0
     thinking_cost: float = 0.0
     #: Your feedback on the work this message belongs to, and where it
-    #: came from: "answers" for /cl-feedback's question answers, "tag"
-    #: for its `[tl-fb: ...]` line (a genuine run only -- SEC-P1), or
+    #: came from: "answers" for /cg-feedback's question answers, "tag"
+    #: for its `[cg-fb: ...]` line (a genuine run only -- SEC-P1), or
     #: "rating" for the dashboard. Self-report calibration trusts only
     #: "answers" and "rating": a "tag" is Claude's own report of the
     #: outcome, not yours.
@@ -575,7 +575,7 @@ class AgentFact:
 @dataclass(slots=True)
 class Piece:
     """A piece of work you gave feedback on: the messages one
-    /cl-feedback answer rates, or a session you rated on the dashboard."""
+    /cg-feedback answer rates, or a session you rated on the dashboard."""
 
     outcome: str
     cost: float
@@ -587,7 +587,7 @@ class Piece:
     #: ``handoff.plan_shape`` of the messages it covers.
     shape: str = "no_plan"
     worth: str | None = None
-    #: The /cl-feedback handoff answer, asked after an approved plan.
+    #: The /cg-feedback handoff answer, asked after an approved plan.
     handoff: str | None = None
 
 
@@ -1431,7 +1431,7 @@ def _item_targeted_checks(h: Habits) -> Item | None:
     # CAP-5: derive a fallback for ``check`` -- a test-runner command
     # actually running (``checked_by_tool``, from the same closed prefix
     # set ``classify_purpose`` uses) is evidence a message was checked
-    # even without a ``[tl: check=...]`` tag, and stronger evidence than
+    # even without a ``[cg: check=...]`` tag, and stronger evidence than
     # one that contradicts it (said "none" but ran a test anyway).
     reported_checked = [c for c in h.cycles if c.tag is not None and c.tag.check]
     inferred_checked = [c for c in h.cycles if c.checked_by_tool]
@@ -1529,7 +1529,7 @@ def _item_effort_fit(h: Habits) -> Item | None:
 
 def _item_outcome_misses(h: Habits) -> Item | None:
     # P4 leftover: a piece that missed its goal or was stopped still has
-    # a known full cost (Piece.cost, your own /cl-feedback rating), so
+    # a known full cost (Piece.cost, your own /cg-feedback rating), so
     # unlike skill_unneeded there is a defensible floor -- half of it,
     # the same conservative fraction split_large/paste_errors/etc. use
     # for a redo or a block tied to a real cost figure, not an invented
@@ -1676,7 +1676,7 @@ _BRIEF_ORDER = {"clear": 0, "partial": 1, "vague": 2}
 
 def _rated_outcomes(h: Habits) -> list[CycleFact]:
     """Cycles whose outcome came from your own answer or rating -- never
-    Claude's own ``[tl-fb: ...]`` tag (SEC-P1)."""
+    Claude's own ``[cg-fb: ...]`` tag (SEC-P1)."""
     return [c for c in h.cycles if c.outcome and c.outcome_source != "tag"]
 
 
@@ -1799,7 +1799,7 @@ def _self_report_calibration(h: Habits) -> dict | None:
     more often than "normal" work, with at least ``MIN_GROUP`` rated
     messages on each side to compare. ``None`` while there isn't enough
     feedback yet to tell either way. SEC-P1: a cycle rated only by
-    Claude's own ``[tl-fb: ...]`` tag doesn't count -- calibration needs
+    Claude's own ``[cg-fb: ...]`` tag doesn't count -- calibration needs
     your answers or your dashboard rating, not Claude grading itself.
 
     CAP-6 additionally plugs in three richer signals, all consistency
@@ -2759,7 +2759,7 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
         )
     if h.cycles and not h.pieces:
         notes.append(
-            "No feedback yet: rate sessions on {{page:spend/sessions}} or run /cl-feedback to see cost per piece of "
+            "No feedback yet: rate sessions on {{page:spend/sessions}} or run /cg-feedback to see cost per piece of "
             "work that met its goal."
         )
     return Section(

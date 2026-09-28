@@ -1,7 +1,7 @@
 """The reply tags Claude Haiku writes, read back.
 
 While ``[capture] tagger`` is ``"haiku"``, the session note asks Claude for
-no ``[tl: ...]`` tag. Instead, when a turn of the main session ends, the
+no ``[cg: ...]`` tag. Instead, when a turn of the main session ends, the
 capture hook's ``Stop`` entry hands a short excerpt of it to a worker of
 its own, which asks Claude Haiku (``claude -p --model haiku``, with the
 user's own login) for the tag, and appends one line to
@@ -127,7 +127,7 @@ def _judged_from(record) -> Judged | None:
         if isinstance(words, str) and _WORDS_RE.fullmatch(words):
             # The same reading as a tag at the end of a reply: unknown keys
             # and words are dropped, and a skill name never survives.
-            tag, _ = parse_reply_tags(f"[tl: {words}]")
+            tag, _ = parse_reply_tags(f"[cg: {words}]")
         if tag is not None and not any(getattr(tag, name) not in (None, ()) for name in MAIN_TAG_FIELDS):
             tag = None  # no word it holds is a known one
         if tag is not None and not tag.has_tl:
@@ -222,7 +222,7 @@ def _by_reply(config_dir: str | Path) -> dict[str, Judged]:
 
 def apply(corpus, config_dir: str | Path | None) -> int:
     """Put each of Haiku's tags on its reply's turn in ``corpus``: a main
-    session's turn, unless it already ends in a ``[tl: ...]`` tag of
+    session's turn, unless it already ends in a ``[cg: ...]`` tag of
     Claude's own, and an agent run's last reply, unless the agent wrote a
     ``[result: ...]`` of its own (an older transcript); returns how many
     were put. The last line for a reply wins. Nothing happens without a

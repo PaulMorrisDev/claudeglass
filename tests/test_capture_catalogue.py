@@ -167,7 +167,7 @@ def test_free_signals_and_feedback_toggles_alone_add_no_subagent_note():
     assert cat.note_text(cat.level_metrics("free"), "subagent") == ""
     assert cat.note_text(["feedback_reminder"], "subagent") == ""
     reminder = cat.note_text(["feedback_reminder"], "main")
-    assert "/cl-feedback" in reminder and "[tl:" not in reminder
+    assert "/cg-feedback" in reminder and "[cg:" not in reminder
 
 
 def test_no_agent_gets_a_note_at_any_level():
@@ -283,7 +283,7 @@ def test_the_levels_table_note_sizes_match_rough_tokens(level):
 
 def test_a_tag_written_as_the_deep_note_asks_is_read_back_whole():
     tag, _ = capture_tags.parse_reply_tags(
-        "Done.\n\n[tl: task=bugfix brief=clear level=hard shift=new size=m missing=files,repro plan=made "
+        "Done.\n\n[cg: task=bugfix brief=clear level=hard shift=new size=m missing=files,repro plan=made "
         "skill=none found=yes prior=none detour=reread check=targeted out=part useful=no]"
     )
     assert (tag.task, tag.brief, tag.level, tag.shift, tag.size) == ("bugfix", "clear", "hard", "new", "m")
@@ -310,7 +310,7 @@ def test_the_session_note_is_recognised_in_a_transcript(tmp_path):
         attachment_line("hook_additional_context", rendered=wrapped, content=[note], hookName="SessionStart",
                         hookEvent="SessionStart", toolUseID="SessionStart"),
         user_str_line("fix it", origin={"kind": "human"}),
-        turn_line(content=[{"type": "text", "text": "Fixed.\n[tl: task=bugfix brief=clear level=easy]"}]),
+        turn_line(content=[{"type": "text", "text": "Fixed.\n[cg: task=bugfix brief=clear level=easy]"}]),
     ])
     result = parse_transcript(path, TranscriptMeta(path=str(path)))
     assert result.meta.cap_metrics == ("task", "brief", "level", "shift", "size")
@@ -325,17 +325,17 @@ def test_the_session_note_offers_fix_for_a_fault_in_earlier_work_and_the_parser_
         "shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the last one; "
         "the scope grew; redoing earlier work; fixing a fault in it)"
     ) in note.splitlines()
-    tag, _ = capture_tags.parse_reply_tags("Fixed the earlier change.\n\n[tl: task=bugfix shift=fix]")
+    tag, _ = capture_tags.parse_reply_tags("Fixed the earlier change.\n\n[cg: task=bugfix shift=fix]")
     assert (tag.task, tag.shift) == ("bugfix", "fix")
 
 
-# -- the /cl-brief skill -----------------------------------------------------
+# -- the /cg-brief skill -----------------------------------------------------
 
 
 def test_the_brief_skill_is_user_invoked_names_no_model_and_holds_every_checklist():
     text = cat.brief_skill_text()
     front, body = text.split("---\n", 2)[1:]
-    assert "name: cl-brief" in front and "disable-model-invocation: true" in front
+    assert "name: cg-brief" in front and "disable-model-invocation: true" in front
     assert "ClaudeGlass" in front and "model:" not in front
     for task, keys in cat.BRIEF_CHECKLISTS.items():
         assert f"   - {task}: " + ", ".join(cat.BRIEF_LINES[k][0] for k in keys) in body

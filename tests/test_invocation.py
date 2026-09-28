@@ -369,7 +369,7 @@ def test_the_page_carries_the_form_for_the_dashboards_own_commands(served):
     resp, raw = served.request("GET", "/")
     assert resp.status == 200
     page = raw.decode("utf-8")
-    assert f'<meta name="tl-command" content="{html.escape(SERVED, quote=True)}">' in page
+    assert f'<meta name="cg-command" content="{html.escape(SERVED, quote=True)}">' in page
     assert 'content="claudeglass"' not in page
 
 

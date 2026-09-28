@@ -141,7 +141,7 @@ def test_the_section_tables_and_privacy():
 
 
 def _report(sessions: int, *, answers=(), costly=0, **kw) -> ReportModel:
-    """``answers``: /cl-feedback handoff words on planned-and-built
+    """``answers``: /cg-feedback handoff words on planned-and-built
     pieces; ``costly``: how many of them said too costly."""
     stats = compute_handoff([_session(session_id=f"s{i}", **kw) for i in range(sessions)], PRICING)
     sections = [build_section(stats)]

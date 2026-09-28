@@ -715,9 +715,9 @@ def test_cli_compare_sample_below_min_sessions_still_exits_0(tmp_path, capsys):
 def _write_tagged(project_dir: Path, session_id: str, day: str, task: str | None) -> None:
     from helpers import user_str_line
 
-    # SEC-P2: a `[tl: ...]` tag only counts once a capture note has been
+    # SEC-P2: a `[cg: ...]` tag only counts once a capture note has been
     # seen and the metric it answers was requested -- "task" here.
-    note_text = "ClaudeGlass metrics capture (tl-cap v1 task): ..."
+    note_text = "ClaudeGlass metrics capture (cg-cap v1 task): ..."
     note = attachment_line(
         "hook_additional_context",
         rendered=f"<system-reminder>\nSessionStart hook additional context: {note_text}\n</system-reminder>",
@@ -727,7 +727,7 @@ def _write_tagged(project_dir: Path, session_id: str, day: str, task: str | None
     lines = [note]
     for n in range(2):
         lines.append(user_str_line("go on", origin={"kind": "human"}, timestamp=f"{day}T10:00:{2 * n:02d}.000Z"))
-        text = f"Done.\n[tl: task={task}]" if task else "Done."
+        text = f"Done.\n[cg: task={task}]" if task else "Done."
         lines.append(turn_line(content=[{"type": "text", "text": text}], timestamp=f"{day}T10:00:{2 * n + 1:02d}.000Z"))
     write_jsonl(project_dir / f"{session_id}.jsonl", lines)
 

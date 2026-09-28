@@ -90,7 +90,7 @@ def test_the_trimmed_transcript_keeps_what_the_excerpt_reads_and_no_tool_output(
 
 def test_haiku_never_sees_claudes_own_tag():
     records = [{"type": "assistant", "message": {"content": [
-        {"type": "text", "text": "Fixed it.\n\n`[tl: task=bugfix brief=clear]`"}]}}]
+        {"type": "text", "text": "Fixed it.\n\n`[cg: task=bugfix brief=clear]`"}]}}]
     assert EVAL._untagged(records)[0]["message"]["content"][0]["text"] == "Fixed it."
     assert records[0]["message"]["content"][0]["text"].endswith("]`")
 

@@ -713,7 +713,7 @@ def test_redacted_commands_never_leak_through_any_renderer(tmp_path: Path):
 # Skill names already have their own fixture above
 # (test_privacy_a_malformed_skill_name_never_reaches_skills_invoked,
 # SEC-P3) -- not duplicated here. These fill the remaining gaps: no
-# fixture in this file had ever put a `[tl: ...]`/`[tl-fb: ...]` tag or a
+# fixture in this file had ever put a `[cg: ...]`/`[cg-fb: ...]` tag or a
 # capture note on a real parsed Turn/Event before (test_capture_parse.py
 # covers the string-level parsing with the looser assert_privacy scan;
 # this is the integration proof under the stricter 64-char _walk), and
@@ -725,7 +725,7 @@ def test_privacy_capture_tag_never_carries_unknown_keys_or_paths(tmp_path: Path)
     # capture_tags.parse_reply_tags already drops unknown keys/words at
     # the string level (test_capture_parse.py's
     # test_unknown_keys_words_and_paths_are_dropped) -- this is the
-    # integration proof that once a [tl: ...] tag lands on Turn.cap, the
+    # integration proof that once a [cg: ...] tag lands on Turn.cap, the
     # walk (which recurses into CaptureTag like any other dataclass
     # field) never finds a leftover long or free-text value either.
     # SEC-P2 (capture_tags.filter_tag): a tag is trusted only for what
@@ -734,8 +734,8 @@ def test_privacy_capture_tag_never_carries_unknown_keys_or_paths(tmp_path: Path)
     lines = [
         attachment_line(
             "hook_additional_context",
-            rendered="tl-cap v1 task,brief,level,shift,missing",
-            content=["tl-cap v1 task,brief,level,shift,missing"],
+            rendered="cg-cap v1 task,brief,level,shift,missing",
+            content=["cg-cap v1 task,brief,level,shift,missing"],
             hookName="SessionStart",
             hookEvent="SessionStart",
             toolUseID="SessionStart",
@@ -749,7 +749,7 @@ def test_privacy_capture_tag_never_carries_unknown_keys_or_paths(tmp_path: Path)
                     "type": "text",
                     "text": (
                         "Fixed the bug.\n\n"
-                        "[tl: task=bugfix brief=clear level=normal shift=build "
+                        "[cg: task=bugfix brief=clear level=normal shift=build "
                         "secret=C:\\Users\\paulm\\secret.py "
                         "notes=jane.doe@acme.com missing=files,done]"
                     ),
@@ -781,7 +781,7 @@ def test_privacy_feedback_tag_never_carries_unknown_keys_or_free_text(tmp_path: 
                     "type": "text",
                     "text": (
                         "Rated the last piece of work.\n\n"
-                        "[tl-fb: outcome=met slow=unclear,tools worth=yes helped=context "
+                        "[cg-fb: outcome=met slow=unclear,tools worth=yes helped=context "
                         "note=contact+jane.doe@acme.com path=C:\\Users\\paulm\\secret]"
                     ),
                 }
@@ -805,7 +805,7 @@ def test_privacy_feedback_tag_never_carries_unknown_keys_or_free_text(tmp_path: 
 
 
 def test_privacy_feedback_answers_drop_free_text_other(tmp_path: Path):
-    # SEC-P1/SECURITY.md: /cl-feedback's four questions are checkbox-only
+    # SEC-P1/SECURITY.md: /cg-feedback's four questions are checkbox-only
     # on the dashboard, but AskUserQuestion always offers a free-text
     # "Other" option -- feedback_from_answers must drop anything that
     # isn't one of the question's own closed labels, never store what
@@ -866,7 +866,7 @@ def test_privacy_capture_note_size_is_kept_never_its_text(tmp_path: Path):
     # codes, hook event) may ever reach a Turn/Event; the note text itself
     # must never.
     secret = "session token abc123 for jane.doe@acme.com at C:\\Users\\paulm\\project"
-    note_text = f"tl-cap v1 task,brief,level -- {secret}"
+    note_text = f"cg-cap v1 task,brief,level -- {secret}"
     wrapped = f"<system-reminder>\nSessionStart hook additional context: {note_text}\n</system-reminder>"
     lines = [
         attachment_line(

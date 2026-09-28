@@ -29,7 +29,7 @@ from .units import NO_LIMIT_SHARE_HINT
 #: tokens (the init question and ``capture on`` say the same).
 WARNING = (
     "Metrics capture uses your tokens. Claude reads a short note when a session or subagent starts, "
-    "and ends each reply with a one-line tag you will see, such as [tl: task=bugfix brief=clear]. "
+    "and ends each reply with a one-line tag you will see, such as [cg: task=bugfix brief=clear]. "
     "The free level only logs a few events to a local file."
 )
 
@@ -40,11 +40,10 @@ BRIEF_COMMAND = "claudeglass capture brief on"
 
 
 def _skill_words(name: str, command: str) -> tuple[dict[str, str], dict[str, str]]:
-    old = next((o for o, n in catalogue.RENAMED_SKILLS.items() if n == name), name)
     states = {
         "missing": f"The /{name} skill isn't installed",
         "outdated": f"The /{name} skill is out of date",
-        "renamed": f"The /{name} skill is still called /{old}",
+        "renamed": f"The /{name} skill is still under an old name",
         "foreign": f"Another skill named {name} is in the way: move it elsewhere first",
     }
     notes = {
@@ -56,12 +55,12 @@ def _skill_words(name: str, command: str) -> tuple[dict[str, str], dict[str, str
     return states, notes
 
 
-#: What to say when the /cl-feedback skill is on but its file isn't right
+#: What to say when the /cg-feedback skill is on but its file isn't right
 #: (``footprint.feedback_skill_state``), and the same with the command,
 #: for the banner and ``capture status``. The dashboard never writes it:
 #: it lives in Claude Code's own folder.
 SKILL_STATES, SKILL_NOTES = _skill_words(catalogue.FEEDBACK_SKILL, FEEDBACK_COMMAND)
-#: The same for the /cl-brief skill (brief templates).
+#: The same for the /cg-brief skill (brief templates).
 BRIEF_SKILL_STATES, BRIEF_SKILL_NOTES = _skill_words(catalogue.BRIEF_SKILL, BRIEF_COMMAND)
 
 #: A metric that installs a skill -> (its state's key in the feedback
@@ -641,8 +640,8 @@ def view(
     ``started_since`` is how many sessions started since then.
     ``feedback_use`` is ``capture.feedback_usage`` over the last
     :data:`capture.HISTORY_DAYS` days, ``skill`` the
-    ``footprint.feedback_skill_state`` of the /cl-feedback skill,
-    ``brief_skill`` that of the /cl-brief skill and
+    ``footprint.feedback_skill_state`` of the /cg-feedback skill,
+    ``brief_skill`` that of the /cg-brief skill and
     ``ratings`` how many sessions you rated on the dashboard (each only
     while its toggle is on). ``coaching_use`` is
     ``capture.coaching_usage`` over the same days, while coaching notes

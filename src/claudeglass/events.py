@@ -69,6 +69,8 @@ from .capture_catalogue import (
     CORRECTION_SCAN_CHARS,
     HOOK_SCRIPT,
     NOTE_MARKER,
+    OLD_COACH_MARKER,
+    OLD_NOTE_MARKER,
 )
 from .capture_tags import parse_brief_markers, parse_note_codes
 from .model import Event, EventKind
@@ -411,8 +413,15 @@ _HOOK_CONTEXT_WRAPPER_CHARS = 63
 #: note's ``Event.detail["hook"]``; anything else is recorded as "other".
 _CAPTURE_NOTE_HOOKS = frozenset({"SessionStart", "SubagentStart", "PostToolUse", "UserPromptSubmit"})
 
-#: A coaching note's marker: ``tl-coach v1 quiet_output``.
-_COACH_RE = re.compile(re.escape(COACH_MARKER) + r"(\d+) ([a-z_]+)")
+#: A coaching note's marker: ``cg-coach v1 quiet_output`` (``tl-coach``
+#: until 0.12.1).
+_COACH_RE = re.compile(f"(?:{re.escape(COACH_MARKER)}|{re.escape(OLD_COACH_MARKER)})" + r"(\d+) ([a-z_]+)")
+
+
+def _find_marker(text: str, *markers: str) -> int:
+    """Where the first of ``markers`` starts in ``text``, or -1."""
+    found = [at for at in (text.find(m) for m in markers) if at >= 0]
+    return min(found) if found else -1
 
 
 def _capture_note(d: dict, attachment: dict) -> tuple[str, int, dict] | None:
@@ -434,8 +443,8 @@ def _capture_note(d: dict, attachment: dict) -> tuple[str, int, dict] | None:
     else:
         texts = []
     text = "\n".join(texts)
-    note_at = text.find(NOTE_MARKER)
-    coach_at = text.find(COACH_MARKER)
+    note_at = _find_marker(text, NOTE_MARKER, OLD_NOTE_MARKER)
+    coach_at = _find_marker(text, COACH_MARKER, OLD_COACH_MARKER)
     if note_at < 0 and coach_at < 0:
         return None
     chars = _rendered_size_chars(d, attachment) if d.get("rendered") is not None else None

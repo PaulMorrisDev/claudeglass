@@ -126,7 +126,7 @@ def test_hook_output_capture_note_detail_has_no_hook_name_key():
         "hook_additional_context",
         hookName="SessionStart",
         hookEvent="SessionStart",
-        content=["ClaudeGlass metrics capture (tl-cap v1 task): ..."],
+        content=["ClaudeGlass metrics capture (cg-cap v1 task): ..."],
     )
     event = events.classify_line(line)
     assert event.subkind == "capture_note"

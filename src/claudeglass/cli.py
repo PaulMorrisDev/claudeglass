@@ -672,8 +672,8 @@ CAPTURE_ACTIONS = (
 #: ``capture <action> on|off`` -> the skill it adds or removes, what the
 #: change is called, and what it turns on.
 _SKILL_SWITCHES = {
-    "feedback": (capture_catalogue.FEEDBACK_SKILL, "Feedback", "the /cl-feedback skill and its status-line reminder"),
-    "brief": (capture_catalogue.BRIEF_SKILL, "Brief templates", "the /cl-brief skill"),
+    "feedback": (capture_catalogue.FEEDBACK_SKILL, "Feedback", "the /cg-feedback skill and its status-line reminder"),
+    "brief": (capture_catalogue.BRIEF_SKILL, "Brief templates", "the /cg-brief skill"),
 }
 
 
@@ -689,8 +689,8 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         choices=CAPTURE_ACTIONS,
         help="status (default); on; off; level LEVEL; enable/disable METRIC...; connect (add the hook entries "
         "the chosen metrics need to settings.json); remove (switch off and take the entries out); "
-        "feedback on|off (the /cl-feedback skill and its status-line reminder); "
-        "brief on|off (the /cl-brief skill, which checks a request against its checklist); "
+        "feedback on|off (the /cg-feedback skill and its status-line reminder); "
+        "brief on|off (the /cg-brief skill, which checks a request against its checklist); "
         "tagger claude|haiku (who writes the tags: Claude, at the end of its replies, or Claude Haiku, asked "
         "after each turn); "
         "prune (delete signal files, capture-log.jsonl records and usage-log.csv rows older than "
@@ -970,7 +970,7 @@ def _add_init_args(sub: argparse.ArgumentParser) -> None:
         "--feedback",
         choices=("on", "off"),
         default=None,
-        help="answer the feedback question without asking: add the /cl-feedback skill and its status-line "
+        help="answer the feedback question without asking: add the /cg-feedback skill and its status-line "
         "reminder (on), or not (off)",
     )
     sub.add_argument(
@@ -2639,7 +2639,7 @@ def _init_feedback_choice(
     args: argparse.Namespace, *, config_dir: Path, claude_root: Path, stdin, stdout
 ) -> tuple[bool, bool, list[str]] | None:
     """``init``'s feedback question (:func:`onboarding.ask_feedback`):
-    the ``/cl-feedback`` skill and its status-line reminder, asked or
+    the ``/cg-feedback`` skill and its status-line reminder, asked or
     taken from ``--feedback`` and the answers file. Returns ``(on,
     was_on, derived notes)``, or ``None`` when there's nothing to decide
     (said on ``stdout``). Feedback on in config.toml without its skill
@@ -2657,12 +2657,12 @@ def _init_feedback_choice(
         from . import footprint
 
         if footprint.read_feedback_skill(claude_root) == capture_catalogue.feedback_skill_text():
-            stdout.write("\nThe /cl-feedback skill is on. 'claudeglass capture feedback off' turns it off.\n")
+            stdout.write("\nThe /cg-feedback skill is on. 'claudeglass capture feedback off' turns it off.\n")
             return None
         # On in config.toml without its skill file: picking Deep just
         # turned it on (config.set_capture), or the file went missing.
         stdout.write(
-            "\nThe /cl-feedback survey is on"
+            "\nThe /cg-feedback survey is on"
             + (", as part of Deep" if current.level == "deep" else "")
             + ". 'claudeglass capture feedback off' turns it off.\n"
         )
@@ -2944,8 +2944,8 @@ def _cmd_update_finish(
        command that can't run, the entries capture needs, and this tool's
        statusline when it runs another Python. Each change is shown and
        made after a yes; settings.json is backed up first. This tool's
-       skills too: one still under its name from before 0.12.0 is
-       renamed, one an earlier version wrote is rewritten.
+       skills too: one still under an earlier name is renamed, one an
+       earlier version wrote is rewritten.
     4. Name copies of this tool installed for other Pythons and, once the
        dashboard runs the new version and nothing else needs them, remove
        them after a yes.
@@ -3258,7 +3258,7 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
     if rough["reminder"]:
-        lines.append(f"about {rough['reminder']} tokens once a session, for the /cl-feedback reminder")
+        lines.append(f"about {rough['reminder']} tokens once a session, for the /cg-feedback reminder")
     if rough["report_tag"]:
         lines.append(f"about {rough['report_tag']} tokens of tag at the end of each subagent report")
     if rough["tool_note"]:
@@ -3576,10 +3576,10 @@ def _capture_skill_step(
     skill: str = capture_catalogue.FEEDBACK_SKILL,
 ) -> bool:
     """Make the skill (``<claude-root>/skills/<skill>/SKILL.md``: by
-    default ``/cl-feedback``, or ``/cl-brief``) there or not, as ``want``
+    default ``/cg-feedback``, or ``/cg-brief``) there or not, as ``want``
     says: show the file to add, the diff, or the file to remove, and make
-    the change after a yes. Our copy still under its name from before
-    0.12.0 (``/tl-feedback``) is renamed, or removed with it. A
+    the change after a yes. Our copy still under an earlier name
+    (``/tl-feedback``, ``/cl-feedback``) is renamed, or removed with it. A
     ``SKILL.md`` there that this tool didn't write is left alone. Returns
     False when a change was needed but not made."""
     from . import footprint
@@ -3874,10 +3874,10 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     need, the diff is shown and made after a yes (``connect`` does only
     this step). ``off`` switches capture off and leaves the entries,
     which add nothing while it is off; ``remove`` switches it off and
-    takes them out. ``feedback on|off`` turns the ``/cl-feedback`` skill
+    takes them out. ``feedback on|off`` turns the ``/cg-feedback`` skill
     and its reminders on or off and adds or removes the skill file, after
     showing it and asking; enabling or disabling ``feedback_skill`` does
-    the same. ``brief on|off`` does that for the ``/cl-brief`` skill (the
+    the same. ``brief on|off`` does that for the ``/cg-brief`` skill (the
     ``brief_templates`` toggle). ``prune`` deletes signal files,
     ``capture-log.jsonl`` records and ``usage-log.csv`` rows older than
     ``retention_days`` (or
@@ -3992,7 +3992,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             stdout.write(f"Metrics capture: {capture_view.describe(current)} -> {capture_view.describe(preview)}\n")
         if any(i not in current.feedback for i in preview.feedback) and preview.level == "deep":
             stdout.write(
-                "Deep also turns on the /cl-feedback survey, its reminder note, and Claude's one-line reminder "
+                "Deep also turns on the /cg-feedback survey, its reminder note, and Claude's one-line reminder "
                 "to run it. 'claudeglass capture feedback off' turns them off.\n"
             )
         if action == "disable":
@@ -4010,7 +4010,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         if costly:
             stdout.write(
                 "\nThis makes Claude use more of your tokens. It adds " + ", ".join(costly) + ", and Claude then "
-                "reads a short note and ends its replies with a one-line tag such as [tl: task=bugfix brief=clear].\n"
+                "reads a short note and ends its replies with a one-line tag such as [cg: task=bugfix brief=clear].\n"
                 "At this setting, roughly:\n"
             )
             for line in _capture_cost_lines(preview.active_metrics(), preview.tagger):
@@ -4073,12 +4073,12 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         return 0
     if action == "remove" and skill_on:
         stdout.write(
-            "The /cl-feedback skill stays: it works with capture off. "
+            "The /cg-feedback skill stays: it works with capture off. "
             "'claudeglass capture feedback off' removes it.\n"
         )
     if action == "remove" and brief_on:
         stdout.write(
-            "The /cl-brief skill stays: it works with capture off. "
+            "The /cg-brief skill stays: it works with capture off. "
             "'claudeglass capture brief off' removes it.\n"
         )
     wanted = () if action == "remove" else hook_health.capture_specs(preview.hook_metrics())

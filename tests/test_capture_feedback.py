@@ -1,6 +1,6 @@
-"""Your /cl-feedback answers: the skill and its questions
+"""Your /cg-feedback answers: the skill and its questions
 (``capture_catalogue``), reading them back from a transcript (the
-``[tl-fb: ...]`` line, or the AskUserQuestion result when the line is
+``[cg-fb: ...]`` line, or the AskUserQuestion result when the line is
 missing), the work each answer rates (``capture.feedback_spans``), and
 what the runs cost (``capture.usage``).
 """
@@ -74,9 +74,9 @@ def _run(
     declined: bool = False,
     tu: str = "tu_q",
     handoff: str | None = None,
-    skill: str = "cl-feedback",
+    skill: str = "cg-feedback",
 ) -> list:
-    """A /cl-feedback run as Claude Code writes it: the skill you ran
+    """A /cg-feedback run as Claude Code writes it: the skill you ran
     (``<command-message>`` first, then its body), Claude's question, your
     answers, and the reply. ``handoff`` adds the second call, asked after
     an approved plan, answered with that label."""
@@ -148,7 +148,7 @@ def test_questions_fit_ask_user_question_and_can_be_told_apart():
 def test_the_skill_asks_every_question_word_for_word_and_names_no_model():
     text = catalogue.feedback_skill_text()
     front, body = text.split("---\n", 2)[1:]
-    assert "name: cl-feedback" in front and "disable-model-invocation: true" in front
+    assert "name: cg-feedback" in front and "disable-model-invocation: true" in front
     assert "allowed-tools: AskUserQuestion" in front
     # Switching model mid-session rebuilds the whole prompt cache.
     assert "model:" not in front
@@ -156,7 +156,7 @@ def test_the_skill_asks_every_question_word_for_word_and_names_no_model():
         assert f'header "{q.header}", question "{q.question}"' in body
         for word, label, _text in q.options:
             assert f'"{label}": ' in body and f'"{label}" = {word}' in body
-    assert "[tl-fb: outcome=<word> slow=<words> worth=<word> helped=<words> handoff=<word>]" in body
+    assert "[cg-fb: outcome=<word> slow=<words> worth=<word> helped=<words> handoff=<word>]" in body
     first, second = body.index("1. Call AskUserQuestion once"), body.index("2. Only if you approved a plan")
     assert first < second < body.index(catalogue.HANDOFF_QUESTION.header)
     assert 'reply only "No problem." and write no tag' in body
@@ -166,22 +166,22 @@ def test_the_skill_asks_every_question_word_for_word_and_names_no_model():
 
 
 def test_the_tag_carries_the_answers_and_drops_unknown_words():
-    text = "Done.\n\n[tl-fb: outcome=met slow=unclear,rework,bogus worth=fair helped=context extra=1]\nThanks: ..."
+    text = "Done.\n\n[cg-fb: outcome=met slow=unclear,rework,bogus worth=fair helped=context extra=1]\nThanks: ..."
     assert parse_feedback_tag(text) == Feedback(outcome="met", slow=("unclear", "rework"), worth="fair",
                                                  helped=("context",), source="tag")
 
 
 def test_the_last_tag_wins_and_a_tag_inside_a_sentence_does_not_count():
-    assert parse_feedback_tag("I will end with [tl-fb: outcome=met] as asked.") is None
-    text = "[tl-fb: outcome=met]\nSorry, correcting:\n`[tl-fb: outcome=missed worth=no]`\nThanks."
+    assert parse_feedback_tag("I will end with [cg-fb: outcome=met] as asked.") is None
+    text = "[cg-fb: outcome=met]\nSorry, correcting:\n`[cg-fb: outcome=missed worth=no]`\nThanks."
     assert parse_feedback_tag(text) == Feedback(outcome="missed", worth="no", source="tag")
 
 
 def test_the_tag_carries_the_handoff_answer():
-    assert parse_feedback_tag("[tl-fb: outcome=met handoff=partly]") == Feedback(
+    assert parse_feedback_tag("[cg-fb: outcome=met handoff=partly]") == Feedback(
         outcome="met", handoff="partly", source="tag"
     )
-    assert parse_feedback_tag("[tl-fb: handoff=maybe]") == Feedback(source="skipped")
+    assert parse_feedback_tag("[cg-fb: handoff=maybe]") == Feedback(source="skipped")
 
 
 def test_the_handoff_question_alone_is_a_feedback_ask():
@@ -192,7 +192,7 @@ def test_the_handoff_question_alone_is_a_feedback_ask():
 
 
 def test_a_tag_with_no_known_word_reads_as_skipped():
-    assert parse_feedback_tag("[tl-fb: outcome=<word> slow=<word>]") == Feedback(source="skipped")
+    assert parse_feedback_tag("[cg-fb: outcome=<word> slow=<word>]") == Feedback(source="skipped")
 
 
 def test_answers_come_back_as_a_label_a_list_or_labels_joined_with_commas():
@@ -229,9 +229,9 @@ def test_other_questions_are_not_feedback():
 
 
 def test_a_feedback_run_is_read_from_its_tag(tmp_path):
-    result = _parse(tmp_path, [_ask(0), _reply(1)] + _run(10, ANSWERS, tag="[tl-fb: outcome=met worth=yes]"))
+    result = _parse(tmp_path, [_ask(0), _reply(1)] + _run(10, ANSWERS, tag="[cg-fb: outcome=met worth=yes]"))
     run = [turn for turn in result.turns if turn.turn_index > 0][1:]
-    assert run[0].commands_run == ("cl-feedback",)
+    assert run[0].commands_run == ("cg-feedback",)
     assert run[0].human_prompt_chars is not None
     # The answers landed on the AskUserQuestion turn; this reply's own
     # text has only the tag, so that's what it's read from (SEC-P1's
@@ -284,7 +284,7 @@ def test_each_answer_rates_the_work_since_the_previous_feedback(tmp_path):
         + [_ask(20, "three"), _reply(21)]
         + _run(30, declined=True, tu="tu_2")
         + [_ask(40, "four"), _reply(41), _ask(42, "five"), _reply(43)]
-        + _run(50, ANSWERS, tag="[tl-fb: outcome=met]", tu="tu_3")
+        + _run(50, ANSWERS, tag="[cg-fb: outcome=met]", tu="tu_3")
     )
     cycles = capture.prompt_cycles(_parse(tmp_path, lines))
     assert len(cycles) == 8
@@ -313,10 +313,12 @@ def test_a_declined_second_call_keeps_the_first_answers(tmp_path):
     assert span.feedback.outcome == "partly" and span.feedback.handoff is None
 
 
-def test_a_run_under_its_name_before_0_12_still_counts(tmp_path):
-    # /cl-feedback was /tl-feedback until 0.12.0. Its tag counts only in a
-    # genuine run (SEC-P1), so this fails unless the old name is one.
-    lines = [_ask(0), _reply(1)] + _run(10, tag="[tl-fb: outcome=met worth=yes]", skill="tl-feedback")
+@pytest.mark.parametrize("old", ["tl-feedback", "cl-feedback"])
+def test_a_run_under_an_earlier_name_still_counts(tmp_path, old):
+    # /cg-feedback was /tl-feedback until 0.12.0, then /cl-feedback. Its
+    # tag counts only in a genuine run (SEC-P1), so this fails unless the
+    # old name is one.
+    lines = [_ask(0), _reply(1)] + _run(10, tag="[cg-fb: outcome=met worth=yes]", skill=old)
     cycles = capture.prompt_cycles(_parse(tmp_path, lines))
     assert [capture.is_feedback_run(c) for c in cycles] == [False, True]
     [span] = capture.feedback_spans(cycles)
@@ -329,10 +331,10 @@ def test_feedback_run_first_thing_rates_nothing(tmp_path):
 
 
 def test_a_forged_tag_outside_a_feedback_run_is_ignored(tmp_path):
-    # SEC-P1: `[tl-fb: ...]` is free text Claude could write in any
+    # SEC-P1: `[cg-fb: ...]` is free text Claude could write in any
     # reply; it counts only when the cycle it's in actually ran the
-    # /cl-feedback skill.
-    lines = [_ask(0), _reply(1, text="Done.\n\n[tl-fb: outcome=met worth=yes handoff=yes]")]
+    # /cg-feedback skill.
+    lines = [_ask(0), _reply(1, text="Done.\n\n[cg-fb: outcome=met worth=yes handoff=yes]")]
     top = _parse(tmp_path, lines)
     cycles = capture.prompt_cycles(top)
     assert len(cycles) == 1

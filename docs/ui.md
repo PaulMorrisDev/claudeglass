@@ -65,7 +65,7 @@ changes Claude Code itself.
 - **Commands in this install's form.** The short `claudeglass`
   runs only when pip's Scripts folder is on `PATH`. The service writes
   the form that runs its own install into `index.html`'s
-  `<meta name="tl-command">` and into the commands in every API
+  `<meta name="cg-command">` and into the commands in every API
   response (`invocation.py`, [`docs/api.md`](api.md#envelope)). A command
   the page writes itself goes through `core.js`'s `cli("capture off")`;
   fixed text that names one (the glossary) through `withCli`.
@@ -434,7 +434,7 @@ when there is something to act on: the end time has passed, a hook
 entry is missing, no notes have been seen, Claude tags too few messages,
 enough has been collected to lower the level, or capture's weekly cost
 can be weighed against what depends on it. It also carries the
-`/cl-feedback` reminder while that item is on, and the `capture feedback
+`/cg-feedback` reminder while that item is on, and the `capture feedback
 on` or `capture brief on` command while a skill's file needs installing.
 It leads with a headline ("Metrics capture: Essentials · since <date> ·
 N tokens · <amount> (x% of spend) · tagged on P% of messages") and links
@@ -1281,7 +1281,7 @@ its report already built:
 | Moment | Budget | Measured (median of 9 loads) |
 |---|---|---|
 | First contentful paint (the `first-contentful-paint` entry) | under 300ms | 44ms |
-| Shell ready (`performance.mark("tl-shell-ready")` at the end of `init()`) | under 500ms | 66ms |
+| Shell ready (`performance.mark("cg-shell-ready")` at the end of `init()`) | under 500ms | 66ms |
 | A view already drawn, to its first frame | under 100ms | 19ms to 36ms, the fade included |
 | Actions, from the idle prefetch | under 100ms | 23ms to 35ms |
 

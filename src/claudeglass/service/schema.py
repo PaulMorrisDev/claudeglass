@@ -115,7 +115,7 @@ exist.
 Version 6 (metrics capture feedback): a new ``session_feedback`` table
 holds the ratings you give a session on the dashboard's Sessions tab
 (``POST /api/sessions/<id>/feedback``): the same four questions as the
-``/cl-feedback`` skill, as words from ``capture_catalogue.FEEDBACK_VOCAB``
+``/cg-feedback`` skill, as words from ``capture_catalogue.FEEDBACK_VOCAB``
 (``slow`` and ``helped`` comma-joined), never free text. A v5 store gains
 the table in place (``store.MIGRATIONS[5]``).
 

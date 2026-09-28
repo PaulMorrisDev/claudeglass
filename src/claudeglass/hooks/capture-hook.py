@@ -4,7 +4,7 @@
 While metrics capture is on (``[capture]`` in ClaudeGlass's ``config.toml``),
 this adds a short note to Claude's context asking it to end its replies
 with a one-line tag of closed-vocabulary words, such as
-``[tl: task=bugfix brief=partial level=normal]``. ClaudeGlass reads the
+``[cg: task=bugfix brief=partial level=normal]``. ClaudeGlass reads the
 tags back from the transcripts. It also logs a few free signals that
 cost no tokens.
 
@@ -33,7 +33,7 @@ connect``):
   for the rest.
 - ``UserPromptSubmit`` and ``PostToolUse`` (also matched to
   ``ExitPlanMode``) for coaching notes (``[capture] coaching`` has
-  ``coaching_notes``): a short ``tl-coach`` note when a hint applies --
+  ``coaching_notes``): a short ``cg-coach`` note when a hint applies --
   an expired cache or a large context when you send a message, the same
   request again, small requests sent one at a time, a big task sent
   without a plan, a vague correction, a huge paste, stopping Claude
@@ -1178,7 +1178,9 @@ _AGENT_TOOLS = ("Agent", "Task")
 #: The most tool names the excerpt lists.
 _JUDGE_TOOL_NAMES = 10
 
-_TL_RE = re.compile(r"\[tl:([^\[\]\n]{0,400})\]", re.IGNORECASE)
+#: A reply's tag: ``[cg: ...]``, or ``[tl: ...]`` as notes asked until
+#: 0.12.1 (a session started before an update still does).
+_TAG_RE = re.compile(r"\[(?:cg|tl):([^\[\]\n]{0,400})\]", re.IGNORECASE)
 
 #: A shell command that runs tests, by its runner at the start of one of
 #: the command's parts (after any VAR=value, timeout or uv/poetry run):
@@ -1420,12 +1422,12 @@ def judge_excerpt(
 
 
 def judge_tag(text, keys, judge: dict, vocab: dict | None = None) -> str:
-    """The ``key=word`` pairs of the last ``[tl: ...]`` in ``text`` whose
+    """The ``key=word`` pairs of the last ``[cg: ...]`` in ``text`` whose
     key is one of ``keys`` and whose words are known ones (in ``vocab``,
     by default the main session's), as the tag file keeps them
     (``task=bugfix brief=clear``); ``""`` without any. A skill name after
     ``would-help:`` is dropped."""
-    matches = _TL_RE.findall(text) if isinstance(text, str) else []
+    matches = _TAG_RE.findall(text) if isinstance(text, str) else []
     if not matches:
         return ""
     vocab = vocab or judge["vocab"]

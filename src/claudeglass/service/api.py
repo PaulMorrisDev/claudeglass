@@ -330,7 +330,7 @@ _STATIC_CONTENT_TYPES = {
 #: index.html's placeholder for the command that runs claudeglass
 #: on this install (invocation.py), filled in as the page is served so
 #: the dashboard's own commands read right before any API call returns.
-_COMMAND_META = b'<meta name="tl-command" content="claudeglass">'
+_COMMAND_META = b'<meta name="cg-command" content="claudeglass">'
 
 _PLACEHOLDER_INDEX_HTML = (
     "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>claudeglass</title>"
@@ -339,7 +339,7 @@ _PLACEHOLDER_INDEX_HTML = (
 
 def _command_meta() -> bytes:
     prefix = html.escape(invocation.command_prefix(), quote=True)
-    return b'<meta name="tl-command" content="' + prefix.encode("utf-8") + b'">'
+    return b'<meta name="cg-command" content="' + prefix.encode("utf-8") + b'">'
 
 
 def _report_json_commands(text: str) -> str:
@@ -1296,7 +1296,7 @@ def make_handler(
 
     def _capture_feedback(config):
         """``capture.feedback_usage`` over the replayed days: your
-        /cl-feedback runs, whatever the capture level."""
+        /cg-feedback runs, whatever the capture level."""
         from .. import capture as capture_mod
         from . import rebuild
 
@@ -1795,7 +1795,7 @@ def make_handler(
         return _ok({"session_id": session_id, "tags": store.tags(session_id)})
 
     def route_set_feedback(store, query, body):
-        """Your rating of a session (the /cl-feedback questions as
+        """Your rating of a session (the /cg-feedback questions as
         checkboxes): words from ``capture_catalogue.RATING_VOCAB`` only.
         Nothing ticked clears it."""
         session_id = query.get("id", "")

@@ -8,7 +8,7 @@ uninstall`` and the Data quality tab (``GET /api/setup``):
   ``settings.json`` (``hook_health.settings_path``: ``--claude-root``,
   else ``$CLAUDE_CONFIG_DIR``, else ``~/.claude``);
 - the metrics-capture hook entries, when capture was connected;
-- the ``/cl-feedback`` skill (``<claude-root>/skills/cl-feedback``), when
+- the ``/cg-feedback`` skill (``<claude-root>/skills/cg-feedback``), when
   feedback was turned on;
 - the logon service (``install-service`` or ``init``);
 - each change ``apply`` made to your Claude Code settings or agent files
@@ -217,8 +217,8 @@ def _uses_tokens(capture: CaptureConfig) -> bool:
 
 
 #: The skills this tool can write into Claude Code's skills folder, and
-#: what each ``SKILL.md`` holds: ``/cl-feedback`` (``capture feedback on``)
-#: and ``/cl-brief`` (``capture brief on``).
+#: what each ``SKILL.md`` holds: ``/cg-feedback`` (``capture feedback on``)
+#: and ``/cg-brief`` (``capture brief on``).
 SKILL_TEXTS = {
     capture_catalogue.FEEDBACK_SKILL: capture_catalogue.feedback_skill_text,
     capture_catalogue.BRIEF_SKILL: capture_catalogue.brief_skill_text,
@@ -246,8 +246,8 @@ def read_skill(name: str, claude_root: str | Path | None = None) -> str | None:
 
 
 def old_skill(name: str, claude_root: str | Path | None = None) -> str | None:
-    """The name ``name`` had until 0.12.0 (``tl-feedback`` for
-    ``cl-feedback``), when this tool's copy is still there under it."""
+    """An earlier name of ``name`` (``tl-feedback`` or ``cl-feedback`` for
+    ``cg-feedback``), when this tool's copy is still there under it."""
     for old, new in capture_catalogue.RENAMED_SKILLS.items():
         if new == name:
             text = read_skill(old, claude_root)
@@ -298,32 +298,32 @@ def rename_skill(old: str, new: str, claude_root: str | Path | None = None) -> P
 
 
 def feedback_skill_path(claude_root: str | Path | None = None) -> Path:
-    """Where ``capture feedback on`` writes the ``/cl-feedback`` skill."""
+    """Where ``capture feedback on`` writes the ``/cg-feedback`` skill."""
     return skill_path(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
 def is_own_feedback_skill(text: str) -> bool:
-    """Whether a ``SKILL.md`` is the ``/cl-feedback`` this tool writes."""
+    """Whether a ``SKILL.md`` is the ``/cg-feedback`` this tool writes."""
     return is_own_skill(capture_catalogue.FEEDBACK_SKILL, text)
 
 
 def read_feedback_skill(claude_root: str | Path | None = None) -> str | None:
-    """The ``/cl-feedback`` ``SKILL.md`` as it is now, or ``None``."""
+    """The ``/cg-feedback`` ``SKILL.md`` as it is now, or ``None``."""
     return read_skill(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
 def feedback_skill_state(claude_root: str | Path | None = None) -> str:
-    """:func:`skill_state` of ``/cl-feedback``."""
+    """:func:`skill_state` of ``/cg-feedback``."""
     return skill_state(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
 def write_feedback_skill(claude_root: str | Path | None = None) -> Path:
-    """Write the ``/cl-feedback`` skill."""
+    """Write the ``/cg-feedback`` skill."""
     return write_skill(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
 def remove_feedback_skill(claude_root: str | Path | None = None) -> Path:
-    """Delete the ``/cl-feedback`` skill."""
+    """Delete the ``/cg-feedback`` skill."""
     return remove_skill(capture_catalogue.FEEDBACK_SKILL, claude_root)
 
 
@@ -406,14 +406,14 @@ def inventory(
         )
     skill_text = read_feedback_skill(claude_root)
     own_skill = skill_text is not None and is_own_feedback_skill(skill_text)
-    # Still under its name from before 0.12.0: installed all the same.
+    # Still under an earlier name: installed all the same.
     old_feedback = None if own_skill else old_skill(capture_catalogue.FEEDBACK_SKILL, claude_root)
     own_skill = own_skill or old_feedback is not None
     if own_skill or "feedback_skill" in capture.feedback:
         items.append(
             FootprintItem(
                 key="feedback_skill",
-                title="The /cl-feedback skill",
+                title="The /cg-feedback skill",
                 status="installed" if own_skill else "not installed",
                 where=home_label(skill_path(old_feedback, claude_root) if old_feedback else feedback_skill_path(claude_root)),
                 what_it_does=(
@@ -437,7 +437,7 @@ def inventory(
         items.append(
             FootprintItem(
                 key="brief_skill",
-                title="The /cl-brief skill",
+                title="The /cg-brief skill",
                 status="installed" if own_brief else "not installed",
                 where=home_label(skill_path(old_brief or brief_name, claude_root)),
                 what_it_does=(
@@ -541,12 +541,13 @@ class UninstallPlan:
     #: Applied changes still in place, newest first.
     applied: list[apply_mod.BackupInfo] = field(default_factory=list)
     data_dir: Path | None = None
-    #: The ``/cl-feedback`` skill this tool wrote, when it is there.
+    #: The ``/cg-feedback`` skill this tool wrote, when it is there.
     feedback_skill: Path | None = None
-    #: The ``/cl-brief`` skill this tool wrote, when it is there.
+    #: The ``/cg-brief`` skill this tool wrote, when it is there.
     brief_skill: Path | None = None
-    #: Either skill under its name from before 0.12.0 (``/tl-feedback``,
-    #: ``/tl-brief``), when this tool's copy is still there: old name -> path.
+    #: Either skill under an earlier name (``/tl-feedback``,
+    #: ``/cl-brief``, ...), when this tool's copy is still there: old name
+    #: -> path.
     old_skills: dict[str, Path] = field(default_factory=dict)
 
 

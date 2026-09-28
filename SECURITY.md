@@ -113,7 +113,7 @@ change before making it:
   made only after a yes (or `--yes`/`--connect`/answering yes to
   `init`'s question), with the same `settings.json.bak-<UTC time>` copy
   first. `feedback on|off` and `brief on|off` instead add or remove
-  `~/.claude/skills/cl-feedback/SKILL.md` or `.../cl-brief/SKILL.md`
+  `~/.claude/skills/cg-feedback/SKILL.md` or `.../cg-brief/SKILL.md`
   (`--claude-root`'s folder, not `<config-dir>`) — the file (or diff, on
   an update) is shown in full and written only after a yes; a
   `SKILL.md` this tool didn't write is left alone rather than
@@ -130,7 +130,7 @@ change before making it:
   [docs/deploy.md](docs/deploy.md).
 - **`uninstall`**: removes this tool's hooks (including the capture
   ones) and statusline from `settings.json` (after the same `.bak-`
-  copy), removes the `/cl-feedback`/`/cl-brief` skill files (each shown
+  copy), removes the `/cg-feedback`/`/cg-brief` skill files (each shown
   and asked separately), removes the logon service, and, only with the
   matching flags, reverts applied changes (`--revert-changes`) and
   deletes `<config-dir>` (`--delete-data`, which also removes the
@@ -318,7 +318,7 @@ questions. `capture remove` takes the hook entries back out.
 
 **It uses your tokens, and only while it's on.** Each metric it adds
 makes Claude read one short note and end its reply with one line of
-closed-vocabulary tags, e.g. `[tl: task=bugfix brief=clear]`; a subagent
+closed-vocabulary tags, e.g. `[cg: task=bugfix brief=clear]`; a subagent
 is asked for nothing; `init` and `capture on` print a token-cost
 estimate from your own history before you confirm it (see
 [docs/onboarding.md](docs/onboarding.md) for the exact wording). With
@@ -328,7 +328,7 @@ exactly as it does without this tool installed.
 **Coaching notes.** Off by default and separate from the level:
 `capture enable coaching_notes` turns them on, at any level, after the
 same settings.json diff and yes. When a hint applies, the capture hook
-adds a short note to Claude's context, `tl-coach v1 <hint>` and a
+adds a short note to Claude's context, `cg-coach v1 <hint>` and a
 sentence built only from token counts, an idle time and an agent
 type's name — never a path, command or anything you wrote. To decide,
 the hook reads the last 256 KB of the session's transcript (the first
@@ -408,7 +408,7 @@ its own words — an unknown key, an unknown word, a value that doesn't
 match — is dropped, never stored. The one exception is
 `skill=would-help:<name>`, and even that survives only when `<name>`
 matches a skill the same transcript already listed or invoked, not
-whatever string Claude wrote. `/cl-feedback` itself has no free-text
+whatever string Claude wrote. `/cg-feedback` itself has no free-text
 field to scrub in the first place: all four of its questions (outcome,
 what slowed it, worth, what would have helped) are answered by ticking
 from a closed list of options — the same lists `POST
@@ -461,7 +461,7 @@ they print.
 **Files.** See "What is written, and where" above for
 `hooks/capture-hook.py`, `hooks/capture-catalogue.json`,
 `capture-log.jsonl` and `signals/`, and the `capture` bullet there for
-how the settings.json hook entries and the `cl-feedback`/`cl-brief`
+how the settings.json hook entries and the `cg-feedback`/`cg-brief`
 skill files under `~/.claude/skills/` are added (diff or full text,
 asked, backed up) and removed.
 
@@ -613,7 +613,7 @@ recommendation or profile gives you a prompt to paste into Claude Code
 (which asks your permission before editing anything under `.claude`)
 and a `claudeglass apply ... --dry-run` command to run yourself.
 The service's few write routes touch only its own files: session tags
-(`mode`/`purpose`) and your `/cl-feedback` rating (`POST
+(`mode`/`purpose`) and your `/cg-feedback` rating (`POST
 /api/sessions/<id>/feedback` — the same closed checkbox vocabulary the
 skill itself writes, `capture_catalogue.FEEDBACK_VOCAB`; an unknown
 field or value is `400`, and nothing ticked clears a rating) in the

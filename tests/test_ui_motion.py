@@ -254,7 +254,7 @@ def test_forced_colours_keep_chart_colours_and_system_chrome() -> None:
 
 def test_the_shell_marks_when_it_is_ready() -> None:
     init = _function("app.js", "init")
-    assert init.rstrip("}").rstrip().endswith('performance.mark("tl-shell-ready");')
+    assert init.rstrip("}").rstrip().endswith('performance.mark("cg-shell-ready");')
 
 
 def test_actions_figures_are_fetched_while_the_overview_is_idle() -> None:

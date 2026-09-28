@@ -1,7 +1,7 @@
 # How well the capture tags come out
 
 With `[capture] tagger = "haiku"`, Claude Haiku writes the main
-session's `[tl: ...]` tags from a short excerpt of each turn
+session's `[cg: ...]` tags from a short excerpt of each turn
 ([capture.md](capture.md#who-writes-the-tags)). This page is how well it
 does, measured by `scripts/eval-tagger.py`: against known right answers,
 with and without thinking, against Sonnet, and against the tags Claude
