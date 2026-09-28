@@ -126,7 +126,7 @@ export var PAGES = [
         id: "profiles",
         label: "Profiles",
         intro:
-          "Groups of settings. Make one from a goal with an estimate of its effect, compare it with yours, and see what each change you made did.",
+          "Groups of settings. Make one from a goal with an estimate of its effect, compare it with yours, and see the best setup for each kind of task.",
       },
       {
         id: "capture",
@@ -433,7 +433,7 @@ export var GLOSSARY = [
   ["CLAUDE.md", "Instruction files Claude reads at the start of every session, and of most subagents: yours, each project's, and rule files. Every line is paid for on every reply that re-reads it."],
   ["Skill", "A packaged set of instructions Claude can load when a task needs it. Its name and description are listed to Claude at the start of every session, used or not."],
   ["Quality signal", "A sign of whether the work went well, not only what it cost: tool calls that failed, agent runs that didn't finish, your corrections. Compared across models and efforts, and before and after each change you make."],
-  ["Metrics capture", "An opt-in feature, off by default: Claude adds a one-line tag saying what a piece of work was and how it went. It costs tokens while it's on. init's last questions and claudeglass capture turn it on, change what it asks for, or turn it off."],
+  ["Metrics capture", "An opt-in feature, off by default: a one-line tag, written by Claude or Claude Haiku, saying what the work was and how it went. It costs tokens while it's on. init's last questions and claudeglass capture turn it on, change what it asks for, or turn it off."],
   ["Capture level", "How much metrics capture asks for: off, free, essentials, standard or deep, each adding more of it. Set at init or with claudeglass capture level."],
   ["Tag", "The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as [tl: task=bugfix brief=clear]. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is."],
   ["Prompt cycle", "One message of yours and everything Claude did to answer it, subagents at any depth included. The unit metrics capture and the Work habits page measure by."],
