@@ -385,17 +385,32 @@ def _snapshot(config_dir: Path, ts: datetime, effective: dict) -> None:
     (folder / f"{stamp}.json").write_text(json.dumps(doc), encoding="utf-8")
 
 
-def test_judge_predictions_closes_out_too_little_data_once_a_later_point_bounds_it(tmp_path):
+@pytest.mark.parametrize(
+    ("key", "value", "before_hours", "after_hours", "judged_as"),
+    [
+        # Only one session before an effort change (which nothing can
+        # reprice from the sessions after it alone), and three after it
+        # before the *next* change closes the window: never enough to judge.
+        ("effortLevel", "low", (2,), (1, 2, 3), "too_little_data"),
+        # One session after a model change before the next change: too
+        # few between them for the next change to bound this one, so the
+        # window is still open and the prediction waits.
+        ("model", "sonnet", (2, 1.5, 1), (1,), None),
+    ],
+)
+def test_judge_predictions_closes_out_too_little_data_once_a_later_point_bounds_it(
+    tmp_path, key, value, before_hours, after_hours, judged_as
+):
     t0 = datetime.now(timezone.utc)
-    config_dir, result = _apply(tmp_path, {"model": "sonnet"})
+    config_dir, result = _apply(tmp_path, {key: value})
     point_ts = backtest.change_points_mod._parse_backup_ts(result.ts)
 
     project_dir = tmp_path / "projects" / "proj"
     project_dir.mkdir(parents=True)
-    for i, hours_before in enumerate((2, 1.5, 1), start=1):
-        _session_file(project_dir, f"before-{i}", point_ts - timedelta(hours=hours_before), input_tokens=100_000)
-    # Only one after-session before the *next* change closes the window.
-    _session_file(project_dir, "after-1", point_ts + timedelta(hours=1), input_tokens=10_000)
+    for i, hours in enumerate(before_hours, start=1):
+        _session_file(project_dir, f"before-{i}", point_ts - timedelta(hours=hours), input_tokens=100_000)
+    for i, hours in enumerate(after_hours, start=1):
+        _session_file(project_dir, f"after-{i}", point_ts + timedelta(hours=hours), input_tokens=10_000)
 
     corpus = load_corpus([project_dir])
     pricing = load_pricing()
@@ -406,7 +421,7 @@ def test_judge_predictions_closes_out_too_little_data_once_a_later_point_bounds_
         prediction_id="pred-1",
         ts=(t0 - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         source="whatif",
-        measure_key="model",
+        measure_key=key,
         agent=None,
         predicted_usd=1.0,
         predicted_pct=None,
@@ -422,8 +437,12 @@ def test_judge_predictions_closes_out_too_little_data_once_a_later_point_bounds_
         store, corpus, pricing, UNITS, config_dir, now=point_ts + timedelta(days=1)
     )
 
+    if judged_as is None:
+        assert judged == 0
+        assert len(store.predictions(judged=False)) == 1
+        return
     assert judged == 1
     [row] = store.predictions(judged=True)
-    assert row["verdict"] == "too_little_data"
+    assert row["verdict"] == judged_as
     assert row["measured_usd"] is None
 

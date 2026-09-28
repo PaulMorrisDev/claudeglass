@@ -113,6 +113,52 @@ def test_changes_made_together_share_their_before_and_after():
         assert result["enough"]
 
 
+def test_changes_with_too_few_sessions_between_them_share_their_before_and_after():
+    """Metrics capture turned on everywhere, then a model change one
+    project's sessions show 12 minutes later, with no session between:
+    cut at each other, capture has nothing after it and the model change
+    nothing before it, however many sessions run since."""
+    sessions = [_session(-d, 2.0) for d in (1, 2, 3)] + [_session(d, 1.0) for d in (0.1, 0.2, 0.3)]
+    for facts in sessions:
+        facts.project = "slug:mine"
+    capture = ChangePoint(CHANGE - timedelta(minutes=12), "capture", "Metrics capture level: Deep",
+                          keys=["capture.level"])
+    model = ChangePoint(CHANGE, "transcript", "Model changed", keys=["model"], project="slug:mine")
+    assert impact.neighbours([capture, model], model) == (capture, None)
+    assert impact.neighbours([capture, model], model, sessions) == (None, None)
+    for result in impact.impact([capture, model], sessions, UNITS):
+        assert (result["before_sessions"], result["after_sessions"]) == (3, 3), result["change"]["label"]
+        assert result["enough"]
+
+
+def test_enough_sessions_between_two_changes_keep_them_apart():
+    between = [_session(-d / 10, 3.0) for d in (1, 2, 3)]
+    sessions = [_session(-d, 2.0) for d in (1, 2, 3)] + between + [_session(d, 1.0) for d in (0.1, 0.2, 0.3)]
+    first = ChangePoint(CHANGE - timedelta(hours=12), "apply", "first")
+    second = ChangePoint(CHANGE, "apply", "second")
+    assert impact.neighbours([first, second], second, sessions) == (first, None)
+    assert impact.neighbours([first, second], second, sessions[:-4]) == (None, None)
+    # Only sessions both changes apply to count: two in another project
+    # don't keep a change in this one apart.
+    second.project = "slug:mine"
+    for facts in sessions:
+        facts.project = "slug:mine"
+    assert impact.neighbours([first, second], second, sessions) == (first, None)
+    for facts in between[:2]:
+        facts.project = "slug:other"
+    assert impact.neighbours([first, second], second, sessions) == (None, None)
+
+
+def test_too_few_sessions_before_says_new_sessions_wont_fill_it():
+    sessions = [_session(-1, 2.0)] + [_session(d, 1.0) for d in (0.1, 0.2, 0.3)]
+    result = impact.compare(ChangePoint(CHANGE, "apply", "x", keys=["model"]), sessions, UNITS)
+    assert not result["enough"]
+    assert result["verdict"] == (
+        "Too few sessions before the change to compare: 1 of the 3 needed. "
+        "Only sessions started before it count here."
+    )
+
+
 def test_without_is_asked_about_each_change_with_its_own_sides():
     """``without`` (counterfactual.for_impact) gets each change point and
     the sessions on each side of it; its answer is the row's "without"."""

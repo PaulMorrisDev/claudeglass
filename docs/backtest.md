@@ -49,7 +49,10 @@ number can never compound (see "Calibration" below).
    own windowing: up to `impact.LOOKBACK_DAYS` (14) before the change,
    or back to the previous change point if that's sooner, and from the
    change until the *next* change point after it, or now if there isn't
-   one yet (`impact.sides` and `impact.neighbours`). A change made in
+   one yet (`impact.sides` and `impact.neighbours`). A change point
+   within ten minutes of this one, or with fewer than
+   `impact.MIN_SESSIONS` (3) sessions between them, doesn't bound it:
+   the two share their before and after. A change made in
    one project (an apply to its settings files, or a change only its
    own settings files made) is judged on that project's sessions only,
    and only changes that apply there bound it.

@@ -115,7 +115,10 @@ those started after it (`impact.py`):
 - **Before** is the 14 days before the change, cut short by an earlier
   change. **After** runs from the change to the next one, or now.
 - Changes within 10 minutes of each other (one apply writing several
-  files, say) share their before and after.
+  files, say) share their before and after, and so do changes with
+  fewer than 3 sessions between them in a project both apply to:
+  cutting each at the other would leave one no sessions after it and
+  the other none before it, for good.
 - It needs at least 3 sessions on each side. With fewer, it says how
   many it has and gives no verdict.
 - The measures follow the keys that changed: cost per reply for a

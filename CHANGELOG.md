@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Two changes made close together stayed "Too early to tell" for
+  good.** Each change's before and after ended at the next change
+  either side of it, so turning metrics capture on and then switching
+  model twelve minutes later gave the capture change no sessions after
+  it and the model change none before it, however many sessions you ran
+  since. Two changes with fewer than 3 sessions between them now share
+  their before and after, as changes made within ten minutes already
+  did, and the back-test windows the same way. The "too few sessions
+  before the change" message now says how many it needs and that only
+  sessions started before the change count, instead of "(0 of 3 so
+  far.)", which read as if new sessions would fill it.
+
 ## [0.11.0] - 2026-09-28
 
 0.10.0 was never tagged or published, so upgrading from 0.9.0 brings

@@ -303,6 +303,10 @@ size. No text is kept (`context_files.py`).
   sessions carry capture's `level` and `size` tags. Nothing is said
   until each side has at least 3 sessions, and the result always notes
   that other things (the work itself, Claude Code updates) change too.
+  Two changes with fewer than 3 sessions between them (turning metrics
+  capture on, then switching model before your next session, say) are
+  compared together: each is read over the other's sessions too, rather
+  than one getting no sessions after it and the other none before.
   [Profiles](profiles.md#on-the-dashboard) has the full rules.
 - **Without this change** (`counterfactual.py`): the sessions after a
   change, priced as if it hadn't been made. A model or fast mode change

@@ -489,8 +489,9 @@ export function restartNote() {
 export function emptyState(message, gate, next) {
   var box = el("div", { class: "empty-state" });
   var text = message || "Not enough data yet.";
-  // A message that already gives the count ("0 so far") isn't told twice.
-  if (gate && typeof gate.have === "number" && typeof gate.need === "number" && !/ so far/.test(text)) {
+  // A message that already gives the count ("0 so far", "0 of the 3
+  // needed") isn't told twice.
+  if (gate && typeof gate.have === "number" && typeof gate.need === "number" && !/ so far| needed/.test(text)) {
     text += " (" + gate.have + " of " + gate.need + " so far.)";
   }
   box.appendChild(el("p", { class: "empty-message" }, prose(text)));
