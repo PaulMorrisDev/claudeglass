@@ -7,9 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.0] - 2026-09-27
+## [0.11.0] - 2026-09-28
 
-0.10.0 was tagged but never reached PyPI, so upgrading from 0.9.0 brings
+0.10.0 was never tagged or published, so upgrading from 0.9.0 brings
 the changes listed under both releases.
 
 ### Added
@@ -62,7 +62,8 @@ the changes listed under both releases.
 - **Claude Haiku can write the tags.** `claudeglass capture tagger
   haiku` (or "Tags written by" on Setup › Capture) takes the
   `[tl: ...]` tag out of Claude's replies and the tag list out of the
-  session note (at Standard, ~336 tokens of note becomes ~73). When a
+  session note (at Essentials and Standard, the ~186- or ~304-token note
+  goes altogether). When a
   turn ends, the hook's `Stop` entry hands a short excerpt of it to a
   worker of its own and returns at once. The excerpt holds your
   message, what Claude did (tools, files changed, commands, any plan)
@@ -111,7 +112,7 @@ the changes listed under both releases.
   Haiku an excerpt (its brief, what Claude said as it started it, what it
   did, the end of its report and the session's earlier runs) and keeps
   the words it answers with, whichever writes the main session's tags.
-  It costs about $0.0015 a run. `scripts/eval-agent-judge.py` measures
+  It costs about $0.002 a run. `scripts/eval-agent-judge.py` measures
   it: 51 of 51 right on known-answer runs ([docs/tagger-eval.md](docs/tagger-eval.md#agent-runs)).
   Whether an agent used your CLAUDE.md rules (`rules`) can't be judged
   from outside it, so that metric is retired; a config.toml that lists
@@ -129,14 +130,28 @@ the changes listed under both releases.
   back half-done work. You get a one-line notice instead, once a run.
 - **The /tl-feedback reminder comes once a session**, after the first
   piece of work Claude finishes, instead of after every one.
-- **After upgrading, run `claudeglass capture connect`** if capture is
-  on: agent runs need the new `SubagentStop` entry, and the old
-  `SubagentStart` one is taken out. `capture status` says when it's
-  needed.
+- **After upgrading, capture needs new hook entries.** Agent runs need
+  the new `SubagentStop` entry, and the old `SubagentStart` one is taken
+  out. `claudeglass update` offers both; after a plain pip upgrade, run
+  `claudeglass capture connect` if capture is on. `capture status` says
+  when it's needed.
 - **Fewer Haiku calls with background agents.** A turn that ends while a
   background agent is still running isn't judged: the turn that answers
   its report is, with the whole piece of work. It was a call per turn in
   between.
+- **The README catches up with 0.10.0 and 0.11.0.** It now covers
+  metrics capture's levels and what each costs, who writes the tags,
+  live coaching and where to switch it on, every hook and skill this
+  tool adds to Claude Code, what Claude Haiku is sent and what's kept,
+  and the Hooks check. Its screenshots show the new Overview and a
+  recommendation. `scripts/demo-corpus.py`, which writes their made-up
+  history, now also connects a scratch Claude Code folder, so the
+  images show a finished setup.
+- **Docs that said the wrong thing.** `docs/capture.md` said capture
+  Off runs no hook (coaching notes still can), that brief templates show
+  only in the status line, and that only three commands change
+  `settings.json`. SECURITY.md left coaching notes and the agent-run
+  Haiku calls out of what can use tokens.
 
 ### Fixed
 
@@ -386,8 +401,8 @@ the changes listed under both releases.
     show" note instead of zero tiles and rows of zeros, so the long
     pages (Spend › Savings most) are shorter.
   - The Overview's setup card is one line, with its steps folded
-    beneath it. Every next best action says what it saves, or that the
-    saving isn't worked out.
+    beneath it. Every row of *Anything wrong?* says what fixing it saves,
+    or that the saving isn't worked out.
   - Work habits no longer repeats, above its cards, the habits the cards
     show, and its "Already saving" figure is tile-sized, not a headline.
 - `docs/ui.md` says the dashboard is desktop only: no phone or tablet
