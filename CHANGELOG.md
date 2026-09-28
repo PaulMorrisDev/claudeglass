@@ -74,8 +74,8 @@ the changes listed under both releases.
   changed, a test run, only documentation changed, no skill run. The
   tags reach every view that reads Claude's, and `capture status` says
   how many turns Haiku tagged, what it cost and why any got none.
-  Subagent reports are still tagged by Claude. `capture tagger claude`
-  switches back.
+  Agent runs are Haiku's to judge either way (see "Subagents are asked
+  for nothing" below). `capture tagger claude` switches back.
 - **How well the tags come out, measured.** `scripts/eval-tagger.py`
   records scripted Claude Code sessions with known right answers and
   scores each judge against them. On 12 sessions held out from tuning,
@@ -179,6 +179,16 @@ the changes listed under both releases.
   command line, and where `claude` is npm's `claude.cmd` on Windows,
   cmd.exe takes their `|` and line breaks for its own. The file is in
   the data folder and deleted as soon as the call ends.
+- **`capture status` reports agent runs whoever writes the tags.** It
+  said what Haiku did only while Haiku wrote the main session's tags,
+  though it judges every agent run either way. It now has a line for
+  agent runs: how many were judged, what the calls cost and why any got
+  no verdict. A run that got none was logged without its `agent` mark
+  and counted as a main-session turn. A `claude` command that isn't
+  signed in (the desktop app keeps its own login) is now told apart as
+  `no_login`, with "run 'claude auth login'", instead of "the call
+  failed". The Capture page says "Claude Haiku judged 60% of agent
+  runs", not "Claude 60% of agent reports".
 - **A question about fixes isn't a vague fix.** "What problems can you
   fix now you are on my machine" got the say-what-you-saw tip. A message
   that opens with what, which, who, where, when or how no longer counts

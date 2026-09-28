@@ -603,6 +603,7 @@ def test_the_worker_logs_the_words_and_the_cost_never_the_excerpt(tmp_path):
     "error, word",
     [
         (FileNotFoundError("claude"), "no_cli"),
+        (HOOK.NoLogin(), "no_login"),
         (subprocess.TimeoutExpired("claude", 60), "timeout"),
         (ValueError("failed"), "failed"),
         (None, "no_tag"),
@@ -618,6 +619,41 @@ def test_a_turn_without_a_tag_says_why(tmp_path, error, word):
 
     record = HOOK.run_judge(tmp_path, CATALOGUE, job, ask=ask)
     assert record["err"] == word and "tl" not in record
+
+
+def test_an_agent_run_that_got_no_words_is_still_an_agent_run(tmp_path):
+    """It was logged with no ``agent`` key and read back as a main
+    session's turn, so ``capture status`` counted it among the turns."""
+    job = {"kind": "agent", "ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "keys": ["result"]}
+
+    def ask(*_args):
+        raise HOOK.NoLogin()
+
+    record = HOOK.run_judge(tmp_path, CATALOGUE, job, ask=ask)
+    assert record == {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "", "err": "no_login"}
+    [judged] = haiku_tags.load(tmp_path)
+    assert (judged.kind, judged.tag, judged.error) == ("agent", None, "no_login")
+
+
+@pytest.mark.parametrize(
+    "result, raised",
+    [
+        # What claude -p answers with no working login (2.1.280 on Windows,
+        # and the older wording), and an error that is something else.
+        ("Failed to authenticate: OAuth session expired and could not be refreshed", "NoLogin"),
+        ("Not logged in · Please run /login", "NoLogin"),
+        ("API Error: 529 Overloaded", "ValueError"),
+    ],
+)
+def test_a_claude_command_with_no_login_is_told_apart(tmp_path, monkeypatch, result, raised):
+    """The desktop app keeps its own login, so the ``claude`` command the
+    hook finds can have none; that is worth saying, not "the call failed"."""
+    answer = json.dumps({"type": "result", "is_error": True, "result": result, "total_cost_usd": 0})
+    monkeypatch.setattr(HOOK, "_claude_command", lambda: "claude")
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: NS(returncode=1, stdout=answer.encode("utf-8")))
+    job = HOOK.judge_job(_stop(_turn(tmp_path)), HAIKU, CATALOGUE)
+    with pytest.raises(HOOK.NoLogin if raised == "NoLogin" else ValueError):
+        HOOK.ask_haiku(job, CATALOGUE["judge"], tmp_path)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="a fake claude command is a shell script")
@@ -834,6 +870,24 @@ def test_capture_status_says_what_haiku_did(claude_dir):
     rc, out = _capture(claude_dir, "status")
     assert "Claude Haiku tagged 1 of the 2 turns it was asked about: $0.0014 ($0.0014 a call)" in out
     assert "No tag for 1 (no claude command on the hook's path)" in out
+
+
+def test_capture_status_says_how_agent_runs_were_judged_whoever_writes_the_tags(claude_dir):
+    """Agent runs are Haiku's to judge while Claude writes the main tags
+    too, so their calls, cost and failures show either way."""
+    set_capture(claude_dir, level="essentials", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    rc, out = _capture(claude_dir, "status")
+    assert "hasn't judged an agent run yet" in out and "hasn't tagged a turn yet" not in out
+    _tag_file(
+        claude_dir,
+        {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "agent": "result=done", "usd": 0.0015, "in": 1500},
+        {"ts": "2026-09-27T10:01:00Z", "reply": "msg_2", "agent": "", "err": "no_login"},
+        {"ts": "2026-09-27T10:02:00Z", "reply": "msg_3", "agent": "", "err": "no_login"},
+    )
+    rc, out = _capture(claude_dir, "status")
+    assert "Claude Haiku judged 1 of the 3 agent runs it was asked about: $0.0015 ($0.0015 a call)" in out
+    assert "No verdict for 2 (the claude command isn't signed in: run 'claude auth login')" in out
+    assert "turns it was asked about" not in out
 
 
 def test_your_changes_names_a_tagger_change():

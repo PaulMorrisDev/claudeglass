@@ -1258,8 +1258,9 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="What metrics capture cost since it was turned on, measured from the transcripts. That covers the "
             "notes that ask Claude for tags, the tags Claude wrote and /tl-feedback runs, with a weekly rate. It also "
             "shows what that buys you: the habits worth trying whose evidence needs capture or your feedback.",
-            read="Share is out of what the captured sessions cost. Coverage is how many messages and agent reports "
-            "carried the tag they were asked for. What it's worth only counts habits whose evidence is reported by "
+            read="Share is out of what the captured sessions cost. Coverage is how many messages carried the tag "
+            "they were asked for, and how many agent runs Claude Haiku judged. What it's worth only counts habits "
+            "whose evidence is reported by "
             "Claude or your feedback, not everything the report finds. When nothing measured yet depends on either, "
             "it says so instead of showing a zero.",
             act="{{page:setup/capture}} turns metrics on and off, one by one or by level. Once what it's worth "
@@ -1277,7 +1278,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "cost": "Cost",
             "share": "Share of spend",
             "coverage": "Messages tagged",
-            "report_coverage": "Agent reports tagged",
+            "report_coverage": "Agent runs judged",
             "feedback_runs": "Feedback runs",
             "feedback_cost": "Feedback cost",
             "weekly_cost": "Cost a week",

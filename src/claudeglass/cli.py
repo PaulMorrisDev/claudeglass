@@ -3293,7 +3293,7 @@ def _capture_usage_lines(use, units) -> list[str]:
     ]
     if use.coverage is not None:
         reports = (
-            f" and Claude {format_cell(use.report_coverage, 'pct')} of agent reports"
+            f"; Claude Haiku judged {format_cell(use.report_coverage, 'pct')} of agent runs"
             if use.report_coverage is not None
             else ""
         )
@@ -3585,6 +3585,7 @@ def _capture_prune(
 #: Why a turn got no tag from Claude Haiku, in words.
 _HAIKU_ERRORS = {
     "no_cli": "no claude command on the hook's path",
+    "no_login": "the claude command isn't signed in: run 'claude auth login'",
     "timeout": "Haiku took too long",
     "failed": "the call failed",
     "no_tag": "its answer had no tag",
@@ -3592,24 +3593,42 @@ _HAIKU_ERRORS = {
 
 
 def _haiku_lines(capture: CaptureConfig, config_dir: Path) -> list[str]:
-    """What Claude Haiku has done since capture was turned on, while it
-    writes the tags: turns asked about, tags written, why any got none,
-    and what the calls cost."""
+    """What Claude Haiku has done since capture was turned on: the main
+    session's turns while it writes the tags, and the agent runs it
+    judges whoever does. How many it was asked about, how many it
+    tagged, why any got none, and what the calls cost."""
     since = datetime.fromisoformat(capture.enabled_at) if capture.enabled_at else None
-    done = haiku_tags.summary(config_dir, since=since)
-    if not done.calls:
-        return [
-            "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
-            "change, once the hook's Stop entry is in settings.json."
-        ]
+    lines: list[str] = []
+    if capture.haiku_tags:
+        done = haiku_tags.summary(config_dir, since=since, kind="main")
+        if done.calls:
+            lines += _haiku_done_lines(done, "tagged", "turn", "No tag")
+        else:
+            lines.append(
+                "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
+                "change, once the hook's Stop entry is in settings.json."
+            )
+    if capture.is_on and capture_catalogue.agent_metric_ids(capture.active_metrics()):
+        done = haiku_tags.summary(config_dir, since=since, kind="agent")
+        if done.calls:
+            lines += _haiku_done_lines(done, "judged", "agent run", "No verdict")
+        else:
+            lines.append(
+                "Claude Haiku hasn't judged an agent run yet: it judges each subagent as it finishes, once the "
+                "hook's SubagentStop entry is in settings.json."
+            )
+    return lines
+
+
+def _haiku_done_lines(done: haiku_tags.Summary, verb: str, what: str, none: str) -> list[str]:
     per_call = f" (${done.usd_per_call:.4f} a call)" if done.usd_per_call is not None else ""
     lines = [
-        f"Claude Haiku tagged {done.tagged} of the {_plural(done.calls, 'turn')} it was asked about: "
+        f"Claude Haiku {verb} {done.tagged} of the {_plural(done.calls, what)} it was asked about: "
         f"${done.usd:.4f}{per_call}, {format_cell(done.tokens_in, 'tokens')} tokens read"
     ]
     if done.errors:
         lines.append(
-            "  No tag for "
+            f"  {none} for "
             + ", ".join(f"{count} ({_HAIKU_ERRORS.get(kind, kind)})" for kind, count in sorted(done.errors.items()))
         )
     return lines
@@ -3648,9 +3667,8 @@ def _capture_status(
             stdout.write(f"  - {line}\n")
     elif capture.is_on:
         stdout.write("It adds nothing to Claude's context at this level.\n")
-    if capture.haiku_tags:
-        for line in _haiku_lines(capture, config_dir):
-            stdout.write(f"{line}\n")
+    for line in _haiku_lines(capture, config_dir):
+        stdout.write(f"{line}\n")
     if args is not None and config is not None:
         for line in _capture_measured(capture, args=args, config=config, config_dir=config_dir):
             stdout.write(f"{line}\n")

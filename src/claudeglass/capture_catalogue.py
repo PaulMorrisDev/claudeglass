@@ -356,9 +356,9 @@ JUDGE_LIMITS = {
 }
 
 #: Why a turn got no Haiku tag, as its line in :data:`JUDGE_DIR` says:
-#: no ``claude`` command on the hook's path, Haiku took too long, the call
-#: failed, or its answer held no tag.
-JUDGE_ERRORS = ("no_cli", "timeout", "failed", "no_tag")
+#: no ``claude`` command on the hook's path, it isn't signed in, Haiku took
+#: too long, the call failed otherwise, or its answer held no tag.
+JUDGE_ERRORS = ("no_cli", "no_login", "timeout", "failed", "no_tag")
 
 JUDGE_INTRO = (
     "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage "
@@ -2196,7 +2196,9 @@ def render_markdown() -> str:
         "the agent's last reply, and are read as if the agent had written them. Each call costs about "
         f"${JUDGE_USD_PER_CALL:.3f}. Agents that set up Claude Code itself ("
         + ", ".join(f"`{t}`" for t in SKIP_AGENT_TYPES)
-        + ") are skipped."
+        + ") are skipped. `capture status` says how many runs were judged, what the calls cost and why any "
+        "got no verdict (a `claude` command that isn't signed in, say: the desktop app keeps its own login), "
+        "whoever writes the main session's tags."
     )
     p(
         "- Whether an agent used your CLAUDE.md rules (`rules`) can't be told from outside the agent, so it is "

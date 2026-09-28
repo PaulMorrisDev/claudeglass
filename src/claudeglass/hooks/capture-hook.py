@@ -1781,6 +1781,17 @@ def _claude_command() -> str | None:
     return fallback if fallback and os.path.isfile(fallback) else None
 
 
+#: What ``claude -p`` answers when it has no working login ("Not logged
+#: in · Please run /login", "Failed to authenticate: OAuth session expired
+#: and could not be refreshed", "Invalid API key"). The desktop app keeps
+#: its own login, so the ``claude`` command can have none.
+_NO_LOGIN_RE = re.compile(r"(?i)not logged in|/login|failed to authenticate|invalid api key|oauth")
+
+
+class NoLogin(Exception):
+    """``claude -p`` answered that it isn't signed in."""
+
+
 def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
     """Claude Code's JSON answer to ``job``, from ``claude -p`` on Haiku
     with no tools, settings, MCP servers or saved session: the excerpt on
@@ -1789,7 +1800,8 @@ def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
     line they would pass through cmd.exe wherever ``claude`` is npm's
     ``claude.cmd``, which reads their ``|`` and line breaks as its own.
     Raises ``FileNotFoundError`` without a ``claude`` command,
-    ``subprocess.TimeoutExpired``, or ``ValueError`` when the call fails."""
+    ``subprocess.TimeoutExpired``, :class:`NoLogin` when it isn't signed
+    in, or ``ValueError`` when the call fails otherwise."""
     import subprocess
     import tempfile
 
@@ -1820,6 +1832,8 @@ def ask_haiku(job: dict, judge: dict, cwd: Path | None = None) -> dict:
         except OSError:
             pass
     answer = json.loads(done.stdout.decode("utf-8", errors="replace") or "null")
+    if isinstance(answer, dict) and answer.get("is_error") and _NO_LOGIN_RE.search(str(answer.get("result") or "")):
+        raise NoLogin()
     if done.returncode != 0 or not isinstance(answer, dict) or answer.get("is_error"):
         raise ValueError("failed")
     return answer
@@ -1835,12 +1849,18 @@ def run_judge(config_dir: Path, catalogue: dict, job: dict, ask=None) -> dict:
     judge = catalogue["judge"]
     agent = job.get("kind") == "agent"
     record: dict = {"ts": job["ts"], "reply": job["reply"]}
+    if agent:
+        # Marked from the start, so a run that got no words still reads
+        # as an agent run, not as a turn of the main session.
+        record["agent"] = ""
     try:
         answer = (ask or ask_haiku)(job, judge, config_dir)
     except FileNotFoundError:
         record["err"] = "no_cli"
     except subprocess.TimeoutExpired:
         record["err"] = "timeout"
+    except NoLogin:
+        record["err"] = "no_login"
     except (OSError, ValueError):
         record["err"] = "failed"
     else:

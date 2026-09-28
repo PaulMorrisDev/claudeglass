@@ -184,7 +184,7 @@ function renderCaptureData(data, container) {
       ];
       if (measured.coverage_text) {
         var tagger = config.tagger === "haiku" ? "Claude Haiku" : "Claude";
-        lines.push(tagger + " tagged " + measured.coverage_text + " of your messages" + (measured.report_coverage_pct !== null ? " and Claude " + formatCell(measured.report_coverage_pct, "pct") + " of agent reports." : "."));
+        lines.push(tagger + " tagged " + measured.coverage_text + " of your messages" + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs." : "."));
       }
       nowBlock.appendChild(el("ul", { class: "notes" }, lines.map(function (line) {
         return el("li", { text: line });
@@ -379,7 +379,7 @@ function renderCaptureControls(data, container) {
   });
   form.appendChild(el("label", { for: taggerId, text: "Tags written by" }));
   form.appendChild(tagger);
-  form.appendChild(el("p", { class: "notes", text: "Claude Haiku keeps the tags out of Claude's replies and context. After each turn, a hook sends it a short excerpt, through your own Claude Code login. Only the tag's words are kept. Subagent reports are still tagged by Claude." }));
+  form.appendChild(el("p", { class: "notes", text: "Claude Haiku keeps the tags out of Claude's replies and context. After each turn, a hook sends it a short excerpt, through your own Claude Code login. Only the tag's words are kept. Agent runs are Claude Haiku's to judge either way." }));
 
   var endId = "capture-end";
   var end = el("select", { id: endId });

@@ -281,16 +281,19 @@ class Summary:
 
     @property
     def usd_per_call(self) -> float | None:
-        costed = self.calls - self.errors.get("no_cli", 0) - self.errors.get("timeout", 0)
+        costed = self.calls - sum(self.errors.get(e, 0) for e in ("no_cli", "no_login", "timeout"))
         return self.usd / costed if costed > 0 else None
 
 
-def summary(config_dir: str | Path | None, *, since: datetime | None = None) -> Summary:
-    """:class:`Summary` of the tag files from ``since`` on."""
+def summary(config_dir: str | Path | None, *, since: datetime | None = None, kind: str | None = None) -> Summary:
+    """:class:`Summary` of the tag files from ``since`` on: the main
+    session's turns (``kind="main"``), agent runs (``"agent"``) or both."""
     out = Summary()
     if config_dir is None:
         return out
     for judged in load(config_dir, since=since):
+        if kind is not None and judged.kind != kind:
+            continue
         out.calls += 1
         out.agent_calls += judged.kind == "agent"
         out.usd += judged.usd
