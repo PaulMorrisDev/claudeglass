@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from claudeglass import advice, fixes
+from claudeglass import advice, fixes, known_savers
 from claudeglass.model import (
     Column,
     Diagnostics,
@@ -572,3 +572,88 @@ def test_effort_mismatch_change_keeps_the_recommendations_own_scope():
     snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"effective": {}})
     (out,) = [r for r in advice.finish([rec], report, snap, Units()) if r.id == "effort-mismatch"]
     assert out.changes[0].scope == "project-local"
+
+
+# -- long-context-share: evidence lookup, title, tokensave variant --------
+
+
+def _tokensave_report() -> ReportModel:
+    """A report where tokensave (github.com/aovestdipaperino/tokensave)
+    was at work in the window: ``known_savers.active_in_report`` reads
+    this the same way it reads a real one, via a ``carry_by_tool`` row
+    whose key is one of tokensave's MCP tools."""
+    table = Table(
+        name="carry_by_tool",
+        columns=[Column(key="key", label="Tool"), Column(key="count", label="Count")],
+        rows=[["mcp__tokensave__tokensave_search", 5]],
+    )
+    return ReportModel(
+        meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)),
+        sections=[Section(key="carry", title="Carry", tables=[table])],
+        diagnostics=Diagnostics(lines=1000),
+    )
+
+
+def _long_context_share_rec(*, p90=None, share_pct=None) -> Recommendation:
+    evidence = []
+    if share_pct is not None:
+        evidence.append(("Cache-read volume share from huge-context turns", share_pct, "recache.recache_huge_context", "all"))
+    if p90 is not None:
+        evidence.append(("Context size 9 in 10 main-session replies stay under", p90, "scorecard.dimensions", "context_hygiene"))
+    return Recommendation(id="long-context-share", severity="advice", category="workflow", lever=None, evidence=evidence)
+
+
+def test_long_context_share_why_names_the_p90_number_and_title_says_main_session():
+    # recommend._rule_long_context_share labels this evidence row
+    # "Context size 9 in 10 main-session replies stay under" -- the old
+    # advice.py lookup searched for "p90", a substring that label never
+    # had, so the whole clause silently dropped out of rec.why.
+    (out,) = advice.finish([_long_context_share_rec(p90=236_196)], _model_swap_report([]), None, Units())
+    assert "236,196" in out.why
+    assert "One main-session reply in ten read more than" in out.why
+    assert "Your main session" in out.title
+
+
+def test_long_context_share_title_does_not_claim_main_session_when_only_share_fired():
+    # The share clause counts every reply, subagents included -- only the
+    # p90 clause is about the main session specifically.
+    (out,) = advice.finish([_long_context_share_rec(share_pct=25.0)], _model_swap_report([]), None, Units())
+    assert "main session" not in out.title.lower()
+
+
+def test_long_context_share_tokensave_variant_avoids_subagent_and_explore_wording():
+    rec = _long_context_share_rec(p90=236_196)
+    (out,) = advice.finish([rec], _tokensave_report(), None, Units())
+    assert out.variant == "tokensave"
+    (fix,) = fixes.build_fixes(out)
+    text = (fix["prompt"] + " " + out.action + " " + " ".join(t for _h, t in fix["explainer"])).lower()
+    assert "tokensave" in text
+    assert "subagent" not in text
+    assert "explore" not in text
+
+
+def test_long_context_share_ignores_tokensave_tried_once_in_a_busy_window():
+    # One scratch session's tokensave calls among a month of work
+    # shouldn't reword every fix for it (known_savers.ADVICE_MIN_SHARE).
+    table = Table(
+        name="carry_by_tool",
+        columns=[Column(key="key", label="Tool"), Column(key="result_count", label="Results")],
+        rows=[["Read", 480], ["Bash", 500], ["mcp__tokensave__tokensave_search", 2]],
+    )
+    report = ReportModel(
+        meta=ReportMeta(pricing=PricingMeta(coverage_pct=100.0)),
+        sections=[Section(key="carry", title="Carry", tables=[table])],
+        diagnostics=Diagnostics(lines=1000),
+    )
+    (out,) = advice.finish([_long_context_share_rec(p90=236_196)], report, None, Units())
+    assert out.variant == ""
+    assert known_savers.active_in_report(report)
+    assert not known_savers.active_in_report(report, min_share=known_savers.ADVICE_MIN_SHARE)
+
+
+def test_long_context_share_without_tokensave_still_mentions_a_subagent():
+    rec = _long_context_share_rec(p90=236_196)
+    (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert out.variant == ""
+    (fix,) = fixes.build_fixes(out)
+    assert "subagent" in fix["prompt"].lower()

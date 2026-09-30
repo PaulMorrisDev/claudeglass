@@ -18,6 +18,108 @@ never reports its present/absent comparison as anything stronger than
 "observed, not controlled" — the same causality caveat `compare.py`'s
 own module docstring states about its arm comparisons.
 
+## Known savers (`known_savers.py`) and the "known-savers" check
+
+The present/absent comparison above is general and unwired (see "API
+and wiring"). `known_savers.py` is a separate, much narrower piece that
+*is* wired in: a small registry of third-party token-saving tools
+ClaudeGlass can recognise **by name**, used by the `quick_actions`
+check `"known-savers"` ("What does tokensave save you?"), which sits
+right after `"tool-search"` in `quick_actions.CHECK_IDS`
+([`api.md`](api.md)).
+
+Today the registry holds one entry, tokensave
+(github.com/aovestdipaperino/tokensave). Its strings were checked
+against v7.13.0, installed and run in a scratch project:
+
+- Its `PreToolUse` hook denies a call with JSON
+  (`permissionDecision: "deny"`), which Claude Code writes into the
+  transcript as `PreToolUse:<Tool> hook error: <reason>`, with no
+  `[command]:` part naming the hook. So the reason's own wording is the
+  only way to tell whose redirect it was — `known_savers.KNOWN_SAVERS`
+  holds a phrase from each of tokensave's redirect messages
+  (`"tokensave-indexed project"`, `"Use tokensave MCP tools"`,
+  `"TOKENSAVE_DISABLE_GREP_HOOK"`), matched by `saver_for_text`. A
+  redirected call is counted in `waste.waste_blocked_by` with
+  `kind="saver"`, `blocker="tokensave"` — a turned-away call, not a
+  mistake, the same distinction `REDIRECT_CAUSE` draws for it.
+- Advice is worded for tokensave (use `tokensave_context` and
+  `tokensave_search` instead of an Explore agent) only where it does a
+  real share of the work: its own calls and redirects must be at least
+  `known_savers.ADVICE_MIN_SHARE` (2%) of the window's tool calls. One
+  scratch session among a month's work doesn't change every tip. The
+  "What does tokensave save you?" check shows on any use.
+- Claude Code also tags that line `toolDenialKind: "permission-rule"`,
+  the same as a deny rule you wrote. `events.py` gives such a denial the
+  subkind `known_savers.REDIRECT_DENIAL_KIND` (`"saver-redirect"`)
+  instead, so the Work habits playbook's "Tell Claude up front what not
+  to do" and the quality signal "Tool calls you denied" don't count a
+  redirect as a request you turned down.
+- It records every call's own before/after estimate in
+  `~/.tokensave/global.db`, table `savings_ledger`
+  (`ts`, `project_path`, `tool_name`, `before_tokens`, `after_tokens`),
+  whether or not its `report_savings` setting adds a
+  `tokensave_metrics:` line to the tool result (off by default in
+  v7.13.0). `known_savers.read_ledger(since_ts, until_ts, home=None,
+  project=None)` reads that table read-only and keeps only the numbers;
+  it returns `None` when the file isn't on this machine (it may run in
+  Docker, or on another machine entirely), never raises. `project`,
+  when given, keeps only rows whose own `project_path` matches it,
+  compared the same case/symlink-insensitive way `discovery.py`
+  normalises a project folder — a report already limited to one
+  project should not fold in another project's calls.
+
+### How the check values it
+
+For the report's own window, the check gathers three things:
+
+1. **tokensave's own carry cost** — the `carry_by_tool` rows whose key
+   starts with `mcp__tokensave__`: its calls, the tokens its own
+   answers put in context, and what carrying them cost.
+2. **Its redirects' cost** — the `waste_blocked_by` rows with
+   `kind="saver"`, `blocker="tokensave"`: replies spent and their cost.
+3. **Its ledger** — `known_savers.read_ledger`, for the same window and
+   (when the report is scoped to one project) the same project.
+
+When the ledger is there, the check prices what tokensave says it
+replaced the same way the rest of a report prices anything carried in
+context: a per-token carry rate, taken from tokensave's *own* answers
+(their carry cost ÷ the tokens they put in context), applied to the
+ledger's `before` tokens as the value of what would otherwise have been
+carried instead:
+
+```
+rate  = own_carry_cost_usd / own_tokens_entered
+value = ledger.before * rate
+net   = value - own_carry_cost_usd - redirect_cost_usd
+```
+
+Net is shown signed (it can be negative), alongside tokensave's own
+`saved` figure (`ledger.before - ledger.after`) and how many of its
+calls (`losing_calls`) cost more than they replaced. Verdicts:
+
+- **`no_data`** — tokensave wasn't active in this report's window
+  (`known_savers.active_in_report` is false): it called none of its
+  own tools and its hook redirected nothing.
+- **No ledger found** — only the known costs (its own carry cost, its
+  redirects' cost) are shown, with no valuation, since there is
+  nothing to price what it replaced against. `"ok"`, unless the
+  redirect cost alone is at least `$0.01` (the same "material at all"
+  floor `SaverThresholds.net_saving_usd_min` uses above), in which case
+  `"act"` with a scope-only fix pointing at tokensave's own search
+  tools.
+- **Net non-negative** — `"ok"`.
+- **Net negative** — `"act"`, always with exactly one fix. If the
+  redirect cost is at least 10% of the net loss's size (the same "worth
+  acting on" bar `CAP_MIN_SAVING_SHARE` uses for an output cap in the
+  `tool-output` check), the fix is a scope-only prompt: go straight to
+  tokensave's own tools instead of `Grep`/`Glob`/an Explore agent, so
+  its hook never has anything to turn away. Otherwise the loss is
+  mostly tokensave's own carried answers, and the fix is a command,
+  `tokensave uninstall --agent claude`, with a warning that it removes
+  only the hook and MCP server entry — not the project's `.tokensave`
+  index or the ledger itself.
+
 ## What this is, precisely
 
 Three stages:

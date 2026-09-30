@@ -695,11 +695,22 @@ window rather than a fresh corpus scan.
 Query: `window`, `window_days`, or `since`/`until` (see "Report-backed
 routes: windowing query params" above).
 
-`data`: `[{"id", "severity", "category", "title", "action", "lever", "scope", "evidence": [[label, value, source_table, row_key], ...], "agent_type", "why", "estimated_saving", "saving_basis", "saving_usd", "changes": [{"target", "key", "agent", "value", "suggested", "note", "unconfirmed", "current", "new_agent_file"}, ...], "fixes": [{"key", "agent", "explainer": [[heading, text], ...], "command", "command_warning", "prompt"}, ...], "key"}, ...]` —
+`data`: `[{"id", "severity", "category", "title", "action", "lever", "scope", "evidence": [[label, value, source_table, row_key], ...], "agent_type", "why", "estimated_saving", "saving_basis", "saving_usd", "changes": [{"target", "key", "agent", "value", "suggested", "note", "unconfirmed", "current", "new_agent_file"}, ...], "fixes": [{"key", "agent", "explainer": [[heading, text], ...], "command", "command_warning", "prompt", "note"}, ...], "key"}, ...]` —
 exactly `render/json_out.py`'s existing `Recommendation` encoding.
 `fixes` (from `fixes.py`) holds, per change, the six-part explainer, an
 `apply --set ... --dry-run` command (`null` when the value needs
-judgement) and a prompt for Claude. `saving_usd` is `estimated_saving`
+judgement) and a prompt for Claude. For a workflow recommendation (no
+setting to change), the explainer is three parts instead of six (where
+and who it affects, the trade-off, how to undo it), with a first "Why
+it's suggested" row prepended when `why` is set. A fix's `note` (not to
+be confused with a `changes` row's own `note` above) is optional and
+picks which reminder belongs under its prompt/command: absent for the
+default (`fixes.RESTART_NOTE`, "restart Claude Code to pick up the
+change"), `"scope"` for a "from now on" prompt that asks Claude where to
+keep the rule (`fixes.SCOPE_NOTE` instead — pasting it doesn't save a
+file a restart would re-read), or `"none"` when neither applies (the
+prompt or change was never something Claude Code reads at startup).
+`saving_usd` is `estimated_saving`
 as a plain number (USD at list price, `null` when not estimated) —
 used to order recommendations of the same severity, and safe for a
 client to format or sort by directly. `key` (additive) is a
@@ -889,7 +900,7 @@ been captured. `capture_status.summary` is the same one-line status
 
 One answer per way of saving tokens (`quick_actions.CHECKS`): models,
 effort, compaction, cache, tools, skills, claude-md, tool-output,
-hooks, tool-search, habits, quality and cost-record. Each check always answers, including "nothing to
+hooks, tool-search, known-savers, habits, quality and cost-record. Each check always answers, including "nothing to
 do". The last, cost-record, checks ClaudeGlass's own figures against the
 cost Claude Code records for a session.
 

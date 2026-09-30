@@ -153,6 +153,227 @@ def test_a_hook_block_is_its_own_cause(tmp_path: Path):
     assert "hook enforces" in waste.LEVERS["blocked"]
 
 
+# -- redirected (known token savers) ------------------------------------------
+
+#: A real tokensave v7.13.0 redirect message (Bash grep), reworded from a
+#: scratch project's own transcript -- see docs/waste.md and
+#: known_savers.py's own module docstring.
+_TOKENSAVE_GREP_BLOCK = (
+    "PreToolUse:Bash hook error: STOP: This Bash grep targets a code file in a tokensave-indexed project and "
+    "the pattern `build_fixes` looks like a symbol name. Use tokensave_search (definition) or "
+    "tokensave_callers_for (usages) instead -- symbol-indexed lookups are faster and more accurate than text "
+    "grep. To override for this one call, set TOKENSAVE_DISABLE_GREP_HOOK=1 in the shell."
+)
+
+
+def test_redirect_cause_when_every_blocked_call_is_a_known_savers_redirect(tmp_path: Path):
+    stats = _one_error_turn(tmp_path, _TOKENSAVE_GREP_BLOCK)
+    assert stats._by_cause["blocked"].turns == 0
+    assert stats.redirected_turns == 1
+    assert stats.redirected_cost_usd == pytest.approx(1.0)
+    # Never counted as wasted.
+    assert stats.wasted_turns == 0
+    assert stats.wasted_cost_usd == 0.0
+
+
+def test_a_mix_of_redirect_and_a_real_block_in_one_turn_stays_blocked(tmp_path: Path):
+    hook_text = "PreToolUse:Bash hook error: [guard.ps1]: BLOCKED: run the eval first"
+    lines = [
+        turn_line(
+            message_id="msg_1", model=_MODEL, input_tokens=1_000_000, output_tokens=0,
+            content=[tool_use_block("Bash", "tu_a", {"command": "grep build_fixes ."}),
+                     tool_use_block("Bash", "tu_b", {"command": "run something"})],
+        ),
+        user_block_line([
+            tool_result_block("tu_a", _TOKENSAVE_GREP_BLOCK, is_error=True),
+            tool_result_block("tu_b", hook_text, is_error=True),
+        ]),
+    ]
+    result = _parse(tmp_path, lines)
+    stats = waste.WasteStats(config_dir=tmp_path / "cfg")
+    stats.add(result, _pricing())
+    assert stats._by_cause["blocked"].turns == 1
+    assert stats.redirected_turns == 0
+
+
+def test_redirected_is_priced_and_shown_but_never_wasted(tmp_path: Path):
+    stats = _one_error_turn(tmp_path, _TOKENSAVE_GREP_BLOCK)
+    section = waste.build_section(stats)
+
+    by_cause = _table(section, "waste_by_cause")
+    row = dict(zip([c.key for c in by_cause.columns], next(r for r in by_cause.rows if r[0] == "redirected")))
+    assert row["turns"] == 1 and row["cost_usd"] == pytest.approx(1.0)
+    assert "Not waste" in row["lever"]
+    assert "redirected" not in waste.CAUSES
+
+    summary = _table(section, "waste_summary")
+    srow = dict(zip([c.key for c in summary.columns], summary.rows[0]))
+    assert srow["wasted_turns"] == 0 and srow["wasted_cost_usd"] == 0.0
+    assert srow["redirected_turns"] == 1 and srow["redirected_cost_usd"] == pytest.approx(1.0)
+
+
+def test_rule_wasted_turns_ignores_redirected_cost(tmp_path: Path):
+    """A window whose only blocked replies are redirects must not read
+    as a problem: the wasted-turns rule never fires from redirected cost
+    alone, however large a share of the window it is."""
+    lines = [
+        turn_line(
+            message_id="msg_1", model=_MODEL, input_tokens=9_000_000, output_tokens=0,
+            content=[tool_use_block("Bash", "tu_a", {"command": "grep build_fixes ."})],
+        ),
+        user_block_line([tool_result_block("tu_a", _TOKENSAVE_GREP_BLOCK, is_error=True)]),
+        turn_line(message_id="msg_2", model=_MODEL, input_tokens=1_000_000, output_tokens=0),
+    ]
+    result = _parse(tmp_path, lines)
+    stats = waste.WasteStats(config_dir=tmp_path / "cfg")
+    stats.add(result, _pricing())
+    section = waste.build_section(stats)
+    report = _report_with_waste_section(section, sessions=10, priced_turns=500)
+
+    th = waste.WasteThresholds(share_pct=10.0, min_sessions=5, min_turns=200)
+    assert waste.RULES[0](report, th) == []
+
+
+# -- waste_blocked_by ----------------------------------------------------------
+
+_WORKTREE_BLOCK = (
+    "This agent is isolated in the worktree /repo/.worktrees/impl-1, but this command names git in a form too "
+    "complex to verify that it stays inside the worktree. Refusing to run it -- a worktree-isolated agent's "
+    "git operations must target its own worktree. Split it into plain, separate commands and run them one at "
+    "a time."
+)
+_SLEEP_CHAIN_BLOCK = (
+    "<tool_use_error>Blocked: sleep 45 followed by: gh pr checks 674. To wait for a condition, use Monitor "
+    "with an until-loop (e.g. `until <check>; do sleep 2; done`). To wait for a command you started, use "
+    "run_in_background: true. Do not chain shorter sleeps to work around this block.</tool_use_error>"
+)
+_NAMED_HOOK_BLOCK = (
+    "PreToolUse:Read hook error: [powershell -File .claude/hooks/index-first-guard.ps1]: index-first-guard: "
+    "first Read of an indexed file must use the index."
+)
+_UNNAMED_HOOK_BLOCK = "PreToolUse:Bash hook error: nope"
+
+
+def _blocked_turn(tmp_path: Path, text: str, *, kind="subagent", agent_type="claude-implementer") -> object:
+    lines = [
+        turn_line(message_id="msg_1", model=_MODEL, input_tokens=1_000_000, output_tokens=0,
+                  content=[tool_use_block("Bash", "tu_a", {"command": "x"})]),
+        user_block_line([tool_result_block("tu_a", text, is_error=True)]),
+    ]
+    result = _parse(tmp_path, lines, kind=kind, agent_type=agent_type)
+    stats = waste.WasteStats(config_dir=tmp_path / "cfg")
+    stats.add(result, _pricing())
+    return waste.build_section(stats)
+
+
+def _blocked_by_row(section, blocker: str) -> dict:
+    table = _table(section, "waste_blocked_by")
+    keys = [c.key for c in table.columns]
+    return dict(zip(keys, next(r for r in table.rows if r[0] == blocker)))
+
+
+def test_blocked_by_names_the_worktree_guard_and_its_lever(tmp_path: Path):
+    section = _blocked_turn(tmp_path, _WORKTREE_BLOCK)
+    row = _blocked_by_row(section, "Claude Code's worktree guard")
+    assert (row["kind"], row["agent_type"], row["turns"]) == ("guard", "claude-implementer", 1)
+    assert "run git as plain, separate commands" in row["lever"]
+
+
+def test_blocked_by_names_the_sleep_chain_guard_and_its_lever(tmp_path: Path):
+    section = _blocked_turn(tmp_path, _SLEEP_CHAIN_BLOCK)
+    row = _blocked_by_row(section, "a Claude Code guard")
+    assert row["kind"] == "guard"
+    assert "Monitor" in row["lever"] and "run_in_background" in row["lever"]
+
+
+def test_blocked_by_names_a_hook_by_its_script(tmp_path: Path):
+    section = _blocked_turn(tmp_path, _NAMED_HOOK_BLOCK)
+    row = _blocked_by_row(section, "index-first-guard.ps1")
+    assert row["kind"] == "hook"
+    assert "Put what index-first-guard.ps1 enforces into" in row["lever"]
+
+
+def test_blocked_by_names_an_unnamed_hook(tmp_path: Path):
+    section = _blocked_turn(tmp_path, _UNNAMED_HOOK_BLOCK)
+    row = _blocked_by_row(section, "a hook that doesn't give its name")
+    assert row["kind"] == "guard"
+    assert "Check your hooks" in row["lever"]
+
+
+def test_blocked_by_names_the_saver_with_a_not_waste_lever(tmp_path: Path):
+    section = _blocked_turn(tmp_path, _TOKENSAVE_GREP_BLOCK, kind="top-level", agent_type=None)
+    row = _blocked_by_row(section, "tokensave")
+    assert (row["kind"], row["agent_type"]) == ("saver", "top-level")
+    assert "Not waste: tokensave" in row["lever"] and "What does tokensave save you?" in row["lever"]
+
+
+def test_blocked_by_leaves_the_saver_out_of_the_comparison_for_a_blocked_turn(tmp_path: Path):
+    """A turn with a redirect mixed into a real block still counts as
+    "blocked" (see test_a_mix_of_redirect_and_a_real_block_in_one_turn_
+    stays_blocked), and its own blocked-by row is the hook or guard,
+    never the saver mixed in alongside it."""
+    hook_text = "PreToolUse:Bash hook error: [guard.ps1]: BLOCKED: run the eval first"
+    lines = [
+        turn_line(
+            message_id="msg_1", model=_MODEL, input_tokens=1_000_000, output_tokens=0,
+            content=[tool_use_block("Bash", "tu_a", {"command": "grep build_fixes ."}),
+                     tool_use_block("Bash", "tu_b", {"command": "run something"})],
+        ),
+        user_block_line([
+            tool_result_block("tu_a", _TOKENSAVE_GREP_BLOCK, is_error=True),
+            tool_result_block("tu_b", hook_text, is_error=True),
+        ]),
+    ]
+    result = _parse(tmp_path, lines)
+    stats = waste.WasteStats(config_dir=tmp_path / "cfg")
+    stats.add(result, _pricing())
+    section = waste.build_section(stats)
+    table = _table(section, "waste_blocked_by")
+    assert [row[0] for row in table.rows] == ["guard.ps1"]
+
+
+def test_blocked_by_sums_to_the_blocked_and_redirected_replies(tmp_path: Path):
+    lines = [
+        turn_line(message_id="msg_1", model=_MODEL, input_tokens=1_000_000, output_tokens=0,
+                  content=[tool_use_block("Bash", "tu_a", {"command": "x"})]),
+        user_block_line([tool_result_block("tu_a", _WORKTREE_BLOCK, is_error=True)]),
+        turn_line(message_id="msg_2", model=_MODEL, input_tokens=1_000_000, output_tokens=0,
+                  content=[tool_use_block("Bash", "tu_b", {"command": "grep build_fixes ."})]),
+        user_block_line([tool_result_block("tu_b", _TOKENSAVE_GREP_BLOCK, is_error=True)]),
+    ]
+    result = _parse(tmp_path, lines, kind="subagent", agent_type="claude-implementer")
+    stats = waste.WasteStats(config_dir=tmp_path / "cfg")
+    stats.add(result, _pricing())
+    section = waste.build_section(stats)
+    table = _table(section, "waste_blocked_by")
+    total = sum(row[_col(table, "turns")] for row in table.rows)
+    assert total == stats._by_cause["blocked"].turns + stats.redirected_turns == 2
+
+
+def test_blocked_by_sorted_by_cost_descending(tmp_path: Path):
+    lines = [
+        turn_line(message_id="msg_1", model=_MODEL, input_tokens=1_000_000, output_tokens=0,
+                  content=[tool_use_block("Bash", "tu_a", {"command": "grep build_fixes ."})]),
+        user_block_line([tool_result_block("tu_a", _TOKENSAVE_GREP_BLOCK, is_error=True)]),
+        turn_line(message_id="msg_2", model=_MODEL, input_tokens=5_000_000, output_tokens=0,
+                  content=[tool_use_block("Bash", "tu_b", {"command": "x"})]),
+        user_block_line([tool_result_block("tu_b", _WORKTREE_BLOCK, is_error=True)]),
+    ]
+    result = _parse(tmp_path, lines, kind="subagent", agent_type="claude-implementer")
+    stats = waste.WasteStats(config_dir=tmp_path / "cfg")
+    stats.add(result, _pricing())
+    section = waste.build_section(stats)
+    table = _table(section, "waste_blocked_by")
+    costs = [row[_col(table, "cost_usd")] for row in table.rows]
+    assert costs == sorted(costs, reverse=True)
+    assert table.rows[0][0] == "Claude Code's worktree guard"
+
+
+def test_waste_blocked_by_passes_privacy_scan(tmp_path: Path):
+    section = _blocked_turn(tmp_path, _NAMED_HOOK_BLOCK)
+    assert_privacy(section)
+
+
 # -- interrupt ---------------------------------------------------------------
 
 

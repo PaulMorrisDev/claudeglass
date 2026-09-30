@@ -44,6 +44,7 @@ from typing import TYPE_CHECKING
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
 from . import classify
+from . import known_savers
 from . import model_gate
 from . import quality
 from .context_files import _parse_ts
@@ -196,6 +197,27 @@ EXAMPLES = {
     "problems.",
     "outcome_misses": "Before you start, tell me your plan in three lines and what done will look like.",
 }
+
+#: ``explore_research``'s own title and example, when ``known_savers``
+#: shows tokensave was at work in the window (``Habits.saver_active``):
+#: its hook blocks every Explore agent call in a tokensave-indexed
+#: project, so the generic advice above would just get redirected.
+EXPLORE_RESEARCH_TOKENSAVE_TITLE = "Search with tokensave's tools instead of reading it yourself"
+EXPLORE_RESEARCH_TOKENSAVE_EXAMPLE = (
+    "tokensave_context \"where are retries handled\" for the concept, tokensave_search for a symbol by name, "
+    "tokensave_files for files by path, then read only the lines you need."
+)
+#: Same switch for the playbook row's WHERE/trade-off (UX-8): ``UNDO``
+#: doesn't name an Explore agent either way, so it needs no variant.
+EXPLORE_RESEARCH_TOKENSAVE_WHERE = (
+    "Nowhere in Claude Code's config. This is choosing to search with tokensave's own tools (tokensave_context, "
+    "tokensave_search, tokensave_files) and read only the lines you need, instead of reading and searching "
+    "yourself in the main session."
+)
+EXPLORE_RESEARCH_TOKENSAVE_TRADE_OFF = (
+    "tokensave's tools return only what matched a query: a detail you'd have noticed reading the whole file "
+    "yourself can get left out, the same trade-off an Explore agent's own summary has."
+)
 
 #: How each item's saving is worked out.
 BASES = {
@@ -631,6 +653,15 @@ class Habits:
     #: .effort_mismatch_thinking_share_pct``; ``build_section`` resolves
     #: the configured value so the two never disagree (UX-3).
     effort_share_threshold_pct: float = 30.0
+    #: A known token saver (tokensave) was relied on in the window: its
+    #: own calls and the calls its hook turned away were at least
+    #: ``known_savers.ADVICE_MIN_SHARE`` of every session's tool calls
+    #: together (``saver_calls``/``tool_calls``). ``explore_research``
+    #: reads this to switch its advice from an Explore agent -- which the
+    #: saver's hook would just block -- to the saver's own search tools.
+    saver_active: bool = False
+    saver_calls: int = 0
+    tool_calls: int = 0
 
     @property
     def weeks(self) -> list[str]:
@@ -697,6 +728,10 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     turns = capture_mod._priced(top)
     if not turns:
         return
+    own, total = known_savers.calls_in_turns(turns)
+    out.saver_calls += own
+    out.tool_calls += total
+    out.saver_active = out.saver_calls > 0 and out.saver_calls >= known_savers.ADVICE_MIN_SHARE * out.tool_calls
     cycles = capture_mod.prompt_cycles(top, bundle.subs)
     carry = _CarryCost(turns, rates)
     first_turn = turns[0]
@@ -979,6 +1014,17 @@ class Item:
     sources: tuple[str, ...]
     evidence: str
     example: str = ""
+    #: Overrides ``ITEMS[key][1]`` for this item's own report, when a
+    #: finding changes what the habit itself asks for (so far only
+    #: ``explore_research``, switched to tokensave's tools -- see
+    #: ``item_title``); "" to use the fixed title.
+    title: str = ""
+    #: Same override shape as ``title``, for the playbook row's
+    #: ``WHERE``/``TRADE_OFFS`` entries (``playbook_table`` uses
+    #: ``item.where or WHERE[item.key]``, etc.); "" to use the fixed one.
+    where: str = ""
+    trade_off: str = ""
+    undo: str = ""
     #: week -> USD the habit addresses, for the trend.
     waste: dict = field(default_factory=dict)
     #: EST-P7: the share of ``saving`` that comes from a ``reported`` or
@@ -995,6 +1041,12 @@ class Item:
     @property
     def source(self) -> str:
         return " + ".join(self.sources)
+
+
+def item_title(item: Item) -> str:
+    """``item``'s display title: its own :attr:`Item.title` when the
+    finding switched it, else ``ITEMS[item.key]``'s fixed one."""
+    return item.title or ITEMS[item.key][1]
 
 
 def _by_week(pairs) -> dict[str, float]:
@@ -1227,8 +1279,13 @@ def _item_explore_research(h: Habits) -> Item | None:
     saving = sum(usd for _, usd in gaps)
     if not heavy or saving <= 0:
         return None
+    # Tokensave's hook blocks every Explore agent call in an indexed
+    # project (``known_savers``), so when it was at work in the window
+    # the advice switches to its own search tools instead.
+    tokensave = h.saver_active
+    with_no = "with tokensave's own tools available instead" if tokensave else "with no Explore agent"
     parts = [f"{len(heavy)} asks ran {_mean(c.reads for c in heavy):.0f} reads and searches in the main session on "
-             "average, with no Explore agent"]
+             f"average, {with_no}"]
     # CAP-5: found=no|partial on one of these *heavy* cycles is direct
     # evidence its reading didn't pay off, so it -- not an unrelated count
     # over the whole corpus (A4) -- decides which dollars of ``saving``
@@ -1239,6 +1296,10 @@ def _item_explore_research(h: Habits) -> Item | None:
         parts.append(f"Claude said it didn't find what it looked for {not_found} times")
     return Item(
         "explore_research", saving, len(heavy), _sources(confirmed > 0, confirmed < saving), _clauses(parts),
+        example=EXPLORE_RESEARCH_TOKENSAVE_EXAMPLE if tokensave else "",
+        title=EXPLORE_RESEARCH_TOKENSAVE_TITLE if tokensave else "",
+        where=EXPLORE_RESEARCH_TOKENSAVE_WHERE if tokensave else "",
+        trade_off=EXPLORE_RESEARCH_TOKENSAVE_TRADE_OFF if tokensave else "",
         waste=_by_week((c.week, usd) for c, usd in gaps),
         reported_share=confirmed / saving if saving else 0.0,
     )
@@ -1879,7 +1940,7 @@ def playbook_table(h: Habits, items: list[Item]) -> Table:
     rows = []
     for item in items:
         word, spark, _ = trend(h, item)
-        theme, _title = ITEMS[item.key]
+        theme, _ = ITEMS[item.key]
         rows.append([
             item.key,
             theme,
@@ -1896,9 +1957,9 @@ def playbook_table(h: Habits, items: list[Item]) -> Table:
             # risks, and how to go back -- same three-part shape as
             # fixes.py's explainer, added here since a habit has no
             # SettingChange for fixes.build_fixes to work from.
-            WHERE[item.key],
-            TRADE_OFFS[item.key],
-            UNDO[item.key],
+            item.where or WHERE[item.key],
+            item.trade_off or TRADE_OFFS[item.key],
+            item.undo or UNDO[item.key],
             # UX-3: filled in later by apply_covered_by, once the rules
             # this report actually fired are known -- "" until then, and
             # for any item COVERED_BY doesn't name.
@@ -1906,6 +1967,15 @@ def playbook_table(h: Habits, items: list[Item]) -> Table:
             # Additive: covered_by_rule, filled in alongside covered_by
             # by the same call.
             "",
+            # Additive: the habit's display title, resolved for this
+            # report (``item_title``) -- ``ITEMS[item.key][1]``'s fixed
+            # one, unless a finding switched it (so far only
+            # ``explore_research``, to tokensave's tools). A reader that
+            # only knows the old ``ITEMS.get(key, ...)[1]`` lookup (e.g.
+            # ``quick_actions._playbook_tips``) still gets a title, just
+            # not this report's variant -- it should read this column
+            # instead once it has one.
+            item_title(item),
         ])
     return Table(
         name="habits_playbook",
@@ -1932,6 +2002,10 @@ def playbook_table(h: Habits, items: list[Item]) -> Table:
             #: until ``apply_covered_by`` fills it in, same as
             #: ``covered_by`` itself.
             Column(key="covered_by_rule", label="Covering rule", kind="str"),
+            #: Additive: see the append above -- the resolved title,
+            #: for a caller to show instead of looking ``habit`` up in
+            #: ``ITEMS`` itself.
+            Column(key="title", label="Title", kind="str"),
         ],
         rows=rows,
         notes=[] if rows else [
@@ -1990,14 +2064,14 @@ def digest_table(h: Habits, items: list[Item] | None = None) -> Table:
     days = round(h.span_days)
     rows = []
     for n, item in enumerate([i for i in items if i.saving][:3], start=1):
-        rows.append([f"top_{n}", ITEMS[item.key][1], _money_or_none(item.saving / weeks), item.evidence])
+        rows.append([f"top_{n}", item_title(item), _money_or_none(item.saving / weeks), item.evidence])
     adopted = [(item, trend(h, item)[2]) for item in items]
     adopted = [(item, usd) for item, usd in adopted if usd > 0]
     if adopted:
         rows.append([
             "adopted", "Habits you already picked up",
             _money_or_none(sum(usd for _, usd in adopted)),
-            ", ".join(ITEMS[item.key][1] for item, _ in adopted),
+            ", ".join(item_title(item) for item, _ in adopted),
         ])
     met = [p for p in h.pieces if p.outcome == "met"]
     if met:
@@ -3186,6 +3260,7 @@ __all__ = [
     "confidence",
     "digest_table",
     "family",
+    "item_title",
     "playbook",
     "playbook_table",
     "section_from",

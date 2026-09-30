@@ -39,7 +39,7 @@ stopped_by_user`, all of which already existed.
   a nested `"waste"` sub-dict, `.describe()` renders the thresholds as
   report notes, mirroring `LimitThresholds`.
 - `build_section(stats, thresholds=None) -> Section` — the corpus-wide
-  `waste` report section (four tables, described below).
+  `waste` report section (five tables, described below).
 - `RULES` — a one-element tuple, `(_rule_wasted_turns,)`, of `(report,
   th) -> list[Recommendation]` callables in the same shape
   `recommend.py`'s own internal `_rule_*` functions already have.
@@ -65,9 +65,22 @@ fixed priority order (a turn is assigned to exactly one cause, so
 |---|---|---|
 | `max-turns` | The turn's own transcript has `TranscriptMeta.kind != "top-level"` and `TranscriptMeta.stopped_by_user` is true. A **transcript-level override**: every priced turn in a killed subagent transcript is wasted, since that transcript returns no report to its parent regardless of what any one turn did. | Raise the subagent's `maxTurns` budget, or narrow its brief so it finishes — and reports back — inside the turns it's given. |
 | `tool-error` | The turn's own `Turn.tool_error_count > 0` — one of its own tool_use calls came back with a tool_result carrying `is_error: true` — and at least one of those calls couldn't run as written (`misfire` in `Turn.tool_errors_by_kind`: a wrong path, a malformed command, an edit whose text wasn't found). | Give exact paths and names in briefs, and have Claude check a path exists or read a file before it edits or runs against it. |
-| `blocked` | The same, where a hook or a Claude Code guard blocked the call (`blocked`) and nothing misfired. | Put the rule the hook enforces into the instructions of the agent that keeps hitting it. |
+| `blocked` | The same, where a hook or a Claude Code guard blocked the call (`blocked`) and nothing misfired, and at least one of those blocked calls was **not** a known token saver's own redirect. | Put the rule the hook enforces into the instructions of the agent that keeps hitting it. |
 | `interrupt` | The *next* priced turn's `preceding_primary == EventKind.INTERRUPT` — the turn under scrutiny is the one the user cut off. | Batch instructions and plan the whole step before running it. |
 | `tool-denial` | The *next* priced turn's `preceding_primary == EventKind.TOOL_DENIAL`. | Add the repeatedly-denied tool/command to the permissions allowlist. |
+
+`redirected` (`REDIRECT_CAUSE`) sits inside the `blocked` check, not in
+`CAUSES`: a turn takes this cause instead of `blocked` only when *every
+one* of its blocked calls was a known token saver's own hook turning
+the call away to point Claude at its own tools instead
+(`Turn.saver_redirects`, `sum(turn.saver_redirects.values()) >=
+turn.tool_errors_by_kind.get("blocked", 0) > 0`) — never a hook or
+guard of Claude Code's own. A turn whose blocked calls are a *mix* of a
+redirect and a real hook/guard block still counts as `blocked`, not
+`redirected`. This is deliberate, not a mistake (see
+`known_savers.py`), so it is priced and shown in `waste_by_cause`, but
+never folded into `wasted_turns`/`wasted_cost_usd`/`wasted_tokens`,
+`waste_by_agent_type` or `waste_top_sessions`.
 
 `api-error-retry` is tracked separately and **counted only, never
 priced**: a turn whose own `preceding_primary == EventKind.API_ERROR`
@@ -75,6 +88,19 @@ priced**: a turn whose own `preceding_primary == EventKind.API_ERROR`
 automatically, so this is a frequency signal, not spend — its cost and
 tokens are always reported as zero and it never contributes to the
 recoverable ceiling.
+
+### Who blocked it
+
+Every `blocked` or `redirected` turn is also attributed to its own
+main blocker: whichever of `Turn.hook_blocks`/`guard_blocks`/
+`saver_redirects` turned away the most of that turn's blocked calls
+(`_main_blocker`) — saver redirects are left out of that comparison for
+a `blocked` turn, since a mixed turn's redirects aren't why it counts
+as blocked. Each `(blocker, agent_type)` pair is rolled up into the
+`waste_blocked_by` table (below), with a lever true to what that
+blocker's real messages say: a saver's row points at what it saved
+instead of asking anyone to stop; every other row points at the hook,
+guard or agent that needs a change.
 
 ## Cost and tokens
 
@@ -94,10 +120,11 @@ this", which only a corpus-wide denominator can answer directly.
 
 | Table | What it shows |
 |---|---|
-| `waste_summary` | One "all" row: total priced turns/cost, wasted turns/share of turns, wasted cost (labelled "Recoverable spend ceiling")/share of cost, wasted tokens, the limit-pause-excluded count, and the api-error-retry count. |
-| `waste_by_cause` | One row per cause (`tool-error`, `blocked`, `interrupt`, `tool-denial`, `max-turns`, fixed order) plus an `api-error-retry` row: turns, share of all priced turns, cost, share of all priced cost, tokens, and that cause's own lever text. |
-| `waste_by_agent_type` | Per-agent-type roll-up (`TranscriptMeta.agent_type`, or `"top-level"`): turns, share of turns, cost, share of cost, tokens. Sorted descending by cost. |
-| `waste_top_sessions` | The 20 sessions with the highest wasted cost: a salted, non-reversible session hash, turns, cost, share of cost, and a `cause:count` cause-mix string (most frequent cause first). |
+| `waste_summary` | One "all" row: total priced turns/cost, wasted turns/share of turns, wasted cost (labelled "Recoverable spend ceiling")/share of cost, wasted tokens, the limit-pause-excluded count, the api-error-retry count, and the redirected turns/cost (priced and shown, never counted as wasted). |
+| `waste_by_cause` | One row per cause (`tool-error`, `blocked`, `interrupt`, `tool-denial`, `max-turns`, fixed order) plus a `redirected` row and an `api-error-retry` row: turns, share of all priced turns, cost, share of all priced cost, tokens, and that cause's own lever text. Only the first five rows are costed causes that sum to `waste_summary`'s totals — `redirected` and `api-error-retry` are each priced/counted but excluded from the totals; the table's own notes say so explicitly. |
+| `waste_by_agent_type` | Per-agent-type roll-up (`TranscriptMeta.agent_type`, or `"top-level"`): turns, share of turns, cost, share of cost, tokens. Sorted descending by cost. `redirected` turns are never folded in. |
+| `waste_top_sessions` | The 20 sessions with the highest wasted cost: a salted, non-reversible session hash, turns, cost, share of cost, and a `cause:count` cause-mix string (most frequent cause first). `redirected` turns are never folded in. |
+| `waste_blocked_by` | One row per `(blocker, agent_type)` pair that blocked or redirected at least one call: `blocker` (the hook script, guard label, or saver name), `agent_type`, `kind` (`"hook"`, `"guard"` or `"saver"`), `turns`, `cost_usd`, `tokens`, and a `lever` true to that blocker's own real messages. Sorted descending by cost. `kind == "saver"` rows exist only for `redirected` turns; `kind` in `"hook"`/`"guard"` rows exist only for `blocked` turns. |
 
 ## Session hashing and privacy
 
@@ -151,6 +178,17 @@ codebase follows.
 - Cause priority for a turn that could match more than one rule:
   limit-pause exclusion first, then `max-turns`, then `tool-error`
   (any misfire), then `blocked`, then `interrupt`/`tool-denial`.
+- `redirected` is not one of the costed causes: a blocked turn is
+  `redirected` instead of `blocked` only when every one of its blocked
+  calls was a known token saver's own hook turning it away on purpose,
+  never a mix with a real hook or guard block — its cost is priced and
+  shown, but never folded into `wasted_turns`/`wasted_cost_usd`/
+  `wasted_tokens`, `waste_by_agent_type` or `waste_top_sessions`.
+- `waste_blocked_by` attributes a blocked or redirected turn to
+  whichever hook, guard or saver blocked the most of its own tool
+  calls; for a blocked turn, saver redirects are left out of that
+  comparison, since a mixed turn's redirects aren't why it counts as
+  blocked.
 - `api-error-retry` is counted, never priced.
 - Every `share_pct` column is against the whole corpus's priced
   turns/cost, not just the wasted subset.

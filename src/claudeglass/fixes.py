@@ -21,7 +21,16 @@ A recommendation with no setting change (workflow advice) gets a single
 fix instead: a where/trade-off/undo explainer (three pairs, not six --
 see :data:`_WORKFLOW_EXPLAINER`) when this module has one for its id,
 plus a prompt when one is useful (see :data:`_WORKFLOW_PROMPTS`). An id
-in neither dict gets no fix at all.
+in neither dict gets no fix at all. When ``rec.why`` is set, its
+explainer's first row is "Why it's suggested".
+
+Every fix dict also carries an optional ``note`` key the render layer
+reads through :func:`fix_note`: absent for the default -- print
+:data:`RESTART_NOTE` below a prompt or command -- ``"scope"`` for a
+"from now on" prompt that ends in :data:`PROMPT_SCOPE`, where
+:data:`SCOPE_NOTE` is printed instead, and ``"none"`` where neither
+applies (an id whose prompt or change was never something a restart
+would pick back up).
 """
 
 from __future__ import annotations
@@ -42,6 +51,33 @@ RESTART_NOTE = (
 #: The last line of every prompt for Claude that changes Claude Code's
 #: files, so the reminder comes at the moment the change is saved.
 PROMPT_RESTART = "Once it's saved, remind me to restart Claude Code so it picks up the change."
+
+#: Shown instead of :data:`RESTART_NOTE` after a "from now on" prompt
+#: (:data:`PROMPT_SCOPE`), whose change isn't a file save Claude Code
+#: reads at startup -- it's a rule Claude asks where to keep.
+SCOPE_NOTE = (
+    "Claude asks whether this is for this session, this project or all your projects. A line in CLAUDE.md "
+    "lasts; new sessions read it when they start."
+)
+
+#: Appended to every "from now on" workflow prompt (one that asks Claude
+#: to work differently going forward, rather than to edit a specific
+#: setting): a pasted "from now on" rule isn't picked up by a restart --
+#: unlike a setting, it only lasts as long as Claude is told to keep it,
+#: so this asks Claude to check with you where it should live before
+#: acting on it.
+PROMPT_SCOPE = (
+    "Before you start, use AskUserQuestion to ask me where this should apply: this session only, this "
+    "project (one line in its CLAUDE.md), or all my projects (one line in ~/.claude/CLAUDE.md). For a "
+    "CLAUDE.md, show me the line before saving. If I pick all my projects, Claude Code will ask my "
+    "permission to edit ~/.claude/CLAUDE.md; that is expected."
+)
+
+#: Opens every workflow prompt (:data:`_WORKFLOW_PROMPTS`): the finding
+#: this prompt is about, quoted once, so the instruction that follows
+#: doesn't have to restate it (that used to be ``{title_lower}``, spliced
+#: mid-sentence into a lead-in that said the same thing again).
+_FINDING_OPEN = 'ClaudeGlass, which tracks my token use, flagged this: "{title}."'
 
 #: key -> (what it controls, trade-off, extra caveat).
 SETTING_TEXT: dict[str, tuple[str, str, str]] = {
@@ -281,10 +317,17 @@ _SETTINGS_WHERE = {
 }
 
 #: Workflow recommendations (no setting to change) that come with a
-#: prompt anyway, keyed by ``Recommendation.id``.
+#: prompt anyway, keyed by ``Recommendation.id`` (or, when
+#: :data:`Recommendation.variant` picks one, ``"id:variant"`` -- see
+#: :func:`build_fixes`). Every entry here is just the instruction: it is
+#: appended to :data:`_FINDING_OPEN` plus ``rec.why``, so the finding is
+#: stated once, not restated mid-sentence (that used to be
+#: ``{title_lower}``). A "from now on" entry -- one that asks Claude to
+#: work differently going forward rather than to edit a specific file --
+#: ends with :data:`PROMPT_SCOPE`, since unlike a setting change a restart
+#: doesn't pick it back up; only a CLAUDE.md line does.
 _WORKFLOW_PROMPTS = {
     "spawn-shared-claude-md": (
-        "My CLAUDE.md files are sent to most of my subagents every time one starts: {title_lower}. "
         "Please read my CLAUDE.md files and my agent files in ~/.claude/agents and .claude/agents. "
         "Find sections that only some agents need, and propose moving each one into those agents' own "
         "files or into a skill they load on demand. Keep rules every agent needs where they are. "
@@ -292,7 +335,6 @@ _WORKFLOW_PROMPTS = {
         "permission before editing files under .claude."
     ),
     "baseline-bloat": (
-        "Every Claude Code session I start loads a large context before my first message: {title_lower}. "
         "Please list the MCP servers and plugins I have enabled (in ~/.claude/settings.json, this project's "
         ".claude/settings.json and .mcp.json), say which ones this project doesn't seem to use, and propose "
         "turning those off for this project only. Show me the proposed change before making it. Claude Code "
@@ -311,53 +353,59 @@ _WORKFLOW_PROMPTS = {
     # module's own docstring) so every card gets a prompt, not just the
     # three above.
     "ttl-switch": (
-        "My prompt-cache TTL doesn't fit how {agent} actually runs: {title_lower}. Please check the "
-        "current TTL setting for {agent} (promptCacheTtl for the main session, subagentPromptCacheTtl or "
-        "experimental.cacheTtl for a named agent) in ~/.claude/settings.json or its agent file, and switch "
-        "it to what this finding recommends. If subagentPromptCacheTtl is set, Claude Code uses it before "
-        "the agent file. Show me the diff before saving. Claude Code will ask my "
+        "Please check the current TTL setting for {agent} (promptCacheTtl for the main session, "
+        "subagentPromptCacheTtl or experimental.cacheTtl for a named agent) in ~/.claude/settings.json or "
+        "its agent file, and switch it to what this finding recommends. If subagentPromptCacheTtl is set, "
+        "Claude Code uses it before the agent file. Show me the diff before saving. Claude Code will ask my "
         "permission before editing files under .claude."
     ),
     "long-tool-waits": (
-        "Long Bash/PowerShell waits are expiring my prompt cache: {title_lower}. From now on, when you're "
-        "about to run something long-running, batch any instructions I've queued first so they land before "
-        "the wait starts, rather than after."
+        "From now on, when you're about to run something long-running, batch any instructions I've queued "
+        "first so they land before the wait starts, rather than after. " + PROMPT_SCOPE
     ),
     "notification-invalidation": (
-        "Task notifications from subagents are invalidating my cache prefix: {title_lower}. From now on, "
-        "when several subagents might report back close together, hold their notifications and summarise "
-        "them together instead of one at a time, where that doesn't cost me visibility I need."
+        "From now on, when several subagents might report back close together, hold their notifications "
+        "and summarise them together instead of one at a time, where that doesn't cost me visibility I "
+        "need. " + PROMPT_SCOPE
     ),
     "batch-instructions": (
-        "I've been sending queued instructions one at a time, and each one re-writes the cache prefix: "
-        "{title_lower}. From now on, if I send you a few small separate asks in a row, ask whether I'd "
-        "like them batched into one message before you start on the first."
+        "From now on, if I send you a few small separate asks in a row, ask whether I'd like them batched "
+        "into one message before you start on the first. " + PROMPT_SCOPE
     ),
     "subagent-volume": (
-        "{agent} accounts for a large share of this corpus's subagent spend: {title_lower}. Please look at "
-        "why {agent} is spawned so often, or so expensively, in my recent sessions, and propose whether "
-        "fewer spawns, a cheaper model, or a tighter brief fits best. Show me the change before making it."
+        "Please look at why {agent} is spawned so often, or so expensively, in my recent sessions, and "
+        "propose whether fewer spawns, a cheaper model, or a tighter brief fits best. Show me the change "
+        "before making it."
     ),
     "compaction-churn": (
-        "Compaction is running often enough to matter: {title_lower}. Please check the current "
-        "autoCompactWindow in ~/.claude/settings.json or this project's .claude/settings.json (or the "
-        "CLAUDE_CODE_AUTO_COMPACT_WINDOW variable, which overrides it when set), and raise "
-        "it to a value that fits this finding. Show me the diff before saving. Claude Code will ask my "
-        "permission before editing files under .claude."
+        "Please check the current autoCompactWindow in ~/.claude/settings.json or this project's "
+        ".claude/settings.json (or the CLAUDE_CODE_AUTO_COMPACT_WINDOW variable, which overrides it when "
+        "set), and raise it to a value that fits this finding. Show me the diff before saving. Claude Code "
+        "will ask my permission before editing files under .claude."
     ),
     # Workflow only: this form is used once the auto-compact window has
     # been left to the compaction replay or to compaction-churn (see
     # advice._consolidate_compaction), so it never proposes the setting.
     "long-context-share": (
-        "My top-level context is running large: {title_lower}. From now on, send searches and "
-        "exploration-heavy work to a subagent, whose context is discarded when it finishes, and when I switch "
-        "to an unrelated task, suggest starting a fresh session instead of carrying this one on."
+        "From now on, send searches and exploration-heavy work to a subagent, whose context is discarded "
+        "when it finishes, and when I switch to an unrelated task, suggest starting a fresh session instead "
+        "of carrying this one on. " + PROMPT_SCOPE
+    ),
+    # known_savers.active_in_report found tokensave at work: its hook
+    # blocks an Explore-agent spawn and a symbol-shaped search in this
+    # project, so the plain variant's advice above would just get
+    # redirected. Point at tokensave's own tools instead.
+    "long-context-share:tokensave": (
+        "From now on, find code with tokensave's tools -- tokensave_context for a concept, tokensave_search "
+        "for a symbol -- and read only the part of a file you need (tokensave_read in \"lines\" mode, or "
+        "Read with offset/limit) instead of the whole file. When I switch to an unrelated task, suggest "
+        "starting a fresh session instead of carrying this one on. " + PROMPT_SCOPE
     ),
     "plan-handoff": (
-        "After I approve a big plan, the planning stays in context for the whole build: {title_lower}. Please "
-        "add a short instruction to my ~/.claude/CLAUDE.md: when I approve a plan that took a lot of exploring, "
-        "remind me to run /clear and start the build from the saved plan file, one phase per session. Show me "
-        "the diff before saving. Claude Code will ask my permission before editing files under .claude."
+        "Please add a short instruction to my ~/.claude/CLAUDE.md: when I approve a plan that took a lot of "
+        "exploring, remind me to run /clear and start the build from the saved plan file, one phase per "
+        "session. Show me the diff before saving. Claude Code will ask my permission before editing files "
+        "under .claude."
     ),
     "run-split": (
         "My {agent} runs get long, and every later reply reads again all the run has read. Please add a short "
@@ -369,89 +417,82 @@ _WORKFLOW_PROMPTS = {
         ".claude."
     ),
     "hook-failures": (
-        "Some of my Claude Code hooks keep failing: {title_lower}. Please find these hooks in ~/.claude/settings.json, "
-        "this project's .claude/settings.json and .claude/settings.local.json, and any plugin I have enabled. For "
-        "each one, work out why it fails: a script named by a relative path (start it with ${{CLAUDE_PROJECT_DIR}} "
-        "instead), a file that isn't there, or an error in the script itself. Propose a fix for each and show me the "
-        "diff before saving. Claude Code will ask my permission before editing files under .claude."
+        "Please find these hooks in ~/.claude/settings.json, this project's .claude/settings.json and "
+        ".claude/settings.local.json, and any plugin I have enabled. For each one, work out why it fails: a "
+        "script named by a relative path (start it with ${{CLAUDE_PROJECT_DIR}} instead), a file that isn't "
+        "there, or an error in the script itself. Propose a fix for each and show me the diff before saving. "
+        "Claude Code will ask my permission before editing files under .claude."
     ),
     "hook-block-resent": (
-        "My {title_lower}. Please read that hook's script and its entry in my settings.json files. Propose changing it "
+        "Please read that hook's script and its entry in my settings.json files. Propose changing it "
         "to let the call through and pass its message as hookSpecificOutput.additionalContext, or to rewrite the "
         "call with updatedInput, where that keeps what the hook is for. Keep any block that stops something harmful. "
         "Show me the diff before saving. Claude Code will ask my permission before editing files under .claude."
     ),
     "hook-context-carry": (
-        "The {title_lower}. Please find that hook in my settings.json files or my enabled plugins and read its script. "
+        "Please find that hook in my settings.json files or my enabled plugins and read its script. "
         "Propose making its message shorter, or having it add context only when there's something to act on. If it "
         "comes from a plugin, tell me how to turn it off for projects that don't need it instead. Show me the diff "
         "before saving. Claude Code will ask my permission before editing files under .claude."
     ),
     "spawn-task-prompt": (
-        "The instructions I write when spawning {agent} are long: {title_lower}. From now on, when I'm "
-        "about to give {agent} a long brief, point it at the files it needs instead of pasting their "
-        "contents, and leave out background it can look up itself."
+        "From now on, when I'm about to give {agent} a long brief, point it at the files it needs instead "
+        "of pasting their contents, and leave out background it can look up itself. " + PROMPT_SCOPE
     ),
     "spawn-cost": (
-        "Spawning {agent} is expensive before it does any work: {title_lower}. Please check whether "
-        "{agent} has its own agent file; if it does, propose an omitClaudeMd or narrower-skills change to "
-        "trim what it's sent at startup, and if it's a built-in agent type with no file, suggest how to "
-        "shorten the Agent prompt I write when I spawn it. Show me the change before making it."
+        "Please check whether {agent} has its own agent file; if it does, propose an omitClaudeMd or "
+        "narrower-skills change to trim what it's sent at startup, and if it's a built-in agent type with no "
+        "file, suggest how to shorten the Agent prompt I write when I spawn it. Show me the change before "
+        "making it."
     ),
     "effort-mismatch": (
-        "High effort is being spent on work that didn't need it: {title_lower}. Please check the current "
-        "effortLevel in ~/.claude/settings.json (or the relevant agent's frontmatter) and propose lowering "
-        "it, keeping /effort in mind for the odd hard task. Show me the diff before saving. Claude Code "
-        "will ask my permission before editing files under .claude."
+        "Please check the current effortLevel in ~/.claude/settings.json (or the relevant agent's "
+        "frontmatter) and propose lowering it, keeping /effort in mind for the odd hard task. Show me the "
+        "diff before saving. Claude Code will ask my permission before editing files under .claude."
     ),
     "discovery-share": (
-        "Discovery is a large share of my work: {title_lower}. Please draft a short reference doc or "
-        "briefing from what you've already found in this project, so a future session can start from it "
-        "instead of re-discovering the same ground. Show me the draft before saving it anywhere."
+        "Please draft a short reference doc or briefing from what you've already found in this project, so "
+        "a future session can start from it instead of re-discovering the same ground. Show me the draft "
+        "before saving it anywhere."
     ),
     "pricing-coverage": (
-        "Some of my usage isn't priced, or is priced only by closest match: {title_lower}. Please look up "
-        "the missing model id(s) this finding names and add a row for each to pricing.toml with their real "
-        "per-token rates, citing the source. Show me the diff before saving."
+        "Please look up the missing model id(s) this finding names and add a row for each to pricing.toml "
+        "with their real per-token rates, citing the source. Show me the diff before saving."
     ),
     "limit-pressure": (
-        "Usage-cap pauses keep interrupting my work: {title_lower}. Please look at when these pauses "
-        "happened in my recent sessions and suggest how to pace concurrent agents to my usage window, or "
-        "whether my weekly cap is worth reviewing against actual usage."
+        "Please look at when these pauses happened in my recent sessions and suggest how to pace concurrent "
+        "agents to my usage window, or whether my weekly cap is worth reviewing against actual usage."
     ),
     "tool-output-carry": (
-        "{title_lower} From now on, when you'd read a large file or run a command with long output, prefer "
-        "Grep over Read for a large file, pipe long shell output through head/tail or a digest script, and "
-        "keep agent reports short before they enter context."
+        "From now on, when you'd read a large file or run a command with long output, prefer Grep over Read "
+        "for a large file, pipe long shell output through head/tail or a digest script, and keep agent "
+        "reports short before they enter context. " + PROMPT_SCOPE
     ),
     "compaction-window": (
-        "My session simulation suggests a larger autoCompactWindow would cost less overall: {title_lower}. "
         "Please check the current autoCompactWindow in ~/.claude/settings.json or this project's "
         ".claude/settings.json (or the CLAUDE_CODE_AUTO_COMPACT_WINDOW variable, which overrides it when "
         "set), and raise it to at least the value this finding names. Show me the diff "
         "before saving. Claude Code will ask my permission before editing files under .claude."
     ),
     "model-tier": (
-        "{agent} could run on a cheaper model tier at today's volumes: {title_lower}. Please check the "
-        "current model setting for {agent} (settings.json for the main session, or its agent file's "
-        "frontmatter) and propose switching to the cheaper tier this finding names. Show me the diff "
-        "before saving, and let's compare quality on a few tasks before keeping it. Claude Code will ask "
-        "my permission before editing files under .claude."
+        "Please check the current model setting for {agent} (settings.json for the main session, or its "
+        "agent file's frontmatter) and propose switching to the cheaper tier this finding names. Show me "
+        "the diff before saving, and let's compare quality on a few tasks before keeping it. Claude Code "
+        "will ask my permission before editing files under .claude."
     ),
     "wasted-turns": (
-        "A material share of my spend went to turns whose output I never used: {title_lower} From now on, "
-        "when the likely cause repeats (see the finding above), flag it before you start rather than after."
+        "From now on, when the likely cause repeats (see the finding above), flag it before you start "
+        "rather than after. " + PROMPT_SCOPE
     ),
     # COV-07/COV-11: env-attribution-deprecated has no SettingChange
     # (its real target, attribution.commit, isn't on profiles.schema's
     # SETTINGS_ALLOWLIST -- see recommend.py's COV-09 section comment),
     # so it keeps a prompt instead, asking Claude to do the migration.
     "env-attribution-deprecated": (
-        "includeCoAuthoredBy is deprecated in favour of the newer attribution setting: {title_lower} Please "
-        "translate my current includeCoAuthoredBy value in ~/.claude/settings.json (or this project's "
-        ".claude/settings.json, whichever sets it) into an equivalent attribution.commit value -- false "
-        "becomes an empty commit trailer, true becomes the default one. Show me the diff before saving. "
-        "Claude Code will ask my permission before editing files under .claude."
+        "Please translate my current includeCoAuthoredBy value in ~/.claude/settings.json (or this "
+        "project's .claude/settings.json, whichever sets it) into an equivalent attribution.commit value -- "
+        "false becomes an empty commit trailer, true becomes the default one. Show me the diff before "
+        "saving. Claude Code will ask my permission before editing files under .claude."
     ),
 }
 
@@ -463,7 +504,17 @@ _WORKFLOW_PROMPTS = {
 #: :data:`_WORKFLOW_PROMPTS` still gets no fix at all (see
 #: ``build_fixes``); an id here with no counterpart in
 #: ``_WORKFLOW_PROMPTS`` gets an explainer with no prompt (a purely
-#: informational card with nothing to ask Claude to do).
+#: informational card with nothing to ask Claude to do). "Where and who
+#: it affects"/"How to undo it" for a card whose prompt ends in
+#: :data:`PROMPT_SCOPE`: the rule doesn't live in Claude Code's config,
+#: it lives wherever Claude was told to keep the CLAUDE.md line (or
+#: nowhere, for a session-only rule).
+_SCOPE_WHERE_TEXT = (
+    "Wherever you tell Claude when it asks: nothing saved (this session only), a line in this project's "
+    "CLAUDE.md (everyone who works in it), or a line in your ~/.claude/CLAUDE.md (every project you open)."
+)
+_SCOPE_UNDO_TEXT = "Remove the line from that CLAUDE.md; a session-only rule ends with the session."
+
 _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
     "ttl-switch": (
         "settings.json's promptCacheTtl (the main session) or subagentPromptCacheTtl (every subagent), or an "
@@ -476,24 +527,21 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "claudeglass apply --revert undoes a change made with apply).",
     ),
     "long-tool-waits": (
-        "Nowhere in Claude Code's config -- this is about how you sequence messages around a "
-        "long-running Bash or PowerShell command, not a setting.",
+        _SCOPE_WHERE_TEXT,
         "Batching instructions before a long command commits you to them before seeing its output, so "
         "you may still need a follow-up message if the result changes what you'd ask for.",
-        "Nothing to undo -- go back to sending instructions as they occur to you.",
+        _SCOPE_UNDO_TEXT,
     ),
     "notification-invalidation": (
-        "Nowhere in Claude Code's config -- this is about how often a subagent's task notification lands "
-        "mid-conversation, which you influence by how you time or batch spawns, not a setting.",
+        _SCOPE_WHERE_TEXT,
         "Batching notifications means you see a subagent's progress less often while it runs.",
-        "Nothing to undo -- go back to letting notifications arrive as they happen.",
+        _SCOPE_UNDO_TEXT,
     ),
     "batch-instructions": (
-        "Nowhere in Claude Code's config -- this is about sending queued instructions in one message "
-        "instead of several, not a setting.",
+        _SCOPE_WHERE_TEXT,
         "One larger message is harder to skim than several short ones, and you lose the chance to react "
         "to Claude's answer to the first before sending the rest.",
-        "Nothing to undo -- go back to sending instructions as they occur to you.",
+        _SCOPE_UNDO_TEXT,
     ),
     "subagent-volume": (
         "Nowhere in Claude Code's config directly -- the fix is fewer spawns, a cheaper model for this "
@@ -512,11 +560,19 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "Set the window back to its previous value (Claude Code shows the change before saving it).",
     ),
     "long-context-share": (
-        "Nowhere in the config: how you work in the main session. The auto-compact window is left to the "
-        "compaction check, so this card doesn't change it.",
+        _SCOPE_WHERE_TEXT,
         "Moving exploration into a subagent means its findings only reach the main session through its final "
         "report, which can lose nuance; a fresh session starts without what the old one knew.",
-        "Go back to exploring directly in the main session and carrying one session across tasks.",
+        _SCOPE_UNDO_TEXT,
+    ),
+    # known_savers.active_in_report found tokensave at work -- see the
+    # matching prompt variant in _WORKFLOW_PROMPTS.
+    "long-context-share:tokensave": (
+        _SCOPE_WHERE_TEXT,
+        "Reading only the lines tokensave points at, instead of the whole file, can miss context nearby; "
+        "check the surrounding code before assuming there's nothing else relevant. A fresh session starts "
+        "without what the old one knew.",
+        _SCOPE_UNDO_TEXT,
     ),
     "plan-handoff": (
         "Nowhere in Claude Code's config: how you move from planning to building in the main session. The "
@@ -572,11 +628,10 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "it's in an agent file).",
     ),
     "spawn-task-prompt": (
-        "Nowhere in Claude Code's config -- this is about what you write in the Agent prompt when you "
-        "spawn this agent type.",
+        _SCOPE_WHERE_TEXT,
         "Pointing an agent at files instead of pasting their contents means it spends a turn reading them "
         "itself, which costs a little and assumes it can find the right ones.",
-        "Nothing to undo -- go back to writing the prompt as before.",
+        _SCOPE_UNDO_TEXT,
     ),
     "spawn-shared-claude-md": (
         "The CLAUDE.md file(s) named in this finding, and the agent files that would gain the moved "
@@ -629,12 +684,10 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "Go back to running agents concurrently as before.",
     ),
     "tool-output-carry": (
-        "Nowhere in Claude Code's config directly -- this is about how you invoke tools (Grep over Read, "
-        "head/tail on long shell output), and separately, the env caps in settings.json "
-        "(BASH_MAX_OUTPUT_LENGTH, MAX_MCP_OUTPUT_TOKENS) that the env-caps card covers on their own.",
+        _SCOPE_WHERE_TEXT,
         "Piping output through head/tail or capping a report's length can cut detail you needed, forcing "
         "a follow-up command to see the rest.",
-        "Nothing to undo -- go back to reading full output as before.",
+        _SCOPE_UNDO_TEXT,
     ),
     "compaction-window": (
         "settings.json's autoCompactWindow, or the CLAUDE_CODE_AUTO_COMPACT_WINDOW variable when it's set "
@@ -654,11 +707,10 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "Set the model back to what it was (Claude Code shows the change before saving it).",
     ),
     "wasted-turns": (
-        "Nowhere in Claude Code's config directly -- the fix depends on the dominant cause named above (a "
-        "retry, a redo, or a targeted-checks-style habit change).",
+        _SCOPE_WHERE_TEXT,
         "Slowing down to avoid a wasted turn (double-checking before running a command, say) costs a "
         "little time up front on every turn, not just the ones that would have been wasted.",
-        "Nothing to undo -- go back to working as before.",
+        _SCOPE_UNDO_TEXT,
     ),
     "window-budget": (
         "Nothing to change here -- this card states a fact about your plan's weekly limit, not a setting.",
@@ -993,20 +1045,65 @@ def build_fix(rec: Recommendation, change: SettingChange) -> dict:
     }
 
 
+#: rec.id -> the fix dict's optional ``note`` key (see :func:`fix_note`):
+#: "scope" for a "from now on" prompt (:data:`PROMPT_SCOPE`), where
+#: :data:`SCOPE_NOTE` replaces the usual :data:`RESTART_NOTE`; "none" for
+#: an id whose prompt asks for something that was never a Claude Code
+#: file Claude Code re-reads on restart (limit-pressure, discovery-share,
+#: pricing-coverage). An id missing here defaults to "none" when it has
+#: no prompt at all (:func:`build_fixes` computes that case directly, so
+#: every informational id doesn't have to be listed twice) or to the
+#: absent key -- :data:`RESTART_NOTE` -- otherwise.
+_NOTE_OVERRIDES: dict[str, str] = {
+    "long-tool-waits": "scope",
+    "notification-invalidation": "scope",
+    "batch-instructions": "scope",
+    "long-context-share": "scope",
+    "spawn-task-prompt": "scope",
+    "tool-output-carry": "scope",
+    "wasted-turns": "scope",
+    "limit-pressure": "none",
+    "discovery-share": "none",
+    "pricing-coverage": "none",
+}
+
+
+def fix_note(fix: dict) -> str:
+    """The note to show under a fix's prompt/command: :data:`SCOPE_NOTE`
+    when ``fix["note"] == "scope"``, ``""`` when it's ``"none"``, else
+    :data:`RESTART_NOTE` -- the fix dict's ``note`` key is absent in that
+    last, default case (see :func:`build_fixes`)."""
+    note = fix.get("note")
+    if note == "none":
+        return ""
+    if note == "scope":
+        return SCOPE_NOTE
+    return RESTART_NOTE
+
+
 def build_fixes(rec: Recommendation) -> list[dict]:
     """One fix per :class:`SettingChange` on ``rec``; for workflow
     advice with no ``SettingChange`` (a bare ``lever`` string or none at
     all), one fix carrying whichever of a where/trade-off/undo explainer
     (:data:`_WORKFLOW_EXPLAINER`, UX-8) and a prompt
     (:data:`_WORKFLOW_PROMPTS`) this id has -- an id with neither gets no
-    fix at all, same as before UX-8. A purely informational id (no
+    fix at all, same as before UX-8. ``rec.variant``, when set, picks
+    ``"id:variant"`` over plain ``id`` in both dicts, falling back to the
+    plain id when there's no variant-specific entry (see
+    :data:`Recommendation.variant`). A purely informational id (no
     change proposed) has an explainer but no prompt: ``prompt`` is then
     ``""``, and the render layer (``render/markdown.py``,
     ``render/html.py``, the dashboard's ``ui.js`` and ``page-setup.js``) skips the "Ask Claude to do it"
-    block rather than printing an empty one."""
+    block rather than printing an empty one. When ``rec.why`` is set, the
+    explainer's first row is "Why it's suggested": ``rec.why``.
+    """
     if rec.changes:
         return [build_fix(rec, change) for change in rec.changes]
-    workflow_entry = _WORKFLOW_EXPLAINER.get(rec.id)
+    variant_id = f"{rec.id}:{rec.variant}" if rec.variant else rec.id
+    workflow_entry = _WORKFLOW_EXPLAINER.get(variant_id, _WORKFLOW_EXPLAINER.get(rec.id))
+    template = _WORKFLOW_PROMPTS.get(variant_id, _WORKFLOW_PROMPTS.get(rec.id))
+    if template is None and workflow_entry is None:
+        return []
     explainer = (
         [
             ["Where and who it affects", workflow_entry[0]],
@@ -1016,24 +1113,27 @@ def build_fixes(rec: Recommendation) -> list[dict]:
         if workflow_entry is not None
         else []
     )
-    template = _WORKFLOW_PROMPTS.get(rec.id)
-    if template is None and not explainer:
-        return []
-    prompt = (
-        template.format(title_lower=rec.title[:1].lower() + rec.title[1:], agent=rec.agent_type or "this agent")
-        if template is not None
-        else ""
-    )
-    return [
-        {
-            "key": None,
-            "agent": None,
-            "explainer": explainer,
-            "command": None,
-            "command_warning": "",
-            "prompt": prompt,
-        }
-    ]
+    if rec.why:
+        explainer = [["Why it's suggested", rec.why]] + explainer
+    if template is not None:
+        opening = _FINDING_OPEN.format(title=rec.title)
+        if rec.why:
+            opening = f"{opening} {rec.why}"
+        prompt = f"{opening} {template.format(agent=rec.agent_type or 'this agent')}"
+    else:
+        prompt = ""
+    fix = {
+        "key": None,
+        "agent": None,
+        "explainer": explainer,
+        "command": None,
+        "command_warning": "",
+        "prompt": prompt,
+    }
+    note = _NOTE_OVERRIDES.get(rec.id) or ("none" if not prompt else "")
+    if note:
+        fix["note"] = note
+    return [fix]
 
 
 def attach_fixes(recommendations: list[Recommendation]) -> None:
@@ -1044,6 +1144,10 @@ def attach_fixes(recommendations: list[Recommendation]) -> None:
 __all__ = [
     "LEVER_LABELS",
     "PROFILE_SCOPE_WHERE",
+    "PROMPT_RESTART",
+    "PROMPT_SCOPE",
+    "RESTART_NOTE",
+    "SCOPE_NOTE",
     "SETTING_TEXT",
     "already_set",
     "attach_fixes",
@@ -1051,6 +1155,7 @@ __all__ = [
     "build_fixes",
     "command_for",
     "explainer_for",
+    "fix_note",
     "profile_change_where",
     "profile_prompt",
     "prompt_for",

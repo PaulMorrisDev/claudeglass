@@ -213,6 +213,21 @@ def project_dir(payload: dict) -> str | None:
     return project
 
 
+def _tokensave_indexed(payload: dict) -> bool:
+    """Whether the project holds a tokensave index (``.tokensave/``), so
+    its own hook already blocks every Explore agent call there and
+    redirects Grep/Glob/Bash search calls too -- the same check as
+    ``claudeglass.known_savers.indexed``, inlined because this hook runs
+    stdlib-only and can't import the package (see the module docstring)."""
+    cwd = project_dir(payload)
+    if not cwd:
+        return False
+    try:
+        return os.path.isdir(os.path.join(cwd, ".tokensave"))
+    except OSError:
+        return False
+
+
 def slug_for(cwd: str) -> str:
     project_dir_name = os.environ.get("CLAUDE_CODE_PROJECT_DIR_NAME")
     if project_dir_name:
@@ -978,10 +993,13 @@ def _plan_hint(payload: dict, th: dict) -> tuple[str, float, dict] | None:
     return "plan_fresh", kept, {"kept": _k(kept)}
 
 
-def _reads_hint(payload: dict, raw_len: int, read_tools, th: dict) -> tuple[str, float, dict] | None:
+def _reads_hint(payload: dict, raw_len: int, read_tools, advice: dict, th: dict) -> tuple[str, float, dict] | None:
     """``explore_reads``: this many reads and searches since your last
     message, counted from the transcript's tool calls, with this one's
-    result (not in the transcript yet) added."""
+    result (not in the transcript yet) added. ``advice`` switches from
+    "hand it to an Explore agent" to tokensave's own tools when the
+    project holds a tokensave index (:func:`_tokensave_indexed`) -- its
+    hook would just turn an Explore agent away there."""
     path = payload.get("transcript_path")
     if not isinstance(path, str) or not path:
         return None
@@ -1003,7 +1021,10 @@ def _reads_hint(payload: dict, raw_len: int, read_tools, th: dict) -> tuple[str,
     chars = sum(n for use_id, n in seen.items() if use_id in reads)
     if this_call not in seen:
         chars += raw_len
-    return "explore_reads", len(reads), {"reads": len(reads), "tokens": _k(chars / _CHARS_PER_TOKEN)}
+    kind = "tokensave" if _tokensave_indexed(payload) else "explore"
+    return "explore_reads", len(reads), {
+        "reads": len(reads), "tokens": _k(chars / _CHARS_PER_TOKEN), "advice": advice[kind],
+    }
 
 
 def _quiet_hint(payload: dict, raw_len: int, quiet_how: dict, th: dict) -> tuple[str, float, dict] | None:
@@ -1142,7 +1163,7 @@ def coaching_for(
             counted = str(payload.get("agent_id")) in (state.get("agents") or {})
         candidates.append(_quiet_hint(payload, raw_len, coaching["quiet_how"], th))
         if not in_agent and tool in coaching["read_tools"]:
-            candidates.append(_reads_hint(payload, raw_len, coaching["read_tools"], th))
+            candidates.append(_reads_hint(payload, raw_len, coaching["read_tools"], coaching["explore_advice"], th))
     session = _session_key(session_id, config_dir)
     for found in candidates:
         if found is None:

@@ -18,6 +18,17 @@ reader" convention -- see that module's docstring):
   that failed.
 - ``blocked`` -- the same, where a hook or a Claude Code guard stopped
   the call (``blocked``) and nothing misfired.
+- ``redirected`` (:data:`REDIRECT_CAUSE`) -- the same ``blocked`` signal,
+  but every one of the turn's own blocked calls was a known token
+  saver's own hook turning the call away to point Claude at its own
+  tools instead (``Turn.saver_redirects`` -- see ``known_savers.py``),
+  never a hook or guard of Claude Code's own (``sum(turn.
+  saver_redirects.values()) >= turn.tool_errors_by_kind.get("blocked",
+  0) > 0``). This is deliberate, not a mistake -- see ``known_savers.py``'s
+  own module docstring -- so it is priced and counted apart from every
+  other cause, never folded into the wasted total: a turn whose blocked
+  calls are a *mix* of a redirect and a real hook/guard block still
+  counts as ``blocked``, not ``redirected``. Not in :data:`CAUSES`.
 - A turn whose only errors are commands that ran and reported failure
   (``failed``: a failing test or build, a timeout) is not wasted: Claude
   reads that output and acts on it. It is counted
@@ -76,7 +87,19 @@ exclusion first (outranks everything -- see above), then ``max-turns``
 turn's own defect), then ``interrupt``/``tool-denial`` (what happened
 right after it). ``api-error-retry`` is independent of this priority order -- it is
 a separate, non-costed counter, not a cause a turn is exclusively
-assigned to.
+assigned to. ``redirected`` sits inside the ``blocked`` branch of that
+same check: a blocked turn is ``redirected`` instead of ``blocked`` only
+when every one of its blocked calls was a known saver's own redirect.
+
+Who blocked it: every ``blocked`` or ``redirected`` turn is also
+attributed to its own main blocker (:func:`_main_blocker`) -- whichever
+of ``Turn.hook_blocks``/``guard_blocks``/``saver_redirects`` turned away
+the most of that turn's blocked calls, saver redirects left out of that
+comparison for a ``blocked`` turn (see ``waste_blocked_by``'s own
+requirement) -- and rolled up by ``(blocker, agent_type)`` into the
+``waste_blocked_by`` table, each row with its own lever: point a saver's
+row at what it saved instead of asking anyone to stop, and point every
+other row at the hook, guard or agent that needs a change.
 
 Session identity: ``waste_top_sessions`` needs a stable-but-non-reversible
 per-session key, same privacy posture as every other per-session table
@@ -154,6 +177,18 @@ ASSUMPTIONS: tuple[str, ...] = (
     "limit-pause exclusion first, then max-turns, then tool-error, then "
     "interrupt/tool-denial -- each wasted turn is assigned exactly one "
     "cause, so waste_by_cause's turns/cost sum to waste_summary's totals",
+    "redirected is not one of the costed causes: a blocked turn is "
+    "redirected instead of blocked only when every one of its blocked "
+    "calls was a known token saver's own hook turning it away on "
+    "purpose, never a mix with a real hook or guard block -- its cost "
+    "is priced and shown, but never folded into wasted_turns/"
+    "wasted_cost_usd/wasted_tokens, waste_by_agent_type or "
+    "waste_top_sessions",
+    "waste_blocked_by attributes a blocked or redirected turn to "
+    "whichever hook, guard or saver blocked the most of its own tool "
+    "calls; for a blocked turn, saver redirects are left out of that "
+    "comparison, since a mixed turn's redirects aren't why it counts as "
+    "blocked",
     "api-error-retry is counted, never priced -- it is a frequency "
     "signal (how often a 529/retry gap preceded a turn), not spend: the "
     "harness already retried automatically",
@@ -171,6 +206,13 @@ CAUSES: tuple[str, ...] = ("tool-error", "blocked", "interrupt", "tool-denial", 
 
 #: The count-only cause, reported alongside CAUSES but never priced.
 API_ERROR_RETRY_CAUSE = "api-error-retry"
+
+#: A blocked turn whose blocked calls were all a known token saver's own
+#: redirect -- deliberate, not waste (see the module docstring and
+#: ``known_savers.py``). Priced and shown in ``waste_by_cause``, but
+#: never one of :data:`CAUSES`: it never contributes to the wasted
+#: total, ``waste_by_agent_type`` or ``waste_top_sessions``.
+REDIRECT_CAUSE = "redirected"
 
 #: One lever per cost-attributed cause -- what to change to stop paying
 #: for this kind of wasted turn again.
@@ -198,6 +240,88 @@ LEVERS: dict[str, str] = {
         "finishes -- and reports back -- inside the turns it's given."
     ),
 }
+
+#: waste_by_cause's own lever for the REDIRECT_CAUSE row: unlike every
+#: LEVERS entry, this isn't something to change -- see waste_blocked_by
+#: for which saver and how much.
+REDIRECT_LEVER = (
+    "Not waste: a token saver's own hook sent these calls to its own "
+    "tools on purpose, not a mistake. See waste_blocked_by for which "
+    "saver, and how much."
+)
+
+#: Labels ``parse._block_source``/``parse._GUARD_LABELS`` give Claude
+#: Code's own guards and a hook that blocked without naming itself --
+#: duplicated here (not imported) for the same reason this module's own
+#: RULES are self-contained (see the module docstring): a literal string
+#: match is all either module needs, and importing parse's own private
+#: names would couple two modules that otherwise only share
+#: ``load_or_create_salt``.
+_WORKTREE_GUARD_LABEL = "Claude Code's worktree guard"
+_CC_GUARD_LABEL = "a Claude Code guard"
+_UNNAMED_HOOK_LABEL = "a hook that doesn't give its name"
+
+
+def _agent_label(agent_type: str) -> str:
+    """``agent_type`` (``agent_type_label``'s own value) worded for a
+    lever sentence: "the main session" for the main conversation, else
+    the agent type as recorded."""
+    return "the main session" if agent_type == "top-level" else agent_type
+
+
+def _blocker_lever(kind: str, label: str, agent_type: str) -> str:
+    """One ``waste_blocked_by`` row's own lever, true to what the
+    blocker's real messages say (see the module docstring's own survey
+    of tokensave's, Claude Code's worktree guard's, its sleep-chain
+    guard's and a named hook's messages)."""
+    who = _agent_label(agent_type)
+    if kind == "saver":
+        return (
+            f"Not waste: {label} sent these calls to its own tools on purpose. See "
+            f"\"What does {label} save you?\""
+        )
+    if label == _WORKTREE_GUARD_LABEL:
+        return (
+            f"Tell {who} (its agent file) to run git as plain, separate commands with literal paths inside "
+            "its own worktree, not a form too complex or computed at runtime for Claude Code to verify it "
+            "stays there."
+        )
+    if label == _CC_GUARD_LABEL:
+        return (
+            "Wait with Monitor and an until-loop, or run_in_background: true for a command you already "
+            "started, instead of chaining sleep commands to wait for something."
+        )
+    if label == _UNNAMED_HOOK_LABEL:
+        return (
+            "Claude Code recorded this block without naming which hook sent it. Check your hooks' own deny "
+            "messages to find which one, then put what it enforces into the blocked agent's instructions."
+        )
+    # A named hook (kind == "hook"): label is the hook's own script or
+    # command label (parse._hook_label).
+    return (
+        f"Put what {label} enforces into {who}'s instructions (its agent file, or CLAUDE.md for the main "
+        "session), so it doesn't try the blocked call first."
+    )
+
+
+def _main_blocker(turn: Turn, cause: str) -> tuple[str, str] | None:
+    """The ``(kind, label)`` of whichever of ``turn``'s own hook_blocks/
+    guard_blocks/saver_redirects turned away the most of its blocked
+    calls -- ``None`` when it has none. For a ``"blocked"`` turn, saver
+    redirects are left out of the comparison (see ``REDIRECT_CAUSE``,
+    which already claims the all-saver case, and the module docstring):
+    a ``"blocked"`` turn's own blocked calls are never all redirects, so
+    its main blocker is always a hook or a guard."""
+    candidates: list[tuple[int, str, str]] = [(n, "hook", label) for label, n in turn.hook_blocks.items()]
+    candidates += [(n, "guard", label) for label, n in turn.guard_blocks.items()]
+    if cause == REDIRECT_CAUSE:
+        candidates += [(n, "saver", label) for label, n in turn.saver_redirects.items()]
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    _, kind, label = candidates[0]
+    return kind, label
+
 
 #: How many rows :func:`_top_sessions_table` reports, highest wasted cost
 #: first. Not itself in the brief; a documented default rather than an
@@ -300,6 +424,19 @@ class _SessionAcc:
     cause_counts: dict[str, int] = field(default_factory=dict)
 
 
+@dataclass(slots=True)
+class _BlockerAcc:
+    """One ``waste_blocked_by`` row's own accumulator, keyed by ``(label,
+    agent_type)``. ``kind`` is fixed once a row exists (a given blocker
+    label is always the same kind, hook/guard/saver never changing for
+    the same label)."""
+
+    kind: str = ""
+    turns: int = 0
+    tokens: int = 0
+    cost_usd: float = 0.0
+
+
 class WasteStats:
     """Accumulates wasted-turn facts across every transcript in a corpus,
     for :func:`build_section` to render. Mirrors ``LimitStats``'s own
@@ -317,10 +454,20 @@ class WasteStats:
         #: Turns whose only failed tool calls were commands that ran and
         #: reported failure -- work, not waste (see the module docstring).
         self.failed_command_turns = 0
+        #: REDIRECT_CAUSE turns: priced and counted, but never folded
+        #: into wasted_turns/wasted_cost_usd/wasted_tokens, by_agent_type
+        #: or by_session (see the module docstring).
+        self.redirected_turns = 0
+        self.redirected_cost_usd = 0.0
+        self.redirected_tokens = 0
         self.pricing_version: str | None = None
         self._by_cause: dict[str, _CauseAcc] = {cause: _CauseAcc() for cause in CAUSES}
         self._by_agent_type: dict[str, _AgentTypeAcc] = {}
         self._by_session: dict[str, _SessionAcc] = {}
+        #: waste_blocked_by's own accumulator: (blocker label, agent
+        #: type) -> its turns/cost/tokens, for every "blocked" or
+        #: REDIRECT_CAUSE turn (see _main_blocker).
+        self._by_blocker: dict[tuple[str, str], _BlockerAcc] = {}
 
     def add(self, result: TranscriptResult, rates: Pricing) -> None:
         """Fold one transcript (top-level or subagent) into the
@@ -368,6 +515,16 @@ class WasteStats:
             if cause is None:
                 continue
 
+            if cause == REDIRECT_CAUSE:
+                # Deliberate, not waste: priced and attributed to its own
+                # blocker, but never folded into the wasted total, by
+                # agent type or by session (see the module docstring).
+                self.redirected_turns += 1
+                self.redirected_cost_usd += breakdown.total
+                self.redirected_tokens += tokens
+                self._accumulate_blocker(turn, cause, agent_type, tokens, breakdown.total)
+                continue
+
             cause_acc = self._by_cause[cause]
             cause_acc.turns += 1
             cause_acc.tokens += tokens
@@ -383,6 +540,19 @@ class WasteStats:
                 session_acc.turns += 1
                 session_acc.cost_usd += breakdown.total
                 session_acc.cause_counts[cause] = session_acc.cause_counts.get(cause, 0) + 1
+
+            if cause == "blocked":
+                self._accumulate_blocker(turn, cause, agent_type, tokens, breakdown.total)
+
+    def _accumulate_blocker(self, turn: Turn, cause: str, agent_type: str, tokens: int, cost_usd: float) -> None:
+        found = _main_blocker(turn, cause)
+        if found is None:
+            return
+        kind, label = found
+        acc = self._by_blocker.setdefault((label, agent_type), _BlockerAcc(kind=kind))
+        acc.turns += 1
+        acc.tokens += tokens
+        acc.cost_usd += cost_usd
 
     @property
     def wasted_turns(self) -> int:
@@ -419,11 +589,18 @@ def compute_waste(
 
 def _error_cause(turn) -> str | None:
     """The cause a turn with failed tool calls counts under, or ``None``
-    when none of them wasted the turn (see the module docstring)."""
+    when none of them wasted the turn (see the module docstring).
+    ``REDIRECT_CAUSE`` when every one of its blocked calls was a known
+    saver's own redirect (``sum(turn.saver_redirects.values()) >=
+    blocked > 0``); a mix of a redirect and a real hook/guard block
+    stays ``"blocked"``."""
     kinds = turn.tool_errors_by_kind
     if not kinds or kinds.get("misfire"):
         return "tool-error"
-    if kinds.get("blocked"):
+    blocked = kinds.get("blocked", 0)
+    if blocked:
+        if sum(turn.saver_redirects.values()) >= blocked > 0:
+            return REDIRECT_CAUSE
         return "blocked"
     return None
 
@@ -433,13 +610,14 @@ def _error_cause(turn) -> str | None:
 
 def build_section(stats: WasteStats, thresholds: WasteThresholds | None = None) -> Section:
     """Render ``stats`` into the ``waste`` report section: summary,
-    by-cause, by-agent-type, and top-sessions tables.
+    by-cause, blocked-by, by-agent-type, and top-sessions tables.
     """
     th = thresholds or stats.thresholds or _DEFAULT_THRESHOLDS
 
     tables = [
         _summary_table(stats),
         _by_cause_table(stats),
+        _blocked_by_table(stats),
         _by_agent_type_table(stats),
         _top_sessions_table(stats),
     ]
@@ -456,6 +634,11 @@ def build_section(stats: WasteStats, thresholds: WasteThresholds | None = None) 
         f"{stats.failed_command_turns} turn(s) had failed tool calls that were all commands that "
         "ran and reported a failure, such as a failing test, build or timeout. Claude used that "
         "output, so they are not counted as wasted."
+    )
+    notes.append(
+        f"{stats.redirected_turns} turn(s) were a known token saver redirecting a call to its own "
+        "tools on purpose. They have their own cost, but are not counted as wasted -- see the "
+        "\"redirected\" row below and waste_blocked_by."
     )
 
     return Section(key="waste", title="Wasted-turn spend", tables=tables, notes=notes)
@@ -480,6 +663,8 @@ def _summary_table(stats: WasteStats) -> Table:
             Column(key="limit_pause_excluded_turns", label="Excluded (limit pause)", kind="int"),
             Column(key="api_error_retry_turns", label="API-error-retry turns (count only)", kind="int"),
             Column(key="failed_command_turns", label="Not counted (a command ran and failed)", kind="int"),
+            Column(key="redirected_turns", label="Redirected (not wasted)", kind="int"),
+            Column(key="redirected_cost_usd", label="Redirected cost (not wasted)", kind="money"),
         ],
         rows=[
             [
@@ -494,6 +679,8 @@ def _summary_table(stats: WasteStats) -> Table:
                 stats.limit_pause_excluded_turns,
                 stats.api_error_retry_turns,
                 stats.failed_command_turns,
+                stats.redirected_turns,
+                round(stats.redirected_cost_usd, 6),
             ]
         ],
         notes=[
@@ -504,6 +691,9 @@ def _summary_table(stats: WasteStats) -> Table:
             "\"After an API error\" is a count only: it is not priced and "
             "not part of the wasted cost (Claude Code already retried these "
             "for you).",
+            "\"Redirected\" replies have their own cost too, but aren't "
+            "part of the wasted cost either: a token saver sent those "
+            "calls to its own tools on purpose, not a mistake.",
         ],
     )
 
@@ -523,6 +713,17 @@ def _by_cause_table(stats: WasteStats) -> Table:
                 LEVERS[cause],
             ]
         )
+    rows.append(
+        [
+            REDIRECT_CAUSE,
+            stats.redirected_turns,
+            _pct(stats.redirected_turns, stats.total_priced_turns),
+            round(stats.redirected_cost_usd, 6),
+            _pct(stats.redirected_cost_usd, stats.total_priced_cost_usd),
+            stats.redirected_tokens,
+            REDIRECT_LEVER,
+        ]
+    )
     rows.append(
         [
             API_ERROR_RETRY_CAUSE,
@@ -549,11 +750,56 @@ def _by_cause_table(stats: WasteStats) -> Table:
         rows=rows,
         notes=[
             "Both shares are of all replies and all cost, not only the "
-            "wasted ones. So across the costed causes, they add up to the "
-            "summary's share of replies and share of cost.",
-            "\"API error, retried automatically\" is shown for how often "
-            "it happens only: its cost and tokens are always 0, and it is "
-            "never part of the wasted cost.",
+            "wasted ones. So across the costed causes (tool-error, "
+            "blocked, interrupt, tool-denial, max-turns), they add up to "
+            "the summary's share of replies and share of cost.",
+            "\"Redirected\" and \"API error, retried automatically\" have "
+            "their own cost and share too, but are not part of that "
+            "total: a redirect is a token saver working on purpose, and "
+            "an API error was already retried automatically, so neither "
+            "is wasted.",
+        ],
+    )
+
+
+def _blocked_by_table(stats: WasteStats) -> Table:
+    """One row per ``(blocker, agent type)`` covering every "blocked" or
+    "redirected" reply -- who stopped it, and the lever true to what
+    that blocker's own messages say (see :func:`_blocker_lever`)."""
+    rows = []
+    for (label, agent_type), acc in stats._by_blocker.items():
+        rows.append(
+            [
+                label,
+                agent_type,
+                acc.kind,
+                acc.turns,
+                round(acc.cost_usd, 6),
+                acc.tokens,
+                _blocker_lever(acc.kind, label, agent_type),
+            ]
+        )
+    rows.sort(key=lambda row: (row[4], row[0]), reverse=True)
+    return Table(
+        name="waste_blocked_by",
+        title="Who blocked or redirected replies",
+        columns=[
+            Column(key="blocker", label="Blocker", kind="str"),
+            Column(key="agent_type", label="Agent type", kind="str"),
+            Column(key="kind", label="Kind", kind="str"),
+            Column(key="turns", label="Replies", kind="int"),
+            Column(key="cost_usd", label="Cost", kind="money"),
+            Column(key="tokens", label="Tokens", kind="tokens"),
+            Column(key="lever", label="What helps", kind="str"),
+        ],
+        rows=rows,
+        notes=[
+            "Each blocked or redirected reply is attributed to whichever hook, guard or saver stopped the "
+            "most of its own tool calls; for a blocked reply, a saver redirect mixed into the same reply "
+            "isn't counted towards that -- see waste_by_cause's own \"blocked\"/\"redirected\" split.",
+            "\"saver\" rows are not waste: the redirect was on purpose. \"guard\" covers Claude Code's own "
+            "checks, including one it recorded without naming the hook. \"hook\" is one of your own hooks, "
+            "named by its script or command.",
         ],
     )
 
@@ -796,6 +1042,8 @@ __all__ = [
     "ASSUMPTIONS",
     "CAUSES",
     "API_ERROR_RETRY_CAUSE",
+    "REDIRECT_CAUSE",
+    "REDIRECT_LEVER",
     "LEVERS",
     "TOP_SESSIONS_LIMIT",
     "WasteThresholds",

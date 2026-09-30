@@ -60,7 +60,7 @@ import json
 import re
 from typing import Iterable, Sequence
 
-from . import prompt_shape
+from . import known_savers, prompt_shape
 from .capture_catalogue import (
     COACH_MARKER,
     COACHING_HINTS,
@@ -344,6 +344,29 @@ def _user_has_tool_result(d: dict) -> bool:
     if not isinstance(content, list):
         return False
     return any(isinstance(block, dict) and block.get("type") == "tool_result" for block in content)
+
+
+def _is_saver_redirect(d: dict) -> bool:
+    """Whether a denied call's tool result is a known token saver's
+    redirect (``known_savers.saver_for_text``). Text is matched, never
+    kept."""
+    message = d.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if not isinstance(block, dict) or block.get("type") != "tool_result":
+            continue
+        inner = block.get("content")
+        if isinstance(inner, str):
+            texts = [inner]
+        elif isinstance(inner, list):
+            texts = [part.get("text") for part in inner if isinstance(part, dict)]
+        else:
+            continue
+        if any(isinstance(text, str) and known_savers.saver_for_text(text) for text in texts):
+            return True
+    return False
 
 
 #: attachment.type -> the raw attachment fields holding the text the
@@ -1449,6 +1472,8 @@ def classify_line(d: dict) -> Event | None:
     # 12. TOOL_DENIAL
     tool_denial_kind = d.get("toolDenialKind")
     if line_type == "user" and tool_denial_kind:
+        if _is_saver_redirect(d):
+            tool_denial_kind = known_savers.REDIRECT_DENIAL_KIND
         return Event(kind=EventKind.TOOL_DENIAL, subkind=tool_denial_kind, ts=ts)
 
     # 13. TOOL_RESULT

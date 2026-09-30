@@ -5,14 +5,15 @@ from __future__ import annotations
 
 import ast
 import re
+import sqlite3
 from pathlib import Path
 from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture_catalogue, discovery, quality
+from claudeglass import capture_catalogue, discovery, known_savers, quality
 from claudeglass import quick_actions as qa
-from claudeglass.fixes import PROMPT_RESTART
+from claudeglass.fixes import PROMPT_RESTART, SCOPE_NOTE, RESTART_NOTE
 from claudeglass.model import Recommendation
 from claudeglass.units import Units
 
@@ -199,8 +200,8 @@ def test_models_check_says_where_each_agents_model_is_set(tmp_path):
 
 def test_tool_output_offers_the_bash_cap_as_a_prompt_only(tmp_path):
     result = qa.run("tool-output", _ctx(tmp_path))
-    [fix] = result["fixes"]
-    assert fix["key"] == "BASH_MAX_OUTPUT_LENGTH" and fix["command"] is None
+    fix = next(f for f in result["fixes"] if f["key"] == "BASH_MAX_OUTPUT_LENGTH")
+    assert fix["command"] is None
     assert '"env"' in fix["prompt"] and "diff" in fix["prompt"]
 
 
@@ -213,19 +214,84 @@ def test_tool_output_prices_the_bash_cap_from_its_own_saving(tmp_path):
     model = _full_model()
     carry = next(s for s in model.sections if s.key == "carry")
     carry.tables.append(_table("carry_output_cap_savings", [_cap_row(2.0, 8.0)]))
-    [fix] = qa.run("tool-output", _ctx(tmp_path, model=model))["fixes"]
+    fix = next(
+        f for f in qa.run("tool-output", _ctx(tmp_path, model=model))["fixes"] if f["key"] == "BASH_MAX_OUTPUT_LENGTH"
+    )
     effect = dict(fix["explainer"])["Expected effect"]
     assert "would have cut 2 of 10 results" in effect and "saved up to 2.00 USD" in effect
 
 
-def test_tool_output_explains_a_bash_cap_that_would_save_little(tmp_path):
+def _no_read_carry_model():
+    """``_full_model`` with the ``Read`` row taken out of ``carry_by_tool``,
+    so only the output-cap logic is under test -- the "would save little"
+    cap sentence moved into the summary, never a fix or a tip."""
     model = _full_model()
+    carry = next(s for s in model.sections if s.key == "carry")
+    carry.tables[0].rows = [row for row in carry.tables[0].rows if row[0] != "Read"]
+    return model
+
+
+def test_tool_output_explains_a_bash_cap_that_would_save_little_in_the_summary(tmp_path):
+    model = _no_read_carry_model()
     carry = next(s for s in model.sections if s.key == "carry")
     carry.tables.append(_table("carry_output_cap_savings", [_cap_row(0.3, 8.0)]))
     result = qa.run("tool-output", _ctx(tmp_path, model=model))
-    assert result["fixes"] == []
-    tip = next(t for t in result["tips"] if t["title"].startswith("BASH_MAX_OUTPUT_LENGTH"))
-    assert "0.30 USD" in tip["text"] and "8.00 USD" in tip["text"]
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert not any(t["title"].startswith("BASH_MAX_OUTPUT_LENGTH") for t in result["tips"])
+    assert "wouldn't help much" in result["summary"]
+    assert "BASH_MAX_OUTPUT_LENGTH at 15000 would have saved 0.30 USD" in result["summary"]
+    assert "because most results are already short" in result["summary"]
+
+
+def test_tool_output_offers_a_fix_when_read_dominates_the_carried_context(tmp_path):
+    """Read's carry cost is >=10% of the total and it has >=5 results:
+    a real fix, not just a tip -- and, since it really is the largest
+    carry cost here, the fix says so."""
+    model = _full_model()
+    carry = next(s for s in model.sections if s.key == "carry")
+    carry.tables[0] = _table("carry_by_tool", [
+        {"key": "Bash", "result_count": 10, "tokens_entered": 3000, "mean_turns_carried": 20, "carry_cost_usd": 2.0},
+        {"key": "Read", "result_count": 10, "tokens_entered": 5000, "mean_turns_carried": 30, "carry_cost_usd": 8.0},
+    ])
+    result = qa.run("tool-output", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    read_fix = next(f for f in result["fixes"] if f["title"] == "Have Claude read only the part of a file it needs")
+    assert read_fix["command"] is None and read_fix["note"] == "scope"
+    why = dict(read_fix["explainer"])["Why it's suggested"]
+    assert why == "Read carried 5,000 tokens over 10 reads; each stayed about 30 replies. That's the most of any tool."
+    assert "offset and limit" in read_fix["prompt"]
+
+
+def test_tool_output_read_fix_says_largest_only_when_it_really_is(tmp_path):
+    """In the default fixture Bash still costs more than Read, so Read's
+    own fix doesn't claim to be the largest carry cost -- while its own
+    10%-of-total and >=5-results bar is still cleared."""
+    result = qa.run("tool-output", _ctx(tmp_path))
+    read_fix = next(f for f in result["fixes"] if f["title"] == "Have Claude read only the part of a file it needs")
+    why = dict(read_fix["explainer"])["Why it's suggested"]
+    assert why == "Read carried 5,000 tokens over 10 reads; each stayed about 30 replies."
+    assert "most of any tool" not in why
+
+
+def test_tool_output_skips_the_read_fix_when_tool_output_carry_already_covers_it(tmp_path):
+    model = _full_model()
+    model.recommendations = [Recommendation(id="tool-output-carry", title="Tool results fill your context",
+                                             why="Carrying results cost a lot.")]
+    result = qa.run("tool-output", _ctx(tmp_path, model=model))
+    assert not any(f["title"] == "Have Claude read only the part of a file it needs" for f in result["fixes"])
+    assert any("Grep over Read" in f["prompt"] for f in result["fixes"])
+
+
+def test_tool_output_read_fix_points_at_tokensaves_own_tools(tmp_path):
+    model = _full_model()
+    model.sections.append(NS(key="waste", tables=[_table("waste_blocked_by", [
+        {"blocker": "tokensave", "agent_type": "top-level", "kind": "saver", "turns": 1, "cost_usd": 0.1,
+         "tokens": 100, "lever": "Use tokensave's own tools."},
+    ])]))
+    result = qa.run("tool-output", _ctx(tmp_path, model=model))
+    read_fix = next(f for f in result["fixes"] if f["title"] == "Have Claude read only the part of a file it needs")
+    assert "tokensave_context" in read_fix["prompt"] and "tokensave_read" in read_fix["prompt"]
+    assert '"lines" mode' in read_fix["prompt"]
 
 
 def test_compaction_says_the_summary_point_is_already_set_when_it_is(tmp_path):
@@ -260,15 +326,62 @@ def test_compaction_says_no_window_is_suggested_when_real_summaries_pass_the_lim
 
 
 def test_habits_are_tips_not_settings(tmp_path):
-    result = qa.run("habits", _ctx(tmp_path))
+    """A habit rec with no prompt fix (an informational-only workflow
+    id, see fixes._WORKFLOW_EXPLAINER) surfaces as a plain tip."""
+    model = _full_model()
+    model.recommendations = [
+        Recommendation(id="cache-read-dominance", title="Cache reads dominate cost",
+                        action="Batch related work into fewer, longer sessions."),
+    ]
+    result = qa.run("habits", _ctx(tmp_path, model=model))
     assert result["status"] == "act"
-    assert result["tips"] == [{"title": "Tools often wait on you", "text": "Pre-approve routine tools."}]
+    assert result["tips"] == [
+        {"title": "Cache reads dominate cost", "text": "Batch related work into fewer, longer sessions."},
+    ]
+
+
+def test_a_rec_whose_fix_already_has_a_prompt_is_not_also_a_tip(tmp_path):
+    """UX: a rec like wasted-turns already gets a fix card with a prompt
+    (fixes._WORKFLOW_PROMPTS) -- listing it as a tip too would say the
+    same finding twice."""
+    model = _full_model()
+    model.recommendations = [
+        Recommendation(id="wasted-turns", title="A material share of spend went to turns with no benefit",
+                        action="10.0% of priced cost went to turns whose output was never used."),
+    ]
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["tips"] == []
+    [fix] = result["fixes"]
+    assert fix["prompt"] and "flag it before you start rather than after" in fix["prompt"]
 
 
 def test_markdown_carries_the_table_tips_and_fixes(tmp_path):
     text = qa.render_markdown(qa.run("models", _ctx(tmp_path)))
     assert text.startswith("## Is each agent on the cheapest model")
     assert "| Agent |" in text and "### Explore: use haiku" in text and "```bash" in text
+
+
+def test_markdown_notes_a_fix_by_its_own_note_kind():
+    """``render_markdown`` looks up each fix's note via ``fixes.fix_note``
+    instead of always appending ``RESTART_NOTE`` -- a "from now on" scope
+    prompt gets ``SCOPE_NOTE``, a fix marked ``note="none"`` gets no note
+    line at all, and a plain settings fix (no ``note`` key) still gets
+    ``RESTART_NOTE``."""
+    result = {
+        "question": "Q", "summary": "S", "tips": [],
+        "fixes": [
+            {"title": "Scope it", "explainer": [], "prompt": "Do X.", "command": None, "note": "scope"},
+            {"title": "No note", "explainer": [], "prompt": "Do Y.", "command": None, "note": "none"},
+            {"title": "Setting", "explainer": [], "prompt": "Do Z.", "command": "SOME_SETTING=1"},
+        ],
+    }
+    text = qa.render_markdown(result)
+    scope_section = text.split("### Scope it", 1)[1].split("### No note", 1)[0]
+    no_note_section = text.split("### No note", 1)[1].split("### Setting", 1)[0]
+    setting_section = text.split("### Setting", 1)[1]
+    assert SCOPE_NOTE in scope_section and RESTART_NOTE not in scope_section
+    assert SCOPE_NOTE not in no_note_section and RESTART_NOTE not in no_note_section
+    assert RESTART_NOTE in setting_section
 
 
 def test_unknown_check_raises(tmp_path):
@@ -536,6 +649,17 @@ def _habits_tables(**tables) -> NS:
     return NS(key="habits", tables=[_table(name, rows) for name, rows in tables.items()])
 
 
+def _waste_tables(**tables) -> NS:
+    return NS(key="waste", tables=[_table(name, rows) for name, rows in tables.items()])
+
+
+def _waste_model(*, recommendations=None, **tables) -> NS:
+    model = _model()
+    model.recommendations = recommendations or []
+    model.sections.append(_waste_tables(**tables))
+    return model
+
+
 _PLAYBOOK = [
     {"habit": key, "saving": saving, "evidence": f"{key} evidence.", "example": f"{key} example.", "source": "inferred"}
     for key, saving in (("tool_loops", 2.0), ("short_reports", 1.0), ("name_files", 0.5), ("quiet_output", 0.25))
@@ -592,6 +716,95 @@ def test_playbook_tips_pick_at_most_one_habit_per_theme(tmp_path):
     assert [t["title"] for t in tips] == [
         "Stop retrying a failing command", "Name the files you already know", "Keep tool output small",
     ]
+
+
+def test_playbook_tips_use_the_rows_own_title_when_present(tmp_path):
+    """A ``habits_playbook`` row can carry its own resolved ``title``
+    (``habits.item_title``, additive column) -- the tip shows that
+    verbatim instead of looking ``habit`` up in ``habits.ITEMS``."""
+    model = _full_model()
+    model.recommendations = []
+    rows = [dict(row, title="") for row in _PLAYBOOK]
+    rows[0]["title"] = "A custom title for tool_loops"
+    model.sections.append(_habits_tables(habits_playbook=rows))
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    tips = result["tips"][-qa.PLAYBOOK_TIPS:]
+    assert tips[0]["title"] == "A custom title for tool_loops"
+
+
+# -- Habits card: who blocked it, and redirects aren't waste --------------------
+
+
+_BLOCKED_BY = [
+    {"blocker": "Claude Code's worktree guard", "agent_type": "claude-implementer", "kind": "guard",
+     "turns": 5, "cost_usd": 3.0, "tokens": 30_000, "lever": "Tell claude-implementer (its agent file) to run git..."},
+    {"blocker": "tokensave", "agent_type": "top-level", "kind": "saver",
+     "turns": 4, "cost_usd": 1.0, "tokens": 8_000, "lever": "Not waste: tokensave sent these calls..."},
+]
+
+
+def test_habits_replaces_the_blocked_row_with_the_blocked_by_breakdown(tmp_path):
+    model = _waste_model(
+        waste_by_cause=[
+            {"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."},
+            {"cause": "blocked", "turns": 5, "cost_usd": 3.0, "lever": "Put the rule a hook enforces..."},
+            {"cause": "redirected", "turns": 4, "cost_usd": 1.0, "lever": "Not waste: a token saver's own hook..."},
+        ],
+        waste_blocked_by=_BLOCKED_BY,
+    )
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    labels = [row[0] for row in result["table"]["rows"]]
+    assert "tool-error" in labels
+    assert "blocked" not in labels and "redirected" not in labels
+    assert "blocked: claude-implementer, by Claude Code's worktree guard" in labels
+    assert "redirected by tokensave (not waste)" in labels
+
+
+def test_a_window_of_only_redirects_reads_as_fine_not_a_problem(tmp_path):
+    """A window whose only blocked replies are on-purpose saver redirects
+    must not read as a problem: no wasted-turns rec fires (waste.py keeps
+    redirected cost out of the wasted total), and the habits card itself
+    must say so plainly rather than defaulting to a bland "nothing to
+    report"."""
+    model = _waste_model(
+        waste_by_cause=[{"cause": "redirected", "turns": 4, "cost_usd": 1.0, "lever": "Not waste: ..."}],
+        waste_blocked_by=[
+            {"blocker": "tokensave", "agent_type": "top-level", "kind": "saver", "turns": 4, "cost_usd": 1.0,
+             "tokens": 8_000, "lever": "Not waste: tokensave sent these calls..."},
+        ],
+    )
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["status"] == "ok"
+    assert "not a problem" in result["summary"]
+    assert "tokensave" in result["summary"]
+
+
+def test_the_act_summary_says_the_costliest_cause_found(tmp_path):
+    model = _waste_model(
+        recommendations=[
+            Recommendation(id="cache-read-dominance", title="Cache reads dominate cost", action="Batch work."),
+        ],
+        waste_by_cause=[
+            {"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."},
+            {"cause": "blocked", "turns": 5, "cost_usd": 3.0, "lever": "Put the rule a hook enforces..."},
+        ],
+        waste_blocked_by=_BLOCKED_BY[:1],
+    )
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    assert "The costliest: blocked: claude-implementer, by Claude Code's worktree guard" in result["summary"]
+
+
+def test_a_problem_that_did_not_clear_the_bar_still_says_its_cost(tmp_path):
+    """No rec fired and no playbook tip -- but the table still shows real
+    wasted-reply cost, so the "ok" summary should say so instead of a
+    blanket "no habit stands out"."""
+    model = _waste_model(
+        waste_by_cause=[{"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."}],
+    )
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["status"] == "ok"
+    assert "went to replies that went nowhere" in result["summary"]
 
 
 def test_skills_late_or_not_needed_become_tips(tmp_path):
@@ -678,3 +891,127 @@ def test_hooks_check_is_fine_once_every_failing_hook_stopped(tmp_path):
         "and none costs much in kept context or blocked calls."
     )
 
+
+
+# -- "What does tokensave save you?" (known-savers) -----------------------------
+
+
+def _write_ledger(path: Path, rows: list[tuple]):
+    """A minimal ``savings_ledger`` table, as tokensave itself writes it
+    (see ``known_savers.py``'s module docstring), holding exactly the
+    columns ``known_savers.read_ledger`` selects."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(path))
+    conn.execute(
+        "CREATE TABLE savings_ledger (ts INTEGER, project_path TEXT, tool_name TEXT, "
+        "before_tokens INTEGER, after_tokens INTEGER)"
+    )
+    conn.executemany(
+        "INSERT INTO savings_ledger (ts, project_path, tool_name, before_tokens, after_tokens) VALUES (?, ?, ?, ?, ?)",
+        rows,
+    )
+    conn.commit()
+    conn.close()
+
+
+def _tokensave_carry_row(cost: float, tokens: int, calls: int = 5):
+    return {"key": "mcp__tokensave__search", "result_count": calls, "tokens_entered": tokens,
+            "mean_turns_carried": 10, "carry_cost_usd": cost}
+
+
+def _redirect_row(replies: float, cost: float):
+    return {"blocker": "tokensave", "agent_type": "top-level", "kind": "saver", "turns": replies,
+            "cost_usd": cost, "tokens": 0, "lever": "Use tokensave's own tools."}
+
+
+def _savers_model(carry_rows=None, redirect_rows=None):
+    model = _model()
+    model.sections.append(NS(key="carry", tables=[_table("carry_by_tool", carry_rows or [])]))
+    model.sections.append(NS(key="waste", tables=[_table("waste_blocked_by", redirect_rows or [])]))
+    return model
+
+
+def _patch_ledger(monkeypatch, tmp_path, rows: list[tuple] | None):
+    """Points ``known_savers.ledger_path`` at a scratch file under
+    ``tmp_path`` instead of the real ``~/.tokensave`` -- ``rows=None``
+    leaves no file at all, so ``read_ledger`` returns ``None`` (the
+    "no ledger on this machine" case)."""
+    ledger_file = tmp_path / ".tokensave" / "global.db"
+    if rows is not None:
+        _write_ledger(ledger_file, rows)
+    monkeypatch.setattr(known_savers, "ledger_path", lambda home=None: ledger_file)
+
+
+def test_known_savers_no_data_when_tokensave_was_not_used(tmp_path):
+    result = qa.run("known-savers", _ctx(tmp_path))
+    assert result["status"] == "no_data"
+    assert result["summary"] == "tokensave wasn't used over the last 14 days."
+
+
+def test_known_savers_ok_when_it_nets_positive(tmp_path, monkeypatch):
+    model = _savers_model(carry_rows=[_tokensave_carry_row(cost=1.0, tokens=1000)])
+    _patch_ledger(monkeypatch, tmp_path, [(1, "any", "tokensave_search", 3000, 500),
+                                           (2, "any", "tokensave_search", 2000, 300)])
+    result = qa.run("known-savers", _ctx(tmp_path, model=model))
+    assert result["status"] == "ok"
+    assert "tokensave says it saved 4,200 tokens in 2 calls over the last 14 days." in result["summary"]
+    assert "Net: 4.00 USD" in result["summary"]
+    assert "0 of 2 calls cost more than they replaced." in result["summary"]
+    assert result["fixes"] == []
+
+
+def test_known_savers_act_offers_a_scope_fix_when_redirects_drive_the_loss(tmp_path, monkeypatch):
+    model = _savers_model(
+        carry_rows=[_tokensave_carry_row(cost=1.0, tokens=1000)],
+        redirect_rows=[_redirect_row(replies=4, cost=2.0)],
+    )
+    _patch_ledger(monkeypatch, tmp_path, [(1, "any", "tokensave_search", 1000, 900)])
+    result = qa.run("known-savers", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    assert "Net: -2.00 USD" in result["summary"]
+    [fix] = result["fixes"]
+    assert fix["title"] == "Go straight to tokensave's own tools"
+    assert fix["command"] is None and fix["note"] == "scope"
+    assert "tokensave_context" in fix["prompt"] and fix["prompt"].endswith(qa.PROMPT_SCOPE)
+
+
+def test_known_savers_act_offers_an_uninstall_fix_when_its_own_cost_drives_the_loss(tmp_path, monkeypatch):
+    model = _savers_model(carry_rows=[_tokensave_carry_row(cost=10.0, tokens=1000)])
+    _patch_ledger(monkeypatch, tmp_path, [(1, "any", "tokensave_search", 500, 100)])
+    result = qa.run("known-savers", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    assert "Net: -5.00 USD" in result["summary"]
+    [fix] = result["fixes"]
+    assert fix["title"] == "Turn tokensave off"
+    assert fix["command"] == "tokensave uninstall --agent claude"
+    assert fix["command_warning"]
+
+
+def test_known_savers_shows_only_known_costs_with_no_ledger_on_this_machine(tmp_path, monkeypatch):
+    model = _savers_model(carry_rows=[_tokensave_carry_row(cost=1.0, tokens=1000)])
+    _patch_ledger(monkeypatch, tmp_path, None)
+    result = qa.run("known-savers", _ctx(tmp_path, model=model))
+    assert result["status"] == "ok"
+    assert "its ledger isn't on this machine" in result["summary"]
+    assert result["fixes"] == []
+
+
+def test_known_savers_no_ledger_still_acts_on_a_material_redirect_cost(tmp_path, monkeypatch):
+    model = _savers_model(
+        carry_rows=[_tokensave_carry_row(cost=1.0, tokens=1000)],
+        redirect_rows=[_redirect_row(replies=3, cost=0.5)],
+    )
+    _patch_ledger(monkeypatch, tmp_path, None)
+    result = qa.run("known-savers", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    [fix] = result["fixes"]
+    assert fix["title"] == "Go straight to tokensave's own tools"
+
+
+def test_rec_fixes_drop_an_informational_fix_with_nothing_to_paste_or_run():
+    from types import SimpleNamespace
+
+    empty = {"key": None, "prompt": "", "command": None, "explainer": [], "note": "none"}
+    prompt = {"key": None, "prompt": "Do this.", "command": None, "explainer": []}
+    rec = SimpleNamespace(title="Most of your cost is re-reading the conversation", fixes=[empty, prompt])
+    assert [f["prompt"] for f in qa._rec_fixes([rec])] == ["Do this."]

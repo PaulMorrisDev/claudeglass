@@ -22,7 +22,7 @@ from __future__ import annotations
 import dataclasses
 
 from .. import pages
-from ..fixes import RESTART_NOTE
+from ..fixes import fix_note
 from ..model import Diagnostics, ReportModel, Table
 from .tables import SCOPE_LABELS, SEVERITY_LABELS, display_cell, display_row, fix_subject, escape_md, evidence_source, format_evidence_value, help_parts
 
@@ -136,8 +136,9 @@ def _render_sections(model: ReportModel, explain: bool = False) -> list[str]:
 
 def _render_fix(fix: dict) -> list[str]:
     """One ``fixes.build_fix`` entry: the explainer, the prompt for
-    Claude, for a plain setting the dry-run command, and the reminder to
-    restart Claude Code afterwards."""
+    Claude, for a plain setting the dry-run command, and the note
+    ``fixes.fix_note`` picks for it (the restart reminder by default, the
+    "where should this apply" note for a scope prompt, or nothing)."""
     lines: list[str] = []
     if fix.get("explainer"):
         subject = fix_subject(fix)
@@ -157,7 +158,9 @@ def _render_fix(fix: dict) -> list[str]:
             fix["command"],
             "```",
         ]
-    lines += ["", RESTART_NOTE]
+    note = fix_note(fix)
+    if note:
+        lines += ["", note]
     return lines
 
 

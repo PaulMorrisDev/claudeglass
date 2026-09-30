@@ -2446,10 +2446,13 @@ def make_handler(
         return _ok({"id": prediction_id, "seen": seen})
 
     def _quick_context(window, query, project=None):
+        from ..discovery import _resolve_window
         from .. import quick_actions
 
         model = _get_report_model(*window, project)
         effective, effective_agents, _env_set = _current_settings()
+        window_days, since, until, _window_by = window
+        since_dt, until_dt = _resolve_window(window_days, since, until)
         return quick_actions, quick_actions.Context(
             model=model,
             units=_report_units(model),
@@ -2459,6 +2462,8 @@ def make_handler(
             effective_agents=effective_agents,
             skip_keys=_ignored_keys(model, query),
             only=_project_folders(project),
+            since_ts=since_dt.timestamp() if since_dt else None,
+            until_ts=until_dt.timestamp() if until_dt else None,
         )
 
     def route_quick_actions(store, query, body):

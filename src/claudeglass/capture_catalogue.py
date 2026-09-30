@@ -649,8 +649,7 @@ COACHING_TEXT = {
     "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
     "explore_reads": (
         "You've made {reads} reads and searches for this message, about {tokens} tokens that every later reply "
-        "reads again. If more searching is needed, hand it to an Explore agent: it searches in its own context "
-        "and sends back a short summary."
+        "reads again. {advice}"
     ),
     "plan_fresh": (
         "This plan was approved with about {kept} tokens of planning in context, which every reply of the build "
@@ -696,6 +695,23 @@ COACHING_QUIET_HOW = {
     "Grep": "narrow the pattern or the path, or ask for file names or counts only",
     "Glob": "narrow the pattern",
     "": "ask for less: a narrower query or a smaller page",
+}
+
+#: ``explore_reads``'s ``{advice}``: what more searching should turn to.
+#: The hook switches to ``"tokensave"`` when the project holds a
+#: tokensave index (``.tokensave/``, ``known_savers.TOKENSAVE.index_dir``)
+#: -- its own hook blocks every Explore agent call there and redirects
+#: Grep/Glob/Bash search calls too, so the generic advice below would
+#: just get turned away.
+COACHING_EXPLORE_ADVICE = {
+    "explore": (
+        "If more searching is needed, hand it to an Explore agent: it searches in its own context and sends "
+        "back a short summary."
+    ),
+    "tokensave": (
+        "If more searching is needed, use tokensave's own tools instead: tokensave_context for a concept, "
+        "tokensave_search for a symbol, tokensave_files for files, then read only the lines you need."
+    ),
 }
 
 
@@ -1845,6 +1861,7 @@ def export_json() -> dict:
             "thresholds": dict(COACHING_THRESHOLDS),
             "text": dict(COACHING_TEXT),
             "quiet_how": dict(COACHING_QUIET_HOW),
+            "explore_advice": dict(COACHING_EXPLORE_ADVICE),
             "notice": dict(COACHING_NOTICE),
             "correction_pattern": CORRECTION_PATTERN,
             "correction_scan_chars": CORRECTION_SCAN_CHARS,

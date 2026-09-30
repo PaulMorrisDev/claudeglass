@@ -801,6 +801,19 @@ def test_app_js_restart_note_matches_fixes() -> None:
     assert "".join(re.findall(r'"([^"]*)"', match.group(1))) == RESTART_NOTE
 
 
+def test_app_js_scope_note_matches_fixes() -> None:
+    """The dashboard's "where should this apply" note under a scope
+    prompt is the same text the CLI and the reports print
+    (fixes.SCOPE_NOTE)."""
+    import re
+
+    from claudeglass.fixes import SCOPE_NOTE
+
+    match = re.search(r"(?:export\s+)?(?:var|let|const) SCOPE_NOTE =((?:\s*\"[^\"]*\"\s*\+?)+);", _app_js())
+    assert match, "the dashboard no longer defines SCOPE_NOTE"
+    assert "".join(re.findall(r'"([^"]*)"', match.group(1))) == SCOPE_NOTE
+
+
 def test_pyproject_declares_static_as_package_data() -> None:
     data = tomllib.loads(PYPROJECT_TOML.read_text(encoding="utf-8"))
     package_data = data["tool"]["setuptools"]["package-data"]["claudeglass"]

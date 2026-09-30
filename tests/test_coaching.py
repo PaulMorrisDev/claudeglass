@@ -187,6 +187,26 @@ def test_many_reads_for_one_message_get_the_explore_hint(tmp_path):
     assert _coach(tmp_path, agent, raw_len=400) == ""
 
 
+def test_the_explore_hint_points_at_tokensave_when_the_project_is_indexed(tmp_path):
+    """A project with a ``.tokensave/`` index gets an Explore agent
+    blocked by tokensave's own hook, so the advice switches to its own
+    tools -- checked from the payload's ``cwd``, inlined
+    (``HOOK._tokensave_indexed``) since this hook can't import
+    ``claudeglass.known_savers``."""
+    earlier = [_read_call(n) for n in range(90, 95)]
+    calls = [record for n in range(1, 8) for record in (_read_call(n), _read_result(n))]
+    path = _transcript(tmp_path, [_prompt("first"), *earlier, _prompt("second"), *calls, _read_call(8)])
+    indexed = tmp_path / "indexed"
+    (indexed / ".tokensave").mkdir(parents=True)
+    read = {"hook_event_name": "PostToolUse", "tool_name": "Read", "tool_use_id": "toolu_8", "transcript_path": path}
+
+    note = _coach(tmp_path, {**read, "cwd": str(indexed)}, raw_len=400)
+    assert _kind(note) == "explore_reads" and "tokensave_context" in note and "Explore agent" not in note
+
+    not_indexed = _coach(tmp_path, {**read, "cwd": str(tmp_path / "elsewhere"), "session_id": "s2"}, raw_len=400)
+    assert _kind(not_indexed) == "explore_reads" and "hand it to an Explore agent" in not_indexed
+
+
 def test_an_approved_plan_after_a_lot_of_planning_gets_the_fresh_session_hint(tmp_path):
     path = _transcript(tmp_path, [_prompt("x" * 4_000), _reply(16_000), _reply(90_000)])
     plan = {"hook_event_name": "PostToolUse", "tool_name": "ExitPlanMode", "transcript_path": path,

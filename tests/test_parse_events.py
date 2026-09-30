@@ -398,6 +398,35 @@ def test_tool_denial():
     assert event.subkind == "user-rejected"
 
 
+def test_tool_denial_from_a_token_saver_is_a_redirect_not_a_refusal():
+    """Claude Code tags tokensave's JSON deny "permission-rule", the same
+    as a deny rule you wrote (seen in a real v7.13.0 transcript); the
+    reason's own words mark it as a redirect."""
+    reason = (
+        "PreToolUse:Grep hook error: STOP: This Grep targets a code file in a tokensave-indexed project and the "
+        "pattern looks like a symbol name. Set TOKENSAVE_DISABLE_GREP_HOOK=1 to turn this off."
+    )
+    line = user_block_line(
+        [{"type": "tool_result", "tool_use_id": "tu1", "content": reason, "is_error": True}],
+        toolDenialKind="permission-rule",
+    )
+    event = events.classify_line(line)
+    assert event.kind == EventKind.TOOL_DENIAL
+    assert event.subkind == "saver-redirect"
+
+    listed = user_block_line(
+        [{"type": "tool_result", "tool_use_id": "tu1", "content": [{"type": "text", "text": reason}], "is_error": True}],
+        toolDenialKind="permission-rule",
+    )
+    assert events.classify_line(listed).subkind == "saver-redirect"
+
+    rule = user_block_line(
+        [{"type": "tool_result", "tool_use_id": "tu1", "content": "Permission to use Bash has been denied.", "is_error": True}],
+        toolDenialKind="permission-rule",
+    )
+    assert events.classify_line(rule).subkind == "permission-rule"
+
+
 def test_tool_denial_beats_meta_flag():
     """Dispatch order (item 7): TOOL_DENIAL is tested before isMeta, so a
     line that is both a tool denial and flagged isMeta classifies as the

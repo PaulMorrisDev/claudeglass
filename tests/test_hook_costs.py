@@ -317,6 +317,137 @@ def test_a_claude_code_guard_block_is_not_one_of_your_hooks(tmp_path: Path):
     assert result.turns[0].hook_blocks == {}
 
 
+# -- savers/guards (v4-redirected: parse._block_source, _tool_error_kind) -------
+
+#: Real tokensave v7.13.0 redirect messages, reworded from a scratch
+#: project's own transcript (see docs/waste.md and known_savers.py's own
+#: module docstring) -- never copied from a real user transcript.
+_TOKENSAVE_GREP_BLOCK = (
+    "PreToolUse:Bash hook error: STOP: This Bash grep targets a code file in a tokensave-indexed project and "
+    "the pattern `build_fixes` looks like a symbol name. Use tokensave_search (definition) or "
+    "tokensave_callers_for (usages) instead -- symbol-indexed lookups are faster and more accurate than text "
+    "grep. To override for this one call, set TOKENSAVE_DISABLE_GREP_HOOK=1 in the shell."
+)
+_TOKENSAVE_GLOB_BLOCK = (
+    "PreToolUse:Glob hook error: STOP: This Glob searches a tokensave-indexed project for files matching "
+    "`**/*.py`. Use tokensave_files(pattern=\"**/*.py\") instead -- symbol-indexed lookups are faster and more "
+    "accurate than a glob. To override for this one call, set TOKENSAVE_DISABLE_GREP_HOOK=1 in the shell."
+)
+_TOKENSAVE_EXPLORE_BLOCK = (
+    "PreToolUse:Agent hook error: STOP: Use tokensave MCP tools (tokensave_context, tokensave_search, "
+    "tokensave_callees, tokensave_callers, tokensave_impact, tokensave_files, tokensave_affected) instead of "
+    "agents for code research. Set TOKENSAVE_DISABLE_GREP_HOOK=1 to override for this one call."
+)
+_WORKTREE_GUARD_BLOCK = (
+    "This agent is isolated in the worktree /repo/.worktrees/impl-1, but this command names git in a form too "
+    "complex to verify that it stays inside the worktree. Refusing to run it -- a worktree-isolated agent's "
+    "git operations must target its own worktree. Split it into plain, separate commands and run them one at "
+    "a time."
+)
+_UNNAMED_JSON_DENY = "PreToolUse:Bash hook error: nope"
+_CLASSIFIER_OUTAGE = (
+    "The server-side auto mode classifier gave no verdict (error): timed out waiting for a response."
+)
+
+
+@pytest.mark.parametrize(
+    ("text", "tool"),
+    [
+        (_TOKENSAVE_GREP_BLOCK, "Bash"),
+        (_TOKENSAVE_GLOB_BLOCK, "Glob"),
+        (_TOKENSAVE_EXPLORE_BLOCK, "Agent"),
+    ],
+)
+def test_a_tokensave_redirect_is_counted_as_a_saver_not_a_hook(tmp_path: Path, text, tool):
+    result = _parse(
+        tmp_path,
+        [
+            turn_line(content=[tool_use_block(tool, "toolu_1", {})]),
+            user_block_line([tool_result_block("toolu_1", text, is_error=True)]),
+            turn_line(),
+        ],
+    )
+    turn = result.turns[0]
+    assert turn.tool_errors_by_kind == {"blocked": 1}
+    assert turn.saver_redirects == {"tokensave": 1}
+    assert turn.hook_blocks == {} and turn.guard_blocks == {}
+    assert_privacy(result)
+
+
+def test_a_worktree_guard_block_is_its_own_guard_label(tmp_path: Path):
+    result = _parse(
+        tmp_path,
+        [
+            turn_line(content=[tool_use_block("Bash", "toolu_1", {"command": "git status && git add ."})]),
+            user_block_line([tool_result_block("toolu_1", _WORKTREE_GUARD_BLOCK, is_error=True)]),
+            turn_line(),
+        ],
+    )
+    turn = result.turns[0]
+    assert turn.tool_errors_by_kind == {"blocked": 1}
+    assert turn.guard_blocks == {"Claude Code's worktree guard": 1}
+    assert turn.hook_blocks == {} and turn.saver_redirects == {}
+    assert_privacy(result)
+
+
+def test_a_sleep_chain_block_is_a_claude_code_guard(tmp_path: Path):
+    result = _parse(
+        tmp_path,
+        [
+            turn_line(content=[tool_use_block("Bash", "toolu_1", {"command": "sleep 45"})]),
+            user_block_line(
+                [tool_result_block("toolu_1", "<tool_use_error>Blocked: sleep 45 followed by: ls", is_error=True)]
+            ),
+            turn_line(),
+        ],
+    )
+    assert result.turns[0].guard_blocks == {"a Claude Code guard": 1}
+
+
+def test_a_named_hook_block_is_counted_by_its_script(tmp_path: Path):
+    text = f"PreToolUse:Read hook error: [{RELATIVE}]: index-first-guard: first Read of an indexed file."
+    result = _parse(
+        tmp_path,
+        [
+            turn_line(content=[tool_use_block("Read", "toolu_1", {"file_path": "src/big.py"})]),
+            user_block_line([tool_result_block("toolu_1", text, is_error=True)]),
+            turn_line(),
+        ],
+    )
+    turn = result.turns[0]
+    assert turn.hook_blocks == {"index-first-guard.ps1": 1}
+    assert turn.guard_blocks == {} and turn.saver_redirects == {}
+
+
+def test_a_hook_that_denies_with_json_and_no_command_is_an_unnamed_guard(tmp_path: Path):
+    result = _parse(
+        tmp_path,
+        [
+            turn_line(content=[tool_use_block("Bash", "toolu_1", {"command": "rm -rf /"})]),
+            user_block_line([tool_result_block("toolu_1", _UNNAMED_JSON_DENY, is_error=True)]),
+            turn_line(),
+        ],
+    )
+    turn = result.turns[0]
+    assert turn.tool_errors_by_kind == {"blocked": 1}
+    assert turn.guard_blocks == {"a hook that doesn't give its name": 1}
+    assert turn.hook_blocks == {} and turn.saver_redirects == {}
+
+
+def test_the_auto_mode_classifier_outage_is_denied_not_blocked(tmp_path: Path):
+    result = _parse(
+        tmp_path,
+        [
+            turn_line(content=[tool_use_block("Bash", "toolu_1", {"command": "ls"})]),
+            user_block_line([tool_result_block("toolu_1", _CLASSIFIER_OUTAGE, is_error=True)]),
+            turn_line(),
+        ],
+    )
+    turn = result.turns[0]
+    assert turn.tool_errors_by_kind == {"denied": 1}
+    assert turn.hook_blocks == {} and turn.guard_blocks == {} and turn.saver_redirects == {}
+
+
 # -- compute and section ----------------------------------------------------------
 
 

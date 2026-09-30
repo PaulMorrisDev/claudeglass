@@ -239,6 +239,22 @@ def test_rework_counts_edits_to_a_file_changed_before_your_last_message(tmp_path
     assert run.cut_off is None  # the main session is never "cut off"
 
 
+def test_a_token_savers_redirect_is_not_a_denial(tmp_path):
+    grep = lambda sec, tid: _reply(sec, tool_use_block("Grep", tid, {"pattern": "build_fix"}))  # noqa: E731
+    redirect = "PreToolUse:Grep hook error: STOP: This Grep targets a code file in a tokensave-indexed project."
+    run = quality.run_facts(_parse(tmp_path, [
+        user_str_line("find build_fix", timestamp=_ts(0)),
+        grep(1, "t1"),
+        user_block_line([tool_result_block("t1", redirect, is_error=True)], timestamp=_ts(2),
+                        toolDenialKind="permission-rule"),
+        grep(3, "t2"),
+        user_block_line([tool_result_block("t2", "Permission to use Grep has been denied.", is_error=True)],
+                        timestamp=_ts(4), toolDenialKind="permission-rule"),
+        _reply(5),
+    ]), None)
+    assert run.denials == 1
+
+
 def test_session_runs_join_notification_outcomes_to_agent_transcripts(tmp_path):
     top = _parse(tmp_path, [
         user_str_line("go", timestamp=_ts(0)),

@@ -1463,6 +1463,26 @@ def test_hint_many_reads_counts_only_the_current_message(tmp_path):
     assert statusline.coaching_hint({}, [_prompt(), *old, _prompt("next"), *fewer], NOW) is None
 
 
+def test_hint_many_reads_points_at_tokensave_when_the_project_is_indexed(tmp_path):
+    """A project with a ``.tokensave/`` index gets Explore agent runs
+    blocked by tokensave's own hook, so the hint's advice switches to its
+    tools instead -- read from ``workspace.project_dir`` (falling back to
+    plain ``cwd``, both as the Status hook payload may carry them)."""
+    current = [_reply([_use(f"r{i}", "Read" if i % 2 else "Grep") for i in range(5)])] + [_result(f"r{i}", 800) for i in range(5)]
+    tail = [_prompt(), *current]
+    (tmp_path / ".tokensave").mkdir()
+
+    hint = statusline.coaching_hint({"workspace": {"project_dir": str(tmp_path)}}, tail, NOW)
+    assert hint is not None and hint[1] == "5 reads this msg: try tokensave's tools instead"
+
+    hint = statusline.coaching_hint({"cwd": str(tmp_path)}, tail, NOW)
+    assert hint is not None and hint[1] == "5 reads this msg: try tokensave's tools instead"
+
+    # No index there: the generic Explore-agent advice.
+    hint = statusline.coaching_hint({"cwd": str(tmp_path / "not-indexed")}, tail, NOW)
+    assert hint is not None and hint[1].startswith("5 reads this msg: try an Explore agent")
+
+
 def test_hint_cache_about_to_go_cold(tmp_path):
     expires = NOW.timestamp() + 40
     payload = {"context_window": {"used_tokens": 80_000}, "prompt_cache": {"warm": True, "ttl": "5m", "expires_at": expires}}

@@ -108,6 +108,7 @@ PLACEMENT: dict[str, str] = {
     "waste_by_cause": "keep",
     "waste_by_agent_type": "advanced",
     "waste_top_sessions": "advanced",
+    "waste_blocked_by": "keep",
     # compactions
     "compactions_summary": "keep",
     "compactions_trigger_mix": "advanced",
@@ -632,9 +633,11 @@ SECTION_COPY: dict[str, SectionCopy] = {
             "stopped, and subagents stopped before they reported."
         ),
         help=Help(
-            shows="Replies whose output you never used, grouped by cause, agent type and session.",
+            shows="Replies whose output you never used, grouped by cause, agent type and session, plus who "
+            "blocked or redirected each one.",
             read="Which replies were wasted is measured from your logs. Each one is priced at its full cost, so the "
-            "total is the most you could recover. Some of that work would still have been needed.",
+            "total is the most you could recover. Some of that work would still have been needed. A reply a "
+            "token saver redirected on purpose is priced and shown too, but never counted as wasted.",
             act="Act when wasted cost is above 10% of your total. Start with the most expensive cause.",
         ),
     ),
@@ -890,6 +893,7 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Covering rule",
                 "The id of the recommendation in \"Already covered by\", for linking to it. Blank otherwise.",
             ),
+            "title": ("Title", "The habit's title, resolved once here so a caller can show it without a second lookup."),
         },
         value_labels={
             **{key: title for key, (_theme, title) in HABIT_ITEMS.items()},
@@ -4241,6 +4245,15 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Replies whose only failed tool calls were commands that ran and reported failure, such as a "
                 "failing test or build. Claude used that output, so they aren't counted.",
             ),
+            "redirected_turns": (
+                "Not wasted: redirected",
+                "Replies a token saver's own hook sent to its own tools on purpose, not a mistake. See \"Why "
+                "replies were wasted\" and \"Who blocked or redirected replies\" for which saver.",
+            ),
+            "redirected_cost_usd": (
+                "Redirected cost (not wasted)",
+                "Full cost of those redirected replies, at list price. Not part of the recoverable ceiling.",
+            ),
         },
         value_labels={"all": "All sessions"},
         lead_columns=["wasted_cost_usd", "wasted_cost_share_pct", "wasted_turns", "wasted_turns_share_pct"],
@@ -4249,8 +4262,9 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="Why replies were wasted",
         help=Help(
             shows="Wasted replies by cause, with what each cost and what to change.",
-            read="Each wasted reply has one cause, so the costed causes add up to the totals above. API "
-            "errors are counted only, never costed. A failing test or build isn't a failed tool call here: "
+            read="Each wasted reply has one cause. The five costed causes add up to the totals above. "
+            "\"Redirected\" and \"API error, retried automatically\" have their own cost too, but aren't "
+            "part of that total: neither is wasted. A failing test or build isn't a failed tool call here: "
             "Claude used that output.",
             act="Start with the cause that cost the most and follow its suggestion.",
         ),
@@ -4269,6 +4283,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "interrupt": "You stopped the reply",
             "tool-denial": "You denied a tool call",
             "max-turns": "Subagent stopped before it reported",
+            "redirected": "Not wasted: a token saver redirected it",
             "api-error-retry": "API error, retried automatically",
             # The builder's lever text (waste.LEVERS), reworded for display.
             "Give exact paths and names in briefs, and have Claude check a path exists or read a file before "
@@ -4295,6 +4310,11 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "None -- retried automatically by the harness; investigate only if persistently frequent.": (
                 "Nothing to do. Claude Code retried these for you. Look into it only if it keeps happening."
+            ),
+            "Not waste: a token saver's own hook sent these calls to its own tools on purpose, not a "
+            "mistake. See waste_blocked_by for which saver, and how much.": (
+                "Nothing to do. A token saver's own hook sent these calls to its own tools on purpose. See "
+                "\"Who blocked or redirected replies\" for which saver, and how much it saved."
             ),
         },
     ),
@@ -4330,6 +4350,34 @@ TABLE_COPY: dict[str, TableCopy] = {
             "cost_usd": ("Wasted cost", "Full cost of those replies, at list price."),
             "share_of_cost_pct": ("Share of all cost", "Against all cost in the window."),
             "cause_mix": ("Causes", "Each cause and its count, most frequent first."),
+        },
+    ),
+    "waste_blocked_by": TableCopy(
+        title="Who blocked or redirected replies",
+        help=Help(
+            shows="Every blocked or redirected reply, grouped by whichever hook, guard or token saver "
+            "stopped it and by the session type it happened in.",
+            read="\"Saver\" rows aren't waste: a token saver's own hook sent those calls to its own tools on "
+            "purpose. \"Guard\" is one of Claude Code's own checks, including one it recorded without naming "
+            "the hook. \"Hook\" is one of your own hooks, named by its script or command.",
+            act="Start with the costliest \"hook\"/\"guard\" row and follow its lever. A \"saver\" row needs "
+            "no action.",
+        ),
+        columns={
+            "blocker": ("Blocked by", "The hook, guard or token saver that stopped the call."),
+            "agent_type": ("Agent type", "The main session or the subagent type it happened in."),
+            "kind": ("Kind", "Whether the blocker is one of your hooks, a Claude Code guard, or a token saver."),
+            "turns": ("Replies", "Replies this blocker stopped."),
+            "cost_usd": ("Cost", "Full cost of those replies, at list price."),
+            "tokens": ("Tokens", "All tokens of those replies."),
+            "lever": ("What helps", "The change that helps, true to what this blocker actually says."),
+        },
+        value_labels={
+            "hook": "One of your hooks",
+            "guard": "A Claude Code guard",
+            "saver": "A token saver (not waste)",
+            "top-level": "Main session",
+            "unknown": "Subagent (type not recorded)",
         },
     ),
     # -- config ------------------------------------------------------------

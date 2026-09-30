@@ -246,7 +246,9 @@ Quality-signals addition (see ``quality.py`` for how these are used):
   ``failed`` (a command ran and reported failure: a failing test or
   build, a timeout) or ``misfire`` (it couldn't run as written: a wrong
   path, a malformed command, an edit whose text wasn't found). Empty on
-  a digest from before this field existed.
+  a digest from before this field existed. From ``PARSER_VERSION`` 33,
+  an auto mode classifier that gave no verdict is ``denied``, and a
+  known token saver's redirect is ``blocked`` however it is worded.
 - ``Turn.edit_target_hashes: tuple[str, ...] = ()`` -- the salted hashes
   of the files this turn edited: Edit/Write/MultiEdit/NotebookEdit
   targets and the files its Bash/PowerShell commands wrote with content
@@ -466,6 +468,21 @@ the words:
   question mark, so your next message answers it.
 - ``Turn.coach_tip: bool = False`` -- this reply showed a ClaudeGlass tip
   (``capture_catalogue.TIP_LABEL``).
+
+Savers addition (``PARSER_VERSION`` 33). Who stopped each blocked tool
+call, so a token saver's redirect isn't counted as waste and a Claude
+Code guard isn't mistaken for a hook of yours. Labels and counts only;
+the block's text is read and dropped:
+
+- ``Turn.saver_redirects: dict = {}`` -- known token saver
+  (``known_savers.KNOWN_SAVERS``, found by a phrase of its redirect
+  message) -> this turn's tool calls its hook turned away.
+- ``Turn.guard_blocks: dict = {}`` -- label -> this turn's tool calls
+  blocked by one of Claude Code's own guards ("Claude Code's worktree
+  guard", "a Claude Code guard"), or by a hook that denied with JSON,
+  which Claude Code records without its command ("a hook that doesn't
+  give its name"). ``hook_blocks`` keeps the hooks that name their
+  command, as before.
 
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
@@ -834,6 +851,14 @@ class Turn:
     #: Your-hooks addition (see module docstring): hook label -> this
     #: turn's tool calls that repeat, unchanged, a call that hook blocked.
     hook_resends: dict = field(default_factory=dict)
+    #: Savers addition (see module docstring): known token saver -> this
+    #: turn's tool calls its hook turned away, pointing Claude at its own
+    #: tools instead.
+    saver_redirects: dict = field(default_factory=dict)
+    #: Savers addition (see module docstring): label -> this turn's tool
+    #: calls blocked by one of Claude Code's own guards, or by a hook that
+    #: doesn't give its name.
+    guard_blocks: dict = field(default_factory=dict)
     #: Tool-search addition (see module docstring): MCP server (or
     #: ``"built-in"``) -> tools listed by name only, their definitions not
     #: loaded, when this reply was requested.
@@ -1282,6 +1307,15 @@ class Recommendation:
     #: recommendations of the same severity; ``None`` when not estimated.
     saving_usd: float | None = None
     why: str = ""
+    #: Picks a variant of this id's workflow prompt/explainer in
+    #: ``fixes._WORKFLOW_PROMPTS``/``fixes._WORKFLOW_EXPLAINER`` (looked
+    #: up as ``f"{id}:{variant}"`` before falling back to ``id`` alone) --
+    #: e.g. ``"tokensave"`` on ``long-context-share`` when
+    #: ``known_savers.active_in_report`` found tokensave at work, so the
+    #: prompt doesn't tell Claude to send searches to a subagent when a
+    #: hook would just block that. Set by ``advice.py``; not part of the
+    #: JSON API contract.
+    variant: str = field(default="", metadata={"json": False})
     #: ``fixes.build_fix`` output per change, filled by ``report.build_report``:
     #: dicts with ``explainer`` (list of (heading, text)), ``command`` and
     #: ``prompt``.

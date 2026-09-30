@@ -96,3 +96,144 @@ def test_render_fix_skips_the_ask_claude_block_for_an_empty_prompt():
     assert not any("Ask Claude to do it" in line for line in md_lines)
     html = _fix_html(fix)
     assert "Ask Claude to do it" not in html
+
+
+def test_no_workflow_prompt_repeats_its_title():
+    """Every ``_WORKFLOW_PROMPTS`` entry used to splice ``{title_lower}``
+    into a lead-in that restated the title mid-sentence, so a real title
+    (e.g. "Your main session's context is running large") could show up
+    twice, sometimes lowercased. Now the title is quoted exactly once, in
+    the opening ``_FINDING_OPEN`` line."""
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    title = "A Distinctive Made-Up Finding Title"
+    for template_key in fixes_mod._WORKFLOW_PROMPTS:
+        rec_id, _, variant = template_key.partition(":")
+        rec = Recommendation(
+            id=rec_id,
+            variant=variant,
+            severity="advice",
+            category="workflow",
+            title=title,
+            why="Some unrelated why sentence that doesn't repeat the title.",
+            agent_type="my-agent",
+            lever=None,
+        )
+        (fix,) = fixes_mod.build_fixes(rec)
+        assert fix["prompt"].lower().count(title.lower()) <= 1, template_key
+        # hook-failures' ${CLAUDE_PROJECT_DIR} is a literal brace pair in
+        # the finished text (the template escapes it as "${{...}}" for
+        # str.format), not a leftover {agent}/{title} placeholder.
+        assert "{agent}" not in fix["prompt"], template_key
+        assert "{title" not in fix["prompt"], template_key
+
+
+def test_scope_ids_get_the_prompt_scope_suffix_and_the_scope_note():
+    """The seven "from now on" ids get ``PROMPT_SCOPE`` appended to their
+    prompt and ``note: "scope"`` on the fix, so the render layer shows
+    ``SCOPE_NOTE`` instead of ``RESTART_NOTE``."""
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    scope_ids = (
+        "long-tool-waits",
+        "notification-invalidation",
+        "batch-instructions",
+        "long-context-share",
+        "spawn-task-prompt",
+        "tool-output-carry",
+        "wasted-turns",
+    )
+    for rec_id in scope_ids:
+        rec = Recommendation(
+            id=rec_id, severity="advice", category="workflow", title="x", agent_type="agent", lever=None
+        )
+        (fix,) = fixes_mod.build_fixes(rec)
+        assert fix["prompt"].rstrip().endswith(fixes_mod.PROMPT_SCOPE), rec_id
+        assert fix.get("note") == "scope", rec_id
+        assert fixes_mod.fix_note(fix) == fixes_mod.SCOPE_NOTE, rec_id
+
+
+def test_none_note_ids_get_no_note():
+    """limit-pressure, discovery-share and pricing-coverage have a prompt
+    but propose nothing a restart would pick back up, so their fix gets
+    ``note: "none"``; an id with no prompt at all gets the same, computed
+    generically rather than listed by hand."""
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    for rec_id in ("limit-pressure", "discovery-share", "pricing-coverage"):
+        rec = Recommendation(
+            id=rec_id, severity="advice", category="workflow", title="x", agent_type="agent", lever=None
+        )
+        (fix,) = fixes_mod.build_fixes(rec)
+        assert fix.get("note") == "none", rec_id
+        assert fixes_mod.fix_note(fix) == "", rec_id
+
+    rec = Recommendation(id="cache-read-dominance", severity="info", category="workflow", title="x", lever=None)
+    (fix,) = fixes_mod.build_fixes(rec)
+    assert fix["prompt"] == ""
+    assert fix.get("note") == "none"
+    assert fixes_mod.fix_note(fix) == ""
+
+
+def test_workflow_fix_prepends_a_why_row_when_why_is_set():
+    from claudeglass.fixes import build_fixes
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id="batch-instructions",
+        severity="advice",
+        category="workflow",
+        title="Queued instructions are re-writing the cache prefix",
+        why="Each message you queue is written to the cache on its own.",
+        lever=None,
+    )
+    (fix,) = build_fixes(rec)
+    assert fix["explainer"][0] == ["Why it's suggested", rec.why]
+
+
+def test_workflow_fix_has_no_why_row_when_why_is_unset():
+    from claudeglass.fixes import build_fixes
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(id="batch-instructions", severity="advice", category="workflow", title="x", lever=None)
+    (fix,) = build_fixes(rec)
+    assert fix["explainer"][0][0] != "Why it's suggested"
+
+
+def test_render_fix_prints_scope_note_instead_of_restart_note():
+    from claudeglass.fixes import RESTART_NOTE, SCOPE_NOTE
+    from claudeglass.render.html import _fix_html
+    from claudeglass.render.markdown import _render_fix
+
+    fix = {"key": None, "agent": None, "explainer": [], "command": None, "prompt": "Do the thing.", "note": "scope"}
+    md_lines = _render_fix(fix)
+    assert SCOPE_NOTE in md_lines and RESTART_NOTE not in md_lines
+    html = _fix_html(fix)
+    assert SCOPE_NOTE in html and RESTART_NOTE not in html
+
+
+def test_render_fix_prints_restart_note_by_default():
+    from claudeglass.fixes import RESTART_NOTE
+    from claudeglass.render.html import _fix_html
+    from claudeglass.render.markdown import _render_fix
+
+    fix = {"key": None, "agent": None, "explainer": [], "command": None, "prompt": "Do the thing."}
+    md_lines = _render_fix(fix)
+    assert RESTART_NOTE in md_lines
+    html = _fix_html(fix)
+    assert RESTART_NOTE in html
+
+
+def test_render_fix_prints_no_note_when_note_is_none():
+    from claudeglass.fixes import RESTART_NOTE, SCOPE_NOTE
+    from claudeglass.render.html import _fix_html
+    from claudeglass.render.markdown import _render_fix
+
+    fix = {"key": None, "agent": None, "explainer": [], "command": None, "prompt": "Do the thing.", "note": "none"}
+    md_lines = _render_fix(fix)
+    assert RESTART_NOTE not in md_lines and SCOPE_NOTE not in md_lines
+    html = _fix_html(fix)
+    assert RESTART_NOTE not in html and SCOPE_NOTE not in html

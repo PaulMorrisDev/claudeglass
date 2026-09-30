@@ -197,6 +197,46 @@ def test_large_asks_count_whether_reported_or_seen_and_say_which():
     assert "1 were compacted part-way" in item.evidence and "1 had to be redone" in item.evidence
 
 
+def test_explore_research_switches_to_tokensave_when_it_was_at_work():
+    """explore_research keeps advising an Explore agent when nothing in
+    the window shows tokensave at work; ``Habits.saver_active`` (set
+    from ``known_savers.active_in_turns`` over the session's own turns)
+    switches its title, example and evidence to tokensave's tools
+    instead -- its hook would just turn an Explore agent away."""
+    heavy = dict(reads=8, read_tokens=3_000, read_carry=2.0)
+
+    h = Habits(cycles=[_cycle(**heavy)])
+    item = _by_key(habits.playbook(h))["explore_research"]
+    assert item.title == "" and item.example == ""
+    assert "with no Explore agent" in item.evidence
+    row = next(r for r in _rows(habits.playbook_table(h, habits.playbook(h))) if r["habit"] == "explore_research")
+    assert row["title"] == habits.ITEMS["explore_research"][1] == habits.item_title(item)
+    assert row["example"] == habits.EXAMPLES["explore_research"]
+    assert row["where"] == habits.WHERE["explore_research"] and "Explore agent" in row["where"]
+    assert row["trade_off"] == habits.TRADE_OFFS["explore_research"] and "Explore agent" in row["trade_off"]
+    assert row["how_to_undo"] == habits.UNDO["explore_research"]
+
+    saver_on = Habits(cycles=[_cycle(**heavy)], saver_active=True)
+    item2 = _by_key(habits.playbook(saver_on))["explore_research"]
+    assert item2.title == habits.EXPLORE_RESEARCH_TOKENSAVE_TITLE
+    assert item2.example == habits.EXPLORE_RESEARCH_TOKENSAVE_EXAMPLE
+    assert "tokensave's own tools available instead" in item2.evidence
+    assert habits.item_title(item2) == habits.EXPLORE_RESEARCH_TOKENSAVE_TITLE
+    row2 = next(
+        r for r in _rows(habits.playbook_table(saver_on, habits.playbook(saver_on))) if r["habit"] == "explore_research"
+    )
+    assert row2["title"] == habits.EXPLORE_RESEARCH_TOKENSAVE_TITLE
+    assert row2["example"] == habits.EXPLORE_RESEARCH_TOKENSAVE_EXAMPLE
+    # WHERE/TRADE_OFFS no longer name an Explore agent, since tokensave's
+    # hook would just turn one away; UNDO never named one to begin with,
+    # so it's untouched.
+    assert row2["where"] == habits.EXPLORE_RESEARCH_TOKENSAVE_WHERE and "Explore agent" not in row2["where"]
+    assert row2["trade_off"] == habits.EXPLORE_RESEARCH_TOKENSAVE_TRADE_OFF
+    assert row2["how_to_undo"] == habits.UNDO["explore_research"]
+    # The habit's key -- covered_by/theme lookups -- is unchanged.
+    assert item2.key == "explore_research" and habits.ITEMS["explore_research"][0] == "research"
+
+
 def test_a_new_task_on_old_context_is_worth_a_clear_unless_the_work_built_on_it():
     stale = habits.STALE_TOKENS
     h = Habits(cycles=[
@@ -611,6 +651,53 @@ def test_collect_turns_tags_ratings_and_agent_reports_into_facts(tmp_path, prici
     assert (agent.agent_type, agent.result, agent.fit, agent.rules, agent.level, agent.task) == (
         "Explore", "done", "larger", None, "hard", "bugfix"
     )
+
+
+def _tokensave_blocked_session(tmp_path):
+    """A session where tokensave's own hook turned an Explore agent call
+    away -- the transcript shape ``Turn.saver_redirects``/
+    ``known_savers.saver_for_text`` reads: a blocked ``tool_result`` whose
+    text carries one of tokensave's own marker phrases."""
+    top_lines = [
+        user_str_line("find where retries are handled", origin={"kind": "human"}, timestamp=_ts(0)),
+        _reply(1, tool_use_block("Agent", "toolu_E", {"subagent_type": "Explore", "prompt": "find retries"})),
+        user_block_line(
+            [tool_result_block(
+                "toolu_E",
+                "STOP: Use tokensave MCP tools (tokensave_context, tokensave_search, tokensave_files, "
+                "tokensave_read) instead of agents for code research.",
+                is_error=True,
+            )],
+            timestamp=_ts(2),
+        ),
+        _reply(3, text="Searched with tokensave's tools instead."),
+    ]
+    top = _parse(tmp_path, "top.jsonl", top_lines, kind="top-level")
+    return NS(sessions=[NS(top=top, subs=[], session_id="s1", project_dir="p", slug="p")])
+
+
+def test_collect_sets_saver_active_when_tokensaves_hook_redirected_a_call(tmp_path, pricing):
+    h = habits.collect(_tokensave_blocked_session(tmp_path), pricing)
+    assert h.saver_active is True
+
+
+def test_calls_in_turns_counts_a_savers_calls_and_redirects_against_every_call():
+    from types import SimpleNamespace as T
+
+    from claudeglass import known_savers
+
+    turns = [
+        T(tool_calls_by_tool={"Grep": 1, "mcp__tokensave__tokensave_search": 2}, saver_redirects={"tokensave": 1}),
+        T(tool_calls_by_tool={"Read": 97}, saver_redirects={}),
+    ]
+    assert known_savers.calls_in_turns(turns) == (3, 100)
+    assert known_savers.active_in_turns(turns, min_share=known_savers.ADVICE_MIN_SHARE)
+    assert not known_savers.active_in_turns(turns, min_share=0.05)
+
+
+def test_collect_leaves_saver_active_false_without_a_redirect(tmp_path, pricing):
+    h = habits.collect(_tagged_session(tmp_path), pricing)
+    assert h.saver_active is False
 
 
 def _asked(questions) -> list[dict]:

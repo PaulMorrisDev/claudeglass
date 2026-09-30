@@ -7,6 +7,73 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **"What does tokensave save you?"** If you use
+  [tokensave](https://github.com/aovestdipaperino/tokensave), a new
+  check sets what it saved against what it cost. The saving is
+  tokensave's own estimate, read from its ledger in
+  `~/.tokensave/global.db`: numbers only, read-only. The costs are its
+  answers carried in context and the replies spent on calls its hook
+  turned away. The card gives the net and counts the calls whose answer
+  cost more than it replaced. With no ledger to read, for instance when
+  tokensave runs in Docker, it shows the costs alone.
+- **Blocked calls say what blocked them.** "Do any habits cost
+  tokens?" splits blocked replies by agent and by what blocked them:
+  Claude Code's worktree guard, one of its other guards, a named hook,
+  or a hook that doesn't give its name. Each row has its own advice.
+  The waste section adds the same breakdown as the table
+  `waste_blocked_by`.
+
+### Changed
+
+- **A token saver turning a call away isn't waste.** When tokensave's
+  hook sends a Grep, Glob or Explore agent to its own tools, the reply
+  is counted as `redirected`. It is priced and shown, but left out of
+  the waste totals. It no longer counts as a request you turned down
+  either, in "Tell Claude up front what not to do" or in the quality
+  signal "Tool calls you denied". Parsed sessions are re-read once to
+  pick this up.
+- **Advice no longer fights tokensave.** ClaudeGlass no longer
+  suggests handing searches to an Explore agent where tokensave would
+  block it. The "context is running large" fix and the playbook tip
+  suggest `tokensave_context` and `tokensave_search` instead when
+  tokensave does a real share of the work (2% or more of tool calls).
+  The live coaching nudge does the same in a project tokensave has
+  indexed.
+- **Pasted rules ask where they should apply.** A prompt that sets a
+  rule "from now on" now ends by having Claude ask, through
+  AskUserQuestion, where it applies. The choices are this session, this
+  project (a line in its CLAUDE.md) or all your projects (a line in
+  `~/.claude/CLAUDE.md`). Claude shows the line before saving it. The
+  note under these prompts says so. It replaces the restart note, which
+  was wrong for them.
+- **Every fix says why it's there.** Each fix's explanation now opens
+  with a "Why it's suggested" row, which gives the finding's evidence.
+- **"Do tool results fill your context?" gives a real fix or says
+  there's nothing to change.** When file reads carry a material share,
+  it offers "Have Claude read only the part of a file it needs". It
+  words this for tokensave where tokensave is at work. An output cap
+  that would save little is explained in the summary instead of being
+  listed as a tip. The card calls a tool the largest thing carried only
+  when that is true.
+
+### Fixed
+
+- **Garbled fix prompts.** Prompts that repeated the finding's title
+  mid-sentence now open by quoting the finding cleanly.
+- **The large-context fix lost its evidence.** It now quotes the
+  figure, for example "one main-session reply in ten read more than
+  236,196 tokens". It says "main session" only when that is what it
+  measured.
+- **Empty fixes.** A check card no longer lists a fix with nothing to
+  paste or run, such as "Most of your cost is re-reading the
+  conversation". That finding is informational, and it still shows as
+  a tip.
+- **Auto-mode classifier outages counted as tool errors.** "The
+  server-side auto mode classifier gave no verdict" is now a denial,
+  not a habit to fix.
+
 ## [0.12.1] - 2026-09-28
 
 ### Changed

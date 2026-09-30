@@ -100,7 +100,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable, Iterable
 
-from . import capture_catalogue
+from . import capture_catalogue, known_savers
 from .fixes import _model_family
 from .model import Column, EventKind, Section, Table, TranscriptResult, Turn, scheduled_main_session
 from .pricing import Pricing, effective_rates, price_turn
@@ -365,7 +365,12 @@ def run_facts(
                 run.cost += price_turn(turn, pricing.resolve_model(turn.model)).total
     run.files_edited = len(edited_before | edited_this_round)
     kinds = Counter(event.kind for event in result.events)
-    run.denials = kinds[EventKind.TOOL_DENIAL]
+    # A token saver's redirect is tagged as a denial too, but nobody
+    # turned the call down (known_savers.REDIRECT_DENIAL_KIND).
+    run.denials = kinds[EventKind.TOOL_DENIAL] - sum(
+        1 for event in result.events
+        if event.kind == EventKind.TOOL_DENIAL and event.subkind == known_savers.REDIRECT_DENIAL_KIND
+    )
     run.interrupts = kinds[EventKind.INTERRUPT]
     run.api_errors = kinds[EventKind.API_ERROR]
     run.fallbacks = kinds[EventKind.MODEL_FALLBACK]

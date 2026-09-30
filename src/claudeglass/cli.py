@@ -1713,8 +1713,11 @@ def _cmd_check(args: argparse.Namespace) -> int:
     from .units import Units
 
     def emit(model, config_dir, window) -> int:
+        from .discovery import _resolve_window
+
         snapshot = snapshots.with_every_project_agents(snapshots.load_snapshots(config_dir))
         agents = snapshot.data.get("effective_agents") if snapshot is not None else None
+        since_dt, until_dt = _resolve_window(args.days, args.since, args.until)
         ctx = quick_actions.Context(
             model=model,
             units=model.units or Units(),
@@ -1723,6 +1726,8 @@ def _cmd_check(args: argparse.Namespace) -> int:
             effective=snapshots.effective_config_in_force(snapshot) if snapshot is not None else {},
             effective_agents=agents if isinstance(agents, dict) else {},
             only=_report_only(args, model, config_dir),
+            since_ts=since_dt.timestamp() if since_dt else None,
+            until_ts=until_dt.timestamp() if until_dt else None,
         )
         if args.id:
             print(quick_actions.render_markdown(quick_actions.run(args.id, ctx)))

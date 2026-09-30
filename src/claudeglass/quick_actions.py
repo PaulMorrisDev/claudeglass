@@ -18,9 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from . import capture_catalogue, carry, discovery, habits, model_gate, model_swap, pages, quality, whatif
+from . import capture_catalogue, carry, discovery, habits, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
-from .fixes import PROMPT_RESTART, RESTART_NOTE, build_fix, build_fixes
+from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, build_fix, build_fixes, fix_note
 from .model import Recommendation, SettingChange
 from .profiles import goals
 from .recommend import _BUILTIN_AGENT_TYPES, _NOT_OVERRIDABLE
@@ -44,6 +44,11 @@ class Context:
     #: saw every project: a skill Claude never used there is hidden in
     #: that project only (``skills_review``).
     only: tuple[Path, ...] | None = None
+    #: The report window's own bounds, as Unix timestamps (``None``: open
+    #: on that side) -- for a check that reads outside the report itself,
+    #: such as the "savers" check's read of tokensave's own ledger.
+    since_ts: float | None = None
+    until_ts: float | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +84,20 @@ def _cell(ctx: Context, usd) -> str:
     column doesn't wrap into a tall stack of words."""
     value = whatif._num(usd)
     return ctx.units.money_cell(value) if value else "none"
+
+
+def _signed_money(ctx: Context, usd, *, period: bool = False) -> str:
+    """``_money``, but a negative amount reads as "-$0.42" instead of
+    "none" -- ``Units.money`` only phrases a positive amount, and a net
+    figure (the "savers" check's own) can go either way."""
+    value = whatif._num(usd) or 0.0
+    return f"-{_money(ctx, -value, period=period)}" if value < 0 else _money(ctx, value, period=period)
+
+
+def _signed_cell(ctx: Context, usd) -> str:
+    """``_cell``, with the same sign handling as :func:`_signed_money`."""
+    value = whatif._num(usd) or 0.0
+    return f"-{_cell(ctx, -value)}" if value < 0 else _cell(ctx, value)
 
 
 def _short(text: str, limit: int = 160) -> str:
@@ -117,6 +136,11 @@ def _rec_fixes(recs) -> list[dict]:
     out = []
     for rec in recs:
         for fix in (getattr(rec, "fixes", None) or build_fixes(rec)):
+            # UX: an informational finding's "fix" has nothing to paste or
+            # run -- a card under "The fixes" that says so is noise; the
+            # finding still shows as a tip and a recommendation.
+            if not fix.get("prompt") and not fix.get("command"):
+                continue
             out.append({**fix, "title": fix.get("title") or rec.title})
     return out
 
@@ -598,6 +622,61 @@ def _env_fix(name: str, value: str, default: str, what: str, effect: str) -> dic
     }
 
 
+#: The least reads (``carry_by_tool``'s own ``result_count``) before a
+#: Read fix is offered -- one or two large reads don't justify a
+#: standing habit change.
+_READ_FIX_MIN_RESULTS = 5
+
+
+def _cap_little_text(ctx: Context, cap_little: list[tuple[str, str, float]], *, period: bool = True) -> str:
+    """``cap_little``'s entries (setting, value, saved) as one clause for
+    the summary sentence: "BASH_MAX_OUTPUT_LENGTH at 15000 would have
+    saved $0.01 and MAX_MCP_OUTPUT_TOKENS nothing". ``period=False`` when
+    the sentence before it already named the period."""
+    parts = []
+    for setting, value, saved in cap_little:
+        amount = _money(ctx, saved, period=period) if saved else "nothing"
+        parts.append(f"{setting} at {value} would have saved {amount}")
+    return " and ".join(parts)
+
+
+def _read_fix(ctx: Context, read: dict, is_largest: bool, share: float) -> dict:
+    """A real fix (not a tip) for Read dominating carried context: read
+    only the lines Claude needs, worded for tokensave's own tools when
+    it's at work (:func:`known_savers.active_in_report`). ``share`` is
+    Read's part of the cost of carrying every tool's results."""
+    tokens = int(whatif._num(read.get("tokens_entered")) or 0)
+    results = int(whatif._num(read.get("result_count")) or 0)
+    turns = whatif._num(read.get("mean_turns_carried")) or 0
+    why = f"Read carried {tokens:,} tokens over {results:,} reads; each stayed about {turns:.0f} replies."
+    if is_largest:
+        why += " That's the most of any tool."
+    if known_savers.active_in_report(ctx.model, min_share=known_savers.ADVICE_MIN_SHARE):
+        saver = known_savers.TOKENSAVE
+        context_tool, search_tool, _files_tool, read_tool = saver.search_tools
+        body = (
+            f"From now on, find the lines first with {context_tool} or {search_tool}, then read just that range "
+            f'with {read_tool} in "lines" mode instead of the whole file.'
+        )
+    else:
+        body = (
+            "From now on, find the lines first (Grep for the function or text), then read just that range with "
+            "Read's offset and limit instead of the whole file."
+        )
+    opening = _FINDING_OPEN.format(title=f"File reads are {share:.0%} of what my tool results cost to keep in context")
+    opening += f" {why}"
+    return {
+        "key": None,
+        "agent": None,
+        "title": "Have Claude read only the part of a file it needs",
+        "explainer": [["Why it's suggested", why]],
+        "command": None,
+        "command_warning": "",
+        "prompt": f"{opening} {body} " + PROMPT_SCOPE,
+        "note": "scope",
+    }
+
+
 def _tool_output(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     rows = sorted(tables.rows("carry", "carry_by_tool"), key=lambda r: -(whatif._num(r.get("carry_cost_usd")) or 0))
@@ -612,6 +691,7 @@ def _tool_output(ctx: Context) -> dict:
           _cell(ctx, r.get("carry_cost_usd"))] for r in rows[:10]],
     )
     fixes, tips = [], []
+    cap_little: list[tuple[str, str, float]] = []
     savings = {r.get("setting"): r for r in tables.rows("carry", "carry_output_cap_savings")}
     for cap in carry.OUTPUT_CAPS:
         default, what = _OUTPUT_CAP_TEXT[cap.setting]
@@ -637,19 +717,28 @@ def _tool_output(ctx: Context) -> dict:
                 "context. Up to: results from one reply are counted together.",
             ))
         else:
-            tips.append({
-                "title": f"{cap.setting} at {cap.value} would save little",
-                "text": f"It would have cut {cut} results and saved {_money(ctx, saved, period=True)} of the "
-                f"{_money(ctx, cost, period=True)} they cost to keep in context: most of that output is already "
-                "shorter, and cutting the rest can hide an error Claude then re-runs a command to see.",
-            })
+            # UX: a cap that would save little is a fact for the summary
+            # sentence, not a card of its own -- it isn't something to do.
+            cap_little.append((cap.setting, cap.value, saved))
+
+    carry_recs = _recommendations(ctx, {"tool-output-carry"})
     read = next((r for r in rows if r.get("key") == "Read"), None)
-    if read and total and (whatif._num(read.get("carry_cost_usd")) or 0) / total >= 0.1:
-        tips.append({
-            "title": "Point Claude at the part of a file you mean",
-            "text": "File reads are the largest thing carried in your context. Naming the function or line range "
-                    "(\"read handle_request in api.py\") keeps whole files out of every later reply.",
-        })
+    if (
+        read
+        and total
+        and (whatif._num(read.get("carry_cost_usd")) or 0) / total >= 0.1
+        and (whatif._num(read.get("result_count")) or 0) >= _READ_FIX_MIN_RESULTS
+        # UX: tool-output-carry's own workflow prompt already tells
+        # Claude to prefer Grep over Read for a large file -- don't say
+        # the same thing twice.
+        and not carry_recs
+    ):
+        fixes.append(_read_fix(
+            ctx, read, is_largest=rows[0].get("key") == "Read",
+            share=(whatif._num(read.get("carry_cost_usd")) or 0) / total,
+        ))
+    fixes = _merge_fixes(fixes, _rec_fixes(carry_recs))
+
     loops = next((r for r in tables.rows("habits", "habits_tool_output") if r.get("tool") == "loops"), None)
     if loops and (whatif._num(loops.get("loops")) or 0) >= 1:
         tips.append({
@@ -658,19 +747,27 @@ def _tool_output(ctx: Context) -> dict:
             f"message, costing {_money(ctx, loops.get('cost'), period=True, prefix='about ')}. Ask Claude to stop after two failed tries "
             "at the same command and tell you what it saw.",
         })
-    if not fixes and not tips:
-        return _result("ok", "No one tool's output dominates your context.", table=table)
-    if not fixes and all(t["title"].endswith("would save little") for t in tips):
-        return _result("ok", "No output cap would save much: most results are already short.", table=table,
-                       tips=tips)
-    return _result(
-        "act",
+
+    if not fixes:
+        if cap_little:
+            return _result(
+                "ok",
+                f"An output cap wouldn't help much: {_cap_little_text(ctx, cap_little)}, because most results are "
+                "already short.",
+                table=table,
+                tips=tips,
+            )
+        return _result("ok", "Nothing to change: no one tool's output dominates your context.", table=table, tips=tips)
+    summary = (
         f"Carrying tool results in context cost {_money(ctx, total, period=True)}. "
-        "Every result is re-read on every later reply until a summary drops it.",
-        table=table,
-        fixes=fixes,
-        tips=tips,
+        "Every result is re-read on every later reply until a summary drops it."
     )
+    if cap_little:
+        summary += (
+            f" An output cap wouldn't help much: {_cap_little_text(ctx, cap_little, period=False)}, because most "
+            "results are already short."
+        )
+    return _result("act", summary, table=table, fixes=fixes, tips=tips)
 
 
 _HOOK_RECS = {"hook-failures", "hook-block-resent", "hook-context-carry"}
@@ -772,6 +869,169 @@ def _tool_search(ctx: Context) -> dict:
     return _result("ok", text, table=table)
 
 
+#: How much of a known saver's own net loss its redirects have to
+#: explain before the fix offered is "search past its hook" rather than
+#: "turn it off" -- reuses ``CAP_MIN_SAVING_SHARE``'s own "worth acting
+#: on" bar (10%) for the same reason: below it, the redirects are a
+#: minor part of the story and turning the saver off is the more direct
+#: lever.
+_SAVER_REDIRECT_SHARE = CAP_MIN_SAVING_SHARE
+#: With no ledger to size a loss by (:func:`known_savers.read_ledger`
+#: returned ``None``), the flat cost its redirects have to reach on
+#: their own before they're worth a fix -- the same $0.01 "material at
+#: all" floor ``savers.SaverThresholds.net_saving_usd_min`` uses for the
+#: general present/absent saver comparison (docs/savers.md).
+_SAVER_REDIRECT_MIN_USD = 0.01
+
+
+def _saver_scope_fix(ctx: Context, saver: known_savers.KnownSaver, replies: int, cost: float) -> dict:
+    """A "from now on" prompt asking Claude to go straight to the
+    saver's own search tools, so its hook has nothing left to redirect."""
+    context_tool, search_tool = saver.search_tools[0], saver.search_tools[1]
+    why = (
+        f"{saver.name}'s hook turned away a search or an Explore agent in {replies:,} "
+        f"{'reply' if replies == 1 else 'replies'}, which cost {_money(ctx, cost, period=True)} and did nothing "
+        "but point Claude at its tools."
+    )
+    opening = _FINDING_OPEN.format(title=f"{saver.name} keeps turning my searches away") + f" {why}"
+    body = (
+        f"From now on, for code searches, go straight to {context_tool} or {search_tool} instead of Grep, Glob "
+        f"or an Explore agent, so {saver.name}'s hook has nothing to turn away."
+    )
+    return {
+        "key": None,
+        "agent": None,
+        "title": f"Go straight to {saver.name}'s own tools",
+        "explainer": [
+            ["Why it's suggested", why],
+            [
+                "Where and who it affects",
+                "Wherever you tell Claude when it asks: this session, a line in this project's CLAUDE.md, or a "
+                "line in your ~/.claude/CLAUDE.md.",
+            ],
+            ["Trade-off", f"{saver.name}'s own tools may miss a match Grep or Glob would have found."],
+            ["How to undo it", "Remove the line from that CLAUDE.md; a session-only rule ends with the session."],
+        ],
+        "command": None,
+        "command_warning": "",
+        "prompt": f"{opening} {body} " + PROMPT_SCOPE,
+        "note": "scope",
+    }
+
+
+def _saver_uninstall_fix(ctx: Context, saver: known_savers.KnownSaver, net: float) -> dict:
+    """A command fix that turns the saver off outright: offered once its
+    net cost, not just its redirects, is the larger part of the loss."""
+    return {
+        "key": None,
+        "agent": None,
+        "title": f"Turn {saver.name} off",
+        "explainer": [
+            [
+                "Why it's suggested",
+                f"What {saver.name} says it replaced was worth less than what its own answers and redirects "
+                f"cost: net {_signed_money(ctx, net, period=True)}.",
+            ],
+            [
+                "Where and who it affects",
+                f"Removes {saver.name}'s MCP server and hook from Claude Code, for every session, in every "
+                "project.",
+            ],
+            [
+                "Trade-off",
+                f"You lose {saver.name}'s search tools; Grep, Glob and Read go back to being the only way to "
+                "look at code. Any real saving it made outside this window is lost too.",
+            ],
+            ["How to undo it", f"Reinstall {saver.name} the way you did the first time."],
+        ],
+        "command": f"{saver.name} uninstall --agent claude",
+        "command_warning": (
+            f"This only removes {saver.name}'s hook and MCP server entry. It doesn't delete the index it built "
+            f"under a project's {saver.index_dir} folder, or its own ledger -- remove those by hand if you don't "
+            "plan to reinstall it."
+        ),
+        "prompt": (
+            f"Run `{saver.name} uninstall --agent claude` and tell me what it changed before doing anything "
+            "further."
+        ),
+    }
+
+
+def _saver_table(rows: list[list]) -> dict | None:
+    return _table([("row", "What"), ("amount", "Tokens / replies"), ("value", "Cost")], rows)
+
+
+def _savers(ctx: Context) -> dict:
+    saver = known_savers.TOKENSAVE
+    if not known_savers.active_in_report(ctx.model, saver):
+        return _result("no_data", f"{saver.name} wasn't used {ctx.period}.")
+
+    tables = whatif._Tables(ctx.model)
+    tool_rows = [
+        r for r in tables.rows("carry", "carry_by_tool") if str(r.get("key") or "").startswith(saver.tool_prefix)
+    ]
+    own_calls = sum(int(whatif._num(r.get("result_count")) or 0) for r in tool_rows)
+    own_tokens = sum(int(whatif._num(r.get("tokens_entered")) or 0) for r in tool_rows)
+    own_cost = sum(whatif._num(r.get("carry_cost_usd")) or 0 for r in tool_rows)
+
+    redirect_rows = [
+        r for r in tables.rows("waste", "waste_blocked_by") if r.get("kind") == "saver" and r.get("blocker") == saver.name
+    ]
+    redirect_replies = sum(int(whatif._num(r.get("turns")) or 0) for r in redirect_rows)
+    redirect_cost = sum(whatif._num(r.get("cost_usd")) or 0 for r in redirect_rows)
+
+    # A report already limited to one project shouldn't fold in another
+    # project's ledger rows; one that spans several (or every) project
+    # reads the whole ledger, same as active_in_report reads the whole
+    # report.
+    project = ctx.only[0] if ctx.only and len(ctx.only) == 1 else None
+    ledger = known_savers.read_ledger(ctx.since_ts, ctx.until_ts, project=project)
+
+    if ledger is None:
+        table = _saver_table([
+            ["Its own answers, carried in context", f"{own_calls:,}", _cell(ctx, own_cost)],
+            ["Replies spent on its redirects", f"{redirect_replies:,}", _cell(ctx, redirect_cost)],
+        ])
+        summary = (
+            f"Only {saver.name}'s own costs are known here, not what it replaced: its ledger isn't on this "
+            "machine (it may run in Docker, or on another one). "
+            f"Its answers cost {_money(ctx, own_cost, period=True)} to carry"
+            + (f", and its redirects cost {_money(ctx, redirect_cost)} more" if redirect_cost else "")
+            + "."
+        )
+        if redirect_cost >= _SAVER_REDIRECT_MIN_USD:
+            return _result(
+                "act", summary, table=table, fixes=[_saver_scope_fix(ctx, saver, redirect_replies, redirect_cost)]
+            )
+        return _result("ok", summary, table=table)
+
+    rate = own_cost / own_tokens if own_tokens else 0.0
+    value = ledger.before * rate
+    net = value - own_cost - redirect_cost
+
+    table = _saver_table([
+        [f"{saver.name} says its answers replaced", f"{ledger.before:,}", _cell(ctx, value)],
+        ["Its own answers, carried in context", f"{own_tokens:,}", _cell(ctx, own_cost)],
+        ["Replies spent on its redirects", f"{redirect_replies:,}", _cell(ctx, redirect_cost)],
+        ["Net", "", _signed_cell(ctx, net)],
+    ])
+    summary = (
+        f"{saver.name} says it saved {ledger.saved:,} tokens in {ledger.calls:,} calls {ctx.period}. "
+        f"ClaudeGlass values what it replaced -- if carried as long as its own answers were -- at "
+        f"{_money(ctx, value)}; its answers themselves cost {_money(ctx, own_cost)} to carry"
+        + (f", and its redirects cost {_money(ctx, redirect_cost)} more" if redirect_cost else "")
+        + f". Net: {_signed_money(ctx, net)}. "
+        f"{ledger.losing_calls} of {ledger.calls} calls cost more than they replaced."
+    )
+    if net >= 0:
+        return _result("ok", summary, table=table)
+    if redirect_cost and redirect_cost >= _SAVER_REDIRECT_SHARE * abs(net):
+        fix = _saver_scope_fix(ctx, saver, redirect_replies, redirect_cost)
+    else:
+        fix = _saver_uninstall_fix(ctx, saver, net)
+    return _result("act", summary, table=table, fixes=[fix])
+
+
 #: The most of a difference from Claude Code's own cost record, in %,
 #: that stopped replies and unlogged requests don't explain, before the
 #: cost-record check says ClaudeGlass's figures may be off.
@@ -820,29 +1080,103 @@ def _cost_record(ctx: Context) -> dict:
 _HABIT_RECS = {
     "batch-instructions", "long-tool-waits", "notification-invalidation", "agent-report-size", "spawn-task-prompt",
     "cache-read-dominance", "limit-pressure", "long-context-share", "subagent-volume", "discovery-share",
+    "wasted-turns",
 }
+
+
+def _blocked_by_label(row: dict) -> str:
+    """A ``waste_blocked_by`` row worded for the habits table's own
+    "cause" column: "blocked: claude-implementer, by Claude Code's
+    worktree guard", or, for a saver's on-purpose redirect, "redirected
+    by tokensave (not waste)" -- no agent named, since a redirect is the
+    same non-problem whichever agent it happened to."""
+    blocker = row.get("blocker") or ""
+    if row.get("kind") == "saver":
+        return f"redirected by {blocker} (not waste)"
+    who = _who(None if row.get("agent_type") == "top-level" else row.get("agent_type"))
+    return f"blocked: {who}, by {blocker}"
+
+
+def _habit_rows(tables) -> list[dict]:
+    """The habits card's own "replies that went nowhere" rows:
+    ``waste_by_cause`` minus its "blocked"/"redirected" rows (a flat
+    total says less than who blocked it), plus one row per
+    ``waste_blocked_by`` breakdown row, each already labelled for
+    display. Kept as plain dicts, cost_usd still a raw number, so the
+    summary can pick out and phrase the costliest one."""
+    rows = [
+        {
+            "label": r.get("cause"), "turns": r.get("turns"), "cost_usd": r.get("cost_usd"),
+            "lever": r.get("lever") or "", "redirect": False, "blocker": None,
+        }
+        for r in tables.rows("waste", "waste_by_cause")
+        if whatif._num(r.get("turns")) and r.get("cause") not in ("blocked", waste.REDIRECT_CAUSE)
+    ]
+    rows += [
+        {
+            "label": _blocked_by_label(r), "turns": r.get("turns"), "cost_usd": r.get("cost_usd"),
+            "lever": r.get("lever") or "", "redirect": r.get("kind") == "saver", "blocker": r.get("blocker"),
+        }
+        for r in tables.rows("waste", "waste_blocked_by")
+        if whatif._num(r.get("turns"))
+    ]
+    return rows
+
+
+def _recs_with_prompt_fix(recs) -> set[str]:
+    """Recommendation ids among ``recs`` whose own fix (``_rec_fixes``)
+    already carries a prompt: these are skipped as tips so the same
+    finding isn't said twice, once as a plain tip and once as a fix card
+    offering to act on it."""
+    return {rec.id for rec in recs if any((fix.get("prompt") or "") for fix in _rec_fixes([rec]))}
 
 
 def _habits(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
-    causes = [r for r in tables.rows("waste", "waste_by_cause") if whatif._num(r.get("turns"))]
+    rows = _habit_rows(tables)
     table = _table(
         [("cause", "Replies that went nowhere"), ("turns", "Replies"), ("cost", "Cost"), ("lever", "What helps")],
-        [[r.get("cause"), r.get("turns"), _cell(ctx, r.get("cost_usd")), r.get("lever") or ""] for r in causes],
+        [[r["label"], r["turns"], _cell(ctx, r["cost_usd"]), r["lever"]] for r in rows],
     )
     recs = _recommendations(ctx, _HABIT_RECS)
-    tips = [{"title": rec.title, "text": rec.action or rec.why} for rec in recs]
+    skip_as_tip = _recs_with_prompt_fix(recs)
+    tips = [{"title": rec.title, "text": rec.action or rec.why} for rec in recs if rec.id not in skip_as_tip]
     playbook = _playbook_tips(ctx, tables)
     tips += playbook
     fixes = _rec_fixes(recs)
-    if not recs and not causes and not playbook:
+
+    if not recs and not rows and not playbook:
         return _result("no_data", "Not enough sessions in this window.")
+
+    problem_rows = [r for r in rows if not r["redirect"]]
+    redirect_rows = [r for r in rows if r["redirect"]]
+
     if not recs and not playbook:
+        if not problem_rows and redirect_rows:
+            savers = ", ".join(sorted({r["blocker"] for r in redirect_rows if r["blocker"]}))
+            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in redirect_rows)
+            return _result(
+                "ok",
+                f"The only blocked replies {ctx.period} were {_money(ctx, cost, prefix='about ')} of on-purpose "
+                f"redirects from {savers} -- not a problem to fix.",
+                table=table,
+            )
+        if problem_rows:
+            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in problem_rows)
+            return _result(
+                "ok",
+                f"{_money(ctx, cost, prefix='About ')} went to replies that went nowhere {ctx.period}, but no "
+                "single habit crossed the bar to flag.",
+                table=table,
+            )
         return _result("ok", "No habit stands out as costing tokens.", table=table)
+
     ways = len(recs) + len(playbook)
+    top = max(problem_rows, key=lambda r: whatif._num(r["cost_usd"]) or 0, default=None)
+    why = f" The costliest: {top['label']} ({_cell(ctx, top['cost_usd'])})." if top else ""
     return _result(
         "act",
-        f"{ways} way{'s' if ways != 1 else ''} of working cost tokens {ctx.period}. These are habits, not "
+        f"{ways} way{'s' if ways != 1 else ''} of working cost tokens {ctx.period}.{why} These are habits, not "
         "settings: nothing changes unless you change how you work. {{page:habits}} has the rest.",
         table=table,
         fixes=fixes,
@@ -875,7 +1209,7 @@ def _playbook_tips(ctx: Context, tables) -> list[dict]:
         if theme and theme in seen_themes:
             continue
         key = row.get("habit")
-        title = habits.ITEMS.get(key, ("", key))[1]
+        title = row.get("title") or habits.ITEMS.get(key, ("", key))[1]
         saving = ""
         if whatif._num(row.get("saving")):
             saving = _money(ctx, row.get("saving"), prefix="About ")
@@ -1259,6 +1593,9 @@ CHECKS: tuple[Check, ...] = (
     Check("tool-search", "What does MCP tool search save you?",
           "Claude Code lists MCP tools by name and loads a full definition only when Claude needs it, so the rest "
           "aren't re-read on every reply.", _tool_search),
+    Check("known-savers", "What does tokensave save you?",
+          "A token-saving tool has its own overhead: its answers still sit in context, and its hook can turn "
+          "a call away and cost a reply. This weighs what it says it saved against what it cost.", _savers),
     Check("habits", "Do any habits cost tokens?",
           "Pauses, retries and long reports cost tokens that no setting can save.", _habits, tuple(sorted(_HABIT_RECS))),
     Check("quality", "Is any agent struggling?",
@@ -1316,8 +1653,9 @@ def render_markdown(result: dict) -> str:
             lines += ["", "Prompt for Claude:", "", "```text", fix["prompt"], "```"]
         if fix.get("command"):
             lines += ["", "Command:", "", "```bash", fix["command"], "```"]
-        if fix.get("prompt") or fix.get("command"):
-            lines += ["", RESTART_NOTE]
+        note = fix_note(fix)
+        if note:
+            lines += ["", note]
         lines.append("")
     return "\n".join(lines).rstrip() + "\n"
 

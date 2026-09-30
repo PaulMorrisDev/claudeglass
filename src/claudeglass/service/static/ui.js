@@ -476,6 +476,18 @@ export function restartNote() {
   return el("p", { class: "restart-note" }, [icon("refresh", { size: 14 }), el("span", { text: RESTART_NOTE })]);
 }
 
+// Shown instead of RESTART_NOTE below a "from now on" prompt (one that
+// ends in fixes.PROMPT_SCOPE): pasting it doesn't save a Claude Code
+// file a restart would pick back up, it asks Claude where to keep the
+// rule (fixes.SCOPE_NOTE; a test keeps the two the same).
+var SCOPE_NOTE =
+  "Claude asks whether this is for this session, this project or all your projects. A line in CLAUDE.md " +
+  "lasts; new sessions read it when they start.";
+
+export function scopeNote() {
+  return el("p", { class: "restart-note" }, [icon("info", { size: 14 }), el("span", { text: SCOPE_NOTE })]);
+}
+
 // -- empty states and skeletons ---------------------------------------------------
 
 // P4 leftover / UX-6/9: one consistent "nothing to show" box, instead
@@ -591,22 +603,36 @@ var commandBlockCount = 0;
 
 // One way to make a change, as fixes.build_fix describes it: the prompt
 // for Claude and (for a plain setting) the dry-run command, as tabs;
-// what changes, where, the trade-off and how to undo it; and the
-// reminder to restart Claude Code. Nothing here changes anything: every
-// path ends in text for you to paste.
+// what changes, where, the trade-off and how to undo it; and a note
+// (restart, scope, or none -- see noteFor). Nothing here changes
+// anything: every path ends in text for you to paste.
 // fix: {explainer: [[heading, text], ...], prompt, command,
 // command_warning, trial_command, trial_note (a profile's one-session
-// trial)}; opts.heading adds the fix's title as an h4.
+// trial), note ("scope"/"none", absent for the restart default -- see
+// fixes.fix_note)}; opts.heading adds the fix's title as an h4.
+
+// fixes.fix_note, mirrored: which note (if any) belongs under this fix's
+// prompt/command.
+function noteFor(fix) {
+  if (fix.note === "none") return null;
+  if (fix.note === "scope") return scopeNote();
+  return restartNote();
+}
+
 export function commandBlock(fix, opts) {
   opts = opts || {};
   var box = el("div", { class: "command-block" });
   if (opts.heading) box.appendChild(el("h4", { text: fixTitle(fix) }));
   var tabs = [];
   if (fix.prompt) {
+    var promptHint =
+      fix.note === "scope"
+        ? "Paste this into Claude Code. It asks where this should apply before saving anything."
+        : "Paste this into Claude Code. It shows you the change before saving it.";
     tabs.push({
       label: "Prompt for Claude",
       icon: "prompt",
-      body: [el("p", { class: "command-hint", text: "Paste this into Claude Code. It shows you the change before saving it." }), codeBlockWithCopy(fix.prompt, "Prompt", fixSubject(fix), opts.onCopy)],
+      body: [el("p", { class: "command-hint", text: promptHint }), codeBlockWithCopy(fix.prompt, "Prompt", fixSubject(fix), opts.onCopy)],
     });
   }
   if (fix.command) {
@@ -650,7 +676,10 @@ export function commandBlock(fix, opts) {
     });
     box.appendChild(list);
   }
-  if (fix.prompt || fix.command || opts.restart) box.appendChild(restartNote());
+  if (fix.prompt || fix.command || opts.restart) {
+    var note = fix.prompt || fix.command ? noteFor(fix) : restartNote();
+    if (note) box.appendChild(note);
+  }
   return box;
 }
 

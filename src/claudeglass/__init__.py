@@ -221,7 +221,19 @@ __version__ = "0.12.1"
 #: (``detail["tool"]``: a built-in tool's name, else ``mcp``), so the
 #: hooks section can tell a hook that has stopped failing from one that
 #: hasn't run since.
-PARSER_VERSION = 32
+#:
+#: Bumped to 33: a blocked tool call records who blocked it -- a known
+#: token saver's redirect (``Turn.saver_redirects``), a Claude Code guard
+#: or an unnamed hook (``Turn.guard_blocks``) -- and an auto mode
+#: classifier that gave no verdict is ``denied``, not ``misfire``. A
+#: pre-33 digest counted a saver's redirect as a plain block and a
+#: classifier outage as a tool call that couldn't run.
+#:
+#: Bumped to 34: a tool-denial event whose denial was a known token
+#: saver's redirect has subkind ``known_savers.REDIRECT_DENIAL_KIND``, not
+#: Claude Code's own ``permission-rule``, so it no longer counts as a
+#: request you turned down.
+PARSER_VERSION = 34
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

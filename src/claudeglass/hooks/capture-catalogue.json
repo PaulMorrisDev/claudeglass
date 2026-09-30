@@ -625,7 +625,7 @@
    "vague_fix": "The user says something is wrong but not what they saw or expected. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that naming what they saw and expected, or pasting the error, gets a fix first time.",
    "big_paste": "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a log, a file or command output, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting they paste only the part that matters, or save it to a file and give the path so only what's needed is read.",
    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
-   "explore_reads": "You've made {reads} reads and searches for this message, about {tokens} tokens that every later reply reads again. If more searching is needed, hand it to an Explore agent: it searches in its own context and sends back a short summary.",
+   "explore_reads": "You've made {reads} reads and searches for this message, about {tokens} tokens that every later reply reads again. {advice}",
    "plan_fresh": "This plan was approved with about {kept} tokens of planning in context, which every reply of the build reads again. Before you start building, tell the user in a quote block starting \"> **ClaudeGlass tip:**\" that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry about {kept} fewer tokens on each reply. Then carry on unless they stop you.",
    "split_run": ""
   },
@@ -635,6 +635,10 @@
    "Grep": "narrow the pattern or the path, or ask for file names or counts only",
    "Glob": "narrow the pattern",
    "": "ask for less: a narrower query or a smaller page"
+  },
+  "explore_advice": {
+   "explore": "If more searching is needed, hand it to an Explore agent: it searches in its own context and sends back a short summary.",
+   "tokensave": "If more searching is needed, use tokensave's own tools instead: tokensave_context for a concept, tokensave_search for a symbol, tokensave_files for files, then read only the lines you need."
   },
   "notice": {
    "drip_feed": "⚠️ ClaudeGlass: {count} small requests in a row, one message each. Work out everything that needs changing and send it as one prompt: it costs less.",

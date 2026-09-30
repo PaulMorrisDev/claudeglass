@@ -183,6 +183,7 @@ from pathlib import Path
 from . import capture_tags
 from . import events as events_mod
 from . import jsonl
+from . import known_savers
 from . import prompt_shape
 from . import shell_writes
 from .capture_catalogue import COACHING_THRESHOLDS
@@ -748,6 +749,10 @@ class _PendingTurn:
     call_keys: dict[str, int] = field(default_factory=dict)
     hook_blocks: dict[str, int] = field(default_factory=dict)
     hook_resends: dict[str, int] = field(default_factory=dict)
+    #: Savers addition (see model.py's ``Turn.saver_redirects``/
+    #: ``guard_blocks``).
+    saver_redirects: dict[str, int] = field(default_factory=dict)
+    guard_blocks: dict[str, int] = field(default_factory=dict)
     #: Tool-search addition (see model.py's ``Turn.deferred_tools_by_server``/
     #: ``deferred_list_chars``): set once, when the reply is requested.
     deferred_tools_by_server: dict[str, int] = field(default_factory=dict)
@@ -1131,10 +1136,21 @@ _ERROR_BLOCKED_RE = re.compile(
     r"|blocked by (?:a |the )?hook",
     re.IGNORECASE,
 )
-#: You, or the permission classifier, said no.
+#: You, or the permission classifier, said no -- or the auto mode
+#: classifier failed to answer, which stops the call the same way and
+#: isn't a mistake in it.
 _ERROR_DENIED_RE = re.compile(
-    r"^(?:The user doesn't want to (?:proceed|take this action)|Permission to use |Permission for this action was denied)"
+    r"^(?:The user doesn't want to (?:proceed|take this action)|Permission to use |Permission for this action was denied"
+    r"|The server-side auto mode classifier gave no verdict)"
 )
+#: Claude Code's own guards, by the start of their message.
+_GUARD_LABELS = (
+    ("This agent is isolated in the worktree", "Claude Code's worktree guard"),
+    ("<tool_use_error>Blocked:", "a Claude Code guard"),
+)
+#: A blocked call that names no hook command and no guard: a hook that
+#: denied with JSON, which Claude Code writes without its command.
+_UNNAMED_HOOK_LABEL = "a hook that doesn't give its name"
 #: A command that exited non-zero.
 _ERROR_EXIT_RE = re.compile(r"^Exit code \d+")
 #: In a non-zero exit's output: the command itself was wrong (a path that
@@ -1297,6 +1313,29 @@ def _hook_block_label(content) -> str | None:
     return _hook_label(match.group(1)) if match else None
 
 
+def _block_source(content) -> tuple[str, str]:
+    """Who stopped a blocked tool call, from the start of its text (read
+    here and dropped): ``("saver", name)`` for a known token saver's
+    redirect (``known_savers``), ``("hook", label)`` for a hook that
+    names its command, else ``("guard", label)`` for one of Claude Code's
+    own guards or a hook that doesn't give its name."""
+    if isinstance(content, list):
+        content = "".join(
+            b.get("text", "") for b in content if isinstance(b, dict) and isinstance(b.get("text"), str)
+        )
+    text = content.strip()[:_ERROR_TEXT_CHARS] if isinstance(content, str) else ""
+    saver = known_savers.saver_for_text(text)
+    if saver is not None:
+        return "saver", saver
+    hook = _hook_block_label(text)
+    if hook is not None:
+        return "hook", hook
+    for start, label in _GUARD_LABELS:
+        if text.startswith(start):
+            return "guard", label
+    return "guard", _UNNAMED_HOOK_LABEL
+
+
 def _tool_error_kind(content) -> str:
     """Why an erroring tool_result failed, from the start of its text:
     ``blocked``, ``denied``, ``failed`` or ``misfire`` (see model.py's
@@ -1306,7 +1345,7 @@ def _tool_error_kind(content) -> str:
             b.get("text", "") for b in content if isinstance(b, dict) and isinstance(b.get("text"), str)
         )
     text = content.strip()[:_ERROR_TEXT_CHARS] if isinstance(content, str) else ""
-    if _ERROR_BLOCKED_RE.search(text.split("\n", 1)[0]):
+    if _ERROR_BLOCKED_RE.search(text.split("\n", 1)[0]) or known_savers.saver_for_text(text):
         return "blocked"
     if _ERROR_DENIED_RE.match(text):
         return "denied"
@@ -1368,8 +1407,14 @@ def _accumulate_tool_results(
                 current.tool_errors_by_kind[kind] = current.tool_errors_by_kind.get(kind, 0) + 1
                 # Your-hooks addition: which of your hooks blocked it, and
                 # the call's key, so an unchanged re-send can be spotted.
-                blocked_by = _hook_block_label(block.get("content")) if kind == "blocked" else None
-                if blocked_by is not None:
+                # Savers addition: a known saver's redirect, or a Claude
+                # Code guard, is counted apart from your hooks.
+                source, blocked_by = _block_source(block.get("content")) if kind == "blocked" else (None, None)
+                if source == "saver":
+                    current.saver_redirects[blocked_by] = current.saver_redirects.get(blocked_by, 0) + 1
+                elif source == "guard":
+                    current.guard_blocks[blocked_by] = current.guard_blocks.get(blocked_by, 0) + 1
+                elif source == "hook":
                     current.hook_blocks[blocked_by] = current.hook_blocks.get(blocked_by, 0) + 1
                     call_key = current.call_keys.get(tool_use_id)
                     if call_key is not None and blocked_calls is not None:
@@ -1640,6 +1685,8 @@ def _finalize_turn(
         hook_context_chars=hook_context_chars,
         hook_blocks=dict(pending.hook_blocks),
         hook_resends=dict(pending.hook_resends),
+        saver_redirects=dict(pending.saver_redirects),
+        guard_blocks=dict(pending.guard_blocks),
         deferred_tools_by_server=dict(pending.deferred_tools_by_server),
         deferred_list_chars=pending.deferred_list_chars,
         prompt_steps=prompt_steps,

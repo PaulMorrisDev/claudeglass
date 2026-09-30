@@ -40,7 +40,7 @@ import re
 from dataclasses import dataclass
 from typing import Callable
 
-from . import model_gate, model_swap, whatif
+from . import known_savers, model_gate, model_swap, whatif
 from .fixes import already_set
 from .model import Recommendation, ReportModel, SettingChange
 from .pricing import model_names_in
@@ -562,24 +562,51 @@ def _explain_compaction_churn(rec: Recommendation, ctx: _Context) -> None:
 
 def _explain_long_context_share(rec: Recommendation, ctx: _Context) -> None:
     share = _evidence_value(rec, "huge-context")
-    p90 = _evidence_value(rec, "p90")
-    rec.title = "Your main session's context is running large"
+    # recommend._rule_long_context_share labels this evidence row "Context
+    # size 9 in 10 main-session replies stay under" -- "p90" alone isn't a
+    # substring of it, so the old lookup here never found it and the p90
+    # clause silently dropped out of rec.why.
+    p90 = _evidence_value(rec, "9 in 10 main-session replies stay under")
+    has_p90 = isinstance(p90, (int, float))
+    # The p90 clause is about the main session specifically; the share
+    # clause counts every reply, subagents included, so only claim "main
+    # session" in the title when p90 is the reason this fired.
+    rec.title = "Your main session's context is running large" if has_p90 else "Context is running large across replies"
     parts = []
     if isinstance(share, (int, float)):
         parts.append(f"{share:.0f}% of what replies read back from the cache came from very large contexts.")
-    if isinstance(p90, (int, float)):
-        parts.append(f"One session in ten grew past {p90:,.0f} tokens.")
+    if has_p90:
+        parts.append(f"One main-session reply in ten read more than {p90:,.0f} tokens of context.")
     parts.append("Every reply re-reads all of it.")
     rec.why = " ".join(parts)
+    # known_savers.active_in_report: tokensave's hook, in a project it has
+    # indexed, blocks an Explore-agent spawn and a symbol-shaped search --
+    # this card's usual "send searches to a subagent" advice would just be
+    # redirected there, so point at tokensave's own tools instead.
+    tokensave = known_savers.active_in_report(ctx.report, min_share=known_savers.ADVICE_MIN_SHARE)
+    if tokensave:
+        rec.variant = "tokensave"
     if rec.lever is None:
         rec.action = (
-            "Send searches and exploration to a subagent, whose context is thrown away when it finishes, and "
-            "start a fresh session when you switch tasks."
+            (
+                "Find code with tokensave's tools, read only the part of a file you need, and start a fresh "
+                "session when you switch tasks."
+            )
+            if tokensave
+            else (
+                "Send searches and exploration to a subagent, whose context is thrown away when it finishes, "
+                "and start a fresh session when you switch tasks."
+            )
         )
         rec.changes = []
         return
     rec.action = (
-        "Summarise the main session sooner (a smaller auto-compact window), and send exploration to subagents."
+        (
+            "Summarise the main session sooner (a smaller auto-compact window), and find code with "
+            "tokensave's tools instead of reading whole files."
+        )
+        if tokensave
+        else "Summarise the main session sooner (a smaller auto-compact window), and send exploration to subagents."
     )
     rec.changes = [
         _window_change(rec, ctx, suggested="a smaller window than now, so the main session is summarised sooner")
@@ -785,7 +812,14 @@ def _explain_cache_read_dominance(rec: Recommendation, ctx: _Context) -> None:
         + "Each reply reads the whole conversation back from the cache. That is already the cheapest way to "
         "send it, so the saving comes from sending less."
     )
-    rec.action = "Keep contexts small: start fresh sessions between tasks, and send exploration to subagents."
+    # See _explain_long_context_share: tokensave's hook redirects the
+    # searches/Explore-agent advice this card would otherwise give.
+    rec.action = (
+        "Keep contexts small: start fresh sessions between tasks, and look up code with tokensave's tools "
+        "instead of reading whole files."
+        if known_savers.active_in_report(ctx.report, min_share=known_savers.ADVICE_MIN_SHARE)
+        else "Keep contexts small: start fresh sessions between tasks, and send exploration to subagents."
+    )
 
 
 def _explain_data_quality(rec: Recommendation, ctx: _Context) -> None:

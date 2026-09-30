@@ -36,6 +36,11 @@ required keys):
 - ``transcript_path`` — read incrementally (last 64 KB only, scanned
   backwards) to find the last assistant turn's timestamp, for the TTL
   countdown.
+- ``workspace.project_dir`` (else plain ``cwd``) — the project's root
+  folder, only to check for a tokensave index (:func:`_coach_project_dir`,
+  ``known_savers.indexed``): the ``explore_reads`` coaching hint switches
+  its advice to tokensave's own tools there, since its hook would just
+  turn an Explore agent away.
 
 S1-context-budget addition: when the payload's ``context_window`` object
 also carries a numeric ``used_tokens``, this module appends a *second*,
@@ -333,6 +338,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import installer as installer_mod
+from . import known_savers
 from .model import Column, Table
 from .tools import log_usage
 
@@ -1708,6 +1714,19 @@ _CHARS_PER_TOKEN = 4
 _READ_TOOLS = frozenset({"Read", "Grep", "Glob"})
 
 
+def _coach_project_dir(payload: dict) -> str | None:
+    """The project's root folder, for the ``explore_reads`` hint's
+    tokensave check (:func:`known_savers.indexed`): the Status hook
+    payload's ``workspace.project_dir``, else its plain ``cwd``."""
+    workspace = payload.get("workspace")
+    if isinstance(workspace, dict):
+        project = workspace.get("project_dir")
+        if isinstance(project, str) and project:
+            return project
+    cwd = payload.get("cwd")
+    return cwd if isinstance(cwd, str) and cwd else None
+
+
 def _parse_capture_until(value: str) -> datetime | None:
     """Same small parse as capture-hook.py's own ``_parse_time``: this hot
     path can't import that hyphenated filename as a module, so it's
@@ -2039,7 +2058,9 @@ def coaching_hint(payload: dict, tail: list[dict], now: datetime) -> tuple[float
       message: it stays in context for every later message.
     - **many reads and searches** (``"explore_reads"``) in the current
       message: an Explore agent reads in its own context and sends back
-      a summary.
+      a summary -- or, when the project holds a tokensave index
+      (:func:`_coach_project_dir`, ``known_savers.indexed``), its own
+      tools, since its hook would just turn an Explore agent away.
     - **how you're prompting** (``"drip_feed"``, ``"repeat_ask"``,
       ``"stop_loop"``, ``"big_paste"``; :func:`_prompt_habits`): small
       requests sent one at a time, the same request again, stopping
@@ -2086,7 +2107,11 @@ def coaching_hint(payload: dict, tail: list[dict], now: datetime) -> tuple[float
             hints.append((output, f"last output ~{_k(output)}: try quieter cmd or offset read", "quiet_output"))
     if len(reads) >= _COACH_READS:
         read_tokens = sum(_result_chars(b) for b in results if str(b.get("tool_use_id")) in reads) / _CHARS_PER_TOKEN
-        hints.append((read_tokens, f"{len(reads)} reads this msg: try an Explore agent instead", "explore_reads"))
+        advice = (
+            "try tokensave's tools instead" if known_savers.indexed(_coach_project_dir(payload))
+            else "try an Explore agent instead"
+        )
+        hints.append((read_tokens, f"{len(reads)} reads this msg: {advice}", "explore_reads"))
     hints.extend(_prompt_habits(tail, ctx, now))
 
     if not hints:
