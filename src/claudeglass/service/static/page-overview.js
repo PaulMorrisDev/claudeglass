@@ -33,6 +33,7 @@ import { chartError, holdChart } from "./charts.js";
 import { dailyChanges, renderChart, savingsLevers, sparkline, tableObjects, windowDays } from "./charts-types.js";
 import { groupRecommendations, groupSavingUsd, groupTitle, listSaving } from "./page-actions.js";
 import { changesLink, renderChangeCards } from "./page-changes.js";
+import { modelIdFor, rateFor } from "./costs.js";
 
 // A page draw that a newer one (a new window) has replaced: its late
 // answers are dropped, so they can't take the chart back.
@@ -185,17 +186,20 @@ function firstRun(container, health) {
 
 // The price of a cache read against fresh input on the model that read
 // the most from the cache in this window (report.meta.rates; the daily
-// rows say which model read what).
+// rows say which model read what, by the id each session recorded, so
+// costs.js finds the rate card's own id for each and adds them up).
 function cacheReadRatio(meta, dailyRows) {
-  var rates = (meta && meta.rates) || {};
   var reads = {};
   (dailyRows || []).forEach(function (row) {
-    if (row.model) reads[row.model] = (reads[row.model] || 0) + (Number(row.cache_read_tokens) || 0);
+    if (!row.model) return;
+    var id = modelIdFor(meta, row.model) || row.model;
+    reads[id] = (reads[id] || 0) + (Number(row.cache_read_tokens) || 0);
   });
   var top = Object.keys(reads).sort(function (a, b) {
     return reads[b] - reads[a];
   })[0];
-  var ratio = top && rates[top] && rates[top].cache_read_ratio;
+  var rates = top ? rateFor(meta, top) : null;
+  var ratio = rates && rates.cache_read_ratio;
   return typeof ratio === "number" && ratio > 0 ? ratio : null;
 }
 

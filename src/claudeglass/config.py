@@ -685,6 +685,18 @@ def saved_billing(config_dir: str | Path | None = None) -> str | None:
     return value if isinstance(value, str) and value in _ALLOWED_BILLING else None
 
 
+def saved_pricing_path(config_dir: str | Path | None = None) -> str | None:
+    """``pricing_path`` as written in ``config.toml``, or ``None`` when
+    the file or the key is missing. Reads only that one file, so it is
+    cheap enough for the service's scanner to call on every tick, unlike
+    :func:`load_config` (which also works out billing from the usage log
+    and loads every project's config). Raises :class:`ConfigError` as
+    :func:`load_config` does."""
+    data = _read_toml(_resolve_config_dir(config_dir) / "config.toml", what="config file")
+    value = (data or {}).get("pricing_path")
+    return value if isinstance(value, str) else None
+
+
 def load_config(config_dir: str | Path | None = None) -> Config:
     """Load ``<config_dir>/config.toml`` (``config_dir`` defaults to
     ``~/.claude/claudeglass``, honouring ``CLAUDE_CONFIG_DIR``). A missing
@@ -1302,6 +1314,7 @@ __all__ = [
     "ProjectConfig",
     "load_config",
     "saved_billing",
+    "saved_pricing_path",
     "check_config_values",
     "FEEDBACK_ON",
     "FEEDBACK_OFF",

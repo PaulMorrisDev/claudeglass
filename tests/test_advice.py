@@ -463,6 +463,33 @@ def test_pricing_coverage_wording_falls_back_when_neither_table_present():
     assert rec.title == "Some usage has no price"
 
 
+def test_pricing_coverage_wording_when_every_closest_match_is_a_newer_version():
+    report = _usage_report(_closest_match_table([["claude-widget-9-1", "claude-widget-9", 3, 1000]]))
+    rec = advice.finish([_pricing_coverage_rec()], report, None, None)[0]
+    assert rec.title == "A newer model is priced at an older model's rate"
+    assert rec.why == (
+        "pricing.toml has no row for this newer model yet, so its cost is estimated from the older "
+        "model's rate and may be off."
+    )
+
+    report = _usage_report(_closest_match_table([
+        ["claude-widget-9-1", "claude-widget-9", 3, 1000],
+        ["claude-gadget-2-5-20261001", "claude-gadget-2", 1, 100],
+    ]))
+    rec = advice.finish([_pricing_coverage_rec()], report, None, None)[0]
+    assert rec.title == "Newer models are priced at older models' rates"
+    assert "no rows for these newer models" in rec.why
+
+
+def test_pricing_coverage_keeps_the_closest_match_wording_when_any_match_is_not_newer():
+    report = _usage_report(_closest_match_table([
+        ["claude-widget-9-1", "claude-widget-9", 3, 1000],
+        ["claude-widget-9-preview", "claude-widget-9", 3, 1000],
+    ]))
+    rec = advice.finish([_pricing_coverage_rec()], report, None, None)[0]
+    assert rec.title == "Some usage is priced by closest match, not its own rate"
+
+
 def test_model_tier_leaves_out_an_agent_often_retried_on_a_larger_model():
     report = _model_swap_report([["reviewer", "claude-sonnet-5", "claude-haiku-4-5-20251001", 50.0]])
     report.sections.append(

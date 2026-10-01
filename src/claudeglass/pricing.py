@@ -39,6 +39,7 @@ import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Iterable
 
 from .model import Column, CostBreakdown, Table, Turn
 
@@ -141,11 +142,12 @@ class ModelRates:
     #: ``_DEFAULT_CONTEXT_WINDOW_TOKENS`` (200,000) when the TOML entry
     #: doesn't set ``context_window_tokens``; the packaged file sets
     #: 1,000,000 explicitly for the models the docs list as natively 1M
-    #: (Fable 5.1, Fable 5, Sonnet 5, Opus 4.7 and later -- V24). Claude
-    #: Code itself compacts a 1M-window session before the window fills,
-    #: at about 967K tokens by default (V24) -- this field is the raw
-    #: window, not that trigger point; a caller wanting the trigger
-    #: should treat it as roughly 0.967x this value when it matters.
+    #: (Fable 5.1, Fable 5, Sonnet 5.5, Sonnet 5, Sonnet 4.6, and Opus
+    #: 4.6 and later -- V24). Claude Code itself compacts a 1M-window
+    #: session before the window fills, at about 967K tokens by default
+    #: (V24) -- this field is the raw window, not that trigger point; a
+    #: caller wanting the trigger should treat it as roughly 0.967x this
+    #: value when it matters.
     context_window_tokens: int = _DEFAULT_CONTEXT_WINDOW_TOKENS
 
 
@@ -176,6 +178,13 @@ class ResolvedRates:
     #: from the same :class:`Pricing` gets the same value, and
     #: ``price_turn`` already receives this object.
     web_search_per_1000: float = 0.0
+    #: True only on a prefix (``approximate``) match whose leftover is a
+    #: bare minor version (``claude-sonnet-5-5`` priced as
+    #: ``claude-sonnet-5``): a newer release of the matched model that
+    #: the rate card has no row for yet. False for a dated, ``-preview``
+    #: or ``-0`` leftover (see :func:`newer_version_of`, which applies
+    #: the same test to two ids after the fact).
+    newer_version: bool = False
 
 
 @dataclass(slots=True)
@@ -287,6 +296,7 @@ class Pricing:
             return ResolvedRates(
                 best_id, self.models[best_id], matched_via, approximate=True,
                 web_search_per_1000=web_search_per_1000,
+                newer_version=bool(_NEWER_VERSION_RE.match(cleaned[len(best_id) :])),
             )
 
         return None
@@ -376,6 +386,27 @@ class Pricing:
             out[model_id] = entry
         return out
 
+    def model_ids_meta(self, observed: Iterable[str] = ()) -> dict[str, str]:
+        """Which canonical id each other name for a model is priced as,
+        for ``report.json``'s additive ``meta.model_ids``: every alias
+        this rate card ships (``"sonnet"`` -> ``"claude-sonnet-5-5"``),
+        plus every ``observed`` id (the report window's ``by_model``
+        keys) that :meth:`resolve_model` lands on a different canonical
+        id (a dated, ``[1m]``, Bedrock/Vertex or newer-version id). The
+        dashboard reads it to find an observed id's own entry in
+        ``meta.rates``, which is keyed by canonical id only. A canonical
+        id maps to nothing (it is already a ``meta.rates`` key), and an
+        id this rate card can't price (``"<unknown>"``) is left out.
+        """
+        out = dict(self.aliases)
+        for model_id in observed:
+            if not isinstance(model_id, str) or not model_id or model_id in self.models:
+                continue
+            resolved = self.resolve_model(model_id)
+            if resolved is not None:
+                out[model_id] = resolved.canonical_id
+        return out
+
 
 #: Characters allowed to immediately follow a matched registered-id
 #: prefix for the match to count (see ``_prefix_boundary_match``).
@@ -394,6 +425,51 @@ def _prefix_boundary_match(cleaned: str, canonical_id: str) -> bool:
         return False
     rest = cleaned[len(canonical_id) :]
     return rest == "" or rest[0] in _PREFIX_BOUNDARY_CHARS
+
+
+#: The leftover after a prefix match that marks a newer release of the
+#: matched model: a bare 1-2 digit minor version (``-5`` in
+#: ``claude-sonnet-5-5`` on ``claude-sonnet-5``, ``-10`` in
+#: ``claude-opus-4-10``), alone or before a further ``-``/``@`` suffix.
+#: Never ``-0`` (``claude-opus-4-0`` is an alias of ``claude-opus-4``),
+#: an 8-digit date or ``-preview``.
+_NEWER_VERSION_RE = re.compile(r"-(?:[1-9]\d?)(?=$|[-@])")
+
+
+def newer_version_of(model_id: str, priced_as: str) -> bool:
+    """Is ``model_id`` a newer release of ``priced_as`` that the rate
+    card has no row for yet, so it was priced at that older model's
+    rate? The same test :meth:`Pricing.resolve_model` applies for
+    ``ResolvedRates.newer_version``, on two plain strings, so a reader
+    of the ``pricing_closest_match`` table (``model_id``, ``priced_as``)
+    can tell the two kinds of closest match apart: ``[1m]`` and
+    Bedrock/Vertex wrapping are stripped first, then ``priced_as`` must
+    be a token-boundary prefix and the rest must start with a bare minor
+    version. True for ``claude-sonnet-5-5`` (or its dated and cloud
+    forms) on ``claude-sonnet-5``; False for ``claude-sonnet-5-20261001``,
+    ``claude-opus-4-1-preview`` on ``claude-opus-4-1``,
+    ``claude-opus-4-0`` and an exact id.
+    """
+    return newer_version_id(model_id, priced_as) is not None
+
+
+def newer_version_id(model_id: str, priced_as: str) -> str | None:
+    """The newer release ``model_id`` names when :func:`newer_version_of`
+    holds: ``priced_as`` plus that minor version, with ``[1m]``,
+    Bedrock/Vertex wrapping and any later suffix dropped
+    (``claude-opus-5-7`` for ``claude-opus-5-7-20261101`` or
+    ``us.anthropic.claude-opus-5-7-v1:0`` priced as ``claude-opus-5``).
+    ``None`` otherwise. Lets a caller that compares ids by canonical id
+    keep apart two releases the rate card prices alike for now."""
+    cleaned = str(model_id or "")
+    if cleaned.endswith(_CONTEXT_WINDOW_SUFFIX):
+        cleaned = cleaned[: -len(_CONTEXT_WINDOW_SUFFIX)]
+    cleaned = _strip_cloud_provider(cleaned)
+    priced_as = str(priced_as or "")
+    if not priced_as or not _prefix_boundary_match(cleaned, priced_as):
+        return None
+    match = _NEWER_VERSION_RE.match(cleaned[len(priced_as) :])
+    return priced_as + match.group(0) if match else None
 
 
 def _strip_cloud_provider(model_id: str) -> str:
@@ -1017,7 +1093,9 @@ class PricingCoverage:
     def as_closest_match_table(self) -> Table:
         """One row per model id priced by closest (prefix) match: what it
         was actually priced as, so the approximation is visible instead
-        of reading as a full 100%-priced model."""
+        of reading as a full 100%-priced model. An id that looks like a
+        newer release of what it was priced as (:func:`newer_version_of`)
+        also gets a note of its own; the columns stay the same."""
         columns = [
             Column(key="model_id", label="Model", kind="str"),
             Column(key="priced_as", label="Priced as", kind="str"),
@@ -1036,6 +1114,14 @@ class PricingCoverage:
                 " it may be off. Add a models.\"<id>\" row for this model's own"
                 " rates to price it exactly."
             )
+        # A newer release the rate card doesn't know yet gets its own
+        # line, so it doesn't read as a mismatched model.
+        for model_id, entry in sorted(self.closest_matches.items()):
+            if newer_version_of(model_id, entry["priced_as"]):
+                notes.append(
+                    f"{model_id} looks like a newer version of {entry['priced_as']}. It is priced at"
+                    f" {entry['priced_as']}'s rate until pricing.toml has a row of its own for it."
+                )
         return Table(
             name="pricing_closest_match",
             title="Priced by closest match",
@@ -1152,6 +1238,8 @@ __all__ = [
     "Pricing",
     "PricingCoverage",
     "load_pricing",
+    "newer_version_id",
+    "newer_version_of",
     "price_turn",
     "effective_rates",
     "model_name",

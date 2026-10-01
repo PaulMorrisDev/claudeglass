@@ -9,7 +9,7 @@ import { findSection, loadInto, loadReport, withWindow } from "./api.js";
 import { errorNotice, loadingNode, tile, tileRow } from "./ui.js";
 import { renderMappedSections, renderReportBackedSection } from "./grid.js";
 import { pageLink, viewIntro } from "./links.js";
-import { avoidableRebuilds } from "./costs.js";
+import { avoidableRebuilds, pricingFacts } from "./costs.js";
 
 // ======================================================================
 // Cache, Rebuilds (what the cache does for you, then the recache and
@@ -63,30 +63,14 @@ function rowObjects(table) {
   });
 }
 
-// The prices of the model you spent most on in this window.
-function mainRates(report) {
-  var rates = (report.meta && report.meta.rates) || {};
-  var byModel = reportTable(report, "overview", "by_model");
-  var ids = byModel
-    ? byModel.rows
-        .map(function (row) {
-          return String(row[0]);
-        })
-        .filter(function (id) {
-          return rates[id];
-        })
-    : [];
-  var id = ids[0] || Object.keys(rates)[0];
-  return id ? rates[id] : null;
-}
-
 function costCardLink(slug, text) {
   return pageLink("glossary/how-costs-work", text, { card: slug });
 }
 
 function renderCacheExplainer(report, container) {
   clear(container);
-  var rates = mainRates(report) || {};
+  // The prices of the model you spent most on in this window.
+  var rates = pricingFacts(report).main || {};
   var readWords = fraction(rates.cache_read_ratio);
   var writeWords = fraction(rates.cache_write_5m_ratio);
   var hourWords = fraction(rates.cache_write_1h_ratio);

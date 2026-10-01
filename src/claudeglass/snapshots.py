@@ -72,6 +72,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .model import Column, Section, Table
+from .pricing import newer_version_id
+from .workstyle import model_tier
 
 #: Compact UTC hook timestamp, e.g. "20260918T191200Z".
 _HOOK_TS_FORMAT = "%Y%m%dT%H%M%SZ"
@@ -827,20 +829,80 @@ def build_config_groups_table(
 # -- schema 2: drift detection ------------------------------------------------
 
 
+#: The ``[1m]`` suffix a settings model alias may carry ("opus[1m]").
+_CONTEXT_SUFFIX = "[1m]"
+
+#: The families ``opusplan`` runs: Opus while planning, Sonnet otherwise.
+_OPUSPLAN_TIERS = frozenset({model_tier("opus"), model_tier("sonnet")})
+
+
 def _model_family(model_id: object, resolve_model) -> object:
     """Fix #15: reduce ``model_id`` to the canonical id ``resolve_model``
-    (a ``Pricing.resolve_model``-shaped callable) resolves it to, so a
-    settings *alias* (``"sonnet"``, ``"fable[1m]"``) compares equal to an
-    observed full API id (``claude-opus-4-5-20260101``) when they name the
-    same model. Falls back to the raw value unchanged when it isn't a
+    (a ``Pricing.resolve_model``-shaped callable) resolves it to, so an
+    explicit pin (``claude-haiku-4-5``) compares equal to an observed
+    dated API id (``claude-haiku-4-5-20251001``) when they name the same
+    model. Falls back to the raw value unchanged when it isn't a
     non-empty string or ``resolve_model`` can't resolve it at all (an
     unrecognised id is still compared as itself, so a genuine drift to an
-    unknown model is still reported).
+    unknown model is still reported). A newer release the rate card has
+    no row for yet (``ResolvedRates.newer_version``: ``claude-opus-5-7``
+    priced as ``claude-opus-5``) keeps its own version
+    (:func:`pricing.newer_version_id`), so it never reads as the older
+    model it is priced like. A settings *alias* (``"opus"``,
+    ``"fable[1m]"``, ``"best"``) is compared one level coarser, by family
+    -- see :func:`_settings_model_agrees`.
     """
     if resolve_model is None or not isinstance(model_id, str) or not model_id:
         return model_id
     resolved = resolve_model(model_id)
-    return resolved.canonical_id if resolved is not None else model_id
+    if resolved is None:
+        return model_id
+    if getattr(resolved, "newer_version", False):
+        return newer_version_id(model_id, resolved.canonical_id) or model_id
+    return resolved.canonical_id
+
+
+def _family_tier(model_id: object, resolve_model) -> int:
+    """:func:`workstyle.model_tier` of ``model_id``'s canonical id (so
+    ``"best"`` reads as Fable through the rate card's alias), or ``-1``
+    when it names no known family or isn't a string."""
+    family = _model_family(model_id, resolve_model)
+    return model_tier(family) if isinstance(family, str) else -1
+
+
+def _settings_model_agrees(snap_value: object, observed_value: object, resolve_model) -> bool:
+    """Does the settings ``model`` value ``snap_value`` agree with the
+    model a session was observed running?
+
+    - ``default`` names no fixed model, so it always agrees.
+    - ``opusplan`` agrees with an observed Opus or Sonnet model.
+    - An alias -- any value with no digit once a trailing ``[1m]`` is
+      stripped (``opus``, ``sonnet[1m]``, ``haiku``, ``fable``, ``best``)
+      -- agrees with any model of its family, compared through
+      :func:`workstyle.model_tier`. An alias follows the newest release,
+      so a session on an older model of the same family (``opus`` against
+      ``claude-opus-5`` once ``opus`` means Opus 5.5) isn't drift.
+    - Every other value -- a ``claude-*`` id, a Bedrock or Vertex id, an
+      ARN -- is an explicit pin and compares exactly, by canonical id
+      (:func:`_model_family`), so a pin moved from Opus 4.1 to 4.5 still
+      reports, and so does a pin on a newer release the rate card prices
+      as an older one. So does an alias-shaped value whose family can't
+      be told, or a non-string.
+    """
+    if isinstance(snap_value, str):
+        base = snap_value.strip().lower()
+        if base.endswith(_CONTEXT_SUFFIX):
+            base = base[: -len(_CONTEXT_SUFFIX)]
+        if base == "default":
+            return True
+        if base == "opusplan":
+            return _family_tier(observed_value, resolve_model) in _OPUSPLAN_TIERS
+        if base and not any(char.isdigit() for char in base):
+            snap_tier = _family_tier(snap_value, resolve_model)
+            observed_tier = _family_tier(observed_value, resolve_model)
+            if snap_tier >= 0 and observed_tier >= 0:
+                return snap_tier == observed_tier
+    return _model_family(snap_value, resolve_model) == _model_family(observed_value, resolve_model)
 
 
 def detect_drift(snapshot: Snapshot, observed: dict, resolve_model=None) -> list[tuple[str, object, object]]:
@@ -860,16 +922,22 @@ def detect_drift(snapshot: Snapshot, observed: dict, resolve_model=None) -> list
     ``"fable[1m]"``) against a full API model id (what any caller derives
     ``observed["model"]`` from), which can never compare equal -- every
     session would report 100% drift on ``model`` the moment this table is
-    wired up (see #14). ``resolve_model`` (a ``Pricing.resolve_model``-
-    shaped callable, typically ``pricing.resolve_model``) resolves both
-    sides to the same canonical id before comparing when the drifting key
-    is ``"model"``; every other key keeps the previous exact-value
-    comparison. ``promptCacheTtl``'s own false-positive case (a session
-    that legitimately writes cache in both the 5m default and an 1h
-    override tier within the same window) is not resolved here -- doing
-    so needs the caller to say whether the session wrote in both tiers,
-    which is outside this function's plain (key -> value) ``observed``
-    contract; flagged rather than silently "fixed" by guessing.
+    wired up (see #14). The ``"model"`` key is compared by
+    :func:`_settings_model_agrees`: ``default`` never drifts, ``opusplan``
+    accepts Opus or Sonnet, an alias compares by family, and an explicit
+    id compares by the canonical id ``resolve_model`` (a
+    ``Pricing.resolve_model``-shaped callable, typically
+    ``pricing.resolve_model``) resolves both sides to. Comparing an alias
+    by canonical id alone flagged every session on an older model of the
+    same family (``opus`` against ``claude-opus-5``) as drift the day the
+    rate card moved the alias to a newer release. Every other key keeps
+    the previous exact-value comparison. ``promptCacheTtl``'s own
+    false-positive case (a session that legitimately writes cache in both
+    the 5m default and an 1h override tier within the same window) is not
+    resolved here -- doing so needs the caller to say whether the session
+    wrote in both tiers, which is outside this function's plain (key ->
+    value) ``observed`` contract; flagged rather than silently "fixed" by
+    guessing.
     """
     eff = effective_config(snapshot)
     mismatches: list[tuple[str, object, object]] = []
@@ -878,7 +946,7 @@ def detect_drift(snapshot: Snapshot, observed: dict, resolve_model=None) -> list
             continue
         snap_value = eff[key]
         if key == "model":
-            if _model_family(snap_value, resolve_model) == _model_family(observed_value, resolve_model):
+            if _settings_model_agrees(snap_value, observed_value, resolve_model):
                 continue
         elif _hashable(snap_value) == _hashable(observed_value):
             continue

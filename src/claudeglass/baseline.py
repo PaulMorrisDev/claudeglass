@@ -438,6 +438,7 @@ def build_baseline(
         cache=cache,
         exclude_projects=config.exclude_projects,
         salt=salt,
+        config_dir=config_dir,
     )
 
     redacted_projects = [discovery.redact_slug(p.name) for p in project_dirs]

@@ -1327,7 +1327,7 @@ hand with Playwright against a dev service.
 | `evidence.js` | `openEvidence`, `evidenceList`, `revealEvidence`, `tableDrawer` |
 | `charts.js` | `CHART_SPECS`, `fillSummary`, `ENTITY_COLOURS`, axes, tooltip, keyboard reading, the table view, resize, `drawChart`, `holdChart`, `chartError` |
 | `charts-types.js` | the eight forms, `renderChart`, `sectionChart`, `sessionContextChart`, `savingsLevers`, `dailyChanges`, `sparkline`, `meter`, `habitSparkline` |
-| `costs.js` | pricing helpers for Actions, Cache and the Glossary: `pricingFacts`, `priced`, `modelSentence`, `avoidableRebuilds`, `cardRuleText` |
+| `costs.js` | pricing helpers for Actions, Cache, the Glossary and the Overview's cache tile: `modelIdFor`, `rateFor`, `pricingFacts`, `priced`, `modelSentence`, `avoidableRebuilds`, `cardRuleText` |
 | `shell.js` | on every view: the health banner, the status line, the capture banner, `RETRY_SECONDS`, `renderHealth`, the setup checklist (`renderSetupCard`, `renderSetupList`) |
 | `icons.js` | `icon(name, opts)` and `ICON_NAMES` |
 | `palette.js` | `openPalette`, `matchScore`, `GO_KEYS`, `showShortcuts`, `initPalette` |

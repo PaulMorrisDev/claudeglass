@@ -455,6 +455,20 @@ def test_pricing_check_models_flags_a_closest_match_resolution(capsys):
     assert "(closest match, not this model's own rate)" not in sonnet_line
 
 
+def test_pricing_check_models_names_a_newer_version_apart_from_a_closest_match(capsys):
+    # claude-opus-4-10 has no row: it is a newer release of the packaged
+    # claude-opus-4, priced at that rate until the card gains one.
+    exit_code = cli.main(["pricing-check", "--models", "claude-opus-4-10,claude-sonnet-5-5"])
+    assert exit_code == 0
+    lines = capsys.readouterr().out.splitlines()
+    newer = next(line for line in lines if line.strip().startswith("claude-opus-4-10 ->"))
+    sonnet = next(line for line in lines if line.strip().startswith("claude-sonnet-5-5 ->"))
+    assert "-> claude-opus-4 (matched via prefix)" in newer
+    assert "(a newer version with no rate of its own yet, so priced at the older model's rate)" in newer
+    assert "closest match" not in newer
+    assert sonnet.strip() == "claude-sonnet-5-5 -> claude-sonnet-5-5 (matched via exact)"
+
+
 def test_snapshot_config_print_hook_exits_0(capsys):
     exit_code = cli.main(["snapshot-config", "--print-hook"])
     assert exit_code == 0
@@ -934,6 +948,35 @@ def test_load_corpus_for_args_quiet_suppresses_stats_even_if_verbose_is_also_set
     cli._load_corpus_for_args(args, config, root, [project_dir])
     err = capsys.readouterr().err
     assert "[corpus]" not in err
+
+
+def test_load_corpus_for_args_costs_workflow_runs_with_the_config_dirs_rate_card(tmp_path, monkeypatch):
+    # Workflow run costs follow config.toml's pricing_path, as the report
+    # and the service do, so the corpus load is told which config dir to read.
+    root = tmp_path / "projects"
+    project_dir = _write_project(root, "proj-a")
+    config_dir = tmp_path / "config"
+    seen = {}
+
+    def fake_load_corpus(project_dirs, **kwargs):
+        seen.update(kwargs)
+        return cli.Corpus(sessions=[])
+
+    monkeypatch.setattr(cli, "load_corpus", fake_load_corpus)
+    args = argparse.Namespace(
+        no_cache=True,
+        rebuild_cache=False,
+        days=None,
+        since=None,
+        until=None,
+        limit=None,
+        window_by="mtime",
+        jobs=1,
+        verbose=False,
+        quiet=True,
+    )
+    cli._load_corpus_for_args(args, cli.load_config(None), config_dir, [project_dir])
+    assert seen["config_dir"] == config_dir
 
 
 @pytest.mark.parametrize(

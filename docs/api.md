@@ -1269,6 +1269,18 @@ Only models `pricing.toml` prices are keys here. Each entry carries
 ratio}` map of that model's `input` rate as a multiple of every other
 priced model's `input` rate.
 
+`meta.model_ids` (additive): a `{name: canonical id}` map of every
+alias `pricing.toml` ships (`"sonnet"` -> `"claude-sonnet-5-5"`), plus
+every model id this window saw that is priced as a different canonical
+id: a dated, `[1m]`, Bedrock or Vertex id, or a newer version the rate
+card has no row for yet (`Pricing.model_ids_meta`). Canonical ids and
+ids the rate card can't price are not keys. The dashboard finds an
+observed id's `meta.rates` entry with `costs.js`'s `modelIdFor`: the
+exact key, then `meta.model_ids`, then `pricing.py`'s own steps (drop
+`[1m]`, strip the cloud wrapping, the longest priced id it starts
+with), so a report without `meta.model_ids` still resolves dated and
+cloud ids.
+
 `meta.projects`: every project slug with a session in this window
 (already redacted -- see "Privacy" above), sorted by this window's cost
 descending, ties broken alphabetically (the same `(-cost, slug)` order

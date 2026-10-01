@@ -4504,8 +4504,10 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="Settings that did not take effect",
         help=Help(
             shows="Sessions where the model or effort level Claude actually used differs from your settings.",
-            read="Only the model and effort level are checked. A mismatch usually means something overrode "
-            "the setting, such as an environment variable, a command-line flag or a switch during the session.",
+            read="Only the model and effort level are checked. A short model name such as opus matches any "
+            "Opus model, including an older one. The opusplan setting matches Opus or Sonnet, and default always "
+            "matches. A full model id must match exactly. A mismatch usually means something overrode the "
+            "setting, such as an environment variable, a command-line flag or a switch during the session.",
             act="If sessions ran on a pricier model or a higher effort level than you set, check your shell "
             "profile and launch command for an override.",
         ),

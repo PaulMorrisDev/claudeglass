@@ -1429,6 +1429,12 @@ class ReportMeta:
     #: (``pricing.Pricing.rates_meta``) -- the dashboard's own rate card,
     #: keyed by canonical model id, only models ``pricing.toml`` prices.
     rates: dict = field(default_factory=dict)
+    #: Additive: every rate-card alias, and every model id this window
+    #: saw that is priced as a different canonical id, mapped to that id
+    #: (``pricing.Pricing.model_ids_meta``) -- how the dashboard finds an
+    #: observed id's entry in ``rates``. Empty on a report built without
+    #: a rate card's view of the window (``cli.py``'s wrapped sections).
+    model_ids: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)

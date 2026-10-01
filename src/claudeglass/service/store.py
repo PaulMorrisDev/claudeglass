@@ -90,6 +90,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 
 from . import schema
+from .. import PARSER_VERSION
 from ..cache import result_from_jsonable
 from ..discovery import _resolve_window, redact_slug, source_label, ts_in_window
 from ..limits import limit_markers as _limit_markers
@@ -182,6 +183,21 @@ def _transaction(conn: sqlite3.Connection):
         raise
     else:
         conn.execute("COMMIT")
+
+
+def _demote_parsed(conn: sqlite3.Connection) -> int:
+    """Record every transcript parsed by this build or an older one as
+    parsed by version 0, so the watcher's stale-parser check
+    (``watcher.FileWatcher._resolve``) parses it again, and prices it
+    again, the next time it finds the file on disk. Rows a newer build
+    wrote are left alone, as the watcher leaves them. Takes the caller's
+    connection, so a ``MIGRATIONS`` step can run it inside the ladder's
+    own transaction; :meth:`Store.demote_parsed` runs it in one of its
+    own. Returns the number of rows marked."""
+    cursor = conn.execute(
+        "UPDATE transcripts SET parser_version = 0 WHERE parser_version <= ?", (PARSER_VERSION,)
+    )
+    return cursor.rowcount
 
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
@@ -518,13 +534,30 @@ class Store:
         store has never been migrated (including the very first call
         ever made against a brand new database, before ``meta`` itself
         exists)."""
+        value = self.get_meta(_SCHEMA_VERSION_KEY)
+        return int(value) if value is not None else None
+
+    def get_meta(self, key: str) -> str | None:
+        """One value from the ``meta`` key/value table (the schema
+        version, and the watcher's own bookkeeping such as the rate card
+        the stored costs were priced with), or ``None`` when the key is
+        missing or ``meta`` itself doesn't exist yet."""
         try:
-            row = self._connection().execute(
-                "SELECT value FROM meta WHERE key = ?", (_SCHEMA_VERSION_KEY,)
-            ).fetchone()
+            row = self._connection().execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
         except sqlite3.OperationalError:
             return None
-        return int(row["value"]) if row is not None else None
+        return row["value"] if row is not None else None
+
+    def set_meta(self, key: str, value: str) -> None:
+        """Write one value into the ``meta`` table, replacing any value
+        already there."""
+        conn = self._connection()
+        with _transaction(conn):
+            conn.execute(
+                "INSERT INTO meta (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, value),
+            )
 
     # -- writers ---------------------------------------------------------
 
@@ -949,6 +982,20 @@ class Store:
             "SELECT path, mtime_ns, size_bytes, parser_version FROM transcripts"
         ).fetchall()
         return {row["path"]: (row["mtime_ns"], row["size_bytes"], row["parser_version"]) for row in rows}
+
+    def demote_parsed(self) -> int:
+        """Mark every stored transcript this build (or an older one)
+        parsed for a fresh parse (see :func:`_demote_parsed`). The
+        watcher calls this when the rate card changes, so every
+        transcript still on disk is priced again at the new rates, over
+        as many ticks as it takes: the mark is in the store, so a project
+        folder out of reach this tick, or a restart, doesn't lose it.
+        Leaves ``updated_at`` alone, so :meth:`change_token` only moves
+        once each row is actually parsed again. Returns the number of
+        rows marked."""
+        conn = self._connection()
+        with _transaction(conn):
+            return _demote_parsed(conn)
 
     def remove_missing(self, known_paths: set[str]) -> int:
         """Mark every transcript row whose ``path`` is not in

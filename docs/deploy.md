@@ -556,6 +556,46 @@ for exactly this reason, so an operator can watch the post-upgrade
 rebuild happen rather than having to infer it from a slower-than-usual
 tick.
 
+## Re-pricing after a rate-card change
+
+The watcher prices replies with the same rate card the dashboard reads:
+the file `config.toml`'s `pricing_path` names, else
+`<config-dir>/pricing.toml`, else the packaged card. It checks every
+tick, so setting `pricing_path`, or creating, editing or removing
+`pricing.toml`, takes effect on the next tick without a restart. Saving
+the same card again changes nothing.
+
+When the card's contents change (its sha256 differs from the one the
+store recorded), the watcher marks every stored transcript as stale and
+re-parses each one it finds on disk, the same way as after a parser
+upgrade above. That rebuilds the stored daily spend, session totals,
+compactions and workflow run costs at the new rates. The digest cache
+keeps it cheap, and `watcher.files_reparsed_stale_parser` counts it.
+The mark is kept in the store, so a projects folder that is out of reach
+during that tick (a WSL distro that is shut down) is re-priced once it
+is back, and a restart part-way through loses nothing. Rows a newer
+version wrote are left alone, as above. Upgrading to the first version
+with this check re-prices the store once, since it has no card recorded
+yet.
+
+- **Transcripts no longer on disk keep their old cost.** Once Claude
+  Code has removed a file, there is nothing to re-parse, so its stored
+  totals (`/api/summary`, `/api/daily-usage`, `/api/sessions`) stay at
+  the rates in force when it was last read. `/api/report.*` prices each
+  request from the stored transcripts with the current card, so for
+  those sessions the two can differ.
+- **A card that can't be read keeps the previous one.** A half-saved
+  edit or a `pricing_path` that has gone missing never prices anything
+  at zero: the watcher carries on with the card it had, and each tick's
+  `watcher.error_messages` says "rate card could not be read; kept the
+  previous one" until it can be read again. If the card is already
+  unreadable when `serve` starts, there is no previous card, so the
+  watcher prices with `<config-dir>/pricing.toml` (skipping
+  `pricing_path`), else the packaged card. It re-prices the store at
+  that card's rates if they differ, says "rate card could not be read;
+  using the default one until it can" each tick, and re-prices again
+  once yours can be read.
+
 ## Performance
 
 S1-perf measured and fixed `serve`'s worst case: a brand-new install's

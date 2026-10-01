@@ -141,7 +141,15 @@ respects.
   `pricing.PricingCoverage.as_closest_match_table`, appended onto this
   section only when at least one reply matched this way, and named by
   the `pricing-coverage` recommendation alongside (or instead of) any
-  unpriced model ids. Shown on Spend › Usage under More tables.
+  unpriced model ids. Shown on Spend › Usage under More tables. An id
+  that is a newer minor version of its `priced_as` model
+  (`pricing.newer_version_of`: `claude-x-5-5` priced as `claude-x-5`)
+  gets a table note of its own, and the recommendation words it as
+  "There is no rate of its own for X yet, so it was priced as Y; update
+  ClaudeGlass or add a models."X" row to pricing.toml". When every
+  closest match is a newer version and no model is unpriced, the card's
+  title reads "A newer model is priced at an older model's rate", or
+  "Newer models are priced at older models' rates" for several.
 - `pricing_fast_priced_as_standard` — one row per model id seen with at
   least one reply flagged `usage.speed == "fast"` whose rate card entry
   has no `[models."<id>".fast]` table, so it was priced at that model's
@@ -1060,7 +1068,10 @@ When snapshots exist it also adds:
   (hash, project count and list, sessions).
 - `config-drift` — only when observed session values exist: sessions
   whose observed value (for example the model) differs from the
-  snapshot's.
+  snapshot's. A model alias such as `opus` matches any model of its
+  family, `opusplan` matches Opus or Sonnet, `default` always matches,
+  and a full model id must match exactly (see
+  [config-layers.md](config-layers.md)).
 
 The standalone `claudeglass config-diff` subcommand, described
 next, is a separate, narrower consumer of the same underlying table

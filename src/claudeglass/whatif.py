@@ -46,6 +46,7 @@ you before, not just repriced or replayed.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from .compaction_sim import CompactionSimThresholds
@@ -108,20 +109,33 @@ def _num(value) -> float | None:
     return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
 
-def _model_column(row: dict, value: str) -> str | None:
+def _model_column(row: dict, value: str, model_ids: dict | None = None) -> str | None:
     """The ``cost_<model id>`` column a model setting ("sonnet",
-    "claude-haiku-4-5", "opus[1m]") prices at: the newest id containing
-    the alias, or an exact id."""
-    wanted = str(value).lower().replace("[1m]", "")
+    "claude-haiku-4-5", "opus[1m]", "best") prices at: the id the rate
+    card's own alias table names (``model_ids``, the report's
+    ``meta.model_ids``), else an exact id, else the newest id containing
+    the value, compared by version number so ``claude-opus-4-10`` beats
+    ``claude-opus-4-9``."""
+    raw = str(value).strip()
+    wanted = raw.lower().replace("[1m]", "")
     columns = [k for k in row if k.startswith("cost_claude")]
+    for name in dict.fromkeys((raw, raw.lower(), wanted)):
+        canonical = (model_ids or {}).get(name)
+        if canonical and f"cost_{canonical}" in columns:
+            return f"cost_{canonical}"
     exact = f"cost_{wanted}"
     if exact in columns:
         return exact
     matches = [k for k in columns if wanted in k[len("cost_") :]]
     if not matches:
         return None
-    # Newest model family first: ids sort by version within a family.
-    return sorted(matches)[-1]
+    return max(matches, key=lambda k: (_version(k[len("cost_") :]), k))
+
+
+def _version(model_id: str) -> tuple[int, ...]:
+    """A model id's version numbers, its date left off: ``claude-opus-4-10``
+    -> ``(4, 10)``. The twin of costs.js's ``versionOf``."""
+    return tuple(int(n) for n in re.findall(r"\d+", re.sub(r"-\d{8}$", "", model_id)))
 
 
 def _row(key: str, agent: str | None, value, saving: float | None, fidelity: str, basis: str) -> dict:
@@ -152,7 +166,9 @@ def _model(tables: _Tables, agent: str, value, key: str, label: str | None) -> d
                 "spawn itself named it.",
             )
         runs = " started without a model of their own"
-    column = _model_column(row, value)
+    # A report without meta.model_ids falls back to matching column names.
+    model_ids = getattr(getattr(tables.model, "meta", None), "model_ids", None) or {}
+    column = _model_column(row, value, model_ids)
     observed = _num(row.get("observed_cost"))
     new = _num(row.get(column)) if column else None
     if column is None or observed is None or new is None:

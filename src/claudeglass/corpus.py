@@ -21,8 +21,9 @@ itself. It:
 - Links each session's workflow runs to their own subagent transcripts via
   ``workflows.parse_workflow_file``/``workflows.link_workflow_agents``,
   which needs a resolved rate card purely to total each run's cost; this
-  module loads the default one (packaged/config-dir ``pricing.toml``) for
-  that purpose alone — see :func:`_default_rates`.
+  module loads the one ``config.toml``'s ``pricing_path`` names, else the
+  config-dir or packaged ``pricing.toml``, for that purpose alone — see
+  :func:`_default_rates`.
 
 ``jobs`` (``concurrent.futures.ProcessPoolExecutor`` when > 1): every
 cache miss (top-level and subagent transcripts alike) is submitted to the
@@ -66,6 +67,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable
 
+from . import config as config_mod
 from . import discovery
 from . import parse as parse_mod
 from .cache import DigestCache
@@ -194,18 +196,27 @@ def _parse_worker(path: str | Path, meta: TranscriptMeta) -> TranscriptResult:
     return parse_transcript(path, meta)
 
 
-def _default_rates() -> Pricing:
-    """The default rate card (explicit ``--pricing``/config-dir override
-    is a report-assembly concern, not this module's), used only to total
-    each ``WorkflowRun.cost`` via ``workflows.link_workflow_agents``. A
-    packaged-default load failure (e.g. a corrupted install) degrades to
-    an all-unknown rate card rather than failing corpus assembly outright
-    — every ``price_turn`` call against it simply prices at zero with
-    ``model_known=False`` (see ``pricing.price_turn``'s own docstring),
-    so a workflow's ``cost`` becomes 0.0 instead of crashing the load.
+def _default_rates(config_dir: str | Path | None = None) -> Pricing:
+    """The rate card ``config.toml``'s ``pricing_path`` names, else
+    ``<config_dir>/pricing.toml``, else the packaged default: the card the
+    report and the service read (``config_dir`` defaults as
+    ``load_pricing``'s does; the CLI's own ``--pricing`` card arrives as
+    ``load_corpus``'s ``rates`` instead). Used only to total each
+    ``WorkflowRun.cost`` via ``workflows.link_workflow_agents``. A
+    ``pricing_path`` that can't be read falls back to the other two, and
+    when that card can't be read either (a malformed ``pricing.toml``, or
+    a corrupted install) this degrades to an all-unknown rate card rather
+    than failing corpus assembly outright — every ``price_turn`` call
+    against it simply prices at zero with ``model_known=False`` (see
+    ``pricing.price_turn``'s own docstring), so a workflow's ``cost``
+    becomes 0.0 instead of crashing the load.
     """
     try:
-        return load_pricing()
+        return load_pricing(path=config_mod.saved_pricing_path(config_dir), config_dir=config_dir)
+    except (config_mod.ConfigError, PricingError):
+        pass
+    try:
+        return load_pricing(config_dir=config_dir)
     except PricingError:
         return Pricing(
             path="none",
@@ -293,13 +304,19 @@ def load_corpus(
     exclude_projects=(),
     progress: Callable[[int, int], None] | None = None,
     salt: bytes | None = None,
+    config_dir: str | Path | None = None,
+    rates: Pricing | None = None,
 ) -> Corpus:
     """Assemble a :class:`Corpus` from ``project_dirs``. See the module
     docstring for the full algorithm; parameters mirror
     ``discovery.find_sessions``/``find_subagents`` (``days``/``since``/
     ``until``/``limit``/``window_by``/``subagent_window``) plus the cache
     and parallelism knobs (``cache``/``jobs``) and a standing exclusion
-    list (``exclude_projects``). ``progress``, when given, is called as
+    list (``exclude_projects``). ``config_dir`` is the folder whose
+    ``config.toml``/``pricing.toml`` choose the rate card workflow runs
+    are costed with (see :func:`_default_rates`); ``None`` means the
+    default one, and ``rates``, when given, is that card already loaded
+    (the CLI's ``--pricing``), so it wins over ``config_dir``'s. ``progress``, when given, is called as
     ``progress(done, total)`` once per transcript file as it's resolved
     (cache hit or freshly parsed) — ``total`` is fixed for the whole call,
     ``done`` only ever increases.
@@ -380,7 +397,7 @@ def load_corpus(
                     cache.put(path, meta, result)
                 _tick()
 
-    rates_lookup = _default_rates()
+    rates_lookup = rates if rates is not None else _default_rates(config_dir)
     bundles: list[SessionBundle] = []
     for spec in specs:
         top_result = results[str(spec.top_path)]

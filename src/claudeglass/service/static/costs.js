@@ -6,31 +6,82 @@
  * both need, and the rebuild count Cache > Rebuilds (page-cache.js)
  * shares with Glossary. Every multiplier goes through format.js's
  * fraction(), never typed in here, so the words always match your
- * pricing.
+ * pricing. modelIdFor and rateFor find a model's prices whatever id a
+ * session recorded it under, for these pages and the Overview's
+ * cache tile alike.
  */
 
 import { findSection } from "./api.js";
 import { modelTier } from "./charts.js";
 import { fraction, modelName } from "./format.js";
 
+// The rate card's own id for a model id a session recorded, so its
+// prices can be found in report.meta.rates (keyed by that id). The
+// same order as pricing.py's resolve_model: the id itself, then
+// meta.model_ids (every alias, and every id this window saw that the
+// rate card prices as another model), then both again without "[1m]"
+// and without any Bedrock or Vertex wrapping, then the longest priced
+// id it starts with, up to a "-" or "@" (so claude-opus-4-10 never
+// matches claude-opus-4-1). Null when the rate card doesn't price it.
+export function modelIdFor(meta, id) {
+  var rates = (meta && meta.rates) || {};
+  var named = (meta && meta.model_ids) || {};
+  var own = Object.prototype.hasOwnProperty;
+  if (id === null || id === undefined || id === "") return null;
+  function onCard(candidate) {
+    if (own.call(rates, candidate)) return candidate;
+    var canonical = own.call(named, candidate) ? named[candidate] : null;
+    return canonical && own.call(rates, canonical) ? canonical : null;
+  }
+  var candidate = String(id);
+  var found = onCard(candidate);
+  if (found) return found;
+  if (/\[1m\]$/.test(candidate)) {
+    candidate = candidate.slice(0, -"[1m]".length);
+    found = onCard(candidate);
+    if (found) return found;
+  }
+  var cleaned = candidate
+    .replace(/^(?:us\.|eu\.)?anthropic\./, "")
+    .replace(/-v1:0$/, "")
+    .replace(/@\d{8}$/, "");
+  if (cleaned !== candidate) {
+    found = onCard(cleaned);
+    if (found) return found;
+  }
+  var best = null;
+  Object.keys(rates).forEach(function (key) {
+    var next = cleaned.charAt(key.length);
+    var boundary = next === "" || next === "-" || next === "@";
+    if (cleaned.indexOf(key) === 0 && boundary && (!best || key.length > best.length)) best = key;
+  });
+  return best;
+}
+
+// The prices for a model id a session recorded (report.meta.rates,
+// found through modelIdFor), or null when the rate card doesn't price
+// it.
+export function rateFor(meta, id) {
+  var canonical = modelIdFor(meta, id);
+  return canonical ? meta.rates[canonical] : null;
+}
+
 // The prices behind the sentences, from your pricing (report.meta.rates,
-// read from pricing.toml), never typed in here. "main" is the model you
-// spent most on in this window.
+// read from pricing.toml), never typed in here. "used" names each
+// model you used once, by the rate card's own id, most spent first, so
+// "main" is the model you spent most on in this window.
 export function pricingFacts(report) {
-  var rates = (report && report.meta && report.meta.rates) || {};
+  var meta = (report && report.meta) || {};
+  var rates = meta.rates || {};
   var overview = report ? findSection(report, "overview") : null;
   var byModel = ((overview && overview.tables) || []).filter(function (t) {
     return t.name === "by_model";
   })[0];
-  var used = byModel
-    ? byModel.rows
-        .map(function (row) {
-          return String(row[0]);
-        })
-        .filter(function (id) {
-          return rates[id];
-        })
-    : [];
+  var used = [];
+  (byModel ? byModel.rows : []).forEach(function (row) {
+    var id = modelIdFor(meta, row[0]);
+    if (id && used.indexOf(id) === -1) used.push(id);
+  });
   var mainId = used[0] || Object.keys(rates)[0] || null;
   return { rates: rates, used: used, main: mainId ? rates[mainId] : null, mainId: mainId };
 }

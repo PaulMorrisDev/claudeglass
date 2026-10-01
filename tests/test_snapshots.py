@@ -17,7 +17,10 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from claudeglass import snapshots as snap_mod
+from claudeglass.pricing import load_pricing
 
 from helpers import assert_privacy
 
@@ -703,6 +706,114 @@ def test_build_config_drift_table_no_drift_notes_it():
         {"session_id": "s1", "first_ts": "2026-09-05T00:00:00.000Z", "observed": {"model": "sonnet"}},
     ]
     table = snap_mod.build_config_drift_table(sessions_with_observed, snapshots)
+    assert table.rows == []
+    assert any("No drift detected" in note for note in table.notes)
+
+
+# -- detect_drift: a model setting compared by what it can mean --------------
+
+
+def _model_drift(setting: object, observed: str, resolve: bool = True) -> list:
+    """``detect_drift`` on the ``model`` key alone, resolved through the
+    packaged rate card. Loaded inside the test, where conftest has already
+    pointed the config dir at a throwaway one."""
+    resolve_model = load_pricing().resolve_model if resolve else None
+    snap = _schema2_snapshot(effective={"model": setting})
+    return snap_mod.detect_drift(snap, {"model": observed}, resolve_model=resolve_model)
+
+
+@pytest.mark.parametrize("setting", ["opus", "opus[1m]", "Opus"])
+def test_detect_drift_opus_alias_accepts_an_older_opus(setting):
+    """``opus`` follows the newest Opus, so a session that ran an older one
+    is the same family, not drift."""
+    assert _model_drift(setting, "claude-opus-5") == []
+    assert _model_drift(setting, "claude-opus-4-5-20251101") == []
+
+
+def test_detect_drift_alias_still_drifts_across_families():
+    assert _model_drift("opus", "claude-sonnet-5-5") == [("model", "opus", "claude-sonnet-5-5")]
+    assert _model_drift("sonnet[1m]", "claude-opus-5-5") == [("model", "sonnet[1m]", "claude-opus-5-5")]
+
+
+def test_detect_drift_explicit_id_compares_exactly():
+    assert _model_drift("claude-opus-5-5", "claude-opus-5") == [("model", "claude-opus-5-5", "claude-opus-5")]
+    assert _model_drift("claude-opus-5-5", "claude-opus-5-5") == []
+
+
+def test_detect_drift_explicit_alias_id_compares_by_canonical_id_not_family():
+    """``claude-haiku-4-5`` is a rate-card alias but an explicit pin: it
+    matches its own dated id and nothing else of the Haiku family."""
+    assert _model_drift("claude-haiku-4-5", "claude-haiku-4-5-20251001") == []
+    assert _model_drift("claude-haiku-4-5", "claude-3-5-haiku-20241022") != []
+
+
+def test_detect_drift_newer_release_priced_as_an_older_one_is_its_own_pin():
+    """Until the rate card has a row for ``claude-opus-5-7`` it is priced
+    as ``claude-opus-5``, but a pin on one and a session on the other are
+    still different releases. Its dated and cloud forms are the same one."""
+    assert _model_drift("claude-opus-5-7", "claude-opus-5") == [("model", "claude-opus-5-7", "claude-opus-5")]
+    assert _model_drift("claude-opus-5", "claude-opus-5-7") == [("model", "claude-opus-5", "claude-opus-5-7")]
+    assert _model_drift("claude-opus-5-7", "claude-opus-5-7-20261101") == []
+    assert _model_drift("claude-opus-5-7", "us.anthropic.claude-opus-5-7-v1:0") == []
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("us.anthropic.claude-opus-4-1-20250805-v1:0", "us.anthropic.claude-opus-4-5-20251101-v1:0"),
+        ("claude-opus-4-1@20250805", "claude-opus-4-5@20251101"),
+        (
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-4-1-20250805-v1:0",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-4-5-20251101-v1:0",
+        ),
+    ],
+)
+def test_detect_drift_cloud_pin_moved_within_a_family_still_drifts(old, new):
+    """A Bedrock, Vertex or ARN pin carries digits, so it is never read as
+    an alias: Opus 4.1 to 4.5 is drift even though both are Opus."""
+    assert _model_drift(old, new) == [("model", old, new)]
+    assert _model_drift(old, old) == []
+
+
+@pytest.mark.parametrize("observed", ["claude-opus-5-5", "claude-haiku-4-5-20251001", "<unknown>"])
+@pytest.mark.parametrize("resolve", [True, False])
+def test_detect_drift_default_never_drifts(observed, resolve):
+    assert _model_drift("default", observed, resolve=resolve) == []
+
+
+@pytest.mark.parametrize("observed", ["claude-opus-5", "claude-sonnet-5", "claude-opus-5-5"])
+def test_detect_drift_opusplan_accepts_opus_or_sonnet(observed):
+    assert _model_drift("opusplan", observed) == []
+
+
+@pytest.mark.parametrize("observed", ["claude-haiku-4-5-20251001", "claude-fable-5-1"])
+def test_detect_drift_opusplan_flags_other_families(observed):
+    assert _model_drift("opusplan", observed) == [("model", "opusplan", observed)]
+
+
+def test_detect_drift_best_reads_as_fable_through_the_rate_card():
+    assert _model_drift("best", "claude-fable-5") == []
+    assert _model_drift("best", "claude-opus-5-5") == [("model", "best", "claude-opus-5-5")]
+
+
+def test_detect_drift_alias_shaped_value_of_unknown_family_compares_exactly():
+    assert _model_drift("my-model", "claude-opus-5") == [("model", "my-model", "claude-opus-5")]
+    assert _model_drift("my-model", "my-model") == []
+
+
+def test_detect_drift_alias_family_works_without_a_resolver():
+    assert _model_drift("sonnet", "claude-sonnet-5", resolve=False) == []
+    assert _model_drift("sonnet", "claude-opus-5", resolve=False) != []
+
+
+def test_build_config_drift_table_older_opus_under_opus_is_no_drift():
+    snapshots = [_schema2_snapshot(ts="20260901T000000Z", effective={"model": "opus"})]
+    sessions_with_observed = [
+        {"session_id": "s1", "first_ts": "2026-09-05T00:00:00.000Z", "observed": {"model": "claude-opus-5"}},
+    ]
+    table = snap_mod.build_config_drift_table(
+        sessions_with_observed, snapshots, resolve_model=load_pricing().resolve_model
+    )
     assert table.rows == []
     assert any("No drift detected" in note for note in table.notes)
 

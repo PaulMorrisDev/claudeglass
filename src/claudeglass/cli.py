@@ -1418,6 +1418,9 @@ def _load_corpus_for_args(
         jobs=args.jobs,
         exclude_projects=config.exclude_projects,
         salt=salt,
+        config_dir=config_dir,
+        # --pricing names the card for this run, workflow costs included.
+        rates=load_pricing(path=args.pricing, config_dir=config_dir) if getattr(args, "pricing", None) else None,
     )
     # The tags Claude Haiku wrote, while it writes them ([capture] tagger).
     haiku_tags.apply(corpus, config_dir)
@@ -2452,7 +2455,9 @@ def _cmd_probe_config(args: argparse.Namespace) -> int:
 def _cmd_pricing_check(args: argparse.Namespace) -> int:
     """``pricing-check``: print the resolved rate card's provenance and
     rate table, and (with ``--models``) how each given model id resolves
-    against it. Exit 2 on a malformed or unreadable pricing file.
+    against it, flagging a closest match, or a newer version the rate
+    card has no row for yet (``ResolvedRates.newer_version``). Exit 2 on
+    a malformed or unreadable pricing file.
     """
     try:
         rates = load_pricing(path=args.pricing, config_dir=args.config_dir)
@@ -2482,7 +2487,13 @@ def _cmd_pricing_check(args: argparse.Namespace) -> int:
             if resolved is None:
                 print(f"  {model_id} -> UNKNOWN (no matching rate)")
             else:
-                approx = " (closest match, not this model's own rate)" if resolved.approximate else ""
+                approx = (
+                    " (a newer version with no rate of its own yet, so priced at the older model's rate)"
+                    if resolved.newer_version
+                    else " (closest match, not this model's own rate)"
+                    if resolved.approximate
+                    else ""
+                )
                 print(
                     f"  {model_id} -> {resolved.canonical_id} (matched via {resolved.matched_via}){approx}"
                 )

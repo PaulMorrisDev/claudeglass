@@ -512,7 +512,10 @@ probes one transcript file instead.
 
 Prints where the rate card came from and its prices. With `--models
 ID,ID,...`, it also shows how each model id is priced, and flags an id
-priced at the closest match rather than its own rate.
+priced at the closest match rather than its own rate. An id that looks
+like a newer version of a priced model (`claude-x-5-5` when the rate
+card only has `claude-x-5`) is flagged as "a newer version with no rate
+of its own yet" instead.
 
 ### `log-usage`
 

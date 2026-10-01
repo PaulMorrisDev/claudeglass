@@ -625,6 +625,265 @@ def test_up_to_date_parser_version_is_not_reparsed_on_an_unchanged_file(tmp_path
         assert stats.files_reparsed_stale_parser == 0
 
 
+# -- a new rate card re-prices what is stored --------------------------------
+
+
+#: Input tokens in :func:`_two_turns`, so a card charging this many
+#: dollars per million input tokens (and nothing else) makes a session's
+#: cost read as the card's own rate in millionths.
+_TWO_TURNS_INPUT = 220
+
+
+def _write_card(path: Path, input_rate: float) -> Path:
+    """A rate card pricing ``claude-sonnet-5`` (``turn_line``'s model)
+    at ``input_rate`` dollars per million input tokens, nothing else."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        f'version = "test-{input_rate}"\n\n'
+        '[models."claude-sonnet-5"]\n'
+        f"input = {input_rate}\noutput = 0.0\ncache_write_5m = 0.0\ncache_write_1h = 0.0\ncache_read = 0.0\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _cost_at(input_rate: float) -> float:
+    return _TWO_TURNS_INPUT * input_rate / 1_000_000
+
+
+def _stored_costs(store: Store, session_id: str) -> tuple[float, float]:
+    """The session's folded total and its ``turns_agg`` total."""
+    daily = sum(row["cost"] for row in store.daily_usage(days=3650))
+    return store.session(session_id)["total_cost"], daily
+
+
+def test_a_rate_card_change_reprices_every_stored_transcript_once(tmp_path: Path, store: Store):
+    card = _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    path_a = _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    watcher = FileWatcher(store, _options(tmp_path))
+    assert watcher.run_once().files_parsed == 1
+    assert _stored_costs(store, "sess-a1") == pytest.approx((_cost_at(1000.0),) * 2)
+
+    _write_card(card, 25000.0)
+    stats = watcher.run_once()
+
+    assert_privacy(stats)
+    assert stats.errors == 0
+    assert stats.files_parsed == 1
+    assert stats.files_reparsed_stale_parser == 1
+    assert store.known_files()[str(path_a)][2] == PARSER_VERSION
+    assert _stored_costs(store, "sess-a1") == pytest.approx((_cost_at(25000.0),) * 2)
+
+    stats = watcher.run_once()
+    assert stats.files_parsed == 0
+    assert stats.files_reparsed_stale_parser == 0
+
+
+def test_a_card_saved_again_unchanged_reprices_nothing(tmp_path: Path, store: Store):
+    card = _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    watcher = FileWatcher(store, _options(tmp_path))
+    watcher.run_once()
+
+    later = _backdated(-5)
+    os.utime(card, (later, later))
+    stats = watcher.run_once()
+
+    assert stats.files_parsed == 0
+    assert stats.files_reparsed_stale_parser == 0
+
+
+def test_an_unchanged_card_across_a_restart_reparses_nothing(tmp_path: Path, store: Store):
+    _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    FileWatcher(store, _options(tmp_path)).run_once()
+
+    stats = FileWatcher(store, _options(tmp_path)).run_once()
+
+    assert stats.files_parsed == 0
+    assert stats.files_reparsed_stale_parser == 0
+
+
+def test_the_watcher_prices_with_config_pricing_path(tmp_path: Path, store: Store):
+    """The same card the API reads (``load_pricing(path=config.pricing_path,
+    config_dir=...)``), not the packaged one, ahead of a config-dir card."""
+    custom = _write_card(tmp_path / "elsewhere" / "my-rates.toml", 7000.0)
+    _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    (tmp_path / "config" / "config.toml").write_text(
+        f"pricing_path = {json.dumps(str(custom))}\n", encoding="utf-8"
+    )
+    _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+
+    stats = FileWatcher(store, _options(tmp_path)).run_once()
+
+    assert stats.errors == 0
+    assert stats.error_messages == ()
+    assert _stored_costs(store, "sess-a1") == pytest.approx((_cost_at(7000.0),) * 2)
+
+
+def test_a_rate_card_created_after_the_first_tick_is_picked_up(tmp_path: Path, store: Store):
+    _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    watcher = FileWatcher(store, _options(tmp_path))
+    watcher.run_once()
+    packaged_cost = store.session("sess-a1")["total_cost"]
+    assert packaged_cost > 0
+
+    _write_card(tmp_path / "config" / "pricing.toml", 90000.0)
+    stats = watcher.run_once()
+
+    assert stats.files_reparsed_stale_parser == 1
+    assert _stored_costs(store, "sess-a1") == pytest.approx((_cost_at(90000.0),) * 2)
+    assert store.session("sess-a1")["total_cost"] != pytest.approx(packaged_cost)
+
+
+def test_a_rate_card_change_never_demotes_a_newer_parser_row(tmp_path: Path, store: Store):
+    card = _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    path_a = _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    watcher = FileWatcher(store, _options(tmp_path))
+    watcher.run_once()
+    store._connection().execute(
+        "UPDATE transcripts SET parser_version = ? WHERE path = ?",
+        (PARSER_VERSION + 1, str(path_a)),
+    )
+
+    _write_card(card, 25000.0)
+    stats = watcher.run_once()
+
+    assert stats.files_parsed == 0
+    assert stats.files_reparsed_stale_parser == 0
+    assert store.known_files()[str(path_a)][2] == PARSER_VERSION + 1
+
+
+def test_a_rate_card_change_reaches_a_folder_that_was_out_of_reach(tmp_path: Path, store: Store):
+    """The mark is in the store, not in one tick's memory: a WSL distro
+    that was shut down while the card changed is re-priced once it is
+    back, even by a watcher started after the change was recorded."""
+    card = _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    wsl_root = tmp_path / "wsl-projects"
+    wsl_path = _write_session(wsl_root, "-home-alice-repo", "sess-w1", _two_turns())
+    options = _options(tmp_path, extra_projects_roots=(wsl_root,))
+    watcher = FileWatcher(store, options)
+    watcher.run_once()
+
+    wsl_root.rename(tmp_path / "wsl-away")
+    _write_card(card, 25000.0)
+    stats = watcher.run_once()
+    assert stats.files_reparsed_stale_parser == 1
+    assert store.session("sess-a1")["total_cost"] == pytest.approx(_cost_at(25000.0))
+    assert store.session("sess-w1")["total_cost"] == pytest.approx(_cost_at(1000.0))
+    assert store.known_files()[str(wsl_path)][2] == 0
+
+    (tmp_path / "wsl-away").rename(wsl_root)
+    stats = FileWatcher(store, options).run_once()
+
+    assert stats.files_parsed == 1
+    assert stats.files_reparsed_stale_parser == 1
+    assert store.session("sess-w1")["total_cost"] == pytest.approx(_cost_at(25000.0))
+    assert store.known_files()[str(wsl_path)][2] == PARSER_VERSION
+
+
+@pytest.mark.parametrize("broken", ["pricing.toml", "config.toml"])
+def test_a_bad_rate_card_keeps_the_previous_one(tmp_path: Path, store: Store, broken: str):
+    card = _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    watcher = FileWatcher(store, _options(tmp_path))
+    watcher.run_once()
+
+    (tmp_path / "config" / broken).write_text("this is = = not toml\n", encoding="utf-8")
+    stats = watcher.run_once()
+
+    assert_privacy(stats)
+    assert stats.files_parsed == 0
+    assert stats.error_messages == ("rate card could not be read; kept the previous one",)
+    assert _stored_costs(store, "sess-a1") == pytest.approx((_cost_at(1000.0),) * 2)
+
+    (tmp_path / "config" / "config.toml").write_text("", encoding="utf-8")
+    _write_card(card, 25000.0)
+    stats = watcher.run_once()
+
+    assert stats.error_messages == ()
+    assert stats.files_reparsed_stale_parser == 1
+    assert _stored_costs(store, "sess-a1") == pytest.approx((_cost_at(25000.0),) * 2)
+
+
+def test_a_restart_with_an_unreadable_card_prices_at_the_packaged_rates(tmp_path: Path, store: Store):
+    """A restart folds every session again, and has no previous card to
+    keep: the packaged card stands in, for the stored rows and the
+    session totals alike, never zero, until the card can be read."""
+    card = _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    FileWatcher(store, _options(tmp_path)).run_once()
+
+    card.write_text("this is = = not toml\n", encoding="utf-8")
+    watcher = FileWatcher(store, _options(tmp_path))
+    stats = watcher.run_once()
+
+    assert stats.error_messages == ("rate card could not be read; using the default one until it can",)
+    assert stats.files_reparsed_stale_parser == 1
+    total, daily = _stored_costs(store, "sess-a1")
+    assert total == pytest.approx(daily)
+    assert total > 0
+    assert total != pytest.approx(_cost_at(1000.0))
+
+    _write_card(card, 25000.0)
+    stats = watcher.run_once()
+
+    assert stats.error_messages == ()
+    assert stats.files_reparsed_stale_parser == 1
+    assert _stored_costs(store, "sess-a1") == pytest.approx((_cost_at(25000.0),) * 2)
+
+
+def test_the_all_unknown_card_never_reprices_the_store(
+    tmp_path: Path, store: Store, monkeypatch: pytest.MonkeyPatch
+):
+    """When no card at all can be read (a corrupted install), stored rows
+    keep the rates they were priced with."""
+    from claudeglass.service import watcher as watcher_mod
+    from claudeglass.service.watcher import TURNS_PRICED_WITH_KEY
+
+    _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    path_a = _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    FileWatcher(store, _options(tmp_path)).run_once()
+    priced_with = store.get_meta(TURNS_PRICED_WITH_KEY)
+    assert priced_with
+
+    def _unreadable(*args, **kwargs):
+        raise watcher_mod.config_mod.ConfigError("unreadable")
+
+    monkeypatch.setattr(watcher_mod, "load_pricing", _unreadable)
+    watcher = FileWatcher(store, _options(tmp_path))
+    assert watcher._pricing.sha256 == ""
+    stats = watcher.run_once()
+
+    assert stats.files_parsed == 0
+    assert store.known_files()[str(path_a)][2] == PARSER_VERSION
+    assert store.get_meta(TURNS_PRICED_WITH_KEY) == priced_with
+    assert sum(row["cost"] for row in store.daily_usage(days=3650)) == pytest.approx(_cost_at(1000.0))
+
+
+def test_a_pricing_path_that_cannot_be_read_falls_back_at_start(tmp_path: Path, store: Store):
+    """With no card loaded yet there is no previous one to keep: the
+    config-dir card prices in its place until ``pricing_path`` is fixed."""
+    _write_card(tmp_path / "config" / "pricing.toml", 1000.0)
+    (tmp_path / "config" / "config.toml").write_text(
+        f"pricing_path = {json.dumps(str(tmp_path / 'no-such-card.toml'))}\n", encoding="utf-8"
+    )
+    _write_session(tmp_path / "projects", "proj-a", "sess-a1", _two_turns())
+    watcher = FileWatcher(store, _options(tmp_path))
+    stats = watcher.run_once()
+
+    assert stats.error_messages == ("rate card could not be read; using the default one until it can",)
+    assert _stored_costs(store, "sess-a1") == pytest.approx((_cost_at(1000.0),) * 2)
+
+    _write_card(tmp_path / "no-such-card.toml", 25000.0)
+    stats = watcher.run_once()
+
+    assert stats.error_messages == ()
+    assert stats.files_reparsed_stale_parser == 1
+    assert _stored_costs(store, "sess-a1") == pytest.approx((_cost_at(25000.0),) * 2)
+
+
 # -- live-file skip / re-check next tick ------------------------------------
 
 

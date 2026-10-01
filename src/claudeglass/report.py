@@ -64,9 +64,11 @@ Deviations from the task brief, reported rather than made silently (see
   ``snapshots.build_effective_config_table``/``build_config_layers_table``/
   ``build_config_groups_table`` (no inputs beyond the snapshots already
   in hand) and, once a session's own dominant top-level model is known,
-  ``build_config_drift_table`` (fix #15: model comparisons are alias-
-  normalised via ``pricing.resolve_model``, so this no longer reports
-  100% drift on ``model``). COV-02: the same table also carries an
+  ``build_config_drift_table`` (fix #15: a settings model alias compares
+  by family and an explicit id by the canonical id
+  ``pricing.resolve_model`` gives, see
+  ``snapshots._settings_model_agrees``, so this no longer reports 100%
+  drift on ``model``). COV-02: the same table also carries an
   ``effortLevel`` row per session once a dominant top-level effort is
   known (``_dominant_transcript_effort``) -- together these are the
   "CLI/overlay layer" the plan asks for: a disagreement between the
@@ -1084,9 +1086,9 @@ def _build_config_section(
     # reachable only via snapshots.build_config_section(...,
     # include_effective=True), which this section deliberately doesn't
     # reuse (see module docstring). Fix #15: build_config_drift_table now
-    # normalises a settings model *alias* against an observed full model
-    # id via resolve_model before comparing, so this is no longer the
-    # "100% drift on model" trap #15 describes.
+    # compares a settings model *alias* with an observed full model id by
+    # family, and an explicit id by the canonical id resolve_model gives,
+    # so this is no longer the "100% drift on model" trap #15 describes.
     if snaps:
         tables.append(snapshots_mod.build_effective_config_table(snaps))
         tables.append(snapshots_mod.build_config_layers_table(snaps))
@@ -1958,6 +1960,9 @@ def build_report(
             "basis": units.basis(),
         },
         rates=pricing.rates_meta(),
+        # by_model is keyed by the observed turn.model, so every id the
+        # by_model table shows can be looked up in `rates`.
+        model_ids=pricing.model_ids_meta(overview.by_model.keys()),
     )
 
     # Fixes 2/3: these two counters are pricing-time totals (every turn

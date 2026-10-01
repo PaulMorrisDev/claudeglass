@@ -813,6 +813,52 @@ def test_known_files_reports_every_transcript(store: Store) -> None:
     assert files[_FAKE_SUB_PATH] == (789, 1011, 3)
 
 
+def test_demote_parsed_marks_this_builds_rows_and_leaves_a_newer_builds(store: Store) -> None:
+    from claudeglass import PARSER_VERSION
+
+    _seed(store)
+    store.upsert_transcript(
+        session_id="session-a", path=_FAKE_PATH, kind="top-level",
+        mtime_ns=123, size_bytes=456, parser_version=PARSER_VERSION, digest_json="{}",
+    )
+    newer = r"C:\Users\definitely-not-a-real-person\.claude\projects\proj-a\session-newer.jsonl"
+    store.upsert_transcript(
+        session_id="session-a", path=newer, kind="top-level",
+        mtime_ns=1, size_bytes=2, parser_version=PARSER_VERSION + 1, digest_json="{}",
+    )
+    token = store.change_token()
+
+    assert store.demote_parsed() == 2
+
+    files = store.known_files()
+    assert files[_FAKE_PATH] == (123, 456, 0)
+    assert files[_FAKE_SUB_PATH] == (789, 1011, 0)
+    assert files[newer] == (1, 2, PARSER_VERSION + 1)
+    # Nothing a reader sees has changed until each row is parsed again.
+    assert store.change_token() == token
+
+
+def test_meta_values_round_trip(store: Store) -> None:
+    assert store.get_meta("turns_priced_with") is None
+    store.set_meta("turns_priced_with", "abc")
+    assert store.get_meta("turns_priced_with") == "abc"
+    store.set_meta("turns_priced_with", "def")
+    assert store.get_meta("turns_priced_with") == "def"
+    # The schema version lives in the same table, untouched.
+    from claudeglass.service import schema
+
+    assert store.schema_version() == schema.SCHEMA_VERSION
+
+
+def test_get_meta_before_the_meta_table_exists_is_none() -> None:
+    unopened = Store(":memory:")
+    try:
+        assert unopened.get_meta("turns_priced_with") is None
+        assert unopened.schema_version() is None
+    finally:
+        unopened.close()
+
+
 def test_remove_missing_marks_transcripts_not_in_known_set(store: Store) -> None:
     # Review finding 3: the store must outlive `cleanupPeriodDays` --
     # `remove_missing` only marks a vanished transcript's `missing_since`,

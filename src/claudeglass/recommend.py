@@ -141,7 +141,7 @@ import dataclasses
 import re
 from dataclasses import dataclass
 
-from . import carry, compaction_sim, elasticity, handoff, hook_costs, model_swap, run_split, tool_search, waste
+from . import carry, compaction_sim, elasticity, handoff, hook_costs, model_swap, pricing, run_split, tool_search, waste
 from .config import Config
 from .context_budget import _READ_ONLY_TOOLS
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
@@ -2034,15 +2034,28 @@ def _rule_pricing_coverage(report: ReportModel) -> list[Recommendation]:
     model with no price, and ``usage.pricing_closest_match``
     (``as_closest_match_table``) whenever one was priced by closest
     match; the action names whichever of those model ids is present.
-    Without either table (a report built with ``include`` leaving out
-    ``usage``) the rule still fires on ``coverage_pct`` alone, with a
-    generic action.
+    A closest-match id that is a newer release of what it was priced as
+    (``pricing.newer_version_of``: ``claude-x-5-5`` on ``claude-x-5``)
+    gets its own sentence, since it isn't a mismatched model, just one
+    the rate card doesn't know yet. Without either table (a report built
+    with ``include`` leaving out ``usage``) the rule still fires on
+    ``coverage_pct`` alone, with a generic action.
     """
     coverage_pct = report.meta.pricing.coverage_pct
     closest_table = _table(report, "usage", "pricing_closest_match")
-    closest_model_ids = (
-        [row[0] for row in closest_table.rows if row] if closest_table is not None else []
-    )
+    closest_rows = [row for row in closest_table.rows if row] if closest_table is not None else []
+    closest_model_ids = [row[0] for row in closest_rows]
+    closest_keys = [c.key for c in closest_table.columns] if closest_table is not None else []
+    priced_as_at = closest_keys.index("priced_as") if "priced_as" in closest_keys else None
+    newer_versions = [
+        (row[0], row[priced_as_at])
+        for row in closest_rows
+        if priced_as_at is not None
+        and len(row) > priced_as_at
+        and pricing.newer_version_of(str(row[0]), str(row[priced_as_at]))
+    ]
+    newer_ids = {m for m, _ in newer_versions}
+    plain_model_ids = [m for m in closest_model_ids if m not in newer_ids]
     if coverage_pct >= 100.0 and not closest_model_ids:
         return []
     dq_value = _cell(report, "scorecard", "dimensions", "data_quality", "value")
@@ -2059,13 +2072,19 @@ def _rule_pricing_coverage(report: ReportModel) -> list[Recommendation]:
             f"Add {', '.join(str(m) for m in unknown_model_ids)} to pricing.toml so the "
             "report's cost figures cover the whole corpus."
         )
-    if closest_model_ids:
+    if plain_model_ids:
+        ids = ", ".join(str(m) for m in plain_model_ids)
         action_parts.append(
-            f"{', '.join(str(m) for m in closest_model_ids)} "
-            + ("was" if len(closest_model_ids) == 1 else "were")
-            + " priced by closest match, not its own rate; give "
-            + ("it" if len(closest_model_ids) == 1 else "them")
-            + " a pricing.toml row of its own for an exact cost."
+            f"{ids} was priced by closest match, not its own rate; give it a pricing.toml row of its own "
+            "for an exact cost."
+            if len(plain_model_ids) == 1
+            else f"{ids} were priced by closest match, not their own rates; give them pricing.toml rows of "
+            "their own for an exact cost."
+        )
+    for model_id, priced_as in newer_versions:
+        action_parts.append(
+            f"There is no rate of its own for {model_id} yet, so it was priced as {priced_as}; update "
+            f"ClaudeGlass or add a models.\"{model_id}\" row to pricing.toml for its exact cost."
         )
     if not action_parts:
         action_parts.append(

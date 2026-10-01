@@ -12,14 +12,23 @@ What the design audit found, and what now holds, read from the source:
   "so far" sits in the margin, where no bar or change label reaches;
 - the sessions scatter says how many sessions it leaves out, and why;
 - the tallest pages fold tables no evidence link, chart or action
-  points at under More tables.
+  points at under More tables;
+- every price is found by the rate card's own id, whatever id a session
+  recorded (costs.js's modelIdFor, in pricing.py's order), so the
+  Overview's cache note and the Cache page name the same model's price.
 """
 
 from __future__ import annotations
 
+import json
 import re
+import shutil
+import subprocess
+
+import pytest
 
 from claudeglass import helptext
+from claudeglass.pricing import load_pricing
 from test_service_static import (
     _app_js,
     _chart_specs,
@@ -229,26 +238,25 @@ def test_long_pages_fold_tables_nothing_points_at() -> None:
 # -- the ways to save, together -----------------------------------------------
 
 
-def _combined(items: list[dict], spend: dict[str, float]) -> float:
-    """``combinedSaving`` from page-overview.js, run in Node."""
-    import json
-    import shutil
-    import subprocess
-
-    import pytest
-
+def _node(functions: list[tuple[str, str]], expression: str) -> object:
+    """Run dashboard functions in Node: each (module, name) function's
+    source, then ``expression``, whose value comes back through JSON."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node isn't installed")
-    script = (
-        _body("page-overview.js", "combinedSaving")
-        + f"\nprocess.stdout.write(String(combinedSaving({json.dumps(items)}, {json.dumps(spend)})));"
-    )
+    script = "\n".join(_body(module, name) for module, name in functions)
+    script += f"\nprocess.stdout.write(JSON.stringify({expression}));"
     # A cold Node on a busy Windows runner has taken over 30 s to start.
     done = subprocess.run(
         [node, "-e", script], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, check=True
     )
-    return float(done.stdout)
+    return json.loads(done.stdout)
+
+
+def _combined(items: list[dict], spend: dict[str, float]) -> float:
+    """``combinedSaving`` from page-overview.js, run in Node."""
+    expression = f"combinedSaving({json.dumps(items)}, {json.dumps(spend)})"
+    return float(_node([("page-overview.js", "combinedSaving")], expression))
 
 
 def test_overlapping_savings_multiply_instead_of_adding_up() -> None:
@@ -274,3 +282,145 @@ def test_the_ways_to_save_never_come_to_more_than_the_spend() -> None:
 def test_without_a_spend_by_agent_type_the_savings_are_added_up() -> None:
     items = [{"usd": 3, "agent": None}, {"usd": 4, "agent": "top-level"}]
     assert _combined(items, {}) == 7
+
+
+# -- every model id finds its prices ------------------------------------------
+
+#: A report's meta as report.py writes it: rates keyed by the rate
+#: card's own ids, and model_ids for the aliases and the ids it prices
+#: as another model.
+_META = {
+    "rates": {
+        "claude-opus-4": {"input": 15.0, "cache_read_ratio": 0.1},
+        "claude-opus-4-1": {"input": 15.0, "cache_read_ratio": 0.11},
+        "claude-sonnet-5": {"input": 2.0, "cache_read_ratio": 0.12},
+        "claude-sonnet-5-5": {"input": 2.0, "cache_read_ratio": 0.13},
+        "claude-haiku-4-5-20251001": {"input": 1.0, "cache_read_ratio": 0.14},
+    },
+    "model_ids": {
+        "sonnet": "claude-sonnet-5-5",
+        "haiku": "claude-haiku-4-5-20251001",
+        "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+        "retired": "claude-sonnet-3",
+    },
+}
+
+_ID_FUNCTIONS = [("costs.js", "modelIdFor"), ("costs.js", "rateFor")]
+
+
+def _model_ids(meta: dict | None, ids: list) -> list:
+    """``modelIdFor`` from costs.js over each id, run in Node."""
+    return _node(
+        _ID_FUNCTIONS,
+        f"{json.dumps(ids)}.map(function (id) {{ return modelIdFor({json.dumps(meta)}, id); }})",
+    )
+
+
+def test_a_recorded_id_finds_the_rate_cards_own_id() -> None:
+    found = {
+        # The id itself.
+        "claude-sonnet-5-5": "claude-sonnet-5-5",
+        # An alias, through meta.model_ids.
+        "sonnet": "claude-sonnet-5-5",
+        "claude-haiku-4-5": "claude-haiku-4-5-20251001",
+        # With "[1m]" taken off, then as before.
+        "claude-sonnet-5-5[1m]": "claude-sonnet-5-5",
+        "haiku[1m]": "claude-haiku-4-5-20251001",
+        # A dated id, by the longest priced id it starts with.
+        "claude-sonnet-5-20261001": "claude-sonnet-5",
+        "claude-sonnet-5-5-20261001": "claude-sonnet-5-5",
+        # Only up to a "-" or "@": claude-opus-4-10 isn't claude-opus-4-1.
+        "claude-opus-4-10": "claude-opus-4",
+        # Bedrock and Vertex wrapping.
+        "us.anthropic.claude-opus-4-1-20250805-v1:0": "claude-opus-4-1",
+        "claude-opus-4-1@20250805": "claude-opus-4-1",
+        "us.anthropic.claude-opus-4-1-v1:0[1m]": "claude-opus-4-1",
+    }
+    assert _model_ids(_META, list(found)) == list(found.values())
+
+
+def test_an_id_the_rate_card_doesnt_price_finds_nothing() -> None:
+    unknown = ["gpt-5", "claude-sonnet-55", "<unknown>", "<synthetic>", "", None, "constructor", "retired"]
+    assert _model_ids(_META, unknown) == [None] * len(unknown)
+    # A report built without model_ids (cli.py's own reports) still
+    # finds every id the rate card prices by its own name.
+    bare = {"rates": _META["rates"]}
+    assert _model_ids(bare, ["sonnet", "claude-sonnet-5-5-20261001"]) == [None, "claude-sonnet-5-5"]
+    assert _model_ids(None, ["claude-sonnet-5-5"]) == [None]
+
+
+def test_rate_for_gives_the_prices_the_id_finds() -> None:
+    meta = json.dumps(_META)
+    rates = _node(
+        _ID_FUNCTIONS,
+        f'["sonnet", "claude-opus-4-1@20250805", "gpt-5"].map(function (id) {{ return rateFor({meta}, id); }})',
+    )
+    assert rates == [_META["rates"]["claude-sonnet-5-5"], _META["rates"]["claude-opus-4-1"], None]
+    assert _node(_ID_FUNCTIONS, 'rateFor(null, "claude-sonnet-5-5")') is None
+
+
+def test_the_cost_sentences_name_each_model_used_once_by_its_own_id() -> None:
+    """pricingFacts kept only the by_model ids meta.rates had as keys, so
+    a newer release priced as an older one (or a dated or cloud id) fell
+    out and "the model you spent most on" named another."""
+    rows = [["claude-sonnet-5-5-20261001"], ["claude-sonnet-5-5"], ["<unknown>"], ["claude-haiku-4-5"]]
+    report = {"meta": _META, "sections": [{"key": "overview", "tables": [{"name": "by_model", "rows": rows}]}]}
+    facts = _node(
+        [("api.js", "findSection"), *_ID_FUNCTIONS, ("costs.js", "pricingFacts")],
+        f"pricingFacts({json.dumps(report)})",
+    )
+    assert facts["used"] == ["claude-sonnet-5-5", "claude-haiku-4-5-20251001"]
+    assert facts["mainId"] == "claude-sonnet-5-5"
+    assert facts["main"] == _META["rates"]["claude-sonnet-5-5"]
+
+
+def test_the_overview_cache_note_adds_up_each_models_reads() -> None:
+    """The daily rows carry the recorded id: two ids of one model add up
+    before the model that read most is picked, and its price is found."""
+    functions = [*_ID_FUNCTIONS, ("page-overview.js", "cacheReadRatio")]
+    rows = [
+        {"model": "claude-opus-4-1-20250805", "cache_read_tokens": 6},
+        {"model": "us.anthropic.claude-opus-4-1-20250805-v1:0", "cache_read_tokens": 6},
+        {"model": "claude-sonnet-5-5", "cache_read_tokens": 10},
+    ]
+    assert _node(functions, f"cacheReadRatio({json.dumps(_META)}, {json.dumps(rows)})") == 0.11
+    # The model that read most has no price: no ratio, as before.
+    rows = [{"model": "gpt-5", "cache_read_tokens": 100}, {"model": "claude-sonnet-5-5", "cache_read_tokens": 1}]
+    assert _node(functions, f"cacheReadRatio({json.dumps(_META)}, {json.dumps(rows)})") is None
+
+
+def test_the_dashboard_finds_the_model_pricing_py_prices() -> None:
+    """modelIdFor and pricing.py's resolve_model agree on every id the
+    packaged rate card names, its "[1m]" forms, and recorded ids that
+    only the cleaning and the prefix step can place. model_ids holds the
+    aliases alone here, so the fallback does all the rest."""
+    pricing = load_pricing()
+    names = sorted(pricing.models) + sorted(pricing.aliases)
+    ids = names + [name + "[1m]" for name in names] + [
+        "claude-sonnet-5-20261001",
+        "claude-sonnet-5-5",
+        "claude-sonnet-5-5-20261001",
+        "claude-sonnet-55",
+        "claude-opus-4-10",
+        "claude-opus-4-1-20250805",
+        "claude-haiku-4-5-20250901",
+        "us.anthropic.claude-opus-4-1-20250805-v1:0",
+        "eu.anthropic.claude-sonnet-4-5-20250929-v1:0",
+        "anthropic.claude-haiku-4-5-20251001-v1:0",
+        "us.anthropic.sonnet",
+        "us.anthropic.claude-opus-4-1-v1:0[1m]",
+        "claude-opus-4-1@20250805",
+        "claude-sonnet-4-5@20250929",
+        "claude-widget-9",
+        "gpt-5",
+        "<synthetic>",
+        "<unknown>",
+        "constructor",
+    ]
+    meta = {"rates": {model_id: {} for model_id in pricing.models}, "model_ids": dict(pricing.aliases)}
+
+    def canonical(model_id: str) -> str | None:
+        resolved = pricing.resolve_model(model_id)
+        return resolved.canonical_id if resolved else None
+
+    assert _model_ids(meta, ids) == [canonical(model_id) for model_id in ids]

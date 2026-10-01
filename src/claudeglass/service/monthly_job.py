@@ -95,7 +95,8 @@ class MonthlyReportJob:
                 month=month,
                 out_dir=self.out_dir,
                 load_corpus=lambda dirs: _with_haiku_tags(
-                    load_corpus(dirs, cache=cache, exclude_projects=exclude, salt=salt), config_dir
+                    load_corpus(dirs, cache=cache, exclude_projects=exclude, salt=salt, config_dir=config_dir),
+                    config_dir,
                 ),
                 note=lambda text: self._log(f"{_LOG_PREFIX}: {text}"),
             )

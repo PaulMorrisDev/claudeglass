@@ -36,6 +36,8 @@ from helpers import assert_privacy, elasticity_with_slope, turn_line, write_json
 
 PRICING = load_pricing()
 
+#: An observed Sonnet id. The cheaper tier a row names is whatever the
+#: rate card's "sonnet" alias points at, PRICING.aliases["sonnet"].
 SONNET = "claude-sonnet-5"
 HAIKU = "claude-haiku-4-5-20251001"
 OPUS = "claude-opus-5"
@@ -213,7 +215,7 @@ def test_a_named_type_with_workflow_runs_prices_its_direct_runs_only():
     assert row.observed_cost == pytest.approx(5 * alone.observed_cost / 2)
     assert row.workflow_runs == 3
     # The saving is the direct runs' alone.
-    assert row.tier_verdict.alt_model == SONNET
+    assert row.tier_verdict.alt_model == PRICING.aliases["sonnet"]
     assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
     assert row.tier_verdict.saving_pct == pytest.approx(alone.tier_verdict.saving_pct)
     assert "on the 2 runs its agent file sets" in row.tier_verdict.label
@@ -269,7 +271,7 @@ def test_runs_given_a_model_when_started_are_left_out_of_the_agent_file_saving()
     # Most of the row ran on Sonnet, but the runs the file decides ran on
     # Opus, so its cheaper tier is Sonnet, priced on those runs alone.
     assert row.observed_model == SONNET
-    assert row.tier_verdict.alt_model == SONNET
+    assert row.tier_verdict.alt_model == PRICING.aliases["sonnet"]
     assert row.tier_verdict.saving_usd == pytest.approx(alone.tier_verdict.saving_usd)
 
     section = model_swap.build_section(stats)

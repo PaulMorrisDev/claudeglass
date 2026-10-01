@@ -43,7 +43,7 @@ from typing import Callable
 from . import known_savers, model_gate, model_swap, whatif
 from .fixes import already_set
 from .model import Recommendation, ReportModel, SettingChange
-from .pricing import model_names_in
+from .pricing import model_names_in, newer_version_of
 from .snapshots import (
     AUTO_COMPACT_WINDOW_ENV,
     Snapshot,
@@ -854,6 +854,16 @@ def _explain_pricing_coverage(rec: Recommendation, ctx: _Context) -> None:
     )
     has_unknown = bool(unknown_table is not None and unknown_table.rows)
     has_closest_match = bool(closest_table is not None and closest_table.rows)
+    # A closest match that is only a newer release the rate card doesn't
+    # know yet (claude-x-5-5 priced as claude-x-5) isn't a mismatched
+    # model; say so when that's all there is.
+    keys = [c.key for c in closest_table.columns] if has_closest_match else []
+    newer_rows = [
+        row
+        for row in (closest_table.rows if "priced_as" in keys else [])
+        if row and newer_version_of(str(row[0]), str(row[keys.index("priced_as")]))
+    ]
+    all_newer = has_closest_match and len(newer_rows) == len(closest_table.rows)
 
     if has_unknown and has_closest_match:
         rec.title = "Some usage has no price, some is only an estimate"
@@ -861,6 +871,18 @@ def _explain_pricing_coverage(rec: Recommendation, ctx: _Context) -> None:
             "Replies from models missing from pricing.toml are left out of every cost, so "
             "totals are too low. Others were priced at a different model's rate, so their "
             "cost may be off."
+        )
+    elif all_newer and len(newer_rows) == 1:
+        rec.title = "A newer model is priced at an older model's rate"
+        rec.why = (
+            "pricing.toml has no row for this newer model yet, so its cost is estimated from the older "
+            "model's rate and may be off."
+        )
+    elif all_newer:
+        rec.title = "Newer models are priced at older models' rates"
+        rec.why = (
+            "pricing.toml has no rows for these newer models yet, so their cost is estimated from the older "
+            "models' rates and may be off."
         )
     elif has_closest_match:
         rec.title = "Some usage is priced by closest match, not its own rate"

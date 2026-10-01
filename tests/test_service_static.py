@@ -491,7 +491,37 @@ def test_glossary_rebuilds_card_counts_what_its_cost_covers() -> None:
     assert "stats.avoidable_cost_usd" in rebuilds
     assert "Rebuilds after a usage-limit pause aren't counted." in rebuilds
     assert "import { avoidableRebuilds, cardRuleText, pricingFacts } from \"./costs.js\";" in _static_text("page-glossary.js")
-    assert "import { avoidableRebuilds } from \"./costs.js\";" in _static_text("page-cache.js")
+    assert "import { avoidableRebuilds, pricingFacts } from \"./costs.js\";" in _static_text("page-cache.js")
+
+
+def test_every_rate_lookup_finds_the_rate_cards_own_id() -> None:
+    """report.meta.rates is keyed by the rate card's own ids, but the
+    by_model table and the daily rows carry the id each session recorded:
+    an alias, a dated or cloud id, or a newer release priced as an older
+    one (claude-sonnet-5-5 before it had a row). Indexing meta.rates with
+    those dropped the model, so the Glossary, Actions and Cache named
+    another model's prices and the Overview's cache note fell silent.
+    Every lookup now goes through costs.js's modelIdFor. Node runs it in
+    test_ui_figures_audit.py."""
+    costs = _static_text("costs.js")
+    assert "export function modelIdFor(meta, id) {" in costs
+    assert "export function rateFor(meta, id) {" in costs
+    facts = _function_source(costs, "pricingFacts")
+    assert "var id = modelIdFor(meta, row[0]);" in facts
+    assert "if (id && used.indexOf(id) === -1) used.push(id);" in facts
+    # Cache > Rebuilds names the same model as the Glossary: no copy of
+    # pricingFacts of its own.
+    cache = _static_text("page-cache.js")
+    assert "function mainRates" not in cache
+    assert "var rates = pricingFacts(report).main || {};" in _function_source(cache, "renderCacheExplainer")
+    overview = _static_text("page-overview.js")
+    assert 'import { modelIdFor, rateFor } from "./costs.js";' in overview
+    ratio = _function_source(overview, "cacheReadRatio")
+    assert "var id = modelIdFor(meta, row.model) || row.model;" in ratio
+    assert "rateFor(meta, top)" in ratio
+    # Nowhere else indexes the rate card by a recorded id.
+    for name in ("page-cache.js", "page-overview.js", "page-actions.js", "page-glossary.js"):
+        assert not re.search(r"rates\[(?:id|top|row|model)", _static_text(name)), name
 
 
 def test_glossary_billing_card_says_when_amounts_are_list_price() -> None:

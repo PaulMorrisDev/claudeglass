@@ -357,9 +357,22 @@ one `"(unknown project)"` bucket.
   session-snapshot-capture time can know what a later `--model`/
   `--effort` flag or shell env var will do), but a `config-drift` row is
   exactly that inference, reported per session/key. Model comparisons
-  are alias-normalised via `pricing.resolve_model` (fix #15); effort
-  comparisons are plain equality, since `turn.effort` already uses the
-  same enum `effortLevel` does (`low`/`medium`/`high`/`xhigh`/`max`).
+  (`_settings_model_agrees`) follow what the setting can mean. `default`
+  names no fixed model, so it never counts as drift. `opusplan` accepts
+  an observed Opus or Sonnet model. An alias (`opus`, `sonnet`, `haiku`,
+  `fable`, `best`, with or without `[1m]`: any value with no digit once
+  `[1m]` is stripped) compares by family (`workstyle.model_tier`, with
+  `best` read as Fable through the rate card), because an alias follows
+  the newest release: `opus` against an older `claude-opus-5` session is
+  not drift. Every other value (a `claude-*` id, a Bedrock or Vertex id,
+  an ARN) is an explicit pin and compares exactly, by the canonical id
+  `pricing.resolve_model` gives both sides (fix #15), so a pin moved from
+  Opus 4.1 to 4.5 still reports. A newer release the rate card has no
+  row for yet keeps its own version (`pricing.newer_version_id`), so a
+  `claude-opus-5-7` pin against a `claude-opus-5` session still reports
+  even while both are priced as `claude-opus-5`. Effort comparisons are
+  plain equality, since `turn.effort` already uses the same enum
+  `effortLevel` does (`low`/`medium`/`high`/`xhigh`/`max`).
 - `build_env_levers_table` (COV-09) — one row per COV-09 env-var lever
   (`DISABLE_PROMPT_CACHING` and its per-model variants,
   `ENABLE_TOOL_SEARCH`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
