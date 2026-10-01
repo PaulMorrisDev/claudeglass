@@ -32,6 +32,7 @@ import re
 import subprocess
 import sys
 import zoneinfo
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -1652,6 +1653,321 @@ def test_tz_flag_is_accepted_uncontested_when_machine_has_no_tz_database(tmp_pat
         ]
     )
     assert exit_code == 0
+
+
+# -- --days is calendar days -------------------------------------------------
+
+#: 13:00 UTC on 2026-09-18, an hour after the default synthetic turn.
+_FROZEN_NOW = datetime(2026, 9, 18, 13, 0, tzinfo=timezone.utc)
+
+
+def _freeze_discovery_now(monkeypatch, now: datetime = _FROZEN_NOW) -> None:
+    """Pin the clock ``discovery.window_start`` reads, as
+    test_service_api.py does for the dashboard's windows."""
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+
+    monkeypatch.setattr(discovery, "datetime", _FrozenDatetime)
+
+
+def _tzdata_has(name: str) -> bool:
+    try:
+        zoneinfo.ZoneInfo(name)
+        return True
+    except zoneinfo.ZoneInfoNotFoundError:
+        return False
+
+
+def _spy_load_corpus(monkeypatch) -> dict:
+    """Record what ``cli.load_corpus`` is called with, then run it."""
+    seen: dict = {}
+    real_load_corpus = cli.load_corpus
+
+    def _spy(project_dirs, **kwargs):
+        seen.update(kwargs)
+        return real_load_corpus(project_dirs, **kwargs)
+
+    monkeypatch.setattr(cli, "load_corpus", _spy)
+    return seen
+
+
+def _window_args(**overrides) -> argparse.Namespace:
+    values = dict(
+        no_cache=True,
+        rebuild_cache=False,
+        days=None,
+        since=None,
+        until=None,
+        limit=None,
+        window_by="last-reply",
+        jobs=1,
+        verbose=False,
+        quiet=True,
+        tz=None,
+    )
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "x", "1.5"])
+def test_days_must_be_a_positive_whole_number(value, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["report", "--days", value])
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--days" in err
+    assert "Traceback" not in err
+
+
+def test_days_accepts_a_positive_whole_number():
+    assert cli._make_parser().parse_args(["report", "--days", "7"]).days == 7
+
+
+@pytest.mark.parametrize("zone", [None, "UTC"])
+def test_report_days_starts_at_local_midnight_and_the_window_keeps_its_name(tmp_path, capsys, monkeypatch, zone):
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen = _spy_load_corpus(monkeypatch)
+    argv = ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+    if zone:
+        argv += ["--tz", zone]
+    exit_code = cli.main([*argv, "--days", "1", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert seen["since"] == discovery.window_start_iso(1, zone, now=_FROZEN_NOW)
+    assert seen["days"] is None
+    assert payload["report"]["meta"]["window"] == "last 1 days"
+    if zone == "UTC":
+        assert seen["since"] == "2026-09-18T00:00:00Z"
+
+
+@pytest.mark.skipif(not _tzdata_has("America/New_York"), reason="no tz database on this machine")
+def test_report_days_counts_days_in_the_tz_flags_zone(tmp_path, capsys, monkeypatch):
+    # 09:00 in New York on the 18th: that day began at 04:00 UTC.
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen = _spy_load_corpus(monkeypatch)
+    exit_code = cli.main(
+        ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "America/New_York", "--days", "1", "--json"]
+    )
+    assert exit_code == 0
+    capsys.readouterr()
+    assert seen["since"] == "2026-09-18T04:00:00Z"
+
+
+def test_window_since_takes_the_tz_flag_over_config_tz(monkeypatch):
+    seen = []
+
+    def _fake_window_start_iso(days, tz=None, **_kwargs):
+        seen.append((days, tz))
+        return "START"
+
+    monkeypatch.setattr(discovery, "window_start_iso", _fake_window_start_iso)
+    config = cli.load_config(None)
+    config.tz = "Europe/Paris"
+    assert cli._window_since(_window_args(days=3, tz="Asia/Tokyo"), config) == "START"
+    assert cli._window_since(_window_args(days=3), config) == "START"
+    config.tz = None
+    assert cli._window_since(_window_args(days=3), config) == "START"
+    assert seen == [(3, "Asia/Tokyo"), (3, "Europe/Paris"), (3, None)]
+
+
+def test_window_since_is_since_as_given_or_nothing():
+    config = cli.load_config(None)
+    assert cli._window_since(_window_args(since="2026-09-01"), config) == "2026-09-01"
+    assert cli._window_since(_window_args(until="2026-09-30"), config) is None
+    assert cli._window_since(_window_args(), config) is None
+
+
+def test_window_description(monkeypatch):
+    _freeze_discovery_now(monkeypatch)
+    config = cli.load_config(None)
+    config.tz = "UTC"
+    assert cli._window_description(_window_args(days=7), config) == "last 7 days"
+    assert cli._window_description(_window_args(), config) == "all time"
+    assert cli._window_description(_window_args(since="2026-09-01"), config) == "since 2026-09-01 until now"
+    assert cli._window_description(_window_args(until="2026-09-30"), config) == "since the beginning until 2026-09-30"
+    # With --until the window names its start, as the dashboard's label does.
+    assert (
+        cli._window_description(_window_args(days=7, until="2026-09-19"), config)
+        == "since 2026-09-12T00:00:00Z until 2026-09-19"
+    )
+
+
+def test_report_days_with_until_names_the_resolved_start(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    exit_code = cli.main(
+        ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "UTC", "--days", "7", "--until", "2026-09-19", "--json"]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["report"]["meta"]["window"] == "since 2026-09-12T00:00:00Z until 2026-09-19"
+
+
+def test_load_corpus_for_args_starts_days_at_local_midnight_unless_rolling(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    project_dir = _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen: dict = {}
+
+    def fake_load_corpus(project_dirs, **kwargs):
+        seen.update(kwargs)
+        return cli.Corpus(sessions=[])
+
+    monkeypatch.setattr(cli, "load_corpus", fake_load_corpus)
+    config = cli.load_config(None)
+    config.tz = "UTC"
+    args = _window_args(days=2)
+
+    cli._load_corpus_for_args(args, config, tmp_path, [project_dir])
+    assert (seen["days"], seen["since"]) == (None, "2026-09-17T00:00:00Z")
+
+    cli._load_corpus_for_args(args, config, tmp_path, [project_dir], rolling=True)
+    assert (seen["days"], seen["since"]) == (2, None)
+
+
+def test_capture_replays_keep_their_days_rolling(tmp_path, monkeypatch):
+    # They divide by their days, so they stay N x 24h whatever --days says.
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen: dict = {}
+
+    def fake_load_corpus(project_dirs, **kwargs):
+        seen.update(kwargs)
+        return cli.Corpus(sessions=[])
+
+    monkeypatch.setattr(cli, "load_corpus", fake_load_corpus)
+    config = cli.load_config(None)
+    config.tz = "UTC"
+    args = _window_args(days=3, projects_root=[str(root)])
+
+    cli._capture_corpus(args, config, tmp_path, days=cli.CAPTURE_HISTORY_DAYS)
+    assert (seen["days"], seen["since"], seen["until"]) == (cli.CAPTURE_HISTORY_DAYS, None, None)
+
+    cli._capture_corpus(args, config, tmp_path, since="2026-09-10T00:00:00Z")
+    assert (seen["days"], seen["since"]) == (None, "2026-09-10T00:00:00Z")
+
+
+def test_check_days_starts_at_local_midnight(tmp_path, capsys, monkeypatch):
+    from claudeglass import quick_actions
+
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen = {}
+
+    def fake_run_all(ctx):
+        seen["since_ts"], seen["until_ts"] = ctx.since_ts, ctx.until_ts
+        return []
+
+    monkeypatch.setattr(quick_actions, "run_all", fake_run_all)
+    exit_code = cli.main(
+        ["check", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "UTC", "--days", "1"]
+    )
+    assert exit_code == 0
+    capsys.readouterr()
+    assert seen == {"since_ts": discovery.window_start(1, "UTC", now=_FROZEN_NOW).timestamp(), "until_ts": None}
+
+
+def test_reconcile_days_stay_rolling(tmp_path, capsys, monkeypatch):
+    # Reconcile compares UTC days with the admin export's: --days stays
+    # N x 24h back from now, as before, not the report's local midnight.
+    from claudeglass import reconcile as reconcile_mod
+
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    csv_path = tmp_path / "admin.csv"
+    csv_path.write_text("date,cost\n2026-09-18,0.0\n", encoding="utf-8", newline="")
+    _freeze_discovery_now(monkeypatch)
+    seen = {}
+    real_reconcile = reconcile_mod.reconcile
+
+    def _spy(*args, **kwargs):
+        seen["since"], seen["until"] = kwargs["since"], kwargs["until"]
+        return real_reconcile(*args, **kwargs)
+
+    monkeypatch.setattr(reconcile_mod, "reconcile", _spy)
+    exit_code = cli.main(
+        ["reconcile", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--admin-csv", str(csv_path), "--tz", "UTC", "--days", "3", "--json"]
+    )
+    assert exit_code == 0
+    capsys.readouterr()
+    assert seen == {"since": "2026-09-15", "until": None}
+
+
+def test_a_rolling_window_with_until_names_its_rolling_start(monkeypatch):
+    _freeze_discovery_now(monkeypatch)
+    config = cli.load_config(None)
+    config.tz = "UTC"
+    args = _window_args(days=3, until="2026-09-19")
+    assert cli._window_description(args, config, rolling=True) == "since 2026-09-15T13:00:00Z until 2026-09-19"
+    assert cli._window_description(_window_args(days=3), config, rolling=True) == "last 3 days"
+
+
+def test_report_works_out_its_days_start_once(tmp_path, capsys, monkeypatch):
+    # The label, the corpus and the usage log share one start, so local
+    # midnight passing while the corpus loads can't split them across days.
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    starts = []
+    real_window_start_iso = discovery.window_start_iso
+
+    def _counting(days, tz=None, **kwargs):
+        starts.append(days)
+        return real_window_start_iso(days, tz, **kwargs)
+
+    monkeypatch.setattr(discovery, "window_start_iso", _counting)
+    exit_code = cli.main(
+        ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "UTC", "--days", "7", "--until", "2026-09-19", "--json"]
+    )
+    assert exit_code == 0
+    capsys.readouterr()
+    assert starts == [7]
+
+
+@pytest.mark.parametrize("command, extra", [("report", []), ("config-diff", ["--auto-keys"]), ("export", [])])
+def test_days_further_back_than_the_calendar_is_a_usage_error(tmp_path, capsys, command, extra):
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    exit_code = cli.main(
+        [command, "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "UTC", "--days", "800000", *extra]
+    )
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert f"claudeglass {command}: --days 800000 is too large" in err
+    assert "Traceback" not in err
+
+
+def test_days_before_1970_on_a_machine_that_cannot_count_back_is_a_usage_error(tmp_path, capsys, monkeypatch):
+    # Windows can't place a local time before 1970 (OSError).
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+
+    def _too_far(days, tz=None, **_kwargs):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(discovery, "window_start_iso", _too_far)
+    exit_code = cli.main(
+        ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--days", "36500", "--json"]
+    )
+    assert exit_code == 2
+    assert "claudeglass report: --days 36500 is too large" in capsys.readouterr().err
 
 
 # -- probe ----------------------------------------------------------------

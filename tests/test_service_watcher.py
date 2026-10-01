@@ -20,9 +20,18 @@ from pathlib import Path
 import pytest
 
 from claudeglass import PARSER_VERSION, config, signals
+from claudeglass.model import TranscriptResult, Turn
+from claudeglass.pricing import load_pricing
 from claudeglass.service.contracts import ServeOptions
 from claudeglass.service.store import Store
-from claudeglass.service.watcher import LIVE_FILE_WINDOW_S, LIVE_REPARSE_S, FileWatcher
+from claudeglass.service.watcher import (
+    LIVE_FILE_WINDOW_S,
+    LIVE_REPARSE_S,
+    FileWatcher,
+    _build_turns_agg,
+    _turn_bucket,
+    _turn_day,
+)
 from claudeglass.tools import log_usage
 
 from helpers import assert_privacy, turn_line, write_jsonl
@@ -1711,3 +1720,157 @@ def test_run_once_uses_an_explicit_retention_days_for_usage_log(tmp_path: Path, 
     rows = log_usage.load_usage_log(csv_path)
     assert len(rows) == 1
     assert rows[0]["session_id"] == "recent"
+
+
+# -- turns_agg rows per UTC quarter hour (schema 8) ------------------------
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _agg_turn(ts: str, *, model: str = "claude-sonnet-5", index: int = 1, **fields) -> Turn:
+    return Turn(turn_index=index, ts=ts, model=model, **{"input_tokens": 100, "output_tokens": 10, **fields})
+
+
+def _agg_rows(*turns: Turn) -> list[dict]:
+    return _build_turns_agg(TranscriptResult(turns=list(turns)), load_pricing())
+
+
+def test_turns_in_one_quarter_hour_share_a_row():
+    rows = _agg_rows(
+        _agg_turn("2026-09-18T12:00:00Z", index=1),
+        _agg_turn("2026-09-18T12:07:30.250Z", index=2),
+        _agg_turn("2026-09-18T12:14:59Z", index=3),
+    )
+    [row] = rows
+    assert (row["day"], row["bucket"], row["model"]) == ("2026-09-18", "2026-09-18T12:00:00Z", "claude-sonnet-5")
+    assert row["turns"] == 3 and row["input_tokens"] == 300 and row["output_tokens"] == 30
+    assert row["cost"] > 0
+
+
+def test_turns_a_quarter_hour_apart_make_two_rows_in_time_order():
+    rows = _agg_rows(
+        _agg_turn("2026-09-18T12:10:00Z", index=1),
+        _agg_turn("2026-09-18T12:15:00Z", index=2),
+        _agg_turn("2026-09-18T12:29:59Z", index=3),
+        _agg_turn("2026-09-18T12:30:00Z", index=4),
+    )
+    assert [(row["bucket"], row["turns"]) for row in rows] == [
+        ("2026-09-18T12:00:00Z", 1),
+        ("2026-09-18T12:15:00Z", 2),
+        ("2026-09-18T12:30:00Z", 1),
+    ]
+    assert {row["day"] for row in rows} == {"2026-09-18"}
+
+
+def test_turns_on_either_side_of_midnight_are_two_rows_with_two_days():
+    rows = _agg_rows(_agg_turn("2026-09-18T23:59:00Z", index=1), _agg_turn("2026-09-19T00:00:00Z", index=2))
+    assert [(row["day"], row["bucket"]) for row in rows] == [
+        ("2026-09-18", "2026-09-18T23:45:00Z"),
+        ("2026-09-19", "2026-09-19T00:00:00Z"),
+    ]
+
+
+def test_each_model_in_a_quarter_hour_has_its_own_row():
+    rows = _agg_rows(
+        _agg_turn("2026-09-18T12:01:00Z", model="claude-sonnet-5", index=1),
+        _agg_turn("2026-09-18T12:02:00Z", model="claude-opus-5", index=2),
+        _agg_turn("2026-09-18T12:03:00Z", model="claude-sonnet-5", index=3),
+    )
+    assert sorted((row["model"], row["turns"], row["bucket"]) for row in rows) == [
+        ("claude-opus-5", 1, "2026-09-18T12:00:00Z"),
+        ("claude-sonnet-5", 2, "2026-09-18T12:00:00Z"),
+    ]
+
+
+def test_a_time_with_no_offset_is_read_as_utc_and_an_offset_is_converted():
+    rows = _agg_rows(
+        _agg_turn("2026-09-18T12:20:00", index=1),
+        _agg_turn("2026-09-19T05:20:00+05:30", index=2),  # 23:50 on the 18th, UTC
+    )
+    assert [(row["day"], row["bucket"]) for row in rows] == [
+        ("2026-09-18", "2026-09-18T12:15:00Z"),
+        ("2026-09-18", "2026-09-18T23:45:00Z"),
+    ]
+
+
+def test_a_turn_with_no_readable_time_has_no_bucket_and_the_unknown_day():
+    rows = _agg_rows(
+        _agg_turn("", index=1),
+        _agg_turn("not a time", index=2),
+        _agg_turn("2026-09-18T12:00:00Z", index=3),
+    )
+    by_bucket = {row["bucket"]: row for row in rows}
+    assert set(by_bucket) == {None, "2026-09-18T12:00:00Z"}
+    assert by_bucket[None]["day"] == "unknown" and by_bucket[None]["turns"] == 2
+    assert by_bucket["2026-09-18T12:00:00Z"]["day"] == "2026-09-18"
+
+
+def test_a_rows_day_is_always_the_first_ten_characters_of_its_bucket():
+    stamps = [
+        "2026-01-01T00:00:00Z", "2026-03-29T00:59:59Z", "2026-09-18T23:59:59.999Z",
+        "2026-09-19T05:05:00+05:30", "2026-09-18T20:00:00-08:00", "2026-12-31T23:45:00",
+    ]  # each in a quarter hour of its own, so one row each
+    rows = _agg_rows(*[_agg_turn(ts, index=i + 1) for i, ts in enumerate(stamps)])
+    assert len(rows) == len(stamps)
+    for row in rows:
+        assert row["bucket"] is not None and row["day"] == row["bucket"][:10]
+        assert len(row["bucket"]) == len("2026-09-18T12:00:00Z") and row["bucket"].endswith(":00Z")
+        assert int(row["bucket"][14:16]) % 15 == 0
+
+
+def test_turn_bucket_is_the_quarter_hour_or_none():
+    assert _turn_bucket(Turn(ts="2026-09-18T12:44:59Z")) == "2026-09-18T12:30:00Z"
+    assert _turn_bucket(Turn(ts="2026-09-18T12:45:00.000Z")) == "2026-09-18T12:45:00Z"
+    assert _turn_bucket(Turn(ts="2026-09-19T05:20:00+05:30")) == "2026-09-18T23:45:00Z"
+    assert _turn_bucket(Turn(ts="")) is None
+    assert _turn_bucket(Turn(ts="soon")) is None
+    assert _turn_day(Turn(ts="2026-09-19T05:20:00+05:30")) == "2026-09-18"
+    assert _turn_day(Turn(ts="")) == "unknown"
+
+
+def test_the_store_regroups_a_parsed_session_into_local_days(tmp_path: Path, store: Store):
+    root = tmp_path / "projects"
+    _write_session(
+        root,
+        "proj-a",
+        "sess-a1",
+        [
+            turn_line(timestamp="2026-09-18T23:50:00.000Z", input_tokens=100, output_tokens=10),
+            turn_line(timestamp="2026-09-19T00:10:00.000Z", input_tokens=200, output_tokens=20),
+        ],
+    )
+    FileWatcher(store, _options(tmp_path)).run_once()
+
+    buckets = [row["bucket"] for row in store._connection().execute("SELECT bucket FROM turns_agg ORDER BY bucket")]
+    assert buckets == ["2026-09-18T23:45:00Z", "2026-09-19T00:00:00Z"]
+    utc = store.daily_usage(days=None)
+    assert [(row["day"], row["turns"]) for row in utc] == [("2026-09-18", 1), ("2026-09-19", 1)]
+    assert [(row["day"], row["turns"]) for row in store.daily_usage(days=None, tz=_IST)] == [("2026-09-19", 2)]
+    assert [(row["day"], row["turns"]) for row in store.daily_usage(days=None, tz=timezone(timedelta(hours=-8)))] == [
+        ("2026-09-18", 2)
+    ]
+    # A window that starts at India's midnight on the 19th (18:30 UTC on the
+    # 18th) takes both replies, as its local day does.
+    window = {"since": "2026-09-18T18:30:00Z", "until": "2026-09-19T18:30:00Z"}
+    assert [(row["day"], row["turns"]) for row in store.daily_usage(days=None, tz=_IST, **window)] == [("2026-09-19", 2)]
+
+
+def test_a_transcript_stored_without_buckets_gets_them_when_it_is_parsed_again(tmp_path: Path, store: Store):
+    """A store upgraded from schema 7 holds rows with no bucket and has
+    every transcript marked for a re-parse (``parser_version`` 0); the next
+    tick rebuilds them with buckets, though the file itself is unchanged."""
+    root = tmp_path / "projects"
+    path = _write_session(root, "proj-a", "sess-a1", _two_turns())
+    watcher = FileWatcher(store, _options(tmp_path))
+    watcher.run_once()
+    conn = store._connection()
+    conn.execute("UPDATE turns_agg SET bucket = NULL")
+    conn.execute("UPDATE transcripts SET parser_version = 0")
+    assert [row["day"] for row in store.daily_usage(days=None)] == ["2026-09-18"]
+
+    stats = watcher.run_once()
+    assert stats.files_parsed == 1 and stats.files_reparsed_stale_parser == 1
+    assert store.known_files()[str(path)][2] == PARSER_VERSION
+    rows = conn.execute("SELECT day, bucket, turns FROM turns_agg ORDER BY bucket").fetchall()
+    # Both replies (12:00 and 12:05) are in one quarter hour.
+    assert [(row["day"], row["bucket"], row["turns"]) for row in rows] == [("2026-09-18", "2026-09-18T12:00:00Z", 2)]

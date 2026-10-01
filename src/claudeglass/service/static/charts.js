@@ -40,10 +40,10 @@ export var CHART_SPECS = {
     summary: "Replies sent {span} cost {total}. The busiest day was {peakDay}, at {peak}.",
     alt: {
       sessions: "Replies sent {span} cost {total}. With their earlier replies, the window's sessions cost {sessionsTotal}. The busiest day was {peakDay}, at {peak}.",
-      firstDay: "Replies sent {span} cost {total}. That counts all of the first day, from midnight UTC; the sessions in this window cost {sessionsTotal}. The busiest day was {peakDay}, at {peak}.",
+      firstDay: "Replies sent {span} cost {total}. That counts replies from just before the window began; the sessions in this window cost {sessionsTotal}. The busiest day was {peakDay}, at {peak}.",
       oneDay: "Replies sent {span} cost {total}.",
       oneDaySessions: "Replies sent {span} cost {total}. With their earlier replies, the window's sessions cost {sessionsTotal}.",
-      oneDayFirstDay: "Replies sent {span} cost {total}. That counts the whole day from midnight UTC, not only this window; the sessions in this window cost {sessionsTotal}.",
+      oneDayFirstDay: "Replies sent {span} cost {total}. That counts replies from just before the window began; the sessions in this window cost {sessionsTotal}.",
     },
   },
   "savings-levers": {
@@ -174,7 +174,9 @@ export function tokenTick(value) {
 }
 
 // A day as a chart writes it: "3 Sep", or "Wed 3 Sep" in a tooltip.
-// Days from the store run midnight to midnight UTC.
+// Day keys are calendar dates in the service's local time ("2026-09-03"),
+// so they print with timeZone UTC: that never shifts one a day, whatever
+// zone the browser is in.
 var DAY_FORMAT = new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "short", timeZone: "UTC" });
 var DAY_LONG_FORMAT = new Intl.DateTimeFormat("en-GB", { weekday: "short", day: "numeric", month: "short", timeZone: "UTC" });
 

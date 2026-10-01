@@ -25,16 +25,20 @@ from __future__ import annotations
 
 import http.client
 import json
+import os
 import sys
 import threading
 import time
 import types
+from datetime import datetime, timedelta, timezone, tzinfo
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
 from claudeglass import corpus as corpus_mod
+from claudeglass import discovery
 from claudeglass.config import ConfigError, load_config, load_session_overrides
 from claudeglass.fixes import PROMPT_RESTART
 from claudeglass.pricing import load_pricing
@@ -300,6 +304,143 @@ def _assert_no_leak(raw: bytes) -> None:
     text = raw.decode("utf-8")
     for needle in _LEAK_NEEDLES:
         assert needle not in text, f"{needle!r} leaked into response: {text[:500]}"
+
+
+# -- calendar-day windows: clocks, zones and what the store was asked ------------
+
+#: The "now" the calendar-window tests pin. It is a few days before the date
+#: this suite was written on, so the rows the fixtures seed on 2026-09-18 are
+#: older than it however late the suite runs.
+_PINNED = datetime(2026, 9, 30, 15, 37, 42, tzinfo=timezone.utc)
+_HOUR = timedelta(hours=1)
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _tzdata_has(name: str) -> bool:
+    """Same helper as ``tests/test_discovery.py``: a bare Windows install has
+    no ``tzdata`` for ``zoneinfo`` to read, so a test that names an IANA zone
+    is skipped there."""
+    try:
+        ZoneInfo(name)
+        return True
+    except ZoneInfoNotFoundError:
+        return False
+
+
+class _DstZone(tzinfo):
+    """A time zone with one summer-time stretch, written out by hand so the
+    tests need no ``tzdata`` (the same zone ``tests/test_discovery.py`` uses).
+    The clocks go forward at the naive UTC instant ``forward`` and back at
+    ``back``; ``std`` is the winter offset."""
+
+    def __init__(self, std: timedelta, forward: datetime, back: datetime) -> None:
+        self.std, self.forward, self.back = std, forward, back
+
+    def utcoffset(self, dt):
+        wall = dt.replace(tzinfo=None)
+        jump = self.forward + self.std  # the wall time the clocks jump from
+        repeat = self.back + self.std  # the wall time the repeated hour starts at
+        if wall < jump:
+            return self.std
+        if wall < jump + _HOUR:  # the hour that doesn't exist
+            return self.std + _HOUR if dt.fold else self.std
+        if wall < repeat:
+            return self.std + _HOUR
+        if wall < repeat + _HOUR:  # the hour that happens twice
+            return self.std if dt.fold else self.std + _HOUR
+        return self.std
+
+    def dst(self, dt):
+        return self.utcoffset(dt) - self.std
+
+    def tzname(self, dt):
+        return "summer" if self.dst(dt) else "winter"
+
+    def fromutc(self, dt):
+        instant = dt.replace(tzinfo=None)
+        if self.forward <= instant < self.back:
+            return (instant + self.std + _HOUR).replace(tzinfo=self)
+        local = (instant + self.std).replace(tzinfo=self)
+        return local.replace(fold=1) if self.back <= instant < self.back + _HOUR else local
+
+
+#: London's 2026 rules: forward at 01:00 UTC on 29 March, back at 01:00 UTC on
+#: 25 October.
+_LONDON = _DstZone(timedelta(0), datetime(2026, 3, 29, 1), datetime(2026, 10, 25, 1))
+
+
+class _Clock:
+    """The pinned "now" ``_freeze_clock`` hands back; ``at`` moves it."""
+
+    def __init__(self, now: datetime) -> None:
+        self.now = now
+
+    def at(self, *parts: int) -> None:
+        self.now = datetime(*parts, tzinfo=timezone.utc)
+
+
+def _freeze_clock(monkeypatch, now: datetime = _PINNED) -> _Clock:
+    """Pin "now" for the window code and return the clock to move it.
+
+    A calendar window is worked out in two modules, each with its own
+    ``datetime``: ``discovery.window_start`` (where ``window_days`` and
+    "today" start) and ``service.api`` (the other named windows, a period's
+    bounds), so both are patched. The store's own clock (the legacy rows'
+    upper bound) and the report cache's monotonic one are not."""
+    clock = _Clock(now)
+
+    class _Frozen(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            moment = clock.now
+            return moment.astimezone(tz) if tz is not None else moment.astimezone().replace(tzinfo=None)
+
+    monkeypatch.setattr(discovery, "datetime", _Frozen)
+    monkeypatch.setattr(service_api, "datetime", _Frozen)
+    return clock
+
+
+def _set_tz(config_dir: Path, tz: str = "UTC") -> None:
+    """Make ``config_dir``'s days ``tz``'s, as ``config.toml``'s ``tz``. ``UTC``
+    needs no tz database; an IANA name does (see ``_tzdata_has``)."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(f'tz = "{tz}"\n', encoding="utf-8")
+
+
+def _use_zone(monkeypatch, zone: tzinfo | None) -> None:
+    """Count days in ``zone`` whatever ``config.toml`` says, with no tz
+    database: the service's own lookup (``_config_tz``) hands a ``tzinfo`` on
+    to the same code an IANA name reaches."""
+    monkeypatch.setattr(service_api, "_config_tz", lambda config_dir: zone)
+
+
+def _spy_corpus_reads(monkeypatch) -> list[dict]:
+    """Record the keyword arguments of every ``corpus_from_store`` call, on
+    whichever ``rebuild`` is installed (the fake the fixtures put in, or the
+    real one). A report build passes all of ``days``, ``since``, ``until``,
+    ``window_by`` and ``project_slugs``; the change points' own read of the
+    sessions passes ``since`` alone."""
+    import importlib
+
+    import claudeglass.service as service_pkg
+
+    real = importlib.import_module("claudeglass.service.rebuild").corpus_from_store
+    calls: list[dict] = []
+
+    def corpus_from_store(store, **kwargs):
+        calls.append(kwargs)
+        return real(store, **kwargs)
+
+    spy = types.ModuleType("claudeglass.service.rebuild")
+    spy.corpus_from_store = corpus_from_store
+    monkeypatch.setitem(sys.modules, "claudeglass.service.rebuild", spy)
+    monkeypatch.setattr(service_pkg, "rebuild", spy, raising=False)
+    return calls
+
+
+def _report_builds(calls: list[dict]) -> list[dict]:
+    """The calls ``_spy_corpus_reads`` saw that were report builds."""
+    return [call for call in calls if "window_by" in call]
 
 
 # -- envelope / headers ---------------------------------------------------
@@ -811,7 +952,10 @@ def test_compactions(server):
     assert_privacy(body)
 
 
-def test_daily_usage_default_is_unchanged(server):
+def test_daily_usage_default_is_unchanged(server, monkeypatch):
+    # The default is the last 30 calendar days, counted from the wall clock,
+    # while the seeded row is a fixed 2026-09-18: pin "now" just after it.
+    _freeze_clock(monkeypatch, datetime(2026, 9, 18, 13, 0, tzinfo=timezone.utc))
     resp, body = server.get_json("/api/daily-usage")
     assert resp.status == 200
     assert len(body["data"]) == 1
@@ -823,28 +967,18 @@ def test_daily_usage_default_is_unchanged(server):
 
 
 def test_daily_usage_accepts_the_shared_window_params(server, monkeypatch):
+    # "days=7" is the last 7 calendar days from the wall clock
+    # (discovery.window_start), while the seeded row's timestamp is a fixed
+    # 2026-09-18. Pin "now" to just after that fixed timestamp so this
+    # assertion holds regardless of the date this test happens to run on.
+    _freeze_clock(monkeypatch, datetime(2026, 9, 18, 13, 0, tzinfo=timezone.utc))
+
     resp, body = server.get_json("/api/daily-usage?since=2099-01-01T00:00:00Z")
     assert resp.status == 200
     assert body["data"] == []
     resp, body = server.get_json("/api/daily-usage?window=all")
     assert resp.status == 200
     assert len(body["data"]) == 1
-
-    # "days=7" resolves against the real wall clock (discovery._resolve_window
-    # does `datetime.now(timezone.utc) - timedelta(days=days)`), while the
-    # seeded row's timestamp is a fixed 2026-09-18. Freeze discovery's notion
-    # of "now" to just after that fixed timestamp so this assertion holds
-    # regardless of the date this test happens to run on.
-    from datetime import datetime, timezone
-
-    from claudeglass import discovery
-
-    class _FrozenDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return datetime(2026, 9, 18, 13, 0, tzinfo=timezone.utc)
-
-    monkeypatch.setattr(discovery, "datetime", _FrozenDatetime)
 
     resp, body = server.get_json("/api/daily-usage?days=7")
     assert resp.status == 200
@@ -2324,7 +2458,7 @@ def test_the_change_window_counts_the_sessions_started_since(server, monkeypatch
     every store read, so its figures match the "Without this change"
     line; the other windows keep counting sessions by their last."""
     monkeypatch.setattr(
-        service_api, "_named_window_since", lambda name, config_dir, now=None, *, latest=None: ("2026-09-18T12:30:00Z", "")
+        service_api, "_named_window_since", lambda name, config_dir, now=None, **_kw: ("2026-09-18T12:30:00Z", "")
     )
     assert service_api._window_query({"window": "change"}) == ((None, "2026-09-18T12:30:00Z", None, "first-reply"), None)
     assert service_api._window_query({"window": "today"}) == ((None, "2026-09-18T12:30:00Z", None, "last-reply"), None)
@@ -2423,6 +2557,9 @@ def test_impact_and_the_last_change_window_see_a_change_only_sessions_show(tmp_p
         assert change["change"]["project_name"] == "proj-a"
         # It starts at the first session of the run, with the three before it.
         assert change["change"]["ts"] == (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        # The local day it falls on, the machine's own (config.toml sets no tz).
+        moment = datetime.fromisoformat(change["change"]["ts"].replace("Z", "+00:00"))
+        assert change["change"]["day"] == moment.astimezone().strftime("%Y-%m-%d")
         assert (change["before_sessions"], change["after_sessions"]) == (3, 3)
     finally:
         handle.close()
@@ -3188,15 +3325,18 @@ def _seed_two_projects(store: Store, corpus: corpus_mod.Corpus) -> dict[str, str
     return session_ids
 
 
-def _start_server_with_two_projects(tmp_path, monkeypatch) -> tuple[_ServerHandle, dict[str, str]]:
+def _start_server_with_two_projects(tmp_path, monkeypatch, corpus=None) -> tuple[_ServerHandle, dict[str, str]]:
     """A server backed by two distinct projects (see
     ``_build_two_project_corpus``/``_seed_two_projects``), for the
     project-filter tests below. Bypasses ``_start_server``'s
     ``_seed_store`` (which hardcodes a single ``"proj-a"`` session) so
     both sessions actually land in the store under their own slugs --
     ``resolve_project_slug`` reads ``sessions.slug`` directly, and a
-    mismatch here would make every filter assertion meaningless."""
-    corpus = _build_two_project_corpus(tmp_path)
+    mismatch here would make every filter assertion meaningless.
+    ``corpus`` stands in for ``_build_two_project_corpus``'s, for a test
+    that needs more sessions in the two projects (their slugs must still
+    be ``proj-alpha`` and ``proj-beta``)."""
+    corpus = corpus if corpus is not None else _build_two_project_corpus(tmp_path)
     _install_fake_rebuild(monkeypatch, corpus)
 
     store = Store(tmp_path / "service.db")
@@ -3383,3 +3523,941 @@ def test_project_filter_does_not_error_on_whatif_or_quick_action(server):
         assert resp.status == 200
     resp, _body = server.post_json("/api/whatif?project=proj-a", {"settings": {"model": "sonnet"}, "agents": {}})
     assert resp.status == 200
+
+
+# -- calendar-day windows ------------------------------------------------------
+# "Last N days" is today and the N-1 days before it, from local midnight in
+# config.toml's tz (else the machine's zone). A request's window_days is
+# resolved to that `since` as it comes in, so the cache key, the store reads
+# and the figures behind it all start at the same moment. These tests pin the
+# clock (_freeze_clock) and the zone (_set_tz, or _use_zone for one that needs
+# no tz database).
+
+_SINCE, _UNTIL = "2026-09-20T10:00:00Z", "2026-09-28T00:00:00Z"
+
+
+def _write_config(config_dir: Path, text: str, *, mtime_ns: int) -> None:
+    """Write ``config.toml`` with an exact modification time, so two writes
+    in a row can't land on the same clock tick."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    path = config_dir / "config.toml"
+    path.write_text(text, encoding="utf-8")
+    os.utime(path, ns=(mtime_ns, mtime_ns))
+
+
+def _summary_data(handle: _ServerHandle, query: str) -> dict:
+    resp, body = handle.get_json(f"/api/summary?{query}")
+    assert resp.status == 200, body
+    return body["data"]
+
+
+def test_window_days_resolve_to_calendar_days(tmp_path, monkeypatch):
+    _set_tz(tmp_path)
+    _freeze_clock(monkeypatch)
+
+    def parse(**query):
+        return service_api._window_query(query, config_dir=tmp_path)
+
+    # Today and the days before it, from midnight, not N x 24 hours back.
+    assert parse(window_days="7") == ((7, "2026-09-24T00:00:00Z", None, "last-reply"), None)
+    assert parse(window_days="1") == ((1, "2026-09-30T00:00:00Z", None, "last-reply"), None)
+    assert parse() == ((30, "2026-09-01T00:00:00Z", None, "last-reply"), None)
+    # With an until, the start is resolved and the end is the caller's.
+    assert parse(window_days="7", until=_UNTIL) == ((7, "2026-09-24T00:00:00Z", _UNTIL, "last-reply"), None)
+    # A since of the caller's wins, and takes window_days with it.
+    assert parse(window_days="7", since=_SINCE) == ((None, _SINCE, None, "last-reply"), None)
+    # The caller's own bounds and the named windows are as they always were.
+    assert parse(since=_SINCE) == ((None, _SINCE, None, "last-reply"), None)
+    assert parse(until=_UNTIL) == ((None, None, _UNTIL, "last-reply"), None)
+    assert parse(since=_SINCE, until=_UNTIL) == ((None, _SINCE, _UNTIL, "last-reply"), None)
+    assert parse(window="all") == ((None, None, None, "last-reply"), None)
+    assert parse(window="today") == ((None, "2026-09-30T00:00:00Z", None, "last-reply"), None)
+    assert parse(window="1h") == ((None, "2026-09-30T14:37:00Z", None, "last-reply"), None)
+    assert parse(window="24h") == ((None, "2026-09-29T15:37:00Z", None, "last-reply"), None)
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        {"window_days": "0"},
+        {"window_days": "-3"},
+        {"window_days": "many"},
+        {"window_days": "0", "since": _SINCE},  # a since of the caller's doesn't excuse a bad window_days
+        {"window_days": "99999999"},  # more days than the calendar has
+    ],
+)
+def test_a_bad_window_days_is_a_400(tmp_path, monkeypatch, query):
+    _set_tz(tmp_path)
+    _freeze_clock(monkeypatch)
+    window, err = service_api._window_query(query, config_dir=tmp_path)
+    assert window is None
+    assert err[0] == 400 and err[1]["error"]["code"] == "bad_request"
+
+
+@pytest.mark.parametrize(
+    "path, message",
+    [
+        ("/api/summary?window_days=99999999", "'window_days' is too large"),
+        ("/api/summary?window_days=400000&previous=1", "'window_days' is too large"),  # the period before it runs past the calendar
+        ("/api/report.json?window_days=99999999", "'window_days' is too large"),
+        ("/api/daily-usage?window_days=99999999", "'window_days' is too large"),
+        ("/api/daily-usage?days=99999999", "'days' is too large"),
+    ],
+)
+def test_more_days_than_the_calendar_has_is_a_400_on_every_route(server, monkeypatch, path, message):
+    _set_tz(server.options.config_dir)
+    _freeze_clock(monkeypatch)
+    resp, body = server.get_json(path)
+    assert resp.status == 400
+    assert body["error"] == {"code": "bad_request", "message": message}
+
+
+@pytest.mark.parametrize(
+    "zone, now, window_days, first_start, today_start",
+    [
+        # 01:30 on 1 October in India: the day is already a day ahead of UTC's.
+        (_IST, datetime(2026, 9, 30, 20, 0, tzinfo=timezone.utc), 2, "2026-09-29T18:30:00Z", "2026-09-30T18:30:00Z"),
+        # The clocks went back on 25 October: 24 October's midnight is still summer time.
+        (_LONDON, datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc), 3, "2026-10-23T23:00:00Z", "2026-10-26T00:00:00Z"),
+        # The clocks went forward on 29 March: 30 March's midnight is summer time.
+        (_LONDON, datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc), 7, "2026-03-24T00:00:00Z", "2026-03-29T23:00:00Z"),
+    ],
+)
+def test_window_days_and_today_start_at_local_midnight_in_the_configured_zone(
+    tmp_path, monkeypatch, zone, now, window_days, first_start, today_start
+):
+    _freeze_clock(monkeypatch, now)
+    _use_zone(monkeypatch, zone)
+    window, err = service_api._window_query({"window_days": str(window_days)}, config_dir=tmp_path)
+    assert err is None and window == (window_days, first_start, None, "last-reply")
+    window, err = service_api._window_query({"window": "today"}, config_dir=tmp_path)
+    assert err is None and window == (None, today_start, None, "last-reply")
+
+
+def test_a_window_is_labelled_by_its_days_not_by_its_resolved_start():
+    since, until = "2026-09-24T00:00:00Z", "2026-09-28T00:00:00Z"
+    label, text = service_api._window_label, service_api._period_text
+    assert label(7, since, None) == "last 7 days"  # the resolved since stays out of the label
+    assert label(None, since, None) == f"since {since} until now"
+    assert label(None, None, until) == f"since the beginning until {until}"
+    assert label(7, since, until) == f"since {since} until {until}"
+    assert label(None, None, None) == "all time"
+    assert text(7, since, None) == "over the last 7 days"
+    assert text(None, since, None) == f"since {since} until now"
+    assert text(7, since, until) == f"since {since} until {until}"
+    assert text(None, None, None) == "over all time"
+    assert text(None, since, None, name="today") == "today"
+
+
+def test_the_routes_label_a_window_days_window_by_its_days(server, monkeypatch):
+    _set_tz(server.options.config_dir)
+    _freeze_clock(monkeypatch)
+    resp, payload = server.get_json("/api/skills?window_days=7")
+    assert resp.status == 200
+    assert payload["data"]["period"] == "over the last 7 days"
+
+
+def test_config_tz_reads_the_zone_and_follows_the_file(tmp_path, monkeypatch):
+    reads = []
+    real = service_api.load_config
+    monkeypatch.setattr(service_api, "load_config", lambda config_dir: reads.append(config_dir) or real(config_dir))
+
+    assert service_api._config_tz(None) is None
+    assert service_api._config_tz(tmp_path) is None  # no config.toml: the machine's zone
+    _write_config(tmp_path, 'tz = "UTC"\n', mtime_ns=1_000_000_000)
+    assert service_api._config_tz(tmp_path) == "UTC"
+    reads.clear()
+    assert service_api._config_tz(tmp_path) == "UTC"
+    assert reads == []  # kept: a calendar window asks on every request
+    _write_config(tmp_path, 'tz = "Etc/UTC"\n', mtime_ns=2_000_000_000)
+    assert service_api._config_tz(tmp_path) == "Etc/UTC"
+    assert len(reads) == 1  # the file changed, so it was read again
+    _write_config(tmp_path, "tz = 5\n", mtime_ns=3_000_000_000)
+    assert service_api._config_tz(tmp_path) is None  # a config that can't be read: the machine's zone
+    _write_config(tmp_path, "", mtime_ns=4_000_000_000)
+    assert service_api._config_tz(tmp_path) is None
+
+
+def test_the_same_time_a_week_ago_counts_a_clock_change():
+    back = service_api._wall_clock_back
+    assert back(_PINNED, 7, timezone.utc) == "2026-09-23T15:37:00Z"
+    assert back(_PINNED, 7, _IST) == "2026-09-23T15:37:00Z"
+    # 12:00 in London on 26 October, a week after it was summer time: 12:00 then was 11:00 UTC.
+    assert back(datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc), 7, _LONDON) == "2026-10-19T11:00:00Z"
+    # 13:00 on 30 March, summer time: a week earlier it was winter time.
+    assert back(datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc), 7, _LONDON) == "2026-03-23T13:00:00Z"
+
+
+# -- the report cache and the calendar ---------------------------------------
+
+
+def test_a_window_days_report_is_built_from_local_midnight(server, monkeypatch):
+    _set_tz(server.options.config_dir)
+    _freeze_clock(monkeypatch)
+    calls = _spy_corpus_reads(monkeypatch)
+    resp, body = server.get_json("/api/report.json?window_days=7")
+    assert resp.status == 200
+    assert body["report"]["meta"]["window"] == "last 7 days"
+    [build] = _report_builds(calls)
+    assert build["since"] == discovery.window_start_iso(7, "UTC", now=_PINNED) == "2026-09-24T00:00:00Z"
+    assert build["until"] is None and build["window_by"] == "last-reply"
+
+
+@pytest.mark.parametrize(
+    "query, first_since, next_since",
+    [
+        ("window_days=7", "2026-09-24T00:00:00Z", "2026-09-25T00:00:00Z"),
+        ("window=today", "2026-09-30T00:00:00Z", "2026-10-01T00:00:00Z"),
+    ],
+)
+def test_a_calendar_window_is_rebuilt_at_the_next_local_midnight_and_not_before(
+    server, monkeypatch, query, first_since, next_since
+):
+    _set_tz(server.options.config_dir)
+    clock = _freeze_clock(monkeypatch, datetime(2026, 9, 30, 9, 0, tzinfo=timezone.utc))
+    calls = _spy_corpus_reads(monkeypatch)
+    path = f"/api/report.json?{query}"
+
+    resp, _ = server.request("GET", path)
+    assert resp.status == 200 and len(_report_builds(calls)) == 1
+    clock.at(2026, 9, 30, 23, 59)
+    resp, _ = server.request("GET", path)
+    assert len(_report_builds(calls)) == 1  # the same local day: the kept report
+    assert resp.getheader("X-Figures-Refreshing") is None
+    clock.at(2026, 10, 1, 0, 1)
+    resp, _ = server.request("GET", path)
+    # A new day is a new window: built while the request waits, not the old one served.
+    assert resp.status == 200 and resp.getheader("X-Figures-Refreshing") is None
+    assert [build["since"] for build in _report_builds(calls)] == [first_since, next_since]
+
+
+def test_the_cache_rolls_at_the_configured_zones_midnight_not_utcs(server, monkeypatch):
+    _use_zone(monkeypatch, _IST)
+    clock = _freeze_clock(monkeypatch, datetime(2026, 9, 30, 18, 0, tzinfo=timezone.utc))  # 23:30 in India
+    calls = _spy_corpus_reads(monkeypatch)
+    path = "/api/report.json?window_days=7"
+
+    server.request("GET", path)
+    clock.at(2026, 9, 30, 18, 20)  # 23:50
+    server.request("GET", path)
+    assert len(_report_builds(calls)) == 1
+    clock.at(2026, 9, 30, 18, 45)  # 00:15 on 1 October: India's midnight has passed
+    server.request("GET", path)
+    assert len(_report_builds(calls)) == 2
+    clock.at(2026, 10, 1, 0, 30)  # UTC's midnight has passed, India's day has not changed
+    server.request("GET", path)
+    assert [build["since"] for build in _report_builds(calls)] == ["2026-09-23T18:30:00Z", "2026-09-24T18:30:00Z"]
+
+
+@pytest.mark.parametrize("name, length", [("1h", timedelta(hours=1)), ("24h", timedelta(hours=24))])
+def test_a_rolling_window_is_still_served_while_its_start_moves_each_minute(server, monkeypatch, name, length):
+    clock = _freeze_clock(monkeypatch, datetime(2026, 9, 30, 10, 0, 30, tzinfo=timezone.utc))
+    calls = _spy_corpus_reads(monkeypatch)
+    path = f"/api/report.json?window={name}"
+
+    server.request("GET", path)
+    first = (datetime(2026, 9, 30, 10, 0, tzinfo=timezone.utc) - length).strftime("%Y-%m-%dT%H:%M:00Z")
+    assert [build["since"] for build in _report_builds(calls)] == [first]
+    clock.at(2026, 9, 30, 10, 1, 30)
+    resp, _ = server.request("GET", path)
+    # The kept report is served at once and refreshed behind the scenes.
+    assert resp.status == 200 and resp.getheader("X-Figures-Refreshing") == "1"
+    _wait_until_fresh(server, path)
+    second = (datetime(2026, 9, 30, 10, 1, tzinfo=timezone.utc) - length).strftime("%Y-%m-%dT%H:%M:00Z")
+    assert [build["since"] for build in _report_builds(calls)] == [first, second]
+
+
+def test_a_since_my_last_change_report_is_never_served_as_the_hour_window(server, monkeypatch):
+    """A change can land on the very minute the hour window starts at; its
+    key (counting sessions by first reply) must not map to the hour's slot."""
+    _freeze_clock(monkeypatch, datetime(2026, 9, 30, 10, 0, 30, tzinfo=timezone.utc))
+    calls = _spy_corpus_reads(monkeypatch)
+    real = service_api._named_window_since
+
+    def change_at_the_hour_start(name, config_dir, now=None, **kwargs):
+        if name == "change":
+            return "2026-09-30T09:00:00Z", ""
+        return real(name, config_dir, now, **kwargs)
+
+    monkeypatch.setattr(service_api, "_named_window_since", change_at_the_hour_start)
+
+    server.request("GET", "/api/report.json?window=1h")
+    assert [(b["since"], b["window_by"]) for b in _report_builds(calls)] == [("2026-09-30T09:00:00Z", "last-reply")]
+    resp, _ = server.request("GET", "/api/report.json?window=change")
+    assert resp.status == 200 and resp.getheader("X-Figures-Refreshing") is None  # built, not the hour's
+    assert [(b["since"], b["window_by"]) for b in _report_builds(calls)] == [
+        ("2026-09-30T09:00:00Z", "last-reply"),
+        ("2026-09-30T09:00:00Z", "first-reply"),
+    ]
+    # Each keeps its own report.
+    server.request("GET", "/api/report.json?window=1h")
+    server.request("GET", "/api/report.json?window=change")
+    assert len(_report_builds(calls)) == 2
+
+
+@pytest.mark.parametrize("order", [("report", "explain", "backtest"), ("backtest", "explain", "report")])
+def test_the_routes_that_price_a_figure_reuse_the_default_windows_build(server, monkeypatch, order):
+    """The session explainer, the impact cards and the backtest price their
+    figures from the default window's report, whatever window is picked:
+    they share the build the picker's "30" asks for, not one of their own."""
+    _set_tz(server.options.config_dir)
+    _freeze_clock(monkeypatch)
+    calls = _spy_corpus_reads(monkeypatch)
+    paths = {
+        "report": "/api/report.json",
+        "explain": f"/api/session/{server.session_id}/explain",
+        "backtest": "/api/backtest",
+    }
+    for name in order:
+        resp, _ = server.request("GET", paths[name])
+        assert resp.status == 200, name
+    [build] = _report_builds(calls)
+    assert build["since"] == "2026-09-01T00:00:00Z"  # the "30": today and the 29 days before it
+
+
+# -- "since my last change" follows the picked project -------------------------
+
+
+def _write_model_run(project_dir: Path, now: datetime, runs) -> None:
+    """One two-reply session for each ``(name, days_ago, model)`` in
+    ``runs``, started that many days before ``now``."""
+    project_dir.mkdir(parents=True, exist_ok=True)
+    for name, days, model in runs:
+        start = now - timedelta(days=days)
+        write_jsonl(
+            project_dir / f"{name}.jsonl",
+            [
+                turn_line(timestamp=(start + timedelta(seconds=s)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), model=model)
+                for s in (0, 5)
+            ],
+        )
+
+
+def _two_project_change_corpus(tmp_path: Path, now: datetime, *, beta_changes: bool) -> corpus_mod.Corpus:
+    """``proj-alpha`` moves from Sonnet to Opus three days ago (three sessions
+    on each, a change only sessions show). ``proj-beta`` does so six days ago,
+    or never when ``beta_changes`` is false."""
+    root = tmp_path / "projects"
+    sonnet, opus = "claude-sonnet-5", "claude-opus-5-5"
+    _write_model_run(
+        root / "proj-alpha",
+        now,
+        [("a1", 6, sonnet), ("a2", 5, sonnet), ("a3", 4, sonnet), ("a4", 3, opus), ("a5", 2, opus), ("a6", 1, opus)],
+    )
+    beta = (
+        [("b1", 9, sonnet), ("b2", 8, sonnet), ("b3", 7, sonnet), ("b4", 6, opus), ("b5", 5, opus), ("b6", 4, opus)]
+        if beta_changes
+        else [(f"b{n}", 7 - n, sonnet) for n in range(1, 7)]
+    )
+    _write_model_run(root / "proj-beta", now, beta)
+    return corpus_mod.load_corpus([root / "proj-alpha", root / "proj-beta"])
+
+
+def _minute(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:00Z")
+
+
+def _apply_a_user_setting(handle: _ServerHandle) -> None:
+    """Record an apply to your user settings, a change that applies in every project."""
+    from claudeglass.profiles import apply as apply_mod
+    from claudeglass.profiles.schema import load_dict
+
+    config_dir = handle.options.config_dir
+    claude_root = config_dir.parent / "fake-claude"
+    claude_root.mkdir(exist_ok=True)
+    plan = apply_mod.plan_apply(
+        load_dict({"id": "one-off", "settings": {"effortLevel": "medium"}}),
+        scope="user", project_path=None, config_dir=config_dir, claude_root=claude_root,
+    )
+    apply_mod.execute(plan, config_dir=config_dir)
+
+
+def test_the_change_window_starts_at_the_picked_projects_own_last_change(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    corpus = _two_project_change_corpus(tmp_path, now, beta_changes=True)
+    handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch, corpus=corpus)
+    try:
+        reads = _spy_corpus_reads(monkeypatch)
+
+        def window_start(project: str | None = None) -> str:
+            query = "window=change" + (f"&project={project}" if project else "")
+            return _summary_data(handle, query)["period"]["since"]
+
+        assert window_start("proj-alpha") == _minute(now - timedelta(days=3))
+        assert window_start("proj-beta") == _minute(now - timedelta(days=6))
+        # Every project: the newest change in any of them.
+        assert window_start() == _minute(now - timedelta(days=3))
+        # One read of the sessions answered all of those (and a repeat is kept).
+        assert window_start("proj-beta") == _minute(now - timedelta(days=6))
+        assert len([call for call in reads if set(call) == {"since"}]) == 1
+
+        resp, body = handle.get_json("/api/summary?window=change&project=not-a-real-project")
+        assert resp.status == 400 and "'project'" in body["error"]["message"]
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_project_with_no_change_of_its_own_has_no_change_window_until_one_applies_to_all(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    corpus = _two_project_change_corpus(tmp_path, now, beta_changes=False)
+    handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch, corpus=corpus)
+    try:
+        resp, body = handle.get_json("/api/summary?window=change&project=proj-beta")
+        assert resp.status == 400
+        assert "No change recorded for this project yet" in body["error"]["message"]
+        # alpha's change doesn't start beta's window, but it starts alpha's.
+        assert _summary_data(handle, "window=change&project=proj-alpha")["period"]["since"] == _minute(
+            now - timedelta(days=3)
+        )
+
+        # A change to your user settings applies in every project: it starts both.
+        _apply_a_user_setting(handle)
+        _resp, impact = handle.get_json("/api/impact")
+        [applied] = [c["change"] for c in impact["data"]["changes"] if c["change"]["project"] == ""]
+        expected = applied["ts"][:17] + "00Z"  # to the minute
+        for project in ("proj-alpha", "proj-beta"):
+            assert _summary_data(handle, f"window=change&project={project}")["period"]["since"] == expected
+        assert _summary_data(handle, "window=change")["period"]["since"] == expected
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_backdated_change_moves_the_change_window_at_once_where_it_is_newest(tmp_path, monkeypatch):
+    """A recorded change can arrive dated before the newest one (a capture
+    change logged five days back, after alpha's three-day-old change). It
+    applies in every project, so it starts beta's window at once, without
+    waiting out the kept answer, and leaves alpha's at alpha's newer change."""
+    now = datetime.now(timezone.utc)
+    corpus = _two_project_change_corpus(tmp_path, now, beta_changes=False)
+    handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch, corpus=corpus)
+    try:
+        resp, _body = handle.get_json("/api/summary?window=change&project=proj-beta")
+        assert resp.status == 400
+        alpha = _summary_data(handle, "window=change&project=proj-alpha")["period"]["since"]
+        assert alpha == _minute(now - timedelta(days=3))
+
+        backdated = now - timedelta(days=5)
+        record = {"ts": backdated.isoformat(), "level": "free", "changed": {"level": {"from": "off", "to": "free"}}}
+        (handle.options.config_dir / "capture-log.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
+        assert _summary_data(handle, "window=change&project=proj-beta")["period"]["since"] == _minute(backdated)
+        assert _summary_data(handle, "window=change&project=proj-alpha")["period"]["since"] == alpha
+        assert _summary_data(handle, "window=change")["period"]["since"] == alpha
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_change_window_taken_from_the_kept_list_expires_with_it(tmp_path, monkeypatch):
+    """A project first asked about while the change list is kept from an
+    earlier store (a session has landed since) takes the list's age, not a
+    fresh one: once the list is too old, the sessions are read again, even
+    though the store hasn't changed since."""
+    now = datetime.now(timezone.utc)
+    corpus = _two_project_change_corpus(tmp_path, now, beta_changes=True)
+    handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch, corpus=corpus)
+    try:
+        clock = {"now": 1_000.0}
+        monkeypatch.setattr(service_api.time, "monotonic", lambda: clock["now"])
+        token = {"value": "before"}
+        monkeypatch.setattr(handle.store, "change_token", lambda: token["value"])
+        reads = _spy_corpus_reads(monkeypatch)
+
+        def change_list_reads() -> int:
+            return len([call for call in reads if set(call) == {"since"}])
+
+        def window_start(project: str) -> str:
+            return _summary_data(handle, f"window=change&project={project}")["period"]["since"]
+
+        assert window_start("proj-alpha") == _minute(now - timedelta(days=3))
+        assert change_list_reads() == 1
+        token["value"] = "after"  # a session lands
+        clock["now"] += 30
+        assert window_start("proj-beta") == _minute(now - timedelta(days=6))  # from the kept list
+        assert change_list_reads() == 1
+        clock["now"] += service_api._LATEST_CHANGE_MAX_AGE_S
+        window_start("proj-beta")
+        assert change_list_reads() == 2
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+# -- summary: the period it covers and the one before it ---------------------
+
+
+_UTC_SUMMARY = {"tz": "UTC", "today": "2026-09-30"}
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        ("window_days=7", {"since": "2026-09-24T00:00:00Z", "until": None, "first_day": "2026-09-24", "last_day": "2026-09-30"}),
+        ("window_days=1", {"since": "2026-09-30T00:00:00Z", "until": None, "first_day": "2026-09-30", "last_day": "2026-09-30"}),
+        ("window=today", {"since": "2026-09-30T00:00:00Z", "until": None, "first_day": "2026-09-30", "last_day": "2026-09-30"}),
+        ("window=1h", {"since": "2026-09-30T14:37:00Z", "until": None, "first_day": "2026-09-30", "last_day": "2026-09-30"}),
+        ("window=24h", {"since": "2026-09-29T15:37:00Z", "until": None, "first_day": "2026-09-29", "last_day": "2026-09-30"}),
+        ("window=all", {"since": None, "until": None, "first_day": None, "last_day": "2026-09-30"}),
+        ("", {"since": None, "until": None, "first_day": None, "last_day": "2026-09-30"}),
+        (
+            f"since={_SINCE}",
+            {"since": _SINCE, "until": None, "first_day": "2026-09-20", "last_day": "2026-09-30"},
+        ),
+        (
+            f"since={_SINCE}&until=2026-09-22T10:00:00Z",
+            {"since": _SINCE, "until": "2026-09-22T10:00:00Z", "first_day": "2026-09-20", "last_day": "2026-09-22"},
+        ),
+        (
+            "window_days=7&until=2026-09-28T12:00:00Z",
+            {"since": "2026-09-24T00:00:00Z", "until": "2026-09-28T12:00:00Z", "first_day": "2026-09-24", "last_day": "2026-09-28"},
+        ),
+    ],
+)
+def test_summary_says_which_local_days_it_covers(server, monkeypatch, query, expected):
+    _set_tz(server.options.config_dir)
+    _freeze_clock(monkeypatch)
+    assert _summary_data(server, query)["period"] == {**_UTC_SUMMARY, **expected}
+
+
+@pytest.mark.parametrize(
+    "query, expected",
+    [
+        # The same hours N days back: the window is today so far and N-1 whole days,
+        # so what it is compared with ends at this time of day, N days ago.
+        ("window_days=7", {"since": "2026-09-17T00:00:00Z", "until": "2026-09-23T15:37:00Z", "first_day": "2026-09-17", "last_day": "2026-09-23"}),
+        ("window_days=1", {"since": "2026-09-29T00:00:00Z", "until": "2026-09-29T15:37:00Z", "first_day": "2026-09-29", "last_day": "2026-09-29"}),
+        ("window=today", {"since": "2026-09-29T00:00:00Z", "until": "2026-09-29T15:37:00Z", "first_day": "2026-09-29", "last_day": "2026-09-29"}),
+        # A rolling window is compared with the same length just before it.
+        ("window=1h", {"since": "2026-09-30T13:37:00Z", "until": "2026-09-30T14:37:00Z", "first_day": "2026-09-30", "last_day": "2026-09-30"}),
+        ("window=24h", {"since": "2026-09-28T15:37:00Z", "until": "2026-09-29T15:37:00Z", "first_day": "2026-09-28", "last_day": "2026-09-29"}),
+    ],
+)
+def test_summary_previous_is_the_same_hours_an_earlier_period_back(server, monkeypatch, query, expected):
+    _set_tz(server.options.config_dir)
+    _freeze_clock(monkeypatch)
+    assert _summary_data(server, f"{query}&previous=1")["period"] == {**_UTC_SUMMARY, **expected}
+
+
+@pytest.mark.parametrize(
+    "zone, now, query, expected",
+    [
+        (
+            _IST, datetime(2026, 9, 30, 20, 0, tzinfo=timezone.utc), "window_days=7",
+            {"since": "2026-09-24T18:30:00Z", "until": None, "first_day": "2026-09-25", "last_day": "2026-10-01", "today": "2026-10-01"},
+        ),
+        (
+            _IST, datetime(2026, 9, 30, 20, 0, tzinfo=timezone.utc), "window_days=7&previous=1",
+            {"since": "2026-09-17T18:30:00Z", "until": "2026-09-23T20:00:00Z", "first_day": "2026-09-18", "last_day": "2026-09-24", "today": "2026-10-01"},
+        ),
+        (
+            _LONDON, datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc), "window_days=2",
+            {"since": "2026-10-24T23:00:00Z", "until": None, "first_day": "2026-10-25", "last_day": "2026-10-26", "today": "2026-10-26"},
+        ),
+        (
+            _LONDON, datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc), "window_days=2&previous=1",
+            {"since": "2026-10-22T23:00:00Z", "until": "2026-10-24T11:00:00Z", "first_day": "2026-10-23", "last_day": "2026-10-24", "today": "2026-10-26"},
+        ),
+        (
+            _LONDON, datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc), "window=today",
+            {"since": "2026-03-29T23:00:00Z", "until": None, "first_day": "2026-03-30", "last_day": "2026-03-30", "today": "2026-03-30"},
+        ),
+        (
+            _LONDON, datetime(2026, 3, 30, 12, 0, tzinfo=timezone.utc), "window=today&previous=1",
+            {"since": "2026-03-29T00:00:00Z", "until": "2026-03-29T12:00:00Z", "first_day": "2026-03-29", "last_day": "2026-03-29", "today": "2026-03-30"},
+        ),
+    ],
+)
+def test_summary_period_follows_the_zone_across_a_clock_change(server, monkeypatch, zone, now, query, expected):
+    _use_zone(monkeypatch, zone)
+    _freeze_clock(monkeypatch, now)
+    # A zone with no IANA name (a fixed offset, or a hand-made one) reports tz null.
+    assert _summary_data(server, query)["period"] == {"tz": None, **expected}
+
+
+def test_summary_previous_counts_the_earlier_period(server, monkeypatch):
+    """The one seeded session's last reply is 2026-09-18T13:00Z."""
+    _set_tz(server.options.config_dir)
+    _freeze_clock(monkeypatch)
+    assert _summary_data(server, "window_days=7")["sessions"] == 0  # 24 to 30 September
+    previous = _summary_data(server, "window_days=7&previous=1")  # 17 to 23 September, to this time of day
+    assert previous["sessions"] == 1
+    assert previous["total_cost"] == pytest.approx(1.23)
+    assert _summary_data(server, "window_days=14")["sessions"] == 1  # 17 to 30 September
+    assert _summary_data(server, "window_days=14&previous=1")["sessions"] == 0  # 3 to 16 September
+    # previous=0 is the window itself.
+    assert _summary_data(server, "window_days=14&previous=0") == _summary_data(server, "window_days=14")
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "",  # no window: all time
+        "window=all",
+        f"since={_SINCE}",
+        "until=2026-09-22T10:00:00Z",
+        f"since={_SINCE}&until=2026-09-22T10:00:00Z",
+        f"window_days=7&since={_SINCE}",
+        "window_days=7&until=2026-09-28T12:00:00Z",
+    ],
+)
+def test_summary_previous_needs_a_window_with_an_earlier_period_of_the_same_length(server, monkeypatch, query):
+    _set_tz(server.options.config_dir)
+    _freeze_clock(monkeypatch)
+    resp, body = server.get_json("/api/summary?previous=1" + (f"&{query}" if query else ""))
+    assert resp.status == 400
+    assert body["error"] == {
+        "code": "bad_request",
+        "message": "This window has no earlier period of the same length",
+    }
+
+
+def test_summary_previous_has_nothing_before_since_my_last_change(server):
+    _apply_a_user_setting(server)
+    resp, body = server.get_json("/api/summary?window=change")
+    assert resp.status == 200
+    resp, body = server.get_json("/api/summary?window=change&previous=1")
+    assert resp.status == 400
+    assert "no earlier period" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("value, message", [("2", "'previous' must be 0 or 1"), ("-1", ">= 0"), ("soon", "must be an integer")])
+def test_summary_previous_must_be_zero_or_one(server, value, message):
+    resp, body = server.get_json(f"/api/summary?window_days=7&previous={value}")
+    assert resp.status == 400
+    assert message in body["error"]["message"]
+
+
+# -- daily usage: the days a window holds ---------------------------------
+
+
+def _seed_buckets(store: Store, buckets: list[str], *, session_id: str = "sess-days") -> None:
+    """A session with one reply in each UTC quarter hour of ``buckets``: a
+    ``turns_agg`` row of its own, 0.50 each."""
+    store.upsert_session(
+        session_id=session_id,
+        project_slug="proj-a",
+        project_root_path=_FAKE_ROOT,
+        slug="proj-a",
+        first_ts=min(buckets),
+        last_ts=max(buckets),
+    )
+    store.upsert_transcript(
+        session_id=session_id,
+        path=f"{_FAKE_PATH}.{session_id}",
+        kind="top-level",
+        mtime_ns=1,
+        size_bytes=1,
+        parser_version=3,
+        digest_json=json.dumps({"turns": len(buckets)}),
+        turns_agg=[
+            {
+                "day": bucket[:10],
+                "bucket": bucket,
+                "model": "claude-sonnet-5",
+                "turns": 1,
+                "input_tokens": 10,
+                "cache_creation_tokens": 0,
+                "cache_read_tokens": 0,
+                "output_tokens": 2,
+                "thinking_tokens": 0,
+                "cc_5m": 0,
+                "cc_1h": 0,
+                "cost": 0.5,
+            }
+            for bucket in buckets
+        ],
+    )
+
+
+def _usage_by_day(handle: _ServerHandle, query: str) -> dict[str, int]:
+    resp, body = handle.get_json(f"/api/daily-usage?{query}")
+    assert resp.status == 200, body
+    days: dict[str, int] = {}
+    for row in body["data"]:
+        days[row["day"]] = days.get(row["day"], 0) + row["turns"]
+    return days
+
+
+def test_window_days_and_days_both_give_exactly_that_many_local_days(server, monkeypatch):
+    _set_tz(server.options.config_dir)
+    _freeze_clock(monkeypatch)
+    _seed_buckets(
+        server.store,
+        [
+            "2026-09-23T23:45:00Z",  # the quarter hour before the window starts
+            "2026-09-24T00:00:00Z",  # the window's first
+            *(f"2026-09-{day}T12:00:00Z" for day in range(20, 31)),
+            "2026-09-30T15:30:00Z",
+        ],
+    )
+    first_seven = {f"2026-09-{day}": 1 for day in range(24, 31)}
+    first_seven["2026-09-24"] = 2  # 00:00 and 12:00
+    first_seven["2026-09-30"] = 2  # 12:00 and 15:30
+    # The seeded 2026-09-18 row (no bucket, from before schema 8) is older than the window.
+    for query in ("window_days=7", "days=7"):
+        assert _usage_by_day(server, query) == first_seven, query
+    assert list(_usage_by_day(server, "window_days=1")) == ["2026-09-30"]
+    assert list(_usage_by_day(server, "window=today")) == ["2026-09-30"]
+    # An until is where it stops, exclusive: the 12:00 bucket on the 26th is out.
+    assert list(_usage_by_day(server, "window_days=7&until=2026-09-26T12:00:00Z")) == ["2026-09-24", "2026-09-25"]
+
+
+def test_daily_usage_days_are_the_configured_zones(server, monkeypatch):
+    _use_zone(monkeypatch, _IST)
+    _freeze_clock(monkeypatch, datetime(2026, 9, 30, 15, 37, 42, tzinfo=timezone.utc))  # 21:07 in India
+    _seed_buckets(
+        server.store,
+        [
+            "2026-09-23T18:15:00Z",  # 23:45 on the 23rd: before the window
+            "2026-09-23T18:30:00Z",  # 00:00 on the 24th: its first quarter hour
+            "2026-09-24T18:30:00Z",  # 00:00 on the 25th, though it is still the 24th in UTC
+            "2026-09-30T12:00:00Z",  # 17:30 on the 30th
+        ],
+    )
+    expected = {"2026-09-24": 1, "2026-09-25": 1, "2026-09-30": 1}
+    for query in ("window_days=7", "days=7"):
+        assert _usage_by_day(server, query) == expected, query
+
+
+# -- sessions: the local days of their first and last replies ---------------
+
+
+def test_sessions_carry_the_local_days_of_their_first_and_last_replies(server, monkeypatch):
+    for session_id, first_ts, last_ts in (
+        ("sess-late", "2026-09-18T20:00:00Z", "2026-09-18T20:30:00Z"),
+        ("sess-across", "2026-09-18T23:30:00Z", "2026-09-19T00:30:00Z"),
+        ("sess-undated", None, None),
+    ):
+        server.store.upsert_session(
+            session_id=session_id, project_slug="proj-a", project_root_path=_FAKE_ROOT, slug="proj-a",
+            first_ts=first_ts, last_ts=last_ts,
+        )
+
+    def days() -> dict[str, tuple]:
+        resp, body = server.get_json("/api/sessions")
+        assert resp.status == 200
+        return {row["id"]: (row["first_day"], row["last_day"]) for row in body["data"]}
+
+    _set_tz(server.options.config_dir)
+    assert days() == {
+        server.session_id: ("2026-09-18", "2026-09-18"),
+        "sess-late": ("2026-09-18", "2026-09-18"),
+        "sess-across": ("2026-09-18", "2026-09-19"),
+        "sess-undated": (None, None),
+    }
+    # In India it is already the 19th at 20:00 UTC.
+    _use_zone(monkeypatch, _IST)
+    assert days() == {
+        server.session_id: ("2026-09-18", "2026-09-18"),
+        "sess-late": ("2026-09-19", "2026-09-19"),
+        "sess-across": ("2026-09-19", "2026-09-19"),
+        "sess-undated": (None, None),
+    }
+
+
+def test_sessions_look_the_zone_up_once_a_request(server, monkeypatch):
+    """A zone name this machine can't find costs a slow lookup each time it
+    is tried, so the listing looks config.toml's zone up once, not twice a
+    row."""
+    lookups = []
+
+    def no_such_zone(name):
+        lookups.append(name)
+        raise ZoneInfoNotFoundError(name)
+
+    monkeypatch.setattr(discovery, "ZoneInfo", no_such_zone)
+    for n in range(5):
+        server.store.upsert_session(
+            session_id=f"sess-{n}", project_slug="proj-a", project_root_path=_FAKE_ROOT, slug="proj-a",
+            first_ts="2026-09-18T20:00:00Z", last_ts="2026-09-18T20:30:00Z",
+        )
+    _set_tz(server.options.config_dir, "Europe/London")
+    resp, body = server.get_json("/api/sessions")
+    assert resp.status == 200 and len(body["data"]) == 6
+    assert lookups == ["Europe/London"]
+
+
+# -- impact: the day a change falls on ------------------------------------
+
+
+def test_impact_days_follow_the_zone_and_move_when_config_toml_does(tmp_path, monkeypatch):
+    """A change's `day` is the local day in config.toml's zone, and the kept
+    answer is not served once config.toml has changed (a zone change moves
+    every change's day, so it is worked out at once, not refreshed behind
+    the scenes)."""
+    root = tmp_path / "projects"
+    sonnet, opus = "claude-sonnet-5", "claude-opus-5-5"
+    _write_model_run(
+        root / "proj-a",
+        _PINNED,
+        [("s1", 6, sonnet), ("s2", 5, sonnet), ("s3", 4, sonnet), ("s4", 3, opus), ("s5", 2, opus), ("s6", 1, opus)],
+    )
+    handle = _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([root / "proj-a"]))
+    try:
+        _freeze_clock(monkeypatch)
+        calls = _spy_corpus_reads(monkeypatch)
+        # The impact cards price their figures from the default window's build.
+        handle.request("GET", "/api/report.json")
+        change = _only_change(handle)
+        assert change["ts"] == "2026-09-27T15:37:42Z"  # the first Opus session
+        assert len(_report_builds(calls)) == 1
+
+        config_dir = handle.options.config_dir
+        _use_zone(monkeypatch, timezone(timedelta(hours=14)))
+        _write_config(config_dir, "# a zone change\n", mtime_ns=1_000_000_000)
+        assert _only_change(handle)["day"] == "2026-09-28"  # 05:37 there
+        _use_zone(monkeypatch, timezone.utc)
+        _write_config(config_dir, "# and back\n", mtime_ns=2_000_000_000)
+        assert _only_change(handle)["day"] == "2026-09-27"
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def _only_change(handle: _ServerHandle) -> dict:
+    resp, payload = handle.get_json("/api/impact")
+    assert resp.status == 200, payload
+    [change] = payload["data"]["changes"]
+    return change["change"]
+
+
+# -- the figures agree: tiles, chart and By project ---------------------------
+
+
+def _watched_server(tmp_path: Path, sessions) -> _ServerHandle:
+    """A server over the real watcher and the real ``rebuild`` (no stand-in,
+    so the store holds what the watcher wrote and the report is built from
+    it). ``sessions`` is ``(project, session id, [reply timestamps])``. Call
+    ``_freeze_clock`` after this, not before."""
+    from claudeglass.service.watcher import LIVE_FILE_WINDOW_S, FileWatcher
+
+    root = tmp_path / "projects"
+    for slug, session_id, stamps in sessions:
+        folder = root / slug
+        folder.mkdir(parents=True, exist_ok=True)
+        path = folder / f"{session_id}.jsonl"
+        write_jsonl(
+            path,
+            [turn_line(timestamp=ts, input_tokens=1000 + i, output_tokens=200 + i) for i, ts in enumerate(stamps)],
+        )
+        settled = time.time() - LIVE_FILE_WINDOW_S * 10  # long enough ago for the watcher not to treat it as live
+        os.utime(path, (settled, settled))
+    config_dir = tmp_path / "config"
+    _set_tz(config_dir)
+    options = ServeOptions(projects_root=root, config_dir=config_dir)
+    store = Store(tmp_path / "service.db")
+    store.open()
+    stats = FileWatcher(store, options).run_once()
+    assert stats.errors == 0, stats.error_messages
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), service_api.make_handler(store, options))
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    return _ServerHandle(httpd, thread, corpus=None, store=store, options=options)
+
+
+def _window_costs(handle: _ServerHandle, query: str) -> tuple[float, float, float]:
+    """What the overview's tiles, the daily chart and the By project table
+    each say the window cost."""
+    _resp, summary = handle.get_json(f"/api/summary?{query}")
+    _resp, daily = handle.get_json(f"/api/daily-usage?{query}")
+    _resp, report = handle.get_json(f"/api/report.json?{query}")
+    [by_project] = [
+        table
+        for section in report["report"]["sections"]
+        if section["key"] == "usage"
+        for table in section["tables"]
+        if table["name"] == "by_project"
+    ]
+    return (
+        summary["data"]["total_cost"],
+        sum(row["cost"] for row in daily["data"]),
+        sum(row[2] for row in by_project["rows"]),
+    )
+
+
+_INSIDE = [
+    ("proj-alpha", "alpha-1", ["2026-09-26T10:00:00.000Z", "2026-09-26T10:05:00.000Z"]),
+    ("proj-beta", "beta-1", ["2026-09-28T08:00:00.000Z", "2026-09-28T23:50:00.000Z"]),
+]
+
+
+def test_the_tiles_the_chart_and_by_project_agree_on_sessions_inside_the_window(tmp_path, monkeypatch):
+    handle = _watched_server(tmp_path, _INSIDE)
+    try:
+        _freeze_clock(monkeypatch)
+        tiles, chart, by_project = _window_costs(handle, "window_days=7")
+        assert tiles > 0
+        assert chart == pytest.approx(tiles)
+        assert by_project == pytest.approx(tiles)
+        assert _usage_by_day(handle, "window_days=7") == {"2026-09-26": 2, "2026-09-28": 2}
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_with_a_straddling_session_the_chart_leaves_out_its_replies_before_the_window(tmp_path, monkeypatch):
+    """Tiles and By project count a session whole when its last reply is in
+    the window; the chart counts only the replies that are. Here the second
+    alpha session replied twice on 23 September, the day before the window."""
+    straddling = (
+        "proj-alpha",
+        "alpha-straddle",
+        ["2026-09-23T22:00:00.000Z", "2026-09-23T23:45:00.000Z", "2026-09-24T09:00:00.000Z", "2026-09-25T09:00:00.000Z"],
+    )
+    handle = _watched_server(tmp_path, [*_INSIDE, straddling])
+    try:
+        _freeze_clock(monkeypatch)
+        tiles, chart, by_project = _window_costs(handle, "window_days=7")
+        assert by_project == pytest.approx(tiles)
+        _resp, everything = handle.get_json("/api/daily-usage?window=all")
+        before_the_window = sum(row["cost"] for row in everything["data"] if row["day"] < "2026-09-24")
+        assert before_the_window > 0
+        assert chart == pytest.approx(tiles - before_the_window)
+        assert _usage_by_day(handle, "window_days=7") == {
+            "2026-09-24": 1, "2026-09-25": 1, "2026-09-26": 2, "2026-09-28": 2,
+        }
+        # The listing says the same of the session: first and last reply's days.
+        _resp, listing = handle.get_json("/api/sessions?window_days=7")
+        days = {row["id"]: (row["first_day"], row["last_day"]) for row in listing["data"]}
+        assert days["alpha-straddle"] == ("2026-09-23", "2026-09-25")
+        assert days["alpha-1"] == ("2026-09-26", "2026-09-26")
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+# -- IANA zone names (needs a tz database) --------------------------------
+
+
+@pytest.mark.skipif(not _tzdata_has("Asia/Kolkata"), reason="no tz database on this machine")
+def test_config_toml_names_the_zone_the_days_are_counted_in(server, monkeypatch):
+    _set_tz(server.options.config_dir, "Asia/Kolkata")
+    _freeze_clock(monkeypatch, datetime(2026, 9, 30, 20, 0, tzinfo=timezone.utc))
+    assert _summary_data(server, "window_days=7")["period"] == {
+        "since": "2026-09-24T18:30:00Z",
+        "until": None,
+        "tz": "Asia/Kolkata",
+        "first_day": "2026-09-25",
+        "last_day": "2026-10-01",
+        "today": "2026-10-01",
+    }
+    _seed_buckets(
+        server.store,
+        [
+            "2026-09-24T18:15:00Z",  # 23:45 on the 24th: before the window
+            "2026-09-24T18:30:00Z",  # 00:00 on the 25th: its first quarter hour
+            "2026-09-30T19:00:00Z",  # 00:30 on 1 October, though it is still the 30th in UTC
+        ],
+    )
+    assert _usage_by_day(server, "window_days=7") == {"2026-09-25": 1, "2026-10-01": 1}
+
+
+@pytest.mark.skipif(not _tzdata_has("Europe/London"), reason="no tz database on this machine")
+def test_a_named_zone_counts_a_clock_change_in_the_window(server, monkeypatch):
+    _set_tz(server.options.config_dir, "Europe/London")
+    _freeze_clock(monkeypatch, datetime(2026, 10, 26, 12, 0, tzinfo=timezone.utc))
+    period = _summary_data(server, "window_days=2")["period"]
+    assert (period["tz"], period["since"], period["first_day"]) == ("Europe/London", "2026-10-24T23:00:00Z", "2026-10-25")
+    period = _summary_data(server, "window_days=2&previous=1")["period"]
+    assert (period["since"], period["until"]) == ("2026-10-22T23:00:00Z", "2026-10-24T11:00:00Z")

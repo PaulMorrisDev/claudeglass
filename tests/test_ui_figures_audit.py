@@ -8,8 +8,9 @@ What the design audit found, and what now holds, read from the source:
 - the daily spend chart counts replies by the day they were sent while
   the Spend figure counts whole sessions: the chart's reading gives both
   and says why they differ, on the Overview and on Spend › Usage;
-- the chart spans the window's days, not only the days with spend, and
-  "so far" sits in the margin, where no bar or change label reaches;
+- the chart spans the window's days, not only the days with spend (the
+  service's local days, from /api/summary's period), and "so far" sits
+  in the margin, where no bar or change label reaches;
 - the sessions scatter says how many sessions it leaves out, and why;
 - the tallest pages fold tables no evidence link, chart or action
   points at under More tables;
@@ -118,13 +119,17 @@ def test_daily_spend_says_why_its_total_differs_from_spend() -> None:
         assert text.startswith("Replies sent {span} cost {total}.")
         assert ("{sessionsTotal}" in text) == (key != "oneDay")
     assert "earlier replies" in spec["alt"]["sessions"] and "earlier replies" in spec["alt"]["oneDaySessions"]
-    assert "counts all of the first day" in spec["alt"]["firstDay"]
+    # Days run local midnight to midnight, so the chart reads higher than
+    # the sessions only by the quarter hour before a window that starts
+    # part way through a day (the last hour, 24 hours, since a change).
+    for key in ("firstDay", "oneDayFirstDay"):
+        assert "replies from just before the window began" in spec["alt"][key], key
     # One day has no busiest day and no first day of several.
     for key in ("oneDay", "oneDaySessions", "oneDayFirstDay"):
         assert "busiest" not in spec["alt"][key] and "first day" not in spec["alt"][key]
-    assert "not only this window" in spec["alt"]["oneDayFirstDay"]
     for text in [spec["summary"], *spec["alt"].values()]:
         assert "$" not in text and "USD" not in text
+        assert "UTC" not in text and "midnight" not in text
     columns = _body("charts-types.js", "stackedColumns")
     # Only when the two read differently, in the billing mode's own words.
     assert "moneyText(sessionsUsd) !== moneyText(grand) ? moneyText(sessionsUsd) : null" in columns
@@ -147,19 +152,26 @@ def test_both_daily_spend_charts_get_the_sessions_and_the_window() -> None:
     assert "Promise.all([dailyLoad, impactLoad, reportLoad, figuresDone, summaryLoad])" in overview
     for source, body in (("renderOverview", overview), ("renderUsage", usage)):
         assert re.search(r"sessionsTotal: \w+ && \w+\.ok === true \? \w+\.data\.total_cost : null", body), source
-        assert "windowDays(state.window)" in body, source
+        # The axis comes from the summary's own period: the browser does
+        # no zone maths of its own.
+        assert re.search(r"windowSpan\((summaryBody|summary)\)", body), source
+        assert "windowDays" not in body, source
 
 
 # -- P2-13: the axis and "so far" ---------------------------------------------
 
 
 def test_daily_spend_spans_the_window_it_counts() -> None:
-    days = _body("charts-types.js", "windowDays")
-    assert "export function windowDays(windowValue, now)" in _static_text("charts-types.js")
-    assert '{ "1h": 1, "24h": 24 }[windowValue]' in days
-    assert 'windowValue === "today"' in days and "setHours(0, 0, 0, 0)" in days
-    assert "return {};" in days
-    assert "return { first: utcDay(start), last: utcDay(now) };" in days
+    span = _body("charts-types.js", "windowSpan")
+    assert "export function windowSpan(summaryBody)" in _static_text("charts-types.js")
+    assert "windowDays" not in _app_js()
+    assert "summaryBody.data.period" in span
+    assert "return {};" in span
+    assert "return { first: period.first_day, last: period.last_day, today: period.today };" in span
+    # The Spend, Overview and Your changes charts all take their span from it.
+    changes = _body("page-changes.js", "renderChanges")
+    assert 'fetchJson(withWindow("/api/summary"))' in changes
+    assert "windowSpan(loaded[3].body)" in changes
     columns = _body("charts-types.js", "stackedColumns")
     # Widened to the window; a day with spend outside it still shows.
     assert "data.first < seen[0] ? data.first : seen[0]" in columns
@@ -238,14 +250,15 @@ def test_long_pages_fold_tables_nothing_points_at() -> None:
 # -- the ways to save, together -----------------------------------------------
 
 
-def _node(functions: list[tuple[str, str]], expression: str) -> object:
-    """Run dashboard functions in Node: each (module, name) function's
-    source, then ``expression``, whose value comes back through JSON."""
+def _node(functions: list[tuple[str, str]], expression: str, preamble: str = "") -> object:
+    """Run dashboard functions in Node: ``preamble`` (the module-level
+    variables they read), each (module, name) function's source, then
+    ``expression``, whose value (or its promise's) comes back through JSON."""
     node = shutil.which("node")
     if node is None:
         pytest.skip("Node isn't installed")
-    script = "\n".join(_body(module, name) for module, name in functions)
-    script += f"\nprocess.stdout.write(JSON.stringify({expression}));"
+    script = preamble + "\n".join(_body(module, name) for module, name in functions)
+    script += f"\nPromise.resolve({expression}).then(function (value) {{ process.stdout.write(JSON.stringify(value)); }});"
     # A cold Node on a busy Windows runner has taken over 30 s to start.
     done = subprocess.run(
         [node, "-e", script], stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=180, check=True
@@ -424,3 +437,214 @@ def test_the_dashboard_finds_the_model_pricing_py_prices() -> None:
         return resolved.canonical_id if resolved else None
 
     assert _model_ids(meta, ids) == [canonical(model_id) for model_id in ids]
+
+
+# -- days are the service's local days ------------------------------------------
+
+#: /api/summary's period for Last 7 days, as api.py writes it: the window's
+#: local days and which is today.
+_PERIOD = {"since": "2026-09-25T00:00:00Z", "until": None, "tz": None, "first_day": "2026-09-25", "last_day": "2026-10-01", "today": "2026-10-01"}
+
+
+def _window_span(body: object) -> object:
+    """``windowSpan`` from charts-types.js over a summary body, run in Node."""
+    return _node([("charts-types.js", "windowSpan")], f"windowSpan({json.dumps(body)})")
+
+
+def test_the_window_span_is_the_summarys_own_days() -> None:
+    body = {"ok": True, "data": {"total_cost": 1.5, "period": _PERIOD}}
+    assert _window_span(body) == {"first": "2026-09-25", "last": "2026-10-01", "today": "2026-10-01"}
+    # Seven days of keys: the axis is the span, whatever days have spend.
+    days = _node(
+        [("charts-types.js", "utcDay"), ("charts-types.js", "dayRange")],
+        'dayRange("2026-09-25", "2026-10-01")',
+        preamble="var DAY_MS = 86400000;\n",
+    )
+    assert days == ["2026-09-25", "2026-09-26", "2026-09-27", "2026-09-28", "2026-09-29", "2026-09-30", "2026-10-01"]
+
+
+def test_a_summary_without_a_period_leaves_the_axis_to_the_days_drawn() -> None:
+    """A service from before ``period``, a canned answer and a failed
+    summary give no span at all. All time (no first day) leaves the axis to
+    the days drawn too, but still names today, so the day still filling is
+    the service's own."""
+    assert _window_span({"ok": True, "data": {"total_cost": 1.5}}) == {}
+    assert _window_span({"ok": True, "data": {"period": None}}) == {}
+    assert _window_span({"ok": False, "error": {"code": "bad_request", "message": "no change"}}) == {}
+    assert _window_span(None) == {}
+    assert _window_span({"ok": True, "data": {"period": {**_PERIOD, "since": None, "first_day": None}}}) == {"today": "2026-10-01"}
+
+
+def test_a_change_is_on_the_local_day_the_service_names() -> None:
+    expression = (
+        "[{day: '2026-09-30', ts: '2026-10-01T01:30:00Z'}, {ts: '2026-10-01T01:30:00Z'}, {day: null, ts: '2026-10-01T23:59:00Z'}, {}, null]"
+        ".map(function (change) { return changeDay(change); })"
+    )
+    # The day wins over the timestamp's UTC date; an older service's rows
+    # have only the timestamp.
+    assert _node([("charts-types.js", "changeDay")], expression) == ["2026-09-30", "2026-10-01", "2026-10-01", "", ""]
+    impact = {"ok": True, "data": {"changes": [{"change": {"day": "2026-09-30", "ts": "2026-10-01T01:30:00Z", "label": "Model"}}]}}
+    marks = _node(
+        [("charts-types.js", "changeDay"), ("charts-types.js", "dailyChanges")],
+        f"dailyChanges({json.dumps(impact)}).map(function (mark) {{ return [mark.day, mark.label]; }})",
+    )
+    assert marks == [["2026-09-30", "Model"]]
+
+
+def test_the_period_before_is_named_for_each_window() -> None:
+    windows = ["1h", "24h", "today", "1", "7", "30", "90", "all", "change"]
+    phrases = _node([("page-overview.js", "previousPhrase")], f"{json.dumps(windows)}.map(function (w) {{ return previousPhrase(w); }})")
+    assert phrases == [
+        "the hour before",
+        "the 24 hours before",
+        "the same hours yesterday",
+        "the day before",
+        "the 7 days before",
+        "the 30 days before",
+        "the 90 days before",
+        None,
+        None,
+    ]
+
+
+def test_the_charts_say_local_time_not_utc() -> None:
+    text = _static_text("charts-types.js")
+    assert 'label: "Day (UTC)"' not in text
+    assert text.count('{ key: "day", label: "Day", kind: "str" }') == 2
+    for name in ("stackedColumns", "changeSteps"):
+        body = _body("charts-types.js", name)
+        assert "Days run midnight to midnight, local time." in body, name
+        assert re.findall(r'"[^"]*UTC[^"]*"', body) == [], name
+    assert "(a UTC day)" not in _app_js()
+    assert "a UTC day" not in _body("page-spend.js", "renderSessions")
+
+
+def _sessions_on(rows: list[dict], day: str) -> list[str]:
+    """The ids ``shownSessions`` (page-spend.js) lists for a picked day."""
+    preamble = f"var sessionsView = {{ rows: {json.dumps(rows)}, range: null, day: {json.dumps(day)} }};\n"
+    return _node([("page-spend.js", "shownSessions")], "shownSessions().map(function (row) { return row.id; })", preamble=preamble)
+
+
+def test_a_picked_day_lists_the_sessions_active_on_the_charts_local_day() -> None:
+    """The column is a local day, so the list matches on the service's
+    first_day and last_day, not on a UTC day cut from the timestamps."""
+    rows = [
+        # 22:30 and 00:30 UTC are both on 1 Oct in a zone 2 hours east.
+        {"id": "east", "first_ts": "2026-09-30T22:30:00Z", "last_ts": "2026-10-01T00:30:00Z", "first_day": "2026-10-01", "last_day": "2026-10-01"},
+        {"id": "spans", "first_ts": "2026-09-28T09:00:00Z", "last_ts": "2026-10-02T09:00:00Z", "first_day": "2026-09-28", "last_day": "2026-10-02"},
+    ]
+    assert _sessions_on(rows, "2026-10-01") == ["east", "spans"]
+    assert _sessions_on(rows, "2026-09-30") == ["spans"]
+    assert _sessions_on(rows, "2026-10-03") == []
+
+
+def test_a_picked_day_falls_back_to_the_timestamps_for_an_older_service() -> None:
+    rows = [
+        {"id": "ts-only", "first_ts": "2026-09-29T10:00:00Z", "last_ts": "2026-10-01T09:00:00Z"},
+        {"id": "one-reply", "first_ts": "2026-09-30T10:00:00Z"},
+        {"id": "no-last", "first_ts": "2026-09-30T10:00:00Z", "first_day": "2026-09-30", "last_day": None},
+    ]
+    assert _sessions_on(rows, "2026-09-30") == ["ts-only", "one-reply", "no-last"]
+    assert _sessions_on(rows, "2026-10-01") == ["ts-only"]
+    assert _sessions_on(rows, "2026-09-28") == []
+
+
+#: What loadReport needs of the page around it, with a fetch that answers
+#: only when told to, and a clock the test sets.
+_REPORT_PREAMBLE = """
+var state = { window: "30", project: "", reportPromises: {}, recommendationPromises: {}, quickActionPromises: {}, currency: "USD", units: null };
+var connection = { reportFailed: false };
+var calls = [];
+var resolvers = [];
+var clock = 0;
+Date.now = function () { return clock; };
+function fetchJson(url) { calls.push(url); return new Promise(function (resolve) { resolvers.push(resolve); }); }
+function noteFiguresAsOf() {}
+function setKnownProjects() {}
+"""
+
+_REPORT_FUNCTIONS = [
+    ("api.js", name)
+    for name in (
+        "windowParam", "projectParam", "addParams", "withWindow", "scopeKey", "browserDay", "reportKept",
+        "loadReport", "loadRecommendations", "loadQuickActions",
+    )
+]
+
+
+def _report_script(expression: str) -> object:
+    kept = re.search(r"^var REPORT_KEPT_MS = [^;]+;", _static_text("api.js"), re.M)
+    assert kept, "api.js no longer says how long a report is kept"
+    return _node(_REPORT_FUNCTIONS, expression, preamble=_REPORT_PREAMBLE + kept.group(0) + "\n")
+
+
+def test_an_open_tab_fetches_the_report_again_after_five_minutes() -> None:
+    """A "Since my last change" window starts at the newest change, so a
+    tab left open mustn't keep the report it first fetched."""
+    counts = _report_script(
+        """(function () {
+          var counts = [];
+          function at(h, m, s) { clock = new Date(2026, 9, 1, h, m, s).getTime(); }
+          at(12, 0, 0); loadReport(); loadReport(); counts.push(calls.length);
+          at(12, 4, 59); loadReport(); counts.push(calls.length);
+          at(12, 5, 0); loadReport(); loadReport(); counts.push(calls.length);
+          state.project = "proj-a"; loadReport(); counts.push(calls.length);
+          return counts;
+        })()"""
+    )
+    assert counts == [1, 1, 2, 3]
+
+
+def test_an_open_tab_fetches_the_report_again_when_its_day_turns_over() -> None:
+    """A number of days starts at local midnight: past it, the report in
+    hand is for yesterday's window, however recently it was fetched."""
+    counts = _report_script(
+        """(function () {
+          var counts = [];
+          clock = new Date(2026, 9, 1, 23, 58, 0).getTime(); loadReport(); counts.push(calls.length);
+          clock = new Date(2026, 9, 1, 23, 59, 30).getTime(); loadReport(); counts.push(calls.length);
+          clock = new Date(2026, 9, 2, 0, 1, 0).getTime(); loadReport(); loadReport(); counts.push(calls.length);
+          return counts;
+        })()"""
+    )
+    assert counts == [1, 1, 2]
+
+
+def test_a_failed_report_is_not_kept_but_a_newer_fetch_is() -> None:
+    kept = _report_script(
+        """(function () {
+          var failure = { httpStatus: 0, body: { ok: false, error: { code: "network_error", message: "gone" } } };
+          clock = new Date(2026, 9, 1, 12, 0, 0).getTime();
+          var first = loadReport();
+          clock = new Date(2026, 9, 1, 12, 6, 0).getTime();
+          var second = loadReport();
+          // The first, expired fetch fails late: the second stays.
+          resolvers[0](failure);
+          return first.then(function (loaded) {
+            var stayed = state.reportPromises["30"] === second;
+            resolvers[1](failure);
+            return second.then(function () {
+              return [!!loaded.error, stayed, Object.keys(state.reportPromises).length];
+            });
+          });
+        })()"""
+    )
+    assert kept == [True, True, 0]
+
+
+def test_recommendations_and_checks_expire_with_the_report() -> None:
+    """Recommendations and checks are built from the report, so a tab left
+    open fetches them again when it fetches the report again: after five
+    minutes, or past midnight."""
+    counts = _report_script(
+        """(function () {
+          var counts = [];
+          function both() { loadRecommendations(); loadQuickActions(); }
+          clock = new Date(2026, 9, 1, 12, 0, 0).getTime(); both(); both(); counts.push(calls.length);
+          clock = new Date(2026, 9, 1, 12, 4, 59).getTime(); both(); counts.push(calls.length);
+          clock = new Date(2026, 9, 1, 12, 5, 0).getTime(); both(); both(); counts.push(calls.length);
+          clock = new Date(2026, 9, 2, 0, 0, 1).getTime(); both(); counts.push(calls.length);
+          return counts;
+        })()"""
+    )
+    assert counts == [2, 2, 4, 6]

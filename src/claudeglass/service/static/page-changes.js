@@ -20,7 +20,7 @@ import { icon } from "./icons.js";
 import { pulseNode, simpleTable } from "./grid.js";
 import { captureLink, pageLink, viewIntro } from "./links.js";
 import { chartError, holdChart } from "./charts.js";
-import { renderChart, windowDays } from "./charts-types.js";
+import { changeDay, renderChart, windowSpan } from "./charts-types.js";
 
 // -- how a measure reads -------------------------------------------------------
 
@@ -205,7 +205,7 @@ function changeCard(item, opts) {
   var change = item.change || {};
   var measures = item.measures || [];
   var lead = measures[0] || null;
-  var card = el("article", { class: "change-card" + (opts.compact ? " is-compact" : ""), "data-day": String(change.ts || "").slice(0, 10) });
+  var card = el("article", { class: "change-card" + (opts.compact ? " is-compact" : ""), "data-day": changeDay(change) });
   var head = el("div", { class: "change-card-head" }, [
     el("h3", { class: "change-card-title", text: change.label + (change.reverted ? " (since undone)" : "") }),
     item.enough && lead ? readingBadge(lead) : chip("Too early to tell", { class: "change-early" }),
@@ -271,7 +271,7 @@ function timelineChanges(impactBody) {
   var rows = (impactBody && impactBody.ok === true && impactBody.data && impactBody.data.changes) || [];
   return rows.map(function (row) {
     var change = row.change || {};
-    var day = String(change.ts || "").slice(0, 10);
+    var day = changeDay(change);
     var elsewhere = change.project && change.project_name !== state.project;
     return {
       day: day,
@@ -354,6 +354,8 @@ export function renderChanges(panel) {
   });
   var impactLoad = fetchJson("/api/impact");
   var dailyLoad = fetchJson(withWindow("/api/daily-usage") + "&split=agent");
+  // The window's first and last day, as the service counts them.
+  var summaryLoad = fetchJson(withWindow("/api/summary"));
   cardsHost.appendChild(loadingNode("Loading your changes", "rows"));
 
   var cardsDrawn = Promise.all([impactLoad, unitsLoad]).then(function (loaded) {
@@ -368,7 +370,7 @@ export function renderChanges(panel) {
     renderChangeCards(cardsHost, body.data, {});
   });
 
-  Promise.all([dailyLoad, impactLoad, unitsLoad]).then(function (loaded) {
+  Promise.all([dailyLoad, impactLoad, unitsLoad, summaryLoad]).then(function (loaded) {
     if (run !== pageRun) return;
     var daily = loaded[0].body;
     if (!daily || daily.ok !== true) {
@@ -380,7 +382,7 @@ export function renderChanges(panel) {
     renderChart(
       chartHost,
       "change-timeline",
-      Object.assign({ rows: daily.data || [], changes: timelineChanges(loaded[1].body) }, windowDays(state.window)),
+      Object.assign({ rows: daily.data || [], changes: timelineChanges(loaded[1].body) }, windowSpan(loaded[3].body)),
       {
         slot: "changes",
         titleTag: "h2",

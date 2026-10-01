@@ -139,12 +139,31 @@ posture ``Store.judge_prediction`` shares with ``impact_cache`` in
 day windows) deletes a still-unmatched prediction after 90 days (it was
 never applied, or nothing traced it) and a judged one after 400 days
 (kept longer so EST-P6's calibration has a real history to learn from).
+
+Version 8 (local calendar-day windows): ``turns_agg`` gains a nullable
+``bucket`` column, the UTC quarter hour a turn's reply falls in
+(``%Y-%m-%dT%H:%M:00Z``, minute 00, 15, 30 or 45), and a row is now one
+per ``(transcript, day, bucket, model)``. ``day`` stays the turn's UTC
+date, which is always the first ten characters of its ``bucket``. The
+store knows no time zone: ``Store.daily_usage`` groups buckets into local
+days when it reads. A quarter hour is the width that keeps every local
+midnight on a bucket edge, since every time zone's offset is a whole
+number of quarter hours (``+05:30``, ``+05:45``, ``+08:45``, ``-03:30``).
+``bucket`` is NULL for a row written before v8 and for a turn with no
+timestamp (its ``day`` is ``unknown``). A v7 store gains the column in
+place (``store.MIGRATIONS[7]``) and marks every transcript for a re-parse
+(``Store.demote_parsed``), which fills it in; until then
+``daily_usage`` reads a NULL-bucket row by its UTC ``day``, and a
+transcript the watcher can't re-parse (its file is gone) keeps it. There
+is no index on ``bucket``: ``ALL_STATEMENTS`` runs before the ladder, so
+one declared here would fail against a v7 table, and the table is small
+enough (``idx_turns_agg_day`` narrows a windowed read first).
 """
 
 from __future__ import annotations
 
 #: Bump when a table or index below changes shape. See module docstring.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 CREATE_META = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -222,9 +241,10 @@ CREATE TABLE IF NOT EXISTS transcripts (
 CREATE INDEX IF NOT EXISTS idx_transcripts_session_id ON transcripts(session_id);
 """
 
-#: Per-transcript, per-day, per-model rollups — the basis for
-#: ``Store.daily_usage`` and the Usage report section without re-reading
-#: every turn on each request.
+#: Per-transcript, per-quarter-hour, per-model rollups (``day`` is the UTC
+#: date, ``bucket`` the UTC quarter hour, see the module docstring's
+#: "Version 8") — the basis for ``Store.daily_usage`` and the Usage report
+#: section without re-reading every turn on each request.
 CREATE_TURNS_AGG = """
 CREATE TABLE IF NOT EXISTS turns_agg (
     id                     INTEGER PRIMARY KEY,
@@ -239,7 +259,8 @@ CREATE TABLE IF NOT EXISTS turns_agg (
     thinking_tokens        INTEGER NOT NULL DEFAULT 0,
     cc_5m                  INTEGER NOT NULL DEFAULT 0,
     cc_1h                  INTEGER NOT NULL DEFAULT 0,
-    cost                   REAL NOT NULL DEFAULT 0
+    cost                   REAL NOT NULL DEFAULT 0,
+    bucket                 TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_turns_agg_day ON turns_agg(day);
 """

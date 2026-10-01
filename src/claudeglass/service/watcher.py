@@ -96,7 +96,7 @@ from .. import signals as signals_mod
 from .. import snapshots as snapshots_mod
 from ..tools import log_usage as log_usage_mod
 from .contracts import ServeOptions, WatcherState, WatcherStats
-from .store import GLOBAL_PROJECT_SLUG, Store, decode_digest_blob
+from .store import GLOBAL_PROJECT_SLUG, Store, bucket_start, decode_digest_blob
 
 #: A file whose mtime is under this many seconds old is assumed to still
 #: be an active Claude Code session (same convention/value as
@@ -256,12 +256,15 @@ def _parse_ts(ts: str | None):
 
 
 def _turn_day(turn) -> str:
-    """The turn's own UTC calendar day, e.g. ``"2026-09-18"``. Unlike
-    ``usage.py``'s ``_day_key`` (which buckets by ``config.tz``'s local
-    day for the report's own Usage section), the watcher has no
-    ``Config``/timezone to read (``ServeOptions`` carries none) — UTC is
-    the only zone available without one, so ``turns_agg.day`` is a UTC
-    calendar day, not a local one. ``Store.daily_usage`` inherits this.
+    """The turn's own UTC calendar day, e.g. ``"2026-09-18"``, or
+    ``"unknown"`` when it has no readable time (a time with no offset is
+    read as UTC). Unlike ``usage.py``'s ``_day_key`` (which buckets by
+    ``config.tz``'s local day for the report's own Usage section), the
+    watcher has no ``Config``/timezone to read (``ServeOptions`` carries
+    none), and the store stays zone-free: ``turns_agg.day`` is a UTC
+    calendar day, not a local one. The local day is worked out when the
+    rows are read, from the quarter-hour ``bucket`` (:func:`_turn_bucket`),
+    by ``Store.daily_usage(tz=...)``.
     """
     dt = _parse_ts(turn.ts)
     if dt is None:
@@ -273,23 +276,37 @@ def _turn_day(turn) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _turn_bucket(turn) -> str | None:
+    """The UTC quarter hour the turn's reply falls in, as
+    ``turns_agg.bucket`` stores it (``%Y-%m-%dT%H:%M:00Z``, see
+    :func:`~claudeglass.service.store.bucket_start`), or ``None`` when the
+    turn has no readable time. A time with no offset is read as UTC, as
+    :func:`_turn_day` reads it, so a turn's ``day`` is always its
+    bucket's first ten characters."""
+    dt = _parse_ts(turn.ts)
+    return bucket_start(dt) if dt is not None else None
+
+
 def _build_turns_agg(result: TranscriptResult, pricing: Pricing) -> list[dict]:
-    """Per-day, per-model rollups (``turns_agg`` rows) for one
-    transcript's priced turns, cost via ``pricing.price_turn`` at the
-    watcher's rate card: ``config.toml``'s ``pricing_path``, else
-    ``<config_dir>/pricing.toml``, else the packaged default, the same
-    card the API reads (see :meth:`FileWatcher._refresh_pricing`). When
-    that card changes, every stored transcript still on disk is parsed
-    again and its rows rebuilt at the new rates (see
-    :meth:`FileWatcher._check_rate_card`)."""
-    buckets: dict[tuple[str, str], dict] = {}
+    """Per-quarter-hour, per-model rollups (``turns_agg`` rows) for one
+    transcript's priced turns, each with its UTC ``day`` and its
+    ``bucket`` (the UTC quarter hour, ``None`` for a turn with no
+    readable time, whose ``day`` is ``"unknown"``). Cost is
+    ``pricing.price_turn`` at the watcher's rate card: ``config.toml``'s
+    ``pricing_path``, else ``<config_dir>/pricing.toml``, else the
+    packaged default, the same card the API reads (see
+    :meth:`FileWatcher._refresh_pricing`). When that card changes, every
+    stored transcript still on disk is parsed again and its rows rebuilt
+    at the new rates (see :meth:`FileWatcher._check_rate_card`)."""
+    buckets: dict[tuple[str, str | None, str], dict] = {}
     for turn in _priced_turns(result):
         model = turn.model or "<unknown>"
-        key = (_turn_day(turn), model)
+        key = (_turn_day(turn), _turn_bucket(turn), model)
         bucket = buckets.setdefault(
             key,
             {
                 "day": key[0],
+                "bucket": key[1],
                 "model": model,
                 "turns": 0,
                 "input_tokens": 0,

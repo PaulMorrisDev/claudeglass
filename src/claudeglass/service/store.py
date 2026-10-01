@@ -86,13 +86,13 @@ import threading
 import time
 import zlib
 from collections.abc import Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 from . import schema
 from .. import PARSER_VERSION
 from ..cache import result_from_jsonable
-from ..discovery import _resolve_window, redact_slug, source_label, ts_in_window
+from ..discovery import _resolve_window, _zone, local_day, redact_slug, source_label, ts_in_window
 from ..limits import limit_markers as _limit_markers
 from ..model import EventKind
 
@@ -147,6 +147,17 @@ def decode_digest_blob(blob: bytes) -> str:
     this rather than calling ``zlib.decompress`` directly, so the one
     compression format is defined in one place."""
     return zlib.decompress(blob).decode("utf-8")
+
+
+def bucket_start(dt: datetime) -> str:
+    """The ``turns_agg.bucket`` value for ``dt``: the UTC quarter hour it
+    falls in, ``%Y-%m-%dT%H:%M:00Z`` (minute 00, 15, 30 or 45; a time
+    with no offset is read as UTC). The shape of a minute-rounded
+    ``since``, so a bucket and a bound compare as strings, in time order.
+    The watcher writes buckets with this and ``Store.daily_usage`` rounds
+    a window's start down with it."""
+    dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
+    return dt.replace(minute=dt.minute - dt.minute % 15).strftime("%Y-%m-%dT%H:%M:00Z")
 
 
 @contextlib.contextmanager
@@ -256,6 +267,17 @@ def _migrate_6_to_7(conn: sqlite3.Connection) -> None:
             conn.execute(statement)
 
 
+def _migrate_7_to_8(conn: sqlite3.Connection) -> None:
+    """v7 -> v8 (``schema.py``'s "Version 8" paragraph): the
+    ``turns_agg.bucket`` column, NULL on every row already there. The
+    rows are rebuilt with their buckets by the watcher's next parse of
+    each transcript, so every stored transcript is marked for one
+    (:func:`_demote_parsed`, the same step a rate-card change takes).
+    A half-applied upgrade is retried in full, which both halves allow."""
+    _add_column_if_missing(conn, "turns_agg", "bucket", "TEXT")
+    _demote_parsed(conn)
+
+
 #: Additive migration ladder for :meth:`Store.migrate`, keyed by the
 #: *recorded* version being migrated away from -- ``MIGRATIONS[4]`` takes
 #: a v4 store to v5. Each step may only add columns/indexes/tables, never
@@ -268,6 +290,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migrate_4_to_5,
     5: _migrate_5_to_6,
     6: _migrate_6_to_7,
+    7: _migrate_7_to_8,
 }
 
 
@@ -283,6 +306,104 @@ def window_column(window_by: str) -> str:
     if window_by == "first-reply":
         return "first_ts"
     raise ValueError(f"unknown window_by: {window_by!r}")
+
+
+#: The ``turns_agg`` columns ``Store.daily_usage`` adds up.
+_USAGE_SUM_COLUMNS = (
+    "turns", "input_tokens", "cache_creation_tokens", "cache_read_tokens",
+    "output_tokens", "thinking_tokens", "cc_5m", "cc_1h", "cost",
+)
+
+
+def _turns_agg_window(
+    since_dt: datetime | None, until_dt: datetime | None, zone: tzinfo | None
+) -> tuple[str, list]:
+    """The ``WHERE`` condition, and its parameters, that keeps the
+    ``turns_agg`` rows a window holds, for :meth:`Store.daily_usage`.
+
+    A row with a ``bucket`` is in when that quarter hour starts at or after
+    the window's start rounded down to a quarter hour, and strictly before
+    its end (so an ``until`` on a quarter-hour edge doesn't pull in the
+    quarter hour after it). A window can take in up to 15 minutes more
+    than asked at either end; a local midnight is always on a bucket edge,
+    so a calendar window is exact.
+
+    A row with no bucket (written before schema 8, kept for a transcript
+    that can't be parsed again, or a turn with no timestamp) can only be
+    placed by its UTC ``day``, and is shown under that day. It is kept
+    when that day lies within both the window's UTC days and its local
+    days in ``zone`` (``None`` is the machine's own zone), so it never adds
+    a day outside the window's local ones. With no ``until`` the window
+    ends today, which also leaves out a turn with no timestamp (day
+    ``unknown``) as soon as any bound is set.
+
+    A row's ``day`` is its bucket's first ten characters (the watcher
+    writes both from one timestamp), so the window's UTC days also
+    bound ``day`` for the rows of both kinds. That plain range, outside
+    the ``OR``, is what lets SQLite read ``idx_turns_agg_day`` instead of
+    every row, now that there is a row per quarter hour."""
+    bucket = ["a.bucket IS NOT NULL"]
+    legacy = ["a.bucket IS NULL"]
+    day_range: list[str] = []
+    day_params: list = []
+    bucket_params: list = []
+    legacy_params: list = []
+    if since_dt is not None:
+        since_utc = since_dt.astimezone(timezone.utc)
+        since_day = since_utc.strftime("%Y-%m-%d")
+        day_range.append("a.day >= ?")
+        day_params.append(since_day)
+        bucket.append("a.bucket >= ?")
+        bucket_params.append(bucket_start(since_utc))
+        legacy.append("a.day >= ?")
+        legacy_params.append(max(since_day, local_day(since_utc, zone)))
+    if until_dt is not None:
+        until_utc = until_dt.astimezone(timezone.utc)
+        until_day = until_utc.strftime("%Y-%m-%d")
+        day_range.append("a.day <= ?")
+        day_params.append(until_day)
+        bucket.append("a.bucket < ?")
+        bucket_params.append(until_utc.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        last_day = min(until_day, local_day(until_utc, zone))
+    else:
+        last_day = local_day(datetime.now(timezone.utc), zone)
+    legacy.append("a.day <= ?")
+    legacy_params.append(last_day)
+    kept = f"(({' AND '.join(bucket)}) OR ({' AND '.join(legacy)}))"
+    condition = " AND ".join([*day_range, kept])
+    return f"({condition})", day_params + bucket_params + legacy_params
+
+
+def _by_local_day(rows: list[sqlite3.Row], zone: tzinfo | None, *, split_agent: bool) -> list[dict]:
+    """Add up ``daily_usage``'s per-bucket rows into one row per local day
+    in ``zone`` (``None`` is the machine's own zone), per model (and per
+    agent with ``split_agent``), sorted by day. A row with no bucket keeps
+    its stored UTC day. Each bucket's local day is worked out once."""
+    days: dict[str, str] = {}
+    merged: dict[tuple, dict] = {}
+    for row in rows:
+        bucket = row["bucket"]
+        if bucket is None:
+            day = row["day"]
+        else:
+            day = days.get(bucket)
+            if day is None:
+                day = days[bucket] = bucket[:10] if zone is timezone.utc else local_day(bucket, zone)
+        key = (day, row["agent"], row["model"]) if split_agent else (day, row["model"])
+        out = merged.get(key)
+        if out is None:
+            out = {"day": day}
+            if split_agent:
+                out["agent"] = row["agent"]
+            out["model"] = row["model"]
+            for column in _USAGE_SUM_COLUMNS:
+                out[column] = row[column]
+            merged[key] = out
+        else:
+            for column in _USAGE_SUM_COLUMNS:
+                out[column] += row[column]
+    return [merged[key] for key in sorted(merged)]
+
 
 class Store:
     """One SQLite-backed store, rooted at ``path``.
@@ -671,7 +792,9 @@ class Store:
         """Insert or update one transcript row, replacing its
         ``turns_agg``/``recache_turns``/``events_agg``/``compactions``
         child rows wholesale (a re-parse always supersedes the previous
-        breakdown for that file). Returns the transcript's row id.
+        breakdown for that file). Returns the transcript's row id. A
+        ``turns_agg`` row's ``bucket`` (its UTC quarter hour, see
+        :func:`bucket_start`) is stored as given, or NULL when it has none.
 
         S1-perf item 3: every child row's value tuple (minus the
         ``transcript_id`` it's keyed on, not known until the parent
@@ -693,7 +816,7 @@ class Store:
                 row.get("input_tokens", 0), row.get("cache_creation_tokens", 0),
                 row.get("cache_read_tokens", 0), row.get("output_tokens", 0),
                 row.get("thinking_tokens", 0), row.get("cc_5m", 0),
-                row.get("cc_1h", 0), row.get("cost", 0.0),
+                row.get("cc_1h", 0), row.get("cost", 0.0), row.get("bucket"),
             )
             for row in turns_agg or []
         ]
@@ -764,8 +887,8 @@ class Store:
                     INSERT INTO turns_agg (
                         transcript_id, day, model, turns, input_tokens,
                         cache_creation_tokens, cache_read_tokens, output_tokens,
-                        thinking_tokens, cc_5m, cc_1h, cost
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        thinking_tokens, cc_5m, cc_1h, cost, bucket
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     [(transcript_id, *row) for row in turns_agg_rows],
                 )
@@ -1548,9 +1671,26 @@ class Store:
         split: str | None = None,
         project_slugs: list[str] | None = None,
         window_by: str = "last-reply",
+        tz: str | tzinfo | None = "UTC",
     ) -> list[dict]:
         """Per-day, per-model token/cost rollups, joined from
         ``turns_agg`` (no per-transcript or path detail).
+
+        ``tz`` is the zone a day is counted in: an IANA name, a
+        ``tzinfo``, or ``None`` for the machine's own zone (a name that
+        can't be resolved, such as one on a machine with no ``tzdata``,
+        falls back to the machine's zone too). The default, ``"UTC"``,
+        keeps a direct caller on UTC days; the dashboard passes
+        ``config.tz``. The store knows no zone, so it adds up the
+        quarter-hour ``bucket`` rows into local days here, on the way out
+        (:func:`_by_local_day`). A row with no bucket (see
+        ``schema.py``'s "Version 8") keeps its stored UTC day.
+
+        A window reads whole quarter-hour buckets (see
+        :func:`_turns_agg_window`): from the one holding ``since`` up to,
+        not including, the one starting at ``until``. A window that starts
+        at a local midnight, as a calendar window does, is exact. A turn
+        with no timestamp is only in a window with no bound at all.
 
         ``window_by="first-reply"`` keeps only the replies of the
         sessions whose first reply falls in the window (see
@@ -1559,11 +1699,12 @@ class Store:
         every session on the window's first day.
 
         ``days`` keeps its original meaning for existing callers -- a
-        trailing window from now -- but ``since``/``until`` (ISO 8601)
+        rolling window back from now -- but ``since``/``until`` (ISO 8601)
         take precedence when given, the same ``_resolve_window``
-        precedence ``summary``/``sessions``/``compactions`` already use;
-        pass ``days=None`` for no lower bound at all (paired with
-        ``since``/``until`` already resolving to "no window", as
+        precedence ``summary``/``sessions``/``compactions`` already use
+        (the dashboard resolves its calendar days to a ``since`` before it
+        gets here); pass ``days=None`` for no lower bound at all (paired
+        with ``since``/``until`` already resolving to "no window", as
         ``route_daily_usage`` does for ``?window=all``).
 
         ``split="agent"`` additionally breaks each day/model row into the
@@ -1582,14 +1723,13 @@ class Store:
         unfiltered call plans identically to before.
         """
         since_dt, until_dt = _resolve_window(days, since, until)
+        zone = _zone(tz)
         conditions = []
         params: list = []
-        if since_dt is not None:
-            conditions.append("a.day >= ?")
-            params.append(since_dt.strftime("%Y-%m-%d"))
-        if until_dt is not None:
-            conditions.append("a.day <= ?")
-            params.append(until_dt.strftime("%Y-%m-%d"))
+        if since_dt is not None or until_dt is not None:
+            window_sql, window_params = _turns_agg_window(since_dt, until_dt, zone)
+            conditions.append(window_sql)
+            params.extend(window_params)
         if project_slugs:
             placeholders = ",".join("?" * len(project_slugs))
             conditions.append(f"s2.slug IN ({placeholders})")
@@ -1606,7 +1746,7 @@ class Store:
             project_join = " JOIN sessions s2 ON s2.id = t.session_id" if project_slugs else ""
             rows = self._connection().execute(
                 f"""
-                SELECT a.day AS day,
+                SELECT a.bucket AS bucket, a.day AS day,
                        CASE WHEN t.kind = 'top-level' THEN 'main' ELSE 'subagent' END AS agent,
                        a.model AS model,
                        SUM(a.turns) AS turns,
@@ -1620,16 +1760,16 @@ class Store:
                        SUM(a.cost) AS cost
                 FROM turns_agg a JOIN transcripts t ON t.id = a.transcript_id{project_join}
                 {where}
-                GROUP BY a.day, agent, a.model
-                ORDER BY a.day, agent, a.model
+                GROUP BY a.bucket, a.day, agent, a.model
+                ORDER BY a.bucket, a.day, agent, a.model
                 """,
                 params,
             ).fetchall()
-            return [dict(row) for row in rows]
+            return _by_local_day(rows, zone, split_agent=True)
         project_join = " JOIN transcripts t ON t.id = a.transcript_id JOIN sessions s2 ON s2.id = t.session_id" if project_slugs else ""
         rows = self._connection().execute(
             f"""
-            SELECT a.day AS day, a.model AS model,
+            SELECT a.bucket AS bucket, a.day AS day, a.model AS model,
                    SUM(a.turns) AS turns,
                    SUM(a.input_tokens) AS input_tokens,
                    SUM(a.cache_creation_tokens) AS cache_creation_tokens,
@@ -1641,12 +1781,12 @@ class Store:
                    SUM(a.cost) AS cost
             FROM turns_agg a{project_join}
             {where}
-            GROUP BY a.day, a.model
-            ORDER BY a.day, a.model
+            GROUP BY a.bucket, a.day, a.model
+            ORDER BY a.bucket, a.day, a.model
             """,
             params,
         ).fetchall()
-        return [dict(row) for row in rows]
+        return _by_local_day(rows, zone, split_agent=False)
 
     def cache_read_tokens_by_model(
         self,

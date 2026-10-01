@@ -153,30 +153,25 @@ var TIER_SERIES = [
   { key: "other", label: "Other models" },
 ];
 
+// A day key is a calendar date, "2026-09-03": the service counts the day
+// in its own zone, so the browser never works one out. Stepping a key
+// through UTC midnights is zone-free: it can't skip or repeat a date.
 function utcDay(ms) {
   return new Date(ms).toISOString().slice(0, 10);
 }
 
-// The UTC days a window with fixed bounds reaches, as /api/daily-usage
-// counts them: from the day it starts to today. Given to daily spend as
-// {first, last}, so the axis spans the window, not only the days with
-// spend (a project picked, say). All time and since your last change
-// have no fixed start: {}.
-export function windowDays(windowValue, now) {
-  if (now === undefined) now = Date.now();
-  var hours = /^[0-9]+$/.test(String(windowValue)) ? Number(windowValue) * 24 : { "1h": 1, "24h": 24 }[windowValue];
-  var start;
-  if (hours) {
-    start = now - hours * 3600000;
-  } else if (windowValue === "today") {
-    // The service's "today" starts at local midnight.
-    var midnight = new Date(now);
-    midnight.setHours(0, 0, 0, 0);
-    start = midnight.getTime();
-  } else {
-    return {};
-  }
-  return { first: utcDay(start), last: utcDay(now) };
+// The days a window with fixed bounds reaches, as /api/summary's
+// data.period gives them (the service's local days, first to last, and
+// which is today). Given to daily spend as {first, last, today}, so the
+// axis spans the window, not only the days with spend (a project picked,
+// say). All time has no first day: its axis spans the days drawn, and only
+// today comes from the period. A service that predates period (or a canned
+// answer) sends none: {}.
+export function windowSpan(summaryBody) {
+  var period = summaryBody && summaryBody.data && summaryBody.data.period;
+  if (!period) return {};
+  if (!period.first_day) return period.today ? { today: period.today } : {};
+  return { first: period.first_day, last: period.last_day, today: period.today };
 }
 
 // A day in a span's words: "26 Aug", with the year when the span crosses one.
@@ -201,13 +196,21 @@ function dayRange(first, last) {
   return days;
 }
 
+// The local day a change was made, as a chart and its card name it:
+// /api/impact's change.day. A service that predates it sends only the
+// timestamp, whose UTC date stands in.
+export function changeDay(change) {
+  change = change || {};
+  return change.day || String(change.ts || "").slice(0, 10);
+}
+
 // The settings changes to mark on a daily spend chart, from /api/impact's
 // body. Each leads to what it did: its card on Your changes.
 export function dailyChanges(impact) {
   var rows = (impact && impact.ok === true && impact.data && impact.data.changes) || [];
   return rows.map(function (row) {
     var change = row.change || {};
-    var day = String(change.ts || "").slice(0, 10);
+    var day = changeDay(change);
     return {
       day: day,
       label: change.label || "A settings change",
@@ -252,8 +255,10 @@ function placeRuleLabel(label, full, cx, ruleXs, spans, bounds) {
 
 // data: {rows, split, first, last, today, changes, sessionsTotal} or
 // the rows alone. rows are /api/daily-usage's (day, model, cost, and
-// agent with split=agent). first and last (windowDays) widen the axis to
-// the whole window; a day with spend outside them still shows.
+// agent with split=agent). first, last and today (windowSpan) widen the
+// axis to the whole window and say which day is still filling; a day with
+// spend outside them still shows. Without them the axis spans the days
+// drawn, and today is UTC's.
 // changes: [{day, label, open}] drawn as labelled rules. sessionsTotal
 // is /api/summary's total_cost, which counts whole sessions: when it
 // reads differently, the summary gives it and says why.
@@ -522,8 +527,10 @@ function stackedColumns(ctx, data) {
   }, columns[0]);
   // The window's whole sessions, when they read differently from the
   // replies drawn: the Spend figure beside this chart counts them. More
-  // when sessions began before the first day; less when the first day
-  // began before the window (days run midnight to midnight UTC).
+  // when sessions began before the first day; less only when a window that
+  // starts part way through a day (the last hour or 24 hours, or since
+  // your last change) draws the quarter hour before it began. Days run
+  // midnight to midnight, local time.
   var sessionsUsd = data && typeof data.sessionsTotal === "number" && data.sessionsTotal > 0 ? data.sessionsTotal : null;
   var sessionsTotal = sessionsUsd !== null && moneyText(sessionsUsd) !== moneyText(grand) ? moneyText(sessionsUsd) : null;
   var variant = sessionsTotal ? (sessionsUsd > grand ? "sessions" : "firstDay") : null;
@@ -548,7 +555,7 @@ function stackedColumns(ctx, data) {
       };
     }),
     table: {
-      columns: [{ key: "day", label: "Day (UTC)", kind: "str" }]
+      columns: [{ key: "day", label: "Day", kind: "str" }]
         .concat(
           series.map(function (s) {
             return { key: s.key, label: s.label, kind: "money" };
@@ -569,7 +576,7 @@ function stackedColumns(ctx, data) {
             return { label: s.label, colour: entityColour(kind, s.key) };
           })
         : [],
-    note: "Days run midnight to midnight UTC.",
+    note: "Days run midnight to midnight, local time.",
   };
 }
 
@@ -578,7 +585,7 @@ function stackedColumns(ctx, data) {
 // data: {rows, changes, first, last}. rows are /api/daily-usage's (day,
 // turns, cost; any split: the day's rows are summed). changes: [{day,
 // label, open}] from /api/impact, drawn as labelled rules. first and last
-// (windowDays) widen the axis to the whole window.
+// (windowSpan) widen the axis to the whole window.
 //
 // Each day is a dot at its cost per reply. The days between one change
 // and the next are one period, drawn as a flat line at its own average
@@ -839,7 +846,7 @@ function changeSteps(ctx, data) {
     }),
     table: {
       columns: [
-        { key: "day", label: "Day (UTC)", kind: "str" },
+        { key: "day", label: "Day", kind: "str" },
         { key: "turns", label: "Replies", kind: "int" },
         { key: "cost", label: "Cost", kind: "money" },
         { key: "per_reply", label: "Cost per reply", kind: "money" },
@@ -851,7 +858,7 @@ function changeSteps(ctx, data) {
       }),
     },
     legend: [],
-    note: "Each flat line is the average cost per reply between two changes, over the projects shown. A change's own day counts after it. Days run midnight to midnight UTC.",
+    note: "Each flat line is the average cost per reply between two changes, over the projects shown. A change's own day counts after it. Days run midnight to midnight, local time.",
   };
 }
 

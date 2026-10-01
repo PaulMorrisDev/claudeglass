@@ -563,7 +563,10 @@ def test_a_change_marker_leads_to_its_change_on_your_changes() -> None:
     source = _app_js()
     changes = _function_source(source, "dailyChanges")
     assert 'goTo("changes", { params: { day: day } })' in changes
-    assert 'String(change.ts || "").slice(0, 10)' in changes
+    # The marker and its card name the same local day (the service's
+    # change.day, else the timestamp's date).
+    assert "var day = changeDay(change);" in changes
+    assert "var day = changeDay(change);" in _function_source(source, "timelineChanges")
     assert 'goTo("changes", { params: { day: day } })' in _function_source(source, "timelineChanges")
     page = _function_source(source, "renderChanges")
     assert 'onParams("changes", function (params)' in page
@@ -571,7 +574,7 @@ def test_a_change_marker_leads_to_its_change_on_your_changes() -> None:
     assert "cardsDrawn.then(" in page
     assert ".change-card[data-day=\"' + params.day + '\"]" in page
     assert 'pulseNode(card, "block-target")' in page
-    assert '"data-day": String(change.ts || "").slice(0, 10)' in _function_source(source, "changeCard")
+    assert '"data-day": changeDay(change)' in _function_source(source, "changeCard")
     # The timeline's own change labels are links the keyboard reaches.
     steps = _function_source(source, "changeSteps")
     assert 'ctx.layer("rule-links", { links: true })' in steps
@@ -1300,18 +1303,34 @@ def test_load_report_cache_is_keyed_by_the_selected_window() -> None:
     assert "if (windowChanged) delete state.reportPromises[state.window]" in changed_src
 
 
+def test_a_kept_report_expires_so_an_open_tab_follows_a_moving_window() -> None:
+    """A window's start moves while a tab sits open: a new change for
+    "Since my last change", local midnight for a number of days. A kept
+    report is fetched again after five minutes, or when the browser's day
+    turns over (test_ui_figures_audit.py runs this in Node)."""
+    api_js = _static_text("api.js")
+    assert "var REPORT_KEPT_MS = 5 * 60 * 1000;" in api_js
+    load_report_src = _function_source(api_js, "loadReport")
+    assert "!reportKept(state.reportPromises[key])" in load_report_src
+    assert "delete state.reportPromises[key];" in load_report_src
+    assert "fetched.fetchedAt = Date.now();" in load_report_src and "fetched.fetchedDay = browserDay();" in load_report_src
+    kept_src = _function_source(api_js, "reportKept")
+    assert "REPORT_KEPT_MS" in kept_src and "browserDay()" in kept_src
+
+
 def test_every_windowed_request_carries_the_picked_project() -> None:
     """The project picker narrows every figure that follows the window:
     withWindow adds the project beside the window, so each route the
     dashboard asks through it is filtered (docs/api.md, "Filtering by
-    project"). The Overview's previous window asks by since and until, so
-    it adds the project on its own."""
+    project"). The Overview's previous window asks through it too: the
+    service works out the earlier period (previous=1), so nothing builds
+    a window of its own and drops the project."""
     app_js = _app_js()
     with_window = _function_source(app_js, "withWindow")
     assert "windowParam()" in with_window and "projectParam()" in with_window
-    assert "projectParam()" in _function_source(app_js, "withProject")
+    assert "withProject" not in app_js
     assert '"project=" + encodeURIComponent(state.project)' in _function_source(app_js, "projectParam")
-    assert 'withProject("/api/summary?since="' in _function_source(app_js, "renderOverview")
+    assert 'withWindow("/api/summary?previous=1")' in _function_source(app_js, "renderOverview")
     # Only windowParam writes the window query: a request that built its
     # own would drop the project. The one exception is the every-project
     # report the picker lists projects from.
@@ -1647,18 +1666,60 @@ def test_the_overview_compares_like_with_like() -> None:
     the period of the same length just before (docs/api.md: store and
     report price differently, so a summary is never compared with a
     report figure), and there is no earlier period for "all time" or
-    "since my last change"."""
+    "since my last change". The service resolves that period
+    (``previous=1``), in its own local days; the Overview only names it,
+    and uses an answer only when it says its period (an older service
+    ignores ``previous=1`` and would answer for this window again)."""
     app_js = _app_js()
     overview = _function_source(app_js, "renderOverview")
     assert 'fetchJson(withWindow("/api/summary"))' in overview
-    assert '"/api/summary?since="' in overview and '"&until="' in overview
+    assert 'withWindow("/api/summary?previous=1")' in overview
+    assert "previousPhrase(state.window)" in overview
+    assert "previousBody.data.period" in overview
+    for gone in ('"/api/summary?since="', '"&until="', "isoMinute", "previousPeriod"):
+        assert gone not in app_js, f"{gone} is how the browser used to work the period out itself"
     assert 'withWindow("/api/daily-usage") + "&split=agent"' in overview, "chart 1 on the Overview splits main and subagents"
     assert 'renderChart(' in overview and '"daily-spend"' in overview
 
-    previous = _function_source(app_js, "previousPeriod")
+    previous = _function_source(app_js, "previousPhrase")
     for phrase in ("the hour before", "the 24 hours before", "the same hours yesterday", "days before"):
-        assert phrase in previous, f"previousPeriod never names {phrase!r}"
+        assert phrase in previous, f"previousPhrase never names {phrase!r}"
     assert '"all"' not in previous and '"change"' not in previous, "all time and since-last-change have no earlier period"
+
+
+def test_days_are_the_services_local_days_not_the_browsers_sums() -> None:
+    """The service counts a day in its own zone and says so: the span of
+    a window (/api/summary's period), the day of a change (change.day) and
+    the days of a session (first_day, last_day). The browser reads those,
+    falling back on the timestamp's UTC date for a service that predates
+    them, and never works out a window or a zone itself (docs/api.md)."""
+    app_js = _app_js()
+    for gone in ("windowDays", "(a UTC day)", "Day (UTC)", "midnight UTC", "midnight to midnight UTC"):
+        assert gone not in app_js, gone
+    # One place reads a change's day, and every chart and card goes through it.
+    assert "export function changeDay(change)" in _static_text("charts-types.js")
+    for module, name in (("charts-types.js", "dailyChanges"), ("page-changes.js", "changeCard"), ("page-changes.js", "timelineChanges"), ("page-overview.js", "lastChangeLine")):
+        assert "changeDay(change)" in _function_source(_static_text(module), name), f"{module} {name}"
+    assert '.slice(0, 10)' not in _function_source(_static_text("page-changes.js"), "changeCard")
+    assert "change.ts || \"\").slice(0, 10)" not in _static_text("page-overview.js") + _static_text("page-changes.js")
+    # The Sessions day filter compares day keys, with the timestamps behind it.
+    shown = _function_source(_static_text("page-spend.js"), "shownSessions")
+    assert "row.first_day || " in shown and "row.last_day || " in shown
+    assert "T00:00:00Z" not in shown
+    assert "(a UTC day)" not in _function_source(_static_text("page-spend.js"), "renderSessions")
+    # The window picker says what a day is.
+    picker = _function_source(_static_text("app.js"), "initWindowPicker")
+    assert "Last 7, 30 or 90 days are today and the days before it, from midnight." in picker
+    assert "Since my last change counts the sessions started after it." in picker
+
+
+def test_the_overview_says_when_the_picked_project_has_no_change_of_its_own() -> None:
+    """With a project picked, "Since my last change" can have nowhere to
+    start though other projects have changes: the Overview says the
+    project has none, not that none is recorded."""
+    overview = _static_text("page-overview.js")
+    assert "No change recorded for this project yet, so this window has nowhere to start." in overview
+    assert "No change recorded yet, so this window has nowhere to start." in overview
 
 
 def test_the_overview_leaves_the_health_detail_to_data_quality() -> None:

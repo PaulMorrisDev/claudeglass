@@ -715,7 +715,7 @@ function initWindowPicker() {
     id: "window",
     icon: "clock",
     name: "Window",
-    note: "A window counts every session with a reply in it, in full. So a long session that started earlier counts whole.",
+    note: "Last 7, 30 or 90 days are today and the days before it, from midnight. A window counts every session with a reply in it, in full; Since my last change counts the sessions started after it.",
     pick: function (value) {
       setWindow(value);
     },
