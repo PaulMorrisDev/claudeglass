@@ -580,27 +580,23 @@ environment-variable surface expose. It is not, and cannot become:
   (`docs/api.md`'s own `POST /api/profiles` note, quoted from the
   plan).
 
-## The one `recommend.py` lever not representable under its own name
+## Levers `recommend.py` emits
 
-`recommend.py`'s `_rule_baseline_bloat` rule emits the literal
-`lever="mcpServers"`. There is no settings key spelled `mcpServers` —
-the allowlist's two MCP-server keys are `enabledMcpjsonServers` and
-`disabledMcpjsonServers` (the `~/.claude.json` project-level
-enable/disable lists — `docs/config-layers.md`'s `claude_json`
-section). `schema.RECOMMEND_LEVER_MAP` resolves the bare `"mcpServers"`
-lever to `("settings", "disabledMcpjsonServers")`: the rule's own
-action text is "review which MCP servers … disabling unused ones
-shrinks every session's first-turn cache write", so the concrete,
-representable action is populating `disabledMcpjsonServers` — a
-profile has no way to discover *which* servers to newly enable, so
-`enabledMcpjsonServers` is never the target of this mapping. Every
-other `lever` literal `recommend.py`/`ttl.py` can emit
+Every `lever` literal `recommend.py`/`ttl.py` can emit
 (`"promptCacheTtl"`, `"autoCompactWindow"`, `"effortLevel"`,
-`"omitClaudeMd"`, and the per-agent-type `"experimental.cacheTtl in
-<agent>.md"` sentence form) resolves directly to an allowlisted key —
-see `tests/test_profiles_schema.py`'s `recommend.py` lever-coverage
-tests for the regression check that keeps this true as `recommend.py`
-evolves.
+`"omitClaudeMd"`, `"includeCoAuthoredBy"`, the `"env:NAME"` levers, and
+the per-agent-type `"experimental.cacheTtl in <agent>.md"` sentence
+form) resolves directly to an allowlisted key through
+`schema.RECOMMEND_LEVER_MAP` — see `tests/test_profiles_schema.py`'s
+`recommend.py` lever-coverage tests for the regression check that keeps
+this true as `recommend.py` evolves.
+
+`_rule_baseline_bloat` carries no lever. It used to emit
+`lever="mcpServers"`, which is no settings key: MCP servers live in
+`~/.claude.json` and `.mcp.json`, so `--patch-set` printed a change that
+doesn't exist, and `RECOMMEND_LEVER_MAP` mapped it to
+`disabledMcpjsonServers`. Its fix is a prompt now, and the mapping is
+gone.
 
 ## Applying a profile
 

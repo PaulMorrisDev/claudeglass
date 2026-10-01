@@ -166,10 +166,16 @@ Only numeric digests and short, non-identifying labels:
   the overridden numbers).
 
 For tool search, a reply keeps only how many tools were listed by name,
-by MCP server name, and the size of that list; a transcript keeps the
-size of each tool definition it loaded, by tool name. A definition's
-description and schema are never stored, and a tool name outside the
-API's tool-name alphabet (letters, digits, `_`, `-`, `.`) is dropped.
+by MCP server name, the size of that list and each server's share of
+it, the length of each server's instructions, and how many times Claude
+read each server's resources. A transcript keeps the size of each tool
+definition it loaded, by tool name; each MCP server's tool names after
+its prefix (at most 64 characters each); the size of the tools sent in
+full, by server; and each server's last connection problem (pending,
+needs sign-in, failed to connect). A definition's description and
+schema, and a server's instruction text, are never stored, and a tool
+name outside the API's tool-name alphabet (letters, digits, `_`, `-`,
+`.`) is dropped.
 
 For the quality signals, a message of yours keeps only a yes/no for
 whether its first 200 characters contain a correction phrase

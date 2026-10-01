@@ -957,6 +957,9 @@ def make_handler(
             usage_log_rows=usage_log_rows,
             # Your Sessions-tab ratings, for the Work habits tab.
             ratings=store.all_feedback(),
+            # No project picked: every project's sessions, so an MCP
+            # server every project loads can be judged unused.
+            all_projects=not project,
             # Spend > Usage shows cost by phase. The CLI keeps it behind
             # --phases; here it costs about 1% of the build.
             phases=True,

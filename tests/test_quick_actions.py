@@ -24,7 +24,7 @@ SRC = Path(__file__).resolve().parent.parent / "src" / "claudeglass"
 #: Every module that can build a ``Recommendation`` -- see recommend.py's
 #: own ``recommend()`` entry point, which folds each of these in.
 _RULE_MODULES = ("recommend.py", "advice.py", "carry.py", "compaction_sim.py", "handoff.py", "hook_costs.py",
-                  "run_split.py", "model_swap.py", "waste.py", "elasticity.py")
+                  "run_split.py", "model_swap.py", "waste.py", "elasticity.py", "tool_search.py")
 
 UNITS = Units(billing_mode="api", currency="USD")
 FIX_KEYS = {"key", "agent", "explainer", "command", "command_warning", "prompt", "title"}
@@ -1015,3 +1015,14 @@ def test_rec_fixes_drop_an_informational_fix_with_nothing_to_paste_or_run():
     prompt = {"key": None, "prompt": "Do this.", "command": None, "explainer": []}
     rec = SimpleNamespace(title="Most of your cost is re-reading the conversation", fixes=[empty, prompt])
     assert [f["prompt"] for f in qa._rec_fixes([rec])] == ["Do this."]
+
+
+def test_tools_offers_the_baseline_fix_when_no_subagent_started(tmp_path):
+    # baseline-bloat is about main sessions: no subagent run mustn't hide it.
+    rec = Recommendation(id="baseline-bloat", severity="advice", category="settings", title="Big start",
+                         action="Turn off MCP servers.", lever=None)
+    empty = NS(sections=[], recommendations=[rec])
+    result = qa.run("tools", _ctx(tmp_path, empty))
+    assert result["status"] == "act" and "No subagents started" in result["summary"]
+    assert result["fixes"] and "~/.claude.json" in result["fixes"][0]["prompt"]
+    assert qa.run("tools", _ctx(tmp_path, NS(sections=[], recommendations=[])))["status"] == "no_data"

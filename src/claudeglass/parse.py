@@ -50,7 +50,21 @@ was requested, by MCP server (``Turn.deferred_tools_by_server``), and the
 size of the name list (``deferred_list_chars``); the transcript keeps
 each loaded definition's size by tool name
 (``TranscriptResult.tool_definition_chars``). ``tool_search.py`` prices
-what that kept out of each request.
+what that kept out of each request. A tool named in ``surfacedNames`` is
+listed and also sent in full, so it isn't counted as kept out.
+
+MCP servers: each server is keyed by its name as its tools carry it
+(:func:`mcp_name`), wherever the transcript names it. Each turn keeps its
+share of the name list (``Turn.deferred_list_chars_by_server``), the
+length of each server's instructions then in context
+(``mcp_instructions_delta``: ``Turn.mcp_instruction_chars_by_server``)
+and the servers whose resources it read (``Turn.mcp_resource_servers``).
+The transcript keeps each server's tool names after the prefix
+(``TranscriptResult.mcp_tool_suffixes_by_server``), the size of the tools
+a ``prompt_snapshot`` shows were sent in full
+(``upfront_definition_chars_by_server``) and the last connection problem
+``deferred_tools_delta`` reported (``mcp_connection_status``). Names,
+lengths and counts only: never an instruction or a definition.
 
 Compaction calls: Claude Code bills the request that writes a
 compaction's summary, but logs only the ``compact_boundary`` line, never
@@ -757,6 +771,12 @@ class _PendingTurn:
     #: ``deferred_list_chars``): set once, when the reply is requested.
     deferred_tools_by_server: dict[str, int] = field(default_factory=dict)
     deferred_list_chars: int = 0
+    #: MCP-servers addition (see model.py's
+    #: ``Turn.deferred_list_chars_by_server``/
+    #: ``mcp_instruction_chars_by_server``/``mcp_resource_servers``).
+    deferred_list_chars_by_server: dict[str, int] = field(default_factory=dict)
+    mcp_instruction_chars_by_server: dict[str, int] = field(default_factory=dict)
+    mcp_resource_servers: dict[str, int] = field(default_factory=dict)
 
 
 #: A tool name kept as a key (``TranscriptResult.tool_definition_chars``):
@@ -776,26 +796,55 @@ def tool_server(name: str) -> str:
     return BUILT_IN_TOOLS
 
 
+_MCP_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")
+
+
+def mcp_name(raw: str) -> str:
+    """An MCP server's name as its tools carry it (``mcp__<name>__<tool>``,
+    :func:`tool_server`): every character outside ``[A-Za-z0-9_-]`` made
+    ``_``, at most 64 characters. Instructions, ``attributionMcpServer``,
+    connection lists and config keep the raw name ("Claude Browser",
+    "plugin:playwright:playwright", "claude.ai Claude Docs"); this puts
+    each under the same key as the server's tools."""
+    return _MCP_NAME_UNSAFE_RE.sub("_", str(raw))[:64]
+
+
+#: The tools that read an MCP server's resources, and the input that names
+#: the server.
+_MCP_RESOURCE_TOOLS = frozenset({"ReadMcpResourceTool", "ListMcpResourcesTool"})
+
+#: ``deferred_tools_delta`` list -> the connection problem it reports.
+_MCP_CONNECTION_LISTS = (
+    ("pendingMcpServers", "pending"),
+    ("needsAuthMcpServers", "needs sign-in"),
+    ("failedMcpServers", "failed to connect"),
+)
+
+
 class _DeferredTools:
     """Tool search, as a transcript records it (see the module docstring):
     the tools listed by name only, and the full definitions loaded since."""
 
-    __slots__ = ("names", "loaded", "definition_chars", "_snapshot")
+    __slots__ = ("names", "loaded", "surfaced", "definition_chars", "_snapshot")
 
     def __init__(self) -> None:
         self.names: set[str] = set()
         self.loaded: set[str] = set()
+        #: Listed tools also sent in full (``surfacedNames``).
+        self.surfaced: set[str] = set()
         #: Tool name -> characters of its full definition, as loaded.
         self.definition_chars: dict[str, int] = {}
-        self._snapshot: tuple[dict[str, int], int] | None = ({}, 0)
+        self._snapshot: tuple[dict[str, int], int, dict[str, int]] | None = ({}, 0, {})
 
     def note(self, attachment: dict) -> None:
         kind = attachment.get("type")
         if kind == "deferred_tools_delta":
             for name in _tool_names(attachment.get("removedNames")):
                 self.names.discard(name)
+                self.surfaced.discard(name)
             for name in _tool_names(attachment.get("addedNames")):
                 self.names.add(name)
+            self.surfaced.update(_tool_names(attachment.get("surfacedNames")))
         elif kind == "deferred_tools_record":
             entries = attachment.get("entries")
             for entry in entries if isinstance(entries, list) else ():
@@ -812,23 +861,103 @@ class _DeferredTools:
             return
         self._snapshot = None
 
-    def snapshot(self) -> tuple[dict[str, int], int]:
-        """Tools listed by name only when a reply is requested, by server,
-        and the characters of the name list sent in their place."""
+    def snapshot(self) -> tuple[dict[str, int], int, dict[str, int]]:
+        """Tools listed by name only when a reply is requested, by server;
+        the characters of the name list sent in their place; and each
+        server's share of those characters. A surfaced tool is on the list
+        but sent in full, so it counts towards the list, not the tools."""
         if self._snapshot is None:
             by_server: dict[str, int] = {}
-            for name in self.names - self.loaded:
+            for name in self.names - self.loaded - self.surfaced:
                 server = tool_server(name)
                 by_server[server] = by_server.get(server, 0) + 1
-            self._snapshot = (by_server, sum(len(name) + 1 for name in self.names))
-        by_server, list_chars = self._snapshot
-        return dict(by_server), list_chars
+            chars_by_server: dict[str, int] = {}
+            for name in self.names:
+                server = tool_server(name)
+                chars_by_server[server] = chars_by_server.get(server, 0) + len(name) + 1
+            self._snapshot = (by_server, sum(chars_by_server.values()), chars_by_server)
+        by_server, list_chars, chars_by_server = self._snapshot
+        return dict(by_server), list_chars, dict(chars_by_server)
+
+
+class _McpServers:
+    """MCP servers, as a transcript records them beyond tool search's own
+    list (see the module docstring). Names, lengths and counts only."""
+
+    __slots__ = ("instructions", "suffixes", "upfront", "status")
+
+    def __init__(self) -> None:
+        #: Server -> characters of its instructions now in context.
+        self.instructions: dict[str, int] = {}
+        #: Server -> its tools' names after ``mcp__<server>__``.
+        self.suffixes: dict[str, set[str]] = {}
+        #: Server -> characters of its tools a ``prompt_snapshot`` shows
+        #: were sent in full (the largest snapshot's).
+        self.upfront: dict[str, int] = {}
+        #: Server -> the last connection problem reported for it, cleared
+        #: once its tools or instructions arrive.
+        self.status: dict[str, str] = {}
+
+    def tool(self, name: str) -> None:
+        server = tool_server(name)
+        if server != BUILT_IN_TOOLS:
+            self.suffixes.setdefault(server, set()).add(name.split("__", 2)[2][:64])
+            # Its tools arrived, so it connected: an earlier problem is over.
+            self.status.pop(server, None)
+
+    def note(self, attachment: dict) -> None:
+        kind = attachment.get("type")
+        if kind == "mcp_instructions_delta":
+            for raw in _raw_names(attachment.get("removedNames")):
+                self.instructions.pop(mcp_name(raw), None)
+            names, blocks = attachment.get("addedNames"), attachment.get("addedBlocks")
+            if isinstance(names, list) and isinstance(blocks, list):
+                for raw, block in zip(names, blocks):
+                    if isinstance(raw, str) and raw and isinstance(block, str):
+                        self.instructions[mcp_name(raw)] = len(block)
+                        self.status.pop(mcp_name(raw), None)
+        elif kind == "deferred_tools_delta":
+            for name in _tool_names(attachment.get("addedNames")):
+                self.tool(name)
+            for key, word in _MCP_CONNECTION_LISTS:
+                for raw in _raw_names(attachment.get(key)):
+                    self.status[mcp_name(raw)] = word
+        elif kind == "deferred_tools_record":
+            entries = attachment.get("entries")
+            for entry in entries if isinstance(entries, list) else ():
+                name = entry.get("name") if isinstance(entry, dict) else None
+                if isinstance(name, str) and _TOOL_NAME_RE.match(name):
+                    self.tool(name)
+        elif kind == "prompt_snapshot":
+            tools = attachment.get("tools")
+            sizes: dict[str, int] = {}
+            for entry in tools if isinstance(tools, list) else ():
+                name = entry.get("name") if isinstance(entry, dict) else None
+                if not isinstance(name, str) or not _TOOL_NAME_RE.match(name):
+                    continue
+                server = tool_server(name)
+                if server == BUILT_IN_TOOLS:
+                    continue
+                self.tool(name)
+                definition = {key: entry.get(key) for key in ("name", "description", "schema")}
+                chars = len(json.dumps(definition, ensure_ascii=False, separators=(",", ":"), default=str))
+                sizes[server] = sizes.get(server, 0) + chars
+            for server, chars in sizes.items():
+                self.upfront[server] = max(chars, self.upfront.get(server, 0))
 
 
 def _tool_names(value) -> list[str]:
     if not isinstance(value, list):
         return []
     return [name for name in value if isinstance(name, str) and _TOOL_NAME_RE.match(name)]
+
+
+def _raw_names(value) -> list[str]:
+    """Raw MCP server names (any text: they're only ever passed through
+    :func:`mcp_name`)."""
+    if not isinstance(value, list):
+        return []
+    return [name for name in value if isinstance(name, str) and name]
 
 
 def _plan_stats(plan: str) -> PlanStats:
@@ -874,6 +1003,11 @@ def _merge_content_blocks(
         tool_input = block.get("input")
         if not isinstance(tool_input, dict):
             continue
+        if name in _MCP_RESOURCE_TOOLS:
+            server = tool_input.get("server")
+            if isinstance(server, str) and server:
+                server = mcp_name(server)
+                pending.mcp_resource_servers[server] = pending.mcp_resource_servers.get(server, 0) + 1
         if pending.cmd_prefix is None and name in _SHELL_TOOL_NAMES:
             command = tool_input.get("command")
             if isinstance(command, str) and command:
@@ -1689,6 +1823,9 @@ def _finalize_turn(
         guard_blocks=dict(pending.guard_blocks),
         deferred_tools_by_server=dict(pending.deferred_tools_by_server),
         deferred_list_chars=pending.deferred_list_chars,
+        deferred_list_chars_by_server=dict(pending.deferred_list_chars_by_server),
+        mcp_instruction_chars_by_server=dict(pending.mcp_instruction_chars_by_server),
+        mcp_resource_servers=dict(pending.mcp_resource_servers),
         prompt_steps=prompt_steps,
         prompt_plan_mode=prompt_plan_mode,
         human_vague=human_vague,
@@ -1997,6 +2134,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: Tool search (see module docstring): the deferred list and the
     #: definitions loaded from it so far.
     deferred_tools = _DeferredTools()
+    #: MCP servers (see module docstring): instructions, tool names,
+    #: definitions sent in full and connection problems.
+    mcp_servers = _McpServers()
     #: Compaction calls (see module docstring): each ``compact_boundary``
     #: event, with how many turns come before it in ``turns`` once the
     #: turn still open is finalised, and the length of the summary that
@@ -2082,7 +2222,12 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             events_since_current = []
             attachments_since_current = []
             current = _new_pending(d, tool_use_names, blocked_calls)
-            current.deferred_tools_by_server, current.deferred_list_chars = deferred_tools.snapshot()
+            (
+                current.deferred_tools_by_server,
+                current.deferred_list_chars,
+                current.deferred_list_chars_by_server,
+            ) = deferred_tools.snapshot()
+            current.mcp_instruction_chars_by_server = dict(mcp_servers.instructions)
             current_key = key
             # Usage-limits addition (see module docstring): a usage-cap
             # hit lives on the synthetic assistant line's own text, which
@@ -2145,6 +2290,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
                     skill_names.update(name for name in names if isinstance(name, str))
             elif isinstance(attachment, dict):
                 deferred_tools.note(attachment)
+                mcp_servers.note(attachment)
 
         event = events_mod.classify_line(d)
         if event is None:
@@ -2300,6 +2446,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         tool_result_calls=tool_result_calls,
         parser_notes=parser_notes,
         tool_definition_chars=dict(deferred_tools.definition_chars),
+        mcp_tool_suffixes_by_server={server: sorted(names) for server, names in mcp_servers.suffixes.items()},
+        upfront_definition_chars_by_server=dict(mcp_servers.upfront),
+        mcp_connection_status=dict(mcp_servers.status),
     )
 
 

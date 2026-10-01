@@ -761,6 +761,15 @@ def _explain_baseline_bloat(rec: Recommendation, ctx: _Context) -> None:
     rec.action = "Turn off MCP servers and plugins in the projects that don't use them."
 
 
+def _explain_mcp_unused_server(rec: Recommendation, ctx: _Context) -> None:
+    rec.estimated_saving = ctx.money(rec.saving_usd, prefix="At least ")
+    rec.saving_basis = ctx.basis(
+        "What these servers' tool names, instructions and tools sent in full cost in this window, at each "
+        "reply's cache read rate; a reply that rebuilt the cache paid more. It starts with your next new "
+        "session, not the ones already running."
+    )
+
+
 def _explain_spawn_cost(rec: Recommendation, ctx: _Context) -> None:
     write = _evidence_value(rec, "first-turn write")
     agent = rec.agent_type or "this agent"
@@ -912,6 +921,7 @@ _EXPLAIN: dict[str, Callable[[Recommendation, _Context], None]] = {
     "hook-block-resent": _explain_hook_block_resent,
     "hook-context-carry": _explain_hook_context_carry,
     "baseline-bloat": _explain_baseline_bloat,
+    "mcp-unused-server": _explain_mcp_unused_server,
     "spawn-cost": _explain_spawn_cost,
     "agent-report-size": _explain_agent_report_size,
     "limit-pressure": _explain_limit_pressure,

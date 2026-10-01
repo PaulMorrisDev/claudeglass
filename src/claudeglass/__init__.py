@@ -233,7 +233,13 @@ __version__ = "0.12.1"
 #: saver's redirect has subkind ``known_savers.REDIRECT_DENIAL_KIND``, not
 #: Claude Code's own ``permission-rule``, so it no longer counts as a
 #: request you turned down.
-PARSER_VERSION = 34
+#:
+#: Bumped to 35: each MCP server's share of the deferred name list, its
+#: instructions' length, its tools' names, the tools sent in full and its
+#: connection problems (model.py's MCP-servers addition), and a surfaced
+#: tool no longer counts as kept out by tool search. A pre-35 digest has
+#: none of these, so every server would look free.
+PARSER_VERSION = 35
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

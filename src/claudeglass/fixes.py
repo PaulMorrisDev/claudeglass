@@ -335,10 +335,19 @@ _WORKFLOW_PROMPTS = {
         "permission before editing files under .claude."
     ),
     "baseline-bloat": (
-        "Please list the MCP servers and plugins I have enabled (in ~/.claude/settings.json, this project's "
-        ".claude/settings.json and .mcp.json), say which ones this project doesn't seem to use, and propose "
-        "turning those off for this project only. Show me the proposed change before making it. Claude Code "
-        "will ask my permission before editing files under .claude."
+        "Please list the MCP servers and plugins I have enabled (MCP servers in ~/.claude.json and this "
+        "project's .mcp.json, plugins in ~/.claude/settings.json and this project's .claude/settings.json), "
+        "say which ones this project doesn't seem to use, and propose turning those off for this project "
+        "only. Show me the proposed change before making it, and don't print any token or key from those "
+        "files. Claude Code will ask my permission before editing files under .claude."
+    ),
+    # {action} is the card's own per-server list: which servers, and the
+    # fix for each one's kind (tool_search.server_fix).
+    "mcp-unused-server": (
+        "Please help me turn them off, as follows. {action} Before running a command, show it to me; "
+        "before removing a server, show me its command and arguments (never its tokens, keys or env values) "
+        "so I can add it back later. For a switch in the desktop app or on claude.ai, which you can't change "
+        "yourself, tell me exactly where to click instead."
     ),
     "agent-report-size": (
         "{agent} sends back long final reports, and each one stays in my main session's context. Please "
@@ -613,11 +622,24 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "Nothing to undo.",
     ),
     "baseline-bloat": (
-        "settings.json's mcpServers list (or a project's .mcp.json), and each agent's own mcpServers "
-        "frontmatter if only some agents need a given server.",
+        "~/.claude.json (your user-scope MCP servers, and each project's local-scope ones and /mcp "
+        "switches), a project's .mcp.json, or settings.json's enabledPlugins; and each agent's own "
+        "mcpServers frontmatter if only some agents need a given server.",
         "Turning a server off for this project means no agent in it can use that server's tools, even for "
         "a task that would have needed one.",
         "Turn the server back on in the same file (Claude Code shows the change before saving it).",
+    ),
+    "mcp-unused-server": (
+        "Only the servers named on the card. A connector in the desktop app is switched off under + > "
+        "Connectors, or, if you added it, disconnected at claude.ai/customize/connectors (which removes it "
+        "from claude.ai chat too; one Anthropic provides itself has nothing to disconnect there); a /mcp switch or a local-scope server applies to one project (~/.claude.json); a user-scope "
+        "server applies to every project; a project's .mcp.json server is turned off just for you in "
+        ".claude/settings.local.json.",
+        "Claude can't use a server you've turned off, even for a task that needs it, until you turn it back "
+        "on. Already-running sessions keep it until they end or are summarised.",
+        "Switch the connector back on under + > Connectors or reconnect it at claude.ai/customize/connectors; "
+        "re-enable it in /mcp or /plugin; or add a removed server back with claude mcp add, using the "
+        "command and arguments Claude showed you before removing it.",
     ),
     "agent-report-size": (
         "The agent's own file (~/.claude/agents/<type>.md or .claude/agents/<type>.md) if it has one, or "
@@ -1090,7 +1112,9 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     fix at all, same as before UX-8. ``rec.variant``, when set, picks
     ``"id:variant"`` over plain ``id`` in both dicts, falling back to the
     plain id when there's no variant-specific entry (see
-    :data:`Recommendation.variant`). A purely informational id (no
+    :data:`Recommendation.variant`). A prompt template may use
+    ``{agent}`` (``rec.agent_type``) and ``{action}`` (``rec.action``,
+    for a card whose fix differs per item it lists). A purely informational id (no
     change proposed) has an explainer but no prompt: ``prompt`` is then
     ``""``, and the render layer (``render/markdown.py``,
     ``render/html.py``, the dashboard's ``ui.js`` and ``page-setup.js``) skips the "Ask Claude to do it"
@@ -1119,7 +1143,7 @@ def build_fixes(rec: Recommendation) -> list[dict]:
         opening = _FINDING_OPEN.format(title=rec.title)
         if rec.why:
             opening = f"{opening} {rec.why}"
-        prompt = f"{opening} {template.format(agent=rec.agent_type or 'this agent')}"
+        prompt = f"{opening} {template.format(agent=rec.agent_type or 'this agent', action=rec.action)}"
     else:
         prompt = ""
     fix = {

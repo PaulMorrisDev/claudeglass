@@ -437,7 +437,6 @@ def test_recommend_py_lever_literals_are_the_expected_set():
     ``test_effort_level_lever_is_representable`` below instead.
     """
     assert _recommend_py_lever_literals() == {
-        "mcpServers",
         "omitClaudeMd",
         "env:ENABLE_TOOL_SEARCH",
         "env:CLAUDE_CODE_MAX_OUTPUT_TOKENS",

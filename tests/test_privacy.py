@@ -927,3 +927,48 @@ def test_privacy_diagnostics_ignored_line_type_is_sanitised_not_stored_verbatim(
         assert len(key) <= 40
         assert "<" not in key and ">" not in key
     _assert_no_violations(result)
+
+
+def test_privacy_mcp_server_fields_hold_only_identifiers_and_numbers(tmp_path: Path):
+    """The MCP server fields are dicts keyed by server names from the
+    transcript, which the generic walk above doesn't enter: keys must be
+    tool-name-shaped identifiers, never raw text or paths, and the values
+    counts, lengths, capped tool-name suffixes or a closed status word."""
+    hostile = "C:\\Users\\someone\\secret notes " + "x" * 200
+    long_tool = "mcp__srv__" + "t" * 110
+    lines = [
+        attachment_line(
+            "deferred_tools_delta", addedNames=[long_tool], addedLines=[long_tool], removedNames=[],
+            surfacedNames=[], pendingMcpServers=[hostile], needsAuthMcpServers=["a b c"], failedMcpServers=[],
+        ),
+        attachment_line("mcp_instructions_delta", addedNames=[hostile], addedBlocks=["Private instructions. " * 10],
+                        removedNames=[]),
+        attachment_line("prompt_snapshot", tools=[{"name": "mcp__up__" + "u" * 100, "description": "Private.",
+                                                    "schema": {}}]),
+        turn_line(message_id="msg_1", content=[
+            tool_use_block("ReadMcpResourceTool", "toolu_1", {"server": hostile, "uri": "file:///C:/Users/x"}),
+        ]),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id="s"))
+    ident = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+    fields = [
+        *(getattr(turn, name) for turn in result.turns for name in (
+            "deferred_list_chars_by_server", "mcp_instruction_chars_by_server", "mcp_resource_servers")),
+        result.upfront_definition_chars_by_server,
+        result.mcp_tool_suffixes_by_server,
+        result.mcp_connection_status,
+    ]
+    assert all(fields), "every field should hold something for this fixture"
+    for field in fields:
+        for key, value in field.items():
+            assert ident.match(key), key
+            if isinstance(value, int):
+                continue
+            if isinstance(value, str):
+                assert value in {"pending", "needs sign-in", "failed to connect"}, value
+                continue
+            assert all(len(suffix) <= _MAX_STR_LEN and ident.match(suffix) for suffix in value), value
+    assert "Private" not in repr(result) and "secret notes" not in repr(result)
+    assert_privacy(result)

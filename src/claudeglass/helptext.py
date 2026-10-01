@@ -145,6 +145,7 @@ PLACEMENT: dict[str, str] = {
     # what tool search saves
     "tool_search_summary": "keep",
     "tool_search_by_server": "keep",
+    "tool_search_servers": "keep",
     "cost_record_summary": "keep",
     "cost_record_sessions": "keep",
     # quality signals
@@ -4185,8 +4186,8 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Each MCP server whose tools were deferred, and Claude Code's own tools, with what keeping their "
             "definitions out saved.",
-            read="A server with no loaded tool is sized at the average of every server. The name list and the "
-            "searches aren't split by server.",
+            read="A server with no loaded tool is sized at the average of every server. The searches aren't split "
+            "by server. Each server's share of the name list is in \"Each MCP server\".",
             act="",
         ),
         columns={
@@ -4200,7 +4201,11 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Kept out of each reply",
                 "Tokens of its definitions left out of each of those requests, on average.",
             ),
-            "saving_usd": ("Saved by keeping them out", "What those tokens would have cost, at list price."),
+            "saving_usd": (
+                "Saved by keeping them out",
+                "What those tokens would have cost, at list price. It falls when you turn a server off, "
+                "since there is less left to keep out.",
+            ),
         },
         value_labels={
             "built-in": "Claude Code's own tools",
@@ -4208,6 +4213,60 @@ TABLE_COPY: dict[str, TableCopy] = {
             "all servers": "All servers",
         },
         lead_columns=["server", "most_deferred", "definition_tokens", "kept_per_reply", "saving_usd"],
+    ),
+    "tool_search_servers": TableCopy(
+        title="Each MCP server",
+        help=Help(
+            shows="Every MCP server your sessions were offered or your config names, whether Claude used it, and "
+            "what keeping it cost.",
+            read="A server you never use still costs every reply its tool names, instructions and any tools sent in "
+            "full. Amounts are at the cache read rate, so they are the least it cost.",
+            act="Turn off the servers marked \"Never used: turn it off\". The card on the Actions page says how for "
+            "each kind.",
+        ),
+        columns={
+            "server": ("MCP server", "The server's name in your sessions."),
+            "kind": ("Kind", "Where it comes from: a claude.ai connector, a plugin, or your config at some scope."),
+            "status": (
+                "Status",
+                "Whether Claude used it. An unused server is flagged once many main sessions over a week or more "
+                "were offered it, recently, and it cost enough to matter.",
+            ),
+            "main_sessions": ("Main sessions offered it", "Main sessions that were offered its tools."),
+            "subagent_runs": ("Subagent runs offered it", "Subagent runs that were offered its tools."),
+            "uses": ("Uses", "Calls to its tools, reads of its resources, and its commands, in all of them."),
+            "first_seen_days": ("First offered", "How many days before the end of this window it was first offered."),
+            "last_seen_days": ("Last offered", "How many days before the end of this window it was last offered."),
+            "also_named": ("Also named", "Other names the same server went by, such as its ID in the desktop app."),
+            "sample_tools": ("Some of its tools", "Up to three of its tools, to help you recognise it."),
+            "config_name": ("Name in your config", "Its name in your MCP config, where that differs."),
+            "projects": ("Projects whose config has it", "Projects whose local or shared MCP config names it."),
+            "list_usd": ("Its share of the name list", "Its part of the tool-name list, by length, at the cache read rate."),
+            "instructions_usd": ("Its instructions", "Its own instructions to Claude, at the cache read rate."),
+            "definitions_usd": ("Its tools sent in full", "Its tools sent with full definitions, at the cache read rate."),
+            "removable_usd": ("Cost of keeping it", "The three amounts added up: what turning it off would have saved."),
+        },
+        value_labels={
+            "remove": "Never used: turn it off",
+            "unused": "Never used, below the bar",
+            "used": "Used",
+            "subagents only": "Only subagents were offered it",
+            "needs sign-in": "Needs sign-in",
+            "failed to connect": "Failed to connect",
+            "pending": "Still connecting",
+            "configured, not seen": "In your config, never offered",
+            "kind unknown": "Kind unknown",
+            "managed": "Set by your organisation",
+            "all-projects view only": "Shown in the all-projects view",
+            "claude.ai connector (desktop app)": "Claude.ai connector, desktop app",
+            "claude.ai connector": "Claude.ai connector",
+            "plugin": "Plugin",
+            "user (every project)": "Your config, every project",
+            "local (one project)": "Your config, one project",
+            "project (.mcp.json)": "Project's shared MCP file",
+            "unknown": "Unknown",
+        },
+        lead_columns=["server", "kind", "status", "main_sessions", "uses", "removable_usd"],
     ),
     # -- savings: wasted replies --------------------------------------------------
     "waste_summary": TableCopy(

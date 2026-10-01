@@ -1230,6 +1230,7 @@ def build_report(
     baseline_note: str | None = None,
     config_dir: str | Path | None = None,
     ratings: dict | None = None,
+    all_projects: bool = False,
 ) -> ReportModel:
     """Assemble the whole :class:`ReportModel` for ``corpus``. See the
     module docstring for section order/keys and the deviations from the
@@ -1294,6 +1295,12 @@ def build_report(
     ``profile_id`` comes from the hook captures in ``snapshots``. The
     ``habits`` section also reads the free signals metrics capture logged
     there (``signals.load``), only when its salt already exists.
+
+    ``all_projects`` says the corpus covers every project (the CLI's
+    ``--all-projects``, the dashboard with no project picked), so a
+    server every project loads can be judged unused (``tool_search``'s
+    ``mcp-unused-server``). Defaults to ``False``: such a server is then
+    shown as "all-projects view only".
 
     ``ratings`` holds your dashboard ratings by session id
     (``Store.all_feedback``), for the ``habits`` section's outcomes; the
@@ -1624,7 +1631,9 @@ def build_report(
         all_results, pricing, run_split_th, compaction_sim_stats.rediscovery_allowance_usd
     )
     hook_stats = hook_costs.compute_hook_costs(all_results, pricing, hooks_th)
-    tool_search_stats = tool_search.compute_tool_search(all_results, pricing, tool_search_th)
+    tool_search_stats = tool_search.compute_tool_search(
+        all_results, pricing, tool_search_th, snapshots=snapshots, all_projects=all_projects
+    )
 
     # How amounts are phrased (billing mode, and under subscription the
     # usage-limit fit). Built before the sections: the elasticity section

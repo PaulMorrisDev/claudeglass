@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **MCP servers you never use.** A new card, `mcp-unused-server`, names
+  the MCP servers offered in your main sessions for a week or more that
+  Claude never used, with what keeping them cost and how to turn each
+  one off for its kind: a desktop-app connector under + > Connectors, a
+  claude.ai connector or plugin with `/mcp`, a user or local server with
+  `claude mcp remove`, a project's shared server in
+  `.claude/settings.local.json`. The cost is its share of the tool-name
+  list, its instructions and its tools sent in full, at the cache read
+  rate, so it is the least it cost. A new table, `tool_search_servers`,
+  lists every MCP server with its kind, status, uses and cost; nothing
+  in the code names a server. The "What does MCP tool search save
+  you?" check offers the fix. Parsed sessions are re-read once to pick
+  this up.
+
 - **"What does tokensave save you?"** If you use
   [tokensave](https://github.com/aovestdipaperino/tokensave), a new
   check sets what it saved against what it cost. The saving is
@@ -27,6 +41,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Tools sent in full aren't counted as kept out.** Tool search's
+  "Kept out of each reply" no longer counts a listed tool Claude Code
+  also sent with its full definition.
+- **"The session baseline is large" points at the right files.** Its
+  fix now looks for MCP servers in `~/.claude.json` and `.mcp.json`,
+  where they live, not a `settings.json` key that doesn't exist, and
+  `report --patch-set` no longer prints that key. The dashboard no
+  longer says it changes your user settings. If you ignored this
+  card, it shows once more.
+- **Check fixes aren't hidden for want of subagents.** "Do agents carry
+  tools, MCP servers or skills they never use?" offers the
+  large-baseline fix even when no subagent ran.
 - **A token saver turning a call away isn't waste.** When tokensave's
   hook sends a Grep, Glob or Explore agent to its own tools, the reply
   is counted as `redirected`. It is priced and shown, but left out of

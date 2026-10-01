@@ -1650,6 +1650,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             baseline_note=baseline_note,
             config_dir=config_dir,
             ratings=ratings,
+            all_projects=bool(getattr(args, "all_projects", False)),
         )
     except ScorecardError as exc:
         # Fix R20: a misordered [thresholds.scorecard] override in
@@ -3452,6 +3453,9 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
         config,
         projects=tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug})),
         window=f"last {coaching.DAYS} days",
+        # Every project's sessions (_capture_corpus), as the service's
+        # daily run builds it.
+        all_projects=True,
         config_dir=config_dir,
     )
     data = coaching.from_report(report, config_dir, config.thresholds, now=now)

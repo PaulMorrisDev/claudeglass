@@ -68,7 +68,7 @@ and it's still useful when you want one section by itself.
 | `phases` | Phases | `phases.py` | cost split across DISCOVERY (read/search only), IMPLEMENTATION (real edits or an ordinary shell command), VERIFICATION (a test/build tool, or a scratch-file edit), OTHER — in the CLI's report only when `--phases` is given; the dashboard always builds it |
 | `config` | Config | `report.py` via `snapshots.py` | one diff table per config key that changed across the window's snapshots (capped at 20 keys) — only present when `snapshot-config` snapshots exist for the window |
 | `context_budget` | Context budget | `context_budget.py` | an estimated breakdown of what a session's context window is spent on before any real work (system prompt and tools, skills, memory files, custom agents, MCP tools), plus ground truth where the statusline logged it |
-| `tool_search` | What tool search saves | `tool_search.py` | how many tool definitions MCP tool search kept out of each request, by MCP server, what that saved at each reply's own cache rate, and the net after the name list and the replies that only searched — see [`tool-search.md`](tool-search.md) |
+| `tool_search` | What tool search saves | `tool_search.py` | how many tool definitions MCP tool search kept out of each request, by MCP server, what that saved at each reply's own cache rate, and the net after the name list and the replies that only searched; and every MCP server, whether Claude used it and what keeping it cost — see [`tool-search.md`](tool-search.md) |
 | `capture` | Capture | `habits.py` | what metrics capture has cost since it was turned on, measured from the transcripts, and what the habits and feedback that depend on it are worth a week — see [`capture.md`](capture.md) |
 | `cost_record` | Claude Code's own cost record | `reconcile.py` | whether ClaudeGlass's cost matches what Claude Code itself recorded for the same sessions, over the same span, with the known reasons they differ split out — on Data quality, and `claudeglass check cost-record` |
 | `scorecard` | Scorecard | `scorecard.py` | five 1-5 levels (cache efficiency, context hygiene, agent efficiency, config fit, data quality) plus an overall level (the minimum of the first four, never an average) |
@@ -1322,9 +1322,22 @@ deferred-tool list.
   reply, its definitions measured, the size each deferred tool was
   counted at, whether that size came from `its own tools` or `all
   servers`, replies, tokens kept out of each reply and the saving.
+- `tool_search_servers` — one row per MCP server the window's
+  transcripts or config snapshots name (never `built-in`), uncapped,
+  ordered by status then cost: kind, status, main sessions and subagent
+  runs that were offered it, uses, first and last offered (days before
+  the window's end), other names, up to three of its tools, its name in
+  your config and the projects that have it, and what keeping it cost
+  (its share of the name list, its instructions, its tools sent in full,
+  and their sum), at the front-of-prompt rate.
 
-There is no rule: tool search is already on wherever this section has
-anything to measure. The quick action `tool-search` reads both tables.
+`recommend.recommend()` runs `tool_search.RULES` after `hook_costs.RULES`:
+`mcp-unused-server` (severity `advice`, category `workflow`, no lever)
+lists every server whose status is `remove`, each with the fix for its
+kind, and cites `tool_search_servers` cells; see
+[`tool-search.md`](tool-search.md#the-mcp-unused-server-recommendation).
+The quick action `tool-search` reads the first two tables and offers
+the card's fix.
 
 ## `savers` (`savers.py`)
 
@@ -1548,7 +1561,8 @@ without `agent_startup` data; otherwise the per-part `spawn-claude-md`,
 `data-quality`, `limit-pressure`. Then each module's own rule:
 `tool-output-carry` (`carry.RULES`), `plan-handoff` (`handoff.RULES`),
 `run-split` (`run_split.RULES`), `hook-failures`, `hook-block-resent`
-and `hook-context-carry` (`hook_costs.RULES`), `compaction-window`
+and `hook-context-carry` (`hook_costs.RULES`), `mcp-unused-server`
+(`tool_search.RULES`), `compaction-window`
 (`compaction_sim.RULES`), `model-tier` (`model_swap.RULES`) and
 `wasted-turns` (`waste.RULES`). Last, `window-budget`
 (`elasticity.RULES`, subscription billing only). Rules are gated by

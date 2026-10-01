@@ -237,3 +237,38 @@ def test_render_fix_prints_no_note_when_note_is_none():
     assert RESTART_NOTE not in md_lines and SCOPE_NOTE not in md_lines
     html = _fix_html(fix)
     assert RESTART_NOTE not in html and SCOPE_NOTE not in html
+
+
+def test_baseline_bloat_points_at_where_mcp_servers_really_live():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(id="baseline-bloat", severity="advice", category="settings", title="x", lever=None)
+    (fix,) = fixes_mod.build_fixes(rec)
+    where = dict(fix["explainer"])["Where and who it affects"]
+    assert "~/.claude.json" in where and "settings.json's mcpServers" not in where
+    assert "~/.claude.json" in fix["prompt"] and ".mcp.json" in fix["prompt"]
+
+
+def test_a_workflow_prompt_can_carry_the_cards_own_action():
+    """``mcp-unused-server``'s fix differs per server, so its prompt takes
+    the card's action (``{action}``) after the finding, which opens it
+    once."""
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id="mcp-unused-server",
+        severity="advice",
+        category="workflow",
+        title="2 MCP servers you never use are loaded into your sessions",
+        why="They were offered in 40 main sessions.",
+        action="Notes: run `claude mcp remove notes --scope user`.",
+        lever=None,
+    )
+    (fix,) = fixes_mod.build_fixes(rec)
+    opening = fixes_mod._FINDING_OPEN.format(title=rec.title)
+    assert fix["prompt"].startswith(f"{opening} {rec.why} ")
+    assert fix["prompt"].count(opening) == 1
+    assert rec.action in fix["prompt"] and "{action}" not in fix["prompt"]
+    assert "never its tokens" in fix["prompt"]

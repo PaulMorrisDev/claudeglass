@@ -77,13 +77,17 @@ def _changes(rec) -> list[dict]:
 
 def fingerprint(rec) -> str:
     """What makes this recommendation the same one: its rule and the
-    changes it suggests, or for one without changes its rule, agent type
-    and lever. Savings, evidence and wording are left out."""
+    changes it suggests, or for one without changes its rule, agent type,
+    lever and subject (left out when empty, so a recommendation without
+    one keeps the fingerprint it always had). Savings, evidence and
+    wording are left out."""
     changes = sorted(json.dumps(change, sort_keys=True, default=str) for change in _changes(rec))
     if changes:
         payload = {"id": rec.id, "changes": changes}
     else:
         payload = {"id": rec.id, "agent_type": rec.agent_type, "lever": rec.lever}
+        if getattr(rec, "subject", ""):
+            payload["subject"] = rec.subject
     return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 

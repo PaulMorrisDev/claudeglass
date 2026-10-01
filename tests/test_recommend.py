@@ -908,7 +908,9 @@ def test_baseline_bloat_fires_with_snapshot_evidence():
     )
     recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
     rec = next(rec for rec in recs if rec.id == "baseline-bloat")
-    assert rec.lever == "mcpServers"
+    # No lever: MCP servers aren't a settings key, so --patch-set has
+    # nothing to write for it, and no one settings file for a scope chip.
+    assert rec.lever is None and rec.scope == ""
     assert rec.evidence == [
         ("Mean session baseline (cache-creation)", 50_000, "agents.topology_session_baseline", "all"),
     ]

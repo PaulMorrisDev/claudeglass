@@ -58,7 +58,8 @@ answered from your own sessions:
 - **"What am I paying for on every reply?"** CLAUDE.md files, skills and
   tool definitions go out with every request. It prices each one and
   says what to trim, move or hide, and what MCP tool search saves by
-  keeping unused tool definitions out, server by server.
+  keeping unused tool definitions out, server by server. An MCP server
+  Claude never uses is named, with how to turn it off for its kind.
 - **"Do my hooks work?"** Each hook you set up is checked against your
   sessions: how often it failed and when it last did, the calls it
   blocked, and what the context it adds costs. A hook that has stopped

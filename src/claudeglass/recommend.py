@@ -141,7 +141,7 @@ import dataclasses
 import re
 from dataclasses import dataclass
 
-from . import carry, compaction_sim, elasticity, handoff, hook_costs, model_swap, run_split, waste
+from . import carry, compaction_sim, elasticity, handoff, hook_costs, model_swap, run_split, tool_search, waste
 from .config import Config
 from .context_budget import _READ_ONLY_TOOLS
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
@@ -1026,7 +1026,12 @@ def _rule_baseline_bloat(
             archetypes=_ALL_ARCHETYPES,
             title="The session baseline is large before any work happens",
             action=action,
-            lever="mcpServers",
+            # No lever: MCP servers aren't a settings key (they live in
+            # ~/.claude.json and .mcp.json), so --patch-set has nothing to
+            # write for this card. Its fix is a prompt (fixes.py), and no
+            # one settings file, so no scope chip either.
+            lever=None,
+            scope="",
             evidence=evidence,
         )
     ]
@@ -2281,6 +2286,7 @@ def recommend(
     handoff_th = handoff.HandoffThresholds.from_config(config.thresholds)
     hooks_th = hook_costs.HookThresholds.from_config(config.thresholds)
     run_split_th = run_split.RunSplitThresholds.from_config(config.thresholds)
+    tool_search_th = tool_search.ToolSearchThresholds.from_config(config.thresholds)
 
     recs: list[Recommendation] = []
     recs.extend(_rule_ttl_switch(report, config, snapshot, archetype, th))
@@ -2321,6 +2327,7 @@ def recommend(
     recs.extend(run_split.RULES[0](report, run_split_th))
     for hook_rule in hook_costs.RULES:
         recs.extend(hook_rule(report, hooks_th))
+    recs.extend(tool_search.RULES[0](report, tool_search_th))
     recs.extend(compaction_sim.RULES[0](report, compaction_sim_th, snapshot))
     recs.extend(model_swap.RULES["model-tier"](report, model_swap_th, archetype, snapshot))
     recs.extend(waste.RULES[0](report, waste_th))
