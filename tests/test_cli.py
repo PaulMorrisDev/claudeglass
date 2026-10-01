@@ -1414,6 +1414,9 @@ def test_snapshot_config_hook_and_config_diff_agree_on_the_same_config_dir(tmp_p
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
+    # The snapshot is proj-diff's, the project config-diff reads below: it
+    # reads only the selected project's snapshots.
+    env["CLAUDE_CODE_PROJECT_DIR_NAME"] = "proj-diff"
     hook_result = subprocess.run(
         [sys.executable, str(hook_path), "--config-dir", str(config_dir)],
         input=json.dumps({"session_id": "s1"}),
@@ -1506,6 +1509,57 @@ def test_config_diff_requires_key_or_auto_keys(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["config-diff", "--projects-root", str(root), "--project", "proj-a"])
     assert exc_info.value.code == 2
+
+
+def _alternating_snapshots(tmp_path: Path) -> tuple[Path, Path]:
+    """Three projects, and snapshots of two that alternate in time: only
+    proj-a changed a setting (effortLevel); the model differs between the
+    two at every step, but neither ever changed its own. proj-b's is the
+    newest. proj-c has no snapshot."""
+    from claudeglass.snapshots import snapshot_project_key
+
+    root = tmp_path / "projects"
+    for slug in ("proj-a", "proj-b", "proj-c"):
+        _write_project(root, slug, age_seconds=120)
+    config_dir = tmp_path / "tl"
+    snapshots_dir = config_dir / "snapshots"
+    snapshots_dir.mkdir(parents=True)
+    for day, slug, settings in (
+        (1, "proj-a", {"model": "opus", "effortLevel": "high"}),
+        (2, "proj-b", {"model": "haiku", "effortLevel": "low"}),
+        (3, "proj-a", {"model": "opus", "effortLevel": "low"}),
+        (4, "proj-b", {"model": "haiku", "effortLevel": "low"}),
+    ):
+        ts = f"202001{day:02d}T000000Z"
+        data = {"schema": 2, "ts": ts, "project_slug": snapshot_project_key(slug), "user_settings": settings, "effective": settings}
+        (snapshots_dir / f"{ts}.json").write_text(json.dumps(data), encoding="utf-8")
+    return root, config_dir
+
+
+def test_config_diff_auto_keys_diffs_each_projects_own_snapshots(tmp_path, capsys):
+    root, config_dir = _alternating_snapshots(tmp_path)
+
+    def run(*selection):
+        code = cli.main(
+            ["config-diff", "--projects-root", str(root), *selection, "--config-dir", str(config_dir), "--auto-keys"]
+        )
+        return code, capsys.readouterr()
+
+    code, out = run("--all-projects")
+    assert code == 0
+    assert "Sessions by setting: effortLevel (your settings)" in out.out
+    assert "Sessions by setting: model" not in out.out
+
+    code, out = run("--project", "proj-a")
+    assert code == 0 and "Sessions by setting: effortLevel (your settings)" in out.out
+
+    code, out = run("--project", "proj-b")
+    assert code == 0
+    assert out.out.strip() == "No setting changed between two snapshots of the same project."
+
+    code, out = run("--project", "proj-c")
+    assert code == 1
+    assert "no config snapshot is recorded for the selected projects" in out.err
 
 
 # -- ScorecardError surfaced as a clean exit-2 error (Fix R20) --------------
@@ -2309,6 +2363,72 @@ def test_check_lists_every_quick_action_and_runs_one_in_full(tmp_path, capsys):
     assert cli.main(["check", "models", *base]) == 0
     assert capsys.readouterr().out.startswith("## Is each agent on the cheapest model")
 
+
+def test_check_reads_the_settings_in_force_in_the_selected_project(tmp_path, capsys, monkeypatch):
+    """proj-a's own newest snapshot, not proj-b's newer one; with every
+    project, the newest of all."""
+    from claudeglass import quick_actions
+
+    root, config_dir = _alternating_snapshots(tmp_path)
+    seen = []
+    real = quick_actions.Context
+    monkeypatch.setattr(quick_actions, "Context", lambda **kwargs: seen.append(kwargs["effective"]) or real(**kwargs))
+
+    for selection in (["--project", "proj-a"], ["--project", "proj-b"], ["--all-projects"]):
+        assert cli.main(["check", "--projects-root", str(root), *selection, "--config-dir", str(config_dir)]) == 0
+    capsys.readouterr()
+    assert [effective.get("model") for effective in seen] == ["opus", "haiku", "haiku"]
+
+
+def test_review_claude_md_follows_the_selected_project(tmp_path, capsys):
+    """As review skills does: the selected project's CLAUDE.md files and
+    your own, never another project's."""
+    claude_root = tmp_path / "claude"
+    root = claude_root / "projects"
+    claude_root.mkdir()
+    (claude_root / "CLAUDE.md").write_text("# Mine\n\nBe brief.\n", encoding="utf-8")
+    for slug, name in (("proj-a", "alpha-repo"), ("proj-b", "beta-repo")):
+        _write_project(root, slug)
+        folder = tmp_path / "work" / name
+        folder.mkdir(parents=True)
+        (folder / "CLAUDE.md").write_text(f"# {name}\n\nNotes for {name}.\n", encoding="utf-8")
+        write_jsonl(root / slug / "folder.jsonl", [{"type": "user", "cwd": str(folder)}])
+    base = ["review", "claude-md", "--projects-root", str(root), "--config-dir", str(claude_root / "claudeglass")]
+
+    assert cli.main([*base, "--project", "proj-a"]) == 0
+    picked = capsys.readouterr().out
+    assert "alpha-repo" in picked and "beta-repo" not in picked
+
+    assert cli.main([*base, "--all-projects"]) == 0
+    everything = capsys.readouterr().out
+    assert "alpha-repo" in everything and "beta-repo" in everything
+
+
+def test_review_and_check_claude_md_find_a_project_under_a_home_folder(tmp_path, capsys):
+    """The report redacts a slug under a home folder (Users-<user>), so the
+    folders come from the raw project names the report loaded: the picked
+    project's CLAUDE.md is listed, never another's."""
+    claude_root = tmp_path / "claude"
+    root = claude_root / "projects"
+    claude_root.mkdir()
+    for slug, name in (("C--Users-alice-alpha", "alpha-repo"), ("C--Users-alice-beta", "beta-repo")):
+        _write_project(root, slug)
+        folder = tmp_path / "work" / name
+        folder.mkdir(parents=True)
+        (folder / "CLAUDE.md").write_text(f"# {name}\n\nNotes for {name}.\n", encoding="utf-8")
+        write_jsonl(root / slug / "folder.jsonl", [{"type": "user", "cwd": str(folder)}])
+    common = [
+        "--projects-root",
+        str(root),
+        "--project",
+        "C--Users-alice-alpha",
+        "--config-dir",
+        str(claude_root / "claudeglass"),
+    ]
+    for command in (["review", "claude-md"], ["check", "claude-md"]):
+        assert cli.main([*command, *common]) == 0
+        out = capsys.readouterr().out
+        assert "alpha-repo" in out and "beta-repo" not in out
 
 
 def test_cli_reports_merge_the_dashboards_session_tags_over_sessions_toml(tmp_path):

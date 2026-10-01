@@ -24,9 +24,11 @@ model-by-role match the archetype's profile" — but no ``profiles.py``
 module (plan Appendix A7) exists yet anywhere in this codebase for a
 session's observed shape to be compared against. This dimension is
 implemented here as a proxy using only what already exists: whether a
-config snapshot covers the corpus window at all, and (when one does) how
-many config keys changed across it — real config-fit signal, but a
-narrower measurement than the full profile-match the plan describes.
+config snapshot covers the corpus's projects at all, and (when one does)
+how many distinct config keys changed between one project's own
+snapshots (snapshots of two projects are never compared: they differ
+anyway) — real config-fit signal, but a narrower measurement than the
+full profile-match the plan describes.
 When no snapshot is available at all, the dimension is scored 5
 ("no observed instability") rather than penalised, since the absence of
 snapshot data is a missing-input problem, not evidence of a bad fit; a
@@ -114,8 +116,8 @@ class ScorecardThresholds:
     context_p90_ctx: tuple[float, float, float, float] = (50_000, 100_000, 150_000, 200_000)
     #: Mean cost-per-agent-type variance ratio (max/median, lower is better).
     agent_cost_variance_ratio: tuple[float, float, float, float] = (1.2, 1.5, 2.0, 3.0)
-    #: Config keys changed across the window when a snapshot exists
-    #: (count, lower is better).
+    #: Distinct config keys that changed between one project's own
+    #: snapshots when a snapshot exists (count, lower is better).
     config_changed_keys: tuple[float, float, float, float] = (0, 3, 6, 10)
     #: Pricing coverage, pct of tokens priced (higher is better).
     data_pricing_coverage_pct: tuple[float, float, float, float] = (99.5, 97.0, 90.0, 75.0)
@@ -207,7 +209,8 @@ class ScorecardInputs:
     has_spawns: bool = False
     agent_cost_variance_ratio: float | None = None
 
-    # config fit
+    # config fit: ``changed_config_keys`` counts each key that changed
+    # within some project's own snapshots once (``snapshots.changed_keys``)
     has_snapshot: bool = False
     changed_config_keys: int = 0
 
@@ -321,7 +324,7 @@ def _config_fit(inputs: ScorecardInputs, th: ScorecardThresholds) -> _DimensionR
             metric="changed_config_keys",
             value=0,
             threshold="no config snapshot available",
-            note="No settings snapshot covers this window, so config stability can't be "
+            note="No settings snapshot is recorded for the projects shown, so config stability can't be "
             "measured. It is rated as stable rather than marked down.",
         )
     level = _level_lower_is_better(inputs.changed_config_keys, th.config_changed_keys)

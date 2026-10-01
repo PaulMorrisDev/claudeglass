@@ -2356,6 +2356,52 @@ def test_every_change_card_request_carries_the_window_and_project() -> None:
     assert _js_code_only(_app_js()).count("windowParam()") == 3
 
 
+def test_the_context_page_asks_for_the_pickers_project_on_every_list() -> None:
+    """The CLAUDE.md list, a file's detail and the skills list on Agents >
+    Context all go through withWindow, which adds the picked project beside
+    the window: the server limits each list to that project's folders."""
+    agents = _static_text("page-agents.js")
+    context = _function_source(agents, "renderContextFiles")
+    assert 'loadInto(files, withWindow("/api/claude-md"), renderClaudeMdList' in context
+    assert 'loadInto(skills, withWindow("/api/skills"), renderSkills' in context
+    assert 'withWindow("/api/claude-md/" + encodeURIComponent(file.id))' in _function_source(agents, "openClaudeMd")
+
+
+def test_the_compactions_list_says_it_covers_whole_sessions() -> None:
+    """The list is the compactions of the sessions the window counts, as the
+    section above it counts them, so a session that began before the window
+    lists its earlier summaries too: the page says so."""
+    usage = _function_source(_static_text("page-spend.js"), "renderUsage")
+    assert 'withWindow("/api/compactions")' in usage
+    assert '"Every conversation summary in this window\'s sessions"' in usage
+    assert "A session counts whole, so one that began before this window lists all its summaries." in usage
+
+
+def test_the_project_picker_says_what_follows_it_and_what_covers_every_project() -> None:
+    """Your changes, Settings and the CLAUDE.md list follow the picked
+    project. The baseline, the estimates and the hook and statusline rows
+    still cover every project, each with its own chip or row group: the
+    picker's note names both, never the old "Settings always cover every
+    project". Profiles reads the newest settings from any project, and the
+    note says so."""
+    picker = _function_source(_app_js(), "initProjectPicker")
+    assert "Your changes, settings and CLAUDE.md files follow the pick too." in picker
+    assert (
+        "The latest baseline, whether your estimates came true, and the hook and statusline checks always cover "
+        "every project." in picker
+    )
+    assert "Profiles uses your newest settings from any project." in picker
+    assert "Settings and Data quality always cover every project" not in picker
+    # Each part named as covering every project says so where it shows.
+    setup = _static_text("page-setup.js")
+    assert 'setupSection(panel, "Latest baseline", "config-baseline", { allTime: true })' in setup
+    assert 'changesSection(panel, "Did your estimates come true?", true)' in _static_text("page-changes.js")
+    # The settings tables ask for the picked project; with none of its
+    # own recorded, the empty state says so.
+    assert 'withWindow("/api/config-diff?auto_keys=1")' in _function_source(setup, "renderConfig")
+    assert '"No settings recorded for this project yet."' in _function_source(setup, "renderConfigDiff")
+
+
 def test_the_overview_asks_for_the_changes_it_can_judge_first() -> None:
     changes_js = _static_text("page-changes.js")
     overview = _function_source(_static_text("page-overview.js"), "renderOverview")

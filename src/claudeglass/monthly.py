@@ -248,8 +248,8 @@ def _habits_digest_table(
     work that met its goal cost. ``None`` when there's nothing to say.
     ``config``, when given, resolves ``effort_fit``'s share gate to the
     same configured number the main report's ``effort-mismatch`` rule
-    uses (UX-3, "one shared effort threshold"); without it, the class
-    default."""
+    uses (UX-3, "one shared effort threshold"), and counts weeks in its
+    ``tz``; without it, the class default and the machine's own zone."""
     from . import habits
     from .helptext import TABLE_COPY
     from .model import Column
@@ -257,7 +257,8 @@ def _habits_digest_table(
     threshold_kwargs = (
         {"effort_share_threshold_pct": _effort_mismatch_share_threshold(config)} if config is not None else {}
     )
-    digest = habits.digest_table(habits.collect(corpus, pricing, ratings=ratings, **threshold_kwargs))
+    tz = config.tz if config is not None else None
+    digest = habits.digest_table(habits.collect(corpus, pricing, ratings=ratings, tz=tz, **threshold_kwargs))
     if not digest.rows:
         return None
     copy = TABLE_COPY["habits_digest"]

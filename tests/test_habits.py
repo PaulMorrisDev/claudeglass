@@ -10,9 +10,10 @@ each saving can be worked out by hand.
 from __future__ import annotations
 
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
@@ -383,16 +384,44 @@ def test_span_weeks_does_not_stretch_a_single_day_into_a_fake_weekly_rate():
     assert two_weeks.span_weeks == pytest.approx(2.0)
 
 
-def test_the_digest_is_titled_with_the_actual_day_span():
+@pytest.mark.parametrize(
+    "window, title",
+    [
+        ("last 7 days", "Weekly pace (last 7 days)"),
+        ("last 30 days", "Weekly pace (last 30 days)"),
+        # ``api._window_label`` writes "last 1 days"; the title says it right.
+        ("last 1 days", "Weekly pace (last 1 day)"),
+        ("last 1 day", "Weekly pace (last 1 day)"),
+        ("all time", "Weekly pace (all time)"),
+        # The last hour, 24 hours, today, since your last change, or a
+        # ``since``: a window that starts at a moment has no day count.
+        ("since 2026-09-30T10:00:00Z until now", "Weekly pace (this window)"),
+        ("since the beginning until 2026-09-01T00:00:00Z", "Weekly pace (this window)"),
+        # A caller that didn't say which window this is.
+        ("", "Weekly pace"),
+    ],
+)
+def test_the_digest_is_titled_with_the_picked_window(window, title):
     """UX-4/7: "Weekly pace (last N days)", not a bare "This week" that
-    implies a calendar week regardless of how much history there is."""
-    one_day = habits.digest_table(Habits(cycles=[_cycle(loops=1, loop_cost=1.0)]))
-    assert one_day.title == "Weekly pace (last 1 day)"
+    implies a calendar week regardless of the window; a window with no day
+    count gets a title with no number."""
+    assert habits.digest_table(Habits(window=window)).title == title
 
-    a_week = habits.digest_table(Habits(cycles=[
-        _cycle(WEEKS[0], loops=1, loop_cost=1.0), _cycle(WEEKS[1], loops=1, loop_cost=1.0),
-    ]))
-    assert a_week.title == "Weekly pace (last 7 days)"
+
+def test_the_digest_title_ignores_how_many_days_the_messages_cover():
+    """The title says the picked window's day count, whatever span the
+    messages in it cover: 3 days of messages in a 7-day window is still
+    "last 7 days"."""
+    three_days = [_cycle("2026-08-03", loops=1, loop_cost=1.0), _cycle("2026-08-06", loops=1, loop_cost=1.0)]
+    assert Habits(cycles=three_days).span_days == pytest.approx(3.0)
+    assert habits.digest_table(Habits(cycles=three_days, window="last 7 days")).title == "Weekly pace (last 7 days)"
+
+    one_day = [_cycle(loops=1, loop_cost=1.0)]
+    assert habits.digest_table(Habits(cycles=one_day, window="last 30 days")).title == "Weekly pace (last 30 days)"
+
+    fortnight = [_cycle(WEEKS[0], loops=1, loop_cost=1.0), _cycle(WEEKS[2], loops=1, loop_cost=1.0)]
+    assert habits.digest_table(Habits(cycles=fortnight, window="all time")).title == "Weekly pace (all time)"
+    assert habits.digest_table(Habits(cycles=fortnight, window="last 7 days")).title == "Weekly pace (last 7 days)"
 
 
 def test_the_digest_leads_with_the_habits_worth_most_then_what_met_goals_cost():
@@ -698,6 +727,156 @@ def test_calls_in_turns_counts_a_savers_calls_and_redirects_against_every_call()
 def test_collect_leaves_saver_active_false_without_a_redirect(tmp_path, pricing):
     h = habits.collect(_tagged_session(tmp_path), pricing)
     assert h.saver_active is False
+
+
+# Weeks and days are local: a fixed offset stands in for ``config.tz`` (no
+# tzdata is needed), and each moment sits where its UTC week or day differs
+# from its local one.
+
+WEST = timezone(timedelta(hours=-8))
+INDIA = timezone(timedelta(hours=5, minutes=30))
+
+
+def _tzdata_has(name: str) -> bool:
+    try:
+        ZoneInfo(name)
+        return True
+    except ZoneInfoNotFoundError:
+        return False
+
+
+def _utc(stamp: str) -> datetime:
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
+
+
+def _at(stamp: str, seconds: int = 0) -> str:
+    """``stamp`` (UTC, ``2026-08-10T07:30:00Z``) moved on by ``seconds``, as
+    a transcript timestamp."""
+    return (_utc(stamp) + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+@pytest.mark.parametrize(
+    "tz, stamp, local_week, utc_week",
+    [
+        # 23:30 on Sunday 9 August at UTC-8 is already Monday in UTC.
+        (WEST, "2026-08-10T07:30:00Z", "2026-08-03", "2026-08-10"),
+        # Midnight Monday at UTC-8 starts the new week.
+        (WEST, "2026-08-10T08:00:00Z", "2026-08-10", "2026-08-10"),
+        # 23:30 on Sunday at UTC+5:30 is still Sunday in UTC.
+        (INDIA, "2026-08-09T18:00:00Z", "2026-08-03", "2026-08-03"),
+        # 00:30 on Monday at UTC+5:30 is still Sunday in UTC.
+        (INDIA, "2026-08-09T19:00:00Z", "2026-08-10", "2026-08-03"),
+        # The week's last moment and the next week's first, at UTC+5:30.
+        (INDIA, "2026-08-09T18:29:59Z", "2026-08-03", "2026-08-03"),
+        (INDIA, "2026-08-09T18:30:00Z", "2026-08-10", "2026-08-03"),
+    ],
+)
+def test_a_week_starts_on_the_local_monday(tz, stamp, local_week, utc_week):
+    moment = _utc(stamp)
+    assert habits._week(moment, tz) == local_week
+    assert habits._week(moment, timezone.utc) == utc_week
+
+
+def test_a_week_with_no_zone_follows_the_machines_own_zone():
+    moment = _utc("2026-08-10T07:30:00Z")
+    assert habits._week(moment) == habits._week(moment, moment.astimezone().tzinfo)
+    # A name that can't be resolved falls back the same way, without raising.
+    assert habits._week(moment, "No/Such_Zone") == habits._week(moment)
+    assert habits._week(None, WEST) == ""
+
+
+@pytest.mark.skipif(not _tzdata_has("America/Los_Angeles"), reason="no tz database on this machine")
+def test_a_week_follows_an_iana_zone_name():
+    # 23:30 on Sunday 11 January in Los Angeles (UTC-8): Monday in UTC.
+    moment = _utc("2026-01-12T07:30:00Z")
+    assert habits._week(moment, "America/Los_Angeles") == "2026-01-05"
+    assert habits._week(moment, "UTC") == "2026-01-12"
+
+
+def _session_at(tmp_path, name: str, stamp: str, *, agent: bool = False, small: bool = False):
+    """A main session whose first message is at ``stamp`` (UTC); ``agent``
+    adds a subagent run two seconds in, ``small`` is a one-message session
+    with no agent."""
+    lines = [user_str_line("fix the login bug", origin={"kind": "human"}, timestamp=_at(stamp))]
+    if agent:
+        lines += [
+            turn_line(content=[tool_use_block("Agent", "toolu_A", {"prompt": "find the cookie"})], model=MODEL,
+                      timestamp=_at(stamp, 1)),
+            user_block_line([tool_result_block("toolu_A", "src/auth.py")], timestamp=_at(stamp, 5)),
+        ]
+    else:
+        lines.append(turn_line(model=MODEL, timestamp=_at(stamp, 1)))
+    if not small:
+        lines.append(turn_line(model=MODEL, timestamp=_at(stamp, 6)))
+    top = _parse(tmp_path, f"{name}.jsonl", lines, kind="top-level")
+    subs = []
+    if agent:
+        sub_lines = [
+            user_str_line("find the cookie", timestamp=_at(stamp, 2)),
+            turn_line(model=MODEL, timestamp=_at(stamp, 3)),
+        ]
+        subs.append(_parse(tmp_path, f"agent-{name}.jsonl", sub_lines, kind="subagent", agent_id=f"agent-{name}",
+                           agent_type="Explore", tool_use_id="toolu_A"))
+    return NS(top=top, subs=subs, session_id=name, project_dir="p", slug="p")
+
+
+def test_a_message_and_an_agent_run_belong_to_the_week_of_their_local_day(tmp_path, pricing):
+    """23:30 on a Sunday at UTC-8 is Monday in UTC, but it is still the
+    old week for the person who sent it."""
+    bundle = _session_at(tmp_path, "s1", "2026-08-10T07:30:00Z", agent=True)
+    local = habits.collect(NS(sessions=[bundle]), pricing, tz=WEST)
+    assert local.tz is WEST
+    assert [c.week for c in local.cycles] == ["2026-08-03"]
+    assert [a.week for a in local.agents] == ["2026-08-03"]
+    assert local.weeks == ["2026-08-03"]
+
+    utc = habits.collect(NS(sessions=[bundle]), pricing, tz=timezone.utc)
+    assert [c.week for c in utc.cycles] == ["2026-08-10"]
+    assert [a.week for a in utc.agents] == ["2026-08-10"]
+
+
+def test_a_message_just_after_local_midnight_on_monday_starts_the_new_week(tmp_path, pricing):
+    bundle = _session_at(tmp_path, "s1", "2026-08-09T19:00:00Z", agent=True)
+    h = habits.collect(NS(sessions=[bundle]), pricing, tz=INDIA)
+    assert [c.week for c in h.cycles] == ["2026-08-10"]
+    assert [a.week for a in h.agents] == ["2026-08-10"]
+    assert [c.week for c in habits.collect(NS(sessions=[bundle]), pricing, tz=timezone.utc).cycles] == ["2026-08-03"]
+
+
+def test_the_weeks_the_trend_compares_are_local_weeks(tmp_path, pricing):
+    """Three sessions on Sunday evening at UTC-8 and none on the Monday
+    after: one local week, where UTC would split them across two."""
+    sessions = [
+        _session_at(tmp_path, "a", "2026-08-09T20:00:00Z"),  # Sunday 12:00 local
+        _session_at(tmp_path, "b", "2026-08-10T04:00:00Z"),  # Sunday 20:00 local
+        _session_at(tmp_path, "c", "2026-08-10T07:30:00Z"),  # Sunday 23:30 local
+    ]
+    assert habits.collect(NS(sessions=sessions), pricing, tz=WEST).weeks == ["2026-08-03"]
+    assert habits.collect(NS(sessions=sessions), pricing, tz=timezone.utc).weeks == ["2026-08-03", "2026-08-10"]
+
+
+def test_two_small_asks_on_one_local_day_count_as_the_same_day(tmp_path, pricing):
+    """``batch_small`` looks for another small ask the same day in the same
+    project: the same local day, not the same UTC day."""
+    sessions = [
+        _session_at(tmp_path, "a", "2026-08-09T18:00:00Z", small=True),  # Sunday 10:00 at UTC-8
+        _session_at(tmp_path, "b", "2026-08-10T07:30:00Z", small=True),  # Sunday 23:30 at UTC-8
+    ]
+    local = habits.collect(NS(sessions=sessions), pricing, tz=WEST)
+    assert [entry[1] for entry in local.small_sessions] == ["2026-08-09", "2026-08-09"]
+    assert [entry[1] for entry in habits.collect(NS(sessions=sessions), pricing, tz=timezone.utc).small_sessions] == [
+        "2026-08-09", "2026-08-10",
+    ]
+
+
+def test_build_section_passes_the_zone_and_the_window_on(tmp_path, pricing):
+    bundle = _session_at(tmp_path, "s1", "2026-08-10T07:30:00Z", agent=True)
+    section = habits.build_section(NS(sessions=[bundle]), pricing, tz=WEST, window="last 7 days")
+    assert _table(section, "habits_digest").title == "Weekly pace (last 7 days)"
+    assert _table(habits.build_section(NS(sessions=[bundle]), pricing), "habits_digest").title == "Weekly pace"
+    h = habits.collect(NS(sessions=[bundle]), pricing, tz=WEST, window="all time")
+    assert (h.tz, h.window) == (WEST, "all time")
+    assert habits.collect(NS(sessions=[bundle]), pricing).window == ""
 
 
 def _asked(questions) -> list[dict]:
@@ -1162,6 +1341,20 @@ def test_patch_capture_recommend_value_folds_the_diff_into_the_table(pricing):
     assert rows["habit_value"] == pytest.approx(12.0)
     assert any("held back 1 recommendation" in note for note in table.notes)
     assert "Nothing measured yet" not in " ".join(table.notes)
+
+
+def test_the_capture_section_collects_again_in_the_zone_it_is_given(monkeypatch, pricing):
+    """With no habits pass to reuse, capture_section and
+    patch_capture_recommend_value count weeks and days in the report's
+    zone, as the Habits section does."""
+    seen = []
+    real = habits.collect
+    monkeypatch.setattr(habits, "collect", lambda *a, **kw: seen.append(kw.get("tz")) or real(*a, **kw))
+    zone = timezone(timedelta(hours=-8))
+    config, corpus = NS(level="standard", enabled_at=""), NS(sessions=[])
+    section = habits.capture_section(corpus, pricing, config, tz=zone)
+    habits.patch_capture_recommend_value(section, corpus, pricing, config, with_habits=[], without_habits=[], tz=zone)
+    assert seen == [zone, zone]
 
 
 # -- Claude's reports against your feedback --------------------------------------

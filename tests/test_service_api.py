@@ -1743,6 +1743,8 @@ def test_report_json_matches_cli_json_for_same_corpus(server):
         window="last 30 days",
         snapshots=_reconstruct_snapshots(server.store),
         session_overrides=overrides,
+        # No project picked, as api.py's _build_report_model says it.
+        all_projects=True,
         phases=True,
     )
     expected = json.loads(render_json(model))
@@ -3928,6 +3930,195 @@ def test_compactions_filters_by_project(two_project_server):
     assert resp.status == 200
     assert len(body["data"]) == 1
     assert body["data"][0]["dropped_tokens"] == 1600
+
+
+def _give_the_projects_folders(handle) -> dict[str, Path]:
+    """What the CLAUDE.md review reads: your own file, which every project
+    gets, and a folder for each project (as the ``cwd`` in its newest
+    transcript names it) with a CLAUDE.md of its own."""
+    root = handle.options.config_dir.parent
+    (root / "CLAUDE.md").write_text("# Mine\n\nBe brief.\n", encoding="utf-8")
+    folders = {}
+    for slug, name in (("proj-alpha", "alpha-repo"), ("proj-beta", "beta-repo")):
+        folder = root / "work" / name
+        folder.mkdir(parents=True)
+        (folder / "CLAUDE.md").write_text(f"# {name}\n\nNotes for {name}.\n", encoding="utf-8")
+        write_jsonl(root / "projects" / slug / "folder.jsonl", [{"type": "user", "cwd": str(folder)}])
+        folders[slug] = folder
+    return folders
+
+
+def _claude_md_projects(handle, query: str = "") -> set[str]:
+    """The folders the CLAUDE.md files listed belong to (``""``: your own)."""
+    resp, body = handle.get_json("/api/claude-md" + query)
+    assert resp.status == 200, body
+    return {item["project"] for item in body["data"]["files"]}
+
+
+def test_claude_md_lists_every_projects_files_until_one_is_picked(two_project_server):
+    _give_the_projects_folders(two_project_server)
+    assert _claude_md_projects(two_project_server) == {"", "alpha-repo", "beta-repo"}
+    # One project: its own files, and yours, which every project reads.
+    assert _claude_md_projects(two_project_server, "?project=proj-alpha") == {"", "alpha-repo"}
+    assert _claude_md_projects(two_project_server, "?project=proj-beta") == {"", "beta-repo"}
+    # The window and the project go together, as they do for Skills.
+    assert _claude_md_projects(two_project_server, "?window_days=7&project=proj-alpha") == {"", "alpha-repo"}
+
+
+def test_a_claude_md_file_of_another_project_is_not_found_under_the_picked_one(two_project_server):
+    _give_the_projects_folders(two_project_server)
+    _resp, body = two_project_server.get_json("/api/claude-md")
+    beta = next(item for item in body["data"]["files"] if item["project"] == "beta-repo")
+    resp, _body = two_project_server.get_json(f"/api/claude-md/{beta['id']}?project=proj-alpha")
+    assert resp.status == 404
+    resp, detail = two_project_server.get_json(f"/api/claude-md/{beta['id']}?project=proj-beta")
+    assert resp.status == 200 and detail["data"]["section_rows"][0]["heading"] == "beta-repo"
+
+
+def test_claude_md_of_a_project_with_no_known_folder_lists_only_your_own(two_project_server):
+    _give_the_projects_folders(two_project_server)
+    # No transcript says where it ran now, so there is no folder to read.
+    (two_project_server.options.config_dir.parent / "projects" / "proj-beta" / "folder.jsonl").unlink()
+    assert _claude_md_projects(two_project_server) == {"", "alpha-repo"}
+    assert _claude_md_projects(two_project_server, "?project=proj-beta") == {""}
+
+
+def test_the_claude_md_quick_action_reads_only_the_picked_projects_files(two_project_server):
+    _give_the_projects_folders(two_project_server)
+
+    def folders_listed(query: str) -> str:
+        resp, body = two_project_server.get_json("/api/quick-actions/claude-md" + query)
+        assert resp.status == 200, body
+        return " ".join(str(row[0]) for row in body["data"]["table"]["rows"])
+
+    everything = folders_listed("")
+    assert "alpha-repo" in everything and "beta-repo" in everything
+    picked = folders_listed("?project=proj-alpha")
+    assert "alpha-repo" in picked and "beta-repo" not in picked
+
+
+def _seed_alternating_settings(handle) -> tuple[str, str]:
+    """Five snapshots that alternate between the two projects. Only alpha
+    changed a setting (effortLevel); the model differs between the projects
+    at every step but neither ever changed its own. The newest is alpha's."""
+    from claudeglass.service.store import GLOBAL_PROJECT_SLUG
+    from claudeglass.snapshots import snapshot_project_key
+
+    key_a, key_b = snapshot_project_key("proj-alpha"), snapshot_project_key("proj-beta")
+    for day, key, settings in (
+        (1, key_a, {"model": "opus", "effortLevel": "high"}),
+        (2, key_b, {"model": "haiku", "effortLevel": "low"}),
+        (3, key_a, {"model": "opus", "effortLevel": "low"}),
+        (4, key_b, {"model": "haiku", "effortLevel": "low"}),
+        (5, key_a, {"model": "opus", "effortLevel": "low"}),
+    ):
+        ts = f"2026-09-0{day}T00:00:00Z"
+        handle.store.upsert_snapshot(
+            project_slug=GLOBAL_PROJECT_SLUG,
+            ts=ts,
+            schema_version=2,
+            digest_json=json.dumps(
+                {"schema": 2, "ts": ts, "project_slug": key, "user_settings": settings, "effective": settings}
+            ),
+        )
+    return key_a, key_b
+
+
+def _settings_tables(handle, query: str = "") -> dict:
+    resp, body = handle.get_json("/api/config-diff?auto_keys=1" + query)
+    assert resp.status == 200, body
+    return {table["name"]: table for table in body["data"]}
+
+
+def test_settings_changes_follow_the_picked_project_and_never_count_a_switch_between_projects(two_project_server):
+    key_a, key_b = _seed_alternating_settings(two_project_server)
+
+    everyone = _settings_tables(two_project_server)
+    assert [name for name in everyone if name.startswith("config-diff-")] == ["config-diff-user_settings.effortLevel"]
+    assert {row[0] for row in everyone["effective-config"]["rows"]} == {key_a, key_b}
+
+    beta = _settings_tables(two_project_server, "&project=proj-beta")
+    assert [name for name in beta if name.startswith("config-diff-")] == []
+    assert {row[0] for row in beta["effective-config"]["rows"]} == {key_b}
+
+    def changed_count(query: str) -> int:
+        resp, raw = two_project_server.request("GET", "/api/report.json" + query)
+        assert resp.status == 200
+        scorecard = next(s for s in json.loads(raw)["report"]["sections"] if s["key"] == "scorecard")
+        return next(row for row in scorecard["tables"][0]["rows"] if row[0] == "config_fit")[4]
+
+    assert (changed_count(""), changed_count("?project=proj-alpha"), changed_count("?project=proj-beta")) == (1, 1, 0)
+
+
+def test_the_settings_tables_say_when_no_setting_changed_in_the_picked_project(two_project_server):
+    """Beta's own snapshots never differ: the first table carries the
+    section's note saying so. With every project, alpha's effortLevel
+    change shows and the note doesn't."""
+    _seed_alternating_settings(two_project_server)
+    note = "No setting changed between two snapshots of the same project."
+    resp, body = two_project_server.get_json("/api/config-diff?auto_keys=1&project=proj-beta")
+    assert resp.status == 200, body
+    assert body["data"][0]["name"] == "effective-config"
+    assert note in body["data"][0]["notes"]
+    resp, body = two_project_server.get_json("/api/config-diff?auto_keys=1")
+    assert resp.status == 200, body
+    assert all(note not in table["notes"] for table in body["data"])
+
+
+def test_settings_in_force_now_are_the_picked_projects(two_project_server, monkeypatch):
+    """Goal drafts, what-if and the quick actions read the settings in force
+    from the picked project's newest snapshot, not another project's newer
+    one; with no project, from the newest of all."""
+    from claudeglass.profiles import goals
+
+    _seed_alternating_settings(two_project_server)
+    seen = []
+    monkeypatch.setattr(goals, "draft", lambda goal, model, units, **kwargs: seen.append(kwargs["effective"]) or {})
+
+    for query in ("", "&project=proj-beta", "&project=proj-alpha"):
+        resp, body = two_project_server.get_json("/api/profile-goals?goal=cache" + query)
+        assert resp.status == 200, body
+    assert [effective.get("model") for effective in seen] == ["opus", "haiku", "opus"]
+
+
+def test_a_picked_project_with_no_session_in_the_window_still_shows_its_settings(two_project_server, monkeypatch):
+    """The window holds only alpha's session; beta is picked. Its settings
+    still show, read from its own snapshots, not "none recorded"."""
+    _key_a, key_b = _seed_alternating_settings(two_project_server)
+    corpus = two_project_server.corpus
+    alpha_only = corpus_mod.Corpus(
+        sessions=[bundle for bundle in corpus.sessions if bundle.slug == "proj-alpha"],
+        total_files=corpus.total_files,
+        total_bytes=corpus.total_bytes,
+        cache_hits=corpus.cache_hits,
+        cache_misses=corpus.cache_misses,
+        elapsed_s=corpus.elapsed_s,
+    )
+    _install_fake_rebuild(monkeypatch, alpha_only)
+
+    beta = _settings_tables(two_project_server, "&project=proj-beta")
+    assert {row[0] for row in beta["effective-config"]["rows"]} == {key_b}
+    resp, raw = two_project_server.request("GET", "/api/report.json?project=proj-beta")
+    assert resp.status == 200
+    assert json.loads(raw)["report"]["meta"]["projects"] == ["proj-beta"]
+
+
+def test_the_compactions_list_is_the_compactions_of_the_sessions_the_window_counts(server):
+    """The seeded session ran from 12:00 to 13:00 with a compaction at 12:30.
+    A window opening at 12:45 counts that session, as the tiles do, so it
+    lists the compaction from before it; one closing at 12:45 doesn't count
+    the session, so the compaction inside it isn't listed."""
+    opens, closes = "since=2026-09-18T12:45:00Z", "since=2026-09-18T12:00:00Z&until=2026-09-18T12:45:00Z"
+    _resp, summary = server.get_json(f"/api/summary?{opens}")
+    _resp, listed = server.get_json(f"/api/compactions?{opens}")
+    assert summary["data"]["sessions"] == 1
+    assert [row["dropped_tokens"] for row in listed["data"]] == [800]
+    _resp, summary = server.get_json(f"/api/summary?{closes}")
+    _resp, listed = server.get_json(f"/api/compactions?{closes}")
+    assert summary["data"]["sessions"] == 0
+    assert listed["data"] == []
+    _resp, listed = server.get_json("/api/compactions?window=all&project=proj-a")
+    assert len(listed["data"]) == 1
 
 
 @pytest.mark.parametrize("route", ["/api/summary", "/api/ttl", "/api/sessions", "/api/compactions"])

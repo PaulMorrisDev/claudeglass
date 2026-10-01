@@ -652,7 +652,9 @@ SECTION_COPY: dict[str, SectionCopy] = {
             shows="Your current settings per project, the file each one came from, and cost per session "
             "grouped by the value a setting had.",
             read="Settings come from snapshots the config hook takes when a session starts. Sessions that "
-            "started before the first snapshot are left out of the comparisons.",
+            "started before the first snapshot are left out of the comparisons. A setting counts as changed when "
+            "it changed between two snapshots of the same project. This uses every snapshot recorded, not only "
+            "this window's. With a project picked, only that project's settings and changes show.",
             act="Before you credit one setting for a cost change, check the note under its table. It lists "
             "the other settings that changed at the same time.",
         ),
@@ -768,7 +770,7 @@ TABLE_COPY: dict[str, TableCopy] = {
     ),
     # -- quality signals ----------------------------------------------------
     "habits_digest": TableCopy(
-        title="",  # UX-4/7: the builder's title names the actual day span
+        title="",  # UX-4/7: the builder's title names the picked window
         help=Help(
             shows="The three habits worth the most to you right now, and what the habits you already picked up are "
             "saving. Also what a piece of work that met its goal cost.",
@@ -2289,7 +2291,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="One row per area: its rating, the one number it is based on, and the limit for that rating.",
             read="Ratings run from 1 (very poor) to 5 (excellent). The limit is the bound the number had to stay "
             "within to earn its rating. Cache rebuilds forced by usage-limit pauses are left out of cache "
-            "efficiency.",
+            "efficiency. Config stability counts the settings that changed between two snapshots of the same "
+            "project. It counts each setting once and uses every snapshot recorded, not only this window's.",
             act="Work on the lowest rating first. For cache efficiency, see {{page:cache/rebuilds}}. For context "
             "size, clear or summarise long sessions sooner. For subagent cost balance, check the costliest "
             "agent type in {{page:agents/subagents}}.",
@@ -2314,7 +2317,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "recache_share_pct": "Cache writes that were rebuilds, excluding usage-limit pauses (%)",
             "p90_top_level_ctx": "Context size that 9 in 10 main session replies stay under (tokens)",
             "agent_cost_variance_ratio": "Cost per run of the costliest agent type, versus the typical type (times)",
-            "changed_config_keys": "Settings changed during the window (count)",
+            "changed_config_keys": "Settings changed between a project's own snapshots (count)",
             "pricing_coverage_pct": "Tokens with a known price (%)",
             "no config snapshot available": "No config snapshot, so counted as stable",
             "excellent": "Excellent",

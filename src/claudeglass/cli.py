@@ -282,7 +282,7 @@ def _add_config_diff_args(sub: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--auto-keys",
         action="store_true",
-        help="diff every config key that changed across the available snapshots",
+        help="diff every config key that changed between two snapshots of the same project",
     )
 
 
@@ -1167,7 +1167,8 @@ def _make_parser() -> argparse.ArgumentParser:
             sub.add_argument(
                 "what",
                 choices=("claude-md", "skills"),
-                help="claude-md: every CLAUDE.md file and rule; skills: every skill Claude Code lists",
+                help="claude-md: every CLAUDE.md file and rule; skills: every skill Claude Code lists "
+                "(both for the selected projects and your own files)",
             )
         if name == "check":
             from .quick_actions import CHECK_IDS
@@ -1740,7 +1741,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
         print(f"claudeglass {command}: {exc}", file=sys.stderr)
         return 2
     if emit is not None:
-        return emit(model, config_dir, window, since_dt, until_dt)
+        return emit(model, config_dir, window, since_dt, until_dt, projects)
     _emit_report_outputs(model, args)
     return 0
 
@@ -1752,29 +1753,34 @@ def _cmd_review(args: argparse.Namespace) -> int:
     from . import claude_md_review, skills_review
     from .units import Units
 
-    def emit(model, config_dir, window, since_dt, until_dt) -> int:
+    def emit(model, config_dir, window, since_dt, until_dt, projects) -> int:
         units = model.units or Units()
         period = _period_phrase(window)
         context = model.context_files or {}
+        # Both follow the project: its folders' files and your own.
+        only = _report_only(args, projects, config_dir)
         if args.what == "skills":
-            only = _report_only(args, model, config_dir)
             print(skills_review.render_markdown(skills_review.review(config_dir, context, units, period, only=only)))
         else:
-            review = claude_md_review.build_review(config_dir, context)
+            review = claude_md_review.build_review(config_dir, context, projects=None if only is None else list(only))
             print(claude_md_review.render_markdown(review, units, period))
         return 0
 
     return _cmd_report_like(args, {"overview"}, emit=emit)
 
 
-def _report_only(args: argparse.Namespace, model, config_dir) -> tuple[Path, ...] | None:
+def _report_only(args: argparse.Namespace, projects, config_dir) -> tuple[Path, ...] | None:
     """The project folders a report was limited to (``--project``, or
-    the folder it was run in), or ``None`` for ``--all-projects``."""
+    the folder it was run in), or ``None`` for ``--all-projects``.
+    ``projects`` are the raw ``~/.claude/projects/`` folder names the
+    report loaded (``_cmd_report_like``'s), never ``model.meta.projects``:
+    those are redacted (``Users-<user>``), so a project under a home
+    folder would match no folder."""
     from . import skills_review
 
     if args.all_projects:
         return None
-    return skills_review.project_folders_for(Path(config_dir).parent, model.meta.projects)
+    return skills_review.project_folders_for(Path(config_dir).parent, projects)
 
 
 def _period_phrase(window: str) -> str:
@@ -1792,10 +1798,15 @@ def _cmd_check(args: argparse.Namespace) -> int:
     from . import quick_actions
     from .units import Units
 
-    def emit(model, config_dir, window, since_dt, until_dt) -> int:
+    def emit(model, config_dir, window, since_dt, until_dt, projects) -> int:
         # since_dt/until_dt: the window as the report resolved it, with
-        # --days already at its local-midnight start.
-        snapshot = snapshots.with_every_project_agents(snapshots.load_snapshots(config_dir))
+        # --days already at its local-midnight start. The settings in
+        # force are the project's own unless --all-projects, as the
+        # report's advice reads them.
+        snaps = snapshots.load_snapshots(config_dir)
+        if not args.all_projects:
+            snaps = snapshots.snapshots_for_projects(snaps, projects)
+        snapshot = snapshots.with_every_project_agents(snaps, snapshots.canonical_project_keys(projects))
         agents = snapshot.data.get("effective_agents") if snapshot is not None else None
         ctx = quick_actions.Context(
             model=model,
@@ -1804,7 +1815,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
             config_dir=Path(config_dir),
             effective=snapshots.effective_config_in_force(snapshot) if snapshot is not None else {},
             effective_agents=agents if isinstance(agents, dict) else {},
-            only=_report_only(args, model, config_dir),
+            only=_report_only(args, projects, config_dir),
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,
         )
@@ -1929,16 +1940,33 @@ def _cmd_config_diff(args: argparse.Namespace) -> int:
     recache_th = recache.RecacheThresholds.from_config(config.thresholds)
     session_metrics = _build_session_metrics(corpus, rates, recache_th, config, session_overrides)
 
+    # The snapshots the report's Settings section reads: every project's
+    # with --all-projects, else only the selected projects', each diffed
+    # within its own snapshots so a switch between projects never reads
+    # as a change.
+    from .report import _settings_snapshots
+
+    scoped, canonical = _settings_snapshots(
+        corpus, tuple(p.name for p in project_dirs), snaps, bool(args.all_projects)
+    )
+    if not scoped:
+        print(
+            "claudeglass config-diff: no config snapshot is recorded for the selected projects "
+            "(--all-projects reads every project's)",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.auto_keys:
-        changed_keys = sorted(snapshots.diff_keys(snaps).keys())
+        changed_keys = snapshots.changed_keys(scoped, canonical)
         if not changed_keys:
-            print("No config keys changed across the available snapshots.")
+            print("No setting changed between two snapshots of the same project.")
             return 0
         tables = [
-            snapshots.build_config_diff_table(session_metrics, snaps, key) for key in changed_keys
+            snapshots.build_config_diff_table(session_metrics, scoped, key, canonical) for key in changed_keys
         ]
     else:
-        tables = [snapshots.build_config_diff_table(session_metrics, snaps, args.key)]
+        tables = [snapshots.build_config_diff_table(session_metrics, scoped, args.key, canonical)]
 
     helptext.annotate_section(Section(key="config", title="", tables=tables), "subscription" if config.billing == "subscription" else "api")
     for table in tables:

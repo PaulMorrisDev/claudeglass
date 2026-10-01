@@ -57,6 +57,16 @@ per :func:`_project_label`. A Windows project's key depends on the case of
 its drive letter, so code that joins a session to its snapshots goes by
 every key the project can carry (:func:`snapshot_project_keys`).
 
+Snapshots of different projects are never compared with one another. A
+project's own snapshots, oldest first, are its *chain*
+(:func:`project_chains`), and "which settings changed" is asked of each
+chain on its own (:func:`changed_keys`): one list ordered by time
+interleaves the projects, so every switch between two projects would read
+as a change. A hash can't be turned back into its other drive-letter
+spelling, so the functions that fold a project's legacy and canonical keys
+into one take a mapping from the transcript slugs
+(:func:`canonical_project_keys`).
+
 This module may import from the rest of the package (unlike the standalone
 hook script) — it reuses :class:`~claudeglass.model.Table` and
 :class:`~claudeglass.model.Column` so a config-diff table renders
@@ -70,7 +80,7 @@ import hashlib
 import json
 import re
 import statistics
-from collections.abc import Collection
+from collections.abc import Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -505,13 +515,17 @@ def layers(snapshot: Snapshot) -> dict:
     return dict(value) if isinstance(value, dict) else {}
 
 
+#: The placeholder :func:`_project_label` gives a snapshot with no project.
+_UNKNOWN_PROJECT = "(unknown project)"
+
+
 def _project_label(snapshot: Snapshot) -> str:
     """The project identity a schema-2 snapshot's own ``project_slug``
     names, or a fixed placeholder for a schema-1 snapshot (which predates
     that field) — see the module docstring's "Project identity" note.
     """
     slug = snapshot.data.get("project_slug")
-    return str(slug) if isinstance(slug, str) and slug else "(unknown project)"
+    return str(slug) if isinstance(slug, str) and slug else _UNKNOWN_PROJECT
 
 
 #: The config hook stores ``project_slug`` as ``"slug:" + sha256(raw
@@ -566,22 +580,88 @@ def latest_for_keys(snapshots: list[Snapshot], keys: Collection[str]) -> Snapsho
     return max(reversed(matches), key=lambda snap: _parse_ts(snap.ts) or oldest, default=None)
 
 
-def latest_snapshot_per_project(snapshots: list[Snapshot]) -> dict[str, Snapshot]:
+def canonical_project_keys(raw_slugs: Iterable[str]) -> dict[str, str]:
+    """Every key a project of ``raw_slugs`` (``~/.claude/projects/``
+    directory names) goes by, to its canonical one
+    (:func:`snapshot_project_keys`): both spellings of a Windows drive
+    letter map to the upper-case one. The mapping :func:`latest_snapshot_per_project`
+    and the other folding functions take; only a project whose transcript
+    slug is known can be folded."""
+    return {key: keys[0] for keys in map(snapshot_project_keys, set(raw_slugs)) for key in keys}
+
+
+def _canonical_label(snapshot: Snapshot, canonical: Mapping[str, str] | None) -> str:
+    """:func:`_project_label` of ``snapshot``, folded to the project's
+    canonical key when ``canonical`` (:func:`canonical_project_keys`) knows
+    the project."""
+    label = _project_label(snapshot)
+    return canonical.get(label, label) if canonical else label
+
+
+def project_snapshots(snapshots: list[Snapshot], keys: Collection[str]) -> list[Snapshot]:
+    """The snapshots of the project that goes by ``keys`` (every key it
+    carries, :func:`snapshot_project_keys`), in their order. Only a project
+    with no snapshot of its own gets the ones with no project (schema 1).
+    That is narrower than :func:`snapshot_for`, which joins a session to its
+    project's rows and to the project-less ones. So in a view of a project
+    with rows of its own, its sessions from before its first snapshot have
+    no setting: they count as predating the earliest snapshot. The
+    all-projects view keeps every snapshot, so there they join the
+    project-less ones."""
+    wanted = set(keys)
+    own = [snap for snap in snapshots if _project_label(snap) in wanted]
+    return own or [snap for snap in snapshots if _project_label(snap) == _UNKNOWN_PROJECT]
+
+
+def snapshots_for_projects(snapshots: list[Snapshot], raw_slugs: Iterable[str]) -> list[Snapshot]:
+    """The snapshots of every project ``raw_slugs`` (``~/.claude/projects/``
+    directory names) names, each one's own (:func:`project_snapshots`), in
+    their order: the settings a report limited to those projects reads."""
+    keep = {id(snap) for slug in set(raw_slugs) for snap in project_snapshots(snapshots, snapshot_project_keys(slug))}
+    return [snap for snap in snapshots if id(snap) in keep]
+
+
+def project_chains(
+    snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None
+) -> dict[str, list[Snapshot]]:
+    """Each project's snapshots, oldest first, by project
+    (:func:`_project_label`; folded to the canonical key where ``canonical``
+    knows the project, so its legacy and canonical rows are one chain).
+    Relies on ``snapshots`` being ascending by ``ts``, like
+    :func:`latest_snapshot_per_project`."""
+    chains: dict[str, list[Snapshot]] = {}
+    for snap in snapshots:
+        chains.setdefault(_canonical_label(snap, canonical), []).append(snap)
+    return chains
+
+
+def latest_snapshot_per_project(
+    snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None
+) -> dict[str, Snapshot]:
     """The most recent snapshot for each project represented in
     ``snapshots`` (grouped by :func:`_project_label`). Relies on
     ``snapshots`` already being ascending by ``ts`` — :func:`load_snapshots`'
     own contract — so simply keeping the last one seen per project is
     correct without a separate sort/max step.
+
+    With ``canonical`` (:func:`canonical_project_keys`), a project filed
+    under both drive-letter keys is one entry under its canonical key: the
+    newest of its rows, so it never appears twice.
     """
     latest: dict[str, Snapshot] = {}
     for snap in snapshots:
-        latest[_project_label(snap)] = snap
+        latest[_canonical_label(snap, canonical)] = snap
     return latest
 
 
-def with_every_project_agents(snapshots: list[Snapshot]) -> Snapshot | None:
+def with_every_project_agents(
+    snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None
+) -> Snapshot | None:
     """The newest snapshot that records settings, with its ``agents`` and
-    ``effective_agents`` widened to every project's latest snapshot.
+    ``effective_agents`` widened to every project's latest snapshot
+    (:func:`latest_snapshot_per_project`, which ``canonical`` is passed to).
+    Pass one project's snapshots (:func:`project_snapshots`) for that
+    project's settings and agents alone.
 
     The config hook records only the agents of the project a session
     started in, so the newest snapshot alone knows nothing of another
@@ -598,7 +678,7 @@ def with_every_project_agents(snapshots: list[Snapshot]) -> Snapshot | None:
     if base is None:
         return None
     merged: dict[str, dict] = {"agents": {}, "effective_agents": {}}
-    for snap in sorted(latest_snapshot_per_project(snapshots).values(), key=lambda s: s.ts) + [base]:
+    for snap in sorted(latest_snapshot_per_project(snapshots, canonical).values(), key=lambda s: s.ts) + [base]:
         for section, into in merged.items():
             entries = snap.data.get(section)
             if not isinstance(entries, dict):
@@ -625,13 +705,14 @@ def _hash_effective_config(effective: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def build_effective_config_table(snapshots: list[Snapshot]) -> Table:
+def build_effective_config_table(snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None) -> Table:
     """One row per (project, key) for every project's *latest* effective
     config: the value currently in effect and which settings layer
     supplied it. Empty (no rows) if no snapshot carries schema 2's
-    ``effective`` field yet.
+    ``effective`` field yet. ``canonical`` folds a project's legacy and
+    canonical keys into one (:func:`latest_snapshot_per_project`).
     """
-    latest = latest_snapshot_per_project(snapshots)
+    latest = latest_snapshot_per_project(snapshots, canonical)
     rows: list[list] = []
     for project in sorted(latest):
         snap = latest[project]
@@ -660,14 +741,15 @@ def build_effective_config_table(snapshots: list[Snapshot]) -> Table:
     )
 
 
-def build_config_layers_table(snapshots: list[Snapshot]) -> Table:
+def build_config_layers_table(snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None) -> Table:
     """One row per (project, settings layer): whether that layer file is
     present, plus a repeated per-project content-layer summary (agent
     count, skill count, rules count, total CLAUDE.md bytes, command count,
     MCP server count) so a reader sees a project's whole config footprint
-    without cross-referencing a second table.
+    without cross-referencing a second table. ``canonical`` folds a
+    project's legacy and canonical keys into one.
     """
-    latest = latest_snapshot_per_project(snapshots)
+    latest = latest_snapshot_per_project(snapshots, canonical)
     rows: list[list] = []
     for project in sorted(latest):
         snap = latest[project]
@@ -763,7 +845,7 @@ ENV_LEVER_NAMES: tuple[str, ...] = (
 SETTINGS_LEVER_KEYS: tuple[str, ...] = ("attribution", "includeCoAuthoredBy")
 
 
-def build_env_levers_table(snapshots: list[Snapshot]) -> Table:
+def build_env_levers_table(snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None) -> Table:
     """One row per :data:`ENV_LEVER_NAMES` entry plus one per
     :data:`SETTINGS_LEVER_KEYS` entry, read from the same "config as of
     now" snapshot ``build_report`` passes ``recommend()``
@@ -780,9 +862,10 @@ def build_env_levers_table(snapshots: list[Snapshot]) -> Table:
     ``report.py``'s own comment on the same call), so a project column
     would be one constant value repeated on every row -- this table names
     the project once, in a note, instead of a column that always agrees
-    with itself.
+    with itself. Pass the picked project's snapshots
+    (:func:`project_snapshots`) and the table reads that project's levers.
     """
-    snap = with_every_project_agents(snapshots) if snapshots else None
+    snap = with_every_project_agents(snapshots, canonical) if snapshots else None
     names = set((snap.data.get("env_names") if snap else None) or [])
     caps = (snap.data.get("env_numeric_caps") if snap else None) or {}
     if not isinstance(caps, dict):
@@ -802,7 +885,7 @@ def build_env_levers_table(snapshots: list[Snapshot]) -> Table:
 
     notes: list[str] = []
     if snap is not None:
-        notes.append(f"Project: {_project_label(snap)}.")
+        notes.append(f"Project: {_canonical_label(snap, canonical)}.")
     elif snapshots:
         notes.append("No snapshot available to read env-var levers from.")
     return Table(
@@ -819,7 +902,9 @@ def build_env_levers_table(snapshots: list[Snapshot]) -> Table:
 
 
 def build_config_groups_table(
-    snapshots: list[Snapshot], sessions_with_metrics: list[dict] | None = None
+    snapshots: list[Snapshot],
+    sessions_with_metrics: list[dict] | None = None,
+    canonical: Mapping[str, str] | None = None,
 ) -> Table:
     """Projects grouped by an identical *current* effective config (each
     project's latest snapshot), with an optional session count per group
@@ -827,9 +912,10 @@ def build_config_groups_table(
     shape :func:`build_config_diff_table` takes) is supplied — a session is
     attributed to whichever project its own :func:`snapshot_for` join
     resolves to, independent of which exact snapshot it joined (only that
-    snapshot's project matters for this count).
+    snapshot's project matters for this count). ``canonical`` folds a
+    project's legacy and canonical keys into one.
     """
-    latest = latest_snapshot_per_project(snapshots)
+    latest = latest_snapshot_per_project(snapshots, canonical)
 
     session_counts: dict[str, int] = {}
     if sessions_with_metrics:
@@ -837,7 +923,7 @@ def build_config_groups_table(
             snap = snapshot_for(session.get("first_ts"), snapshots, session.get("project_key"))
             if snap is None:
                 continue
-            project = _project_label(snap)
+            project = _canonical_label(snap, canonical)
             session_counts[project] = session_counts.get(project, 0) + 1
 
     groups: dict[str, dict] = {}
@@ -1140,7 +1226,9 @@ def diff_keys(snapshots: list[Snapshot]) -> dict[str, list]:
     ``snapshots``, mapped to its value at each snapshot in order (missing
     keys as ``None``). Keys whose value never changes are omitted — this is
     the auto-detection ``config-diff --auto-keys`` uses to find candidate
-    keys without the caller naming one.
+    keys without the caller naming one. ``snapshots`` should be one
+    project's (:func:`project_chains`); for the keys that changed across
+    several projects, :func:`changed_keys` diffs each one's own.
     """
     flattened = [flatten_snapshot(snap) for snap in snapshots]
     all_keys: set[str] = set()
@@ -1153,6 +1241,19 @@ def diff_keys(snapshots: list[Snapshot]) -> dict[str, list]:
         if len({_hashable(v) for v in values}) > 1:
             result[key] = values
     return result
+
+
+def changed_keys(snapshots: list[Snapshot], canonical: Mapping[str, str] | None = None) -> list[str]:
+    """Every flattened config key that changed within some project's own
+    snapshots (:func:`project_chains`, each diffed by :func:`diff_keys`),
+    sorted. A key two projects both changed is listed once. ``snapshots``
+    from several projects, in time order, would read every switch between
+    projects as a change; pass one project's (:func:`project_snapshots`)
+    for that project's changes alone."""
+    changed: set[str] = set()
+    for chain in project_chains(snapshots, canonical).values():
+        changed.update(diff_keys(chain))
+    return sorted(changed)
 
 
 def co_changed_keys(snapshot_a: Snapshot, snapshot_b: Snapshot) -> list[str]:
@@ -1192,20 +1293,23 @@ def _plain_setting_key(key: str) -> str:
     return f"{rest.replace('_', ' ')} ({where})" if rest else where
 
 
-def _keys_co_changed_with(snapshots: list[Snapshot], key: str) -> list[str]:
-    """Across consecutive snapshots in ``snapshots``, every other key that
-    changed at the same time ``key`` changed. Feeds the note on a
-    :func:`build_config_diff_table` result.
+def _keys_co_changed_with(
+    snapshots: list[Snapshot], key: str, canonical: Mapping[str, str] | None = None
+) -> list[str]:
+    """Across consecutive snapshots of one project (:func:`project_chains`),
+    every other key that changed at the same time ``key`` changed. Feeds
+    the note on a :func:`build_config_diff_table` result.
     """
     co_changed: set[str] = set()
-    for earlier, later in zip(snapshots, snapshots[1:]):
-        flat_earlier = flatten_snapshot(earlier)
-        flat_later = flatten_snapshot(later)
-        if _hashable(flat_earlier.get(key)) == _hashable(flat_later.get(key)):
-            continue
-        for other in co_changed_keys(earlier, later):
-            if other != key:
-                co_changed.add(other)
+    for chain in project_chains(snapshots, canonical).values():
+        for earlier, later in zip(chain, chain[1:]):
+            flat_earlier = flatten_snapshot(earlier)
+            flat_later = flatten_snapshot(later)
+            if _hashable(flat_earlier.get(key)) == _hashable(flat_later.get(key)):
+                continue
+            for other in co_changed_keys(earlier, later):
+                if other != key:
+                    co_changed.add(other)
     return sorted(co_changed)
 
 
@@ -1216,6 +1320,7 @@ def build_config_diff_table(
     sessions_with_metrics: list[dict],
     snapshots: list[Snapshot],
     key: str,
+    canonical: Mapping[str, str] | None = None,
 ) -> Table:
     """Group ``sessions_with_metrics`` by the value of flattened config
     ``key`` in effect at each session's start (via :func:`snapshot_for` +
@@ -1229,8 +1334,10 @@ def build_config_diff_table(
     A session whose start predates every snapshot is excluded from every
     group (there's no config value to attribute it to) and counted in a
     note instead. A second note lists every other key that changed
-    alongside ``key`` in the same window, so a reader doesn't credit one
-    key alone for a cost difference two keys might explain.
+    alongside ``key`` between the same two snapshots of one project, so a
+    reader doesn't credit one key alone for a cost difference two keys
+    might explain. ``canonical`` (:func:`canonical_project_keys`) makes a
+    project's legacy and canonical snapshots one run of snapshots there.
     """
     groups: dict[object, dict] = {}
     order: list[object] = []
@@ -1297,7 +1404,7 @@ def build_config_diff_table(
             f"{excluded} session{plural} predate the earliest config snapshot "
             "and are excluded from every group above."
         )
-    co_changed = _keys_co_changed_with(snapshots, key)
+    co_changed = _keys_co_changed_with(snapshots, key, canonical)
     plain = _plain_setting_key(key)
     if co_changed:
         notes.append(
@@ -1349,6 +1456,7 @@ def build_config_section(
     include_effective: bool = False,
     sessions_with_observed: list[dict] | None = None,
     resolve_model=None,
+    canonical: Mapping[str, str] | None = None,
 ) -> Section:
     """Wrap :func:`build_config_diff_table` in a "Config diff" report
     ``Section`` (fix item 10), so a CLI report can list a config-diff
@@ -1373,8 +1481,12 @@ def build_config_section(
     - ``sessions_with_observed`` (the ``{"session_id", "first_ts",
       "observed": {...}}`` shape :func:`build_config_drift_table` takes),
       when given, appends a config-drift table.
+
+    ``canonical`` (:func:`canonical_project_keys`) folds a project's legacy
+    and canonical snapshot keys into one, in the diff table's co-changed
+    note and in the effective, layers and groups tables.
     """
-    diff_table = build_config_diff_table(sessions_with_metrics, snapshots, key)
+    diff_table = build_config_diff_table(sessions_with_metrics, snapshots, key, canonical)
     rows = [[_stringify_config_value(row[0]), *row[1:]] for row in diff_table.rows]
     section_table = Table(
         name=diff_table.name,
@@ -1385,9 +1497,9 @@ def build_config_section(
     )
     tables = [section_table]
     if include_effective:
-        tables.append(build_effective_config_table(snapshots))
-        tables.append(build_config_layers_table(snapshots))
-        tables.append(build_config_groups_table(snapshots, sessions_with_metrics))
+        tables.append(build_effective_config_table(snapshots, canonical))
+        tables.append(build_config_layers_table(snapshots, canonical))
+        tables.append(build_config_groups_table(snapshots, sessions_with_metrics, canonical))
     if sessions_with_observed:
         tables.append(build_config_drift_table(sessions_with_observed, snapshots, resolve_model=resolve_model))
     return Section(key="config_diff", title="Config diff", tables=tables)
@@ -1401,9 +1513,14 @@ __all__ = [
     "snapshot_project_key",
     "snapshot_project_keys",
     "latest_for_keys",
+    "canonical_project_keys",
+    "project_snapshots",
+    "snapshots_for_projects",
+    "project_chains",
     "flatten_snapshot",
     "managed_keys",
     "diff_keys",
+    "changed_keys",
     "co_changed_keys",
     "build_config_diff_table",
     "build_config_section",

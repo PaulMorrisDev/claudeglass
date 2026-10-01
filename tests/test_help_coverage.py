@@ -131,6 +131,11 @@ def test_copy_keeps_to_short_plain_sentences(where, text):
     assert not CAMEL_CASE.search(text), f"{where}: camelCase name in {text!r}"
 
 
+def test_the_settings_help_says_changes_use_every_snapshot_not_only_the_window():
+    read = helptext.SECTION_COPY["config"].help.read
+    assert "This uses every snapshot recorded, not only this window's." in read
+
+
 @pytest.fixture(scope="module")
 def report(tmp_path_factory):
     project_dir = tmp_path_factory.mktemp("help") / "proj"

@@ -1001,11 +1001,130 @@ def test_compactions_listing(store: Store) -> None:
     assert rows[0]["dropped_tokens"] == 140000
 
 
-def test_compactions_listing_keeps_only_those_in_the_window(store: Store) -> None:
-    _seed(store)  # one compaction, at 2026-09-18T12:30:00Z
+def test_compactions_listing_keeps_only_those_of_the_sessions_in_the_window(store: Store) -> None:
+    _seed(store)  # session-a, 12:00 to 13:00, one compaction at 12:30 on 2026-09-18
     assert len(store.compactions(since="2026-09-18T12:00:00Z")) == 1
-    assert store.compactions(since="2026-09-18T13:00:00Z") == []
+    # The window opens after the compaction but before the session's last
+    # reply: the session counts, so its compaction does too.
+    assert len(store.compactions(since="2026-09-18T12:45:00Z")) == 1
+    assert store.compactions(since="2026-09-18T13:30:00Z") == []
+    # The window closes before the session's last reply: it isn't counted,
+    # whenever its compaction happened.
+    assert store.compactions(until="2026-09-18T12:45:00Z") == []
     assert store.compactions(until="2026-09-18T12:00:00Z") == []
+
+
+def _compacting_session(store: Store, session_id: str, slug: str, first_ts: str, last_ts: str, compacted_at: list[str]) -> None:
+    store.upsert_session(
+        session_id=session_id, project_slug=slug, slug=slug, first_ts=first_ts, last_ts=last_ts, total_cost=1.0, total_tokens=100
+    )
+    store.upsert_transcript(
+        session_id=session_id,
+        path=rf"C:\Users\definitely-not-a-real-person\.claude\projects\{slug}\{session_id}.jsonl",
+        kind="top-level",
+        digest_json=json.dumps({"turns": 1}),
+        compactions=[
+            {"ts": ts, "pre_tokens": 1000, "post_tokens": 200, "dropped_tokens": 800, "trigger": "auto", "join_delta_s": 1.0}
+            for ts in compacted_at
+        ],
+    )
+
+
+def test_compactions_are_counted_and_listed_by_the_sessions_the_window_counts(store: Store) -> None:
+    """A window counts a session whole, so the list holds every compaction
+    of the sessions the tiles count, wherever in the session it fell: one
+    that began before the window opened lists the compactions from before
+    it too, and one that ran on past the window's end lists none."""
+    _compacting_session(store, "straddles", "proj-a", "2026-09-19T22:00:00Z", "2026-09-20T02:00:00Z",
+                        ["2026-09-19T23:00:00Z", "2026-09-20T01:00:00Z"])
+    _compacting_session(store, "earlier", "proj-a", "2026-09-18T09:00:00Z", "2026-09-18T10:00:00Z", ["2026-09-18T09:30:00Z"])
+    _compacting_session(store, "later", "proj-b", "2026-09-21T09:00:00Z", "2026-09-21T10:00:00Z", ["2026-09-21T09:30:00Z"])
+    _compacting_session(store, "runs-on", "proj-b", "2026-09-20T10:00:00Z", "2026-09-22T10:00:00Z", ["2026-09-20T11:00:00Z"])
+    compactions = {"straddles": 2, "earlier": 1, "later": 1, "runs-on": 1}
+    opens, closes = "2026-09-20T00:00:00Z", "2026-09-21T12:00:00Z"
+
+    def listed(**window) -> list[str]:
+        rows = store.compactions(**window)
+        # The list is as long as the compactions of the sessions the window counts.
+        counted = [s["id"] for s in store.sessions(**window)]
+        assert len(rows) == sum(compactions[session_id] for session_id in counted), window
+        return [row["ts"] for row in rows]
+
+    # Last replies on the 20th, 21st and 22nd: three sessions, and all the
+    # compactions of each, the one before the window's start among them.
+    assert store.summary(since=opens)["sessions"] == 3
+    assert listed(since=opens) == [
+        "2026-09-19T23:00:00Z", "2026-09-20T01:00:00Z", "2026-09-20T11:00:00Z", "2026-09-21T09:30:00Z",
+    ]
+    # The window closes while "runs-on" is still going: it, and the
+    # compaction inside the window, are out.
+    assert store.summary(since=opens, until=closes)["sessions"] == 2
+    assert listed(since=opens, until=closes) == ["2026-09-19T23:00:00Z", "2026-09-20T01:00:00Z", "2026-09-21T09:30:00Z"]
+    assert listed(project_slugs=["proj-b"], since=opens) == ["2026-09-20T11:00:00Z", "2026-09-21T09:30:00Z"]
+    # "Since my last change" counts by first reply: "straddles" began before it.
+    assert store.summary(since=opens, window_by="first-reply")["sessions"] == 2
+    assert listed(since=opens, window_by="first-reply") == ["2026-09-20T11:00:00Z", "2026-09-21T09:30:00Z"]
+    # With no window, every compaction.
+    assert len(store.compactions()) == sum(compactions.values())
+
+
+def test_the_compactions_list_is_as_long_as_the_reports_own_count(tmp_path) -> None:
+    """End to end: real transcripts through the watcher, then the report the
+    dashboard builds over the same window. Its Compactions section counts the
+    compactions of the sessions the window counts, so the list has as many
+    rows, the one a straddling session had before the window opened included."""
+    from claudeglass.config import Config
+    from claudeglass.pricing import load_pricing
+    from claudeglass.report import build_report
+    from claudeglass.service.contracts import ServeOptions
+    from claudeglass.service.rebuild import corpus_from_store
+    from claudeglass.service.watcher import FileWatcher
+    from helpers import system_line, turn_line, write_jsonl
+
+    def compaction(timestamp: str) -> dict:
+        return system_line(
+            "compact_boundary",
+            timestamp=timestamp,
+            compactMetadata={"trigger": "auto", "preTokens": 100000, "postTokens": 20000, "cumulativeDroppedTokens": 80000},
+        )
+
+    def session(slug: str, name: str, first: str, last: str, compacted_at: list[str]) -> None:
+        lines = [turn_line(timestamp=first)] + [compaction(ts) for ts in compacted_at] + [turn_line(timestamp=last)]
+        path = tmp_path / "projects" / slug / f"{name}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_jsonl(path, lines)
+        os.utime(path, (1_700_000_000, 1_700_000_000))  # long settled, so the watcher takes it
+
+    session("proj-a", "straddles", "2026-09-19T22:00:00.000Z", "2026-09-20T02:00:00.000Z",
+            ["2026-09-19T23:00:00.000Z", "2026-09-20T01:00:00.000Z"])
+    session("proj-a", "earlier", "2026-09-18T09:00:00.000Z", "2026-09-18T10:00:00.000Z", ["2026-09-18T09:30:00.000Z"])
+    session("proj-b", "later", "2026-09-21T09:00:00.000Z", "2026-09-21T10:00:00.000Z", ["2026-09-21T09:30:00.000Z"])
+
+    store = Store(":memory:")
+    store.open()
+    try:
+        stats = FileWatcher(store, ServeOptions(projects_root=tmp_path / "projects", config_dir=tmp_path / "config")).run_once()
+        assert stats.errors == 0
+
+        def reported(**window) -> int:
+            corpus = corpus_from_store(store, **window)
+            model = build_report(corpus, load_pricing(), Config(), projects=("proj-a", "proj-b"), window="w", include={"compactions"})
+            section = next(item for item in model.sections if item.key == "compactions")
+            mix = next(table for table in section.tables if table.name == "compactions_trigger_mix")
+            return sum(row[1] for row in mix.rows)
+
+        for window in (
+            {"since": "2026-09-20T00:00:00Z"},
+            {"since": "2026-09-20T00:00:00Z", "until": "2026-09-21T00:00:00Z"},
+            {"since": "2026-09-20T03:00:00Z"},
+            {"since": "2026-09-18T00:00:00Z"},
+        ):
+            assert len(store.compactions(**window)) == reported(**window), window
+        # The straddling session counts whole: three compactions, not two.
+        assert len(store.compactions(since="2026-09-20T00:00:00Z")) == 3
+        assert len(store.compactions(since="2026-09-20T03:00:00Z")) == 1
+    finally:
+        store.close()
 
 
 def test_sessions_listing_keeps_only_sessions_with_a_reply_in_the_window(store: Store) -> None:
@@ -1061,6 +1180,13 @@ def test_resolve_project_slug_finds_the_raw_slug_or_none(store: Store) -> None:
     assert store.resolve_project_slug("proj-a") == ["proj-a"]
     assert store.resolve_project_slug("proj-b") == ["proj-b"]
     assert store.resolve_project_slug("no-such-project") is None
+
+
+def test_project_slugs_lists_every_project_with_a_session(store: Store) -> None:
+    assert store.project_slugs() == []
+    _seed(store)
+    _seed_second_project(store)
+    assert store.project_slugs() == ["proj-a", "proj-b"]
 
 
 def test_summary_filters_by_project_slugs(store: Store) -> None:

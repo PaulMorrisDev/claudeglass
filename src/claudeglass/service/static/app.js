@@ -749,7 +749,7 @@ function initProjectPicker() {
     id: "project",
     icon: "folder",
     name: "Project",
-    note: "Projects with a session in this window, the most expensive first. Settings and Data quality always cover every project.",
+    note: "Projects with a session in this window, the most expensive first. Your changes, settings and CLAUDE.md files follow the pick too. The latest baseline, whether your estimates came true, and the hook and statusline checks always cover every project. Profiles uses your newest settings from any project.",
     pick: function (value) {
       setProject(value);
     },

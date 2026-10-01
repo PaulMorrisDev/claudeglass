@@ -694,12 +694,14 @@ export function renderUsage(panel) {
     renderMappedSections(result.report, "spend/usage", sectionContainer);
   });
 
+  // The compactions of the sessions the window counts, whole, as the
+  // compactions section above counts them: the server lists them so.
   var compactions = el("section", { class: "report-section", id: "usage-compactions-section" });
-  compactions.appendChild(el("h2", { class: "section-title", text: "Every conversation summary in this window" }));
+  compactions.appendChild(el("h2", { class: "section-title", text: "Every conversation summary in this window's sessions" }));
   compactions.appendChild(
     el("p", {
       class: "section-intro",
-      text: "Each time Claude Code summarised a conversation to make room (a compaction), newest first.",
+      text: "Each time Claude Code summarised a conversation to make room (a compaction), newest first. A session counts whole, so one that began before this window lists all its summaries.",
     })
   );
   var compactionsContainer = el("div", { id: "usage-compactions" });

@@ -50,9 +50,9 @@ project's convention -- see e.g. ``report.py``'s own module docstring):
 - ``GET /api/profiles/<id>/diff`` renders the real
   ``profiles/diff.py`` computation (v0.3) against the store's own
   *latest* recorded config snapshot (``snapshots.effective_config`` and
-  friends) -- not a per-project selection, since config-diff/ttl/
-  recommendations are already computed the same window-wide,
-  not-per-project way elsewhere in this module. A store with no
+  friends) -- not a per-project selection: it takes no ``project``
+  filter, unlike config-diff, recommendations and the quick actions'
+  "in force now" settings, which follow a picked project. A store with no
   snapshot at all diffs against an empty effective config (nothing
   currently set, nothing managed) and adds a note saying so, rather
   than erroring.
@@ -1143,12 +1143,18 @@ def make_handler(
                 return snapshot
         return snaps[-1] if snaps else None
 
-    def _config_snapshot_with_every_project_agents() -> Snapshot | None:
+    def _config_snapshot_with_every_project_agents(project=None) -> Snapshot | None:
         """:func:`_latest_config_snapshot` with its agents widened to
         every project's latest snapshot (see
         ``snapshots.with_every_project_agents``), for the "now" value of
-        an agent recorded in another project."""
-        return snapshots_mod.with_every_project_agents(_snapshots_from_store())
+        an agent recorded in another project. With a ``project`` filter
+        (its raw slugs), only that project's snapshots count, as the
+        report's own advice reads them (``report._settings_snapshots``)."""
+        snaps = _snapshots_from_store()
+        if project:
+            snaps = snapshots_mod.snapshots_for_projects(snaps, project)
+        canonical = snapshots_mod.canonical_project_keys(store.project_slugs())
+        return snapshots_mod.with_every_project_agents(snaps, canonical)
 
     def _build_report_model(
         window_days: int | None,
@@ -1173,7 +1179,11 @@ def make_handler(
             project_slugs=list(project) if project else None,
         )
         snaps = _snapshots_from_store()
-        projects = tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug}))
+        # The picked project counts even with no session in the window, so
+        # its settings still show (report._settings_snapshots) and the
+        # report's meta.projects names it, as the CLI's does for a selected
+        # folder.
+        projects =tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug} | set(project or ())))
         window = _window_label(window_days, since, until)
         try:
             overrides = load_session_overrides(options.config_dir)
@@ -1219,6 +1229,10 @@ def make_handler(
             # No project picked: every project's sessions, so an MCP
             # server every project loads can be judged unused.
             all_projects=not project,
+            # Every project the store knows, so a project's two
+            # drive-letter snapshot keys fold into one even when it has
+            # no session in the window.
+            known_slugs=tuple(store.project_slugs()),
             # Spend > Usage shows cost by phase. The CLI keeps it behind
             # --phases; here it costs about 1% of the build.
             phases=True,
@@ -1542,6 +1556,7 @@ def make_handler(
         dependent_value = habits_mod.capture_dependent_value(
             habits_mod.collect(
                 corpus, rates, ratings=store.all_feedback(), signals=_capture_signals(corpus, options.config_dir),
+                tz=config.tz,
             )
         )
         start = _parse_bound(enabled_at)
@@ -1956,6 +1971,9 @@ def make_handler(
         )
 
     def route_compactions(store, query, body):
+        """Every compaction of the sessions the window counts, as the
+        tiles count them (``Store.compactions``), so the list is as long
+        as the Spend page's own count."""
         window, err = _listing_window(query)
         if err is not None:
             return err
@@ -2505,7 +2523,13 @@ def make_handler(
         section = _find_section(model, "config")
         tables = section.tables if section is not None else []
         if auto_keys:
-            return _ok([to_jsonable(table) for table in tables])
+            data = [to_jsonable(table) for table in tables]
+            # The page shows only the tables, so the section's own notes (no
+            # setting changed between two snapshots of the same project, or
+            # only the first 20 changed settings shown) go under the first.
+            if data and section is not None and section.notes:
+                data[0]["notes"] = [*section.notes, *(data[0].get("notes") or [])]
+            return _ok(data)
         table = next((t for t in tables if t.name == f"config-diff-{key}"), None)
         return _ok(to_jsonable(table) if table is not None else [])
 
@@ -2539,13 +2563,19 @@ def make_handler(
         from .. import claude_md_review
 
         model = _get_report_model(*window, project)
-        review = claude_md_review.build_review(options.config_dir, model.context_files or {})
+        # With a project picked, only its folders' files (and your user
+        # files, which every project reads), as Skills reads them.
+        folders = _project_folders(project)
+        review = claude_md_review.build_review(
+            options.config_dir, model.context_files or {}, projects=None if folders is None else list(folders)
+        )
         return claude_md_review, review, _report_units(model), _period_text(*window, name=query.get("window"))
 
     def route_claude_md(store, query, body):
-        """Every CLAUDE.md-family file on disk, with how often it was sent
-        in the window and what it cost. File text is read now and never
-        stored."""
+        """Every CLAUDE.md-family file on disk (your own, and every
+        project's, or only the picked project's), with how often it was
+        sent in the window and what it cost. File text is read now and
+        never stored."""
         window, err = _window_query(query)
         if err is not None:
             return err
@@ -2606,13 +2636,14 @@ def make_handler(
 
         return skills_review.project_folders_for(Path(options.config_dir).parent, project) if project else None
 
-    def _current_settings() -> tuple[dict, dict, bool]:
+    def _current_settings(project=None) -> tuple[dict, dict, bool]:
         """The latest snapshot's effective settings as in force, every project's agent
         fields, and (PROF-03) whether ``CLAUDE_CODE_EFFORT_LEVEL`` is set
         -- content_layers' own flag, never a value that could be
         anything else -- or empty/``False`` when no snapshot is recorded
-        yet."""
-        snapshot = _config_snapshot_with_every_project_agents()
+        yet. With a ``project`` filter, that project's own settings and
+        agents (:func:`_config_snapshot_with_every_project_agents`)."""
+        snapshot = _config_snapshot_with_every_project_agents(project)
         if snapshot is None:
             return {}, {}, False
         agents = snapshot.data.get("effective_agents")
@@ -2645,7 +2676,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, effective_agents, effort_level_env_set = _current_settings()
+        effective, effective_agents, effort_level_env_set = _current_settings(project)
         return _ok(
             goals.draft(
                 goal,
@@ -2713,7 +2744,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, _agents, _env_set = _current_settings()
+        effective, _agents, _env_set = _current_settings(project)
         units = _report_units(model)
         period = _period_text(*window, name=query.get("window"))
         result = whatif.estimate(
@@ -2761,7 +2792,7 @@ def make_handler(
         from .. import quick_actions
 
         model = _get_report_model(*window, project)
-        effective, effective_agents, _env_set = _current_settings()
+        effective, effective_agents, _env_set = _current_settings(project)
         window_days, since, until, _window_by = window
         since_dt, until_dt = _resolve_window(window_days, since, until)
         return quick_actions, quick_actions.Context(

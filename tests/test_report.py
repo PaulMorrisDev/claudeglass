@@ -466,6 +466,361 @@ def test_snapshots_add_config_section(tmp_path):
     assert "config" not in [s.key for s in report_none.sections]
 
 
+# -- settings per project: the config table and the scorecard never mix projects --
+
+
+def _corpus_of(tmp_path: Path, *slugs: str):
+    dirs = []
+    for slug in slugs:
+        project_dir = tmp_path / slug
+        project_dir.mkdir(parents=True)
+        _write_top(project_dir, "session-001", n_turns=2)
+        dirs.append(project_dir)
+    return load_corpus(dirs)
+
+
+def _settings_snap(key: str, day: int, effective: dict | None = None, **user_settings) -> Snapshot:
+    ts = f"2026-09-{day:02d}T00:00:00.000Z"
+    data = {"schema": 2, "ts": ts, "project_slug": key, "user_settings": user_settings}
+    data["effective"] = effective if effective is not None else dict(user_settings)
+    return Snapshot(path=f"cfg-{day}", ts=ts, data=data)
+
+
+def _config_tables(report) -> dict:
+    return {t.name: t for t in next(s for s in report.sections if s.key == "config").tables}
+
+
+def _config_fit(report) -> list:
+    scorecard = next(s for s in report.sections if s.key == "scorecard")
+    return next(row for row in scorecard.tables[0].rows if row[0] == "config_fit")
+
+
+def _build(corpus, snapshots, slugs, **kwargs):
+    return build_report(corpus, PRICING, Config(), projects=slugs, window="w", snapshots=snapshots, **kwargs)
+
+
+def test_two_projects_alternating_snapshots_with_stable_settings_changed_nothing(tmp_path):
+    """One time-ordered list of these four snapshots differs at every step;
+    neither project changed a thing, so the change table is empty and the
+    scorecard rates config stability as stable."""
+    corpus = _corpus_of(tmp_path, "proj-a", "proj-b")
+    key_a, key_b = snapshot_project_key("proj-a"), snapshot_project_key("proj-b")
+    snaps = [
+        _settings_snap(key_a, 1, model="opus", effortLevel="high"),
+        _settings_snap(key_b, 2, model="sonnet", effortLevel="low"),
+        _settings_snap(key_a, 3, model="opus", effortLevel="high"),
+        _settings_snap(key_b, 4, model="sonnet", effortLevel="low"),
+    ]
+
+    report = _build(corpus, snaps, ("proj-a", "proj-b"), all_projects=True)
+
+    config = next(s for s in report.sections if s.key == "config")
+    assert not [t for t in config.tables if t.name.startswith("config-diff-")]
+    assert config.notes == ["No setting changed between two snapshots of the same project."]
+    fit = _config_fit(report)
+    assert fit[1] == 5
+    assert fit[4] == 0
+
+
+def test_a_real_change_in_one_projects_chain_shows_once(tmp_path):
+    corpus = _corpus_of(tmp_path, "proj-a", "proj-b")
+    key_a, key_b = snapshot_project_key("proj-a"), snapshot_project_key("proj-b")
+    snaps = [
+        _settings_snap(key_a, 1, model="opus", effortLevel="high"),
+        _settings_snap(key_b, 2, model="sonnet", effortLevel="low"),
+        _settings_snap(key_a, 3, model="opus", effortLevel="low"),
+        _settings_snap(key_b, 4, model="sonnet", effortLevel="low"),
+        _settings_snap(key_a, 5, model="opus", effortLevel="medium"),
+    ]
+
+    report = _build(corpus, snaps, ("proj-a", "proj-b"), all_projects=True)
+
+    diff_names = [t.name for t in next(s for s in report.sections if s.key == "config").tables if t.name.startswith("config-diff-")]
+    assert diff_names == ["config-diff-user_settings.effortLevel"]
+    assert _config_fit(report)[4] == 1
+
+
+def test_config_fit_buckets_on_the_per_project_count_not_the_interleaved_one(tmp_path):
+    """Twelve settings that differ between the two projects: an interleaved
+    diff counts all twelve (the worst bucket); each project's own chain
+    changed none. Four settings changed inside one project put it in the
+    middle bucket."""
+    corpus = _corpus_of(tmp_path, "proj-a", "proj-b")
+    key_a, key_b = snapshot_project_key("proj-a"), snapshot_project_key("proj-b")
+    mine = {f"setting{i}": f"a{i}" for i in range(12)}
+    theirs = {f"setting{i}": f"b{i}" for i in range(12)}
+    stable = [
+        _settings_snap(key_a, 1, **mine),
+        _settings_snap(key_b, 2, **theirs),
+        _settings_snap(key_a, 3, **mine),
+        _settings_snap(key_b, 4, **theirs),
+    ]
+    fit = _config_fit(_build(corpus, stable, ("proj-a", "proj-b"), all_projects=True))
+    assert (fit[1], fit[4]) == (5, 0)
+
+    moved = dict(mine, **{f"setting{i}": "changed" for i in range(4)})
+    fit = _config_fit(_build(corpus, [*stable, _settings_snap(key_a, 5, **moved)], ("proj-a", "proj-b"), all_projects=True))
+    assert (fit[1], fit[4]) == (3, 4)
+
+
+def test_picking_a_project_shows_only_its_changes_and_its_latest_tables(tmp_path):
+    corpus_a = _corpus_of(tmp_path / "a", "proj-a")
+    key_a, key_b = snapshot_project_key("proj-a"), snapshot_project_key("proj-b")
+    snaps = [
+        _settings_snap(key_a, 1, model="opus", effortLevel="high"),
+        _settings_snap(key_b, 2, model="sonnet", effortLevel="high", autoCompactWindow=100000),
+        _settings_snap(key_a, 3, model="opus", effortLevel="low"),
+        _settings_snap(key_b, 4, model="haiku", effortLevel="high", autoCompactWindow=300000),
+    ]
+
+    picked = _build(corpus_a, snaps, ("proj-a",), all_projects=False)
+
+    tables = _config_tables(picked)
+    assert [n for n in tables if n.startswith("config-diff-")] == ["config-diff-user_settings.effortLevel"]
+    assert {row[0] for row in tables["effective-config"].rows} == {key_a}
+    assert {row[1]: row[2] for row in tables["effective-config"].rows} == {"model": "opus", "effortLevel": "low"}
+    assert {row[0] for row in tables["config-layers"].rows} <= {key_a}
+    assert tables["env-levers"].notes == [f"Project: {key_a}."]
+    assert all(key_b not in row[2] for row in tables["config-groups"].rows)
+    assert _config_fit(picked)[4] == 1
+
+    # With every project: both chains' changes and both projects' latest settings.
+    corpus_both = _corpus_of(tmp_path / "both", "proj-a", "proj-b")
+    everyone = _build(corpus_both, snaps, ("proj-a", "proj-b"), all_projects=True)
+    tables = _config_tables(everyone)
+    assert [n for n in tables if n.startswith("config-diff-")] == [
+        "config-diff-user_settings.autoCompactWindow",
+        "config-diff-user_settings.effortLevel",
+        "config-diff-user_settings.model",
+    ]
+    assert {row[0] for row in tables["effective-config"].rows} == {key_a, key_b}
+    assert _config_fit(everyone)[4] == 3
+
+
+def test_a_projects_legacy_and_canonical_keys_are_one_chain_in_the_tables(tmp_path):
+    """The folder is ``C--Dev-x``; the hook filed its older snapshots under
+    the lower-case drive's key. One change between them shows once, and the
+    project is one row group in the latest tables, not two."""
+    corpus = _corpus_of(tmp_path, "C--Dev-x", "proj-b")
+    upper, lower = snapshot_project_keys("C--Dev-x")
+    snaps = [
+        _settings_snap(lower, 1, model="opus", effortLevel="high"),
+        _settings_snap(snapshot_project_key("proj-b"), 2, model="sonnet", effortLevel="high"),
+        _settings_snap(upper, 3, model="opus", effortLevel="low"),
+    ]
+
+    report = _build(corpus, snaps, ("C--Dev-x", "proj-b"), all_projects=True)
+
+    tables = _config_tables(report)
+    assert [n for n in tables if n.startswith("config-diff-")] == ["config-diff-user_settings.effortLevel"]
+    assert {row[0] for row in tables["effective-config"].rows} == {upper, snapshot_project_key("proj-b")}
+    assert _config_fit(report)[4] == 1
+
+
+def test_known_slugs_fold_a_project_with_no_session_in_the_window(tmp_path):
+    """Every project's latest settings show with all projects, also one with
+    no session in the window. The dashboard names every project its store
+    knows (``known_slugs``), so such a project's two drive-letter keys are
+    still one row group; it doesn't join the report's projects."""
+    corpus = _corpus_of(tmp_path, "proj-b")
+    upper, lower = snapshot_project_keys("c--Dev-x")
+    snaps = [
+        _settings_snap(lower, 1, model="opus", effortLevel="high"),
+        _settings_snap(snapshot_project_key("proj-b"), 2, model="sonnet"),
+        _settings_snap(upper, 3, model="opus", effortLevel="low"),
+    ]
+
+    unfolded = _config_tables(_build(corpus, snaps, ("proj-b",), all_projects=True))
+    assert {row[0] for row in unfolded["effective-config"].rows} == {upper, lower, snapshot_project_key("proj-b")}
+
+    report = _build(corpus, snaps, ("proj-b",), all_projects=True, known_slugs=("c--Dev-x", "proj-b"))
+    tables = _config_tables(report)
+    assert {row[0] for row in tables["effective-config"].rows} == {upper, snapshot_project_key("proj-b")}
+    assert [n for n in tables if n.startswith("config-diff-")] == ["config-diff-user_settings.effortLevel"]
+    assert report.meta.projects == ("proj-b",)
+
+    # Picking proj-b still reads only proj-b's settings.
+    picked = _config_tables(_build(corpus, snaps, ("proj-b",), all_projects=False, known_slugs=("c--Dev-x", "proj-b")))
+    assert {row[0] for row in picked["effective-config"].rows} == {snapshot_project_key("proj-b")}
+
+
+def test_the_habits_section_counts_weeks_in_the_configured_zone_and_names_the_window(tmp_path, monkeypatch):
+    """The report hands habits its zone (``config.tz``) and window label, so
+    its weeks are the dashboard's local ones and the digest's title names
+    the window picked, not the span the messages cover."""
+    from claudeglass import habits
+
+    seen = {}
+    real = habits.collect
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(habits, "collect", spy)
+    corpus = _corpus_of(tmp_path, "proj-a")
+
+    report = build_report(corpus, PRICING, Config(tz="UTC"), projects=("proj-a",), window="last 7 days")
+
+    assert (seen["tz"], seen["window"]) == ("UTC", "last 7 days")
+    digest = next(t for s in report.sections if s.key == "habits" for t in s.tables if t.name == "habits_digest")
+    assert digest.title == "Weekly pace (last 7 days)"
+
+
+def test_the_capture_section_collects_in_the_configured_zone_when_habits_is_not_built(tmp_path, monkeypatch):
+    """With no habits pass to reuse, the capture section's own collect gets
+    the zone too, so its weeks and days are the Habits section's."""
+    from claudeglass import habits
+
+    seen = []
+    real = habits.collect
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs.get("tz"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(habits, "collect", spy)
+    corpus = _corpus_of(tmp_path, "proj-a")
+
+    build_report(corpus, PRICING, Config(tz="UTC"), projects=("proj-a",), window="last 7 days", include={"capture"})
+
+    assert seen and set(seen) == {"UTC"}
+
+
+def test_picking_a_project_reads_its_snapshots_under_either_drive_key(tmp_path):
+    corpus = _corpus_of(tmp_path, "c--Dev-x")
+    upper, lower = snapshot_project_keys("c--Dev-x")
+    snaps = [
+        _settings_snap(lower, 1, model="opus", effortLevel="high"),
+        _settings_snap(snapshot_project_key("proj-b"), 2, model="sonnet", effortLevel="low"),
+        _settings_snap(upper, 3, model="opus", effortLevel="low"),
+    ]
+
+    report = _build(corpus, snaps, ("c--Dev-x",), all_projects=False)
+
+    tables = _config_tables(report)
+    assert [n for n in tables if n.startswith("config-diff-")] == ["config-diff-user_settings.effortLevel"]
+    assert {row[0] for row in tables["effective-config"].rows} == {upper}
+
+
+def test_the_config_table_still_caps_the_changed_keys_at_twenty(tmp_path):
+    corpus = _corpus_of(tmp_path, "proj-a", "proj-b")
+    key_a, key_b = snapshot_project_key("proj-a"), snapshot_project_key("proj-b")
+    before = {f"setting{i:02d}": "x" for i in range(15)}
+    after = {f"setting{i:02d}": "y" for i in range(15)}
+    other_before = {f"other{i:02d}": "x" for i in range(10)}
+    other_after = {f"other{i:02d}": "y" for i in range(10)}
+    snaps = [
+        _settings_snap(key_a, 1, **before),
+        _settings_snap(key_b, 2, **other_before),
+        _settings_snap(key_a, 3, **after),
+        _settings_snap(key_b, 4, **other_after),
+    ]
+
+    report = _build(corpus, snaps, ("proj-a", "proj-b"), all_projects=True)
+
+    config = next(s for s in report.sections if s.key == "config")
+    assert len([t for t in config.tables if t.name.startswith("config-diff-")]) == 20
+    assert config.notes == ["Showing the first 20 of 25 changed config keys, alphabetically."]
+    assert _config_fit(report)[1] == 1
+
+
+def test_settings_snapshots_scopes_each_project_of_the_corpus_to_its_own_rows(tmp_path):
+    """A project with rows of its own reads only those; one with none reads
+    the project-less (schema 1) rows, as its sessions join to them. With
+    every project, nothing is left out. The mapping folds both drive-letter
+    keys of a corpus project."""
+    from claudeglass.report import _settings_snapshots
+
+    corpus = _corpus_of(tmp_path, "C--Dev-a", "proj-b")
+    upper, lower = snapshot_project_keys("C--Dev-a")
+    legacy = _settings_snap(lower, 1, model="opus")
+    own = _settings_snap(upper, 3, model="sonnet")
+    elsewhere = _settings_snap(snapshot_project_key("proj-c"), 2, model="haiku")
+    schema1 = Snapshot(path="old", ts="2026-08-01T00:00:00.000Z", data={"schema": 1, "user_settings": {"model": "x"}})
+    snaps = [schema1, legacy, elsewhere, own]
+
+    scoped, canonical = _settings_snapshots(corpus, (), snaps, all_projects=False)
+
+    assert scoped == [schema1, legacy, own]
+    assert canonical[lower] == upper
+    assert canonical[snapshot_project_key("proj-b")] == snapshot_project_key("proj-b")
+    everyone, _ = _settings_snapshots(corpus, (), snaps, all_projects=True)
+    assert everyone == snaps
+
+
+def test_settings_snapshots_of_an_empty_corpus_picks_none_rather_than_every_project(tmp_path):
+    from claudeglass.report import _settings_snapshots
+
+    snaps = [_settings_snap(snapshot_project_key("proj-a"), 1, model="opus")]
+    corpus = load_corpus([])
+
+    assert _settings_snapshots(corpus, (), snaps, all_projects=False) == ([], {})
+    assert _settings_snapshots(corpus, (), None, all_projects=False) == (None, {})
+
+
+def test_settings_snapshots_reads_a_named_project_the_corpus_holds_no_session_of():
+    """The CLI names every project it looked at, also one with no session in
+    the window: its two drive-letter keys are still one project."""
+    from claudeglass.report import _settings_snapshots
+
+    upper, lower = snapshot_project_keys("C--Dev-x")
+    mine = _settings_snap(lower, 1, model="opus")
+    elsewhere = _settings_snap(snapshot_project_key("proj-c"), 2, model="haiku")
+    snaps = [mine, elsewhere]
+
+    scoped, canonical = _settings_snapshots(load_corpus([]), ("C--Dev-x",), snaps, all_projects=False)
+    assert scoped == [mine]
+    assert canonical == {upper: upper, lower: upper}
+    everyone, canonical = _settings_snapshots(load_corpus([]), ("C--Dev-x",), snaps, all_projects=True)
+    assert everyone == snaps
+    assert canonical == {upper: upper, lower: upper}
+
+
+def test_a_picked_project_with_no_snapshot_says_none_is_recorded(tmp_path):
+    corpus = _corpus_of(tmp_path, "proj-a")
+    snaps = [_settings_snap(snapshot_project_key("proj-b"), 1, model="opus")]
+
+    report = _build(corpus, snaps, ("proj-a",), all_projects=False)
+
+    config = next(s for s in report.sections if s.key == "config")
+    assert config.notes == ["No settings snapshot is recorded for the projects in this report."]
+    # No table at all, not a drift table saying none was found: the
+    # dashboard then shows its own empty state.
+    assert config.tables == []
+    fit = _config_fit(report)
+    assert fit[1] == 5
+    scorecard = next(s for s in report.sections if s.key == "scorecard")
+    assert any("No settings snapshot" in note for note in scorecard.tables[0].notes)
+
+
+def test_a_picked_project_gets_advice_from_its_own_snapshot(tmp_path, monkeypatch):
+    """The "in force now" settings recommend() reads are the picked project's,
+    not a newer snapshot of another project's."""
+    from claudeglass import report as report_mod
+
+    seen = []
+    real = report_mod.recommend
+
+    def spy(model, **kwargs):
+        seen.append(kwargs["snapshot"])
+        return real(model, **kwargs)
+
+    monkeypatch.setattr(report_mod, "recommend", spy)
+    key_a, key_b = snapshot_project_key("proj-a"), snapshot_project_key("proj-b")
+    snaps = [
+        _settings_snap(key_a, 1, effective={"model": "opus"}, model="opus"),
+        _settings_snap(key_b, 2, effective={"model": "haiku"}, model="haiku"),
+    ]
+
+    _build(_corpus_of(tmp_path / "a", "proj-a"), snaps, ("proj-a",), all_projects=False)
+    _build(_corpus_of(tmp_path / "b", "proj-a", "proj-b"), snaps, ("proj-a", "proj-b"), all_projects=True)
+
+    picked, everyone = seen[0], seen[-1]
+    assert picked.data["effective"] == {"model": "opus"}
+    assert everyone.data["effective"] == {"model": "haiku"}
+
+
 # -- COV-09: CLAUDE_AUTOCOMPACT_PCT_OVERRIDE feeds compaction_sim -----------
 
 
@@ -600,9 +955,10 @@ def test_a_lower_case_drive_folder_joins_its_snapshots_under_either_key(tmp_path
         )
 
     def effort_rows(report):
+        # Another project's snapshot alone: no table at all for this one.
         config = next(s for s in report.sections if s.key == "config")
-        drift = next(t for t in config.tables if t.name == "config-drift")
-        return [row for row in drift.rows if row[1] == "effortLevel"]
+        drift = next((t for t in config.tables if t.name == "config-drift"), None)
+        return [row for row in drift.rows if row[1] == "effortLevel"] if drift else []
 
     assert effort_rows(build(snap(mine_key, effortLevel="low")))
     assert not effort_rows(build(snap(other_key, effortLevel="low")))

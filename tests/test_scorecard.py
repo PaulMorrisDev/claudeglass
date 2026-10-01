@@ -8,6 +8,8 @@ no-snapshot-scores-5 special cases.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from claudeglass.model import Section
@@ -19,6 +21,7 @@ from claudeglass.scorecard import (
     ScorecardThresholds,
     build_section,
 )
+from claudeglass.snapshots import Snapshot, changed_keys
 
 from helpers import assert_privacy
 
@@ -126,6 +129,40 @@ def test_config_fit_scores_five_when_no_snapshot_available():
     assert dims["config_fit"][1] == 5
     dimensions_table = section.tables[0]
     assert any("No settings snapshot" in (note or "") for note in dimensions_table.notes)
+
+
+def test_config_fit_no_snapshot_note_names_the_projects_shown():
+    section = build_section(ScorecardInputs(has_snapshot=False))
+    notes = section.tables[0].notes
+    assert any("recorded for the projects shown" in (note or "") for note in notes)
+
+
+def _user_snapshot(project_slug: str, ts: str, **user_settings) -> Snapshot:
+    data = {"schema": 2, "ts": ts, "project_slug": project_slug, "user_settings": user_settings}
+    return Snapshot(path=Path(f"{ts}.json"), ts=ts, data=data)
+
+
+def test_config_fit_counts_the_changes_within_each_projects_own_snapshots():
+    """Two projects with different settings, alternating: every neighbouring
+    pair differs, but no project changed anything, so config stability is
+    stable. A change inside one project counts, once."""
+    mine = {f"setting{i}": f"a{i}" for i in range(12)}
+    theirs = {f"setting{i}": f"b{i}" for i in range(12)}
+    snaps = [
+        _user_snapshot("proj-a", "20260901T000000Z", **mine),
+        _user_snapshot("proj-b", "20260902T000000Z", **theirs),
+        _user_snapshot("proj-a", "20260903T000000Z", **mine),
+        _user_snapshot("proj-b", "20260904T000000Z", **theirs),
+    ]
+
+    def dims_for(snapshots):
+        inputs = ScorecardInputs(has_snapshot=True, changed_config_keys=len(changed_keys(snapshots)))
+        return {row[0]: row for row in build_section(inputs).tables[0].rows}
+
+    assert dims_for(snaps)["config_fit"][1] == 5
+    snaps.append(_user_snapshot("proj-a", "20260905T000000Z", **dict(mine, setting0="changed")))
+    assert dims_for(snaps)["config_fit"][1] == 4
+    assert dims_for(snaps)["config_fit"][4] == 1
 
 
 def test_dimensions_with_none_metric_are_skipped_entirely():

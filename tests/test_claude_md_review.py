@@ -60,6 +60,21 @@ def test_finds_user_and_project_files_with_sections(tmp_path):
     assert levels["Project"].id == parse.path_hash(str(project / "CLAUDE.md"), SALT)
 
 
+def test_a_review_limited_to_some_projects_reads_only_their_files_and_yours(tmp_path):
+    config_dir, project = _setup(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "CLAUDE.md").write_text("# Other\n\nOther notes.\n", encoding="utf-8")
+
+    def projects(selected):
+        return {item.project for item in cmr.build_review(config_dir, {}, salt=SALT, projects=selected).files}
+
+    assert projects([project, other]) == {"", "repo", "other"}
+    assert projects([project]) == {"", "repo"}
+    # A project whose folder isn't known: yours only. Every project gets those.
+    assert projects([]) == {""}
+
+
 def test_flags_agent_sections_duplicates_and_stale_references(tmp_path):
     review, _project = _review(tmp_path)
     project_file = next(item for item in review.files if item.level == "Project")

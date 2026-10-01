@@ -6,8 +6,9 @@ Files are read from disk when you ask for a review and never stored.
 The candidates are:
 
 - your user file, ``~/.claude/CLAUDE.md``, and ``~/.claude/rules/*.md``;
-- for each project you have used Claude Code in (its folder is read from
-  the newest transcript's ``cwd`` field): ``CLAUDE.md``,
+- for each project you have used Claude Code in, or only the project a
+  report is limited to (its folder is read from the newest transcript's
+  ``cwd`` field): ``CLAUDE.md``,
   ``.claude/CLAUDE.md``, ``CLAUDE.local.md``, ``.claude/rules/**/*.md``,
   ``CLAUDE.md`` files in subfolders (a bounded walk) and in parent
   folders, and the project's auto memory ``MEMORY.md``;
@@ -908,7 +909,12 @@ def build_review(
     salt: bytes | None = None,
     projects: list[Path] | None = None,
 ) -> Review:
-    """Read every CLAUDE.md-family file and join it to its usage."""
+    """Read every CLAUDE.md-family file and join it to its usage.
+
+    ``projects``: the project folders to read (the ones a report limited
+    to one project saw, ``skills_review.project_folders_for``), or
+    ``None`` for every project Claude Code ran in. Your own files are
+    read either way: every project gets them."""
     config_dir = Path(config_dir)
     salt = salt if salt is not None else parse_mod.load_or_create_salt(config_dir)
     claude_root = _claude_root(config_dir)

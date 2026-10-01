@@ -42,7 +42,8 @@ class Context:
     skip_keys: frozenset = frozenset()
     #: The project folders the report was limited to, or ``None`` when it
     #: saw every project: a skill Claude never used there is hidden in
-    #: that project only (``skills_review``).
+    #: that project only (``skills_review``), and only those folders'
+    #: CLAUDE.md files are reviewed (``claude_md_review``).
     only: tuple[Path, ...] | None = None
     #: The report window's own bounds, as Unix timestamps (``None``: open
     #: on that side) -- for a check that reads outside the report itself,
@@ -553,7 +554,9 @@ def _claude_md(ctx: Context) -> dict:
     from . import claude_md_review
 
     review = claude_md_review.build_review(
-        ctx.config_dir, getattr(ctx.model, "context_files", None) or {},
+        ctx.config_dir,
+        getattr(ctx.model, "context_files", None) or {},
+        projects=None if ctx.only is None else list(ctx.only),
     )
     pairs = sorted(
         ((item, claude_md_review.file_summary(item, ctx.units, ctx.period)) for item in review.files),

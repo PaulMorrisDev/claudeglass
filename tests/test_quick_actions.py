@@ -4,6 +4,7 @@ contract (``quick_actions``)."""
 from __future__ import annotations
 
 import ast
+import json
 import re
 import sqlite3
 from pathlib import Path
@@ -141,6 +142,36 @@ def test_files_on_disk_without_transcript_records_are_no_data_not_ok(tmp_path):
         result = qa.run(check_id, ctx)
         assert result["status"] == "no_data", (check_id, result["summary"])
         assert "over the last 14 days" in result["summary"]
+
+
+def test_claude_md_check_of_one_project_reads_only_its_files_and_yours(tmp_path):
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[]))
+    claude_root = ctx.config_dir.parent
+    (claude_root / "CLAUDE.md").write_text("# Rules\n\nBe brief.\n", encoding="utf-8")
+    folders = {}
+    for name in ("alpha-repo", "beta-repo"):
+        folder = tmp_path / "work" / name
+        folder.mkdir(parents=True)
+        (folder / "CLAUDE.md").write_text(f"# {name}\n\nNotes for {name}.\n", encoding="utf-8")
+        (claude_root / "projects" / name).mkdir()
+        (claude_root / "projects" / name / "session.jsonl").write_text(json.dumps({"cwd": str(folder)}) + "\n", encoding="utf-8")
+        folders[name] = folder
+
+    def listed() -> list[str]:
+        return [row[0] for row in qa.run("claude-md", ctx)["table"]["rows"]]
+
+    def projects(paths: list[str]) -> set[str]:
+        return {name for name in folders if any(name in path for path in paths)}
+
+    assert ctx.only is None
+    assert projects(listed()) == {"alpha-repo", "beta-repo"}
+    ctx.only = (folders["alpha-repo"],)
+    one = listed()
+    assert projects(one) == {"alpha-repo"}
+    assert any("-repo" not in path for path in one)  # yours is still read
+    # A project whose folder isn't known lists only yours.
+    ctx.only = ()
+    assert projects(listed()) == set()
 
 
 def test_skills_check_keeps_a_skill_a_claude_code_tool_loads_out_of_the_hide_list(tmp_path):

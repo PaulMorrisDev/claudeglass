@@ -1574,9 +1574,17 @@ class Store:
         every match is returned, sorted; ``None`` when ``redacted``
         matches no session's slug at all -- ``api.py``'s ``_project_query``
         treats that as an unknown project (``400 bad_request``)."""
-        rows = self._connection().execute("SELECT DISTINCT slug FROM sessions WHERE slug IS NOT NULL").fetchall()
-        matches = sorted({row["slug"] for row in rows if redact_slug(row["slug"]) == redacted})
+        matches = [slug for slug in self.project_slugs() if redact_slug(slug) == redacted]
         return matches or None
+
+    def project_slugs(self) -> list[str]:
+        """Every raw ``sessions.slug`` this store has recorded a session
+        for, sorted. Never handed out by the API (see
+        :meth:`resolve_project_slug`): the report reads it only to fold a
+        project's two snapshot keys into one (``build_report``'s
+        ``known_slugs``)."""
+        rows = self._connection().execute("SELECT DISTINCT slug FROM sessions WHERE slug IS NOT NULL").fetchall()
+        return sorted({row["slug"] for row in rows})
 
     def sessions(
         self,
@@ -1848,35 +1856,34 @@ class Store:
         window_by: str = "last-reply",
     ) -> list[dict]:
         """Every recorded compaction event (no transcript path — only
-        the opaque, store-local ``transcript_id``), oldest first; with a
-        window, only those that happened in it. ``project_slugs``
-        (additive), when given, further restricts to raw slugs in that
-        list -- see ``resolve_project_slug``; reaching a project needs
-        two joins ``compactions`` otherwise skips
-        (``transcript_id -> transcripts.session_id -> sessions.slug``),
-        added only when filtering is requested. ``window_by="first-reply"``
-        keeps only the compactions of the sessions whose first reply falls
-        in the window (see :meth:`_session_ids_in_window`)."""
+        the opaque, store-local ``transcript_id``), oldest first. With a
+        window, every compaction of the sessions it counts, the same
+        sessions :meth:`summary` counts (a session whose last reply falls
+        in it, or whose first does with ``window_by="first-reply"``; see
+        :meth:`_session_ids_in_window`), whenever in the session it
+        happened: so the list is as long as the report's own count, and a
+        session that began before the window still lists all its
+        compactions. ``project_slugs`` (additive), when given, further
+        restricts to raw slugs in that list -- see
+        ``resolve_project_slug``; reaching a project needs a join
+        ``compactions`` otherwise skips (``transcripts.session_id ->
+        sessions.slug``), added only when filtering is requested."""
         since_dt, until_dt = _resolve_window(window_days, since, until)
-        wanted: set | None = None
-        if window_by != "last-reply" and (since_dt is not None or until_dt is not None):
-            session_ids = self._session_ids_in_window(since_dt, until_dt, project_slugs=project_slugs, window_by=window_by)
-            if not session_ids:
+        counted: set | None = None
+        if since_dt is not None or until_dt is not None:
+            counted = set(
+                self._session_ids_in_window(since_dt, until_dt, project_slugs=project_slugs, window_by=window_by)
+            )
+            if not counted:
                 return []
-            placeholders = ",".join("?" * len(session_ids))
-            wanted = {
-                row["id"]
-                for row in self._connection().execute(
-                    f"SELECT id FROM transcripts WHERE session_id IN ({placeholders})", session_ids
-                ).fetchall()
-            }
         if project_slugs:
             placeholders = ",".join("?" * len(project_slugs))
             rows = self._connection().execute(
                 f"""
                 SELECT c.transcript_id AS transcript_id, c.ts AS ts, c.pre_tokens AS pre_tokens,
                        c.post_tokens AS post_tokens, c.dropped_tokens AS dropped_tokens,
-                       c.trigger AS trigger, c.join_delta_s AS join_delta_s
+                       c.trigger AS trigger, c.join_delta_s AS join_delta_s,
+                       t.session_id AS session_id
                 FROM compactions c
                 JOIN transcripts t ON t.id = c.transcript_id
                 JOIN sessions s ON s.id = t.session_id
@@ -1888,16 +1895,22 @@ class Store:
         else:
             rows = self._connection().execute(
                 """
-                SELECT transcript_id, ts, pre_tokens, post_tokens, dropped_tokens, trigger, join_delta_s
-                FROM compactions
-                ORDER BY ts
+                SELECT c.transcript_id AS transcript_id, c.ts AS ts, c.pre_tokens AS pre_tokens,
+                       c.post_tokens AS post_tokens, c.dropped_tokens AS dropped_tokens,
+                       c.trigger AS trigger, c.join_delta_s AS join_delta_s,
+                       t.session_id AS session_id
+                FROM compactions c
+                LEFT JOIN transcripts t ON t.id = c.transcript_id
+                ORDER BY c.ts
                 """
             ).fetchall()
-        return [
-            dict(row)
-            for row in rows
-            if ts_in_window(row["ts"], since_dt, until_dt) and (wanted is None or row["transcript_id"] in wanted)
-        ]
+        listed = []
+        for row in rows:
+            item = dict(row)
+            session_id = item.pop("session_id")
+            if counted is None or session_id in counted:
+                listed.append(item)
+        return listed
 
     def snapshots(self) -> list[dict]:
         """Every captured config snapshot's identity and digest (already
