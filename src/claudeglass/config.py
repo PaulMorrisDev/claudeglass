@@ -697,6 +697,18 @@ def saved_pricing_path(config_dir: str | Path | None = None) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def saved_retention_days(config_dir: str | Path | None = None) -> int | None:
+    """``retention_days`` as written in ``config.toml``, or ``None`` when
+    the file or the key is missing or the value is out of range. Reads
+    only that one file, as :func:`saved_pricing_path` does. Raises
+    :class:`ConfigError` as :func:`load_config` does."""
+    data = _read_toml(_resolve_config_dir(config_dir) / "config.toml", what="config file")
+    value = (data or {}).get("retention_days")
+    if isinstance(value, int) and not isinstance(value, bool) and RETENTION_DAYS_MIN <= value <= RETENTION_DAYS_MAX:
+        return value
+    return None
+
+
 def load_config(config_dir: str | Path | None = None) -> Config:
     """Load ``<config_dir>/config.toml`` (``config_dir`` defaults to
     ``~/.claude/claudeglass``, honouring ``CLAUDE_CONFIG_DIR``). A missing
@@ -1315,6 +1327,7 @@ __all__ = [
     "load_config",
     "saved_billing",
     "saved_pricing_path",
+    "saved_retention_days",
     "check_config_values",
     "FEEDBACK_ON",
     "FEEDBACK_OFF",

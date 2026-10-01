@@ -1798,7 +1798,7 @@ def _build_session_metrics(
             {
                 "session_id": record.session_id,
                 "first_ts": record.first_ts,
-                "project_key": snapshots.snapshot_project_key(bundle.slug),
+                "project_key": snapshots.snapshot_project_keys(bundle.slug),
                 "turns": turns,
                 "cost": cost,
                 "recache_cc": recache_cc,
@@ -4656,8 +4656,8 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     # A user-scope apply with no --project-dir keeps the old newest-overall
     # behaviour, since there is no single project to key on.
     if project_path is not None:
-        project_key = snapshots.snapshot_project_key(discovery.slug_for(str(project_path)))
-        latest_snapshot = snapshots.latest_snapshot_per_project(snaps).get(project_key) if snaps else None
+        project_keys = snapshots.snapshot_project_keys(discovery.slug_for(str(project_path)))
+        latest_snapshot = snapshots.latest_for_keys(snaps, project_keys)
     else:
         latest_snapshot = snaps[-1] if snaps else None
 

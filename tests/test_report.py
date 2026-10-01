@@ -25,7 +25,7 @@ from claudeglass.render.csv_out import write_csv_dir
 from claudeglass.render.html import render_html
 from claudeglass.render.json_out import render_json
 from claudeglass.render.markdown import render_markdown
-from claudeglass.snapshots import Snapshot
+from claudeglass.snapshots import Snapshot, snapshot_project_key, snapshot_project_keys
 
 from helpers import assert_privacy, turn_line, user_str_line, write_jsonl
 
@@ -574,6 +574,45 @@ def test_config_drift_table_carries_observed_effort_level(tmp_path):
     assert effort_rows, f"expected an effortLevel drift row, got: {drift.rows}"
     assert effort_rows[0][2] == "low"  # snapshot_value
     assert effort_rows[0][3] == "high"  # observed_value
+
+
+@pytest.mark.parametrize("which_key", [0, 1], ids=["canonical-key", "legacy-key"])
+def test_a_lower_case_drive_folder_joins_its_snapshots_under_either_key(tmp_path, which_key):
+    """The folder is ``c--Dev-effort``: the drift table and the compaction
+    window both read the snapshot the hook filed for that project, under
+    the upper-case drive's key now or the lower-case one's before, and not
+    another project's newer snapshot."""
+    project_dir = tmp_path / "c--Dev-effort"
+    project_dir.mkdir()
+    _write_top(project_dir, "session-001", n_turns=2, effort="high")
+    corpus = load_corpus([project_dir])
+    mine_key = snapshot_project_keys("c--Dev-effort")[which_key]
+    other_key = snapshot_project_key("C--Dev-other")
+
+    def snap(key, **effective):
+        return Snapshot(
+            path="cfg", ts="2020-01-01T00:00:00.000Z", data={"project_slug": key, "effective": effective}
+        )
+
+    def build(*snaps, phases=False):
+        return build_report(
+            corpus, PRICING, Config(), projects=("c--Dev-effort",), window="w", snapshots=list(snaps), phases=phases
+        )
+
+    def effort_rows(report):
+        config = next(s for s in report.sections if s.key == "config")
+        drift = next(t for t in config.tables if t.name == "config-drift")
+        return [row for row in drift.rows if row[1] == "effortLevel"]
+
+    assert effort_rows(build(snap(mine_key, effortLevel="low")))
+    assert not effort_rows(build(snap(other_key, effortLevel="low")))
+
+    def sim(report):
+        return next(s for s in report.sections if s.key == "compaction_sim").tables
+
+    mine = sim(build(snap(mine_key, autoCompactWindow=100_000), phases=True))
+    assert mine != sim(build(snap(other_key, autoCompactWindow=100_000), phases=True))
+    assert mine == sim(build(snap(mine_key, autoCompactWindow=100_000), snap(other_key, autoCompactWindow=300_000), phases=True))
 
 
 def test_config_drift_table_no_effort_row_when_settings_agree(tmp_path):

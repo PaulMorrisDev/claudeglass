@@ -1945,6 +1945,17 @@ class Store:
             (change_ts, _now(), verdict, measured_usd, measured_pct, prediction_id),
         )
 
+    def reopen_predictions(self, verdict: str) -> int:
+        """Put every prediction judged ``verdict`` back to unjudged, so
+        ``backtest.py`` matches and judges it again from scratch. Returns
+        the number of predictions reopened."""
+        cursor = self._connection().execute(
+            "UPDATE predictions SET change_ts = NULL, judged_at = NULL, verdict = NULL, "
+            "measured_usd = NULL, measured_pct = NULL WHERE verdict = ?",
+            (verdict,),
+        )
+        return cursor.rowcount
+
     @staticmethod
     def _prediction_row(row) -> dict:
         return {

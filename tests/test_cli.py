@@ -37,7 +37,7 @@ from pathlib import Path
 import pytest
 
 from claudeglass import __version__, baseline as baseline_mod, cli, discovery
-from claudeglass.snapshots import snapshot_project_key
+from claudeglass.snapshots import snapshot_project_key, snapshot_project_keys
 
 from helpers import assert_privacy, turn_line, write_jsonl
 
@@ -321,6 +321,50 @@ def test_cmd_apply_project_scope_uses_that_projects_own_snapshot_not_the_newest_
     out = capsys.readouterr().out
     assert "Already overridden by a higher-precedence layer" in out
     assert "model: already set by" in out
+
+
+@pytest.mark.parametrize("which_key", [0, 1], ids=["canonical-key", "legacy-key"])
+def test_cmd_apply_project_scope_finds_a_lower_case_drive_projects_snapshot(tmp_path, monkeypatch, capsys, which_key):
+    """The folder is `c--Dev-a`; the hook files its snapshots under the
+    upper-case drive's key now and filed them under this one before. Either
+    way apply must read that project's snapshot, not the newer project-b one."""
+    config_dir = tmp_path / "tl"
+    project_a = tmp_path / "project-a"
+    project_b = tmp_path / "project-b"
+    (project_a / ".claude").mkdir(parents=True)
+    (project_b / ".claude").mkdir(parents=True)
+    real_slug_for = discovery.slug_for
+    monkeypatch.setattr(
+        discovery, "slug_for", lambda path, *a, **k: "c--Dev-a" if path == str(project_a) else real_slug_for(path, *a, **k)
+    )
+
+    snapshots_dir = config_dir / "snapshots"
+    snapshots_dir.mkdir(parents=True)
+    for ts, key, provenance in (
+        ("20260101T000000Z", snapshot_project_keys("c--Dev-a")[which_key], {"model": "project_local"}),
+        ("20260201T000000Z", snapshot_project_key(discovery.slug_for(str(project_b))), {}),
+    ):
+        (snapshots_dir / f"{ts}.json").write_text(
+            json.dumps(
+                {
+                    "ts": ts,
+                    "schema_version": 2,
+                    "project_slug": key,
+                    "effective": {"model": "haiku"},
+                    "effective_provenance": provenance,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    exit_code = cli.main(
+        [
+            "apply", "--set", "model=haiku", "--scope", "repo", "--project-dir", str(project_a),
+            "--config-dir", str(config_dir), "--dry-run",
+        ]
+    )
+    assert exit_code == 0
+    assert "model: already set by" in capsys.readouterr().out
 
 
 def test_cmd_apply_dry_run_exits_nonzero_when_plan_would_be_refused(tmp_path, capsys):

@@ -54,8 +54,17 @@ number can never compound (see "Calibration" below).
    `impact.MIN_SESSIONS` (3) sessions between them, doesn't bound it:
    the two share their before and after. A change made in
    one project (an apply to its settings files, or a change only its
-   own settings files made) is judged on that project's sessions only,
-   and only changes that apply there bound it.
+   own files made: its settings files, its agents or its `.mcp.json`) is
+   judged on that project's sessions only, and only changes that apply
+   there bound it. A change to every project is bounded in each project
+   on its own (`impact.bounds`, the same call the Your changes cards
+   make): by the changes that apply there, with the sessions between
+   them counted in that project. So a change made in
+   one project cuts that project's before and after and no other's, and a
+   change to every project reads, across all projects, as the sum of its
+   readings in each. Sessions started under either spelling of a Windows
+   drive letter (`c--Dev-x` and `C--Dev-x`) are one project, and a change
+   recorded under either applies to them.
 3. **Measure.** The dollar quantity a prediction estimated is always
    either the whole session's cost (a main-session-level setting) or
    one agent's cost per spawn (an agent-scoped setting) — the same two
@@ -102,6 +111,21 @@ change point already bounds the after-window (so no more sessions can
 ever arrive for it). Otherwise the prediction is left unjudged and
 retried on a future call, so a change you just made isn't prematurely
 locked into a permanent negative verdict while data is still coming in.
+For a change to every project, only a later change to every project
+closes the window: a change made in one project bounds that project's
+after-window alone, and another project, or one not seen yet, can still
+add sessions. A prediction still waiting 90 days after it was made
+expires unjudged (`Store.prune_predictions`), like one that never
+matched.
+
+**Older `too_little_data` verdicts are judged again, once.** Versions
+before 0.13.0 cut a change's windows at every change made in any project,
+and at every flip of model, effort or CLAUDE.md between two sessions, so
+many windows closed too short. The first judging on a store puts every
+`too_little_data` prediction back to unjudged (a `meta` flag in the
+store records that it ran), and the sessions judge them again on the
+windows as they are now. A verdict reached after that stays; one whose
+window is open again waits, and expires, like any other.
 
 ## Calibration (EST-P6)
 

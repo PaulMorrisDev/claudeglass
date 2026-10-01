@@ -1351,7 +1351,7 @@ def build_report(
     #: the same way, ``(-cost, slug)``) just to know which project cost
     #: the most in this window.
     project_cost: dict[str, float] = {}
-    session_snapshot_key: dict[str, str] = {}
+    session_snapshot_key: dict[str, tuple[str, ...]] = {}
     session_cc_total: dict[str, int] = {}
     session_recache_cc: dict[str, int] = {}
     #: v0.3 Task 2: session -> classification.mode, so a baseline
@@ -1424,7 +1424,7 @@ def build_report(
         )
         record = classify.build_session_record(top, subs, bundle.workflows, classification, slug)
         session_mode[record.session_id] = classification.mode
-        record.project_key = snapshots_mod.snapshot_project_key(bundle.slug)
+        record.project_key = snapshots_mod.snapshot_project_keys(bundle.slug)
         record.profile_id = snapshots_mod.profile_for(record.first_ts, profile_marks, record.session_id)
         session_snapshot_key[record.session_id] = record.project_key
 
@@ -1605,7 +1605,7 @@ def build_report(
     # snapshot_windows: dict[session_id, int | None] -- the
     # autoCompactWindow each session actually ran under: the snapshot its
     # own project had when it started (``snapshot_for`` with the hashed
-    # project key, so another project's settings never leak in).
+    # project keys, so another project's settings never leak in).
     snapshot_windows: dict[str, int | None] = {}
     for record in session_records:
         snap = (

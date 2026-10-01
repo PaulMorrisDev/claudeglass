@@ -1598,6 +1598,27 @@ def test_snapshot_project_key_matches_the_hooks_stored_slug():
     assert snap_mod.snapshot_project_key(raw) == hook._redact_slug(raw)
 
 
+@pytest.mark.parametrize("raw", ["C--Dev-x", "c--Dev-x", "c--dev-X", "-home-alice-x", "c-Users-x", "x--y", ""])
+def test_the_hooks_stored_slug_is_the_packages_canonical_key_for_either_drive_letter_case(raw):
+    """The hook keeps its own copy of the drive-letter fold, so a drift
+    from ``snapshots.snapshot_project_keys`` files every new snapshot under
+    a key no session matches."""
+    from claudeglass import snapshots as snap_mod
+
+    hook = _load_hook_module()
+    assert hook._redact_slug(raw) == snap_mod.snapshot_project_keys(raw)[0]
+    assert hook._redact_slug(raw) == snap_mod.snapshot_project_key(raw)
+
+
+def test_the_hook_files_a_lower_case_drive_cwd_under_the_upper_case_key():
+    from claudeglass import snapshots as snap_mod
+
+    hook = _load_hook_module()
+    assert hook._redact_slug("c--Dev-x") == hook._redact_slug("C--Dev-x")
+    assert hook._redact_slug("c--Dev-x") == snap_mod.snapshot_project_keys("c--Dev-x")[0]
+    assert hook._redact_slug("c--Dev-x") != snap_mod.snapshot_project_keys("c--Dev-x")[1]
+
+
 # -- hook_command / hook_fragment_text (ROB-P8/ROB-P9, install-time only) --
 
 

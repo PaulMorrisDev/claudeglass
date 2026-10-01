@@ -29,7 +29,7 @@ from claudeglass.model import (
 )
 from claudeglass.parse import mcp_name, parse_transcript, tool_server
 from claudeglass.pricing import load_pricing, price_turn
-from claudeglass.snapshots import Snapshot, snapshot_project_key
+from claudeglass.snapshots import Snapshot, snapshot_project_key, snapshot_project_keys
 from claudeglass.units import Units
 
 from helpers import attachment_line, system_line, tool_use_block, turn_line, write_jsonl
@@ -545,6 +545,42 @@ def test_a_clipped_config_name_finds_its_server():
     rows = _rows(_unused("very-long-server-name"), snapshots=[snap])
     assert set(rows) == {"very-long-server-name"}
     assert rows["very-long-server-name"].kind == tool_search.KIND_USER
+
+
+def test_a_snapshot_filed_under_either_drive_letter_spelling_names_its_project():
+    """The config hook filed these under the lower-case drive's hash before
+    it upper-cased the letter; the folder is ``c--Dev-x`` either way."""
+    canonical, legacy = snapshot_project_keys("c--Dev-x")
+    for key in (canonical, legacy):
+        snap = Snapshot(
+            path=None, ts="2026-09-30T00:00:00Z",
+            data={"project_slug": key, "content_layers": {"mcp_json": {"names": ["linear"]}}},
+        )
+        rows = _rows(_unused("linear", slug="c--Dev-x"), snapshots=[snap])
+        assert rows["linear"].kind == tool_search.KIND_PROJECT
+        assert rows["linear"].projects == ("c--Dev-x",)
+
+
+def test_a_project_with_snapshots_under_both_keys_is_read_from_its_newest_one():
+    canonical, legacy = snapshot_project_keys("c--Dev-x")
+    older = Snapshot(
+        path=None, ts="2026-09-20T00:00:00Z",
+        data={"project_slug": legacy, "claude_json": {"mcp_servers": ["sentry"]}},
+    )
+    newer = Snapshot(path=None, ts="2026-09-25T00:00:00Z", data={"project_slug": canonical})
+    results = _unused("sentry", slug="c--Dev-x")
+    # The newer row no longer configures it, so the older one's name is stale.
+    for snaps in ([older, newer], [newer, older]):
+        assert _rows(results, snapshots=snaps)["sentry"].kind == tool_search.KIND_UNKNOWN
+    assert _rows(results, snapshots=[older])["sentry"].kind == tool_search.KIND_LOCAL
+    # Another project's newer snapshot says nothing about this one's.
+    other = Snapshot(path=None, ts="2026-09-28T00:00:00Z", data={"project_slug": snapshot_project_key("C--Dev-y")})
+    assert _rows(results, snapshots=[older, other])["sentry"].kind == tool_search.KIND_LOCAL
+
+
+def test_a_snapshot_with_no_project_still_names_its_servers():
+    snap = Snapshot(path=None, ts="2026-09-30T00:00:00Z", data={"claude_json": {"mcp_servers": ["sentry"]}})
+    assert _rows(_unused("sentry"), snapshots=[snap])["sentry"].kind == tool_search.KIND_LOCAL
 
 
 def test_an_account_wide_server_is_judged_only_across_every_project():

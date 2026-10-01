@@ -291,9 +291,9 @@ class _ProjectAcc:
     skills_listing_est_tokens: list[float] = field(default_factory=list)
     compaction_records: list[compaction.CompactionRecord] = field(default_factory=list)
     session_ids: list[str] = field(default_factory=list)
-    #: The key this project's config snapshots are stored under (see
-    #: ``snapshots.snapshot_project_key``); ``None`` when unknown.
-    snapshot_key: str | None = None
+    #: The keys this project's config snapshots can be stored under (see
+    #: ``snapshots.snapshot_project_keys``); empty when unknown.
+    snapshot_keys: tuple[str, ...] = ()
 
 
 #: Parts of a subagent's startup context, in display order. Each is
@@ -481,8 +481,8 @@ class ContextBudgetStats:
         ``topology``'s downward/spawn-write table).
         """
         acc = self.projects.setdefault(project, _ProjectAcc(project=project))
-        if raw_slug and acc.snapshot_key is None:
-            acc.snapshot_key = snapshots_mod.snapshot_project_key(raw_slug)
+        if raw_slug and not acc.snapshot_keys:
+            acc.snapshot_keys = snapshots_mod.snapshot_project_keys(raw_slug)
         acc.sessions += 1
         if top.meta.session_id:
             acc.session_ids.append(top.meta.session_id)
@@ -657,11 +657,11 @@ def _baseline_row(
 
 
 def _snapshot_for_project(latest_snapshots: dict[str, Snapshot], acc: _ProjectAcc) -> Snapshot | None:
-    """The project's latest snapshot: by its hashed snapshot key, falling
-    back to the readable slug (older snapshots and hand-built tests)."""
-    if acc.snapshot_key and acc.snapshot_key in latest_snapshots:
-        return latest_snapshots[acc.snapshot_key]
-    return latest_snapshots.get(acc.project)
+    """The project's latest snapshot: by its hashed snapshot keys (the
+    newest of the drive-letter spellings), falling back to the readable
+    slug (older snapshots and hand-built tests)."""
+    found = snapshots_mod.latest_for_keys(list(latest_snapshots.values()), acc.snapshot_keys)
+    return found if found is not None else latest_snapshots.get(acc.project)
 
 
 def _build_baseline_table(stats: ContextBudgetStats, latest_snapshots: dict[str, Snapshot]) -> Table:
@@ -909,7 +909,9 @@ def build_section(
     section that reads config takes (``report.py``'s own ``snapshots``
     parameter); this function joins each project to its own *latest*
     snapshot via :func:`snapshots.latest_snapshot_per_project` rather
-    than requiring a caller to have done that join already.
+    than requiring a caller to have done that join already. A Windows
+    project's snapshots can sit under two keys (the drive letter's case);
+    the newest of the two is the project's latest.
 
     ``usage_log_rows`` is whatever :func:`load_context_window_rows`
     returns (or an equivalent hand-built list of the same dict shape, as

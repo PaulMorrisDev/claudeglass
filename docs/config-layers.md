@@ -321,6 +321,15 @@ the on-disk directory name every transcript under
 `~/.claude/projects/<slug>/` uses, and the non-alnum substitution means
 it no longer contains a drive-letter colon or path separator.
 
+The snapshot stores the slug hashed (`slug:` and the first 12 hex
+characters of its SHA-256), with a leading Windows drive letter
+upper-cased first. Claude Code writes the drive letter in whichever case
+the folder was opened with, so `C--Dev-x` and `c--Dev-x` are one project
+and get one key. A snapshot taken before 0.13.0 may carry the hash of the
+lower-case spelling instead: `snapshots.snapshot_project_keys` gives both
+keys, and the package matches a project's sessions to its snapshots and
+changes under either.
+
 ## Multi-project tables (`snapshots.py`)
 
 A single `<config-dir>/snapshots/` directory accumulates snapshots from

@@ -272,9 +272,15 @@ size. No text is kept (`context_files.py`).
   change straight away; they hold few sessions, so read them as a quick
   signal, not a verdict.
 - **Since my last change**: starts at the latest change point: an
-  `apply`, its undo, a settings change the snapshot hook saw, a change
-  to metrics capture, or a model, effort or CLAUDE.md size change your
-  sessions show (`change_points.py`). Unlike the other windows, it
+  `apply`, its undo, a settings change the snapshot hook saw (one edit
+  to your user settings is one change, however many projects' snapshots
+  show it), a change to metrics capture, or a model, effort or CLAUDE.md
+  size change your sessions show (`change_points.py`). Your sessions
+  show one only once the new value has held for 3 sessions in a row in a
+  project, and it is dated at the first of them. Switching back and
+  forth, one odd session, a CLAUDE.md that grows a little at a time or
+  is missing from a scratch session, and an effort level a transcript
+  doesn't record aren't changes. Unlike the other windows, it
   counts the sessions that *started* after the change, so every figure
   on the page, the daily spend chart included, is work done wholly on
   the new settings. A session already running at the change isn't

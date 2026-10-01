@@ -1043,11 +1043,11 @@ are known: a `config` change records a setting's values only when both
 are plain values of at most 80 characters. `summary` is those changes
 in one line ("model: opus → sonnet"), then any other changed key by
 name. `project` is empty for a change that applies in every project;
-otherwise the change was made in one project's own settings files, it
-is judged on that project's sessions only, and `project_name` is
-that project's value in the project filter (empty when no session
-loaded is from it). `label_key` is a measure's
-ratio-test reading (`lower`, `possibly_lower`, `higher`,
+otherwise the change was made in one project's own files (its settings
+files, its agents or its `.mcp.json`), it is judged on that project's
+sessions only, and `project_name` is that project's value in the
+project filter (empty when no session loaded is from it). `label_key`
+is a measure's ratio-test reading (`lower`, `possibly_lower`, `higher`,
 `possibly_higher`, `no_clear_change` or `too_little_data`) and
 `label_text` the same in words. `kind` is the measure's unit (`money`,
 `pct`, `tokens` or `count`), `before_value`/`after_value` its raw

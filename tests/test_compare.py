@@ -443,6 +443,29 @@ def test_compare_key_arm_matches_via_snapshot_and_reports_co_changed(tmp_path):
     assert any("no other" in n.lower() for n in co_changed.notes)
 
 
+@pytest.mark.parametrize("stored_slug", ["C--Dev-x", "c--Dev-x"])
+def test_compare_key_arm_joins_a_lower_case_drive_folder_to_its_snapshots(tmp_path, stored_slug):
+    """The folder ``c--Dev-x`` and a snapshot the hook filed under either
+    drive spelling are one project; another project's snapshot is not."""
+    project_dir = tmp_path / "projects" / "c--Dev-x"
+    project_dir.mkdir(parents=True)
+    _write_session(project_dir, "mine", "2026-09-10T10:00:00.000Z")
+    corpus = load_corpus([project_dir])
+
+    mine = _snapshot("20260801T000000Z", autocompact=5)
+    mine.data["project_slug"] = snapshots_mod.snapshot_project_key(stored_slug)
+    other = _snapshot("20260805T000000Z", autocompact=10)
+    other.data["project_slug"] = snapshots_mod.snapshot_project_key("C--Dev-y")
+
+    arm_a = compare_mod.parse_arm_spec("key:user_settings.autoCompactWindow=5")
+    arm_b = compare_mod.parse_arm_spec("key:user_settings.autoCompactWindow=10")
+    section = compare_mod.compare(
+        corpus, PRICING, CONFIG, arm_a=arm_a, arm_b=arm_b, min_sessions=1, snapshots=[mine, other]
+    )
+    sessions = next(row for row in _table(section, "compare_overview").rows if row[0] == "Sessions")
+    assert sessions[1:3] == ["1", "0"]
+
+
 def test_compare_co_changed_reports_other_differing_keys(tmp_path):
     root = tmp_path / "projects"
     project_dir = root / "proj"

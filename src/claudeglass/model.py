@@ -1145,9 +1145,10 @@ class SessionRecord:
     #: Batch C addition (see module docstring): carried through from
     #: ``top.meta.entrypoint`` by ``classify.build_session_record``.
     entrypoint: str | None = None
-    #: The key this session's project's config snapshots carry (see
-    #: ``snapshots.snapshot_project_key``); set by the report builder.
-    project_key: str | None = None
+    #: The keys this session's project's config snapshots can carry (see
+    #: ``snapshots.snapshot_project_keys``, the canonical one first); set by
+    #: the report builder.
+    project_key: tuple[str, ...] | str | None = None
 
 
 @dataclass(slots=True)

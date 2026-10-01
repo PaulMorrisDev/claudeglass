@@ -944,6 +944,66 @@ def test_snapshot_for_with_project_key_ignores_other_projects():
     assert snap_mod.snapshot_for("2026-09-12T00:00:00Z", snaps) is other
 
 
+def _sha(slug: str) -> str:
+    import hashlib
+
+    return "slug:" + hashlib.sha256(slug.encode("utf-8")).hexdigest()[:12]
+
+
+def test_snapshot_project_keys_name_both_drive_letter_spellings_canonical_first():
+    upper, lower = _sha("C--X"), _sha("c--X")
+    assert snap_mod.snapshot_project_keys("c--X") == (upper, lower)
+    assert snap_mod.snapshot_project_keys("C--X") == (upper, lower)
+    assert snap_mod.snapshot_project_key("c--X") == snap_mod.snapshot_project_key("C--X") == upper
+
+
+def test_snapshot_project_keys_leave_a_slug_with_no_drive_letter_alone():
+    keys = snap_mod.snapshot_project_keys("-home-u-x")
+    assert keys == (_sha("-home-u-x"), _sha("-home-u-x"))
+    assert snap_mod.snapshot_project_key("-home-u-x") == keys[0]
+    # Only the first letter is folded, and only when it is a drive.
+    assert snap_mod.snapshot_project_key("c-Users-x") == _sha("c-Users-x")
+    assert snap_mod.snapshot_project_key("C--dev-X") == _sha("C--dev-X")
+    assert snap_mod.snapshot_project_key("c--dev-X") == _sha("C--dev-X")
+
+
+def test_snapshot_project_key_keeps_the_hashes_snapshots_were_already_stored_under():
+    assert snap_mod.snapshot_project_key("C--Dev-claude-token-lens") == "slug:60178b259715"
+    assert snap_mod.snapshot_project_key("C--Dev-RevIXO") == "slug:3cfd027c1c29"
+    assert snap_mod.snapshot_project_keys("c--Dev-RevIXO")[1] == "slug:b7aa2921726a"
+
+
+def test_snapshot_for_takes_every_key_a_project_goes_by():
+    upper, lower = snap_mod.snapshot_project_keys("c--X")
+    legacy = snap_mod.Snapshot(path=None, ts="20260901T000000Z", data={"project_slug": lower})
+    other = snap_mod.Snapshot(path=None, ts="20260910T000000Z", data={"project_slug": "slug:bbb"})
+    fresh = snap_mod.Snapshot(path=None, ts="20260905T000000Z", data={"project_slug": upper})
+    snaps = [legacy, fresh, other]
+    when = "2026-09-12T00:00:00Z"
+    assert snap_mod.snapshot_for(when, snaps, (upper, lower)) is fresh
+    assert snap_mod.snapshot_for(when, snaps, snap_mod.snapshot_project_keys("C--X")) is fresh
+    assert snap_mod.snapshot_for("2026-09-02T00:00:00Z", snaps, (upper, lower)) is legacy
+    assert snap_mod.snapshot_for(when, snaps, {lower}) is legacy
+    assert snap_mod.snapshot_for(when, snaps, upper) is fresh
+    assert snap_mod.snapshot_for(when, snaps, ()) is None
+    assert snap_mod.snapshot_for(when, snaps) is other
+
+
+def test_latest_for_keys_picks_the_newest_across_a_projects_keys():
+    upper, lower = snap_mod.snapshot_project_keys("c--X")
+    old = snap_mod.Snapshot(path=None, ts="20260901T000000Z", data={"project_slug": lower})
+    new = snap_mod.Snapshot(path=None, ts="20260905T000000Z", data={"project_slug": upper})
+    stale = snap_mod.Snapshot(path=None, ts="20260903T000000Z", data={"project_slug": lower})
+    other = snap_mod.Snapshot(path=None, ts="20260910T000000Z", data={"project_slug": "slug:bbb"})
+    legacy = snap_mod.Snapshot(path=None, ts="20260911T000000Z", data={})
+    assert snap_mod.latest_for_keys([old, new, stale, other, legacy], (upper, lower)) is new
+    # The order the snapshots come in doesn't matter, nor does a lone alias.
+    assert snap_mod.latest_for_keys([other, new, legacy, stale, old], (upper, lower)) is new
+    assert snap_mod.latest_for_keys([old, new, stale, other], (lower,)) is stale
+    assert snap_mod.latest_for_keys([old, new, stale, other], ("slug:ccc",)) is None
+    assert snap_mod.latest_for_keys([], (upper, lower)) is None
+
+
 def test_load_snapshots_skips_apply_stamps_that_record_no_config(tmp_path):
     import json as _json
 

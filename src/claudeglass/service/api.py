@@ -2594,7 +2594,7 @@ def make_handler(
         from .. import change_points, counterfactual
         from .. import impact as impact_mod
         from ..discovery import redact_slug
-        from ..snapshots import snapshot_project_key
+        from ..snapshots import snapshot_project_keys
         from . import rebuild
 
         started = time.monotonic()
@@ -2619,8 +2619,11 @@ def make_handler(
                 points, sessions, units, without=counterfactual.for_impact(corpus, rates, units)
             )
             # A project change names its project as the dashboard's
-            # project filter does (redacted), never by its snapshot key.
-            names = {snapshot_project_key(b.slug): redact_slug(b.slug) for b in corpus.sessions if b.slug}
+            # project filter does (redacted), never by its snapshot key,
+            # and by either spelling of its drive letter.
+            names = {
+                key: redact_slug(b.slug) for b in corpus.sessions if b.slug for key in snapshot_project_keys(b.slug)
+            }
             for change in changes:
                 project = change["change"]["project"]
                 change["change"]["project_name"] = names.get(project, "") if project else ""

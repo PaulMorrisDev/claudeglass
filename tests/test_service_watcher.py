@@ -1121,6 +1121,39 @@ def test_snapshot_ingestion_is_deduped_across_ticks(tmp_path: Path, store: Store
 
 
 
+def test_a_session_joins_the_snapshot_its_own_project_had_under_either_drive_letter_spelling(
+    tmp_path: Path, store: Store
+):
+    """Not the newest snapshot of any project: ``c--Dev-a`` is one project
+    whether the hook filed its snapshots under the upper-case drive's key
+    (now) or the lower-case one (before 0.13.0)."""
+    from claudeglass.snapshots import snapshot_project_key, snapshot_project_keys
+
+    root = tmp_path / "projects"
+    _write_session(root, "c--Dev-a", "sess-a1", _two_turns())
+    _write_session(root, "proj-b", "sess-b1", _two_turns())
+    options = _options(tmp_path)
+    canonical, legacy = snapshot_project_keys("c--Dev-a")
+    for ts, key in (
+        ("20260918T100000Z", legacy),
+        ("20260918T110000Z", snapshot_project_key("proj-b")),
+        ("20260918T113000Z", canonical),
+        ("20260918T115000Z", snapshot_project_key("proj-c")),
+    ):
+        path = _write_snapshot(options.config_dir, ts, schema=2)
+        data = json.loads(path.read_text(encoding="utf-8"))
+        path.write_text(json.dumps({**data, "project_slug": key}), encoding="utf-8")
+
+    FileWatcher(store, options).run_once()
+
+    ids = {row["ts"]: row["id"] for row in store.snapshots()}
+    assert len(ids) == 4
+    joined = {
+        row["id"]: row["snapshot_id"] for row in store._connection().execute("SELECT id, snapshot_id FROM sessions")
+    }
+    assert joined == {"sess-a1": ids["20260918T113000Z"], "sess-b1": ids["20260918T110000Z"]}
+
+
 def test_stored_snapshot_keeps_the_fields_its_accessors_read(tmp_path: Path, store: Store):
     # api.py rebuilds a Snapshot from the stored digest; effective config,
     # managed keys and effective agents must survive the round trip.

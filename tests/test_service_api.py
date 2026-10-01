@@ -2388,8 +2388,9 @@ def test_impact_is_empty_without_changes_and_lists_an_apply(server):
 
 
 def test_impact_and_the_last_change_window_see_a_change_only_sessions_show(tmp_path, monkeypatch):
-    """A model change no apply or snapshot recorded (EST-P9) reaches the
-    impact card and starts the "since my last change" window."""
+    """A model change no apply or snapshot recorded (EST-P9), held for
+    three sessions in a row, reaches the impact card and starts the "since
+    my last change" window."""
     from datetime import datetime, timedelta, timezone
 
     from claudeglass.snapshots import snapshot_project_key
@@ -2397,7 +2398,11 @@ def test_impact_and_the_last_change_window_see_a_change_only_sessions_show(tmp_p
     project_dir = tmp_path / "projects" / "proj-a"
     project_dir.mkdir(parents=True)
     now = datetime.now(timezone.utc)
-    for name, days, model in (("s1", 3, "claude-sonnet-5"), ("s2", 1, "claude-opus-5-5")):
+    sessions = (
+        ("s1", 6, "claude-sonnet-5"), ("s2", 5, "claude-sonnet-5"), ("s3", 4, "claude-sonnet-5"),
+        ("s4", 3, "claude-opus-5-5"), ("s5", 2, "claude-opus-5-5"), ("s6", 1, "claude-opus-5-5"),
+    )
+    for name, days, model in sessions:
         start = now - timedelta(days=days)
         write_jsonl(
             project_dir / f"{name}.jsonl",
@@ -2416,6 +2421,54 @@ def test_impact_and_the_last_change_window_see_a_change_only_sessions_show(tmp_p
         assert change["change"]["summary"] == "model: claude-sonnet-5 → claude-opus-5-5"
         assert change["change"]["project"] == snapshot_project_key("proj-a")
         assert change["change"]["project_name"] == "proj-a"
+        # It starts at the first session of the run, with the three before it.
+        assert change["change"]["ts"] == (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        assert (change["before_sessions"], change["after_sessions"]) == (3, 3)
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_impact_names_a_project_whichever_case_its_drive_letter_is_in(tmp_path, monkeypatch):
+    """A Windows folder with a lower-case drive letter: its transcript
+    change and a settings change its snapshots filed under the older,
+    lower-case key both carry the canonical key and the folder's name."""
+    import json
+    from datetime import datetime, timedelta, timezone
+
+    from claudeglass.snapshots import snapshot_project_keys
+
+    project_dir = tmp_path / "projects" / "c--Dev-a"
+    project_dir.mkdir(parents=True)
+    now = datetime.now(timezone.utc)
+    for days, model in ((12, "claude-sonnet-5"), (11, "claude-sonnet-5"), (10, "claude-sonnet-5"),
+                        (9, "claude-opus-5-5"), (8, "claude-opus-5-5"), (7, "claude-opus-5-5")):
+        start = now - timedelta(days=days)
+        write_jsonl(
+            project_dir / f"s{days:02d}.jsonl",
+            [
+                turn_line(timestamp=(start + timedelta(seconds=s)).strftime("%Y-%m-%dT%H:%M:%S.000Z"), model=model)
+                for s in (0, 5)
+            ],
+        )
+    handle = _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([project_dir]))
+    canonical, legacy = snapshot_project_keys("c--Dev-a")
+    folder = handle.options.config_dir / "snapshots"
+    folder.mkdir()
+    for days, model, layer in ((3, "sonnet", "user"), (2, "opus", "project_local")):
+        ts = (now - timedelta(days=days)).strftime("%Y%m%dT%H%M%SZ")
+        doc = {
+            "ts": ts, "schema_version": 2, "project_slug": legacy,
+            "effective": {"model": model}, "effective_provenance": {"model": layer},
+        }
+        (folder / f"{ts}.json").write_text(json.dumps(doc), encoding="utf-8")
+    try:
+        resp, payload = handle.get_json("/api/impact")
+        assert resp.status == 200, payload
+        changes = {change["change"]["source"]: change["change"] for change in payload["data"]["changes"]}
+        assert set(changes) == {"config", "transcript"}
+        for change in changes.values():
+            assert (change["project"], change["project_name"]) == (canonical, "c--Dev-a")
     finally:
         handle.close()
         handle.store.close()

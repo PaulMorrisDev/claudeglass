@@ -53,7 +53,9 @@ caller-supplied project argument — a single ``<config-dir>/snapshots/``
 directory accumulates snapshots from every project the hook has ever run
 in, exactly like ``~/.claude/projects/`` itself. A schema-1 snapshot (no
 ``project_slug`` field) collapses into one ``"(unknown project)"`` bucket
-per :func:`_project_label`.
+per :func:`_project_label`. A Windows project's key depends on the case of
+its drive letter, so code that joins a session to its snapshots goes by
+every key the project can carry (:func:`snapshot_project_keys`).
 
 This module may import from the rest of the package (unlike the standalone
 hook script) — it reuses :class:`~claudeglass.model.Table` and
@@ -66,7 +68,9 @@ from __future__ import annotations
 import functools
 import hashlib
 import json
+import re
 import statistics
+from collections.abc import Collection
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -190,23 +194,26 @@ def _parse_ts(ts: str | None) -> datetime | None:
 
 
 def snapshot_for(
-    session_first_ts: str, snapshots: list[Snapshot], project_key: str | None = None
+    session_first_ts: str, snapshots: list[Snapshot], project_key: str | Collection[str] | None = None
 ) -> Snapshot | None:
     """The latest snapshot with ``ts <= session_first_ts``, or ``None`` if
     the session predates every snapshot (or its timestamp is unparsable).
 
     With ``project_key`` (see :func:`snapshot_project_key`), only that
     project's snapshots and snapshots with no project (schema 1) count,
-    so a session is never joined to another project's settings.
+    so a session is never joined to another project's settings. Pass every
+    key the project goes by (:func:`snapshot_project_keys`) and a snapshot
+    stored under any of them counts.
     """
     target = _parse_ts(session_first_ts)
     if target is None:
         return None
 
+    keys = None if project_key is None else {project_key} if isinstance(project_key, str) else set(project_key)
     best: Snapshot | None = None
     best_dt: datetime | None = None
     for snap in snapshots:
-        if project_key is not None and snap.data.get("project_slug") not in (None, "", project_key):
+        if keys is not None and snap.data.get("project_slug") not in (None, "", *keys):
             continue
         dt = _parse_ts(snap.ts)
         if dt is None or dt > target:
@@ -515,12 +522,48 @@ _SNAPSHOT_SLUG_PREFIX = "slug"
 _SNAPSHOT_SLUG_HEX_CHARS = 12
 
 
-def snapshot_project_key(raw_slug: str) -> str:
-    """The ``project_slug`` a snapshot taken in the project whose
-    ``~/.claude/projects/`` directory is ``raw_slug`` carries, so report
-    code keyed by transcript slug can find that project's snapshot."""
+#: A Windows project's slug starts with its drive letter (``C--Dev-x``
+#: for ``C:\Dev\x``), and Claude Code writes that letter in whichever
+#: case the folder was opened with, so one project can have two slugs.
+_DRIVE_SLUG_RE = re.compile(r"^[A-Za-z]--")
+
+
+def _slug_digest(raw_slug: str) -> str:
     digest = hashlib.sha256(raw_slug.encode("utf-8")).hexdigest()[:_SNAPSHOT_SLUG_HEX_CHARS]
     return f"{_SNAPSHOT_SLUG_PREFIX}:{digest}"
+
+
+def snapshot_project_keys(raw_slug: str) -> tuple[str, str]:
+    """Both ``project_slug`` values a snapshot taken in the project whose
+    ``~/.claude/projects/`` directory is ``raw_slug`` can carry: the one
+    with the drive letter upper-cased first (the canonical key), then the
+    one with it lower-cased. The same key twice for a slug with no drive
+    letter. The config hook has upper-cased the drive since 0.13.0, but
+    older snapshots may carry either."""
+    if not _DRIVE_SLUG_RE.match(raw_slug):
+        key = _slug_digest(raw_slug)
+        return key, key
+    return _slug_digest(raw_slug[0].upper() + raw_slug[1:]), _slug_digest(raw_slug[0].lower() + raw_slug[1:])
+
+
+def snapshot_project_key(raw_slug: str) -> str:
+    """The canonical ``project_slug`` a snapshot taken in the project whose
+    ``~/.claude/projects/`` directory is ``raw_slug`` carries, so report
+    code keyed by transcript slug can find that project's snapshot. See
+    :func:`snapshot_project_keys` for the drive letter."""
+    return snapshot_project_keys(raw_slug)[0]
+
+
+def latest_for_keys(snapshots: list[Snapshot], keys: Collection[str]) -> Snapshot | None:
+    """The newest snapshot whose ``project_slug`` is one of ``keys``, every
+    key one project goes by (:func:`snapshot_project_keys`), or ``None``.
+    A project whose snapshots span the hook's drive-letter change has rows
+    under both keys, and this takes the newest of the two. ``snapshots``
+    can be in any order; of two with the same ``ts`` the later one wins."""
+    wanted = set(keys)
+    oldest = datetime.min.replace(tzinfo=timezone.utc)
+    matches = [snap for snap in snapshots if snap.data.get("project_slug") in wanted]
+    return max(reversed(matches), key=lambda snap: _parse_ts(snap.ts) or oldest, default=None)
 
 
 def latest_snapshot_per_project(snapshots: list[Snapshot]) -> dict[str, Snapshot]:
@@ -1355,6 +1398,9 @@ __all__ = [
     "load_snapshots",
     "records_config",
     "snapshot_for",
+    "snapshot_project_key",
+    "snapshot_project_keys",
+    "latest_for_keys",
     "flatten_snapshot",
     "managed_keys",
     "diff_keys",

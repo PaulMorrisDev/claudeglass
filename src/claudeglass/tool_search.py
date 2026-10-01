@@ -335,12 +335,24 @@ def _dict(value) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def _read_config(snapshots, slugs: dict[str, str], known: set[str]) -> _Config:
-    """Every project's latest snapshot. ``slugs`` maps a snapshot's
-    project key to the project as reports name it."""
+def _read_config(snapshots, slugs: dict[str, str], canonical: dict[str, str], known: set[str]) -> _Config:
+    """Every project's latest snapshot. ``slugs`` maps each key a snapshot's
+    project can carry to the project as reports name it, and ``canonical``
+    maps it to the project's canonical key: a Windows project whose
+    snapshots span the hook's change to the case of the slug's first
+    letter has rows under both keys, and only its newest one counts (a
+    stale row would keep its MCP names configured)."""
     config = _Config()
-    for label, snap in snapshots_mod.latest_snapshot_per_project(list(snapshots or ())).items():
-        project = slugs.get(label, "")
+    latest = snapshots_mod.latest_snapshot_per_project(list(snapshots or ()))
+    labels_by_project: dict[str, list[str]] = {}
+    for label in latest:
+        labels_by_project.setdefault(canonical.get(label, label), []).append(label)
+    for labels in labels_by_project.values():
+        snap = snapshots_mod.latest_for_keys(list(latest.values()), labels)
+        if snap is None:
+            # The "(unknown project)" bucket of schema-1 snapshots.
+            snap = latest[labels[0]]
+        project = slugs.get(labels[0], "")
         layers = _dict(snap.data.get("content_layers"))
         for raw in _config_names(_dict(snap.data.get("claude_json")).get("mcp_servers")):
             config.local.setdefault(_config_key(raw, known), (raw, set()))[1].add(project)
@@ -426,6 +438,7 @@ def _mcp_servers(
     seen: dict[str, _Seen] = {}
     savers = _saver_servers()
     slugs: dict[str, str] = {}
+    canonical: dict[str, str] = {}
     end: datetime | None = None
 
     def get(server: str) -> _Seen:
@@ -439,7 +452,10 @@ def _mcp_servers(
         run = tr.meta.session_id if main else tr.meta.path
         slug = tr.meta.project_slug or ""
         if slug:
-            slugs.setdefault(snapshots_mod.snapshot_project_key(slug), redact_slug(slug))
+            keys = snapshots_mod.snapshot_project_keys(slug)
+            for key in keys:
+                slugs.setdefault(key, redact_slug(slug))
+                canonical.setdefault(key, keys[0])
         upfront = {
             s: c for s, c in (tr.upfront_definition_chars_by_server or {}).items() if isinstance(c, int) and c > 0
         }
@@ -478,7 +494,7 @@ def _mcp_servers(
                     entry.last = at if entry.last is None or at > entry.last else entry.last
 
     seen.pop(BUILT_IN_TOOLS, None)
-    config = _read_config(snapshots, slugs, set(seen))
+    config = _read_config(snapshots, slugs, canonical, set(seen))
     for name in config.names() - set(seen):
         get(name)
 

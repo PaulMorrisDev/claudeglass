@@ -18,6 +18,7 @@ from claudeglass.config import (
     load_session_overrides,
     save_session_override,
     saved_pricing_path,
+    saved_retention_days,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "config"
@@ -517,6 +518,15 @@ def test_saved_pricing_path_on_malformed_toml_raises_config_error(tmp_path):
     (tmp_path / "config.toml").write_text("not = = toml\n", encoding="utf-8")
     with pytest.raises(ConfigError):
         saved_pricing_path(tmp_path)
+
+
+def test_saved_retention_days_reads_the_key_or_none(tmp_path):
+    assert saved_retention_days(tmp_path) is None
+    (tmp_path / "config.toml").write_text("retention_days = 30\n", encoding="utf-8")
+    assert saved_retention_days(tmp_path) == 30
+    for bad in ("0", "true", '"30"', "99999999"):
+        (tmp_path / "config.toml").write_text(f"retention_days = {bad}\n", encoding="utf-8")
+        assert saved_retention_days(tmp_path) is None
 
 
 # --------------------------------------------------------------------

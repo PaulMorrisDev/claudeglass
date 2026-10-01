@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from claudeglass import impact
-from claudeglass.change_points import ChangePoint
+from claudeglass.change_points import ChangePoint, applies_to
 from claudeglass.corpus import load_corpus
 from claudeglass.impact import Measure, SessionFacts, _Transcript
 from claudeglass.pricing import load_pricing
@@ -147,6 +147,158 @@ def test_enough_sessions_between_two_changes_keep_them_apart():
     for facts in between[:2]:
         facts.project = "slug:other"
     assert impact.neighbours([first, second], second, sessions) == (None, None)
+
+
+# -- bounds: a change in one project cuts that project's window and no other's --
+
+
+def _in(project: str, days: float, cost: float = 1.0) -> SessionFacts:
+    facts = _session(days, cost)
+    facts.project = project
+    return facts
+
+
+def _count(sessions: list[SessionFacts], project: str) -> int:
+    return sum(1 for s in sessions if s.project == project)
+
+
+def test_a_change_in_one_project_cuts_a_global_changes_window_there_and_nowhere_else():
+    """A change to every project, with a change in project X three days
+    before it and another two days after it. X's sessions are read between
+    those two; Y's, which neither change touched, across the whole span."""
+    earlier = ChangePoint(CHANGE - timedelta(days=3), "apply", "x earlier", keys=["model"], project="slug:x")
+    everywhere = ChangePoint(CHANGE, "config", "everywhere", keys=["effective.model"])
+    later = ChangePoint(CHANGE + timedelta(days=2), "apply", "x later", keys=["model"], project="slug:x")
+    points = [earlier, everywhere, later]
+    days = (-4, -2.5, -2, -1.5, -1, 0.5, 1, 1.5, 2.5, 3)
+    sessions = sorted([_in("slug:x", d) for d in days] + [_in("slug:y", d) for d in days], key=lambda s: s.start)
+    now = CHANGE + timedelta(days=9)
+
+    previous, following, per_project = impact.bounds(points, everywhere, sessions)
+    assert (previous, following) == (None, None)
+    assert per_project == {"slug:x": (earlier, later), "slug:y": (None, None)}
+    before, after = impact.sides(
+        everywhere, sessions, previous=previous, following=following, per_project=per_project, now=now
+    )
+    # Before: X from its earlier change on, Y back the full 14 days.
+    assert (_count(before, "slug:x"), _count(before, "slug:y")) == (4, 5)
+    # After: X until its later change, Y to now.
+    assert (_count(after, "slug:x"), _count(after, "slug:y")) == (3, 5)
+    result = impact.compare(
+        everywhere, sessions, UNITS, previous=previous, following=following, per_project=per_project, now=now
+    )
+    assert (result["before_sessions"], result["after_sessions"]) == (9, 8)
+    # The nearest changes that apply anywhere cut every project alike,
+    # which is what this replaces.
+    cut_everywhere = impact.neighbours(points, everywhere, sessions)
+    assert cut_everywhere == (earlier, later)
+    before, after = impact.sides(everywhere, sessions, previous=earlier, following=later, now=now)
+    assert (_count(before, "slug:y"), _count(after, "slug:y")) == (4, 3)
+
+
+def test_the_bounds_of_a_change_in_one_project_are_its_neighbours():
+    everywhere = ChangePoint(CHANGE - timedelta(days=3), "config", "everywhere", keys=["effective.model"])
+    mine = ChangePoint(CHANGE, "apply", "mine", keys=["model"], project="slug:x")
+    elsewhere = ChangePoint(CHANGE + timedelta(days=1), "apply", "elsewhere", keys=["model"], project="slug:y")
+    last = ChangePoint(CHANGE + timedelta(days=2), "config", "last", keys=["effective.model"])
+    points = [everywhere, mine, elsewhere, last]
+    sessions = [_in("slug:x", d) for d in (-2, -1.5, -1, 0.5, 1, 1.5, 2.5)]
+    sessions += [_in("slug:y", d) for d in (-2, -1, 0.5, 1.5)]
+    previous, following, per_project = impact.bounds(points, mine, sessions)
+    assert (previous, following) == impact.neighbours(points, mine, sessions) == (everywhere, last)
+    assert per_project is None
+
+
+def test_sessions_with_no_project_use_the_changes_to_every_project():
+    """A session the project of which isn't known isn't cut by a change
+    made in a project, and a project with no sessions gets no bounds."""
+    first = ChangePoint(CHANGE - timedelta(days=3), "config", "first", keys=["effective.model"])
+    mine = ChangePoint(CHANGE, "apply", "mine", keys=["model"], project="slug:gone")
+    last = ChangePoint(CHANGE + timedelta(days=2), "config", "last", keys=["effective.model"])
+    point = ChangePoint(CHANGE - timedelta(days=1), "config", "point", keys=["effective.model"])
+    sessions = [_session(d, 1.0) for d in (-2.5, -2, -1.5, -0.5, -0.25, 0.5, 1, 1.5, 2.5)]
+    previous, following, per_project = impact.bounds([first, point, mine, last], point, sessions)
+    assert (previous, following) == (first, last)
+    assert per_project == {}
+
+
+def test_the_all_projects_reading_is_the_project_readings_put_together():
+    """Every change, judged on every project's sessions at once, reads as
+    the sum of the same change judged on each project's sessions alone."""
+    first = ChangePoint(CHANGE, "config", "first", keys=["effective.model"])
+    y_only = ChangePoint(CHANGE + timedelta(days=1), "apply", "y only", keys=["model"], project="slug:y")
+    x_only = ChangePoint(CHANGE + timedelta(days=2), "apply", "x only", keys=["model"], project="slug:x")
+    last = ChangePoint(CHANGE + timedelta(days=4), "config", "last", keys=["effective.model"])
+    points = [first, y_only, x_only, last]
+    x_days = (-3, -2, -1, 0.5, 1, 1.5, 2.5, 3, 3.5, 4.5, 5)
+    y_days = (-3, -2, -1, 0.2, 0.4, 0.6, 0.8, 1.5, 2, 3, 3.5, 4.5, 5, 6)
+    sessions = sorted([_in("slug:x", d) for d in x_days] + [_in("slug:y", d) for d in y_days], key=lambda s: s.start)
+
+    everything = {r["change"]["label"]: r for r in impact.impact(points, sessions, UNITS)}
+    views = []
+    for project in ("slug:x", "slug:y"):
+        mine = [s for s in sessions if s.project == project]
+        shown = [p for p in points if applies_to(p, project)]
+        views.append({r["change"]["label"]: r for r in impact.impact(shown, mine, UNITS)})
+    assert set(everything) == {"first", "y only", "x only", "last"}
+    for label, row in everything.items():
+        seen = [view[label] for view in views if label in view]
+        assert row["before_sessions"] == sum(r["before_sessions"] for r in seen), label
+        assert row["after_sessions"] == sum(r["after_sessions"] for r in seen), label
+    # Not the same as one project's change cutting the other's: X's
+    # sessions run to its own change two days on, Y's to its own at one.
+    assert (everything["first"]["before_sessions"], everything["first"]["after_sessions"]) == (6, 7)
+    assert (everything["last"]["before_sessions"], everything["last"]["after_sessions"]) == (7, 5)
+
+
+# -- one project, two spellings of its drive letter ---------------------------
+
+
+def test_session_facts_carry_every_key_a_drive_letter_project_goes_by(tmp_path):
+    from claudeglass import snapshots
+
+    def facts_in(folder: str):
+        project_dir = tmp_path / folder
+        project_dir.mkdir()
+        write_jsonl(
+            project_dir / "s.jsonl",
+            [turn_line(timestamp=ts) for ts in ("2026-09-18T12:00:00.000Z", "2026-09-18T12:05:00.000Z")],
+        )
+        [facts] = impact.session_facts(load_corpus([project_dir]), load_pricing())
+        return facts
+
+    lower = facts_in("c--Dev-X")
+    assert lower.keys == snapshots.snapshot_project_keys("c--Dev-X")
+    assert lower.project == lower.keys[0] == snapshots.snapshot_project_key("C--Dev-X")
+    assert lower.keys[0] != lower.keys[1]
+    plain = facts_in("proj")
+    assert plain.keys == snapshots.snapshot_project_keys("proj")
+    assert plain.project == plain.keys[0] == snapshots.snapshot_project_key("proj")
+
+
+def test_a_change_applies_to_a_session_under_either_spelling_of_its_drive_letter():
+    from claudeglass import snapshots
+
+    canonical, legacy = snapshots.snapshot_project_keys("c--Dev-X")
+    sessions = [_session(d, 1.0) for d in (-3, -2, -1, 0.1, 0.2, 0.3)]
+    for facts in sessions:
+        facts.project, facts.keys = canonical, (canonical, legacy)
+    now = CHANGE + timedelta(days=1)
+    for key in (canonical, legacy):
+        point = ChangePoint(CHANGE, "apply", "x", keys=["model"], project=key)
+        result = impact.compare(point, sessions, UNITS, now=now)
+        assert (result["before_sessions"], result["after_sessions"]) == (3, 3), key
+    elsewhere = ChangePoint(CHANGE, "apply", "x", keys=["model"], project=snapshots.snapshot_project_key("c--Dev-Y"))
+    assert impact.sides(elsewhere, sessions, now=now) == ([], [])
+    # And a change under either spelling keeps another apart from this one
+    # only when enough of the project's sessions ran between them.
+    first = ChangePoint(CHANGE - timedelta(hours=12), "apply", "first", keys=["model"])
+    second = ChangePoint(CHANGE, "apply", "second", keys=["model"], project=legacy)
+    between = [_session(-d / 10, 3.0) for d in (1, 2, 3)]
+    for facts in between:
+        facts.project, facts.keys = canonical, (canonical, legacy)
+    assert impact.neighbours([first, second], second, sessions + between) == (first, None)
+    assert impact.neighbours([first, second], second, sessions + between[:2]) == (None, None)
 
 
 def test_too_few_sessions_before_says_new_sessions_wont_fill_it():

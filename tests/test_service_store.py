@@ -1511,6 +1511,23 @@ def test_mark_prediction_seen_and_judge_prediction(store: Store) -> None:
     assert store.predictions(judged=False) == []
 
 
+def test_reopen_predictions_unjudges_only_the_verdict_named(store: Store) -> None:
+    for prediction_id, verdict in (("short", "too_little_data"), ("kept", "as_estimated")):
+        store.upsert_prediction(
+            prediction_id=prediction_id, ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
+            agent=None, predicted_usd=2.0, predicted_pct=None, fidelity="ceiling",
+        )
+        store.judge_prediction(
+            prediction_id, change_ts="2026-09-21T09:00:00Z", verdict=verdict, measured_usd=1.8, measured_pct=None
+        )
+    assert store.reopen_predictions("too_little_data") == 1
+    [reopened] = store.predictions(judged=False)
+    assert reopened["id"] == "short"
+    assert [reopened[k] for k in ("change_ts", "judged_at", "verdict", "measured_usd", "measured_pct")] == [None] * 5
+    assert [row["id"] for row in store.predictions(judged=True)] == ["kept"]
+    assert store.reopen_predictions("too_little_data") == 0
+
+
 def test_prune_predictions_drops_stale_unjudged_and_old_judged_rows(store: Store) -> None:
     store.upsert_prediction(
         prediction_id="fresh", ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",

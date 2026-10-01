@@ -1318,7 +1318,11 @@ class FileWatcher:
 
         snapshot_id: int | None = None
         if record.first_ts and self._loaded_snapshots:
-            snap = snapshots_mod.snapshot_for(record.first_ts, self._loaded_snapshots)
+            # The settings this session's own project had, under either
+            # spelling of its drive letter, never another project's.
+            snap = snapshots_mod.snapshot_for(
+                record.first_ts, self._loaded_snapshots, snapshots_mod.snapshot_project_keys(slug)
+            )
             if snap is not None:
                 snapshot_id = self._snapshot_ids_by_ts.get(snap.ts)
         profile_id = snapshots_mod.profile_for(record.first_ts, self._profile_marks, session_id)

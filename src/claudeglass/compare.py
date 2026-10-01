@@ -241,7 +241,9 @@ class _SessionMetrics:
     mode: str
     purpose: str
     profile_id: str | None
-    project_key: str | None = None
+    #: Every key the session's project's snapshots can carry
+    #: (``snapshots.snapshot_project_keys``).
+    project_key: tuple[str, ...] | str | None = None
     task: str = "untagged"
     priced_turns: int = 0
     cost: float = 0.0
@@ -300,7 +302,7 @@ def _collect_session_metrics(
             mode=classification.mode,
             purpose=classification.purpose,
             profile_id=snapshots_mod.profile_for(record.first_ts, profile_marks or [], record.session_id),
-            project_key=snapshots_mod.snapshot_project_key(bundle.slug),
+            project_key=snapshots_mod.snapshot_project_keys(bundle.slug),
             task=classify.reported_task(bundle.top)[0] or "untagged",
         )
 
