@@ -25,14 +25,18 @@ import json
 import re
 import shutil
 import subprocess
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from claudeglass import helptext
+from claudeglass import helptext, impact
+from claudeglass.impact import SessionFacts, _Transcript
 from claudeglass.pricing import load_pricing
+from claudeglass.units import Units
 from test_service_static import (
     _app_js,
     _chart_specs,
+    _declaration_source,
     _evidence_sources,
     _function_source,
     _static_text,
@@ -932,3 +936,47 @@ def test_ten_or_fewer_changes_have_nothing_to_fold() -> None:
     drawn = _drawn(_data(*changes), {"foldAfter": 10}, window="all")
     assert len(drawn["items"]) == 10 and not any(item.get("hidden") for item in drawn["items"])
     assert "Show" not in drawn["text"]
+
+
+# -- a change card reads tokens and replies by which way is better -----------
+
+
+def test_a_tokens_row_and_a_count_row_read_by_which_way_is_better() -> None:
+    """A model change is judged on tokens and replies as well as money.
+    Fewer of either is good news and more is bad, as it is for a price,
+    and the card draws the server's own text for them, never money."""
+
+    def sessions(replies: int, tokens: int) -> list[SessionFacts]:
+        return [
+            SessionFacts(
+                start=datetime(2026, 9, 20, tzinfo=timezone.utc) + timedelta(hours=n),
+                main=_Transcript(turns=replies, total_tokens=tokens),
+            )
+            for n in range(4)
+        ]
+
+    def row(measure: impact.Measure, before: list[SessionFacts], after: list[SessionFacts]) -> dict:
+        rows = [impact._measure_row(measure, before, after, Units(billing_mode="api", currency="USD"))]
+        impact._label_rows(rows)
+        return rows[0]
+
+    rows = [
+        row(impact._TOKENS, sessions(10, 100_000), sessions(10, 50_000)),
+        row(impact._TOKENS, sessions(10, 50_000), sessions(10, 100_000)),
+        row(impact._REPLIES, sessions(20, 1), sessions(10, 1)),
+        row(impact._REPLIES, sessions(10, 1), sessions(20, 1)),
+        row(impact._TOKENS, sessions(10, 50_000), sessions(10, 50_000)),
+    ]
+    assert [(r["kind"], r["better"], r["before"], r["after"]) for r in rows] == [
+        ("tokens", "lower", "100,000 tokens", "50,000 tokens"),
+        ("tokens", "lower", "50,000 tokens", "100,000 tokens"),
+        ("count", "lower", "20.0", "10.0"),
+        ("count", "lower", "10.0", "20.0"),
+        ("tokens", "lower", "50,000 tokens", "50,000 tokens"),
+    ]
+    tones = _node(
+        [("page-changes.js", "readingTone")],
+        f"{json.dumps(rows)}.map(readingTone)",
+        preamble=_declaration_source(_static_text("page-changes.js"), "READINGS") + ";\n",
+    )
+    assert tones == ["good", "bad", "good", "bad", "neutral"]

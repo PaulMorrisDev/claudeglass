@@ -6,13 +6,16 @@ Per session, not per window, so a quiet week after a change doesn't
 read as a saving: cost per session, cost per reply, the share of cache
 writes that rebuilt expired context, summaries per session, the context
 at session start, and, for a change to one agent, that agent's cost and
-start-up context per spawn. "Before" is the sessions started in the
-:data:`LOOKBACK_DAYS` before the change (and after the change before
-it); "after" is those started from the change until the next one. Two
-changes with fewer than :data:`MIN_SESSIONS` sessions between them
-share their before and after rather than cut each other's to too few
-for good: too few sessions ran with one and not the other to judge
-either alone, so each is read with the other. A change made in one
+start-up context per spawn. A change of model is also read in tokens
+per session, output tokens per reply and replies per session, and a
+change of effort or thinking in output tokens per reply, so a new price
+per token can't pass for a new amount of work. "Before" is the sessions
+started in the :data:`LOOKBACK_DAYS` before the change (and after the
+change before it); "after" is those started from the change until the
+next one. Two changes with fewer than :data:`MIN_SESSIONS` sessions
+between them share their before and after rather than cut each other's
+to too few for good: too few sessions ran with one and not the other to
+judge either alone, so each is read with the other. A change made in one
 project (``ChangePoint.project``) is judged on that project's sessions
 only, and only changes that apply there bound it. A change to every
 project is bounded in each project on its own (:func:`bounds`): by the
@@ -109,6 +112,16 @@ class _Transcript:
     turns: int = 0
     startup_tokens: int = 0
     peak_context: int = 0
+    #: Output tokens of the replies ``turns`` counts, so output per reply
+    #: divides like by like: a compaction's estimated request
+    #: (``Turn.estimated``) is spend, not a reply. The API's
+    #: ``output_tokens`` already counts the thinking, and
+    #: ``Turn.thinking_tokens`` is a breakdown of it, so thinking is never
+    #: added on top.
+    output_tokens: int = 0
+    #: Everything read and written by every priced turn, a compaction's
+    #: estimated request included: input, cache writes, cache reads and output.
+    total_tokens: int = 0
     rebuild_tokens: int = 0
     write_tokens: int = 0
     summaries: int = 0
@@ -159,6 +172,10 @@ class SessionFacts:
     def cost(self) -> float:
         return self.main.cost + sum(spawn.cost for _agent, spawn in self.spawns)
 
+    @property
+    def tokens(self) -> int:
+        return self.main.total_tokens + sum(spawn.total_tokens for _agent, spawn in self.spawns)
+
 
 def _session_keys(session: SessionFacts) -> tuple[str, ...]:
     return session.keys or (session.project,)
@@ -177,6 +194,11 @@ def _transcript(result: TranscriptResult, pricing: Pricing) -> _Transcript:
         facts.turns += not turn.is_synthetic
         facts.peak_context = max(
             facts.peak_context, turn.input_tokens + turn.cache_creation_tokens + turn.cache_read_tokens
+        )
+        if not turn.is_synthetic:
+            facts.output_tokens += turn.output_tokens
+        facts.total_tokens += (
+            turn.input_tokens + turn.cache_creation_tokens + turn.cache_read_tokens + turn.output_tokens
         )
         facts.write_tokens += turn.cache_creation_tokens
         facts.capture_chars += turn.cap_note_chars + (turn.cap.chars if turn.cap is not None else 0)
@@ -293,6 +315,12 @@ def _pairs(measure: Measure, sessions: list[SessionFacts]) -> list[tuple[float, 
         return [(s.cost, 1.0) for s in sessions]
     if measure.key == "cost_per_turn":
         return [(s.main.cost, float(s.main.turns)) for s in sessions]
+    if measure.key == "tokens_per_session":
+        return [(float(s.tokens), 1.0) for s in sessions]
+    if measure.key == "output_per_turn":
+        return [(float(s.main.output_tokens), float(s.main.turns)) for s in sessions]
+    if measure.key == "turns_per_session":
+        return [(float(s.main.turns), 1.0) for s in sessions]
     if measure.key == "rebuild_share":
         return [(100.0 * s.main.rebuild_tokens, float(s.main.write_tokens)) for s in sessions]
     if measure.key == "summaries":
@@ -387,6 +415,9 @@ def _value(measure: Measure, sessions: list[SessionFacts]) -> tuple[float | None
 
 _COST = Measure("cost_per_session", "Cost per session", "money")
 _TURN = Measure("cost_per_turn", "Cost per reply", "money")
+_TOKENS = Measure("tokens_per_session", "Tokens per session", "tokens")
+_OUTPUT = Measure("output_per_turn", "Output tokens per reply", "tokens")
+_REPLIES = Measure("turns_per_session", "Replies per session", "count")
 _REBUILD = Measure("rebuild_share", "Cache writes that rebuilt expired context", "pct")
 _SUMMARIES = Measure("summaries", "Conversation summaries per session", "count")
 _PEAK = Measure("peak_context", "Largest context per session", "tokens")
@@ -399,12 +430,25 @@ _DRIP = Measure("drip_share", "Messages that were small requests sent one at a t
 
 def measures_for(point: ChangePoint) -> list[Measure]:
     """The measures a change should move, most telling first; cost per
-    session always comes last as the overall check."""
+    session always comes last as the overall check. A model change is
+    judged on the tokens it spends (all of them per session, output
+    tokens per reply, and replies per session) before what they cost,
+    so a different price per token can't pass for a different amount of
+    work; effort and thinking changes on output tokens per reply, then
+    cost per reply; fast mode, which changes the price and speed but
+    not the tokens, on cost per reply alone. Measures come in the order
+    the changed keys name them, except that the tokens always come
+    before cost per reply: a settings edit lists its keys
+    alphabetically, so ``effortLevel`` or ``fastMode`` comes before
+    ``model``, and its card would otherwise lead with money."""
     chosen: list[Measure] = []
 
-    def add(measure: Measure) -> None:
-        if measure not in chosen:
-            chosen.append(measure)
+    def add(measure: Measure, ahead_of: tuple[Measure, ...] = ()) -> None:
+        # Last, or just before the first of ``ahead_of`` already chosen.
+        if measure in chosen:
+            return
+        at = next((i for i, m in enumerate(chosen) if m in ahead_of), len(chosen))
+        chosen.insert(at, measure)
 
     for label in point.keys or ():
         agent, _, key = label.rpartition(": ")
@@ -423,7 +467,15 @@ def measures_for(point: ChangePoint) -> list[Measure]:
         elif agent:
             add(Measure("agent_cost", f"{agent}: cost per spawn", "money", agent))
             add(Measure("agent_startup", f"{agent}: context at the start of each spawn", "tokens", agent))
-        elif key in ("model", "effortLevel", "alwaysThinkingEnabled", "MAX_THINKING_TOKENS", "fastMode"):
+        elif key == "model":
+            add(_TOKENS, ahead_of=(_OUTPUT, _TURN))
+            add(_OUTPUT, ahead_of=(_TURN,))
+            add(_REPLIES, ahead_of=(_TURN,))
+            add(_TURN)
+        elif key in ("effortLevel", "alwaysThinkingEnabled", "MAX_THINKING_TOKENS"):
+            add(_OUTPUT, ahead_of=(_TURN,))
+            add(_TURN)
+        elif key == "fastMode":
             add(_TURN)
         elif key == "autoCompactWindow":
             add(_SUMMARIES)

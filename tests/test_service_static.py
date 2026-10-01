@@ -2304,6 +2304,9 @@ def test_a_change_card_says_what_changed_where_and_each_measures_reading() -> No
     tone = _function_source(source, "readingTone")
     assert "if (!reading.side || !measure.better) return \"neutral\";" in tone
     assert 'reading.side === measure.better ? "good" : "bad"' in tone
+    # The figures are the server's text, so a tokens or count row never reads as money.
+    assert "measure.before || " in row and "measure.after || " in row
+    assert "moneyText" not in row
 
 
 def test_a_change_card_says_what_the_sessions_since_saved() -> None:

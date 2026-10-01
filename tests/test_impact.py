@@ -11,6 +11,7 @@ from claudeglass import impact
 from claudeglass.change_points import ChangePoint, applies_to
 from claudeglass.corpus import load_corpus
 from claudeglass.impact import Measure, SessionFacts, _Transcript
+from claudeglass.model import TranscriptResult, Turn
 from claudeglass.pricing import load_pricing
 from claudeglass.units import Units
 
@@ -36,12 +37,57 @@ def _tasked(days: float, cost: float, task: str) -> SessionFacts:
 
 
 def test_measures_follow_the_changed_keys():
+    # A model change is judged on the tokens it spends first, then on cost.
     assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=["model"]))] == [
+        "tokens_per_session",
+        "output_per_turn",
+        "turns_per_session",
+        "cost_per_turn",
+        "cost_per_session",
+    ]
+    for key in ("effortLevel", "alwaysThinkingEnabled", "MAX_THINKING_TOKENS"):
+        assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=[key]))] == [
+            "output_per_turn",
+            "cost_per_turn",
+            "cost_per_session",
+        ], key
+    # Fast mode changes the price and the speed, not the tokens.
+    assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=["fastMode"]))] == [
+        "cost_per_turn",
+        "cost_per_session",
+    ]
+    # A settings edit lists its keys alphabetically, so effort or fast mode
+    # can come before the model: the tokens still come before the money.
+    for keys in (
+        ["effective.effortLevel", "effective.model"],
+        ["effective.fastMode", "effective.model"],
+        ["effective.alwaysThinkingEnabled", "effective.effortLevel", "effective.fastMode", "effective.model"],
+    ):
+        assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=keys))] == [
+            "tokens_per_session",
+            "output_per_turn",
+            "turns_per_session",
+            "cost_per_turn",
+            "cost_per_session",
+        ], keys
+    assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=["fastMode", "effortLevel"]))] == [
+        "output_per_turn",
         "cost_per_turn",
         "cost_per_session",
     ]
     agent = impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=["Explore: model"]))
     assert [(m.key, m.agent) for m in agent][:2] == [("agent_cost", "Explore"), ("agent_startup", "Explore")]
+    # An agent's model change stays on that agent's cost and context.
+    for key in ("Explore: model", "agents.Explore.model"):
+        scoped = impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=[key]))
+        assert [(m.key, m.agent) for m in scoped] == [
+            ("agent_cost", "Explore"),
+            ("agent_startup", "Explore"),
+            ("cost_per_session", None),
+        ], key
+    # The settings layers name the same key.
+    layered = impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=["effective.model"]))
+    assert [m.key for m in layered][0] == "tokens_per_session"
     ttl = impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=["effective.promptCacheTtl"]))
     assert ttl[0].key == "rebuild_share"
     assert impact.measures_for(ChangePoint(CHANGE, "apply", "x"))[0].key == "startup_tokens"
@@ -415,6 +461,181 @@ def test_scheduled_main_sessions_are_left_out_of_the_quality_check():
         session.runs = [quality.Run(replies=5, tool_calls=20, scheduled=i % 2 == 1)]
     group = impact.compare(ChangePoint(CHANGE, "apply", "x", keys=["model"]), sessions, UNITS)["quality"][0]
     assert (group["before_runs"], group["after_runs"]) == (3, 3)
+
+
+# -- a model change is judged on tokens as well as money ------------------------
+
+
+def _widgets(tmp_path):
+    """A rate card with two versions of one family, the newer at twice the
+    price per token."""
+    card = tmp_path / "pricing.toml"
+    card.write_text(
+        'version = "2099-01-01-test"\ncurrency = "USD"\nsource_url = "https://example.invalid/pricing"\n'
+        'retrieved = "2099-01-01"\nnotes = "Two versions of one family, the newer dearer per token."\n\n'
+        '[models."claude-widget-4"]\naliases = []\ninput = 1.0\noutput = 5.0\n'
+        "cache_write_5m = 1.25\ncache_write_1h = 2.0\ncache_read = 0.1\n\n"
+        '[models."claude-widget-4-1"]\naliases = []\ninput = 2.0\noutput = 10.0\n'
+        "cache_write_5m = 2.5\ncache_write_1h = 4.0\ncache_read = 0.2\n",
+        encoding="utf-8",
+    )
+    return load_pricing(path=card)
+
+
+def _widget_session(pricing, days: float, model: str, *, output: int = 400, replies: int = 4) -> SessionFacts:
+    """A session of ``replies`` replies on ``model``, each reading 32,100 tokens and writing ``output``."""
+    turns = [
+        Turn(
+            message_id=f"{model}-{days}-{n}",
+            turn_index=n + 1,
+            model=model,
+            input_tokens=100,
+            cache_creation_tokens=2_000,
+            cc_5m=2_000,
+            cache_read_tokens=30_000,
+            output_tokens=output,
+        )
+        for n in range(replies)
+    ]
+    return SessionFacts(
+        start=CHANGE + timedelta(days=days), main=impact._transcript(TranscriptResult(turns=turns), pricing)
+    )
+
+
+def test_a_dearer_version_with_the_same_usage_moves_cost_but_not_tokens(tmp_path):
+    pricing = _widgets(tmp_path)
+    before = [_widget_session(pricing, -d, "claude-widget-4") for d in (1, 2, 3)]
+    after = [_widget_session(pricing, d, "claude-widget-4-1") for d in (0.1, 0.2, 0.3, 0.4)]
+    point = ChangePoint(CHANGE, "transcript", "Model changed", keys=["model"])
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    assert result["enough"]
+    by_key = {m["key"]: m for m in result["measures"]}
+    assert list(by_key) == [
+        "tokens_per_session", "output_per_turn", "turns_per_session", "cost_per_turn", "cost_per_session",
+    ]
+    # Same tokens, replies and output per reply before and after: nothing to see.
+    for key in ("tokens_per_session", "output_per_turn", "turns_per_session"):
+        assert by_key[key]["change_pct"] == 0.0 and by_key[key]["direction"] == "same", key
+        assert by_key[key]["label_key"] == "no_clear_change", key
+    # Twice the price for them: cost per reply and per session double.
+    for key in ("cost_per_turn", "cost_per_session"):
+        assert by_key[key]["change_pct"] == 100.0 and by_key[key]["direction"] == "higher", key
+        assert by_key[key]["label_key"] == "higher", key
+    # Read in their own units, and lower is better for each.
+    assert [(by_key[k]["kind"], by_key[k]["before"]) for k in list(by_key)[:3]] == [
+        ("tokens", "130,000 tokens"), ("tokens", "400 tokens"), ("count", "4.0"),
+    ]
+    assert all(row["better"] == "lower" for row in by_key.values())
+    # The headline is the tokens: usage didn't move, so it says so rather than the price.
+    assert result["verdict"] == (
+        "Tokens per session: about the same (130,000 tokens before, 130,000 tokens after)."
+    )
+
+
+def test_a_version_that_writes_half_as_much_a_reply_reads_lower_though_it_costs_more(tmp_path):
+    pricing = _widgets(tmp_path)
+    before = [_widget_session(pricing, -d, "claude-widget-4", output=400) for d in (1, 2, 3)]
+    after = [_widget_session(pricing, d, "claude-widget-4-1", output=200) for d in (0.1, 0.2, 0.3, 0.4)]
+    point = ChangePoint(CHANGE, "transcript", "Model changed", keys=["model"])
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    assert result["enough"]
+    by_key = {m["key"]: m for m in result["measures"]}
+    # Half the output a reply: a clear fall.
+    output = by_key["output_per_turn"]
+    assert (output["before"], output["after"]) == ("400 tokens", "200 tokens")
+    assert output["change_pct"] == -50.0 and output["direction"] == "lower"
+    assert output["label_key"] == "lower"
+    # Cache reads dwarf the output, so a session's tokens barely fall, and the headline says so.
+    tokens = by_key["tokens_per_session"]
+    assert (tokens["before"], tokens["after"]) == ("130,000 tokens", "129,200 tokens")
+    assert tokens["change_pct"] == -0.6 and tokens["direction"] == "same"
+    assert result["verdict"] == (
+        "Tokens per session: about the same (130,000 tokens before, 129,200 tokens after)."
+    )
+    assert by_key["turns_per_session"]["direction"] == "same"
+    # Twice the price per token still costs more a reply, for all the shorter replies.
+    for key in ("cost_per_turn", "cost_per_session"):
+        assert by_key[key]["change_pct"] == 73.7 and by_key[key]["direction"] == "higher", key
+        assert by_key[key]["label_key"] == "higher", key
+
+
+def test_fewer_output_tokens_a_reply_after_a_change_read_as_lower():
+    def session(days: float, output: int) -> SessionFacts:
+        return SessionFacts(
+            start=CHANGE + timedelta(days=days),
+            main=_Transcript(cost=1.0, turns=10, output_tokens=10 * output, total_tokens=10 * (output + 30_000)),
+        )
+
+    before = [session(-d, output) for d, output in ((1, 380), (2, 400), (3, 420))]
+    after = [session(d, output) for d, output in ((0.1, 190), (0.2, 200), (0.3, 210), (0.4, 200))]
+    point = ChangePoint(CHANGE, "transcript", "Effort level changed", keys=["effortLevel"])
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    assert [m["key"] for m in result["measures"]] == ["output_per_turn", "cost_per_turn", "cost_per_session"]
+    row = result["measures"][0]
+    assert (row["kind"], row["better"]) == ("tokens", "lower")
+    assert (row["before"], row["after"]) == ("400 tokens", "200 tokens")
+    assert row["change_pct"] == -50.0 and row["direction"] == "lower"
+    assert row["label_key"] == "lower"
+    assert result["verdict"].startswith("Output tokens per reply fell 50%, from 400 tokens to 200 tokens")
+    # Cost per session didn't move, so only the tokens did.
+    assert result["measures"][-1]["direction"] == "same"
+
+
+def test_a_transcript_counts_output_once_and_every_token_read_or_written():
+    def turn(index: int, **fields) -> Turn:
+        return Turn(message_id=f"m{index}", turn_index=index, model="claude-sonnet-5", **fields)
+
+    result = TranscriptResult(
+        turns=[
+            # Not a priced reply: counted nowhere.
+            turn(0, input_tokens=9_000, cache_creation_tokens=9_000, cache_read_tokens=9_000, output_tokens=9_000),
+            turn(1, input_tokens=100, cache_creation_tokens=2_000, cache_read_tokens=30_000, output_tokens=400,
+                 thinking_tokens=150),
+            turn(2, input_tokens=10, cache_creation_tokens=500, cache_read_tokens=32_000, output_tokens=250,
+                 thinking_tokens=250),
+            # The estimated request that wrote a compaction's summary: spend, not a reply.
+            turn(3, is_synthetic=True, estimated="compaction", input_tokens=1_000, cache_read_tokens=32_000,
+                 output_tokens=8_000),
+        ]
+    )
+    facts = impact._transcript(result, load_pricing())
+    assert facts.turns == 2
+    # The thinking is inside output_tokens already: 400 + 250, not + 150 + 250.
+    # A compaction's output counts in the total, never in the replies' output.
+    assert facts.output_tokens == 650
+    assert facts.total_tokens == (
+        (100 + 2_000 + 30_000 + 400) + (10 + 500 + 32_000 + 250) + (1_000 + 32_000 + 8_000)
+    )
+
+
+def test_tokens_per_session_counts_the_spawns_but_output_and_replies_are_the_main_sessions():
+    def session(days: float) -> SessionFacts:
+        return SessionFacts(
+            start=CHANGE + timedelta(days=days),
+            main=_Transcript(turns=10, output_tokens=1_000, total_tokens=50_000),
+            spawns=[("Explore", _Transcript(turns=3, output_tokens=9_000, total_tokens=20_000))],
+        )
+
+    sessions = [session(d) for d in (0.1, 0.2, 0.3)]
+    assert sessions[0].tokens == 70_000
+    assert impact._value(impact._TOKENS, sessions) == (70_000.0, 3)
+    assert impact._value(impact._OUTPUT, sessions) == (100.0, 3)
+    assert impact._value(impact._REPLIES, sessions) == (10.0, 3)
+
+
+def test_session_facts_carries_a_sessions_token_totals(tmp_path):
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    write_jsonl(
+        project_dir / "session-abc.jsonl",
+        [
+            turn_line(timestamp=ts, input_tokens=100, cache_read_input_tokens=1_000, output_tokens=50)
+            for ts in ("2026-09-18T12:00:00.000Z", "2026-09-18T12:05:00.000Z")
+        ],
+    )
+    [facts] = impact.session_facts(load_corpus([project_dir]), load_pricing())
+    assert (facts.main.turns, facts.main.output_tokens) == (2, 100)
+    assert facts.main.total_tokens == 2 * (100 + 1_000 + 50) == facts.tokens
 
 
 # -- metrics capture changes ---------------------------------------------------
