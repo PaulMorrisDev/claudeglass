@@ -626,7 +626,8 @@ export function renderUsage(panel) {
   panel.appendChild(controls);
   panel.appendChild(chartHost);
   var loads = {};
-  var impactLoad = fetchJson("/api/impact");
+  // The changes made in the window (and the project), marked on the chart.
+  var impactLoad = fetchJson(withWindow("/api/impact"));
   // The window's whole sessions, as the cost by model below counts them:
   // the chart's reading gives that figure too, and says why it differs.
   var summaryLoad = fetchJson(withWindow("/api/summary"));

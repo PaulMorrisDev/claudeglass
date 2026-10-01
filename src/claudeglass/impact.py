@@ -717,15 +717,29 @@ def _verdict(rows: list[dict], before: int, after: int, enough: bool) -> str:
 
 
 def impact(
-    points: list[ChangePoint], sessions: list[SessionFacts], units: Units, *, limit: int = 10, without=None
+    points: list[ChangePoint],
+    sessions: list[SessionFacts],
+    units: Units,
+    *,
+    limit: int | None = 10,
+    without=None,
+    listed=None,
 ) -> list[dict]:
-    """Newest change first, at most ``limit``. A change made within
-    :data:`TOGETHER` of another, or with fewer than :data:`MIN_SESSIONS`
-    sessions between them, doesn't bound its before or after, and a
-    change to one project bounds that project's sessions only
-    (:func:`bounds`). ``without`` is passed to :func:`compare`."""
+    """Newest change first, at most ``limit`` (every one when it is
+    ``None``). A change made within :data:`TOGETHER` of another, or with
+    fewer than :data:`MIN_SESSIONS` sessions between them, doesn't bound
+    its before or after, and a change to one project bounds that
+    project's sessions only (:func:`bounds`). ``without`` is passed to
+    :func:`compare`.
+
+    ``listed``, when given, is called with a point and says whether to
+    compare it: only the points it accepts are compared and returned,
+    and ``limit`` counts those. Every point still bounds its neighbours,
+    so a change's before and after are the same whichever are listed."""
     out = []
     for point in reversed(points):
+        if listed is not None and not listed(point):
+            continue
         previous, following, per_project = bounds(points, point, sessions)
         out.append(
             compare(
@@ -733,7 +747,7 @@ def impact(
                 previous=previous, following=following, per_project=per_project, without=without,
             )
         )
-        if len(out) >= limit:
+        if limit is not None and len(out) >= limit:
             break
     return out
 

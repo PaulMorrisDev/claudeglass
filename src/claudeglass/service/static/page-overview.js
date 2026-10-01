@@ -9,7 +9,7 @@
  */
 
 import { clear, el, goTo, state, WINDOW_OPTIONS } from "./core.js";
-import { fraction, money, moneyParts, projectName, shortTs, thousands } from "./format.js";
+import { fraction, money, moneyParts, projectName, shortTs, thousands, windowWhen } from "./format.js";
 import { fetchJson, findSection, loadQuickActions, loadRecommendations, loadReport, prefetchActions, withWindow } from "./api.js";
 import {
   button,
@@ -91,12 +91,6 @@ function windowLabel(value) {
     if (WINDOW_OPTIONS[i].value === value) return WINDOW_OPTIONS[i].label;
   }
   return /^[0-9]+$/.test(value) ? "Last " + value + " days" : "This window";
-}
-
-// "No sessions <when>."
-function windowWhen(value) {
-  if (/^[0-9]+$/.test(value)) return value === "1" ? "in the last day" : "in the last " + value + " days";
-  return { "1h": "in the last hour", today: "today", "24h": "in the last 24 hours", change: "since your last change" }[value] || "yet";
 }
 
 // What the window cost, as a clause: dollars on the API, a share of the
@@ -678,7 +672,7 @@ export function renderOverview(panel) {
   var phrase = previousPhrase(state.window);
   var previousLoad = phrase ? fetchJson(withWindow("/api/summary?previous=1")) : Promise.resolve(null);
   var dailyLoad = fetchJson(withWindow("/api/daily-usage") + "&split=agent");
-  var impactLoad = fetchJson("/api/impact");
+  var impactLoad = fetchJson(withWindow("/api/impact"));
   // Recommendations and checks are built from the report, so they follow it.
   var recsLoad = reportLoad.then(function () {
     return loadRecommendations();
@@ -809,8 +803,9 @@ export function renderOverview(panel) {
     });
   });
 
-  // 2. Did your changes work? The latest two, in short; the rest on
-  // Your changes.
+  // 2. Did your changes work? The window's changes, the latest two that
+  // can be judged in short, and a line for the newer ones still waiting
+  // for sessions; the rest on Your changes.
   Promise.all([impactLoad, figuresDone]).then(function (loaded) {
     if (!current() || body.hidden) return;
     clear(changes.body);
@@ -819,7 +814,7 @@ export function renderOverview(panel) {
       changes.body.appendChild(errorNotice(impact && impact.error));
       return;
     }
-    var count = renderChangeCards(changes.body, impact.data, { compact: true, limit: CHANGES_SHOWN });
+    var count = renderChangeCards(changes.body, impact.data, { compact: true, limit: CHANGES_SHOWN, judgedFirst: true });
     if (count) changes.head.appendChild(el("p", { class: "overview-answer-count" }, [changesLink(count)]));
   });
 
@@ -857,10 +852,10 @@ export function renderOverview(panel) {
   });
 
   // "Since my last change": what the sessions started since would have
-  // cost without it, under the headline. All projects only: the figure
-  // isn't split by project.
+  // cost without it, under the headline. With a project picked, the
+  // changes and the figure are that project's own.
   Promise.all([impactLoad, figuresDone]).then(function (loaded) {
-    if (!current() || body.hidden || state.window !== "change" || state.project) return;
+    if (!current() || body.hidden || state.window !== "change") return;
     var line = lastChangeLine(loaded[0].body);
     if (line) sentence.appendChild(line);
   });

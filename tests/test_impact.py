@@ -100,6 +100,53 @@ def test_before_stops_at_the_previous_change_and_after_at_the_next():
     assert cost["before"] == "2.00 USD" and cost["after"] == "1.00 USD"
 
 
+def _three_changes() -> tuple[list[SessionFacts], list[ChangePoint]]:
+    sessions = [_session(-d, 5.0) for d in (4, 5)] + [_session(-d, 2.0) for d in (0.5, 1, 1.5)] + [
+        _session(d, 1.0) for d in (0.1, 0.2, 0.3)
+    ] + [_session(3, 9.0)]
+    points = [
+        ChangePoint(CHANGE - timedelta(days=2), "apply", "first"),
+        ChangePoint(CHANGE, "apply", "second"),
+        ChangePoint(CHANGE + timedelta(days=2), "apply", "third"),
+    ]
+    return sessions, points
+
+
+def test_listed_compares_only_the_points_it_accepts_newest_first():
+    sessions, points = _three_changes()
+    everything = {row["change"]["label"]: row for row in impact.impact(points, sessions, UNITS)}
+    rows = impact.impact(points, sessions, UNITS, listed=lambda p: p.label != "second")
+    assert [row["change"]["label"] for row in rows] == ["third", "first"]
+    # Each one's neighbours are still every point's, so its sides and its
+    # measures are what the full run gave it.
+    for row in rows:
+        full = everything[row["change"]["label"]]
+        assert (row["before_sessions"], row["after_sessions"]) == (full["before_sessions"], full["after_sessions"])
+        assert row["measures"] == full["measures"] and row["verdict"] == full["verdict"]
+
+
+def test_listed_leaves_a_point_it_rejects_as_a_neighbour():
+    """``second`` is not listed, but it still cuts ``first``'s after side."""
+    sessions, points = _three_changes()
+    (first,) = impact.impact(points, sessions, UNITS, listed=lambda p: p.label == "first")
+    assert first["after_sessions"] == 3  # not the 6 the sessions after it would give with no ``second``
+    alone, = impact.impact(points[:1], sessions, UNITS)
+    assert alone["after_sessions"] > first["after_sessions"]
+
+
+def test_no_limit_returns_every_point_and_a_limit_counts_only_the_listed_ones():
+    sessions, points = _three_changes()
+    assert [r["change"]["label"] for r in impact.impact(points, sessions, UNITS, limit=None)] == [
+        "third",
+        "second",
+        "first",
+    ]
+    assert [r["change"]["label"] for r in impact.impact(points, sessions, UNITS, limit=2)] == ["third", "second"]
+    rows = impact.impact(points, sessions, UNITS, limit=1, listed=lambda p: p.label != "third")
+    assert [r["change"]["label"] for r in rows] == ["second"]
+    assert impact.impact(points, sessions, UNITS, limit=None, listed=lambda p: False) == []
+
+
 def test_changes_made_together_share_their_before_and_after():
     """One apply that wrote two files gives two change points seconds
     apart; neither cuts the other's comparison to nothing."""

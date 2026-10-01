@@ -457,6 +457,15 @@ export function timeNode(ts) {
   return el("time", { dateTime: String(ts || ""), title: shortTs(ts), text: relativeTime(ts) });
 }
 
+// -- the window in words -------------------------------------------------
+
+// The window as the end of a sentence: "No sessions <when>.", "No changes
+// <when>."
+export function windowWhen(value) {
+  if (/^[0-9]+$/.test(value)) return value === "1" ? "in the last day" : "in the last " + value + " days";
+  return { "1h": "in the last hour", today: "today", "24h": "in the last 24 hours", change: "since your last change" }[value] || "yet";
+}
+
 // -- entity names --------------------------------------------------------
 
 // Claude Code names a project's folder after its path with every

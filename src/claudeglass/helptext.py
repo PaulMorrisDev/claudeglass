@@ -4744,13 +4744,27 @@ def diagnostics_table(diagnostics: Diagnostics, hook=None, statusline=None, pars
     ``parser_notes`` (``ReportModel.parser_notes``) adds one row per key
     it carries, labelled via ``_PARSER_NOTE_LABELS`` -- a side channel
     for counters that don't fit the ``Diagnostics`` dataclass, see that
-    module's docstring."""
+    module's docstring.
+
+    With a hook or statusline row, ``row_groups`` splits the table in two:
+    those rows describe your setup and every session in every project
+    (the hook's settings and snapshot age, the statusline's count of every
+    session ever), while the counters are the window and project picked."""
     rows = []
     if hook is not None:
         rows.append(["snapshot_hook", "working" if hook.ok else "needs attention", hook.summary()])
     if statusline is not None:
         working, sentence = statusline
         rows.append(["statusline", "working" if working else "needs attention", sentence])
+    # Consecutive rows share a group, so the first setup row heads both.
+    row_groups = (
+        {
+            rows[0][0]: "Your setup and every session, every project",
+            dataclasses.fields(Diagnostics)[0].name: "Read in this window",
+        }
+        if rows
+        else {}
+    )
     for field_def in dataclasses.fields(Diagnostics):
         value = getattr(diagnostics, field_def.name)
         if isinstance(value, dict):
@@ -4772,6 +4786,7 @@ def diagnostics_table(diagnostics: Diagnostics, hook=None, statusline=None, pars
             Column(key="meaning", label="What it means", kind="str", help="What the count tells you."),
         ],
         rows=rows,
+        row_groups=row_groups,
         help=Help(
             shows="Counters from reading your conversation logs.",
             read="Most should be zero or small. Large skipped or unreadable counts mean some usage is missing from the rest of the report.",

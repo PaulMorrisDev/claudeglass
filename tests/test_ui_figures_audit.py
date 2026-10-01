@@ -648,3 +648,287 @@ def test_recommendations_and_checks_expire_with_the_report() -> None:
         })()"""
     )
     assert counts == [2, 2, 4, 6]
+
+
+# -- the change cards follow the window and the project ---------------------
+
+
+#: What renderChangeCards needs of the page around it, as a small element
+#: tree: the service's own words (windowWhen, changeDay) are real; the
+#: elements, links, buttons and the card itself are stand-ins that keep
+#: what a test reads. ``state`` is set by each call.
+_CARDS_PREAMBLE = """
+var state = { window: "30", project: "" };
+function projectName(slug) { return slug; }
+function plain(n) {
+  if (n.text !== undefined) return n.text;
+  return n.children.map(plain).join("");
+}
+function walk(n, found) {
+  n.children.forEach(function (c) { if (c.children) { found.push(c); walk(c, found); } });
+  return found;
+}
+function el(tag, attrs, children) {
+  var n = { tag: tag, className: (attrs && attrs.class) || "", hidden: false, children: [], tabIndex: null, focused: false };
+  n.appendChild = function (c) { n.children.push(c); return c; };
+  n.removeChild = function (c) { n.children = n.children.filter(function (x) { return x !== c; }); };
+  n.focus = function () { n.focused = true; };
+  function matches(c, selector) {
+    var named = (" " + c.className + " ").indexOf(" " + selector.split("[")[0].slice(1) + " ") !== -1;
+    return named && (selector.indexOf("[hidden]") === -1 || c.hidden);
+  }
+  n.querySelectorAll = function (selector) { return walk(n, []).filter(function (c) { return matches(c, selector); }); };
+  n.querySelector = function (selector) { return n.querySelectorAll(selector)[0] || null; };
+  (children || []).forEach(function (c) { if (c !== null && c !== undefined) n.appendChild(typeof c === "string" ? { text: c } : c); });
+  return n;
+}
+function emptyState(message, gate, next) {
+  var box = el("div", { class: "empty-state" }, [message]);
+  if (next) box.appendChild(typeof next === "string" ? { text: " " + next } : el("span", {}, [" ", next]));
+  return box;
+}
+function pageLink(key, text, params) {
+  var link = el("a", { class: "page-link" }, [text]);
+  link.params = params || null;
+  return link;
+}
+function button(label, opts) {
+  var node = el("button", { class: "button" }, [label]);
+  node.click = opts.action;
+  return node;
+}
+function changeCard(item) {
+  var card = el("article", { class: "change-card" });
+  card.label = item.change.label;
+  return card;
+}
+function drawn(data, opts, scope) {
+  state.window = scope.window;
+  state.project = scope.project;
+  var container = el("div");
+  var count = renderChangeCards(container, data, opts);
+  var list = container.children[0];
+  var cards = list && list.className === "change-cards";
+  return {
+    count: count,
+    text: plain(container),
+    items: cards
+      ? list.children.map(function (c) { return c.label !== undefined ? { card: c.label, hidden: c.hidden } : { text: plain(c), class: c.className }; })
+      : [],
+    links: walk(container, []).filter(function (c) { return c.params; }).map(function (c) { return [plain(c), c.params]; }),
+  };
+}
+"""
+
+_CARDS_FUNCTIONS = [
+    ("format.js", "windowWhen"),
+    ("charts-types.js", "changeDay"),
+    ("page-changes.js", "judgedFirst"),
+    ("page-changes.js", "waitingLine"),
+    ("page-changes.js", "showOlderChanges"),
+    ("page-changes.js", "olderButton"),
+    ("page-changes.js", "renderChangeCards"),
+]
+
+
+def _cards_preamble() -> str:
+    """The preamble with the file's own NO_CHANGES_NEXT, so the empty
+    states are checked against the words the dashboard has."""
+    said = re.search(r'^var NO_CHANGES_NEXT = "[^"]*";', _static_text("page-changes.js"), re.M)
+    assert said, "page-changes.js no longer says what a change is for"
+    return _CARDS_PREAMBLE + said.group(0) + "\n"
+
+
+def _change(label: str, ts: str, *, enough: bool = True, before: int = 5, after: int = 5) -> dict:
+    """One row of /api/impact's changes, as the cards read it."""
+    return {
+        "change": {"label": label, "ts": ts, "day": ts[:10]},
+        "enough": enough,
+        "before_sessions": before,
+        "after_sessions": after,
+    }
+
+
+def _data(*changes: dict) -> dict:
+    return {"changes": list(changes), "min_sessions": 3, "caveat": ""}
+
+
+def _drawn(data: dict | None, opts: dict | None = None, *, window: str = "30", project: str = "") -> dict:
+    scope = {"window": window, "project": project}
+    expression = f"drawn({json.dumps(data)}, {json.dumps(opts or {})}, {json.dumps(scope)})"
+    return _node(_CARDS_FUNCTIONS, expression, preamble=_cards_preamble())
+
+
+def _picked(changes: list[dict], limit: int = 2) -> dict:
+    """``judgedFirst``'s answer over ``changes``, as labels."""
+    expression = (
+        "(function (picked) { return {"
+        " judged: picked.judged.map(function (c) { return c.change.label; }),"
+        " waiting: picked.waiting.map(function (c) { return c.change.label; }) }; })"
+        f"(judgedFirst({json.dumps(changes)}, {limit}, 3))"
+    )
+    return _node(_CARDS_FUNCTIONS, expression, preamble=_cards_preamble())
+
+
+#: A window's changes, newest first: two still waiting for sessions after
+#: them, two that can be judged, and one waiting that is older than them.
+_MIXED = [
+    _change("C6", "2026-09-30T10:00:00Z", enough=False, after=0),
+    _change("C5", "2026-09-29T10:00:00Z", enough=False, after=2),
+    _change("C4", "2026-09-27T10:00:00Z"),
+    _change("C3", "2026-09-26T10:00:00Z"),
+    _change("C2", "2026-09-25T10:00:00Z", enough=False, after=1),
+    _change("C1", "2026-09-24T10:00:00Z"),
+]
+
+
+def test_the_overview_leads_with_the_changes_it_can_judge() -> None:
+    # The newest two that can be judged lead; the waiting ones are the
+    # newer ones, not C2, which is older than the newest judged.
+    assert _picked(_MIXED) == {"judged": ["C4", "C3"], "waiting": ["C6", "C5"]}
+    assert _picked(_MIXED, limit=1)["judged"] == ["C4"]
+    assert _picked(_MIXED, limit=9)["judged"] == ["C4", "C3", "C1"]
+
+
+def test_only_changes_short_of_sessions_after_them_are_too_new_to_judge() -> None:
+    """A newer change short of sessions before it isn't too new: counting
+    it would promise sessions that won't change its answer."""
+    early = _change("early", "2026-09-30T10:00:00Z", enough=False, before=1, after=5)
+    fresh = _change("fresh", "2026-09-29T10:00:00Z", enough=False, before=5, after=0)
+    held = _change("held", "2026-09-27T10:00:00Z")
+    assert _picked([early, fresh, held])["waiting"] == ["fresh"]
+    # Short before, and nothing else newer: no line at all.
+    drawn = _drawn(_data(early, held), {"compact": True, "limit": 2, "judgedFirst": True})
+    assert [item.get("card") for item in drawn["items"]] == ["held"]
+    assert drawn["links"] == []
+
+
+def test_none_judged_means_nothing_waits() -> None:
+    changes = [_change(f"C{n}", f"2026-09-{20 + n}T10:00:00Z", enough=False, after=n - 1) for n in (3, 2, 1)]
+    assert _picked(changes) == {"judged": [], "waiting": []}
+
+
+def test_the_waiting_line_counts_the_newer_changes_and_leads_to_the_newest() -> None:
+    drawn = _drawn(_data(*_MIXED), {"compact": True, "limit": 2, "judgedFirst": True})
+    assert drawn["items"][0] == {
+        "text": "2 newer changes are too new to judge yet: each needs 3 sessions after it.",
+        "class": "notes change-waiting",
+    }
+    assert [item["card"] for item in drawn["items"][1:]] == ["C4", "C3"]
+    # The count leads to Your changes at the newest of them, on the day the
+    # service names; and every change in the window is counted for the link.
+    assert drawn["links"] == [["2 newer changes", {"day": "2026-09-30"}]]
+    assert drawn["count"] == len(_MIXED)
+
+
+def test_one_waiting_change_reads_in_the_singular() -> None:
+    changes = [_change("C2", "2026-09-30T10:00:00Z", enough=False, after=1), _change("C1", "2026-09-26T10:00:00Z")]
+    drawn = _drawn(_data(*changes), {"compact": True, "limit": 2, "judgedFirst": True})
+    assert drawn["items"][0]["text"] == "1 newer change is too new to judge yet: it needs 3 sessions after it."
+    assert drawn["links"] == [["1 newer change", {"day": "2026-09-30"}]]
+
+
+def test_with_none_judged_the_newest_changes_are_drawn_as_they_are() -> None:
+    changes = [_change(f"C{n}", f"2026-09-{20 + n}T10:00:00Z", enough=False, after=n - 1) for n in (3, 2, 1)]
+    drawn = _drawn(_data(*changes), {"compact": True, "limit": 2, "judgedFirst": True})
+    assert drawn["items"] == [{"card": "C3", "hidden": False}, {"card": "C2", "hidden": False}]
+    assert drawn["links"] == []
+    assert drawn["count"] == 3
+    # Without judgedFirst the newest are drawn the same way, whatever can be judged.
+    unordered = _drawn(_data(*_MIXED), {"compact": True, "limit": 2})
+    assert [item["card"] for item in unordered["items"]] == ["C6", "C5"]
+
+
+def test_an_empty_window_says_where_older_changes_are() -> None:
+    nothing = _data()
+    overview = _drawn(nothing, {"compact": True}, window="7")
+    assert overview["text"] == "No changes in the last 7 days. See older ones on Your changes under All time."
+    assert overview["links"] == [["Your changes", {"w": "all"}]]
+    page = _drawn(nothing, {}, window="7")
+    assert page["text"] == "No changes in the last 7 days. Pick All time to see older ones."
+    assert page["links"] == [["All time", {"w": "all"}]]
+    # The window's words come from windowWhen, one for each.
+    assert _drawn(nothing, {}, window="today")["text"].startswith("No changes today.")
+    assert _drawn(nothing, {}, window="24h")["text"].startswith("No changes in the last 24 hours.")
+    assert _drawn(nothing, {}, window="1")["text"].startswith("No changes in the last day.")
+    assert _drawn(nothing, {}, window="change")["text"].startswith("No changes since your last change.")
+    # A project is named, in every window but All time.
+    assert _drawn(nothing, {}, window="30", project="acme")["text"].startswith("No changes in acme in the last 30 days.")
+
+
+def test_all_time_with_no_change_says_so_for_the_project_or_for_every_project() -> None:
+    nothing = _data()
+    every = _drawn(nothing, {}, window="all")
+    assert every["text"].startswith("No changes recorded yet. When you apply a profile or fix")
+    assert every["links"] == []
+    mine = _drawn(nothing, {}, window="all", project="acme")
+    assert mine["text"].startswith("No changes in acme yet. When you apply a profile or fix")
+    # "Since my last change" with none recorded has no older ones to point
+    # to either: it reads as All time with nothing in it.
+    nowhere = _drawn(None, {"noOlder": True}, window="change")
+    assert nowhere["text"].startswith("No changes recorded yet.") and nowhere["links"] == []
+    nowhere = _drawn(None, {"noOlder": True, "compact": True}, window="change", project="acme")
+    assert nowhere["text"].startswith("No changes in acme yet.")
+
+
+def test_a_change_window_with_no_change_recorded_is_not_an_error() -> None:
+    failure = {"ok": False, "error": {"code": "bad_request", "message": "No change recorded yet. Pick another window."}}
+    unknown = {"ok": False, "error": {"code": "bad_request", "message": "'project' does not match a known project"}}
+    outage = {"ok": False, "error": {"code": "internal", "message": "boom"}}
+    ok = {"ok": True, "data": {"changes": []}}
+    functions = [("page-changes.js", "noChangeYet")]
+    preamble = 'var state = { window: "x", project: "" };\n'
+
+    def asked(window: str, body: object) -> object:
+        expression = f"(function () {{ state.window = {json.dumps(window)}; return noChangeYet({json.dumps(body)}); }})()"
+        return _node(functions, expression, preamble=preamble)
+
+    assert asked("change", failure) is True
+    # An unknown project gives way to every project on its own; any other
+    # failure, and any other window, stays an error.
+    assert asked("change", unknown) is False
+    assert asked("change", outage) is False
+    assert asked("change", ok) is False
+    assert asked("change", None) is False
+    assert asked("7", failure) is False
+
+
+def test_your_changes_folds_the_cards_past_ten_behind_a_button() -> None:
+    changes = [_change(f"C{n:02d}", f"2026-09-{n:02d}T10:00:00Z") for n in range(13, 0, -1)]
+    expression = (
+        """(function () {
+      state.window = "all";
+      state.project = "";
+      var container = el("div");
+      var count = renderChangeCards(container, %s, { foldAfter: 10 });
+      var list = container.children[0];
+      var before = list.children.map(function (c) { return c.label !== undefined ? [c.label, c.hidden] : plain(c); });
+      list.children[list.children.length - 1].children[0].click();
+      var cards = list.children.filter(function (c) { return c.label !== undefined; });
+      return {
+        count: count,
+        before: before,
+        hiddenAfter: cards.filter(function (c) { return c.hidden; }).length,
+        kids: list.children.length,
+        focused: cards.filter(function (c) { return c.focused; }).map(function (c) { return c.label; }),
+      };
+    })()"""
+        % json.dumps(_data(*changes))
+    )
+    out = _node(_CARDS_FUNCTIONS, expression, preamble=_cards_preamble())
+    assert out["count"] == 13
+    shown = [entry for entry in out["before"] if isinstance(entry, list)]
+    assert [label for label, hidden in shown if not hidden] == [f"C{n:02d}" for n in range(13, 3, -1)]
+    assert [label for label, hidden in shown if hidden] == ["C03", "C02", "C01"]
+    assert out["before"][-1] == "Show 3 older changes"
+    # The button is gone once it is used, every card shows, and the first
+    # of the older ones takes focus.
+    assert out["hiddenAfter"] == 0 and out["kids"] == 13
+    assert out["focused"] == ["C03"]
+
+
+def test_ten_or_fewer_changes_have_nothing_to_fold() -> None:
+    changes = [_change(f"C{n:02d}", f"2026-09-{n:02d}T10:00:00Z") for n in range(10, 0, -1)]
+    drawn = _drawn(_data(*changes), {"foldAfter": 10}, window="all")
+    assert len(drawn["items"]) == 10 and not any(item.get("hidden") for item in drawn["items"])
+    assert "Show" not in drawn["text"]

@@ -254,7 +254,12 @@ def test_fixed_window_chip_and_all_time_chips_say_what_is_true() -> None:
     assert 'chip(state.project ? "All time, all projects" : "All time", { icon: "clock", class: "all-time-chip" })' in section
     setup = _static_text("page-setup.js")
     assert re.search(re.escape("Latest baseline") + r'", "[\w-]+", \{ allTime: true \}\)', setup)
+    # Your changes' cards follow the window and the project, so they carry
+    # no chip. The estimates aren't kept per project: with one picked, their
+    # section says "All projects" (and never "All time", which they aren't).
     changes = _static_text("page-changes.js")
-    assert 'chip(state.project ? "All time, all projects" : "All time", { icon: "clock", class: "all-time-chip" })' in _function_source(changes, "changesSection")
-    for title in ("Each change, before and after", "Did your estimates come true?"):
-        assert 'changesSection(panel, "' + title + '", true)' in changes, title
+    section = _function_source(changes, "changesSection")
+    assert 'allProjects && state.project ? chip("All projects", { icon: "folder", class: "all-time-chip" }) : null' in section
+    assert "All time" not in section
+    assert 'changesSection(panel, "Each change, before and after")' in changes
+    assert 'changesSection(panel, "Did your estimates come true?", true)' in changes

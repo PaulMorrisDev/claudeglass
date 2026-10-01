@@ -235,7 +235,10 @@ document.addEventListener("click", passClickThrough);
 // sidebar, the segments): it adds one history entry, and resolveRoute
 // does the rest when the hash changes. A page id alone opens that
 // page's last-used segment. options.params go in the address too: an
-// item to select (id) or a table row to show (t, row).
+// item to select (id) or a table row to show (t, row). They go over the
+// picked window and project, as pageLink's own address does, so a link
+// can name another window ({ w: "all" }) and the click lands where the
+// address says.
 function goTo(target, options) {
   options = options || {};
   var route = parseHash("#/" + String(target));
@@ -246,7 +249,7 @@ function goTo(target, options) {
     return;
   }
   router.pending = { key: key, options: options };
-  var hash = formatHash(key, Object.assign({}, options.params || {}, scopeParams()));
+  var hash = formatHash(key, Object.assign({}, scopeParams(), options.params || {}));
   if (window.location.hash === hash) resolveRoute();
   else window.location.hash = hash;
 }
@@ -689,10 +692,14 @@ function setProject(value, options) {
 // open if the new figures have it; a table row shown from an evidence
 // link was a one-off. Neither picker adds a history entry. While a move
 // to another view is under way (its address set, not yet shown), that
-// move carries the old scope, and resolveRoute applies the new one when
-// it lands.
+// address is rewritten with the new scope, over any window the link
+// named, so resolveRoute keeps the pick when the move lands.
 function redrawForScope() {
-  if (router.pending) return;
+  if (router.pending) {
+    var pending = router.pending;
+    window.history.replaceState(null, "", formatHash(pending.key, Object.assign({}, pending.options.params || {}, scopeParams())));
+    return;
+  }
   var view = viewFor(router.current);
   var keep = {};
   if (state.params.id) keep.id = state.params.id;

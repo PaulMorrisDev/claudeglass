@@ -2631,6 +2631,510 @@ def test_impact_gate_is_null_once_both_sides_have_enough_sessions(server):
     assert service_api._min_sessions_gate(before, 0, impact_mod.MIN_SESSIONS)["have"] == 0
 
 
+# -- impact: the window and the project the change cards follow ---------------
+
+
+_SONNET, _OPUS = "claude-sonnet-5", "claude-opus-5-5"
+
+
+def _log_captures(handle: _ServerHandle, moments: list[datetime]) -> None:
+    """A metrics capture change at each of ``moments`` (a minute or more
+    apart, or they are one): a change that applies in every project."""
+    lines = [
+        json.dumps({"ts": when.isoformat(), "level": f"l{n + 1}", "changed": {"level": {"from": f"l{n}", "to": f"l{n + 1}"}}})
+        for n, when in enumerate(sorted(moments))
+    ]
+    (handle.options.config_dir / "capture-log.jsonl").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _impact_changes(handle: _ServerHandle, query: str = "") -> list[dict]:
+    resp, body = handle.get_json("/api/impact" + (f"?{query}" if query else ""))
+    assert resp.status == 200, body
+    return body["data"]["changes"]
+
+
+def _sources(changes: list[dict]) -> list[str]:
+    return [change["change"]["source"] for change in changes]
+
+
+def _stamp(moment: datetime) -> str:
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _non_report_reads(calls: list[dict]) -> list[dict]:
+    """The calls ``_spy_corpus_reads`` saw that read sessions for the change cards."""
+    return [call for call in calls if "window_by" not in call]
+
+
+def test_impact_lists_the_changes_a_window_covers_and_judges_each_on_its_whole_sides(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    runs = [(f"s{n}", days, _SONNET) for n, days in enumerate((13, 12, 11), 1)]
+    runs += [(f"s{n}", days, _OPUS) for n, days in enumerate((9, 8, 7, 6, 5, 4, 2, 1, 0.5), 4)]
+    project_dir = tmp_path / "projects" / "proj-a"
+    _write_model_run(project_dir, now, runs)
+    handle = _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([project_dir]))
+    try:
+        _log_captures(handle, [now - timedelta(days=3)])
+        # Seven days first, while nothing is kept: only the change made three
+        # days ago is compared, still bounded by the model change before it.
+        [seven] = _impact_changes(handle, "window_days=7")
+        assert seven["change"]["source"] == "capture"
+        assert (seven["before_sessions"], seven["after_sessions"]) == (6, 3)
+        everything = _impact_changes(handle)
+        assert _sources(everything) == ["capture", "transcript"]  # newest first
+        newest = everything[0]
+        # All time works it out on its own, and the two agree.
+        for field in ("before_sessions", "after_sessions", "verdict", "measures"):
+            assert seven[field] == newest[field], field
+        # With no window at all, as with window=all, every change is listed.
+        assert _impact_changes(handle, "window=all") == everything
+        assert _impact_changes(handle, "window_days=7") == [newest]
+        # The change since my last change is the newest.
+        assert _impact_changes(handle, "window=change") == [newest]
+        # An explicit span lists the change inside it, however far from the other.
+        span = f"since={_stamp(now - timedelta(days=10))}&until={_stamp(now - timedelta(days=5))}"
+        assert _sources(_impact_changes(handle, span)) == ["transcript"]
+        # Nothing made in a window: an empty list, not an error.
+        assert _impact_changes(handle, "window_days=1") == []
+        for bad in ("window_days=0", "window=bogus"):
+            resp, body = handle.get_json(f"/api/impact?{bad}")
+            assert resp.status == 400, body
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_impact_with_no_change_recorded_keeps_the_change_windows_error(server):
+    resp, body = server.get_json("/api/impact?window=change")
+    assert resp.status == 400
+    assert "No change recorded" in body["error"]["message"]
+    resp, body = server.get_json("/api/backtest?window=change")
+    assert resp.status == 400
+    assert "No change recorded" in body["error"]["message"]
+
+
+def test_impact_lists_every_change_a_window_covers_with_no_cap(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    handle = _start_server(tmp_path, monkeypatch)
+    try:
+        _log_captures(handle, [now - timedelta(days=days + 0.5) for days in range(11)])
+        for query in ("", "window_days=14"):
+            changes = _impact_changes(handle, query)
+            assert len(changes) == 11, query
+            stamps = [change["change"]["ts"] for change in changes]
+            assert stamps == sorted(stamps, reverse=True)
+        assert len(_impact_changes(handle, f"since={_stamp(now - timedelta(days=5))}")) == 5
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_impact_never_lists_a_change_older_than_the_sessions_it_reads_from(tmp_path, monkeypatch):
+    """A model change 93 days back sits in the margin All time reads for the
+    oldest change in reach (14 days before its 90 days): it bounds the changes
+    after it but its own before side may be cut short, so it is not listed
+    until a wider window reads from further back."""
+    now = datetime.now(timezone.utc)
+    runs = [(f"s{n}", days, _SONNET) for n, days in enumerate((96, 95, 94), 1)]
+    runs += [(f"s{n}", days, _OPUS) for n, days in enumerate((93, 92, 91), 4)]
+    project_dir = tmp_path / "projects" / "proj-a"
+    _write_model_run(project_dir, now, runs)
+    handle = _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([project_dir]))
+    try:
+        _log_captures(handle, [now - timedelta(days=5)])
+        for query in ("", "window=all", "window_days=90"):
+            assert _sources(_impact_changes(handle, query)) == ["capture"], query
+        # 120 days reaches back past it, and it is listed with its whole before side.
+        changes = _impact_changes(handle, "window_days=120")
+        assert _sources(changes) == ["capture", "transcript"]
+        assert (changes[1]["before_sessions"], changes[1]["after_sessions"]) == (3, 3)
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_all_time_lists_every_change_a_window_on_the_picker_does(tmp_path, monkeypatch):
+    """A model change 37 days back, with nothing recorded, is past the 30-day
+    default reach: Last 90 days and Since my last change list it, and so does
+    All time, which reads as far back as the widest window."""
+    now = datetime.now(timezone.utc)
+    runs = [(f"s{n}", days, _SONNET) for n, days in enumerate((40, 39, 38), 1)]
+    runs += [(f"s{n}", days, _OPUS) for n, days in enumerate((36, 35, 34), 4)]
+    project_dir = tmp_path / "projects" / "proj-a"
+    _write_model_run(project_dir, now, runs)
+    handle = _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([project_dir]))
+    try:
+        for query in ("window=change", "window_days=90", "window=all", ""):
+            changes = _impact_changes(handle, query)
+            assert _sources(changes) == ["transcript"], query
+            assert (changes[0]["before_sessions"], changes[0]["after_sessions"]) == (3, 3), query
+        assert _impact_changes(handle, "window_days=30") == []
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_impact_reach_is_the_default_window_unless_a_wider_window_or_an_older_change_moves_it():
+    from claudeglass import impact as impact_mod
+
+    now = datetime(2026, 9, 30, 15, 37, 42, tzinfo=timezone.utc)
+    lookback = timedelta(days=impact_mod.LOOKBACK_DAYS)
+    default = now - timedelta(days=service_api._DEFAULT_WINDOW_DAYS)
+    reach = service_api._impact_reach
+
+    # No window: the default reach, however far back the margin goes.
+    assert reach(None, None, now) == (default - lookback, default, None)
+    # A window inside the default reach moves nothing and keeps its slot.
+    assert reach(None, now - timedelta(days=7), now) == (default - lookback, default, None)
+    assert reach(None, default, now) == (default - lookback, default, None)
+    # One that starts before it moves it to the start of that day (UTC), keyed by that day.
+    day = datetime(2026, 8, 1, tzinfo=timezone.utc)
+    assert reach(None, now - timedelta(days=60), now) == (day - lookback, day, day.isoformat())
+    east = timezone(timedelta(hours=2))
+    assert reach(None, datetime(2026, 8, 1, 1, tzinfo=east), now) == (
+        datetime(2026, 7, 31, tzinfo=timezone.utc) - lookback,
+        datetime(2026, 7, 31, tzinfo=timezone.utc),
+        datetime(2026, 7, 31, tzinfo=timezone.utc).isoformat(),
+    )
+    # The oldest change recorded older than the default is the base instead,
+    # and a window that starts after it doesn't move it.
+    oldest = now - timedelta(days=50)
+    assert reach(oldest, None, now) == (oldest - lookback, oldest, None)
+    assert reach(oldest, now - timedelta(days=40), now) == (oldest - lookback, oldest, None)
+    # A newer one changes nothing; a window before an older one still rounds to its day.
+    assert reach(now - timedelta(days=3), None, now) == (default - lookback, default, None)
+    assert reach(oldest, now - timedelta(days=60), now) == (day - lookback, day, day.isoformat())
+
+
+def test_the_corpus_the_last_change_window_reads_is_the_default_reach_of_the_change_cards(monkeypatch):
+    from claudeglass.change_points import ChangePoint
+
+    clock = _freeze_clock(monkeypatch)
+    start = _PINNED - timedelta(days=service_api._DEFAULT_WINDOW_DAYS + 14)
+    assert service_api._change_corpus_since([]) == _stamp(start)
+    assert service_api._change_corpus_since([ChangePoint(_PINNED - timedelta(days=3), "apply", "x")]) == _stamp(start)
+    older = ChangePoint(_PINNED - timedelta(days=50), "apply", "x")
+    assert service_api._change_corpus_since([older]) == _stamp(_PINNED - timedelta(days=64))
+    clock.at(2026, 10, 1, 8, 0, 0)
+    assert service_api._change_corpus_since([]) == _stamp(datetime(2026, 8, 18, 8, tzinfo=timezone.utc))
+
+
+def test_a_window_past_the_default_reads_the_sessions_from_further_back(server, monkeypatch):
+    reads = _spy_corpus_reads(monkeypatch)
+    now = datetime.now(timezone.utc)
+
+    def read_by(query: str) -> datetime:
+        before = len(_non_report_reads(reads))
+        _impact_changes(server, query)
+        [call] = _non_report_reads(reads)[before:]
+        return datetime.strptime(call["since"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+    # The default: 30 days back, and the 14 before the first change in it.
+    assert abs(read_by("window_days=30") - (now - timedelta(days=44))) < timedelta(minutes=5)
+    # A window inside the default reach reads nothing more.
+    before = len(_non_report_reads(reads))
+    _impact_changes(server, "window_days=7")
+    assert len(_non_report_reads(reads)) == before
+    # Sixty calendar days, rounded to the start of a day (local, then UTC): never
+    # nearer than 60 - 1 + 14 days back, never more than a day further.
+    assert now - timedelta(days=75) < read_by("window_days=60") <= now - timedelta(days=73)
+    # All time, bare or asked for, reads as far back as Last 90 days does, and
+    # shares its answer.
+    assert now - timedelta(days=106) < read_by("") <= now - timedelta(days=102)
+    before = len(_non_report_reads(reads))
+    _impact_changes(server, "window=all")
+    _impact_changes(server, "window_days=90")
+    assert len(_non_report_reads(reads)) == before
+
+
+def test_the_change_cards_are_kept_per_project_and_reach_not_per_window(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    corpus = _two_project_change_corpus(tmp_path, now, beta_changes=True)
+    handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch, corpus=corpus)
+    try:
+        handle.get_json("/api/report.json")  # the units the changes are worked out in
+        reads = _spy_corpus_reads(monkeypatch)
+
+        def read_after(query: str) -> int:
+            before = len(_non_report_reads(reads))
+            _impact_changes(handle, query)
+            return len(_non_report_reads(reads)) - before
+
+        assert read_after("window_days=30") == 1
+        assert read_after("window_days=7") == 0  # inside the same reach: the kept sessions are read
+        assert read_after("") == 1  # All time reads as far back as 90 days
+        assert read_after("window=all") == 0
+        assert read_after("window_days=90") == 0
+        assert read_after("project=proj-alpha") == 1
+        assert read_after("project=proj-alpha&window=all") == 0
+        assert read_after("") == 0
+        assert read_after("project=proj-beta") == 1
+        assert read_after("project=proj-alpha") == 0
+        # Each reach is its own: a wider one reads again, a repeat of it doesn't.
+        assert read_after("window_days=60") == 1
+        assert read_after("window_days=60") == 0
+        assert read_after("") == 0
+        # The sessions the project asked about are the project's alone.
+        project_reads = [call for call in _non_report_reads(reads) if "project_slugs" in call]
+        assert [call["project_slugs"] for call in project_reads] == [["proj-alpha"], ["proj-beta"]]
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_the_change_cards_keep_the_six_scopes_asked_about_last(server, monkeypatch):
+    reads = _spy_corpus_reads(monkeypatch)
+
+    def read_after(query: str) -> int:
+        before = len(_non_report_reads(reads))
+        _impact_changes(server, query)
+        return len(_non_report_reads(reads)) - before
+
+    server.get_json("/api/report.json")
+    reads.clear()
+    # The default scope, then seven widening windows: each is its own reach.
+    assert read_after("window_days=7") == 1
+    wide = [f"window_days={days}" for days in (40, 50, 60, 70, 80, 100, 110)]
+    assert [read_after(query) for query in wide] == [1] * 7
+    # The last six are kept (the default scope and the first window are gone).
+    assert [read_after(query) for query in wide[1:]] == [0] * 6
+    assert read_after(wide[0]) == 1
+    assert read_after("window_days=7") == 1
+
+
+def test_impact_for_a_project_lists_the_changes_that_apply_there_and_judges_them_on_its_sessions(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    corpus = _two_project_change_corpus(tmp_path, now, beta_changes=True)
+    handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch, corpus=corpus)
+    try:
+        _apply_a_user_setting(handle)
+
+        def listed(query: str = "") -> dict:
+            return {
+                (change["change"]["source"], change["change"]["project_name"]): change
+                for change in _impact_changes(handle, query)
+            }
+
+        # A project and a short window first, while nothing is kept: the change
+        # to every project is still bounded by the project's own change before it.
+        cold = listed("project=proj-alpha&window_days=1")
+        assert set(cold) == {("apply", "")}
+        assert cold[("apply", "")]["before_sessions"] == 3
+        everywhere = listed()
+        assert set(everywhere) == {("apply", ""), ("transcript", "proj-alpha"), ("transcript", "proj-beta")}
+        alpha = listed("project=proj-alpha")
+        for field in ("before_sessions", "after_sessions", "verdict", "measures"):
+            assert cold[("apply", "")][field] == alpha[("apply", "")][field], field
+        beta = listed("project=proj-beta")
+        assert set(alpha) == {("apply", ""), ("transcript", "proj-alpha")}
+        assert set(beta) == {("apply", ""), ("transcript", "proj-beta")}
+        # The change to every project is judged on the project's sessions alone:
+        # each project's three sessions since its own change, and the two
+        # projects together are the sum.
+        sides = {name: rows[("apply", "")] for name, rows in (("all", everywhere), ("alpha", alpha), ("beta", beta))}
+        assert sides["alpha"]["before_sessions"] == sides["beta"]["before_sessions"] == 3
+        assert sides["all"]["before_sessions"] == 6
+        # Its own change is judged where it was made.
+        assert (alpha[("transcript", "proj-alpha")]["before_sessions"], alpha[("transcript", "proj-alpha")]["after_sessions"]) == (3, 3)
+        # A project and a window together: beta's change six days ago is outside four days.
+        assert set(listed("project=proj-beta&window_days=4")) == {("apply", "")}
+        assert set(listed("project=proj-beta&window_days=8")) == set(beta)
+        # And what one project's request kept doesn't change another's or every project's answer.
+        assert set(listed()) == set(everywhere)
+        assert listed("project=proj-alpha")[("apply", "")] == alpha[("apply", "")]
+
+        resp, body = handle.get_json("/api/impact?project=nope")
+        assert resp.status == 400
+        assert body["error"]["message"] == "'project' does not match a known project"
+        assert "nope" not in json.dumps(body)
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def _failing_corpus_reads(monkeypatch) -> threading.Event:
+    """Make every read of the sessions fail, setting the event it returns first."""
+    import claudeglass.service as service_pkg
+
+    reached = threading.Event()
+
+    def corpus_from_store(store, **kwargs):
+        reached.set()
+        raise RuntimeError("boom")
+
+    fake = types.ModuleType("claudeglass.service.rebuild")
+    fake.corpus_from_store = corpus_from_store
+    monkeypatch.setitem(sys.modules, "claudeglass.service.rebuild", fake)
+    monkeypatch.setattr(service_pkg, "rebuild", fake, raising=False)
+    return reached
+
+
+def _wait_for_stderr(capsys, needle: str, timeout: float = 10.0) -> str:
+    seen = ""
+    deadline = time.monotonic() + timeout
+    while needle not in seen and time.monotonic() < deadline:
+        seen += capsys.readouterr().err
+        time.sleep(0.05)
+    return seen
+
+
+@pytest.mark.parametrize(
+    "path, message",
+    [
+        ("/api/impact", "claudeglass serve: your changes were not refreshed: boom"),
+        ("/api/backtest", "claudeglass serve: past estimates were not checked: boom"),
+        ("/api/recommendations", "claudeglass serve: your report was not refreshed: boom"),
+    ],
+)
+def test_a_background_refresh_that_fails_says_so_and_can_be_tried_again(
+    server, monkeypatch, capsys, path, message
+):
+    server.get_json(path)
+    _touch_store(server, ".failing")
+    reached = _failing_corpus_reads(monkeypatch)
+    resp, body = server.get_json(path)
+    # The kept answer is served at once, marked as refreshing.
+    assert resp.status == 200 and body["ok"] is True
+    assert resp.getheader("X-Figures-Refreshing") == "1"
+    assert reached.wait(10), "the refresh never read the sessions"
+    assert message in _wait_for_stderr(capsys, message)
+    # The failure left nothing stuck: with the reads working again, the next
+    # request refreshes it.
+    _install_fake_rebuild(monkeypatch, server.corpus)
+    _wait_until_fresh(server, path)
+
+
+def test_backtest_lists_the_predictions_a_window_covers_by_the_change_they_judged(server):
+    now = datetime.now(timezone.utc)
+    ago = lambda days: _stamp(now - timedelta(days=days))  # noqa: E731
+    for prediction_id, days in (("judged-early", 25), ("judged-late", 20), ("waiting-old", 20), ("waiting-new", 2)):
+        server.store.upsert_prediction(
+            prediction_id=prediction_id, ts=ago(days), source="whatif", measure_key="nothing.matches", agent=None,
+            predicted_usd=1.0, predicted_pct=None, fidelity="estimate",
+        )
+    # One logged 25 days ago, matched to a change 20 days ago; one logged 20
+    # days ago, matched to a change two days ago.
+    for prediction_id, change_days in (("judged-early", 20), ("judged-late", 2)):
+        server.store.judge_prediction(
+            prediction_id, change_ts=ago(change_days), verdict="as_estimated", measured_usd=1.0, measured_pct=None
+        )
+
+    def ids(query: str = "") -> set[str]:
+        resp, body = server.get_json("/api/backtest" + (f"?{query}" if query else ""))
+        assert resp.status == 200, body
+        return {row["id"] for row in body["data"]["predictions"]}
+
+    everything = {"judged-early", "judged-late", "waiting-old", "waiting-new"}
+    assert ids() == ids("window=all") == everything
+    # A judged one is dated by its change, one still waiting by when it was logged.
+    assert ids("window_days=7") == {"judged-late", "waiting-new"}
+    span = f"since={ago(30)}&until={ago(10)}"
+    assert ids(span) == {"judged-early", "waiting-old"}
+    # Every project's: a project is checked and then ignored.
+    assert ids("project=proj-a") == everything
+    assert ids("project=proj-a&window_days=7") == {"judged-late", "waiting-new"}
+    resp, body = server.get_json("/api/backtest?project=nope")
+    assert resp.status == 400 and "'project'" in body["error"]["message"]
+    for bad in ("window_days=0", "window=bogus"):
+        resp, body = server.get_json(f"/api/backtest?{bad}")
+        assert resp.status == 400, body
+
+
+def test_backtest_reads_the_sessions_back_to_the_oldest_estimate_still_waiting_whatever_the_window(server, monkeypatch):
+    now = datetime.now(timezone.utc)
+    logged = now - timedelta(days=60)
+    server.store.upsert_prediction(
+        prediction_id="waiting", ts=_stamp(logged), source="whatif", measure_key="nothing.matches", agent=None,
+        predicted_usd=1.0, predicted_pct=None, fidelity="estimate",
+    )
+    server.get_json("/api/report.json")
+    reads = _spy_corpus_reads(monkeypatch)
+
+    def reads_after(query: str) -> list[dict]:
+        before = len(_non_report_reads(reads))
+        resp, body = server.get_json(f"/api/backtest?{query}")
+        assert resp.status == 200, body
+        return _non_report_reads(reads)[before:]
+
+    # Seven days asks for nothing that old, but the estimate logged 60 days
+    # ago is still waiting: the sessions reach back to the start of its day
+    # (UTC), and the 14 days before it.
+    [call] = reads_after("window_days=7")
+    start = logged.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=14)
+    assert call["since"] == _stamp(start)
+    # Another window is the same answer, read once.
+    assert reads_after("window_days=90") == []
+    assert reads_after("window=all") == []
+
+
+def test_the_first_backtest_reads_back_to_the_estimates_it_reopens(server, monkeypatch):
+    """The first check on a store judges again every too_little_data verdict
+    (backtest._reopen_too_little_data): the sessions it reads reach back to
+    them, as to any estimate still waiting."""
+    from claudeglass import backtest as backtest_mod
+
+    logged = datetime.now(timezone.utc) - timedelta(days=60)
+    server.store.upsert_prediction(
+        prediction_id="closed", ts=_stamp(logged), source="whatif", measure_key="nothing.matches", agent=None,
+        predicted_usd=1.0, predicted_pct=None, fidelity="estimate",
+    )
+    server.store.judge_prediction(
+        "closed", change_ts=_stamp(logged + timedelta(days=1)), verdict="too_little_data", measured_usd=None,
+        measured_pct=None,
+    )
+    assert server.store.get_meta(backtest_mod._REOPENED_KEY) is None
+    server.get_json("/api/report.json")
+    reads = _spy_corpus_reads(monkeypatch)
+    resp, body = server.get_json("/api/backtest?window_days=7")
+    assert resp.status == 200, body
+    [call] = _non_report_reads(reads)
+    assert call["since"] == _stamp(logged.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=14))
+
+
+def test_backtest_under_since_my_last_change_keeps_every_projects_window(tmp_path, monkeypatch):
+    """The estimates are every project's, so "since my last change" starts at
+    the newest change anywhere, whatever project is picked: one with no change
+    of its own lists the same estimates, where its change cards answer 400."""
+    now = datetime.now(timezone.utc)
+    corpus = _two_project_change_corpus(tmp_path, now, beta_changes=False)
+    handle, _ids = _start_server_with_two_projects(tmp_path, monkeypatch, corpus=corpus)
+    try:
+        handle.store.upsert_prediction(
+            prediction_id="waiting", ts=_stamp(now - timedelta(hours=1)), source="whatif",
+            measure_key="nothing.matches", agent=None, predicted_usd=1.0, predicted_pct=None, fidelity="estimate",
+        )
+
+        def ids(query: str) -> list[str]:
+            resp, body = handle.get_json(f"/api/backtest?{query}")
+            assert resp.status == 200, body
+            return [row["id"] for row in body["data"]["predictions"]]
+
+        for project in ("", "&project=proj-alpha", "&project=proj-beta"):
+            assert ids("window=change" + project) == ["waiting"], project
+        resp, body = handle.get_json("/api/impact?window=change&project=proj-beta")
+        assert resp.status == 400 and "No change recorded for this project" in body["error"]["message"]
+        resp, body = handle.get_json("/api/backtest?window=change&project=nope")
+        assert resp.status == 400
+        assert body["error"]["message"] == "'project' does not match a known project"
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_capture_refresh_that_fails_says_so(server, monkeypatch, capsys):
+    resp, _payload = server.post_json("/api/capture", {"level": "essentials"})
+    assert resp.status == 200
+    server.get_json("/api/capture")  # keeps the figures since capture went on
+    _touch_store(server, ".failing")
+    reached = _failing_corpus_reads(monkeypatch)
+    resp, body = server.get_json("/api/capture")
+    assert resp.status == 200 and body["ok"] is True
+    assert resp.getheader("X-Figures-Refreshing") == "1"
+    assert reached.wait(10), "the refresh never read the sessions"
+    message = "claudeglass serve: your capture figures were not refreshed: boom"
+    assert message in _wait_for_stderr(capsys, message)
+
+
 def test_backtest_is_empty_without_predictions(server):
     resp, payload = server.get_json("/api/backtest")
     assert resp.status == 200

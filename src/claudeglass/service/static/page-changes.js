@@ -6,16 +6,19 @@
  * card per change (/api/impact): the measures that change should move,
  * before against after, how sure the difference is, what it saved so
  * far, whether quality held, and how to undo it. Then whether the
- * estimates Profiles showed came true (/api/backtest).
+ * estimates Profiles showed came true (/api/backtest). The changes follow
+ * the window and the picked project; the estimates, which aren't kept per
+ * project, follow only the window.
  *
  * The Overview's "Did your changes work?" draws the latest cards in
- * short (renderChangeCards with opts.compact).
+ * short (renderChangeCards with opts.compact), the ones that can be
+ * judged first (opts.judgedFirst).
  */
 
 import { clear, cli, el, goTo, onParams, state } from "./core.js";
-import { fetchJson, loadInto, loadReport, withWindow } from "./api.js";
-import { modelNames, moneyText, projectName, shortTs, signedPercent } from "./format.js";
-import { chip, codeBlockWithCopy, emptyState, errorNotice, loadingNode, prose } from "./ui.js";
+import { fetchJson, loadInto, loadingLabel, loadReport, withWindow } from "./api.js";
+import { modelNames, moneyText, projectName, shortTs, signedPercent, windowWhen } from "./format.js";
+import { button, chip, codeBlockWithCopy, emptyState, errorNotice, loadingNode, prose } from "./ui.js";
 import { icon } from "./icons.js";
 import { pulseNode, simpleTable } from "./grid.js";
 import { captureLink, pageLink, viewIntro } from "./links.js";
@@ -237,26 +240,128 @@ function changeCard(item, opts) {
   return card;
 }
 
+// How many cards Your changes draws before the older ones fold behind a
+// button.
+var CARDS_SHOWN = 10;
+
+var NO_CHANGES_NEXT = "When you apply a profile or fix, or change a setting or model, this compares the sessions before and after it.";
+
+// "Since my last change" with no change recorded has nowhere to start, and
+// the service answers 400 for it (one about the project gives way to every
+// project on its own). That reads as nothing to show, not as a failure.
+function noChangeYet(body) {
+  var error = body && body.ok !== true ? body.error : null;
+  return state.window === "change" && !!error && error.code === "bad_request" && String(error.message).indexOf("'project'") === -1;
+}
+
+// The Overview's pick from a window's changes (newest first, as
+// /api/impact lists them): the newest `limit` that can be judged, and the
+// newer ones still waiting for sessions after them. A newer change short
+// of sessions before it isn't too new, so it isn't counted; it stays on
+// Your changes. Timestamps are all YYYY-MM-DDTHH:MM:SSZ, so they compare
+// as text.
+export function judgedFirst(changes, limit, minSessions) {
+  var judged = changes
+    .filter(function (item) {
+      return item.enough;
+    })
+    .slice(0, limit);
+  if (!judged.length) return { judged: [], waiting: [] };
+  var newest = String((judged[0].change || {}).ts || "");
+  var waiting = changes.filter(function (item) {
+    return !item.enough && item.after_sessions < minSessions && String((item.change || {}).ts || "") > newest;
+  });
+  return { judged: judged, waiting: waiting };
+}
+
+// "3 newer changes are too new to judge yet": the count leads to the
+// newest of them on Your changes.
+function waitingLine(waiting, need) {
+  var count = waiting.length;
+  var link = pageLink("changes", count === 1 ? "1 newer change" : count + " newer changes", { day: changeDay(waiting[0].change) });
+  return el("p", { class: "notes change-waiting" }, [
+    link,
+    count === 1 ? " is too new to judge yet: it needs " + need + " sessions after it." : " are too new to judge yet: each needs " + need + " sessions after it.",
+  ]);
+}
+
+// The cards past the fold, brought into view. focus: a click on the
+// button moves on to the first of them, as the button is gone.
+function showOlderChanges(list, focus) {
+  var folded = list.querySelectorAll(".change-card[hidden]");
+  for (var i = 0; i < folded.length; i++) folded[i].hidden = false;
+  var more = list.querySelector(".change-cards-more");
+  if (more) list.removeChild(more);
+  if (focus && folded.length) {
+    folded[0].tabIndex = -1;
+    folded[0].focus();
+  }
+}
+
+function olderButton(list, count) {
+  var label = "Show " + count + " older " + (count === 1 ? "change" : "changes");
+  return el("div", { class: "change-cards-more" }, [
+    button(label, {
+      variant: "quiet",
+      action: function () {
+        showOlderChanges(list, true);
+      },
+    }),
+  ]);
+}
+
 // Every change in /api/impact's data, newest first, as cards. opts:
-// compact (the lead measure and the saving only) and limit (how many).
-// Returns how many changes there are in all.
+// compact (the lead measure and the saving only), limit (how many),
+// judgedFirst (the Overview: the newest changes that can be judged lead,
+// and the newer ones still waiting for sessions become one line above
+// them; with none judged, the newest are drawn as they are, each with
+// what it is waiting for), foldAfter (how many cards to draw before the
+// older ones fold behind a button) and noOlder (nothing is recorded, so
+// an empty window has no older changes to point to). Returns how many
+// changes there are in all.
 export function renderChangeCards(container, data, opts) {
   opts = opts || {};
   var changes = (data && data.changes) || [];
   if (!changes.length) {
+    if (state.window !== "all" && !opts.noOlder) {
+      // Older ones may be recorded: say where to find them.
+      var where = state.project ? " in " + projectName(state.project) : "";
+      var older = opts.compact
+        ? el("span", {}, ["See older ones on ", pageLink("changes", "Your changes", { w: "all" }), " under All time."])
+        : el("span", {}, ["Pick ", pageLink("changes", "All time", { w: "all" }), " to see older ones."]);
+      container.appendChild(emptyState("No changes" + where + " " + windowWhen(state.window) + ".", null, older));
+      return 0;
+    }
+    if (state.project) {
+      container.appendChild(emptyState("No changes in " + projectName(state.project) + " yet.", null, NO_CHANGES_NEXT));
+      return 0;
+    }
     container.appendChild(
       emptyState(
         "No changes recorded yet.",
         null,
-        "When you apply a profile or fix, or change a setting or model, this compares the sessions before and after it."
+        NO_CHANGES_NEXT
       )
     );
     return 0;
   }
+  var shown = changes.slice(0, opts.limit || changes.length);
+  var waiting = [];
+  if (opts.judgedFirst) {
+    var picked = judgedFirst(changes, opts.limit || changes.length, data.min_sessions);
+    if (picked.judged.length) {
+      shown = picked.judged;
+      waiting = picked.waiting;
+    }
+  }
   var list = el("div", { class: "change-cards" });
-  changes.slice(0, opts.limit || changes.length).forEach(function (item) {
-    list.appendChild(changeCard(item, opts));
+  if (waiting.length) list.appendChild(waitingLine(waiting, data.min_sessions));
+  shown.forEach(function (item, index) {
+    var card = changeCard(item, opts);
+    if (opts.foldAfter && index >= opts.foldAfter) card.hidden = true;
+    list.appendChild(card);
   });
+  if (opts.foldAfter && shown.length > opts.foldAfter) list.appendChild(olderButton(list, shown.length - opts.foldAfter));
   container.appendChild(list);
   if (!opts.compact && data.caveat) container.appendChild(el("p", { class: "notes" }, prose(data.caveat)));
   return changes.length;
@@ -265,17 +370,18 @@ export function renderChangeCards(container, data, opts) {
 // -- the timeline's changes --------------------------------------------------------
 
 // The changes to mark on the timeline, from /api/impact's body: each
-// leads to its card below. One made in another project than the one
-// picked says which.
+// leads to its card below. Across every project, one made in a single
+// project says which; with a project picked, every change is its own or
+// everyone's.
 function timelineChanges(impactBody) {
   var rows = (impactBody && impactBody.ok === true && impactBody.data && impactBody.data.changes) || [];
   return rows.map(function (row) {
     var change = row.change || {};
     var day = changeDay(change);
-    var elsewhere = change.project && change.project_name !== state.project;
+    var inProject = !state.project && change.project && change.project_name;
     return {
       day: day,
-      label: (change.label || "A settings change") + (elsewhere && change.project_name ? " (" + projectName(change.project_name) + ")" : ""),
+      label: (change.label || "A settings change") + (inProject ? " (" + projectName(change.project_name) + ")" : ""),
       open: function () {
         goTo("changes", { params: { day: day } });
       },
@@ -291,9 +397,25 @@ function timelineChanges(impactBody) {
 // sentences) -- this just lays them out in a table, no client-side
 // money or verdict logic, per docs/ui.md's "server formats, dashboard
 // shows" rule.
-function renderBacktest(data, container) {
+//
+// noOlder: no change is recorded at all, so "Since my last change" has no
+// start. Estimates may still be logged (saving or copying a change's
+// command logs one), so it points to All time rather than say there are none.
+function renderBacktest(data, container, noOlder) {
   var predictions = (data && data.predictions) || [];
   if (!predictions.length) {
+    if (noOlder) {
+      container.appendChild(
+        emptyState("No change recorded yet, so this window has nowhere to start.", null, el("span", {}, ["Pick ", pageLink("changes", "All time", { w: "all" }), " to see every estimate logged."]))
+      );
+      return;
+    }
+    if (state.window !== "all") {
+      container.appendChild(
+        emptyState("No estimates logged " + windowWhen(state.window) + ".", null, el("span", {}, ["Pick ", pageLink("changes", "All time", { w: "all" }), " to see older ones."]))
+      );
+      return;
+    }
     container.appendChild(
       emptyState("No estimates logged yet. Each estimated effect Profiles shows is logged, then checked here once enough sessions after a matching change arrive.")
     );
@@ -317,13 +439,14 @@ function renderBacktest(data, container) {
 
 // -- the page ------------------------------------------------------------------------
 
-// A part of the page: an h2 (with "All time" when it covers every change
-// ever, whatever the window) and its body.
-function changesSection(panel, title, allTime) {
+// A part of the page: an h2 and its body. allProjects: the figures cover
+// every project whatever the picker says (the estimates aren't kept per
+// project), so a picked project gets a chip saying so.
+function changesSection(panel, title, allProjects) {
   var section = el("section", { class: "report-section" }, [
     el("div", { class: "block-head" }, [
       el("h2", { class: "section-title", text: title }),
-      allTime ? chip(state.project ? "All time, all projects" : "All time", { icon: "clock", class: "all-time-chip" }) : null,
+      allProjects && state.project ? chip("All projects", { icon: "folder", class: "all-time-chip" }) : null,
     ]),
   ]);
   var body = el("div");
@@ -334,6 +457,30 @@ function changesSection(panel, title, allTime) {
 
 var pageRun = 0;
 
+// The estimates, for the window. They are every project's, so "Since my
+// last change" starts at the newest change in any project, whatever the
+// cards above say for the one picked; with no change recorded anywhere the
+// service answers 400, which reads as nothing to show.
+function loadEstimates(host) {
+  var url = withWindow("/api/backtest");
+  if (state.window !== "change") return loadInto(host, url, renderBacktest, { skeleton: "rows" });
+  host.appendChild(loadingNode(loadingLabel(url), "rows"));
+  return fetchJson(url).then(function (result) {
+    if (!host.isConnected) return null;
+    var body = result.body;
+    if (noChangeYet(body)) {
+      clear(host);
+      renderBacktest(null, host, true);
+      return null;
+    }
+    // A failure: loadInto says so, with a way to try again.
+    if (!body || body.ok !== true) return loadInto(host, url, renderBacktest, { skeleton: "rows" });
+    clear(host);
+    renderBacktest(body.data, host);
+    return body.data;
+  });
+}
+
 export function renderChanges(panel) {
   var run = ++pageRun;
   clear(panel);
@@ -343,16 +490,16 @@ export function renderChanges(panel) {
   panel.appendChild(chartHost);
   if (!holdChart(chartHost, "change-timeline", { slot: "changes" })) chartHost.appendChild(loadingNode("Loading cost per reply", "chart"));
 
-  var cardsHost = changesSection(panel, "Each change, before and after", true);
+  var cardsHost = changesSection(panel, "Each change, before and after");
   var backtestHost = changesSection(panel, "Did your estimates come true?", true);
-  loadInto(backtestHost, "/api/backtest", renderBacktest, { skeleton: "rows" });
 
   // Every amount follows the billing mode, which the report sets: the
   // drawing waits for it (a failed report still draws, in list price).
   var unitsLoad = loadReport().then(null, function () {
     return null;
   });
-  var impactLoad = fetchJson("/api/impact");
+  var impactLoad = fetchJson(withWindow("/api/impact"));
+  loadEstimates(backtestHost);
   var dailyLoad = fetchJson(withWindow("/api/daily-usage") + "&split=agent");
   // The window's first and last day, as the service counts them.
   var summaryLoad = fetchJson(withWindow("/api/summary"));
@@ -363,16 +510,29 @@ export function renderChanges(panel) {
     if (run !== pageRun) return;
     clear(cardsHost);
     var body = result.body;
+    if (noChangeYet(body)) {
+      renderChangeCards(cardsHost, null, { noOlder: true });
+      return;
+    }
     if (!body || body.ok !== true) {
       cardsHost.appendChild(errorNotice(body && body.error));
       return;
     }
-    renderChangeCards(cardsHost, body.data, {});
+    renderChangeCards(cardsHost, body.data, { foldAfter: CARDS_SHOWN });
   });
 
   Promise.all([dailyLoad, impactLoad, unitsLoad, summaryLoad]).then(function (loaded) {
     if (run !== pageRun) return;
     var daily = loaded[0].body;
+    if (noChangeYet(daily)) {
+      // No days to draw from, as the cards and the estimates below say too.
+      renderChart(chartHost, "change-timeline", { rows: [] }, {
+        slot: "changes",
+        titleTag: "h2",
+        empty: state.project ? "No change recorded for this project yet, so this window has nowhere to start." : "No change recorded yet, so this window has nowhere to start.",
+      });
+      return;
+    }
     if (!daily || daily.ok !== true) {
       chartError(chartHost, "change-timeline", daily && daily.error, function () {
         goTo("changes", { force: true });
@@ -395,11 +555,13 @@ export function renderChanges(panel) {
   });
 
   // ?day=: a change marked on a chart. That day's card (the first, so the
-  // latest that day) is brought into view and pulsed.
+  // latest that day) is brought into view and pulsed, out from the fold
+  // if it was folded.
   onParams("changes", function (params) {
     if (!/^\d{4}-\d\d-\d\d$/.test(params.day || "")) return;
     cardsDrawn.then(function () {
       var card = cardsHost.querySelector('.change-card[data-day="' + params.day + '"]');
+      if (card && card.hidden) showOlderChanges(cardsHost.querySelector(".change-cards"), false);
       if (card) pulseNode(card, "block-target");
     });
   });

@@ -2325,8 +2325,141 @@ def test_the_last_change_window_says_what_it_would_have_cost_without_that_change
     assert 'pageLink("changes"' in line
     assert "projectName(change.project_name)" in line
     overview = _function_source(source, "renderOverview")
-    assert 'state.window !== "change" || state.project' in overview
+    # The changes, and so the figure, are the picked project's own: only the
+    # window decides whether the line shows.
+    assert 'body.hidden || state.window !== "change") return;' in overview
+    assert 'state.window !== "change" || state.project' not in overview
     assert "lastChangeLine(loaded[0].body)" in overview
+
+
+def test_every_change_card_request_carries_the_window_and_project() -> None:
+    """The cards, the chart's markers and the estimates follow the pickers:
+    every request for /api/impact or /api/backtest goes through withWindow,
+    which adds the project beside the window (test_ui_figures_audit.py
+    reads what each page draws from the answer)."""
+    for module in _js_modules():
+        if module.name == "api.js":
+            continue  # LOADING_LABELS names the routes
+        text = module.read_text(encoding="utf-8")
+        for match in re.finditer(r'"/api/(?:impact|backtest)"', text):
+            before = text[max(0, match.start() - len("withWindow(")) : match.start()]
+            assert before == "withWindow(", (module.name, match.group(0))
+    for module, name, route in (
+        ("page-overview.js", "renderOverview", "/api/impact"),
+        ("page-spend.js", "renderUsage", "/api/impact"),
+        ("page-changes.js", "renderChanges", "/api/impact"),
+        ("page-changes.js", "loadEstimates", "/api/backtest"),
+    ):
+        assert f'withWindow("{route}")' in _function_source(_static_text(module), name), (module, name)
+    assert "loadEstimates(backtestHost);" in _function_source(_static_text("page-changes.js"), "renderChanges")
+    # windowParam writes the window query and nothing else does.
+    assert _js_code_only(_app_js()).count("windowParam()") == 3
+
+
+def test_the_overview_asks_for_the_changes_it_can_judge_first() -> None:
+    changes_js = _static_text("page-changes.js")
+    overview = _function_source(_static_text("page-overview.js"), "renderOverview")
+    assert "renderChangeCards(changes.body, impact.data, { compact: true, limit: CHANGES_SHOWN, judgedFirst: true })" in overview
+    cards = _function_source(changes_js, "renderChangeCards")
+    assert "judgedFirst(changes, opts.limit || changes.length, data.min_sessions)" in cards
+    # Every change in the window counts for "See all N changes".
+    assert "return changes.length;" in cards
+    assert "export function judgedFirst(changes, limit, minSessions)" in changes_js
+    # Only a change short of sessions after it is too new to judge.
+    assert "!item.enough && item.after_sessions < minSessions" in _function_source(changes_js, "judgedFirst")
+    waiting = _function_source(changes_js, "waitingLine")
+    assert '"1 newer change"' in waiting and "changeDay(waiting[0].change)" in waiting
+    assert '" is too new to judge yet: it needs "' in waiting and '" are too new to judge yet: each needs "' in waiting
+
+
+def test_an_empty_window_points_to_all_time_where_older_changes_are() -> None:
+    changes_js = _static_text("page-changes.js")
+    cards = _function_source(changes_js, "renderChangeCards")
+    assert 'emptyState("No changes" + where + " " + windowWhen(state.window) + ".", null, older)' in cards
+    assert '"See older ones on ", pageLink("changes", "Your changes", { w: "all" }), " under All time."' in cards
+    assert '"Pick ", pageLink("changes", "All time", { w: "all" }), " to see older ones."' in cards
+    assert 'emptyState("No changes in " + projectName(state.project) + " yet.", null, NO_CHANGES_NEXT)' in cards
+    assert 'if (state.window !== "all" && !opts.noOlder) {' in cards
+    backtest = _function_source(changes_js, "renderBacktest")
+    assert 'emptyState("No estimates logged " + windowWhen(state.window) + "."' in backtest
+    assert 'pageLink("changes", "All time", { w: "all" })' in backtest
+    # windowWhen is shared: the Overview's "No sessions ..." reads the same.
+    assert "export function windowWhen(value) {" in _static_text("format.js")
+    assert "function windowWhen" not in _static_text("page-overview.js")
+    assert "windowWhen(state.window)" in _function_source(_static_text("page-overview.js"), "renderOverview")
+
+
+def test_a_change_window_with_no_change_recorded_shows_the_empty_states() -> None:
+    """"Since my last change" with no change recorded answers 400 on both
+    routes: the cards and the estimates read it as nothing to show, and
+    an error about the project still gives way to every project."""
+    changes_js = _static_text("page-changes.js")
+    check = _function_source(changes_js, "noChangeYet")
+    assert 'state.window === "change"' in check and 'error.code === "bad_request"' in check
+    assert "\"'project'\"" in check
+    page = _function_source(changes_js, "renderChanges")
+    assert "if (noChangeYet(body)) {" in page and "{ noOlder: true }" in page
+    estimates = _function_source(changes_js, "loadEstimates")
+    assert 'state.window !== "change"' in estimates
+    # The estimates read their own answer: they are every project's, so a
+    # project with no change of its own still lists them.
+    assert "impactLoad" not in estimates
+    assert "noChangeYet(body)" in estimates and "renderBacktest(null, host, true)" in estimates
+    # Estimates can be logged before any change is recorded: the empty state
+    # says the window has no start and points to All time, not that none were logged.
+    backtest = _function_source(changes_js, "renderBacktest")
+    assert (
+        'emptyState("No change recorded yet, so this window has nowhere to start.", null, el("span", {}, ["Pick ", pageLink("changes", "All time", { w: "all" }), " to see every estimate logged."]))'
+        in backtest
+    )
+    assert "if (noOlder) {" in backtest
+    # The chart above them shows its empty state too, not an error.
+    assert "if (noChangeYet(daily)) {" in page
+    assert '"No change recorded yet, so this window has nowhere to start."' in page
+    assert '"No change recorded for this project yet, so this window has nowhere to start."' in page
+
+
+def test_your_changes_folds_the_cards_past_ten_behind_a_show_button() -> None:
+    changes_js = _static_text("page-changes.js")
+    assert "var CARDS_SHOWN = 10;" in changes_js
+    assert "{ foldAfter: CARDS_SHOWN }" in _function_source(changes_js, "renderChanges")
+    cards = _function_source(changes_js, "renderChangeCards")
+    assert "if (opts.foldAfter && index >= opts.foldAfter) card.hidden = true;" in cards
+    assert "olderButton(list, shown.length - opts.foldAfter)" in cards
+    assert '"Show " + count + " older " + (count === 1 ? "change" : "changes")' in _function_source(changes_js, "olderButton")
+    # A change marked on a chart that is folded away is brought out first.
+    assert "showOlderChanges(" in _function_source(changes_js, "renderChanges")
+    # The Overview never folds: it has a limit of its own.
+    assert "foldAfter" not in _function_source(_static_text("page-overview.js"), "renderOverview")
+
+
+def test_the_cards_say_all_projects_only_for_the_estimates() -> None:
+    changes_js = _static_text("page-changes.js")
+    section = _function_source(changes_js, "changesSection")
+    assert 'allProjects && state.project ? chip("All projects", { icon: "folder"' in section
+    assert "All time" not in section
+    # No marker is named for a project picked: every change shown is its own.
+    markers = _function_source(changes_js, "timelineChanges")
+    assert "elsewhere" not in markers
+    assert "!state.project && change.project && change.project_name" in markers
+
+
+def test_a_link_can_name_the_window_and_a_pick_during_a_move_is_kept() -> None:
+    """goTo puts a link's own params over the picked window and project, as
+    pageLink's address does, so "All time" from an empty state lands on All
+    time. A pick made while a move is under way rewrites that move's address:
+    returning early let resolveRoute read the old scope back and undo it."""
+    app_js = _app_js()
+    go = _function_source(app_js, "goTo")
+    assert "Object.assign({}, scopeParams(), options.params || {})" in go
+    assert "Object.assign({}, options.params || {}, scopeParams())" not in go
+    redraw = _function_source(app_js, "redrawForScope")
+    assert "if (router.pending) return;" not in redraw
+    assert "if (router.pending) {" in redraw
+    assert (
+        'window.history.replaceState(null, "", formatHash(pending.key, Object.assign({}, pending.options.params || {}, scopeParams())))'
+        in redraw
+    )
 
 
 def test_an_estimate_is_logged_when_a_change_is_saved_or_its_command_copied() -> None:
