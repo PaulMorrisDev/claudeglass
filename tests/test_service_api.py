@@ -51,7 +51,7 @@ from claudeglass.service.contracts import CodeState, ServeOptions, WatcherState,
 from claudeglass.service.store import Store
 from claudeglass.snapshots import Snapshot
 
-from helpers import assert_privacy, turn_line, write_jsonl
+from helpers import assert_privacy, tool_use_block, turn_line, write_jsonl
 
 #: Distinctive fake local-only strings -- same convention
 #: ``tests/test_service_store.py`` uses for its own path-leak guard. If
@@ -1644,6 +1644,93 @@ def test_recommendations_carry_a_key_and_saving_usd(tmp_path, monkeypatch):
             assert rec["key"] == rec["id"] or rec["key"].startswith(rec["id"] + ":")
     finally:
         handle.close()
+
+
+def _start_agent_model_server(tmp_path, monkeypatch) -> _ServerHandle:
+    """A server whose corpus fires ``agent-model-inherited``: six main
+    sessions that run a shell command (so none is chat-only) and, in the
+    first, two workflow agents started with no model that edited a file on
+    Opus. Every id and path here is made up."""
+    project_dir = tmp_path / "projects" / "proj-b"
+    project_dir.mkdir(parents=True)
+    for n in range(6):
+        write_jsonl(
+            project_dir / f"session-{n}.jsonl",
+            [
+                turn_line(
+                    model="claude-opus-5-5",
+                    timestamp=f"2026-09-20T09:{n:02d}:{i:02d}.000Z",
+                    content=[tool_use_block("Bash", f"toolu_top_{n}_{i}", {"command": "ls"})],
+                )
+                for i in range(3)
+            ],
+        )
+    agent_dir = project_dir / "session-0" / "subagents" / "workflows" / "wf_test_run"
+    agent_dir.mkdir(parents=True)
+    edit = {"file_path": "/home/dev/project/app.py", "old_string": "a", "new_string": "b"}
+    for agent_id in ("agent-impl1", "agent-impl2"):
+        write_jsonl(
+            agent_dir / f"{agent_id}.jsonl",
+            [
+                turn_line(
+                    model="claude-opus-5-5",
+                    input_tokens=4000,
+                    output_tokens=1500,
+                    cache_read_input_tokens=30_000,
+                    timestamp=f"2026-09-20T10:{n:02d}:00.000Z",
+                    content=[tool_use_block("Edit", f"toolu_{agent_id}_{n}", edit)],
+                )
+                for n in range(2)
+            ],
+        )
+        meta = {"agentType": "workflow-subagent", "workflowPhase": "Implement"}
+        (agent_dir / f"{agent_id}.meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    return _start_server(tmp_path, monkeypatch, corpus=corpus_mod.load_corpus([project_dir]))
+
+
+def test_an_agent_model_card_reaches_the_dashboard_with_its_fix(tmp_path, monkeypatch):
+    """``agent-model-inherited`` from the report to ``/api/recommendations``:
+    its key, its fix (prompt and explainer), evidence that names a row of
+    the table ``/api/report.json`` carries, and the models check acting on
+    it."""
+    handle = _start_agent_model_server(tmp_path, monkeypatch)
+    try:
+        resp, body = handle.get_json("/api/recommendations")
+        assert resp.status == 200
+        [card] = [rec for rec in body["data"] if rec["id"] == "agent-model-inherited"]
+        assert card["key"] == "agent-model-inherited:workflow-subagent"
+        assert (card["severity"], card["agent_type"]) == ("advice", "workflow-subagent")
+        # The card's subject (its last-seen date) stays server-side; the
+        # date reaches the page as evidence.
+        assert "subject" not in card
+        assert ["Last seen", "2026-09-20"] in [ev[:2] for ev in card["evidence"]]
+        assert card["title"] == "2 workflow agents wrote code on Opus 5.5 with no model set"
+        assert card["saving_usd"] > 0 and card["ignored"] is False
+        [fix] = card["fixes"]
+        assert '"2 workflow agents wrote code on Opus 5.5 with no model set."' in fix["prompt"]
+        assert "From now on, set the model on every subagent and workflow agent you start." in fix["prompt"]
+        explainer = dict(fix["explainer"])
+        assert "agent(brief, { phase: 'Implement', model: 'sonnet' })" in explainer["Where and who it affects"]
+        assert explainer["Trade-off"] and explainer["How to undo it"]
+        assert_privacy(card)
+
+        _resp, raw = handle.request("GET", "/api/report.json")
+        sections = json.loads(raw)["report"]["sections"]
+        table = next(t for s in sections for t in s["tables"] if t["name"] == "model_swap_agent_models")
+        assert [row[0] for row in table["rows"]] == ["workflow-subagent:inherited"]
+        assert {row_key for *_cited, row_key in card["evidence"]} == {"workflow-subagent:inherited"}
+        assert table["value_labels"]["workflow-subagent:inherited"] == "Workflow agents, no model set"
+
+        resp, body = handle.get_json("/api/quick-actions/models")
+        assert resp.status == 200
+        check = body["data"]
+        assert check["status"] == "act"
+        assert "2 workflow agents wrote code on Opus 5.5 with no model set." in check["summary"]
+        assert fix["prompt"] in [f["prompt"] for f in check["fixes"]]
+        assert "agent-model-inherited" in check["rule_ids"]
+    finally:
+        handle.close()
+        handle.store.close()
 
 
 def test_ttl_and_recommendations_accept_since_until(server):

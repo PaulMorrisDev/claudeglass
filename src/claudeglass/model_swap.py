@@ -170,8 +170,10 @@ ASSUMPTIONS: list[str] = [
     "advice only ever suggests the next cheaper family's current model, never the cheapest alternative overall",
     "tier order (Fable, then Opus, then Sonnet, then Haiku) follows each model's family name, not its price",
     "a subagent's saving counts only the runs its agent file's model line decides: runs started without a model "
-    "of their own. A model named when the run started wins over the agent file, and a workflow script's agent() "
-    "call or the workflow's default sets the model for the runs it starts",
+    "of their own. A model named when the run started wins over the agent file. A workflow agent's model comes "
+    "from its agent() call, else its agent type's file, else CLAUDE_CODE_SUBAGENT_MODEL, else your main session's "
+    "model. A workflow has no default of its own: the run file's defaultModel only records the main model at "
+    "launch. Every workflow agent run counts as set by its script, so none is in an agent type's saving",
 ]
 
 
@@ -196,8 +198,13 @@ def model_set_by(result: TranscriptResult) -> str:
     ``CLAUDE_CODE_SUBAGENT_MODEL``, then the main model):
 
     - ``"settings"`` -- the main session: its ``model`` setting;
-    - ``"workflow"`` -- a run a workflow script started: the script's
-      ``agent()`` call, or the workflow's default model;
+    - ``"workflow"`` -- a run a workflow script started. Its model is the
+      ``agent()`` call's ``model``, else its ``agentType``'s agent file,
+      else ``CLAUDE_CODE_SUBAGENT_MODEL``, else the main session's model:
+      a workflow has no default of its own (the run file's
+      ``defaultModel`` only records the main model at launch). Every such
+      run counts as the script's, whatever ``agentType`` it names, since
+      the ``agent()`` call is the lever the script holds;
     - ``"spawn"`` -- a direct run whose spawn named a model. The
       ``.meta.json`` ``model`` (``agent_model_alias``) is the model the
       spawn asked for, absent when it asked for none, and it wins over the
@@ -995,9 +1002,9 @@ def _count(row: list, idx: int | None) -> int:
 def set_elsewhere_sentence(workflow_runs: int, spawn_model_runs: int) -> str:
     """Where the model of an agent type's other runs is set, as one
     sentence with a leading space, or ``""`` when the agent file decides
-    every run: a workflow script's ``agent()`` call (or the workflow's
-    default model), and the model a run was given when it started, which
-    comes from whatever prompt, skill or command asked for it."""
+    every run: a workflow script's ``agent()`` call, and the model a run
+    was given when it started, which comes from whatever prompt, skill or
+    command asked for it."""
     parts = []
     if workflow_runs:
         parts.append(

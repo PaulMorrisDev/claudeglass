@@ -489,6 +489,27 @@ _WORKFLOW_PROMPTS = {
         "the diff before saving, and let's compare quality on a few tasks before keeping it. Claude Code "
         "will ask my permission before editing files under .claude."
     ),
+    # Agent-model cards (agent_models.RULES): no SettingChange, so a prompt.
+    # The first and third are "from now on" rules, so they end in
+    # PROMPT_SCOPE; the second edits files a restart picks up. A prompt has
+    # no braces: build_fixes runs it through str.format.
+    "agent-model-inherited": (
+        "From now on, set the model on every subagent and workflow agent you start. Never leave an agent to "
+        "inherit my session's model, even where a tool's instructions say to omit it. Use Sonnet for agents "
+        "that write code to a settled spec: implementers, and fixers applying a change a judge has specified. "
+        "Use Opus for agents that decide: integrate, review, verify and judge. Never give one Opus agent both "
+        "the deciding and the applying. " + PROMPT_SCOPE
+    ),
+    "agent-model-asked": (
+        "Please find where my agents that write code are started with model set to opus or fable: skills, "
+        "agent files, workflow scripts and CLAUDE.md files. For each place, say whether its work needs Opus. "
+        "Propose sonnet where it doesn't, and show me each change before saving. " + PROMPT_RESTART
+    ),
+    "agent-decide-apply": (
+        "From now on, when an agent's job is to review, audit, verify or judge, have it report the exact "
+        "changes instead of making them. Then start a separate agent on Sonnet to apply them. Keep the "
+        "deciding agent on Opus. " + PROMPT_SCOPE
+    ),
     "wasted-turns": (
         "From now on, when the likely cause repeats (see the finding above), flag it before you start "
         "rather than after. " + PROMPT_SCOPE
@@ -727,6 +748,29 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "report holds token volumes and turn counts constant, so the real saving depends on trying it and "
         "comparing quality first.",
         "Set the model back to what it was (Claude Code shows the change before saving it).",
+    ),
+    # Agent-model cards (agent_models.RULES): the lever is the call that
+    # starts the agent, so where it goes is a rule, not a setting.
+    "agent-model-inherited": (
+        _SCOPE_WHERE_TEXT + " In a workflow script the model goes on each call, as in agent(brief, { phase: "
+        "'Implement', model: 'sonnet' }). A model in meta.phases only labels the phase. For a named agent "
+        "type, a model: sonnet line in its agent file also works; a file named like a built-in agent "
+        "replaces it whole.",
+        "Sonnet may need more replies on hard, open-ended code, so keep Opus where the spec isn't settled. "
+        "CLAUDE_CODE_SUBAGENT_MODEL=sonnet is blunter: it also moves reviewers and judges, any model a call "
+        "or agent file sets still wins, and it never reaches Explore, Plan or forks.",
+        _SCOPE_UNDO_TEXT,
+    ),
+    "agent-model-asked": (
+        "The prompt, skill, agent file or workflow script that names the model when it starts these agents.",
+        "Sonnet may need more replies on hard code. Keep Opus where an agent has to decide as well as write.",
+        "Set the model back to opus where you changed it.",
+    ),
+    "agent-decide-apply": (
+        _SCOPE_WHERE_TEXT,
+        "Two agents instead of one: the decider's report has to be exact enough for the applier to follow "
+        "without deciding again.",
+        _SCOPE_UNDO_TEXT,
     ),
     "wasted-turns": (
         _SCOPE_WHERE_TEXT,
@@ -1084,6 +1128,8 @@ _NOTE_OVERRIDES: dict[str, str] = {
     "spawn-task-prompt": "scope",
     "tool-output-carry": "scope",
     "wasted-turns": "scope",
+    "agent-model-inherited": "scope",
+    "agent-decide-apply": "scope",
     "limit-pressure": "none",
     "discovery-share": "none",
     "pricing-coverage": "none",

@@ -23,6 +23,11 @@ change, in one place, so every card reads the same way:
   ``why`` sentence and, where a setting is involved, ``changes``
   (:class:`~claudeglass.model.SettingChange`) with the current
   value from the latest config snapshot.
+- **Agent models.** ``agent-model-inherited``, ``agent-model-asked`` and
+  ``agent-decide-apply`` (``agent_models.RULES``) carry only numbers in
+  their evidence; the card's words are written here from it. They have no
+  setting to change, so ``NOT_OVERRIDABLE`` and the already-applied pass
+  leave them alone: the fix is a prompt (``fixes``).
 - **Already applied.** The rules measure the whole period, so a change
   made part-way through it would still be offered at its full saving. A
   change the current config already makes is left out, and a card with
@@ -38,6 +43,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from datetime import date
 from typing import Callable
 
 from . import known_savers, model_gate, model_swap, whatif
@@ -922,6 +928,241 @@ def _explain_subagent_volume(rec: Recommendation, ctx: _Context) -> None:
     )
 
 
+# -- agent models: code written on a larger model than it needed -----------------
+
+
+#: What a code-writing agent is called, by the role word ``agent_models``
+#: counted it under. ``other`` is a run with no role word.
+_WRITER_NOUNS = {
+    "implement": ("implementer", "implementers"),
+    "fix": ("fixer", "fixers"),
+    "apply": ("applier", "appliers"),
+    "test": ("test writer", "test writers"),
+    "build": ("builder", "builders"),
+    "write": ("writer", "writers"),
+    "migrate": ("migrator", "migrators"),
+    "refactor": ("refactorer", "refactorers"),
+    "other": ("other agent that edited code", "other agents that edited code"),
+}
+
+#: A deciding role word as the verb "started to ..." takes. A word left out
+#: reads as its own verb ("review", "audit").
+_DECIDER_VERBS = {"completeness": "check", "adversarial": "challenge", "baseline": "measure"}
+
+#: Most roles named in one sentence; the rest are counted as "N more", so
+#: the sentence stays short however many roles a card covers.
+_ROLES_NAMED = 3
+
+#: Most verbs the decide-and-apply card lists.
+_VERBS_NAMED = 3
+
+_MONTHS = (
+    "January", "February", "March", "April", "May", "June",
+    "July", "August", "September", "October", "November", "December",
+)
+
+_AGENT_MODEL_BASIS = (
+    "Worked out by pricing the same tokens at Sonnet's list price. Sonnet may need more replies, so this is a "
+    "ceiling, not a forecast."
+)
+
+
+@dataclass(slots=True)
+class _AgentModelFacts:
+    """What one ``agent_models`` rule cited, read back from its evidence
+    (never from a table cell: a row key repeats across verdicts)."""
+
+    agents: int
+    roles: list[tuple[str, int]]
+    model: str
+    saving: float | None
+    edit_turns: int
+    workflow_runs: int
+    last_seen: str
+    later: int
+    env_var_set: bool
+
+
+def _agent_model_facts(rec: Recommendation) -> _AgentModelFacts | None:
+    agents = _evidence_value(rec, "Agents")
+    if not isinstance(agents, int) or isinstance(agents, bool):
+        return None
+    roles = _evidence_value(rec, "Roles")
+    saving = _evidence_value(rec, "Ceiling saving (USD)")
+    return _AgentModelFacts(
+        agents=agents,
+        roles=[(word, int(count)) for word, count in re.findall(r"([a-z]+) (\d+)", roles)]
+        if isinstance(roles, str)
+        else [],
+        model=str(_evidence_value(rec, "Model") or ""),
+        saving=saving if isinstance(saving, (int, float)) else rec.saving_usd,
+        edit_turns=_int(_evidence_value(rec, "Edit turns")),
+        workflow_runs=_int(_evidence_value(rec, "Workflow runs")),
+        last_seen=str(_evidence_value(rec, "Last seen") or ""),
+        later=_int(_evidence_value(rec, "Later compliant writers")),
+        env_var_set=_evidence_value(rec, "CLAUDE_CODE_SUBAGENT_MODEL set") == "yes",
+    )
+
+
+def _agent_noun(agent_type: str | None, count: int) -> str:
+    """``workflow agents`` for the workflow card, else ``<type> agents``."""
+    kind = "workflow" if agent_type == "workflow-subagent" else (agent_type or "")
+    return " ".join(part for part in (kind, "agent" if count == 1 else "agents") if part)
+
+
+def _listed(parts: list[str], joiner: str = "and") -> str:
+    """``a``, ``a and b`` or ``a, b and c``."""
+    if len(parts) == 1:
+        return parts[0]
+    return ", ".join(parts[:-1]) + f" {joiner} " + parts[-1]
+
+
+def _role_noun(word: str, count: int) -> str:
+    one, many = _WRITER_NOUNS.get(word, (f"{word} agent", f"{word} agents"))
+    return f"{count} {one if count == 1 else many}"
+
+
+def _roles_phrase(facts: _AgentModelFacts, noun: str) -> str:
+    """``4 implementers and 1 fixer``; the agent count when the card cites
+    no roles."""
+    roles = facts.roles
+    if not roles:
+        return f"{facts.agents} {noun}"
+    if len(roles) > _ROLES_NAMED:
+        rest = sum(count for _word, count in roles[_ROLES_NAMED - 1 :])
+        parts = [_role_noun(word, count) for word, count in roles[: _ROLES_NAMED - 1]] + [f"{rest} more"]
+    else:
+        parts = [_role_noun(word, count) for word, count in roles]
+    return _listed(parts)
+
+
+def _most_recently(day: str, report: ReportModel) -> str:
+    """``, most recently on 1 October`` for an ISO date; nothing when it
+    isn't one. The year is added only when it isn't the report's own."""
+    try:
+        seen = date.fromisoformat(day[:10])
+    except ValueError:
+        return ""
+    stamp = report.meta.generated_at[:4]
+    year = int(stamp) if stamp.isdigit() else date.today().year
+    text = f"{seen.day} {_MONTHS[seen.month - 1]}" + ("" if seen.year == year else f" {seen.year}")
+    return f", most recently on {text}"
+
+
+def _family_name(model: str) -> str:
+    """``Opus`` for ``claude-opus-5-5``. The flagged agents ran above
+    Sonnet, so a model with no family in its id is called Opus."""
+    family = _family_alias(model)
+    return family.capitalize() if family in ("haiku", "sonnet", "opus", "fable") else "Opus"
+
+
+def _agent_model_saving(rec: Recommendation, facts: _AgentModelFacts, ctx: _Context) -> None:
+    rec.estimated_saving = ctx.money(facts.saving, prefix="At most ")
+    rec.saving_basis = ctx.basis(_AGENT_MODEL_BASIS)
+
+
+def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:
+    facts = _agent_model_facts(rec)
+    if facts is None:
+        return
+    count = facts.agents
+    noun = _agent_noun(rec.agent_type, count)
+    model = _model_prose(facts.model) if facts.model else "a larger model"
+    when = _most_recently(facts.last_seen, ctx.report)
+    if rec.agent_type == "workflow-subagent":
+        runs = max(facts.workflow_runs, 1)
+        started = (
+            f"{_roles_phrase(facts, noun)} in {runs} workflow run{'s' if runs != 1 else ''} started with no "
+            f"model{when}."
+        )
+    else:
+        started = f"{count} {noun} started with no model and wrote code{when}."
+    source = "the model CLAUDE_CODE_SUBAGENT_MODEL names" if facts.env_var_set else "your main session's model"
+    many = count != 1
+    why = [
+        started,
+        f"So {'each' if many else 'it'} ran on {source}, {model}.",
+        f"{'They' if many else 'It'} wrote code to a settled spec, which Sonnet does well.",
+        "Agents that decide, such as integrate and review, aren't counted: Opus suits them.",
+    ]
+    if rec.variant == "fixed":
+        why.append(
+            f"Since then, {facts.later} agent{'s' if facts.later != 1 else ''} that wrote code ran on Sonnet or "
+            "a smaller model, so this looks fixed."
+        )
+    if rec.agent_type not in (None, "workflow-subagent") and model_gate.build(whatif._Tables(ctx.report)).vetoed(
+        rec.agent_type, "sonnet"
+    ):
+        rec.severity = "info"
+        why.append(
+            f"Your quality data says {rec.agent_type} may not be enough on Sonnet, so try it on a few tasks first."
+        )
+    rec.title = f"{count} {noun} wrote code on {model} with no model set"
+    rec.why = " ".join(why)
+    rec.action = (
+        "If this rule lives in one project's notes, copy it to ~/.claude/CLAUDE.md so every project follows it."
+        if rec.variant == "fixed"
+        else "Paste the prompt below so Claude sets the model on every agent it starts."
+    )
+    _agent_model_saving(rec, facts, ctx)
+
+
+def _explain_agent_model_asked(rec: Recommendation, ctx: _Context) -> None:
+    facts = _agent_model_facts(rec)
+    if facts is None:
+        return
+    count = facts.agents
+    noun = _agent_noun(rec.agent_type, count)
+    model = _model_prose(facts.model) if facts.model else "a larger model"
+    family = _family_name(facts.model)
+    many = count != 1
+    rec.title = f"{count} {noun} that wrote code {'were' if many else 'was'} started on {model}"
+    rec.why = " ".join(
+        [
+            f"{_roles_phrase(facts, noun)} {'were' if many else 'was'} started with {model} named in the call"
+            f"{_most_recently(facts.last_seen, ctx.report)}.",
+            f"{'They' if many else 'It'} wrote code to a settled spec, which Sonnet does well.",
+            f"If whatever starts {'them' if many else 'it'} asks for {family} out of habit, Sonnet would cost less.",
+        ]
+    )
+    rec.action = (
+        f"Check the prompt, skill or script that starts {'these agents' if many else 'this agent'}. "
+        f"Ask for Sonnet where nothing needs {family}."
+    )
+    _agent_model_saving(rec, facts, ctx)
+
+
+def _explain_agent_decide_apply(rec: Recommendation, ctx: _Context) -> None:
+    facts = _agent_model_facts(rec)
+    if facts is None:
+        return
+    count = facts.agents
+    noun = _agent_noun(rec.agent_type, count)
+    model = _model_prose(facts.model) if facts.model else "a larger model"
+    family = _family_name(facts.model)
+    verbs = []
+    for word, _count in facts.roles:
+        verb = _DECIDER_VERBS.get(word, word)
+        if verb not in verbs:
+            verbs.append(verb)
+    edits = facts.edit_turns
+    rec.title = f"{count} {noun} decided and changed code on {model}"
+    rec.why = " ".join(
+        [
+            f"{count} {noun} started to {_listed(verbs[:_VERBS_NAMED] or ['decide'], 'or')} and then edited code "
+            f"in {edits} repl{'ies' if edits != 1 else 'y'}{_most_recently(facts.last_seen, ctx.report)}.",
+            f"Deciding and applying in one {family} agent spends {family} rates on the edits too.",
+            "Splitting it lets Opus decide and Sonnet apply what was decided.",
+        ]
+    )
+    rec.action = (
+        "Split this work: an Opus agent that decides and writes the exact changes, then a Sonnet agent that "
+        "applies them."
+    )
+    rec.estimated_saving = ""
+    rec.saving_usd = None
+
+
 def _why_only(text: str, title: str = "") -> Callable[[Recommendation, _Context], None]:
     def explain(rec: Recommendation, ctx: _Context) -> None:
         if title:
@@ -952,6 +1193,9 @@ _EXPLAIN: dict[str, Callable[[Recommendation, _Context], None]] = {
     "pricing-coverage": _explain_pricing_coverage,
     "discovery-share": _explain_discovery_share,
     "subagent-volume": _explain_subagent_volume,
+    "agent-model-inherited": _explain_agent_model_inherited,
+    "agent-model-asked": _explain_agent_model_asked,
+    "agent-decide-apply": _explain_agent_decide_apply,
     "long-tool-waits": _why_only(
         "When a command runs for more than 5 minutes, the cache expires and the next reply pays to rebuild it.",
         "Long waits for commands let the cache expire",

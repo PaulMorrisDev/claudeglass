@@ -2445,6 +2445,18 @@ def test_render_patch_set_top_level_agent_type_stays_a_settings_key_not_a_file()
     assert ".claude/agents/" not in text
 
 
+def test_render_patch_set_skips_the_agent_model_cards():
+    """Their fix is a prompt: no agent-file stanza, least of all for
+    workflow-subagent, which has no agent file."""
+    from claudeglass import agent_models
+
+    recs = [
+        dataclasses.replace(_make_recommendation(id=rule_id), category="workflow", lever="model", agent_type=agent_type)
+        for rule_id, agent_type in zip(agent_models.RULES, ("workflow-subagent", "claude-implementer", "general-purpose"))
+    ]
+    assert render_patch_set(recs) == ""
+
+
 def _make_recommendation(**overrides):
     from claudeglass.model import Recommendation
 

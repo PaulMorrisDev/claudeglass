@@ -276,6 +276,25 @@ def _combined(items: list[dict], spend: dict[str, float]) -> float:
     return float(_node([("page-overview.js", "combinedSaving")], expression))
 
 
+def _available(levers: list[dict], groups: list[dict], agents: list[list]) -> float:
+    """``availableSaving`` from page-overview.js, run in Node, over the
+    model lever's rows by agent type ([agent_type, observed_cost, saving_usd])."""
+    preamble = "".join(_declaration_source(_static_text("page-overview.js"), name) + ";\n" for name in ("LEVER_RULES", "AGENT_MODEL_RULES"))
+    preamble += 'var MAIN_AGENT = "top-level";\nvar WORKFLOW_AGENT = "workflow-subagent";\n'
+    functions = [
+        ("charts-types.js", "tableObjects"),
+        ("page-actions.js", "groupSavingUsd"),
+        ("page-overview.js", "usdOf"),
+        ("page-overview.js", "combinedSaving"),
+        ("page-overview.js", "agentModelItems"),
+        ("page-overview.js", "availableSaving"),
+    ]
+    columns = [{"key": "agent_type"}, {"key": "observed_cost"}, {"key": "saving_usd"}]
+    tables = {"model_swap_by_agent_type": {"columns": columns, "rows": agents}}
+    expression = f"availableSaving({json.dumps(levers)}, {json.dumps(groups)}, {json.dumps(tables)})"
+    return float(_node(functions, expression, preamble=preamble))
+
+
 def test_overlapping_savings_multiply_instead_of_adding_up() -> None:
     """Two ways to save half of the same $100 save $75 together, not $100:
     the second halves what the first leaves."""
@@ -299,6 +318,38 @@ def test_the_ways_to_save_never_come_to_more_than_the_spend() -> None:
 def test_without_a_spend_by_agent_type_the_savings_are_added_up() -> None:
     items = [{"usd": 3, "agent": None}, {"usd": 4, "agent": "top-level"}]
     assert _combined(items, {}) == 7
+
+
+def test_an_agent_model_saving_joins_only_where_nothing_else_counts_it() -> None:
+    """The model lever prices an Agent-tool type's inherited runs, so only
+    a workflow agent's saving joins it. The asked figure is a ceiling for
+    information, decided-and-changed has no saving, and an inherited card
+    at info level looks fixed."""
+    assert 'var WORKFLOW_AGENT = "workflow-subagent";' in _static_text("page-overview.js")
+    agents = [["top-level", 300, 0], ["general-purpose", 100, 20], ["workflow-subagent", 50, 0]]
+
+    def member(rule: str, agent: str, usd: float | None) -> dict:
+        return {"id": rule, "key": f"{rule}:{agent}", "agent_type": agent, "saving_usd": usd}
+
+    groups = [
+        {
+            "id": "agent-model-inherited",
+            "severity": "advice",
+            "members": [member("agent-model-inherited", "general-purpose", 20), member("agent-model-inherited", "workflow-subagent", 10)],
+        },
+        {"id": "agent-model-asked", "severity": "info", "members": [member("agent-model-asked", "claude-implementer", 40)]},
+        {"id": "agent-decide-apply", "severity": "info", "members": [member("agent-decide-apply", "general-purpose", None)]},
+    ]
+    spend = {"top-level": 300, "general-purpose": 100, "workflow-subagent": 50}
+    counted_once = _combined([{"usd": 20, "agent": "general-purpose"}, {"usd": 10, "agent": None}], spend)
+    # general-purpose's $20 is the model lever's: the workflow agents' $10 joins it.
+    assert abs(_available([{"key": "model_swap", "usd": 20}], groups, agents) - counted_once) < 1e-9
+    # With no lever saving for general-purpose, its inherited $20 is counted once, here.
+    agents[1][2] = 0
+    assert abs(_available([], groups, agents) - counted_once) < 1e-9
+    # An inherited card at info level looks fixed: nothing of it is left to save.
+    groups[0]["severity"] = "info"
+    assert _available([], groups, agents) == 0
 
 
 # -- every model id finds its prices ------------------------------------------

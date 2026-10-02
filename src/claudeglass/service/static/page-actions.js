@@ -50,6 +50,9 @@ import { modelSentence, priced, pricingFacts } from "./costs.js";
 export var RULE_AREA = {
   "model-tier": "models",
   "model-tier-main": "models",
+  "agent-model-inherited": "models",
+  "agent-model-asked": "models",
+  "agent-decide-apply": "models",
   "effort-mismatch": "models",
   "env-subagent-model": "models",
   "env-max-output-tokens": "models",
@@ -119,6 +122,9 @@ function areaLabel(area) {
 var RULE_MECHANISM = {
   "model-tier": "model",
   "model-tier-main": "model",
+  "agent-model-inherited": "model",
+  "agent-model-asked": "model",
+  "agent-decide-apply": "model",
   "env-subagent-model": "model",
   "effort-mismatch": "thinking",
   "env-max-output-tokens": "output",

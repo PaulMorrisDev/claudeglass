@@ -230,12 +230,30 @@ def _models(ctx: Context) -> dict:
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_set_elsewhere(rows)
-    if not fixes:
+    # The agent-model cards (agents that ran on a larger model than their
+    # work needed): an advice-level one makes the check "act"; every
+    # info-level one is a tip, its title and why. Each one's own fix is
+    # offered either way.
+    agent_recs = [rec for rec in _recommendations(ctx, _AGENT_MODEL_RECS) if rec.key not in ctx.skip_keys]
+    flagged = [rec for rec in agent_recs if rec.severity != "info"]
+    tips += [{"title": rec.title, "text": rec.why or rec.action} for rec in agent_recs if rec.severity == "info"]
+    agent_fixes = _merge_fixes(_rec_fixes(agent_recs))
+    if not fixes and not flagged:
         return _result(
             "ok",
             "Every agent is already on the cheapest model that priced lower by a useful margin"
             + (", or did worse on it." if left_out else "."),
             table=table,
+            fixes=agent_fixes,
+            tips=tips,
+        )
+    flagged_text = _agent_model_titles(flagged)
+    if not fixes:
+        return _result(
+            "act",
+            f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount.",
+            table=table,
+            fixes=agent_fixes,
             tips=tips,
         )
     top = max(draft["candidates"], key=lambda c: (c["estimate"] or {}).get("saving_usd") or 0)
@@ -243,11 +261,27 @@ def _models(ctx: Context) -> dict:
         "act",
         f"{len(fixes)} model change{'s' if len(fixes) != 1 else ''} would have cost less. The largest: {_who(top['agent'])} on "
         f"{top['value']}, {top['estimate']['effect_text'][:1].lower()}{top['estimate']['effect_text'][1:]}. A "
-        "cheaper model may need more replies for hard work, so try it on one agent first.",
+        "cheaper model may need more replies for hard work, so try it on one agent first."
+        + (f" {flagged_text}" if flagged_text else ""),
         table=table,
-        fixes=fixes,
+        fixes=fixes + agent_fixes,
         tips=tips,
     )
+
+
+#: Agent-model cards named in the "models" summary before it says how many more.
+AGENT_MODEL_TITLES = 3
+
+
+def _agent_model_titles(flagged) -> str:
+    """The advice-level agent-model cards' titles, one sentence each, for
+    the "models" summary: the first ``AGENT_MODEL_TITLES``, then how many
+    more are flagged. Empty when none is."""
+    sentences = [f"{rec.title.rstrip('.')}." for rec in flagged[:AGENT_MODEL_TITLES]]
+    more = len(flagged) - AGENT_MODEL_TITLES
+    if more > 0:
+        sentences.append(f"{more} more {'is' if more == 1 else 'are'} flagged too.")
+    return " ".join(sentences)
 
 
 def _count(value) -> int:
@@ -1099,6 +1133,11 @@ _HABIT_RECS = {
     "wasted-turns",
 }
 
+#: The agent-model cards (``agent_models.RULES``), claimed by the "models"
+#: check: agents that wrote code or decided on a larger model than the work
+#: needed. Three ids, so ignoring one never hides another.
+_AGENT_MODEL_RECS = {"agent-model-inherited", "agent-model-asked", "agent-decide-apply"}
+
 
 def _blocked_by_label(row: dict) -> str:
     """A ``waste_blocked_by`` row worded for the habits table's own
@@ -1583,7 +1622,7 @@ def _quality(ctx: Context) -> dict:
 CHECKS: tuple[Check, ...] = (
     Check("models", "Is each agent on the cheapest model that does the job?",
           "Every reply is priced by its model; a cheaper model for routine agents is usually the largest saving.",
-          _models, ("model-tier", "model-tier-main")),
+          _models, ("model-tier", "model-tier-main", *sorted(_AGENT_MODEL_RECS))),
     Check("effort", "Is anything thinking more than the work needs?",
           "Thinking is billed as output, the most expensive kind of token.", _effort, ("effort-mismatch",)),
     Check("compaction", "When should conversations be summarised?",

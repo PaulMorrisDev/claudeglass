@@ -12,7 +12,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture_catalogue, discovery, known_savers, quality
+from claudeglass import agent_models, capture_catalogue, discovery, known_savers, quality
 from claudeglass import quick_actions as qa
 from claudeglass.fixes import PROMPT_RESTART, SCOPE_NOTE, RESTART_NOTE
 from claudeglass.model import Recommendation
@@ -98,8 +98,9 @@ def test_check_ids_documented_in_api_md_match_the_code():
 def _all_recommendation_ids() -> set[str]:
     """Every literal ``id="..."`` a ``Recommendation(...)`` call passes,
     across every module ``recommend.recommend()`` folds in -- the real
-    id space a quick-action's ``rule_ids`` can point into."""
-    ids: set[str] = set()
+    id space a quick-action's ``rule_ids`` can point into. ``agent_models``
+    builds its three through one helper, so its ids are its ``RULES`` keys."""
+    ids: set[str] = set(agent_models.RULES)
     for name in _RULE_MODULES:
         tree = ast.parse((SRC / name).read_text(encoding="utf-8"))
         for node in ast.walk(tree):
@@ -227,6 +228,127 @@ def test_models_check_says_where_each_agents_model_is_set(tmp_path):
     assert set_by == {"Main session": "settings", "Explore": "its agent file (5), workflow scripts (12), when started (3)"}
     (tip,) = [t for t in result["tips"] if t["title"] == "Some runs' model isn't set by an agent file"]
     assert "12 runs a workflow script started" in tip["text"] and "3 runs given a model" in tip["text"]
+
+
+_AGENT_MODEL_IDS = ("agent-decide-apply", "agent-model-asked", "agent-model-inherited")
+
+
+def _agent_model_rec(rec_id, severity, title, why="", prompt=None, key=""):
+    """An agent-model card as ``agent_models.RULES`` and ``advice`` leave it:
+    its title and why, and a fix with a prompt (``fixes.build_fixes``'s
+    shape) unless ``prompt`` is empty."""
+    fixes = [{"key": None, "agent": None, "explainer": [("Where", "Your notes.")], "command": None,
+              "command_warning": None, "prompt": prompt, "title": title}] if prompt else []
+    return Recommendation(id=rec_id, severity=severity, category="workflow", title=title, why=why, fixes=fixes,
+                          agent_type="workflow-subagent", key=key)
+
+
+_INHERITED = "5 workflow agents wrote code on Opus 5.5 with no model set"
+
+
+def test_models_check_acts_on_an_advice_level_agent_model_card_and_offers_its_fix(tmp_path):
+    model = _model()
+    model.recommendations = [_agent_model_rec(
+        "agent-model-inherited", "advice", _INHERITED, why="They ran on your main session's model.",
+        prompt="From now on, set the model on every agent you start.",
+    )]
+    result = qa.run("models", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    assert result["summary"].startswith(_INHERITED + ".")
+    assert "no change to an agent file or setting would save a useful amount" in result["summary"]
+    [fix] = result["fixes"]
+    assert fix["title"] == _INHERITED and fix["prompt"] == "From now on, set the model on every agent you start."
+    assert FIX_KEYS <= set(fix)
+    assert result["tips"] == []
+    assert result["table"] == qa.run("models", _ctx(tmp_path, model=_model()))["table"]
+
+
+def test_models_check_adds_the_agent_model_title_after_its_own_model_changes(tmp_path):
+    model = _full_model()
+    model.recommendations = [_agent_model_rec(
+        "agent-model-inherited", "advice", _INHERITED, prompt="From now on, set the model on every agent you start.",
+    )]
+    result = qa.run("models", _ctx(tmp_path, model=model, effective_agents={"Explore": {}}))
+    plain = qa.run("models", _ctx(tmp_path, effective_agents={"Explore": {}}))
+    assert result["status"] == plain["status"] == "act"
+    assert result["summary"] == plain["summary"] + " " + _INHERITED + "."
+    assert [fix["title"] for fix in result["fixes"]] == [fix["title"] for fix in plain["fixes"]] + [_INHERITED]
+
+
+def test_models_check_names_three_advice_level_cards_then_counts_the_rest(tmp_path):
+    model = _model()
+    model.recommendations = [
+        _agent_model_rec("agent-model-inherited", "advice", f"3 {kind} agents wrote code on Opus 5.5 with no model set")
+        for kind in ("workflow", "general-purpose", "claude-implementer", "builder", "fixer")
+    ]
+    summary = qa.run("models", _ctx(tmp_path, model=model))["summary"]
+    assert summary.startswith(
+        "3 workflow agents wrote code on Opus 5.5 with no model set. "
+        "3 general-purpose agents wrote code on Opus 5.5 with no model set. "
+        "3 claude-implementer agents wrote code on Opus 5.5 with no model set. 2 more are flagged too."
+    )
+    model.recommendations = model.recommendations[:4]
+    summary = qa.run("models", _ctx(tmp_path, model=model))["summary"]
+    assert summary.endswith(
+        "1 more is flagged too. Apart from that, no change to an agent file or setting would save a useful amount."
+    )
+
+
+def test_models_check_lists_info_level_agent_model_cards_as_tips_and_offers_their_fixes(tmp_path):
+    plain = qa.run("models", _ctx(tmp_path, model=_model()))
+    model = _model()
+    model.recommendations = [
+        _agent_model_rec("agent-model-inherited", "info", _INHERITED, why="Your 6 later workflow runs set a model.",
+                         prompt="Copy this rule to your CLAUDE.md."),
+        _agent_model_rec("agent-model-asked", "info", "46 agents that wrote code were started on Opus 5.5",
+                         why="Sonnet would cost less.", prompt="Find where these agents are started."),
+        _agent_model_rec("agent-decide-apply", "info", "5 general-purpose agents decided and changed code on Opus 5.5",
+                         why="Splitting it lets Opus decide and Sonnet apply.", prompt="Split the deciding from the applying."),
+        _agent_model_rec("long-tool-waits", "advice", "Tools often wait on you", why="Not a models finding.",
+                         prompt="Pre-approve routine tools."),
+    ]
+    result = qa.run("models", _ctx(tmp_path, model=model))
+    assert result["status"] == plain["status"] == "ok"
+    assert result["summary"] == plain["summary"] and result["table"] == plain["table"]
+    # Each card's own fix is offered; another rule's is not.
+    assert [fix["prompt"] for fix in result["fixes"]] == [
+        "Copy this rule to your CLAUDE.md.", "Find where these agents are started.",
+        "Split the deciding from the applying.",
+    ]
+    # Every info-level card is a tip too: its title and why.
+    assert result["tips"] == plain["tips"] + [
+        {"title": _INHERITED, "text": "Your 6 later workflow runs set a model."},
+        {"title": "46 agents that wrote code were started on Opus 5.5", "text": "Sonnet would cost less."},
+        {"title": "5 general-purpose agents decided and changed code on Opus 5.5",
+         "text": "Splitting it lets Opus decide and Sonnet apply."},
+    ]
+
+
+def test_models_check_leaves_an_ignored_agent_model_card_out(tmp_path):
+    model = _model()
+    model.recommendations = [
+        _agent_model_rec("agent-model-inherited", "advice", _INHERITED, prompt="Set the model.",
+                         key="agent-model-inherited:workflow-subagent"),
+        _agent_model_rec("agent-model-asked", "info", "46 agents that wrote code were started on Opus 5.5",
+                         why="Sonnet would cost less.", prompt="Find where these agents are started.",
+                         key="agent-model-asked:workflow-subagent"),
+    ]
+    ctx = _ctx(tmp_path, model=model)
+    ctx.skip_keys = frozenset({"agent-model-inherited:workflow-subagent"})
+    result = qa.run("models", ctx)
+    assert result["status"] == "ok"
+    assert [fix["prompt"] for fix in result["fixes"]] == ["Find where these agents are started."]
+
+
+def test_models_check_claims_the_three_agent_model_rule_ids(tmp_path):
+    result = qa.run("models", _ctx(tmp_path))
+    assert set(_AGENT_MODEL_IDS) <= set(result["rule_ids"])
+    assert {"model-tier", "model-tier-main"} <= set(result["rule_ids"])
+    assert qa._AGENT_MODEL_RECS == set(_AGENT_MODEL_IDS)
+    # No other check claims them: ignoring a card never moves it elsewhere.
+    for check in qa.CHECKS:
+        if check.id != "models":
+            assert not set(_AGENT_MODEL_IDS) & set(check.rule_ids), check.id
 
 
 def test_tool_output_offers_the_bash_cap_as_a_prompt_only(tmp_path):

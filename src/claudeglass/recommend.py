@@ -141,7 +141,19 @@ import dataclasses
 import re
 from dataclasses import dataclass
 
-from . import carry, compaction_sim, elasticity, handoff, hook_costs, model_swap, pricing, run_split, tool_search, waste
+from . import (
+    agent_models,
+    carry,
+    compaction_sim,
+    elasticity,
+    handoff,
+    hook_costs,
+    model_swap,
+    pricing,
+    run_split,
+    tool_search,
+    waste,
+)
 from .config import Config
 from .context_budget import _READ_ONLY_TOOLS
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
@@ -2301,6 +2313,7 @@ def recommend(
     carry_th = carry.CarryThresholds.from_config(config.thresholds)
     compaction_sim_th = compaction_sim.CompactionSimThresholds.from_config(config.thresholds)
     model_swap_th = model_swap.ModelSwapThresholds.from_config(config.thresholds)
+    agent_models_th = agent_models.AgentModelThresholds.from_config(config.thresholds)
     waste_th = waste.WasteThresholds.from_config(config.thresholds)
     handoff_th = handoff.HandoffThresholds.from_config(config.thresholds)
     hooks_th = hook_costs.HookThresholds.from_config(config.thresholds)
@@ -2349,6 +2362,11 @@ def recommend(
     recs.extend(tool_search.RULES[0](report, tool_search_th))
     recs.extend(compaction_sim.RULES[0](report, compaction_sim_th, snapshot))
     recs.extend(model_swap.RULES["model-tier"](report, model_swap_th, archetype, snapshot))
+    # Agents that ran on a larger model than their work needed: its own
+    # cards, kept out of model-tier and the Savings levers so nothing is
+    # counted twice.
+    for agent_models_rule in agent_models.RULES.values():
+        recs.extend(agent_models_rule(report, agent_models_th, archetype, snapshot))
     recs.extend(waste.RULES[0](report, waste_th))
 
     if archetype is not None:
@@ -2471,7 +2489,10 @@ def render_patch_set(recs: list[Recommendation]) -> str:
                 lines.append("")
             continue
         bare_lever = rec.lever
-        if not bare_lever:
+        # The agent-model cards (agent_models.RULES) name the model as their
+        # lever, but their fix is a prompt: the call that starts the agent
+        # sets it, so there is no agent-file line to patch.
+        if not bare_lever or rec.id in agent_models.RULES:
             continue
         is_managed = rec.scope == "managed"
 

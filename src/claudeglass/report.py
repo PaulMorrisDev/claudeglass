@@ -137,6 +137,7 @@ from typing import Callable
 
 from . import __version__ as _TOOL_VERSION
 from . import (
+    agent_models,
     carry,
     classify,
     compaction,
@@ -1083,6 +1084,25 @@ def _settings_snapshots(
     return snapshots_mod.snapshots_for_projects(snapshots, slugs), canonical
 
 
+def _agent_file_models(snapshot: Snapshot | None) -> dict[str, str | None]:
+    """Each agent file's ``model`` line (``None``: it names none), by agent
+    type, from ``snapshot``'s ``agents``; empty without a snapshot."""
+    agents = snapshot.data.get("agents") if snapshot is not None else None
+    if not isinstance(agents, dict):
+        return {}
+    return {
+        name: entry.get("model") if isinstance(entry.get("model"), str) else None
+        for name, entry in agents.items()
+        if isinstance(entry, dict)
+    }
+
+
+def _snapshot_env_names(snapshot: Snapshot | None) -> list[str]:
+    """The environment variable names ``snapshot`` records (never values)."""
+    names = snapshot.data.get("env_names") if snapshot is not None else None
+    return [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
+
+
 def _build_config_section(
     sessions_with_metrics: list[dict],
     snaps: list[Snapshot],
@@ -1385,6 +1405,7 @@ def build_report(
     carry_th = carry.CarryThresholds.from_config(config.thresholds)
     compaction_sim_th = compaction_sim.CompactionSimThresholds.from_config(config.thresholds)
     model_swap_th = model_swap.ModelSwapThresholds.from_config(config.thresholds)
+    agent_models_th = agent_models.AgentModelThresholds.from_config(config.thresholds)
     waste_th = waste.WasteThresholds.from_config(config.thresholds)
     handoff_th = handoff.HandoffThresholds.from_config(config.thresholds)
     hooks_th = hook_costs.HookThresholds.from_config(config.thresholds)
@@ -1705,6 +1726,18 @@ def build_report(
     # The settings the config and scorecard sections and the advice read:
     # every project's with ``all_projects``, else the report's own.
     settings_snaps, canonical = _settings_snapshots(corpus, projects, snapshots, all_projects, known_slugs)
+    # The snapshot the advice reads as "now" (see ``recommend`` below), built
+    # here because the agent-model section reads the same one: an agent file
+    # that names a run's model, or CLAUDE_CODE_SUBAGENT_MODEL, is not an
+    # accident of inheriting.
+    latest_snapshot = snapshots_mod.with_every_project_agents(settings_snaps, canonical) if settings_snaps else None
+    agent_models_stats = agent_models.compute_agent_models(
+        all_results,
+        pricing,
+        agent_files=_agent_file_models(latest_snapshot),
+        env_names=_snapshot_env_names(latest_snapshot),
+        thresholds=agent_models_th,
+    )
 
     # -- assemble sections ---------------------------------------------
 
@@ -1814,7 +1847,13 @@ def build_report(
         sections.append(handoff.build_section(handoff_stats, handoff_th))
 
     if _want("model_swap"):
-        sections.append(model_swap.build_section(model_swap_stats, model_swap_th, units=units))
+        model_swap_section = model_swap.build_section(model_swap_stats, model_swap_th, units=units)
+        sections.append(
+            dataclasses.replace(
+                model_swap_section,
+                tables=[*model_swap_section.tables, agent_models.build_table(agent_models_stats)],
+            )
+        )
 
     if _want("waste"):
         sections.append(waste.build_section(ws, waste_th))
@@ -1981,6 +2020,7 @@ def build_report(
         + list(hook_costs.ASSUMPTIONS)
         + list(tool_search.ASSUMPTIONS)
         + list(model_swap.ASSUMPTIONS)
+        + list(agent_models.ASSUMPTIONS)
         + list(waste.ASSUMPTIONS)
         + list(quality.ASSUMPTIONS)
     )
@@ -2069,7 +2109,6 @@ def build_report(
     # project in that set, since the newest snapshot records only the
     # agents of the project it was taken in.
     corpus_archetype, _archetype_evidence = workstyle.corpus_archetype(session_records)
-    latest_snapshot = snapshots_mod.with_every_project_agents(settings_snaps, canonical) if settings_snaps else None
     report_model.units = units
     report_model.recommendations = recommend(
         report_model,

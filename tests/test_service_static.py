@@ -2818,7 +2818,9 @@ def _js_hyphen_map(app_js: str, var_name: str) -> dict[str, str]:
 
 def _recommendation_ids() -> set[str]:
     """Every literal ``id="..."`` a ``Recommendation(...)`` call passes in
-    the package. quick_actions.py builds one only to render a fix, never
+    the package, and every key of a module's ``RULES`` dict (one that
+    builds its cards through a shared helper passes the id on as a
+    variable). quick_actions.py builds one only to render a fix, never
     to send, so its placeholder id is left out."""
     ids: set[str] = set()
     for path in SRC_DIR.rglob("*.py"):
@@ -2829,22 +2831,41 @@ def _recommendation_ids() -> set[str]:
                 for kw in node.keywords:
                     if kw.arg == "id" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                         ids.add(kw.value.value)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Dict):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(getattr(target, "id", None) == "RULES" for target in targets):
+                    ids.update(
+                        key.value for key in node.value.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    )
     return ids
 
 
 def _evidence_sources() -> set[tuple[str, str]]:
     """Every (section, table) an ``_evidence(label, value, section,
-    table, row)`` call names. Each must be a literal, so this scan sees
-    every place a recommendation can point."""
+    table, row)`` call names. Each must be a literal, or a module-level
+    constant set to one, so this scan sees every place a recommendation
+    can point."""
     sources: set[tuple[str, str]] = set()
     for path in SRC_DIR.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants = {
+            target.id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+
+        def literal(arg: ast.expr) -> object:
+            return arg.value if isinstance(arg, ast.Constant) else constants.get(getattr(arg, "id", None))
+
+        for node in ast.walk(tree):
             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_evidence":
-                section, table = node.args[2], node.args[3]
-                assert isinstance(section, ast.Constant) and isinstance(table, ast.Constant), (
+                section, table = literal(node.args[2]), literal(node.args[3])
+                assert isinstance(section, str) and isinstance(table, str), (
                     f"{path.name}:{node.lineno} names its evidence table indirectly"
                 )
-                sources.add((section.value, table.value))
+                sources.add((section, table))
     return sources
 
 
@@ -2866,6 +2887,28 @@ def test_every_recommendation_rule_has_an_area_on_the_actions_page() -> None:
     # Every rule with a "what the change does" sentence has an area too.
     mechanisms = _js_hyphen_map(app_js, "RULE_MECHANISM")
     assert set(mechanisms) <= set(areas)
+
+
+def test_the_agent_model_cards_sit_under_models_and_group_by_kind() -> None:
+    """The three agent-model cards (agents that wrote code on a larger
+    model with none set, ones asked for it, and an Opus agent that decided
+    and applied) are about the Models area and the model price rule. When
+    several agent types raise one of them, the inbox shows one item with
+    a title of its own, not "(and N more)"."""
+    app_js = _app_js()
+    areas = _js_hyphen_map(app_js, "RULE_AREA")
+    mechanisms = _js_hyphen_map(app_js, "RULE_MECHANISM")
+    titles = _declaration_source(app_js, "GROUP_TITLES")
+    for rule_id in ("agent-model-inherited", "agent-model-asked", "agent-decide-apply"):
+        assert areas.get(rule_id) == "models", rule_id
+        assert mechanisms.get(rule_id) == "model", rule_id
+        title = re.search(re.escape(f'"{rule_id}": function (n) {{') + r'\s*return n \+ "([^"]+)";', titles)
+        assert title, f"no GROUP_TITLES entry for {rule_id}"
+        assert "kinds of agent" in title.group(1), rule_id
+    # A grouped title belongs to a rule the Actions page places.
+    grouped = re.findall(r'^\s*"([a-z0-9-]+)"\s*:\s*function \(n\)', titles, re.MULTILINE)
+    assert len(grouped) > 3, grouped
+    assert sorted(set(grouped) - set(areas)) == []
 
 
 def test_every_evidence_source_resolves_to_a_page_or_the_table_drawer() -> None:

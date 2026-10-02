@@ -334,6 +334,15 @@ var GROUP_TITLES = {
   "model-tier": function (n) {
     return n + " agent types could run a cheaper model";
   },
+  "agent-model-inherited": function (n) {
+    return n + " kinds of agent wrote code with no model set";
+  },
+  "agent-model-asked": function (n) {
+    return n + " kinds of agent that write code were started on a larger model";
+  },
+  "agent-decide-apply": function (n) {
+    return n + " kinds of agent decided and changed code";
+  },
   "ttl-switch": function (n) {
     return "The cache lifetime (TTL) is a poor fit for " + n + " agent types";
   },

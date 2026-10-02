@@ -104,6 +104,7 @@ PLACEMENT: dict[str, str] = {
     "model_swap_by_agent_type": "keep",
     "model_swap_summary": "keep",
     "model_swap_agent_file_runs": "report",
+    "model_swap_agent_models": "keep",
     "waste_summary": "keep",
     "waste_by_cause": "keep",
     "waste_by_agent_type": "advanced",
@@ -3888,6 +3889,77 @@ TABLE_COPY: dict[str, TableCopy] = {
             "observed_cost": ("Real cost", "Measured cost of those runs, at list price."),
         },
     ),
+    "model_swap_agent_models": TableCopy(
+        title="Agents that ran on a larger model than their work needed",
+        help=Help(
+            shows="Each row is one kind of agent and one finding about it. Every agent a workflow script started "
+            "counts as one kind. The main session is left out.",
+            read="Cost is measured. The cost on Sonnet reprices the same tokens, so a saving is the most you could "
+            "save, not a forecast. Sonnet may need more replies. Agents that decided and changed code have no "
+            "saving, because the fix is to split the work.",
+            act="Start with agents that had no model set and wrote code. If later agents ran on Sonnet, it looks "
+            "fixed. {{page:actions/recommendations}} has a prompt to paste.",
+        ),
+        columns={
+            "case": ("Agents and finding", "Which agents, and what was found about them."),
+            "agent_type": (
+                "Agent",
+                "The agent type. Every agent a workflow script started counts as one type, because the script's "
+                "own call sets their model.",
+            ),
+            "verdict": (
+                "Finding",
+                "No model set means the agent ran on your main session's model. Asked for a larger model means "
+                "the call named Opus or Fable. Decided and changed code means a review or judging agent also "
+                "edited files on a larger model.",
+            ),
+            "runs": ("Agents", "How many agents this row counts, one per run."),
+            "roles": (
+                "Roles",
+                "What each agent was for, as one word read from its phase, type or opening words, with a count. "
+                "Other means no word was found.",
+            ),
+            "model": ("Model", "The model most of these agents ran on."),
+            "cost_usd": ("Cost", "Measured cost of these agents, at list price."),
+            "cost_on_sonnet_usd": (
+                "On Sonnet",
+                "The same tokens at Sonnet's list price. Empty where the finding has no saving.",
+            ),
+            "saving_usd": (
+                "Saving",
+                "Cost minus the cost on Sonnet. The most you could save, since Sonnet may need more replies.",
+            ),
+            "saving_pct": ("Saving %", "That saving as a share of cost."),
+            "write_turns": (
+                "Edit replies",
+                "Replies in which an agent edited a file or wrote one from the shell, across these agents.",
+            ),
+            "workflow_runs": (
+                "Workflow runs",
+                "How many separate workflow runs these agents came from. Zero for agents started outside a workflow.",
+            ),
+            "first_seen": ("First", "The date of the earliest of these agents."),
+            "last_seen": ("Last", "The date of the most recent of these agents."),
+            "later_compliant": (
+                "Later on Sonnet",
+                "Agents of the same kind that wrote code on Sonnet or a smaller model after the last one flagged here.",
+            ),
+            "env_var_set": (
+                "Env var set",
+                "Whether CLAUDE_CODE_SUBAGENT_MODEL is set now: if it is, agents that name no model run on the one "
+                "it names.",
+            ),
+        },
+        # The row key ("workflow-subagent:inherited") is labelled by the
+        # table itself, one label per row, since agent types are open-ended.
+        value_labels={
+            "inherited": "No model set",
+            "asked": "Asked for a larger model",
+            "decide-apply": "Decided and changed code",
+            "workflow-subagent": "Workflow agents",
+        },
+        lead_columns=["case", "runs", "roles", "model", "cost_usd", "saving_usd", "last_seen"],
+    ),
     # -- savings: building fresh after a plan ------------------------------------
     "plan_handoff_summary": TableCopy(
         title="Building in a fresh session after a big plan",
@@ -4818,7 +4890,9 @@ def _apply_table_copy(table: Table, copy: TableCopy | None, billing_mode: str) -
         if copy.help is not None:
             table.help = copy.help
         if copy.value_labels:
-            table.value_labels = dict(copy.value_labels)
+            # Kept beside the table's own labels (one per run-time row key,
+            # as model_swap_agent_models has); the copy wins on a clash.
+            table.value_labels = {**table.value_labels, **copy.value_labels}
         if copy.row_groups:
             table.row_groups = dict(copy.row_groups)
         if copy.row_kinds:

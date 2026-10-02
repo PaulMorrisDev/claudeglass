@@ -212,13 +212,46 @@ var LEVER_RULES = {
   "wasted-turns": "waste",
 };
 
+// Agent-model actions (agent_models.py): their saving joins only where
+// nothing else counts it (agentModelItems).
+var AGENT_MODEL_RULES = {
+  "agent-model-inherited": true,
+  "agent-model-asked": true,
+  "agent-decide-apply": true,
+};
+
 // The main session's agent type, as model_swap_by_agent_type and a
 // recommendation's agent_type name it.
 var MAIN_AGENT = "top-level";
+// Every workflow agent's agent type on an agent-model action.
+var WORKFLOW_AGENT = "workflow-subagent";
 
 function usdOf(value) {
   var number = typeof value === "number" ? value : parseFloat(value);
   return isFinite(number) && number > 0 ? number : 0;
+}
+
+// An agent-model action's saving that nothing else counts, as items for
+// combinedSaving. The asked figure is a ceiling for information, never
+// added to anything, and decided-and-changed has no saving. An inherited
+// card at info level looks fixed already (or is held back for quality),
+// so there is nothing left to save. An Agent-tool type's inherited runs
+// are among the runs the model lever prices for that type, so they join
+// only when the lever has no saving for it. A workflow agent's runs are
+// no lever's and span every type a script named, so their saving comes
+// from all the spend.
+function agentModelItems(group, agents) {
+  if (group.id !== "agent-model-inherited" || group.severity !== "advice") return [];
+  var priced = {};
+  agents.forEach(function (row) {
+    if (usdOf(row.saving_usd)) priced[row.agent_type] = true;
+  });
+  var items = [];
+  group.members.forEach(function (rec) {
+    var usd = usdOf(rec.saving_usd);
+    if (usd && !priced[rec.agent_type]) items.push({ usd: usd, agent: rec.agent_type === WORKFLOW_AGENT ? null : rec.agent_type });
+  });
+  return items;
 }
 
 // What doing every way to save would come to: the four Savings levers,
@@ -245,6 +278,12 @@ function availableSaving(levers, groups, tables) {
   });
   groups.forEach(function (group) {
     if (LEVER_RULES[group.id]) return;
+    if (AGENT_MODEL_RULES[group.id]) {
+      agentModelItems(group, agents).forEach(function (item) {
+        items.push(item);
+      });
+      return;
+    }
     var usd = groupSavingUsd(group);
     var owners = group.members.map(function (rec) {
       return rec.agent_type || null;

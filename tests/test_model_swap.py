@@ -193,6 +193,20 @@ def test_model_set_by_follows_claude_codes_order():
     assert model_swap.model_set_by(_run(OPUS, "fork")) == "none"
 
 
+def test_the_assumptions_give_a_workflow_agents_model_order_and_no_workflow_default():
+    """A workflow agent's model is its call's, else its agent type's file's,
+    else CLAUDE_CODE_SUBAGENT_MODEL, else the main session's: the run file's
+    defaultModel only records the main model at launch."""
+    text = " ".join(model_swap.ASSUMPTIONS)
+
+    for part in (
+        "agent() call, else its agent type's file, else CLAUDE_CODE_SUBAGENT_MODEL, else your main session's model",
+        "defaultModel only records the main model at launch",
+    ):
+        assert part in text
+    assert "workflow's default" not in text
+
+
 def _row_cells(section: Section, agent_type: str, table_name: str = "model_swap_by_agent_type") -> dict:
     table = next(t for t in section.tables if t.name == table_name)
     row = next(r for r in table.rows if r[0] == agent_type)
