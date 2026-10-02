@@ -1361,7 +1361,7 @@ def _window_description(args: argparse.Namespace, config: Config, *, rolling: bo
         return f"last {args.days} days"
     if rolling:
         since_dt = discovery._resolve_window(args.days, args.since, None)[0]
-        since = args.since or (since_dt.strftime("%Y-%m-%dT%H:%M:%SZ") if since_dt else None)
+        since = args.since or (discovery.utc_stamp(since_dt, seconds=True) if since_dt else None)
     else:
         since = _window_since(args, config)
     if since or args.until:

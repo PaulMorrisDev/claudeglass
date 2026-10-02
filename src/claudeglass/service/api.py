@@ -481,7 +481,7 @@ def _round_iso_to_minute(value: str) -> str:
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:00Z")
+    return discovery.utc_stamp(dt.astimezone(timezone.utc))
 
 
 #: Short windows the dashboard offers by name (``?window=``), each as the
@@ -547,7 +547,7 @@ def _wall_clock_back(now: datetime, days: int, tz) -> str:
     wall = datetime.combine(local.date() - timedelta(days=days), local.time())
     zone = discovery._zone(tz)
     moment = wall.replace(tzinfo=zone) if zone is not None else wall.astimezone()
-    return moment.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:00Z")
+    return discovery.utc_stamp(moment.astimezone(timezone.utc))
 
 
 def _previous_period(
@@ -571,7 +571,7 @@ def _previous_period(
         if start is None:
             return None
         length = timedelta(hours=1 if name == "1h" else 24)
-        return (start - length).strftime("%Y-%m-%dT%H:%M:00Z"), since
+        return discovery.utc_stamp(start - length), since
     if name == "today":
         return discovery.window_start_iso(2, tz, now=now), _wall_clock_back(now, 1, tz)
     if name is None and window_days and until is None and "since" not in query and "until" not in query:
@@ -637,7 +637,7 @@ def _named_window_since(
         start = point.ts
     else:
         return None, f"'window' must be one of {', '.join(WINDOW_NAMES)}"
-    return start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:00Z"), ""
+    return discovery.utc_stamp(start.astimezone(timezone.utc)), ""
 
 
 def _window_query(
@@ -788,7 +788,7 @@ def _change_corpus_since(points) -> str:
     impact cards and the "since my last change" window both read from here,
     so the window starts where the newest card's change does."""
     earliest, _base, _key = _impact_reach(min((p.ts for p in points), default=None), None, datetime.now(timezone.utc))
-    return earliest.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return discovery.utc_stamp(earliest, seconds=True)
 
 
 def _change_id(point) -> tuple:
@@ -3018,7 +3018,7 @@ def make_handler(
         # Transcript changes (EST-P9) can only be found once they are read.
         # A project reads its own sessions alone.
         read = {"project_slugs": list(project)} if project else {}
-        corpus = rebuild.corpus_from_store(store, since=earliest.strftime("%Y-%m-%dT%H:%M:%SZ"), **read)
+        corpus = rebuild.corpus_from_store(store, since=discovery.utc_stamp(earliest, seconds=True), **read)
         points = change_points.change_points(options.config_dir, corpus)
         if project:
             # The changes that apply there: every project's, and its own
@@ -3191,7 +3191,7 @@ def make_handler(
         # need a corpus before they can even be listed, the same
         # chicken-and-egg change_points.py's own docstring notes), so a change
         # one lists is the change the other judges on.
-        corpus = rebuild.corpus_from_store(store, since=earliest.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        corpus = rebuild.corpus_from_store(store, since=discovery.utc_stamp(earliest, seconds=True))
         units = _report_units(_get_report_model(*_default_window()))
         judged = backtest_mod.judge_predictions(store, corpus, rates, units, options.config_dir)
         predictions = store.predictions()

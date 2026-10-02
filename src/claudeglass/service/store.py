@@ -92,7 +92,7 @@ from pathlib import Path
 from . import schema
 from .. import PARSER_VERSION
 from ..cache import result_from_jsonable
-from ..discovery import _resolve_window, _zone, local_day, redact_slug, source_label, ts_in_window
+from ..discovery import _resolve_window, _zone, local_day, redact_slug, source_label, ts_in_window, utc_stamp
 from ..limits import limit_markers as _limit_markers
 from ..model import EventKind
 
@@ -157,7 +157,7 @@ def bucket_start(dt: datetime) -> str:
     The watcher writes buckets with this and ``Store.daily_usage`` rounds
     a window's start down with it."""
     dt = dt.replace(tzinfo=timezone.utc) if dt.tzinfo is None else dt.astimezone(timezone.utc)
-    return dt.replace(minute=dt.minute - dt.minute % 15).strftime("%Y-%m-%dT%H:%M:00Z")
+    return utc_stamp(dt.replace(minute=dt.minute - dt.minute % 15))
 
 
 @contextlib.contextmanager
@@ -350,7 +350,7 @@ def _turns_agg_window(
     legacy_params: list = []
     if since_dt is not None:
         since_utc = since_dt.astimezone(timezone.utc)
-        since_day = since_utc.strftime("%Y-%m-%d")
+        since_day = since_utc.date().isoformat()
         day_range.append("a.day >= ?")
         day_params.append(since_day)
         bucket.append("a.bucket >= ?")
@@ -359,11 +359,11 @@ def _turns_agg_window(
         legacy_params.append(max(since_day, local_day(since_utc, zone)))
     if until_dt is not None:
         until_utc = until_dt.astimezone(timezone.utc)
-        until_day = until_utc.strftime("%Y-%m-%d")
+        until_day = until_utc.date().isoformat()
         day_range.append("a.day <= ?")
         day_params.append(until_day)
         bucket.append("a.bucket < ?")
-        bucket_params.append(until_utc.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        bucket_params.append(utc_stamp(until_utc, seconds=True))
         last_day = min(until_day, local_day(until_utc, zone))
     else:
         last_day = local_day(datetime.now(timezone.utc), zone)

@@ -332,7 +332,8 @@ def local_day(value: str | datetime, tz: str | tzinfo | None = None) -> str:
     dt = _parse_bound(value) if isinstance(value, str) else value
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return to_local(dt, tz).strftime("%Y-%m-%d")
+    # isoformat, not strftime("%Y"): see utc_stamp.
+    return to_local(dt, tz).date().isoformat()
 
 
 def zone_name(tz: str | tzinfo | None) -> str | None:
@@ -379,10 +380,25 @@ def window_start(days: int, tz: str | tzinfo | None = None, *, now: datetime | N
     return local_midnight(to_local(now, tz).date() - timedelta(days=days - 1), tz)
 
 
+def utc_stamp(moment: datetime, *, seconds: bool = False) -> str:
+    """``moment``'s clock reading (already in UTC) as the string a
+    ``since`` takes: rounded down to the minute, e.g.
+    ``2026-09-25T00:00:00Z``, or to the second with ``seconds``. The year
+    is always four digits: ``strftime("%Y")`` leaves a year before 1000
+    unpadded on Linux ("931-03-01"), which ``fromisoformat`` rejects and
+    which sorts after "2026" as a string. A window of hundreds of
+    thousands of days reaches such a year."""
+    second = moment.second if seconds else 0
+    return (
+        f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}"
+        f"T{moment.hour:02d}:{moment.minute:02d}:{second:02d}Z"
+    )
+
+
 def window_start_iso(days: int, tz: str | tzinfo | None = None, *, now: datetime | None = None) -> str:
     """:func:`window_start` as the minute-shaped UTC string a ``since``
     takes, e.g. ``2026-09-25T00:00:00Z``."""
-    return window_start(days, tz, now=now).strftime("%Y-%m-%dT%H:%M:00Z")
+    return utc_stamp(window_start(days, tz, now=now))
 
 
 #: How a session is matched to a window. ``last-reply`` (the default): the

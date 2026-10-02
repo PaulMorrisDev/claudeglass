@@ -2072,6 +2072,8 @@ def test_bucket_start_floors_to_the_utc_quarter_hour() -> None:
     # An offset is converted, and a time with none is read as UTC.
     assert bucket_start(datetime(2026, 9, 19, 5, 20, tzinfo=_IST)) == "2026-09-18T23:45:00Z"
     assert bucket_start(datetime(2026, 9, 18, 23, 50)) == "2026-09-18T23:45:00Z"
+    # A year before 1000 keeps four digits, as a window's bound does.
+    assert bucket_start(datetime(931, 3, 1, 5, 20, tzinfo=timezone.utc)) == "0931-03-01T05:15:00Z"
 
 
 # -- the v7 -> v8 migration ----------------------------------------------------

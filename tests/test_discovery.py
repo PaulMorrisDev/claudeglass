@@ -719,6 +719,18 @@ def test_window_start_iso_is_the_minute_shaped_utc_string():
     assert discovery.window_start_iso(1, _IST, now=now) == "2026-09-30T18:30:00Z"
 
 
+def test_a_year_before_1000_keeps_four_digits_on_every_platform():
+    """strftime("%Y") gives "931" on Linux and "0931" on Windows: the
+    strings a window is written as are built so they don't depend on it."""
+    moment = _utc(931, 3, 1, 5, 7) + timedelta(seconds=9)
+    assert discovery.utc_stamp(moment) == "0931-03-01T05:07:00Z"
+    assert discovery.utc_stamp(moment, seconds=True) == "0931-03-01T05:07:09Z"
+    assert discovery.utc_stamp(_utc(2026, 9, 25)) == "2026-09-25T00:00:00Z"
+    assert discovery.local_day(moment, "UTC") == "0931-03-01"
+    # 400,000 days back from 2026 is the year 931.
+    assert discovery.window_start_iso(400_000, "UTC", now=_utc(2026, 10, 1, 15, 0)).startswith("0931-")
+
+
 @pytest.mark.parametrize("days", [0, -1, -30])
 def test_window_start_needs_at_least_one_day(days):
     with pytest.raises(ValueError):
