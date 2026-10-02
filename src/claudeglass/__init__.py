@@ -244,7 +244,11 @@ __version__ = "0.13.0"
 #: agent_roles.py, never the phase, label or description it came from),
 #: whether its meta records a model at all, and the shell writes a turn
 #: made outside the temp dir (model.py's Agent-roles addition). A pre-36
-#: digest has none of these, so no agent could be told apart.
+#: digest has none of these, so no agent could be told apart. It also
+#: tests an edit tool's target against the temp dir the way a shell
+#: write target is (a forward-slash or Git Bash path was a real edit
+#: before), so a pre-36 digest counts those scratch writes as real
+#: edits.
 PARSER_VERSION = 36
 
 #: Bump when the model.py contract changes in a way that invalidates the

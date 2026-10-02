@@ -529,6 +529,11 @@ phase, label, description or path:
   back for a command that was blocked or denied. A count only, never a
   path.
 
+The same bump puts ``Turn.edit_kind`` on that temp test: an
+Edit/Write/MultiEdit/NotebookEdit target in any of those forms is
+"scratch". Before it, only the temp dir's own spelling matched, so a
+forward-slash path on Windows counted as a "real" edit.
+
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
 count, a closed word (with an "other" fallback) or a raw number off a
@@ -760,7 +765,12 @@ class Turn:
 
     tool_names: tuple[str, ...] = ()
     cmd_prefix: str | None = None  # <= 40 chars
-    edit_kind: str | None = None  # "real" | "scratch" | None
+    #: "real" | "scratch" | None: "real" when an Edit/Write/MultiEdit/
+    #: NotebookEdit call in this turn targeted a file outside the temp dir,
+    #: "scratch" when every one targeted a file inside it, None when the
+    #: turn made no such call. The temp dir is matched like a shell write
+    #: target (see ``shell_write_count``), so a forward-slash path counts.
+    edit_kind: str | None = None
 
     attribution_mcp_server: str | None = None
     attribution_mcp_tool: str | None = None

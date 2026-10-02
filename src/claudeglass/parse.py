@@ -218,7 +218,10 @@ from .model import (
 _SHELL_TOOL_NAMES = ("Bash", "PowerShell")
 
 #: tool name -> the input key holding the path to check against the
-#: system temp dir for ``edit_kind`` ("scratch" vs "real").
+#: system temp dir for ``edit_kind`` ("scratch" vs "real"). The test is
+#: ``_is_temp_target``, the one a shell write target gets, so a
+#: backslashed, forward-slash, mixed-case or Git Bash form of the temp
+#: dir all match.
 _EDIT_TOOL_PATH_KEYS = {
     "Edit": "file_path",
     "Write": "file_path",
@@ -536,14 +539,16 @@ def path_hash(path_value: str, salt: bytes) -> str:
 def _temp_prefixes() -> tuple[str, ...]:
     """The normalised directory prefixes (see :func:`_normalize_path_for_hash`,
     so the lower-case, forward-slash and Git Bash ``/c/`` forms all match)
-    that count as temp for a shell write: the system temp dir, and the
-    ``/tmp/`` Git Bash and Linux use."""
+    that count as temp for a shell write target or an edit tool's target:
+    the system temp dir, and the ``/tmp/`` Git Bash and Linux use."""
     return (_normalize_path_for_hash(tempfile.gettempdir()).rstrip("/") + "/", "/tmp/")
 
 
 def _is_temp_target(target: str, prefixes: tuple[str, ...]) -> bool:
-    """Whether a shell write target is inside a temp dir. A scratch file is
-    not an edit to your work, so ``Turn.shell_write_count`` leaves it out."""
+    """Whether a write target is inside a temp dir. A scratch file is not
+    an edit to your work, so ``Turn.shell_write_count`` leaves a shell
+    write to one out, and ``Turn.edit_kind`` calls an edit tool's write to
+    one "scratch"."""
     return _normalize_path_for_hash(target).startswith(prefixes)
 
 
@@ -1000,7 +1005,6 @@ def _merge_content_blocks(
     hook's label: a call here with the same key is an unchanged re-send."""
     if not isinstance(content, list):
         return
-    tmpdir = tempfile.gettempdir().lower()
     temp_prefixes = _temp_prefixes()
     for block in content:
         if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
@@ -1039,7 +1043,7 @@ def _merge_content_blocks(
         if path_key is not None:
             path_value = tool_input.get(path_key)
             if isinstance(path_value, str) and path_value:
-                if path_value.lower().startswith(tmpdir):
+                if _is_temp_target(path_value, temp_prefixes):
                     pending.edit_scratch_found = True
                 else:
                     pending.edit_real_found = True
