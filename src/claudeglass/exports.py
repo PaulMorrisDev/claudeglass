@@ -74,9 +74,9 @@ import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import __version__ as _TOOL_VERSION
+from . import discovery
 from .config import Config
 from .corpus import Corpus, SessionBundle
 from .model import TranscriptResult, Turn
@@ -121,12 +121,7 @@ def _parse_ts(ts: str | None) -> datetime | None:
 
 
 def _to_local(dt: datetime, tz: str | None) -> datetime:
-    if tz:
-        try:
-            return dt.astimezone(ZoneInfo(tz))
-        except (ZoneInfoNotFoundError, ValueError):
-            return dt.astimezone()
-    return dt.astimezone()
+    return discovery.to_local(dt, tz)
 
 
 def _priced_turns(result: TranscriptResult) -> list[Turn]:

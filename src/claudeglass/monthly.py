@@ -61,9 +61,8 @@ from calendar import monthrange
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import invocation, pages
+from . import discovery, invocation, pages
 from .config import Config
 from .corpus import Corpus, SessionBundle
 from .model import ReportModel, Table
@@ -124,12 +123,7 @@ def _parse_ts(ts: str | None) -> datetime | None:
 
 
 def _to_local(dt: datetime, tz: str | None) -> datetime:
-    if tz:
-        try:
-            return dt.astimezone(ZoneInfo(tz))
-        except (ZoneInfoNotFoundError, ValueError):
-            return dt.astimezone()
-    return dt.astimezone()
+    return discovery.to_local(dt, tz)
 
 
 # -- month-scoped corpus filtering -------------------------------------------

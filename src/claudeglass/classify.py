@@ -82,9 +82,11 @@ only (as ``effective_span_s`` — ``span_s`` itself is left alone since
 other consumers, and the multi-day flag below, want the session's real
 wall-clock extent).
 
-Timezone conversion (``start_local_hour``/``end_local_hour``) uses
-``zoneinfo.ZoneInfo``. On a machine with no system tz database and no
-``tzdata`` package installed (a bare Windows install, common on this
+Timezone conversion (``start_local_hour``/``end_local_hour``) goes
+through ``discovery.to_local``: ``UTC`` and ``Etc/UTC`` resolve without a
+tz database, other names through ``zoneinfo.ZoneInfo``. On a machine
+with no system tz database and no ``tzdata`` package installed (a bare
+Windows install, common on this
 project's own dev machine — confirmed by hand: ``ZoneInfo("America/
 New_York")`` raises ``ZoneInfoNotFoundError`` here), a named zone that
 can't be resolved degrades to the same behaviour as ``tz=None`` (the
@@ -101,9 +103,7 @@ import statistics
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
-from . import limits
+from . import discovery, limits
 from .model import (
     Classification,
     Column,
@@ -404,12 +404,7 @@ def _to_local(dt: datetime, tz: str | None) -> datetime:
     machine's own local zone when ``tz`` is falsy or can't be resolved
     (see the module docstring's timezone-conversion note).
     """
-    if tz:
-        try:
-            return dt.astimezone(ZoneInfo(tz))
-        except (ZoneInfoNotFoundError, ValueError):
-            return dt.astimezone()
-    return dt.astimezone()
+    return discovery.to_local(dt, tz)
 
 
 def _local_hour(ts: str | None, tz: str | None) -> int | None:

@@ -35,8 +35,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
-
+from . import discovery
 from .config import Config
 from .corpus import Corpus, SessionBundle
 from .model import Column, Section, Table, TranscriptResult, Turn
@@ -59,12 +58,7 @@ def _to_local(dt: datetime, tz: str | None) -> datetime:
     """Same convention as ``classify._to_local``: convert to ``tz`` (an
     IANA name), falling back to the machine's own local zone when ``tz``
     is falsy or can't be resolved."""
-    if tz:
-        try:
-            return dt.astimezone(ZoneInfo(tz))
-        except (ZoneInfoNotFoundError, ValueError):
-            return dt.astimezone()
-    return dt.astimezone()
+    return discovery.to_local(dt, tz)
 
 
 def _priced_turns(result: TranscriptResult) -> list[Turn]:
