@@ -231,12 +231,14 @@ def _models(ctx: Context) -> dict:
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_set_elsewhere(rows)
     # The agent-model cards (agents that ran on a larger model than their
-    # work needed): an advice-level one makes the check "act"; every
-    # info-level one is a tip, its title and why. Each one's own fix is
-    # offered either way.
+    # work needed): an advice-level one makes the check "act". Each one's
+    # own fix is offered either way; an info-level one with no prompt in
+    # its fix is a tip instead, its title and why. The cards share ids
+    # across agent types, so this is decided per card, not per id.
     agent_recs = [rec for rec in _recommendations(ctx, _AGENT_MODEL_RECS) if rec.key not in ctx.skip_keys]
     flagged = [rec for rec in agent_recs if rec.severity != "info"]
-    tips += [{"title": rec.title, "text": rec.why or rec.action} for rec in agent_recs if rec.severity == "info"]
+    tips += [{"title": rec.title, "text": rec.why or rec.action} for rec in agent_recs
+             if rec.severity == "info" and not _recs_with_prompt_fix([rec])]
     agent_fixes = _merge_fixes(_rec_fixes(agent_recs))
     if not fixes and not flagged:
         return _result(

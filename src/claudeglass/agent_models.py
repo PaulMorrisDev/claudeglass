@@ -9,7 +9,7 @@ verdicts, each at its own severity (see :data:`RULES`):
 
 - ``inherited`` -- the call set no model, no agent file chose one, and the
   agent wrote code on Opus or Fable. The one verdict that carries advice;
-  it drops to a tip once later writers of the same kind ran on Sonnet or
+  it drops to info once later writers of the same kind ran on Sonnet or
   smaller, so a rule that is already followed stops nagging.
 - ``asked`` -- the same, but the call named the larger model. Priced as a
   ceiling for information; never added to the ``inherited`` figure.
@@ -104,7 +104,7 @@ class AgentModelThresholds:
     """Every tunable number this module's verdicts depend on, in the same
     config-driven shape as ``model_swap.ModelSwapThresholds``."""
 
-    #: An ``inherited`` card drops from advice to a tip when this many
+    #: An ``inherited`` card drops from advice to info when this many
     #: later writers of the same kind (workflow or Agent tool) ran on
     #: Sonnet or smaller.
     later_compliant_for_info: int = 3
@@ -144,8 +144,8 @@ class AgentModelThresholds:
         return [
             f"An agent no role word describes counts as writing code when at least {self.unknown_min_edit_turns} "
             "of its replies edited code.",
-            f"The advice becomes a tip once {self.later_compliant_for_info} or more later agents that wrote code "
-            "ran on Sonnet or a smaller model.",
+            f"The card drops to For your information once {self.later_compliant_for_info} or more later agents "
+            "that wrote code ran on Sonnet or a smaller model.",
             f"An agent that decides counts as also changing code when at least {self.decide_apply_min_edit_turns} "
             "of its replies edited code.",
         ]

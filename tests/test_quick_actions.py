@@ -294,7 +294,7 @@ def test_models_check_names_three_advice_level_cards_then_counts_the_rest(tmp_pa
     )
 
 
-def test_models_check_lists_info_level_agent_model_cards_as_tips_and_offers_their_fixes(tmp_path):
+def test_models_check_offers_info_level_agent_model_cards_as_fixes_not_tips(tmp_path):
     plain = qa.run("models", _ctx(tmp_path, model=_model()))
     model = _model()
     model.recommendations = [
@@ -315,12 +315,28 @@ def test_models_check_lists_info_level_agent_model_cards_as_tips_and_offers_thei
         "Copy this rule to your CLAUDE.md.", "Find where these agents are started.",
         "Split the deciding from the applying.",
     ]
-    # Every info-level card is a tip too: its title and why.
+    # A card whose fix carries a prompt isn't said twice as a tip.
+    assert result["tips"] == plain["tips"]
+
+
+def test_models_check_lists_an_info_level_agent_model_card_with_no_prompt_as_a_tip(tmp_path):
+    plain = qa.run("models", _ctx(tmp_path, model=_model()))
+    model = _model()
+    model.recommendations = [
+        _agent_model_rec("agent-model-asked", "info", "46 agents that wrote code were started on Opus 5.5",
+                         why="Sonnet would cost less.", prompt="Find where these agents are started."),
+        _agent_model_rec("agent-model-asked", "info", "3 claude agents that wrote code were started on Opus 5.5",
+                         why="Sonnet would cost less here too."),
+    ]
+    # A fix with nothing to paste or run isn't offered.
+    model.recommendations[1].fixes = [{"key": None, "agent": None, "explainer": [], "command": None,
+                                       "command_warning": None, "prompt": None, "title": None}]
+    result = qa.run("models", _ctx(tmp_path, model=model))
+    assert result["status"] == "ok"
+    assert [fix["prompt"] for fix in result["fixes"]] == ["Find where these agents are started."]
+    # Decided per card: the same id with no prompt is still a tip.
     assert result["tips"] == plain["tips"] + [
-        {"title": _INHERITED, "text": "Your 6 later workflow runs set a model."},
-        {"title": "46 agents that wrote code were started on Opus 5.5", "text": "Sonnet would cost less."},
-        {"title": "5 general-purpose agents decided and changed code on Opus 5.5",
-         "text": "Splitting it lets Opus decide and Sonnet apply."},
+        {"title": "3 claude agents that wrote code were started on Opus 5.5", "text": "Sonnet would cost less here too."},
     ]
 
 
