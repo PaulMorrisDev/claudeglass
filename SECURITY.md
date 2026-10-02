@@ -166,10 +166,16 @@ Only numeric digests and short, non-identifying labels:
   the overridden numbers).
 
 For tool search, a reply keeps only how many tools were listed by name,
-by MCP server name, and the size of that list; a transcript keeps the
-size of each tool definition it loaded, by tool name. A definition's
-description and schema are never stored, and a tool name outside the
-API's tool-name alphabet (letters, digits, `_`, `-`, `.`) is dropped.
+by MCP server name, the size of that list and each server's share of
+it, the length of each server's instructions, and how many times Claude
+read each server's resources. A transcript keeps the size of each tool
+definition it loaded, by tool name; each MCP server's tool names after
+its prefix (at most 64 characters each); the size of the tools sent in
+full, by server; and each server's last connection problem (pending,
+needs sign-in, failed to connect). A definition's description and
+schema, and a server's instruction text, are never stored, and a tool
+name outside the API's tool-name alphabet (letters, digits, `_`, `-`,
+`.`) is dropped.
 
 For the quality signals, a message of yours keeps only a yes/no for
 whether its first 200 characters contain a correction phrase
@@ -178,6 +184,18 @@ notification keeps only its task id and status word, and a workflow
 agent only its state word from the run file (`done`, `error`,
 `progress`), never the run file's prompt or result previews. Edited files are
 known by the same salted hash as below (`Turn.edit_target_hashes`).
+
+To tell an agent that writes code from one that decides, an agent keeps
+one role word (`TranscriptMeta.role_word`): a single canonical word from
+a closed list (`agent_roles.py`: `implement`, `review`, `audit`, ...),
+found in its workflow phase, its agent type or the first four words of
+its description, and never the phase or description text it came from,
+which is dropped as the meta file is read. It also keeps whether its
+meta file records a model at all (`TranscriptMeta.model_recorded`:
+whether the file has a `description` or `workflowPhase` key, never the
+value), and a turn keeps a count of the writes its shell commands made
+outside the temp dir (`Turn.shell_write_count`; a file written twice
+counts twice), never the paths.
 
 `Turn.read_target_hashes` is the one exception to "no path fragment is
 ever stored", and it is deliberately a one-way hash rather than a

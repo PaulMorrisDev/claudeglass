@@ -131,6 +131,11 @@ def test_copy_keeps_to_short_plain_sentences(where, text):
     assert not CAMEL_CASE.search(text), f"{where}: camelCase name in {text!r}"
 
 
+def test_the_settings_help_says_changes_use_every_snapshot_not_only_the_window():
+    read = helptext.SECTION_COPY["config"].help.read
+    assert "This uses every snapshot recorded, not only this window's." in read
+
+
 @pytest.fixture(scope="module")
 def report(tmp_path_factory):
     project_dir = tmp_path_factory.mktemp("help") / "proj"
@@ -162,6 +167,64 @@ def test_not_yet_covered_list_only_shrinks(report):
         if kept and all(t.help and t.help.shows and all(c.help for c in t.columns) for t in kept):
             done.append(section.key)
     assert done == [], f"remove from NOT_YET_COVERED: {done}"
+
+
+#: The columns of ``agent_models.build_table``, in order.
+AGENT_MODEL_COLUMNS = [
+    "case", "agent_type", "verdict", "runs", "roles", "model", "cost_usd", "cost_on_sonnet_usd", "saving_usd",
+    "saving_pct", "write_turns", "workflow_runs", "first_seen", "last_seen", "later_compliant", "env_var_set",
+]
+
+
+def test_the_agent_models_table_is_kept_and_every_column_has_copy():
+    name = "model_swap_agent_models"
+    copy = helptext.TABLE_COPY[name]
+    assert helptext.placement_for(name) == "keep"
+    assert list(copy.columns) == AGENT_MODEL_COLUMNS
+    for key, (label, text) in copy.columns.items():
+        assert label and text, key
+    assert copy.help and copy.help.shows and copy.help.read and copy.help.act
+    assert copy.lead_columns[0] == "case" and len(copy.lead_columns) <= 7
+    assert all(key in copy.columns for key in copy.lead_columns)
+    assert copy.columns["model"][1] == "The model most of these agents ran on."
+    env_help = copy.columns["env_var_set"][1]
+    assert "force" not in env_help and "is set now" in env_help
+
+
+def test_the_agent_models_verdict_help_explains_each_finding_in_plain_words():
+    copy = helptext.TABLE_COPY["model_swap_agent_models"]
+    verdict_help = copy.columns["verdict"][1]
+    for raw, words in (
+        ("inherited", "No model set"),
+        ("asked", "Asked for a larger model"),
+        ("decide-apply", "Decided and changed code"),
+    ):
+        assert copy.value_labels[raw] == words
+        assert words in verdict_help
+
+
+@pytest.mark.parametrize("billing", ["api", "subscription"])
+def test_annotating_the_agent_models_table_fills_its_help_and_column_help(billing):
+    from claudeglass.model import Column, Section, Table
+
+    kinds = {"cost_usd": "money", "cost_on_sonnet_usd": "money", "saving_usd": "money", "saving_pct": "pct"}
+    table = Table(
+        name="model_swap_agent_models",
+        columns=[Column(key=key, label=key, kind=kinds.get(key, "str")) for key in AGENT_MODEL_COLUMNS],
+        rows=[],
+        value_labels={"workflow-subagent:inherited": "Workflow agents, no model set"},
+    )
+    helptext.annotate_section(Section(key="model_swap", tables=[table]), billing)
+    assert table.dashboard == "keep"
+    assert table.title == "Agents that ran on a larger model than their work needed"
+    assert table.help and table.help.shows
+    assert [c.label for c in table.columns][:4] == ["Agents and finding", "Agent", "Finding", "Agents"]
+    assert all(c.help for c in table.columns)
+    # The table's own row labels stay beside the copy's.
+    assert table.value_labels["workflow-subagent:inherited"] == "Workflow agents, no model set"
+    assert table.value_labels["inherited"] == "No model set"
+    if billing == "subscription":
+        assert all("list price" in c.help for c in table.columns if c.kind == "money")
 
 
 def test_annotate_keeps_names_keys_and_rows(report):

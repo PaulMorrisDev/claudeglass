@@ -54,15 +54,29 @@ number can never compound (see "Calibration" below).
    `impact.MIN_SESSIONS` (3) sessions between them, doesn't bound it:
    the two share their before and after. A change made in
    one project (an apply to its settings files, or a change only its
-   own settings files made) is judged on that project's sessions only,
-   and only changes that apply there bound it.
+   own files made: its settings files, its agents or its `.mcp.json`) is
+   judged on that project's sessions only, and only changes that apply
+   there bound it. A change to every project is bounded in each project
+   on its own (`impact.bounds`, the same call the Your changes cards
+   make): by the changes that apply there, with the sessions between
+   them counted in that project. So a change made in
+   one project cuts that project's before and after and no other's, and a
+   change to every project reads, across all projects, as the sum of its
+   readings in each. Sessions started under either spelling of a Windows
+   drive letter (`c--Dev-x` and `C--Dev-x`) are one project, and a change
+   recorded under either applies to them.
 3. **Measure.** The dollar quantity a prediction estimated is always
    either the whole session's cost (a main-session-level setting) or
    one agent's cost per spawn (an agent-scoped setting) — the same two
    totals `whatif.estimate` itself reprices from. Its before/after
    estimate is `impact._measure_row`'s own ratio-of-sums,
    stratum-reweighted, Holm-tested row (unchanged from EST-P3), called
-   for this one measure instead of a change point's whole table. When
+   for this one measure instead of a change point's whole table. A
+   prediction is a dollar saving, so it stays on money even though a
+   model change's card on Your changes now leads with tokens per session
+   (see [concepts](concepts.md#6-windows-what-if-estimates-and-beforeafter-comparisons)):
+   it is judged on cost per session, or on one agent's cost per spawn,
+   whatever the card shows first. When
    `counterfactual.py` can undo the predicted setting on the sessions
    after the change themselves (repriced, simulated or approximate, see
    [concepts](concepts.md#6-windows-what-if-estimates-and-beforeafter-comparisons)),
@@ -102,6 +116,34 @@ change point already bounds the after-window (so no more sessions can
 ever arrive for it). Otherwise the prediction is left unjudged and
 retried on a future call, so a change you just made isn't prematurely
 locked into a permanent negative verdict while data is still coming in.
+For a change to every project, only a later change to every project
+closes the window: a change made in one project bounds that project's
+after-window alone, and another project, or one not seen yet, can still
+add sessions. A prediction still waiting 90 days after it was made
+expires unjudged (`Store.prune_predictions`), like one that never
+matched.
+
+**Older `too_little_data` verdicts are judged again, once.** Versions
+before 0.13.0 cut a change's windows at every change made in any project,
+and at every flip of model, effort or CLAUDE.md between two sessions, so
+many windows closed too short. The first judging on a store puts every
+`too_little_data` prediction back to unjudged (a `meta` flag in the
+store records that it ran), and the sessions judge them again on the
+windows as they are now. A verdict reached after that stays; one whose
+window is open again waits, and expires, like any other.
+
+**The window picker lists predictions; it doesn't change a verdict.**
+`GET /api/backtest` takes the same window as `/api/impact` (none means
+all time) and lists the predictions that belong to it: a judged one by
+the change it was matched to, one still waiting by when it was logged.
+The judging reads the same sessions whichever window is open, reaching
+back to the oldest prediction still waiting so each change is judged on
+its whole before side, and a verdict is kept once it is reached, so
+narrowing the window only hides predictions, and never changes one. A
+prediction names no project, so the project picker is checked and then
+ignored: the table shows every project's predictions, says so with an
+"All projects" chip when a project is picked, and "since my last change"
+starts at the newest change in any project.
 
 ## Calibration (EST-P6)
 

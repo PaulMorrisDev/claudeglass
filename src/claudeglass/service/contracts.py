@@ -124,7 +124,11 @@ class WatcherStats:
     #: digest was written under an older ``PARSER_VERSION`` than the one
     #: now running (``FileWatcher._resolve``) -- lets an operator see a
     #: parser-version bump's corpus-wide rebuild actually happening,
-    #: rather than it silently never reaching untouched files.
+    #: rather than it silently never reaching untouched files. Also
+    #: counts the one-time re-parse after the rate card (``pricing.toml``,
+    #: or ``config.toml``'s ``pricing_path``) changes, since a card change
+    #: marks every stored transcript stale through the same path
+    #: (``FileWatcher._check_rate_card``).
     files_reparsed_stale_parser: int = 0
     #: Running total of transcripts currently marked missing
     #: (``Store.count_missing_transcripts``) as of this tick -- a

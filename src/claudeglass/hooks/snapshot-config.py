@@ -800,7 +800,18 @@ _SLUG_HASH_PREFIX = "slug"
 _SLUG_HASH_HEX_CHARS_REDACTED = 12
 
 
+#: A Windows slug starts with its drive letter (``C--Dev-x``), and Claude
+#: Code writes the letter in whichever case the folder was opened with, so
+#: one project can have two slugs. The key uses the upper-case spelling.
+#: Duplicates ``snapshots._DRIVE_SLUG_RE`` (this script imports nothing from
+#: the package); ``snapshots.snapshot_project_keys()[0]`` must give the same
+#: key, which ``test_hook`` checks.
+_DRIVE_SLUG_RE = re.compile(r"^[A-Za-z]--")
+
+
 def _redact_slug(slug: str) -> str:
+    if _DRIVE_SLUG_RE.match(slug):
+        slug = slug[0].upper() + slug[1:]
     digest = hashlib.sha256(slug.encode("utf-8")).hexdigest()[:_SLUG_HASH_HEX_CHARS_REDACTED]
     return f"{_SLUG_HASH_PREFIX}:{digest}"
 

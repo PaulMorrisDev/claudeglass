@@ -182,15 +182,26 @@ export function withWindow(url) {
   return addParams(url, [windowParam(), projectParam()]);
 }
 
-// The project only, for a route asked about its own period (the
-// Overview's previous window, by since and until).
-export function withProject(url) {
-  return addParams(url, [projectParam()]);
-}
-
 // What the window and project decide, as one cache key.
 export function scopeKey() {
   return state.window + (state.project ? "|" + state.project : "");
+}
+
+// How long a fetched report is served again. A window's start moves
+// while a tab sits open (the newest change for "Since my last change",
+// local midnight for a number of days), so a report is fetched afresh
+// after this long, and when the browser's day turns over.
+var REPORT_KEPT_MS = 5 * 60 * 1000;
+
+// The browser's local day, as a key: a change of it expires the reports.
+function browserDay() {
+  var now = new Date(Date.now());
+  return now.getFullYear() + "-" + (now.getMonth() + 1) + "-" + now.getDate();
+}
+
+// A kept report promise carries when and on which day it was fetched.
+function reportKept(promise) {
+  return Date.now() - promise.fetchedAt < REPORT_KEPT_MS && promise.fetchedDay === browserDay();
 }
 
 // The report for the window and the picked project. options.allProjects
@@ -200,6 +211,7 @@ export function scopeKey() {
 export function loadReport(options) {
   var allProjects = !!(options && options.allProjects && state.project);
   var key = allProjects ? state.window : scopeKey();
+  if (state.reportPromises[key] && !reportKept(state.reportPromises[key])) delete state.reportPromises[key];
   if (state.reportPromises[key]) {
     // A report fetched earlier is drawn again: its figures' time counts.
     if (!allProjects) {
@@ -210,12 +222,13 @@ export function loadReport(options) {
   } else {
     var url = allProjects ? "/api/report.json?" + windowParam() : withWindow("/api/report.json");
     var everyProject = allProjects || !state.project;
-    state.reportPromises[key] = fetchJson(url, undefined, allProjects).then(function (result) {
+    var fetched = fetchJson(url, undefined, allProjects).then(function (result) {
       var body = result.body;
       if (!body || body.ok === false) {
         // Not kept: the next view that asks fetches it again (the
-        // service may be back, or the failure passing).
-        delete state.reportPromises[key];
+        // service may be back, or the failure passing). A newer fetch
+        // that replaced this one stays.
+        if (state.reportPromises[key] === fetched) delete state.reportPromises[key];
         if (result.httpStatus === 0) connection.reportFailed = true;
         return { error: (body && body.error) || { code: "error", message: "failed to load report" } };
       }
@@ -241,6 +254,9 @@ export function loadReport(options) {
       if (report && report.meta && report.meta.projects && everyProject) setKnownProjects(report.meta.projects);
       return { report: report, asOf: asOf };
     });
+    fetched.fetchedAt = Date.now();
+    fetched.fetchedDay = browserDay();
+    state.reportPromises[key] = fetched;
   }
   return state.reportPromises[key];
 }
@@ -258,32 +274,41 @@ export function loadProjects() {
 // /api/recommendations for the window and project on screen, fetched
 // once per window and project and shared by every view that reads it
 // (the Actions badge and inbox, the Overview, the "Feeds N actions"
-// chips). Resolves to fetchJson's result; a failed fetch isn't kept, so
-// the next caller asks again.
+// chips). Built from the report, so kept as long as a report is
+// (reportKept). Resolves to fetchJson's result; a failed fetch isn't
+// kept, so the next caller asks again.
 export function loadRecommendations() {
   var key = scopeKey();
+  if (state.recommendationPromises[key] && !reportKept(state.recommendationPromises[key])) delete state.recommendationPromises[key];
   if (!state.recommendationPromises[key]) {
-    state.recommendationPromises[key] = fetchJson(withWindow("/api/recommendations")).then(function (result) {
+    var fetched = fetchJson(withWindow("/api/recommendations")).then(function (result) {
       var body = result.body;
-      if (!body || body.ok !== true || !Array.isArray(body.data)) delete state.recommendationPromises[key];
+      if ((!body || body.ok !== true || !Array.isArray(body.data)) && state.recommendationPromises[key] === fetched) delete state.recommendationPromises[key];
       return result;
     });
+    fetched.fetchedAt = Date.now();
+    fetched.fetchedDay = browserDay();
+    state.recommendationPromises[key] = fetched;
   }
   return state.recommendationPromises[key];
 }
 
 // /api/quick-actions (the checks) for the window and project on screen,
 // fetched once per window and project the same way: Actions › Checks,
-// the recommendation detail and search share it. A failed fetch isn't
-// kept.
+// the recommendation detail and search share it. Kept as long as a
+// report is; a failed fetch isn't kept.
 export function loadQuickActions() {
   var key = scopeKey();
+  if (state.quickActionPromises[key] && !reportKept(state.quickActionPromises[key])) delete state.quickActionPromises[key];
   if (!state.quickActionPromises[key]) {
-    state.quickActionPromises[key] = fetchJson(withWindow("/api/quick-actions")).then(function (result) {
+    var fetched = fetchJson(withWindow("/api/quick-actions")).then(function (result) {
       var body = result.body;
-      if (!body || body.ok !== true) delete state.quickActionPromises[key];
+      if ((!body || body.ok !== true) && state.quickActionPromises[key] === fetched) delete state.quickActionPromises[key];
       return result;
     });
+    fetched.fetchedAt = Date.now();
+    fetched.fetchedDay = browserDay();
+    state.quickActionPromises[key] = fetched;
   }
   return state.quickActionPromises[key];
 }
@@ -308,6 +333,15 @@ export function prefetchActions() {
 var GROUP_TITLES = {
   "model-tier": function (n) {
     return n + " agent types could run a cheaper model";
+  },
+  "agent-model-inherited": function (n) {
+    return n + " kinds of agent wrote code with no model set";
+  },
+  "agent-model-asked": function (n) {
+    return n + " kinds of agent that write code were started on a larger model";
+  },
+  "agent-decide-apply": function (n) {
+    return n + " kinds of agent decided and changed code";
   },
   "ttl-switch": function (n) {
     return "The cache lifetime (TTL) is a poor fit for " + n + " agent types";

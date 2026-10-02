@@ -10,17 +10,17 @@ import { button, drawer, errorNotice, loadingNode, prose, tile, tileRow, toast }
 import { dataGrid, renderMappedSections, renderReportBackedSection } from "./grid.js";
 import { replaceParams, viewIntro } from "./links.js";
 import { chartError, dayLabel, holdChart } from "./charts.js";
-import { dailyChanges, modeColour, renderChart, savingsLevers, sessionContextChart, windowDays } from "./charts-types.js";
+import { dailyChanges, modeColour, renderChart, savingsLevers, sessionContextChart, windowSpan } from "./charts-types.js";
 
 // ======================================================================
 // Spend, Sessions: which sessions stand out (chart 4), over the list. A
 // stretch of time picked on the chart, or a day picked on a daily spend
-// chart (?day=YYYY-MM-DD, a UTC day), narrows the list.
+// chart (?day=YYYY-MM-DD, a local day as the service counts it), narrows
+// the list.
 // ======================================================================
 
 // The window's sessions, newest first, up to this many.
 var SESSIONS_LIMIT = 2000;
-var DAY_MS = 86400000;
 
 // run: the draw on screen, so an older draw's late answer is dropped.
 var sessionsView = { run: 0, rows: [], range: null, day: null };
@@ -30,7 +30,10 @@ function validDay(value) {
 }
 
 // The sessions the list shows: those started in the picked stretch, or
-// active on the picked day.
+// active on the picked day. The service names each session's first and
+// last day (/api/sessions: first_day, last_day, its local days), so the
+// day matches the chart's column; an older service gives the timestamps,
+// whose UTC dates stand in.
 function shownSessions() {
   var rows = sessionsView.rows;
   if (sessionsView.range) {
@@ -42,11 +45,11 @@ function shownSessions() {
     });
   }
   if (sessionsView.day) {
-    var dayStart = Date.parse(sessionsView.day + "T00:00:00Z");
+    var day = sessionsView.day;
     return rows.filter(function (row) {
-      var first = Date.parse(row.first_ts);
-      var last = Date.parse(row.last_ts || row.first_ts);
-      return first < dayStart + DAY_MS && last >= dayStart;
+      var first = row.first_day || String(row.first_ts || "").slice(0, 10);
+      var last = row.last_day || (row.last_ts ? String(row.last_ts).slice(0, 10) : first);
+      return first <= day && last >= day;
     });
   }
   return rows;
@@ -108,7 +111,7 @@ export function renderSessions(panel) {
     if (sessionsView.range) {
       what = "Sessions started from " + shortTs(new Date(sessionsView.range[0]).toISOString()) + " to " + shortTs(new Date(sessionsView.range[1]).toISOString());
     } else if (sessionsView.day) {
-      what = "Sessions active on " + dayLabel(sessionsView.day, true) + " (a UTC day)";
+      what = "Sessions active on " + dayLabel(sessionsView.day, true);
     }
     if (!what) return;
     var showAll = button("Show all sessions", { variant: "quiet" });
@@ -623,7 +626,8 @@ export function renderUsage(panel) {
   panel.appendChild(controls);
   panel.appendChild(chartHost);
   var loads = {};
-  var impactLoad = fetchJson("/api/impact");
+  // The changes made in the window (and the project), marked on the chart.
+  var impactLoad = fetchJson(withWindow("/api/impact"));
   // The window's whole sessions, as the cost by model below counts them:
   // the chart's reading gives that figure too, and says why it differs.
   var summaryLoad = fetchJson(withWindow("/api/summary"));
@@ -646,7 +650,7 @@ export function renderUsage(panel) {
         "daily-spend",
         Object.assign(
           { rows: daily.data || [], split: wanted, changes: dailyChanges(loaded[1].body), sessionsTotal: summary && summary.ok === true ? summary.data.total_cost : null },
-          windowDays(state.window)
+          windowSpan(summary)
         ),
         {
           slot: "usage",
@@ -690,12 +694,14 @@ export function renderUsage(panel) {
     renderMappedSections(result.report, "spend/usage", sectionContainer);
   });
 
+  // The compactions of the sessions the window counts, whole, as the
+  // compactions section above counts them: the server lists them so.
   var compactions = el("section", { class: "report-section", id: "usage-compactions-section" });
-  compactions.appendChild(el("h2", { class: "section-title", text: "Every conversation summary in this window" }));
+  compactions.appendChild(el("h2", { class: "section-title", text: "Every conversation summary in this window's sessions" }));
   compactions.appendChild(
     el("p", {
       class: "section-intro",
-      text: "Each time Claude Code summarised a conversation to make room (a compaction), newest first.",
+      text: "Each time Claude Code summarised a conversation to make room (a compaction), newest first. A session counts whole, so one that began before this window lists all its summaries.",
     })
   );
   var compactionsContainer = el("div", { id: "usage-compactions" });

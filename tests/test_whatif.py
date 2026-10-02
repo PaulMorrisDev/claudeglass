@@ -115,6 +115,49 @@ def test_an_agent_model_prices_only_the_runs_its_agent_file_decides():
     assert "workflow script" in none["basis"]
 
 
+def _swap_model(columns: dict, model_ids: dict | None = None):
+    """A report whose main session row carries only ``columns`` (and,
+    with ``model_ids``, a ``meta.model_ids`` like a real report's)."""
+    row = {"agent_type": "top-level", "observed_model": "claude-fable-5", "observed_cost": 100.0, **columns}
+    model = NS(sections=[NS(key="model_swap", tables=[_table("model_swap_by_agent_type", [row])])])
+    if model_ids is not None:
+        model.meta = NS(model_ids=model_ids)
+    return model
+
+
+def test_an_alias_prices_at_the_column_the_rate_card_names():
+    # "best" names no column itself; the rate card's alias table puts it
+    # on Fable 5.1, as it does "sonnet[1m]" on Sonnet 5.5.
+    columns = {"cost_claude-fable-5-1": 70.0, "cost_claude-sonnet-5-5": 30.0, "cost_claude-sonnet-5": 25.0}
+    model = _swap_model(columns, {"best": "claude-fable-5-1", "sonnet[1m]": "claude-sonnet-5-5"})
+    [best] = whatif.estimate({"model": "best"}, {}, model, UNITS, period=PERIOD)["rows"]
+    assert (best["saving_usd"], best["fidelity"]) == (30.0, "ceiling")
+    assert "at claude-fable-5-1" in best["basis"]
+    [sonnet] = whatif.estimate({"model": "sonnet[1m]"}, {}, model, UNITS, period=PERIOD)["rows"]
+    assert sonnet["saving_usd"] == 70.0
+    # Without meta.model_ids, an alias that names no column stays unpriced.
+    [none] = whatif.estimate({"model": "best"}, {}, _swap_model(columns), UNITS, period=PERIOD)["rows"]
+    assert none["saving_usd"] is None and none["basis"] == "No price for best in the rate card."
+
+
+def test_an_alias_whose_target_has_no_column_falls_back_to_the_column_names():
+    model = _swap_model({"cost_claude-sonnet-5": 25.0}, {"sonnet": "claude-sonnet-5-5"})
+    [row] = whatif.estimate({"model": "sonnet"}, {}, model, UNITS, period=PERIOD)["rows"]
+    assert row["saving_usd"] == 75.0
+
+
+def test_the_newest_model_is_picked_by_version_number_not_by_spelling():
+    # As text, "claude-opus-4-9" sorts after "claude-opus-4-10".
+    columns = {"cost_claude-opus-4-9": 60.0, "cost_claude-opus-4-10": 40.0, "cost_claude-3-opus-20240229": 90.0}
+    [row] = whatif.estimate({"model": "opus"}, {}, _swap_model(columns), UNITS, period=PERIOD)["rows"]
+    assert row["saving_usd"] == 60.0
+    assert "at claude-opus-4-10" in row["basis"]
+    # A date is not a version: Sonnet 5.5 beats a dated Sonnet 5.
+    columns = {"cost_claude-sonnet-5-20260101": 10.0, "cost_claude-sonnet-5-5": 20.0}
+    [row] = whatif.estimate({"model": "sonnet"}, {}, _swap_model(columns), UNITS, period=PERIOD)["rows"]
+    assert "at claude-sonnet-5-5" in row["basis"]
+
+
 def test_subagent_ttl_sums_every_subagent_and_can_cost_more():
     [row] = _estimate({"subagentPromptCacheTtl": "1h"})["rows"]
     assert row["saving_usd"] == -1.5

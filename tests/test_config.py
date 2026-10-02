@@ -17,6 +17,8 @@ from claudeglass.config import (
     load_prediction_log,
     load_session_overrides,
     save_session_override,
+    saved_pricing_path,
+    saved_retention_days,
 )
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures" / "config"
@@ -488,6 +490,43 @@ def test_explicit_billing_wins_over_usage_log(tmp_path):
     assert config.billing_source == "set in config.toml"
     (tmp_path / "config.toml").write_text('billing = "auto"\n', encoding="utf-8")
     assert load_config(config_dir=tmp_path).billing == "subscription"
+
+
+# --------------------------------------------------------------------
+# saved_pricing_path: the one key the service's scanner reads each tick
+# --------------------------------------------------------------------
+
+
+def test_saved_pricing_path_reads_the_key_or_none(tmp_path):
+    assert saved_pricing_path(tmp_path) is None
+    (tmp_path / "config.toml").write_text('billing = "api"\n', encoding="utf-8")
+    assert saved_pricing_path(tmp_path) is None
+    (tmp_path / "config.toml").write_text('pricing_path = "/custom/pricing.toml"\n', encoding="utf-8")
+    assert saved_pricing_path(tmp_path) == "/custom/pricing.toml"
+    (tmp_path / "config.toml").write_text("pricing_path = 3\n", encoding="utf-8")
+    assert saved_pricing_path(tmp_path) is None
+
+
+def test_saved_pricing_path_matches_load_config(tmp_path):
+    (tmp_path / "config.toml").write_text(
+        (FIXTURES / "config_valid.toml").read_text(encoding="utf-8"), encoding="utf-8"
+    )
+    assert saved_pricing_path(tmp_path) == load_config(config_dir=tmp_path).pricing_path == "/custom/pricing.toml"
+
+
+def test_saved_pricing_path_on_malformed_toml_raises_config_error(tmp_path):
+    (tmp_path / "config.toml").write_text("not = = toml\n", encoding="utf-8")
+    with pytest.raises(ConfigError):
+        saved_pricing_path(tmp_path)
+
+
+def test_saved_retention_days_reads_the_key_or_none(tmp_path):
+    assert saved_retention_days(tmp_path) is None
+    (tmp_path / "config.toml").write_text("retention_days = 30\n", encoding="utf-8")
+    assert saved_retention_days(tmp_path) == 30
+    for bad in ("0", "true", '"30"', "99999999"):
+        (tmp_path / "config.toml").write_text(f"retention_days = {bad}\n", encoding="utf-8")
+        assert saved_retention_days(tmp_path) is None
 
 
 # --------------------------------------------------------------------

@@ -17,7 +17,10 @@ import json
 import shutil
 from pathlib import Path
 
+import pytest
+
 from claudeglass import snapshots as snap_mod
+from claudeglass.pricing import load_pricing
 
 from helpers import assert_privacy
 
@@ -170,6 +173,146 @@ def test_diff_keys_excludes_unchanged_keys():
     assert "env_names" not in diff
 
 
+# -- per-project chains: canonical_project_keys / project_chains / changed_keys ---
+
+
+def _user_snapshot(project_slug: str, ts: str, **user_settings) -> snap_mod.Snapshot:
+    """A snapshot whose only diffable section is ``user_settings``."""
+    return _schema2_snapshot(project_slug=project_slug, ts=ts, user_settings=user_settings)
+
+
+def test_canonical_project_keys_maps_both_drive_letter_keys_to_the_canonical_one():
+    upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
+    assert upper != lower
+    assert snap_mod.canonical_project_keys(["C--Dev-x"]) == {upper: upper, lower: upper}
+    assert snap_mod.canonical_project_keys(["c--Dev-x"]) == {upper: upper, lower: upper}
+
+
+def test_canonical_project_keys_a_slug_without_a_drive_letter_maps_to_itself():
+    key = snap_mod.snapshot_project_key("home-me-proj")
+    assert snap_mod.canonical_project_keys(["home-me-proj"]) == {key: key}
+
+
+def test_project_chains_split_snapshots_by_project_in_order():
+    a1 = _user_snapshot("proj-a", "20260901T000000Z", model="opus")
+    b1 = _user_snapshot("proj-b", "20260902T000000Z", model="sonnet")
+    a2 = _user_snapshot("proj-a", "20260903T000000Z", model="opus")
+    chains = snap_mod.project_chains([a1, b1, a2])
+    assert chains == {"proj-a": [a1, a2], "proj-b": [b1]}
+
+
+def test_project_chains_fold_legacy_and_canonical_keys_into_one_chain():
+    upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
+    legacy = _user_snapshot(lower, "20260901T000000Z", model="opus")
+    current = _user_snapshot(upper, "20260902T000000Z", model="sonnet")
+    canonical = snap_mod.canonical_project_keys(["C--Dev-x"])
+    assert snap_mod.project_chains([legacy, current], canonical) == {upper: [legacy, current]}
+    assert set(snap_mod.project_chains([legacy, current])) == {upper, lower}
+
+
+def test_changed_keys_two_projects_alternating_with_stable_settings_changed_nothing():
+    """Each project keeps its own setting; the time-ordered list differs at
+    every step, but no project ever changed anything."""
+    snapshots = [
+        _user_snapshot("proj-a", "20260901T000000Z", model="opus"),
+        _user_snapshot("proj-b", "20260902T000000Z", model="sonnet"),
+        _user_snapshot("proj-a", "20260903T000000Z", model="opus"),
+        _user_snapshot("proj-b", "20260904T000000Z", model="sonnet"),
+    ]
+    assert snap_mod.diff_keys(snapshots) != {}  # the interleaved diff reads it as a change
+    assert snap_mod.changed_keys(snapshots) == []
+
+
+def test_changed_keys_a_real_change_in_one_chain_shows_once():
+    snapshots = [
+        _user_snapshot("proj-a", "20260901T000000Z", model="opus", effortLevel="high"),
+        _user_snapshot("proj-b", "20260902T000000Z", model="sonnet", effortLevel="high"),
+        _user_snapshot("proj-a", "20260903T000000Z", model="opus", effortLevel="low"),
+        _user_snapshot("proj-b", "20260904T000000Z", model="sonnet", effortLevel="high"),
+        _user_snapshot("proj-a", "20260905T000000Z", model="opus", effortLevel="medium"),
+    ]
+    assert snap_mod.changed_keys(snapshots) == ["user_settings.effortLevel"]
+
+
+def test_changed_keys_a_key_both_projects_changed_is_listed_once():
+    snapshots = [
+        _user_snapshot("proj-a", "20260901T000000Z", model="opus"),
+        _user_snapshot("proj-b", "20260902T000000Z", model="opus"),
+        _user_snapshot("proj-a", "20260903T000000Z", model="sonnet"),
+        _user_snapshot("proj-b", "20260904T000000Z", model="haiku"),
+    ]
+    assert snap_mod.changed_keys(snapshots) == ["user_settings.model"]
+
+
+def test_changed_keys_a_project_with_one_snapshot_changed_nothing():
+    assert snap_mod.changed_keys([_user_snapshot("proj-a", "20260901T000000Z", model="opus")]) == []
+    assert snap_mod.changed_keys([]) == []
+
+
+def test_changed_keys_counts_a_drive_letter_pair_as_one_chain():
+    """The same project's legacy and canonical rows: a real change shows once,
+    and no change at all shows nothing, however the rows are keyed."""
+    upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
+    canonical = snap_mod.canonical_project_keys(["C--Dev-x"])
+    same = [
+        _user_snapshot(lower, "20260901T000000Z", model="opus"),
+        _user_snapshot(upper, "20260902T000000Z", model="opus"),
+    ]
+    assert snap_mod.changed_keys(same, canonical) == []
+    changed = [
+        _user_snapshot(lower, "20260901T000000Z", model="opus"),
+        _user_snapshot(upper, "20260902T000000Z", model="sonnet"),
+    ]
+    assert snap_mod.changed_keys(changed, canonical) == ["user_settings.model"]
+    # Without the mapping the two rows are two chains of one snapshot each.
+    assert snap_mod.changed_keys(changed) == []
+
+
+def test_changed_keys_project_less_snapshots_are_their_own_chain():
+    schema1_a = snap_mod.Snapshot(
+        path=Path("a"), ts="20260901T000000Z", data={"schema": 1, "user_settings": {"model": "opus"}}
+    )
+    schema1_b = snap_mod.Snapshot(
+        path=Path("b"), ts="20260902T000000Z", data={"schema": 1, "user_settings": {"model": "sonnet"}}
+    )
+    project = _user_snapshot("proj-a", "20260903T000000Z", model="haiku")
+    assert snap_mod.changed_keys([schema1_a, schema1_b, project]) == ["user_settings.model"]
+
+
+def test_project_snapshots_keeps_only_the_projects_own_rows_under_either_key():
+    upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
+    legacy = _user_snapshot(lower, "20260901T000000Z", model="opus")
+    other = _user_snapshot("proj-b", "20260902T000000Z", model="sonnet")
+    current = _user_snapshot(upper, "20260903T000000Z", model="haiku")
+    assert snap_mod.project_snapshots([legacy, other, current], {upper, lower}) == [legacy, current]
+    assert snap_mod.project_snapshots([legacy, other, current], {"proj-b"}) == [other]
+
+
+def test_project_snapshots_a_project_with_no_rows_falls_back_to_the_project_less_ones():
+    schema1 = snap_mod.Snapshot(path=Path("a"), ts="20260901T000000Z", data={"schema": 1})
+    other = _user_snapshot("proj-b", "20260902T000000Z", model="sonnet")
+    assert snap_mod.project_snapshots([schema1, other], {"slug:nothing"}) == [schema1]
+    assert snap_mod.project_snapshots([other], {"slug:nothing"}) == []
+
+
+def test_snapshots_for_projects_joins_each_projects_own_rows_in_order():
+    """Two projects by their folder names: each one's rows under either
+    drive-letter key, in the list's order, another project's left out. A
+    named project with no rows of its own brings the project-less ones."""
+    upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
+    key_b, key_c = snap_mod.snapshot_project_key("proj-b"), snap_mod.snapshot_project_key("proj-c")
+    schema1 = snap_mod.Snapshot(path=Path("a"), ts="20260801T000000Z", data={"schema": 1})
+    legacy = _user_snapshot(lower, "20260901T000000Z", model="opus")
+    b = _user_snapshot(key_b, "20260902T000000Z", model="sonnet")
+    c = _user_snapshot(key_c, "20260903T000000Z", model="haiku")
+    current = _user_snapshot(upper, "20260904T000000Z", model="opus")
+    snapshots = [schema1, legacy, b, c, current]
+
+    assert snap_mod.snapshots_for_projects(snapshots, ["c--Dev-x", "proj-b"]) == [legacy, b, current]
+    assert snap_mod.snapshots_for_projects(snapshots, ["proj-nothing"]) == [schema1]
+    assert snap_mod.snapshots_for_projects(snapshots, []) == []
+
+
 # -- co_changed_keys --------------------------------------------------------
 
 
@@ -311,6 +454,19 @@ def test_build_config_diff_table_no_co_changed_keys_note():
     table = snap_mod.build_config_diff_table(
         _sessions_with_metrics(), snapshots, "user_settings.model"
     )
+    assert any("No other setting changed" in note for note in table.notes)
+
+
+def test_build_config_diff_table_co_changed_note_follows_each_projects_own_chain():
+    """Each project's settings are stable; a time-ordered pairing would see
+    the model and effort change at every step and credit them to each other."""
+    snapshots = [
+        _user_snapshot("proj-a", "20260901T000000Z", model="opus", effortLevel="high"),
+        _user_snapshot("proj-b", "20260902T000000Z", model="haiku", effortLevel="low"),
+        _user_snapshot("proj-a", "20260903T000000Z", model="opus", effortLevel="high"),
+        _user_snapshot("proj-b", "20260904T000000Z", model="haiku", effortLevel="low"),
+    ]
+    table = snap_mod.build_config_diff_table([], snapshots, "user_settings.model")
     assert any("No other setting changed" in note for note in table.notes)
 
 
@@ -482,6 +638,23 @@ def test_latest_snapshot_per_project_schema1_snapshots_collapse_to_one_bucket():
     assert latest["(unknown project)"] is b
 
 
+@pytest.mark.parametrize("legacy_first", [True, False])
+def test_latest_snapshot_per_project_folds_a_projects_two_drive_letter_keys_into_one_newest_entry(legacy_first):
+    upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
+    canonical = snap_mod.canonical_project_keys(["C--Dev-x"])
+    older_key, newer_key = (lower, upper) if legacy_first else (upper, lower)
+    older = _schema2_snapshot(project_slug=older_key, ts="20260901T000000Z", effective={"model": "sonnet"})
+    newer = _schema2_snapshot(project_slug=newer_key, ts="20260910T000000Z", effective={"model": "opus"})
+    other = _schema2_snapshot(project_slug="proj-b", ts="20260905T000000Z", effective={"model": "fable"})
+
+    latest = snap_mod.latest_snapshot_per_project([older, other, newer], canonical)
+
+    assert set(latest) == {upper, "proj-b"}
+    assert latest[upper] is newer
+    # Without the mapping a hash cannot be folded: the same project is listed twice.
+    assert set(snap_mod.latest_snapshot_per_project([older, other, newer])) == {upper, lower, "proj-b"}
+
+
 # -- schema 2: with_every_project_agents -------------------------------------
 
 
@@ -542,6 +715,49 @@ def test_with_every_project_agents_reads_settings_from_the_newest_snapshot_that_
     view = snap_mod.with_every_project_agents([settings, schema1])
 
     assert snap_mod.effective_config(view) == {"model": "sonnet"}
+
+
+def test_with_every_project_agents_for_a_picked_project_uses_that_projects_snapshot():
+    """Picking a project hands over its own snapshots: the settings and the
+    agents come from them, never from a newer snapshot of another project."""
+    mine = _schema2_snapshot(
+        project_slug="revixo",
+        ts="20260920T000000Z",
+        effective={"model": "opus"},
+        agents={"implementer": _agent("project", "haiku")},
+    )
+    other = _schema2_snapshot(
+        project_slug="claudeglass",
+        ts="20260923T000000Z",
+        effective={"model": "sonnet"},
+        agents={"reviewer": _agent("project", "opus")},
+    )
+    scoped = snap_mod.project_snapshots([mine, other], {"revixo"})
+
+    view = snap_mod.with_every_project_agents(scoped)
+
+    assert snap_mod.effective_config(view) == {"model": "opus"}
+    assert view.ts == mine.ts
+    assert set(view.data["agents"]) == {"implementer"}
+    # Every project, unscoped: the newest settings, with both projects' agents.
+    everyone = snap_mod.with_every_project_agents([mine, other])
+    assert snap_mod.effective_config(everyone) == {"model": "sonnet"}
+    assert set(everyone.data["agents"]) == {"implementer", "reviewer"}
+
+
+def test_with_every_project_agents_folds_a_projects_drive_letter_keys():
+    upper, lower = snap_mod.snapshot_project_keys("C--Dev-x")
+    canonical = snap_mod.canonical_project_keys(["C--Dev-x"])
+    older = _schema2_snapshot(
+        project_slug=lower, ts="20260920T000000Z", agents={"implementer": _agent("project", "haiku")}
+    )
+    newer = _schema2_snapshot(
+        project_slug=upper, ts="20260923T000000Z", agents={"implementer": _agent("project", "opus")}
+    )
+
+    view = snap_mod.with_every_project_agents([older, newer], canonical)
+
+    assert view.data["agents"]["implementer"] == _agent("project", "opus")
 
 
 def test_with_every_project_agents_is_none_without_snapshots():
@@ -707,6 +923,114 @@ def test_build_config_drift_table_no_drift_notes_it():
     assert any("No drift detected" in note for note in table.notes)
 
 
+# -- detect_drift: a model setting compared by what it can mean --------------
+
+
+def _model_drift(setting: object, observed: str, resolve: bool = True) -> list:
+    """``detect_drift`` on the ``model`` key alone, resolved through the
+    packaged rate card. Loaded inside the test, where conftest has already
+    pointed the config dir at a throwaway one."""
+    resolve_model = load_pricing().resolve_model if resolve else None
+    snap = _schema2_snapshot(effective={"model": setting})
+    return snap_mod.detect_drift(snap, {"model": observed}, resolve_model=resolve_model)
+
+
+@pytest.mark.parametrize("setting", ["opus", "opus[1m]", "Opus"])
+def test_detect_drift_opus_alias_accepts_an_older_opus(setting):
+    """``opus`` follows the newest Opus, so a session that ran an older one
+    is the same family, not drift."""
+    assert _model_drift(setting, "claude-opus-5") == []
+    assert _model_drift(setting, "claude-opus-4-5-20251101") == []
+
+
+def test_detect_drift_alias_still_drifts_across_families():
+    assert _model_drift("opus", "claude-sonnet-5-5") == [("model", "opus", "claude-sonnet-5-5")]
+    assert _model_drift("sonnet[1m]", "claude-opus-5-5") == [("model", "sonnet[1m]", "claude-opus-5-5")]
+
+
+def test_detect_drift_explicit_id_compares_exactly():
+    assert _model_drift("claude-opus-5-5", "claude-opus-5") == [("model", "claude-opus-5-5", "claude-opus-5")]
+    assert _model_drift("claude-opus-5-5", "claude-opus-5-5") == []
+
+
+def test_detect_drift_explicit_alias_id_compares_by_canonical_id_not_family():
+    """``claude-haiku-4-5`` is a rate-card alias but an explicit pin: it
+    matches its own dated id and nothing else of the Haiku family."""
+    assert _model_drift("claude-haiku-4-5", "claude-haiku-4-5-20251001") == []
+    assert _model_drift("claude-haiku-4-5", "claude-3-5-haiku-20241022") != []
+
+
+def test_detect_drift_newer_release_priced_as_an_older_one_is_its_own_pin():
+    """Until the rate card has a row for ``claude-opus-5-7`` it is priced
+    as ``claude-opus-5``, but a pin on one and a session on the other are
+    still different releases. Its dated and cloud forms are the same one."""
+    assert _model_drift("claude-opus-5-7", "claude-opus-5") == [("model", "claude-opus-5-7", "claude-opus-5")]
+    assert _model_drift("claude-opus-5", "claude-opus-5-7") == [("model", "claude-opus-5", "claude-opus-5-7")]
+    assert _model_drift("claude-opus-5-7", "claude-opus-5-7-20261101") == []
+    assert _model_drift("claude-opus-5-7", "us.anthropic.claude-opus-5-7-v1:0") == []
+
+
+@pytest.mark.parametrize(
+    "old,new",
+    [
+        ("us.anthropic.claude-opus-4-1-20250805-v1:0", "us.anthropic.claude-opus-4-5-20251101-v1:0"),
+        ("claude-opus-4-1@20250805", "claude-opus-4-5@20251101"),
+        (
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-4-1-20250805-v1:0",
+            "arn:aws:bedrock:us-east-1:123456789012:inference-profile/us.anthropic.claude-opus-4-5-20251101-v1:0",
+        ),
+    ],
+)
+def test_detect_drift_cloud_pin_moved_within_a_family_still_drifts(old, new):
+    """A Bedrock, Vertex or ARN pin carries digits, so it is never read as
+    an alias: Opus 4.1 to 4.5 is drift even though both are Opus."""
+    assert _model_drift(old, new) == [("model", old, new)]
+    assert _model_drift(old, old) == []
+
+
+@pytest.mark.parametrize("observed", ["claude-opus-5-5", "claude-haiku-4-5-20251001", "<unknown>"])
+@pytest.mark.parametrize("resolve", [True, False])
+def test_detect_drift_default_never_drifts(observed, resolve):
+    assert _model_drift("default", observed, resolve=resolve) == []
+
+
+@pytest.mark.parametrize("observed", ["claude-opus-5", "claude-sonnet-5", "claude-opus-5-5"])
+def test_detect_drift_opusplan_accepts_opus_or_sonnet(observed):
+    assert _model_drift("opusplan", observed) == []
+
+
+@pytest.mark.parametrize("observed", ["claude-haiku-4-5-20251001", "claude-fable-5-1"])
+def test_detect_drift_opusplan_flags_other_families(observed):
+    assert _model_drift("opusplan", observed) == [("model", "opusplan", observed)]
+
+
+def test_detect_drift_best_reads_as_fable_through_the_rate_card():
+    assert _model_drift("best", "claude-fable-5") == []
+    assert _model_drift("best", "claude-opus-5-5") == [("model", "best", "claude-opus-5-5")]
+
+
+def test_detect_drift_alias_shaped_value_of_unknown_family_compares_exactly():
+    assert _model_drift("my-model", "claude-opus-5") == [("model", "my-model", "claude-opus-5")]
+    assert _model_drift("my-model", "my-model") == []
+
+
+def test_detect_drift_alias_family_works_without_a_resolver():
+    assert _model_drift("sonnet", "claude-sonnet-5", resolve=False) == []
+    assert _model_drift("sonnet", "claude-opus-5", resolve=False) != []
+
+
+def test_build_config_drift_table_older_opus_under_opus_is_no_drift():
+    snapshots = [_schema2_snapshot(ts="20260901T000000Z", effective={"model": "opus"})]
+    sessions_with_observed = [
+        {"session_id": "s1", "first_ts": "2026-09-05T00:00:00.000Z", "observed": {"model": "claude-opus-5"}},
+    ]
+    table = snap_mod.build_config_drift_table(
+        sessions_with_observed, snapshots, resolve_model=load_pricing().resolve_model
+    )
+    assert table.rows == []
+    assert any("No drift detected" in note for note in table.notes)
+
+
 # -- schema 2: claude_json_cross_check ----------------------------------------
 
 
@@ -831,6 +1155,66 @@ def test_snapshot_for_with_project_key_ignores_other_projects():
     assert snap_mod.snapshot_for("2026-09-12T00:00:00Z", snaps, "slug:aaa") is legacy
     assert snap_mod.snapshot_for("2026-09-12T00:00:00Z", [mine, other], "slug:aaa") is mine
     assert snap_mod.snapshot_for("2026-09-12T00:00:00Z", snaps) is other
+
+
+def _sha(slug: str) -> str:
+    import hashlib
+
+    return "slug:" + hashlib.sha256(slug.encode("utf-8")).hexdigest()[:12]
+
+
+def test_snapshot_project_keys_name_both_drive_letter_spellings_canonical_first():
+    upper, lower = _sha("C--X"), _sha("c--X")
+    assert snap_mod.snapshot_project_keys("c--X") == (upper, lower)
+    assert snap_mod.snapshot_project_keys("C--X") == (upper, lower)
+    assert snap_mod.snapshot_project_key("c--X") == snap_mod.snapshot_project_key("C--X") == upper
+
+
+def test_snapshot_project_keys_leave_a_slug_with_no_drive_letter_alone():
+    keys = snap_mod.snapshot_project_keys("-home-u-x")
+    assert keys == (_sha("-home-u-x"), _sha("-home-u-x"))
+    assert snap_mod.snapshot_project_key("-home-u-x") == keys[0]
+    # Only the first letter is folded, and only when it is a drive.
+    assert snap_mod.snapshot_project_key("c-Users-x") == _sha("c-Users-x")
+    assert snap_mod.snapshot_project_key("C--dev-X") == _sha("C--dev-X")
+    assert snap_mod.snapshot_project_key("c--dev-X") == _sha("C--dev-X")
+
+
+def test_snapshot_project_key_keeps_the_hashes_snapshots_were_already_stored_under():
+    assert snap_mod.snapshot_project_key("C--Dev-claude-token-lens") == "slug:60178b259715"
+    assert snap_mod.snapshot_project_key("C--Dev-RevIXO") == "slug:3cfd027c1c29"
+    assert snap_mod.snapshot_project_keys("c--Dev-RevIXO")[1] == "slug:b7aa2921726a"
+
+
+def test_snapshot_for_takes_every_key_a_project_goes_by():
+    upper, lower = snap_mod.snapshot_project_keys("c--X")
+    legacy = snap_mod.Snapshot(path=None, ts="20260901T000000Z", data={"project_slug": lower})
+    other = snap_mod.Snapshot(path=None, ts="20260910T000000Z", data={"project_slug": "slug:bbb"})
+    fresh = snap_mod.Snapshot(path=None, ts="20260905T000000Z", data={"project_slug": upper})
+    snaps = [legacy, fresh, other]
+    when = "2026-09-12T00:00:00Z"
+    assert snap_mod.snapshot_for(when, snaps, (upper, lower)) is fresh
+    assert snap_mod.snapshot_for(when, snaps, snap_mod.snapshot_project_keys("C--X")) is fresh
+    assert snap_mod.snapshot_for("2026-09-02T00:00:00Z", snaps, (upper, lower)) is legacy
+    assert snap_mod.snapshot_for(when, snaps, {lower}) is legacy
+    assert snap_mod.snapshot_for(when, snaps, upper) is fresh
+    assert snap_mod.snapshot_for(when, snaps, ()) is None
+    assert snap_mod.snapshot_for(when, snaps) is other
+
+
+def test_latest_for_keys_picks_the_newest_across_a_projects_keys():
+    upper, lower = snap_mod.snapshot_project_keys("c--X")
+    old = snap_mod.Snapshot(path=None, ts="20260901T000000Z", data={"project_slug": lower})
+    new = snap_mod.Snapshot(path=None, ts="20260905T000000Z", data={"project_slug": upper})
+    stale = snap_mod.Snapshot(path=None, ts="20260903T000000Z", data={"project_slug": lower})
+    other = snap_mod.Snapshot(path=None, ts="20260910T000000Z", data={"project_slug": "slug:bbb"})
+    legacy = snap_mod.Snapshot(path=None, ts="20260911T000000Z", data={})
+    assert snap_mod.latest_for_keys([old, new, stale, other, legacy], (upper, lower)) is new
+    # The order the snapshots come in doesn't matter, nor does a lone alias.
+    assert snap_mod.latest_for_keys([other, new, legacy, stale, old], (upper, lower)) is new
+    assert snap_mod.latest_for_keys([old, new, stale, other], (lower,)) is stale
+    assert snap_mod.latest_for_keys([old, new, stale, other], ("slug:ccc",)) is None
+    assert snap_mod.latest_for_keys([], (upper, lower)) is None
 
 
 def test_load_snapshots_skips_apply_stamps_that_record_no_config(tmp_path):

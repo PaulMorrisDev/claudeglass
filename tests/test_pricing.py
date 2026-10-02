@@ -23,6 +23,8 @@ from claudeglass.pricing import (
     cache_read_savings_usd,
     effective_rates,
     load_pricing,
+    newer_version_id,
+    newer_version_of,
     price_turn,
 )
 
@@ -40,6 +42,7 @@ REQUIRED_PACKAGED_MODEL_IDS = {
     "claude-opus-4-5",
     "claude-opus-4-1",
     "claude-opus-4",
+    "claude-sonnet-5-5",
     "claude-sonnet-5",
     "claude-sonnet-4-6",
     "claude-sonnet-4-5",
@@ -80,7 +83,7 @@ def _turn(**overrides) -> model.Turn:
 
 def test_packaged_default_loads():
     pricing = load_pricing()
-    assert pricing.version == "2026-09-23"
+    assert pricing.version == "2026-10-01"
     assert pricing.currency == "USD"
     assert pricing.sha256
     assert len(pricing.sha8) == 8
@@ -99,7 +102,7 @@ def test_packaged_default_covers_every_required_model_id():
 def test_packaged_default_currency_and_version_surfaced():
     pricing = load_pricing()
     assert pricing.currency == "USD"
-    assert pricing.version == "2026-09-23"
+    assert pricing.version == "2026-10-01"
     assert pricing.source_url
 
 
@@ -297,6 +300,53 @@ def test_packaged_claude_opus_5_has_no_alias_of_its_own():
     assert resolved.matched_via == "exact"
 
 
+@pytest.mark.parametrize("alias", ["sonnet", "sonnet[1m]"])
+def test_packaged_sonnet_alias_resolves_to_sonnet_5_5(alias):
+    # Sonnet 5.5 shipped on 2026-09-28; the aliases moved to it.
+    pricing = load_pricing()
+    resolved = pricing.resolve_model(alias)
+    assert resolved is not None
+    assert resolved.canonical_id == "claude-sonnet-5-5"
+    assert resolved.matched_via == "alias"
+
+
+def test_packaged_claude_sonnet_5_has_no_alias_of_its_own():
+    pricing = load_pricing()
+    assert "claude-sonnet-5" not in pricing.aliases.values()
+    resolved = pricing.resolve_model("claude-sonnet-5")
+    assert resolved is not None
+    assert resolved.canonical_id == "claude-sonnet-5"
+    assert resolved.matched_via == "exact"
+
+
+def test_packaged_sonnet_5_5_rates_match_sonnet_5():
+    # Same list price, 1M window and data-residency uplift as Sonnet 5,
+    # and no fast mode (documented only for Opus 5.5, Opus 5, Opus 4.8).
+    pricing = load_pricing()
+    rates = pricing.models["claude-sonnet-5-5"]
+    assert (rates.input, rates.output, rates.cache_write_5m, rates.cache_write_1h, rates.cache_read) == (
+        2.0, 10.0, 2.5, 4.0, 0.2,
+    )
+    assert rates.geo_multipliers == {"us": 1.1}
+    assert rates.fast is None
+    assert rates.context_window_tokens == 1_000_000
+
+
+def test_packaged_aliases_are_unique():
+    # _build_pricing lets the last row naming an alias win without a
+    # word, so an alias copied onto two rows would silently pick one.
+    import tomllib
+
+    from importlib.resources import files
+
+    data = tomllib.loads(files("claudeglass").joinpath("pricing.toml").read_text(encoding="utf-8"))
+    seen: dict[str, str] = {}
+    for model_id, entry in data["models"].items():
+        for alias in entry.get("aliases", []):
+            assert alias not in seen, f"{alias!r} is on both {seen[alias]} and {model_id}"
+            seen[alias] = model_id
+
+
 def test_strip_1m_suffix_for_an_unregistered_alias(min_pricing):
     # "claude-gadget-2" has no "[1m]" alias registered, so resolution
     # must fall through to the strip-1m step against its exact id.
@@ -464,6 +514,134 @@ def test_approximate_true_for_cloud_strip_then_prefix(min_pricing):
 
 
 # --------------------------------------------------------------------
+# Newer versions the rate card has no row for yet: ResolvedRates.
+# newer_version and newer_version_of. A prefix match whose leftover is a
+# bare minor version is a newer release of the matched model; a dated,
+# "-preview" or "-0" leftover is not.
+# --------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    [
+        "claude-widget-9-1",
+        "claude-widget-9-12",
+        "claude-widget-9-1-20261001",
+        "claude-widget-9-1[1m]",
+        "us.anthropic.claude-widget-9-1-v1:0",
+        "claude-widget-9-1@20261001",
+    ],
+)
+def test_newer_version_is_flagged_on_a_minor_version_leftover(min_pricing, model_id):
+    resolved = min_pricing.resolve_model(model_id)
+    assert resolved.canonical_id == "claude-widget-9"
+    assert resolved.approximate is True
+    assert resolved.newer_version is True
+    assert newer_version_of(model_id, "claude-widget-9") is True
+
+
+@pytest.mark.parametrize(
+    "model_id",
+    ["claude-widget-9-20261001", "claude-widget-9-preview-2026", "claude-widget-9-0", "claude-widget-9-01"],
+)
+def test_newer_version_is_not_flagged_on_a_date_preview_or_zero(min_pricing, model_id):
+    resolved = min_pricing.resolve_model(model_id)
+    assert resolved.canonical_id == "claude-widget-9"
+    assert resolved.approximate is True
+    assert resolved.newer_version is False
+    assert newer_version_of(model_id, "claude-widget-9") is False
+
+
+@pytest.mark.parametrize("model_id", ["claude-widget-9", "widget", "widget[1m]", "anthropic.claude-widget-9-v1:0"])
+def test_newer_version_is_false_for_an_exact_or_alias_hit(min_pricing, model_id):
+    resolved = min_pricing.resolve_model(model_id)
+    assert resolved.approximate is False
+    assert resolved.newer_version is False
+    assert newer_version_of(model_id, resolved.canonical_id) is False
+
+
+def test_newer_version_of_on_the_packaged_card():
+    pricing = load_pricing()
+    # claude-opus-4-0 is a real alias of claude-opus-4, not a newer one.
+    assert pricing.resolve_model("claude-opus-4-0").newer_version is False
+    assert newer_version_of("claude-opus-4-0", "claude-opus-4") is False
+    assert newer_version_of("claude-opus-4-1-preview", "claude-opus-4-1") is False
+    assert newer_version_of("claude-sonnet-5-20261001", "claude-sonnet-5") is False
+    # Two-digit minors, which the token boundary keeps off claude-opus-4-1.
+    resolved = pricing.resolve_model("claude-opus-4-10")
+    assert resolved.canonical_id == "claude-opus-4"
+    assert resolved.newer_version is True
+    assert newer_version_of("claude-opus-4-10-x", "claude-opus-4") is True
+    # Only a prefix at a token boundary counts.
+    assert newer_version_of("claude-opus-4-10", "claude-opus-4-1") is False
+    assert newer_version_of("claude-sonnet-5-5", "claude-opus-5") is False
+    assert newer_version_of("claude-sonnet-5-5", "") is False
+
+
+@pytest.mark.parametrize(
+    "model_id,expected",
+    [
+        ("claude-widget-9-1", "claude-widget-9-1"),
+        ("claude-widget-9-12", "claude-widget-9-12"),
+        ("claude-widget-9-1-20261001", "claude-widget-9-1"),
+        ("claude-widget-9-1[1m]", "claude-widget-9-1"),
+        ("us.anthropic.claude-widget-9-1-v1:0", "claude-widget-9-1"),
+        ("claude-widget-9-1@20261001", "claude-widget-9-1"),
+        ("claude-widget-9", None),
+        ("claude-widget-9-20261001", None),
+        ("claude-widget-9-0", None),
+        ("claude-widget-9-preview-2026", None),
+    ],
+)
+def test_newer_version_id_names_the_release_without_its_wrapping(model_id, expected):
+    """The newer release itself, so two forms of it compare equal and it
+    never compares equal to the older model it is priced as."""
+    assert newer_version_id(model_id, "claude-widget-9") == expected
+    assert newer_version_of(model_id, "claude-widget-9") is (expected is not None)
+
+
+# --------------------------------------------------------------------
+# Pricing.model_ids_meta (report.json's additive meta.model_ids)
+# --------------------------------------------------------------------
+
+
+def test_model_ids_meta_maps_every_alias_to_its_canonical_id():
+    pricing = load_pricing()
+    meta = pricing.model_ids_meta()
+    assert meta == pricing.aliases
+    assert meta["sonnet"] == "claude-sonnet-5-5"
+    assert meta["sonnet[1m]"] == "claude-sonnet-5-5"
+    assert meta["opus"] == "claude-opus-5-5"
+    assert meta["best"] == "claude-fable-5-1"
+    assert meta["claude-haiku-4-5"] == "claude-haiku-4-5-20251001"
+
+
+def test_model_ids_meta_adds_observed_ids_priced_as_another_id(min_pricing):
+    observed = [
+        "claude-widget-9",  # canonical: already a meta.rates key
+        "claude-widget-9-20261001",  # dated, by prefix
+        "claude-widget-9-1",  # newer version, by prefix
+        "us.anthropic.claude-widget-9-v1:0",  # Bedrock
+        "claude-gadget-2[1m]",  # strip_1m
+        "widget",  # alias, already there
+        "<unknown>",  # no model on the turn
+        "claude-mystery-model",  # unpriced
+        "",
+        None,
+    ]
+    assert min_pricing.model_ids_meta(observed) == {
+        "widget": "claude-widget-9",
+        "widget[1m]": "claude-widget-9",
+        "claude-widget-9-20261001": "claude-widget-9",
+        "claude-widget-9-1": "claude-widget-9",
+        "us.anthropic.claude-widget-9-v1:0": "claude-widget-9",
+        "claude-gadget-2[1m]": "claude-gadget-2",
+    }
+    # The rate card's own alias table is never changed by it.
+    assert min_pricing.aliases == {"widget": "claude-widget-9", "widget[1m]": "claude-widget-9"}
+
+
+# --------------------------------------------------------------------
 # Legacy dated ids (independent-review fix 5)
 # --------------------------------------------------------------------
 
@@ -517,12 +695,15 @@ def test_packaged_legacy_ids_have_no_geo_multiplier():
         "claude-opus-5",
         "claude-opus-4-8",
         "claude-opus-4-7",
+        "claude-opus-4-6",
+        "claude-sonnet-5-5",
         "claude-sonnet-5",
+        "claude-sonnet-4-6",
     ],
 )
 def test_packaged_1m_context_models(model_id):
-    # D2/D4/COV-12/V24: "Fable 5.1, Fable 5, Sonnet 5, Opus 4.7+: native
-    # 1M token context window".
+    # D2/D4/COV-12/V24: Fable 5.1, Fable 5, Sonnet 5.5, Sonnet 5, Sonnet
+    # 4.6 and Opus 4.6+ have a native 1M token context window.
     pricing = load_pricing()
     assert pricing.models[model_id].context_window_tokens == 1_000_000
 
@@ -530,11 +711,9 @@ def test_packaged_1m_context_models(model_id):
 @pytest.mark.parametrize(
     "model_id",
     [
-        "claude-opus-4-6",
         "claude-opus-4-5",
         "claude-opus-4-1",
         "claude-opus-4",
-        "claude-sonnet-4-6",
         "claude-sonnet-4-5",
         "claude-sonnet-4",
         "claude-haiku-4-5-20251001",
@@ -947,6 +1126,29 @@ def test_coverage_tracks_closest_match_turns(min_pricing):
     table = coverage.as_closest_match_table()
     assert table.rows == [["claude-widget-9-preview-2026", "claude-widget-9", 1, 1_000_000]]
     assert table.notes
+    # A preview build isn't a newer version: only the generic note.
+    assert len(table.notes) == 1
+
+
+def test_closest_match_table_notes_a_newer_version_without_changing_its_shape(min_pricing):
+    coverage = PricingCoverage()
+    for model_id in ("claude-widget-9-1", "claude-widget-9-preview-2026"):
+        turn = _turn(model=model_id, input_tokens=1_000)
+        resolved = min_pricing.resolve_model(model_id)
+        coverage.add(turn, price_turn(turn, resolved), resolved)
+
+    table = coverage.as_closest_match_table()
+    assert [c.key for c in table.columns] == ["model_id", "priced_as", "turns", "tokens"]
+    assert coverage.closest_matches["claude-widget-9-1"] == {
+        "priced_as": "claude-widget-9",
+        "turns": 1,
+        "tokens": 1_000,
+    }
+    assert len(table.notes) == 2
+    assert table.notes[1] == (
+        "claude-widget-9-1 looks like a newer version of claude-widget-9. It is priced at"
+        " claude-widget-9's rate until pricing.toml has a row of its own for it."
+    )
 
 
 def test_coverage_does_not_record_closest_match_for_exact_hit(min_pricing):

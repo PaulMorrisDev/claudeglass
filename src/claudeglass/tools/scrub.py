@@ -36,6 +36,13 @@ here rather than silently decided, per project convention):
   unlisted field, even though ``events.py`` reads ``trigger`` when it is
   present -- the scrubbed fixture simply carries a blank trigger, which
   does not affect any WP12a test assertion.
+* ``workflowPhase`` and a sidecar ``description`` keep one thing of their
+  text: the canonical role word ``agent_roles`` finds in them. The phase
+  is kept as that word alone (dropped when it has none); a description
+  becomes that word, a space, then ``x``s to the original length (or
+  plain ``x``s when it has no role word). Nothing else of either string
+  survives, so the scrubbed meta still says what kind of agent it was
+  without saying what it was asked to do.
 * Directory/file names under the output (``<session_id>.jsonl``,
   ``agent-<hex>.jsonl``/``.meta.json``, ``wf_<hex>.json``) are also
   rehashed with the same key, mirroring ``discovery.py``'s layout
@@ -62,7 +69,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
-from .. import jsonl
+from .. import agent_roles, jsonl
 
 SCRUB_TOOL_VERSION = 1
 
@@ -168,6 +175,20 @@ def _x_run(text: str) -> str:
 
 def _x_run_len(n: int) -> str:
     return "x" * max(n, 0)
+
+
+def _scrub_description(description: str) -> str:
+    """A sidecar ``description`` -> its canonical role word (if it has
+    one), a space, then ``x``s so the whole is the original length; plain
+    ``x``s when it has no role word. The word alone when the original is
+    too short to hold the word and a space.
+    """
+    word = agent_roles.role_word(None, None, description)
+    if word is None:
+        return _x_run(description)
+    if len(description) < len(word) + 1:
+        return word
+    return word + " " + _x_run_len(len(description) - len(word) - 1)
 
 
 def _is_pure_x_run(s: str) -> bool:
@@ -407,7 +428,12 @@ _META_STR_KEEP_KEYS = ("agentType", "model", "requestShape")
 
 
 def scrub_meta_json(d: dict, hmac_key: bytes) -> dict:
-    """Whitelist-rewrite one subagent ``.meta.json`` sidecar."""
+    """Whitelist-rewrite one subagent ``.meta.json`` sidecar.
+
+    ``workflowPhase`` is kept only as its canonical role word and
+    ``description`` as that word plus an ``x`` run (see
+    ``_scrub_description``); neither string's own text survives.
+    """
     out: dict[str, Any] = {}
     for key in _META_STR_KEEP_KEYS:
         value = d.get(key)
@@ -425,9 +451,12 @@ def scrub_meta_json(d: dict, hmac_key: bytes) -> dict:
     parent_agent_id = d.get("parentAgentId")
     if isinstance(parent_agent_id, str):
         out["parentAgentId"] = _rehash_id(hmac_key, parent_agent_id)
+    workflow_phase = agent_roles.role_word(d.get("workflowPhase"), None, None)
+    if workflow_phase is not None:
+        out["workflowPhase"] = workflow_phase
     description = d.get("description")
     if isinstance(description, str):
-        out["description"] = _x_run(description)
+        out["description"] = _scrub_description(description)
     worktree_branch = d.get("worktreeBranch")
     if isinstance(worktree_branch, str):
         out["worktreeBranch"] = _x_run(worktree_branch)
@@ -436,9 +465,10 @@ def scrub_meta_json(d: dict, hmac_key: bytes) -> dict:
     return out
 
 
-#: Generic phase-name words allowed to survive verbatim; anything else
-#: becomes ``phase-<index>`` -- the plan's "kept only if allowlisted else
-#: phase-N" rule for workflow phase titles.
+#: Generic phase-name words allowed to survive verbatim, plus every form
+#: ``agent_roles.FORMS`` accepts; anything else becomes ``phase-<index>``
+#: -- the plan's "kept only if allowlisted else phase-N" rule for
+#: workflow phase titles.
 _PHASE_TITLE_ALLOWLIST = frozenset(
     {
         "plan",
@@ -462,8 +492,10 @@ _PHASE_TITLE_ALLOWLIST = frozenset(
 
 
 def _scrub_phase_title(title: Any, index: int) -> str:
-    if isinstance(title, str) and title.strip().lower() in _PHASE_TITLE_ALLOWLIST:
-        return title
+    if isinstance(title, str):
+        key = title.strip().lower()
+        if key in _PHASE_TITLE_ALLOWLIST or key in agent_roles.FORMS:
+            return title
     return f"phase-{index}"
 
 
@@ -675,6 +707,11 @@ _VERIFY_SAFE_KEYS = frozenset(
 )
 
 _ALNUM_RUN_RE = re.compile(r"[A-Za-z0-9]{4,}")
+
+#: The canonical role words ``scrub_meta_json`` may leave in a sidecar's
+#: ``workflowPhase`` and ``description``.
+_ROLE_WORDS = frozenset(agent_roles.FORMS.values())
+
 _UNIVERSAL_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
     (re.compile(r"[A-Za-z]:[\\/]"), "drive path"),
     (re.compile(r"/home/"), "/home/ path"),
@@ -685,13 +722,26 @@ _UNIVERSAL_PATTERNS: tuple[tuple[re.Pattern, str], ...] = (
 )
 
 
+def _is_role_word_value(value: str, key: str | None) -> bool:
+    """True for exactly what ``scrub_meta_json`` writes under
+    ``workflowPhase`` (a canonical role word) or ``description`` (a
+    canonical role word alone, or followed by a space and an ``x`` run).
+    """
+    if key == "workflowPhase":
+        return value in _ROLE_WORDS
+    if key == "description":
+        word, _, rest = value.partition(" ")
+        return word in _ROLE_WORDS and (not rest or _is_pure_x_run(rest))
+    return False
+
+
 def _check_string_value(value: str, key: str | None, where: str, violations: list[str]) -> None:
     for pattern, label in _UNIVERSAL_PATTERNS:
         if pattern.search(value):
             violations.append(f"{where}: contains {label}: {value!r}")
     if any(value.startswith(p) for p in _PREFIX_PRESERVE):
         return
-    if key in _VERIFY_SAFE_KEYS:
+    if key in _VERIFY_SAFE_KEYS or _is_role_word_value(value, key):
         return
     for match in _ALNUM_RUN_RE.finditer(value):
         run = match.group(0)

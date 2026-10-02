@@ -7,7 +7,9 @@ from __future__ import annotations
 import json
 import os
 import time
+from datetime import date, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
@@ -546,3 +548,369 @@ def test_load_meta_reads_a_workflow_agents_end_state_from_its_finished_run(tmp_p
     assert meta.workflow_run_id == "wf_0001"
     assert meta.workflow_agent_state == expected
     assert "never kept" not in repr(meta)
+
+
+def _workflow_meta_path(tmp_path, meta_body):
+    run_dir = tmp_path / "session-roles" / "subagents" / "workflows" / "wf_x"
+    run_dir.mkdir(parents=True)
+    meta_path = run_dir / "agent-a1.meta.json"
+    meta_path.write_text(json.dumps(meta_body))
+    return meta_path
+
+
+def test_load_meta_keeps_a_workflow_agents_role_word_and_none_of_its_label(tmp_path):
+    meta_path = _workflow_meta_path(
+        tmp_path,
+        {"agentType": "workflow-subagent", "workflowPhase": "Implement", "description": "impl:C:/Users/x/secret.py"},
+    )
+    meta = discovery.load_meta(meta_path)
+    assert meta.kind == "workflow-agent"
+    assert meta.role_word == "implement"
+    assert meta.model_recorded is True  # a new-shape meta, and it names no model
+    assert meta.agent_model_alias is None
+    assert "secret" not in repr(meta)
+    assert "C:/" not in repr(meta)
+
+
+def test_load_meta_an_old_shape_workflow_meta_has_no_role_and_records_no_model(tmp_path):
+    meta = discovery.load_meta(_workflow_meta_path(tmp_path, {"agentType": "workflow-subagent", "spawnDepth": 1}))
+    assert meta.role_word is None
+    assert meta.model_recorded is False
+
+
+def test_load_meta_an_agent_tool_meta_takes_its_role_from_the_description(tmp_path):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(
+        json.dumps({"agentType": "general-purpose", "description": "Fix the parser", "model": "sonnet"})
+    )
+    meta = discovery.load_meta(meta_path)
+    assert meta.role_word == "fix"
+    assert meta.model_recorded is True
+    assert meta.agent_model_alias == "sonnet"
+
+
+def test_load_meta_a_fork_meta_has_no_role_word(tmp_path):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(json.dumps({"agentType": "fork", "description": "A side question about the config"}))
+    meta = discovery.load_meta(meta_path)
+    assert meta.role_word is None
+    assert meta.model_recorded is True
+
+
+def test_load_meta_a_named_type_gives_the_role_when_the_label_has_none(tmp_path):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(json.dumps({"agentType": "claude-implementer", "description": "Parser work"}))
+    assert discovery.load_meta(meta_path).role_word == "implement"
+
+
+def test_load_meta_the_phase_wins_over_the_description(tmp_path):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(json.dumps({"workflowPhase": "Verify", "description": "Implement the change"}))
+    assert discovery.load_meta(meta_path).role_word == "verify"
+
+
+@pytest.mark.parametrize("body", [{"description": None}, {"workflowPhase": ""}, {"description": 7}])
+def test_load_meta_model_recorded_is_key_presence_whatever_the_value(tmp_path, body):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(json.dumps(body))
+    meta = discovery.load_meta(meta_path)
+    assert meta.model_recorded is True
+    assert meta.role_word is None
+
+
+def test_load_meta_a_missing_or_malformed_meta_has_no_role_and_records_no_model(tmp_path):
+    bad = tmp_path / "bad.meta.json"
+    bad.write_text("{not valid json")
+    for path in (bad, tmp_path / "does-not-exist.meta.json"):
+        meta = discovery.load_meta(path)
+        assert meta.role_word is None
+        assert meta.model_recorded is False
+
+
+# -- calendar windows: window_start and its zone helpers ---------------------
+
+_HOUR = timedelta(hours=1)
+_IST = timezone(timedelta(hours=5, minutes=30))
+
+
+def _utc(*parts: int) -> datetime:
+    return datetime(*parts, tzinfo=timezone.utc)
+
+
+def _tzdata_has(name: str) -> bool:
+    """Same helper as ``tests/test_classify.py`` and ``tests/test_monthly.py``:
+    a bare Windows install has no ``tzdata`` for ``zoneinfo`` to read."""
+    try:
+        ZoneInfo(name)
+        return True
+    except ZoneInfoNotFoundError:
+        return False
+
+
+class _DstZone(tzinfo):
+    """A time zone with one summer-time stretch, written out by hand so the
+    tests need no ``tzdata``. The clocks go forward at the naive UTC instant
+    ``forward`` and back at ``back``; ``std`` is the winter offset. Follows
+    PEP 495 across the clock changes: a time that doesn't exist or happens
+    twice takes its offset from its ``fold``."""
+
+    def __init__(self, std: timedelta, forward: datetime, back: datetime) -> None:
+        self.std, self.forward, self.back = std, forward, back
+
+    def utcoffset(self, dt):
+        wall = dt.replace(tzinfo=None)
+        jump = self.forward + self.std  # the wall time the clocks jump from
+        repeat = self.back + self.std  # the wall time the repeated hour starts at
+        if wall < jump:
+            return self.std
+        if wall < jump + _HOUR:  # the hour that doesn't exist
+            return self.std + _HOUR if dt.fold else self.std
+        if wall < repeat:
+            return self.std + _HOUR
+        if wall < repeat + _HOUR:  # the hour that happens twice
+            return self.std if dt.fold else self.std + _HOUR
+        return self.std
+
+    def dst(self, dt):
+        return self.utcoffset(dt) - self.std
+
+    def tzname(self, dt):
+        return "summer" if self.dst(dt) else "winter"
+
+    def fromutc(self, dt):
+        instant = dt.replace(tzinfo=None)
+        if self.forward <= instant < self.back:
+            return (instant + self.std + _HOUR).replace(tzinfo=self)
+        local = (instant + self.std).replace(tzinfo=self)
+        return local.replace(fold=1) if self.back <= instant < self.back + _HOUR else local
+
+
+#: London's 2026 rules: forward at 01:00 UTC on 29 March, back at 01:00 UTC
+#: on 25 October.
+_LONDON = _DstZone(timedelta(0), datetime(2026, 3, 29, 1), datetime(2026, 10, 25, 1))
+#: A zone whose summer time starts at midnight (as Santiago's does): the
+#: clocks jump from 00:00 to 01:00, so that midnight never happens.
+_MIDNIGHT_JUMP = _DstZone(timedelta(hours=-4), datetime(2026, 9, 6, 4), datetime(2027, 4, 4, 3))
+
+
+class _FrozenDatetime(datetime):
+    """``discovery.datetime`` with a fixed "now", as ``test_service_api.py``
+    freezes it."""
+
+    @classmethod
+    def now(cls, tz=None):
+        return _utc(2026, 10, 1, 15, 0)
+
+
+def test_window_start_is_local_midnight_of_the_first_day():
+    now = _utc(2026, 10, 1, 15, 0)
+    assert discovery.window_start(7, "UTC", now=now) == _utc(2026, 9, 25)
+    assert discovery.window_start(1, "UTC", now=now) == _utc(2026, 10, 1)
+    assert discovery.window_start(30, "UTC", now=now) == _utc(2026, 9, 2)
+    # Just after midnight is still the day it just became.
+    assert discovery.window_start(1, "UTC", now=_utc(2026, 10, 1, 0, 0)) == _utc(2026, 10, 1)
+    assert discovery.window_start(1, "UTC", now=_utc(2026, 9, 30, 23, 59)) == _utc(2026, 9, 30)
+    assert discovery.window_start(7, "UTC", now=now).tzinfo is timezone.utc
+
+
+def test_window_start_iso_is_the_minute_shaped_utc_string():
+    now = _utc(2026, 10, 1, 15, 37)
+    assert discovery.window_start_iso(7, "UTC", now=now) == "2026-09-25T00:00:00Z"
+    assert discovery.window_start_iso(1, _IST, now=now) == "2026-09-30T18:30:00Z"
+
+
+def test_a_year_before_1000_keeps_four_digits_on_every_platform():
+    """strftime("%Y") gives "931" on Linux and "0931" on Windows: the
+    strings a window is written as are built so they don't depend on it."""
+    moment = _utc(931, 3, 1, 5, 7) + timedelta(seconds=9)
+    assert discovery.utc_stamp(moment) == "0931-03-01T05:07:00Z"
+    assert discovery.utc_stamp(moment, seconds=True) == "0931-03-01T05:07:09Z"
+    assert discovery.utc_stamp(_utc(2026, 9, 25)) == "2026-09-25T00:00:00Z"
+    assert discovery.local_day(moment, "UTC") == "0931-03-01"
+    # 400,000 days back from 2026 is the year 931.
+    assert discovery.window_start_iso(400_000, "UTC", now=_utc(2026, 10, 1, 15, 0)).startswith("0931-")
+
+
+@pytest.mark.parametrize("days", [0, -1, -30])
+def test_window_start_needs_at_least_one_day(days):
+    with pytest.raises(ValueError):
+        discovery.window_start(days, "UTC")
+    with pytest.raises(ValueError):
+        discovery.window_start_iso(days, "UTC")
+
+
+def test_window_start_follows_the_clocks_going_forward():
+    now = _utc(2026, 3, 30, 12, 0)  # 13:00 on the 30th, an hour after the change
+    assert discovery.window_start(1, _LONDON, now=now) == _utc(2026, 3, 29, 23, 0)
+    assert discovery.window_start(7, _LONDON, now=now) == _utc(2026, 3, 24, 0, 0)
+    # The day the clocks went forward has 23 hours.
+    midnight = discovery.local_midnight
+    assert midnight(date(2026, 3, 30), _LONDON) - midnight(date(2026, 3, 29), _LONDON) == timedelta(hours=23)
+    # Before the change on the 29th it is still winter time.
+    assert discovery.window_start(1, _LONDON, now=_utc(2026, 3, 29, 0, 30)) == _utc(2026, 3, 29, 0, 0)
+    assert discovery.local_day("2026-03-29T23:30:00Z", _LONDON) == "2026-03-30"
+
+
+def test_window_start_follows_the_clocks_going_back():
+    now = _utc(2026, 10, 26, 12, 0)
+    assert discovery.window_start(1, _LONDON, now=now) == _utc(2026, 10, 26, 0, 0)
+    assert discovery.window_start(2, _LONDON, now=now) == _utc(2026, 10, 24, 23, 0)
+    assert discovery.window_start(3, _LONDON, now=now) == _utc(2026, 10, 23, 23, 0)
+    # The day the clocks went back has 25 hours.
+    midnight = discovery.local_midnight
+    assert midnight(date(2026, 10, 26), _LONDON) - midnight(date(2026, 10, 25), _LONDON) == timedelta(hours=25)
+    # The repeated hour is one day, whichever side of it a reply falls on.
+    assert discovery.local_day("2026-10-25T00:30:00Z", _LONDON) == "2026-10-25"
+    assert discovery.local_day("2026-10-25T01:30:00Z", _LONDON) == "2026-10-25"
+    assert discovery.local_day("2026-10-25T23:59:00Z", _LONDON) == "2026-10-25"
+    assert discovery.local_day("2026-10-26T00:00:00Z", _LONDON) == "2026-10-26"
+
+
+def test_local_midnight_that_never_happens_is_the_first_moment_of_the_day():
+    # The clocks jump from 00:00 to 01:00 on 6 September, at 04:00 UTC.
+    first = discovery.local_midnight(date(2026, 9, 6), _MIDNIGHT_JUMP)
+    assert first == _utc(2026, 9, 6, 4, 0)
+    assert discovery.local_midnight(date(2026, 9, 7), _MIDNIGHT_JUMP) == _utc(2026, 9, 7, 3, 0)
+    assert discovery.window_start(1, _MIDNIGHT_JUMP, now=_utc(2026, 9, 6, 20, 0)) == first
+
+
+def test_window_start_in_a_half_hour_zone():
+    # 20:00 UTC is 01:30 on 2 October in India, so the day began at 18:30 UTC.
+    now = _utc(2026, 10, 1, 20, 0)
+    assert discovery.window_start(1, _IST, now=now) == _utc(2026, 10, 1, 18, 30)
+    assert discovery.window_start(7, _IST, now=now) == _utc(2026, 9, 25, 18, 30)
+    assert discovery.local_day("2026-09-18T23:45:00Z", _IST) == "2026-09-19"
+    assert discovery.local_day("2026-09-18T18:29:00Z", _IST) == "2026-09-18"
+    assert discovery.local_day("2026-09-18T18:30:00Z", _IST) == "2026-09-19"
+    assert discovery.local_day("2026-09-18T18:30:00Z", "UTC") == "2026-09-18"
+
+
+def test_local_day_reads_a_time_with_no_offset_as_utc():
+    assert discovery.local_day("2026-09-18T23:45:00", _IST) == "2026-09-19"
+    assert discovery.local_day("2026-09-18", _IST) == "2026-09-18"
+    assert discovery.local_day(datetime(2026, 9, 18, 23, 45), _IST) == "2026-09-19"
+    assert discovery.local_day(_utc(2026, 9, 18, 23, 45), _IST) == "2026-09-19"
+    assert discovery.local_day("2026-09-18T23:45:00+05:30", "UTC") == "2026-09-18"
+    with pytest.raises(ValueError):
+        discovery.local_day("not a time", "UTC")
+
+
+def test_window_start_in_the_machine_zone():
+    now = _utc(2026, 10, 1, 15, 0)
+    local_today = now.astimezone().date()
+    expected = datetime.combine(local_today - timedelta(days=6), datetime.min.time()).astimezone(timezone.utc)
+    assert discovery.window_start(7, None, now=now) == expected
+    assert discovery.window_start(7, "", now=now) == expected
+    assert discovery.window_start(7, now=now) == expected
+    assert discovery.to_local(now, None) == now.astimezone()
+    assert discovery.local_day(now, None) == local_today.isoformat()
+
+
+def test_a_zone_that_cannot_be_resolved_is_the_machine_zone():
+    now = _utc(2026, 10, 1, 15, 0)
+    assert discovery.window_start(7, "Mars/Olympus", now=now) == discovery.window_start(7, None, now=now)
+    assert discovery.local_day(now, "Mars/Olympus") == discovery.local_day(now, None)
+    assert discovery.zone_name("Mars/Olympus") is None
+    assert discovery.zone_name(None) is None
+    assert discovery.zone_name("") is None
+
+
+def test_a_zone_lookup_that_fails_in_any_way_is_the_machine_zone(monkeypatch):
+    # ZoneInfo raises more than ZoneInfoNotFoundError for a bad key: a
+    # folder where a zone file should be, an unreadable file.
+    def fail(key):
+        raise IsADirectoryError(key)
+
+    monkeypatch.setattr(discovery, "ZoneInfo", fail)
+    assert discovery._zone("America") is None
+    now = _utc(2026, 10, 1, 15, 0)
+    assert discovery.window_start(7, "America", now=now) == discovery.window_start(7, None, now=now)
+    # UTC and a tzinfo never reach the lookup.
+    assert discovery._zone("UTC") is timezone.utc
+    assert discovery._zone(_LONDON) is _LONDON
+
+
+def test_utc_resolves_without_tzdata(monkeypatch):
+    def fail(key):
+        raise ZoneInfoNotFoundError(key)
+
+    monkeypatch.setattr(discovery, "ZoneInfo", fail)
+    assert discovery._zone("UTC") is timezone.utc
+    assert discovery._zone("Etc/UTC") is timezone.utc
+    assert discovery.zone_name("UTC") == "UTC"
+    assert discovery.zone_name("Etc/UTC") == "Etc/UTC"
+    assert discovery.window_start(2, "Etc/UTC", now=_utc(2026, 10, 1, 15, 0)) == _utc(2026, 9, 30)
+
+
+def test_zone_name_gives_the_iana_name():
+    assert discovery.zone_name("UTC") == "UTC"
+    assert discovery.zone_name(timezone.utc) == "UTC"
+    # A fixed offset or a hand-written zone has no IANA name.
+    assert discovery.zone_name(_IST) is None
+    assert discovery.zone_name(_LONDON) is None
+
+
+@pytest.mark.skipif(not _tzdata_has("Europe/London"), reason="no tzdata for Europe/London on this machine")
+def test_window_start_in_a_named_zone_across_the_clock_changes():
+    assert discovery.zone_name("Europe/London") == "Europe/London"
+    now = _utc(2026, 3, 30, 12, 0)
+    assert discovery.window_start(1, "Europe/London", now=now) == _utc(2026, 3, 29, 23, 0)
+    assert discovery.window_start(7, "Europe/London", now=now) == _utc(2026, 3, 24, 0, 0)
+    now = _utc(2026, 10, 26, 12, 0)
+    assert discovery.window_start(2, "Europe/London", now=now) == _utc(2026, 10, 24, 23, 0)
+    assert discovery.local_day("2026-03-29T23:30:00Z", "Europe/London") == "2026-03-30"
+
+
+@pytest.mark.skipif(not hasattr(time, "tzset"), reason="the machine zone can only be changed with tzset")
+def test_window_start_in_the_machine_zone_across_the_clock_changes():
+    # A POSIX rule string, so no zoneinfo files are needed: GMT, and BST from
+    # the last Sunday in March (01:00 UTC) to the last Sunday in October.
+    saved = os.environ.get("TZ")
+    os.environ["TZ"] = "GMT0BST,M3.5.0/1,M10.5.0"
+    time.tzset()
+    try:
+        assert discovery.window_start(1, None, now=_utc(2026, 3, 30, 12, 0)) == _utc(2026, 3, 29, 23, 0)
+        assert discovery.window_start(7, None, now=_utc(2026, 3, 30, 12, 0)) == _utc(2026, 3, 24, 0, 0)
+        assert discovery.window_start(2, None, now=_utc(2026, 10, 26, 12, 0)) == _utc(2026, 10, 24, 23, 0)
+        assert discovery.window_start(1, None, now=_utc(2026, 10, 26, 12, 0)) == _utc(2026, 10, 26, 0, 0)
+    finally:
+        if saved is None:
+            os.environ.pop("TZ", None)
+        else:
+            os.environ["TZ"] = saved
+        time.tzset()
+
+
+def test_window_start_uses_the_clock_discovery_has_when_it_is_not_given_one(monkeypatch):
+    monkeypatch.setattr(discovery, "datetime", _FrozenDatetime)
+    assert discovery.window_start(7, "UTC") == _utc(2026, 9, 25)
+    assert discovery.window_start_iso(1, _IST) == "2026-09-30T18:30:00Z"
+
+
+def test_resolve_window_stays_rolling():
+    # The replays that divide by their own length (capture, the baseline)
+    # need N x 24 hours, not calendar days; the dashboard passes a calendar
+    # ``since`` instead.
+    since_dt, until_dt = discovery._resolve_window(7, None, None)
+    assert until_dt is None
+    assert abs((datetime.now(timezone.utc) - since_dt) - timedelta(days=7)) < timedelta(minutes=1)
+
+
+def test_resolve_window_rolls_back_from_now_not_from_midnight(monkeypatch):
+    monkeypatch.setattr(discovery, "datetime", _FrozenDatetime)
+    since_dt, until_dt = discovery._resolve_window(7, None, None)
+    assert since_dt == _utc(2026, 9, 24, 15, 0)
+    assert since_dt != discovery.window_start(7, "UTC")
+    assert until_dt is None
+
+
+def test_resolve_window_lets_since_win_over_days():
+    since_dt, until_dt = discovery._resolve_window(7, "2026-09-01T06:30:00Z", "2026-09-02")
+    assert since_dt == _utc(2026, 9, 1, 6, 30)
+    assert until_dt == _utc(2026, 9, 2)
+    assert discovery._resolve_window(None, None, None) == (None, None)
+
+
+def test_the_zone_helpers_are_exported():
+    for name in ("to_local", "local_day", "zone_name", "local_midnight", "window_start", "window_start_iso"):
+        assert name in discovery.__all__

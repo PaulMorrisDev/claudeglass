@@ -28,6 +28,10 @@ read per reply at each reply's own rates (fast mode, long context and
 data residency included). That undercounts whenever the cache went cold,
 so it is a floor.
 
+Weeks start on Monday, and a day is midnight to midnight, in ``config.tz``
+(the machine's own zone when it sets none): the same local days the
+dashboard's windows count.
+
 Only words from closed lists, counts and flags reach the tables; nothing
 you or Claude wrote is kept.
 """
@@ -35,10 +39,11 @@ you or Claude wrote is kept.
 from __future__ import annotations
 
 import bisect
+import re
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 from typing import TYPE_CHECKING
 
 from . import capture as capture_mod
@@ -48,6 +53,7 @@ from . import known_savers
 from . import model_gate
 from . import quality
 from .context_files import _parse_ts
+from .discovery import local_day, to_local
 from .handoff import plan_carried, plan_shape, starting_context
 from .model import PROMPT_FLAGS, Column, EventKind, Feedback, Recommendation, Section, Table, Turn
 from .pricing import Pricing, effective_rates, price_turn
@@ -662,6 +668,13 @@ class Habits:
     saver_active: bool = False
     saver_calls: int = 0
     tool_calls: int = 0
+    #: The zone weeks and days were counted in (``config.tz``; ``None`` is
+    #: the machine's own zone), and the report's window label
+    #: (``ReportMeta.window``: "last 7 days", "all time", "since ... until
+    #: now") that ``digest_table`` titles itself with. ``""`` when the
+    #: caller didn't say which window this is.
+    tz: str | tzinfo | None = None
+    window: str = ""
 
     @property
     def weeks(self) -> list[str]:
@@ -688,10 +701,15 @@ class Habits:
         return max(self.span_days, 7.0) / 7
 
 
-def _week(moment: datetime | None) -> str:
+def _week(moment: datetime | None, tz: str | tzinfo | None = None) -> str:
+    """The Monday, ``YYYY-MM-DD``, of the week ``moment`` falls in. Weeks
+    start at local midnight on Monday in ``tz`` (the machine's own zone
+    when it is empty or can't be resolved), so a message sent late on a
+    Sunday evening belongs to the week its local day does, not to the
+    next one because it is already Monday in UTC."""
     if moment is None:
         return ""
-    day = moment.astimezone(timezone.utc).date()
+    day = to_local(moment, tz).date()
     return (day - timedelta(days=day.weekday())).isoformat()
 
 
@@ -770,7 +788,9 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     facts: list[CycleFact] = []
     for cycle in work:
         facts.append(
-            _cycle_fact(bundle.session_id, cycle, carry, index_of, rates, baseline, rated, session_rating, denied)
+            _cycle_fact(
+                bundle.session_id, cycle, carry, index_of, rates, baseline, rated, session_rating, denied, out.tz
+            )
         )
     for fact, cycle, following in zip(facts, work, work[1:] + [None]):
         if following is None:
@@ -785,7 +805,7 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
         tag = work[0].tag
         if tag is None or tag.size in (None, "xs", "s"):
             premium = first_turn.cache_creation_tokens * max(0.0, rates.write(first_turn) - rates.read(first_turn))
-            day = facts[0].ts.date().isoformat() if facts and facts[0].ts else ""
+            day = local_day(facts[0].ts, out.tz) if facts and facts[0].ts else ""
             out.small_sessions.append((bundle.session_id, day, bundle.slug, premium, tag is not None))
 
     _agents(bundle, cycles, turns, carry, first_read, rates, out)
@@ -820,7 +840,9 @@ def _piece(fb: Feedback, cycles, rates: _Rates, source: str) -> Piece:
     )
 
 
-def _cycle_fact(session_id, cycle, carry: _CarryCost, index_of, rates: _Rates, baseline, rated, session_rating, denied):
+def _cycle_fact(
+    session_id, cycle, carry: _CarryCost, index_of, rates: _Rates, baseline, rated, session_rating, denied, tz=None
+):
     first = cycle.turns[0]
     moment = _moment(first.ts)
     start_ctx = first.ctx - (first.human_prompt_chars or 0) // capture_mod.CHARS_PER_TOKEN
@@ -829,7 +851,7 @@ def _cycle_fact(session_id, cycle, carry: _CarryCost, index_of, rates: _Rates, b
     fact = CycleFact(
         session_id=session_id,
         ts=moment,
-        week=_week(moment),
+        week=_week(moment, tz),
         cost=capture_mod._cycle_cost(cycle, rates.pricing),
         turns=len(cycle.turns),
         tag=cycle.tag,
@@ -927,7 +949,7 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
         fact = AgentFact(
             session_id=bundle.session_id,
             agent_type=sub.meta.agent_type or "general-purpose",
-            week=_week(_moment(first.ts)),
+            week=_week(_moment(first.ts), out.tz),
             cost=sum(sub_carry.costs),
             depth=max(1, sub.meta.spawn_depth or 1),
             model=_dominant(t.model for t in priced) or "",
@@ -983,13 +1005,18 @@ def collect(
     ratings: dict | None = None,
     signals: dict | None = None,
     effort_share_threshold_pct: float = 30.0,
+    tz: str | tzinfo | None = None,
+    window: str = "",
 ) -> Habits:
     """Work out the facts for every session in ``corpus``. ``ratings``
     holds your dashboard ratings by session id (``Store.all_feedback``);
     ``signals`` the free signals by session id (``signals.by_session``).
     ``effort_share_threshold_pct`` is ``effort_fit``'s share gate -- see
-    ``Habits.effort_share_threshold_pct``."""
-    out = Habits(effort_share_threshold_pct=effort_share_threshold_pct)
+    ``Habits.effort_share_threshold_pct``. ``tz`` (``config.tz``; the
+    machine's own zone when empty) is the zone weeks and days are counted
+    in, and ``window`` the report's window label (``ReportMeta.window``),
+    which titles ``digest_table`` -- see ``Habits.tz``."""
+    out = Habits(effort_share_threshold_pct=effort_share_threshold_pct, tz=tz, window=window)
     rates = _Rates(pricing)
     for bundle in corpus.sessions:
         if bundle.top is None:
@@ -2049,19 +2076,41 @@ def apply_covered_by(report: "ReportModel") -> None:
             row[covered_rule_idx] = rule_id
 
 
+#: ``ReportMeta.window`` for a window of whole days ("last 1 days" is what
+#: ``api._window_label`` writes for one).
+_LAST_DAYS = re.compile(r"last (\d+) days?")
+
+
+def _digest_title(window: str) -> str:
+    """"Weekly pace (last 7 days)": the digest's title for the report
+    window ``window`` (``ReportMeta.window``). A window of days names its
+    own count, whatever span the messages in it cover; "all time" and a
+    window that starts at a moment (the last hour, today, since your last
+    change) have no count, so they read "all time" and "this window". A
+    caller that didn't say which window this is gets the bare name."""
+    found = _LAST_DAYS.fullmatch(window)
+    if found:
+        days = int(found.group(1))
+        return f"Weekly pace (last {days} day{'s' if days != 1 else ''})"
+    if window == "all time":
+        return "Weekly pace (all time)"
+    return "Weekly pace (this window)" if window else "Weekly pace"
+
+
 def digest_table(h: Habits, items: list[Item] | None = None) -> Table:
     """"Weekly pace (last N days)": the three habits worth the most, what
     the habits you already picked up save, and what a piece of work that
     met its goal cost.
 
-    UX-4/7 (F3): titled with the actual number of days the corpus covers,
-    not a bare "This week" that implies a calendar week regardless of
-    span -- ``h.span_weeks`` itself no longer stretches a short span into
-    a fake weekly rate (see its docstring), so the figures here are
-    already honest; the title says so too."""
+    UX-4/7 (F3): titled with the picked window (``h.window``), not a bare
+    "This week" that implies a calendar week regardless of window, and not
+    the span the messages happen to cover: a 7-day window whose messages
+    all fall in 3 days is still "last 7 days" (``_digest_title``).
+    ``h.span_weeks`` itself no longer stretches a short span into a fake
+    weekly rate (see its docstring), so the figures here are already
+    honest; the title says which window they are from."""
     items = playbook(h) if items is None else items
     weeks = h.span_weeks
-    days = round(h.span_days)
     rows = []
     for n, item in enumerate([i for i in items if i.saving][:3], start=1):
         rows.append([f"top_{n}", item_title(item), _money_or_none(item.saving / weeks), item.evidence])
@@ -2084,7 +2133,7 @@ def digest_table(h: Habits, items: list[Item] | None = None) -> Table:
         rows.append(["tagged", "Messages Claude tagged", _pct(tagged, len(h.cycles)), f"{tagged} of {len(h.cycles)}"])
     return Table(
         name="habits_digest",
-        title=f"Weekly pace (last {days} day{'s' if days != 1 else ''})",
+        title=_digest_title(h.window),
         columns=[
             Column(key="item", label="Item", kind="str"),
             Column(key="what", label="What", kind="str"),
@@ -2809,6 +2858,8 @@ def build_section(
     signals: dict | None = None,
     model_swap=None,
     effort_share_threshold_pct: float = 30.0,
+    tz: str | tzinfo | None = None,
+    window: str = "",
 ) -> Section:
     """The "habits" report section. Every table is always there, empty
     when there's nothing to show, so the report keeps its shape.
@@ -2818,8 +2869,13 @@ def build_section(
     caller's resolved ``recommend.RecommendThresholds
     .effort_mismatch_thinking_share_pct`` (UX-3's shared effort
     threshold), so ``effort_fit`` and the ``effort-mismatch`` rule agree
-    on when there's enough to say something."""
-    h = collect(corpus, pricing, ratings=ratings, signals=signals, effort_share_threshold_pct=effort_share_threshold_pct)
+    on when there's enough to say something. ``tz`` and ``window`` are
+    ``collect``'s: the zone weeks are counted in and the window label the
+    digest is titled with."""
+    h = collect(
+        corpus, pricing, ratings=ratings, signals=signals, effort_share_threshold_pct=effort_share_threshold_pct,
+        tz=tz, window=window,
+    )
     return section_from(h, model_swap=model_swap)
 
 
@@ -3095,7 +3151,13 @@ def capture_step_down_suggestion(
 
 
 def capture_section(
-    corpus, pricing: Pricing | None, capture_config, *, ratings: dict | None = None, h: Habits | None = None
+    corpus,
+    pricing: Pricing | None,
+    capture_config,
+    *,
+    ratings: dict | None = None,
+    h: Habits | None = None,
+    tz: str | tzinfo | None = None,
 ) -> Section:
     """The "capture" report section: what metrics capture cost while it
     was on, measured from the transcripts (``capture.usage``), a week
@@ -3110,7 +3172,9 @@ def capture_section(
     config (UX-3), which this section has never done, so reusing a
     differently-thresholded ``h`` could change ``capture_dependent_value``
     for a config that overrides it. Otherwise a fresh, unthresholded
-    ``collect`` runs exactly as before.
+    ``collect`` runs exactly as before. ``tz`` (``config.tz``) is the zone
+    that fresh ``collect`` counts weeks and days in, as the habits
+    section's own pass does.
 
     ``sessions_with_notes`` is ``capture.usage``'s own main-session count
     (SURV-8's gate on the Capture page's per-metric worth table lives
@@ -3134,7 +3198,7 @@ def capture_section(
     use = capture_mod.usage(corpus, pricing, since=since)
     weekly = capture_mod.weekly_cost(use)
     if h is None or h.effort_share_threshold_pct != 30.0:
-        h = collect(corpus, pricing, ratings=ratings)
+        h = collect(corpus, pricing, ratings=ratings, tz=tz)
     value = capture_dependent_value(h, since=since)
     suggestion = capture_step_down_suggestion(h, capture_config, use)
     rows = [
@@ -3199,6 +3263,7 @@ def patch_capture_recommend_value(
     with_habits: list[Recommendation],
     without_habits: list[Recommendation],
     h: Habits | None = None,
+    tz: str | tzinfo | None = None,
 ) -> Section:
     """EST-P7 + CAP-3: ``report.build_report`` calls this right after
     running ``recommend()`` twice (with and without the habits section),
@@ -3208,10 +3273,11 @@ def patch_capture_recommend_value(
     the one ``capture_section`` built (same corpus/pricing/config), since
     this recomputes the habits playbook rather than threading it through
     the whole report pipeline. ``h`` is reused under the same rule as
-    :func:`capture_section` (S5/ROB-P3: one ``collect`` pass per report)."""
+    :func:`capture_section` (S5/ROB-P3: one ``collect`` pass per report);
+    ``tz`` as there."""
     since = getattr(capture_config, "enabled_at", "") or ""
     if h is None or h.effort_share_threshold_pct != 30.0:
-        h = collect(corpus, pricing, ratings=ratings)
+        h = collect(corpus, pricing, ratings=ratings, tz=tz)
     items = playbook(h)
     value = capture_dependent_value(h, items, with_habits=with_habits, without_habits=without_habits, since=since)
     held_back = capture_value_breakdown(items, with_habits, without_habits)["held_back"]

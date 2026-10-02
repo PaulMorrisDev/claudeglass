@@ -141,6 +141,19 @@ _REPORT_LIKE_SECTIONS: dict[str, str] = {
 _REPORT_LIKE_COMMANDS: tuple[str, ...] = ("report", *_REPORT_LIKE_SECTIONS)
 
 
+def _positive_int(value: str) -> int:
+    """argparse type for ``--days``: a whole number, 1 or more. A window
+    of no days has no start (``discovery.window_start`` raises on it), so
+    it is a usage error here, exit 2, not a traceback later."""
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid int value: {value!r}") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError(f"must be 1 or more, got {number}")
+    return number
+
+
 def _build_common_parser() -> argparse.ArgumentParser:
     """Global options shared by every subcommand, per the plan's CLI
     surface. Returned as a parent parser so each subcommand inherits them.
@@ -163,7 +176,7 @@ def _build_common_parser() -> argparse.ArgumentParser:
     common.add_argument("--project-family", metavar="REGEX")
 
     window = common.add_mutually_exclusive_group()
-    window.add_argument("--days", type=int)
+    window.add_argument("--days", type=_positive_int)
     window.add_argument("--since")
     common.add_argument("--until")
     common.add_argument("--limit", type=int)
@@ -269,7 +282,7 @@ def _add_config_diff_args(sub: argparse.ArgumentParser) -> None:
     group.add_argument(
         "--auto-keys",
         action="store_true",
-        help="diff every config key that changed across the available snapshots",
+        help="diff every config key that changed between two snapshots of the same project",
     )
 
 
@@ -1154,7 +1167,8 @@ def _make_parser() -> argparse.ArgumentParser:
             sub.add_argument(
                 "what",
                 choices=("claude-md", "skills"),
-                help="claude-md: every CLAUDE.md file and rule; skills: every skill Claude Code lists",
+                help="claude-md: every CLAUDE.md file and rule; skills: every skill Claude Code lists "
+                "(both for the selected projects and your own files)",
             )
         if name == "check":
             from .quick_actions import CHECK_IDS
@@ -1302,13 +1316,58 @@ def _resolve_project_dirs_for_args(args: argparse.Namespace, config: Config) -> 
     return root, project_dirs
 
 
-def _window_description(args: argparse.Namespace) -> str:
-    if args.since or args.until:
-        start = f"since {args.since}" if args.since else "since the beginning"
+def _window_since(args: argparse.Namespace, config: Config) -> str | None:
+    """Where a report-style window starts: ``--since`` as given, or for
+    ``--days N`` the local midnight that opens today and the N-1 days
+    before it (``--tz``, else config.toml's tz, else the machine's zone),
+    the same start the dashboard's Last N days uses; ``None`` for neither.
+
+    For report-style commands only. The capture, coaching and baseline
+    replays divide by their days, and reconcile matches the admin export's
+    UTC days, so they stay a rolling N x 24h
+    (``_load_corpus_for_args(..., rolling=True)``, ``discovery._resolve_window``).
+
+    Worked out once per command and kept on ``args`` as ``window_start``,
+    so the label, the corpus and the usage log start at the same moment
+    even when local midnight passes while the corpus loads.
+    """
+    if args.since:
+        return args.since
+    if not args.days:
+        return None
+    if getattr(args, "window_start", None) is None:
+        args.window_start = discovery.window_start_iso(args.days, getattr(args, "tz", None) or config.tz)
+    return args.window_start
+
+
+def _resolve_window_start(args: argparse.Namespace, config: Config, command: str) -> int | None:
+    """Work out ``--days``' start (:func:`_window_since`) before anything
+    reads it. Returns 2, with the reason on stderr, when it falls further
+    back than the calendar or this machine can count (Windows can't place
+    a local time before 1970), as the dashboard answers a 400."""
+    try:
+        _window_since(args, config)
+    except (OverflowError, OSError, ValueError):
+        print(f"claudeglass {command}: --days {args.days} is too large", file=sys.stderr)
+        return 2
+    return None
+
+
+def _window_description(args: argparse.Namespace, config: Config, *, rolling: bool = False) -> str:
+    # --days alone stays "last N days". With --until it names the resolved
+    # start, as the dashboard's window label does for the same window
+    # (``rolling``: the N x 24h start a rolling replay reads from).
+    if args.days and not args.since and not args.until:
+        return f"last {args.days} days"
+    if rolling:
+        since_dt = discovery._resolve_window(args.days, args.since, None)[0]
+        since = args.since or (discovery.utc_stamp(since_dt, seconds=True) if since_dt else None)
+    else:
+        since = _window_since(args, config)
+    if since or args.until:
+        start = f"since {since}" if since else "since the beginning"
         end = f"until {args.until}" if args.until else "until now"
         return f"{start} {end}"
-    if args.days:
-        return f"last {args.days} days"
     return "all time"
 
 
@@ -1381,8 +1440,17 @@ def _merge_dashboard_marks(config_dir: Path, overrides: dict) -> tuple[dict, dic
 
 
 def _load_corpus_for_args(
-    args: argparse.Namespace, config: Config, config_dir: Path, project_dirs: list[Path]
+    args: argparse.Namespace,
+    config: Config,
+    config_dir: Path,
+    project_dirs: list[Path],
+    *,
+    rolling: bool = False,
 ) -> Corpus:
+    """Load the corpus for ``args``' window. ``--days`` starts at local
+    midnight (:func:`_window_since`), as the dashboard's Last N days does;
+    ``rolling=True`` keeps ``days`` as a rolling N x 24h for the replays
+    that divide by it (capture, coaching) and for reconcile."""
     # Fix #8: wire the A3 read-target-hash salt up to the actual corpus
     # load -- previously nothing in src/ ever called set_salt/
     # load_or_create_salt, so Turn.read_target_hashes was always empty in
@@ -1407,10 +1475,14 @@ def _load_corpus_for_args(
             # version's own folder, and a prune right after would just
             # be extra directory churn for no benefit.
             cache.prune_stale_versions()
+    if rolling:
+        days, since = args.days, args.since
+    else:
+        days, since = None, _window_since(args, config)
     corpus = load_corpus(
         project_dirs,
-        days=args.days,
-        since=args.since,
+        days=days,
+        since=since,
         until=args.until,
         limit=args.limit,
         window_by=args.window_by,
@@ -1418,6 +1490,9 @@ def _load_corpus_for_args(
         jobs=args.jobs,
         exclude_projects=config.exclude_projects,
         salt=salt,
+        config_dir=config_dir,
+        # --pricing names the card for this run, workflow costs included.
+        rates=load_pricing(path=args.pricing, config_dir=config_dir) if getattr(args, "pricing", None) else None,
     )
     # The tags Claude Haiku wrote, while it writes them ([capture] tagger).
     haiku_tags.apply(corpus, config_dir)
@@ -1544,9 +1619,12 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
     config, rates, config_dir, err = _load_config_and_pricing(args)
     if err is not None:
         return err
+    err = _resolve_window_start(args, config, command)
+    if err is not None:
+        return err
 
     root, project_dirs = _resolve_project_dirs_for_args(args, config)
-    window = _window_description(args)
+    window = _window_description(args, config)
     if not project_dirs:
         print(
             f"claudeglass {command}: no matching project directories under {root}",
@@ -1592,9 +1670,11 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
     # logged_at (discovery._resolve_window is the same resolution
     # discovery.find_sessions itself uses -- see service/rebuild.py for
     # existing precedent importing this private helper cross-module).
+    # --days is resolved to its local-midnight start first, the same
+    # start the corpus above was loaded with.
     from .discovery import _resolve_window
 
-    since_dt, until_dt = _resolve_window(args.days, args.since, args.until)
+    since_dt, until_dt = _resolve_window(None, _window_since(args, config), args.until)
     usage_log_rows = statusline_mod.scoped_usage_log_rows(
         config_dir / "usage-log.csv", {b.session_id for b in corpus.sessions}, since_dt, until_dt
     )
@@ -1650,6 +1730,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             baseline_note=baseline_note,
             config_dir=config_dir,
             ratings=ratings,
+            all_projects=bool(getattr(args, "all_projects", False)),
         )
     except ScorecardError as exc:
         # Fix R20: a misordered [thresholds.scorecard] override in
@@ -1660,7 +1741,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
         print(f"claudeglass {command}: {exc}", file=sys.stderr)
         return 2
     if emit is not None:
-        return emit(model, config_dir, window)
+        return emit(model, config_dir, window, since_dt, until_dt, projects)
     _emit_report_outputs(model, args)
     return 0
 
@@ -1672,29 +1753,34 @@ def _cmd_review(args: argparse.Namespace) -> int:
     from . import claude_md_review, skills_review
     from .units import Units
 
-    def emit(model, config_dir, window) -> int:
+    def emit(model, config_dir, window, since_dt, until_dt, projects) -> int:
         units = model.units or Units()
         period = _period_phrase(window)
         context = model.context_files or {}
+        # Both follow the project: its folders' files and your own.
+        only = _report_only(args, projects, config_dir)
         if args.what == "skills":
-            only = _report_only(args, model, config_dir)
             print(skills_review.render_markdown(skills_review.review(config_dir, context, units, period, only=only)))
         else:
-            review = claude_md_review.build_review(config_dir, context)
+            review = claude_md_review.build_review(config_dir, context, projects=None if only is None else list(only))
             print(claude_md_review.render_markdown(review, units, period))
         return 0
 
     return _cmd_report_like(args, {"overview"}, emit=emit)
 
 
-def _report_only(args: argparse.Namespace, model, config_dir) -> tuple[Path, ...] | None:
+def _report_only(args: argparse.Namespace, projects, config_dir) -> tuple[Path, ...] | None:
     """The project folders a report was limited to (``--project``, or
-    the folder it was run in), or ``None`` for ``--all-projects``."""
+    the folder it was run in), or ``None`` for ``--all-projects``.
+    ``projects`` are the raw ``~/.claude/projects/`` folder names the
+    report loaded (``_cmd_report_like``'s), never ``model.meta.projects``:
+    those are redacted (``Users-<user>``), so a project under a home
+    folder would match no folder."""
     from . import skills_review
 
     if args.all_projects:
         return None
-    return skills_review.project_folders_for(Path(config_dir).parent, model.meta.projects)
+    return skills_review.project_folders_for(Path(config_dir).parent, projects)
 
 
 def _period_phrase(window: str) -> str:
@@ -1712,12 +1798,16 @@ def _cmd_check(args: argparse.Namespace) -> int:
     from . import quick_actions
     from .units import Units
 
-    def emit(model, config_dir, window) -> int:
-        from .discovery import _resolve_window
-
-        snapshot = snapshots.with_every_project_agents(snapshots.load_snapshots(config_dir))
+    def emit(model, config_dir, window, since_dt, until_dt, projects) -> int:
+        # since_dt/until_dt: the window as the report resolved it, with
+        # --days already at its local-midnight start. The settings in
+        # force are the project's own unless --all-projects, as the
+        # report's advice reads them.
+        snaps = snapshots.load_snapshots(config_dir)
+        if not args.all_projects:
+            snaps = snapshots.snapshots_for_projects(snaps, projects)
+        snapshot = snapshots.with_every_project_agents(snaps, snapshots.canonical_project_keys(projects))
         agents = snapshot.data.get("effective_agents") if snapshot is not None else None
-        since_dt, until_dt = _resolve_window(args.days, args.since, args.until)
         ctx = quick_actions.Context(
             model=model,
             units=model.units or Units(),
@@ -1725,7 +1815,7 @@ def _cmd_check(args: argparse.Namespace) -> int:
             config_dir=Path(config_dir),
             effective=snapshots.effective_config_in_force(snapshot) if snapshot is not None else {},
             effective_agents=agents if isinstance(agents, dict) else {},
-            only=_report_only(args, model, config_dir),
+            only=_report_only(args, projects, config_dir),
             since_ts=since_dt.timestamp() if since_dt else None,
             until_ts=until_dt.timestamp() if until_dt else None,
         )
@@ -1794,7 +1884,7 @@ def _build_session_metrics(
             {
                 "session_id": record.session_id,
                 "first_ts": record.first_ts,
-                "project_key": snapshots.snapshot_project_key(bundle.slug),
+                "project_key": snapshots.snapshot_project_keys(bundle.slug),
                 "turns": turns,
                 "cost": cost,
                 "recache_cc": recache_cc,
@@ -1810,9 +1900,12 @@ def _cmd_config_diff(args: argparse.Namespace) -> int:
     config, rates, config_dir, err = _load_config_and_pricing(args)
     if err is not None:
         return err
+    err = _resolve_window_start(args, config, "config-diff")
+    if err is not None:
+        return err
 
     root, project_dirs = _resolve_project_dirs_for_args(args, config)
-    window = _window_description(args)
+    window = _window_description(args, config)
     if not project_dirs:
         print(
             f"claudeglass config-diff: no matching project directories under {root}",
@@ -1847,16 +1940,33 @@ def _cmd_config_diff(args: argparse.Namespace) -> int:
     recache_th = recache.RecacheThresholds.from_config(config.thresholds)
     session_metrics = _build_session_metrics(corpus, rates, recache_th, config, session_overrides)
 
+    # The snapshots the report's Settings section reads: every project's
+    # with --all-projects, else only the selected projects', each diffed
+    # within its own snapshots so a switch between projects never reads
+    # as a change.
+    from .report import _settings_snapshots
+
+    scoped, canonical = _settings_snapshots(
+        corpus, tuple(p.name for p in project_dirs), snaps, bool(args.all_projects)
+    )
+    if not scoped:
+        print(
+            "claudeglass config-diff: no config snapshot is recorded for the selected projects "
+            "(--all-projects reads every project's)",
+            file=sys.stderr,
+        )
+        return 1
+
     if args.auto_keys:
-        changed_keys = sorted(snapshots.diff_keys(snaps).keys())
+        changed_keys = snapshots.changed_keys(scoped, canonical)
         if not changed_keys:
-            print("No config keys changed across the available snapshots.")
+            print("No setting changed between two snapshots of the same project.")
             return 0
         tables = [
-            snapshots.build_config_diff_table(session_metrics, snaps, key) for key in changed_keys
+            snapshots.build_config_diff_table(session_metrics, scoped, key, canonical) for key in changed_keys
         ]
     else:
-        tables = [snapshots.build_config_diff_table(session_metrics, snaps, args.key)]
+        tables = [snapshots.build_config_diff_table(session_metrics, scoped, args.key, canonical)]
 
     helptext.annotate_section(Section(key="config", title="", tables=tables), "subscription" if config.billing == "subscription" else "api")
     for table in tables:
@@ -1907,9 +2017,12 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     config, rates, config_dir, err = _load_config_and_pricing(args)
     if err is not None:
         return err
+    err = _resolve_window_start(args, config, "compare")
+    if err is not None:
+        return err
 
     try:
-        arm_a = compare_mod.parse_arm_spec(args.arm_a)
+        arm_a =compare_mod.parse_arm_spec(args.arm_a)
         arm_b = compare_mod.parse_arm_spec(args.arm_b)
     except ValueError as exc:
         print(f"claudeglass compare: {exc}", file=sys.stderr)
@@ -1929,7 +2042,7 @@ def _cmd_compare(args: argparse.Namespace) -> int:
     min_sessions = args.min_sessions if args.min_sessions is not None else config.min_sessions
 
     root, project_dirs = _resolve_project_dirs_for_args(args, config)
-    window = _window_description(args)
+    window = _window_description(args, config)
     if not project_dirs:
         print(f"claudeglass compare: no matching project directories under {root}", file=sys.stderr)
         return 1
@@ -1997,13 +2110,16 @@ def _cmd_reconcile(args: argparse.Namespace) -> int:
 
     by = tuple(args.by.split(","))
 
+    # Reconcile keeps --days a rolling N x 24h: it compares UTC days with
+    # the admin export's, so the local-midnight start of the report-style
+    # commands doesn't apply.
     root, project_dirs = _resolve_project_dirs_for_args(args, config)
-    window = _window_description(args)
+    window = _window_description(args, config, rolling=True)
     if not project_dirs:
         print(f"claudeglass reconcile: no matching project directories under {root}", file=sys.stderr)
         return 1
 
-    corpus = _load_corpus_for_args(args, config, config_dir, project_dirs)
+    corpus = _load_corpus_for_args(args, config, config_dir, project_dirs, rolling=True)
     if not corpus.sessions:
         print(f"claudeglass reconcile: no sessions found under {root} for window {window!r}", file=sys.stderr)
         return 1
@@ -2146,9 +2262,12 @@ def _cmd_export(args: argparse.Namespace) -> int:
     config, rates, config_dir, err = _load_config_and_pricing(args)
     if err is not None:
         return err
+    err = _resolve_window_start(args, config, command)
+    if err is not None:
+        return err
 
     root, project_dirs = _resolve_project_dirs_for_args(args, config)
-    window = _window_description(args)
+    window = _window_description(args, config)
     if not project_dirs:
         print(
             f"claudeglass {command}: no matching project directories under {root}",
@@ -2264,6 +2383,9 @@ def _cmd_monthly_report(args: argparse.Namespace) -> int:
 
     command = "monthly-report"
     config, rates, config_dir, err = _load_config_and_pricing(args)
+    if err is not None:
+        return err
+    err = _resolve_window_start(args, config, command)
     if err is not None:
         return err
 
@@ -2451,7 +2573,9 @@ def _cmd_probe_config(args: argparse.Namespace) -> int:
 def _cmd_pricing_check(args: argparse.Namespace) -> int:
     """``pricing-check``: print the resolved rate card's provenance and
     rate table, and (with ``--models``) how each given model id resolves
-    against it. Exit 2 on a malformed or unreadable pricing file.
+    against it, flagging a closest match, or a newer version the rate
+    card has no row for yet (``ResolvedRates.newer_version``). Exit 2 on
+    a malformed or unreadable pricing file.
     """
     try:
         rates = load_pricing(path=args.pricing, config_dir=args.config_dir)
@@ -2481,7 +2605,13 @@ def _cmd_pricing_check(args: argparse.Namespace) -> int:
             if resolved is None:
                 print(f"  {model_id} -> UNKNOWN (no matching rate)")
             else:
-                approx = " (closest match, not this model's own rate)" if resolved.approximate else ""
+                approx = (
+                    " (a newer version with no rate of its own yet, so priced at the older model's rate)"
+                    if resolved.newer_version
+                    else " (closest match, not this model's own rate)"
+                    if resolved.approximate
+                    else ""
+                )
                 print(
                     f"  {model_id} -> {resolved.canonical_id} (matched via {resolved.matched_via}){approx}"
                 )
@@ -3284,13 +3414,14 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
 def _capture_corpus(args: argparse.Namespace, config: Config, config_dir: Path, *, days=None, since=None) -> Corpus:
     """Every project's sessions over ``days`` or from ``since`` on:
     capture runs in all of them unless ``[capture] projects`` narrows
-    it. ``--until`` is the capture end time here, not a window."""
+    it. ``--until`` is the capture end time here, not a window. ``days``
+    is a rolling N x 24h: the callers divide by it."""
     roots = discovery.projects_roots(args.projects_root, config.extra_projects_roots)
     project_dirs = discovery.resolve_project_dirs(
         roots, slugs=None, all_projects=True, family_regex=None, exclude_projects=config.exclude_projects
     )
     window = argparse.Namespace(**{**vars(args), "days": days, "since": since, "until": None, "limit": None})
-    return _load_corpus_for_args(window, config, config_dir, project_dirs)
+    return _load_corpus_for_args(window, config, config_dir, project_dirs, rolling=True)
 
 
 def _capture_pricing(args: argparse.Namespace, config: Config, config_dir: Path) -> Pricing | None:
@@ -3452,6 +3583,9 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
         config,
         projects=tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug})),
         window=f"last {coaching.DAYS} days",
+        # Every project's sessions (_capture_corpus), as the service's
+        # daily run builds it.
+        all_projects=True,
         config_dir=config_dir,
     )
     data = coaching.from_report(report, config_dir, config.thresholds, now=now)
@@ -4641,8 +4775,8 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     # A user-scope apply with no --project-dir keeps the old newest-overall
     # behaviour, since there is no single project to key on.
     if project_path is not None:
-        project_key = snapshots.snapshot_project_key(discovery.slug_for(str(project_path)))
-        latest_snapshot = snapshots.latest_snapshot_per_project(snaps).get(project_key) if snaps else None
+        project_keys = snapshots.snapshot_project_keys(discovery.slug_for(str(project_path)))
+        latest_snapshot = snapshots.latest_for_keys(snaps, project_keys)
     else:
         latest_snapshot = snaps[-1] if snaps else None
 

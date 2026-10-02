@@ -267,14 +267,33 @@ size. No text is kept (`context_files.py`).
   written doesn't matter: Claude Code adds titles and other notes to
   old transcripts without any new reply. The named windows are the last
   hour, today (from midnight in `config.toml`'s `tz`, else your
-  machine's time zone), the last 24 hours, since your last change, and
-  all time. Short windows (the last hour, today) are for checking a
+  machine's time zone), the last 24 hours, 7, 30 or 90 days, since your
+  last change, and all time. The 7, 30 and 90 day windows are whole
+  local calendar days in that same zone, today included, from midnight:
+  7 days is today and the 6 days before it, and a day in the daily spend
+  chart is a local day too. `--days` in the report commands counts the
+  same way (`capture`, `baseline` and `reconcile` keep a rolling
+  N x 24 hours; [the CLI reference](cli.md#global-flags) has the
+  list). Short windows (the last hour, today) are for checking a
   change straight away; they hold few sessions, so read them as a quick
   signal, not a verdict.
 - **Since my last change**: starts at the latest change point: an
-  `apply`, its undo, a settings change the snapshot hook saw, a change
-  to metrics capture, or a model, effort or CLAUDE.md size change your
-  sessions show (`change_points.py`). Unlike the other windows, it
+  `apply`, its undo, a settings change the snapshot hook saw (one edit
+  to your user settings is one change, however many projects' snapshots
+  show it, and a project's own settings files give that project a change
+  of its own), a change to metrics capture (the hooks rewrite that comes
+  with turning capture on, changing it or removing it isn't a second
+  change), or a model, effort or CLAUDE.md size change your sessions
+  show (`change_points.py`). Your sessions show one only once the new
+  value has held for 3 sessions in a row in a project, and it is dated
+  at the first of them. Switching back and forth, one odd session, a
+  CLAUDE.md that grows a little at a time or is missing from a scratch
+  session, and an effort level a transcript doesn't record aren't
+  changes, and neither is a transcript change that an apply, undo or
+  settings change recorded just before it already explains. A change
+  recorded under one spelling of a drive letter (`C:` or `c:`) applies to
+  sessions under the other.
+  Unlike the other windows, it
   counts the sessions that *started* after the change, so every figure
   on the page, the daily spend chart included, is work done wholly on
   the new settings. A session already running at the change isn't
@@ -295,14 +314,32 @@ size. No text is kept (`context_files.py`).
 - **Before and after** (`impact.py`): for each change point, the
   sessions started in the 14 days before it (or since the previous
   change) are compared with those started after it, on the measures
-  that change should move (cost per reply for a model or effort change,
-  cost per spawn for a change to one agent, summaries per session for
-  `autoCompactWindow`, cache rebuild share for a TTL change, and so on).
-  The sessions after it are weighted to the mix of work before it: the
-  kind of task, and how hard and how big it was once at least half the
-  sessions carry capture's `level` and `size` tags. Nothing is said
-  until each side has at least 3 sessions, and the result always notes
-  that other things (the work itself, Claude Code updates) change too.
+  that change should move, most telling first, with cost per session
+  always last as the overall check. A model change is judged on the
+  tokens it spends before what they cost, so a different price per token
+  can't pass for a different amount of work: tokens per session, output
+  tokens per reply, replies per session, cost per reply, then cost per
+  session. An effort or thinking change is judged on output tokens per
+  reply, cost per reply, then cost per session. A fast mode change
+  changes the price, not the tokens, so it is judged on cost per reply,
+  then cost per session. When one settings edit changes several keys,
+  the measures follow the order the keys are listed in (alphabetically),
+  but the token measures always come before cost per reply, even when an
+  effort, thinking or fast mode key is listed ahead of `model`. Output tokens per
+  reply counts real replies only; a conversation summary's estimated
+  request counts in tokens per session instead. Other changes use cost
+  per spawn for a change to one agent, summaries per session for
+  `autoCompactWindow`, cache rebuild share for a TTL change, and so on.
+  Each project is judged between its own neighbouring changes: a change
+  to every project is compared in each project with the changes that
+  apply there, so a change made in one project cuts only that project's
+  before and after, and the all-projects card is the project readings
+  put together. The sessions after it are weighted to the mix of work
+  before it: the kind of task, and how hard and how big it was once at
+  least half the sessions carry capture's `level` and `size` tags.
+  Nothing is said until each side has at least 3 sessions, and the
+  result always notes that other things (the work itself, Claude Code
+  updates) change too.
   Two changes with fewer than 3 sessions between them (turning metrics
   capture on, then switching model before your next session, say) are
   compared together: each is read over the other's sessions too, rather

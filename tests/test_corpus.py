@@ -11,8 +11,11 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from claudeglass.cache import DigestCache
 from claudeglass.corpus import Corpus, SessionBundle, load_corpus
+from claudeglass.pricing import load_pricing
 from claudeglass.render.json_out import to_jsonable
 
 from helpers import turn_line, write_jsonl
@@ -349,3 +352,65 @@ def test_workflow_runs_are_linked_and_costed(tmp_path):
     # workflows.link_workflow_agents.
     assert len(bundle.subs) == 1
     assert run.cost > 0.0
+
+
+def _write_card(path: Path, input_rate: float) -> Path:
+    """A rate card pricing ``claude-sonnet-5`` input only."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        'version = "test"\n\n[models."claude-sonnet-5"]\n'
+        f"input = {input_rate}\noutput = 0.0\ncache_write_5m = 0.0\ncache_write_1h = 0.0\ncache_read = 0.0\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def _workflow_corpus(tmp_path: Path) -> Path:
+    project_dir = tmp_path / "proj-workflow"
+    project_dir.mkdir()
+    _write_top(project_dir, "session-wf")
+    _write_workflow(project_dir, "session-wf", "wf_test-000", agent_count=1)
+    _write_subagent(project_dir, "session-wf", "agent-work1", n_turns=1, workflow_run_id="wf_test-000")
+    return project_dir
+
+
+def test_workflow_runs_are_costed_at_the_config_pricing_path(tmp_path):
+    """The card config.toml names, as the report and the service use, ahead
+    of the config-dir one. The subagent's one reply reads 50 input tokens."""
+    project_dir = _workflow_corpus(tmp_path)
+    config_dir = tmp_path / "config"
+    _write_card(config_dir / "pricing.toml", 1_000.0)
+    custom = _write_card(tmp_path / "elsewhere" / "rates.toml", 1_000_000.0)
+    (config_dir / "config.toml").write_text(f"pricing_path = {json.dumps(str(custom))}\n", encoding="utf-8")
+
+    run = load_corpus([project_dir], config_dir=config_dir).sessions[0].workflows[0]
+
+    assert run.cost == pytest.approx(50.0)
+
+
+def test_a_card_passed_in_wins_over_the_config_pricing_path(tmp_path):
+    """The CLI's --pricing card arrives as ``rates`` and prices workflow runs
+    too, as it prices the rest of the report."""
+    project_dir = _workflow_corpus(tmp_path)
+    config_dir = tmp_path / "config"
+    custom = _write_card(tmp_path / "elsewhere" / "rates.toml", 1_000.0)
+    (config_dir / "config.toml").parent.mkdir(parents=True, exist_ok=True)
+    (config_dir / "config.toml").write_text(f"pricing_path = {json.dumps(str(custom))}\n", encoding="utf-8")
+    passed = load_pricing(path=_write_card(tmp_path / "flag" / "rates.toml", 1_000_000.0))
+
+    run = load_corpus([project_dir], config_dir=config_dir, rates=passed).sessions[0].workflows[0]
+
+    assert run.cost == pytest.approx(50.0)
+
+
+def test_an_unreadable_pricing_path_falls_back_to_the_config_dir_card(tmp_path):
+    project_dir = _workflow_corpus(tmp_path)
+    config_dir = tmp_path / "config"
+    _write_card(config_dir / "pricing.toml", 1_000_000.0)
+    (config_dir / "config.toml").write_text(
+        f"pricing_path = {json.dumps(str(tmp_path / 'no-such-card.toml'))}\n", encoding="utf-8"
+    )
+
+    run = load_corpus([project_dir], config_dir=config_dir).sessions[0].workflows[0]
+
+    assert run.cost == pytest.approx(50.0)

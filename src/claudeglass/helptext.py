@@ -104,6 +104,7 @@ PLACEMENT: dict[str, str] = {
     "model_swap_by_agent_type": "keep",
     "model_swap_summary": "keep",
     "model_swap_agent_file_runs": "report",
+    "model_swap_agent_models": "keep",
     "waste_summary": "keep",
     "waste_by_cause": "keep",
     "waste_by_agent_type": "advanced",
@@ -145,6 +146,7 @@ PLACEMENT: dict[str, str] = {
     # what tool search saves
     "tool_search_summary": "keep",
     "tool_search_by_server": "keep",
+    "tool_search_servers": "keep",
     "cost_record_summary": "keep",
     "cost_record_sessions": "keep",
     # quality signals
@@ -651,7 +653,9 @@ SECTION_COPY: dict[str, SectionCopy] = {
             shows="Your current settings per project, the file each one came from, and cost per session "
             "grouped by the value a setting had.",
             read="Settings come from snapshots the config hook takes when a session starts. Sessions that "
-            "started before the first snapshot are left out of the comparisons.",
+            "started before the first snapshot are left out of the comparisons. A setting counts as changed when "
+            "it changed between two snapshots of the same project. This uses every snapshot recorded, not only "
+            "this window's. With a project picked, only that project's settings and changes show.",
             act="Before you credit one setting for a cost change, check the note under its table. It lists "
             "the other settings that changed at the same time.",
         ),
@@ -767,7 +771,7 @@ TABLE_COPY: dict[str, TableCopy] = {
     ),
     # -- quality signals ----------------------------------------------------
     "habits_digest": TableCopy(
-        title="",  # UX-4/7: the builder's title names the actual day span
+        title="",  # UX-4/7: the builder's title names the picked window
         help=Help(
             shows="The three habits worth the most to you right now, and what the habits you already picked up are "
             "saving. Also what a piece of work that met its goal cost.",
@@ -2288,7 +2292,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="One row per area: its rating, the one number it is based on, and the limit for that rating.",
             read="Ratings run from 1 (very poor) to 5 (excellent). The limit is the bound the number had to stay "
             "within to earn its rating. Cache rebuilds forced by usage-limit pauses are left out of cache "
-            "efficiency.",
+            "efficiency. Config stability counts the settings that changed between two snapshots of the same "
+            "project. It counts each setting once and uses every snapshot recorded, not only this window's.",
             act="Work on the lowest rating first. For cache efficiency, see {{page:cache/rebuilds}}. For context "
             "size, clear or summarise long sessions sooner. For subagent cost balance, check the costliest "
             "agent type in {{page:agents/subagents}}.",
@@ -2313,7 +2318,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "recache_share_pct": "Cache writes that were rebuilds, excluding usage-limit pauses (%)",
             "p90_top_level_ctx": "Context size that 9 in 10 main session replies stay under (tokens)",
             "agent_cost_variance_ratio": "Cost per run of the costliest agent type, versus the typical type (times)",
-            "changed_config_keys": "Settings changed during the window (count)",
+            "changed_config_keys": "Settings changed between a project's own snapshots (count)",
             "pricing_coverage_pct": "Tokens with a known price (%)",
             "no config snapshot available": "No config snapshot, so counted as stable",
             "excellent": "Excellent",
@@ -3884,6 +3889,77 @@ TABLE_COPY: dict[str, TableCopy] = {
             "observed_cost": ("Real cost", "Measured cost of those runs, at list price."),
         },
     ),
+    "model_swap_agent_models": TableCopy(
+        title="Agents that ran on a larger model than their work needed",
+        help=Help(
+            shows="Each row is one kind of agent and one finding about it. Every agent a workflow script started "
+            "counts as one kind. The main session is left out.",
+            read="Cost is measured. The cost on Sonnet reprices the same tokens, so a saving is the most you could "
+            "save, not a forecast. Sonnet may need more replies. Agents that decided and changed code have no "
+            "saving, because the fix is to split the work.",
+            act="Start with agents that had no model set and wrote code. If later agents ran on Sonnet, it looks "
+            "fixed. {{page:actions/recommendations}} has a prompt to paste.",
+        ),
+        columns={
+            "case": ("Agents and finding", "Which agents, and what was found about them."),
+            "agent_type": (
+                "Agent",
+                "The agent type. Every agent a workflow script started counts as one type, because the script's "
+                "own call sets their model.",
+            ),
+            "verdict": (
+                "Finding",
+                "No model set means the agent ran on your main session's model. Asked for a larger model means "
+                "the call named Opus or Fable. Decided and changed code means a review or judging agent also "
+                "edited files on a larger model.",
+            ),
+            "runs": ("Agents", "How many agents this row counts, one per run."),
+            "roles": (
+                "Roles",
+                "What each agent was for, as one word read from its phase, type or opening words, with a count. "
+                "Other means no word was found.",
+            ),
+            "model": ("Model", "The model most of these agents ran on."),
+            "cost_usd": ("Cost", "Measured cost of these agents, at list price."),
+            "cost_on_sonnet_usd": (
+                "On Sonnet",
+                "The same tokens at Sonnet's list price. Empty where the finding has no saving.",
+            ),
+            "saving_usd": (
+                "Saving",
+                "Cost minus the cost on Sonnet. The most you could save, since Sonnet may need more replies.",
+            ),
+            "saving_pct": ("Saving %", "That saving as a share of cost."),
+            "write_turns": (
+                "Edit replies",
+                "Replies in which an agent edited a file or wrote one from the shell, across these agents.",
+            ),
+            "workflow_runs": (
+                "Workflow runs",
+                "How many separate workflow runs these agents came from. Zero for agents started outside a workflow.",
+            ),
+            "first_seen": ("First", "The date of the earliest of these agents."),
+            "last_seen": ("Last", "The date of the most recent of these agents."),
+            "later_compliant": (
+                "Later on Sonnet",
+                "Agents of the same kind that wrote code on Sonnet or a smaller model after the last one flagged here.",
+            ),
+            "env_var_set": (
+                "Env var set",
+                "Whether CLAUDE_CODE_SUBAGENT_MODEL is set now: if it is, agents that name no model run on the one "
+                "it names.",
+            ),
+        },
+        # The row key ("workflow-subagent:inherited") is labelled by the
+        # table itself, one label per row, since agent types are open-ended.
+        value_labels={
+            "inherited": "No model set",
+            "asked": "Asked for a larger model",
+            "decide-apply": "Decided and changed code",
+            "workflow-subagent": "Workflow agents",
+        },
+        lead_columns=["case", "runs", "roles", "model", "cost_usd", "saving_usd", "last_seen"],
+    ),
     # -- savings: building fresh after a plan ------------------------------------
     "plan_handoff_summary": TableCopy(
         title="Building in a fresh session after a big plan",
@@ -4185,8 +4261,8 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Each MCP server whose tools were deferred, and Claude Code's own tools, with what keeping their "
             "definitions out saved.",
-            read="A server with no loaded tool is sized at the average of every server. The name list and the "
-            "searches aren't split by server.",
+            read="A server with no loaded tool is sized at the average of every server. The searches aren't split "
+            "by server. Each server's share of the name list is in \"Each MCP server\".",
             act="",
         ),
         columns={
@@ -4200,7 +4276,11 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Kept out of each reply",
                 "Tokens of its definitions left out of each of those requests, on average.",
             ),
-            "saving_usd": ("Saved by keeping them out", "What those tokens would have cost, at list price."),
+            "saving_usd": (
+                "Saved by keeping them out",
+                "What those tokens would have cost, at list price. It falls when you turn a server off, "
+                "since there is less left to keep out.",
+            ),
         },
         value_labels={
             "built-in": "Claude Code's own tools",
@@ -4208,6 +4288,60 @@ TABLE_COPY: dict[str, TableCopy] = {
             "all servers": "All servers",
         },
         lead_columns=["server", "most_deferred", "definition_tokens", "kept_per_reply", "saving_usd"],
+    ),
+    "tool_search_servers": TableCopy(
+        title="Each MCP server",
+        help=Help(
+            shows="Every MCP server your sessions were offered or your config names, whether Claude used it, and "
+            "what keeping it cost.",
+            read="A server you never use still costs every reply its tool names, instructions and any tools sent in "
+            "full. Amounts are at the cache read rate, so they are the least it cost.",
+            act="Turn off the servers marked \"Never used: turn it off\". The card on the Actions page says how for "
+            "each kind.",
+        ),
+        columns={
+            "server": ("MCP server", "The server's name in your sessions."),
+            "kind": ("Kind", "Where it comes from: a claude.ai connector, a plugin, or your config at some scope."),
+            "status": (
+                "Status",
+                "Whether Claude used it. An unused server is flagged once many main sessions over a week or more "
+                "were offered it, recently, and it cost enough to matter.",
+            ),
+            "main_sessions": ("Main sessions offered it", "Main sessions that were offered its tools."),
+            "subagent_runs": ("Subagent runs offered it", "Subagent runs that were offered its tools."),
+            "uses": ("Uses", "Calls to its tools, reads of its resources, and its commands, in all of them."),
+            "first_seen_days": ("First offered", "How many days before the end of this window it was first offered."),
+            "last_seen_days": ("Last offered", "How many days before the end of this window it was last offered."),
+            "also_named": ("Also named", "Other names the same server went by, such as its ID in the desktop app."),
+            "sample_tools": ("Some of its tools", "Up to three of its tools, to help you recognise it."),
+            "config_name": ("Name in your config", "Its name in your MCP config, where that differs."),
+            "projects": ("Projects whose config has it", "Projects whose local or shared MCP config names it."),
+            "list_usd": ("Its share of the name list", "Its part of the tool-name list, by length, at the cache read rate."),
+            "instructions_usd": ("Its instructions", "Its own instructions to Claude, at the cache read rate."),
+            "definitions_usd": ("Its tools sent in full", "Its tools sent with full definitions, at the cache read rate."),
+            "removable_usd": ("Cost of keeping it", "The three amounts added up: what turning it off would have saved."),
+        },
+        value_labels={
+            "remove": "Never used: turn it off",
+            "unused": "Never used, below the bar",
+            "used": "Used",
+            "subagents only": "Only subagents were offered it",
+            "needs sign-in": "Needs sign-in",
+            "failed to connect": "Failed to connect",
+            "pending": "Still connecting",
+            "configured, not seen": "In your config, never offered",
+            "kind unknown": "Kind unknown",
+            "managed": "Set by your organisation",
+            "all-projects view only": "Shown in the all-projects view",
+            "claude.ai connector (desktop app)": "Claude.ai connector, desktop app",
+            "claude.ai connector": "Claude.ai connector",
+            "plugin": "Plugin",
+            "user (every project)": "Your config, every project",
+            "local (one project)": "Your config, one project",
+            "project (.mcp.json)": "Project's shared MCP file",
+            "unknown": "Unknown",
+        },
+        lead_columns=["server", "kind", "status", "main_sessions", "uses", "removable_usd"],
     ),
     # -- savings: wasted replies --------------------------------------------------
     "waste_summary": TableCopy(
@@ -4445,8 +4579,10 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="Settings that did not take effect",
         help=Help(
             shows="Sessions where the model or effort level Claude actually used differs from your settings.",
-            read="Only the model and effort level are checked. A mismatch usually means something overrode "
-            "the setting, such as an environment variable, a command-line flag or a switch during the session.",
+            read="Only the model and effort level are checked. A short model name such as opus matches any "
+            "Opus model, including an older one. The opusplan setting matches Opus or Sonnet, and default always "
+            "matches. A full model id must match exactly. A mismatch usually means something overrode the "
+            "setting, such as an environment variable, a command-line flag or a switch during the session.",
             act="If sessions ran on a pricier model or a higher effort level than you set, check your shell "
             "profile and launch command for an override.",
         ),
@@ -4683,13 +4819,27 @@ def diagnostics_table(diagnostics: Diagnostics, hook=None, statusline=None, pars
     ``parser_notes`` (``ReportModel.parser_notes``) adds one row per key
     it carries, labelled via ``_PARSER_NOTE_LABELS`` -- a side channel
     for counters that don't fit the ``Diagnostics`` dataclass, see that
-    module's docstring."""
+    module's docstring.
+
+    With a hook or statusline row, ``row_groups`` splits the table in two:
+    those rows describe your setup and every session in every project
+    (the hook's settings and snapshot age, the statusline's count of every
+    session ever), while the counters are the window and project picked."""
     rows = []
     if hook is not None:
         rows.append(["snapshot_hook", "working" if hook.ok else "needs attention", hook.summary()])
     if statusline is not None:
         working, sentence = statusline
         rows.append(["statusline", "working" if working else "needs attention", sentence])
+    # Consecutive rows share a group, so the first setup row heads both.
+    row_groups = (
+        {
+            rows[0][0]: "Your setup and every session, every project",
+            dataclasses.fields(Diagnostics)[0].name: "Read in this window",
+        }
+        if rows
+        else {}
+    )
     for field_def in dataclasses.fields(Diagnostics):
         value = getattr(diagnostics, field_def.name)
         if isinstance(value, dict):
@@ -4711,6 +4861,7 @@ def diagnostics_table(diagnostics: Diagnostics, hook=None, statusline=None, pars
             Column(key="meaning", label="What it means", kind="str", help="What the count tells you."),
         ],
         rows=rows,
+        row_groups=row_groups,
         help=Help(
             shows="Counters from reading your conversation logs.",
             read="Most should be zero or small. Large skipped or unreadable counts mean some usage is missing from the rest of the report.",
@@ -4739,7 +4890,9 @@ def _apply_table_copy(table: Table, copy: TableCopy | None, billing_mode: str) -
         if copy.help is not None:
             table.help = copy.help
         if copy.value_labels:
-            table.value_labels = dict(copy.value_labels)
+            # Kept beside the table's own labels (one per run-time row key,
+            # as model_swap_agent_models has); the copy wins on a clash.
+            table.value_labels = {**table.value_labels, **copy.value_labels}
         if copy.row_groups:
             table.row_groups = dict(copy.row_groups)
         if copy.row_kinds:

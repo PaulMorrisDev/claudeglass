@@ -237,3 +237,149 @@ def test_render_fix_prints_no_note_when_note_is_none():
     assert RESTART_NOTE not in md_lines and SCOPE_NOTE not in md_lines
     html = _fix_html(fix)
     assert RESTART_NOTE not in html and SCOPE_NOTE not in html
+
+
+def test_baseline_bloat_points_at_where_mcp_servers_really_live():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(id="baseline-bloat", severity="advice", category="settings", title="x", lever=None)
+    (fix,) = fixes_mod.build_fixes(rec)
+    where = dict(fix["explainer"])["Where and who it affects"]
+    assert "~/.claude.json" in where and "settings.json's mcpServers" not in where
+    assert "~/.claude.json" in fix["prompt"] and ".mcp.json" in fix["prompt"]
+
+
+def test_a_workflow_prompt_can_carry_the_cards_own_action():
+    """``mcp-unused-server``'s fix differs per server, so its prompt takes
+    the card's action (``{action}``) after the finding, which opens it
+    once."""
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id="mcp-unused-server",
+        severity="advice",
+        category="workflow",
+        title="2 MCP servers you never use are loaded into your sessions",
+        why="They were offered in 40 main sessions.",
+        action="Notes: run `claude mcp remove notes --scope user`.",
+        lever=None,
+    )
+    (fix,) = fixes_mod.build_fixes(rec)
+    opening = fixes_mod._FINDING_OPEN.format(title=rec.title)
+    assert fix["prompt"].startswith(f"{opening} {rec.why} ")
+    assert fix["prompt"].count(opening) == 1
+    assert rec.action in fix["prompt"] and "{action}" not in fix["prompt"]
+    assert "never its tokens" in fix["prompt"]
+
+
+def _agent_model_rec(rec_id: str, variant: str = ""):
+    from claudeglass.model import Recommendation
+
+    return Recommendation(
+        id=rec_id,
+        variant=variant,
+        severity="advice",
+        category="workflow",
+        title="5 workflow agents wrote code on Opus 5.5 with no model set",
+        why="4 implementers and 1 fixer in 1 workflow run started with no model, most recently on 1 October.",
+        action="Paste the prompt below so Claude sets the model on every agent it starts.",
+        agent_type="workflow-subagent",
+        lever="model",
+    )
+
+
+def test_each_agent_model_card_gets_one_fix_whose_prompt_quotes_the_finding_and_ends_as_its_kind_does():
+    """The three agent-model cards have no setting to change, so each gets
+    one workflow fix: a prompt that opens with the finding and has no brace
+    left over from ``str.format``. The two "from now on" rules end in
+    ``PROMPT_SCOPE``; the one that edits files ends in ``PROMPT_RESTART``."""
+    from claudeglass import fixes as fixes_mod
+
+    endings = {
+        "agent-model-inherited": fixes_mod.PROMPT_SCOPE,
+        "agent-model-asked": fixes_mod.PROMPT_RESTART,
+        "agent-decide-apply": fixes_mod.PROMPT_SCOPE,
+    }
+    for rec_id, ending in endings.items():
+        rec = _agent_model_rec(rec_id)
+        fixes = fixes_mod.build_fixes(rec)
+        assert len(fixes) == 1, rec_id
+        prompt = fixes[0]["prompt"]
+        assert prompt.startswith(f"{fixes_mod._FINDING_OPEN.format(title=rec.title)} {rec.why} "), rec_id
+        assert "{" not in prompt and "}" not in prompt, rec_id
+        assert prompt.endswith(ending), rec_id
+        assert "_FORCE" not in prompt, rec_id
+        assert [pair[0] for pair in fixes[0]["explainer"]] == [
+            "Why it's suggested",
+            "Where and who it affects",
+            "Trade-off",
+            "How to undo it",
+        ], rec_id
+        assert fixes[0]["command"] is None and fixes[0]["key"] is None, rec_id
+
+
+def test_the_agent_model_notes_follow_the_prompt():
+    """A rule to keep gets the scope note, as the other "from now on" ids
+    do; the file edit keeps the restart note."""
+    from claudeglass import fixes as fixes_mod
+
+    for rec_id in ("agent-model-inherited", "agent-decide-apply"):
+        (fix,) = fixes_mod.build_fixes(_agent_model_rec(rec_id))
+        assert fix.get("note") == "scope", rec_id
+        assert fixes_mod.fix_note(fix) == fixes_mod.SCOPE_NOTE, rec_id
+    (fix,) = fixes_mod.build_fixes(_agent_model_rec("agent-model-asked"))
+    assert "note" not in fix
+    assert fixes_mod.fix_note(fix) == fixes_mod.RESTART_NOTE
+
+
+def test_the_inherited_prompt_asks_for_the_rule_and_the_fixed_card_keeps_it():
+    from claudeglass import fixes as fixes_mod
+
+    (plain,) = fixes_mod.build_fixes(_agent_model_rec("agent-model-inherited"))
+    (fixed,) = fixes_mod.build_fixes(_agent_model_rec("agent-model-inherited", "fixed"))
+    assert fixed["prompt"] == plain["prompt"] and fixed["explainer"] == plain["explainer"]
+    prompt = plain["prompt"]
+    assert "From now on, set the model on every subagent and workflow agent you start." in prompt
+    assert "Never leave an agent to inherit my session's model, even where a tool's instructions say to omit it." in prompt
+    assert "Use Sonnet for agents that write code to a settled spec" in prompt
+    assert "Use Opus for agents that decide: integrate, review, verify and judge." in prompt
+    assert "Never give one Opus agent both the deciding and the applying." in prompt
+
+
+def test_the_inherited_explainer_gives_the_call_the_file_and_the_variable():
+    from claudeglass import fixes as fixes_mod
+
+    (fix,) = fixes_mod.build_fixes(_agent_model_rec("agent-model-inherited"))
+    rows = dict(fix["explainer"])
+    where = rows["Where and who it affects"]
+    assert where.startswith(fixes_mod._SCOPE_WHERE_TEXT)
+    assert "agent(brief, { phase: 'Implement', model: 'sonnet' })" in where
+    assert "meta.phases" in where and "only labels the phase" in where
+    assert "model: sonnet line in its agent file" in where and "replaces it whole" in where
+    tradeoff = rows["Trade-off"]
+    assert "CLAUDE_CODE_SUBAGENT_MODEL=sonnet" in tradeoff and "also moves reviewers and judges" in tradeoff
+    assert "any model a call or agent file sets still wins" in tradeoff
+    assert "never reaches Explore, Plan or forks" in tradeoff
+    assert rows["How to undo it"] == fixes_mod._SCOPE_UNDO_TEXT
+    assert "_FORCE" not in " ".join(rows.values())
+
+
+def test_the_asked_and_decide_apply_explainers():
+    from claudeglass import fixes as fixes_mod
+
+    (asked,) = fixes_mod.build_fixes(_agent_model_rec("agent-model-asked"))
+    rows = dict(asked["explainer"])
+    assert "workflow script that names the model" in rows["Where and who it affects"]
+    assert "Keep Opus where an agent has to decide as well as write." in rows["Trade-off"]
+    assert rows["How to undo it"] == "Set the model back to opus where you changed it."
+
+    (split,) = fixes_mod.build_fixes(_agent_model_rec("agent-decide-apply"))
+    rows = dict(split["explainer"])
+    assert rows["Where and who it affects"] == fixes_mod._SCOPE_WHERE_TEXT
+    assert "the decider's report has to be exact enough" in rows["Trade-off"]
+    assert rows["How to undo it"] == fixes_mod._SCOPE_UNDO_TEXT
+    assert "have it report the exact changes instead of making them" in split["prompt"]
+    assert "Keep the deciding agent on Opus." in split["prompt"]
+    assert "started with model set to opus or fable" in asked["prompt"]

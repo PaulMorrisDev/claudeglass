@@ -107,7 +107,9 @@ def test_long_agentic_classifies_as_long_agentic():
 
 def test_overnight_classifies_as_overnight():
     top, subs = _load_session(FIXTURES / "overnight", "session-overnight-001")
-    features = classify.extract_features(top, subs, tz=None)
+    # tz="UTC" so the fixture's UTC hours are the local hours checked,
+    # whatever zone the machine running the test is in.
+    features = classify.extract_features(top, subs, tz="UTC")
 
     assert features.span_s == pytest.approx(5 * 3600)
     assert features.human_gap_max_s == pytest.approx(90 * 60)
@@ -386,11 +388,24 @@ def test_gap_overlaps_night_detects_overlap_even_when_endpoints_are_daytime():
     # window -- the interval-overlap check must catch this, not just an
     # endpoint-hour check. tz="UTC" is passed explicitly so the fixed UTC
     # inputs below are also the "local" hours being checked, independent
-    # of the machine running the test (falls back to the machine's own
-    # zone only if "UTC" itself can't be resolved -- see _to_local).
+    # of the machine running the test ("UTC" resolves without tzdata --
+    # see discovery._zone).
     start = datetime(2026, 9, 17, 18, 0, tzinfo=timezone.utc)
     end = datetime(2026, 9, 18, 9, 0, tzinfo=timezone.utc)
     assert classify._gap_overlaps_night(start, end, "UTC", 22, 7) is True
+
+
+def test_utc_resolves_without_tzdata_whatever_the_machine_zone():
+    from datetime import datetime, timedelta, timezone
+
+    from claudeglass import exports, monthly, usage
+
+    # "UTC" is the one name a bare Windows install (no tzdata) can't look
+    # up through zoneinfo: each module's _to_local must still honour it,
+    # not fall back to the machine's own zone.
+    dt = datetime(2026, 9, 17, 23, 30, tzinfo=timezone.utc)
+    for module in (classify, usage, exports, monthly):
+        assert module._to_local(dt, "UTC").utcoffset() == timedelta(0), module.__name__
 
 
 def test_gap_overlaps_night_false_for_a_purely_daytime_gap():
@@ -398,7 +413,7 @@ def test_gap_overlaps_night_false_for_a_purely_daytime_gap():
 
     start = datetime(2026, 9, 17, 9, 0, tzinfo=timezone.utc)
     end = datetime(2026, 9, 17, 17, 0, tzinfo=timezone.utc)
-    assert classify._gap_overlaps_night(start, end, None, 22, 7) is False
+    assert classify._gap_overlaps_night(start, end, "UTC", 22, 7) is False
 
 
 # --------------------------------------------------------------------
@@ -670,7 +685,8 @@ def _build_all_records():
     ):
         project_dir = FIXTURES / project_name
         top, subs = _load_session(project_dir, session_id)
-        classification = classify.classify_session(top, subs, overrides={}, tz=None)
+        # The fixtures' hours are UTC; the overnight one is night only there.
+        classification = classify.classify_session(top, subs, overrides={}, tz="UTC")
         record = classify.build_session_record(
             top, subs, workflows=[], classification=classification, slug=project_dir.name
         )

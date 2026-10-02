@@ -53,7 +53,7 @@ and it's still useful when you want one section by itself.
 | `carry` | Context carry cost per tool | `carry.py` | cost of a tool result riding along in the cached prefix on every turn after the one it entered on, by tool and by agent type, plus the saving a truncation cap would have made — see [`carry.md`](carry.md) |
 | `compaction_sim` | Compaction-window sweep | `compaction_sim.py` | modelled cost under other `autoCompactWindow` settings, a fidelity check against each session's actually-configured window, and a conservative "at least W" recommendation — see [`compaction-sim.md`](compaction-sim.md) |
 | `plan_handoff` | Building fresh after a plan | `handoff.py` | what the replies after each approved plan would have cost in a fresh session started from the plan alone, and the same build at Sonnet's prices — see [`plan-handoff.md`](plan-handoff.md) |
-| `model_swap` | Model-swap counterfactual | `model_swap.py` | ceiling saving from repricing every already-observed turn one model tier down, per agent type and corpus-wide — see [`model-swap.md`](model-swap.md) |
+| `model_swap` | Model-swap counterfactual | `model_swap.py` | ceiling saving from repricing every already-observed turn one model tier down, per agent type and corpus-wide, and the agents that ran on a larger model than their work needed — see [`model-swap.md`](model-swap.md) |
 | `waste` | Wasted-turn spend | `waste.py` | spend on turns whose output was never used (tool error, interrupt, tool denial, harness-killed subagent), by cause, agent type and top session — see [`waste.md`](waste.md) |
 | `compactions` | Compactions | `compaction.py` | compaction count, trigger mix, pre/post/dropped tokens, and the re-cache cost of the turn right after each compaction |
 | `agent_startup` | Subagent startup | `context_budget.py` | what each agent type is given before its first turn, what it was given but never used, and what every agent type receives alike |
@@ -62,13 +62,13 @@ and it's still useful when you want one section by itself.
 | `hooks` | Your hooks | `hook_costs.py` | whether each hook you set up works (failed runs and why, relative script paths), what the context it adds costs to keep, what the calls it blocks cost and how often Claude sent them again unchanged, and time waited — see [`hooks.md`](hooks.md) |
 | `quality` | Quality signals | `quality.py` | whether the work went well: agent runs that didn't finish or likely ran out of turns, failed tool calls and shell commands, denials, corrections, edits redone, per agent type and per model and effort, with a significance test — see [`concepts.md`](concepts.md#7-quality-signals) |
 | `workstyle` | Workstyle | `workstyle.py` | one archetype per session/corpus: `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
-| `habits` | Work habits | `habits.py` | the "Weekly pace" digest, habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/cg-feedback`) cost per piece of work that met its goal |
+| `habits` | Work habits | `habits.py` | the "Weekly pace" digest (titled with the window you picked), habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/cg-feedback`) cost per piece of work that met its goal |
 | `prompting` | How you prompt | `prompting.py` | how often each prompting habit the coaching notes warn about happened (small requests sent one at a time, the same request again, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
 | `workflows` | Workflows | `workflows.py` | per-run agent count, phase count, duration and cost from `<session>/workflows/wf_*.json` |
 | `phases` | Phases | `phases.py` | cost split across DISCOVERY (read/search only), IMPLEMENTATION (real edits or an ordinary shell command), VERIFICATION (a test/build tool, or a scratch-file edit), OTHER — in the CLI's report only when `--phases` is given; the dashboard always builds it |
-| `config` | Config | `report.py` via `snapshots.py` | one diff table per config key that changed across the window's snapshots (capped at 20 keys) — only present when `snapshot-config` snapshots exist for the window |
+| `config` | Config | `report.py` via `snapshots.py` | one diff table per config key that changed between two snapshots of the same project (capped at 20 keys), then each project's settings in effect and drift — only present when any `snapshot-config` snapshot exists; when none applies to the projects in the report, it has only a note saying so |
 | `context_budget` | Context budget | `context_budget.py` | an estimated breakdown of what a session's context window is spent on before any real work (system prompt and tools, skills, memory files, custom agents, MCP tools), plus ground truth where the statusline logged it |
-| `tool_search` | What tool search saves | `tool_search.py` | how many tool definitions MCP tool search kept out of each request, by MCP server, what that saved at each reply's own cache rate, and the net after the name list and the replies that only searched — see [`tool-search.md`](tool-search.md) |
+| `tool_search` | What tool search saves | `tool_search.py` | how many tool definitions MCP tool search kept out of each request, by MCP server, what that saved at each reply's own cache rate, and the net after the name list and the replies that only searched; and every MCP server, whether Claude used it and what keeping it cost — see [`tool-search.md`](tool-search.md) |
 | `capture` | Capture | `habits.py` | what metrics capture has cost since it was turned on, measured from the transcripts, and what the habits and feedback that depend on it are worth a week — see [`capture.md`](capture.md) |
 | `cost_record` | Claude Code's own cost record | `reconcile.py` | whether ClaudeGlass's cost matches what Claude Code itself recorded for the same sessions, over the same span, with the known reasons they differ split out — on Data quality, and `claudeglass check cost-record` |
 | `scorecard` | Scorecard | `scorecard.py` | five 1-5 levels (cache efficiency, context hygiene, agent efficiency, config fit, data quality) plus an overall level (the minimum of the first four, never an average) |
@@ -112,7 +112,8 @@ respects.
 
 - `by_day` / `by_week` / `by_month` — period x model:
   turns, tokens, cost. The period key is computed in `config.tz` (falling
-  back to the machine's own local zone).
+  back to the machine's own local zone). The dashboard's daily spend chart
+  counts the same local days.
 - `by_project` — sessions and cost per project slug.
 - `by_entrypoint` — transcripts, turns, tokens, cost per
   `entrypoint` (e.g. `claude-desktop`, `claude-code`).
@@ -141,7 +142,15 @@ respects.
   `pricing.PricingCoverage.as_closest_match_table`, appended onto this
   section only when at least one reply matched this way, and named by
   the `pricing-coverage` recommendation alongside (or instead of) any
-  unpriced model ids. Shown on Spend › Usage under More tables.
+  unpriced model ids. Shown on Spend › Usage under More tables. An id
+  that is a newer minor version of its `priced_as` model
+  (`pricing.newer_version_of`: `claude-x-5-5` priced as `claude-x-5`)
+  gets a table note of its own, and the recommendation words it as
+  "There is no rate of its own for X yet, so it was priced as Y; update
+  ClaudeGlass or add a models."X" row to pricing.toml". When every
+  closest match is a newer version and no model is unpriced, the card's
+  title reads "A newer model is priced at an older model's rate", or
+  "Newer models are priced at older models' rates" for several.
 - `pricing_fast_priced_as_standard` — one row per model id seen with at
   least one reply flagged `usage.speed == "fast"` whose rate card entry
   has no `[models."<id>".fast]` table, so it was priced at that model's
@@ -552,6 +561,21 @@ changes a figure.
   with agent-file runs: `runs`, `priced_turns`, `observed_model`,
   `observed_cost` and a `cost_<model-id>` column per model, for those
   runs only. The what-if engine prices a subagent's model from it.
+- `model_swap_agent_models` — one row per agent type and finding, for
+  agents that ran on a larger model than their work needed. Every agent
+  a workflow started is one type, `workflow-subagent`; the main session
+  is never in it. Columns: `case` (the row key,
+  `<agent type>:<verdict>`), `agent_type`, `verdict` (`inherited`,
+  `asked` or `decide-apply`), `runs`, `roles` (role words and their
+  counts, such as "implement 4, fix 1"; "other" when no word fits),
+  `model`, `cost_usd`, `cost_on_sonnet_usd`, `saving_usd`, `saving_pct`
+  (these last three empty for `decide-apply`), `write_turns` (replies
+  that wrote code), `workflow_runs`, `first_seen`, `last_seen`,
+  `later_compliant` (later writers of the same kind on Sonnet or
+  smaller) and `env_var_set` (`yes` or `no`:
+  `CLAUDE_CODE_SUBAGENT_MODEL` is among the latest snapshot's
+  environment variable names). It holds agent types, role words,
+  counts, models, amounts and dates, and nothing else.
 
 `recommend.recommend()` runs the `model-tier` rule
 (`model_swap.RULES`). It fires per qualifying row (real cheaper
@@ -565,6 +589,47 @@ all set elsewhere gets no `.md` advice. A Sonnet main session never gets Haiku: 
 `main_floor`, with no alternative and no saving. `advice.finish` gives
 the main session's card its own id, `model-tier-main`, ranked last
 among cards of its severity.
+
+`recommend.recommend()` then runs three rules over
+`model_swap_agent_models` (`agent_models.RULES`, category `workflow`,
+lever `model`; see
+[`model-swap.md`](model-swap.md#agents-that-ran-on-a-larger-model-than-their-work-needed)),
+one per verdict. A card is for one agent type, or for all workflow
+agents at once, since the script's `agent()` call sets their model. An
+agent counts only when its `.meta.json` says whether the call set a
+model, it ran on Opus or Fable, and it wrote code: a reply edited or
+wrote a file outside the temp dir, with an edit tool or from the
+shell. Its role word says whether it writes: one word, read from its
+workflow phase, its agent type or the first words of its description,
+and the text it came from is never kept. An agent whose word decides
+(review, verify, judge) or integrates never counts as a writer, and
+one with no word counts once `unknown_min_edit_turns` (default 2)
+replies wrote code.
+
+- `agent-model-inherited` (advice) — the call set no model and no agent
+  file chose the one it ran on, so it ran on your main session's model
+  (or `CLAUDE_CODE_SUBAGENT_MODEL`'s, when that is set). It becomes
+  info (`variant` `fixed`) once `later_compliant_for_info` (default 3)
+  writers of the same kind, workflow or Agent tool, ran on Sonnet or
+  smaller after the latest agent it flags. For a named agent type, a
+  quality veto from `model_gate` also makes it info. Its fix is a
+  prompt for a "from now on" rule, to set the model on every agent,
+  saved where you choose (this session, a project's CLAUDE.md or
+  `~/.claude/CLAUDE.md`); no setting changes.
+- `agent-model-asked` (info) — the same, but the call named the model.
+- `agent-decide-apply` (info) — an agent whose word decides that also
+  wrote code in at least `decide_apply_min_edit_turns` (default 3)
+  replies. It has no saving: the fix is two agents, one to decide and
+  one to apply.
+
+A saving is the agent's own replies repriced at Sonnet's list rate (same
+tokens, same cache-write split), a ceiling like every `model_swap`
+figure. The `asked` figure is for information and is never added to the
+`inherited` one, and none of them joins `model-tier` or the Savings
+levers. A card's `subject` is the date of the latest agent it flags, so
+an ignored card shows again when an agent is flagged on a later day.
+The three thresholds can be set in `config.toml`'s
+`[thresholds.agent_models]` table.
 
 ## `waste` (`waste.py`)
 
@@ -620,6 +685,12 @@ dominant cause and its lever.
   counts and share.
 - `compactions_per_session` — top 20 sessions by dropped tokens:
   session, compaction count, dropped tokens, post-compaction write cost.
+
+A compaction belongs to the window of its session, not to the moment it
+happened: a session counts, in full, when it was last active in the
+window, so a session that began before the window still counts all its
+compactions. The dashboard's compaction list (`GET /api/compactions`)
+reads the same way, so it is as long as the report's own count.
 
 Post-compaction
 write/recache cost aggregates exclude any join to the next turn that
@@ -816,11 +887,16 @@ capture is off or no feedback has been given.
   a week, `top_1` to `top_3`), what the habits you already picked up
   save (`adopted`), the average cost of a piece of work that met its
   goal (`cost_per_met`), and the share of messages Claude tagged
-  (`tagged`). The monthly report carries the same digest. `N` is
-  `Habits.span_days`; a saving is only spread into a per-week rate once
-  there's a full week of it (`Habits.span_weeks`, UX-4/7/F3) -- under 7
-  days it's the raw total observed so far, not a figure stretched by
-  dividing by a fraction of a week.
+  (`tagged`). The monthly report carries the same digest. The title names
+  the window you picked: `N` is that window's own day count ("last 7
+  days" stays 7 even when your messages in it cover 3), and a window with
+  no day count reads "Weekly pace (all time)" or "Weekly pace (this
+  window)". Weeks start on Monday and a day runs midnight to midnight in
+  `config.tz` (the machine's own zone when it sets none), the same local
+  days the dashboard's windows count. A saving is only spread into a
+  per-week rate once there's a full week of it (`Habits.span_weeks`,
+  UX-4/7/F3) -- under 7 days it's the raw total observed so far, not a
+  figure stretched by dividing by a fraction of a week.
 - `habits_playbook` — one row per habit worth trying (`habits.ITEMS`),
   the largest weekly saving first: theme, saving a week, what your
   sessions show, an example to copy, how the saving is worked out, how
@@ -1025,7 +1101,12 @@ vitest`/`playwright`, `go test`, `cargo test`, `make`, `mvn`, `gradle`)
 or made a scratch (temp-dir) edit; **OTHER** otherwise. A turn that both
 edits *and* runs a test/build command in the same turn lands in
 IMPLEMENTATION, since DISCOVERY/IMPLEMENTATION are checked first — noted
-here since a turn usually does one or the other, not both.
+here since a turn usually does one or the other, not both. A scratch
+edit is one to a file in the system temp dir or `/tmp/`, whether its
+path is written with backslashes, forward slashes or Git Bash's `/c/`,
+and in any case. Parses before `PARSER_VERSION` 36 matched only the
+temp dir's own spelling, so a forward-slash path on Windows counted as
+a real edit.
 
 - `phases_summary` — turns, new tokens, cache-read tokens, output
   tokens, cost and cost share per phase.
@@ -1046,10 +1127,14 @@ below.
 ## `config` (`report.py` via `snapshots.py`) and `config-diff` (CLI-only)
 
 The assembled report's own `config` section renders one
-`config-diff-<key>` table per config key that changed across the
-window's `snapshot-config` snapshots (the first 20 keys alphabetically —
-`report._MAX_CONFIG_DIFF_KEYS`), automatically, with no key to name.
-When snapshots exist it also adds:
+`config-diff-<key>` table per config key that changed between two
+snapshots of the same project (the first 20 keys alphabetically —
+`report._MAX_CONFIG_DIFF_KEYS`), automatically, with no key to name. A
+project's snapshots are read as its own run, so switching between
+projects is never a change, and a project filed under both drive-letter
+spellings is one project. The snapshots are every one recorded, not only
+the window's, and with a project picked the section reads only that
+project's. When snapshots exist it also adds:
 
 - `effective-config` — per project, each key's value in the latest
   snapshot and the settings layer it came from.
@@ -1060,7 +1145,11 @@ When snapshots exist it also adds:
   (hash, project count and list, sessions).
 - `config-drift` — only when observed session values exist: sessions
   whose observed value (for example the model) differs from the
-  snapshot's.
+  snapshot's. A model alias such as `opus` matches any model of its
+  family, `opusplan` matches Opus or Sonnet, `default` always matches,
+  and a full model id must match exactly (see
+  [config-layers.md](config-layers.md)). A session is read against its
+  own project's snapshot, never another project's.
 
 The standalone `claudeglass config-diff` subcommand, described
 next, is a separate, narrower consumer of the same underlying table
@@ -1073,22 +1162,28 @@ Reads the JSON files `hooks/snapshot-config.py` writes (see
 [The SessionStart hook](reference.md#the-sessionstart-hook)).
 
 - `config-diff-<key>` — `config-diff --key KEY` prints one, and
-  `config-diff --auto-keys` prints one per changed key. Per distinct
+  `config-diff --auto-keys` prints one per changed key (a key that
+  changed between two snapshots of the same project). Per distinct
   value of that config key across a window: sessions, turns, cost, cost
   per session, re-cache share, compactions per session, median span. A
-  table note lists the keys that also changed in the same snapshot,
-  since a before/after comparison across two different snapshots can't
-  isolate one key's effect from everything else that changed alongside
-  it.
+  table note lists the keys that also changed in the same project's two
+  snapshots, since a before/after comparison across two different
+  snapshots can't isolate one key's effect from everything else that
+  changed alongside it.
 
-The subcommand prints these tables directly as Markdown.
+The subcommand prints these tables as plain fixed-width text, with each
+table's notes under it.
 `snapshots.build_config_section` wraps the same table in a
 `config_diff` section for a library caller; nothing in the CLI or the
 report calls it.
 
-`snapshot_for(session, snapshots)` joins a session to the latest snapshot
-whose timestamp is at or before the session's start; `diff_keys` and
-`co_changed_keys` are the lower-level functions this table is built from.
+`snapshot_for(session_first_ts, snapshots, project_key=None)` joins a
+session's first timestamp to the latest snapshot at or before it. With
+`project_key` (one key, or every key the project goes by, such as its
+two drive-letter spellings), only that project's snapshots and the ones
+recorded with no project (schema 1) count; with `None`, every snapshot
+does. `project_chains`, `diff_keys` and `co_changed_keys` are the
+lower-level functions this table is built from.
 
 ## `compare` (`compare.py`) — CLI-only
 
@@ -1322,9 +1417,22 @@ deferred-tool list.
   reply, its definitions measured, the size each deferred tool was
   counted at, whether that size came from `its own tools` or `all
   servers`, replies, tokens kept out of each reply and the saving.
+- `tool_search_servers` — one row per MCP server the window's
+  transcripts or config snapshots name (never `built-in`), uncapped,
+  ordered by status then cost: kind, status, main sessions and subagent
+  runs that were offered it, uses, first and last offered (days before
+  the window's end), other names, up to three of its tools, its name in
+  your config and the projects that have it, and what keeping it cost
+  (its share of the name list, its instructions, its tools sent in full,
+  and their sum), at the front-of-prompt rate.
 
-There is no rule: tool search is already on wherever this section has
-anything to measure. The quick action `tool-search` reads both tables.
+`recommend.recommend()` runs `tool_search.RULES` after `hook_costs.RULES`:
+`mcp-unused-server` (severity `advice`, category `workflow`, no lever)
+lists every server whose status is `remove`, each with the fix for its
+kind, and cites `tool_search_servers` cells; see
+[`tool-search.md`](tool-search.md#the-mcp-unused-server-recommendation).
+The quick action `tool-search` reads the first two tables and offers
+the card's fix.
 
 ## `savers` (`savers.py`)
 
@@ -1501,12 +1609,15 @@ quality — see [Sections at a glance](#sections-at-a-glance).
   low-fidelity measurement shouldn't be conflated with a genuinely poor
   working pattern).
 
-`config_fit` is a proxy for config stability: how many keys changed
-across the window's config snapshots (`changed_config_keys`), not a
-match against a profile. With no snapshot it is rated 5 with a note,
-rather than marked down. `agent_efficiency` is similarly a proxy
-(`agent_cost_variance_ratio`): the ratio of the costliest agent type's
-mean cost to the median across agent types.
+`config_fit` is a proxy for config stability: how many distinct keys
+changed between two snapshots of the same project (`changed_config_keys`,
+counted once however many projects changed it, from every snapshot
+recorded rather than only the window's), not a match against a profile.
+A project picked narrows it to that project's own snapshots. With no
+snapshot it is rated 5 with a note, rather than marked down.
+`agent_efficiency` is similarly a proxy (`agent_cost_variance_ratio`):
+the ratio of the costliest agent type's mean cost to the median across
+agent types.
 
 ## Recommendations (`recommend.py`)
 
@@ -1548,14 +1659,17 @@ without `agent_startup` data; otherwise the per-part `spawn-claude-md`,
 `data-quality`, `limit-pressure`. Then each module's own rule:
 `tool-output-carry` (`carry.RULES`), `plan-handoff` (`handoff.RULES`),
 `run-split` (`run_split.RULES`), `hook-failures`, `hook-block-resent`
-and `hook-context-carry` (`hook_costs.RULES`), `compaction-window`
-(`compaction_sim.RULES`), `model-tier` (`model_swap.RULES`) and
-`wasted-turns` (`waste.RULES`). Last, `window-budget`
-(`elasticity.RULES`, subscription billing only). Rules are gated by
-archetype (a `ttl-switch` recommendation for a `chat-only` session's
-subagents is suppressed, since a chat-only session barely has any), a
-minimum-sample size (`min_sessions`/`min_turns` in `config.toml`'s
-`[thresholds]` table), and managed-settings awareness (see
+and `hook-context-carry` (`hook_costs.RULES`), `mcp-unused-server`
+(`tool_search.RULES`), `compaction-window`
+(`compaction_sim.RULES`), `model-tier` (`model_swap.RULES`),
+`agent-model-inherited`, `agent-model-asked` and `agent-decide-apply`
+(`agent_models.RULES`) and `wasted-turns` (`waste.RULES`). Last,
+`window-budget` (`elasticity.RULES`, subscription billing only). Rules
+are gated by archetype (a `ttl-switch` recommendation for a
+`chat-only` session's subagents is suppressed, since a chat-only
+session barely has any), a minimum-sample size
+(`min_sessions`/`min_turns` in `config.toml`'s `[thresholds]` table),
+and managed-settings awareness (see
 [`team.md`](team.md#settings-for-teams-and-enterprise)).
 `report --patch-set` renders the whole set as unified-diff-style text
 via `recommend.render_patch_set`, showing the before and after value for

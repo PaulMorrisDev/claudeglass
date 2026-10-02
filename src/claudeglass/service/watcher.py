@@ -17,7 +17,11 @@ Each :meth:`FileWatcher.run_once` tick:
    each stored transcript's own ``parser_version``, against
    ``Store.known_files()`` to decide, per file, whether to re-parse it
    this tick (see :meth:`FileWatcher._resolve`'s docstring for the exact
-   new/changed/live/stale-parser decision table).
+   new/changed/live/stale-parser decision table). Just before that, a
+   changed rate card (``config.toml``'s ``pricing_path``, or
+   ``<config_dir>/pricing.toml``) marks every stored transcript stale,
+   so each one is priced again (see
+   :meth:`FileWatcher._check_rate_card`).
 3. Folds every parsed (or previously-stored, for an unchanged file)
    transcript into the store via ``Store.upsert_transcript``, and every
    session's classification/cost totals via ``Store.upsert_session``. A
@@ -64,6 +68,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import hashlib
+import importlib.resources
 import json
 import os
 import sqlite3
@@ -83,7 +88,7 @@ from ..corpus import _parse_worker
 from ..model import TranscriptMeta, TranscriptResult
 from .. import parse as parse_mod
 from ..parse import parse_transcript
-from ..pricing import Pricing, PricingError, load_pricing, price_turn
+from ..pricing import Pricing, load_pricing, price_turn
 from ..profiles import catalogue as profile_catalogue, schema as profile_schema
 from ..report import _dominant_transcript_model, _extract_workstyle_features
 from .. import haiku_tags
@@ -91,7 +96,7 @@ from .. import signals as signals_mod
 from .. import snapshots as snapshots_mod
 from ..tools import log_usage as log_usage_mod
 from .contracts import ServeOptions, WatcherState, WatcherStats
-from .store import GLOBAL_PROJECT_SLUG, Store, decode_digest_blob
+from .store import GLOBAL_PROJECT_SLUG, Store, bucket_start, decode_digest_blob
 
 #: A file whose mtime is under this many seconds old is assumed to still
 #: be an active Claude Code session (same convention/value as
@@ -122,6 +127,23 @@ _PARALLEL_PARSE_THRESHOLD = 50
 #: (not whole-corpus) batch.
 _MAX_PARSE_WORKERS = 4
 
+#: ``meta`` key holding the ``sha256`` of the rate card the stored
+#: ``turns_agg``/``compactions``/``workflow_runs.cost``/
+#: ``sessions.total_cost`` were priced with (see
+#: :meth:`FileWatcher._check_rate_card`).
+TURNS_PRICED_WITH_KEY = "turns_priced_with"
+
+#: ``WatcherStats.error_messages`` note for a tick whose rate card (or
+#: the ``config.toml`` naming it) couldn't be read. Path-free, like every
+#: message this module records.
+_PRICING_UNREADABLE = "rate card could not be read; kept the previous one"
+
+#: The same note while no card has loaded since the watcher started, so
+#: there is no previous one to keep: it prices with the stand-in
+#: :func:`_fallback_pricing` chose instead (``<config_dir>/pricing.toml``,
+#: else the packaged card).
+_PRICING_UNREADABLE_AT_START = "rate card could not be read; using the default one until it can"
+
 
 def _is_dir(path: Path) -> bool:
     """``Path.is_dir`` that treats an unreadable network path (a WSL
@@ -151,28 +173,56 @@ def _error_summary(exc: BaseException) -> str:
     return name
 
 
-def _default_pricing() -> Pricing:
-    """The packaged default rate card, used to price every turn folded
-    into ``turns_agg``/``sessions.total_cost``. Mirrors ``corpus.py``'s
-    own ``_default_rates`` (duplicated rather than imported — that
-    function is module-private to ``corpus.py`` and this module has no
-    other reason to import from it): a corrupted/missing packaged
-    ``pricing.toml`` degrades to an all-unknown rate card (every
-    ``price_turn`` call prices at zero, ``model_known=False``) rather
-    than failing every watcher tick outright.
+def _empty_pricing() -> Pricing:
+    """An all-unknown rate card: every ``price_turn`` call against it
+    prices at zero, ``model_known=False``. Its empty ``sha256`` never
+    re-prices the store (see :meth:`FileWatcher._check_rate_card`)."""
+    return Pricing(
+        path="none",
+        version="none",
+        currency="USD",
+        source_url=None,
+        retrieved=None,
+        notes=None,
+        sha256="",
+    )
+
+
+def _packaged_pricing() -> Pricing:
+    """The rate card shipped inside this package, whatever
+    ``<config_dir>/pricing.toml`` holds. Raises when it can't be read."""
+    packaged = importlib.resources.files("claudeglass").joinpath("pricing.toml")
+    with importlib.resources.as_file(packaged) as path:
+        return load_pricing(path=path)
+
+
+def _fallback_pricing(config_dir: Path) -> Pricing:
+    """The card to price with when the one ``config.toml`` chooses can't
+    be read as the watcher starts, so there is no previous card to keep:
+    ``<config_dir>/pricing.toml`` (``pricing_path`` skipped), else the
+    packaged default. A restart folds every session again, so pricing at
+    zero here would reset every session's cost; the packaged rates are
+    the closest stand-in, and the store is re-priced again once the card
+    can be read. Only when even the packaged card can't be read (a
+    corrupted install) does this degrade to :func:`_empty_pricing`,
+    rather than failing every watcher tick outright.
     """
+    for load in (lambda: load_pricing(config_dir=config_dir), _packaged_pricing):
+        try:
+            return load()
+        except Exception:  # the next card down, whatever went wrong with this one
+            continue
+    return _empty_pricing()
+
+
+def _stat_key(path: Path) -> tuple[int, int] | None:
+    """``(mtime_ns, size_bytes)`` of ``path``, or ``None`` when it is
+    missing or can't be read."""
     try:
-        return load_pricing()
-    except PricingError:
-        return Pricing(
-            path="none",
-            version="none",
-            currency="USD",
-            source_url=None,
-            retrieved=None,
-            notes=None,
-            sha256="",
-        )
+        stat = path.stat()
+    except (OSError, ValueError):
+        return None
+    return stat.st_mtime_ns, stat.st_size
 
 
 def _build_top_meta(top_path: Path, session_id: str, project_slug: str) -> TranscriptMeta:
@@ -206,12 +256,15 @@ def _parse_ts(ts: str | None):
 
 
 def _turn_day(turn) -> str:
-    """The turn's own UTC calendar day, e.g. ``"2026-09-18"``. Unlike
-    ``usage.py``'s ``_day_key`` (which buckets by ``config.tz``'s local
-    day for the report's own Usage section), the watcher has no
-    ``Config``/timezone to read (``ServeOptions`` carries none) — UTC is
-    the only zone available without one, so ``turns_agg.day`` is a UTC
-    calendar day, not a local one. ``Store.daily_usage`` inherits this.
+    """The turn's own UTC calendar day, e.g. ``"2026-09-18"``, or
+    ``"unknown"`` when it has no readable time (a time with no offset is
+    read as UTC). Unlike ``usage.py``'s ``_day_key`` (which buckets by
+    ``config.tz``'s local day for the report's own Usage section), the
+    watcher has no ``Config``/timezone to read (``ServeOptions`` carries
+    none), and the store stays zone-free: ``turns_agg.day`` is a UTC
+    calendar day, not a local one. The local day is worked out when the
+    rows are read, from the quarter-hour ``bucket`` (:func:`_turn_bucket`),
+    by ``Store.daily_usage(tz=...)``.
     """
     dt = _parse_ts(turn.ts)
     if dt is None:
@@ -223,19 +276,37 @@ def _turn_day(turn) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _turn_bucket(turn) -> str | None:
+    """The UTC quarter hour the turn's reply falls in, as
+    ``turns_agg.bucket`` stores it (``%Y-%m-%dT%H:%M:00Z``, see
+    :func:`~claudeglass.service.store.bucket_start`), or ``None`` when the
+    turn has no readable time. A time with no offset is read as UTC, as
+    :func:`_turn_day` reads it, so a turn's ``day`` is always its
+    bucket's first ten characters."""
+    dt = _parse_ts(turn.ts)
+    return bucket_start(dt) if dt is not None else None
+
+
 def _build_turns_agg(result: TranscriptResult, pricing: Pricing) -> list[dict]:
-    """Per-day, per-model rollups (``turns_agg`` rows) for one
-    transcript's priced turns, cost via ``pricing.price_turn`` at default
-    pricing (the packaged rate card — no per-project/CLI override is
-    plumbed through ``ServeOptions``)."""
-    buckets: dict[tuple[str, str], dict] = {}
+    """Per-quarter-hour, per-model rollups (``turns_agg`` rows) for one
+    transcript's priced turns, each with its UTC ``day`` and its
+    ``bucket`` (the UTC quarter hour, ``None`` for a turn with no
+    readable time, whose ``day`` is ``"unknown"``). Cost is
+    ``pricing.price_turn`` at the watcher's rate card: ``config.toml``'s
+    ``pricing_path``, else ``<config_dir>/pricing.toml``, else the
+    packaged default, the same card the API reads (see
+    :meth:`FileWatcher._refresh_pricing`). When that card changes, every
+    stored transcript still on disk is parsed again and its rows rebuilt
+    at the new rates (see :meth:`FileWatcher._check_rate_card`)."""
+    buckets: dict[tuple[str, str | None, str], dict] = {}
     for turn in _priced_turns(result):
         model = turn.model or "<unknown>"
-        key = (_turn_day(turn), model)
+        key = (_turn_day(turn), _turn_bucket(turn), model)
         bucket = buckets.setdefault(
             key,
             {
                 "day": key[0],
+                "bucket": key[1],
                 "model": model,
                 "turns": 0,
                 "input_tokens": 0,
@@ -266,7 +337,7 @@ def _build_turns_agg(result: TranscriptResult, pricing: Pricing) -> list[dict]:
 def _build_recache_turns(result: TranscriptResult, thresholds: recache.RecacheThresholds) -> list[dict]:
     """``recache_turns`` rows for one transcript, via ``recache.detect``
     at default thresholds (``ServeOptions`` carries no threshold
-    overrides — same posture as pricing above)."""
+    overrides)."""
     flagged = recache.detect(result.turns, thresholds)
     return [
         {
@@ -353,7 +424,14 @@ class FileWatcher:
         #: ``spawn``) does not inherit this process's ``parse.set_salt``.
         self._salt = salt
         self._now = now or time.time
-        self._pricing = _default_pricing()
+        #: The rate card every turn is priced with, and where it was read
+        #: from: ``(pricing_path, (mtime_ns, size_bytes) of the card
+        #: file)``, ``None`` until a card has loaded. Each tick
+        #: :meth:`_refresh_pricing` reloads the card when that changes.
+        self._pricing = _empty_pricing()
+        self._pricing_source: tuple[str | None, tuple[int, int] | None] | None = None
+        if not self._refresh_pricing():
+            self._pricing = _fallback_pricing(Path(options.config_dir))
         self._recache_thresholds = recache.RecacheThresholds()
 
         #: Paths force-parsed once while still "live" (see :meth:`_resolve`)
@@ -536,6 +614,9 @@ class FileWatcher:
         self._scan_profiles(stats)
         self._scan_predictions(stats)
 
+        # Before known_files: a new rate card marks every stored
+        # transcript for a fresh parse, which this tick then starts on.
+        self._check_rate_card(stats)
         known = self._time_store(stats, self.store.known_files)
         seen_paths: set[str] = set()
 
@@ -637,6 +718,69 @@ class FileWatcher:
         # judged) is fixed, unlike the rest of this module's retention --
         # it runs every tick regardless of --retention-days.
         self._time_store(stats, self.store.prune_predictions)
+
+    # -- the rate card ---------------------------------------------------------
+
+    def _rate_card_source(self) -> tuple[str | None, tuple[int, int] | None]:
+        """Where ``load_pricing`` would read the card from now, in the
+        same order the API resolves it (``config.toml``'s
+        ``pricing_path``, else ``<config_dir>/pricing.toml``, else the
+        packaged default): ``(pricing_path, (mtime_ns, size_bytes) of
+        the card file)``. ``(None, None)`` is the packaged default.
+        Reads ``config.toml`` with ``config.saved_pricing_path``, not
+        ``load_config``, which is too heavy to run every tick. Raises
+        ``ConfigError`` when ``config.toml`` can't be read."""
+        config_dir = Path(self.options.config_dir)
+        pricing_path = config_mod.saved_pricing_path(config_dir)
+        card = Path(pricing_path) if pricing_path is not None else config_dir / "pricing.toml"
+        return pricing_path, _stat_key(card)
+
+    def _refresh_pricing(self) -> bool:
+        """Reload the rate card when the file it comes from has changed
+        since it was last loaded: ``pricing_path`` set, changed or
+        cleared, ``<config_dir>/pricing.toml`` created, edited or removed.
+        A card that can't be read keeps the one already loaded, so a
+        half-saved edit never prices anything at zero; the next tick
+        tries again. Returns ``False`` when the card, or the
+        ``config.toml`` naming it, couldn't be read."""
+        try:
+            source = self._rate_card_source()
+            if source != self._pricing_source:
+                self._pricing = load_pricing(path=source[0], config_dir=self.options.config_dir)
+                self._pricing_source = source
+        except Exception:  # any unreadable card, whatever the reason, must not stop the scans
+            return False
+        return True
+
+    def _check_rate_card(self, stats: WatcherStats) -> None:
+        """Pick up a changed rate card (:meth:`_refresh_pricing`), and
+        when its ``sha256`` differs from the one the store's costs were
+        priced with (``meta`` key :data:`TURNS_PRICED_WITH_KEY`), mark
+        every stored transcript for a fresh parse (``Store.demote_parsed``)
+        and record the new one. The stale-parser path in :meth:`_resolve`
+        then parses each transcript again, a digest-cache hit when the
+        file is unchanged, and rebuilds its ``turns_agg``, compactions,
+        workflow run costs and session total at the new rates, counted in
+        ``files_reparsed_stale_parser``.
+
+        The mark is in the store, not in this tick's ``known``, so
+        transcripts this tick doesn't reach (a projects folder out of
+        reach, a restart part-way through) are still parsed again later.
+        Rows a newer build wrote are left alone. Transcripts no longer on
+        disk can't be parsed again and keep their old cost. A store with
+        no recorded card counts as changed: one full re-price, which on a
+        fresh store is free (nothing is stored yet). The all-unknown card
+        of a corrupted install (``sha256 == ""``, see
+        :func:`_fallback_pricing`) never re-prices, so it never resets
+        every stored transcript's cost to zero."""
+        if not self._refresh_pricing():
+            note = _PRICING_UNREADABLE if self._pricing_source is not None else _PRICING_UNREADABLE_AT_START
+            stats.error_messages = stats.error_messages + (note,)
+        sha256 = self._pricing.sha256
+        if not sha256 or self._time_store(stats, self.store.get_meta, TURNS_PRICED_WITH_KEY) == sha256:
+            return
+        self._time_store(stats, self.store.demote_parsed)
+        self._time_store(stats, self.store.set_meta, TURNS_PRICED_WITH_KEY, sha256)
 
     # -- S1-perf item 2: bulk parallel prewarm -------------------------------
 
@@ -1026,7 +1170,9 @@ class FileWatcher:
           older parser must not be silently reused forever (this is the
           only path that ever revisits an untouched file; see the digest
           cache's own ``header["parser_version"]`` check in ``cache.py``
-          for the matching on-disk-cache half of this).
+          for the matching on-disk-cache half of this). A rate-card
+          change reuses it: :meth:`_check_rate_card` records every stored
+          transcript as parsed by version 0.
         - New-or-changed, but live (mtime under
           :data:`LIVE_FILE_WINDOW_S`), already known from a previous
           tick, and parsed less than :data:`LIVE_REPARSE_S` ago: skip
@@ -1189,7 +1335,11 @@ class FileWatcher:
 
         snapshot_id: int | None = None
         if record.first_ts and self._loaded_snapshots:
-            snap = snapshots_mod.snapshot_for(record.first_ts, self._loaded_snapshots)
+            # The settings this session's own project had, under either
+            # spelling of its drive letter, never another project's.
+            snap = snapshots_mod.snapshot_for(
+                record.first_ts, self._loaded_snapshots, snapshots_mod.snapshot_project_keys(slug)
+            )
             if snap is not None:
                 snapshot_id = self._snapshot_ids_by_ts.get(snap.ts)
         profile_id = snapshots_mod.profile_for(record.first_ts, self._profile_marks, session_id)
@@ -1438,4 +1588,4 @@ class FileWatcher:
                 stats.error_messages = stats.error_messages + (f"prediction ingest error: {_error_summary(exc)}",)
 
 
-__all__ = ["FileWatcher", "LIVE_FILE_WINDOW_S", "LIVE_REPARSE_S"]
+__all__ = ["FileWatcher", "LIVE_FILE_WINDOW_S", "LIVE_REPARSE_S", "TURNS_PRICED_WITH_KEY"]

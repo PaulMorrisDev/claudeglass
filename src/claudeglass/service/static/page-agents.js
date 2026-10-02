@@ -53,8 +53,8 @@ export function renderAgentHooks(panel) {
 
 // ======================================================================
 // Agents & context, Context: every CLAUDE.md file and every skill Claude
-// Code lists, with how often each is sent and what it costs, then the
-// context budget section
+// Code lists (the picked project's, once one is picked), with how often
+// each is sent and what it costs, then the context budget section
 // ======================================================================
 
 export function renderContextFiles(panel) {

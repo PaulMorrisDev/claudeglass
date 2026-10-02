@@ -141,7 +141,19 @@ import dataclasses
 import re
 from dataclasses import dataclass
 
-from . import carry, compaction_sim, elasticity, handoff, hook_costs, model_swap, run_split, waste
+from . import (
+    agent_models,
+    carry,
+    compaction_sim,
+    elasticity,
+    handoff,
+    hook_costs,
+    model_swap,
+    pricing,
+    run_split,
+    tool_search,
+    waste,
+)
 from .config import Config
 from .context_budget import _READ_ONLY_TOOLS
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
@@ -1026,7 +1038,12 @@ def _rule_baseline_bloat(
             archetypes=_ALL_ARCHETYPES,
             title="The session baseline is large before any work happens",
             action=action,
-            lever="mcpServers",
+            # No lever: MCP servers aren't a settings key (they live in
+            # ~/.claude.json and .mcp.json), so --patch-set has nothing to
+            # write for this card. Its fix is a prompt (fixes.py), and no
+            # one settings file, so no scope chip either.
+            lever=None,
+            scope="",
             evidence=evidence,
         )
     ]
@@ -2029,15 +2046,28 @@ def _rule_pricing_coverage(report: ReportModel) -> list[Recommendation]:
     model with no price, and ``usage.pricing_closest_match``
     (``as_closest_match_table``) whenever one was priced by closest
     match; the action names whichever of those model ids is present.
-    Without either table (a report built with ``include`` leaving out
-    ``usage``) the rule still fires on ``coverage_pct`` alone, with a
-    generic action.
+    A closest-match id that is a newer release of what it was priced as
+    (``pricing.newer_version_of``: ``claude-x-5-5`` on ``claude-x-5``)
+    gets its own sentence, since it isn't a mismatched model, just one
+    the rate card doesn't know yet. Without either table (a report built
+    with ``include`` leaving out ``usage``) the rule still fires on
+    ``coverage_pct`` alone, with a generic action.
     """
     coverage_pct = report.meta.pricing.coverage_pct
     closest_table = _table(report, "usage", "pricing_closest_match")
-    closest_model_ids = (
-        [row[0] for row in closest_table.rows if row] if closest_table is not None else []
-    )
+    closest_rows = [row for row in closest_table.rows if row] if closest_table is not None else []
+    closest_model_ids = [row[0] for row in closest_rows]
+    closest_keys = [c.key for c in closest_table.columns] if closest_table is not None else []
+    priced_as_at = closest_keys.index("priced_as") if "priced_as" in closest_keys else None
+    newer_versions = [
+        (row[0], row[priced_as_at])
+        for row in closest_rows
+        if priced_as_at is not None
+        and len(row) > priced_as_at
+        and pricing.newer_version_of(str(row[0]), str(row[priced_as_at]))
+    ]
+    newer_ids = {m for m, _ in newer_versions}
+    plain_model_ids = [m for m in closest_model_ids if m not in newer_ids]
     if coverage_pct >= 100.0 and not closest_model_ids:
         return []
     dq_value = _cell(report, "scorecard", "dimensions", "data_quality", "value")
@@ -2054,13 +2084,19 @@ def _rule_pricing_coverage(report: ReportModel) -> list[Recommendation]:
             f"Add {', '.join(str(m) for m in unknown_model_ids)} to pricing.toml so the "
             "report's cost figures cover the whole corpus."
         )
-    if closest_model_ids:
+    if plain_model_ids:
+        ids = ", ".join(str(m) for m in plain_model_ids)
         action_parts.append(
-            f"{', '.join(str(m) for m in closest_model_ids)} "
-            + ("was" if len(closest_model_ids) == 1 else "were")
-            + " priced by closest match, not its own rate; give "
-            + ("it" if len(closest_model_ids) == 1 else "them")
-            + " a pricing.toml row of its own for an exact cost."
+            f"{ids} was priced by closest match, not its own rate; give it a pricing.toml row of its own "
+            "for an exact cost."
+            if len(plain_model_ids) == 1
+            else f"{ids} were priced by closest match, not their own rates; give them pricing.toml rows of "
+            "their own for an exact cost."
+        )
+    for model_id, priced_as in newer_versions:
+        action_parts.append(
+            f"There is no rate of its own for {model_id} yet, so it was priced as {priced_as}; update "
+            f"ClaudeGlass or add a models.\"{model_id}\" row to pricing.toml for its exact cost."
         )
     if not action_parts:
         action_parts.append(
@@ -2277,10 +2313,12 @@ def recommend(
     carry_th = carry.CarryThresholds.from_config(config.thresholds)
     compaction_sim_th = compaction_sim.CompactionSimThresholds.from_config(config.thresholds)
     model_swap_th = model_swap.ModelSwapThresholds.from_config(config.thresholds)
+    agent_models_th = agent_models.AgentModelThresholds.from_config(config.thresholds)
     waste_th = waste.WasteThresholds.from_config(config.thresholds)
     handoff_th = handoff.HandoffThresholds.from_config(config.thresholds)
     hooks_th = hook_costs.HookThresholds.from_config(config.thresholds)
     run_split_th = run_split.RunSplitThresholds.from_config(config.thresholds)
+    tool_search_th = tool_search.ToolSearchThresholds.from_config(config.thresholds)
 
     recs: list[Recommendation] = []
     recs.extend(_rule_ttl_switch(report, config, snapshot, archetype, th))
@@ -2321,8 +2359,14 @@ def recommend(
     recs.extend(run_split.RULES[0](report, run_split_th))
     for hook_rule in hook_costs.RULES:
         recs.extend(hook_rule(report, hooks_th))
+    recs.extend(tool_search.RULES[0](report, tool_search_th))
     recs.extend(compaction_sim.RULES[0](report, compaction_sim_th, snapshot))
     recs.extend(model_swap.RULES["model-tier"](report, model_swap_th, archetype, snapshot))
+    # Agents that ran on a larger model than their work needed: its own
+    # cards, kept out of model-tier and the Savings levers so nothing is
+    # counted twice.
+    for agent_models_rule in agent_models.RULES.values():
+        recs.extend(agent_models_rule(report, agent_models_th, archetype, snapshot))
     recs.extend(waste.RULES[0](report, waste_th))
 
     if archetype is not None:
@@ -2445,7 +2489,10 @@ def render_patch_set(recs: list[Recommendation]) -> str:
                 lines.append("")
             continue
         bare_lever = rec.lever
-        if not bare_lever:
+        # The agent-model cards (agent_models.RULES) name the model as their
+        # lever, but their fix is a prompt: the call that starts the agent
+        # sets it, so there is no agent-file line to patch.
+        if not bare_lever or rec.id in agent_models.RULES:
             continue
         is_managed = rec.scope == "managed"
 

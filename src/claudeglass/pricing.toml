@@ -1,7 +1,7 @@
-version = "2026-09-23"
+version = "2026-10-01"
 currency = "USD"
 source_url = "https://platform.claude.com/docs/en/about-claude/pricing"
-retrieved = "2026-09-23"
+retrieved = "2026-10-01"
 notes = """
 Manually curated USD list prices, per million tokens, read from the
 Claude pricing page on the date above. Never fetched automatically (see
@@ -20,8 +20,9 @@ them for anything other than relative comparisons.
 # [models.<id>.geo_multipliers] table — that's the asymmetry documented
 # here, not an omission to fix.
 
-# Context-window rule (D2/D4/COV-12): "Fable 5.1, Fable 5, Sonnet 5,
-# Opus 4.7+: native 1M token context window" (docs/en/model-config).
+# Context-window rule (D2/D4/COV-12): Fable 5.1, Fable 5, Sonnet 5.5,
+# Sonnet 5, Sonnet 4.6 and Opus 4.6+ have a native 1M token context
+# window (docs/en/model-config; the 4.6 models need no beta header).
 # Those models set context_window_tokens = 1000000 below; every other
 # model omits the key and gets pricing.py's 200,000-token default, the
 # window every earlier generation shipped with. Claude Code itself
@@ -147,6 +148,7 @@ output = 25.0
 cache_write_5m = 6.25
 cache_write_1h = 10.0
 cache_read = 0.5
+context_window_tokens = 1000000
 
 [models."claude-opus-4-6".geo_multipliers]
 us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"
@@ -177,8 +179,20 @@ cache_read = 1.5
 
 # --- Sonnet ---------------------------------------------------------------
 
-[models."claude-sonnet-5"]
+[models."claude-sonnet-5-5"]
 aliases = ["sonnet", "sonnet[1m]"]
+input = 2.0
+output = 10.0
+cache_write_5m = 2.5
+cache_write_1h = 4.0
+cache_read = 0.2
+context_window_tokens = 1000000
+
+[models."claude-sonnet-5-5".geo_multipliers]
+us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"
+
+[models."claude-sonnet-5"]
+aliases = []
 input = 2.0
 output = 10.0
 cache_write_5m = 2.5
@@ -196,6 +210,7 @@ output = 15.0
 cache_write_5m = 3.75
 cache_write_1h = 6.0
 cache_read = 0.3
+context_window_tokens = 1000000
 
 [models."claude-sonnet-4-6".geo_multipliers]
 us = 1.1 # documented data-residency uplift when usage.inference_geo == "us"

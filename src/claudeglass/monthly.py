@@ -14,10 +14,9 @@ recache/ttl/compaction/topology/etc., which are optimisation-focused
 rather than finance-focused.
 
 Month attribution: a session is attributed to the calendar month of its
-*first* top-level turn's local timestamp (``config.tz``, the same
-fallback-to-machine-zone convention ``usage.py``'s/``classify.py``'s own
-``_to_local`` use -- duplicated here per this project's small-helper
-convention). A session whose turns straddle a month boundary is
+*first* top-level turn's local timestamp (``config.tz``, through the
+same ``discovery.to_local`` fallback rule ``usage.py``'s/``classify.py``'s
+own ``_to_local`` use). A session whose turns straddle a month boundary is
 therefore counted wholly in the month it started, not split across two
 reports -- a documented approximation, the same kind ``usage.py``'s own
 five-hour-block grid already accepts for a similar reason (no exact
@@ -61,9 +60,8 @@ from calendar import monthrange
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from . import invocation, pages
+from . import discovery, invocation, pages
 from .config import Config
 from .corpus import Corpus, SessionBundle
 from .model import ReportModel, Table
@@ -124,12 +122,7 @@ def _parse_ts(ts: str | None) -> datetime | None:
 
 
 def _to_local(dt: datetime, tz: str | None) -> datetime:
-    if tz:
-        try:
-            return dt.astimezone(ZoneInfo(tz))
-        except (ZoneInfoNotFoundError, ValueError):
-            return dt.astimezone()
-    return dt.astimezone()
+    return discovery.to_local(dt, tz)
 
 
 # -- month-scoped corpus filtering -------------------------------------------
@@ -248,8 +241,8 @@ def _habits_digest_table(
     work that met its goal cost. ``None`` when there's nothing to say.
     ``config``, when given, resolves ``effort_fit``'s share gate to the
     same configured number the main report's ``effort-mismatch`` rule
-    uses (UX-3, "one shared effort threshold"); without it, the class
-    default."""
+    uses (UX-3, "one shared effort threshold"), and counts weeks in its
+    ``tz``; without it, the class default and the machine's own zone."""
     from . import habits
     from .helptext import TABLE_COPY
     from .model import Column
@@ -257,7 +250,8 @@ def _habits_digest_table(
     threshold_kwargs = (
         {"effort_share_threshold_pct": _effort_mismatch_share_threshold(config)} if config is not None else {}
     )
-    digest = habits.digest_table(habits.collect(corpus, pricing, ratings=ratings, **threshold_kwargs))
+    tz = config.tz if config is not None else None
+    digest = habits.digest_table(habits.collect(corpus, pricing, ratings=ratings, tz=tz, **threshold_kwargs))
     if not digest.rows:
         return None
     copy = TABLE_COPY["habits_digest"]

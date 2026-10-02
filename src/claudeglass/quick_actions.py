@@ -42,7 +42,8 @@ class Context:
     skip_keys: frozenset = frozenset()
     #: The project folders the report was limited to, or ``None`` when it
     #: saw every project: a skill Claude never used there is hidden in
-    #: that project only (``skills_review``).
+    #: that project only (``skills_review``), and only those folders'
+    #: CLAUDE.md files are reviewed (``claude_md_review``).
     only: tuple[Path, ...] | None = None
     #: The report window's own bounds, as Unix timestamps (``None``: open
     #: on that side) -- for a check that reads outside the report itself,
@@ -229,12 +230,32 @@ def _models(ctx: Context) -> dict:
     fixes = _goal_fixes(ctx, draft, lambda c: f"{_who(c['agent'])}: use {c['value']}")
     left_out = _models_left_out(ctx, rows)
     tips = left_out + _models_set_elsewhere(rows)
-    if not fixes:
+    # The agent-model cards (agents that ran on a larger model than their
+    # work needed): an advice-level one makes the check "act". Each one's
+    # own fix is offered either way; an info-level one with no prompt in
+    # its fix is a tip instead, its title and why. The cards share ids
+    # across agent types, so this is decided per card, not per id.
+    agent_recs = [rec for rec in _recommendations(ctx, _AGENT_MODEL_RECS) if rec.key not in ctx.skip_keys]
+    flagged = [rec for rec in agent_recs if rec.severity != "info"]
+    tips += [{"title": rec.title, "text": rec.why or rec.action} for rec in agent_recs
+             if rec.severity == "info" and not _recs_with_prompt_fix([rec])]
+    agent_fixes = _merge_fixes(_rec_fixes(agent_recs))
+    if not fixes and not flagged:
         return _result(
             "ok",
             "Every agent is already on the cheapest model that priced lower by a useful margin"
             + (", or did worse on it." if left_out else "."),
             table=table,
+            fixes=agent_fixes,
+            tips=tips,
+        )
+    flagged_text = _agent_model_titles(flagged)
+    if not fixes:
+        return _result(
+            "act",
+            f"{flagged_text} Apart from that, no change to an agent file or setting would save a useful amount.",
+            table=table,
+            fixes=agent_fixes,
             tips=tips,
         )
     top = max(draft["candidates"], key=lambda c: (c["estimate"] or {}).get("saving_usd") or 0)
@@ -242,11 +263,27 @@ def _models(ctx: Context) -> dict:
         "act",
         f"{len(fixes)} model change{'s' if len(fixes) != 1 else ''} would have cost less. The largest: {_who(top['agent'])} on "
         f"{top['value']}, {top['estimate']['effect_text'][:1].lower()}{top['estimate']['effect_text'][1:]}. A "
-        "cheaper model may need more replies for hard work, so try it on one agent first.",
+        "cheaper model may need more replies for hard work, so try it on one agent first."
+        + (f" {flagged_text}" if flagged_text else ""),
         table=table,
-        fixes=fixes,
+        fixes=fixes + agent_fixes,
         tips=tips,
     )
+
+
+#: Agent-model cards named in the "models" summary before it says how many more.
+AGENT_MODEL_TITLES = 3
+
+
+def _agent_model_titles(flagged) -> str:
+    """The advice-level agent-model cards' titles, one sentence each, for
+    the "models" summary: the first ``AGENT_MODEL_TITLES``, then how many
+    more are flagged. Empty when none is."""
+    sentences = [f"{rec.title.rstrip('.')}." for rec in flagged[:AGENT_MODEL_TITLES]]
+    more = len(flagged) - AGENT_MODEL_TITLES
+    if more > 0:
+        sentences.append(f"{more} more {'is' if more == 1 else 'are'} flagged too.")
+    return " ".join(sentences)
 
 
 def _count(value) -> int:
@@ -449,7 +486,14 @@ def _cache(ctx: Context) -> dict:
 def _tools(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     rows = tables.rows("agent_startup", "agent_startup_unused")
+    ids = {"spawn-unused-mcp", "spawn-unused-skills", "spawn-read-only-tools", "baseline-bloat"}
+    # baseline-bloat is about main sessions, so it can fire when no
+    # subagent started: look its fix up first.
+    fixes = _rec_fixes(_recommendations(ctx, ids))
     if not rows:
+        if fixes:
+            return _result("act", "No subagents started in this window; the fix below is for your main sessions.",
+                           fixes=fixes)
         return _result("no_data", "No subagents started in this window.")
     table = _table(
         [("agent", "Agent"), ("spawns", "Starts"), ("mcp", "Offered MCP / used it"),
@@ -458,8 +502,6 @@ def _tools(ctx: Context) -> dict:
           f"{r.get('mcp_offered_spawns') or 0} / {r.get('mcp_used_spawns') or 0}",
           f"{r.get('skills_listed_spawns') or 0} / {r.get('skills_used_spawns') or 0}"] for r in rows],
     )
-    ids = {"spawn-unused-mcp", "spawn-unused-skills", "spawn-read-only-tools", "baseline-bloat"}
-    fixes = _rec_fixes(_recommendations(ctx, ids))
     if not fixes:
         return _result("ok", "Every agent uses the tools, MCP servers and skills it's given, or they cost little.",
                        table=table)
@@ -548,7 +590,9 @@ def _claude_md(ctx: Context) -> dict:
     from . import claude_md_review
 
     review = claude_md_review.build_review(
-        ctx.config_dir, getattr(ctx.model, "context_files", None) or {},
+        ctx.config_dir,
+        getattr(ctx.model, "context_files", None) or {},
+        projects=None if ctx.only is None else list(ctx.only),
     )
     pairs = sorted(
         ((item, claude_md_review.file_summary(item, ctx.units, ctx.period)) for item in review.files),
@@ -838,14 +882,22 @@ def _tool_search(ctx: Context) -> dict:
         return int(round(whatif._num(r.get(key)) or 0))
 
     replies, most, mcp = count(row, "replies"), count(row, "most_deferred"), count(row, "most_deferred_mcp")
+    # An MCP server Claude never used costs every reply whether or not
+    # tool search deferred anything (one loaded upfront isn't deferred),
+    # so its fix is looked up before either "no data" answer.
+    unused = _recommendations(ctx, {"mcp-unused-server"})
+    fixes = _rec_fixes(unused)
+    also = "".join(f" {rec.title}." for rec in unused) if fixes else ""
+    status = "act" if fixes else "no_data"
     if not replies:
-        return _result("no_data", f"No reply {ctx.period} had tools deferred by tool search.")
+        return _result(status, f"No reply {ctx.period} had tools deferred by tool search.{also}", fixes=fixes)
     net = whatif._num(row.get("net_usd"))
     if net is None:
         return _result(
-            "no_data",
+            status,
             f"Tool search deferred up to {most:,} tools a reply {ctx.period}, but none was loaded, so their size "
-            "isn't known.",
+            f"isn't known.{also}",
+            fixes=fixes,
         )
     table = _table(
         [("server", "MCP server"), ("deferred", "Most tools deferred"), ("kept", "Kept out of each reply"),
@@ -866,7 +918,7 @@ def _tool_search(ctx: Context) -> dict:
             f"Tool search saved nothing {ctx.period}: the replies spent searching for tools cost more than keeping "
             f"up to {most:,} tool definitions out of each reply saved."
         )
-    return _result("ok", text, table=table)
+    return _result("act" if fixes else "ok", text + also, table=table, fixes=fixes)
 
 
 #: How much of a known saver's own net loss its redirects have to
@@ -1082,6 +1134,11 @@ _HABIT_RECS = {
     "cache-read-dominance", "limit-pressure", "long-context-share", "subagent-volume", "discovery-share",
     "wasted-turns",
 }
+
+#: The agent-model cards (``agent_models.RULES``), claimed by the "models"
+#: check: agents that wrote code or decided on a larger model than the work
+#: needed. Three ids, so ignoring one never hides another.
+_AGENT_MODEL_RECS = {"agent-model-inherited", "agent-model-asked", "agent-decide-apply"}
 
 
 def _blocked_by_label(row: dict) -> str:
@@ -1567,7 +1624,7 @@ def _quality(ctx: Context) -> dict:
 CHECKS: tuple[Check, ...] = (
     Check("models", "Is each agent on the cheapest model that does the job?",
           "Every reply is priced by its model; a cheaper model for routine agents is usually the largest saving.",
-          _models, ("model-tier", "model-tier-main")),
+          _models, ("model-tier", "model-tier-main", *sorted(_AGENT_MODEL_RECS))),
     Check("effort", "Is anything thinking more than the work needs?",
           "Thinking is billed as output, the most expensive kind of token.", _effort, ("effort-mismatch",)),
     Check("compaction", "When should conversations be summarised?",
@@ -1592,7 +1649,7 @@ CHECKS: tuple[Check, ...] = (
           tuple(sorted(_HOOK_RECS))),
     Check("tool-search", "What does MCP tool search save you?",
           "Claude Code lists MCP tools by name and loads a full definition only when Claude needs it, so the rest "
-          "aren't re-read on every reply.", _tool_search),
+          "aren't re-read on every reply.", _tool_search, ("mcp-unused-server",)),
     Check("known-savers", "What does tokensave save you?",
           "A token-saving tool has its own overhead: its answers still sit in context, and its hook can turn "
           "a call away and cost a reply. This weighs what it says it saved against what it cost.", _savers),

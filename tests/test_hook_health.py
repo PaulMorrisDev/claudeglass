@@ -5,6 +5,7 @@ broken by JSON escaping, and repairing only that command after a backup
 
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import os
@@ -16,6 +17,7 @@ import pytest
 
 from claudeglass import cli, helptext, hook_health, setup_flow
 from claudeglass.model import Diagnostics, Event, EventKind, TranscriptResult
+from claudeglass.render import markdown
 
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
 
@@ -155,6 +157,37 @@ def test_diagnostics_table_leads_with_the_hook_row(tmp_path):
     assert table.rows[0][0] == "snapshot_hook"
     assert table.rows[0][1] == "working"
     assert table.value_labels["snapshot_hook"] == "Config snapshot hook"
+
+
+def test_diagnostics_table_heads_the_setup_rows_apart_from_the_window_counters(tmp_path):
+    """The hook and statusline rows describe your setup and every session
+    (not the window or project picked); the counters below them are the
+    window's. Only the first setup row heads its group."""
+    config_dir, _ = _claude_dir(tmp_path)
+    hook = hook_health.check(config_dir, now=NOW)
+    statusline = (True, "Your statusline is on.")
+    setup = "Your setup and every session, every project"
+    first = dataclasses.fields(Diagnostics)[0].name
+    counters = {first: "Read in this window"}
+
+    both = helptext.diagnostics_table(Diagnostics(), hook=hook, statusline=statusline)
+    assert [row[0] for row in both.rows[:3]] == ["snapshot_hook", "statusline", first]
+    assert both.row_groups == {"snapshot_hook": setup, **counters}
+    only_hook = helptext.diagnostics_table(Diagnostics(), hook=hook)
+    assert only_hook.row_groups == {"snapshot_hook": setup, **counters}
+    only_statusline = helptext.diagnostics_table(Diagnostics(), statusline=statusline)
+    assert only_statusline.row_groups == {"statusline": setup, **counters}
+    # No setup row: one list of counters, no headings.
+    neither = helptext.diagnostics_table(Diagnostics())
+    assert neither.row_groups == {}
+    assert neither.rows[0][0] == first
+
+    # The headings read in the markdown report, each once, in order.
+    lines = markdown._render_table(both, "USD")
+    headings = [line for line in lines if line.startswith("| **")]
+    assert [h.split("**")[1] for h in headings] == [setup, "Read in this window"]
+    assert lines.index(headings[0]) < next(i for i, line in enumerate(lines) if "Config snapshot hook" in line)
+    assert lines.index(headings[1]) < next(i for i, line in enumerate(lines) if "Lines read" in line)
 
 
 def _run_init(config_dir, tmp_path, *, repair_hook=False):

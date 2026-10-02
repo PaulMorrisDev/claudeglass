@@ -1,0 +1,169 @@
+"""``Turn.shell_write_count`` (``parse``): how many write targets a
+turn's shell commands named outside the temp dir, repeats kept. A count
+only, taken without a salt, and taken back for a command that never ran."""
+
+from __future__ import annotations
+
+import re
+import tempfile
+
+import pytest
+
+from claudeglass import parse
+from claudeglass.model import TranscriptMeta
+from claudeglass.parse import parse_transcript
+
+from helpers import tool_result_block, tool_use_block, turn_line, user_block_line, user_str_line, write_jsonl
+
+REPO = "C:/Dev/repo"
+TEMP = tempfile.gettempdir()
+TEMP_SLASHED = TEMP.replace("\\", "/")
+
+
+def _ts(second: int) -> str:
+    return f"2026-09-18T12:{second // 60:02d}:{second % 60:02d}.000Z"
+
+
+def _turn(tmp_path, blocks, results, cwd=REPO):
+    path = tmp_path / "t.jsonl"
+    reply = turn_line(content=list(blocks), timestamp=_ts(1), cwd=cwd)
+    reply["message"]["stop_reason"] = "tool_use"
+    final = turn_line(content=[{"type": "text", "text": "done"}], timestamp=_ts(3))
+    final["message"]["stop_reason"] = "end_turn"
+    write_jsonl(path, [
+        user_str_line("go", timestamp=_ts(0)),
+        reply,
+        user_block_line(list(results), timestamp=_ts(2)),
+        final,
+    ])
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    return next(t for t in result.turns if t.tool_use_ids)
+
+
+def _bash(command, tool_use_id="t1"):
+    return tool_use_block("Bash", tool_use_id, {"command": command})
+
+
+def _ok(tool_use_id="t1"):
+    return tool_result_block(tool_use_id, "ok")
+
+
+@pytest.fixture(params=["no salt", "salt"])
+def salt(request, monkeypatch):
+    """Every case runs both ways: the count must not depend on the salt."""
+    monkeypatch.setattr(parse, "_SALT", b"s" * 32 if request.param == "salt" else None)
+    return request.param
+
+
+def test_a_bash_write_to_a_repo_file_counts(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("echo x > src/a.py")], [_ok()])
+    assert turn.shell_write_count == 1
+    # The salted hashes still come only with a salt.
+    assert len(turn.edit_target_hashes) == (1 if salt == "salt" else 0)
+
+
+def test_a_powershell_write_to_a_repo_file_counts(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("PowerShell", "t1", {"command": "Set-Content -Path src\\a.ts -Value 'x'"}),
+    ], [_ok()], cwd="C:\\Dev\\repo")
+    assert turn.shell_write_count == 1
+
+
+def test_every_target_a_command_names_counts(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("sed -i 's/a/b/' src/a.py src/b.py"), _bash("echo x > c.txt", "t2")],
+                 [_ok("t1"), _ok("t2")])
+    assert turn.shell_write_count == 3
+
+
+def test_a_file_written_twice_counts_twice(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("echo x > a.txt && echo y >> a.txt")], [_ok()])
+    assert turn.shell_write_count == 2
+
+
+@pytest.mark.parametrize(
+    "target",
+    [TEMP_SLASHED + "/scratch.txt", TEMP + "\\scratch.txt", TEMP_SLASHED + "/sub/x.txt"],
+    ids=["forward slashes", "backslashes", "a folder in it"],
+)
+def test_a_write_to_the_temp_dir_is_not_counted(tmp_path, salt, target):
+    turn = _turn(tmp_path, [_bash(f'echo x > "{target}"')], [_ok()])
+    assert turn.shell_write_count == 0
+
+
+def test_a_write_to_the_git_bash_form_of_the_temp_dir_is_not_counted(tmp_path, salt):
+    drive = re.match(r"^([A-Za-z]):/", TEMP_SLASHED)
+    if drive is None:
+        pytest.skip("the temp dir has no drive letter")
+    msys = f"/{drive.group(1).lower()}/{TEMP_SLASHED[3:]}/scratch.txt"
+    turn = _turn(tmp_path, [_bash(f'echo x > "{msys}"')], [_ok()])
+    assert turn.shell_write_count == 0
+
+
+def test_a_write_to_slash_tmp_is_not_counted(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("echo x > /tmp/x.txt")], [_ok()])
+    assert turn.shell_write_count == 0
+
+
+def test_a_powershell_write_to_the_temp_dir_is_not_counted(tmp_path, salt):
+    command = f"[IO.File]::WriteAllText('{TEMP}\\x.json', $json)"
+    turn = _turn(tmp_path, [tool_use_block("PowerShell", "t1", {"command": command})], [_ok()])
+    assert turn.shell_write_count == 0
+
+
+def test_a_path_that_climbs_out_of_the_temp_dir_counts(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("echo x > /tmp/../repo/a.py")], [_ok()])
+    assert turn.shell_write_count == 1
+
+
+def test_a_directory_that_only_starts_like_the_temp_dir_counts(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash(f'echo x > "{TEMP_SLASHED}2/a.py"'), _bash("echo x > /tmpfiles/b.py", "t2")],
+                 [_ok("t1"), _ok("t2")])
+    assert turn.shell_write_count == 2
+
+
+def test_only_the_write_outside_the_temp_dir_is_counted(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash(f'echo x > /tmp/x.txt && echo y > "{TEMP_SLASHED}/y.txt" && echo z > z.txt')],
+                 [_ok()])
+    assert turn.shell_write_count == 1
+
+
+def test_a_command_that_writes_nothing_counts_nothing(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("npm test > test.log"), _bash("git status", "t2")], [_ok("t1"), _ok("t2")])
+    assert turn.shell_write_count == 0
+
+
+def test_an_edit_tool_call_is_not_a_shell_write(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": "C:/Dev/repo/a.py"}),
+        tool_use_block("Write", "t2", {"file_path": "C:/Dev/repo/b.py"}),
+    ], [_ok("t1"), _ok("t2")])
+    assert turn.shell_write_count == 0
+
+
+@pytest.mark.parametrize("message", [
+    "The user doesn't want to proceed with this tool use. The tool use was rejected.",
+    "PreToolUse:Bash hook error: [guard.sh]: not here",
+])
+def test_a_command_that_was_denied_or_blocked_is_taken_back(tmp_path, salt, message):
+    turn = _turn(tmp_path, [_bash("echo x > src/a.py")], [tool_result_block("t1", message, is_error=True)])
+    assert turn.shell_write_count == 0
+
+
+def test_a_command_that_ran_and_failed_still_counts(tmp_path, salt):
+    turn = _turn(tmp_path, [_bash("echo x > src/a.py && false")],
+                 [tool_result_block("t1", "Exit code 1", is_error=True)])
+    assert turn.shell_write_count == 1
+
+
+def test_only_the_command_that_never_ran_is_taken_back(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        _bash("echo a > a.txt && echo b > b.txt", "t1"),
+        _bash("echo c > c.txt", "t2"),
+        _bash("echo d > d.txt", "t3"),
+    ], [
+        tool_result_block("t1", "The user doesn't want to proceed with this tool use.", is_error=True),
+        tool_result_block("t2", "Exit code 1", is_error=True),
+        _ok("t3"),
+    ])
+    assert turn.shell_write_count == 2
+

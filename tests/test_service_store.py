@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
@@ -518,8 +520,9 @@ def test_migrate_then_watcher_upgrades_a_stale_parser_version(tmp_path) -> None:
     above), and the watcher's own stale-``parser_version`` re-parse (the
     confirmed watcher bug this fix addresses) then reaching that
     preserved row on the very next tick, even though its file never
-    changed and the schema migration itself never touches
-    ``parser_version``."""
+    changed. The ladder's v7 -> v8 step marks every transcript as parsed
+    by version 0 (so each gets its ``turns_agg.bucket``), which is the
+    stale-parser check's own trigger, whatever version it was at."""
     import time
 
     from claudeglass import PARSER_VERSION
@@ -563,7 +566,7 @@ def test_migrate_then_watcher_upgrades_a_stale_parser_version(tmp_path) -> None:
             "SELECT COUNT(*) AS n FROM transcripts"
         ).fetchone()["n"]
         assert transcript_count == 1, "the migration lost the v4 store's transcript row"
-        assert store.known_files()[str(session_path)] == (file_stat.st_mtime_ns, file_stat.st_size, 1)
+        assert store.known_files()[str(session_path)] == (file_stat.st_mtime_ns, file_stat.st_size, 0)
 
         options = ServeOptions(projects_root=projects_root, config_dir=tmp_path / "config")
         watcher = FileWatcher(store, options)
@@ -656,7 +659,7 @@ def test_a_second_rebuild_of_the_same_version_gets_its_own_backup(tmp_path) -> N
     assert len(backups) == 2, f"expected two distinct backups, found {[p.name for p in backups]}"
 
 
-def test_a_v7_to_v6_to_v7_round_trip_keeps_the_ratings(tmp_path, monkeypatch) -> None:
+def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) -> None:
     """ROB-P6: session_feedback and session_tags are exported before a
     drop-and-rebuild and re-imported after, so a store that briefly looks
     older or newer than this build's own SCHEMA_VERSION -- e.g. an
@@ -668,7 +671,7 @@ def test_a_v7_to_v6_to_v7_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
 
     db_path = tmp_path / "roundtrip.db"
     store = Store(str(db_path))
-    store.open()  # built fresh at the real, current SCHEMA_VERSION (7)
+    store.open()  # built fresh at the real, current SCHEMA_VERSION (8)
     _seed(store)
     store.set_feedback("session-a", outcome="delivered", slow=("scope",), worth="yes", helped=("clearer-brief",))
     store.set_tag("session-a", "purpose", "refactor")
@@ -678,25 +681,26 @@ def test_a_v7_to_v6_to_v7_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
     )
     store.close()
 
-    # "Downgrade": a build that only knows up to v6 opens this v7 store.
-    # v7 is newer than that build's own SCHEMA_VERSION, so migrate() takes
+    # "Downgrade": a build that only knows up to v7 opens this v8 store.
+    # v8 is newer than that build's own SCHEMA_VERSION, so migrate() takes
     # the backup-then-drop-and-rebuild path (same branch as the test
-    # above), stamping the store back down to "6".
+    # above), stamping the store back down to "7".
     monkeypatch.setattr(schema, "SCHEMA_VERSION", schema.SCHEMA_VERSION - 1)
     downgraded = Store(str(db_path))
     downgraded.open()
-    assert downgraded.schema_version() == 6
+    assert downgraded.schema_version() == 7
     downgraded.close()
 
-    # Upgrade back to the real, current build: v6 -> v7 walks the
-    # additive MIGRATIONS ladder (it never drops a table), so this step
+    # Upgrade back to the real, current build: v7 -> v8 walks the
+    # additive MIGRATIONS ladder (it never drops a table, and finds the
+    # bucket column the rebuilt tables already carry), so this step
     # alone was never the risk -- the ratings must already have survived
     # the downgrade step above to still be here now.
     monkeypatch.undo()
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 7
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 8
         assert upgraded.feedback("session-a") == {
             "outcome": "delivered", "slow": ["scope"], "worth": "yes", "helped": ["clearer-brief"],
             "set_at": upgraded.feedback("session-a")["set_at"],
@@ -811,6 +815,52 @@ def test_known_files_reports_every_transcript(store: Store) -> None:
     files = store.known_files()
     assert files[_FAKE_PATH] == (123, 456, 3)
     assert files[_FAKE_SUB_PATH] == (789, 1011, 3)
+
+
+def test_demote_parsed_marks_this_builds_rows_and_leaves_a_newer_builds(store: Store) -> None:
+    from claudeglass import PARSER_VERSION
+
+    _seed(store)
+    store.upsert_transcript(
+        session_id="session-a", path=_FAKE_PATH, kind="top-level",
+        mtime_ns=123, size_bytes=456, parser_version=PARSER_VERSION, digest_json="{}",
+    )
+    newer = r"C:\Users\definitely-not-a-real-person\.claude\projects\proj-a\session-newer.jsonl"
+    store.upsert_transcript(
+        session_id="session-a", path=newer, kind="top-level",
+        mtime_ns=1, size_bytes=2, parser_version=PARSER_VERSION + 1, digest_json="{}",
+    )
+    token = store.change_token()
+
+    assert store.demote_parsed() == 2
+
+    files = store.known_files()
+    assert files[_FAKE_PATH] == (123, 456, 0)
+    assert files[_FAKE_SUB_PATH] == (789, 1011, 0)
+    assert files[newer] == (1, 2, PARSER_VERSION + 1)
+    # Nothing a reader sees has changed until each row is parsed again.
+    assert store.change_token() == token
+
+
+def test_meta_values_round_trip(store: Store) -> None:
+    assert store.get_meta("turns_priced_with") is None
+    store.set_meta("turns_priced_with", "abc")
+    assert store.get_meta("turns_priced_with") == "abc"
+    store.set_meta("turns_priced_with", "def")
+    assert store.get_meta("turns_priced_with") == "def"
+    # The schema version lives in the same table, untouched.
+    from claudeglass.service import schema
+
+    assert store.schema_version() == schema.SCHEMA_VERSION
+
+
+def test_get_meta_before_the_meta_table_exists_is_none() -> None:
+    unopened = Store(":memory:")
+    try:
+        assert unopened.get_meta("turns_priced_with") is None
+        assert unopened.schema_version() is None
+    finally:
+        unopened.close()
 
 
 def test_remove_missing_marks_transcripts_not_in_known_set(store: Store) -> None:
@@ -951,11 +1001,130 @@ def test_compactions_listing(store: Store) -> None:
     assert rows[0]["dropped_tokens"] == 140000
 
 
-def test_compactions_listing_keeps_only_those_in_the_window(store: Store) -> None:
-    _seed(store)  # one compaction, at 2026-09-18T12:30:00Z
+def test_compactions_listing_keeps_only_those_of_the_sessions_in_the_window(store: Store) -> None:
+    _seed(store)  # session-a, 12:00 to 13:00, one compaction at 12:30 on 2026-09-18
     assert len(store.compactions(since="2026-09-18T12:00:00Z")) == 1
-    assert store.compactions(since="2026-09-18T13:00:00Z") == []
+    # The window opens after the compaction but before the session's last
+    # reply: the session counts, so its compaction does too.
+    assert len(store.compactions(since="2026-09-18T12:45:00Z")) == 1
+    assert store.compactions(since="2026-09-18T13:30:00Z") == []
+    # The window closes before the session's last reply: it isn't counted,
+    # whenever its compaction happened.
+    assert store.compactions(until="2026-09-18T12:45:00Z") == []
     assert store.compactions(until="2026-09-18T12:00:00Z") == []
+
+
+def _compacting_session(store: Store, session_id: str, slug: str, first_ts: str, last_ts: str, compacted_at: list[str]) -> None:
+    store.upsert_session(
+        session_id=session_id, project_slug=slug, slug=slug, first_ts=first_ts, last_ts=last_ts, total_cost=1.0, total_tokens=100
+    )
+    store.upsert_transcript(
+        session_id=session_id,
+        path=rf"C:\Users\definitely-not-a-real-person\.claude\projects\{slug}\{session_id}.jsonl",
+        kind="top-level",
+        digest_json=json.dumps({"turns": 1}),
+        compactions=[
+            {"ts": ts, "pre_tokens": 1000, "post_tokens": 200, "dropped_tokens": 800, "trigger": "auto", "join_delta_s": 1.0}
+            for ts in compacted_at
+        ],
+    )
+
+
+def test_compactions_are_counted_and_listed_by_the_sessions_the_window_counts(store: Store) -> None:
+    """A window counts a session whole, so the list holds every compaction
+    of the sessions the tiles count, wherever in the session it fell: one
+    that began before the window opened lists the compactions from before
+    it too, and one that ran on past the window's end lists none."""
+    _compacting_session(store, "straddles", "proj-a", "2026-09-19T22:00:00Z", "2026-09-20T02:00:00Z",
+                        ["2026-09-19T23:00:00Z", "2026-09-20T01:00:00Z"])
+    _compacting_session(store, "earlier", "proj-a", "2026-09-18T09:00:00Z", "2026-09-18T10:00:00Z", ["2026-09-18T09:30:00Z"])
+    _compacting_session(store, "later", "proj-b", "2026-09-21T09:00:00Z", "2026-09-21T10:00:00Z", ["2026-09-21T09:30:00Z"])
+    _compacting_session(store, "runs-on", "proj-b", "2026-09-20T10:00:00Z", "2026-09-22T10:00:00Z", ["2026-09-20T11:00:00Z"])
+    compactions = {"straddles": 2, "earlier": 1, "later": 1, "runs-on": 1}
+    opens, closes = "2026-09-20T00:00:00Z", "2026-09-21T12:00:00Z"
+
+    def listed(**window) -> list[str]:
+        rows = store.compactions(**window)
+        # The list is as long as the compactions of the sessions the window counts.
+        counted = [s["id"] for s in store.sessions(**window)]
+        assert len(rows) == sum(compactions[session_id] for session_id in counted), window
+        return [row["ts"] for row in rows]
+
+    # Last replies on the 20th, 21st and 22nd: three sessions, and all the
+    # compactions of each, the one before the window's start among them.
+    assert store.summary(since=opens)["sessions"] == 3
+    assert listed(since=opens) == [
+        "2026-09-19T23:00:00Z", "2026-09-20T01:00:00Z", "2026-09-20T11:00:00Z", "2026-09-21T09:30:00Z",
+    ]
+    # The window closes while "runs-on" is still going: it, and the
+    # compaction inside the window, are out.
+    assert store.summary(since=opens, until=closes)["sessions"] == 2
+    assert listed(since=opens, until=closes) == ["2026-09-19T23:00:00Z", "2026-09-20T01:00:00Z", "2026-09-21T09:30:00Z"]
+    assert listed(project_slugs=["proj-b"], since=opens) == ["2026-09-20T11:00:00Z", "2026-09-21T09:30:00Z"]
+    # "Since my last change" counts by first reply: "straddles" began before it.
+    assert store.summary(since=opens, window_by="first-reply")["sessions"] == 2
+    assert listed(since=opens, window_by="first-reply") == ["2026-09-20T11:00:00Z", "2026-09-21T09:30:00Z"]
+    # With no window, every compaction.
+    assert len(store.compactions()) == sum(compactions.values())
+
+
+def test_the_compactions_list_is_as_long_as_the_reports_own_count(tmp_path) -> None:
+    """End to end: real transcripts through the watcher, then the report the
+    dashboard builds over the same window. Its Compactions section counts the
+    compactions of the sessions the window counts, so the list has as many
+    rows, the one a straddling session had before the window opened included."""
+    from claudeglass.config import Config
+    from claudeglass.pricing import load_pricing
+    from claudeglass.report import build_report
+    from claudeglass.service.contracts import ServeOptions
+    from claudeglass.service.rebuild import corpus_from_store
+    from claudeglass.service.watcher import FileWatcher
+    from helpers import system_line, turn_line, write_jsonl
+
+    def compaction(timestamp: str) -> dict:
+        return system_line(
+            "compact_boundary",
+            timestamp=timestamp,
+            compactMetadata={"trigger": "auto", "preTokens": 100000, "postTokens": 20000, "cumulativeDroppedTokens": 80000},
+        )
+
+    def session(slug: str, name: str, first: str, last: str, compacted_at: list[str]) -> None:
+        lines = [turn_line(timestamp=first)] + [compaction(ts) for ts in compacted_at] + [turn_line(timestamp=last)]
+        path = tmp_path / "projects" / slug / f"{name}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        write_jsonl(path, lines)
+        os.utime(path, (1_700_000_000, 1_700_000_000))  # long settled, so the watcher takes it
+
+    session("proj-a", "straddles", "2026-09-19T22:00:00.000Z", "2026-09-20T02:00:00.000Z",
+            ["2026-09-19T23:00:00.000Z", "2026-09-20T01:00:00.000Z"])
+    session("proj-a", "earlier", "2026-09-18T09:00:00.000Z", "2026-09-18T10:00:00.000Z", ["2026-09-18T09:30:00.000Z"])
+    session("proj-b", "later", "2026-09-21T09:00:00.000Z", "2026-09-21T10:00:00.000Z", ["2026-09-21T09:30:00.000Z"])
+
+    store = Store(":memory:")
+    store.open()
+    try:
+        stats = FileWatcher(store, ServeOptions(projects_root=tmp_path / "projects", config_dir=tmp_path / "config")).run_once()
+        assert stats.errors == 0
+
+        def reported(**window) -> int:
+            corpus = corpus_from_store(store, **window)
+            model = build_report(corpus, load_pricing(), Config(), projects=("proj-a", "proj-b"), window="w", include={"compactions"})
+            section = next(item for item in model.sections if item.key == "compactions")
+            mix = next(table for table in section.tables if table.name == "compactions_trigger_mix")
+            return sum(row[1] for row in mix.rows)
+
+        for window in (
+            {"since": "2026-09-20T00:00:00Z"},
+            {"since": "2026-09-20T00:00:00Z", "until": "2026-09-21T00:00:00Z"},
+            {"since": "2026-09-20T03:00:00Z"},
+            {"since": "2026-09-18T00:00:00Z"},
+        ):
+            assert len(store.compactions(**window)) == reported(**window), window
+        # The straddling session counts whole: three compactions, not two.
+        assert len(store.compactions(since="2026-09-20T00:00:00Z")) == 3
+        assert len(store.compactions(since="2026-09-20T03:00:00Z")) == 1
+    finally:
+        store.close()
 
 
 def test_sessions_listing_keeps_only_sessions_with_a_reply_in_the_window(store: Store) -> None:
@@ -1011,6 +1180,13 @@ def test_resolve_project_slug_finds_the_raw_slug_or_none(store: Store) -> None:
     assert store.resolve_project_slug("proj-a") == ["proj-a"]
     assert store.resolve_project_slug("proj-b") == ["proj-b"]
     assert store.resolve_project_slug("no-such-project") is None
+
+
+def test_project_slugs_lists_every_project_with_a_session(store: Store) -> None:
+    assert store.project_slugs() == []
+    _seed(store)
+    _seed_second_project(store)
+    assert store.project_slugs() == ["proj-a", "proj-b"]
 
 
 def test_summary_filters_by_project_slugs(store: Store) -> None:
@@ -1465,6 +1641,23 @@ def test_mark_prediction_seen_and_judge_prediction(store: Store) -> None:
     assert store.predictions(judged=False) == []
 
 
+def test_reopen_predictions_unjudges_only_the_verdict_named(store: Store) -> None:
+    for prediction_id, verdict in (("short", "too_little_data"), ("kept", "as_estimated")):
+        store.upsert_prediction(
+            prediction_id=prediction_id, ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
+            agent=None, predicted_usd=2.0, predicted_pct=None, fidelity="ceiling",
+        )
+        store.judge_prediction(
+            prediction_id, change_ts="2026-09-21T09:00:00Z", verdict=verdict, measured_usd=1.8, measured_pct=None
+        )
+    assert store.reopen_predictions("too_little_data") == 1
+    [reopened] = store.predictions(judged=False)
+    assert reopened["id"] == "short"
+    assert [reopened[k] for k in ("change_ts", "judged_at", "verdict", "measured_usd", "measured_pct")] == [None] * 5
+    assert [row["id"] for row in store.predictions(judged=True)] == ["kept"]
+    assert store.reopen_predictions("too_little_data") == 0
+
+
 def test_prune_predictions_drops_stale_unjudged_and_old_judged_rows(store: Store) -> None:
     store.upsert_prediction(
         prediction_id="fresh", ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
@@ -1507,7 +1700,7 @@ def test_migrate_upgrades_a_v5_store_with_the_feedback_table(tmp_path) -> None:
     store = Store(str(db_path))
     store.open()
     try:
-        assert store.schema_version() == schema.SCHEMA_VERSION == 7
+        assert store.schema_version() == schema.SCHEMA_VERSION == 8
         assert store.session("session-a") is not None
         assert store.tags("session-a") == {"purpose": "refactor-override"}
         store.set_feedback("session-a", outcome="met", worth="yes")
@@ -1549,3 +1742,468 @@ def test_read_session_marks_of_a_store_without_the_ratings_table_reads_the_tags(
     assert read_session_marks(db_path) == ({"session-a": {"purpose": "refactor-override"}}, {})
     (tmp_path / "junk.db").write_bytes(b"not a database")
     assert read_session_marks(tmp_path / "junk.db") == ({}, {})
+
+
+# -- turns_agg.bucket (schema 8) and daily_usage's local days ------------------
+
+_IST = timezone(timedelta(hours=5, minutes=30))
+_PST = timezone(timedelta(hours=-8))
+_MODEL = "claude-sonnet-5"
+_COLUMNS = [
+    "turns", "input_tokens", "cache_creation_tokens", "cache_read_tokens",
+    "output_tokens", "thinking_tokens", "cc_5m", "cc_1h", "cost",
+]
+
+
+def _tzdata_has(name: str) -> bool:
+    """Same helper as ``tests/test_classify.py``: a bare Windows install
+    has no ``tzdata`` for ``zoneinfo`` to read."""
+    try:
+        ZoneInfo(name)
+        return True
+    except ZoneInfoNotFoundError:
+        return False
+
+
+def _agg(bucket: str | None, *, day: str | None = None, model: str = _MODEL, turns: int = 1, cost: float = 1.0) -> dict:
+    """One ``turns_agg`` row. ``bucket`` is the UTC quarter hour
+    (``2026-09-18T23:45:00Z``), and its date is the row's ``day``; a row
+    written before schema 8 has no bucket and says its ``day``."""
+    return {
+        "day": day or bucket[:10], "bucket": bucket, "model": model, "turns": turns,
+        "input_tokens": 10 * turns, "cache_creation_tokens": 0, "cache_read_tokens": turns,
+        "output_tokens": turns, "thinking_tokens": 0, "cc_5m": 0, "cc_1h": 0, "cost": cost,
+    }
+
+
+def _seed_agg(
+    store: Store,
+    *rows: dict,
+    session_id: str = "session-bk",
+    slug: str = "proj-bk",
+    kind: str = "top-level",
+    path: str | None = None,
+    first_ts: str = "2026-09-01T00:00:00Z",
+    last_ts: str = "2026-09-30T00:00:00Z",
+    parser_version: int = 0,
+) -> None:
+    """A session (wholly inside any window the tests ask about, unless a
+    test says otherwise) and one transcript holding ``rows``."""
+    store.upsert_session(session_id=session_id, project_slug=slug, slug=slug, first_ts=first_ts, last_ts=last_ts)
+    store.upsert_transcript(
+        session_id=session_id,
+        path=path or f"/x/{session_id}-{kind}.jsonl",
+        kind=kind,
+        parser_version=parser_version,
+        digest_json="{}",
+        turns_agg=list(rows),
+    )
+
+
+def _by_day(rows: list[dict]) -> list[tuple[str, int]]:
+    return [(row["day"], row["turns"]) for row in rows]
+
+
+def test_daily_usage_groups_buckets_into_local_days(store: Store) -> None:
+    _seed_agg(store, _agg("2026-09-18T23:45:00Z", turns=2), _agg("2026-09-19T00:15:00Z", turns=3))
+    utc = store.daily_usage(days=None)
+    assert _by_day(utc) == [("2026-09-18", 2), ("2026-09-19", 3)]
+    assert store.daily_usage(days=None, tz="UTC") == utc
+    # In India both buckets are on the 19th (05:15 and 05:45), in
+    # California both are on the 18th (15:45 and 16:15).
+    assert _by_day(store.daily_usage(days=None, tz=_IST)) == [("2026-09-19", 5)]
+    assert _by_day(store.daily_usage(days=None, tz=_PST)) == [("2026-09-18", 5)]
+
+
+def test_daily_usage_adds_up_every_column_across_a_local_day(store: Store) -> None:
+    _seed_agg(
+        store,
+        _agg("2026-09-18T20:00:00Z", turns=2, cost=0.25),
+        _agg("2026-09-18T22:30:00Z", turns=3, cost=0.5),
+        _agg("2026-09-19T01:00:00Z", turns=4, cost=1.5),
+    )
+    [row] = store.daily_usage(days=None, tz=_IST)  # 01:30, 04:00 and 06:30 on the 19th
+    assert row["day"] == "2026-09-19" and row["model"] == _MODEL
+    assert row["turns"] == 9
+    assert row["input_tokens"] == 90 and row["cache_read_tokens"] == 9 and row["output_tokens"] == 9
+    assert row["cost"] == pytest.approx(2.25)
+
+
+def test_daily_usage_window_starts_in_the_bucket_holding_since(store: Store) -> None:
+    _seed_agg(
+        store,
+        _agg("2026-09-18T11:45:00Z", turns=1),
+        _agg("2026-09-18T12:00:00Z", turns=2),
+        _agg("2026-09-18T12:15:00Z", turns=4),
+    )
+
+    def turns(**window) -> int:
+        return sum(row["turns"] for row in store.daily_usage(days=None, **window))
+
+    assert turns(since="2026-09-18T12:07:00Z") == 6  # keeps 12:00, drops 11:45
+    assert turns(since="2026-09-18T12:00:00Z") == 6
+    assert turns(since="2026-09-18T12:15:00Z") == 4
+    assert turns(since="2026-09-18T11:59:59Z") == 7  # the 11:45 bucket still holds it
+    assert turns(since="2026-09-18T12:16:00Z") == 4
+    assert turns(since="2026-09-18T12:30:00Z") == 0
+
+
+def test_daily_usage_window_ends_before_the_bucket_starting_at_until(store: Store) -> None:
+    _seed_agg(
+        store,
+        _agg("2026-09-18T11:45:00Z", turns=1),
+        _agg("2026-09-18T12:00:00Z", turns=2),
+        _agg("2026-09-18T12:15:00Z", turns=4),
+    )
+
+    def turns(until: str) -> int:
+        return sum(row["turns"] for row in store.daily_usage(days=None, until=until))
+
+    assert turns("2026-09-18T12:15:00Z") == 3  # strict: 12:15 itself isn't in
+    assert turns("2026-09-18T12:15:30Z") == 7
+    assert turns("2026-09-18T12:00:00Z") == 1
+    assert turns("2026-09-18T11:45:00Z") == 0
+    assert turns("2026-09-18T12:10:00Z") == 3
+
+
+def test_daily_usage_calendar_window_in_a_half_hour_zone_is_exact(store: Store) -> None:
+    # 18 September, 00:00 to 24:00 in India is 17 September 18:30 UTC to
+    # 18 September 18:30 UTC, and a local midnight is always on a bucket
+    # edge.
+    _seed_agg(
+        store,
+        _agg("2026-09-17T18:15:00Z", turns=1),  # 23:45 on the 17th
+        _agg("2026-09-17T18:30:00Z", turns=2),  # 00:00 on the 18th
+        _agg("2026-09-18T18:15:00Z", turns=4),  # 23:45 on the 18th
+        _agg("2026-09-18T18:30:00Z", turns=8),  # 00:00 on the 19th
+    )
+    window = {"since": "2026-09-17T18:30:00Z", "until": "2026-09-18T18:30:00Z"}
+    assert _by_day(store.daily_usage(days=None, tz=_IST, **window)) == [("2026-09-18", 6)]
+    # The same window grouped by UTC day is two days.
+    assert _by_day(store.daily_usage(days=None, tz="UTC", **window)) == [("2026-09-17", 2), ("2026-09-18", 4)]
+
+
+def test_daily_usage_legacy_rows_never_add_a_day_before_the_first_local_day(store: Store) -> None:
+    # Rows with no bucket can only say their UTC day. East of UTC the
+    # window's first local day starts on the previous UTC day, and a row for
+    # that UTC day would be a column the chart has no room for.
+    _seed_agg(store, _agg(None, day="2026-09-17", turns=1), _agg(None, day="2026-09-18", turns=2))
+    since = "2026-09-17T18:30:00Z"  # 00:00 on the 18th in India
+    assert _by_day(store.daily_usage(days=None, since=since, tz=_IST)) == [("2026-09-18", 2)]
+    assert _by_day(store.daily_usage(days=None, since=since, tz="UTC")) == [("2026-09-17", 1), ("2026-09-18", 2)]
+    shown = store.daily_usage(days=None, since=since, tz=_IST)
+    assert min(row["day"] for row in shown) >= "2026-09-18"
+
+
+def test_daily_usage_legacy_rows_never_add_a_day_after_the_last_local_day(store: Store) -> None:
+    _seed_agg(store, _agg(None, day="2026-09-18", turns=1), _agg(None, day="2026-09-19", turns=2))
+    until = "2026-09-19T05:00:00Z"  # 21:00 on the 18th in California
+    assert _by_day(store.daily_usage(days=None, until=until, tz=_PST)) == [("2026-09-18", 1)]
+    assert _by_day(store.daily_usage(days=None, until=until, tz="UTC")) == [("2026-09-18", 1), ("2026-09-19", 2)]
+
+
+def test_daily_usage_legacy_rows_are_kept_whole_inside_the_window(store: Store) -> None:
+    _seed_agg(store, _agg(None, day="2026-09-18", turns=3))
+    assert _by_day(store.daily_usage(days=None, since="2026-09-18T00:00:00Z", until="2026-09-18T23:59:00Z")) == [
+        ("2026-09-18", 3)
+    ]
+    assert _by_day(store.daily_usage(days=None, since="2026-09-18T12:00:00Z")) == [("2026-09-18", 3)]
+    assert store.daily_usage(days=None, since="2026-09-19T00:00:00Z") == []
+    assert store.daily_usage(days=None, until="2026-09-17T23:59:00Z") == []
+
+
+def test_daily_usage_leaves_out_a_turn_with_no_timestamp_unless_the_window_is_open(store: Store) -> None:
+    _seed_agg(store, _agg(None, day="unknown", turns=1), _agg("2026-09-18T12:00:00Z", turns=2))
+    assert _by_day(store.daily_usage(days=None)) == [("2026-09-18", 2), ("unknown", 1)]
+    assert _by_day(store.daily_usage(days=None, since="2026-09-01T00:00:00Z")) == [("2026-09-18", 2)]
+    assert _by_day(store.daily_usage(days=None, until="2026-09-30T00:00:00Z")) == [("2026-09-18", 2)]
+    assert _by_day(store.daily_usage(days=None, since="2026-09-01T00:00:00Z", until="2026-09-30T00:00:00Z")) == [
+        ("2026-09-18", 2)
+    ]
+
+
+def test_daily_usage_legacy_rows_after_today_are_left_out_of_a_window(store: Store) -> None:
+    _seed_agg(store, _agg(None, day="2026-09-18", turns=1), _agg(None, day="2099-01-01", turns=2))
+    assert _by_day(store.daily_usage(days=None, since="2026-09-01T00:00:00Z")) == [("2026-09-18", 1)]
+    assert _by_day(store.daily_usage(days=None)) == [("2026-09-18", 1), ("2099-01-01", 2)]
+
+
+def test_daily_usage_puts_bucket_and_legacy_rows_of_one_day_in_one_row(store: Store) -> None:
+    _seed_agg(store, _agg(None, day="2026-09-18", turns=1), session_id="old")
+    _seed_agg(store, _agg("2026-09-18T10:00:00Z", turns=2), _agg("2026-09-18T10:15:00Z", turns=4), session_id="new")
+    [row] = store.daily_usage(days=None)
+    assert row["day"] == "2026-09-18" and row["turns"] == 7
+
+
+def test_daily_usage_row_shape_and_order_are_unchanged(store: Store) -> None:
+    other = "claude-opus-5"
+    _seed_agg(
+        store,
+        _agg("2026-09-19T00:15:00Z", model=other, turns=1, cost=0.1),
+        _agg("2026-09-18T23:45:00Z", model=_MODEL, turns=2, cost=0.2),
+        _agg("2026-09-18T23:30:00Z", model=_MODEL, turns=3, cost=0.4),
+        _agg("2026-09-18T12:00:00Z", model=other, turns=4, cost=0.8),
+    )
+    _seed_agg(
+        store,
+        _agg("2026-09-18T23:45:00Z", model=_MODEL, turns=5, cost=1.6),
+        session_id="session-bk",
+        kind="subagent",
+        path="/x/session-bk-sub.jsonl",
+    )
+    plain = store.daily_usage(days=None)
+    assert [list(row) for row in plain] == [["day", "model", *_COLUMNS]] * len(plain)
+    assert [(row["day"], row["model"]) for row in plain] == [
+        ("2026-09-18", other), ("2026-09-18", _MODEL), ("2026-09-19", other),
+    ]
+    assert plain[1]["turns"] == 10 and plain[1]["cost"] == pytest.approx(2.2)
+    assert isinstance(plain[1]["turns"], int) and isinstance(plain[1]["cost"], float)
+    assert store.daily_usage(days=None, split="model") == plain
+
+    by_agent = store.daily_usage(days=None, split="agent")
+    assert [list(row) for row in by_agent] == [["day", "agent", "model", *_COLUMNS]] * len(by_agent)
+    assert [(row["day"], row["agent"], row["model"]) for row in by_agent] == [
+        ("2026-09-18", "main", other),
+        ("2026-09-18", "main", _MODEL),
+        ("2026-09-18", "subagent", _MODEL),
+        ("2026-09-19", "main", other),
+    ]
+    assert sum(row["turns"] for row in by_agent) == sum(row["turns"] for row in plain)
+    assert sum(row["cost"] for row in by_agent) == pytest.approx(sum(row["cost"] for row in plain))
+
+
+def test_daily_usage_split_by_agent_regroups_to_local_days(store: Store) -> None:
+    _seed_agg(store, _agg("2026-09-18T20:00:00Z", turns=1), _agg("2026-09-19T01:00:00Z", turns=2))
+    _seed_agg(
+        store,
+        _agg("2026-09-18T23:45:00Z", turns=4),
+        session_id="session-bk",
+        kind="subagent",
+        path="/x/session-bk-sub.jsonl",
+    )
+    rows = store.daily_usage(days=None, split="agent", tz=_IST)
+    assert [(row["day"], row["agent"], row["turns"]) for row in rows] == [
+        ("2026-09-19", "main", 3),
+        ("2026-09-19", "subagent", 4),
+    ]
+
+
+def test_daily_usage_first_reply_window_still_counts_only_the_sessions_started_in_it(store: Store) -> None:
+    _seed_agg(
+        store, _agg("2026-09-18T12:00:00Z", turns=5), session_id="old",
+        first_ts="2026-09-10T00:00:00Z", last_ts="2026-09-19T00:00:00Z",
+    )
+    _seed_agg(
+        store, _agg("2026-09-18T12:00:00Z", turns=2), session_id="new",
+        first_ts="2026-09-18T11:00:00Z", last_ts="2026-09-18T13:00:00Z",
+    )
+    since = "2026-09-18T00:00:00Z"
+    assert _by_day(store.daily_usage(days=None, since=since)) == [("2026-09-18", 7)]
+    assert _by_day(store.daily_usage(days=None, since=since, window_by="first-reply")) == [("2026-09-18", 2)]
+    assert _by_day(store.daily_usage(days=None, since=since, window_by="first-reply", tz=_IST)) == [("2026-09-18", 2)]
+
+
+def test_daily_usage_regroups_by_local_day_for_a_project(store: Store) -> None:
+    _seed_agg(store, _agg("2026-09-18T20:00:00Z", turns=1), _agg("2026-09-19T01:00:00Z", turns=2), slug="proj-a", session_id="a")
+    _seed_agg(store, _agg("2026-09-18T20:00:00Z", turns=8), slug="proj-b", session_id="b")
+    assert _by_day(store.daily_usage(days=None, project_slugs=["proj-a"], tz=_IST)) == [("2026-09-19", 3)]
+    assert _by_day(store.daily_usage(days=None, project_slugs=["proj-b"], tz=_IST)) == [("2026-09-19", 8)]
+    assert _by_day(store.daily_usage(days=None, project_slugs=["proj-a"])) == [("2026-09-18", 1), ("2026-09-19", 2)]
+    assert _by_day(store.daily_usage(days=None, split="agent", project_slugs=["proj-a"], tz=_IST)) == [("2026-09-19", 3)]
+
+
+def test_daily_usage_zone_that_cannot_be_resolved_is_the_machine_zone(store: Store) -> None:
+    _seed_agg(store, _agg("2026-09-18T23:45:00Z", turns=2), _agg("2026-09-19T00:15:00Z", turns=3))
+    assert store.daily_usage(days=None, tz="Mars/Olympus") == store.daily_usage(days=None, tz=None)
+    assert store.daily_usage(days=None, tz="") == store.daily_usage(days=None, tz=None)
+
+
+@pytest.mark.skipif(not _tzdata_has("Asia/Kolkata"), reason="no tzdata for Asia/Kolkata on this machine")
+def test_daily_usage_takes_an_iana_zone_name(store: Store) -> None:
+    _seed_agg(store, _agg("2026-09-18T23:45:00Z", turns=2), _agg("2026-09-19T00:15:00Z", turns=3))
+    assert store.daily_usage(days=None, tz="Asia/Kolkata") == store.daily_usage(days=None, tz=_IST)
+
+
+def test_a_new_store_has_the_bucket_column_and_no_index_on_it(store: Store) -> None:
+    conn = store._connection()
+    assert "bucket" in {row["name"] for row in conn.execute("PRAGMA table_info(turns_agg)")}
+    indexed = {row["name"] for row in conn.execute("PRAGMA index_list(turns_agg)")}
+    assert "idx_turns_agg_day" in indexed and not any("bucket" in name for name in indexed)
+
+
+def test_upsert_transcript_stores_the_bucket_or_null(store: Store) -> None:
+    _seed_agg(store, _agg("2026-09-18T12:15:00Z", turns=1), _agg(None, day="2026-09-18", turns=2, model="other"))
+    no_key = _agg(None, day="2026-09-18", turns=3, model="third")
+    del no_key["bucket"]  # as every row in ``_seed`` is written
+    store.upsert_transcript(
+        session_id="session-bk", path="/x/other.jsonl", kind="top-level", digest_json="{}", turns_agg=[no_key]
+    )
+    rows = store._connection().execute("SELECT day, bucket, model FROM turns_agg ORDER BY id").fetchall()
+    assert [(row["day"], row["bucket"], row["model"]) for row in rows] == [
+        ("2026-09-18", "2026-09-18T12:15:00Z", _MODEL),
+        ("2026-09-18", None, "other"),
+        ("2026-09-18", None, "third"),
+    ]
+    # A re-parse replaces the rows wholesale, buckets included.
+    _seed_agg(store, _agg("2026-09-18T12:30:00Z", turns=1))
+    buckets = [
+        row["bucket"]
+        for row in store._connection().execute(
+            "SELECT bucket FROM turns_agg a JOIN transcripts t ON t.id = a.transcript_id WHERE t.path = '/x/session-bk-top-level.jsonl'"
+        )
+    ]
+    assert buckets == ["2026-09-18T12:30:00Z"]
+
+
+def test_seeded_rows_without_a_bucket_read_as_before(store: Store) -> None:
+    _seed(store)
+    assert [row["bucket"] for row in store._connection().execute("SELECT bucket FROM turns_agg")] == [None, None]
+    [row] = store.daily_usage(days=None)
+    assert row["day"] == "2026-09-18" and row["turns"] == 15
+
+
+def test_bucket_start_floors_to_the_utc_quarter_hour() -> None:
+    from claudeglass.service.store import bucket_start
+
+    assert bucket_start(datetime(2026, 9, 18, 12, 7, 59, tzinfo=timezone.utc)) == "2026-09-18T12:00:00Z"
+    assert bucket_start(datetime(2026, 9, 18, 12, 15, tzinfo=timezone.utc)) == "2026-09-18T12:15:00Z"
+    assert bucket_start(datetime(2026, 9, 18, 12, 59, 59, 999999, tzinfo=timezone.utc)) == "2026-09-18T12:45:00Z"
+    assert bucket_start(datetime(2026, 9, 18, 0, 0, tzinfo=timezone.utc)) == "2026-09-18T00:00:00Z"
+    # An offset is converted, and a time with none is read as UTC.
+    assert bucket_start(datetime(2026, 9, 19, 5, 20, tzinfo=_IST)) == "2026-09-18T23:45:00Z"
+    assert bucket_start(datetime(2026, 9, 18, 23, 50)) == "2026-09-18T23:45:00Z"
+    # A year before 1000 keeps four digits, as a window's bound does.
+    assert bucket_start(datetime(931, 3, 1, 5, 20, tzinfo=timezone.utc)) == "0931-03-01T05:15:00Z"
+
+
+# -- the v7 -> v8 migration ----------------------------------------------------
+
+#: ``turns_agg`` as schema 7 declared it: no ``bucket``.
+_V7_TURNS_AGG = """
+CREATE TABLE turns_agg (
+    id                     INTEGER PRIMARY KEY,
+    transcript_id          INTEGER NOT NULL REFERENCES transcripts(id),
+    day                    TEXT NOT NULL,
+    model                  TEXT NOT NULL,
+    turns                  INTEGER NOT NULL DEFAULT 0,
+    input_tokens           INTEGER NOT NULL DEFAULT 0,
+    cache_creation_tokens  INTEGER NOT NULL DEFAULT 0,
+    cache_read_tokens      INTEGER NOT NULL DEFAULT 0,
+    output_tokens          INTEGER NOT NULL DEFAULT 0,
+    thinking_tokens        INTEGER NOT NULL DEFAULT 0,
+    cc_5m                  INTEGER NOT NULL DEFAULT 0,
+    cc_1h                  INTEGER NOT NULL DEFAULT 0,
+    cost                   REAL NOT NULL DEFAULT 0
+)
+"""
+_V7_COLUMNS = "id, transcript_id, day, model, turns, input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens, thinking_tokens, cc_5m, cc_1h, cost"
+
+
+def _make_v7(store: Store) -> None:
+    """Turn an open store into a schema-7 one: ``turns_agg`` as it was
+    before ``bucket`` (every row kept), stamped version 7."""
+    conn = store._connection()
+    conn.execute("ALTER TABLE turns_agg RENAME TO turns_agg_v8")
+    conn.execute(_V7_TURNS_AGG)
+    conn.execute(f"INSERT INTO turns_agg ({_V7_COLUMNS}) SELECT {_V7_COLUMNS} FROM turns_agg_v8")
+    conn.execute("DROP TABLE turns_agg_v8")
+    conn.execute("CREATE INDEX idx_turns_agg_day ON turns_agg(day)")
+    conn.execute("UPDATE meta SET value = '7' WHERE key = 'schema_version'")
+
+
+def _agg_rows(store: Store) -> list[tuple]:
+    return [
+        tuple(row)
+        for row in store._connection().execute("SELECT id, transcript_id, day, model, turns, cost FROM turns_agg ORDER BY id")
+    ]
+
+
+def _parser_versions(store: Store) -> dict[str, int]:
+    return {path: version for path, (_mtime, _size, version) in store.known_files().items()}
+
+
+def test_migrate_upgrades_a_v7_store_and_marks_every_transcript_for_a_re_parse(tmp_path) -> None:
+    from claudeglass import PARSER_VERSION
+    from claudeglass.service import schema
+
+    db_path = tmp_path / "v7.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)  # two transcripts at parser version 3, rows with no bucket
+    _seed_agg(store, _agg("2026-09-18T12:00:00Z", turns=2), session_id="now", path="/x/now.jsonl", parser_version=PARSER_VERSION)
+    _seed_agg(store, _agg("2026-09-18T12:15:00Z", turns=4), session_id="later", path="/x/later.jsonl", parser_version=PARSER_VERSION + 1)
+    rows_before = _agg_rows(store)
+    assert len(rows_before) == 4
+    _make_v7(store)
+    assert "bucket" not in {row["name"] for row in store._connection().execute("PRAGMA table_info(turns_agg)")}
+    store.close()
+
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 8
+        assert "bucket" in {row["name"] for row in upgraded._connection().execute("PRAGMA table_info(turns_agg)")}
+        # Every row is kept, with no bucket until its transcript is parsed again.
+        assert _agg_rows(upgraded) == rows_before
+        assert [row["bucket"] for row in upgraded._connection().execute("SELECT bucket FROM turns_agg")] == [None] * 4
+        # Every transcript a build this old or this new parsed is marked to be
+        # parsed again; one a newer build wrote is left alone.
+        assert _parser_versions(upgraded) == {
+            _FAKE_PATH: 0,
+            _FAKE_SUB_PATH: 0,
+            "/x/now.jsonl": 0,
+            "/x/later.jsonl": PARSER_VERSION + 1,
+        }
+        # Until then every read still works, by the rows' UTC days.
+        assert _by_day(upgraded.daily_usage(days=None)) == [("2026-09-18", 21)]
+    finally:
+        upgraded.close()
+
+
+def test_migrate_7_to_8_is_a_no_op_when_run_again(store: Store) -> None:
+    from claudeglass import PARSER_VERSION
+    from claudeglass.service import store as store_mod
+
+    _seed(store)
+    _seed_agg(store, _agg("2026-09-18T12:15:00Z"), session_id="later", path="/x/later.jsonl", parser_version=PARSER_VERSION + 1)
+    conn = store._connection()
+    store_mod._migrate_7_to_8(conn)
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(turns_agg)")]
+    versions, rows = _parser_versions(store), _agg_rows(store)
+    assert versions[_FAKE_PATH] == 0 and versions["/x/later.jsonl"] == PARSER_VERSION + 1
+
+    store_mod._migrate_7_to_8(conn)  # the column is there already, nothing is left to mark
+    assert [row["name"] for row in conn.execute("PRAGMA table_info(turns_agg)")] == columns
+    assert _parser_versions(store) == versions
+    assert _agg_rows(store) == rows
+
+
+def test_migrating_a_store_that_is_already_current_marks_nothing(store: Store) -> None:
+    _seed(store)
+    store.migrate()
+    store.migrate()
+    assert set(_parser_versions(store).values()) == {3}
+
+
+def test_the_migration_ladder_reaches_the_current_version() -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    assert set(store_mod.MIGRATIONS) == set(range(4, schema.SCHEMA_VERSION))
+    assert store_mod.MIGRATIONS[7] is store_mod._migrate_7_to_8
+
+
+def test_a_windowed_read_of_turns_agg_uses_the_day_index(store: Store) -> None:
+    from claudeglass.service.store import _turns_agg_window
+
+    conn = store._connection()
+    for since, until in [
+        (datetime(2026, 9, 18, 18, 30, tzinfo=timezone.utc), datetime(2026, 9, 19, 18, 30, tzinfo=timezone.utc)),
+        (datetime(2026, 9, 18, 18, 30, tzinfo=timezone.utc), None),
+        (None, datetime(2026, 9, 19, 18, 30, tzinfo=timezone.utc)),
+    ]:
+        condition, params = _turns_agg_window(since, until, _IST)
+        plan = " ".join(
+            row["detail"] for row in conn.execute(f"EXPLAIN QUERY PLAN SELECT a.id FROM turns_agg a WHERE {condition}", params)
+        )
+        assert "idx_turns_agg_day" in plan, plan

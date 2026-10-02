@@ -32,7 +32,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from claudeglass import classify, compaction, recache, recommend, report, scorecard, snapshots, ttl, usage, workflows, workstyle
+from claudeglass import (
+    agent_models,
+    classify,
+    compaction,
+    recache,
+    recommend,
+    report,
+    scorecard,
+    snapshots,
+    ttl,
+    usage,
+    workflows,
+    workstyle,
+)
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import (
@@ -461,8 +474,39 @@ _ALL_RULE_IDS = frozenset(
         "pricing-coverage",
         "data-quality",
         "limit-pressure",
+        "agent-model-inherited",
+        "agent-model-asked",
+        "agent-decide-apply",
     }
 )
+
+
+def _agent_models_table() -> "Table":
+    """``model_swap_agent_models`` as ``agent_models.build_table`` makes it,
+    from hand-built stats with one group per verdict. general-purpose has a
+    row for two verdicts, so each card's evidence must cite its own row."""
+    opus = "claude-opus-5-5"
+    stats = agent_models.AgentModelStats(sonnet_model="claude-sonnet-5-5")
+    for agent_type, kind, verdict, roles, cost, on_sonnet in (
+        ("workflow-subagent", "workflow", "inherited", {"implement": 4, "fix": 1}, 30.0, 24.0),
+        ("general-purpose", "agent tool", "asked", {"implement": 3}, 20.0, 16.0),
+        ("general-purpose", "agent tool", "decide-apply", {"audit": 2}, 10.0, 0.0),
+    ):
+        stats.groups[(agent_type, verdict)] = agent_models.AgentModelGroup(
+            key=agent_type,
+            kind=kind,
+            verdict=verdict,
+            runs=sum(roles.values()),
+            role_counts=roles,
+            model_counts={opus: sum(roles.values())},
+            cost=cost,
+            cost_on_sonnet=on_sonnet,
+            write_turns=12,
+            workflow_run_ids={"wf_a"} if kind == "workflow" else set(),
+            first_seen="2026-09-23",
+            last_seen="2026-10-01",
+        )
+    return agent_models.build_table(stats)
 
 
 def _build_every_rule_fixture() -> "report.ReportModel":
@@ -679,6 +723,8 @@ def _build_every_rule_fixture() -> "report.ReportModel":
         ],
     )
 
+    model_swap_section = Section(key="model_swap", title="Model swap", tables=[_agent_models_table()])
+
     return ReportModel(
         meta=ReportMeta(pricing=PricingMeta(coverage_pct=90.0)),
         sections=[
@@ -691,6 +737,7 @@ def _build_every_rule_fixture() -> "report.ReportModel":
             sessions_section,
             phases_section,
             limits_section,
+            model_swap_section,
         ],
         recommendations=[],
         diagnostics=Diagnostics(lines=1000, unparsable_lines=0, ttl_sum_mismatch=1),

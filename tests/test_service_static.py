@@ -491,7 +491,37 @@ def test_glossary_rebuilds_card_counts_what_its_cost_covers() -> None:
     assert "stats.avoidable_cost_usd" in rebuilds
     assert "Rebuilds after a usage-limit pause aren't counted." in rebuilds
     assert "import { avoidableRebuilds, cardRuleText, pricingFacts } from \"./costs.js\";" in _static_text("page-glossary.js")
-    assert "import { avoidableRebuilds } from \"./costs.js\";" in _static_text("page-cache.js")
+    assert "import { avoidableRebuilds, pricingFacts } from \"./costs.js\";" in _static_text("page-cache.js")
+
+
+def test_every_rate_lookup_finds_the_rate_cards_own_id() -> None:
+    """report.meta.rates is keyed by the rate card's own ids, but the
+    by_model table and the daily rows carry the id each session recorded:
+    an alias, a dated or cloud id, or a newer release priced as an older
+    one (claude-sonnet-5-5 before it had a row). Indexing meta.rates with
+    those dropped the model, so the Glossary, Actions and Cache named
+    another model's prices and the Overview's cache note fell silent.
+    Every lookup now goes through costs.js's modelIdFor. Node runs it in
+    test_ui_figures_audit.py."""
+    costs = _static_text("costs.js")
+    assert "export function modelIdFor(meta, id) {" in costs
+    assert "export function rateFor(meta, id) {" in costs
+    facts = _function_source(costs, "pricingFacts")
+    assert "var id = modelIdFor(meta, row[0]);" in facts
+    assert "if (id && used.indexOf(id) === -1) used.push(id);" in facts
+    # Cache > Rebuilds names the same model as the Glossary: no copy of
+    # pricingFacts of its own.
+    cache = _static_text("page-cache.js")
+    assert "function mainRates" not in cache
+    assert "var rates = pricingFacts(report).main || {};" in _function_source(cache, "renderCacheExplainer")
+    overview = _static_text("page-overview.js")
+    assert 'import { modelIdFor, rateFor } from "./costs.js";' in overview
+    ratio = _function_source(overview, "cacheReadRatio")
+    assert "var id = modelIdFor(meta, row.model) || row.model;" in ratio
+    assert "rateFor(meta, top)" in ratio
+    # Nowhere else indexes the rate card by a recorded id.
+    for name in ("page-cache.js", "page-overview.js", "page-actions.js", "page-glossary.js"):
+        assert not re.search(r"rates\[(?:id|top|row|model)", _static_text(name)), name
 
 
 def test_glossary_billing_card_says_when_amounts_are_list_price() -> None:
@@ -533,7 +563,10 @@ def test_a_change_marker_leads_to_its_change_on_your_changes() -> None:
     source = _app_js()
     changes = _function_source(source, "dailyChanges")
     assert 'goTo("changes", { params: { day: day } })' in changes
-    assert 'String(change.ts || "").slice(0, 10)' in changes
+    # The marker and its card name the same local day (the service's
+    # change.day, else the timestamp's date).
+    assert "var day = changeDay(change);" in changes
+    assert "var day = changeDay(change);" in _function_source(source, "timelineChanges")
     assert 'goTo("changes", { params: { day: day } })' in _function_source(source, "timelineChanges")
     page = _function_source(source, "renderChanges")
     assert 'onParams("changes", function (params)' in page
@@ -541,7 +574,7 @@ def test_a_change_marker_leads_to_its_change_on_your_changes() -> None:
     assert "cardsDrawn.then(" in page
     assert ".change-card[data-day=\"' + params.day + '\"]" in page
     assert 'pulseNode(card, "block-target")' in page
-    assert '"data-day": String(change.ts || "").slice(0, 10)' in _function_source(source, "changeCard")
+    assert '"data-day": changeDay(change)' in _function_source(source, "changeCard")
     # The timeline's own change labels are links the keyboard reaches.
     steps = _function_source(source, "changeSteps")
     assert 'ctx.layer("rule-links", { links: true })' in steps
@@ -1270,18 +1303,34 @@ def test_load_report_cache_is_keyed_by_the_selected_window() -> None:
     assert "if (windowChanged) delete state.reportPromises[state.window]" in changed_src
 
 
+def test_a_kept_report_expires_so_an_open_tab_follows_a_moving_window() -> None:
+    """A window's start moves while a tab sits open: a new change for
+    "Since my last change", local midnight for a number of days. A kept
+    report is fetched again after five minutes, or when the browser's day
+    turns over (test_ui_figures_audit.py runs this in Node)."""
+    api_js = _static_text("api.js")
+    assert "var REPORT_KEPT_MS = 5 * 60 * 1000;" in api_js
+    load_report_src = _function_source(api_js, "loadReport")
+    assert "!reportKept(state.reportPromises[key])" in load_report_src
+    assert "delete state.reportPromises[key];" in load_report_src
+    assert "fetched.fetchedAt = Date.now();" in load_report_src and "fetched.fetchedDay = browserDay();" in load_report_src
+    kept_src = _function_source(api_js, "reportKept")
+    assert "REPORT_KEPT_MS" in kept_src and "browserDay()" in kept_src
+
+
 def test_every_windowed_request_carries_the_picked_project() -> None:
     """The project picker narrows every figure that follows the window:
     withWindow adds the project beside the window, so each route the
     dashboard asks through it is filtered (docs/api.md, "Filtering by
-    project"). The Overview's previous window asks by since and until, so
-    it adds the project on its own."""
+    project"). The Overview's previous window asks through it too: the
+    service works out the earlier period (previous=1), so nothing builds
+    a window of its own and drops the project."""
     app_js = _app_js()
     with_window = _function_source(app_js, "withWindow")
     assert "windowParam()" in with_window and "projectParam()" in with_window
-    assert "projectParam()" in _function_source(app_js, "withProject")
+    assert "withProject" not in app_js
     assert '"project=" + encodeURIComponent(state.project)' in _function_source(app_js, "projectParam")
-    assert 'withProject("/api/summary?since="' in _function_source(app_js, "renderOverview")
+    assert 'withWindow("/api/summary?previous=1")' in _function_source(app_js, "renderOverview")
     # Only windowParam writes the window query: a request that built its
     # own would drop the project. The one exception is the every-project
     # report the picker lists projects from.
@@ -1617,18 +1666,60 @@ def test_the_overview_compares_like_with_like() -> None:
     the period of the same length just before (docs/api.md: store and
     report price differently, so a summary is never compared with a
     report figure), and there is no earlier period for "all time" or
-    "since my last change"."""
+    "since my last change". The service resolves that period
+    (``previous=1``), in its own local days; the Overview only names it,
+    and uses an answer only when it says its period (an older service
+    ignores ``previous=1`` and would answer for this window again)."""
     app_js = _app_js()
     overview = _function_source(app_js, "renderOverview")
     assert 'fetchJson(withWindow("/api/summary"))' in overview
-    assert '"/api/summary?since="' in overview and '"&until="' in overview
+    assert 'withWindow("/api/summary?previous=1")' in overview
+    assert "previousPhrase(state.window)" in overview
+    assert "previousBody.data.period" in overview
+    for gone in ('"/api/summary?since="', '"&until="', "isoMinute", "previousPeriod"):
+        assert gone not in app_js, f"{gone} is how the browser used to work the period out itself"
     assert 'withWindow("/api/daily-usage") + "&split=agent"' in overview, "chart 1 on the Overview splits main and subagents"
     assert 'renderChart(' in overview and '"daily-spend"' in overview
 
-    previous = _function_source(app_js, "previousPeriod")
+    previous = _function_source(app_js, "previousPhrase")
     for phrase in ("the hour before", "the 24 hours before", "the same hours yesterday", "days before"):
-        assert phrase in previous, f"previousPeriod never names {phrase!r}"
+        assert phrase in previous, f"previousPhrase never names {phrase!r}"
     assert '"all"' not in previous and '"change"' not in previous, "all time and since-last-change have no earlier period"
+
+
+def test_days_are_the_services_local_days_not_the_browsers_sums() -> None:
+    """The service counts a day in its own zone and says so: the span of
+    a window (/api/summary's period), the day of a change (change.day) and
+    the days of a session (first_day, last_day). The browser reads those,
+    falling back on the timestamp's UTC date for a service that predates
+    them, and never works out a window or a zone itself (docs/api.md)."""
+    app_js = _app_js()
+    for gone in ("windowDays", "(a UTC day)", "Day (UTC)", "midnight UTC", "midnight to midnight UTC"):
+        assert gone not in app_js, gone
+    # One place reads a change's day, and every chart and card goes through it.
+    assert "export function changeDay(change)" in _static_text("charts-types.js")
+    for module, name in (("charts-types.js", "dailyChanges"), ("page-changes.js", "changeCard"), ("page-changes.js", "timelineChanges"), ("page-overview.js", "lastChangeLine")):
+        assert "changeDay(change)" in _function_source(_static_text(module), name), f"{module} {name}"
+    assert '.slice(0, 10)' not in _function_source(_static_text("page-changes.js"), "changeCard")
+    assert "change.ts || \"\").slice(0, 10)" not in _static_text("page-overview.js") + _static_text("page-changes.js")
+    # The Sessions day filter compares day keys, with the timestamps behind it.
+    shown = _function_source(_static_text("page-spend.js"), "shownSessions")
+    assert "row.first_day || " in shown and "row.last_day || " in shown
+    assert "T00:00:00Z" not in shown
+    assert "(a UTC day)" not in _function_source(_static_text("page-spend.js"), "renderSessions")
+    # The window picker says what a day is.
+    picker = _function_source(_static_text("app.js"), "initWindowPicker")
+    assert "Last 7, 30 or 90 days are today and the days before it, from midnight." in picker
+    assert "Since my last change counts the sessions started after it." in picker
+
+
+def test_the_overview_says_when_the_picked_project_has_no_change_of_its_own() -> None:
+    """With a project picked, "Since my last change" can have nowhere to
+    start though other projects have changes: the Overview says the
+    project has none, not that none is recorded."""
+    overview = _static_text("page-overview.js")
+    assert "No change recorded for this project yet, so this window has nowhere to start." in overview
+    assert "No change recorded yet, so this window has nowhere to start." in overview
 
 
 def test_the_overview_leaves_the_health_detail_to_data_quality() -> None:
@@ -2213,6 +2304,9 @@ def test_a_change_card_says_what_changed_where_and_each_measures_reading() -> No
     tone = _function_source(source, "readingTone")
     assert "if (!reading.side || !measure.better) return \"neutral\";" in tone
     assert 'reading.side === measure.better ? "good" : "bad"' in tone
+    # The figures are the server's text, so a tokens or count row never reads as money.
+    assert "measure.before || " in row and "measure.after || " in row
+    assert "moneyText" not in row
 
 
 def test_a_change_card_says_what_the_sessions_since_saved() -> None:
@@ -2234,8 +2328,187 @@ def test_the_last_change_window_says_what_it_would_have_cost_without_that_change
     assert 'pageLink("changes"' in line
     assert "projectName(change.project_name)" in line
     overview = _function_source(source, "renderOverview")
-    assert 'state.window !== "change" || state.project' in overview
+    # The changes, and so the figure, are the picked project's own: only the
+    # window decides whether the line shows.
+    assert 'body.hidden || state.window !== "change") return;' in overview
+    assert 'state.window !== "change" || state.project' not in overview
     assert "lastChangeLine(loaded[0].body)" in overview
+
+
+def test_every_change_card_request_carries_the_window_and_project() -> None:
+    """The cards, the chart's markers and the estimates follow the pickers:
+    every request for /api/impact or /api/backtest goes through withWindow,
+    which adds the project beside the window (test_ui_figures_audit.py
+    reads what each page draws from the answer)."""
+    for module in _js_modules():
+        if module.name == "api.js":
+            continue  # LOADING_LABELS names the routes
+        text = module.read_text(encoding="utf-8")
+        for match in re.finditer(r'"/api/(?:impact|backtest)"', text):
+            before = text[max(0, match.start() - len("withWindow(")) : match.start()]
+            assert before == "withWindow(", (module.name, match.group(0))
+    for module, name, route in (
+        ("page-overview.js", "renderOverview", "/api/impact"),
+        ("page-spend.js", "renderUsage", "/api/impact"),
+        ("page-changes.js", "renderChanges", "/api/impact"),
+        ("page-changes.js", "loadEstimates", "/api/backtest"),
+    ):
+        assert f'withWindow("{route}")' in _function_source(_static_text(module), name), (module, name)
+    assert "loadEstimates(backtestHost);" in _function_source(_static_text("page-changes.js"), "renderChanges")
+    # windowParam writes the window query and nothing else does.
+    assert _js_code_only(_app_js()).count("windowParam()") == 3
+
+
+def test_the_context_page_asks_for_the_pickers_project_on_every_list() -> None:
+    """The CLAUDE.md list, a file's detail and the skills list on Agents >
+    Context all go through withWindow, which adds the picked project beside
+    the window: the server limits each list to that project's folders."""
+    agents = _static_text("page-agents.js")
+    context = _function_source(agents, "renderContextFiles")
+    assert 'loadInto(files, withWindow("/api/claude-md"), renderClaudeMdList' in context
+    assert 'loadInto(skills, withWindow("/api/skills"), renderSkills' in context
+    assert 'withWindow("/api/claude-md/" + encodeURIComponent(file.id))' in _function_source(agents, "openClaudeMd")
+
+
+def test_the_compactions_list_says_it_covers_whole_sessions() -> None:
+    """The list is the compactions of the sessions the window counts, as the
+    section above it counts them, so a session that began before the window
+    lists its earlier summaries too: the page says so."""
+    usage = _function_source(_static_text("page-spend.js"), "renderUsage")
+    assert 'withWindow("/api/compactions")' in usage
+    assert '"Every conversation summary in this window\'s sessions"' in usage
+    assert "A session counts whole, so one that began before this window lists all its summaries." in usage
+
+
+def test_the_project_picker_says_what_follows_it_and_what_covers_every_project() -> None:
+    """Your changes, Settings and the CLAUDE.md list follow the picked
+    project. The baseline, the estimates and the hook and statusline rows
+    still cover every project, each with its own chip or row group: the
+    picker's note names both, never the old "Settings always cover every
+    project". Profiles reads the newest settings from any project, and the
+    note says so."""
+    picker = _function_source(_app_js(), "initProjectPicker")
+    assert "Your changes, settings and CLAUDE.md files follow the pick too." in picker
+    assert (
+        "The latest baseline, whether your estimates came true, and the hook and statusline checks always cover "
+        "every project." in picker
+    )
+    assert "Profiles uses your newest settings from any project." in picker
+    assert "Settings and Data quality always cover every project" not in picker
+    # Each part named as covering every project says so where it shows.
+    setup = _static_text("page-setup.js")
+    assert 'setupSection(panel, "Latest baseline", "config-baseline", { allTime: true })' in setup
+    assert 'changesSection(panel, "Did your estimates come true?", true)' in _static_text("page-changes.js")
+    # The settings tables ask for the picked project; with none of its
+    # own recorded, the empty state says so.
+    assert 'withWindow("/api/config-diff?auto_keys=1")' in _function_source(setup, "renderConfig")
+    assert '"No settings recorded for this project yet."' in _function_source(setup, "renderConfigDiff")
+
+
+def test_the_overview_asks_for_the_changes_it_can_judge_first() -> None:
+    changes_js = _static_text("page-changes.js")
+    overview = _function_source(_static_text("page-overview.js"), "renderOverview")
+    assert "renderChangeCards(changes.body, impact.data, { compact: true, limit: CHANGES_SHOWN, judgedFirst: true })" in overview
+    cards = _function_source(changes_js, "renderChangeCards")
+    assert "judgedFirst(changes, opts.limit || changes.length, data.min_sessions)" in cards
+    # Every change in the window counts for "See all N changes".
+    assert "return changes.length;" in cards
+    assert "export function judgedFirst(changes, limit, minSessions)" in changes_js
+    # Only a change short of sessions after it is too new to judge.
+    assert "!item.enough && item.after_sessions < minSessions" in _function_source(changes_js, "judgedFirst")
+    waiting = _function_source(changes_js, "waitingLine")
+    assert '"1 newer change"' in waiting and "changeDay(waiting[0].change)" in waiting
+    assert '" is too new to judge yet: it needs "' in waiting and '" are too new to judge yet: each needs "' in waiting
+
+
+def test_an_empty_window_points_to_all_time_where_older_changes_are() -> None:
+    changes_js = _static_text("page-changes.js")
+    cards = _function_source(changes_js, "renderChangeCards")
+    assert 'emptyState("No changes" + where + " " + windowWhen(state.window) + ".", null, older)' in cards
+    assert '"See older ones on ", pageLink("changes", "Your changes", { w: "all" }), " under All time."' in cards
+    assert '"Pick ", pageLink("changes", "All time", { w: "all" }), " to see older ones."' in cards
+    assert 'emptyState("No changes in " + projectName(state.project) + " yet.", null, NO_CHANGES_NEXT)' in cards
+    assert 'if (state.window !== "all" && !opts.noOlder) {' in cards
+    backtest = _function_source(changes_js, "renderBacktest")
+    assert 'emptyState("No estimates logged " + windowWhen(state.window) + "."' in backtest
+    assert 'pageLink("changes", "All time", { w: "all" })' in backtest
+    # windowWhen is shared: the Overview's "No sessions ..." reads the same.
+    assert "export function windowWhen(value) {" in _static_text("format.js")
+    assert "function windowWhen" not in _static_text("page-overview.js")
+    assert "windowWhen(state.window)" in _function_source(_static_text("page-overview.js"), "renderOverview")
+
+
+def test_a_change_window_with_no_change_recorded_shows_the_empty_states() -> None:
+    """"Since my last change" with no change recorded answers 400 on both
+    routes: the cards and the estimates read it as nothing to show, and
+    an error about the project still gives way to every project."""
+    changes_js = _static_text("page-changes.js")
+    check = _function_source(changes_js, "noChangeYet")
+    assert 'state.window === "change"' in check and 'error.code === "bad_request"' in check
+    assert "\"'project'\"" in check
+    page = _function_source(changes_js, "renderChanges")
+    assert "if (noChangeYet(body)) {" in page and "{ noOlder: true }" in page
+    estimates = _function_source(changes_js, "loadEstimates")
+    assert 'state.window !== "change"' in estimates
+    # The estimates read their own answer: they are every project's, so a
+    # project with no change of its own still lists them.
+    assert "impactLoad" not in estimates
+    assert "noChangeYet(body)" in estimates and "renderBacktest(null, host, true)" in estimates
+    # Estimates can be logged before any change is recorded: the empty state
+    # says the window has no start and points to All time, not that none were logged.
+    backtest = _function_source(changes_js, "renderBacktest")
+    assert (
+        'emptyState("No change recorded yet, so this window has nowhere to start.", null, el("span", {}, ["Pick ", pageLink("changes", "All time", { w: "all" }), " to see every estimate logged."]))'
+        in backtest
+    )
+    assert "if (noOlder) {" in backtest
+    # The chart above them shows its empty state too, not an error.
+    assert "if (noChangeYet(daily)) {" in page
+    assert '"No change recorded yet, so this window has nowhere to start."' in page
+    assert '"No change recorded for this project yet, so this window has nowhere to start."' in page
+
+
+def test_your_changes_folds_the_cards_past_ten_behind_a_show_button() -> None:
+    changes_js = _static_text("page-changes.js")
+    assert "var CARDS_SHOWN = 10;" in changes_js
+    assert "{ foldAfter: CARDS_SHOWN }" in _function_source(changes_js, "renderChanges")
+    cards = _function_source(changes_js, "renderChangeCards")
+    assert "if (opts.foldAfter && index >= opts.foldAfter) card.hidden = true;" in cards
+    assert "olderButton(list, shown.length - opts.foldAfter)" in cards
+    assert '"Show " + count + " older " + (count === 1 ? "change" : "changes")' in _function_source(changes_js, "olderButton")
+    # A change marked on a chart that is folded away is brought out first.
+    assert "showOlderChanges(" in _function_source(changes_js, "renderChanges")
+    # The Overview never folds: it has a limit of its own.
+    assert "foldAfter" not in _function_source(_static_text("page-overview.js"), "renderOverview")
+
+
+def test_the_cards_say_all_projects_only_for_the_estimates() -> None:
+    changes_js = _static_text("page-changes.js")
+    section = _function_source(changes_js, "changesSection")
+    assert 'allProjects && state.project ? chip("All projects", { icon: "folder"' in section
+    assert "All time" not in section
+    # No marker is named for a project picked: every change shown is its own.
+    markers = _function_source(changes_js, "timelineChanges")
+    assert "elsewhere" not in markers
+    assert "!state.project && change.project && change.project_name" in markers
+
+
+def test_a_link_can_name_the_window_and_a_pick_during_a_move_is_kept() -> None:
+    """goTo puts a link's own params over the picked window and project, as
+    pageLink's address does, so "All time" from an empty state lands on All
+    time. A pick made while a move is under way rewrites that move's address:
+    returning early let resolveRoute read the old scope back and undo it."""
+    app_js = _app_js()
+    go = _function_source(app_js, "goTo")
+    assert "Object.assign({}, scopeParams(), options.params || {})" in go
+    assert "Object.assign({}, options.params || {}, scopeParams())" not in go
+    redraw = _function_source(app_js, "redrawForScope")
+    assert "if (router.pending) return;" not in redraw
+    assert "if (router.pending) {" in redraw
+    assert (
+        'window.history.replaceState(null, "", formatHash(pending.key, Object.assign({}, pending.options.params || {}, scopeParams())))'
+        in redraw
+    )
 
 
 def test_an_estimate_is_logged_when_a_change_is_saved_or_its_command_copied() -> None:
@@ -2545,7 +2818,9 @@ def _js_hyphen_map(app_js: str, var_name: str) -> dict[str, str]:
 
 def _recommendation_ids() -> set[str]:
     """Every literal ``id="..."`` a ``Recommendation(...)`` call passes in
-    the package. quick_actions.py builds one only to render a fix, never
+    the package, and every key of a module's ``RULES`` dict (one that
+    builds its cards through a shared helper passes the id on as a
+    variable). quick_actions.py builds one only to render a fix, never
     to send, so its placeholder id is left out."""
     ids: set[str] = set()
     for path in SRC_DIR.rglob("*.py"):
@@ -2556,22 +2831,41 @@ def _recommendation_ids() -> set[str]:
                 for kw in node.keywords:
                     if kw.arg == "id" and isinstance(kw.value, ast.Constant) and isinstance(kw.value.value, str):
                         ids.add(kw.value.value)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)) and isinstance(node.value, ast.Dict):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                if any(getattr(target, "id", None) == "RULES" for target in targets):
+                    ids.update(
+                        key.value for key in node.value.keys if isinstance(key, ast.Constant) and isinstance(key.value, str)
+                    )
     return ids
 
 
 def _evidence_sources() -> set[tuple[str, str]]:
     """Every (section, table) an ``_evidence(label, value, section,
-    table, row)`` call names. Each must be a literal, so this scan sees
-    every place a recommendation can point."""
+    table, row)`` call names. Each must be a literal, or a module-level
+    constant set to one, so this scan sees every place a recommendation
+    can point."""
     sources: set[tuple[str, str]] = set()
     for path in SRC_DIR.rglob("*.py"):
-        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        constants = {
+            target.id: node.value.value
+            for node in tree.body
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+            for target in node.targets
+            if isinstance(target, ast.Name)
+        }
+
+        def literal(arg: ast.expr) -> object:
+            return arg.value if isinstance(arg, ast.Constant) else constants.get(getattr(arg, "id", None))
+
+        for node in ast.walk(tree):
             if isinstance(node, ast.Call) and getattr(node.func, "id", None) == "_evidence":
-                section, table = node.args[2], node.args[3]
-                assert isinstance(section, ast.Constant) and isinstance(table, ast.Constant), (
+                section, table = literal(node.args[2]), literal(node.args[3])
+                assert isinstance(section, str) and isinstance(table, str), (
                     f"{path.name}:{node.lineno} names its evidence table indirectly"
                 )
-                sources.add((section.value, table.value))
+                sources.add((section, table))
     return sources
 
 
@@ -2593,6 +2887,28 @@ def test_every_recommendation_rule_has_an_area_on_the_actions_page() -> None:
     # Every rule with a "what the change does" sentence has an area too.
     mechanisms = _js_hyphen_map(app_js, "RULE_MECHANISM")
     assert set(mechanisms) <= set(areas)
+
+
+def test_the_agent_model_cards_sit_under_models_and_group_by_kind() -> None:
+    """The three agent-model cards (agents that wrote code on a larger
+    model with none set, ones asked for it, and an Opus agent that decided
+    and applied) are about the Models area and the model price rule. When
+    several agent types raise one of them, the inbox shows one item with
+    a title of its own, not "(and N more)"."""
+    app_js = _app_js()
+    areas = _js_hyphen_map(app_js, "RULE_AREA")
+    mechanisms = _js_hyphen_map(app_js, "RULE_MECHANISM")
+    titles = _declaration_source(app_js, "GROUP_TITLES")
+    for rule_id in ("agent-model-inherited", "agent-model-asked", "agent-decide-apply"):
+        assert areas.get(rule_id) == "models", rule_id
+        assert mechanisms.get(rule_id) == "model", rule_id
+        title = re.search(re.escape(f'"{rule_id}": function (n) {{') + r'\s*return n \+ "([^"]+)";', titles)
+        assert title, f"no GROUP_TITLES entry for {rule_id}"
+        assert "kinds of agent" in title.group(1), rule_id
+    # A grouped title belongs to a rule the Actions page places.
+    grouped = re.findall(r'^\s*"([a-z0-9-]+)"\s*:\s*function \(n\)', titles, re.MULTILINE)
+    assert len(grouped) > 3, grouped
+    assert sorted(set(grouped) - set(areas)) == []
 
 
 def test_every_evidence_source_resolves_to_a_page_or_the_table_drawer() -> None:

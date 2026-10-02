@@ -29,10 +29,12 @@ import re
 import subprocess
 import sys
 from collections.abc import Iterable
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone, tzinfo
+from datetime import time as dtime
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
-from . import jsonl
+from . import agent_roles, jsonl
 from .model import TranscriptMeta
 from .parse import detect_provider
 
@@ -269,6 +271,12 @@ def resolve_project_dirs(
 def _resolve_window(
     days: int | None, since: str | None, until: str | None
 ) -> tuple[datetime | None, datetime | None]:
+    """``(since, until)`` as aware datetimes. ``since`` wins over ``days``,
+    and ``days`` here is rolling: now minus ``days`` x 24 hours, for the
+    replays that divide by their own length (capture, the baseline, the
+    reconcile and coaching passes). The dashboard and the report commands
+    count calendar days instead: they resolve :func:`window_start` at
+    their entry point and pass it in as ``since``."""
     since_dt: datetime | None = None
     until_dt: datetime | None = None
     if since is not None:
@@ -286,6 +294,111 @@ def _parse_bound(value: str) -> datetime:
     transcript times, so it compares with them."""
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _zone(tz: str | tzinfo | None) -> tzinfo | None:
+    """The zone ``tz`` names, or ``None`` for the machine's own zone.
+    ``tz`` is an IANA name (``config.toml``'s ``tz``), a ``tzinfo`` (passed
+    straight through) or empty. ``UTC`` and ``Etc/UTC`` resolve without
+    ``tzdata``, which a bare Windows install lacks. A name that can't be
+    resolved, whatever the reason (no ``tzdata``, a typo, a folder where a
+    zone file should be), also gives ``None``, the same fallback
+    ``usage._to_local`` and ``classify._to_local`` make."""
+    if tz is None or tz == "":
+        return None
+    if isinstance(tz, tzinfo):
+        return tz
+    if tz in ("UTC", "Etc/UTC"):
+        return timezone.utc
+    try:
+        return ZoneInfo(tz)
+    except Exception:
+        return None
+
+
+def to_local(dt: datetime, tz: str | tzinfo | None = None) -> datetime:
+    """``dt`` (aware) in ``tz``, or in the machine's own zone when ``tz``
+    is empty or can't be resolved (see :func:`_zone`)."""
+    zone = _zone(tz)
+    return dt.astimezone(zone) if zone is not None else dt.astimezone()
+
+
+def local_day(value: str | datetime, tz: str | tzinfo | None = None) -> str:
+    """The calendar day, ``YYYY-MM-DD``, that ``value`` falls on in ``tz``
+    (the machine's own zone when ``tz`` is empty or can't be resolved).
+    ``value`` is an aware datetime or an ISO 8601 string; a time with no
+    offset is read as UTC, as :func:`ts_in_window` reads transcript times.
+    Raises ``ValueError`` for a string that isn't a time."""
+    dt = _parse_bound(value) if isinstance(value, str) else value
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    # isoformat, not strftime("%Y"): see utc_stamp.
+    return to_local(dt, tz).date().isoformat()
+
+
+def zone_name(tz: str | tzinfo | None) -> str | None:
+    """The IANA name of the zone days are counted in, or ``None`` when
+    that is the machine's own zone (``tz`` empty or unresolvable) or a
+    zone with no name (a fixed offset), for the dashboard to show which
+    zone its days follow."""
+    zone = _zone(tz)
+    if zone is None:
+        return None
+    if isinstance(tz, str):
+        return tz
+    if zone is timezone.utc:
+        return "UTC"
+    key = getattr(zone, "key", None)
+    return key if isinstance(key, str) else None
+
+
+def local_midnight(day: date, tz: str | tzinfo | None = None) -> datetime:
+    """The first instant of ``day`` in ``tz`` (the machine's own zone when
+    ``tz`` is empty or can't be resolved), as an aware UTC datetime. Right
+    across a clock change: when midnight doesn't exist (the clocks jump
+    over it) this is the first moment that does, and when it happens twice
+    (the clocks go back across it) the earlier one."""
+    zone = _zone(tz)
+    if zone is not None:
+        local = datetime.combine(day, dtime.min, tzinfo=zone)
+    else:
+        local = datetime.combine(day, dtime.min).astimezone()
+    return local.astimezone(timezone.utc)
+
+
+def window_start(days: int, tz: str | tzinfo | None = None, *, now: datetime | None = None) -> datetime:
+    """Where a calendar window of ``days`` days starts: local midnight of
+    today minus ``days - 1`` days, as an aware UTC datetime. "Last 7 days"
+    is today and the six days before it, whole days in ``tz`` (the
+    machine's own zone when ``tz`` is empty or can't be resolved), not
+    7 x 24 hours back from this minute. ``now`` (aware) stands in for the
+    current time. Raises ``ValueError`` for fewer than one day."""
+    if days < 1:
+        raise ValueError(f"days must be at least 1, got {days}")
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return local_midnight(to_local(now, tz).date() - timedelta(days=days - 1), tz)
+
+
+def utc_stamp(moment: datetime, *, seconds: bool = False) -> str:
+    """``moment``'s clock reading (already in UTC) as the string a
+    ``since`` takes: rounded down to the minute, e.g.
+    ``2026-09-25T00:00:00Z``, or to the second with ``seconds``. The year
+    is always four digits: ``strftime("%Y")`` leaves a year before 1000
+    unpadded on Linux ("931-03-01"), which ``fromisoformat`` rejects and
+    which sorts after "2026" as a string. A window of hundreds of
+    thousands of days reaches such a year."""
+    second = moment.second if seconds else 0
+    return (
+        f"{moment.year:04d}-{moment.month:02d}-{moment.day:02d}"
+        f"T{moment.hour:02d}:{moment.minute:02d}:{second:02d}Z"
+    )
+
+
+def window_start_iso(days: int, tz: str | tzinfo | None = None, *, now: datetime | None = None) -> str:
+    """:func:`window_start` as the minute-shaped UTC string a ``since``
+    takes, e.g. ``2026-09-25T00:00:00Z``."""
+    return utc_stamp(window_start(days, tz, now=now))
 
 
 #: How a session is matched to a window. ``last-reply`` (the default): the
@@ -532,7 +645,13 @@ def load_meta(path: str | Path) -> TranscriptMeta:
     """Load one subagent ``.meta.json`` file into a ``TranscriptMeta``.
 
     Maps ``agentType``, ``description`` (length only, never the text),
-    ``spawnDepth``, ``parentAgentId``, ``model`` (-> ``agent_model_alias``
+    ``workflowPhase`` and ``description`` (-> ``role_word``, the one
+    canonical word ``agent_roles.role_word`` finds in the phase, then the
+    type, then the description's first words; never the text, so a phase
+    or label that carries a path leaves nothing behind), the presence of
+    either of those two keys (-> ``model_recorded``: the newer meta shape,
+    where an absent ``model`` means the call set none), ``spawnDepth``,
+    ``parentAgentId``, ``model`` (-> ``agent_model_alias``
     — ``model`` on ``TranscriptMeta`` isn't a field; the transcript's own
     turns carry the real per-turn ``model`` — and, from the same value,
     -> ``provider`` via ``parse.detect_provider``, a best guess before any
@@ -589,6 +708,12 @@ def load_meta(path: str | Path) -> TranscriptMeta:
     description = raw.get("description")
     if isinstance(description, str):
         meta.description_len = len(description)
+
+    # Agent-roles addition (see model.py's TranscriptMeta.role_word
+    # docstring): the one canonical word, then the phase, type and
+    # description text is dropped. model_recorded is key presence only.
+    meta.role_word = agent_roles.role_word(raw.get("workflowPhase"), raw.get("agentType"), description)
+    meta.model_recorded = "description" in raw or "workflowPhase" in raw
 
     model = raw.get("model")
     if isinstance(model, str):
@@ -682,6 +807,12 @@ __all__ = [
     "resolve_project_dirs",
     "find_sessions",
     "ts_in_window",
+    "to_local",
+    "local_day",
+    "zone_name",
+    "local_midnight",
+    "window_start",
+    "window_start_iso",
     "WINDOW_BY",
     "find_subagents",
     "find_subagent_paths",

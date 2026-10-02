@@ -321,6 +321,15 @@ the on-disk directory name every transcript under
 `~/.claude/projects/<slug>/` uses, and the non-alnum substitution means
 it no longer contains a drive-letter colon or path separator.
 
+The snapshot stores the slug hashed (`slug:` and the first 12 hex
+characters of its SHA-256), with a leading Windows drive letter
+upper-cased first. Claude Code writes the drive letter in whichever case
+the folder was opened with, so `C--Dev-x` and `c--Dev-x` are one project
+and get one key. A snapshot taken before 0.13.0 may carry the hash of the
+lower-case spelling instead: `snapshots.snapshot_project_keys` gives both
+keys, and the package matches a project's sessions to its snapshots and
+changes under either.
+
 ## Multi-project tables (`snapshots.py`)
 
 A single `<config-dir>/snapshots/` directory accumulates snapshots from
@@ -357,9 +366,22 @@ one `"(unknown project)"` bucket.
   session-snapshot-capture time can know what a later `--model`/
   `--effort` flag or shell env var will do), but a `config-drift` row is
   exactly that inference, reported per session/key. Model comparisons
-  are alias-normalised via `pricing.resolve_model` (fix #15); effort
-  comparisons are plain equality, since `turn.effort` already uses the
-  same enum `effortLevel` does (`low`/`medium`/`high`/`xhigh`/`max`).
+  (`_settings_model_agrees`) follow what the setting can mean. `default`
+  names no fixed model, so it never counts as drift. `opusplan` accepts
+  an observed Opus or Sonnet model. An alias (`opus`, `sonnet`, `haiku`,
+  `fable`, `best`, with or without `[1m]`: any value with no digit once
+  `[1m]` is stripped) compares by family (`workstyle.model_tier`, with
+  `best` read as Fable through the rate card), because an alias follows
+  the newest release: `opus` against an older `claude-opus-5` session is
+  not drift. Every other value (a `claude-*` id, a Bedrock or Vertex id,
+  an ARN) is an explicit pin and compares exactly, by the canonical id
+  `pricing.resolve_model` gives both sides (fix #15), so a pin moved from
+  Opus 4.1 to 4.5 still reports. A newer release the rate card has no
+  row for yet keeps its own version (`pricing.newer_version_id`), so a
+  `claude-opus-5-7` pin against a `claude-opus-5` session still reports
+  even while both are priced as `claude-opus-5`. Effort comparisons are
+  plain equality, since `turn.effort` already uses the same enum
+  `effortLevel` does (`low`/`medium`/`high`/`xhigh`/`max`).
 - `build_env_levers_table` (COV-09) — one row per COV-09 env-var lever
   (`DISABLE_PROMPT_CACHING` and its per-model variants,
   `ENABLE_TOOL_SEARCH`, `CLAUDE_CODE_MAX_OUTPUT_TOKENS`,
@@ -373,6 +395,24 @@ one `"(unknown project)"` bucket.
   can't be cited for one specific key (`_row` matches only on
   `row[0]` == the row key, and that table's row key is the project, not
   the settings key).
+- `project_chains`, `changed_keys` and `build_config_diff_table` —
+  what changed between snapshots is always read within one project's own
+  run of snapshots (`project_chains`, oldest first, a project filed under
+  both drive-letter keys being one chain). The hook records one
+  snapshot per session start, in whichever project the session opened,
+  so a single list across projects would read every switch from one
+  project to another as a settings change. `changed_keys` is every
+  flattened key that changed in some project's chain, each key counted
+  once however many projects changed it, and it is what the `config`
+  section's changed-settings count, the scorecard's config stability and
+  `config-diff --auto-keys` use. The snapshots are every one recorded,
+  not only the window's, so a setting you changed last month still counts
+  in a 7-day report.
+  `build_config_diff_table`'s note on keys that changed alongside the
+  one you named looks at the same project's two consecutive snapshots.
+  With a project picked (or the folder you ran in, on the CLI), only that
+  project's snapshots are read; with all projects, every project's chain
+  is diffed on its own.
 
 `build_config_section(..., include_effective=True, sessions_with_observed=...)`
 appends these tables to the existing config-diff section; both keyword
@@ -411,7 +451,13 @@ apply-side wiring:
   parameter, 2) the subagent's own `model` frontmatter (including
   `inherit`), 3) `CLAUDE_CODE_SUBAGENT_MODEL`, 4) the main conversation's
   model — and that setting it alone does **not** change what the
-  built-in Explore/Plan subagents run on.
+  built-in Explore/Plan subagents run on. The agent-model cards
+  (`agent_models.py`, see
+  [`model-swap.md`](model-swap.md#agents-that-ran-on-a-larger-model-than-their-work-needed))
+  read the same name from the latest snapshot's `env_names`: when it
+  is there, the `agent-model-inherited` card says an agent that named
+  no model ran on the model that variable names, not on your main
+  session's. They do not read `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`.
 - `env-attribution-deprecated` (severity `info`) — fires when
   `includeCoAuthoredBy` is set in `effective` and `attribution` is not
   (docs/en/settings-reference.md: `attribution` replaces the deprecated

@@ -908,7 +908,9 @@ def test_baseline_bloat_fires_with_snapshot_evidence():
     )
     recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
     rec = next(rec for rec in recs if rec.id == "baseline-bloat")
-    assert rec.lever == "mcpServers"
+    # No lever: MCP servers aren't a settings key, so --patch-set has
+    # nothing to write for it, and no one settings file for a scope chip.
+    assert rec.lever is None and rec.scope == ""
     assert rec.evidence == [
         ("Mean session baseline (cache-creation)", 50_000, "agents.topology_session_baseline", "all"),
     ]
@@ -1830,6 +1832,69 @@ def test_pricing_coverage_fires_at_full_coverage_when_closest_match_table_presen
     recs = recommend_fn(r, config=_config(), archetype=None)
     rec = next(rec for rec in recs if rec.id == "pricing-coverage")
     assert "claude-widget-9-preview" in rec.action
+    assert (
+        "claude-widget-9-preview was priced by closest match, not its own rate; give it a pricing.toml row of "
+        "its own for an exact cost."
+    ) in rec.action
+
+
+def _closest_match_report(rows: list[list]):
+    r = _base_report()
+    r.meta.pricing.coverage_pct = 100.0
+    r = _add_section(
+        r,
+        Section(
+            key="scorecard",
+            title="Scorecard",
+            tables=[_scorecard_dimensions_table([["data_quality", "warn", "Data quality", "pricing_coverage_pct", 100.0, 100.0]])],
+        ),
+    )
+    return _add_section(
+        r,
+        Section(
+            key="usage",
+            title="Usage",
+            tables=[
+                Table(
+                    name="pricing_closest_match",
+                    title="Priced by closest match",
+                    columns=[
+                        Column(key="model_id", label="Model"),
+                        Column(key="priced_as", label="Priced as"),
+                        Column(key="turns", label="Turns"),
+                        Column(key="tokens", label="Tokens"),
+                    ],
+                    rows=rows,
+                )
+            ],
+        ),
+    )
+
+
+def test_pricing_coverage_names_a_newer_version_as_one_with_no_rate_yet():
+    r = _closest_match_report([["claude-widget-9-1", "claude-widget-9", 4, 2000]])
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "pricing-coverage")
+    assert rec.action == (
+        "There is no rate of its own for claude-widget-9-1 yet, so it was priced as claude-widget-9; update "
+        'ClaudeGlass or add a models."claude-widget-9-1" row to pricing.toml for its exact cost.'
+    )
+    assert "closest match" not in rec.action
+
+
+def test_pricing_coverage_words_newer_versions_and_other_closest_matches_apart():
+    r = _closest_match_report([
+        ["claude-widget-9-1", "claude-widget-9", 4, 2000],
+        ["claude-widget-9-preview", "claude-widget-9", 2, 1000],
+        ["claude-gadget-2-20260101", "claude-gadget-2", 1, 500],
+    ])
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "pricing-coverage")
+    # Two plain closest matches read in the plural.
+    assert (
+        "claude-widget-9-preview, claude-gadget-2-20260101 were priced by closest match, not their own rates; "
+        "give them pricing.toml rows of their own for an exact cost."
+    ) in rec.action
+    assert "There is no rate of its own for claude-widget-9-1 yet, so it was priced as claude-widget-9;" in rec.action
+    assert "claude-widget-9-1," not in rec.action
 
 
 # -- data-quality ---------------------------------------------------------
@@ -2380,6 +2445,18 @@ def test_render_patch_set_top_level_agent_type_stays_a_settings_key_not_a_file()
     assert ".claude/agents/" not in text
 
 
+def test_render_patch_set_skips_the_agent_model_cards():
+    """Their fix is a prompt: no agent-file stanza, least of all for
+    workflow-subagent, which has no agent file."""
+    from claudeglass import agent_models
+
+    recs = [
+        dataclasses.replace(_make_recommendation(id=rule_id), category="workflow", lever="model", agent_type=agent_type)
+        for rule_id, agent_type in zip(agent_models.RULES, ("workflow-subagent", "claude-implementer", "general-purpose"))
+    ]
+    assert render_patch_set(recs) == ""
+
+
 def _make_recommendation(**overrides):
     from claudeglass.model import Recommendation
 
@@ -2691,6 +2768,42 @@ def test_pricing_coverage_names_unknown_models_from_a_built_report(tmp_path):
     assert unknown.dashboard == "advanced" and unknown.help and unknown.help.shows
     rec = next(r for r in model.recommendations if r.id == "pricing-coverage")
     assert "claude-mystery-9" in rec.action
+
+
+def test_a_newer_version_is_named_end_to_end_and_its_id_reaches_meta_model_ids(tmp_path):
+    # claude-sonnet-5-7 has no row: it is priced as claude-sonnet-5 by
+    # prefix. The rule says so in its own words, and meta.model_ids tells
+    # the dashboard which meta.rates entry the observed ids use.
+    import json
+
+    from claudeglass.pricing import load_pricing
+    from claudeglass.render.json_out import render_json
+    from claudeglass.report import build_report
+
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    for i in range(6):
+        write_jsonl(
+            project_dir / f"s{i}.jsonl",
+            [turn_line(timestamp=f"2026-09-1{i}T10:00:00.000Z", model="claude-sonnet-5-7")]
+            + [turn_line(timestamp=f"2026-09-1{i}T10:01:00.000Z", model="us.anthropic.claude-opus-5-5-v1:0")]
+            + [turn_line(timestamp=f"2026-09-1{i}T10:02:00.000Z")],
+        )
+    pricing = load_pricing()
+    model = build_report(load_corpus([project_dir]), pricing, Config(), projects=("proj",), window="w")
+
+    rec = next(r for r in model.recommendations if r.id == "pricing-coverage")
+    assert "There is no rate of its own for claude-sonnet-5-7 yet, so it was priced as claude-sonnet-5;" in rec.action
+    assert rec.title == "A newer model is priced at an older model's rate"
+
+    model_ids = model.meta.model_ids
+    assert model_ids["claude-sonnet-5-7"] == "claude-sonnet-5"
+    assert model_ids["us.anthropic.claude-opus-5-5-v1:0"] == "claude-opus-5-5"
+    assert model_ids["sonnet"] == "claude-sonnet-5-5"
+    assert "claude-sonnet-5" not in model_ids  # already a meta.rates key
+    assert set(model_ids.values()) <= set(model.meta.rates)
+    meta = json.loads(render_json(model))["report"]["meta"]
+    assert meta["model_ids"] == model_ids
 
 
 # -- effort-mismatch from work Claude reported easy (metrics capture) --------

@@ -148,7 +148,10 @@ export var state = {
 
 // Short windows show a change's effect within the hour; "Since my
 // last change" starts at the newest apply, undo or settings change.
-// A window counts every session active in it, whole.
+// Last 7, 30 or 90 days are local calendar days: today and the days
+// before it, from midnight in the service's zone. A window counts every
+// session active in it, whole; "Since my last change" counts the
+// sessions started after it.
 export var WINDOW_OPTIONS = [
   { label: "Last hour", value: "1h" },
   { label: "Today", value: "today" },

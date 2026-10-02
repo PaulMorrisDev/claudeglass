@@ -4,7 +4,7 @@ Claude Code transcripts.
 
 from __future__ import annotations
 
-__version__ = "0.12.1"
+__version__ = "0.14.0"
 
 #: Bump when transcript-parsing logic changes in a way that could change
 #: results computed from a previously cached file.
@@ -233,7 +233,23 @@ __version__ = "0.12.1"
 #: saver's redirect has subkind ``known_savers.REDIRECT_DENIAL_KIND``, not
 #: Claude Code's own ``permission-rule``, so it no longer counts as a
 #: request you turned down.
-PARSER_VERSION = 34
+#:
+#: Bumped to 35: each MCP server's share of the deferred name list, its
+#: instructions' length, its tools' names, the tools sent in full and its
+#: connection problems (model.py's MCP-servers addition), and a surfaced
+#: tool no longer counts as kept out by tool search. A pre-35 digest has
+#: none of these, so every server would look free.
+#:
+#: Bumped to 36: each agent's role word (a canonical word from
+#: agent_roles.py, never the phase, label or description it came from),
+#: whether its meta records a model at all, and the shell writes a turn
+#: made outside the temp dir (model.py's Agent-roles addition). A pre-36
+#: digest has none of these, so no agent could be told apart. It also
+#: tests an edit tool's target against the temp dir the way a shell
+#: write target is (a forward-slash or Git Bash path was a real edit
+#: before), so a pre-36 digest counts those scratch writes as real
+#: edits.
+PARSER_VERSION = 36
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

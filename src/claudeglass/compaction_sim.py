@@ -203,10 +203,11 @@ ASSUMPTIONS: list[str] = [
 #: docstring's "no candidate window" identity).
 #:
 #: D2/COV-12: widened past 500_000 to cover the natively-1M-context
-#: models (Fable 5.1, Fable 5, Sonnet 5, Opus 4.7+ -- V24), which
-#: compact by default at about 967,000 tokens rather than the ~200k a
-#: pre-Fable-5 model assumes; a corpus running one of those models would
-#: otherwise never see a realistic candidate near its actual window.
+#: models (Fable 5.1, Fable 5, Sonnet 5.5, Sonnet 5, Sonnet 4.6, Opus
+#: 4.6+ -- V24), which compact by default at about 967,000 tokens
+#: rather than the ~200k a pre-Fable-5 model assumes; a corpus running
+#: one of those models would otherwise never see a realistic candidate
+#: near its actual window.
 #: Values must stay ascending (excluding ``None``) -- callers rely on
 #: "first candidate that fires" being the smallest one.
 CANDIDATE_WINDOWS: tuple[int | None, ...] = (

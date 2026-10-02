@@ -54,19 +54,27 @@ Deviations from the task brief, reported rather than made silently (see
   present)") doesn't specify which config key(s) to diff — a report-wide
   ``build_report`` call has no single "the one key that changed" the way
   a ``config-diff <key>`` CLI subcommand would. This module calls
-  :func:`snapshots.diff_keys` to find every key that changed across the
-  supplied snapshots, and renders one :func:`snapshots.build_config_diff_table`
+  :func:`snapshots.changed_keys` to find every key that changed within one
+  project's own snapshots (never across the interleaved snapshots of
+  several projects, which would count every switch between them), and
+  renders one :func:`snapshots.build_config_diff_table`
   per changed key (capped — see :data:`_MAX_CONFIG_DIFF_KEYS`), rather
   than reusing :func:`snapshots.build_config_section` directly (which
   takes exactly one ``key`` and returns ``Section(key="config_diff", ...)``
   — a different section key than this task specifies).
+  Which snapshots the section reads follows the report's projects: with
+  ``all_projects`` every project's, otherwise only those of the report's
+  own projects (:func:`_settings_snapshots`), so a project view never
+  shows, or counts a change from, another project's settings.
   Review fix #14: this section now additionally appends
   ``snapshots.build_effective_config_table``/``build_config_layers_table``/
   ``build_config_groups_table`` (no inputs beyond the snapshots already
   in hand) and, once a session's own dominant top-level model is known,
-  ``build_config_drift_table`` (fix #15: model comparisons are alias-
-  normalised via ``pricing.resolve_model``, so this no longer reports
-  100% drift on ``model``). COV-02: the same table also carries an
+  ``build_config_drift_table`` (fix #15: a settings model alias compares
+  by family and an explicit id by the canonical id
+  ``pricing.resolve_model`` gives, see
+  ``snapshots._settings_model_agrees``, so this no longer reports 100%
+  drift on ``model``). COV-02: the same table also carries an
   ``effortLevel`` row per session once a dominant top-level effort is
   known (``_dominant_transcript_effort``) -- together these are the
   "CLI/overlay layer" the plan asks for: a disagreement between the
@@ -129,6 +137,7 @@ from typing import Callable
 
 from . import __version__ as _TOOL_VERSION
 from . import (
+    agent_models,
     carry,
     classify,
     compaction,
@@ -1045,19 +1054,76 @@ def _build_overview_section(
 # -- config section (see module docstring's deviation note) -------------
 
 
+def _settings_snapshots(
+    corpus: Corpus,
+    projects: tuple[str, ...],
+    snapshots: list[Snapshot] | None,
+    all_projects: bool,
+    known_slugs: tuple[str, ...] = (),
+) -> tuple[list[Snapshot] | None, dict[str, str]]:
+    """``(scoped, canonical)``: the snapshots whose settings the report
+    shows, and the mapping that folds a project's two drive-letter keys
+    into one (``snapshots.canonical_project_keys`` of the report's
+    projects: the transcript slugs of the corpus's sessions, and the
+    caller's ``projects``, which can name one with no session in the
+    window; and of ``known_slugs``, which only folds).
+
+    ``scoped`` is every snapshot with ``all_projects``. Otherwise it is the
+    snapshots of those projects (``snapshots.snapshots_for_projects``), the
+    picked project's, so another project's settings never reach the tables,
+    the change count or the "in force now" advice built from it. A project
+    with snapshots of its own reads only those, never the project-less
+    (schema 1) ones (``snapshots.project_snapshots``), so in its view its
+    sessions from before its first snapshot drop out of the Sessions by
+    setting groups.
+    """
+    slugs = {bundle.slug for bundle in corpus.sessions if bundle.slug} | set(projects)
+    canonical = snapshots_mod.canonical_project_keys(slugs | set(known_slugs))
+    if not snapshots or all_projects:
+        return snapshots, canonical
+    return snapshots_mod.snapshots_for_projects(snapshots, slugs), canonical
+
+
+def _agent_file_models(snapshot: Snapshot | None) -> dict[str, str | None]:
+    """Each agent file's ``model`` line (``None``: it names none), by agent
+    type, from ``snapshot``'s ``agents``; empty without a snapshot."""
+    agents = snapshot.data.get("agents") if snapshot is not None else None
+    if not isinstance(agents, dict):
+        return {}
+    return {
+        name: entry.get("model") if isinstance(entry.get("model"), str) else None
+        for name, entry in agents.items()
+        if isinstance(entry, dict)
+    }
+
+
+def _snapshot_env_names(snapshot: Snapshot | None) -> list[str]:
+    """The environment variable names ``snapshot`` records (never values)."""
+    names = snapshot.data.get("env_names") if snapshot is not None else None
+    return [name for name in names if isinstance(name, str)] if isinstance(names, list) else []
+
+
 def _build_config_section(
     sessions_with_metrics: list[dict],
     snaps: list[Snapshot],
+    scoped: list[Snapshot],
+    canonical: dict[str, str],
     *,
     sessions_with_observed: list[dict] | None = None,
     resolve_model=None,
 ) -> Section:
-    changed_keys = sorted(snapshots_mod.diff_keys(snaps).keys())
+    """The "config" section. ``snaps`` is every snapshot supplied: each
+    session's drift is read from the one its own project had
+    (``snapshot_for``). ``scoped`` is what the section shows
+    (:func:`_settings_snapshots`: every project's, or the picked project's):
+    a table for each key that changed within one project's own snapshots,
+    and each project's latest settings."""
+    changed_keys = snapshots_mod.changed_keys(scoped, canonical)
     shown_keys = changed_keys[:_MAX_CONFIG_DIFF_KEYS]
 
     tables: list[Table] = []
     for key in shown_keys:
-        diff_table = snapshots_mod.build_config_diff_table(sessions_with_metrics, snaps, key)
+        diff_table = snapshots_mod.build_config_diff_table(sessions_with_metrics, scoped, key, canonical)
         rows = [[_stringify(row[0]), *row[1:]] for row in diff_table.rows]
         tables.append(
             Table(
@@ -1070,8 +1136,10 @@ def _build_config_section(
         )
 
     notes = []
-    if not changed_keys:
-        notes.append("No config key changed across the supplied snapshots in this window.")
+    if not scoped:
+        notes.append("No settings snapshot is recorded for the projects in this report.")
+    elif not changed_keys:
+        notes.append("No setting changed between two snapshots of the same project.")
     elif len(changed_keys) > _MAX_CONFIG_DIFF_KEYS:
         notes.append(
             f"Showing the first {_MAX_CONFIG_DIFF_KEYS} of {len(changed_keys)} changed "
@@ -1084,17 +1152,20 @@ def _build_config_section(
     # reachable only via snapshots.build_config_section(...,
     # include_effective=True), which this section deliberately doesn't
     # reuse (see module docstring). Fix #15: build_config_drift_table now
-    # normalises a settings model *alias* against an observed full model
-    # id via resolve_model before comparing, so this is no longer the
-    # "100% drift on model" trap #15 describes.
-    if snaps:
-        tables.append(snapshots_mod.build_effective_config_table(snaps))
-        tables.append(snapshots_mod.build_config_layers_table(snaps))
+    # compares a settings model *alias* with an observed full model id by
+    # family, and an explicit id by the canonical id resolve_model gives,
+    # so this is no longer the "100% drift on model" trap #15 describes.
+    if scoped:
+        tables.append(snapshots_mod.build_effective_config_table(scoped, canonical))
+        tables.append(snapshots_mod.build_config_layers_table(scoped, canonical))
         # COV-09: gives recommend.py's env-var-lever rules a real, citable
         # table row (see build_env_levers_table's own docstring) -- read
-        # from the same corpus-wide snapshot recommend() itself uses.
-        tables.append(snapshots_mod.build_env_levers_table(snaps))
-        tables.append(snapshots_mod.build_config_groups_table(snaps, sessions_with_metrics))
+        # from the same snapshot recommend() itself uses.
+        tables.append(snapshots_mod.build_env_levers_table(scoped, canonical))
+        tables.append(snapshots_mod.build_config_groups_table(scoped, sessions_with_metrics, canonical))
+        # Each session joins its own project's snapshot (snapshot_for), so
+        # every snapshot can go in; with none in scope there is no table,
+        # not one saying no drift was found.
         if sessions_with_observed:
             tables.append(
                 snapshots_mod.build_config_drift_table(sessions_with_observed, snaps, resolve_model=resolve_model)
@@ -1230,6 +1301,8 @@ def build_report(
     baseline_note: str | None = None,
     config_dir: str | Path | None = None,
     ratings: dict | None = None,
+    all_projects: bool = False,
+    known_slugs: tuple[str, ...] = (),
 ) -> ReportModel:
     """Assemble the whole :class:`ReportModel` for ``corpus``. See the
     module docstring for section order/keys and the deviations from the
@@ -1295,6 +1368,22 @@ def build_report(
     ``habits`` section also reads the free signals metrics capture logged
     there (``signals.load``), only when its salt already exists.
 
+    ``all_projects`` says the corpus covers every project (the CLI's
+    ``--all-projects``, the dashboard with no project picked), so a
+    server every project loads can be judged unused (``tool_search``'s
+    ``mcp-unused-server``). Defaults to ``False``: such a server is then
+    shown as "all-projects view only". It also sets which settings
+    snapshots the ``config`` and ``scorecard`` sections and the advice
+    read: every project's, or, without it, only those of the report's own
+    projects (``projects`` and the corpus's sessions,
+    :func:`_settings_snapshots`).
+
+    ``known_slugs`` (the dashboard passes every project slug its store has
+    recorded) only folds a project's two drive-letter snapshot keys into
+    one (``snapshots.canonical_project_keys``), so a project with no
+    session in the window still shows once in the settings tables. It
+    never changes which projects the report covers.
+
     ``ratings`` holds your dashboard ratings by session id
     (``Store.all_feedback``), for the ``habits`` section's outcomes; the
     CLI and the service pass them when the store has any.
@@ -1316,6 +1405,7 @@ def build_report(
     carry_th = carry.CarryThresholds.from_config(config.thresholds)
     compaction_sim_th = compaction_sim.CompactionSimThresholds.from_config(config.thresholds)
     model_swap_th = model_swap.ModelSwapThresholds.from_config(config.thresholds)
+    agent_models_th = agent_models.AgentModelThresholds.from_config(config.thresholds)
     waste_th = waste.WasteThresholds.from_config(config.thresholds)
     handoff_th = handoff.HandoffThresholds.from_config(config.thresholds)
     hooks_th = hook_costs.HookThresholds.from_config(config.thresholds)
@@ -1342,7 +1432,7 @@ def build_report(
     #: the same way, ``(-cost, slug)``) just to know which project cost
     #: the most in this window.
     project_cost: dict[str, float] = {}
-    session_snapshot_key: dict[str, str] = {}
+    session_snapshot_key: dict[str, tuple[str, ...]] = {}
     session_cc_total: dict[str, int] = {}
     session_recache_cc: dict[str, int] = {}
     #: v0.3 Task 2: session -> classification.mode, so a baseline
@@ -1415,7 +1505,7 @@ def build_report(
         )
         record = classify.build_session_record(top, subs, bundle.workflows, classification, slug)
         session_mode[record.session_id] = classification.mode
-        record.project_key = snapshots_mod.snapshot_project_key(bundle.slug)
+        record.project_key = snapshots_mod.snapshot_project_keys(bundle.slug)
         record.profile_id = snapshots_mod.profile_for(record.first_ts, profile_marks, record.session_id)
         session_snapshot_key[record.session_id] = record.project_key
 
@@ -1596,7 +1686,7 @@ def build_report(
     # snapshot_windows: dict[session_id, int | None] -- the
     # autoCompactWindow each session actually ran under: the snapshot its
     # own project had when it started (``snapshot_for`` with the hashed
-    # project key, so another project's settings never leak in).
+    # project keys, so another project's settings never leak in).
     snapshot_windows: dict[str, int | None] = {}
     for record in session_records:
         snap = (
@@ -1624,12 +1714,30 @@ def build_report(
         all_results, pricing, run_split_th, compaction_sim_stats.rediscovery_allowance_usd
     )
     hook_stats = hook_costs.compute_hook_costs(all_results, pricing, hooks_th)
-    tool_search_stats = tool_search.compute_tool_search(all_results, pricing, tool_search_th)
+    tool_search_stats = tool_search.compute_tool_search(
+        all_results, pricing, tool_search_th, snapshots=snapshots, all_projects=all_projects
+    )
 
     # How amounts are phrased (billing mode, and under subscription the
     # usage-limit fit). Built before the sections: the elasticity section
     # renders the same fit.
     units = _report_units(corpus, pricing, config, config_dir)
+
+    # The settings the config and scorecard sections and the advice read:
+    # every project's with ``all_projects``, else the report's own.
+    settings_snaps, canonical = _settings_snapshots(corpus, projects, snapshots, all_projects, known_slugs)
+    # The snapshot the advice reads as "now" (see ``recommend`` below), built
+    # here because the agent-model section reads the same one: an agent file
+    # that names a run's model, or CLAUDE_CODE_SUBAGENT_MODEL, is not an
+    # accident of inheriting.
+    latest_snapshot = snapshots_mod.with_every_project_agents(settings_snaps, canonical) if settings_snaps else None
+    agent_models_stats = agent_models.compute_agent_models(
+        all_results,
+        pricing,
+        agent_files=_agent_file_models(latest_snapshot),
+        env_names=_snapshot_env_names(latest_snapshot),
+        thresholds=agent_models_th,
+    )
 
     # -- assemble sections ---------------------------------------------
 
@@ -1739,7 +1847,13 @@ def build_report(
         sections.append(handoff.build_section(handoff_stats, handoff_th))
 
     if _want("model_swap"):
-        sections.append(model_swap.build_section(model_swap_stats, model_swap_th, units=units))
+        model_swap_section = model_swap.build_section(model_swap_stats, model_swap_th, units=units)
+        sections.append(
+            dataclasses.replace(
+                model_swap_section,
+                tables=[*model_swap_section.tables, agent_models.build_table(agent_models_stats)],
+            )
+        )
 
     if _want("waste"):
         sections.append(waste.build_section(ws, waste_th))
@@ -1774,6 +1888,7 @@ def build_report(
         _habits_built = habits.collect(
             corpus, pricing, ratings=ratings, signals=capture_signals,
             effort_share_threshold_pct=_effort_mismatch_share_threshold(config),
+            tz=config.tz, window=window,
         )
         sections.append(habits.section_from(_habits_built, model_swap=model_swap_stats))
 
@@ -1833,6 +1948,8 @@ def build_report(
             _build_config_section(
                 sessions_with_metrics,
                 snapshots,
+                settings_snaps,
+                canonical,
                 sessions_with_observed=sessions_with_observed,
                 resolve_model=pricing.resolve_model,
             )
@@ -1847,13 +1964,20 @@ def build_report(
         sections.append(tool_search.build_section(tool_search_stats, tool_search_th))
 
     if _want("capture"):
-        sections.append(habits.capture_section(corpus, pricing, config.capture, ratings=ratings, h=_habits_built))
+        sections.append(
+            habits.capture_section(corpus, pricing, config.capture, ratings=ratings, h=_habits_built, tz=config.tz)
+        )
 
     if _want("cost_record"):
         sections.append(reconcile.build_cost_record_section(reconcile.claude_code_reported_costs(corpus, pricing)))
 
     if _want("scorecard"):
-        sections.append(_build_scorecard_section(rs, ls, ts, tp, cs, pricing_coverage, diagnostics, session_records, snapshots, config, scorecard_th, pricing))
+        sections.append(
+            _build_scorecard_section(
+                rs, ls, ts, tp, cs, pricing_coverage, diagnostics, session_records, settings_snaps, config,
+                scorecard_th, pricing, canonical,
+            )
+        )
 
     if baseline_record is not None:
         # Deliberately not gated by _want()/include -- see build_report's
@@ -1896,6 +2020,7 @@ def build_report(
         + list(hook_costs.ASSUMPTIONS)
         + list(tool_search.ASSUMPTIONS)
         + list(model_swap.ASSUMPTIONS)
+        + list(agent_models.ASSUMPTIONS)
         + list(waste.ASSUMPTIONS)
         + list(quality.ASSUMPTIONS)
     )
@@ -1918,8 +2043,9 @@ def build_report(
         # ``(-cost, slug)`` key ``usage.by_project`` already sorts its own
         # rows by, so the highest-spend project a caller could filter to
         # always sorts first. A project with no session in this window
-        # (the CLI's ``--all-projects`` can pass one that exists on disk
-        # but never appears in ``corpus.sessions``) has no entry in
+        # (the CLI's ``--all-projects`` can pass one that exists on disk,
+        # and the dashboard the project picked, that never appears in
+        # ``corpus.sessions``) has no entry in
         # ``project_cost`` and sinks to the bottom, alphabetically among
         # its own kind.
         projects=tuple(
@@ -1949,6 +2075,9 @@ def build_report(
             "basis": units.basis(),
         },
         rates=pricing.rates_meta(),
+        # by_model is keyed by the observed turn.model, so every id the
+        # by_model table shows can be looked up in `rates`.
+        model_ids=pricing.model_ids_meta(overview.by_model.keys()),
     )
 
     # Fixes 2/3: these two counters are pricing-time totals (every turn
@@ -1974,11 +2103,12 @@ def build_report(
     # corpus's majority archetype and the latest config snapshot (if any)
     # as of "now" -- a per-session snapshot join is not attempted here,
     # matching how ``_build_config_section``/``_build_scorecard_section``
-    # already treat ``snapshots`` as a single corpus-wide input. Its agents
-    # are widened to every project's, since the newest snapshot records
-    # only the agents of the project it was taken in.
+    # already treat the snapshots as a single input. It is the picked
+    # project's (``_settings_snapshots``), so advice never reads another
+    # project's settings as in force. Its agents are widened to every
+    # project in that set, since the newest snapshot records only the
+    # agents of the project it was taken in.
     corpus_archetype, _archetype_evidence = workstyle.corpus_archetype(session_records)
-    latest_snapshot = snapshots_mod.with_every_project_agents(snapshots) if snapshots else None
     report_model.units = units
     report_model.recommendations = recommend(
         report_model,
@@ -2011,7 +2141,7 @@ def build_report(
                 sections[i] = habits.patch_capture_recommend_value(
                     section, corpus, pricing, config.capture, ratings=ratings,
                     with_habits=report_model.recommendations, without_habits=without_habits_recs,
-                    h=_habits_built,
+                    h=_habits_built, tz=config.tz,
                 )
                 break
 
@@ -2116,6 +2246,7 @@ def _build_scorecard_section(
     config: Config,
     th: scorecard.ScorecardThresholds,
     pricing: Pricing,
+    canonical: dict[str, str] | None = None,
 ) -> Section:
     all_turns = [r.turn for r in rs.records]
     # D2/COV-12: only scale when the caller hasn't already customised
@@ -2158,8 +2289,10 @@ def _build_scorecard_section(
             max_cost = max(per_type_mean.values())
             agent_variance = max_cost / median_cost if median_cost else None
 
+    # The same keys the config section tables: each changed within one
+    # project's own snapshots, counted once however many projects changed it.
     has_snapshot = bool(snaps)
-    changed_keys = len(snapshots_mod.diff_keys(snaps)) if snaps else 0
+    changed_keys = len(snapshots_mod.changed_keys(snaps, canonical)) if snaps else 0
 
     parse_error_rate_pct = (
         100.0 * diagnostics.unparsable_lines / diagnostics.lines if diagnostics.lines else 0.0

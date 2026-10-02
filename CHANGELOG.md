@@ -7,7 +7,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-10-02
+
 ### Added
+
+- **Agents that ran on a larger model than their work needed.**
+  ClaudeGlass now reads, for every subagent and workflow agent,
+  whether a model was set and whether it wrote code. A new card,
+  `agent-model-inherited`, names agents that wrote code on a model
+  above Sonnet because nothing set one: workflow agents as one card,
+  each Agent-tool type as its own. It prices the same tokens on Sonnet
+  as a ceiling, since Sonnet may need more replies, and gives you a
+  "from now on" rule to paste. Once 3 or more later agents that wrote
+  code ran on Sonnet or smaller, it drops to info and says it looks
+  fixed. While it is advice, its saving counts in the Overview's
+  available saving wherever the model lever has none for that agent
+  type. Two info cards cover the rest. `agent-model-asked` is for
+  agents that wrote code on Opus or Fable because their call asked for
+  it. `agent-decide-apply` is for Opus or Fable agents whose job was to
+  decide, such as review, verify or judge, that also changed code in 3
+  or more replies, which suggests splitting the work. Agents that
+  decide never count as code writers, an agent that integrates is
+  never flagged, and the main session is never advised on. A new
+  table, `model_swap_agent_models`, on Spend › Savings lists each
+  case, and the Models check raises the cards. ClaudeGlass stores one
+  role word per agent, whether its meta file records a model, and a
+  count of the shell writes in each reply outside the temp folder,
+  never a prompt, label or description. Parsed sessions are re-read
+  once to pick this up. `scrub-fixture` now keeps that role word from
+  a workflow phase or description, and nothing else of either.
+
+### Fixed
+
+- **A scratch edit written with forward slashes counted as an edit to
+  your code.** Claude Code on Windows often gives a Write or Edit into
+  the temp folder with forward slashes, and only the backslash form was
+  recognised, so a script an agent wrote to its scratchpad looked like
+  a change to your code. The temp folder now matches however it is
+  spelled, and `/tmp/` counts as temp on every system. This touches
+  every figure that tells your edits from scratch ones: the Building
+  and Checking phases, whether a plan was built after it was approved,
+  what a session was for, and the new agent cards. The re-read above
+  picks it up.
+- **The model-swap notes gave a workflow agent's model wrongly.** They
+  said a workflow has a default model. It has none: a workflow agent's
+  model comes from its `agent()` call, else its agent type's file, else
+  `CLAUDE_CODE_SUBAGENT_MODEL`, else your main session's model. The
+  run file's `defaultModel` only records the main model at launch, and
+  a model in `meta.phases` only labels the phase. The report's
+  assumptions and the model-swap docs now say so. Model swap still
+  counts every workflow agent run as set by its script, whatever its
+  agent type, so none is in an agent type's saving.
+- **A window that starts before the year 1000 failed on Linux.** A
+  window of hundreds of thousands of days starts that far back. On
+  Linux its start was written with a three-digit year, which ClaudeGlass
+  then couldn't read back, so `/api/summary` answered with an error
+  instead of saying the window is too large. Every window's start and
+  end are now written with a four-digit year on every system.
+
+## [0.13.0] - 2026-10-02
+
+### Added
+
+- **MCP servers you never use.** A new card, `mcp-unused-server`, names
+  the MCP servers offered in your main sessions for a week or more that
+  Claude never used, with what keeping them cost and how to turn each
+  one off for its kind: a desktop-app connector under + > Connectors, a
+  claude.ai connector or plugin with `/mcp`, a user or local server with
+  `claude mcp remove`, a project's shared server in
+  `.claude/settings.local.json`. The cost is its share of the tool-name
+  list, its instructions and its tools sent in full, at the cache read
+  rate, so it is the least it cost. A new table, `tool_search_servers`,
+  lists every MCP server with its kind, status, uses and cost; nothing
+  in the code names a server. The "What does MCP tool search save
+  you?" check offers the fix. Parsed sessions are re-read once to pick
+  this up.
 
 - **"What does tokensave save you?"** If you use
   [tokensave](https://github.com/aovestdipaperino/tokensave), a new
@@ -24,9 +98,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or a hook that doesn't give its name. Each row has its own advice.
   The waste section adds the same breakdown as the table
   `waste_blocked_by`.
+- **The API says which days a window covers.** `/api/summary` returns
+  `period`: the window's first and last local day, today and the zone.
+  With `previous=1` it answers for the same hours one window back.
+  `/api/sessions` rows carry `first_day` and `last_day`, and
+  `/api/impact` rows `change.day`, so a page never does zone maths.
+  `/api/impact` takes the window and `project`, and `/api/backtest` the
+  window; a bare request still means all time.
 
 ### Changed
 
+- **Tools sent in full aren't counted as kept out.** Tool search's
+  "Kept out of each reply" no longer counts a listed tool Claude Code
+  also sent with its full definition.
+- **"The session baseline is large" points at the right files.** Its
+  fix now looks for MCP servers in `~/.claude.json` and `.mcp.json`,
+  where they live, not a `settings.json` key that doesn't exist, and
+  `report --patch-set` no longer prints that key. The dashboard no
+  longer says it changes your user settings. If you ignored this
+  card, it shows once more.
+- **Check fixes aren't hidden for want of subagents.** "Do agents carry
+  tools, MCP servers or skills they never use?" offers the
+  large-baseline fix even when no subagent ran.
 - **A token saver turning a call away isn't waste.** When tokensave's
   hook sends a Grep, Glob or Explore agent to its own tools, the reply
   is counted as `redirected`. It is priced and shown, but left out of
@@ -57,6 +150,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that would save little is explained in the summary instead of being
   listed as a tip. The card calls a tool the largest thing carried only
   when that is true.
+- **7, 30 and 90 days are calendar days.** "Last 7 days" is today and
+  the 6 days before it, counted from local midnight in `config.toml`'s
+  `tz`, else your machine's zone. Early in the day its figures read
+  lower than the old rolling 7 x 24 hours did. Last hour, Today, Last
+  24 hours, All time and Since my last change mean what they did. Daily
+  spend is grouped by local day too (`/api/daily-usage`'s `day` is
+  local now), half-hour zones included. The Overview's "the 7 days
+  before" is the same hours one window back, so a morning isn't set
+  against whole days.
+- **The command line counts the same days.** `--days N` on the
+  report-style commands starts at that local midnight (`--tz` sets a
+  zone for one run), and `--days` must be 1 or more. The capture,
+  coaching and baseline replays and `reconcile` keep a rolling N x 24
+  hours: they divide by it, or match UTC days.
+- **Change cards follow the window and project you pick.** Your
+  changes lists every change made in the window, each judged on its
+  whole before and after, so a card's figures never depend on the
+  window. A project lists the changes that apply there, judged on that
+  project's sessions. The Overview shows the two newest changes that
+  can be judged, and folds the newer ones into one line ("2 newer
+  changes are too new to judge yet: each needs 3 sessions after it").
+  Your changes folds cards past ten behind "Show N older changes", and
+  an empty window points to All time. "Did your estimates come true?"
+  follows the window but stays every project's, with an "All projects"
+  chip.
+- **Changes your sessions show count once they hold.** A change of
+  model, effort level or CLAUDE.md size is recorded only when the new
+  value holds for 3 sessions in a row in a project, dated at the first
+  of them. Flipping back and forth, one odd session, a CLAUDE.md that
+  grows a little at a time or is missing from a session, and an effort
+  level the transcript doesn't record are no longer changes. Values
+  that start at the same session are one change.
+- **A model change is judged on the tokens it spends first.** Its card
+  leads with Tokens per session (everything read and written,
+  subagents included), Output tokens per reply and Replies per
+  session, then cost per reply, then cost per session. A change of
+  effort or thinking adds Output tokens per reply ahead of cost per
+  reply. A new model version's different price per token no longer
+  hides whether it does the work with fewer tokens. "Did your
+  estimates come true?" stays on money: an estimate is a saving.
+- **"Since my last change" is per project.** With a project picked, it
+  starts at the newest change that applies there, and the line "Without
+  your last change" under the headline is that project's own. A
+  project with no change says so instead of showing an error.
+- **A refresh that fails is logged.** When `serve` can't refresh your
+  report, your changes, your estimates or the capture figures in the
+  background, it writes a line saying so instead of dropping the error.
+- **The store moves to schema 8.** It keeps each reply's quarter-hour,
+  so a day can start at local midnight in any zone. Upgrading keeps
+  every row and re-reads each parsed session once to fill that in; a
+  session whose transcript Claude Code has since deleted keeps its UTC
+  day. Going back to an older version rebuilds the store from the
+  transcripts still on disk, after copying the old file to
+  `service.db.bak-8-<time>`: a session whose transcript is gone drops
+  out, your tags and ratings stay, and predictions are read back from
+  `prediction-log.jsonl` without their verdicts and judged again.
 
 ### Fixed
 
@@ -73,6 +222,94 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Auto-mode classifier outages counted as tool errors.** "The
   server-side auto mode classifier gave no verdict" is now a denial,
   not a habit to fix.
+- **Sonnet 5.5 is priced as itself.** `claude-sonnet-5-5` has its own
+  row on the rate card, at Sonnet 5's rates, and the `sonnet` and
+  `sonnet[1m]` aliases point at it, so no cost moves. A newer version
+  the card doesn't list yet (a `claude-x-5-5` with only `claude-x-5`
+  priced) now says it was priced as the closest older version: "There
+  is no rate of its own for X yet, so it was priced as Y". The
+  pricing-coverage card, its advice and `pricing-check` say so, where
+  they said "closest match".
+- **"Too few sessions since the change to compare yet" stuck on every
+  card.** More changes were recorded than you made, so the newest never
+  had 3 sessions after it. Every flip of model, effort level or
+  CLAUDE.md size between two sessions counted as a change, one settings
+  edit counted once for each project, a lower-case drive letter on
+  Windows split a project's sessions from its changes, and a change in
+  one project cut every other project's before and after short. A
+  change you make once is now one change, judged on each project's own
+  sessions. Estimates stuck on "too little data" are judged again once.
+- **"Last 7 days" drew 8 columns, and "Last 24 hours" could chart 48
+  hours.** The window was a rolling 7 x 24 hours and its days were UTC
+  days, so it touched eight of them. A number of days is now that many
+  local calendar days, and the tiles, the daily chart and the Sessions
+  day filter agree on what a day is. Today no longer slips an hour on
+  the days the clocks change.
+- **"Since my last change" could start in the wrong place.** It could
+  serve a start from before your latest change for up to ten minutes,
+  and it ignored the project you picked. A new or backdated apply,
+  undo, settings change or capture change moves it at once, one only
+  your sessions show within two minutes, and it follows the project. A
+  number of days now rebuilds at local midnight instead of freezing
+  while idle, and an open tab drops its report after five minutes or a
+  new day.
+- **A change recorded under one drive-letter case missed sessions under
+  the other.** Claude Code names a project's folder with its drive
+  letter in whichever case the project was opened with, so its sessions
+  could sit under `c--Dev-X` while its snapshots and applies used
+  `C--Dev-X`, and a change applied to it found none of those sessions.
+  A snapshot or apply under either case now applies to the sessions
+  under both, and the hook records the upper-case one.
+- **A capture toggle was two changes.** Turning capture on, changing
+  what it measures or removing it also rewrites its hook entries in
+  your settings, which showed as a second change a moment later. The
+  rewrite now belongs to the capture change.
+- **Aliases aren't drift.** "Settings that did not take effect" no
+  longer lists `opus` against an older Opus id: an alias follows the
+  newest release, so it agrees with any model of its family. `default`
+  never counts, and `opusplan` agrees with Opus or Sonnet. A full model
+  id still has to match exactly.
+- **The dashboard's prices missed some model ids.** It looked a model's
+  rate up by the exact id a session recorded, so an alias, a `[1m]` or
+  dated id or a Bedrock or Vertex id got another model's prices. The
+  Cache page's price sentences and the Overview's cache read ratio now
+  find the right row, as the rest of ClaudeGlass does.
+- **What-if estimates for a model picked it by string order.** Of two
+  versions of a model, `claude-opus-4-10` lost to `claude-opus-4-9`.
+  The estimate now takes the newest version by number, and reads
+  aliases such as `best` from the rate card.
+- **A rate card you set priced the report, not what's stored.** The
+  background scanner priced stored sessions with the packaged card
+  whatever `config.toml`'s `pricing_path` said, and never re-priced.
+  It now reads `pricing_path`, else `pricing.toml` in your config
+  folder, else the packaged card. When the card changes it re-prices
+  stored sessions, daily spend and workflow runs once, without a
+  restart. A card it can't read keeps the previous one, and a session
+  whose transcript Claude Code has deleted keeps its old cost.
+- **Opus 4.6 and Sonnet 4.6 have a 1M-token context window.** The
+  rate card gave them 200,000, which the huge-context table, the
+  context score and the context budget all read.
+- **Some figures ignored the project you picked, or mixed projects.**
+  Setup › Settings and the scorecard's config stability compared
+  snapshots of different projects, so settings that never changed
+  looked like a change each time two projects alternated. Each
+  project's own snapshots are compared, and a picked project shows its
+  own settings and changes even with no session in the window. The
+  CLAUDE.md list under Agents › Context and its quick action cover the
+  picked project's folders. Spend's list of conversation summaries
+  counts only those from the window's sessions, so it matches the
+  count above it. The weekly pace starts its weeks on your local
+  Monday, and its title names the window you picked, not the span the
+  messages cover.
+- **A `tz` of `UTC` was partly ignored on Windows.** Without the
+  `tzdata` package, the hour a session started, the usage section's
+  days, weeks and months, exports and the monthly report couldn't find
+  `UTC` and used your machine's zone, while the dashboard's days used
+  UTC. They all use UTC now.
+- **A pick made while a page loads was undone.** A window or project
+  you chose before the page arrived reverted when it did, and a link's
+  own window lost to the one you had picked. Your pick sticks, and a
+  link's window wins.
 
 ## [0.12.1] - 2026-09-28
 

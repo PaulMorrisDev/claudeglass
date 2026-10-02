@@ -613,6 +613,26 @@ def test_build_baseline_does_not_count_orphan_subagent_bundles_as_sessions(tmp_p
     assert record["sessions_analysed"] == 1
 
 
+def test_build_baseline_costs_workflow_runs_with_the_config_dirs_rate_card(tmp_path, monkeypatch):
+    """The corpus load reads the same config dir's pricing_path the rest of
+    the baseline does, so its workflow run costs use the same card."""
+    project_dir = tmp_path / "projects" / "proj"
+    project_dir.mkdir(parents=True)
+    _write_session(project_dir, "session-1", n_turns=2)
+    real_load = baseline.load_corpus
+    seen = {}
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real_load(*args, **kwargs)
+
+    monkeypatch.setattr(baseline, "load_corpus", spy)
+    baseline.build_baseline(
+        config=Config(), pricing=PRICING, config_dir=tmp_path / "config", project_dirs=[project_dir]
+    )
+    assert seen["config_dir"] == tmp_path / "config"
+
+
 # -- metrics capture: the kinds of task Claude reported ----------------------------
 
 

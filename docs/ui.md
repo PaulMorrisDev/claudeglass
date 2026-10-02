@@ -268,7 +268,7 @@ search and the README's page table all follow it.
 | Page | Segments | Window |
 |---|---|---|
 | Overview | none | follows |
-| Your changes | none | the chart follows; the cards cover all time |
+| Your changes | none | follows |
 | Actions | Recommendations, Checks | follows |
 | Spend | Usage, Savings, Sessions | follows |
 | Cache | Rebuilds, Lifetime (TTL) | follows |
@@ -338,7 +338,7 @@ of lower-case words joined by hyphens.
 | `id` | the inbox item picked: a recommendation's `key` (its id, plus the agent type for a per-agent rule) or a check id |
 | `t`, `row` | a report table (`section.table`) and the row to open at |
 | `term`, `card` | a glossary term or a How costs work card |
-| `day` | a UTC day: Spend › Sessions lists its sessions, Setup › Settings pulses its change |
+| `day` | a local day, as the service counts it: Spend › Sessions lists the sessions active that day, Your changes pulses the card of the change made that day |
 | `split` | `model` on Spend › Usage's daily chart; absent means by agent |
 
 **The router** (`app.js`) reads the address on load and on every
@@ -351,7 +351,11 @@ Picking an inbox item or a picker's choice rewrites the address in place
 (`replaceParams`), so it always names what is on screen. A view hears a
 new `id` through `onParams`, so a link to the view already open selects
 without redrawing. Every address written carries the window and project
-(`scopeParams()`).
+(`scopeParams()`), and a link's own parameters go over them, so a link
+can name another window: "See older ones" opens Your changes under All
+time. A window or project picked while a move to another view is under
+way goes into that move's address, over any window the link named, so
+the pick is still there when the view opens.
 
 A view is drawn the first time it is opened and kept until the window or
 project changes. Views have no background poll. `history.scrollRestoration`
@@ -368,14 +372,36 @@ Settings, and so on). `tls:activeTab` is then removed.
 Its choices (`WINDOW_OPTIONS`) are Last hour, Today, Last 24 hours, Last
 7, 30 or 90 days (30 by default), All time, and Since my last change.
 
+- **Days are local calendar days.** Last 7, 30 or 90 days are today and
+  the N-1 days before it, from local midnight in the service's zone
+  (`tz` in `config.toml`, else the machine's). So Last 7 days is exactly
+  seven day columns on a chart, the last of them a part day. Today
+  starts at local midnight too. Last hour and Last 24 hours roll back
+  from now, and All time has no start. A day runs midnight to midnight,
+  local time, and the charts say so.
+- **Since my last change** starts at the newest change that applies to
+  the project picked (any project's with none picked) and counts the
+  sessions that *started* after it, so it holds only work done on the
+  new settings. With no change to start from, the Overview says "No
+  change recorded yet, so this window has nowhere to start." ("No change
+  recorded for this project yet" with a project picked), and Your
+  changes shows each panel's empty state, not an error.
+- The service names the days, so the browser does no zone arithmetic.
+  `/api/summary`'s `period` gives the window's first and last day and
+  today (`windowSpan`), each `/api/sessions` row its `first_day` and
+  `last_day`, and each change its `day` (`changeDay`). The daily chart,
+  the Sessions day filter and the change rules all use the day the
+  tiles do.
 - It is sent to every report-backed route as `window=<name>` or
   `window_days=N` (`withWindow()`), carried as `?w=`, and kept in
   `tls:window`.
 - A change drops every drawn view that follows the window and redraws
   the one on screen, so no view keeps old numbers. It keeps `id` and
   drops `t` and `row`.
-- The menu's note: a window counts every session with a reply in it, in
-  full, so a long session that started earlier counts whole.
+- The menu's note: Last 7, 30 or 90 days are today and the days before
+  it, from midnight. A window counts every session with a reply in it,
+  in full, so a long session that started earlier counts whole; Since my
+  last change counts the sessions started after it.
 
 A view has one of three window modes (`windowMode`). It *follows* the
 window by default. A segment marked `window: false` is *fixed*: the
@@ -383,10 +409,13 @@ pickers hide and the chip "Same for every window" takes their
 place. Setup › Capture and Glossary › Terms are fixed. A page without
 segments marked the same way would show neither; none ships.
 
-Some panels on views that follow the window cover all history: on Your
-changes, each change's card and the estimates check; on Setup ›
-Settings, the baseline. Each carries an "All time" chip ("All time, all
-projects" while a project is picked).
+Two panels on views that follow the window cover more than the pick says.
+On Setup › Settings, the latest baseline covers all history and every
+project: its chip reads "All time", or "All time, all projects" while a
+project is picked. On Your changes, the estimates follow the window but
+cover every project, since an estimate names none: while a project is
+picked, its chip reads "All projects". The change cards follow both
+pickers.
 
 ### The project picker
 
@@ -398,15 +427,27 @@ all-projects report, `loadProjects()`).
   kept, with the full slug on hover. A project with no session in the
   window stays listed, marked "No sessions in this window".
 - Picking one sends `project=<slug>` with every window-aware request
-  (`withWindow()`, and `withProject()` for the Overview's previous
-  period), and the button keeps the accent (`.is-filtered`). It lives in
-  the address only and hides wherever the window picker does.
+  (`withWindow()`, the Overview's previous period and the change cards
+  included), and the button keeps the accent (`.is-filtered`). It lives
+  in the address only and hides wherever the window picker does.
 - An unknown project in the address (an old bookmark, a moved folder) is
   checked once (`checkProject`, asking `/api/sessions?limit=1&project=`).
   The dashboard then shows every project, and a toast says why.
+- The menu's note says what follows the pick: your changes, settings and
+  CLAUDE.md files, as well as the window's figures. The latest baseline,
+  whether your estimates came true, and the hook and statusline checks
+  always cover every project, and Profiles uses your newest settings
+  from any project. In the page:
+  - Your changes lists the changes that apply in the project (those for
+    every project and its own), each judged on that project's sessions.
+  - Setup › Settings shows only that project's settings and changes,
+    even with no session in the window.
+  - Agents & context › Context lists only the CLAUDE.md files in that
+    project's folders, and your own, which every project reads.
 - Panels that cover every project whatever the picker says say so while
-  one is picked: Settings' changes, estimates and baseline read "All
-  time, all projects".
+  one is picked: the baseline reads "All time, all projects" and the
+  estimates "All projects". In Data quality, the rows about your setup
+  sit apart from the counters read in the window (see "Data quality").
 
 ### Banners
 
@@ -471,13 +512,26 @@ that order, each as a heading with a one-line answer beside it.
    of it), taken from what the others leave (`combinedSaving`). A cheaper
    model prices the fewer tokens earlier summaries leave, so the two
    multiply. An action a Savings lever already counts (`LEVER_RULES`) is
-   left out. The total is still "at most", and never above the spend. The previous period comes
-   from `/api/summary?since=&until=`, so a change compares a summary
-   with a summary. "All time" and "Since my last change" have none.
-   Other forms cover no sessions in the window or project, no change
-   recorded yet, and, before any session is read, **What ClaudeGlass
-   does for you** (saying the first scan is running while
-   `scan.scanning` is true).
+   left out. An inherited agent-model action's saving joins only while
+   its card is Worth considering, and only where the model lever has no
+   saving for that agent type (`agentModelItems`): a workflow agent's,
+   which has no lever, is a share of all the spend. The other two
+   agent-model cards add nothing. The total is still "at most", and
+   never above the spend.
+   The previous period comes from `/api/summary?previous=1` for the same
+   window and project, so a change compares a summary with a summary.
+   The service works the period out in its own days, and `previousPhrase`
+   names it: for a number of days, the same hours that many days back
+   ("the 7 days before"), so a morning isn't set against whole days;
+   "the same hours yesterday" for Today; "the hour before" and "the 24
+   hours before" for the rolling windows. "All time" and "Since my last
+   change" have none. With Since my last change, a line under the
+   sentence says what the sessions started since would have cost without
+   the newest change that applies in the picked project, when one is
+   picked. Other forms cover no sessions in the window or project, no
+   change recorded yet (for the project picked, when one is), and, before
+   any session is read, **What ClaudeGlass does for you** (saying the
+   first scan is running while `scan.scanning` is true).
 2. **Anything wrong?** One checklist (`checklistRows`): a row for each
    of Actions' checks (`/api/quick-actions`), carrying the Actions items
    (`groupRecommendations`) its `rule_ids` raised, so a check and the
@@ -489,26 +543,47 @@ that order, each as a heading with a one-line answer beside it.
    or the check. Rows to fix come first, then those worth a look, by
    saving. The checks with nothing to do, and those with too little
    data, fold into one line each. Beside the heading: "1 thing to fix ·
-   3 worth a look · 5 checks fine · 3 without enough data".
-3. **Did your changes work?** The latest two changes from `/api/impact`
-   as short cards (`renderChangeCards` with `compact`): what changed and
-   where, the lead measure before against after, how sure the
-   difference is, and what it saved so far. Beside the heading, a link
-   to all of them on Your changes.
+   3 worth a look · 5 checks fine · 3 without enough data". The Models
+   check also draws on the three agent-model cards: one that is Worth
+   considering rides on the Models row and makes it Worth a look. One
+   that is For your information isn't a problem, so it stays off the
+   checklist. Its prompt is among the check's fixes, and it is an item
+   on Actions › Recommendations like any other card.
+3. **Did your changes work?** The changes made in the window, from
+   `/api/impact` for the window and project picked, judged first
+   (`renderChangeCards` with `compact` and `judgedFirst`): the newest 2
+   that can be judged, as short cards with what changed and where, the
+   lead measure before against after, how sure the difference is, and
+   what it saved so far. A newer change still waiting for sessions takes
+   no place of its own: those fold into one line above the cards, "3
+   newer changes are too new to judge yet: each needs 3 sessions after
+   it" ("1 newer change is too new to judge yet: it needs 3 sessions
+   after it"). Its count links to the newest of them on Your changes. A
+   newer change held up only by too few sessions *before* it isn't too
+   new, so it isn't counted and stays on Your changes. With none judged,
+   the newest 2 show as they are, each saying how many sessions it has.
+   A window with no change says so and where to look ("No changes in the
+   last 7 days. See older ones on Your changes under All time."; "No
+   changes in claudeglass in the last 7 days." with a project picked).
+   With All time picked it reads "No changes in claudeglass yet." or the
+   plain "No changes recorded yet." Beside the heading, a link to all of
+   them on Your changes.
 4. **Where do your tokens go?** Three tiles, each linking to its page:
    Spend, every session with a reply in the window at its whole cost,
    with its change and a daily sparkline; Saved by cache reads
    (`cache_saved`, an estimate, before paying for the cache writes:
    Cache › Rebuilds leads with the saving after them, so its figure is
    smaller and its label says so); and Sessions, with the subagent runs.
-   Then **Daily spend** (chart 1) at the page's width, with your
-   settings changes from `/api/impact` as labelled rules. It counts
-   replies by the UTC day they were sent, over every day of the window
-   (`windowDays`); when the window's whole sessions come to a different
-   figure, its reading gives that too and says why. A day opens Spend ›
-   Sessions and a change Your changes. Under it, spend **by project**
-   (the usage section's `by_project` table) and **by model** (the daily
-   rows summed), side by side, each left out when it has one row.
+   Then **Daily spend** (chart 1) at the page's width, with the changes
+   made in the window (from `/api/impact`) as labelled rules. It counts
+   replies by the local day they were sent, over every day of the window:
+   `windowSpan` reads the first and last day and today from
+   `/api/summary`'s `period`, so Last 7 days is exactly seven columns.
+   When the window's whole sessions come to a different figure, its
+   reading gives that too and says why. A day opens Spend › Sessions and
+   a change Your changes. Under it, spend **by project** (the usage
+   section's `by_project` table) and **by model** (the daily rows
+   summed), side by side, each left out when it has one row.
 5. **Scores, totals, and how amounts are counted** (folded): the billing
    mode and why (`report.meta`), the scorecard's five areas as a table
    (`scorecard.dimensions`, which a recommendation's evidence can point
@@ -522,32 +597,81 @@ the billing mode. A newer draw drops an older one's answers.
 **Answers:** "Did each change I made work, by how much, and how sure is
 that?"
 
+The page lists the changes made in the window and project picked, each
+judged on its whole before and after, so switching windows never changes
+a card's figures. A change is an `apply` or its undo, a settings edit the
+config hook saw, a metrics capture change, or a model, effort or
+CLAUDE.md size change your sessions show. Your sessions show one only
+once the new value has held for 3 sessions in a row in a project, and it
+is dated at the first of them, so switching back and forth or one odd
+session isn't a change. A project lists the changes that apply there,
+those for every project and its own, judged on that project's sessions
+alone.
+
 1. **Is each reply cheaper since your changes?** (chart 9): cost per
    reply a day over the window, as dots, with each change from
    `/api/impact` as a labelled rule and a flat line at the average of
    each period between two changes. A change's label carries its step
-   ("Model changed: −21% a reply") and opens its card; a change made in
-   another project than the one picked names it. The lines are the
-   chart's own sums over the projects shown, and a change's own day
-   counts after it. A day opens Spend › Sessions.
-2. **Each change, before and after** (All time): a card per change
-   (`changeCard`), newest first. What changed, when and where
+   ("Model changed: −21% a reply") and opens its card. Across every
+   project, a change made in one project names it; with a project picked,
+   every change is its own or applies everywhere, so none does. The
+   lines are the chart's own sums over the projects shown, and a change's
+   own day counts after it. Days run midnight to midnight, local time. A
+   day opens Spend › Sessions.
+2. **Each change, before and after**: a card per change in the window
+   (`changeCard`), newest first, with the cards past 10 folded behind
+   **Show N older changes**. What changed, when and where
    (`modelNames` for the values); its lead measure's reading as a chip;
    each measure the change should move as two bars on one scale
    (`before_value` and `after_value`), the change as a signed percent,
    and the ratio test's reading coloured by the measure's `better`
    (Lower is good news for a cost; the share of messages tagged has no
-   better side and reads neutral). Turning coaching notes on is measured
-   by the prompting habits it warns about, per 100 of your messages, and
-   the share of messages that were small requests sent one at a time. Then **Saved so far** from
-   `without.saved_usd` ("Cost more so far" when it's negative) with how
-   it was priced, a row per setting when several changed at once, the
-   quality verdicts with every signal folded, and the command that
-   undoes an `apply` or a capture change. Until each side has
-   `min_sessions`, the card is the "not enough data yet" box with how
-   many it has (`item.gate`). A `?day=` pulses that day's card.
-3. **Did your estimates come true?** (`/api/backtest`, All time): each
-   estimate Profiles showed, against what happened.
+   better side and reads neutral). Which measures a card shows depends
+   on the change. The first is its lead: its reading is the chip by the
+   title, and it is the only one on the Overview's short card.
+   - A **model** change is judged on the tokens it spends first: Tokens
+     per session (everything read and written, subagents included),
+     Output tokens per reply and Replies per session, then Cost per reply
+     and Cost per session. A new model version can be priced differently
+     per token, so cost alone can't say whether it does the same work
+     with less; the tokens can. They stay ahead of Cost per reply even
+     when the same settings edit changes effort, thinking or fast mode, so
+     a model change made alone or with those leads with Tokens per session.
+     A settings edit lists its keys alphabetically, so another setting
+     changed with the model and listed before it, such as the compaction
+     window, a plugin or an agent, leads with its own measure.
+   - An **effort or thinking** change (the effort level, thinking on or
+     off, the thinking budget) leads with Output tokens per reply, then
+     Cost per reply and Cost per session.
+   - **Fast mode** changes the price and the speed, not the tokens, so it
+     stays on cost. A change to one agent's model keeps that agent's own
+     measures: its cost per spawn and its context at the start of each
+     spawn.
+   - Turning coaching notes on is measured by the prompting habits it
+     warns about, per 100 of your messages, and the share of messages
+     that were small requests sent one at a time.
+
+   Then **Saved so far** from `without.saved_usd` ("Cost more so far"
+   when it's negative) with how it was priced, a row per setting when
+   several changed at once, the quality verdicts with every signal
+   folded, and the command that undoes an `apply` or a capture change.
+   Until each side has `min_sessions` (3), the card is the "not enough
+   data yet" box with how many it has (`item.gate`). A `?day=` pulses
+   that day's card, opening the folded ones first. A window with no
+   change says so and where to look ("No changes in the last 7 days.
+   Pick All time to see older ones."); with All time picked and a
+   project, "No changes in claudeglass yet.", and with neither, "No
+   changes recorded yet." Since my last change with no change to start
+   from shows those two plain ones, and the chart and the estimates say
+   there is nowhere to start, not an error.
+3. **Did your estimates come true?** (`/api/backtest`, for the window):
+   each estimate Profiles showed, against what happened, listed by the
+   time of the change it matched once judged, or by when it was logged
+   while it waits. They cover every project, since an estimate names
+   none: with a project picked the panel carries an "All projects" chip,
+   and Since my last change starts at the newest change in any project.
+   A window with none says "No estimates logged in the last 7 days." and
+   points to All time.
 
 ### Actions › Recommendations
 
@@ -564,7 +688,12 @@ detail scrolls) and the one picked.
   what it leaves.
 - **Groups.** A rule that fires per agent type (`ttl-switch`, `spawn-*`
   and the rest) is one item for all of them ("7 agent types are sent
-  your CLAUDE.md files every time they start").
+  your CLAUDE.md files every time they start"). The three agent-model
+  cards (`agent-model-inherited`, `agent-model-asked` and
+  `agent-decide-apply`) sit under Models and group the same way, one
+  member per agent type, with every workflow agent as one type ("3 kinds
+  of agent wrote code with no model set"). Each has a prompt to copy,
+  and none changes a setting.
 - **The detail** has the severity chip inside the `h2`, then chips for
   who it's for, its area and where the change lands. **How this saves
   you money** gives what it costs now, what the change does to the price
@@ -581,7 +710,9 @@ detail scrolls) and the one picked.
   all-projects view, while the profile `apply` last marked active stays
   active. It shows again when it starts suggesting something else, and
   its detail then says why ("It shows again because it now suggests
-  120000 (you ignored 100000)"). An ignored item's detail says when,
+  120000 (you ignored 100000)"). An agent-model card carries the date
+  of the latest agent it flags, so an ignored one shows again when an
+  agent is flagged on a later day. An ignored item's detail says when,
   where and under which profile it was ignored, with **Stop ignoring**
   (**Stop ignoring in every project** when an every-project ignore is
   seen from one project). Ignored items leave every other list: the
@@ -603,7 +734,11 @@ status (Worth a look, Nothing to do, Not enough data), filtered by
 status. The detail gives why it matters and the answer, then loads
 `/api/quick-actions/<id>`: **The numbers**, the fixes, **Habits that
 help**, and **The recommendation it leads to**. A check with not enough
-data says why. The same checks run as `claudeglass check`.
+data says why. The same checks run as `claudeglass check`. On the
+Models check, every agent-model card's prompt is among the fixes. A
+card isn't said twice: only one that is For your information and has
+no prompt is one of **Habits that help**. Of those cards, only one that
+is Worth considering makes the check Worth a look.
 
 ### Spend › Usage
 
@@ -614,7 +749,10 @@ Chart 1 with **Split by**: main session and subagents, or model tier
 day leads to its sessions and a change marker to what it did. Then cost
 by model (`overview.by_model`, placed by `TABLE_PAGE_MAP`), the
 `usage`, `elasticity`, `compactions` and `phases` sections, and
-`/api/compactions`, newest first. `elasticity` shows only under
+`/api/compactions`, newest first. That list is every compaction of the
+sessions the window counts, whole, so a session that began before the
+window lists all its summaries, and the list is as long as the
+`compactions` section's count. `elasticity` shows only under
 subscription billing with usage-limit readings. `phases` ("Where the
 work went") is always built for the dashboard (the CLI needs
 `--phases`): Cost by phase up front, and the main session, subagent and
@@ -637,7 +775,8 @@ sections, each from its own route rather than the full report:
   the conversation-summary saving);
 - `/api/model-swap`: the most a one-tier-cheaper model could save,
   counting for each subagent only the runs its agent file's model
-  decides;
+  decides, and the agents that ran on a larger model than their work
+  needed;
 - `/api/waste`: spend on replies whose output was never used.
 
 Their recommendations show on Actions › Recommendations, not here.
@@ -651,9 +790,10 @@ with a note when there are more) by start time and cost on a log scale,
 coloured by work mode. Its reading says how many cost nothing, or have no
 start time, and so aren't plotted. Dragging across it, or Shift with the arrow keys,
 lists only the sessions that started then. A `?day=` lists the sessions
-active that UTC day. A line above the list says what it is narrowed to,
-with **Show all sessions**. A row and its dot light up together. The
-report's `sessions` section follows.
+active that local day, by each row's `first_day` and `last_day`, so it
+is the day of the chart's column. A line above the list says what it is
+narrowed to, with **Show all sessions**. A row and its dot light up
+together. The report's `sessions` section follows.
 
 **Detail:** a row, Enter or a dot opens the session drawer
 (`openSessionDrawer`, from `/api/session/<id>`): a summary; **Why was
@@ -673,7 +813,16 @@ cost?"
 
 **What the cache does for you**: three tiles, each with its price
 multiplier from `report.meta.rates` and a link to its card in Glossary ›
-How costs work. What cache reads saved (an estimate); what avoidable
+How costs work. The multipliers are those of the model you spent most on
+in the window (`pricingFacts(report).main`). A model's prices are found
+whatever id its sessions recorded: the rate card's own id, an alias such
+as `sonnet`, an id with `[1m]`, a dated or Bedrock or Vertex id, or a
+newer version the rate card has no row of its own for yet, which is
+priced as the older one (`modelIdFor` and `rateFor` in `costs.js`, from
+`report.meta.model_ids`, then the same steps `pricing.py` takes). The
+Overview's Saved by cache reads tile finds the read price of the model
+that read the most from the cache the same way, adding up the ids that
+resolve to one rate. What cache reads saved (an estimate); what avoidable
 rebuilds cost and how many of the window's rebuilds that covers ("431
 of the 457 ... were avoidable"), leaving out the usage-limit pause as
 the cost does (`avoidableRebuilds`, shared with the Glossary); and how
@@ -720,7 +869,9 @@ is shaded against its column's largest, with the value shown.
 - **CLAUDE.md files** (`/api/claude-md`): one row per file with who reads
   it, its size, how often it was sent, the cost and its fixes. A row
   opens a drawer (`/api/claude-md/<id>`): sections by size, duplicates,
-  stale references and fix prompts.
+  stale references and fix prompts. With a project picked, the list is
+  the files in that project's folders and your own, which every project
+  reads, as the Skills list is.
 - **Skills** (`/api/skills`): the listing's size and cost, one fix that
   hides every unused skill when there are two or more, and a grid with
   "Show only skills Claude never used". A row opens a drawer with the
@@ -748,7 +899,10 @@ waited. The same question is a check on Actions › Checks.
 
 **Answers:** "Which ways of working would save the most?"
 
-The `habits` section: the **Weekly pace** digest; **Habits worth
+The `habits` section: the **Weekly pace** digest, whose title names the
+window ("Weekly pace (last 7 days)", "(all time)", or "(this window)" for
+an hour, today, 24 hours or since your last change) and whose weeks, here
+and in the by-week lines, start on your local Monday; **Habits worth
 trying** as cards (saving a week, what your sessions show, an example to
 copy, how often it was seen, its source, confidence, a weekly pace line
 and how the saving is worked out); the brief templates with Copy
@@ -768,7 +922,20 @@ my baseline?" What each change did is on Your changes, which a line at
 the top links to.
 
 1. `/api/config-diff?auto_keys=1`: which layer supplied each key, which
-   projects share one effective config, and the per-key diffs.
+   projects share one effective config, and the per-key diffs. It
+   follows the project picked. Each project's own snapshots are diffed in
+   turn, never the interleaved snapshots of several, so a switch between
+   two projects with steady settings isn't a change, and a setting counts
+   once however many projects changed it. Which settings changed is read
+   from every snapshot recorded, not only the window's. With a project
+   picked, only that project's snapshots count, so the page shows its
+   settings and changes even with no session in the window, and a
+   project's two drive-letter spellings (`c--Dev-x` and `C--Dev-x`) are
+   one project. The first 20 changed settings get a table, and a note
+   under the first says so, or that nothing changed between two snapshots
+   of the same project. With no snapshot the page says "No settings
+   recorded for this project yet." ("No settings recorded yet." for every
+   project). The scorecard's config stability counts the same changes.
 2. **Latest baseline** (`/api/baseline`): the capture window's status,
    the latest baseline and the history, marked provisional while a
    capture window is open.
@@ -781,9 +948,12 @@ change?"
 **Save my current settings as a profile** comes first. **Create a
 profile** turns a goal (`/api/profile-goals`) into a table of changes
 with the ones your data supports ticked; each tick asks
-`POST /api/whatif` again. **Your profiles and the built-in ones** marks
+`POST /api/whatif` again. The table's "now" values and each tick's
+estimate use the window and project picked. **Your profiles and the
+built-in ones** marks
 the one the latest baseline suggests. **Show what it changes** opens a
-drawer (`/api/profiles/<id>/diff`) with a Setting / Now / After / Set in
+drawer (`/api/profiles/<id>/diff`, against your newest settings from any
+project, whichever is picked) with a Setting / Now / After / Set in
 table, **Estimated effect**, and "Ask Claude to do it", "Or run this
 command" and "Or try it for one session", each with Copy. Then **Best
 setup for each kind of task** (`habits.habits_setups`) and, folded,
@@ -843,6 +1013,9 @@ CLI commands instead.
    report section no other view claims (`SECTION_PAGE_MAP`'s fallback).
 5. `/api/diagnostics`: whether the hook and the status line work, then
    the parse-quality counters, matching the CLI report's Diagnostics.
+   The hook and status line rows sit under "Your setup and every
+   session, every project", since they cover everything whichever
+   project is picked. The counters sit under "Read in this window".
 
 ### Glossary › Terms
 
@@ -1058,10 +1231,15 @@ Every chart has the same parts, top to bottom:
 - the plot: bars at most 24px thick (`MAX_BAR`) with a 4px rounded end,
   2px lines, hairline gridlines, a 2px gap between stacked parts;
 - a note for what the reader needs to trust it, such as "Days run
-  midnight to midnight UTC" or why a bar is hatched.
+  midnight to midnight, local time." or why a bar is hatched.
 
-On daily spend, today's column is marked "so far" in the margin above
-the plot, over the change labels; each change label sits right of its
+On daily spend, today's column (the service's today, from `period`) is
+marked "so far" in the margin above the plot, over the change labels. Its
+total counts replies sent on the days drawn, where the Spend tile counts
+whole sessions, so the two differ when a session began before the first
+day (the tile reads more) or when a window that starts part way through a
+day draws the quarter hour before it began (the tile reads less); the
+chart's reading says which. Each change label sits right of its
 rule, else left, else is cut to fit, so labels never overlap. A day
 with several changes has one rule labelled "3 changes", and its tooltip
 names each. A chart of one day reads without the busiest day or "the
@@ -1267,11 +1445,14 @@ and capture changes; session tags go through `fetchJson` with `POST`. No
 view holds state the server doesn't have, so a reload is always safe.
 
 `loadReport()`, `loadRecommendations()` and `loadQuickActions()` (the
-checks) are cached per window and project, keyed by `scopeKey()`.
-Search's entries (`loadEntries` in `palette.js`) are cached the same
-way, in `state.searchPromises`. A new window or project (`scopeChanged`
-in `app.js`) or **Redraw figures** (`redrawEverything` in `shell.js`)
-clears them all.
+checks) are cached per window and project, keyed by `scopeKey()`, and
+kept for 5 minutes and until the browser's day turns over (`reportKept`
+in `api.js`). So a tab left open picks up a new local midnight, and a new
+change for Since my last change. Search's entries (`loadEntries` in `palette.js`) are cached per window
+and project too, in `state.searchPromises`, but with no time limit; a
+list that came back empty is fetched again next time. A new window or
+project (`scopeChanged` in `app.js`) or **Redraw figures**
+(`redrawEverything` in `shell.js`) clears them all.
 
 ## Performance
 
@@ -1320,16 +1501,16 @@ hand with Playwright against a dev service.
 | `app.js` | the entry point: the router (`resolveRoute`, `changeView`, `showView`, `VIEW_RENDERERS`), the sidebar, the page header, `menuControl`, the theme toggle and `init()` |
 | `core.js` | `el`, `clear`, the storage helpers, `state`, `WINDOW_OPTIONS`, `renderedViews`, the `goTo` and project hooks, `onParams`, `highlight` and `listenHighlight` |
 | `links.js` | `PAGES`, `viewLabel`, `viewIntro`, `parseHash`, `formatHash`, `scopeParams`, `OLD_TAB_VIEWS`, `SECTION_PAGE_MAP`, `TABLE_PAGE_MAP`, `pageLink`, `GLOSSARY`, `JARGON`, `COST_CARDS`, `termLink`, `cardLink`, the `{{page:}}` pattern |
-| `format.js` | `formatCell`, `money`, `moneyText`, `moneyNode`, `moneyParts`, `moneyUnit`, `moneyAxis`, `readableAmounts`, `compactNumber`, `signedPercent`, `fraction`, `shortTs`, `relativeTime`, `modelName`, `modelNames`, `projectName`, `setKnownProjects` |
-| `api.js` | `fetchJson`, `loadInto`, `postJson`, `withWindow`, `withProject`, `scopeKey`, `loadReport`, `loadProjects`, `loadRecommendations`, `loadQuickActions`, `prefetchActions`, `actionIndex`, `findSection`, the figures-as-of stamp, the connection state |
+| `format.js` | `formatCell`, `money`, `moneyText`, `moneyNode`, `moneyParts`, `moneyUnit`, `moneyAxis`, `readableAmounts`, `compactNumber`, `signedPercent`, `fraction`, `shortTs`, `relativeTime`, `windowWhen`, `modelName`, `modelNames`, `projectName`, `setKnownProjects` |
+| `api.js` | `fetchJson`, `loadInto`, `postJson`, `withWindow`, `scopeKey`, `loadReport`, `loadProjects`, `loadRecommendations`, `loadQuickActions`, `prefetchActions`, `actionIndex`, `findSection`, the figures-as-of stamp, the connection state |
 | `ui.js` | the components in the table above, plus `prose`, `countUp`, `enterInTurn` and `motionOK` |
 | `grid.js` | `dataGrid`, `pulseRow`, `pulseNode`, `renderTable`, `renderPlacedTables`, `renderMappedSections`, `renderReportBackedSection`, `simpleTable`, `setSectionChart`, `NEWEST_LAST`, `formatEvidenceValue` |
 | `evidence.js` | `openEvidence`, `evidenceList`, `revealEvidence`, `tableDrawer` |
 | `charts.js` | `CHART_SPECS`, `fillSummary`, `ENTITY_COLOURS`, axes, tooltip, keyboard reading, the table view, resize, `drawChart`, `holdChart`, `chartError` |
-| `charts-types.js` | the eight forms, `renderChart`, `sectionChart`, `sessionContextChart`, `savingsLevers`, `dailyChanges`, `sparkline`, `meter`, `habitSparkline` |
-| `costs.js` | pricing helpers for Actions, Cache and the Glossary: `pricingFacts`, `priced`, `modelSentence`, `avoidableRebuilds`, `cardRuleText` |
+| `charts-types.js` | the eight forms, `renderChart`, `sectionChart`, `sessionContextChart`, `savingsLevers`, `dailyChanges`, `windowSpan`, `changeDay`, `sparkline`, `meter`, `habitSparkline` |
+| `costs.js` | pricing helpers for Actions, Cache, the Glossary and the Overview's cache tile: `modelIdFor`, `rateFor`, `pricingFacts`, `priced`, `modelSentence`, `avoidableRebuilds`, `cardRuleText` |
 | `shell.js` | on every view: the health banner, the status line, the capture banner, `RETRY_SECONDS`, `renderHealth`, the setup checklist (`renderSetupCard`, `renderSetupList`) |
 | `icons.js` | `icon(name, opts)` and `ICON_NAMES` |
 | `palette.js` | `openPalette`, `matchScore`, `GO_KEYS`, `showShortcuts`, `initPalette` |
 | `d3.js` | the one door to the vendored d3 |
-| `page-*.js` | one renderer per view: `page-overview.js`, `page-actions.js` (with `RULE_AREA`), `page-spend.js` (with the session drawer), `page-cache.js`, `page-agents.js`, `page-habits.js`, `page-setup.js` (Settings and Profiles), `page-capture.js`, `page-data.js`, `page-glossary.js` |
+| `page-*.js` | one renderer per view: `page-overview.js`, `page-changes.js` (Your changes, and the change cards the Overview shares: `renderChangeCards`, `judgedFirst`), `page-actions.js` (with `RULE_AREA`), `page-spend.js` (with the session drawer), `page-cache.js`, `page-agents.js`, `page-habits.js`, `page-setup.js` (Settings and Profiles), `page-capture.js`, `page-data.js`, `page-glossary.js` |

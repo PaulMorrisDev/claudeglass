@@ -304,7 +304,7 @@ skill.
 | `exclude_projects` | `--advanced` | Projects to always leave out (folder names under `~/.claude/projects`, comma-separated) | `config.exclude_projects` |
 | `launch_overlays` | `--advanced` | Do you start Claude Code with `--settings` or `CLAUDE_CONFIG_DIR` pointing at extra settings? | `config.launch_overlays` and this project's `projects/<slug>.toml` |
 | `shared_project_config` | `--advanced` | Is this project's `.claude` folder (agents, skills) committed to a repo colleagues use? | `config.shared_project_config` and this project's `projects/<slug>.toml` |
-| `tz` | `--advanced` | Time zone, such as Europe/London (blank for this computer's) | `config.tz` |
+| `tz` | `--advanced` | Time zone, such as Europe/London (blank for this computer's) | `config.tz` (on Windows, a name other than `UTC` needs `pip install tzdata`; see [deploy.md](deploy.md#time-zone-and-tzdata)) |
 | `apply_scope` | `--advanced` | Where should changes you apply go by default (`user`/`project-local`/`repo`) | `config.apply_scope` and this project's `projects/<slug>.toml` |
 | `capture_window` | `--advanced` | How many days to collect data before the first baseline | `config.capture_window` (default 7) |
 | `capture_level` | `--advanced` | Metrics capture level: off, free, essentials, standard, deep (asked after the token-use warning and each level's estimate; by default, the sharper-tips question stands in for it) | `[capture] level` |

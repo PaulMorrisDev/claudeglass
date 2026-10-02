@@ -335,10 +335,19 @@ _WORKFLOW_PROMPTS = {
         "permission before editing files under .claude."
     ),
     "baseline-bloat": (
-        "Please list the MCP servers and plugins I have enabled (in ~/.claude/settings.json, this project's "
-        ".claude/settings.json and .mcp.json), say which ones this project doesn't seem to use, and propose "
-        "turning those off for this project only. Show me the proposed change before making it. Claude Code "
-        "will ask my permission before editing files under .claude."
+        "Please list the MCP servers and plugins I have enabled (MCP servers in ~/.claude.json and this "
+        "project's .mcp.json, plugins in ~/.claude/settings.json and this project's .claude/settings.json), "
+        "say which ones this project doesn't seem to use, and propose turning those off for this project "
+        "only. Show me the proposed change before making it, and don't print any token or key from those "
+        "files. Claude Code will ask my permission before editing files under .claude."
+    ),
+    # {action} is the card's own per-server list: which servers, and the
+    # fix for each one's kind (tool_search.server_fix).
+    "mcp-unused-server": (
+        "Please help me turn them off, as follows. {action} Before running a command, show it to me; "
+        "before removing a server, show me its command and arguments (never its tokens, keys or env values) "
+        "so I can add it back later. For a switch in the desktop app or on claude.ai, which you can't change "
+        "yourself, tell me exactly where to click instead."
     ),
     "agent-report-size": (
         "{agent} sends back long final reports, and each one stays in my main session's context. Please "
@@ -480,6 +489,27 @@ _WORKFLOW_PROMPTS = {
         "the diff before saving, and let's compare quality on a few tasks before keeping it. Claude Code "
         "will ask my permission before editing files under .claude."
     ),
+    # Agent-model cards (agent_models.RULES): no SettingChange, so a prompt.
+    # The first and third are "from now on" rules, so they end in
+    # PROMPT_SCOPE; the second edits files a restart picks up. A prompt has
+    # no braces: build_fixes runs it through str.format.
+    "agent-model-inherited": (
+        "From now on, set the model on every subagent and workflow agent you start. Never leave an agent to "
+        "inherit my session's model, even where a tool's instructions say to omit it. Use Sonnet for agents "
+        "that write code to a settled spec: implementers, and fixers applying a change a judge has specified. "
+        "Use Opus for agents that decide: integrate, review, verify and judge. Never give one Opus agent both "
+        "the deciding and the applying. " + PROMPT_SCOPE
+    ),
+    "agent-model-asked": (
+        "Please find where my agents that write code are started with model set to opus or fable: skills, "
+        "agent files, workflow scripts and CLAUDE.md files. For each place, say whether its work needs Opus. "
+        "Propose sonnet where it doesn't, and show me each change before saving. " + PROMPT_RESTART
+    ),
+    "agent-decide-apply": (
+        "From now on, when an agent's job is to review, audit, verify or judge, have it report the exact "
+        "changes instead of making them. Then start a separate agent on Sonnet to apply them. Keep the "
+        "deciding agent on Opus. " + PROMPT_SCOPE
+    ),
     "wasted-turns": (
         "From now on, when the likely cause repeats (see the finding above), flag it before you start "
         "rather than after. " + PROMPT_SCOPE
@@ -613,11 +643,24 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "Nothing to undo.",
     ),
     "baseline-bloat": (
-        "settings.json's mcpServers list (or a project's .mcp.json), and each agent's own mcpServers "
-        "frontmatter if only some agents need a given server.",
+        "~/.claude.json (your user-scope MCP servers, and each project's local-scope ones and /mcp "
+        "switches), a project's .mcp.json, or settings.json's enabledPlugins; and each agent's own "
+        "mcpServers frontmatter if only some agents need a given server.",
         "Turning a server off for this project means no agent in it can use that server's tools, even for "
         "a task that would have needed one.",
         "Turn the server back on in the same file (Claude Code shows the change before saving it).",
+    ),
+    "mcp-unused-server": (
+        "Only the servers named on the card. A connector in the desktop app is switched off under + > "
+        "Connectors, or, if you added it, disconnected at claude.ai/customize/connectors (which removes it "
+        "from claude.ai chat too; one Anthropic provides itself has nothing to disconnect there); a /mcp switch or a local-scope server applies to one project (~/.claude.json); a user-scope "
+        "server applies to every project; a project's .mcp.json server is turned off just for you in "
+        ".claude/settings.local.json.",
+        "Claude can't use a server you've turned off, even for a task that needs it, until you turn it back "
+        "on. Already-running sessions keep it until they end or are summarised.",
+        "Switch the connector back on under + > Connectors or reconnect it at claude.ai/customize/connectors; "
+        "re-enable it in /mcp or /plugin; or add a removed server back with claude mcp add, using the "
+        "command and arguments Claude showed you before removing it.",
     ),
     "agent-report-size": (
         "The agent's own file (~/.claude/agents/<type>.md or .claude/agents/<type>.md) if it has one, or "
@@ -705,6 +748,29 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "report holds token volumes and turn counts constant, so the real saving depends on trying it and "
         "comparing quality first.",
         "Set the model back to what it was (Claude Code shows the change before saving it).",
+    ),
+    # Agent-model cards (agent_models.RULES): the lever is the call that
+    # starts the agent, so where it goes is a rule, not a setting.
+    "agent-model-inherited": (
+        _SCOPE_WHERE_TEXT + " In a workflow script the model goes on each call, as in agent(brief, { phase: "
+        "'Implement', model: 'sonnet' }). A model in meta.phases only labels the phase. For a named agent "
+        "type, a model: sonnet line in its agent file also works; a file named like a built-in agent "
+        "replaces it whole.",
+        "Sonnet may need more replies on hard, open-ended code, so keep Opus where the spec isn't settled. "
+        "CLAUDE_CODE_SUBAGENT_MODEL=sonnet is blunter: it also moves reviewers and judges, any model a call "
+        "or agent file sets still wins, and it never reaches Explore, Plan or forks.",
+        _SCOPE_UNDO_TEXT,
+    ),
+    "agent-model-asked": (
+        "The prompt, skill, agent file or workflow script that names the model when it starts these agents.",
+        "Sonnet may need more replies on hard code. Keep Opus where an agent has to decide as well as write.",
+        "Set the model back to opus where you changed it.",
+    ),
+    "agent-decide-apply": (
+        _SCOPE_WHERE_TEXT,
+        "Two agents instead of one: the decider's report has to be exact enough for the applier to follow "
+        "without deciding again.",
+        _SCOPE_UNDO_TEXT,
     ),
     "wasted-turns": (
         _SCOPE_WHERE_TEXT,
@@ -1062,6 +1128,8 @@ _NOTE_OVERRIDES: dict[str, str] = {
     "spawn-task-prompt": "scope",
     "tool-output-carry": "scope",
     "wasted-turns": "scope",
+    "agent-model-inherited": "scope",
+    "agent-decide-apply": "scope",
     "limit-pressure": "none",
     "discovery-share": "none",
     "pricing-coverage": "none",
@@ -1090,7 +1158,9 @@ def build_fixes(rec: Recommendation) -> list[dict]:
     fix at all, same as before UX-8. ``rec.variant``, when set, picks
     ``"id:variant"`` over plain ``id`` in both dicts, falling back to the
     plain id when there's no variant-specific entry (see
-    :data:`Recommendation.variant`). A purely informational id (no
+    :data:`Recommendation.variant`). A prompt template may use
+    ``{agent}`` (``rec.agent_type``) and ``{action}`` (``rec.action``,
+    for a card whose fix differs per item it lists). A purely informational id (no
     change proposed) has an explainer but no prompt: ``prompt`` is then
     ``""``, and the render layer (``render/markdown.py``,
     ``render/html.py``, the dashboard's ``ui.js`` and ``page-setup.js``) skips the "Ask Claude to do it"
@@ -1119,7 +1189,7 @@ def build_fixes(rec: Recommendation) -> list[dict]:
         opening = _FINDING_OPEN.format(title=rec.title)
         if rec.why:
             opening = f"{opening} {rec.why}"
-        prompt = f"{opening} {template.format(agent=rec.agent_type or 'this agent')}"
+        prompt = f"{opening} {template.format(agent=rec.agent_type or 'this agent', action=rec.action)}"
     else:
         prompt = ""
     fix = {

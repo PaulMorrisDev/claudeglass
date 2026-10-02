@@ -28,6 +28,11 @@ Method, in full (see also ``docs/backtest.md``):
    *next* change point after it (or now, if there isn't one yet). A
    change point with fewer than :data:`impact.MIN_SESSIONS` sessions
    between it and this one doesn't bound either (:func:`impact.neighbours`).
+   A change to every project is bounded in each project by that project's
+   own changes (:func:`impact.bounds`), the same call
+   :func:`impact.impact` makes, so the two never disagree; its window
+   stays open until a later change to every project bounds it
+   (``following``).
 3. **Measure.** The dollar quantity a prediction estimated is always
    either the whole session's cost (a main-session-level setting) or one
    agent's cost per spawn (an agent-scoped setting) -- the same two
@@ -193,6 +198,26 @@ def _judge_row(
     return _Judgement(verdict, measured_usd, row["change_pct"], True)
 
 
+#: ``meta`` key set once :func:`_reopen_too_little_data` has run.
+_REOPENED_KEY = "predictions_too_little_data_reopened"
+
+
+def _reopen_too_little_data(store) -> None:
+    """Once per store, put every prediction judged ``too_little_data``
+    back to unjudged. An earlier version bounded a change's windows by
+    changes in other projects and by every flip of model, effort or
+    CLAUDE.md between sessions, so those verdicts were reached on windows
+    that were too short; the sessions now judge them again. Recorded in
+    ``meta`` so a verdict reached afterwards, on the windows as they are
+    now, stays. One whose window is open again waits like any other
+    unjudged prediction, and ``Store.prune_predictions`` drops it 90 days
+    after it was made."""
+    if store.get_meta(_REOPENED_KEY) is not None:
+        return
+    store.reopen_predictions("too_little_data")
+    store.set_meta(_REOPENED_KEY, "1")
+
+
 def judge_predictions(
     store, corpus, pricing: Pricing, units: Units, config_dir, *, now: datetime | None = None
 ) -> int:
@@ -200,9 +225,13 @@ def judge_predictions(
     each verdict via ``Store.judge_prediction``. Returns how many were
     judged. A prediction that matched a change point but still has too
     little data, and whose after-window is still open (no later change
-    point yet, and ``now`` hasn't outrun the corpus), is left for a later
-    call rather than forced to ``too_little_data`` early."""
+    point bounds it yet; for a change to every project, no later change to
+    every project: :func:`impact.bounds`'s ``following``), is left for a
+    later call rather than forced to ``too_little_data`` early. The first
+    call on a store also judges again every prediction an earlier version
+    closed out as ``too_little_data`` (:func:`_reopen_too_little_data`)."""
     now = now or datetime.now(timezone.utc)
+    _reopen_too_little_data(store)
     points = change_points_mod.change_points(config_dir, corpus)
     if not points:
         return 0
@@ -215,8 +244,10 @@ def judge_predictions(
             continue
         # impact's own bounds and project, so a back-tested window and an
         # impact comparison of the same change never disagree.
-        previous, following = impact.neighbours(points, point, sessions)
-        before, after = impact.sides(point, sessions, previous=previous, following=following, now=now)
+        previous, following, per_project = impact.bounds(points, point, sessions)
+        before, after = impact.sides(
+            point, sessions, previous=previous, following=following, per_project=per_project, now=now
+        )
         exact = _exact_saving(prediction, point, before, after, bundles, pricing)
         result = _judge_row(prediction, before, after, units, exact)
         if not result.enough:

@@ -446,3 +446,184 @@ def test_judge_predictions_closes_out_too_little_data_once_a_later_point_bounds_
     assert row["verdict"] == judged_as
     assert row["measured_usd"] is None
 
+
+
+# -- a change to every project, and changes made in one project --------------
+
+
+def _projects(tmp_path: Path, days_by_project: dict[str, tuple[float, ...]]):
+    """A corpus with one project folder per name, each session started
+    ``days`` from CHANGE: costly before it, cheap after."""
+    folders = []
+    for name, days in days_by_project.items():
+        folder = tmp_path / "projects" / name
+        folder.mkdir(parents=True)
+        for i, day in enumerate(days):
+            _session_file(
+                folder, f"{name}-{i}", CHANGE + timedelta(days=day), input_tokens=100_000 if day < 0 else 10_000
+            )
+        folders.append(folder)
+    return load_corpus(folders)
+
+
+def _predicted(measure_key: str = "effortLevel") -> Store:
+    store = Store(":memory:")
+    store.open()
+    store.upsert_prediction(
+        prediction_id="pred-1",
+        ts=(CHANGE - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        source="whatif",
+        measure_key=measure_key,
+        agent=None,
+        predicted_usd=0.01,
+        predicted_pct=None,
+        fidelity="ceiling",
+    )
+    return store
+
+
+def _use_points(monkeypatch, points: list[ChangePoint]) -> None:
+    monkeypatch.setattr(backtest.change_points_mod, "change_points", lambda config_dir, corpus=None: points)
+
+
+def test_a_change_to_every_project_is_judged_on_the_windows_impact_reads_it_on(tmp_path, monkeypatch):
+    """A change in project X two days after a change to every project cuts
+    X's after-window and no other project's, in the back-test and in the
+    impact card alike."""
+    from claudeglass.snapshots import snapshot_project_key
+
+    everywhere = ChangePoint(CHANGE, "apply", "everywhere", keys=["effortLevel"])
+    x_later = ChangePoint(
+        CHANGE + timedelta(days=2), "apply", "x later", keys=["model"], project=snapshot_project_key("proj-x")
+    )
+    points = [everywhere, x_later]
+    _use_points(monkeypatch, points)
+    corpus = _projects(
+        tmp_path,
+        {"proj-x": (-3, -2, -1, 0.5, 1, 1.5, 2.5, 3), "proj-y": (-3, -2, -1, 0.5, 1, 3, 4)},
+    )
+    pricing = load_pricing()
+    seen: list[tuple[str, int, int]] = []
+    real_sides = impact.sides
+
+    def spy(point, sessions, **kwargs):
+        before, after = real_sides(point, sessions, **kwargs)
+        seen.append((point.label, len(before), len(after)))
+        return before, after
+
+    monkeypatch.setattr(impact, "sides", spy)
+    store = _predicted()
+    judged = backtest.judge_predictions(store, corpus, pricing, UNITS, tmp_path / "cfg", now=CHANGE + timedelta(days=10))
+    assert judged == 1
+    assert seen == [("everywhere", 6, 7)]
+    card = next(
+        row
+        for row in impact.impact(points, impact.session_facts(corpus, pricing), UNITS)
+        if row["change"]["label"] == "everywhere"
+    )
+    assert (card["before_sessions"], card["after_sessions"]) == (6, 7)
+
+
+@pytest.mark.parametrize(
+    ("later_project", "judged_as"),
+    [
+        # A later change to every project, with enough sessions between
+        # the two, closes the window, even in proj-old, whose sessions all
+        # ended before the first change and so have nothing to bound them.
+        ("", "too_little_data"),
+        # A later change made in proj-x alone closes only proj-x's
+        # after-window: another project can still add sessions, so the
+        # prediction waits.
+        ("proj-x", None),
+    ],
+)
+def test_a_change_to_every_project_closes_once_a_later_change_to_every_project_bounds_it(
+    tmp_path, monkeypatch, later_project, judged_as
+):
+    from claudeglass.snapshots import snapshot_project_key
+
+    first = ChangePoint(CHANGE, "apply", "first", keys=["effortLevel"])
+    last = ChangePoint(
+        CHANGE + timedelta(days=3), "apply", "last", keys=["model"],
+        project=snapshot_project_key(later_project) if later_project else "",
+    )
+    _use_points(monkeypatch, [first, last])
+    corpus = _projects(
+        tmp_path,
+        {
+            # One session before the change: never enough to judge it.
+            "proj-x": (-1, 0.5, 1, 1.5, 2),
+            # A project that stopped long before the change.
+            "proj-old": (-80, -79, -78),
+        },
+    )
+    store = _predicted()
+    judged = backtest.judge_predictions(
+        store, corpus, load_pricing(), UNITS, tmp_path / "cfg", now=CHANGE + timedelta(days=10)
+    )
+    if judged_as is None:
+        assert judged == 0
+        assert len(store.predictions(judged=False)) == 1
+        return
+    assert judged == 1
+    [row] = store.predictions(judged=True)
+    assert row["verdict"] == judged_as
+
+
+def test_sessions_under_a_lower_case_drive_letter_are_judged_with_a_change_under_an_upper_case_one(
+    tmp_path, monkeypatch
+):
+    from claudeglass.snapshots import snapshot_project_key
+
+    point = ChangePoint(CHANGE, "apply", "x", keys=["effortLevel"], project=snapshot_project_key("C--Dev-X"))
+    _use_points(monkeypatch, [point])
+    corpus = _projects(tmp_path, {"c--Dev-X": (-3, -2, -1, 0.5, 1, 2)})
+    store = _predicted()
+    judged = backtest.judge_predictions(
+        store, corpus, load_pricing(), UNITS, tmp_path / "cfg", now=CHANGE + timedelta(days=10)
+    )
+    assert judged == 1
+    [row] = store.predictions(judged=True)
+    assert row["change_ts"] == point.iso()
+    assert row["measured_usd"] > 0
+
+
+# -- judging again what an earlier version closed out as too_little_data ------
+
+
+def test_too_little_data_verdicts_are_judged_again_once(tmp_path):
+    store = Store(":memory:")
+    store.open()
+    for pid in ("closed", "judged"):
+        store.upsert_prediction(
+            prediction_id=pid, ts="2026-09-20T09:00:00Z", source="whatif", measure_key="model",
+            agent=None, predicted_usd=1.0, predicted_pct=None, fidelity="ceiling",
+        )
+    store.judge_prediction("closed", change_ts="2026-09-21T09:00:00Z", verdict="too_little_data",
+                           measured_usd=None, measured_pct=None)
+    store.judge_prediction("judged", change_ts="2026-09-21T09:00:00Z", verdict="as_estimated",
+                           measured_usd=1.0, measured_pct=-10.0)
+    corpus = load_corpus([])
+    config_dir = tmp_path / "cfg"
+    config_dir.mkdir()
+    assert store.get_meta(backtest._REOPENED_KEY) is None
+
+    assert backtest.judge_predictions(store, corpus, load_pricing(), UNITS, config_dir) == 0
+    [reopened] = store.predictions(judged=False)
+    assert reopened["id"] == "closed"
+    assert (reopened["verdict"], reopened["change_ts"], reopened["measured_usd"], reopened["measured_pct"]) == (
+        None, None, None, None,
+    )
+    [kept] = store.predictions(judged=True)
+    assert (kept["id"], kept["verdict"], kept["measured_usd"]) == ("judged", "as_estimated", 1.0)
+    assert store.get_meta(backtest._REOPENED_KEY) == "1"
+
+    # A verdict reached after that, on the windows as they are now, stays.
+    store.judge_prediction("closed", change_ts="2026-09-21T09:00:00Z", verdict="too_little_data",
+                           measured_usd=None, measured_pct=None)
+    assert backtest.judge_predictions(store, corpus, load_pricing(), UNITS, config_dir) == 0
+    assert store.predictions(judged=False) == []
+    assert {row["id"]: row["verdict"] for row in store.predictions(judged=True)} == {
+        "closed": "too_little_data",
+        "judged": "as_estimated",
+    }

@@ -9,8 +9,8 @@
  */
 
 import { clear, el, goTo, state, WINDOW_OPTIONS } from "./core.js";
-import { fraction, money, moneyParts, projectName, shortTs, thousands } from "./format.js";
-import { fetchJson, findSection, loadQuickActions, loadRecommendations, loadReport, prefetchActions, withProject, withWindow } from "./api.js";
+import { fraction, money, moneyParts, projectName, shortTs, thousands, windowWhen } from "./format.js";
+import { fetchJson, findSection, loadQuickActions, loadRecommendations, loadReport, prefetchActions, withWindow } from "./api.js";
 import {
   button,
   copyToClipboard,
@@ -30,9 +30,10 @@ import { icon } from "./icons.js";
 import { pageLink, viewIntro } from "./links.js";
 import { renderSetupCard } from "./shell.js";
 import { chartError, holdChart } from "./charts.js";
-import { dailyChanges, renderChart, savingsLevers, sparkline, tableObjects, windowDays } from "./charts-types.js";
+import { changeDay, dailyChanges, renderChart, savingsLevers, sparkline, tableObjects, windowSpan } from "./charts-types.js";
 import { groupRecommendations, groupSavingUsd, groupTitle, listSaving } from "./page-actions.js";
 import { changesLink, renderChangeCards } from "./page-changes.js";
+import { modelIdFor, rateFor } from "./costs.js";
 
 // A page draw that a newer one (a new window) has replaced: its late
 // answers are dropped, so they can't take the chart back.
@@ -53,8 +54,6 @@ var shownFigures = null;
 
 // -- the period before -----------------------------------------------------------
 
-var DAY_MS = 24 * 3600 * 1000;
-
 // The "Since my last change" window's counterfactual (counterfactual.py):
 // the newest change /api/impact judges is the one the window starts at.
 // Nothing when too few sessions have started since it to say.
@@ -67,36 +66,22 @@ function lastChangeLine(impactBody) {
   if (change.project) when.push("in " + (change.project_name ? projectName(change.project_name) : "one project") + " only");
   return el("p", { class: "notes last-change-without" }, [
     el("span", { text: "Without your last change (" }),
-    pageLink("changes", change.label || "a settings change", { day: String(change.ts || "").slice(0, 10) }),
+    pageLink("changes", change.label || "a settings change", { day: changeDay(change) }),
     el("span", { text: ", " + when.join(", ") + "), " + without.since_text }),
   ]);
 }
 
-// The period of the same length just before this window, for the
-// deltas: its bounds, and how the sentence names it. None for "all" and
-// "since my last change", which have nothing the same length before them.
-function previousPeriod(windowValue, now) {
-  var end;
-  var length;
+// How the sentence names the period of the same length just before this
+// window, for the deltas. None for "all" and "since my last change", which
+// have nothing the same length before them. The service works the period
+// out (/api/summary?previous=1), in its own days: the same hours a number
+// of days back, so a morning isn't set against whole days.
+function previousPhrase(windowValue) {
   if (/^[0-9]+$/.test(windowValue)) {
     var days = Number(windowValue);
-    length = days * DAY_MS;
-    end = now - length;
-    return { since: end - length, until: end, phrase: days === 1 ? "the day before" : "the " + days + " days before" };
+    return days === 1 ? "the day before" : "the " + days + " days before";
   }
-  if (windowValue === "1h") return { since: now - 2 * 3600 * 1000, until: now - 3600 * 1000, phrase: "the hour before" };
-  if (windowValue === "24h") return { since: now - 2 * DAY_MS, until: now - DAY_MS, phrase: "the 24 hours before" };
-  if (windowValue === "today") {
-    // The same hours yesterday: local midnight to this time, a day back.
-    var midnight = new Date(now);
-    midnight.setHours(0, 0, 0, 0);
-    return { since: midnight.getTime() - DAY_MS, until: now - DAY_MS, phrase: "the same hours yesterday" };
-  }
-  return null;
-}
-
-function isoMinute(ms) {
-  return new Date(ms).toISOString().slice(0, 16) + ":00Z";
+  return { "1h": "the hour before", "24h": "the 24 hours before", today: "the same hours yesterday" }[windowValue] || null;
 }
 
 // -- the summary sentence ----------------------------------------------------------
@@ -106,12 +91,6 @@ function windowLabel(value) {
     if (WINDOW_OPTIONS[i].value === value) return WINDOW_OPTIONS[i].label;
   }
   return /^[0-9]+$/.test(value) ? "Last " + value + " days" : "This window";
-}
-
-// "No sessions <when>."
-function windowWhen(value) {
-  if (/^[0-9]+$/.test(value)) return value === "1" ? "in the last day" : "in the last " + value + " days";
-  return { "1h": "in the last hour", today: "today", "24h": "in the last 24 hours", change: "since your last change" }[value] || "yet";
 }
 
 // What the window cost, as a clause: dollars on the API, a share of the
@@ -185,17 +164,20 @@ function firstRun(container, health) {
 
 // The price of a cache read against fresh input on the model that read
 // the most from the cache in this window (report.meta.rates; the daily
-// rows say which model read what).
+// rows say which model read what, by the id each session recorded, so
+// costs.js finds the rate card's own id for each and adds them up).
 function cacheReadRatio(meta, dailyRows) {
-  var rates = (meta && meta.rates) || {};
   var reads = {};
   (dailyRows || []).forEach(function (row) {
-    if (row.model) reads[row.model] = (reads[row.model] || 0) + (Number(row.cache_read_tokens) || 0);
+    if (!row.model) return;
+    var id = modelIdFor(meta, row.model) || row.model;
+    reads[id] = (reads[id] || 0) + (Number(row.cache_read_tokens) || 0);
   });
   var top = Object.keys(reads).sort(function (a, b) {
     return reads[b] - reads[a];
   })[0];
-  var ratio = top && rates[top] && rates[top].cache_read_ratio;
+  var rates = top ? rateFor(meta, top) : null;
+  var ratio = rates && rates.cache_read_ratio;
   return typeof ratio === "number" && ratio > 0 ? ratio : null;
 }
 
@@ -230,13 +212,46 @@ var LEVER_RULES = {
   "wasted-turns": "waste",
 };
 
+// Agent-model actions (agent_models.py): their saving joins only where
+// nothing else counts it (agentModelItems).
+var AGENT_MODEL_RULES = {
+  "agent-model-inherited": true,
+  "agent-model-asked": true,
+  "agent-decide-apply": true,
+};
+
 // The main session's agent type, as model_swap_by_agent_type and a
 // recommendation's agent_type name it.
 var MAIN_AGENT = "top-level";
+// Every workflow agent's agent type on an agent-model action.
+var WORKFLOW_AGENT = "workflow-subagent";
 
 function usdOf(value) {
   var number = typeof value === "number" ? value : parseFloat(value);
   return isFinite(number) && number > 0 ? number : 0;
+}
+
+// An agent-model action's saving that nothing else counts, as items for
+// combinedSaving. The asked figure is a ceiling for information, never
+// added to anything, and decided-and-changed has no saving. An inherited
+// card at info level looks fixed already (or is held back for quality),
+// so there is nothing left to save. An Agent-tool type's inherited runs
+// are among the runs the model lever prices for that type, so they join
+// only when the lever has no saving for it. A workflow agent's runs are
+// no lever's and span every type a script named, so their saving comes
+// from all the spend.
+function agentModelItems(group, agents) {
+  if (group.id !== "agent-model-inherited" || group.severity !== "advice") return [];
+  var priced = {};
+  agents.forEach(function (row) {
+    if (usdOf(row.saving_usd)) priced[row.agent_type] = true;
+  });
+  var items = [];
+  group.members.forEach(function (rec) {
+    var usd = usdOf(rec.saving_usd);
+    if (usd && !priced[rec.agent_type]) items.push({ usd: usd, agent: rec.agent_type === WORKFLOW_AGENT ? null : rec.agent_type });
+  });
+  return items;
 }
 
 // What doing every way to save would come to: the four Savings levers,
@@ -263,6 +278,12 @@ function availableSaving(levers, groups, tables) {
   });
   groups.forEach(function (group) {
     if (LEVER_RULES[group.id]) return;
+    if (AGENT_MODEL_RULES[group.id]) {
+      agentModelItems(group, agents).forEach(function (item) {
+        items.push(item);
+      });
+      return;
+    }
     var usd = groupSavingUsd(group);
     var owners = group.members.map(function (rec) {
       return rec.agent_type || null;
@@ -687,12 +708,10 @@ export function renderOverview(panel) {
   var healthLoad = fetchJson("/api/health");
   var setupLoad = fetchJson("/api/setup/status");
   var summaryLoad = fetchJson(withWindow("/api/summary"));
-  var previous = previousPeriod(state.window, Date.now());
-  var previousLoad = previous
-    ? fetchJson(withProject("/api/summary?since=" + encodeURIComponent(isoMinute(previous.since)) + "&until=" + encodeURIComponent(isoMinute(previous.until))))
-    : Promise.resolve(null);
+  var phrase = previousPhrase(state.window);
+  var previousLoad = phrase ? fetchJson(withWindow("/api/summary?previous=1")) : Promise.resolve(null);
   var dailyLoad = fetchJson(withWindow("/api/daily-usage") + "&split=agent");
-  var impactLoad = fetchJson("/api/impact");
+  var impactLoad = fetchJson(withWindow("/api/impact"));
   // Recommendations and checks are built from the report, so they follow it.
   var recsLoad = reportLoad.then(function () {
     return loadRecommendations();
@@ -724,9 +743,15 @@ export function renderOverview(panel) {
     var summaryError = summaryBody && summaryBody.ok !== true ? summaryBody.error : null;
     var projectError = !!summaryError && String(summaryError.message).indexOf("'project'") !== -1;
     if (summaryError && state.window === "change" && summaryError.code === "bad_request" && !projectError) {
-      // "Since my last change" with no change recorded has nowhere to start.
+      // "Since my last change" with no change recorded (none in the picked
+      // project) has nowhere to start.
       sentence.appendChild(
-        el("p", { class: "overview-summary", text: "No change recorded yet, so this window has nowhere to start. Pick another window, or come back after you change a setting." })
+        el("p", {
+          class: "overview-summary",
+          text: state.project
+            ? "No change recorded for this project yet, so this window has nowhere to start. Pick another window or project, or come back after you change a setting."
+            : "No change recorded yet, so this window has nowhere to start. Pick another window, or come back after you change a setting.",
+        })
       );
       body.hidden = true;
       return;
@@ -767,9 +792,11 @@ export function renderOverview(panel) {
     var levers = report ? savingsLevers(reportTables) : [];
     var facts = {
       summary: summary,
-      previousSummary: previousBody && previousBody.ok === true ? previousBody.data : null,
+      // A service that predates previous=1 ignores it and answers for this
+      // window again, so only an answer that names its period counts.
+      previousSummary: previousBody && previousBody.ok === true && previousBody.data && previousBody.data.period ? previousBody.data : null,
       cost: summary.total_cost || 0,
-      phrase: previous ? previous.phrase : null,
+      phrase: phrase,
     };
     facts.previousCost = facts.previousSummary ? facts.previousSummary.total_cost || 0 : null;
     facts.saving = availableSaving(levers, groups, reportTables);
@@ -815,8 +842,9 @@ export function renderOverview(panel) {
     });
   });
 
-  // 2. Did your changes work? The latest two, in short; the rest on
-  // Your changes.
+  // 2. Did your changes work? The window's changes, the latest two that
+  // can be judged in short, and a line for the newer ones still waiting
+  // for sessions; the rest on Your changes.
   Promise.all([impactLoad, figuresDone]).then(function (loaded) {
     if (!current() || body.hidden) return;
     clear(changes.body);
@@ -825,7 +853,7 @@ export function renderOverview(panel) {
       changes.body.appendChild(errorNotice(impact && impact.error));
       return;
     }
-    var count = renderChangeCards(changes.body, impact.data, { compact: true, limit: CHANGES_SHOWN });
+    var count = renderChangeCards(changes.body, impact.data, { compact: true, limit: CHANGES_SHOWN, judgedFirst: true });
     if (count) changes.head.appendChild(el("p", { class: "overview-answer-count" }, [changesLink(count)]));
   });
 
@@ -848,7 +876,7 @@ export function renderOverview(panel) {
       // chart's reading says why its total differs.
       Object.assign(
         { rows: daily.data || [], split: "agent", changes: dailyChanges(loaded[1].body), sessionsTotal: summaryBody && summaryBody.ok === true ? summaryBody.data.total_cost : null },
-        windowDays(state.window)
+        windowSpan(summaryBody)
       ),
       {
         slot: "overview",
@@ -863,10 +891,10 @@ export function renderOverview(panel) {
   });
 
   // "Since my last change": what the sessions started since would have
-  // cost without it, under the headline. All projects only: the figure
-  // isn't split by project.
+  // cost without it, under the headline. With a project picked, the
+  // changes and the figure are that project's own.
   Promise.all([impactLoad, figuresDone]).then(function (loaded) {
-    if (!current() || body.hidden || state.window !== "change" || state.project) return;
+    if (!current() || body.hidden || state.window !== "change") return;
     var line = lastChangeLine(loaded[0].body);
     if (line) sentence.appendChild(line);
   });

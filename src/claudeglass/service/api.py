@@ -50,9 +50,9 @@ project's convention -- see e.g. ``report.py``'s own module docstring):
 - ``GET /api/profiles/<id>/diff`` renders the real
   ``profiles/diff.py`` computation (v0.3) against the store's own
   *latest* recorded config snapshot (``snapshots.effective_config`` and
-  friends) -- not a per-project selection, since config-diff/ttl/
-  recommendations are already computed the same window-wide,
-  not-per-project way elsewhere in this module. A store with no
+  friends) -- not a per-project selection: it takes no ``project``
+  filter, unlike config-diff, recommendations and the quick actions'
+  "in force now" settings, which follow a picked project. A store with no
   snapshot at all diffs against an empty effective config (nothing
   currently set, nothing managed) and adds a note saying so, rather
   than erroring.
@@ -97,21 +97,21 @@ import json
 import mimetypes
 import os
 import re
+import sys
 import tempfile
 import threading
 import time
 import urllib.parse
 from collections import OrderedDict
 from concurrent.futures import Future
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
-from zoneinfo import ZoneInfo
 
 from .. import __version__ as _TOOL_VERSION
 from .. import baseline as baseline_mod
-from .. import capture_catalogue, helptext, hook_health, ignores, invocation
+from .. import capture_catalogue, discovery, helptext, hook_health, ignores, invocation
 from .. import snapshots as snapshots_mod
 from ..config import CAPTURE_SAMPLES, ConfigError, load_config, load_session_overrides, set_capture
 from ..pricing import PricingError, cache_read_savings_usd, load_pricing
@@ -147,9 +147,10 @@ _SECURITY_HEADERS: tuple[tuple[str, str], ...] = (
 _PINNED_STATIC_DIRS = frozenset({"vendor", "fonts"})
 _PINNED_CACHE_CONTROL = "public, max-age=31536000, immutable"
 
-#: Default report window (days) for the report-backed routes when
-#: ``window_days`` isn't given -- matches ``docs/api.md``'s "Accept
-#: window_days (default 30) on these routes".
+#: Default report window (calendar days: today and the days before it, see
+#: ``_window_query``) for the report-backed routes when ``window_days``
+#: isn't given -- matches ``docs/api.md``'s "Accept window_days (default 30)
+#: on these routes".
 _DEFAULT_WINDOW_DAYS = 30
 
 #: v3: how long a ``service_registered`` probe result is reused before
@@ -178,6 +179,15 @@ _STALE_REPORT_MAX_AGE_S = 600.0
 #: How long the "since my last change" window's newest change is kept
 #: while sessions keep arriving (each would otherwise re-read them).
 _LATEST_CHANGE_MAX_AGE_S = 120.0
+#: How many projects' newest change are kept (one more per project picked).
+_LATEST_CHANGE_CACHE_SIZE = 8
+#: How many scopes of the change cards (a project, and how far back the
+#: window reaches: ``_impact_reach``) the service keeps.
+_IMPACT_CACHE_SIZE = 6
+#: How far back "All time" reads for the change cards: the widest window the
+#: dashboard's picker offers (core.js WINDOW_OPTIONS), so it lists every
+#: change any window does.
+_ALL_TIME_REACH_DAYS = 90
 
 _RESTART_ADVICE = "Restart the dashboard: claudeglass install-service, or stop and start serve."
 
@@ -471,7 +481,7 @@ def _round_iso_to_minute(value: str) -> str:
     dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
     if dt.tzinfo is None:
         dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:00Z")
+    return discovery.utc_stamp(dt.astimezone(timezone.utc))
 
 
 #: Short windows the dashboard offers by name (``?window=``), each as the
@@ -484,30 +494,132 @@ WINDOW_NAMES = {
     "all": "over all time",
 }
 
+#: The named windows whose start slides with the clock: each keeps one
+#: report-cache slot under its name (``_slot_for``), so a start that has
+#: moved a minute on serves the last report while a new one is built.
+#: "today" and "change" start at a fixed moment, so they key on it.
+_ROLLING_WINDOWS = ("1h", "24h")
+
+#: ``_config_tz``'s answers: ``config.toml``'s path -> ((mtime, size), tz).
+_CONFIG_TZ_KEPT: dict[str, tuple[tuple[int, int], str | None]] = {}
+
+
+def _config_tz(config_dir: Path | str | None) -> str | None:
+    """The ``tz`` name in ``config.toml``, ``None`` (the machine's own
+    zone) when it sets none or the file can't be read. A calendar window is
+    worked out on every request, so the answer is kept until the file
+    changes rather than parsed again each time."""
+    if config_dir is None:
+        return None
+    path = Path(config_dir) / "config.toml"
+    try:
+        stat = path.stat()
+        stamp = (stat.st_mtime_ns, stat.st_size)
+    except OSError:
+        stamp = (0, 0)
+    kept = _CONFIG_TZ_KEPT.get(str(path))
+    if kept is not None and kept[0] == stamp:
+        return kept[1]
+    try:
+        tz = load_config(config_dir).tz or None
+    except Exception:  # noqa: BLE001 -- a config that can't be read means the machine's zone
+        tz = None
+    _CONFIG_TZ_KEPT[str(path)] = (stamp, tz)
+    return tz
+
+
+def _local_day_or_none(value: str | None, tz) -> str | None:
+    """``value`` (an ISO timestamp) as a local ``YYYY-MM-DD`` day in ``tz``,
+    ``None`` when it is missing or can't be read."""
+    if not value:
+        return None
+    try:
+        return discovery.local_day(value, tz)
+    except (ValueError, TypeError, OverflowError, OSError):
+        return None
+
+
+def _wall_clock_back(now: datetime, days: int, tz) -> str:
+    """``now``'s local time of day, ``days`` calendar days earlier, as an
+    ISO timestamp in UTC rounded down to the minute: "this time a week
+    ago", with a clock change in between counted in."""
+    local = discovery.to_local(now, tz)
+    wall = datetime.combine(local.date() - timedelta(days=days), local.time())
+    zone = discovery._zone(tz)
+    moment = wall.replace(tzinfo=zone) if zone is not None else wall.astimezone()
+    return discovery.utc_stamp(moment.astimezone(timezone.utc))
+
+
+def _previous_period(
+    query: dict[str, str], window_days: int | None, since: str | None, until: str | None, tz, now: datetime
+) -> tuple[str, str] | None:
+    """``(since, until)`` of the period of the same length just before the
+    window a request names, or ``None`` when it has none: "all time",
+    "since my last change" and a ``since``/``until`` the caller picked have
+    nothing the same length before them.
+
+    - ``window_days`` N: the same hours N days back. The window is today so
+      far and N-1 whole days, so the N days before it end at this time of
+      day, N days ago (a whole earlier N days would compare a part-day with
+      full ones and show a drop every morning).
+    - "today": the same hours yesterday.
+    - "1h", "24h": the hour or the 24 hours just before.
+    """
+    name = _str_query(query, "window")
+    if name in _ROLLING_WINDOWS:
+        start = _parse_utc(since)
+        if start is None:
+            return None
+        length = timedelta(hours=1 if name == "1h" else 24)
+        return discovery.utc_stamp(start - length), since
+    if name == "today":
+        return discovery.window_start_iso(2, tz, now=now), _wall_clock_back(now, 1, tz)
+    if name is None and window_days and until is None and "since" not in query and "until" not in query:
+        return discovery.window_start_iso(2 * window_days, tz, now=now), _wall_clock_back(now, window_days, tz)
+    return None
+
+
+def _summary_period(window_days: int | None, since: str | None, until: str | None, tz, now: datetime) -> dict:
+    """``/api/summary``'s ``period``: the window's bounds and the local
+    calendar days it covers, so the dashboard draws and compares the days
+    the figures count and does no zone arithmetic of its own. ``tz`` is the
+    IANA name the days were worked out in (``null`` for the machine's own
+    zone, or one that can't be found); ``today`` is the day it is now.
+    ``window_days`` windows (today and the days before it) cover exactly
+    that many days, counted in calendar days so a midnight passing between
+    two requests can't add one."""
+    first_day = _local_day_or_none(since, tz)
+    if window_days and until is None and first_day is not None:
+        last_day = (date.fromisoformat(first_day) + timedelta(days=window_days - 1)).isoformat()
+    else:
+        last_day = _local_day_or_none(until, tz) or discovery.local_day(now, tz)
+    return {
+        "since": since,
+        "until": until,
+        "tz": discovery.zone_name(tz),
+        "first_day": first_day,
+        "last_day": last_day,
+        "today": discovery.local_day(now, tz),
+    }
+
 
 def _named_window_since(
-    name: str, config_dir: Path | None, now: datetime | None = None, *, latest=None
+    name: str, config_dir: Path | None, now: datetime | None = None, *, latest=None, project: bool = False
 ) -> tuple[str | None, str]:
     """``(since, "")`` for a named window as an ISO timestamp, rounded
     down to the minute so repeat requests share one cached report, or
     ``(None, reason)`` when it can't be worked out. ``latest``, when
     given, returns the newest change point for the "change" window (the
-    service passes one that counts changes only your sessions show)."""
+    service passes one that counts changes only your sessions show).
+    ``project`` says a project is picked: with no change that applies
+    there, the reason says the project has none (others may)."""
     now = now or datetime.now(timezone.utc)
     if name == "1h":
         start = now - timedelta(hours=1)
     elif name == "24h":
         start = now - timedelta(hours=24)
     elif name == "today":
-        tz = None
-        if config_dir is not None:
-            try:
-                tz_name = load_config(config_dir).tz
-                tz = ZoneInfo(tz_name) if tz_name else None
-            except Exception:  # noqa: BLE001 -- a bad tz falls back to the machine's own
-                tz = None
-        local = now.astimezone(tz) if tz is not None else now.astimezone()
-        start = local.replace(hour=0, minute=0, second=0, microsecond=0).astimezone(timezone.utc)
+        start = discovery.window_start(1, _config_tz(config_dir), now=now)
     elif name == "change":
         from .. import change_points
 
@@ -516,15 +628,16 @@ def _named_window_since(
         else:
             point = change_points.latest(config_dir) if config_dir is not None else None
         if point is None:
+            where = " for this project" if project else ""
             return None, (
-                "No change recorded yet. This window starts at your latest `apply` (a profile or a "
+                f"No change recorded{where} yet. This window starts at your latest `apply` (a profile or a "
                 "one-off change), its undo, a settings change the config hook saw, a change to metrics "
                 "capture, or a model, effort or CLAUDE.md size change your sessions show."
             )
         start = point.ts
     else:
         return None, f"'window' must be one of {', '.join(WINDOW_NAMES)}"
-    return start.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:00Z"), ""
+    return discovery.utc_stamp(start.astimezone(timezone.utc)), ""
 
 
 def _window_query(
@@ -532,7 +645,8 @@ def _window_query(
     *,
     config_dir: Path | None = None,
     latest=None,
-) -> tuple[tuple[int | None, str | None, str | None], tuple[int, dict] | None]:
+    project: bool = False,
+) -> tuple[tuple[int | None, str | None, str | None, str], tuple[int, dict] | None]:
     """Parse the report-backed routes' windowing query params: ``window``
     (a named short window, :data:`WINDOW_NAMES`, resolved to ``since``), or
     ``since``/``until`` (ISO 8601, matching the CLI's own ``report
@@ -543,17 +657,27 @@ def _window_query(
     routes' usual 30-day default (docs/api.md's "byte-equivalent to the
     CLI" parity requirement for ``/api/report.*``).
 
+    ``window_days`` is calendar days: today and the days before it, from
+    local midnight (``discovery.window_start``, in ``config.toml``'s
+    ``tz``, else the machine's zone). It is resolved to ``since`` here, so
+    a window's cache key and every figure behind it start at the same
+    moment, and a ``since`` the caller gave wins over it (``window_days``
+    then comes back ``None``). A returned ``window_days`` always has its
+    resolved ``since`` beside it.
+
     Returns ``((window_days, since, until, window_by), None)`` on
     success, or ``(None, error)`` -- an already-built ``400 bad_request``
     response. ``window_by`` is ``"first-reply"`` for "since your last
     change", whose sessions are the ones that started on the new
-    settings, and ``"last-reply"`` otherwise.
+    settings, and ``"last-reply"`` otherwise. ``project`` (whether a
+    project is picked) goes to :func:`_named_window_since` for its "no
+    change" reason.
     """
     name = _str_query(query, "window")
     if name == "all":
         return (None, None, None, "last-reply"), None
     if name is not None:
-        since, reason = _named_window_since(name, config_dir, latest=latest)
+        since, reason = _named_window_since(name, config_dir, latest=latest, project=project)
         if since is None:
             return None, _bad_request(reason)
         return (None, since, None, "first-reply" if name == "change" else "last-reply"), None
@@ -567,6 +691,13 @@ def _window_query(
     window_days, err = _int_query(query, "window_days", default_days, minimum=1)
     if err is not None:
         return None, err
+    if since is not None:
+        window_days = None
+    elif window_days is not None:
+        try:
+            since = discovery.window_start_iso(window_days, _config_tz(config_dir))
+        except (OverflowError, OSError, ValueError):
+            return None, _bad_request("'window_days' is too large")
     return (window_days, since, until, "last-reply"), None
 
 
@@ -578,24 +709,27 @@ def _period_text(
     time"."""
     if name in WINDOW_NAMES:
         return WINDOW_NAMES[name]
+    if window_days and until is None:
+        return f"over the last {window_days} days"
     if since or until:
         return _window_label(window_days, since, until)
-    if window_days:
-        return f"over the last {window_days} days"
     return "over all time"
 
 
 def _window_label(window_days: int | None, since: str | None, until: str | None) -> str:
     """Matches ``cli.py``'s own ``_window_description`` exactly, so
     ``report.meta.window`` in an API-served report is byte-identical to
-    the CLI's for the same window (see this module's docstring).
+    the CLI's for the same window (see this module's docstring). A
+    ``window_days`` window carries its resolved ``since`` (calendar days
+    from local midnight), which the label leaves out: it reads "last 30
+    days" as it always has.
     """
+    if window_days and until is None:
+        return f"last {window_days} days"
     if since or until:
         start = f"since {since}" if since else "since the beginning"
         end = f"until {until}" if until else "until now"
         return f"{start} {end}"
-    if window_days:
-        return f"last {window_days} days"
     return "all time"
 
 
@@ -617,6 +751,86 @@ def _min_sessions_gate(before: int, after: int, need: int) -> dict | None:
     if have >= need:
         return None
     return {"reason": "min_sessions", "have": have, "need": need}
+
+
+def _impact_reach(
+    oldest_recorded: datetime | None, since_dt: datetime | None, now: datetime
+) -> tuple[datetime, datetime, str | None]:
+    """``(earliest, base, reach_key)``: where the sessions the change cards
+    are worked out from start, and the oldest change they list.
+
+    ``base`` is this service's default window back from ``now``, or the
+    oldest recorded change when that is older, so the changes only your
+    sessions show (``change_points``' EST-P9) are found over at least that.
+    A window that starts before ``base`` (``since_dt``) moves it back to the
+    start of its day, and ``reach_key`` is that day (``None`` when the
+    default reach covers the window): rounding to the day keeps a window
+    that slides with the clock from opening a new kept answer every second.
+    ``earliest`` is ``base`` less impact's lookback, for the sessions before
+    the first change. A change older than ``base`` has its before side cut
+    short by ``earliest``, so the cards never list one."""
+    from .. import impact as impact_mod
+
+    base = now - timedelta(days=_DEFAULT_WINDOW_DAYS)
+    if oldest_recorded is not None and oldest_recorded < base:
+        base = oldest_recorded
+    reach_key = None
+    if since_dt is not None and since_dt < base:
+        base = since_dt.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        reach_key = base.isoformat()
+    return base - timedelta(days=impact_mod.LOOKBACK_DAYS), base, reach_key
+
+
+def _change_corpus_since(points) -> str:
+    """Where the sessions that change points are worked out from start, as
+    the ``since`` ``corpus_from_store`` takes: the default reach of the
+    change cards (:func:`_impact_reach`) over the recorded ``points``. The
+    impact cards and the "since my last change" window both read from here,
+    so the window starts where the newest card's change does."""
+    earliest, _base, _key = _impact_reach(min((p.ts for p in points), default=None), None, datetime.now(timezone.utc))
+    return discovery.utc_stamp(earliest, seconds=True)
+
+
+def _change_id(point) -> tuple:
+    """What names one change point across two builds of the change list
+    from the same store: ``ChangePoint`` isn't hashable, and each build
+    makes new objects."""
+    return (point.iso(), point.source, point.backup_ts, point.project, point.label, tuple(point.keys))
+
+
+def _changes_listed(points, base: datetime, since_dt: datetime | None, until_dt: datetime | None) -> list:
+    """The change ``points`` (oldest first) a window lists: those made from
+    ``base`` on (``_impact_reach``) and inside ``[since_dt, until_dt]``, by
+    the second the dashboard shows. A change older than ``base`` is never
+    listed, whatever the window says: its before side would be cut short."""
+    return [p for p in points if p.ts >= base and discovery.ts_in_window(p.iso(), since_dt, until_dt)]
+
+
+def _impact_answer(rows: dict, listed: list) -> dict:
+    """``/api/impact``'s data: each of ``listed`` (change points, oldest
+    first) as its compared row in ``rows``, newest first. The list is new
+    every time, so what a request does with it never changes the rows kept."""
+    from .. import impact as impact_mod
+
+    return {
+        "changes": [rows[_change_id(p)] for p in reversed(listed)],
+        "caveat": impact_mod.CAVEAT,
+        "min_sessions": impact_mod.MIN_SESSIONS,
+        "lookback_days": impact_mod.LOOKBACK_DAYS,
+    }
+
+
+def _backtest_listing(data: dict, since_dt: datetime | None, until_dt: datetime | None) -> dict:
+    """``/api/backtest``'s data with only the predictions a window lists: a
+    judged one is dated by the change it was matched to, one still waiting
+    by when it was logged. ``data`` itself, which is kept, is left as it is."""
+
+    def dated(row: dict) -> str | None:
+        return (row.get("change_ts") if row.get("judged_at") else None) or row.get("ts")
+
+    return dict(
+        data, predictions=[r for r in data["predictions"] if discovery.ts_in_window(dated(r), since_dt, until_dt)]
+    )
 
 
 # -- make_handler ---------------------------------------------------------
@@ -732,14 +946,16 @@ def make_handler(
     report_lock = threading.Lock()
     #: slot -> the latest report built for it: {"key", "token", "model",
     #: "started" (monotonic), "as_of" (ISO)}, least recently used first.
-    #: A slot is the window as asked for: a named window by its name (its
-    #: resolved start moves every minute), anything else by its key.
+    #: A slot is the window as asked for: a rolling window ("1h", "24h")
+    #: by its name (its resolved start moves every minute), anything else
+    #: by its key (a calendar window's start moves at local midnight, "since
+    #: my last change" at a new change: each a fresh build).
     report_cache: OrderedDict = OrderedDict()
     #: cache key -> the build in progress for it, which later requests
     #: for the same window wait on (see _get_report_model).
     report_building: dict = {}
-    #: window name -> the start it last resolved to, so a named window's
-    #: key maps back to its slot.
+    #: rolling window name (``_ROLLING_WINDOWS``) -> the start it last
+    #: resolved to, so its key maps back to its slot.
     named_window_starts: dict[str, str] = {}
     #: One background rebuild at a time: each is a whole report build,
     #: and they would only slow each other (and requests) down.
@@ -748,20 +964,38 @@ def make_handler(
     #: header (see Handler._write_headers).
     request_ctx = threading.local()
 
-    #: The newest change, counting the ones only sessions show, for the
-    #: "since my last change" window: {"key", "point", "at" (monotonic)}.
-    latest_change_cache: dict = {"key": None, "point": None, "at": 0.0}
+    #: Every change point, counting the ones only sessions show, as of
+    #: one store and one list of recorded changes: {"key", "points", "at"
+    #: (monotonic)}. Not tied to a project: each project reads its own
+    #: newest change from it.
+    change_list_cache: dict = {"key": None, "points": [], "at": 0.0}
+    #: The newest change in a project (its raw slugs, or ``None`` for every
+    #: project), for the "since my last change" window: project ->
+    #: {"key", "point", "at" (monotonic)}, least recently used first.
+    latest_change_cache: OrderedDict = OrderedDict()
 
-    def _latest_change():
-        """The newest change point, counting a model, effort or CLAUDE.md
-        size change only your sessions show (``change_points``' EST-P9),
-        so the "since my last change" window starts where the impact
-        card's newest change does. Reads the sessions from the newest
-        recorded change (less impact's lookback, for the session before
-        it). While sessions keep arriving, the answer is kept for
+    def _change_kept(entry: dict, token, point_key, now: float) -> bool:
+        """Whether a kept change answer still holds: the recorded changes
+        are the same and the store is too, or only sessions have arrived
+        and it is under ``_LATEST_CHANGE_MAX_AGE_S`` old. Call with
+        ``report_lock`` held."""
+        kept_key = entry["key"]
+        return kept_key is not None and kept_key[1] == point_key and (
+            kept_key[0] == token or now - entry["at"] <= _LATEST_CHANGE_MAX_AGE_S
+        )
+
+    def _latest_change(project: tuple[str, ...] | None = None):
+        """The newest change point that applies in ``project`` (the raw
+        slugs of the picked project, ``None`` for every one), counting a
+        model, effort or CLAUDE.md size change only your sessions show
+        (``change_points``' EST-P9), so the "since my last change" window
+        starts where the impact card's newest change does. A change for one
+        project doesn't start the window in another; a change for every
+        project starts it everywhere. Reads the sessions from the same
+        place the impact cards do (``_change_corpus_since``). While
+        sessions keep arriving, the answer is kept for
         ``_LATEST_CHANGE_MAX_AGE_S`` rather than worked out per request."""
         from .. import change_points
-        from .. import impact as impact_mod
         from . import rebuild
 
         points = change_points.change_points(options.config_dir)
@@ -769,28 +1003,53 @@ def make_handler(
         token = store.change_token()
         now = time.monotonic()
         with report_lock:
-            kept_key = latest_change_cache["key"]
-            if kept_key is not None and kept_key[1] == point_key and (
-                kept_key[0] == token or now - latest_change_cache["at"] <= _LATEST_CHANGE_MAX_AGE_S
-            ):
-                return latest_change_cache["point"]
-        newest = points[-1].ts if points else datetime.now(timezone.utc) - timedelta(days=_DEFAULT_WINDOW_DAYS)
-        since = newest - timedelta(days=impact_mod.LOOKBACK_DAYS)
-        corpus = rebuild.corpus_from_store(store, since=since.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        point = change_points.latest(options.config_dir, corpus)
+            kept = latest_change_cache.get(project)
+            if kept is not None and _change_kept(kept, token, point_key, now):
+                latest_change_cache.move_to_end(project)
+                return kept["point"]
+            # A list kept from an earlier store lends its own key and age to
+            # the project's answer, so the answer expires when the list would.
+            found, list_key, list_at = None, (token, point_key), now
+            if _change_kept(change_list_cache, token, point_key, now):
+                found, list_key, list_at = change_list_cache["points"], change_list_cache["key"], change_list_cache["at"]
+        if found is None:
+            corpus = rebuild.corpus_from_store(store, since=_change_corpus_since(points))
+            found = change_points.change_points(options.config_dir, corpus)
+            with report_lock:
+                change_list_cache.update(key=list_key, points=found, at=list_at)
+        if project is not None:
+            keys = {key for slug in project for key in snapshots_mod.snapshot_project_keys(slug)}
+            found = [p for p in found if change_points.applies_to(p, keys)]
+        point = found[-1] if found else None
         with report_lock:
-            latest_change_cache.update(key=(token, point_key), point=point, at=now)
+            latest_change_cache[project] = {"key": list_key, "point": point, "at": list_at}
+            latest_change_cache.move_to_end(project)
+            while len(latest_change_cache) > _LATEST_CHANGE_CACHE_SIZE:
+                latest_change_cache.popitem(last=False)
         return point
 
     def _window_query(query, _parse=globals()["_window_query"]):
         # Named windows ("since your last change", "today") need this
-        # service's config dir: its apply backups, snapshots and tz.
-        window, err = _parse(query, config_dir=options.config_dir, latest=_latest_change)
+        # service's config dir: its apply backups, snapshots and tz. The
+        # last change is the picked project's own.
         name = _str_query(query, "window")
-        if err is None and name in WINDOW_NAMES and window[1] is not None:
+        latest, picked = None, False
+        if name == "change":
+            project, _err = _project_query(query)  # an unknown project is the route's own 400
+            latest = lambda: _latest_change(project)  # noqa: E731
+            picked = project is not None
+        window, err = _parse(query, config_dir=options.config_dir, latest=latest, project=picked)
+        if err is None and name in _ROLLING_WINDOWS and window[1] is not None:
             with report_lock:
                 named_window_starts[name] = window[1]
         return window, err
+
+    def _default_window():
+        """The default window (``_window_query`` with nothing asked for) as
+        ``_get_report_model`` takes it, for the routes that explain or price
+        a figure on it whatever window is picked: they share the build the
+        picker's "30" asks for rather than make their own."""
+        return _window_query({})[0]
 
     def _project_query(query):
         """Parse the additive ``project`` query param (see docs/api.md's
@@ -884,12 +1143,18 @@ def make_handler(
                 return snapshot
         return snaps[-1] if snaps else None
 
-    def _config_snapshot_with_every_project_agents() -> Snapshot | None:
+    def _config_snapshot_with_every_project_agents(project=None) -> Snapshot | None:
         """:func:`_latest_config_snapshot` with its agents widened to
         every project's latest snapshot (see
         ``snapshots.with_every_project_agents``), for the "now" value of
-        an agent recorded in another project."""
-        return snapshots_mod.with_every_project_agents(_snapshots_from_store())
+        an agent recorded in another project. With a ``project`` filter
+        (its raw slugs), only that project's snapshots count, as the
+        report's own advice reads them (``report._settings_snapshots``)."""
+        snaps = _snapshots_from_store()
+        if project:
+            snaps = snapshots_mod.snapshots_for_projects(snaps, project)
+        canonical = snapshots_mod.canonical_project_keys(store.project_slugs())
+        return snapshots_mod.with_every_project_agents(snaps, canonical)
 
     def _build_report_model(
         window_days: int | None,
@@ -914,7 +1179,11 @@ def make_handler(
             project_slugs=list(project) if project else None,
         )
         snaps = _snapshots_from_store()
-        projects = tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug}))
+        # The picked project counts even with no session in the window, so
+        # its settings still show (report._settings_snapshots) and the
+        # report's meta.projects names it, as the CLI's does for a selected
+        # folder.
+        projects =tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug} | set(project or ())))
         window = _window_label(window_days, since, until)
         try:
             overrides = load_session_overrides(options.config_dir)
@@ -957,6 +1226,13 @@ def make_handler(
             usage_log_rows=usage_log_rows,
             # Your Sessions-tab ratings, for the Work habits tab.
             ratings=store.all_feedback(),
+            # No project picked: every project's sessions, so an MCP
+            # server every project loads can be judged unused.
+            all_projects=not project,
+            # Every project the store knows, so a project's two
+            # drive-letter snapshot keys fold into one even when it has
+            # no session in the window.
+            known_slugs=tuple(store.project_slugs()),
             # Spend > Usage shows cost by phase. The CLI keeps it behind
             # --phases; here it costs about 1% of the build.
             phases=True,
@@ -972,15 +1248,18 @@ def make_handler(
     def _slot_for(cache_key):
         """The report cache slot for a key (see ``report_cache``). Call
         with ``report_lock`` held."""
-        window_days, since, until, _window_by, project = cache_key
-        if window_days is None and until is None and since is not None:
+        window_days, since, until, window_by, project = cache_key
+        # Only a last-reply key: a first-reply one ("since my last change")
+        # can start at the very minute "1h" does, and must not be served
+        # that window's report.
+        if window_days is None and until is None and since is not None and window_by == "last-reply":
             for name, start in named_window_starts.items():
                 if start == since:
                     # `project` rides along in the named slot too (rather
-                    # than being dropped), so "today" unfiltered and
-                    # "today" for one project never collide into the same
-                    # cache entry even though they'd resolve to the same
-                    # `since` a minute apart.
+                    # than being dropped), so "1h" unfiltered and "1h" for
+                    # one project never collide into the same cache entry
+                    # even though they'd resolve to the same `since` a
+                    # minute apart.
                     return ("named", name, project)
         return cache_key
 
@@ -1027,8 +1306,8 @@ def make_handler(
             try:
                 with background_builds:
                     _build_and_keep(cache_key, building)
-            except BaseException:  # noqa: BLE001 -- the next request retries; waiters see it via the Future
-                pass
+            except BaseException as exc:  # noqa: BLE001 -- the next request retries; waiters see it via the Future
+                print(f"claudeglass serve: your report was not refreshed: {exc}", file=sys.stderr, flush=True)
             finally:
                 store.close()  # this thread's own connection
 
@@ -1217,8 +1496,12 @@ def make_handler(
                     try:
                         with background_builds:
                             _keep_capture_part(name, key, soft, build)
-                    except BaseException:  # noqa: BLE001 -- the next request retries
-                        pass
+                    except BaseException as exc:  # noqa: BLE001 -- the next request retries
+                        print(
+                            f"claudeglass serve: your capture figures were not refreshed: {exc}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     finally:
                         with report_lock:
                             current = capture_parts.get(name)
@@ -1273,6 +1556,7 @@ def make_handler(
         dependent_value = habits_mod.capture_dependent_value(
             habits_mod.collect(
                 corpus, rates, ratings=store.all_feedback(), signals=_capture_signals(corpus, options.config_dir),
+                tz=config.tz,
             )
         )
         start = _parse_bound(enabled_at)
@@ -1509,14 +1793,33 @@ def make_handler(
         project, err = _project_query(query)
         if err is not None:
             return err
+        previous, err = _int_query(query, "previous", 0, minimum=0)
+        if err is None and previous not in (0, 1):
+            err = _bad_request("'previous' must be 0 or 1")
+        if err is not None:
+            return err
+        tz = _config_tz(options.config_dir)
+        now = datetime.now(timezone.utc)
         # Round explicit bounds to the minute the same way a named
         # window's own `since` already is (_named_window_since) -- so two
-        # requests for "the same" period (e.g. the dashboard's current
-        # and previous-period calls) a few seconds apart agree exactly.
+        # requests for "the same" explicit period a few seconds apart
+        # agree exactly. (The dashboard's previous period is `previous=1`,
+        # resolved below by _previous_period, not a second since/until call.)
         if since is not None:
             since = _round_iso_to_minute(since)
         if until is not None:
             until = _round_iso_to_minute(until)
+        if previous:
+            # The period of the same length just before this window, with
+            # its own `period`: the dashboard's deltas read both.
+            try:
+                bounds = _previous_period(query, window_days, since, until, tz, now)
+            except (OverflowError, OSError, ValueError):
+                return _bad_request("'window_days' is too large")
+            if bounds is None:
+                return _bad_request("This window has no earlier period of the same length")
+            window_days, window_by = None, "last-reply"
+            since, until = bounds
         result = store.summary(
             window_days=window_days, since=since, until=until, project_slugs=project, window_by=window_by
         )
@@ -1536,6 +1839,10 @@ def make_handler(
             if rates is not None
             else 0.0
         )
+        # Additive: the calendar days this window covers, as the server's
+        # zone reads them, so a chart draws the same days the figures
+        # count (see _summary_period).
+        result["period"] = _summary_period(window_days, since, until, tz, now)
         return _ok(result)
 
     def _listing_window(query):
@@ -1560,17 +1867,23 @@ def make_handler(
         project, err = _project_query(query)
         if err is not None:
             return err
-        return _ok(
-            store.sessions(
-                limit=limit,
-                offset=offset,
-                window_days=window_days,
-                since=since,
-                until=until,
-                project_slugs=project,
-                window_by=window_by,
-            )
+        rows = store.sessions(
+            limit=limit,
+            offset=offset,
+            window_days=window_days,
+            since=since,
+            until=until,
+            project_slugs=project,
+            window_by=window_by,
         )
+        # Additive: the local days a session's first and last replies fall
+        # on, so the day a chart column names filters to the same sessions
+        # (null when the session has no timestamp).
+        zone = discovery._zone(_config_tz(options.config_dir))
+        for row in rows:
+            row["first_day"] = _local_day_or_none(row.get("first_ts"), zone)
+            row["last_day"] = _local_day_or_none(row.get("last_ts"), zone)
+        return _ok(rows)
 
     def route_session(store, query, body):
         session_id = query.get("id", "")
@@ -1621,6 +1934,10 @@ def make_handler(
         # callers; the shared window params (window/window_days/since/
         # until) are additive and, when any is given, take precedence --
         # the same "new params win when present" rule route_summary uses.
+        # Either way the days are calendar days in this service's zone
+        # (config.toml's tz, else the machine's), and so are the `day`
+        # keys of the rows.
+        tz = _config_tz(options.config_dir)
         if any(key in query for key in ("window", "window_days", "since", "until")):
             window, err = _window_query(query)
             if err is not None:
@@ -1630,7 +1947,11 @@ def make_handler(
             window_days, err = _int_query(query, "days", 30, minimum=1)
             if err is not None:
                 return err
-            since = until = None
+            try:
+                since = discovery.window_start_iso(window_days, tz)
+            except (OverflowError, OSError, ValueError):
+                return _bad_request("'days' is too large")
+            until = None
             window_by = "last-reply"
         split = _str_query(query, "split")
         if split not in (None, "agent", "model"):
@@ -1640,11 +1961,20 @@ def make_handler(
             return err
         return _ok(
             store.daily_usage(
-                days=window_days, since=since, until=until, split=split, project_slugs=project, window_by=window_by
+                days=window_days,
+                since=since,
+                until=until,
+                split=split,
+                project_slugs=project,
+                window_by=window_by,
+                tz=tz,
             )
         )
 
     def route_compactions(store, query, body):
+        """Every compaction of the sessions the window counts, as the
+        tiles count them (``Store.compactions``), so the list is as long
+        as the Spend page's own count."""
         window, err = _listing_window(query)
         if err is not None:
             return err
@@ -2003,7 +2333,7 @@ def make_handler(
         # own statusline usage-limit readings) rather than a bare
         # Units(billing_mode, currency) that always fell back to
         # "list-price equivalent" -- same idiom _compute_impact uses.
-        units = _report_units(_get_report_model(_DEFAULT_WINDOW_DAYS))
+        units = _report_units(_get_report_model(*_default_window()))
         explained = explain_session(
             detail, store.session_parts(session_id), rates, units, store.median_session_cost()
         )
@@ -2194,7 +2524,13 @@ def make_handler(
         section = _find_section(model, "config")
         tables = section.tables if section is not None else []
         if auto_keys:
-            return _ok([to_jsonable(table) for table in tables])
+            data = [to_jsonable(table) for table in tables]
+            # The page shows only the tables, so the section's own notes (no
+            # setting changed between two snapshots of the same project, or
+            # only the first 20 changed settings shown) go under the first.
+            if data and section is not None and section.notes:
+                data[0]["notes"] = [*section.notes, *(data[0].get("notes") or [])]
+            return _ok(data)
         table = next((t for t in tables if t.name == f"config-diff-{key}"), None)
         return _ok(to_jsonable(table) if table is not None else [])
 
@@ -2228,13 +2564,19 @@ def make_handler(
         from .. import claude_md_review
 
         model = _get_report_model(*window, project)
-        review = claude_md_review.build_review(options.config_dir, model.context_files or {})
+        # With a project picked, only its folders' files (and your user
+        # files, which every project reads), as Skills reads them.
+        folders = _project_folders(project)
+        review = claude_md_review.build_review(
+            options.config_dir, model.context_files or {}, projects=None if folders is None else list(folders)
+        )
         return claude_md_review, review, _report_units(model), _period_text(*window, name=query.get("window"))
 
     def route_claude_md(store, query, body):
-        """Every CLAUDE.md-family file on disk, with how often it was sent
-        in the window and what it cost. File text is read now and never
-        stored."""
+        """Every CLAUDE.md-family file on disk (your own, and every
+        project's, or only the picked project's), with how often it was
+        sent in the window and what it cost. File text is read now and
+        never stored."""
         window, err = _window_query(query)
         if err is not None:
             return err
@@ -2295,13 +2637,14 @@ def make_handler(
 
         return skills_review.project_folders_for(Path(options.config_dir).parent, project) if project else None
 
-    def _current_settings() -> tuple[dict, dict, bool]:
+    def _current_settings(project=None) -> tuple[dict, dict, bool]:
         """The latest snapshot's effective settings as in force, every project's agent
         fields, and (PROF-03) whether ``CLAUDE_CODE_EFFORT_LEVEL`` is set
         -- content_layers' own flag, never a value that could be
         anything else -- or empty/``False`` when no snapshot is recorded
-        yet."""
-        snapshot = _config_snapshot_with_every_project_agents()
+        yet. With a ``project`` filter, that project's own settings and
+        agents (:func:`_config_snapshot_with_every_project_agents`)."""
+        snapshot = _config_snapshot_with_every_project_agents(project)
         if snapshot is None:
             return {}, {}, False
         agents = snapshot.data.get("effective_agents")
@@ -2334,7 +2677,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, effective_agents, effort_level_env_set = _current_settings()
+        effective, effective_agents, effort_level_env_set = _current_settings(project)
         return _ok(
             goals.draft(
                 goal,
@@ -2402,7 +2745,7 @@ def make_handler(
         if err is not None:
             return err
         model = _get_report_model(*window, project)
-        effective, _agents, _env_set = _current_settings()
+        effective, _agents, _env_set = _current_settings(project)
         units = _report_units(model)
         period = _period_text(*window, name=query.get("window"))
         result = whatif.estimate(
@@ -2450,7 +2793,7 @@ def make_handler(
         from .. import quick_actions
 
         model = _get_report_model(*window, project)
-        effective, effective_agents, _env_set = _current_settings()
+        effective, effective_agents, _env_set = _current_settings(project)
         window_days, since, until, _window_by = window
         since_dt, until_dt = _resolve_window(window_days, since, until)
         return quick_actions, quick_actions.Context(
@@ -2532,95 +2875,189 @@ def make_handler(
             }
         )
 
-    impact_cache: dict = {"key": None, "data": None, "started": 0.0, "as_of": None, "building": False}
+    #: scope -> the change cards worked out for it, least recently used
+    #: first. A scope is the project picked (its raw slugs, ``()`` for every
+    #: one) and how far back a window reaches (``_impact_reach``'s key), so
+    #: the windows inside one reach share a slot. A slot: {"key" (the store's
+    #: change token and the recorded changes), "points" (every change that
+    #: applies in it, oldest first), "rows" (``_change_id`` -> that change
+    #: compared, worked out only for the changes a window listed),
+    #: "earliest" and "base" (``_impact_reach``), "started" (monotonic),
+    #: "as_of" (ISO), "building"}.
+    impact_cache: OrderedDict = OrderedDict()
+
+    def _change_scope(query):
+        """The window and project the change cards (``/api/impact``,
+        ``/api/backtest``) are asked about: ``((since_dt, until_dt),
+        project_slugs, None)``, or ``(None, None, error)``. With no window
+        param at all it is all time, as for every listing (``_listing_window``);
+        a ``window_days`` window is the local calendar days the dashboard's
+        other figures count, already resolved to its ``since``."""
+        window, err = _listing_window(query)
+        if err is not None:
+            return None, None, err
+        project, err = _project_query(query)
+        if err is not None:
+            return None, None, err
+        return discovery._resolve_window(*window[:3]), project, None
 
     def route_impact(store, query, body):
         """Each change you made (an apply, its undo, a settings change the
         config hook saw, or a metrics capture change), and each model,
         effort or CLAUDE.md size change your sessions show, with the
         sessions before it against those after it, on the measures that
-        change should move. Cached like the report (see
-        _get_report_model): a store change serves the kept answer and
-        refreshes it in the background, while a new recorded change point
-        (the list itself changing) is worked out at once."""
+        change should move.
+
+        The window (``window``, ``window_days``, ``since``/``until``; none
+        means all time) lists every change made inside it, newest first, and
+        never clips one: a change is compared on its whole before and after
+        whichever window lists it. All time (no start) reads back as far as
+        the widest window the picker offers (``_ALL_TIME_REACH_DAYS``), so it
+        lists every change another window does; a change older than the
+        sessions this reads from (``_impact_reach``) is not listed.
+        ``project`` lists the changes that apply there (those for every
+        project and that project's own), compared on that project's
+        sessions alone.
+
+        Cached like the report (see _get_report_model), one slot per
+        project and reach (``impact_cache``): a store change serves the kept
+        answer and refreshes it in the background, while a new recorded
+        change point (the list itself changing) or a changed config.toml
+        (its tz sets each change's day) is worked out at once. Inside a slot
+        each change is compared once, and a window works out only the
+        changes it lists that the slot lacks, so switching windows doesn't
+        compare anything again."""
         from .. import change_points
 
-        points = change_points.change_points(options.config_dir)
-        point_key = tuple((p.iso(), p.source, p.backup_ts) for p in points)
+        span, project, err = _change_scope(query)
+        if err is not None:
+            return err
+        since_dt, until_dt = span
+        recorded = change_points.change_points(options.config_dir)
+        # The changes themselves, and config.toml (its tz decides each
+        # change's `day`): either moving is worked out at once, not served
+        # stale while it refreshes.
+        point_key = (tuple((p.iso(), p.source, p.backup_ts) for p in recorded), _config_mtime_ns())
         key = (store.change_token(), point_key)
+        now_utc = datetime.now(timezone.utc)
+        # All time (no start) reads as far back as the widest window, so it
+        # lists every change another window can.
+        reach_since = since_dt or discovery.window_start(
+            _ALL_TIME_REACH_DAYS, _config_tz(options.config_dir), now=now_utc
+        )
+        earliest, base, reach_key = _impact_reach(recorded[0].ts if recorded else None, reach_since, now_utc)
+        scope = (project or (), reach_key)
         now = time.monotonic()
-        refresh = False
+        answer, refresh, carry, keep = None, False, frozenset(), None
         with report_lock:
-            kept = impact_cache["data"]
-            kept_key = impact_cache["key"]
-            if kept is not None and kept_key == key:
-                _note_as_of(impact_cache["as_of"], False)
-                return _ok(kept)
-            if (
-                kept is not None
-                and kept_key[1] == point_key
-                and now - impact_cache["started"] <= _STALE_REPORT_MAX_AGE_S
-            ):
-                refresh = not impact_cache["building"]
-                if refresh:
-                    impact_cache["building"] = True
-                _note_as_of(impact_cache["as_of"], True)
-            else:
-                kept = None
-        if kept is not None:
+            slot = impact_cache.get(scope)
+            if slot is not None:
+                impact_cache.move_to_end(scope)
+                listed = _changes_listed(slot["points"], slot["base"], since_dt, until_dt)
+                complete = all(_change_id(p) in slot["rows"] for p in listed)
+                if complete and slot["key"] == key:
+                    _note_as_of(slot["as_of"], False)
+                    return _ok(_impact_answer(slot["rows"], listed))
+                if complete and slot["key"][1] == point_key and now - slot["started"] <= _STALE_REPORT_MAX_AGE_S:
+                    refresh = not slot["building"]
+                    if refresh:
+                        slot["building"] = True
+                        carry = frozenset(slot["rows"])
+                    _note_as_of(slot["as_of"], True)
+                    answer = _impact_answer(slot["rows"], listed)
+                elif slot["key"] == key:
+                    # The answer kept is this one's, but lacks changes this
+                    # window lists: add them to it, on the reach it was made on.
+                    earliest, base, keep = slot["earliest"], slot["base"], dict(slot["rows"])
+        if answer is not None:
             if refresh:
 
                 def run():
                     try:
                         with background_builds:
-                            _compute_impact(key)
-                    except BaseException:  # noqa: BLE001 -- the next request retries
-                        pass
+                            _compute_impact(
+                                scope, key, project, earliest, base, since_dt, until_dt, carry=carry, background=True
+                            )
+                    except BaseException as exc:  # noqa: BLE001 -- the next request retries
+                        print(f"claudeglass serve: your changes were not refreshed: {exc}", file=sys.stderr, flush=True)
                     finally:
                         with report_lock:
-                            impact_cache["building"] = False
+                            current = impact_cache.get(scope)
+                            if current is not None:
+                                current["building"] = False
                         store.close()
 
                 threading.Thread(target=run, name="claudeglass-impact", daemon=True).start()
-            return _ok(kept)
-        data = _compute_impact(key)
-        _note_as_of(impact_cache["as_of"] or _now_utc_iso(), False)
-        return _ok(data)
+            return _ok(answer)
+        answer, as_of = _compute_impact(scope, key, project, earliest, base, since_dt, until_dt, keep=keep)
+        _note_as_of(as_of, False)
+        return _ok(answer)
 
-    def _compute_impact(key):
+    def _compute_impact(
+        scope, key, project, earliest, base, since_dt, until_dt, *, keep=None, carry=frozenset(), background=False
+    ):
+        """Compare the changes the window lists in ``scope``'s slot, and
+        return ``(answer, as_of)`` for the window. ``keep`` (the slot's rows
+        for this same ``key``) is added to rather than started again;
+        ``carry`` names changes to compare again besides the window's (a
+        refresh keeps what was already shown). A ``background`` build that
+        finds its slot gone (evicted while it ran) drops its result rather
+        than bring the slot back."""
         from .. import change_points, counterfactual
         from .. import impact as impact_mod
         from ..discovery import redact_slug
-        from ..snapshots import snapshot_project_key
+        from ..snapshots import snapshot_project_keys
         from . import rebuild
 
         started = time.monotonic()
         as_of = _now_utc_iso()
-        changes: list = []
-        recorded = change_points.change_points(options.config_dir)
-        # The corpus reaches back to the oldest recorded change, or this
-        # service's default window when that is newer, so changes only
-        # sessions show (EST-P9) are found over at least that window.
-        oldest = datetime.now(timezone.utc) - timedelta(days=_DEFAULT_WINDOW_DAYS)
-        if recorded and recorded[0].ts < oldest:
-            oldest = recorded[0].ts
-        earliest = oldest - timedelta(days=impact_mod.LOOKBACK_DAYS)
-        corpus = rebuild.corpus_from_store(store, since=earliest.strftime("%Y-%m-%dT%H:%M:%SZ"))
+        # The sessions the changes are worked out from reach back from
+        # _impact_reach's earliest: the older of this service's default
+        # window and the oldest recorded change (or the start of a wider
+        # window's day, All time's included), less impact's lookback.
+        # Transcript changes (EST-P9) can only be found once they are read.
+        # A project reads its own sessions alone.
+        read = {"project_slugs": list(project)} if project else {}
+        corpus = rebuild.corpus_from_store(store, since=discovery.utc_stamp(earliest, seconds=True), **read)
         points = change_points.change_points(options.config_dir, corpus)
-        if points:
+        if project:
+            # The changes that apply there: every project's, and its own
+            # (named by either spelling of its drive letter).
+            keys = {k for slug in project for k in snapshot_project_keys(slug)}
+            points = [p for p in points if not p.project or p.project in keys]
+        listed = _changes_listed(points, base, since_dt, until_dt)
+        rows = dict(keep) if keep is not None else {}
+        # A refresh compares again what it kept, as far as the reach goes.
+        in_reach = {_change_id(p) for p in points if p.ts >= base}
+        todo = ({_change_id(p) for p in listed} | (carry & in_reach)) - set(rows)
+        if todo:
             config = load_config(options.config_dir)
+            zone = discovery._zone(_config_tz(options.config_dir))
             rates = load_pricing(path=config.pricing_path, config_dir=options.config_dir)
             sessions = impact_mod.session_facts(corpus, rates)
-            units = _report_units(_get_report_model(_DEFAULT_WINDOW_DAYS))
-            changes = impact_mod.impact(
-                points, sessions, units, without=counterfactual.for_impact(corpus, rates, units)
+            units = _report_units(_get_report_model(*_default_window()))
+            # Every change still bounds its neighbours: only the ones to be
+            # compared are.
+            compared = impact_mod.impact(
+                points,
+                sessions,
+                units,
+                limit=None,
+                without=counterfactual.for_impact(corpus, rates, units),
+                listed=lambda p: _change_id(p) in todo,
             )
             # A project change names its project as the dashboard's
-            # project filter does (redacted), never by its snapshot key.
-            names = {snapshot_project_key(b.slug): redact_slug(b.slug) for b in corpus.sessions if b.slug}
-            for change in changes:
-                project = change["change"]["project"]
-                change["change"]["project_name"] = names.get(project, "") if project else ""
+            # project filter does (redacted), never by its snapshot key,
+            # and by either spelling of its drive letter.
+            names = {
+                k: redact_slug(b.slug) for b in corpus.sessions if b.slug for k in snapshot_project_keys(b.slug)
+            }
+            for point, change in zip((p for p in reversed(points) if _change_id(p) in todo), compared):
+                project_key = change["change"]["project"]
+                change["change"]["project_name"] = names.get(project_key, "") if project_key else ""
+                # The local day the change falls on, so a chart marks the
+                # column the daily figures put it in.
+                change["change"]["day"] = _local_day_or_none(change["change"].get("ts"), zone)
                 # P4 leftover: a structured gate the dashboard's
                 # emptyState() can key off, alongside the existing prose
                 # verdict -- same "enough" predicate impact.compare
@@ -2628,25 +3065,31 @@ def make_handler(
                 change["gate"] = _min_sessions_gate(
                     change["before_sessions"], change["after_sessions"], impact_mod.MIN_SESSIONS
                 )
-        data = {
-            "changes": changes,
-            "caveat": impact_mod.CAVEAT,
-            "min_sessions": impact_mod.MIN_SESSIONS,
-            "lookback_days": impact_mod.LOOKBACK_DAYS,
-        }
+                rows[_change_id(point)] = change
         with report_lock:
-            if started >= impact_cache["started"]:
-                impact_cache.update(key=key, data=data, started=started, as_of=as_of)
-        return data
+            slot = impact_cache.get(scope)
+            if keep is not None:
+                if slot is not None and slot["key"] == key:
+                    slot["rows"].update(rows)
+            elif slot is not None and started >= slot["started"]:
+                slot.update(
+                    key=key, points=points, rows=rows, earliest=earliest, base=base, started=started, as_of=as_of
+                )
+                impact_cache.move_to_end(scope)
+            elif slot is None and not background:
+                impact_cache[scope] = {
+                    "key": key, "points": points, "rows": rows, "earliest": earliest, "base": base,
+                    "started": started, "as_of": as_of, "building": False,
+                }
+                while len(impact_cache) > _IMPACT_CACHE_SIZE:
+                    impact_cache.popitem(last=False)
+        return _impact_answer(rows, listed), as_of
 
     backtest_cache: dict = {"key": None, "data": None, "started": 0.0, "as_of": None, "building": False}
 
-    def _backtest_key(store):
-        from .. import change_points
-
-        points = change_points.change_points(options.config_dir)
-        point_key = tuple((p.iso(), p.source, p.backup_ts) for p in points)
-        predictions_key = tuple(sorted((p["id"], p["judged_at"]) for p in store.predictions()))
+    def _backtest_key(store, recorded, predictions):
+        point_key = tuple((p.iso(), p.source, p.backup_ts) for p in recorded)
+        predictions_key = tuple(sorted((p["id"], p["judged_at"]) for p in predictions))
         return (store.change_token(), point_key, predictions_key)
 
     def route_backtest(store, query, body):
@@ -2657,8 +3100,45 @@ def make_handler(
         like ``/api/impact`` -- a store or prediction-log change serves
         the kept answer and judges any newly-eligible predictions in the
         background, while a genuinely new set of change points is worked
-        out at once."""
-        key = _backtest_key(store)
+        out at once.
+
+        The window (as for ``/api/impact``; none means all time) lists the
+        predictions that belong to it: a judged one by the change it was
+        matched to (``change_ts``), one still waiting by when it was
+        logged (``ts``). The sessions are read from ``/api/impact``'s default
+        reach (``_impact_reach``, the one its 30-day window reads), stretched
+        back to the oldest prediction still waiting (the too_little_data ones
+        the first check reopens included): the change it turns into is at or
+        after it, and is judged on its whole before side. The window never
+        moves that reach, since a verdict is kept once it is reached.
+        ``project`` is checked and then ignored: a prediction names no
+        project, so the estimates, and where "since my last change" starts
+        for them (the newest change in any project), stay every project's."""
+        from .. import backtest as backtest_mod
+        from .. import change_points
+
+        _project, err = _project_query(query)
+        if err is not None:
+            return err
+        # The estimates are every project's, so the window is too: "since my
+        # last change" starts at the newest change in any project.
+        span, _every, err = _change_scope({k: v for k, v in query.items() if k != "project"})
+        if err is not None:
+            return err
+        since_dt, until_dt = span
+        recorded = change_points.change_points(options.config_dir)
+        # The first check on a store judges the old too_little_data verdicts
+        # again: reopen them before the reach is worked out, so it reaches
+        # back to them too.
+        backtest_mod._reopen_too_little_data(store)
+        predictions = store.predictions()
+        key = _backtest_key(store, recorded, predictions)
+        waiting = [change_points._parse_iso(p.get("ts")) for p in predictions if not p.get("judged_at")]
+        earliest = _impact_reach(
+            recorded[0].ts if recorded else None,
+            min((ts for ts in waiting if ts is not None), default=None),
+            datetime.now(timezone.utc),
+        )[0]
         now = time.monotonic()
         refresh = False
         with report_lock:
@@ -2666,7 +3146,7 @@ def make_handler(
             kept_key = backtest_cache["key"]
             if kept is not None and kept_key == key:
                 _note_as_of(backtest_cache["as_of"], False)
-                return _ok(kept)
+                return _ok(_backtest_listing(kept, since_dt, until_dt))
             if (
                 kept is not None
                 and kept_key[1] == key[1]
@@ -2684,21 +3164,21 @@ def make_handler(
                 def run():
                     try:
                         with background_builds:
-                            _compute_backtest(key)
-                    except BaseException:  # noqa: BLE001 -- the next request retries
-                        pass
+                            _compute_backtest(key, earliest)
+                    except BaseException as exc:  # noqa: BLE001 -- the next request retries
+                        print(f"claudeglass serve: past estimates were not checked: {exc}", file=sys.stderr, flush=True)
                     finally:
                         with report_lock:
                             backtest_cache["building"] = False
                         store.close()
 
                 threading.Thread(target=run, name="claudeglass-backtest", daemon=True).start()
-            return _ok(kept)
-        data = _compute_backtest(key)
+            return _ok(_backtest_listing(kept, since_dt, until_dt))
+        data = _compute_backtest(key, earliest)
         _note_as_of(backtest_cache["as_of"] or _now_utc_iso(), False)
-        return _ok(data)
+        return _ok(_backtest_listing(data, since_dt, until_dt))
 
-    def _compute_backtest(key):
+    def _compute_backtest(key, earliest):
         from .. import backtest as backtest_mod
         from . import rebuild
 
@@ -2706,13 +3186,13 @@ def make_handler(
         as_of = _now_utc_iso()
         config = load_config(options.config_dir)
         rates = load_pricing(path=config.pricing_path, config_dir=options.config_dir)
-        # Unlike _compute_impact, this can't narrow the corpus to "since
-        # the earliest change point" first -- EST-P9's transcript-derived
-        # points need a corpus before they can even be listed (the same
-        # chicken-and-egg change_points.py's own docstring notes), so the
-        # corpus comes first here and the points are worked out from it.
-        corpus = rebuild.corpus_from_store(store)
-        units = _report_units(_get_report_model(_DEFAULT_WINDOW_DAYS))
+        # The sessions from the impact cards' default reach, back to the
+        # oldest prediction still waiting (EST-P9's transcript-derived points
+        # need a corpus before they can even be listed, the same
+        # chicken-and-egg change_points.py's own docstring notes), so a change
+        # one lists is the change the other judges on.
+        corpus = rebuild.corpus_from_store(store, since=discovery.utc_stamp(earliest, seconds=True))
+        units = _report_units(_get_report_model(*_default_window()))
         judged = backtest_mod.judge_predictions(store, corpus, rates, units, options.config_dir)
         predictions = store.predictions()
         data = {

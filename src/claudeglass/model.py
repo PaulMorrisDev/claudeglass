@@ -484,6 +484,56 @@ the block's text is read and dropped:
   give its name"). ``hook_blocks`` keeps the hooks that name their
   command, as before.
 
+MCP-servers addition (``PARSER_VERSION`` 35). Each MCP server's own
+cost and use, keyed by its name as its tools carry it
+(``parse.mcp_name``), for ``tool_search.py``'s unused-server check.
+Names, lengths and counts only, never an instruction or a definition:
+
+- ``Turn.deferred_list_chars_by_server: dict = {}`` -- each server's
+  share of ``deferred_list_chars``.
+- ``Turn.mcp_instruction_chars_by_server: dict = {}`` -- characters of
+  each server's instructions in context when the reply was requested.
+- ``Turn.mcp_resource_servers: dict = {}`` -- server -> calls reading its
+  resources.
+- ``TranscriptResult.mcp_tool_suffixes_by_server: dict = {}`` -- server
+  -> its tools' names after the ``mcp__<server>__`` prefix (at most 64
+  characters each), so two names for one server can be matched.
+- ``TranscriptResult.upfront_definition_chars_by_server: dict = {}`` --
+  characters of each server's tools sent in full (``prompt_snapshot``).
+- ``TranscriptResult.mcp_connection_status: dict = {}`` -- the last
+  connection problem reported per server.
+
+``Turn.deferred_tools_by_server`` no longer counts a tool named in
+``surfacedNames``: it is listed, and also sent in full.
+
+Agent-roles addition (``PARSER_VERSION`` 36). What telling an agent that
+writes code from one that decides needs, for the check on agents that run
+on a model by accident. A closed word, a yes/no and a count; never a
+phase, label, description or path:
+
+- ``TranscriptMeta.role_word: str | None = None`` -- the canonical word
+  (``agent_roles.role_word``) for what the agent is: its ``workflowPhase``
+  first, then a named ``agentType``, then the first words of its
+  ``description``. ``None`` when none of them names a role. Read by
+  ``discovery.load_meta``, which drops the text at once.
+- ``TranscriptMeta.model_recorded: bool = False`` -- the meta file has a
+  ``description`` or ``workflowPhase`` key (whatever its value), so it is
+  the newer shape, where an absent ``model`` means the call chose none.
+- ``Turn.shell_write_count: int = 0`` -- how many write targets this
+  turn's Bash/PowerShell commands named outside the temp dir
+  (``shell_writes.write_targets``, the same call ``edit_target_hashes``
+  uses, but counted with or without the salt). Repeats are kept, so a
+  file written twice counts twice. A target is temp when, normalised like
+  the path hashes (``..`` resolved, case and slashes folded, ``/c/`` read
+  as ``c:``), it sits under ``tempfile.gettempdir()`` or ``/tmp/``. Taken
+  back for a command that was blocked or denied. A count only, never a
+  path.
+
+The same bump puts ``Turn.edit_kind`` on that temp test: an
+Edit/Write/MultiEdit/NotebookEdit target in any of those forms is
+"scratch". Before it, only the temp dir's own spelling matched, so a
+forward-slash path on Windows counted as a "real" edit.
+
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
 count, a closed word (with an "other" fallback) or a raw number off a
@@ -715,7 +765,12 @@ class Turn:
 
     tool_names: tuple[str, ...] = ()
     cmd_prefix: str | None = None  # <= 40 chars
-    edit_kind: str | None = None  # "real" | "scratch" | None
+    #: "real" | "scratch" | None: "real" when an Edit/Write/MultiEdit/
+    #: NotebookEdit call in this turn targeted a file outside the temp dir,
+    #: "scratch" when every one targeted a file inside it, None when the
+    #: turn made no such call. The temp dir is matched like a shell write
+    #: target (see ``shell_write_count``), so a forward-slash path counts.
+    edit_kind: str | None = None
 
     attribution_mcp_server: str | None = None
     attribution_mcp_tool: str | None = None
@@ -806,6 +861,10 @@ class Turn:
     #: Quality-signals addition (see module docstring): salted hashes of
     #: the files this turn edited, by edit tool or shell command.
     edit_target_hashes: tuple[str, ...] = ()
+    #: Agent-roles addition (see module docstring): how many write targets
+    #: this turn's Bash/PowerShell commands named outside the temp dir (a
+    #: file written twice counts twice). A count only, never a path.
+    shell_write_count: int = 0
     #: Quality-signals addition (see module docstring): the preceding
     #: human message looks like a correction. Flag only.
     human_correction: bool = False
@@ -866,6 +925,15 @@ class Turn:
     #: Tool-search addition: characters of the name list sent in place of
     #: those definitions.
     deferred_list_chars: int = 0
+    #: MCP-servers addition (see module docstring): MCP server (or
+    #: ``"built-in"``) -> its share of ``deferred_list_chars``.
+    deferred_list_chars_by_server: dict = field(default_factory=dict)
+    #: MCP-servers addition: MCP server -> characters of its instructions
+    #: in context when this reply was requested.
+    mcp_instruction_chars_by_server: dict = field(default_factory=dict)
+    #: MCP-servers addition: MCP server -> this turn's calls reading its
+    #: resources (``ReadMcpResourceTool``/``ListMcpResourcesTool``).
+    mcp_resource_servers: dict = field(default_factory=dict)
     #: Compaction-call addition (see module docstring): ``"compaction"``
     #: when this turn is the estimated request that wrote a compaction's
     #: summary, not a reply Claude Code logged.
@@ -935,6 +1003,16 @@ class TranscriptMeta:
     cc_cost_by_model: dict = field(default_factory=dict)
     #: When the process that total counts from started (``startTime``).
     cc_cost_since: str | None = None
+    #: Agent-roles addition (see module docstring): the canonical word
+    #: ``agent_roles.role_word`` finds in the agent's phase, then its named
+    #: type, then the first four words of its description ("implement",
+    #: "review"), else None. The word only, never the text it came from.
+    role_word: str | None = None
+    #: Agent-roles addition: whether the meta file records a model at all.
+    #: Only the newer shape (it carries ``description`` or
+    #: ``workflowPhase``) leaves ``model`` out exactly when the call set
+    #: none; an older meta can't say. Key presence only.
+    model_recorded: bool = False
 
 
 @dataclass(slots=True)
@@ -1049,6 +1127,15 @@ class TranscriptResult:
     #: Tool-search addition (see module docstring): tool name -> characters
     #: of its full definition, for each deferred tool this transcript loaded.
     tool_definition_chars: dict = field(default_factory=dict)
+    #: MCP-servers addition (see module docstring): MCP server -> the
+    #: sorted names of its tools after ``mcp__<server>__``.
+    mcp_tool_suffixes_by_server: dict = field(default_factory=dict)
+    #: MCP-servers addition: MCP server -> characters of its tools sent in
+    #: full, as a ``prompt_snapshot`` shows them.
+    upfront_definition_chars_by_server: dict = field(default_factory=dict)
+    #: MCP-servers addition: MCP server -> the last connection problem
+    #: reported for it: "pending", "needs sign-in" or "failed to connect".
+    mcp_connection_status: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1105,9 +1192,10 @@ class SessionRecord:
     #: Batch C addition (see module docstring): carried through from
     #: ``top.meta.entrypoint`` by ``classify.build_session_record``.
     entrypoint: str | None = None
-    #: The key this session's project's config snapshots carry (see
-    #: ``snapshots.snapshot_project_key``); set by the report builder.
-    project_key: str | None = None
+    #: The keys this session's project's config snapshots can carry (see
+    #: ``snapshots.snapshot_project_keys``, the canonical one first); set by
+    #: the report builder.
+    project_key: tuple[str, ...] | str | None = None
 
 
 @dataclass(slots=True)
@@ -1316,6 +1404,12 @@ class Recommendation:
     #: hook would just block that. Set by ``advice.py``; not part of the
     #: JSON API contract.
     variant: str = field(default="", metadata={"json": False})
+    #: What a recommendation with no ``changes`` is about, when that is
+    #: more than its rule: e.g. the MCP servers ``mcp-unused-server``
+    #: lists. ``ignores.fingerprint`` includes it, so an ignored card
+    #: comes back when it names something new. Unlike ``lever``, never
+    #: read as a settings key. Not part of the JSON API contract.
+    subject: str = field(default="", metadata={"json": False})
     #: ``fixes.build_fix`` output per change, filled by ``report.build_report``:
     #: dicts with ``explainer`` (list of (heading, text)), ``command`` and
     #: ``prompt``.
@@ -1383,6 +1477,12 @@ class ReportMeta:
     #: (``pricing.Pricing.rates_meta``) -- the dashboard's own rate card,
     #: keyed by canonical model id, only models ``pricing.toml`` prices.
     rates: dict = field(default_factory=dict)
+    #: Additive: every rate-card alias, and every model id this window
+    #: saw that is priced as a different canonical id, mapped to that id
+    #: (``pricing.Pricing.model_ids_meta``) -- how the dashboard finds an
+    #: observed id's entry in ``rates``. Empty on a report built without
+    #: a rate card's view of the window (``cli.py``'s wrapped sections).
+    model_ids: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)

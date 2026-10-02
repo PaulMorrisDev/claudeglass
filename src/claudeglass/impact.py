@@ -6,15 +6,22 @@ Per session, not per window, so a quiet week after a change doesn't
 read as a saving: cost per session, cost per reply, the share of cache
 writes that rebuilt expired context, summaries per session, the context
 at session start, and, for a change to one agent, that agent's cost and
-start-up context per spawn. "Before" is the sessions started in the
-:data:`LOOKBACK_DAYS` before the change (and after the change before
-it); "after" is those started from the change until the next one. Two
-changes with fewer than :data:`MIN_SESSIONS` sessions between them
-share their before and after rather than cut each other's to too few
-for good: too few sessions ran with one and not the other to judge
-either alone, so each is read with the other. A change made in one
+start-up context per spawn. A change of model is also read in tokens
+per session, output tokens per reply and replies per session, and a
+change of effort or thinking in output tokens per reply, so a new price
+per token can't pass for a new amount of work. "Before" is the sessions
+started in the :data:`LOOKBACK_DAYS` before the change (and after the
+change before it); "after" is those started from the change until the
+next one. Two changes with fewer than :data:`MIN_SESSIONS` sessions
+between them share their before and after rather than cut each other's
+to too few for good: too few sessions ran with one and not the other to
+judge either alone, so each is read with the other. A change made in one
 project (``ChangePoint.project``) is judged on that project's sessions
-only, and only changes that apply there bound it.
+only, and only changes that apply there bound it. A change to every
+project is bounded in each project on its own (:func:`bounds`): by the
+changes that apply there, counting that project's sessions, so a change
+to one project never cuts another project's before or after, and the
+all-projects reading is the project readings put together.
 
 Sessions differ in size and kind of work, so a difference is a signal,
 not proof; with fewer than :data:`MIN_SESSIONS` on either side there is
@@ -105,6 +112,16 @@ class _Transcript:
     turns: int = 0
     startup_tokens: int = 0
     peak_context: int = 0
+    #: Output tokens of the replies ``turns`` counts, so output per reply
+    #: divides like by like: a compaction's estimated request
+    #: (``Turn.estimated``) is spend, not a reply. The API's
+    #: ``output_tokens`` already counts the thinking, and
+    #: ``Turn.thinking_tokens`` is a breakdown of it, so thinking is never
+    #: added on top.
+    output_tokens: int = 0
+    #: Everything read and written by every priced turn, a compaction's
+    #: estimated request included: input, cache writes, cache reads and output.
+    total_tokens: int = 0
     rebuild_tokens: int = 0
     write_tokens: int = 0
     summaries: int = 0
@@ -143,12 +160,25 @@ class SessionFacts:
     spawns: list[tuple[str, _Transcript]] = field(default_factory=list)
     #: Quality counts per transcript: the main session and each spawn.
     runs: list[quality.Run] = field(default_factory=list)
-    #: The project, as ``snapshots.snapshot_project_key`` names it.
+    #: The project, as ``snapshots.snapshot_project_key`` names it (the
+    #: canonical key).
     project: str = ""
+    #: Every key the project goes by (``snapshots.snapshot_project_keys``:
+    #: a Windows folder can spell its drive letter either way), so a
+    #: change recorded under either one applies. Empty means just ``project``.
+    keys: tuple[str, ...] = ()
 
     @property
     def cost(self) -> float:
         return self.main.cost + sum(spawn.cost for _agent, spawn in self.spawns)
+
+    @property
+    def tokens(self) -> int:
+        return self.main.total_tokens + sum(spawn.total_tokens for _agent, spawn in self.spawns)
+
+
+def _session_keys(session: SessionFacts) -> tuple[str, ...]:
+    return session.keys or (session.project,)
 
 
 def _transcript(result: TranscriptResult, pricing: Pricing) -> _Transcript:
@@ -164,6 +194,11 @@ def _transcript(result: TranscriptResult, pricing: Pricing) -> _Transcript:
         facts.turns += not turn.is_synthetic
         facts.peak_context = max(
             facts.peak_context, turn.input_tokens + turn.cache_creation_tokens + turn.cache_read_tokens
+        )
+        if not turn.is_synthetic:
+            facts.output_tokens += turn.output_tokens
+        facts.total_tokens += (
+            turn.input_tokens + turn.cache_creation_tokens + turn.cache_read_tokens + turn.output_tokens
         )
         facts.write_tokens += turn.cache_creation_tokens
         facts.capture_chars += turn.cap_note_chars + (turn.cap.chars if turn.cap is not None else 0)
@@ -189,6 +224,7 @@ def session_facts(corpus, pricing: Pricing) -> list[SessionFacts]:
         start = next((_ts(turn.ts) for turn in _priced(top) if _ts(turn.ts)), None)
         if start is None:
             continue
+        keys = snapshots_mod.snapshot_project_keys(bundle.slug) if bundle.slug else ()
         cycles = capture_mod.prompt_cycles(top)
         habit_facts = prompting.session_prompting(bundle, prices)
         habits, drip, _messages = prompting.habit_rates(habit_facts) if habit_facts else (0, 0, 0)
@@ -213,7 +249,8 @@ def session_facts(corpus, pricing: Pricing) -> list[SessionFacts]:
                 tagged=sum(1 for cycle in cycles if cycle.tag is not None),
                 habits=habits,
                 drip_messages=drip,
-                project=snapshots_mod.snapshot_project_key(bundle.slug) if bundle.slug else "",
+                project=keys[0] if keys else "",
+                keys=keys,
             )
         )
     out.sort(key=lambda s: s.start)
@@ -278,6 +315,12 @@ def _pairs(measure: Measure, sessions: list[SessionFacts]) -> list[tuple[float, 
         return [(s.cost, 1.0) for s in sessions]
     if measure.key == "cost_per_turn":
         return [(s.main.cost, float(s.main.turns)) for s in sessions]
+    if measure.key == "tokens_per_session":
+        return [(float(s.tokens), 1.0) for s in sessions]
+    if measure.key == "output_per_turn":
+        return [(float(s.main.output_tokens), float(s.main.turns)) for s in sessions]
+    if measure.key == "turns_per_session":
+        return [(float(s.main.turns), 1.0) for s in sessions]
     if measure.key == "rebuild_share":
         return [(100.0 * s.main.rebuild_tokens, float(s.main.write_tokens)) for s in sessions]
     if measure.key == "summaries":
@@ -372,6 +415,9 @@ def _value(measure: Measure, sessions: list[SessionFacts]) -> tuple[float | None
 
 _COST = Measure("cost_per_session", "Cost per session", "money")
 _TURN = Measure("cost_per_turn", "Cost per reply", "money")
+_TOKENS = Measure("tokens_per_session", "Tokens per session", "tokens")
+_OUTPUT = Measure("output_per_turn", "Output tokens per reply", "tokens")
+_REPLIES = Measure("turns_per_session", "Replies per session", "count")
 _REBUILD = Measure("rebuild_share", "Cache writes that rebuilt expired context", "pct")
 _SUMMARIES = Measure("summaries", "Conversation summaries per session", "count")
 _PEAK = Measure("peak_context", "Largest context per session", "tokens")
@@ -384,12 +430,25 @@ _DRIP = Measure("drip_share", "Messages that were small requests sent one at a t
 
 def measures_for(point: ChangePoint) -> list[Measure]:
     """The measures a change should move, most telling first; cost per
-    session always comes last as the overall check."""
+    session always comes last as the overall check. A model change is
+    judged on the tokens it spends (all of them per session, output
+    tokens per reply, and replies per session) before what they cost,
+    so a different price per token can't pass for a different amount of
+    work; effort and thinking changes on output tokens per reply, then
+    cost per reply; fast mode, which changes the price and speed but
+    not the tokens, on cost per reply alone. Measures come in the order
+    the changed keys name them, except that the tokens always come
+    before cost per reply: a settings edit lists its keys
+    alphabetically, so ``effortLevel`` or ``fastMode`` comes before
+    ``model``, and its card would otherwise lead with money."""
     chosen: list[Measure] = []
 
-    def add(measure: Measure) -> None:
-        if measure not in chosen:
-            chosen.append(measure)
+    def add(measure: Measure, ahead_of: tuple[Measure, ...] = ()) -> None:
+        # Last, or just before the first of ``ahead_of`` already chosen.
+        if measure in chosen:
+            return
+        at = next((i for i, m in enumerate(chosen) if m in ahead_of), len(chosen))
+        chosen.insert(at, measure)
 
     for label in point.keys or ():
         agent, _, key = label.rpartition(": ")
@@ -408,7 +467,15 @@ def measures_for(point: ChangePoint) -> list[Measure]:
         elif agent:
             add(Measure("agent_cost", f"{agent}: cost per spawn", "money", agent))
             add(Measure("agent_startup", f"{agent}: context at the start of each spawn", "tokens", agent))
-        elif key in ("model", "effortLevel", "alwaysThinkingEnabled", "MAX_THINKING_TOKENS", "fastMode"):
+        elif key == "model":
+            add(_TOKENS, ahead_of=(_OUTPUT, _TURN))
+            add(_OUTPUT, ahead_of=(_TURN,))
+            add(_REPLIES, ahead_of=(_TURN,))
+            add(_TURN)
+        elif key in ("effortLevel", "alwaysThinkingEnabled", "MAX_THINKING_TOKENS"):
+            add(_OUTPUT, ahead_of=(_TURN,))
+            add(_TURN)
+        elif key == "fastMode":
             add(_TURN)
         elif key == "autoCompactWindow":
             add(_SUMMARIES)
@@ -511,13 +578,18 @@ def compare(
     *,
     previous: ChangePoint | None = None,
     following: ChangePoint | None = None,
+    per_project: dict[str, tuple[ChangePoint | None, ChangePoint | None]] | None = None,
     now: datetime | None = None,
     without=None,
 ) -> dict:
-    """``without``, when given, is called with ``(point, before, after)``
-    for what the sessions after the change would have cost without it
-    (``counterfactual.for_impact``); its answer is ``"without"``."""
-    before, after = sides(point, sessions, previous=previous, following=following, now=now)
+    """``previous``, ``following`` and ``per_project`` are what
+    :func:`bounds` returns. ``without``, when given, is called with
+    ``(point, before, after)`` for what the sessions after the change
+    would have cost without it (``counterfactual.for_impact``); its answer
+    is ``"without"``."""
+    before, after = sides(
+        point, sessions, previous=previous, following=following, per_project=per_project, now=now
+    )
     enough = len(before) >= MIN_SESSIONS and len(after) >= MIN_SESSIONS
     rows = [_measure_row(measure, before, after, units) for measure in measures_for(point)]
     _label_rows(rows)
@@ -539,19 +611,31 @@ def sides(
     *,
     previous: ChangePoint | None = None,
     following: ChangePoint | None = None,
+    per_project: dict[str, tuple[ChangePoint | None, ChangePoint | None]] | None = None,
     now: datetime | None = None,
 ) -> tuple[list[SessionFacts], list[SessionFacts]]:
     """The sessions before ``point`` (back :data:`LOOKBACK_DAYS`, or to
     ``previous``) and after it (to ``following``, or ``now``), in the
-    project it applies to."""
+    projects it applies to. ``per_project``, from :func:`bounds`, gives a
+    project's own ``(previous, following)``, which its sessions use in
+    place of the two given."""
     now = now or datetime.now(timezone.utc)
-    start = point.ts - timedelta(days=LOOKBACK_DAYS)
-    if previous is not None and previous.ts > start:
-        start = previous.ts
-    end = following.ts if following is not None else now
-    mine = [s for s in sessions if applies_to(point, s.project)]
-    before = [s for s in mine if start <= s.start < point.ts]
-    after = [s for s in mine if point.ts <= s.start < end]
+    before: list[SessionFacts] = []
+    after: list[SessionFacts] = []
+    for session in sessions:
+        keys = _session_keys(session)
+        if not applies_to(point, keys):
+            continue
+        own = next((per_project[k] for k in keys if k in per_project), None) if per_project else None
+        earlier, later = own or (previous, following)
+        start = point.ts - timedelta(days=LOOKBACK_DAYS)
+        if earlier is not None and earlier.ts > start:
+            start = earlier.ts
+        end = later.ts if later is not None else now
+        if start <= session.start < point.ts:
+            before.append(session)
+        elif point.ts <= session.start < end:
+            after.append(session)
     return before, after
 
 
@@ -574,7 +658,9 @@ def _apart(earlier: ChangePoint, later: ChangePoint, sessions: list[SessionFacts
     between = sum(
         1
         for s in sessions
-        if earlier.ts <= s.start < later.ts and applies_to(earlier, s.project) and applies_to(later, s.project)
+        if earlier.ts <= s.start < later.ts
+        and applies_to(earlier, _session_keys(s))
+        and applies_to(later, _session_keys(s))
     )
     return between >= MIN_SESSIONS
 
@@ -590,6 +676,42 @@ def neighbours(
     previous = next((p for p in reversed(earlier) if _apart(p, point, sessions)), None)
     following = next((p for p in later if _apart(point, p, sessions)), None)
     return previous, following
+
+
+def bounds(
+    points: list[ChangePoint], point: ChangePoint, sessions: list[SessionFacts]
+) -> tuple[
+    ChangePoint | None,
+    ChangePoint | None,
+    dict[str, tuple[ChangePoint | None, ChangePoint | None]] | None,
+]:
+    """``(previous, following, per_project)``: the changes that bound
+    ``point``'s before and after, for :func:`sides` and :func:`compare`.
+
+    A change made in one project is bounded by :func:`neighbours`, and
+    ``per_project`` is ``None``. A change to every project is bounded in
+    each project by the changes that apply there alone, with
+    :func:`_apart` counted on that project's sessions: ``per_project``
+    maps each project's key to its own ``(previous, following)``, so a
+    change made in one project cuts that project's before and after and
+    no other's, and the all-projects reading is the project readings put
+    together. ``previous`` and ``following`` come from the changes to every
+    project alone: they bound a session whose project isn't known, and
+    ``following`` is ``None`` while no later change to every project
+    closes the window, so a project with no later change of its own can
+    still add sessions after ``point`` (one not seen yet included)."""
+    if point.project:
+        return (*neighbours(points, point, sessions), None)
+    previous, following = neighbours([p for p in points if not p.project], point, sessions)
+    by_project: dict[str, list[SessionFacts]] = {}
+    for session in sessions:
+        if session.project:
+            by_project.setdefault(session.project, []).append(session)
+    per_project = {}
+    for project, mine in by_project.items():
+        keys = _session_keys(mine[0])
+        per_project[project] = neighbours([p for p in points if applies_to(p, keys)], point, mine)
+    return previous, following, per_project
 
 
 def quality_groups(point: ChangePoint) -> list[str]:
@@ -647,17 +769,37 @@ def _verdict(rows: list[dict], before: int, after: int, enough: bool) -> str:
 
 
 def impact(
-    points: list[ChangePoint], sessions: list[SessionFacts], units: Units, *, limit: int = 10, without=None
+    points: list[ChangePoint],
+    sessions: list[SessionFacts],
+    units: Units,
+    *,
+    limit: int | None = 10,
+    without=None,
+    listed=None,
 ) -> list[dict]:
-    """Newest change first, at most ``limit``. A change made within
-    :data:`TOGETHER` of another, or with fewer than :data:`MIN_SESSIONS`
-    sessions between them, doesn't bound its before or after.
-    ``without`` is passed to :func:`compare`."""
+    """Newest change first, at most ``limit`` (every one when it is
+    ``None``). A change made within :data:`TOGETHER` of another, or with
+    fewer than :data:`MIN_SESSIONS` sessions between them, doesn't bound
+    its before or after, and a change to one project bounds that
+    project's sessions only (:func:`bounds`). ``without`` is passed to
+    :func:`compare`.
+
+    ``listed``, when given, is called with a point and says whether to
+    compare it: only the points it accepts are compared and returned,
+    and ``limit`` counts those. Every point still bounds its neighbours,
+    so a change's before and after are the same whichever are listed."""
     out = []
     for point in reversed(points):
-        previous, following = neighbours(points, point, sessions)
-        out.append(compare(point, sessions, units, previous=previous, following=following, without=without))
-        if len(out) >= limit:
+        if listed is not None and not listed(point):
+            continue
+        previous, following, per_project = bounds(points, point, sessions)
+        out.append(
+            compare(
+                point, sessions, units,
+                previous=previous, following=following, per_project=per_project, without=without,
+            )
+        )
+        if limit is not None and len(out) >= limit:
             break
     return out
 
@@ -667,6 +809,7 @@ __all__ = [
     "LOOKBACK_DAYS",
     "MIN_SESSIONS",
     "SessionFacts",
+    "bounds",
     "compare",
     "impact",
     "measures_for",

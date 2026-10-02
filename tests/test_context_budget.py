@@ -547,3 +547,54 @@ def test_baseline_table_finds_the_snapshot_by_its_hashed_project_key(tmp_path):
     col = {c.key: i for i, c in enumerate(table.columns)}
     row = next(r for r in table.rows if r[col["project"]] == "C--Users-<user>-proj")
     assert row[col["custom_agents_est"]] == pytest.approx(2 * 60)
+
+
+def _custom_agents_est(stats, snapshots):
+    section = context_budget.build_section(stats, snapshots=snapshots)
+    table = next(t for t in section.tables if t.name == "context_budget_baseline")
+    col = {c.key: i for i, c in enumerate(table.columns)}
+    row = next(r for r in table.rows if r[col["project"]] == "c--Users-<user>-proj")
+    return row[col["custom_agents_est"]]
+
+
+def test_baseline_table_joins_a_lower_case_drive_folder_to_a_snapshot_under_either_key(tmp_path):
+    from claudeglass import snapshots as snap_mod
+
+    top = _build_session(tmp_path, "s1", session_id="sess_1", baseline_cache_creation=50_000)
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("c--Users-<user>-proj", top, raw_slug="c--Users-alice-proj")
+    canonical, legacy = snap_mod.snapshot_project_keys("c--Users-alice-proj")
+    layers = {"agents_summary": {"count": 2}}
+    assert _custom_agents_est(stats, [_snapshot(canonical, content_layers=layers)]) == pytest.approx(2 * 60)
+    assert _custom_agents_est(stats, [_snapshot(legacy, content_layers=layers)]) == pytest.approx(2 * 60)
+
+
+def test_baseline_table_reads_the_newest_snapshot_of_a_project_filed_under_both_keys(tmp_path):
+    from claudeglass import snapshots as snap_mod
+
+    top = _build_session(tmp_path, "s1", session_id="sess_1", baseline_cache_creation=50_000)
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("c--Users-<user>-proj", top, raw_slug="c--Users-alice-proj")
+    canonical, legacy = snap_mod.snapshot_project_keys("c--Users-alice-proj")
+    old = Snapshot(
+        path=Path("old.json"), ts="2026-09-10T00:00:00.000Z",
+        data={"project_slug": legacy, "content_layers": {"agents_summary": {"count": 5}}},
+    )
+    new = Snapshot(
+        path=Path("new.json"), ts="2026-09-20T00:00:00.000Z",
+        data={"project_slug": canonical, "content_layers": {"agents_summary": {"count": 2}}},
+    )
+    other = Snapshot(
+        path=Path("other.json"), ts="2026-09-25T00:00:00.000Z",
+        data={"project_slug": snap_mod.snapshot_project_key("C--Users-bob-other"),
+              "content_layers": {"agents_summary": {"count": 9}}},
+    )
+    assert _custom_agents_est(stats, [old, new, other]) == pytest.approx(2 * 60)
+    # The order they arrive in doesn't matter.
+    assert _custom_agents_est(stats, [new, old, other]) == pytest.approx(2 * 60)
+    # The newest wins whichever key it carries.
+    newer_legacy = Snapshot(
+        path=Path("newer.json"), ts="2026-09-22T00:00:00.000Z",
+        data={"project_slug": legacy, "content_layers": {"agents_summary": {"count": 7}}},
+    )
+    assert _custom_agents_est(stats, [old, new, newer_legacy, other]) == pytest.approx(7 * 60)

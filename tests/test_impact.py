@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from claudeglass import impact
-from claudeglass.change_points import ChangePoint
+from claudeglass.change_points import ChangePoint, applies_to
 from claudeglass.corpus import load_corpus
 from claudeglass.impact import Measure, SessionFacts, _Transcript
+from claudeglass.model import TranscriptResult, Turn
 from claudeglass.pricing import load_pricing
 from claudeglass.units import Units
 
@@ -36,12 +37,57 @@ def _tasked(days: float, cost: float, task: str) -> SessionFacts:
 
 
 def test_measures_follow_the_changed_keys():
+    # A model change is judged on the tokens it spends first, then on cost.
     assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=["model"]))] == [
+        "tokens_per_session",
+        "output_per_turn",
+        "turns_per_session",
+        "cost_per_turn",
+        "cost_per_session",
+    ]
+    for key in ("effortLevel", "alwaysThinkingEnabled", "MAX_THINKING_TOKENS"):
+        assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=[key]))] == [
+            "output_per_turn",
+            "cost_per_turn",
+            "cost_per_session",
+        ], key
+    # Fast mode changes the price and the speed, not the tokens.
+    assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=["fastMode"]))] == [
+        "cost_per_turn",
+        "cost_per_session",
+    ]
+    # A settings edit lists its keys alphabetically, so effort or fast mode
+    # can come before the model: the tokens still come before the money.
+    for keys in (
+        ["effective.effortLevel", "effective.model"],
+        ["effective.fastMode", "effective.model"],
+        ["effective.alwaysThinkingEnabled", "effective.effortLevel", "effective.fastMode", "effective.model"],
+    ):
+        assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=keys))] == [
+            "tokens_per_session",
+            "output_per_turn",
+            "turns_per_session",
+            "cost_per_turn",
+            "cost_per_session",
+        ], keys
+    assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=["fastMode", "effortLevel"]))] == [
+        "output_per_turn",
         "cost_per_turn",
         "cost_per_session",
     ]
     agent = impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=["Explore: model"]))
     assert [(m.key, m.agent) for m in agent][:2] == [("agent_cost", "Explore"), ("agent_startup", "Explore")]
+    # An agent's model change stays on that agent's cost and context.
+    for key in ("Explore: model", "agents.Explore.model"):
+        scoped = impact.measures_for(ChangePoint(CHANGE, "apply", "x", keys=[key]))
+        assert [(m.key, m.agent) for m in scoped] == [
+            ("agent_cost", "Explore"),
+            ("agent_startup", "Explore"),
+            ("cost_per_session", None),
+        ], key
+    # The settings layers name the same key.
+    layered = impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=["effective.model"]))
+    assert [m.key for m in layered][0] == "tokens_per_session"
     ttl = impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=["effective.promptCacheTtl"]))
     assert ttl[0].key == "rebuild_share"
     assert impact.measures_for(ChangePoint(CHANGE, "apply", "x"))[0].key == "startup_tokens"
@@ -100,6 +146,53 @@ def test_before_stops_at_the_previous_change_and_after_at_the_next():
     assert cost["before"] == "2.00 USD" and cost["after"] == "1.00 USD"
 
 
+def _three_changes() -> tuple[list[SessionFacts], list[ChangePoint]]:
+    sessions = [_session(-d, 5.0) for d in (4, 5)] + [_session(-d, 2.0) for d in (0.5, 1, 1.5)] + [
+        _session(d, 1.0) for d in (0.1, 0.2, 0.3)
+    ] + [_session(3, 9.0)]
+    points = [
+        ChangePoint(CHANGE - timedelta(days=2), "apply", "first"),
+        ChangePoint(CHANGE, "apply", "second"),
+        ChangePoint(CHANGE + timedelta(days=2), "apply", "third"),
+    ]
+    return sessions, points
+
+
+def test_listed_compares_only_the_points_it_accepts_newest_first():
+    sessions, points = _three_changes()
+    everything = {row["change"]["label"]: row for row in impact.impact(points, sessions, UNITS)}
+    rows = impact.impact(points, sessions, UNITS, listed=lambda p: p.label != "second")
+    assert [row["change"]["label"] for row in rows] == ["third", "first"]
+    # Each one's neighbours are still every point's, so its sides and its
+    # measures are what the full run gave it.
+    for row in rows:
+        full = everything[row["change"]["label"]]
+        assert (row["before_sessions"], row["after_sessions"]) == (full["before_sessions"], full["after_sessions"])
+        assert row["measures"] == full["measures"] and row["verdict"] == full["verdict"]
+
+
+def test_listed_leaves_a_point_it_rejects_as_a_neighbour():
+    """``second`` is not listed, but it still cuts ``first``'s after side."""
+    sessions, points = _three_changes()
+    (first,) = impact.impact(points, sessions, UNITS, listed=lambda p: p.label == "first")
+    assert first["after_sessions"] == 3  # not the 6 the sessions after it would give with no ``second``
+    alone, = impact.impact(points[:1], sessions, UNITS)
+    assert alone["after_sessions"] > first["after_sessions"]
+
+
+def test_no_limit_returns_every_point_and_a_limit_counts_only_the_listed_ones():
+    sessions, points = _three_changes()
+    assert [r["change"]["label"] for r in impact.impact(points, sessions, UNITS, limit=None)] == [
+        "third",
+        "second",
+        "first",
+    ]
+    assert [r["change"]["label"] for r in impact.impact(points, sessions, UNITS, limit=2)] == ["third", "second"]
+    rows = impact.impact(points, sessions, UNITS, limit=1, listed=lambda p: p.label != "third")
+    assert [r["change"]["label"] for r in rows] == ["second"]
+    assert impact.impact(points, sessions, UNITS, limit=None, listed=lambda p: False) == []
+
+
 def test_changes_made_together_share_their_before_and_after():
     """One apply that wrote two files gives two change points seconds
     apart; neither cuts the other's comparison to nothing."""
@@ -147,6 +240,158 @@ def test_enough_sessions_between_two_changes_keep_them_apart():
     for facts in between[:2]:
         facts.project = "slug:other"
     assert impact.neighbours([first, second], second, sessions) == (None, None)
+
+
+# -- bounds: a change in one project cuts that project's window and no other's --
+
+
+def _in(project: str, days: float, cost: float = 1.0) -> SessionFacts:
+    facts = _session(days, cost)
+    facts.project = project
+    return facts
+
+
+def _count(sessions: list[SessionFacts], project: str) -> int:
+    return sum(1 for s in sessions if s.project == project)
+
+
+def test_a_change_in_one_project_cuts_a_global_changes_window_there_and_nowhere_else():
+    """A change to every project, with a change in project X three days
+    before it and another two days after it. X's sessions are read between
+    those two; Y's, which neither change touched, across the whole span."""
+    earlier = ChangePoint(CHANGE - timedelta(days=3), "apply", "x earlier", keys=["model"], project="slug:x")
+    everywhere = ChangePoint(CHANGE, "config", "everywhere", keys=["effective.model"])
+    later = ChangePoint(CHANGE + timedelta(days=2), "apply", "x later", keys=["model"], project="slug:x")
+    points = [earlier, everywhere, later]
+    days = (-4, -2.5, -2, -1.5, -1, 0.5, 1, 1.5, 2.5, 3)
+    sessions = sorted([_in("slug:x", d) for d in days] + [_in("slug:y", d) for d in days], key=lambda s: s.start)
+    now = CHANGE + timedelta(days=9)
+
+    previous, following, per_project = impact.bounds(points, everywhere, sessions)
+    assert (previous, following) == (None, None)
+    assert per_project == {"slug:x": (earlier, later), "slug:y": (None, None)}
+    before, after = impact.sides(
+        everywhere, sessions, previous=previous, following=following, per_project=per_project, now=now
+    )
+    # Before: X from its earlier change on, Y back the full 14 days.
+    assert (_count(before, "slug:x"), _count(before, "slug:y")) == (4, 5)
+    # After: X until its later change, Y to now.
+    assert (_count(after, "slug:x"), _count(after, "slug:y")) == (3, 5)
+    result = impact.compare(
+        everywhere, sessions, UNITS, previous=previous, following=following, per_project=per_project, now=now
+    )
+    assert (result["before_sessions"], result["after_sessions"]) == (9, 8)
+    # The nearest changes that apply anywhere cut every project alike,
+    # which is what this replaces.
+    cut_everywhere = impact.neighbours(points, everywhere, sessions)
+    assert cut_everywhere == (earlier, later)
+    before, after = impact.sides(everywhere, sessions, previous=earlier, following=later, now=now)
+    assert (_count(before, "slug:y"), _count(after, "slug:y")) == (4, 3)
+
+
+def test_the_bounds_of_a_change_in_one_project_are_its_neighbours():
+    everywhere = ChangePoint(CHANGE - timedelta(days=3), "config", "everywhere", keys=["effective.model"])
+    mine = ChangePoint(CHANGE, "apply", "mine", keys=["model"], project="slug:x")
+    elsewhere = ChangePoint(CHANGE + timedelta(days=1), "apply", "elsewhere", keys=["model"], project="slug:y")
+    last = ChangePoint(CHANGE + timedelta(days=2), "config", "last", keys=["effective.model"])
+    points = [everywhere, mine, elsewhere, last]
+    sessions = [_in("slug:x", d) for d in (-2, -1.5, -1, 0.5, 1, 1.5, 2.5)]
+    sessions += [_in("slug:y", d) for d in (-2, -1, 0.5, 1.5)]
+    previous, following, per_project = impact.bounds(points, mine, sessions)
+    assert (previous, following) == impact.neighbours(points, mine, sessions) == (everywhere, last)
+    assert per_project is None
+
+
+def test_sessions_with_no_project_use_the_changes_to_every_project():
+    """A session the project of which isn't known isn't cut by a change
+    made in a project, and a project with no sessions gets no bounds."""
+    first = ChangePoint(CHANGE - timedelta(days=3), "config", "first", keys=["effective.model"])
+    mine = ChangePoint(CHANGE, "apply", "mine", keys=["model"], project="slug:gone")
+    last = ChangePoint(CHANGE + timedelta(days=2), "config", "last", keys=["effective.model"])
+    point = ChangePoint(CHANGE - timedelta(days=1), "config", "point", keys=["effective.model"])
+    sessions = [_session(d, 1.0) for d in (-2.5, -2, -1.5, -0.5, -0.25, 0.5, 1, 1.5, 2.5)]
+    previous, following, per_project = impact.bounds([first, point, mine, last], point, sessions)
+    assert (previous, following) == (first, last)
+    assert per_project == {}
+
+
+def test_the_all_projects_reading_is_the_project_readings_put_together():
+    """Every change, judged on every project's sessions at once, reads as
+    the sum of the same change judged on each project's sessions alone."""
+    first = ChangePoint(CHANGE, "config", "first", keys=["effective.model"])
+    y_only = ChangePoint(CHANGE + timedelta(days=1), "apply", "y only", keys=["model"], project="slug:y")
+    x_only = ChangePoint(CHANGE + timedelta(days=2), "apply", "x only", keys=["model"], project="slug:x")
+    last = ChangePoint(CHANGE + timedelta(days=4), "config", "last", keys=["effective.model"])
+    points = [first, y_only, x_only, last]
+    x_days = (-3, -2, -1, 0.5, 1, 1.5, 2.5, 3, 3.5, 4.5, 5)
+    y_days = (-3, -2, -1, 0.2, 0.4, 0.6, 0.8, 1.5, 2, 3, 3.5, 4.5, 5, 6)
+    sessions = sorted([_in("slug:x", d) for d in x_days] + [_in("slug:y", d) for d in y_days], key=lambda s: s.start)
+
+    everything = {r["change"]["label"]: r for r in impact.impact(points, sessions, UNITS)}
+    views = []
+    for project in ("slug:x", "slug:y"):
+        mine = [s for s in sessions if s.project == project]
+        shown = [p for p in points if applies_to(p, project)]
+        views.append({r["change"]["label"]: r for r in impact.impact(shown, mine, UNITS)})
+    assert set(everything) == {"first", "y only", "x only", "last"}
+    for label, row in everything.items():
+        seen = [view[label] for view in views if label in view]
+        assert row["before_sessions"] == sum(r["before_sessions"] for r in seen), label
+        assert row["after_sessions"] == sum(r["after_sessions"] for r in seen), label
+    # Not the same as one project's change cutting the other's: X's
+    # sessions run to its own change two days on, Y's to its own at one.
+    assert (everything["first"]["before_sessions"], everything["first"]["after_sessions"]) == (6, 7)
+    assert (everything["last"]["before_sessions"], everything["last"]["after_sessions"]) == (7, 5)
+
+
+# -- one project, two spellings of its drive letter ---------------------------
+
+
+def test_session_facts_carry_every_key_a_drive_letter_project_goes_by(tmp_path):
+    from claudeglass import snapshots
+
+    def facts_in(folder: str):
+        project_dir = tmp_path / folder
+        project_dir.mkdir()
+        write_jsonl(
+            project_dir / "s.jsonl",
+            [turn_line(timestamp=ts) for ts in ("2026-09-18T12:00:00.000Z", "2026-09-18T12:05:00.000Z")],
+        )
+        [facts] = impact.session_facts(load_corpus([project_dir]), load_pricing())
+        return facts
+
+    lower = facts_in("c--Dev-X")
+    assert lower.keys == snapshots.snapshot_project_keys("c--Dev-X")
+    assert lower.project == lower.keys[0] == snapshots.snapshot_project_key("C--Dev-X")
+    assert lower.keys[0] != lower.keys[1]
+    plain = facts_in("proj")
+    assert plain.keys == snapshots.snapshot_project_keys("proj")
+    assert plain.project == plain.keys[0] == snapshots.snapshot_project_key("proj")
+
+
+def test_a_change_applies_to_a_session_under_either_spelling_of_its_drive_letter():
+    from claudeglass import snapshots
+
+    canonical, legacy = snapshots.snapshot_project_keys("c--Dev-X")
+    sessions = [_session(d, 1.0) for d in (-3, -2, -1, 0.1, 0.2, 0.3)]
+    for facts in sessions:
+        facts.project, facts.keys = canonical, (canonical, legacy)
+    now = CHANGE + timedelta(days=1)
+    for key in (canonical, legacy):
+        point = ChangePoint(CHANGE, "apply", "x", keys=["model"], project=key)
+        result = impact.compare(point, sessions, UNITS, now=now)
+        assert (result["before_sessions"], result["after_sessions"]) == (3, 3), key
+    elsewhere = ChangePoint(CHANGE, "apply", "x", keys=["model"], project=snapshots.snapshot_project_key("c--Dev-Y"))
+    assert impact.sides(elsewhere, sessions, now=now) == ([], [])
+    # And a change under either spelling keeps another apart from this one
+    # only when enough of the project's sessions ran between them.
+    first = ChangePoint(CHANGE - timedelta(hours=12), "apply", "first", keys=["model"])
+    second = ChangePoint(CHANGE, "apply", "second", keys=["model"], project=legacy)
+    between = [_session(-d / 10, 3.0) for d in (1, 2, 3)]
+    for facts in between:
+        facts.project, facts.keys = canonical, (canonical, legacy)
+    assert impact.neighbours([first, second], second, sessions + between) == (first, None)
+    assert impact.neighbours([first, second], second, sessions + between[:2]) == (None, None)
 
 
 def test_too_few_sessions_before_says_new_sessions_wont_fill_it():
@@ -216,6 +461,181 @@ def test_scheduled_main_sessions_are_left_out_of_the_quality_check():
         session.runs = [quality.Run(replies=5, tool_calls=20, scheduled=i % 2 == 1)]
     group = impact.compare(ChangePoint(CHANGE, "apply", "x", keys=["model"]), sessions, UNITS)["quality"][0]
     assert (group["before_runs"], group["after_runs"]) == (3, 3)
+
+
+# -- a model change is judged on tokens as well as money ------------------------
+
+
+def _widgets(tmp_path):
+    """A rate card with two versions of one family, the newer at twice the
+    price per token."""
+    card = tmp_path / "pricing.toml"
+    card.write_text(
+        'version = "2099-01-01-test"\ncurrency = "USD"\nsource_url = "https://example.invalid/pricing"\n'
+        'retrieved = "2099-01-01"\nnotes = "Two versions of one family, the newer dearer per token."\n\n'
+        '[models."claude-widget-4"]\naliases = []\ninput = 1.0\noutput = 5.0\n'
+        "cache_write_5m = 1.25\ncache_write_1h = 2.0\ncache_read = 0.1\n\n"
+        '[models."claude-widget-4-1"]\naliases = []\ninput = 2.0\noutput = 10.0\n'
+        "cache_write_5m = 2.5\ncache_write_1h = 4.0\ncache_read = 0.2\n",
+        encoding="utf-8",
+    )
+    return load_pricing(path=card)
+
+
+def _widget_session(pricing, days: float, model: str, *, output: int = 400, replies: int = 4) -> SessionFacts:
+    """A session of ``replies`` replies on ``model``, each reading 32,100 tokens and writing ``output``."""
+    turns = [
+        Turn(
+            message_id=f"{model}-{days}-{n}",
+            turn_index=n + 1,
+            model=model,
+            input_tokens=100,
+            cache_creation_tokens=2_000,
+            cc_5m=2_000,
+            cache_read_tokens=30_000,
+            output_tokens=output,
+        )
+        for n in range(replies)
+    ]
+    return SessionFacts(
+        start=CHANGE + timedelta(days=days), main=impact._transcript(TranscriptResult(turns=turns), pricing)
+    )
+
+
+def test_a_dearer_version_with_the_same_usage_moves_cost_but_not_tokens(tmp_path):
+    pricing = _widgets(tmp_path)
+    before = [_widget_session(pricing, -d, "claude-widget-4") for d in (1, 2, 3)]
+    after = [_widget_session(pricing, d, "claude-widget-4-1") for d in (0.1, 0.2, 0.3, 0.4)]
+    point = ChangePoint(CHANGE, "transcript", "Model changed", keys=["model"])
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    assert result["enough"]
+    by_key = {m["key"]: m for m in result["measures"]}
+    assert list(by_key) == [
+        "tokens_per_session", "output_per_turn", "turns_per_session", "cost_per_turn", "cost_per_session",
+    ]
+    # Same tokens, replies and output per reply before and after: nothing to see.
+    for key in ("tokens_per_session", "output_per_turn", "turns_per_session"):
+        assert by_key[key]["change_pct"] == 0.0 and by_key[key]["direction"] == "same", key
+        assert by_key[key]["label_key"] == "no_clear_change", key
+    # Twice the price for them: cost per reply and per session double.
+    for key in ("cost_per_turn", "cost_per_session"):
+        assert by_key[key]["change_pct"] == 100.0 and by_key[key]["direction"] == "higher", key
+        assert by_key[key]["label_key"] == "higher", key
+    # Read in their own units, and lower is better for each.
+    assert [(by_key[k]["kind"], by_key[k]["before"]) for k in list(by_key)[:3]] == [
+        ("tokens", "130,000 tokens"), ("tokens", "400 tokens"), ("count", "4.0"),
+    ]
+    assert all(row["better"] == "lower" for row in by_key.values())
+    # The headline is the tokens: usage didn't move, so it says so rather than the price.
+    assert result["verdict"] == (
+        "Tokens per session: about the same (130,000 tokens before, 130,000 tokens after)."
+    )
+
+
+def test_a_version_that_writes_half_as_much_a_reply_reads_lower_though_it_costs_more(tmp_path):
+    pricing = _widgets(tmp_path)
+    before = [_widget_session(pricing, -d, "claude-widget-4", output=400) for d in (1, 2, 3)]
+    after = [_widget_session(pricing, d, "claude-widget-4-1", output=200) for d in (0.1, 0.2, 0.3, 0.4)]
+    point = ChangePoint(CHANGE, "transcript", "Model changed", keys=["model"])
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    assert result["enough"]
+    by_key = {m["key"]: m for m in result["measures"]}
+    # Half the output a reply: a clear fall.
+    output = by_key["output_per_turn"]
+    assert (output["before"], output["after"]) == ("400 tokens", "200 tokens")
+    assert output["change_pct"] == -50.0 and output["direction"] == "lower"
+    assert output["label_key"] == "lower"
+    # Cache reads dwarf the output, so a session's tokens barely fall, and the headline says so.
+    tokens = by_key["tokens_per_session"]
+    assert (tokens["before"], tokens["after"]) == ("130,000 tokens", "129,200 tokens")
+    assert tokens["change_pct"] == -0.6 and tokens["direction"] == "same"
+    assert result["verdict"] == (
+        "Tokens per session: about the same (130,000 tokens before, 129,200 tokens after)."
+    )
+    assert by_key["turns_per_session"]["direction"] == "same"
+    # Twice the price per token still costs more a reply, for all the shorter replies.
+    for key in ("cost_per_turn", "cost_per_session"):
+        assert by_key[key]["change_pct"] == 73.7 and by_key[key]["direction"] == "higher", key
+        assert by_key[key]["label_key"] == "higher", key
+
+
+def test_fewer_output_tokens_a_reply_after_a_change_read_as_lower():
+    def session(days: float, output: int) -> SessionFacts:
+        return SessionFacts(
+            start=CHANGE + timedelta(days=days),
+            main=_Transcript(cost=1.0, turns=10, output_tokens=10 * output, total_tokens=10 * (output + 30_000)),
+        )
+
+    before = [session(-d, output) for d, output in ((1, 380), (2, 400), (3, 420))]
+    after = [session(d, output) for d, output in ((0.1, 190), (0.2, 200), (0.3, 210), (0.4, 200))]
+    point = ChangePoint(CHANGE, "transcript", "Effort level changed", keys=["effortLevel"])
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    assert [m["key"] for m in result["measures"]] == ["output_per_turn", "cost_per_turn", "cost_per_session"]
+    row = result["measures"][0]
+    assert (row["kind"], row["better"]) == ("tokens", "lower")
+    assert (row["before"], row["after"]) == ("400 tokens", "200 tokens")
+    assert row["change_pct"] == -50.0 and row["direction"] == "lower"
+    assert row["label_key"] == "lower"
+    assert result["verdict"].startswith("Output tokens per reply fell 50%, from 400 tokens to 200 tokens")
+    # Cost per session didn't move, so only the tokens did.
+    assert result["measures"][-1]["direction"] == "same"
+
+
+def test_a_transcript_counts_output_once_and_every_token_read_or_written():
+    def turn(index: int, **fields) -> Turn:
+        return Turn(message_id=f"m{index}", turn_index=index, model="claude-sonnet-5", **fields)
+
+    result = TranscriptResult(
+        turns=[
+            # Not a priced reply: counted nowhere.
+            turn(0, input_tokens=9_000, cache_creation_tokens=9_000, cache_read_tokens=9_000, output_tokens=9_000),
+            turn(1, input_tokens=100, cache_creation_tokens=2_000, cache_read_tokens=30_000, output_tokens=400,
+                 thinking_tokens=150),
+            turn(2, input_tokens=10, cache_creation_tokens=500, cache_read_tokens=32_000, output_tokens=250,
+                 thinking_tokens=250),
+            # The estimated request that wrote a compaction's summary: spend, not a reply.
+            turn(3, is_synthetic=True, estimated="compaction", input_tokens=1_000, cache_read_tokens=32_000,
+                 output_tokens=8_000),
+        ]
+    )
+    facts = impact._transcript(result, load_pricing())
+    assert facts.turns == 2
+    # The thinking is inside output_tokens already: 400 + 250, not + 150 + 250.
+    # A compaction's output counts in the total, never in the replies' output.
+    assert facts.output_tokens == 650
+    assert facts.total_tokens == (
+        (100 + 2_000 + 30_000 + 400) + (10 + 500 + 32_000 + 250) + (1_000 + 32_000 + 8_000)
+    )
+
+
+def test_tokens_per_session_counts_the_spawns_but_output_and_replies_are_the_main_sessions():
+    def session(days: float) -> SessionFacts:
+        return SessionFacts(
+            start=CHANGE + timedelta(days=days),
+            main=_Transcript(turns=10, output_tokens=1_000, total_tokens=50_000),
+            spawns=[("Explore", _Transcript(turns=3, output_tokens=9_000, total_tokens=20_000))],
+        )
+
+    sessions = [session(d) for d in (0.1, 0.2, 0.3)]
+    assert sessions[0].tokens == 70_000
+    assert impact._value(impact._TOKENS, sessions) == (70_000.0, 3)
+    assert impact._value(impact._OUTPUT, sessions) == (100.0, 3)
+    assert impact._value(impact._REPLIES, sessions) == (10.0, 3)
+
+
+def test_session_facts_carries_a_sessions_token_totals(tmp_path):
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    write_jsonl(
+        project_dir / "session-abc.jsonl",
+        [
+            turn_line(timestamp=ts, input_tokens=100, cache_read_input_tokens=1_000, output_tokens=50)
+            for ts in ("2026-09-18T12:00:00.000Z", "2026-09-18T12:05:00.000Z")
+        ],
+    )
+    [facts] = impact.session_facts(load_corpus([project_dir]), load_pricing())
+    assert (facts.main.turns, facts.main.output_tokens) == (2, 100)
+    assert facts.main.total_tokens == 2 * (100 + 1_000 + 50) == facts.tokens
 
 
 # -- metrics capture changes ---------------------------------------------------

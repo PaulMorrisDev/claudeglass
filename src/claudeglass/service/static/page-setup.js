@@ -73,13 +73,15 @@ function renderConfigDiff(data, container) {
   } else if (Array.isArray(data) && data.length) {
     renderPlacedTables(container, data, state.currency, "config-diff");
   } else {
-    // Only changes the session-start hook saw in your settings files are
-    // listed here. A change found in your sessions (the model they ran
-    // on, say) is on Your changes, so this can't say your settings didn't
-    // change.
+    // No tables at all means no settings snapshot covers the picked
+    // project (or any project): with one, its current settings show, with a
+    // note under them when nothing changed. Only changes the session-start hook saw in
+    // your settings files are listed here. A change found in your
+    // sessions (the model they ran on, say) is on Your changes, so this
+    // can't say your settings didn't change.
     container.appendChild(
       emptyState(
-        "No settings changes recorded in this window.",
+        state.project ? "No settings recorded for this project yet." : "No settings recorded yet.",
         null,
         "This lists the changes ClaudeGlass sees in your settings files as each session starts, once it's connected. A change your sessions show another way, such as a different model, is on Your changes."
       )

@@ -37,23 +37,14 @@ Deviations from the plan/brief, reported rather than made silently (see
   TOML and round-trips correctly. A7's ordering is kept for the
   ``id``/``name``/``for``/``archetype``/``[settings]``/``[agents.*]``/
   ``[env]`` sections exactly as shown.
-- **``recommend.py``'s ``"mcpServers"`` lever (``_rule_baseline_bloat``)
-  has no exact-name counterpart on the allowlist.** The allowlist's two
-  MCP-server keys are ``enabledMcpjsonServers``/``disabledMcpjsonServers``
-  (the ``~/.claude.json`` project-level enable/disable lists Claude Code
-  itself exposes -- see ``docs/config-layers.md``'s ``claude_json``
-  section), not a bare ``mcpServers``. :data:`RECOMMEND_LEVER_MAP` and
-  :func:`recommend_lever_key` resolve the bare ``"mcpServers"`` lever to
-  ``("settings", "disabledMcpjsonServers")`` -- the rule's own action
-  text is "review which MCP servers ... disabling unused ones shrinks
-  every session's first-turn cache write", i.e. the concrete action a
-  profile can actually take against this lever is to populate
-  ``disabledMcpjsonServers``, never ``enabledMcpjsonServers`` (a profile
-  has no way to discover *which* servers to newly enable). This is the
-  one ``lever`` string ``recommend.py`` emits that is not representable
-  under its own literal name; see ``tests/test_profiles_schema.py`` for
-  the regression test asserting every lever recommend.py/ttl.py can emit
-  still resolves to *some* allowlisted key via this mapping.
+- **``recommend.py``'s baseline-bloat rule carries no lever.** It used
+  to emit a bare ``"mcpServers"``, which is no settings key (MCP servers
+  live in ``~/.claude.json`` and ``.mcp.json``), so ``--patch-set``
+  printed a settings change that doesn't exist, and
+  :data:`RECOMMEND_LEVER_MAP` mapped it to ``disabledMcpjsonServers``.
+  Its fix is a prompt now, and the mapping is gone. Every lever
+  ``recommend.py``/``ttl.py`` still emits resolves to an allowlisted key;
+  see ``tests/test_profiles_schema.py`` for the regression test.
 """
 
 from __future__ import annotations
@@ -640,15 +631,12 @@ _AGENT_LEVER_RE = re.compile(r"experimental\.cacheTtl in ([^.]+)\.md")
 
 #: Maps a bare lever string ``recommend.py`` can emit directly (a literal
 #: ``lever="..."``/``lever = "..."`` in a ``Recommendation(...)`` call)
-#: onto the ``(scope_kind, allowlisted key)`` pair it represents. See the
-#: module docstring's deviation note for why ``"mcpServers"`` maps to
-#: ``disabledMcpjsonServers`` rather than a same-named key.
+#: onto the ``(scope_kind, allowlisted key)`` pair it represents.
 RECOMMEND_LEVER_MAP: dict[str, tuple[str, str]] = {
     "promptCacheTtl": ("settings", "promptCacheTtl"),
     "autoCompactWindow": ("settings", "autoCompactWindow"),
     "effortLevel": ("settings", "effortLevel"),
     "omitClaudeMd": ("agent frontmatter", "omitClaudeMd"),
-    "mcpServers": ("settings", "disabledMcpjsonServers"),
     # COV-09: the deprecated-setting rule's bare settings-key lever.
     "includeCoAuthoredBy": ("settings", "includeCoAuthoredBy"),
 }

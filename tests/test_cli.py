@@ -32,12 +32,13 @@ import re
 import subprocess
 import sys
 import zoneinfo
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from claudeglass import __version__, baseline as baseline_mod, cli, discovery
-from claudeglass.snapshots import snapshot_project_key
+from claudeglass.snapshots import snapshot_project_key, snapshot_project_keys
 
 from helpers import assert_privacy, turn_line, write_jsonl
 
@@ -323,6 +324,50 @@ def test_cmd_apply_project_scope_uses_that_projects_own_snapshot_not_the_newest_
     assert "model: already set by" in out
 
 
+@pytest.mark.parametrize("which_key", [0, 1], ids=["canonical-key", "legacy-key"])
+def test_cmd_apply_project_scope_finds_a_lower_case_drive_projects_snapshot(tmp_path, monkeypatch, capsys, which_key):
+    """The folder is `c--Dev-a`; the hook files its snapshots under the
+    upper-case drive's key now and filed them under this one before. Either
+    way apply must read that project's snapshot, not the newer project-b one."""
+    config_dir = tmp_path / "tl"
+    project_a = tmp_path / "project-a"
+    project_b = tmp_path / "project-b"
+    (project_a / ".claude").mkdir(parents=True)
+    (project_b / ".claude").mkdir(parents=True)
+    real_slug_for = discovery.slug_for
+    monkeypatch.setattr(
+        discovery, "slug_for", lambda path, *a, **k: "c--Dev-a" if path == str(project_a) else real_slug_for(path, *a, **k)
+    )
+
+    snapshots_dir = config_dir / "snapshots"
+    snapshots_dir.mkdir(parents=True)
+    for ts, key, provenance in (
+        ("20260101T000000Z", snapshot_project_keys("c--Dev-a")[which_key], {"model": "project_local"}),
+        ("20260201T000000Z", snapshot_project_key(discovery.slug_for(str(project_b))), {}),
+    ):
+        (snapshots_dir / f"{ts}.json").write_text(
+            json.dumps(
+                {
+                    "ts": ts,
+                    "schema_version": 2,
+                    "project_slug": key,
+                    "effective": {"model": "haiku"},
+                    "effective_provenance": provenance,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    exit_code = cli.main(
+        [
+            "apply", "--set", "model=haiku", "--scope", "repo", "--project-dir", str(project_a),
+            "--config-dir", str(config_dir), "--dry-run",
+        ]
+    )
+    assert exit_code == 0
+    assert "model: already set by" in capsys.readouterr().out
+
+
 def test_cmd_apply_dry_run_exits_nonzero_when_plan_would_be_refused(tmp_path, capsys):
     """Fix S1: a --dry-run whose real apply would refuse (here: a
     profile naming an agent with no corresponding file, and no
@@ -453,6 +498,20 @@ def test_pricing_check_models_flags_a_closest_match_resolution(capsys):
     sonnet_line = next(line for line in out.splitlines() if line.strip().startswith("claude-sonnet-5"))
     assert "(closest match, not this model's own rate)" in preview_line
     assert "(closest match, not this model's own rate)" not in sonnet_line
+
+
+def test_pricing_check_models_names_a_newer_version_apart_from_a_closest_match(capsys):
+    # claude-opus-4-10 has no row: it is a newer release of the packaged
+    # claude-opus-4, priced at that rate until the card gains one.
+    exit_code = cli.main(["pricing-check", "--models", "claude-opus-4-10,claude-sonnet-5-5"])
+    assert exit_code == 0
+    lines = capsys.readouterr().out.splitlines()
+    newer = next(line for line in lines if line.strip().startswith("claude-opus-4-10 ->"))
+    sonnet = next(line for line in lines if line.strip().startswith("claude-sonnet-5-5 ->"))
+    assert "-> claude-opus-4 (matched via prefix)" in newer
+    assert "(a newer version with no rate of its own yet, so priced at the older model's rate)" in newer
+    assert "closest match" not in newer
+    assert sonnet.strip() == "claude-sonnet-5-5 -> claude-sonnet-5-5 (matched via exact)"
 
 
 def test_snapshot_config_print_hook_exits_0(capsys):
@@ -936,6 +995,35 @@ def test_load_corpus_for_args_quiet_suppresses_stats_even_if_verbose_is_also_set
     assert "[corpus]" not in err
 
 
+def test_load_corpus_for_args_costs_workflow_runs_with_the_config_dirs_rate_card(tmp_path, monkeypatch):
+    # Workflow run costs follow config.toml's pricing_path, as the report
+    # and the service do, so the corpus load is told which config dir to read.
+    root = tmp_path / "projects"
+    project_dir = _write_project(root, "proj-a")
+    config_dir = tmp_path / "config"
+    seen = {}
+
+    def fake_load_corpus(project_dirs, **kwargs):
+        seen.update(kwargs)
+        return cli.Corpus(sessions=[])
+
+    monkeypatch.setattr(cli, "load_corpus", fake_load_corpus)
+    args = argparse.Namespace(
+        no_cache=True,
+        rebuild_cache=False,
+        days=None,
+        since=None,
+        until=None,
+        limit=None,
+        window_by="mtime",
+        jobs=1,
+        verbose=False,
+        quiet=True,
+    )
+    cli._load_corpus_for_args(args, cli.load_config(None), config_dir, [project_dir])
+    assert seen["config_dir"] == config_dir
+
+
 @pytest.mark.parametrize(
     "command,section_title",
     [
@@ -1326,6 +1414,9 @@ def test_snapshot_config_hook_and_config_diff_agree_on_the_same_config_dir(tmp_p
     env = os.environ.copy()
     env["HOME"] = str(home)
     env["USERPROFILE"] = str(home)
+    # The snapshot is proj-diff's, the project config-diff reads below: it
+    # reads only the selected project's snapshots.
+    env["CLAUDE_CODE_PROJECT_DIR_NAME"] = "proj-diff"
     hook_result = subprocess.run(
         [sys.executable, str(hook_path), "--config-dir", str(config_dir)],
         input=json.dumps({"session_id": "s1"}),
@@ -1418,6 +1509,57 @@ def test_config_diff_requires_key_or_auto_keys(tmp_path, capsys):
     with pytest.raises(SystemExit) as exc_info:
         cli.main(["config-diff", "--projects-root", str(root), "--project", "proj-a"])
     assert exc_info.value.code == 2
+
+
+def _alternating_snapshots(tmp_path: Path) -> tuple[Path, Path]:
+    """Three projects, and snapshots of two that alternate in time: only
+    proj-a changed a setting (effortLevel); the model differs between the
+    two at every step, but neither ever changed its own. proj-b's is the
+    newest. proj-c has no snapshot."""
+    from claudeglass.snapshots import snapshot_project_key
+
+    root = tmp_path / "projects"
+    for slug in ("proj-a", "proj-b", "proj-c"):
+        _write_project(root, slug, age_seconds=120)
+    config_dir = tmp_path / "tl"
+    snapshots_dir = config_dir / "snapshots"
+    snapshots_dir.mkdir(parents=True)
+    for day, slug, settings in (
+        (1, "proj-a", {"model": "opus", "effortLevel": "high"}),
+        (2, "proj-b", {"model": "haiku", "effortLevel": "low"}),
+        (3, "proj-a", {"model": "opus", "effortLevel": "low"}),
+        (4, "proj-b", {"model": "haiku", "effortLevel": "low"}),
+    ):
+        ts = f"202001{day:02d}T000000Z"
+        data = {"schema": 2, "ts": ts, "project_slug": snapshot_project_key(slug), "user_settings": settings, "effective": settings}
+        (snapshots_dir / f"{ts}.json").write_text(json.dumps(data), encoding="utf-8")
+    return root, config_dir
+
+
+def test_config_diff_auto_keys_diffs_each_projects_own_snapshots(tmp_path, capsys):
+    root, config_dir = _alternating_snapshots(tmp_path)
+
+    def run(*selection):
+        code = cli.main(
+            ["config-diff", "--projects-root", str(root), *selection, "--config-dir", str(config_dir), "--auto-keys"]
+        )
+        return code, capsys.readouterr()
+
+    code, out = run("--all-projects")
+    assert code == 0
+    assert "Sessions by setting: effortLevel (your settings)" in out.out
+    assert "Sessions by setting: model" not in out.out
+
+    code, out = run("--project", "proj-a")
+    assert code == 0 and "Sessions by setting: effortLevel (your settings)" in out.out
+
+    code, out = run("--project", "proj-b")
+    assert code == 0
+    assert out.out.strip() == "No setting changed between two snapshots of the same project."
+
+    code, out = run("--project", "proj-c")
+    assert code == 1
+    assert "no config snapshot is recorded for the selected projects" in out.err
 
 
 # -- ScorecardError surfaced as a clean exit-2 error (Fix R20) --------------
@@ -1565,6 +1707,321 @@ def test_tz_flag_is_accepted_uncontested_when_machine_has_no_tz_database(tmp_pat
         ]
     )
     assert exit_code == 0
+
+
+# -- --days is calendar days -------------------------------------------------
+
+#: 13:00 UTC on 2026-09-18, an hour after the default synthetic turn.
+_FROZEN_NOW = datetime(2026, 9, 18, 13, 0, tzinfo=timezone.utc)
+
+
+def _freeze_discovery_now(monkeypatch, now: datetime = _FROZEN_NOW) -> None:
+    """Pin the clock ``discovery.window_start`` reads, as
+    test_service_api.py does for the dashboard's windows."""
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now if tz is None else now.astimezone(tz)
+
+    monkeypatch.setattr(discovery, "datetime", _FrozenDatetime)
+
+
+def _tzdata_has(name: str) -> bool:
+    try:
+        zoneinfo.ZoneInfo(name)
+        return True
+    except zoneinfo.ZoneInfoNotFoundError:
+        return False
+
+
+def _spy_load_corpus(monkeypatch) -> dict:
+    """Record what ``cli.load_corpus`` is called with, then run it."""
+    seen: dict = {}
+    real_load_corpus = cli.load_corpus
+
+    def _spy(project_dirs, **kwargs):
+        seen.update(kwargs)
+        return real_load_corpus(project_dirs, **kwargs)
+
+    monkeypatch.setattr(cli, "load_corpus", _spy)
+    return seen
+
+
+def _window_args(**overrides) -> argparse.Namespace:
+    values = dict(
+        no_cache=True,
+        rebuild_cache=False,
+        days=None,
+        since=None,
+        until=None,
+        limit=None,
+        window_by="last-reply",
+        jobs=1,
+        verbose=False,
+        quiet=True,
+        tz=None,
+    )
+    values.update(overrides)
+    return argparse.Namespace(**values)
+
+
+@pytest.mark.parametrize("value", ["0", "-3", "x", "1.5"])
+def test_days_must_be_a_positive_whole_number(value, capsys):
+    with pytest.raises(SystemExit) as exc_info:
+        cli.main(["report", "--days", value])
+    assert exc_info.value.code == 2
+    err = capsys.readouterr().err
+    assert "--days" in err
+    assert "Traceback" not in err
+
+
+def test_days_accepts_a_positive_whole_number():
+    assert cli._make_parser().parse_args(["report", "--days", "7"]).days == 7
+
+
+@pytest.mark.parametrize("zone", [None, "UTC"])
+def test_report_days_starts_at_local_midnight_and_the_window_keeps_its_name(tmp_path, capsys, monkeypatch, zone):
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen = _spy_load_corpus(monkeypatch)
+    argv = ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+    if zone:
+        argv += ["--tz", zone]
+    exit_code = cli.main([*argv, "--days", "1", "--json"])
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert seen["since"] == discovery.window_start_iso(1, zone, now=_FROZEN_NOW)
+    assert seen["days"] is None
+    assert payload["report"]["meta"]["window"] == "last 1 days"
+    if zone == "UTC":
+        assert seen["since"] == "2026-09-18T00:00:00Z"
+
+
+@pytest.mark.skipif(not _tzdata_has("America/New_York"), reason="no tz database on this machine")
+def test_report_days_counts_days_in_the_tz_flags_zone(tmp_path, capsys, monkeypatch):
+    # 09:00 in New York on the 18th: that day began at 04:00 UTC.
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen = _spy_load_corpus(monkeypatch)
+    exit_code = cli.main(
+        ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "America/New_York", "--days", "1", "--json"]
+    )
+    assert exit_code == 0
+    capsys.readouterr()
+    assert seen["since"] == "2026-09-18T04:00:00Z"
+
+
+def test_window_since_takes_the_tz_flag_over_config_tz(monkeypatch):
+    seen = []
+
+    def _fake_window_start_iso(days, tz=None, **_kwargs):
+        seen.append((days, tz))
+        return "START"
+
+    monkeypatch.setattr(discovery, "window_start_iso", _fake_window_start_iso)
+    config = cli.load_config(None)
+    config.tz = "Europe/Paris"
+    assert cli._window_since(_window_args(days=3, tz="Asia/Tokyo"), config) == "START"
+    assert cli._window_since(_window_args(days=3), config) == "START"
+    config.tz = None
+    assert cli._window_since(_window_args(days=3), config) == "START"
+    assert seen == [(3, "Asia/Tokyo"), (3, "Europe/Paris"), (3, None)]
+
+
+def test_window_since_is_since_as_given_or_nothing():
+    config = cli.load_config(None)
+    assert cli._window_since(_window_args(since="2026-09-01"), config) == "2026-09-01"
+    assert cli._window_since(_window_args(until="2026-09-30"), config) is None
+    assert cli._window_since(_window_args(), config) is None
+
+
+def test_window_description(monkeypatch):
+    _freeze_discovery_now(monkeypatch)
+    config = cli.load_config(None)
+    config.tz = "UTC"
+    assert cli._window_description(_window_args(days=7), config) == "last 7 days"
+    assert cli._window_description(_window_args(), config) == "all time"
+    assert cli._window_description(_window_args(since="2026-09-01"), config) == "since 2026-09-01 until now"
+    assert cli._window_description(_window_args(until="2026-09-30"), config) == "since the beginning until 2026-09-30"
+    # With --until the window names its start, as the dashboard's label does.
+    assert (
+        cli._window_description(_window_args(days=7, until="2026-09-19"), config)
+        == "since 2026-09-12T00:00:00Z until 2026-09-19"
+    )
+
+
+def test_report_days_with_until_names_the_resolved_start(tmp_path, capsys, monkeypatch):
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    exit_code = cli.main(
+        ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "UTC", "--days", "7", "--until", "2026-09-19", "--json"]
+    )
+    assert exit_code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["report"]["meta"]["window"] == "since 2026-09-12T00:00:00Z until 2026-09-19"
+
+
+def test_load_corpus_for_args_starts_days_at_local_midnight_unless_rolling(tmp_path, monkeypatch):
+    root = tmp_path / "projects"
+    project_dir = _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen: dict = {}
+
+    def fake_load_corpus(project_dirs, **kwargs):
+        seen.update(kwargs)
+        return cli.Corpus(sessions=[])
+
+    monkeypatch.setattr(cli, "load_corpus", fake_load_corpus)
+    config = cli.load_config(None)
+    config.tz = "UTC"
+    args = _window_args(days=2)
+
+    cli._load_corpus_for_args(args, config, tmp_path, [project_dir])
+    assert (seen["days"], seen["since"]) == (None, "2026-09-17T00:00:00Z")
+
+    cli._load_corpus_for_args(args, config, tmp_path, [project_dir], rolling=True)
+    assert (seen["days"], seen["since"]) == (2, None)
+
+
+def test_capture_replays_keep_their_days_rolling(tmp_path, monkeypatch):
+    # They divide by their days, so they stay N x 24h whatever --days says.
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen: dict = {}
+
+    def fake_load_corpus(project_dirs, **kwargs):
+        seen.update(kwargs)
+        return cli.Corpus(sessions=[])
+
+    monkeypatch.setattr(cli, "load_corpus", fake_load_corpus)
+    config = cli.load_config(None)
+    config.tz = "UTC"
+    args = _window_args(days=3, projects_root=[str(root)])
+
+    cli._capture_corpus(args, config, tmp_path, days=cli.CAPTURE_HISTORY_DAYS)
+    assert (seen["days"], seen["since"], seen["until"]) == (cli.CAPTURE_HISTORY_DAYS, None, None)
+
+    cli._capture_corpus(args, config, tmp_path, since="2026-09-10T00:00:00Z")
+    assert (seen["days"], seen["since"]) == (None, "2026-09-10T00:00:00Z")
+
+
+def test_check_days_starts_at_local_midnight(tmp_path, capsys, monkeypatch):
+    from claudeglass import quick_actions
+
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    seen = {}
+
+    def fake_run_all(ctx):
+        seen["since_ts"], seen["until_ts"] = ctx.since_ts, ctx.until_ts
+        return []
+
+    monkeypatch.setattr(quick_actions, "run_all", fake_run_all)
+    exit_code = cli.main(
+        ["check", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "UTC", "--days", "1"]
+    )
+    assert exit_code == 0
+    capsys.readouterr()
+    assert seen == {"since_ts": discovery.window_start(1, "UTC", now=_FROZEN_NOW).timestamp(), "until_ts": None}
+
+
+def test_reconcile_days_stay_rolling(tmp_path, capsys, monkeypatch):
+    # Reconcile compares UTC days with the admin export's: --days stays
+    # N x 24h back from now, as before, not the report's local midnight.
+    from claudeglass import reconcile as reconcile_mod
+
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    csv_path = tmp_path / "admin.csv"
+    csv_path.write_text("date,cost\n2026-09-18,0.0\n", encoding="utf-8", newline="")
+    _freeze_discovery_now(monkeypatch)
+    seen = {}
+    real_reconcile = reconcile_mod.reconcile
+
+    def _spy(*args, **kwargs):
+        seen["since"], seen["until"] = kwargs["since"], kwargs["until"]
+        return real_reconcile(*args, **kwargs)
+
+    monkeypatch.setattr(reconcile_mod, "reconcile", _spy)
+    exit_code = cli.main(
+        ["reconcile", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--admin-csv", str(csv_path), "--tz", "UTC", "--days", "3", "--json"]
+    )
+    assert exit_code == 0
+    capsys.readouterr()
+    assert seen == {"since": "2026-09-15", "until": None}
+
+
+def test_a_rolling_window_with_until_names_its_rolling_start(monkeypatch):
+    _freeze_discovery_now(monkeypatch)
+    config = cli.load_config(None)
+    config.tz = "UTC"
+    args = _window_args(days=3, until="2026-09-19")
+    assert cli._window_description(args, config, rolling=True) == "since 2026-09-15T13:00:00Z until 2026-09-19"
+    assert cli._window_description(_window_args(days=3), config, rolling=True) == "last 3 days"
+
+
+def test_report_works_out_its_days_start_once(tmp_path, capsys, monkeypatch):
+    # The label, the corpus and the usage log share one start, so local
+    # midnight passing while the corpus loads can't split them across days.
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    _freeze_discovery_now(monkeypatch)
+    starts = []
+    real_window_start_iso = discovery.window_start_iso
+
+    def _counting(days, tz=None, **kwargs):
+        starts.append(days)
+        return real_window_start_iso(days, tz, **kwargs)
+
+    monkeypatch.setattr(discovery, "window_start_iso", _counting)
+    exit_code = cli.main(
+        ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "UTC", "--days", "7", "--until", "2026-09-19", "--json"]
+    )
+    assert exit_code == 0
+    capsys.readouterr()
+    assert starts == [7]
+
+
+@pytest.mark.parametrize("command, extra", [("report", []), ("config-diff", ["--auto-keys"]), ("export", [])])
+def test_days_further_back_than_the_calendar_is_a_usage_error(tmp_path, capsys, command, extra):
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+    exit_code = cli.main(
+        [command, "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--tz", "UTC", "--days", "800000", *extra]
+    )
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert f"claudeglass {command}: --days 800000 is too large" in err
+    assert "Traceback" not in err
+
+
+def test_days_before_1970_on_a_machine_that_cannot_count_back_is_a_usage_error(tmp_path, capsys, monkeypatch):
+    # Windows can't place a local time before 1970 (OSError).
+    root = tmp_path / "projects"
+    _write_project(root, "proj-a")
+
+    def _too_far(days, tz=None, **_kwargs):
+        raise OSError(22, "Invalid argument")
+
+    monkeypatch.setattr(discovery, "window_start_iso", _too_far)
+    exit_code = cli.main(
+        ["report", "--projects-root", str(root), "--project", "proj-a", "--config-dir", str(tmp_path / "tl")]
+        + ["--days", "36500", "--json"]
+    )
+    assert exit_code == 2
+    assert "claudeglass report: --days 36500 is too large" in capsys.readouterr().err
 
 
 # -- probe ----------------------------------------------------------------
@@ -1906,6 +2363,72 @@ def test_check_lists_every_quick_action_and_runs_one_in_full(tmp_path, capsys):
     assert cli.main(["check", "models", *base]) == 0
     assert capsys.readouterr().out.startswith("## Is each agent on the cheapest model")
 
+
+def test_check_reads_the_settings_in_force_in_the_selected_project(tmp_path, capsys, monkeypatch):
+    """proj-a's own newest snapshot, not proj-b's newer one; with every
+    project, the newest of all."""
+    from claudeglass import quick_actions
+
+    root, config_dir = _alternating_snapshots(tmp_path)
+    seen = []
+    real = quick_actions.Context
+    monkeypatch.setattr(quick_actions, "Context", lambda **kwargs: seen.append(kwargs["effective"]) or real(**kwargs))
+
+    for selection in (["--project", "proj-a"], ["--project", "proj-b"], ["--all-projects"]):
+        assert cli.main(["check", "--projects-root", str(root), *selection, "--config-dir", str(config_dir)]) == 0
+    capsys.readouterr()
+    assert [effective.get("model") for effective in seen] == ["opus", "haiku", "haiku"]
+
+
+def test_review_claude_md_follows_the_selected_project(tmp_path, capsys):
+    """As review skills does: the selected project's CLAUDE.md files and
+    your own, never another project's."""
+    claude_root = tmp_path / "claude"
+    root = claude_root / "projects"
+    claude_root.mkdir()
+    (claude_root / "CLAUDE.md").write_text("# Mine\n\nBe brief.\n", encoding="utf-8")
+    for slug, name in (("proj-a", "alpha-repo"), ("proj-b", "beta-repo")):
+        _write_project(root, slug)
+        folder = tmp_path / "work" / name
+        folder.mkdir(parents=True)
+        (folder / "CLAUDE.md").write_text(f"# {name}\n\nNotes for {name}.\n", encoding="utf-8")
+        write_jsonl(root / slug / "folder.jsonl", [{"type": "user", "cwd": str(folder)}])
+    base = ["review", "claude-md", "--projects-root", str(root), "--config-dir", str(claude_root / "claudeglass")]
+
+    assert cli.main([*base, "--project", "proj-a"]) == 0
+    picked = capsys.readouterr().out
+    assert "alpha-repo" in picked and "beta-repo" not in picked
+
+    assert cli.main([*base, "--all-projects"]) == 0
+    everything = capsys.readouterr().out
+    assert "alpha-repo" in everything and "beta-repo" in everything
+
+
+def test_review_and_check_claude_md_find_a_project_under_a_home_folder(tmp_path, capsys):
+    """The report redacts a slug under a home folder (Users-<user>), so the
+    folders come from the raw project names the report loaded: the picked
+    project's CLAUDE.md is listed, never another's."""
+    claude_root = tmp_path / "claude"
+    root = claude_root / "projects"
+    claude_root.mkdir()
+    for slug, name in (("C--Users-alice-alpha", "alpha-repo"), ("C--Users-alice-beta", "beta-repo")):
+        _write_project(root, slug)
+        folder = tmp_path / "work" / name
+        folder.mkdir(parents=True)
+        (folder / "CLAUDE.md").write_text(f"# {name}\n\nNotes for {name}.\n", encoding="utf-8")
+        write_jsonl(root / slug / "folder.jsonl", [{"type": "user", "cwd": str(folder)}])
+    common = [
+        "--projects-root",
+        str(root),
+        "--project",
+        "C--Users-alice-alpha",
+        "--config-dir",
+        str(claude_root / "claudeglass"),
+    ]
+    for command in (["review", "claude-md"], ["check", "claude-md"]):
+        assert cli.main([*command, *common]) == 0
+        out = capsys.readouterr().out
+        assert "alpha-repo" in out and "beta-repo" not in out
 
 
 def test_cli_reports_merge_the_dashboards_session_tags_over_sessions_toml(tmp_path):

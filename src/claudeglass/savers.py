@@ -390,6 +390,9 @@ def _build_session_aggs(
             continue
         transcripts = [record.top, *record.subs]
 
+        # ``project_key`` is every key the project's snapshots can carry
+        # (``snapshots.snapshot_project_keys``), so either drive-letter
+        # spelling joins.
         joined = snapshots_mod.snapshot_for(record.first_ts, snapshots, record.project_key) if record.first_ts and snapshots else None
         present: set[str] = set()
         if joined is not None:
