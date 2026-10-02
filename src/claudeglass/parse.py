@@ -533,6 +533,20 @@ def path_hash(path_value: str, salt: bytes) -> str:
     return hmac.new(salt, normalized.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
 
 
+def _temp_prefixes() -> tuple[str, ...]:
+    """The normalised directory prefixes (see :func:`_normalize_path_for_hash`,
+    so the lower-case, forward-slash and Git Bash ``/c/`` forms all match)
+    that count as temp for a shell write: the system temp dir, and the
+    ``/tmp/`` Git Bash and Linux use."""
+    return (_normalize_path_for_hash(tempfile.gettempdir()).rstrip("/") + "/", "/tmp/")
+
+
+def _is_temp_target(target: str, prefixes: tuple[str, ...]) -> bool:
+    """Whether a shell write target is inside a temp dir. A scratch file is
+    not an edit to your work, so ``Turn.shell_write_count`` leaves it out."""
+    return _normalize_path_for_hash(target).startswith(prefixes)
+
+
 def detect_provider(model_id: str | None) -> str | None:
     """Classify which API surface a model id was billed through, from the
     id's own form (plan Enterprise-use section): a Bedrock id is prefixed
@@ -738,6 +752,12 @@ class _PendingTurn:
     #: tool_use id -> the hashes it added to ``edit_target_hashes``, so
     #: ``_accumulate_tool_results`` can take back an edit that failed.
     edit_hashes_by_tool_use: dict[str, list[str]] = field(default_factory=dict)
+    #: Agent-roles addition (see model.py's ``Turn.shell_write_count``):
+    #: the shell write targets outside the temp dir, a count only, and the
+    #: part each tool_use added, so a command that never ran can be taken
+    #: back like ``edit_hashes_by_tool_use``.
+    shell_write_count: int = 0
+    shell_writes_by_tool_use: dict[str, int] = field(default_factory=dict)
     #: Fast-mode addition (see model.py's ``Turn.speed`` docstring).
     speed: str | None = None
     #: Quality-markers/metrics-capture addition: the end of this reply's
@@ -981,6 +1001,7 @@ def _merge_content_blocks(
     if not isinstance(content, list):
         return
     tmpdir = tempfile.gettempdir().lower()
+    temp_prefixes = _temp_prefixes()
     for block in content:
         if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
             # The reply's last text block decides: a marker further up
@@ -1062,13 +1083,25 @@ def _merge_content_blocks(
                 hashed = _read_target_hash(target_value)
                 if hashed is not None:
                     edited.append(hashed)
-        elif name in _SHELL_TOOL_NAMES and _SALT is not None:
+        elif name in _SHELL_TOOL_NAMES:
             command = tool_input.get("command")
             if isinstance(command, str) and command:
+                outside_temp = 0
                 for target in shell_writes.write_targets(
                     command, powershell=name == "PowerShell", cwd=cwd if isinstance(cwd, str) else None
                 ):
-                    edited.append(path_hash(target, _SALT))
+                    if _SALT is not None:
+                        edited.append(path_hash(target, _SALT))
+                    # Agent-roles addition: the count needs no salt, and
+                    # keeps no path.
+                    if not _is_temp_target(target, temp_prefixes):
+                        outside_temp += 1
+                if outside_temp:
+                    pending.shell_write_count += outside_temp
+                    if isinstance(tool_use_id, str) and tool_use_id:
+                        pending.shell_writes_by_tool_use[tool_use_id] = (
+                            pending.shell_writes_by_tool_use.get(tool_use_id, 0) + outside_temp
+                        )
         if edited:
             pending.edit_target_hashes.extend(edited)
             if isinstance(tool_use_id, str) and tool_use_id:
@@ -1560,6 +1593,11 @@ def _accumulate_tool_results(
                 if edited and (name not in _SHELL_TOOL_NAMES or kind in _SHELL_NOT_RUN_KINDS):
                     for hashed in edited:
                         current.edit_target_hashes.remove(hashed)
+                # The same for the count, which has no salt to depend on: a
+                # command that never ran wrote nothing.
+                shell_writes_made = current.shell_writes_by_tool_use.pop(tool_use_id, 0)
+                if shell_writes_made and kind in _SHELL_NOT_RUN_KINDS:
+                    current.shell_write_count -= shell_writes_made
                 # SEC-P3: a Skill call that errored never happened as far
                 # as "known skills" is concerned -- take back its
                 # provisional name so it can't self-authorise this same
@@ -1804,6 +1842,7 @@ def _finalize_turn(
         tool_errors_by_tool=dict(pending.tool_errors_by_tool),
         tool_errors_by_kind=dict(pending.tool_errors_by_kind),
         edit_target_hashes=tuple(pending.edit_target_hashes),
+        shell_write_count=pending.shell_write_count,
         human_correction=human_correction,
         speed=pending.speed,
         retry_marker=retry_marker,

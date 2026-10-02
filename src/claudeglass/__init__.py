@@ -239,7 +239,13 @@ __version__ = "0.13.0"
 #: connection problems (model.py's MCP-servers addition), and a surfaced
 #: tool no longer counts as kept out by tool search. A pre-35 digest has
 #: none of these, so every server would look free.
-PARSER_VERSION = 35
+#:
+#: Bumped to 36: each agent's role word (a canonical word from
+#: agent_roles.py, never the phase, label or description it came from),
+#: whether its meta records a model at all, and the shell writes a turn
+#: made outside the temp dir (model.py's Agent-roles addition). A pre-36
+#: digest has none of these, so no agent could be told apart.
+PARSER_VERSION = 36
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

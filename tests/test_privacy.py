@@ -30,9 +30,11 @@ path under 64 chars).
 from __future__ import annotations
 
 import dataclasses
+import json
 import re
 from pathlib import Path
 
+from claudeglass.discovery import load_meta
 from claudeglass.model import Column, EventKind, Recommendation, Section, Table, TranscriptMeta
 from claudeglass.parse import parse_transcript
 
@@ -972,3 +974,43 @@ def test_privacy_mcp_server_fields_hold_only_identifiers_and_numbers(tmp_path: P
             assert all(len(suffix) <= _MAX_STR_LEN and ident.match(suffix) for suffix in value), value
     assert "Private" not in repr(result) and "secret notes" not in repr(result)
     assert_privacy(result)
+
+
+def test_privacy_meta_phase_and_description_leave_only_the_role_word(tmp_path: Path):
+    """A workflow agent's phase and description are free text. The meta keeps
+    one canonical role word and nothing they said: no sentence, no path, no
+    fragment of either, in any field."""
+    sentence = "Review the parser rewrite in C:/Users/someone/secret-project/src/parser.py and report back"
+    run_dir = tmp_path / "session-p" / "subagents" / "workflows" / "wf_p"
+    run_dir.mkdir(parents=True)
+    meta_path = run_dir / "agent-p1.meta.json"
+    meta_path.write_text(
+        json.dumps(
+            {
+                "agentType": "workflow-subagent",
+                "workflowPhase": sentence + " " + sentence,
+                "description": "impl:/home/someone/private/notes.txt " + sentence,
+            }
+        )
+    )
+    write_jsonl(run_dir / "agent-p1.jsonl", [turn_line(message_id="msg_1", input_tokens=100, output_tokens=10)])
+
+    meta = load_meta(meta_path)
+    result = parse_transcript(run_dir / "agent-p1.jsonl", meta)
+
+    for held in (meta, result.meta):
+        assert held.role_word == "review"  # the phase wins; the word, not the sentence
+        assert held.model_recorded is True
+        strings = [
+            value
+            for f in dataclasses.fields(held)
+            if f.name != "path"
+            for value in (getattr(held, f.name),)
+            if isinstance(value, str)
+        ]
+        for forbidden in ("parser", "rewrite", "someone", "secret", "notes", "report back", "C:/", "/home/"):
+            assert not any(forbidden in value for value in strings), forbidden
+            assert forbidden not in repr(dataclasses.replace(held, path=""))
+    assert meta.description_len == len("impl:/home/someone/private/notes.txt " + sentence)
+    _assert_no_violations(result)
+    assert_privacy(meta)

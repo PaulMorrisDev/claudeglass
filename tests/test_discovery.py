@@ -550,6 +550,83 @@ def test_load_meta_reads_a_workflow_agents_end_state_from_its_finished_run(tmp_p
     assert "never kept" not in repr(meta)
 
 
+def _workflow_meta_path(tmp_path, meta_body):
+    run_dir = tmp_path / "session-roles" / "subagents" / "workflows" / "wf_x"
+    run_dir.mkdir(parents=True)
+    meta_path = run_dir / "agent-a1.meta.json"
+    meta_path.write_text(json.dumps(meta_body))
+    return meta_path
+
+
+def test_load_meta_keeps_a_workflow_agents_role_word_and_none_of_its_label(tmp_path):
+    meta_path = _workflow_meta_path(
+        tmp_path,
+        {"agentType": "workflow-subagent", "workflowPhase": "Implement", "description": "impl:C:/Users/x/secret.py"},
+    )
+    meta = discovery.load_meta(meta_path)
+    assert meta.kind == "workflow-agent"
+    assert meta.role_word == "implement"
+    assert meta.model_recorded is True  # a new-shape meta, and it names no model
+    assert meta.agent_model_alias is None
+    assert "secret" not in repr(meta)
+    assert "C:/" not in repr(meta)
+
+
+def test_load_meta_an_old_shape_workflow_meta_has_no_role_and_records_no_model(tmp_path):
+    meta = discovery.load_meta(_workflow_meta_path(tmp_path, {"agentType": "workflow-subagent", "spawnDepth": 1}))
+    assert meta.role_word is None
+    assert meta.model_recorded is False
+
+
+def test_load_meta_an_agent_tool_meta_takes_its_role_from_the_description(tmp_path):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(
+        json.dumps({"agentType": "general-purpose", "description": "Fix the parser", "model": "sonnet"})
+    )
+    meta = discovery.load_meta(meta_path)
+    assert meta.role_word == "fix"
+    assert meta.model_recorded is True
+    assert meta.agent_model_alias == "sonnet"
+
+
+def test_load_meta_a_fork_meta_has_no_role_word(tmp_path):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(json.dumps({"agentType": "fork", "description": "A side question about the config"}))
+    meta = discovery.load_meta(meta_path)
+    assert meta.role_word is None
+    assert meta.model_recorded is True
+
+
+def test_load_meta_a_named_type_gives_the_role_when_the_label_has_none(tmp_path):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(json.dumps({"agentType": "claude-implementer", "description": "Parser work"}))
+    assert discovery.load_meta(meta_path).role_word == "implement"
+
+
+def test_load_meta_the_phase_wins_over_the_description(tmp_path):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(json.dumps({"workflowPhase": "Verify", "description": "Implement the change"}))
+    assert discovery.load_meta(meta_path).role_word == "verify"
+
+
+@pytest.mark.parametrize("body", [{"description": None}, {"workflowPhase": ""}, {"description": 7}])
+def test_load_meta_model_recorded_is_key_presence_whatever_the_value(tmp_path, body):
+    meta_path = tmp_path / "agent-abc.meta.json"
+    meta_path.write_text(json.dumps(body))
+    meta = discovery.load_meta(meta_path)
+    assert meta.model_recorded is True
+    assert meta.role_word is None
+
+
+def test_load_meta_a_missing_or_malformed_meta_has_no_role_and_records_no_model(tmp_path):
+    bad = tmp_path / "bad.meta.json"
+    bad.write_text("{not valid json")
+    for path in (bad, tmp_path / "does-not-exist.meta.json"):
+        meta = discovery.load_meta(path)
+        assert meta.role_word is None
+        assert meta.model_recorded is False
+
+
 # -- calendar windows: window_start and its zone helpers ---------------------
 
 _HOUR = timedelta(hours=1)

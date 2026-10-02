@@ -34,7 +34,7 @@ from datetime import time as dtime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from . import jsonl
+from . import agent_roles, jsonl
 from .model import TranscriptMeta
 from .parse import detect_provider
 
@@ -629,7 +629,13 @@ def load_meta(path: str | Path) -> TranscriptMeta:
     """Load one subagent ``.meta.json`` file into a ``TranscriptMeta``.
 
     Maps ``agentType``, ``description`` (length only, never the text),
-    ``spawnDepth``, ``parentAgentId``, ``model`` (-> ``agent_model_alias``
+    ``workflowPhase`` and ``description`` (-> ``role_word``, the one
+    canonical word ``agent_roles.role_word`` finds in the phase, then the
+    type, then the description's first words; never the text, so a phase
+    or label that carries a path leaves nothing behind), the presence of
+    either of those two keys (-> ``model_recorded``: the newer meta shape,
+    where an absent ``model`` means the call set none), ``spawnDepth``,
+    ``parentAgentId``, ``model`` (-> ``agent_model_alias``
     — ``model`` on ``TranscriptMeta`` isn't a field; the transcript's own
     turns carry the real per-turn ``model`` — and, from the same value,
     -> ``provider`` via ``parse.detect_provider``, a best guess before any
@@ -686,6 +692,12 @@ def load_meta(path: str | Path) -> TranscriptMeta:
     description = raw.get("description")
     if isinstance(description, str):
         meta.description_len = len(description)
+
+    # Agent-roles addition (see model.py's TranscriptMeta.role_word
+    # docstring): the one canonical word, then the phase, type and
+    # description text is dropped. model_recorded is key presence only.
+    meta.role_word = agent_roles.role_word(raw.get("workflowPhase"), raw.get("agentType"), description)
+    meta.model_recorded = "description" in raw or "workflowPhase" in raw
 
     model = raw.get("model")
     if isinstance(model, str):

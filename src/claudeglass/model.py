@@ -506,6 +506,29 @@ Names, lengths and counts only, never an instruction or a definition:
 ``Turn.deferred_tools_by_server`` no longer counts a tool named in
 ``surfacedNames``: it is listed, and also sent in full.
 
+Agent-roles addition (``PARSER_VERSION`` 36). What telling an agent that
+writes code from one that decides needs, for the check on agents that run
+on a model by accident. A closed word, a yes/no and a count; never a
+phase, label, description or path:
+
+- ``TranscriptMeta.role_word: str | None = None`` -- the canonical word
+  (``agent_roles.role_word``) for what the agent is: its ``workflowPhase``
+  first, then a named ``agentType``, then the first words of its
+  ``description``. ``None`` when none of them names a role. Read by
+  ``discovery.load_meta``, which drops the text at once.
+- ``TranscriptMeta.model_recorded: bool = False`` -- the meta file has a
+  ``description`` or ``workflowPhase`` key (whatever its value), so it is
+  the newer shape, where an absent ``model`` means the call chose none.
+- ``Turn.shell_write_count: int = 0`` -- how many write targets this
+  turn's Bash/PowerShell commands named outside the temp dir
+  (``shell_writes.write_targets``, the same call ``edit_target_hashes``
+  uses, but counted with or without the salt). Repeats are kept, so a
+  file written twice counts twice. A target is temp when, normalised like
+  the path hashes (``..`` resolved, case and slashes folded, ``/c/`` read
+  as ``c:``), it sits under ``tempfile.gettempdir()`` or ``/tmp/``. Taken
+  back for a command that was blocked or denied. A count only, never a
+  path.
+
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
 count, a closed word (with an "other" fallback) or a raw number off a
@@ -828,6 +851,10 @@ class Turn:
     #: Quality-signals addition (see module docstring): salted hashes of
     #: the files this turn edited, by edit tool or shell command.
     edit_target_hashes: tuple[str, ...] = ()
+    #: Agent-roles addition (see module docstring): how many write targets
+    #: this turn's Bash/PowerShell commands named outside the temp dir (a
+    #: file written twice counts twice). A count only, never a path.
+    shell_write_count: int = 0
     #: Quality-signals addition (see module docstring): the preceding
     #: human message looks like a correction. Flag only.
     human_correction: bool = False
@@ -966,6 +993,16 @@ class TranscriptMeta:
     cc_cost_by_model: dict = field(default_factory=dict)
     #: When the process that total counts from started (``startTime``).
     cc_cost_since: str | None = None
+    #: Agent-roles addition (see module docstring): the canonical word
+    #: ``agent_roles.role_word`` finds in the agent's phase, then its named
+    #: type, then the first four words of its description ("implement",
+    #: "review"), else None. The word only, never the text it came from.
+    role_word: str | None = None
+    #: Agent-roles addition: whether the meta file records a model at all.
+    #: Only the newer shape (it carries ``description`` or
+    #: ``workflowPhase``) leaves ``model`` out exactly when the call set
+    #: none; an older meta can't say. Key presence only.
+    model_recorded: bool = False
 
 
 @dataclass(slots=True)

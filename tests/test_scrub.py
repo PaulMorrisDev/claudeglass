@@ -13,6 +13,7 @@ import hmac
 import json
 from pathlib import Path
 
+from claudeglass import agent_roles
 from claudeglass.tools import scrub
 
 from helpers import (
@@ -242,7 +243,7 @@ def test_scrub_line_hashes_cwd_to_a_short_slug():
 def test_scrub_meta_json_whitelists_fields_and_x_fills_description():
     raw = {
         "agentType": "code-reviewer",
-        "description": "review the auth module for a customer named Alice",
+        "description": "summarise the auth module for a customer named Alice",
         "spawnDepth": 1,
         "model": "claude-sonnet-5",
         "requestShape": "task",
@@ -261,6 +262,69 @@ def test_scrub_meta_json_whitelists_fields_and_x_fills_description():
     assert out["worktreeBranch"] == "x" * len(raw["worktreeBranch"])
     assert out["toolUseId"] != "toolu_meta_1"
     assert len(out["toolUseId"]) == len("toolu_meta_1")
+
+
+def test_scrub_meta_json_keeps_workflow_phase_only_as_its_role_word():
+    out = scrub.scrub_meta_json({"workflowPhase": "Implement"}, _KEY)
+    assert out["workflowPhase"] == "implement"
+
+    # A form maps to its canonical word, never stays as written.
+    out = scrub.scrub_meta_json({"workflowPhase": "Verifying the Acme billing"}, _KEY)
+    assert out["workflowPhase"] == "verify"
+    assert "Acme" not in json.dumps(out)
+
+
+def test_scrub_meta_json_drops_a_workflow_phase_with_no_role_word():
+    out = scrub.scrub_meta_json({"workflowPhase": "Pricing for Acme"}, _KEY)
+    assert "workflowPhase" not in out
+    assert "Acme" not in json.dumps(out)
+
+
+def test_scrub_meta_json_drops_a_workflow_phase_that_is_not_a_string():
+    for phase in (None, 7, True, ["implement"], {"phase": "implement"}):
+        assert "workflowPhase" not in scrub.scrub_meta_json({"workflowPhase": phase}, _KEY)
+
+
+def test_scrub_meta_json_description_with_a_role_word_keeps_the_word_and_the_length():
+    description = "Fix the Acme parser in C:/x"
+    out = scrub.scrub_meta_json({"description": description}, _KEY)
+
+    assert out["description"] == "fix" + " " + "x" * (len(description) - len("fix") - 1)
+    assert len(out["description"]) == len(description)
+    assert "Acme" not in out["description"]
+    assert "C:" not in out["description"]
+
+
+def test_scrub_meta_json_description_keeps_the_canonical_word_not_the_form():
+    description = "impl: the Acme importer"
+    out = scrub.scrub_meta_json({"description": description}, _KEY)
+    assert out["description"] == "implement " + "x" * (len(description) - len("implement") - 1)
+
+
+def test_scrub_meta_json_description_shorter_than_its_word_is_just_the_word():
+    out = scrub.scrub_meta_json({"description": "impl"}, _KEY)
+    assert out["description"] == "implement"
+
+
+def test_scrub_meta_json_description_with_no_role_word_is_all_x():
+    description = "Pricing for the Acme parser"
+    out = scrub.scrub_meta_json({"description": description}, _KEY)
+    assert out["description"] == "x" * len(description)
+
+
+def test_scrub_meta_json_description_role_word_past_the_fourth_token_is_ignored():
+    description = "one two three four fix the Acme parser"
+    out = scrub.scrub_meta_json({"description": description}, _KEY)
+    assert out["description"] == "x" * len(description)
+
+
+def test_scrub_meta_json_role_words_survive_a_second_read():
+    # The scrubbed fixture has to tell the same agents apart as the original.
+    raw = {"workflowPhase": "Reviewing", "description": "Implementation of the Acme importer"}
+    out = scrub.scrub_meta_json(raw, _KEY)
+    assert agent_roles.role_word(out["workflowPhase"], None, None) == "review"
+    assert agent_roles.role_word(None, None, out["description"]) == "implement"
+    assert agent_roles.role_word(None, None, out["description"]) == agent_roles.role_word(None, None, raw["description"])
 
 
 # -- workflow json -------------------------------------------------------
@@ -307,6 +371,13 @@ def test_scrub_workflow_json_non_allowlisted_title_becomes_phase_n():
     raw = {"runId": "wf_x", "phases": [{"title": "Fix the customer's billing issue"}]}
     out = scrub.scrub_workflow_json(raw, _KEY)
     assert out["phases"][0]["title"] == "phase-0"
+
+
+def test_scrub_workflow_json_keeps_a_role_word_title_verbatim():
+    raw = {"runId": "wf_x", "phases": [{"title": "Judge"}, {"title": " Reviewers "}, {"title": "Judge Acme"}]}
+    out = scrub.scrub_workflow_json(raw, _KEY)
+    assert [p["title"] for p in out["phases"]] == ["Judge", " Reviewers ", "phase-2"]
+    assert "Acme" not in json.dumps(out)
 
 
 # -- scrub_session end to end ---------------------------------------------
@@ -388,6 +459,39 @@ def test_scrub_session_end_to_end_produces_a_privacy_clean_directory(tmp_path):
     assert len(subs) == 3
 
 
+def test_scrub_session_keeps_role_words_in_workflow_sidecars_and_verifies_clean(tmp_path):
+    session_dir = _build_synthetic_session(tmp_path / "in")
+    run_dir = session_dir / "subagents" / "workflows" / "wf_run1"
+    run_dir.mkdir(parents=True)
+    agent_path = run_dir / "agent-00000000000000aa.jsonl"
+    write_jsonl(agent_path, [turn_line(message_id="wf_agent_msg", output_tokens=10)])
+    agent_path.with_name(agent_path.stem + ".meta.json").write_text(
+        json.dumps(
+            {
+                "agentType": "workflow-subagent",
+                "workflowPhase": "Implement",
+                "description": "Fix the Acme parser in C:/x",
+                "toolUseId": "toolu_wf_1",
+            }
+        ),
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out" / "session-roles"
+
+    scrub.scrub_session(session_dir, out_dir, _KEY)
+
+    metas = [p for p in out_dir.rglob("*.meta.json") if "workflows" in p.parts]
+    assert len(metas) == 1
+    meta = json.loads(metas[0].read_text(encoding="utf-8"))
+    assert meta["workflowPhase"] == "implement"
+    assert meta["description"] == "fix" + " " + "x" * (len("Fix the Acme parser in C:/x") - len("fix") - 1)
+    for path in out_dir.rglob("*"):
+        if path.is_file():
+            assert "Acme" not in path.read_text(encoding="utf-8")
+    ok, violations = scrub.verify_dir(out_dir)
+    assert ok, violations
+
+
 def test_scrub_session_reproducible_with_key_seed(tmp_path):
     session_dir = _build_synthetic_session(tmp_path / "in")
     key_a = scrub._resolve_key("fixed-seed")
@@ -426,6 +530,30 @@ def test_verify_dir_fails_on_windows_drive_path(tmp_path):
     )
     ok, violations = scrub.verify_dir(out_dir)
     assert not ok
+
+
+def test_verify_dir_passes_on_scrubbed_role_words(tmp_path):
+    out_dir = tmp_path / "roles"
+    out_dir.mkdir()
+    meta = scrub.scrub_meta_json(
+        {"workflowPhase": "Implement", "description": "Fix the Acme parser in the billing service"}, _KEY
+    )
+    assert meta["workflowPhase"] == "implement" and meta["description"].startswith("fix x")
+    (out_dir / "agent-0.meta.json").write_text(json.dumps(meta), encoding="utf-8")
+    ok, violations = scrub.verify_dir(out_dir)
+    assert ok, violations
+
+
+def test_verify_dir_fails_on_role_word_keys_carrying_other_text(tmp_path):
+    out_dir = tmp_path / "leaky3"
+    out_dir.mkdir()
+    (out_dir / "agent-0.meta.json").write_text(
+        json.dumps({"workflowPhase": "Pricing for Acme", "description": "fix the Acme parser"}), encoding="utf-8"
+    )
+    ok, violations = scrub.verify_dir(out_dir)
+    assert not ok
+    assert any("workflowPhase" in v and "Pricing" in v for v in violations)
+    assert any("description" in v and "parser" in v for v in violations)
 
 
 def test_verify_dir_passes_on_clean_x_runs(tmp_path):

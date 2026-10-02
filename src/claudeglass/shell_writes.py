@@ -1,6 +1,8 @@
 """Which files a Bash or PowerShell command writes, so an edit made
 through a shell command is recorded like one made with Edit or Write
-(``Turn.edit_target_hashes``, as salted hashes only).
+(``Turn.edit_target_hashes``, as salted hashes only), and counted
+(``Turn.shell_write_count``: outside the temp dir, with no salt needed,
+a count only).
 
 Only writes whose content the command itself authors count:
 
@@ -23,7 +25,7 @@ resolves against the process directory, not the shell's, so only an
 absolute one counts.
 
 The command is read here and dropped: :func:`write_targets` returns the
-paths for the caller to hash and discard.
+paths for the caller to hash and count, then discard.
 """
 
 from __future__ import annotations
