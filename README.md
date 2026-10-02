@@ -51,7 +51,8 @@ answered from your own sessions:
   thinking.
 - **"Am I on the right model?"** It finds agents on Opus or Sonnet doing
   work a cheaper model finishes just as well, and checks whether cheaper
-  runs had to be redone by a larger model.
+  runs had to be redone by a larger model. It also names the agents that
+  wrote code on Opus or Fable only because nothing set their model.
 - **"Why did my cache miss?"** Each prompt-cache rebuild is dated and
   explained: a pause longer than the cache lifetime, a conversation
   summary, or a change early in the context.

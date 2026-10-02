@@ -718,7 +718,16 @@ only the runs its agent file's model decides; the per-type table's
 additive `lever_runs`, `lever_priced_turns`, `lever_model`,
 `lever_cost`, `workflow_runs` and `spawn_model_runs` columns say which,
 and a third table, `model_swap_agent_file_runs`, reprices those runs at
-every model (see [`model-swap.md`](model-swap.md)).
+every model (see [`model-swap.md`](model-swap.md)). A fourth,
+`model_swap_agent_models`, has one row per agent type and finding for
+agents that ran on a larger model than their work needed: `verdict` is
+`inherited` (no model set), `asked` (the call named it) or
+`decide-apply`, with the agents' roles, model, cost, cost on Sonnet,
+ceiling saving, edit turns, first and last dates, later writers on
+Sonnet or smaller, and whether `CLAUDE_CODE_SUBAGENT_MODEL` is set. It
+carries agent types, role words, counts, models, amounts and dates, and
+no ids, labels or paths. It has no rows when no agent was flagged (see
+[`model-swap.md`](model-swap.md#agents-that-ran-on-a-larger-model-than-their-work-needed)).
 
 Query: `window`, `window_days`, or `since`/`until` (see "Report-backed
 routes: windowing query params" above).

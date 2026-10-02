@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Agents that ran on a larger model than their work needed.**
+  ClaudeGlass now reads, for every subagent and workflow agent,
+  whether a model was set and whether it wrote code. A new card,
+  `agent-model-inherited`, names agents that wrote code on a model
+  above Sonnet because nothing set one: workflow agents as one card,
+  each Agent-tool type as its own. It prices the same tokens on Sonnet
+  as a ceiling, since Sonnet may need more replies, and gives you a
+  "from now on" rule to paste. Once 3 or more later agents that wrote
+  code ran on Sonnet or smaller, it drops to info and says it looks
+  fixed. While it is advice, its saving counts in the Overview's
+  available saving wherever the model lever has none for that agent
+  type. Two info cards cover the rest. `agent-model-asked` is for
+  agents that wrote code on Opus or Fable because their call asked for
+  it. `agent-decide-apply` is for Opus or Fable agents whose job was to
+  decide, such as review, verify or judge, that also changed code in 3
+  or more replies, which suggests splitting the work. Agents that
+  decide never count as code writers, an agent that integrates is
+  never flagged, and the main session is never advised on. A new
+  table, `model_swap_agent_models`, on Spend › Savings lists each
+  case, and the Models check raises the cards. ClaudeGlass stores one
+  role word per agent, whether its meta file records a model, and a
+  count of the shell writes in each reply outside the temp folder,
+  never a prompt, label or description. Parsed sessions are re-read
+  once to pick this up. `scrub-fixture` now keeps that role word from
+  a workflow phase or description, and nothing else of either.
+
+### Fixed
+
+- **A scratch edit written with forward slashes counted as an edit to
+  your code.** Claude Code on Windows often gives a Write or Edit into
+  the temp folder with forward slashes, and only the backslash form was
+  recognised, so a script an agent wrote to its scratchpad looked like
+  a change to your code. The temp folder now matches however it is
+  spelled, and `/tmp/` counts as temp on every system. This touches
+  every figure that tells your edits from scratch ones: the Building
+  and Checking phases, whether a plan was built after it was approved,
+  what a session was for, and the new agent cards. The re-read above
+  picks it up.
+- **The model-swap notes gave a workflow agent's model wrongly.** They
+  said a workflow has a default model. It has none: a workflow agent's
+  model comes from its `agent()` call, else its agent type's file, else
+  `CLAUDE_CODE_SUBAGENT_MODEL`, else your main session's model. The
+  run file's `defaultModel` only records the main model at launch, and
+  a model in `meta.phases` only labels the phase. The report's
+  assumptions and the model-swap docs now say so. Model swap still
+  counts every workflow agent run as set by its script, whatever its
+  agent type, so none is in an agent type's saving.
+
 ## [0.13.0] - 2026-10-02
 
 ### Added

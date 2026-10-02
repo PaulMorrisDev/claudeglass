@@ -451,7 +451,13 @@ apply-side wiring:
   parameter, 2) the subagent's own `model` frontmatter (including
   `inherit`), 3) `CLAUDE_CODE_SUBAGENT_MODEL`, 4) the main conversation's
   model — and that setting it alone does **not** change what the
-  built-in Explore/Plan subagents run on.
+  built-in Explore/Plan subagents run on. The agent-model cards
+  (`agent_models.py`, see
+  [`model-swap.md`](model-swap.md#agents-that-ran-on-a-larger-model-than-their-work-needed))
+  read the same name from the latest snapshot's `env_names`: when it
+  is there, the `agent-model-inherited` card says an agent that named
+  no model ran on the model that variable names, not on your main
+  session's. They do not read `CLAUDE_CODE_SUBAGENT_MODEL_FORCE`.
 - `env-attribution-deprecated` (severity `info`) — fires when
   `includeCoAuthoredBy` is set in `effective` and `attribution` is not
   (docs/en/settings-reference.md: `attribution` replaces the deprecated

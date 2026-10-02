@@ -512,7 +512,12 @@ that order, each as a heading with a one-line answer beside it.
    of it), taken from what the others leave (`combinedSaving`). A cheaper
    model prices the fewer tokens earlier summaries leave, so the two
    multiply. An action a Savings lever already counts (`LEVER_RULES`) is
-   left out. The total is still "at most", and never above the spend.
+   left out. An inherited agent-model action's saving joins only while
+   its card is Worth considering, and only where the model lever has no
+   saving for that agent type (`agentModelItems`): a workflow agent's,
+   which has no lever, is a share of all the spend. The other two
+   agent-model cards add nothing. The total is still "at most", and
+   never above the spend.
    The previous period comes from `/api/summary?previous=1` for the same
    window and project, so a change compares a summary with a summary.
    The service works the period out in its own days, and `previousPhrase`
@@ -538,7 +543,12 @@ that order, each as a heading with a one-line answer beside it.
    or the check. Rows to fix come first, then those worth a look, by
    saving. The checks with nothing to do, and those with too little
    data, fold into one line each. Beside the heading: "1 thing to fix ·
-   3 worth a look · 5 checks fine · 3 without enough data".
+   3 worth a look · 5 checks fine · 3 without enough data". The Models
+   check also draws on the three agent-model cards: one that is Worth
+   considering rides on the Models row and makes it Worth a look. One
+   that is For your information isn't a problem, so it stays off the
+   checklist. Its prompt is among the check's fixes, and it is an item
+   on Actions › Recommendations like any other card.
 3. **Did your changes work?** The changes made in the window, from
    `/api/impact` for the window and project picked, judged first
    (`renderChangeCards` with `compact` and `judgedFirst`): the newest 2
@@ -678,7 +688,12 @@ detail scrolls) and the one picked.
   what it leaves.
 - **Groups.** A rule that fires per agent type (`ttl-switch`, `spawn-*`
   and the rest) is one item for all of them ("7 agent types are sent
-  your CLAUDE.md files every time they start").
+  your CLAUDE.md files every time they start"). The three agent-model
+  cards (`agent-model-inherited`, `agent-model-asked` and
+  `agent-decide-apply`) sit under Models and group the same way, one
+  member per agent type, with every workflow agent as one type ("3 kinds
+  of agent wrote code with no model set"). Each has a prompt to copy,
+  and none changes a setting.
 - **The detail** has the severity chip inside the `h2`, then chips for
   who it's for, its area and where the change lands. **How this saves
   you money** gives what it costs now, what the change does to the price
@@ -695,7 +710,9 @@ detail scrolls) and the one picked.
   all-projects view, while the profile `apply` last marked active stays
   active. It shows again when it starts suggesting something else, and
   its detail then says why ("It shows again because it now suggests
-  120000 (you ignored 100000)"). An ignored item's detail says when,
+  120000 (you ignored 100000)"). An agent-model card carries the date
+  of the latest agent it flags, so an ignored one shows again when an
+  agent is flagged on a later day. An ignored item's detail says when,
   where and under which profile it was ignored, with **Stop ignoring**
   (**Stop ignoring in every project** when an every-project ignore is
   seen from one project). Ignored items leave every other list: the
@@ -717,7 +734,11 @@ status (Worth a look, Nothing to do, Not enough data), filtered by
 status. The detail gives why it matters and the answer, then loads
 `/api/quick-actions/<id>`: **The numbers**, the fixes, **Habits that
 help**, and **The recommendation it leads to**. A check with not enough
-data says why. The same checks run as `claudeglass check`.
+data says why. The same checks run as `claudeglass check`. On the
+Models check, every agent-model card's prompt is among the fixes. A
+card isn't said twice: only one that is For your information and has
+no prompt is one of **Habits that help**. Of those cards, only one that
+is Worth considering makes the check Worth a look.
 
 ### Spend › Usage
 
@@ -754,7 +775,8 @@ sections, each from its own route rather than the full report:
   the conversation-summary saving);
 - `/api/model-swap`: the most a one-tier-cheaper model could save,
   counting for each subagent only the runs its agent file's model
-  decides;
+  decides, and the agents that ran on a larger model than their work
+  needed;
 - `/api/waste`: spend on replies whose output was never used.
 
 Their recommendations show on Actions › Recommendations, not here.

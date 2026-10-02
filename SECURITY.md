@@ -188,14 +188,14 @@ known by the same salted hash as below (`Turn.edit_target_hashes`).
 To tell an agent that writes code from one that decides, an agent keeps
 one role word (`TranscriptMeta.role_word`): a single canonical word from
 a closed list (`agent_roles.py`: `implement`, `review`, `audit`, ...),
-found in its phase, agent type or the first few words of its label, and
-never the phase, label or description text it came from, which is
-dropped as the meta file is read. It also keeps whether its meta file
-records a model at all (`TranscriptMeta.model_recorded`: whether the
-file has a `description` or `workflowPhase` key, never the value), and a
-turn keeps a count of the writes its shell commands made outside the
-temp dir (`Turn.shell_write_count`; a file written twice counts twice),
-never the paths.
+found in its workflow phase, its agent type or the first four words of
+its description, and never the phase or description text it came from,
+which is dropped as the meta file is read. It also keeps whether its
+meta file records a model at all (`TranscriptMeta.model_recorded`:
+whether the file has a `description` or `workflowPhase` key, never the
+value), and a turn keeps a count of the writes its shell commands made
+outside the temp dir (`Turn.shell_write_count`; a file written twice
+counts twice), never the paths.
 
 `Turn.read_target_hashes` is the one exception to "no path fragment is
 ever stored", and it is deliberately a one-way hash rather than a

@@ -53,7 +53,7 @@ and it's still useful when you want one section by itself.
 | `carry` | Context carry cost per tool | `carry.py` | cost of a tool result riding along in the cached prefix on every turn after the one it entered on, by tool and by agent type, plus the saving a truncation cap would have made — see [`carry.md`](carry.md) |
 | `compaction_sim` | Compaction-window sweep | `compaction_sim.py` | modelled cost under other `autoCompactWindow` settings, a fidelity check against each session's actually-configured window, and a conservative "at least W" recommendation — see [`compaction-sim.md`](compaction-sim.md) |
 | `plan_handoff` | Building fresh after a plan | `handoff.py` | what the replies after each approved plan would have cost in a fresh session started from the plan alone, and the same build at Sonnet's prices — see [`plan-handoff.md`](plan-handoff.md) |
-| `model_swap` | Model-swap counterfactual | `model_swap.py` | ceiling saving from repricing every already-observed turn one model tier down, per agent type and corpus-wide — see [`model-swap.md`](model-swap.md) |
+| `model_swap` | Model-swap counterfactual | `model_swap.py` | ceiling saving from repricing every already-observed turn one model tier down, per agent type and corpus-wide, and the agents that ran on a larger model than their work needed — see [`model-swap.md`](model-swap.md) |
 | `waste` | Wasted-turn spend | `waste.py` | spend on turns whose output was never used (tool error, interrupt, tool denial, harness-killed subagent), by cause, agent type and top session — see [`waste.md`](waste.md) |
 | `compactions` | Compactions | `compaction.py` | compaction count, trigger mix, pre/post/dropped tokens, and the re-cache cost of the turn right after each compaction |
 | `agent_startup` | Subagent startup | `context_budget.py` | what each agent type is given before its first turn, what it was given but never used, and what every agent type receives alike |
@@ -561,6 +561,21 @@ changes a figure.
   with agent-file runs: `runs`, `priced_turns`, `observed_model`,
   `observed_cost` and a `cost_<model-id>` column per model, for those
   runs only. The what-if engine prices a subagent's model from it.
+- `model_swap_agent_models` — one row per agent type and finding, for
+  agents that ran on a larger model than their work needed. Every agent
+  a workflow started is one type, `workflow-subagent`; the main session
+  is never in it. Columns: `case` (the row key,
+  `<agent type>:<verdict>`), `agent_type`, `verdict` (`inherited`,
+  `asked` or `decide-apply`), `runs`, `roles` (role words and their
+  counts, such as "implement 4, fix 1"; "other" when no word fits),
+  `model`, `cost_usd`, `cost_on_sonnet_usd`, `saving_usd`, `saving_pct`
+  (these last three empty for `decide-apply`), `write_turns` (replies
+  that wrote code), `workflow_runs`, `first_seen`, `last_seen`,
+  `later_compliant` (later writers of the same kind on Sonnet or
+  smaller) and `env_var_set` (`yes` or `no`:
+  `CLAUDE_CODE_SUBAGENT_MODEL` is among the latest snapshot's
+  environment variable names). It holds agent types, role words,
+  counts, models, amounts and dates, and nothing else.
 
 `recommend.recommend()` runs the `model-tier` rule
 (`model_swap.RULES`). It fires per qualifying row (real cheaper
@@ -574,6 +589,47 @@ all set elsewhere gets no `.md` advice. A Sonnet main session never gets Haiku: 
 `main_floor`, with no alternative and no saving. `advice.finish` gives
 the main session's card its own id, `model-tier-main`, ranked last
 among cards of its severity.
+
+`recommend.recommend()` then runs three rules over
+`model_swap_agent_models` (`agent_models.RULES`, category `workflow`,
+lever `model`; see
+[`model-swap.md`](model-swap.md#agents-that-ran-on-a-larger-model-than-their-work-needed)),
+one per verdict. A card is for one agent type, or for all workflow
+agents at once, since the script's `agent()` call sets their model. An
+agent counts only when its `.meta.json` says whether the call set a
+model, it ran on Opus or Fable, and it wrote code: a reply edited or
+wrote a file outside the temp dir, with an edit tool or from the
+shell. Its role word says whether it writes: one word, read from its
+workflow phase, its agent type or the first words of its description,
+and the text it came from is never kept. An agent whose word decides
+(review, verify, judge) or integrates never counts as a writer, and
+one with no word counts once `unknown_min_edit_turns` (default 2)
+replies wrote code.
+
+- `agent-model-inherited` (advice) — the call set no model and no agent
+  file chose the one it ran on, so it ran on your main session's model
+  (or `CLAUDE_CODE_SUBAGENT_MODEL`'s, when that is set). It becomes
+  info (`variant` `fixed`) once `later_compliant_for_info` (default 3)
+  writers of the same kind, workflow or Agent tool, ran on Sonnet or
+  smaller after the latest agent it flags. For a named agent type, a
+  quality veto from `model_gate` also makes it info. Its fix is a
+  prompt for a "from now on" rule, to set the model on every agent,
+  saved where you choose (this session, a project's CLAUDE.md or
+  `~/.claude/CLAUDE.md`); no setting changes.
+- `agent-model-asked` (info) — the same, but the call named the model.
+- `agent-decide-apply` (info) — an agent whose word decides that also
+  wrote code in at least `decide_apply_min_edit_turns` (default 3)
+  replies. It has no saving: the fix is two agents, one to decide and
+  one to apply.
+
+A saving is the agent's own replies repriced at Sonnet's list rate (same
+tokens, same cache-write split), a ceiling like every `model_swap`
+figure. The `asked` figure is for information and is never added to the
+`inherited` one, and none of them joins `model-tier` or the Savings
+levers. A card's `subject` is the date of the latest agent it flags, so
+an ignored card shows again when an agent is flagged on a later day.
+The three thresholds can be set in `config.toml`'s
+`[thresholds.agent_models]` table.
 
 ## `waste` (`waste.py`)
 
@@ -1045,7 +1101,12 @@ vitest`/`playwright`, `go test`, `cargo test`, `make`, `mvn`, `gradle`)
 or made a scratch (temp-dir) edit; **OTHER** otherwise. A turn that both
 edits *and* runs a test/build command in the same turn lands in
 IMPLEMENTATION, since DISCOVERY/IMPLEMENTATION are checked first — noted
-here since a turn usually does one or the other, not both.
+here since a turn usually does one or the other, not both. A scratch
+edit is one to a file in the system temp dir or `/tmp/`, whether its
+path is written with backslashes, forward slashes or Git Bash's `/c/`,
+and in any case. Parses before `PARSER_VERSION` 36 matched only the
+temp dir's own spelling, so a forward-slash path on Windows counted as
+a real edit.
 
 - `phases_summary` — turns, new tokens, cache-read tokens, output
   tokens, cost and cost share per phase.
@@ -1600,13 +1661,15 @@ without `agent_startup` data; otherwise the per-part `spawn-claude-md`,
 `run-split` (`run_split.RULES`), `hook-failures`, `hook-block-resent`
 and `hook-context-carry` (`hook_costs.RULES`), `mcp-unused-server`
 (`tool_search.RULES`), `compaction-window`
-(`compaction_sim.RULES`), `model-tier` (`model_swap.RULES`) and
-`wasted-turns` (`waste.RULES`). Last, `window-budget`
-(`elasticity.RULES`, subscription billing only). Rules are gated by
-archetype (a `ttl-switch` recommendation for a `chat-only` session's
-subagents is suppressed, since a chat-only session barely has any), a
-minimum-sample size (`min_sessions`/`min_turns` in `config.toml`'s
-`[thresholds]` table), and managed-settings awareness (see
+(`compaction_sim.RULES`), `model-tier` (`model_swap.RULES`),
+`agent-model-inherited`, `agent-model-asked` and `agent-decide-apply`
+(`agent_models.RULES`) and `wasted-turns` (`waste.RULES`). Last,
+`window-budget` (`elasticity.RULES`, subscription billing only). Rules
+are gated by archetype (a `ttl-switch` recommendation for a
+`chat-only` session's subagents is suppressed, since a chat-only
+session barely has any), a minimum-sample size
+(`min_sessions`/`min_turns` in `config.toml`'s `[thresholds]` table),
+and managed-settings awareness (see
 [`team.md`](team.md#settings-for-teams-and-enterprise)).
 `report --patch-set` renders the whole set as unified-diff-style text
 via `recommend.render_patch_set`, showing the before and after value for
