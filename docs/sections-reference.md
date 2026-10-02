@@ -62,11 +62,11 @@ and it's still useful when you want one section by itself.
 | `hooks` | Your hooks | `hook_costs.py` | whether each hook you set up works (failed runs and why, relative script paths), what the context it adds costs to keep, what the calls it blocks cost and how often Claude sent them again unchanged, and time waited — see [`hooks.md`](hooks.md) |
 | `quality` | Quality signals | `quality.py` | whether the work went well: agent runs that didn't finish or likely ran out of turns, failed tool calls and shell commands, denials, corrections, edits redone, per agent type and per model and effort, with a significance test — see [`concepts.md`](concepts.md#7-quality-signals) |
 | `workstyle` | Workstyle | `workstyle.py` | one archetype per session/corpus: `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
-| `habits` | Work habits | `habits.py` | the "Weekly pace" digest, habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/cg-feedback`) cost per piece of work that met its goal |
+| `habits` | Work habits | `habits.py` | the "Weekly pace" digest (titled with the window you picked), habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/cg-feedback`) cost per piece of work that met its goal |
 | `prompting` | How you prompt | `prompting.py` | how often each prompting habit the coaching notes warn about happened (small requests sent one at a time, the same request again, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
 | `workflows` | Workflows | `workflows.py` | per-run agent count, phase count, duration and cost from `<session>/workflows/wf_*.json` |
 | `phases` | Phases | `phases.py` | cost split across DISCOVERY (read/search only), IMPLEMENTATION (real edits or an ordinary shell command), VERIFICATION (a test/build tool, or a scratch-file edit), OTHER — in the CLI's report only when `--phases` is given; the dashboard always builds it |
-| `config` | Config | `report.py` via `snapshots.py` | one diff table per config key that changed across the window's snapshots (capped at 20 keys) — only present when `snapshot-config` snapshots exist for the window |
+| `config` | Config | `report.py` via `snapshots.py` | one diff table per config key that changed between two snapshots of the same project (capped at 20 keys), then each project's settings in effect and drift — only present when any `snapshot-config` snapshot exists; when none applies to the projects in the report, it has only a note saying so |
 | `context_budget` | Context budget | `context_budget.py` | an estimated breakdown of what a session's context window is spent on before any real work (system prompt and tools, skills, memory files, custom agents, MCP tools), plus ground truth where the statusline logged it |
 | `tool_search` | What tool search saves | `tool_search.py` | how many tool definitions MCP tool search kept out of each request, by MCP server, what that saved at each reply's own cache rate, and the net after the name list and the replies that only searched; and every MCP server, whether Claude used it and what keeping it cost — see [`tool-search.md`](tool-search.md) |
 | `capture` | Capture | `habits.py` | what metrics capture has cost since it was turned on, measured from the transcripts, and what the habits and feedback that depend on it are worth a week — see [`capture.md`](capture.md) |
@@ -112,7 +112,8 @@ respects.
 
 - `by_day` / `by_week` / `by_month` — period x model:
   turns, tokens, cost. The period key is computed in `config.tz` (falling
-  back to the machine's own local zone).
+  back to the machine's own local zone). The dashboard's daily spend chart
+  counts the same local days.
 - `by_project` — sessions and cost per project slug.
 - `by_entrypoint` — transcripts, turns, tokens, cost per
   `entrypoint` (e.g. `claude-desktop`, `claude-code`).
@@ -629,6 +630,12 @@ dominant cause and its lever.
 - `compactions_per_session` — top 20 sessions by dropped tokens:
   session, compaction count, dropped tokens, post-compaction write cost.
 
+A compaction belongs to the window of its session, not to the moment it
+happened: a session counts, in full, when it was last active in the
+window, so a session that began before the window still counts all its
+compactions. The dashboard's compaction list (`GET /api/compactions`)
+reads the same way, so it is as long as the report's own count.
+
 Post-compaction
 write/recache cost aggregates exclude any join to the next turn that
 took longer than 15 minutes (the join is presumed stale, not a genuine
@@ -824,11 +831,16 @@ capture is off or no feedback has been given.
   a week, `top_1` to `top_3`), what the habits you already picked up
   save (`adopted`), the average cost of a piece of work that met its
   goal (`cost_per_met`), and the share of messages Claude tagged
-  (`tagged`). The monthly report carries the same digest. `N` is
-  `Habits.span_days`; a saving is only spread into a per-week rate once
-  there's a full week of it (`Habits.span_weeks`, UX-4/7/F3) -- under 7
-  days it's the raw total observed so far, not a figure stretched by
-  dividing by a fraction of a week.
+  (`tagged`). The monthly report carries the same digest. The title names
+  the window you picked: `N` is that window's own day count ("last 7
+  days" stays 7 even when your messages in it cover 3), and a window with
+  no day count reads "Weekly pace (all time)" or "Weekly pace (this
+  window)". Weeks start on Monday and a day runs midnight to midnight in
+  `config.tz` (the machine's own zone when it sets none), the same local
+  days the dashboard's windows count. A saving is only spread into a
+  per-week rate once there's a full week of it (`Habits.span_weeks`,
+  UX-4/7/F3) -- under 7 days it's the raw total observed so far, not a
+  figure stretched by dividing by a fraction of a week.
 - `habits_playbook` — one row per habit worth trying (`habits.ITEMS`),
   the largest weekly saving first: theme, saving a week, what your
   sessions show, an example to copy, how the saving is worked out, how
@@ -1054,10 +1066,14 @@ below.
 ## `config` (`report.py` via `snapshots.py`) and `config-diff` (CLI-only)
 
 The assembled report's own `config` section renders one
-`config-diff-<key>` table per config key that changed across the
-window's `snapshot-config` snapshots (the first 20 keys alphabetically —
-`report._MAX_CONFIG_DIFF_KEYS`), automatically, with no key to name.
-When snapshots exist it also adds:
+`config-diff-<key>` table per config key that changed between two
+snapshots of the same project (the first 20 keys alphabetically —
+`report._MAX_CONFIG_DIFF_KEYS`), automatically, with no key to name. A
+project's snapshots are read as its own run, so switching between
+projects is never a change, and a project filed under both drive-letter
+spellings is one project. The snapshots are every one recorded, not only
+the window's, and with a project picked the section reads only that
+project's. When snapshots exist it also adds:
 
 - `effective-config` — per project, each key's value in the latest
   snapshot and the settings layer it came from.
@@ -1071,7 +1087,8 @@ When snapshots exist it also adds:
   snapshot's. A model alias such as `opus` matches any model of its
   family, `opusplan` matches Opus or Sonnet, `default` always matches,
   and a full model id must match exactly (see
-  [config-layers.md](config-layers.md)).
+  [config-layers.md](config-layers.md)). A session is read against its
+  own project's snapshot, never another project's.
 
 The standalone `claudeglass config-diff` subcommand, described
 next, is a separate, narrower consumer of the same underlying table
@@ -1084,22 +1101,28 @@ Reads the JSON files `hooks/snapshot-config.py` writes (see
 [The SessionStart hook](reference.md#the-sessionstart-hook)).
 
 - `config-diff-<key>` — `config-diff --key KEY` prints one, and
-  `config-diff --auto-keys` prints one per changed key. Per distinct
+  `config-diff --auto-keys` prints one per changed key (a key that
+  changed between two snapshots of the same project). Per distinct
   value of that config key across a window: sessions, turns, cost, cost
   per session, re-cache share, compactions per session, median span. A
-  table note lists the keys that also changed in the same snapshot,
-  since a before/after comparison across two different snapshots can't
-  isolate one key's effect from everything else that changed alongside
-  it.
+  table note lists the keys that also changed in the same project's two
+  snapshots, since a before/after comparison across two different
+  snapshots can't isolate one key's effect from everything else that
+  changed alongside it.
 
-The subcommand prints these tables directly as Markdown.
+The subcommand prints these tables as plain fixed-width text, with each
+table's notes under it.
 `snapshots.build_config_section` wraps the same table in a
 `config_diff` section for a library caller; nothing in the CLI or the
 report calls it.
 
-`snapshot_for(session, snapshots)` joins a session to the latest snapshot
-whose timestamp is at or before the session's start; `diff_keys` and
-`co_changed_keys` are the lower-level functions this table is built from.
+`snapshot_for(session_first_ts, snapshots, project_key=None)` joins a
+session's first timestamp to the latest snapshot at or before it. With
+`project_key` (one key, or every key the project goes by, such as its
+two drive-letter spellings), only that project's snapshots and the ones
+recorded with no project (schema 1) count; with `None`, every snapshot
+does. `project_chains`, `diff_keys` and `co_changed_keys` are the
+lower-level functions this table is built from.
 
 ## `compare` (`compare.py`) — CLI-only
 
@@ -1525,12 +1548,15 @@ quality — see [Sections at a glance](#sections-at-a-glance).
   low-fidelity measurement shouldn't be conflated with a genuinely poor
   working pattern).
 
-`config_fit` is a proxy for config stability: how many keys changed
-across the window's config snapshots (`changed_config_keys`), not a
-match against a profile. With no snapshot it is rated 5 with a note,
-rather than marked down. `agent_efficiency` is similarly a proxy
-(`agent_cost_variance_ratio`): the ratio of the costliest agent type's
-mean cost to the median across agent types.
+`config_fit` is a proxy for config stability: how many distinct keys
+changed between two snapshots of the same project (`changed_config_keys`,
+counted once however many projects changed it, from every snapshot
+recorded rather than only the window's), not a match against a profile.
+A project picked narrows it to that project's own snapshots. With no
+snapshot it is rated 5 with a note, rather than marked down.
+`agent_efficiency` is similarly a proxy (`agent_cost_variance_ratio`):
+the ratio of the costliest agent type's mean cost to the median across
+agent types.
 
 ## Recommendations (`recommend.py`)
 

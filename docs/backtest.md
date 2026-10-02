@@ -71,7 +71,12 @@ number can never compound (see "Calibration" below).
    totals `whatif.estimate` itself reprices from. Its before/after
    estimate is `impact._measure_row`'s own ratio-of-sums,
    stratum-reweighted, Holm-tested row (unchanged from EST-P3), called
-   for this one measure instead of a change point's whole table. When
+   for this one measure instead of a change point's whole table. A
+   prediction is a dollar saving, so it stays on money even though a
+   model change's card on Your changes now leads with tokens per session
+   (see [concepts](concepts.md#6-windows-what-if-estimates-and-beforeafter-comparisons)):
+   it is judged on cost per session, or on one agent's cost per spawn,
+   whatever the card shows first. When
    `counterfactual.py` can undo the predicted setting on the sessions
    after the change themselves (repriced, simulated or approximate, see
    [concepts](concepts.md#6-windows-what-if-estimates-and-beforeafter-comparisons)),
@@ -126,6 +131,19 @@ many windows closed too short. The first judging on a store puts every
 store records that it ran), and the sessions judge them again on the
 windows as they are now. A verdict reached after that stays; one whose
 window is open again waits, and expires, like any other.
+
+**The window picker lists predictions; it doesn't change a verdict.**
+`GET /api/backtest` takes the same window as `/api/impact` (none means
+all time) and lists the predictions that belong to it: a judged one by
+the change it was matched to, one still waiting by when it was logged.
+The judging reads the same sessions whichever window is open, reaching
+back to the oldest prediction still waiting so each change is judged on
+its whole before side, and a verdict is kept once it is reached, so
+narrowing the window only hides predictions, and never changes one. A
+prediction names no project, so the project picker is checked and then
+ignored: the table shows every project's predictions, says so with an
+"All projects" chip when a project is picked, and "since my last change"
+starts at the newest change in any project.
 
 ## Calibration (EST-P6)
 

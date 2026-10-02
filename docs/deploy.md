@@ -463,8 +463,8 @@ that actually delete a row.
   Safe at any time: the store is always a derived cache, never source
   of truth (`service/store.py`'s module docstring) — the next `serve`
   run simply rebuilds it from the transcripts already on disk, the same
-  way a schema-version bump's drop-and-rebuild migration
-  (`Store.migrate()`) does.
+  way a downgrade's drop-and-rebuild (`Store.migrate()`, see "The store's
+  schema version" below) does.
 
   If one of the files cannot be deleted (for example a `-wal` sidecar
   still held open by another process), `--purge` deletes everything it
@@ -532,6 +532,44 @@ from the loaded code:
 A task registered before this flag existed doesn't have it: run
 `install-service` once more to add it. Until then the banner still
 says what to do.
+
+## The store's schema version
+
+`service.db` records the schema version it was written under
+(`meta.schema_version`). Version 8, from 0.13.0, adds `turns_agg.bucket`:
+the UTC quarter hour each group of replies falls in. It lets the
+dashboard cut a window and its daily chart at local midnight in any time
+zone, rather than at UTC's.
+
+- **Upgrading from 7 keeps every row.** `Store.migrate()` adds the column
+  and marks every stored transcript for one re-parse, the same step a
+  rate-card change takes (see below), in one transaction that stamps the
+  new version last. The watcher fills the buckets in over its next ticks
+  and `watcher.files_reparsed_stale_parser` counts them. Until a
+  transcript is read again, its rows have no bucket and count on the UTC
+  day they were stored under, so a daily chart can place a late-evening
+  reply a day off for that short time.
+- **Downgrading rebuilds the store.** An older version pointed at a store
+  a newer one migrated can't be served by an additive step, so `migrate()`
+  copies `service.db` aside as `service.db.bak-<version>-<timestamp>`
+  (and prints where on stderr), drops every table and recreates them. The
+  next watcher tick reads the transcripts still on disk again. Your
+  session tags and ratings are put back. Logged "what if" predictions are
+  re-read from `prediction-log.jsonl` and come back unjudged, so their
+  verdicts and seen marks are lost until the dashboard judges them again.
+  Transcripts Claude Code has already removed are not rebuilt; they stay
+  in the backup file.
+
+## Time zone and `tzdata`
+
+Days, the Today window and the 7, 30 and 90 day windows are counted from
+midnight in `config.toml`'s `tz`, else the machine's own zone. A named
+zone needs the IANA zone database. Linux and macOS have it. A bare
+Windows Python does not, so there a name such as `America/New_York`
+can't be found and the machine's zone is used instead, with no error.
+Run `pip install tzdata` to make the name work (`UTC` needs nothing).
+`GET /api/summary`'s `period.tz` says which zone the days were counted
+in: `null` means the machine's own.
 
 ## Re-parsing after a parser upgrade
 

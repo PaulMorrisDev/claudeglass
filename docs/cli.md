@@ -94,7 +94,9 @@ Leave the ID out for every check's one-line answer. Give one to see it
 in full: `models`, `effort`, `compaction`, `cache`, `tools`, `skills`,
 `claude-md`, `tool-output`, `hooks`, `tool-search`, `habits`, `quality` or `cost-record`
 (whether ClaudeGlass's cost matches Claude Code's own record). The window comes
-from the global `--days`, `--since` and `--until`.
+from the global `--days`, `--since` and `--until`. Without
+`--all-projects`, a check reads the project you're in, and the settings
+it reports are that project's own.
 
 ### `review`
 
@@ -110,7 +112,9 @@ python -m claudeglass review skills
 The window comes from the global flags. Without `--all-projects`, only
 one project's sessions are read, so a skill Claude never used is hidden
 in that project's `.claude/settings.local.json`, not for every project.
-`check skills` does the same.
+`check skills` does the same. `review claude-md` follows the selected
+projects too: it lists their CLAUDE.md files and rules and your own, and
+`check claude-md` does the same.
 
 ### `serve`
 
@@ -474,7 +478,11 @@ judging. [`backtest.md`](backtest.md) has the details.
 Compares sessions grouped by the value of one Claude Code setting, from
 the snapshots the SessionStart hook takes. It prints its own plain-text
 tables. Give exactly one of `--key KEY` (one setting) or `--auto-keys`
-(every setting that changed across the snapshots).
+(every setting that changed between two snapshots of the same project).
+`--auto-keys` diffs each project's snapshots on their own, so switching
+between projects never reads as a change, and it uses every snapshot
+recorded, not only this window's. Without `--all-projects` it reads only
+the selected projects' snapshots.
 
 ## Diagnostics
 
@@ -551,18 +559,25 @@ Every command reads these.
 | `--project NAME` | Repeatable. A project to include. Default: the one for the current folder |
 | `--all-projects` | Include every project |
 | `--project-family REGEX` | Treat projects whose names match as one, such as a project and its worktrees |
-| `--days N` / `--since DATE` | Where the window starts. Use one or the other |
+| `--days N` / `--since DATE` | Where the window starts. Use one or the other. `N` is a positive whole number: `0`, a negative number or a word is a usage error (exit 2). `--days N` is the last `N` local calendar days, today included, from midnight (see `--tz`), as the dashboard's 7, 30 and 90 days are |
 | `--until DATE` | Where the window ends |
 | `--limit N` | Read at most N sessions |
 | `--window-by {last-reply,mtime,timestamp}` | What puts a session in the window: its last reply (the default), its file's modified time, or its first reply |
 | `--pricing PATH` | Use another rate card instead of the packaged one or your own in the config folder |
 | `--config-dir PATH` | This tool's own folder. Default `~/.claude/claudeglass`, or `$CLAUDE_CONFIG_DIR/claudeglass` |
-| `--tz ZONE` | A time zone for this run only, such as `America/New_York`. Default: `tz` in `config.toml`, else your machine's |
+| `--tz ZONE` | A time zone for this run only, such as `America/New_York`. It sets where `--days` and the day boundaries fall. Default: `tz` in `config.toml`, else your machine's. A name that isn't an IANA zone is refused (exit 2) when this machine has the zone database. A machine without it, such as Windows without `pip install tzdata`, can't check the name and uses its own zone instead; `UTC` always works |
 | `--group-by {agent,entrypoint,mode,model,project,purpose}` | How tables that support it are grouped |
 | `--no-cache` / `--rebuild-cache` | Skip the digest cache for this run, or empty it first and fill it again. Use one or the other |
 | `--jobs N` | How many files to read at once. Default 1 |
 | `--quiet` / `--verbose` | Print less, or more. `--verbose` adds a line on stderr with files read, cache hits and misses, and time taken |
 | `--version` | Print the version and exit |
+
+The report-style commands (`report`, the focused views, `check`,
+`review`, `compare`, `config-diff` and the rest that read a window) count
+`--days` as local calendar days. Three keep a rolling window of `N` x 24
+hours from now, because they divide by the days or match UTC days:
+`capture` (and the coaching replay behind it), `baseline` and
+`reconcile`, which compares with an Admin API export's UTC days.
 
 ## Exit codes
 
@@ -572,7 +587,7 @@ Every command uses the same three.
 |---|---|
 | `0` | It ran and printed its output |
 | `1` | No data: no sessions for the projects and window you picked, or, for `config-diff`, no settings snapshots. A one-line reason on stderr names the projects folder and the window |
-| `2` | Bad input: a config or rate card file it can't read, a flag combination that doesn't work, or an unknown command |
+| `2` | Bad input: a config or rate card file it can't read, a flag combination that doesn't work, a `--days` that isn't a positive whole number or reaches back further than the calendar or this machine can count, or an unknown command |
 
 ## Performance and the digest cache
 

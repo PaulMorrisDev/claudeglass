@@ -395,6 +395,24 @@ one `"(unknown project)"` bucket.
   can't be cited for one specific key (`_row` matches only on
   `row[0]` == the row key, and that table's row key is the project, not
   the settings key).
+- `project_chains`, `changed_keys` and `build_config_diff_table` —
+  what changed between snapshots is always read within one project's own
+  run of snapshots (`project_chains`, oldest first, a project filed under
+  both drive-letter keys being one chain). The hook records one
+  snapshot per session start, in whichever project the session opened,
+  so a single list across projects would read every switch from one
+  project to another as a settings change. `changed_keys` is every
+  flattened key that changed in some project's chain, each key counted
+  once however many projects changed it, and it is what the `config`
+  section's changed-settings count, the scorecard's config stability and
+  `config-diff --auto-keys` use. The snapshots are every one recorded,
+  not only the window's, so a setting you changed last month still counts
+  in a 7-day report.
+  `build_config_diff_table`'s note on keys that changed alongside the
+  one you named looks at the same project's two consecutive snapshots.
+  With a project picked (or the folder you ran in, on the CLI), only that
+  project's snapshots are read; with all projects, every project's chain
+  is diffed on its own.
 
 `build_config_section(..., include_effective=True, sessions_with_observed=...)`
 appends these tables to the existing config-diff section; both keyword

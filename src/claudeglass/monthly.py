@@ -14,10 +14,9 @@ recache/ttl/compaction/topology/etc., which are optimisation-focused
 rather than finance-focused.
 
 Month attribution: a session is attributed to the calendar month of its
-*first* top-level turn's local timestamp (``config.tz``, the same
-fallback-to-machine-zone convention ``usage.py``'s/``classify.py``'s own
-``_to_local`` use -- duplicated here per this project's small-helper
-convention). A session whose turns straddle a month boundary is
+*first* top-level turn's local timestamp (``config.tz``, through the
+same ``discovery.to_local`` fallback rule ``usage.py``'s/``classify.py``'s
+own ``_to_local`` use). A session whose turns straddle a month boundary is
 therefore counted wholly in the month it started, not split across two
 reports -- a documented approximation, the same kind ``usage.py``'s own
 five-hour-block grid already accepts for a similar reason (no exact

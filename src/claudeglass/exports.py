@@ -21,10 +21,10 @@ in an export; every column here is a count, a token total or a cost.
 Row grain (``csv-flat``/``json``): one row per (day, project, model,
 entrypoint, agent_type), plus ``session_id`` as an extra grouping
 dimension when per-session is in effect. This mirrors ``usage.py``'s own
-day/project/entrypoint axes and its ``_day_key``/``_to_local``/
-``_parse_ts``/``_priced_turns`` helpers -- duplicated here rather than
-imported, per this project's established small-helper convention (see
-``usage.py``'s and ``workflows.py``'s own module docstrings) -- plus
+day/project/entrypoint axes and its ``_day_key``/``_parse_ts``/
+``_priced_turns`` helpers -- duplicated here rather than imported, as
+this project does with small cross-module helpers -- and its
+``_to_local``, which both modules take from ``discovery.to_local``, plus
 ``model`` and ``agent_type``, since a BI import wants those split out
 rather than pre-summed away.
 

@@ -257,8 +257,8 @@ function noChangeYet(body) {
 // The Overview's pick from a window's changes (newest first, as
 // /api/impact lists them): the newest `limit` that can be judged, and the
 // newer ones still waiting for sessions after them. A newer change short
-// of sessions before it isn't too new, so it isn't counted; it stays on
-// Your changes. Timestamps are all YYYY-MM-DDTHH:MM:SSZ, so they compare
+// only of sessions before it isn't too new, so it isn't counted; it stays
+// on Your changes. Timestamps are all YYYY-MM-DDTHH:MM:SSZ, so they compare
 // as text.
 export function judgedFirst(changes, limit, minSessions) {
   var judged = changes

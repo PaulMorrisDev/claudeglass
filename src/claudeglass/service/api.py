@@ -1802,8 +1802,9 @@ def make_handler(
         now = datetime.now(timezone.utc)
         # Round explicit bounds to the minute the same way a named
         # window's own `since` already is (_named_window_since) -- so two
-        # requests for "the same" period (e.g. the dashboard's current
-        # and previous-period calls) a few seconds apart agree exactly.
+        # requests for "the same" explicit period a few seconds apart
+        # agree exactly. (The dashboard's previous period is `previous=1`,
+        # resolved below by _previous_period, not a second since/until call.)
         if since is not None:
             since = _round_iso_to_minute(since)
         if until is not None:

@@ -106,14 +106,25 @@ shows the same estimate.
 **Your changes** (its own page, second in the sidebar) lists every
 `apply`, its undo,
 any settings change the snapshot hook saw between one session start
-and the next, and every change to metrics capture (from
-`capture-log.jsonl`) (`change_points.py`). A snapshot change that spans an
-apply or undo is that same change, not a second one. For each, newest
-first (at most 10), it compares the sessions started before it with
+and the next, every change to metrics capture (from
+`capture-log.jsonl`), and every model, effort or CLAUDE.md size change
+your sessions show once it has held for 3 sessions in a row in a
+project, dated at the first of them (`change_points.py`). A snapshot
+change that spans an apply or undo is that same change, not a second
+one. So is a change your sessions show when an apply, undo or settings
+change made just before it already explains it. The
+window and project pickers choose which changes show: every change
+inside the window is listed, newest first, with the cards past the first
+ten folded behind a button (the Overview shows the newest few it can
+judge). For each, it compares the sessions started before it with
 those started after it (`impact.py`):
 
 - **Before** is the 14 days before the change, cut short by an earlier
-  change. **After** runs from the change to the next one, or now.
+  change. **After** runs from the change to the next one, or now. Each
+  project is judged between its own neighbouring changes, so a change
+  made in one project cuts only that project's before and after, and the
+  card for a change to every project is its readings in each project put
+  together.
 - Changes within 10 minutes of each other (one apply writing several
   files, say) share their before and after, and so do changes with
   fewer than 3 sessions between them in a project both apply to:
@@ -121,17 +132,29 @@ those started after it (`impact.py`):
   the other none before it, for good.
 - It needs at least 3 sessions on each side. With fewer, it says how
   many it has and gives no verdict.
-- The measures follow the keys that changed: cost per reply for a
-  model or effort change, summaries per session and largest context
-  for `autoCompactWindow`, the share of cache writes that rebuilt
-  expired context for a cache lifetime, context at session start for
-  skills, plugins and MCP servers, cost and start-up context per
-  spawn for a change to one agent, and for a metrics capture change,
-  what capture's notes and tags add per session (in tokens) and the
-  share of your messages Claude tagged. Cost per session always comes
-  last. A capture change's card shows the command that changes its
-  level back.
-  A change under 5% reads as "about the same".
+- The measures follow the keys that changed, most telling first:
+  - a model change: tokens per session, output tokens per reply,
+    replies per session, then cost per reply, so a new price per token
+    can't pass for a different amount of work. These stay ahead of cost
+    per reply even when a settings edit lists an effort, thinking or fast
+    mode key before `model`; another key listed before `model` keeps its
+    own measures first;
+  - effort and thinking: output tokens per reply, then cost per reply;
+  - fast mode (the price and speed change, not the tokens): cost per
+    reply;
+  - summaries per session and largest context for `autoCompactWindow`,
+    the share of cache writes that rebuilt expired context for a cache
+    lifetime, context at session start for skills, plugins and MCP
+    servers, and cost and start-up context per spawn for a change to one
+    agent;
+  - for a metrics capture change, what capture's notes and tags add per
+    session (in tokens) and the share of your messages Claude tagged.
+
+  Cost per session always comes last. Output tokens per reply counts
+  real replies only; a conversation summary's estimated request counts
+  in tokens per session instead. A capture change's card shows the
+  command that changes its level back. A change under 5% reads as "about
+  the same".
 - An apply names its keys from its backup manifest. An apply made
   before manifests recorded keys names them from the difference
   between the backup and the file as it is now. Later edits to the
@@ -158,8 +181,11 @@ actually happened once a matching real change and enough sessions came
 in, and a verdict: about as estimated, smaller, larger, the opposite
 direction, or not enough sessions yet to judge. Only a change the
 dashboard tracked on your behalf is logged; exploring the "what if"
-sliders interactively never is. Once at least 3 of your own past
-estimates for the same kind of change have been judged, later what-if
+sliders interactively never is. The window picker lists the estimates
+that belong to it, and the project picker is ignored, since an estimate
+names no project; a prediction stays on money (a dollar saving) even
+though a model change's card leads with tokens. Once at least 3 of your
+own past estimates for the same kind of change have been judged, later what-if
 estimates of that kind are calibrated by how it actually turned out for
 you before — their fidelity shows as "calibrated" instead of "ceiling",
 "simulated", "measured" or "estimated" (see the fidelity table above),

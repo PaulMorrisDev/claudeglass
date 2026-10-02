@@ -317,6 +317,14 @@ can still include a session whose transcript file Claude Code's own
 `cleanupPeriodDays` retention has already removed — see "Store rebuild"
 below.
 
+`schema_version` is the store's schema: 8 as of 0.13.0, which added
+`turns_agg.bucket`, the UTC quarter hour each day's figures are split
+into, so `GET /api/daily-usage` can count a day in your own zone. A store
+at 7 gains the column in place and every transcript is read once more to
+fill it in (a transcript whose file is gone keeps its UTC day). An older
+version that opens a store already at 8 rebuilds it from the transcripts,
+after setting a copy aside; your session tags and ratings are put back.
+
 `watcher` (S1-perf) additionally carries a per-tick timing breakdown of
 its own `duration_s`: `discovery_s` (filesystem walk + diffing against
 the store's known files), `parse_s` (cache lookups, on-miss parsing,
@@ -356,16 +364,19 @@ Corpus-wide totals — `Store.summary`.
 Query: `window_days` (int, optional; no default, so all time when
 omitted), `window` (a named window, as for the report-backed routes
 below; it takes precedence, and `window_days` is then `null` in the
-response), or, additively, explicit `since`/`until` (ISO 8601) — the same
-four params `/api/sessions`/`/api/compactions` accept, and, like those two
-(unlike the report-backed routes below), *no* params at all still means
-all time rather than a 30-day default. An explicit `since`/`until` is
-rounded down to the minute the same way a named window's own resolved
-`since` already is, so two requests for "the same" bound issued a few
-seconds apart — the dashboard's own current-period and previous-period
-calls, for instance — agree on exactly the same window.
+response), or, additively, explicit `since`/`until` (ISO 8601; with a
+`since`, `window_days` is `null` too) — the same four params
+`/api/sessions`/`/api/compactions` accept, and, like those two (unlike the
+report-backed routes below), *no* params at all still means all time
+rather than a 30-day default. A `window_days` window is local calendar
+days (see "Report-backed routes: windowing query params"). An explicit
+`since`/`until` is rounded down to the minute the same way a named
+window's own resolved `since` already is, so two requests for "the same"
+bound issued a few seconds apart agree on exactly the same window.
+Additive: `previous` (`0`, the default, or `1`; anything else is `400`),
+below.
 
-`data`: `{"window_days": int|null, "sessions": int, "transcripts": int, "total_cost": float, "total_tokens": int, "cache_read_tokens": int, "cache_saved": float}`.
+`data`: `{"window_days": int|null, "sessions": int, "transcripts": int, "total_cost": float, "total_tokens": int, "cache_read_tokens": int, "cache_saved": float, "period": {"since": str|null, "until": str|null, "tz": str|null, "first_day": str|null, "last_day": str, "today": str}}`.
 `total_cost` is at list price, whatever the billing mode. Additive:
 `cache_read_tokens` is `turns_agg.cache_read_tokens` summed across every
 model over the sessions the window counts, whole (the same rule as
@@ -393,6 +404,36 @@ windowing the CLI's `report` overview section uses, so
 window (v0.3 fix — this route used to window `sessions` by the session
 row's own `last_ts` and never window `transcripts` at all).
 
+`period` (additive) says which window the figures cover and which local
+calendar days it holds, so a chart draws the days the figures count and
+does no zone arithmetic of its own. `since` and `until` are the bounds the
+figures were counted over (UTC, rounded to the minute; `null` where the
+window has no such end). `first_day` and `last_day` are the local days
+(`YYYY-MM-DD`) of `since`, and of `until` or, with none, of now;
+`first_day` is `null` for all time. A `window_days` window always spans
+exactly that many days from `first_day` to `last_day`, so a midnight
+passing between two requests can't add one. `today` is the local day now.
+`tz` is the IANA name of the zone the days were counted in (`config.toml`'s
+`tz`), or `null` when that is the machine's own zone: no `tz` set, a zone
+with no name, or a name this machine can't find (a Windows install needs
+the `tzdata` package for most of them).
+
+**`previous=1`** answers for the period just before the window instead,
+with that period's own `period` and a `window_days` of `null`, so a delta
+compares like with like:
+
+- A `window_days` window of N days is compared with the N days before it,
+  up to this time of day, N days ago. Today is part of the window and
+  only part of a day has passed, so a whole earlier N days would show a
+  drop every morning. `window=today` is compared with the same hours
+  yesterday.
+- `1h` and `24h` are compared with the same length of time just before.
+- Every other window has no earlier period of the same length, and is
+  `400`: `window=all`, no window at all, `window=change` and an explicit
+  `since` or `until`.
+
+The dashboard's Overview asks for this to draw its up and down arrows.
+
 ### `GET /api/sessions`
 
 Recent sessions — `Store.sessions`.
@@ -402,7 +443,14 @@ Query: `limit` (default 50), `offset` (default 0), plus the optional
 sessions a report over that window counts (last reply in the window).
 Without one, every session. Newest first (by `first_ts`).
 
-`data`: `[{"id", "slug", "first_ts", "last_ts", "span_s", "archetype", "mode", "purpose", "entrypoint", "billing_mode", "profile_id", "total_cost", "total_tokens", "source"}, ...]`.
+`data`: `[{"id", "slug", "first_ts", "last_ts", "span_s", "archetype", "mode", "purpose", "entrypoint", "billing_mode", "profile_id", "total_cost", "total_tokens", "source", "first_day", "last_day"}, ...]`.
+
+`first_day` and `last_day` (additive) are the local calendar days
+(`YYYY-MM-DD`, in `config.toml`'s `tz`, else the machine's zone) of the
+session's first and last reply, `null` for a session with no timestamp.
+They are the same local days `GET /api/daily-usage` counts, so a day
+picked on a Spend chart lists the sessions whose first-to-last-reply span
+includes it.
 
 `source` says where the session ran: `"This computer"`, or
 `"WSL: <distro>"` for one read from a WSL distro's folder (see
@@ -495,14 +543,16 @@ Per-day, per-model token and cost totals — `Store.daily_usage`. The
 dashboard's Overview draws its daily spend chart from it, with the
 window and `split=agent`.
 
-Query: `days` (int, default 30, at least 1; unchanged for existing
-callers). Days are UTC calendar days. Additive: the same `window`/
+Query: `days` (int, default 30, at least 1). Days are local calendar
+days, in `config.toml`'s `tz` (else the machine's zone): `days=7` is
+today and the six days before it, from local midnight, the same seven
+days `window_days=7` gives (before 0.13.0 it meant 7 x 24 hours back, in
+UTC days, which spanned eight). Additive: the same `window`/
 `window_days`/`since`/`until` params the report-backed routes below
 accept (see "Report-backed routes: windowing query params") take
 precedence over `days` when any of the four is given, so `?window=all`
 or an explicit `since`/`until` isn't also clamped to a trailing `days`
-window; with none of them, `days` (default 30) applies exactly as
-before. Additive: `split` — `agent` breaks each day/model row into the
+window; with none of them, `days` (default 30) applies. Additive: `split` — `agent` breaks each day/model row into the
 main session and every subagent (`transcripts.kind` joined in from
 `turns_agg.transcript_id`: `"top-level"` is `"main"`, `"subagent"`/
 `"workflow-agent"` (an agent a workflow run started) are `"subagent"`),
@@ -514,6 +564,18 @@ original, unsplit shape. Any other `split` value is `400`.
 `"main"`|`"subagent"`), ordered by day, then (with `split=agent`) agent,
 then model. `cost` is at list price.
 
+`day` is a local day (`YYYY-MM-DD`), not a UTC day: the store keeps each
+reply's UTC quarter hour (`turns_agg.bucket`, schema 8) and this route adds
+the quarter hours up into local days on the way out. A window takes in
+whole quarter hours, so a start or end that isn't on one can take in up
+to 15 minutes more than asked; a local midnight always is, so a calendar
+window is exact. A row written before schema 8 and not read again yet
+(its transcript file is gone, say) has no quarter hour and is shown under
+its UTC day. A reply with no timestamp has day `unknown` and shows only
+with no window at all. With `window=change`, only the rows of the sessions
+whose first reply falls in the window are kept, so the days add up to
+`/api/summary`'s total.
+
 ### Report-backed routes: windowing query params
 
 `/api/ttl`, `/api/carry`, `/api/compaction-sim`, `/api/plan-handoff`,
@@ -523,13 +585,14 @@ then model. `cost` is at list price.
 `/api/quick-actions/<id>`, `POST /api/whatif` and
 `/api/report.md`/`.html`/`.json` (below) all accept the same windowing
 query params, mirroring the CLI `report` subcommand's own
-`--days`/`--since`/`--until` (`discovery._resolve_window`'s exact
-resolution). `/api/summary` takes the same four params, but with no
-params it means all time rather than a 30-day default.
-`/api/sessions` and `/api/compactions` accept them all but, unlike the
-report routes, list everything when none is given. Every other route
-(`/api/health`, `/api/session/<id>`, `/api/recache`, `/api/baseline`,
-`/api/profiles*`, `/api/impact`, `/api/setup`, `/api/setup/status`, `/api/capture`) ignores them.
+`--days`/`--since`/`--until`, which count calendar days from local
+midnight the same way. `/api/summary` takes the same four params, but
+with no params it means all time rather than a 30-day default.
+`/api/sessions`, `/api/compactions`, `/api/impact` and `/api/backtest`
+accept them all but, unlike the report routes, list everything (all time)
+when none is given. Every other route (`/api/health`, `/api/session/<id>`,
+`/api/recache`, `/api/baseline`, `/api/profiles*`, `/api/setup`,
+`/api/setup/status`, `/api/capture`) ignores them.
 
 **Caching.** The service builds each window's report once per store
 change (`Store.change_token()`) or `config.toml` change (its
@@ -538,48 +601,65 @@ figures) and keeps the last eight. When the store
 has changed since a window's report was built (a live session writes
 every few seconds), a request is answered from the kept report at once
 and a rebuild starts in the background (one at a time), so a page never
-waits on a whole report build just because a transcript grew. A named
-`window` keeps its report across the minute-by-minute moves of its
-start the same way. A request waits for a build only when nothing is
-kept for its window, when the kept report is over ten minutes old, or
-when the list of change points behind `/api/impact` has changed; and
-requests for a window already being built wait on that one build.
-`/api/impact` is cached the same way.
+waits on a whole report build just because a transcript grew. `1h` and
+`24h`, whose start moves every minute, keep their report across those
+moves the same way. Every other window starts at a fixed moment, so it
+has a report of its own, and a new one is built when that moment moves:
+at local midnight for `today` and a `window_days` window, or when a
+newer change is recorded for `change`. A request waits for a build only
+when nothing is kept for its window or when the kept report is over ten
+minutes old; and requests for a window already being built wait on that
+one build. A background rebuild that fails is logged to the service's
+stderr ("your report was not refreshed"), and the next request tries
+again. `/api/impact` and `/api/backtest` are kept the same way, each
+on its own terms (see their sections).
 
-Every response built from a kept report carries **`X-Figures-As-Of`**
-(ISO 8601, UTC): when that report's figures were read from the store.
-While a newer one is being built it also carries
+Every response built from a kept report (or kept change cards) carries
+**`X-Figures-As-Of`** (ISO 8601, UTC): when those figures were read from
+the store. While a newer one is being built it also carries
 **`X-Figures-Refreshing: 1`**. The dashboard shows the time on its
 status line, at the foot of the sidebar.
 
 - **`window`** (optional) — a named window, used by the dashboard's
-  header picker: `1h` (the last hour), `today` (since midnight in
+  header picker: `1h` (the last hour), `today` (since local midnight, in
   `config.toml`'s `tz`, else the machine's zone), `24h`, `change` (since
   your latest `apply`, its undo, a settings change the config hook saw,
   a change to metrics capture, or a model, effort or CLAUDE.md size
-  change your sessions show; the same newest change `/api/impact`
-  lists; `400` when there is none yet) or
-  `all` (no limit). Anything else is `400`. A named window takes
-  precedence over the other three params. It is turned into a `since`
-  rounded down to the minute, so repeat requests share one cached report.
-  A session counts when its last reply falls inside the window (so it
-  was active then), and it then counts in full. `change` is the
+  change your sessions show; the same newest change `/api/impact` lists,
+  and with a `project`, the newest one that applies in that project, so
+  a change made in another project doesn't start it; `400` when there is
+  none yet) or `all` (no limit). Anything else is `400`. A named window
+  takes precedence over the other three params. It is turned into a
+  `since` rounded down to the minute, so repeat requests share one cached
+  report. A session counts when its last reply falls inside the window
+  (so it was active then), and it then counts in full. `change` is the
   exception: it counts the sessions whose *first* reply falls inside it
   (the ones that started on the new settings), and `/api/daily-usage`
-  and `/api/compactions` then keep only those sessions' rows, so the
-  daily figures add up to `/api/summary`'s total.
-- **`window_days`** (int, at least 1, optional) — the last N days;
-  defaults to 30 when neither `since` nor `until` is given.
+  then keeps only those sessions' rows, so the daily figures add up to
+  `/api/summary`'s total.
+- **`window_days`** (int, at least 1, optional) — the last N calendar
+  days: today and the N-1 days before it, from local midnight in
+  `config.toml`'s `tz` (else the machine's zone), so `7` is seven
+  columns on a daily chart, and a day with a clock change in it is 23 or
+  25 hours long. It is turned into a `since` (that midnight, in UTC) the
+  same way a named window's is, so the window, its cache key and every
+  figure behind it start at the same moment. `1h` and `24h` are the only
+  windows that still roll: a number of days is never N x 24 hours back
+  from now. A number too large for the calendar (or, on Windows, one
+  that reaches back before 1970) is `400`. Defaults to 30 when neither
+  `since` nor `until` is given.
 - **`since`** / **`until`** (ISO 8601, optional) — when either is
   present, `window_days` is *not* defaulted to 30 (matching the CLI's
   own `--days`/`--since` mutually-exclusive argparse group), so a
   `since`/`until` request windows the report exactly the way
   `report --since ... --until ...` does rather than being silently
-  additionally clamped to the last 30 days. A malformed `since`/`until`
-  is a `400 bad_request`. `report.meta.window` in the response is
-  rendered identically to the CLI's own `_window_description` (`"since
-  <since> until <until>"`, `"since the beginning until <until>"`, etc.)
-  so the two are byte-equivalent for the same window, not just
+  additionally clamped to the last 30 days. A `since` wins over
+  `window_days`, which is then `null` in the response. A malformed
+  `since`/`until` is a `400 bad_request`. `report.meta.window` in the
+  response is rendered identically to the CLI's own
+  `_window_description` (`"last <N> days"` for a `window_days` window,
+  `"since <since> until <until>"`, `"since the beginning until <until>"`,
+  etc.) so the two are byte-equivalent for the same window, not just
   numerically equal.
 
 ### `GET /api/ttl`
@@ -657,7 +737,13 @@ routes: windowing query params" above).
 ### `GET /api/compactions`
 
 Every recorded compaction — `Store.compactions` — oldest first. With
-`window`/`window_days`/`since`/`until`, only those in the window.
+`window`/`window_days`/`since`/`until`, every compaction of the sessions
+the window counts (the same sessions `/api/summary` counts, by last reply,
+or by first reply for `window=change`), whenever in the session it
+happened: the list is as long as the report's own count of compactions,
+and a session that began before the window lists all of its. Before
+0.13.0 the list kept the compactions that happened inside the window, so
+it could be shorter or longer than the count beside it.
 
 `data`: `[{"transcript_id", "ts", "pre_tokens", "post_tokens", "dropped_tokens", "trigger", "join_delta_s"}, ...]`.
 
@@ -665,17 +751,32 @@ Every recorded compaction — `Store.compactions` — oldest first. With
 
 Effective-config comparison across projects (plan "Configuration
 layers" section: `config_groups`/`config_drift`), computed from the
-latest `snapshots` row per project.
+`snapshots` rows: the latest one per project for what each project has
+set, and each project's own run of them for what changed.
 
 Query: `key` (a specific settings key) or `auto_keys=1` (the whole
 config section; `400` when neither is given), plus `window`/`window_days`/`since`/
-`until` (see "Report-backed routes: windowing query params" above).
-Mirrors the CLI's `config-diff` subcommand.
+`until` (see "Report-backed routes: windowing query params" above) and
+`project`. Mirrors the CLI's `config-diff` subcommand.
+
+A change to a setting is looked for within one project's own run of
+snapshots, never across the interleaved snapshots of several projects:
+two projects whose settings never change would otherwise show a change
+every time a session in one followed a session in the other. The two
+spellings of a Windows project's drive letter (`C:` and `c:`), which older
+snapshots may carry, count as one project. Every snapshot recorded is
+read, not only the window's, so a setting changed before the window
+still has its table; the window chooses the sessions in each table. At
+most the first 20 changed keys, alphabetically, get a table. With a
+`project`, only that project's snapshots are read, so only its settings
+and its changes show, even when it has no session in the window.
 
 `data`: with `auto_keys=1`, a list of every `config` section table (the
-dashboard's Setup › Settings uses this); with `key`, that key's
-`config-diff-<key>` `Table`, or `[]` when it didn't change in the
-window.
+dashboard's Setup › Settings uses this), with the section's notes ("No
+setting changed between two snapshots of the same project", or how many of
+the changed keys are shown) added to the first table's `notes`; with
+`key`, that key's `config-diff-<key>` `Table`, or `[]` when it isn't
+one of the changed keys given a table.
 
 The watcher files every snapshot under the store's internal
 machine-wide bucket, and `Store.snapshots()` reports that bucket's
@@ -761,7 +862,7 @@ plain-English `Table` — `helptext.diagnostics_table`. Used by the
 dashboard's Data quality page.
 
 Query: `window`, `window_days`, or `since`/`until` (see "Report-backed
-routes: windowing query params" above).
+routes: windowing query params" above), and `project`.
 
 `data`: a `Table` (`name: "data_quality"`). Each row is `[field, value,
 meaning]`; `field` is the raw `Diagnostics` field name and
@@ -772,7 +873,9 @@ SessionStart hook runs `snapshot-config.py`, whether its path exists,
 and how long ago the last snapshot was taken. The second, `statusline`,
 is `hook_health.statusline_check`: whether the statusline that records
 usage limits is running, given where your sessions run. Both have the
-value `working` or `needs attention`.
+value `working` or `needs attention`. With a `project`, the counters
+count that project's sessions, but these two rows still describe the
+whole machine: the hook and the statusline are not per project.
 
 ### `GET /api/profiles`
 
@@ -878,6 +981,19 @@ the config hook records only the agents of the project a session
 started in, so the newest snapshot alone would show another project's
 agents as not set.
 
+This diff, and `POST /api/profiles/from-current`, always read the
+machine's newest snapshot and take no `project`: a profile is applied to
+your user settings (or to a project folder you name when you run the
+command), whichever project the dashboard is showing. The routes that
+judge a window do follow a picked project: with `project`,
+`/api/profile-goals`, `/api/quick-actions`, `/api/quick-actions/<id>` and
+`POST /api/whatif` read the picked project's own newest snapshot for
+"in force now" (the settings, and the agents widened over that project's
+snapshots only), as the report's own advice does
+(`report._settings_snapshots`). A project with no snapshot of its own gets
+the ones recorded with no project (schema 1), or none. Two snapshots of
+the same project whose drive letters differ in case count as one.
+
 ### `GET /api/baseline`
 
 The latest stored baseline capture, its full history, and the
@@ -933,7 +1049,12 @@ Every CLAUDE.md-family file on disk (user, project, local, `.claude/rules`
 and nested files seen in transcripts), with how often it was sent in the
 window and what that cost. File text is read now and never stored.
 
-Query: the windowing params above.
+Query: the windowing params above, and `project`. With a `project`, only
+that project's folders are read (`skills_review.project_folders_for`: the
+folder each slug's newest transcripts ran in), and the sends and costs are
+those of its sessions. Your own files under `~/.claude` are listed either
+way, because every project reads them. A picked project with no folder on
+disk (one you deleted) has no project files to list.
 
 `data`: `{"period", "transcripts", "files": [{"id", "path", "name", "level", "project", "who", "tokens", "scoped", "sections", "seen", "sends", "reach", "reach_text", "cost_usd", "cost_text", "findings": [str, ...], "fix_count"}, ...]}`.
 `id` is a 16-character hex hash of the path. `path` is the file's path
@@ -945,7 +1066,9 @@ kind of path this API returns (see "Privacy" above).
 One file's sections, duplicates, stale references and fixes. `404` for
 an unknown id, and for an id that is not 16 hex characters.
 
-Query: the windowing params above.
+Query: the windowing params above, and `project`. The id is looked up in
+the same narrowed list `/api/claude-md` returns for that `project`, so
+the id of another project's file is `404` while this one is picked.
 
 `data`: `period`, the list entry, plus `section_rows` (`heading`,
 `level`, `line`, `tokens`, `share` as a fraction of the file, `cost_text`,
@@ -1029,11 +1152,43 @@ effort or CLAUDE.md size change your sessions show, with the sessions
 before it against those after it, on the measures that change should
 move.
 
-Takes no window: each change is compared over its own before and after
-periods, looking back at most `lookback_days`.
+Query: the windowing params above (`window`, `window_days`,
+`since`/`until`) and `project`. With none of the four it means all time,
+as for `/api/sessions`. The window lists every change made inside it, by
+the second the dashboard shows, newest first and with no cap, and it
+never clips one: a change is compared over its own whole before and after
+periods, whichever window lists it, so it reads the same under 7 days as
+under 90. The before side reaches back at most `lookback_days`, or to the
+change before it; the after side runs to the next change that bounds it,
+or to now. `window=change` starts at the newest change (rounded down to
+the minute, like any named window), so it lists that change: with a
+`project`, the newest one that applies there (see the `change` window
+above). An unknown `project` is `400`.
 
-`data`: `{"changes": [{"change": {"ts", "source", "label", "keys", "changes", "backup_ts", "reverted", "project", "project_name", "summary"}, "before_sessions", "after_sessions", "enough", "gate", "verdict", "measures": [{"key", "label", "kind", "better", "before", "after", "before_value", "after_value", "before_n", "after_n", "change_pct", "direction", "p", "label_key", "label_text"}, ...], "quality": [{"group", "label", "before_runs", "after_runs", "verdict", "judged", "min_runs", "signals": [{"key", "label", "kind", "worse_when", "unit", "before", "after", "before_text", "after_text", "before_counts", "after_counts", "before_runs", "after_runs", "p", "label_key", "verdict"}, ...]}, ...], "without": {"paid_usd", "without_usd", "saved_usd", "fidelity", "fidelity_text", "basis", "sessions", "text", "since_text", "per_key": [{"key", "agent", "fidelity", "fidelity_text", "saved_usd", "saved_text", "basis"}, ...]} | null}, ...], "caveat", "min_sessions", "lookback_days"}`.
-Newest change first, at most ten. `change.source` is `apply`, `revert`,
+`project` lists the changes that apply in that project (the ones for
+every project, and that project's own, by either spelling of its drive
+letter) and compares each on that project's sessions alone. A change made
+in one project bounds the before and after of that project's sessions
+only. A change to every project is bounded in each project by the changes
+that apply there, so a change made in one project cuts that project's
+before and after and no other's, and the all-projects reading is the
+project readings put together (`impact.bounds`).
+
+**Reach.** The sessions the cards are worked out from start 14 days
+(`lookback_days`) before a base, to give the first change a before side.
+The base is 30 days back, or the oldest recorded change (an `apply`, a
+settings snapshot or a capture change) when that is older, or the start
+of the first UTC day of the window when the window begins before both.
+All time counts as beginning 90 calendar days back
+(`_ALL_TIME_REACH_DAYS`, the widest window the picker offers), so it
+lists every change any window can. A change before the base is never
+listed, whatever the window says, because its before side would be cut
+short. Only a change your sessions alone show (`source` `transcript`) can
+fall before it: every other kind is itself a recorded change, and moves
+the base back to it.
+
+`data`: `{"changes": [{"change": {"ts", "source", "label", "keys", "changes", "backup_ts", "reverted", "project", "project_name", "summary", "day"}, "before_sessions", "after_sessions", "enough", "gate", "verdict", "measures": [{"key", "label", "kind", "better", "before", "after", "before_value", "after_value", "before_n", "after_n", "change_pct", "direction", "p", "label_key", "label_text"}, ...], "quality": [{"group", "label", "before_runs", "after_runs", "verdict", "judged", "min_runs", "signals": [{"key", "label", "kind", "worse_when", "unit", "before", "after", "before_text", "after_text", "before_counts", "after_counts", "before_runs", "after_runs", "p", "label_key", "verdict"}, ...]}, ...], "without": {"paid_usd", "without_usd", "saved_usd", "fidelity", "fidelity_text", "basis", "sessions", "text", "since_text", "per_key": [{"key", "agent", "fidelity", "fidelity_text", "saved_usd", "saved_text", "basis"}, ...]} | null}, ...], "caveat", "min_sessions", "lookback_days"}`.
+Newest change first. `change.source` is `apply`, `revert`,
 `config` (a settings change the hook saw), `capture` (a metrics
 capture change from `capture-log.jsonl`, whose keys are `capture.<field>`
 and are measured by capture's own tokens per session and the share of
@@ -1046,8 +1201,11 @@ name. `project` is empty for a change that applies in every project;
 otherwise the change was made in one project's own files (its settings
 files, its agents or its `.mcp.json`), it is judged on that project's
 sessions only, and `project_name` is that project's value in the
-project filter (empty when no session loaded is from it). `label_key`
-is a measure's ratio-test reading (`lower`, `possibly_lower`, `higher`,
+project filter (empty when no session loaded is from it). `day` is the
+local day the change falls on, in `config.toml`'s `tz` (`YYYY-MM-DD`): the
+column a daily chart marks it in, since `/api/daily-usage` counts days the
+same way. It is `null` when `ts` can't be read. `label_key` is a
+measure's ratio-test reading (`lower`, `possibly_lower`, `higher`,
 `possibly_higher`, `no_clear_change` or `too_little_data`) and
 `label_text` the same in words. `kind` is the measure's unit (`money`,
 `pct`, `tokens` or `count`), `before_value`/`after_value` its raw
@@ -1059,6 +1217,49 @@ state, or `null` once `enough` is true. `before`/`after` are display
 text in the billing mode's units; `direction` is `lower`, `higher`,
 `same` or `null`. For an `apply` that is not yet undone, `backup_ts` is
 what `claudeglass apply --revert <backup_ts>` takes.
+
+A measure's `key` says what it counts. Each is a ratio of sums over the
+sessions on a side, so a per-reply figure weighs a long session by its
+replies, and `better` is `lower` for every one except `tagged_share`:
+
+| `key` | `kind` | What it measures |
+|---|---|---|
+| `tokens_per_session` | `tokens` | Every token the session read and wrote: input, cache writes, cache reads and output, subagents included. |
+| `output_per_turn` | `tokens` | Output tokens (thinking included) per main-session reply. |
+| `turns_per_session` | `count` | Main-session replies per session. |
+| `cost_per_turn` | `money` | Cost per main-session reply. |
+| `cost_per_session` | `money` | Cost per session, the overall check. |
+| `rebuild_share` | `pct` | Share of cache writes that rebuilt expired context. |
+| `summaries` | `count` | Conversation summaries per session. |
+| `peak_context` | `tokens` | Largest context per session. |
+| `startup_tokens` | `tokens` | Context at the start of a session. |
+| `agent_cost`, `agent_startup` | `money`, `tokens` | One agent's cost, and its starting context, per spawn. |
+| `capture_tokens`, `tagged_share`, `prompting_habits`, `drip_share` | `tokens`, `pct`, `count`, `pct` | Metrics capture's own notes and tags per session, the messages Claude tagged, and the prompting habits and one-at-a-time small requests per message. |
+
+Which measures a change gets, in order (`impact.measures_for`), from the
+keys it names; `cost_per_session` is always last:
+
+| A change to | Measures |
+|---|---|
+| `model` | `tokens_per_session`, `output_per_turn`, `turns_per_session`, `cost_per_turn` |
+| `effortLevel`, `alwaysThinkingEnabled`, `MAX_THINKING_TOKENS` | `output_per_turn`, `cost_per_turn` |
+| `fastMode` | `cost_per_turn` |
+| `autoCompactWindow` | `summaries`, `peak_context` |
+| a cache-lifetime key | `rebuild_share` |
+| skills, plugins or MCP servers | `startup_tokens` |
+| an agent's setting | `agent_cost`, `agent_startup` for that agent |
+| `capture.coaching` | `prompting_habits`, `drip_share`, `capture_tokens` |
+| any other `capture.<field>` | `capture_tokens`, `tagged_share` |
+| anything else (a CLAUDE.md size change) | `startup_tokens` |
+
+A model change is judged on the tokens it spends before what they cost,
+so a different price per token can't pass for a different amount of work.
+For a change that names several keys the measures follow the order of
+the keys, except that the token measures and `output_per_turn` always
+come before `cost_per_turn`: a settings edit lists its keys
+alphabetically, so `effortLevel` comes before `model`, and its card would
+otherwise lead with money. `fastMode` changes the price and the speed but
+not the tokens, so it is judged on cost per reply alone.
 
 `without` is what the sessions after the change would have cost
 without it (`counterfactual.py`), or `null` with fewer than
@@ -1093,14 +1294,54 @@ such as replies per run), `no_clear_change` or `too_little_data`; `p` is
 the two-sided p-value before the Holm correction, `null` with too little
 data. `worse_when` is `"higher"`, or `null` for a neutral measure.
 
+**Caching.** The service keeps the last six scopes (`_IMPACT_CACHE_SIZE`),
+a scope being the picked project (its raw slugs, none for every project)
+and the reach above (the UTC day it was moved back to, or none while the
+30-day default covers the window). The windows inside one reach share a
+slot, so changing the window compares nothing again. A slot holds every
+change that applies in it, and a comparison for each change a window has
+listed: a window works out only the listed changes the slot lacks, and
+each change is compared once. A slot's key is the store's change token
+together with the recorded changes (their times, sources and backup
+stamps) and `config.toml`'s modification time (its `tz` sets each
+change's `day`). When only the store's token has moved (a live session
+writing), a slot built within the last ten minutes answers at once,
+carries `X-Figures-Refreshing: 1`, and is refreshed in the background, one
+build at a time, comparing again the changes it had shown. A new recorded
+change or a changed `config.toml` is worked out before answering. A
+background refresh that fails is logged to the service's stderr and the
+next request tries again.
+
 ### `GET /api/backtest`
 
 Did your estimates come true? Every prediction `POST /api/whatif` has
 logged (with `"log": true`), matched to the change point it turned
 into and judged against the sessions before and after that change —
 the same before/after windowing and ratio test `/api/impact` uses
-(`backtest.py`). Takes no window: each prediction is judged over its
-own before and after periods.
+(`backtest.py`).
+
+Query: the windowing params above and `project`. With none of the four it
+means all time. The window only chooses which predictions are listed: a
+judged one is dated by the change it was matched to (`change_ts`), one
+still waiting by when it was logged (`ts`). A verdict doesn't depend on
+the window, so the same prediction reads the same under any of them.
+
+`project` is checked and then ignored. An unknown project is `400`, as
+elsewhere, but a logged prediction names no project, so the estimates
+stay every project's and so does the window: with a project picked,
+`window=change` still starts at the newest change in any project, not at
+the picked project's.
+
+Each prediction is judged on the sides `/api/impact` gives the change it
+matched (`impact.bounds`, then `impact.sides`), so an estimate and that
+change's card never disagree. The sessions come from the change cards'
+default reach (30 days back, or the oldest recorded change when that is
+older, less `lookback_days`), stretched back to the oldest prediction still
+waiting. The window never moves that reach, since a verdict, once
+reached, is kept. The first check on a store judges again every
+prediction an earlier version closed as `too_little_data`, once, because
+their windows were cut too short then. Such a prediction waits like any
+other unjudged one, and is dropped 90 days after it was made.
 
 `data`: `{"predictions": [{"id", "ts", "source", "measure_key", "agent", "predicted_usd", "predicted_pct", "fidelity", "seen_at", "change_ts", "judged_at", "verdict", "measured_usd", "measured_pct", "predicted_text", "measured_text", "verdict_text"}, ...], "judged_just_now", "verdicts"}`.
 Newest prediction first. `verdict` is `null` until a matching change
@@ -1113,6 +1354,15 @@ verdict itself. `measured_usd`/`measured_text` stay `null` until
 judged. `judged_just_now` is how many predictions this call judged for
 the first time (a stale answer can be served while a change is worked
 out in the background, as with `/api/impact`).
+
+**Caching.** One answer is kept, keyed on the store's change token, the
+recorded changes, and the predictions with when each was judged. A change
+in the store or in the prediction log serves the kept answer, if it is
+under ten minutes old, with `X-Figures-Refreshing: 1`, and judges any
+newly eligible predictions in the background. A background check that
+fails is logged to the service's stderr, and the next request tries
+again. A new set of recorded changes is worked out before answering. The window filters the kept
+answer afterwards, so it is not part of the key.
 
 ### `GET /api/setup`
 
@@ -1286,7 +1536,9 @@ cloud ids.
 descending, ties broken alphabetically (the same `(-cost, slug)` order
 `usage.by_project`'s rows already sort by). This is the list a `project`
 filter (below) accepts and the dashboard's project picker can render
-without a second request.
+without a second request. A report narrowed to a `project` lists that
+project even when none of its sessions falls in the window, so its
+settings still show.
 
 ### Filtering by project
 
@@ -1295,15 +1547,22 @@ per-section route: `/api/ttl`, `/api/carry`, `/api/recommendations`,
 `/api/quick-actions[/<id>]`, `/api/compaction-sim`, `/api/model-swap`,
 `/api/waste`, `/api/config-diff`, `/api/diagnostics`,
 `/api/claude-md[/<id>]`, `/api/skills`, `/api/profile-goals`, `/api/whatif`),
-plus `/api/summary`, `/api/sessions`, `/api/daily-usage` and
-`/api/compactions`, additionally accept a `project=<slug>` query param
-(additive). `<slug>` is one of `meta.projects`'/`/api/sessions`'
-already-redacted slugs -- never the raw, unredacted slug a filesystem
+plus `/api/summary`, `/api/sessions`, `/api/daily-usage`,
+`/api/compactions` and `/api/impact`, additionally accept a
+`project=<slug>` query param (additive). `<slug>` is one of
+`meta.projects`'/`/api/sessions`' already-redacted slugs -- never the raw, unredacted slug a filesystem
 path could embed a username in, since the API never hands one out
 (see "Privacy" above). The route narrows to that project's sessions
 only: fewer sessions, fewer transcripts, and (for report-backed routes)
 a report built from just that subset -- the same shape as an unfiltered
-response, just scoped.
+response, just scoped. A route that reads files or settings narrows
+those too: `/api/claude-md[/<id>]` and `/api/skills` read that project's
+folders (and your own files), `/api/config-diff` and the settings the
+quick actions, `/api/profile-goals` and `POST /api/whatif` call "in force
+now" read that project's own snapshots, and `/api/impact` lists the
+changes that apply there (see each route). `/api/backtest` validates
+`project` the same way and then ignores it: a logged prediction names no
+project, so its estimates stay every project's.
 
 An unrecognized or malformed `project` (a slug redacting to no known
 project in the current store) is a `400 bad_request`, same envelope as
@@ -1315,11 +1574,24 @@ given value back, only that `project` was the problem. The report cache
 The dashboard's project picker lists every project's
 `report.json` `meta.projects` for the window, then sends the picked
 slug as `project=` with every window-aware request, the Overview's
-previous-window `/api/summary?since=&until=` included. Routes that
-don't take the filter (`/api/impact`, `/api/backtest`,
-`/api/baseline`, `/api/recache`) keep covering every project,
-and the dashboard's "All time" chip beside what the first three draw reads
-"All time, all projects" while a project is picked. It checks an unknown slug once with
+previous-window call (`/api/summary?previous=1`, which returns the period
+before the one asked for, in the same project) included. A project is
+valid while the store has ever recorded a session for it, so one with no
+session in the window is not a `400`: its routes answer with empty
+figures, and a report narrowed to it still names it in `meta.projects`
+(so its settings show), though the unfiltered list the picker reads
+names only the projects that have a session in the window. The picker
+keeps a picked project in its menu either way, marked "No sessions in
+this window".
+
+Some routes keep covering every project whichever one is picked:
+`/api/baseline` (the dashboard's "All time, all projects" chip beside
+the latest baseline) and `/api/recache`; `/api/profiles/<id>/diff` and
+`POST /api/profiles/from-current`, which read the machine's newest
+settings; and `/api/backtest`, which checks `project` and ignores it
+(the dashboard's "All projects" chip beside it says so while a project is
+picked). The hook and statusline rows of `/api/diagnostics` also stay
+machine-wide. The dashboard checks an unknown slug once with
 `/api/sessions?limit=1&project=` and, on the `400`, falls back to every
 project.
 
@@ -1590,13 +1862,19 @@ had a `config_dir` of their own to give it.
 every request would make every page switch in the UI (`docs/ui.md`)
 re-parse the whole corpus. The implementation caches the assembled
 `ReportModel` in-process, keyed by `(window_days, since, until,
-change_token)` (a named `window` is first turned into its `since`,
-rounded to the minute), where `change_token` is `Store.change_token()` (S1-integration fix 1.f),
-paired with `config.toml`'s modification time — a
-single string combining `(COUNT(*), MAX(updated_at))` over `transcripts`
-and `(COUNT(*), MAX(ts))` over `snapshots`. A cache hit only requires
-this token to be unchanged since the entry was built; any transcript or
-snapshot insert/update moves it, forcing a rebuild on the next request.
+window_by, project)` (a named `window`, and a `window_days` window, is
+first turned into its `since`, rounded to the minute; `project` is the
+sorted tuple of the raw project slugs the picked project stands for, or
+none), and keeps the last eight. An entry is current while its token is
+unchanged: `Store.change_token()` (S1-integration fix 1.f), paired with
+`config.toml`'s modification time. `change_token()` is a single string
+combining `(COUNT(*), MAX(updated_at))` over `transcripts` and `(COUNT(*),
+MAX(ts))` over `snapshots`. A cache hit only requires this token to be
+unchanged since the entry was built; any transcript or snapshot
+insert/update moves it, and the next request rebuilds (serving the kept
+entry meanwhile: see "Caching" under the windowing params). `/api/impact`
+and `/api/backtest` have their own, per scope and per store (see their
+sections).
 
 **`/api/report.json`/`.md`/`.html` are unwrapped on success.** Their
 body on `200` is the renderer's own native output (`render_json`/
@@ -1729,7 +2007,7 @@ hook; see `code` under `GET /api/health`).
 
 `GET /api/report.*` above is built from the store instead of a fresh
 parse, via `service/rebuild.py`'s `corpus_from_store(store, *, days=None,
-since=None, until=None, window_by="last-reply") -> Corpus`. This is what lets
+since=None, until=None, window_by="last-reply", project_slugs=None) -> Corpus`. This is what lets
 a report be served for a session whose transcript file has already been
 removed by Claude Code's own `cleanupPeriodDays` retention: the watcher
 (`service/watcher.py`) folds every parsed transcript's full
@@ -1740,7 +2018,8 @@ digests straight back into a `Corpus` shaped exactly as
 `corpus.load_corpus` would have produced from the live files, so
 `report.build_report(corpus, ...)` runs unmodified against either one.
 `days`/`since`/`until`/`window_by` mirror `discovery.find_sessions`'s own
-parameters and windowing semantics.
+parameters and windowing semantics, and `project_slugs` keeps only the
+sessions of those projects (the raw slugs a `project` query param names).
 
 **A file Claude Code removed is marked, not deleted, in the store**
 (review finding 3). `Store.remove_missing` notices its transcript is no

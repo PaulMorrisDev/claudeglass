@@ -6,11 +6,10 @@ Where the rest of the report answers "how is caching/agentic work
 behaving", this section answers the plainer question a finance or
 platform-team reader actually has: how much was used, and when. Every
 period bucket (:func:`_day_key`/:func:`_week_key`/:func:`_month_key`) is
-computed in ``config.tz`` (the same "fall back to the machine's own local
-zone on an unresolvable/absent name" convention ``classify._to_local``
-uses — duplicated here rather than imported, per this project's
-established convention for small cross-module helpers, see
-``workflows.py``'s/``phases.py``'s module docstrings).
+computed in ``config.tz`` through ``discovery.to_local``, the one
+fallback rule ``classify._to_local`` and the dashboard's days share:
+``UTC`` resolves without a tz database, and any other name that can't be
+resolved (or none) falls back to the machine's own local zone.
 
 In subscription billing mode (``config.billing == "subscription"``),
 every money column in this section is what the tokens *would* have cost
