@@ -58,6 +58,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   assumptions and the model-swap docs now say so. Model swap still
   counts every workflow agent run as set by its script, whatever its
   agent type, so none is in an agent type's saving.
+- **A window that starts before the year 1000 failed on Linux.** A
+  window of hundreds of thousands of days starts that far back. On
+  Linux its start was written with a three-digit year, which ClaudeGlass
+  then couldn't read back, so `/api/summary` answered with an error
+  instead of saying the window is too large. Every window's start and
+  end are now written with a four-digit year on every system.
 
 ## [0.13.0] - 2026-10-02
 
