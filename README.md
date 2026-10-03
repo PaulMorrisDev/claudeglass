@@ -71,7 +71,9 @@ answered from your own sessions:
   prompting habits that cost extra replies, such as small requests sent
   one at a time, the same request sent again or asking how it's going,
   and what each cost.
-  Turn on coaching notes and you're told the moment you send one.
+  Turn on coaching notes and small requests sent one at a time, a huge
+  paste or a check on background work are flagged the moment you send
+  them.
 - **"Did my change work?"** It records your settings as each session
   starts, and compares the sessions before a change with those after
   it: Your changes shows each one's effect on the measures it should

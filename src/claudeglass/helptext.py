@@ -356,13 +356,13 @@ SECTION_COPY: dict[str, SectionCopy] = {
         intro="Habits in how you send messages that cost extra replies, how often they happened, and what they cost.",
         help=Help(
             shows="Habits in how you send messages, counted in your sessions whether or not coaching notes were on. "
-            "Notes warn about small requests, big tasks, huge pastes and checks on a background task as you type. "
-            "The rest are only counted here.",
+            "Notes warn about small requests, huge pastes and checks on a background task as you type. "
+            "The rest, big tasks without a plan among them, are only counted here.",
             read="Each cost is rough, with what it counts alongside. Some habits have no cost, because what they "
             "led to can't be told apart from the work. By week is how often it happened per message, the worst "
             "week as 100. A dash is a week with too few messages.",
             act="Pick the costliest habit and try its alternative for a week. Coaching notes "
-            "({{page:setup/capture}}) warn you about the four they cover as they happen.",
+            "({{page:setup/capture}}) warn you about the three they cover as they happen.",
         ),
     ),
     "capture": SectionCopy(
@@ -810,8 +810,9 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="How you prompt",
         help=Help(
             shows="Each habit seen in this window, the costliest first.",
-            read="A small request counts when it was short, sent soon after Claude's reply, and answered with a "
-            "file change. A vague correction says something went wrong, with no detail. A repeat counts only when "
+            read="A small request counts when it was short, asked for a change, came soon after your last message, "
+            "and was answered with a file change. A big task without a plan asks for three or more separate changes in one message sent "
+            "outside plan mode. A vague correction says something went wrong, with no detail. A repeat counts only when "
             "the request before it was answered with a change. Asking how it's going counts each time, priced from "
             "the reply to that message. Costs are at list price.",
             act="",
@@ -868,7 +869,6 @@ TABLE_COPY: dict[str, TableCopy] = {
             "plan_fresh": "Fresh session after a plan",
             "plan_fresh_early": "Clear context at plan approval",
             "drip_feed": "Small requests sent one at a time",
-            "plan_first": "Big task without a plan",
             "big_paste": "Huge paste",
             "status_poll": "Asking how it's going",
             "cold_return": "Back after a break",

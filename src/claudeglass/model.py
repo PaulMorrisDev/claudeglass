@@ -455,7 +455,9 @@ the words:
   quoted line or pasted log lines, and need a change verb: 0 for a message
   that mentions a plan (it follows one), opens by asking to review or
   explain, or is a plan already (1,500 characters or more with a heading,
-  or five numbered items).
+  or five listed items; since ``PARSER_VERSION`` 37 also 2,000 characters or more
+  whatever its formatting). Since 37 it is 0 too for a message with pasted
+  code or a pasted log, and for one that asks to merge or release.
 - ``Turn.prompt_plan_mode: bool = False`` -- it was sent in plan mode
   (its line's ``permissionMode``).
 - ``Turn.human_vague: bool = False`` -- it was a short correction that
@@ -581,21 +583,37 @@ message is read in memory and dropped:
   usage-limit resume and app-quit notes, and a ``turnOrigin`` of
   ``task_notification``, ``peer`` or ``scheduled`` ruling a line out
   (``human`` never rules one in). Such a line is a ``META`` event with
-  subkind ``not_typed``.
+  subkind ``not_typed``, or ``resume`` for the usage-limit resume and
+  app-quit notes, which carry on your last message's work.
 - An ``output_style`` attachment is a ``REMINDER`` unless the style
   changed from the last one in the transcript, when it is the
   ``CACHE_SIGNAL`` it was. A ``permission-mode`` line and a system
   ``informational`` line are ignored.
 
 Live-coaching addition (``PARSER_VERSION`` 37). What the small-requests
-check (``drip_feed``) needs to tell a request from what isn't one, and a
-change to your work from one to Claude's own folders. A yes/no and counts
-only:
+check (``drip_feed``: the live hint and the report's count in
+``prompting.py``) needs to tell a request from what isn't one, and a change
+to your work from one to Claude's own folders. A yes/no and counts only:
 
 - ``Turn.human_question: bool = False`` -- the preceding message you typed
   only asked something: it ended in a question mark or opened with a
   question word (``prompt_shape.is_question``). Like ``human_go`` and
   ``human_status``, a question asks for no change.
+- ``Turn.human_change: bool = False`` -- the preceding message you typed
+  asked Claude to change something: a change verb opened a sentence
+  ("make it bigger", "now move the logo"), and it was no go-ahead,
+  thank-you, status check, question or explain request
+  (``prompt_shape.is_change_request``). Any of the messages you typed
+  before the reply, unlike ``human_go`` and ``human_question``. A
+  statement, a report ("it does not load") and an explain request are
+  none, so none joins a run of small changes.
+- ``Turn.preceding_not_typed: bool = False`` -- a line you didn't type
+  (a ``META`` event of subkind ``not_typed``: a shell command you ran
+  with ``!``, another session's message) came between the previous reply
+  and this one. The reply to it is nobody's answer to the message of yours
+  before it (``prompting._own_reply``), as the hook's ``_untyped_start``
+  reads it. A resume note (subkind ``resume``) carries on that message's
+  work and sets nothing.
 - ``Turn.config_edit_count: int = 0`` -- how many of this turn's edit
   calls and shell write targets sat inside a ``.claude`` folder
   (``prompt_shape.is_config_path``): Claude's memory, plans and scripts, or
@@ -605,7 +623,7 @@ only:
 - ``Turn.agent_edit_files: int = 0`` -- the files this turn's subagents
   changed (``toolUseResult.toolStats.editFileCount`` of each synchronous
   ``Agent`` result that wasn't an error): their own edits aren't main-chain
-  tool calls.
+  tool calls. They are credited to the turn whose call launched the agent.
 
 Plan-feedback addition (``PARSER_VERSION`` 37). How each tool call that
 didn't run was answered, and what became of each plan. Closed words and
@@ -1152,8 +1170,12 @@ class Turn:
     human_status: bool = False
     human_remind: bool = False
     #: Live-coaching addition (see module docstring): the preceding message
-    #: only asked something.
+    #: only asked something, and whether it asked for a change.
     human_question: bool = False
+    human_change: bool = False
+    #: A line you didn't type (a ``META`` event of subkind ``not_typed``)
+    #: came between the previous reply and this one.
+    preceding_not_typed: bool = False
     queued_prompts: int = 0
     queued_chars: int = 0
     queued_steps: int = 0

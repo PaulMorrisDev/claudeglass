@@ -2085,7 +2085,7 @@ def _finalize_turn(
     prompt_plan_mode = human_vague = human_repeat = False
     human_acks: list[bool] = []
     # Parser-signals addition (see model.py's module docstring).
-    human_adjust = human_remind = False
+    human_adjust = human_remind = human_change = preceding_not_typed = False
     human_gos: list[bool] = []
     human_statuses: list[bool] = []
     human_questions: list[bool] = []
@@ -2103,6 +2103,9 @@ def _finalize_turn(
         if pending_event.kind == EventKind.HOOK_OUTPUT and pending_event.subkind == "hook_additional_context":
             label = pending_event.detail.get("script") or "built-in"
             hook_context_chars[label] = hook_context_chars.get(label, 0) + (pending_event.size_chars or 0)
+            continue
+        if pending_event.kind == EventKind.META and pending_event.subkind == "not_typed":
+            preceding_not_typed = True
             continue
         if pending_event.kind == EventKind.SLASH_COMMAND:
             command = pending_event.detail.get("command")
@@ -2147,6 +2150,7 @@ def _finalize_turn(
         human_acks.append(bool(pending_event.detail.get("ack")))
         human_adjust = human_adjust or bool(pending_event.detail.get("adjust"))
         human_remind = human_remind or bool(pending_event.detail.get("remind"))
+        human_change = human_change or bool(pending_event.detail.get("change"))
         human_gos.append(bool(pending_event.detail.get("go")))
         human_statuses.append(bool(pending_event.detail.get("status")))
         human_questions.append(bool(pending_event.detail.get("question")))
@@ -2261,6 +2265,8 @@ def _finalize_turn(
         human_go=bool(human_gos) and all(human_gos),
         human_status=bool(human_statuses) and all(human_statuses),
         human_question=bool(human_questions) and all(human_questions),
+        human_change=human_change,
+        preceding_not_typed=preceding_not_typed,
         human_remind=human_remind,
         queued_prompts=queued_prompts,
         queued_chars=queued_chars,

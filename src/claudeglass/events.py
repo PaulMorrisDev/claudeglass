@@ -59,8 +59,9 @@ a cycle, but its detail now says who sent it and how it reads
 (:func:`_queued_prompt_detail`, sharing :func:`_message_flags` with a
 typed message). A ``user`` line you didn't type -- one of
 ``capture_catalogue.NOT_TYPED_PREFIXES``, or one a ``turnOrigin`` rules
-out -- is a ``META`` event with subkind ``not_typed`` (19.9), checked just
-before ``HUMAN_TEXT``. ``output_style`` is a ``REMINDER`` (``parse.py``
+out -- is a ``META`` event with subkind ``not_typed`` (19.9), or
+``resume`` for the notes that carry on your last message's work,
+checked just before ``HUMAN_TEXT``. ``output_style`` is a ``REMINDER`` (``parse.py``
 promotes a change of style), and ``permission-mode`` and ``system``
 ``informational`` lines are ignored.
 
@@ -89,6 +90,7 @@ from .capture_catalogue import (
     COACHING_HINTS,
     CORRECTION_PATTERN,
     CORRECTION_SCAN_CHARS,
+    ERROR_TEXT_PATTERN,
     HOOK_SCRIPT,
     LIMIT_RESUME_PREFIX,
     NOT_TYPED_PREFIXES,
@@ -96,8 +98,12 @@ from .capture_catalogue import (
     NOTE_MARKER,
     OLD_COACH_MARKER,
     OLD_NOTE_MARKER,
+    PASTE_MARKER,
     REPORT_THRESHOLDS,
+    RESUME_PREFIXES,
     RETIRED_COACHING_HINTS,
+    SESSION_LIMIT_PREFIX,
+    WEEKLY_LIMIT_PREFIX,
 )
 from .capture_tags import parse_brief_markers, parse_note_codes
 from .model import Event, EventKind
@@ -994,7 +1000,6 @@ def sanitize_line_type(line_type: object) -> str:
 #: block at or beyond this length is treated as pasted, same as the
 #: ``[Pasted text`` marker Claude Code's own composer inserts.
 _PASTE_CHAR_THRESHOLD = 2000
-_PASTE_MARKER = "[Pasted text"
 
 
 #: Quality-signals addition: phrases that mark a message as correcting
@@ -1024,14 +1029,7 @@ _PATH_RE = re.compile(
     r"|sh|ps1|psm1|md|json|jsonl|toml|ya?ml|ini|cfg|css|scss|html|vue|svelte|xml|gradle|tf|proto)\b"
     r"|(?:^|\s)(?:src|lib|app|tests?|docs|packages|scripts|config)/[\w.-]+"
 )
-_ERROR_TEXT_RE = re.compile(
-    r"Traceback \(most recent call last\)"
-    r"|^\s+at [\w.$<>]+ ?\(.*:\d+(?::\d+)?\)"
-    r"|\b[A-Z]\w*(?:Error|Exception)\b(?::|\s+at\b)"
-    r"|^(?:error|fatal)(?:\[E\d+\])?: "
-    r"|\bFAILED\b|\bpanicked at\b|npm ERR!|exit code [1-9]\d*",
-    re.MULTILINE,
-)
+_ERROR_TEXT_RE = re.compile(ERROR_TEXT_PATTERN)
 _DONE_RE = re.compile(
     r"\b(?:done when|definition of done|acceptance criteria|success criteria"
     r"|expected (?:output|result|behaviou?r)"
@@ -1093,7 +1091,7 @@ def _human_text_metrics(d: dict, str_content: str | None) -> tuple[int, bool, di
     estimate (``content_block_size``) for a list-content line -- these
     used to silently count as 0 chars. Flags a paste when any one text
     block exceeds ``_PASTE_CHAR_THRESHOLD`` chars or contains
-    ``_PASTE_MARKER``. Never retains any block's own content.
+    ``PASTE_MARKER``. Never retains any block's own content.
     ``unsized_counts`` is block type -> count for a block this function
     recognises (image/document) but could not size -- the caller folds
     it into ``parser_notes["unsized_blocks"]``.
@@ -1126,7 +1124,7 @@ def _content_metrics(str_content: str | None, blocks: Sequence | None) -> tuple[
             else:
                 unsized_counts[block_type] = unsized_counts.get(block_type, 0) + 1
     total_chars = sum(len(text) for text in texts) + block_chars
-    has_paste = any(len(text) > _PASTE_CHAR_THRESHOLD or _PASTE_MARKER in text for text in texts)
+    has_paste = any(len(text) > _PASTE_CHAR_THRESHOLD or PASTE_MARKER in text for text in texts)
     return total_chars, has_paste, unsized_counts
 
 
@@ -1148,7 +1146,7 @@ def _has_image_block(blocks: Sequence | None) -> bool:
 def _message_flags(texts: Sequence[str], *, has_image: bool = False, skill_command: bool = False) -> dict:
     """The ``Event.detail`` flags a message you typed, or typed while
     Claude was working, carries: ``correction``, ``adjust``, ``remind``,
-    ``go``, ``status``, ``ack``, ``question``, ``vague``, ``has_image``,
+    ``go``, ``status``, ``ack``, ``question``, ``change``, ``vague``, ``has_image``,
     ``steps`` (two or more changes, ``prompt_shape.plan_steps``: none for a
     message that mentions a plan, opens by asking to review or is a plan
     already) and ``flags`` (``model.PROMPT_FLAGS``). Each is there only
@@ -1180,6 +1178,7 @@ def _message_flags(texts: Sequence[str], *, has_image: bool = False, skill_comma
             ("go", prompt_shape.is_go),
             ("status", prompt_shape.is_status),
             ("question", prompt_shape.is_question),
+            ("change", prompt_shape.is_change_request),
             ("adjust", prompt_shape.is_adjust),
             ("remind", prompt_shape.is_remind),
         ):
@@ -1289,10 +1288,9 @@ def _queued_prompt_detail(attachment: dict) -> dict | None:
 
 #: Usage-limits addition (see module docstring): the six known synthetic
 #: assistant texts, matched by ordered startswith/substring checks
-#: verified against the real corpus. Never stored -- only the resulting
-#: enum-like label survives onto ``Turn.synthetic_kind``.
-_SESSION_LIMIT_PREFIX = "You've hit your session limit"
-_WEEKLY_LIMIT_PREFIX = "You've hit your weekly limit"
+#: verified against the real corpus (the two usage-limit prefixes are the
+#: catalogue's, which the capture hook reads too). Never stored -- only
+#: the resulting enum-like label survives onto ``Turn.synthetic_kind``.
 _OVERLOADED_PREFIX = "API Error: 529"
 _AUTOCOMPACT_THRASH_PREFIX = "Autocompact is thrashing"
 
@@ -1305,9 +1303,9 @@ def classify_synthetic_text(text: str | None) -> str:
     """
     if not isinstance(text, str):
         return "other_api_error"
-    if text.startswith(_SESSION_LIMIT_PREFIX):
+    if text.startswith(SESSION_LIMIT_PREFIX):
         return "session_limit"
-    if text.startswith(_WEEKLY_LIMIT_PREFIX):
+    if text.startswith(WEEKLY_LIMIT_PREFIX):
         return "weekly_limit"
     if text.startswith(_OVERLOADED_PREFIX):
         return "overloaded"
@@ -1514,6 +1512,19 @@ def _is_not_typed(d: dict, str_content: str | None) -> bool:
     if text is None or text.startswith(_SKILL_COMMAND_PREFIX):
         return False
     return text.lstrip().startswith(NOT_TYPED_PREFIXES)
+
+
+def _not_typed_subkind(d: dict, str_content: str | None) -> str:
+    """The ``META`` subkind of a line you didn't type: ``resume`` for a
+    note that carries on your last message's work
+    (``capture_catalogue.RESUME_PREFIXES``, unless a ``turnOrigin`` rules
+    it out), ``not_typed`` for every other line, which Claude answers by
+    itself and which ends the reply to your last message (the hook's
+    ``_untyped_start`` reads the same lines)."""
+    if d.get("turnOrigin") in NOT_TYPED_TURN_ORIGINS:
+        return "not_typed"
+    text = _first_user_text(d, str_content)
+    return "resume" if text is not None and text.lstrip().startswith(RESUME_PREFIXES) else "not_typed"
 
 
 def classify_line(d: dict) -> Event | None:
@@ -1812,9 +1823,10 @@ def classify_line(d: dict) -> Event | None:
     # that looks like your message but isn't -- one list shared with the
     # hook (``capture_catalogue.NOT_TYPED_PREFIXES``), and a
     # ``turnOrigin`` that rules it out. Checked here so everything
-    # above that classified such a line more specifically still wins.
+    # above that classified such a line more specifically still wins. A
+    # resume note is subkind ``resume``, the rest ``not_typed``.
     if line_type == "user" and _is_not_typed(d, str_content):
-        return Event(kind=EventKind.META, subkind="not_typed", ts=ts)
+        return Event(kind=EventKind.META, subkind=_not_typed_subkind(d, str_content), ts=ts)
 
     # 20. HUMAN_TEXT
     if line_type == "user" and (

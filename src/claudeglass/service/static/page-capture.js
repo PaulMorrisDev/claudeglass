@@ -468,6 +468,12 @@ function renderMetricRow(row, data, container) {
     more.appendChild(facts);
     box.appendChild(more);
   }
+  if (row.needs_hook && row.hook_command && !(data.hooks && data.hooks.blocked_by)) {
+    // The chip says an entry is missing; this says how to add it. The
+    // dashboard never writes settings.json: the CLI shows the change first.
+    box.appendChild(el("p", { class: "notes" }, prose("settings.json has no entry for this. The dashboard doesn't change it, so add the entry from a terminal:")));
+    box.appendChild(codeBlockWithCopy(row.hook_command, "Command"));
+  }
   if (row.needs_install) {
     // The dashboard never writes Claude Code's folder: the CLI adds the
     // skill after showing it and asking.

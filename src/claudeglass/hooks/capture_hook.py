@@ -59,21 +59,22 @@ connect``):
   ``coaching_notes``): a short ``cg-coach`` note when a hint applies --
   a message sent after a break that outlasted the prompt cache (a receipt
   for the rewrite, ``cold_return``), a message asking how background work
-  is going while it still runs (``status_poll``), small requests sent one
-  at a time, a big task sent without a plan, a huge paste, a large result,
-  a plan approved after a lot of planning, or a message sent in plan
-  mode after a lot of planning (the note asks Claude to end the plan it
-  submits with the tip to approve it with a clear context). A tip
+  is going while it still runs (``status_poll``), small change requests
+  sent one at a time (``drip_feed``), a huge paste, a large result, a plan
+  approved after a lot of planning, or a message sent in plan mode after a
+  lot of planning (the note asks Claude to end the plan it submits with
+  the tip to approve it with a clear context). A tip
   reaches you through
   Claude: the note's first sentence tells it to write the tip and its
   last line is the tip, word for word, so the reply carries it in every
   app. The notes never ask Claude to change how it works. Your message
-  is read only for its length, how many changes it asks for and whether
-  it is a request at all (not thanks, a go-ahead, a status check or a
-  question); its words never leave the hook. A message sent while Claude
-  was still working (queued: the transcript ends on a tool call or a
-  tool's result) gets no note at all. Where Claude Code shows hook
-  messages, the same
+  is read only for its length and whether it is a status check, a
+  go-ahead, a question or a request to change something (by a change
+  verb opening one of its sentences, for ``drip_feed``); its words never
+  leave the hook. A message sent while Claude was still working (queued:
+  the transcript ends on a tool call or a tool's result under
+  ``coaching_queued_minutes`` old) gets no note at all. Where Claude Code
+  shows hook messages, the same
   tip also appears at once as a one-line notice (``systemMessage``,
   never sent to Claude); the desktop app's Code tab doesn't show one
   (it folds it into a collapsed row of the run summary), so there
@@ -1135,8 +1136,41 @@ def _compacted_since(records: list[dict], at: float) -> bool:
     return False
 
 
+def _limit_stop(records: list[dict], at: float, prefixes: tuple[str, ...]) -> tuple[bool, float | None]:
+    """Whether a usage-limit line was written after the reply at ``at`` (a
+    timestamp, or, with no time of its own, after the tail's last reply),
+    and the latest time a limit it names resets (epoch seconds from the
+    line's ``quotaLimits.resetsAt``, ``None`` when no line carries one).
+    A limit line is Claude Code's own line in place of a reply, its text
+    opening with one of ``prefixes``. Only the time is read from it."""
+    found = False
+    reset = None
+    after_last_reply = True
+    for record in reversed(records):
+        if _is_reply(record):
+            after_last_reply = False
+            continue
+        if record.get("type") != "assistant" or record.get("isSidechain") or not _is_synthetic(record):
+            continue
+        if not any(
+            isinstance(block, dict) and block.get("type") == "text" and str(block.get("text") or "").startswith(prefixes)
+            for block in _blocks(record)
+        ):
+            continue
+        stamp = _reply_time(record)
+        if not ((stamp is None and after_last_reply) or (stamp is not None and stamp.timestamp() >= at)):
+            continue
+        found = True
+        quota = record.get("quotaLimits")
+        moment = _number(quota.get("resetsAt")) if isinstance(quota, dict) else None
+        if moment is not None and (reset is None or moment > reset):
+            reset = moment
+    return found, reset
+
+
 def _cold_hint(
-    path: str, records: list[dict], replayed: bool, last: dict | None, kept: bool, th: dict, now_ts: float
+    path: str, records: list[dict], replayed: bool, last: dict | None, kept: bool, th: dict, now_ts: float,
+    limit_prefixes: tuple[str, ...] = (),
 ) -> tuple[str, float, dict] | None:
     """``cold_return`` for a message sent after a break that outlasted the
     prompt cache: the gap since the newest reply is longer than its cache
@@ -1145,12 +1179,19 @@ def _cold_hint(
     ``kept`` says it came from the coach state too, so a replay at the end
     of the tail can't have misled it). Silent with no reply known, when
     the tail ends in a replay and nothing was kept, and after a compaction
-    since that reply. The context is stated less the shared start
+    since that reply. Silent too when a usage-limit line followed that
+    reply and you are back within a cache lifetime of the limit's reset (or
+    the reset isn't known): the wait was the limit's, not a break you took,
+    and the cache couldn't have outlived it. Back later than that, it is a
+    break like any other. The context is stated less the shared start
     (``warm_prefix_tokens``): that part is rewritten for everyone."""
     if last is None or (replayed and not kept) or last["ctx"] < th["cold_min_tokens"]:
         return None
     idle = now_ts - last["at"]
     if idle <= last["ttl"] or _compacted_since(records, last["at"]):
+        return None
+    stopped, reset = _limit_stop(records, last["at"], limit_prefixes) if limit_prefixes else (False, None)
+    if stopped and (reset is None or now_ts - reset <= last["ttl"]):
         return None
     ctx = max(0, last["ctx"] - th["warm_prefix_tokens"])
     return "cold_return", last["ctx"], {
@@ -1256,8 +1297,10 @@ def _poll_hint(
 #: and its output, a shell command run with ``!``, a scheduled task, a
 #: background agent's report, another session's message, the desktop
 #: app's resume notes. Read once from the catalogue
-#: (``capture_catalogue.NOT_TYPED_PREFIXES``, the one list the parser and
-#: the status line share) rather than copied here.
+#: (``capture_catalogue.NOT_TYPED_PREFIXES`` and ``NOT_TYPED_TURN_ORIGINS``,
+#: the lists the parser and the status line share) rather than copied
+#: here, with the resume notes among them that carry on your last
+#: message's work (``RESUME_PREFIXES``).
 _NOT_TYPED: dict = {}
 
 
@@ -1266,12 +1309,18 @@ def _not_typed_prefixes() -> tuple[str, ...]:
         coaching = load_catalogue()["coaching"]
         _NOT_TYPED["prefixes"] = tuple(coaching["not_typed_prefixes"])
         _NOT_TYPED["origins"] = tuple(coaching["not_typed_turn_origins"])
+        _NOT_TYPED["resume"] = tuple(coaching["resume_prefixes"])
     return _NOT_TYPED["prefixes"]
 
 
 def _not_typed_origins() -> tuple[str, ...]:
     _not_typed_prefixes()
     return _NOT_TYPED["origins"]
+
+
+def _resume_prefixes() -> tuple[str, ...]:
+    _not_typed_prefixes()
+    return _NOT_TYPED["resume"]
 
 
 def _text_of(record: dict) -> str:
@@ -1375,33 +1424,71 @@ def _agent_edit_files(record: dict) -> int:
     return count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 0
 
 
+def _is_async_launch(record: dict) -> bool:
+    """Whether a tool result is a background agent's launch message
+    rather than its report (``parse._is_async_launch``)."""
+    result = record.get("toolUseResult")
+    return isinstance(result, dict) and (result.get("isAsync") is True or result.get("status") == "async_launched")
+
+
+def _untyped_start(record: dict) -> bool:
+    """Whether a ``user`` line is one you didn't type, that Claude
+    answers by itself and that ends the reply to your last message: a
+    background agent's report, a scheduled task, a slash command's output,
+    a message from another session. Not a resume note, which carries on
+    that message's work (``capture_catalogue.RESUME_PREFIXES``), nor a
+    stopped reply's marker (``prompting._UNTYPED_STARTS`` names the same
+    lines for the report). The line itself, written when Claude begins
+    answering it, marks the end, not the queue operation that held it."""
+    if (
+        record.get("type") != "user" or record.get("isMeta") or record.get("isCompactSummary")
+        or "toolUseResult" in record or not _is_typed_text(record)
+    ):
+        return False
+    if record.get("turnOrigin") in _not_typed_origins():
+        return True
+    text = _text_of(record).lstrip()
+    return text.startswith(_not_typed_prefixes()) and not text.startswith(_resume_prefixes())
+
+
 def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict], dict]:
     """The messages you typed, oldest first, each with its time
-    (``at``), the seconds since Claude's reply before it (``gap``),
-    whether that reply ended on a question, so the message answers it
-    (``answer``; a question that closes a reply that changed a file is an
-    offer, and the next message isn't taken for an answer to it), whether
-    Claude replied to it at all (``answered``: one it didn't reply to
-    before another was sent was stopped before any reply, and Claude Code
-    put it back to edit; an API error, an overload or a usage limit in a
-    reply's place doesn't answer it either) and whether Claude changed a
-    file in reply to it (``edited``, from ``edits``: its own edit calls
-    and shell writes outside a ``.claude`` folder, and the files its
-    subagents changed, less the edit calls that failed); and, as the
-    second item, ``replied_at`` and ``answer`` for a message sent now. A
-    stopped reply's marker, a slash command, a compaction summary or a
-    subagent's line isn't a message."""
+    (``at``), the seconds since your message before it (``since``: your
+    own messages alone set the clock), whether the reply before it ended
+    on a question, so the message answers it (``answer``; a question that
+    closes a reply that changed a file is an offer, and the next message
+    isn't taken for an answer to it), whether Claude replied to it at all
+    (``answered``: one it didn't reply to before another was sent was
+    stopped before any reply, and Claude Code put it back to edit; an API
+    error, an overload or a usage limit in a reply's place doesn't answer
+    it either) and whether Claude changed a file in reply to it
+    (``edited``, from ``edits``: its own edit calls and shell writes
+    outside a ``.claude`` folder, and the files its subagents changed,
+    less the edit calls that failed). Only the reply the message started
+    counts: a line you didn't type (:func:`_untyped_start`) ends it, and
+    what Claude does after that is nobody's request; a subagent's files go
+    to the message whose reply launched it, whenever its result comes
+    back. As the second item, ``typed_at`` (your last message's time) and
+    ``answer`` for a message sent now. A stopped reply's marker, a slash
+    command, a compaction summary or a subagent's line isn't a message.
+    ``statusline._exchanges`` reads the same (held to it by a test)."""
     out: list[dict] = []
-    replied_at = None
+    typed_at = None
     said = ""
     edit_calls: dict[str, dict] = {}
+    launches: dict[str, dict] = {}
     for record in records:
         if record.get("isSidechain"):
             continue
         if record.get("type") == "assistant" and _is_synthetic(record):
             continue
+        if _untyped_start(record):
+            # Before Claude's first reply to the message, the line still
+            # leaves that reply its own.
+            if out and out[-1]["answered"]:
+                out[-1]["closed"] = True
+            continue
         if record.get("type") == "assistant":
-            replied_at = _reply_time(record) or replied_at
             if out:
                 out[-1]["answered"] = True
             for block in _blocks(record):
@@ -1409,23 +1496,25 @@ def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict]
                     continue
                 if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
                     said = block["text"]
-                elif block.get("type") == "tool_use" and out and _changes_file(block, edit_tools):
-                    out[-1]["edits"] += 1
-                    if block.get("name") in edit_tools:
-                        edit_calls[str(block.get("id"))] = out[-1]
+                elif block.get("type") == "tool_use" and out and not out[-1]["closed"]:
+                    if _changes_file(block, edit_tools):
+                        out[-1]["edits"] += 1
+                        if block.get("name") in edit_tools:
+                            edit_calls[str(block.get("id"))] = out[-1]
+                    elif block.get("name") in _AGENT_TOOLS:
+                        launches[str(block.get("id"))] = out[-1]
             continue
         results = [b for b in _blocks(record) if isinstance(b, dict) and b.get("type") == "tool_result"]
         if record.get("type") == "user" and results:
-            if out:
-                failed = False
-                for block in results:
-                    if block.get("is_error"):
-                        failed = True
-                        call = edit_calls.pop(str(block.get("tool_use_id")), None)
-                        if call is not None:
-                            call["edits"] = max(0, call["edits"] - 1)
-                if not failed:
-                    out[-1]["edits"] += _agent_edit_files(record)
+            for block in results:
+                key = str(block.get("tool_use_id"))
+                call = edit_calls.pop(key, None)
+                launched = launches.pop(key, None)
+                if block.get("is_error"):
+                    if call is not None:
+                        call["edits"] = max(0, call["edits"] - 1)
+                elif launched is not None and not _is_async_launch(record):
+                    launched["edits"] += _agent_edit_files(record)
             continue
         if record.get("isCompactSummary") or not _is_human_prompt(record):
             continue
@@ -1434,14 +1523,17 @@ def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict]
             continue
         at = _reply_time(record)
         out.append({
-            "text": text, "at": at, "edits": 0, "edited": False, "answered": False,
-            "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
-            "answer": _ends_on_question(said) and not (out and out[-1]["edits"] > 0),
+            "text": text, "at": at, "edits": 0, "edited": False, "answered": False, "closed": False,
+            "since": (at - typed_at).total_seconds() if at is not None and typed_at is not None else None,
+            "asked": _ends_on_question(said),
         })
+        typed_at = at or typed_at
         said = ""
-    for ex in out:
+    for i, ex in enumerate(out):
         ex["edited"] = ex["edits"] > 0
-    return out, {"replied_at": replied_at, "answer": _ends_on_question(said) and not (out and out[-1]["edits"] > 0)}
+        ex["answer"] = ex.pop("asked") and not (i > 0 and out[i - 1]["edits"] > 0)
+        del ex["closed"]
+    return out, {"typed_at": typed_at, "answer": _ends_on_question(said) and not (out and out[-1]["edits"] > 0)}
 
 
 def _is_status(text: str, coaching: dict) -> bool:
@@ -1458,113 +1550,132 @@ def _is_question(text: str, coaching: dict) -> bool:
     return text.endswith("?") or re.match(coaching["asks_pattern"], text, re.IGNORECASE) is not None
 
 
-def _is_request(text: str, coaching: dict) -> bool:
-    """A message that asks for something: not a thank-you, a go-ahead, a
-    status check or a question (``prompt_shape.is_request``)."""
-    stripped = text.strip()
-    return bool(stripped) and not (
-        re.fullmatch(coaching["ack_pattern"], stripped, re.IGNORECASE)
-        or _is_go(text, coaching)
-        or _is_status(text, coaching)
-        or _is_question(text, coaching)
+def _is_change_request(text: str, coaching: dict) -> bool:
+    """A message that asks Claude to change something: a change verb that
+    opens a sentence (``change_pattern``), and not a thank-you, a go-ahead,
+    a status check, a question or a request to look rather than change
+    (``prompt_shape.is_change_request``)."""
+    text = text.strip()
+    return (
+        bool(text)
+        and re.search(coaching["change_pattern"], text[:coaching["change_scan_chars"]], re.IGNORECASE) is not None
+        and not (
+            re.fullmatch(coaching["ack_pattern"], text, re.IGNORECASE)
+            or _is_go(text, coaching)
+            or _is_status(text, coaching)
+            or _is_question(text, coaching)
+            or re.match(coaching["review_pattern"], text, re.IGNORECASE)
+        )
     )
 
 
-#: How much of a message is read for its steps (``prompt_shape.STEP_SCAN_CHARS``).
-_STEP_SCAN_CHARS = 8_000
-_PLAN_WORD_RE = re.compile(r"\bplan\b", re.IGNORECASE)
-
-
-def _prose(text: str, coaching: dict) -> str:
-    """The start of ``text`` without what isn't your own writing: a fenced
-    block, a quoted line and a pasted log or stack-trace line
-    (``prompt_shape.prose``)."""
-    return re.sub(coaching["prose_noise_pattern"], " ", text[:_STEP_SCAN_CHARS])
-
-
-def _request_steps(text: str, coaching: dict) -> int:
-    """How many separate changes ``text`` asks for in your own prose: the
-    most of its list lines, its change verbs, and the items of one
-    sentence that starts with a change verb; 0 with no change verb
-    (``prompt_shape.request_steps``, which a test holds this to)."""
-    text = _prose(text, coaching)
-    action_re = re.compile(coaching["action_pattern"], re.IGNORECASE)
-    actions = len(action_re.findall(text))
-    if not actions:
-        return 0
-    separator_re = re.compile(coaching["item_separator_pattern"], re.IGNORECASE)
-    items = len(re.findall(coaching["list_item_pattern"], text))
-    listed = 0
-    for sentence in re.split(coaching["sentence_end_pattern"], text):
-        sentence = sentence.strip()
-        if sentence and action_re.match(sentence):
-            listed = max(listed, 1 + len(separator_re.findall(sentence)))
-    return max(items, actions, listed)
-
-
-def _is_plan(text: str, coaching: dict) -> bool:
-    """A message that is a plan already: long enough prose with a heading,
-    or enough numbered items (``prompt_shape.is_plan``)."""
-    text = _prose(text, coaching)
-    return (
-        len(text.strip()) >= coaching["plan_doc_chars"] and re.search(coaching["plan_heading_pattern"], text) is not None
-    ) or len(re.findall(coaching["plan_numbered_pattern"], text)) >= coaching["plan_doc_items"]
-
-
-def _plan_steps(text: str, coaching: dict) -> int:
-    """The changes ``text`` asks for that call for a plan first: 0 for a
-    message that mentions a plan, opens by asking to review or is a plan
-    already (``prompt_shape.plan_steps``)."""
-    if (
-        _PLAN_WORD_RE.search(text[:_STEP_SCAN_CHARS])
-        or re.match(coaching["review_pattern"], text, re.IGNORECASE)
-        or _is_plan(text, coaching)
-    ):
-        return 0
-    return _request_steps(text, coaching)
-
-
-def _drip_count(earlier: list[dict], prompt: str, gap, answer: bool, coaching: dict, th: dict) -> int:
-    """How many small requests in a row ``prompt`` makes: it and the
-    messages before it, each short and sent within ``drip_window_minutes``
-    of Claude's reply, the earlier ones each answered with a file change.
-    A go-ahead, a thank-you, a status check and a question ask for nothing
-    (:func:`_is_request`): none counts and none ends a run, nor does an
-    answer to Claude's question or a message stopped before any reply and
-    sent again, and one of them sent now gives no run
-    (``prompt_shape.drip_count``, which a test holds this to)."""
+def _drip_count(earlier: list[dict], prompt: str, since, answer: bool, coaching: dict, th: dict) -> int:
+    """How many small change requests in a row ``prompt`` makes: it and the
+    messages before it, each short, asking for a change and sent within
+    ``drip_window_minutes`` of the message of yours before it, the earlier
+    ones each answered with a file change by the reply they started. A
+    go-ahead, a thank-you, a status check, a question, a statement and an
+    explain request ask for no change (:func:`_is_change_request`): none
+    counts and none ends a run, nor does an answer to Claude's question or
+    a message stopped before any reply and sent again, and one of them
+    sent now gives no run (``prompt_shape.drip_count``, which a test holds
+    this to)."""
     window = th["drip_window_minutes"] * 60
 
     def small(text: str) -> bool:
         return len(text.strip()) <= th["drip_chars"]
 
-    if not small(prompt) or not _is_request(prompt, coaching) or answer or gap is None or gap > window:
+    if not small(prompt) or not _is_change_request(prompt, coaching) or answer or since is None or since > window:
         return 0
     count = 1
     for ex in reversed(earlier):
-        if ex["answer"] or not ex["answered"] or not _is_request(ex["text"], coaching):
+        if ex["answer"] or not ex["answered"] or not _is_change_request(ex["text"], coaching):
             continue
-        if not (small(ex["text"]) and ex["edited"] and ex["gap"] is not None and ex["gap"] <= window):
+        if not (small(ex["text"]) and ex["edited"] and ex["since"] is not None and ex["since"] <= window):
             break
         count += 1
     return count
 
 
-def _queued(records: list[dict], prefix: str) -> bool:
+def _drip_hint(
+    prompt, records: list[dict], coaching: dict, th: dict, now: datetime, ctx: int = 0
+) -> tuple[str, float, dict] | None:
+    """``drip_feed`` for the message you just sent (``prompt``) when it
+    makes ``drip_count`` or more small change requests in a row, as
+    ``(kind, stake, fields)``; ``ctx`` is the context the last reply left,
+    for the tip's figure. Only lengths, times, counts and what Claude did
+    are used; your words never leave this function. The caller has left
+    out a queued message and a line you didn't type. A big job sent
+    outside plan mode, vague corrections, repeated requests and stopped
+    replies are counted after the fact only (``prompting.py``): as live
+    hints they fired on questions, polls and refusals, or were right too
+    rarely."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        return None
+    earlier, state = _exchanges(records, coaching["interrupt_prefix"], coaching["edit_tools"])
+    since = None
+    # Claude Code may already have written this message to the transcript.
+    last = earlier[-1] if earlier else None
+    if last and last["text"] == prompt and last["at"] is not None and (now - last["at"]).total_seconds() < 10:
+        earlier.pop()
+        answer, since = last["answer"], last["since"]
+    else:
+        answer = state["answer"]
+        if state["typed_at"] is not None:
+            since = (now - state["typed_at"]).total_seconds()
+    count = _drip_count(earlier, prompt, since, answer, coaching, th)
+    return ("drip_feed", count, {"count": count, "ctx": _k(ctx)}) if count >= th["drip_count"] else None
+
+
+def _agent_earlier_in_reply(records: list[dict], index: int) -> bool:
+    """Whether a line of the reply that ``records[index]`` belongs to,
+    before it, launched a subagent. Claude Code writes each tool call of a
+    reply as a line of its own with the reply's message id, so a subagent
+    started beside another tool ([Agent, Bash]) isn't on the newest line."""
+    message = records[index].get("message")
+    reply = message.get("id") if isinstance(message, dict) else None
+    if not reply:
+        return False
+    for record in reversed(records[:index]):
+        if record.get("isSidechain") or record.get("type") not in ("user", "assistant"):
+            continue
+        earlier = record.get("message")
+        if record.get("type") != "assistant" or not isinstance(earlier, dict) or earlier.get("id") != reply:
+            return False
+        if any(isinstance(b, dict) and b.get("type") == "tool_use" and b.get("name") in _AGENT_TOOLS
+               for b in _blocks(record)):
+            return True
+    return False
+
+
+def _queued(records: list[dict], prefix: str, now: datetime, max_age_s: float) -> bool:
     """Whether the message being sent arrived while Claude was still
     working: the last line of the main chain ends on a tool call or is a
-    tool's result (a stopped tool's note aside), not a finished reply.
-    Such a message is a nudge into work under way, not a new request."""
-    for record in reversed(records):
+    tool's result (a stopped tool's note aside), not a finished reply, and
+    that line is under ``max_age_s`` old. An older one is where work
+    stopped, not work under way: you came back to it and typed. Such a
+    message is a nudge into work under way, not a new request. A line with
+    no time of its own can't be told from a recent one, so it counts. A
+    call that launched a subagent and has no result yet is work under way
+    whatever its age: a subagent runs as long as it needs. So is one
+    launched beside another tool in the same reply, whose own line comes
+    later: the results are written together at the end."""
+    for index in range(len(records) - 1, -1, -1):
+        record = records[index]
         kind = record.get("type")
         if record.get("isSidechain") or kind not in ("user", "assistant"):
             continue
         blocks = [b for b in _blocks(record) if isinstance(b, dict)]
         if kind == "assistant":
-            return bool(blocks) and blocks[-1].get("type") == "tool_use"
-        return any(b.get("type") == "tool_result" for b in blocks) and not any(
-            b.get("type") == "text" and str(b.get("text") or "").startswith(prefix) for b in blocks
-        )
+            working = bool(blocks) and blocks[-1].get("type") == "tool_use"
+            if working and (blocks[-1].get("name") in _AGENT_TOOLS or _agent_earlier_in_reply(records, index)):
+                return True
+        else:
+            working = any(b.get("type") == "tool_result" for b in blocks) and not any(
+                b.get("type") == "text" and str(b.get("text") or "").startswith(prefix) for b in blocks
+            )
+        stamp = _reply_time(record)
+        return working and (stamp is None or (now - stamp).total_seconds() < max_age_s)
     return False
 
 
@@ -1574,9 +1685,8 @@ def _queued(records: list[dict], prefix: str) -> bool:
 _SCAN_CHUNK_BYTES = 1024 * 1024
 _SCAN_OVERLAP_BYTES = 128
 
-#: A plan submitted for approval, and a compaction, as a transcript line
-#: writes them (the whole file is read: neither is always in the tail).
-_EXIT_PLAN_RE = re.compile(rb'"name"\s*:\s*"ExitPlanMode"')
+#: A compaction, as a transcript line writes it (the whole file is read:
+#: it isn't always in the tail).
 _COMPACT_RE = re.compile(rb'"subtype"\s*:\s*"compact_boundary"')
 
 
@@ -1598,61 +1708,18 @@ def _file_has(path: str, pattern: re.Pattern) -> bool:
         return False
 
 
-def _planned(records: list[dict], path) -> bool:
-    """Whether this session already submitted a plan for approval: in the
-    tail, or, when it isn't there, anywhere in the transcript."""
-    if any(
-        isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "ExitPlanMode"
-        for r in records if r.get("type") == "assistant" for block in _blocks(r)
-    ):
-        return True
-    return isinstance(path, str) and bool(path) and _file_has(path, _EXIT_PLAN_RE)
-
-
-def _practice_hints(
-    prompt, records: list[dict], coaching: dict, th: dict, now: datetime, mode=None, path=None, ctx: int = 0
-) -> list[tuple[str, float, dict]]:
-    """``drip_feed``, ``plan_first`` and ``big_paste`` for the message you
-    just sent (``prompt``, in permission ``mode``; ``path`` is the
-    transcript, read whole only to find an earlier plan; ``ctx`` the
-    context the last reply left, for the drip tip's figure), as ``(kind,
-    stake, fields)``, in that order. Only lengths, times, counts and what
-    Claude did are used; your words never leave this function. A message
-    sent while Claude was working (queued) gets neither of the first two.
-    Vague corrections, repeated requests and stopped replies are counted
-    after the fact only (``prompting.py``): as live hints they mostly fired
-    on questions, polls and refusals."""
-    earlier, now_state = _exchanges(records, coaching["interrupt_prefix"], coaching["edit_tools"])
+def _paste_hint(prompt, th: dict) -> tuple[str, float, dict] | None:
+    """``big_paste`` for the message you just sent (``prompt``) when it is
+    about ``big_paste_tokens`` or more, as ``(kind, stake, fields)``. Only
+    its length is used; your words never leave this function. Vague
+    corrections, repeated requests, stopped replies and a big job sent
+    outside plan mode are counted after the fact only (``prompting.py``):
+    as live hints they fired on questions, polls and refusals, or were
+    right too rarely."""
     if not isinstance(prompt, str) or not prompt.strip():
-        return []
-    if prompt.lstrip().startswith(_not_typed_prefixes()):
-        # A background agent's report, a scheduled task or a command's
-        # output arriving as the next message: nothing you wrote.
-        return []
-    queued = _queued(records, coaching["interrupt_prefix"])
-    gap = None
-    # Claude Code may already have written this message to the transcript.
-    last = earlier[-1] if earlier else None
-    if last and last["text"] == prompt and last["at"] is not None and (now - last["at"]).total_seconds() < 10:
-        earlier.pop()
-        now_state = {"replied_at": None, "answer": last["answer"]}
-        gap = last["gap"]
-    elif now_state["replied_at"] is not None:
-        gap = (now - now_state["replied_at"]).total_seconds()
-    count = 0 if queued else _drip_count(earlier, prompt, gap, now_state["answer"], coaching, th)
-    drip = plan = paste = None
-    if count >= th["drip_count"]:
-        drip = ("drip_feed", count, {"count": count, "ctx": _k(ctx)})
+        return None
     tokens = len(prompt) / _CHARS_PER_TOKEN
-    if tokens >= th["big_paste_tokens"]:
-        paste = ("big_paste", tokens, {"tokens": _k(tokens)})
-    elif not queued and isinstance(mode, str) and mode and mode != "plan" and len(prompt.strip()) >= th["plan_min_chars"]:
-        # Building a plan already approved, or a message about a plan,
-        # doesn't need another.
-        steps = _plan_steps(prompt, coaching)
-        if steps >= th["plan_steps"] and not _planned(records, path):
-            plan = ("plan_first", steps, {"steps": steps})
-    return [hint for hint in (drip, plan, paste) if hint]
+    return ("big_paste", tokens, {"tokens": _k(tokens)}) if tokens >= th["big_paste_tokens"] else None
 
 
 def _starting_context(path: str) -> int | None:
@@ -1687,7 +1754,9 @@ def _fresh_hint(path: str, plan_chars: int, th: dict) -> tuple[str, float, dict]
     return "plan_fresh", kept, {"kept": _k(kept)}
 
 
-def _planning_hint(payload: dict, records: list[dict], coaching: dict, th: dict) -> tuple[str, float, dict] | None:
+def _planning_hint(
+    payload: dict, records: list[dict], coaching: dict, th: dict, now: datetime
+) -> tuple[str, float, dict] | None:
     """``plan_fresh_early`` for a message sent in plan mode after a lot of
     planning: the plan isn't written yet, so the note asks Claude to end
     the plan it submits with the tip to approve it with a clear context.
@@ -1696,7 +1765,7 @@ def _planning_hint(payload: dict, records: list[dict], coaching: dict, th: dict)
     path = payload.get("transcript_path")
     if payload.get("permission_mode") != "plan" or not isinstance(path, str) or not path:
         return None
-    if _queued(records, coaching["interrupt_prefix"]):
+    if _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
         return None
     replies = [r for r in records if _is_reply(r)]
     start = _starting_context(path) if replies else None
@@ -1954,16 +2023,17 @@ def coaching_for(
         typed = not (isinstance(prompt, str) and prompt.lstrip().startswith(_not_typed_prefixes()))
         if not in_agent and typed and isinstance(path, str) and path:
             records, replayed = _ordered(_tail(path, _COACH_PROMPT_TAIL_BYTES))
-            if not _queued(records, coaching["interrupt_prefix"]):
+            if not _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
                 fresh = personal.get("plan_fresh", True) is not False
                 last = _last_reply(records, state, session)
                 known = _stored_reply(state, session) is not None
                 ctx = last["ctx"] if last else next((_reply_ctx(r) for r in reversed(records) if _is_reply(r)), 0)
                 candidates = [
-                    *([_typed_plan_hint(payload, records, coaching, th), _planning_hint(payload, records, coaching, th)] if fresh else []),
-                    *_practice_hints(prompt, records, coaching, th, now, payload.get("permission_mode"), path, ctx),
+                    *([_typed_plan_hint(payload, records, coaching, th), _planning_hint(payload, records, coaching, th, now)] if fresh else []),
+                    _drip_hint(prompt, records, coaching, th, now, ctx),
+                    _paste_hint(prompt, th),
                     _poll_hint(prompt, records, replayed, last, known, coaching, now_ts),
-                    _cold_hint(path, records, replayed, last, known, th, now_ts),
+                    _cold_hint(path, records, replayed, last, known, th, now_ts, tuple(coaching["limit_line_prefixes"])),
                 ]
     elif tool == "ExitPlanMode":
         if not in_agent:

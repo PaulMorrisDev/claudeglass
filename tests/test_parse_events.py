@@ -800,21 +800,26 @@ def test_a_line_you_didnt_type_is_not_human_text(text):
 
 @pytest.mark.parametrize("text", [_APP_QUIT, _CROSS_SESSION, "Another Claude session sent a message: hi"])
 def test_the_new_not_typed_lines_are_meta_not_typed(text):
+    # The app-quit note carries on your last message's work: subkind "resume". The rest end its reply.
+    subkind = "resume" if text == _APP_QUIT else "not_typed"
     for line in (
         user_str_line(text, origin={"kind": "human"}),
         user_str_line(text, promptSource="sdk", origin={"kind": "human"}),
         user_block_line([{"type": "text", "text": text}], origin={"kind": "human"}),
     ):
         event = events.classify_line(line)
-        assert (event.kind, event.subkind) == (EventKind.META, "not_typed")
+        assert (event.kind, event.subkind) == (EventKind.META, subkind)
 
 
 def test_the_limit_resume_note_is_a_limit_resume_not_your_message():
     text = events.LIMIT_RESUME_PREFIX + ", so carry on"
     event = events.classify_line(user_str_line(text, promptSource="sdk", origin={"kind": "human"}))
     assert event.kind == EventKind.LIMIT_RESUME
-    # Without the sdk source it is still no message of yours.
+    # Without the sdk source it is still no message of yours, and still carries on your last message's work.
     event = events.classify_line(user_str_line(text, origin={"kind": "human"}))
+    assert (event.kind, event.subkind) == (EventKind.META, "resume")
+    # A turnOrigin that rules the line out makes it one that ends the reply, as the hook reads it.
+    event = events.classify_line(user_str_line(text, origin={"kind": "human"}, turnOrigin="scheduled"))
     assert (event.kind, event.subkind) == (EventKind.META, "not_typed")
 
 

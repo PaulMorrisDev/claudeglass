@@ -10,19 +10,21 @@ Each habit uses its own rule and default threshold
 about each message (``Turn.prompt_steps`` and the other prompting-habits
 fields; see ``model.py``) -- counts and flags, never your words:
 
-- ``drip_feed``: three or more small requests in a row, each sent within
-  ``drip_window_minutes`` of Claude's reply and answered with a change to
-  a file of yours: an edit or a shell write outside a ``.claude`` folder,
-  or a subagent's. A reply to Claude's question is skipped, and so is a
-  message that asks for nothing (a go-ahead, a thank-you, a status check
-  or a question); a long message, a reply that changed nothing or a longer
-  wait ends the run. A question that closes a reply that changed a file
-  is an offer, not a question the next message answers.
-- ``plan_first``: a request for ``plan_steps`` or more separate changes
-  in your own prose (``prompt_shape.plan_steps``: not a review, not a
-  plan already, not a message that mentions a plan), ``plan_min_chars``
-  or longer, sent outside plan mode before any plan was approved in that
-  session.
+- ``drip_feed``: three or more small change requests in a row, each sent
+  within ``drip_window_minutes`` of the message of yours before it (your
+  messages alone set the window: Claude's replies to a background agent's
+  report or a scheduled run neither restart nor stretch it) and answered
+  with a change to a file of yours: an edit or a shell write outside a
+  ``.claude`` folder, or a subagent's that the reply launched. Only the
+  reply cycle your message started counts: it ends at a line you didn't
+  type. A reply to Claude's question is skipped, and so is a message
+  that asks for no change (``Message.change``: a go-ahead, a thank-you, a
+  status check, a question, a statement, a report or an explain request);
+  a long message, a reply that changed nothing or a longer wait ends the
+  run. A question that closes a reply that changed a file is an offer, not
+  a question the next message answers. The live hint
+  (``prompt_shape.drip_count``) counts the same runs as you send them,
+  and says nothing about a message sent while Claude is working.
 - ``big_paste``: a message of ``big_paste_tokens`` or more.
 - ``status_poll``: a message that only asks how the work is going
   (``Message.status``: the whole message, as ``prompt_shape.is_status``
@@ -32,9 +34,15 @@ fields; see ``model.py``) -- counts and flags, never your words:
   work started in the background has sent no message of its own, and only
   with a warm cache (after a break, ``cold_return`` speaks).
 
-Counted here only, as a live hint fired mostly on something else (the
-audit behind each rule is in the changelog):
+Counted here only, as a live hint fired mostly on something else or
+never showed it could be right (the audit behind each rule is in the
+changelog):
 
+- ``plan_first``: a request for ``plan_steps`` or more separate changes
+  in your own prose (``prompt_shape.plan_steps``: not a review, not a
+  plan already, not a message that mentions a plan), ``plan_min_chars``
+  or longer, sent outside plan mode before any plan was approved in that
+  session.
 - ``vague_fix``: a short correction that says something went wrong but
   names nothing specific. It needs a correction or bad-outcome phrase
   (``prompt_shape.is_vague_fix``), and skips a question, a go-ahead, a
@@ -89,8 +97,9 @@ HABITS = (
 )
 
 #: The habits a live hint warns about, the ones whether coaching notes help
-#: is judged on (``habit_rates``).
-COACHED_HABITS = ("drip_feed", "status_poll", "plan_first", "big_paste")
+#: is judged on (``habit_rates``). ``plan_first`` is not among them: it is
+#: report-only now, as its live hint was wrong more often than right.
+COACHED_HABITS = ("drip_feed", "status_poll", "big_paste")
 
 #: What each habit is called on the page.
 TITLES = {
@@ -235,6 +244,9 @@ class Message:
     status: bool = False
     #: It only asks something, so it asks for no change either.
     question: bool = False
+    #: It asks Claude to change something (``prompt_shape.is_change_request``):
+    #: only these join a run of small changes.
+    change: bool = False
     #: The reply before it was an API error, an overload or a usage limit,
     #: so this message is a retry.
     after_failed: bool = False
@@ -244,6 +256,8 @@ class Message:
     answers: bool = False
     #: Seconds since Claude's reply before it; ``None`` for the first.
     gap: float | None = None
+    #: Seconds since the message of yours before it; ``None`` for the first.
+    since: float | None = None
     #: A plan was approved earlier in the session.
     planned: bool = False
     #: The whole reply to it, and what its first reply paid to take in
@@ -328,6 +342,29 @@ def _edited(turns: list[Turn]) -> bool:
     return changes > 0
 
 
+#: What starts a reply of Claude's without a message of yours: a background
+#: agent's report, a scheduled run, another session's message and a slash
+#: command's output (the hook's ``_untyped_start``), and any other line you didn't
+#: type (``Turn.preceding_not_typed``: a shell command you ran with ``!``).
+#: The reply to one is not the answer to the message of yours before it.
+_UNTYPED_STARTS = frozenset({
+    EventKind.TASK_NOTIFICATION, EventKind.AGENT_TERMINATED, EventKind.SCHEDULED_TASK, EventKind.PEER_MESSAGE,
+    EventKind.SLASH_COMMAND, EventKind.LOCAL_COMMAND,
+})
+
+
+def _own_reply(turns: list[Turn]) -> list[Turn]:
+    """The turns of a message's cycle that answer the message itself: up to
+    the first reply that began with a line you didn't type
+    (:data:`_UNTYPED_STARTS`, or any line the parser marked ``not_typed``).
+    What Claude does after that, in answer to a background agent's report,
+    is nobody's request."""
+    for i, turn in enumerate(turns):
+        if i and (turn.preceding_not_typed or _UNTYPED_STARTS.intersection(turn.preceding_event_kinds)):
+            return turns[:i]
+    return turns
+
+
 def messages_of(top, prices: _Prices) -> list[Message]:
     """Each message of yours in a main transcript, with what the parser
     kept about it and the work that answered it."""
@@ -335,6 +372,7 @@ def messages_of(top, prices: _Prices) -> list[Message]:
     cycles = capture_mod.prompt_cycles(top)
     out: list[Message] = []
     replied_at: datetime | None = None
+    typed_at: datetime | None = None
     asked = planned = False
     retries = _retries(top)
     baseline = starting_context(turns)
@@ -342,6 +380,8 @@ def messages_of(top, prices: _Prices) -> list[Message]:
         first = cycle.turns[0]
         at = _moment(first.ts)
         gap = (at - replied_at).total_seconds() if at is not None and replied_at is not None else None
+        since = (at - typed_at).total_seconds() if at is not None and typed_at is not None else None
+        mine = _own_reply(cycle.turns)
         start_ctx = first.ctx - (first.human_prompt_chars or 0) // _CHARS_PER_TOKEN
         carried = max(0, start_ctx - baseline)
         message = Message(
@@ -355,10 +395,12 @@ def messages_of(top, prices: _Prices) -> list[Message]:
             go=first.human_go,
             status=first.human_status,
             question=first.human_question,
+            change=first.human_change,
             after_failed=id(first) in retries,
-            edited=_edited(cycle.turns),
+            edited=_edited(mine),
             answers=asked,
             gap=gap,
+            since=since,
             planned=planned,
             cost=sum(prices.cost(turn) for turn in cycle.turns),
             reread=prices.reread(first),
@@ -371,6 +413,7 @@ def messages_of(top, prices: _Prices) -> list[Message]:
         out.append(message)
         last = cycle.turns[-1]
         replied_at = _moment(last.ts) or replied_at
+        typed_at = at or typed_at
         # A question that closes a reply that changed a file is an offer.
         asked = last.reply_asked and not message.edited
         planned = planned or any(turn.plan_stats is not None for turn in cycle.turns)
@@ -378,16 +421,16 @@ def messages_of(top, prices: _Prices) -> list[Message]:
 
 
 def _drip_runs(messages: list[Message]) -> list[list[int]]:
-    """Runs of small, quick follow-ups each answered with a file change
-    (answers to Claude's questions, and messages that ask for nothing,
-    skipped), at least ``drip_count`` long."""
+    """Runs of small, quick change requests each answered with a file
+    change (answers to Claude's questions, and messages that ask for no
+    change, skipped), at least ``drip_count`` long."""
     window = _TH["drip_window_minutes"] * 60
     runs: list[list[int]] = []
     run: list[int] = []
     for i, m in enumerate(messages):
         if m.answers or not _asks_for_change(m):
             continue
-        if m.chars <= _TH["drip_chars"] and m.edited and m.gap is not None and m.gap <= window:
+        if m.chars <= _TH["drip_chars"] and m.edited and m.since is not None and m.since <= window:
             run.append(i)
             continue
         if len(run) >= _TH["drip_count"]:
@@ -405,9 +448,10 @@ def _asks_again(m: Message) -> bool:
 
 
 def _asks_for_change(m: Message) -> bool:
-    """Whether a message is a request (``prompt_shape.is_request``): it
-    also isn't a question."""
-    return _asks_again(m) and not m.question
+    """Whether a message asks Claude to change something
+    (``prompt_shape.is_change_request``, kept by the parser as
+    ``Turn.human_change``)."""
+    return m.change
 
 
 def _stop_loops(stops: list[datetime]) -> list[list[datetime]]:
@@ -446,7 +490,7 @@ def occurrences(messages: list[Message], stops: list[tuple[datetime, float]]) ->
             # reply, which read the whole session to answer.
             out.append(Occurrence("status_poll", m.at, m.cost))
         if (
-            m.steps >= _TH["plan_steps"] and m.chars >= _TH["plan_min_chars"] and not m.plan_mode
+            m.steps >= _REPORT["plan_steps"] and m.chars >= _REPORT["plan_min_chars"] and not m.plan_mode
             and not m.planned and m.chars / _CHARS_PER_TOKEN < _TH["big_paste_tokens"]
         ):
             out.append(Occurrence("plan_first", m.at, None))

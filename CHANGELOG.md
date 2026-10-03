@@ -125,25 +125,89 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   outside a `.claude` folder, or a file a subagent changed; Claude's
   own memory, plans and scripts don't count. A message you send while
   Claude is working gets no hint. The window stays 20 minutes.
+- **`drip_feed` follows your messages, not Claude's replies.** A replay
+  of 30 days of real sessions found it right in 2 of 11 firings. The 20
+  minutes now run between your own messages, so Claude answering a
+  background agent's report no longer stretches a run over hours. A
+  message is credited only with the edits of the reply it started, and a
+  subagent's with the message whose reply launched it. Only a message
+  that asks for a change counts: a statement, a report, an explain
+  request and a bug report neither count nor end a run. A go-ahead also
+  covers merge, release, push, commit, "run the tests", "ship it" and
+  "carry on". "Try again" is a vague correction, not a go-ahead.
 - **`plan_first` reads your own prose.** Steps are counted outside
-  fenced blocks, quoted lines and pasted logs, and the hint applies from
-  3 steps, down from 4 (`coaching_plan_steps`; in 2,755 messages that
-  added 6). A review-only request, a message that is a plan already
-  (1,500 characters or more with headings, or five numbered items) and a
-  message sent while Claude is working are left alone.
-- **Plan-mode wording follows the app.** The desktop says to start the
-  message with `/plan` or pick Plan in the mode menu next to Send; the
-  terminal keeps Shift+Tab. The tip in How you prompt reads the same.
+  fenced blocks, quoted lines and pasted logs, and a job counts from 3
+  steps, down from 4 (in 2,755 messages that added 6). A review-only
+  request and a message that is a plan already (1,500 characters or more
+  with headings, or five numbered items) are left alone.
+- **`plan_first` leaves briefs, pastes and releases alone.** The same
+  replay found it right in none of 7 firings. A message of 2,000
+  characters or more is a plan, and so are five listed items, whether
+  numbered "1." or "1)" or opened with "-" or "*". A message with pasted
+  code or a pasted log, or one that asks to merge, ship or release,
+  has no steps.
+- **`cold_return` waits out a usage limit.** It was right in all 10
+  firings, but 27% followed a usage-limit stop, where the wait was the
+  limit's. It stays quiet when you come back within a cache lifetime of
+  the limit's reset, or when the reset can't be told, and speaks as
+  usual after that.
+- **A message typed after a pause is no longer "queued".** The last tool
+  call or result must be under 10 minutes old (`coaching_queued_minutes`)
+  for a message to count as sent while Claude is working. The replay found 5
+  messages typed 10 minutes to 2 hours later that were read as queued.
+  A call that launched a subagent and has no result yet is the exception:
+  a subagent runs as long as it needs, so a message typed meanwhile is
+  still sent into work under way, whatever the call's age.
+- **A change verb counts where it opens a sentence.** "Build failed",
+  "Update: it works now" and "Support for tabs is missing" use the verb
+  as a noun or as the subject of a report, so they are no change request
+  and no longer count towards `drip_feed`. The merge, ship and release
+  words that keep `plan_first` quiet count the same way: "the merge
+  conflict in step 3" is a mention, "merge it" is a request.
+- **A shell line you ran no longer lends its edits to your last
+  message.** In the report, a reply that began with a line you didn't
+  type (a `!` command, another session's message) is nobody's answer to
+  your message before it, in the report and the live hint alike, so both
+  count the same small-requests run.
+- **Plan-mode wording names both apps.** The `plan_first` and `stop_loop`
+  rows in How you prompt say to start the message with `/plan` or pick Plan
+  in the mode menu next to Send on the desktop, and to press Shift+Tab in
+  the terminal.
 
-- **Six hints no longer speak up in the session.** `clear_context`
+- **Seven hints no longer speak up in the session.** `clear_context`
   fired on almost every long session and produced almost no tips,
   `cache_cold` is now the `cold_return` receipt above, and
   `explore_reads` is now the Explore cost table above. `repeat_ask`,
   `stop_loop` and `vague_fix` fired on polls, go-aheads, refusals and
   questions far more often than on the habit, so they are counted after
-  the fact only, in How you prompt, with no live note. Their old notes
+  the fact only, in How you prompt, with no live note. `plan_first` is
+  counted after the fact only too, for the reason below. Their old notes
   in earlier transcripts are still recognised, so what they cost is
   still counted. The `config.toml` keys for them are ignored.
+- **`plan_first` is report-only.** Before its rule was tightened, a
+  replay of 30 days of real sessions found it right in none of 7
+  firings, which is wrong more often than right. Those 7 were detailed
+  briefs for long runs, a pasted install log, a scripted hook test and a
+  merge request mixed with questions. With the tightened rule, 12
+  messages asked for 3 or more changes, and each was rightly left alone:
+  a long brief (5), a message that mentions a plan (5), one already
+  shaped like a plan (1) and a merge request (1). That author writes
+  plans upfront, so the hint had no real chance to help. It still shows
+  in How you prompt, with the same advice, and the help text explains
+  it. The hook no longer speaks up for it, and `coaching_plan_steps` and
+  `coaching_plan_min_chars` are ignored: its rule is fixed, as the other
+  report-only habits' are.
+- **`drip_feed` stays live, with the tighter rule.** It was right in 2 of
+  11 firings before the tightening. With the tightened rule the same
+  replay found 630 messages that reached the check and 43 short requests
+  for a change, but no run got past one request: 23 stopped there, with
+  no earlier request (14), an earlier one with no file change behind it
+  (7) or one that was too long (2). The 8 nearest misses were not runs
+  of small requests. It fired 0 times in the last 30 days, so it now
+  speaks only on a clear run of small change requests. The hook, the
+  status line and Work habits count a run the same way, and
+  `coaching_drip_count`, `coaching_drip_window_minutes` and
+  `coaching_drip_chars` still set it.
 - **Stricter rules for the three counted after the fact.** A repeat is
   an answer with a file change that missed: a poll, a go-ahead and a
   thank-you are never one, so what a poll costs is `status_poll`'s.
@@ -201,6 +265,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **"Needs a hook entry" names the fix.** On Setup › Capture, a metric
+  whose hook entry is missing now shows `claudeglass capture connect`
+  with a Copy button, except under a settings policy that stops hooks
+  from running. A test holds `update`, `capture connect` and `init` to
+  adding the background `Stop` entry and the plan tool's matcher.
 - **Coaching notices.** The docs now show how a notice really appears,
   and the desktop app, which folds it into a collapsed row, no longer
   gets one that Claude's reply already carries.

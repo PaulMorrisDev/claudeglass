@@ -10,7 +10,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture_catalogue as cat, events as events_mod, habits, prompting
+from claudeglass import capture_catalogue as cat, events as events_mod, habits, prompt_shape, prompting
 from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
@@ -107,7 +107,7 @@ def test_the_parser_keeps_counts_and_flags_about_each_message_and_reply(tmp_path
     assert turns[4].human_repeat
     # Nothing about the words is kept on the events either.
     human = [e for e in result.events if e.kind.name == "HUMAN_TEXT"]
-    assert all(set(e.detail) <= {"has_paste", "correction", "steps", "vague", "ack", "repeat", "plan_mode", "flags"}
+    assert all(set(e.detail) <= {"has_paste", "correction", "steps", "vague", "ack", "change", "repeat", "plan_mode", "flags"}
                for e in human)
 
 
@@ -180,19 +180,20 @@ def test_the_parser_flags_a_message_that_only_asks_something(tmp_path):
 def test_small_requests_answered_with_file_changes_are_one_drip_run(tmp_path):
     session = _session(tmp_path, [
         *_START,
-        # A question after a change is an offer: the next message is a request like any other.
+        # A question after a change is an offer: the next message isn't an answer Claude waited for. "left"
+        # asks for no change, so it neither counts nor ends the run.
         _said("make the button bigger", 2), _reply(3, edit=True, say="Done. Left or right?"),
         _said("left", 4), _reply(5, edit=True),
         _said("now move the logo", 6), _reply(7, edit=True),
-        _said("and the footer text", 8), _reply(9, edit=True),
+        _said("move the footer text", 8), _reply(9, edit=True),
         _said("thanks", 10), _reply(11),
     ])
     drips = [o for o in session.occurrences if o.habit == "drip_feed"]
     assert len(drips) == 1
     assert not session.messages[2].answers
-    # What the messages after the first paid to take in the context.
+    # What the messages after the first of the run paid to take in the context.
     rereads = [m.reread for m in session.messages]
-    assert drips[0].cost > 0 and abs(drips[0].cost - (rereads[2] + rereads[3] + rereads[4])) < 1e-9
+    assert drips[0].cost > 0 and abs(drips[0].cost - (rereads[3] + rereads[4])) < 1e-9
 
 
 def test_a_go_ahead_a_question_and_the_answer_to_one_neither_count_nor_end_a_run(tmp_path):
@@ -203,7 +204,7 @@ def test_a_go_ahead_a_question_and_the_answer_to_one_neither_count_nor_end_a_run
         _said("which side suits the logo?", 6), _reply(7, say="Left or right of the title?"),
         _said("left", 8), _reply(9, edit=True),
         _said("now move the logo", 10), _reply(11, edit=True),
-        _said("and the footer text", 12), _reply(13, edit=True),
+        _said("move the footer text", 12), _reply(13, edit=True),
     ])
     drips = [o for o in session.occurrences if o.habit == "drip_feed"]
     assert len(drips) == 1
@@ -212,6 +213,55 @@ def test_a_go_ahead_a_question_and_the_answer_to_one_neither_count_nor_end_a_run
     # The request that began the run, and the two after it.
     rereads = [m.reread for m in session.messages]
     assert abs(drips[0].cost - (rereads[5] + rereads[6])) < 1e-9
+
+
+@pytest.mark.parametrize("between", ["go ahead", "thanks!", "how is it going?", "why is the button blue?"])
+def test_a_go_ahead_a_thank_you_a_status_check_and_a_question_do_not_end_a_run(tmp_path, between):
+    session = _session(tmp_path, [
+        *_START,
+        _said("make the button bigger", 2), _reply(3, edit=True),
+        _said(between, 4), _reply(5),
+        _said("now move the logo", 6), _reply(7, edit=True),
+        _said("move the footer text", 8), _reply(9, edit=True),
+    ])
+    assert session.counts()["drip_feed"] == 1, between
+
+
+@pytest.mark.parametrize("prompt", [
+    "go ahead", "continue", "how is it going?", "any update on the footer?", "why is the button blue?",
+    "what does the footer do", "can you move the logo left?",
+])
+def test_a_message_that_asks_for_no_change_is_not_one_more_small_request(tmp_path, prompt):
+    run = [*_START, _said("make the button bigger", 2), _reply(3, edit=True), _said("now move the logo", 4),
+           _reply(5, edit=True)]
+    assert "drip_feed" not in _session(tmp_path, [*run, _said(prompt, 6), _reply(7, edit=True)], "a.jsonl").counts(), prompt
+    assert _session(tmp_path, [*run, _said("move the footer text", 6), _reply(7, edit=True)], "b.jsonl").counts()[
+        "drip_feed"] == 1
+
+
+def _failed(minute: float) -> dict:
+    """What Claude Code writes when a reply dies on an API error."""
+    return turn_line(
+        timestamp=_at(minute), content=[{"type": "text", "text": "API Error: 529 Overloaded"}], model="<synthetic>",
+        isApiErrorMessage=True,
+    )
+
+
+def test_a_failed_reply_is_not_an_answer_to_a_run_of_small_requests(tmp_path):
+    # A reply that died on an API error changed nothing: it neither answers a
+    # message nor joins a run of small requests that were each answered by a change.
+    dead = _session(tmp_path, [
+        *_START, _said("fix the header", 2), _failed(3), _said("tighten the footer", 4), _failed(5),
+        _said("move the logo left", 6), _failed(7),
+    ], "a.jsonl")
+    assert "drip_feed" not in dead.counts()
+    # The failed one in the middle is skipped, not a break: the run holds the three answered messages.
+    answered = _session(tmp_path, [
+        *_START, _said("fix the header", 2), _reply(3, edit=True), _said("tighten the footer", 4), _failed(5),
+        _said("move the logo left", 6), _reply(7, edit=True), _said("make the save button bigger", 8),
+        _reply(9, edit=True),
+    ], "b.jsonl")
+    assert answered.counts()["drip_feed"] == 1
 
 
 #: The reply to a message, and whether it changed a file of yours.
@@ -256,15 +306,81 @@ def test_the_parser_counts_what_went_into_a_claude_folder_and_the_files_a_subage
         (1, 0, 0), (1, 2, 0), (0, 0, 3)]
 
 
+def _notified(minute: float) -> dict:
+    """A background agent's report arriving as the next message: not yours."""
+    text = "<task-notification><task-id>t1</task-id><status>completed</status><result>found it</result></task-notification>"
+    return user_str_line(text, origin={"kind": "task-notification"}, timestamp=_at(minute))
+
+
+def test_the_window_runs_between_your_messages_not_from_claudes_replies(tmp_path):
+    # Claude answers a background agent's report two minutes before the third message: the old clock
+    # (the gap from Claude's last reply) saw a quick follow-up; yours, 23 minutes on, did not.
+    slow = _session(tmp_path, [
+        *_START,
+        _said("make the button bigger", 2), _reply(3, edit=True),
+        _notified(24), _reply(24.5, edit=True),
+        _said("now move the logo", 25), _reply(26, edit=True),
+        _said("move the footer text", 27), _reply(28, edit=True),
+    ], "slow.jsonl")
+    assert [m.since for m in slow.messages] == [None, 120.0, 23 * 60.0, 120.0]
+    assert slow.messages[2].gap < 5 * 60 and "drip_feed" not in slow.counts()
+    # The same run with the third message 8 minutes after the second is one.
+    quick = _session(tmp_path, [
+        *_START,
+        _said("make the button bigger", 2), _reply(3, edit=True),
+        _notified(9), _reply(9.5, edit=True),
+        _said("now move the logo", 10), _reply(11, edit=True),
+        _said("move the footer text", 12), _reply(13, edit=True),
+    ], "quick.jsonl")
+    assert quick.counts()["drip_feed"] == 1
+
+
+def test_only_the_reply_a_message_started_is_credited_with_its_edits(tmp_path):
+    base = [*_START, _said("make the button bigger", 2), _reply(3, edit=True)]
+    after = [_said("move the footer text", 8), _reply(9, edit=True)]
+    # Claude's only edit after the second message answers a background agent's report, not the message.
+    reported = _session(tmp_path, [
+        *base, _said("now move the logo", 4), _reply(5), _notified(6), _reply(7, edit=True), *after], "a.jsonl")
+    assert reported.messages[2].edited is False
+    assert "drip_feed" not in reported.counts()
+    # The same edit made in answer to the message itself is its own.
+    own = _session(tmp_path, [*base, _said("now move the logo", 4), _reply(5, edit=True), *after], "b.jsonl")
+    assert own.messages[2].edited is True and own.counts()["drip_feed"] == 1
+
+
+def test_a_subagent_is_credited_to_the_message_whose_reply_launched_it(tmp_path):
+    # A subagent launched for the second message finishes after the third is sent: it changed the files
+    # for the second, and the third's own reply changed none.
+    session = _session(tmp_path, [
+        *_START, _said("make the button bigger", 2), _call(3, "Agent", {"prompt": "go"}, say=""),
+        _said("now move the logo", 4), _came_back(5, 3, edited_files=2), _reply(6, say="Done."),
+    ])
+    assert session.messages[1].edited is True
+    assert session.messages[2].edited is False
+
+
+def test_the_parser_flags_a_message_that_asks_for_a_change(tmp_path):
+    result = _parse(tmp_path, [
+        _said("make the button red", 0), _reply(1), _said("the button is too small", 2), _reply(3),
+        _said("explain how the footer works", 4), _reply(5), _said("run the tests", 6), _reply(7),
+        _said("thanks", 8), _said("now rename the store", 9), _reply(10),
+    ])
+    assert [turn.human_change for turn in result.turns] == [True, False, False, False, True]
+    # A flag on the event, never the words.
+    human = [e for e in result.events if e.kind.name == "HUMAN_TEXT"]
+    assert [bool(e.detail.get("change")) for e in human] == [True, False, False, False, False, True]
+    assert [turn.human_go for turn in result.turns] == [False, False, False, True, False]
+
+
 def test_a_reply_that_changed_nothing_or_a_long_wait_breaks_the_run(tmp_path):
     no_change = _session(tmp_path, [
         *_START, _said("make the button bigger", 2), _reply(3, edit=True),
-        _said("now move the logo", 4), _reply(5), _said("and the footer text", 6), _reply(7, edit=True),
+        _said("now move the logo", 4), _reply(5), _said("move the footer text", 6), _reply(7, edit=True),
     ], "a.jsonl")
     assert "drip_feed" not in no_change.counts()
     late = _session(tmp_path, [
         *_START, _said("make the button bigger", 2), _reply(3, edit=True),
-        _said("now move the logo", 40), _reply(41, edit=True), _said("and the footer text", 42), _reply(43, edit=True),
+        _said("now move the logo", 40), _reply(41, edit=True), _said("move the footer text", 42), _reply(43, edit=True),
     ], "b.jsonl")
     assert "drip_feed" not in late.counts()
 
@@ -281,7 +397,8 @@ def test_repeats_vague_fixes_big_pastes_and_big_tasks(tmp_path):
         _said("still broken", 6), _reply(7, say="What do you see?"),
         _said("the button is grey", 8), _reply(9, edit=True),
         _said("Why does this fail?\n" + "log line\n" * 5_000, 10), _reply(11), _reply(12), _reply(13),
-        _said(big_task, 14, permissionMode="default"), _reply(15, edit=True),
+        # Sent long after the two before it, so it is no third small change in a run.
+        _said(big_task, 40, permissionMode="default"), _reply(41, edit=True),
     ])
     by = {o.habit: o for o in session.occurrences}
     assert set(by) == {"repeat_ask", "vague_fix", "big_paste", "plan_first"}
@@ -385,6 +502,55 @@ def test_a_big_task_in_plan_mode_or_after_an_approved_plan_is_fine(tmp_path):
         _said("Plan the settings page", 0), _reply(1, plan=True), _said(big_task, 2), _reply(3, edit=True),
     ], "b.jsonl")
     assert "plan_first" not in in_plan.counts() and "plan_first" not in after_plan.counts()
+
+
+def test_a_long_brief_a_list_of_five_a_paste_and_a_release_are_not_a_big_task_without_a_plan(tmp_path):
+    """Replayed over 30 days of real sessions, each of the 12 messages of 3 or
+    more steps was rightly left alone, for these reasons."""
+    three = ("Add a login page, add a settings page and add an admin screen for the app, keeping the existing styles "
+             "and every test passing as it does today across the whole of the project.")
+    brief = three + " " + "Keep every test passing. " * 100
+    tail = " for the app, keeping every test passing as it does today and the styles the same across the whole project."
+    cases = [
+        (three, True),
+        # A brief of 2,000 characters is written out already: a plan, however it is formatted.
+        (brief[:1_999], True), (brief[:2_000], False),
+        # Five listed items are a plan, numbered "1." or "1)" or bulleted; four are not.
+        (three + "\n1. styles\n2. tests\n3. docs\n4. alerts\n5. help", False),
+        (three + " Order: 1) styles 2) tests 3) docs 4) alerts 5) help", False),
+        (three + "\n- styles\n- tests\n- docs\n- alerts\n- help", False),
+        (three + "\n* styles\n* tests\n* docs\n* alerts\n* help", False),
+        (three + "\n- styles\n- tests\n- docs\n- alerts", True),
+        (three + " Order: 1) styles 2) tests 3) docs 4) alerts", True),
+        # A paste, a log or a stack trace holds steps that are not yours.
+        ("[Pasted text #1 +30 lines] " + three, False),
+        ("npm ERR! code ELIFECYCLE\n" + three, False),
+        ("Traceback (most recent call last):\n  File \"a.py\", line 3, in <module>\nKeyError: 'x'\n" + three, False),
+        # Merging, releasing and shipping are the next step of the work you have, not work to plan first.
+        ("Merge the PR, then add a changelog entry, update the docs and bump the version" + tail, False),
+        ("Ship it: " + three, False),
+        ("Add a changelog entry, update the docs and bump the version" + tail, True),
+        # A mention of one further in is no request to merge or release.
+        (three + " All of it has to land before the release next week.", True),
+        (three + " The merge conflict in step 3 is the hard part.", True),
+        # A message that mentions a plan.
+        ("Carry out the plan: " + three, False),
+    ]
+    for n, (text, counted) in enumerate(cases):
+        session = _session(tmp_path, [*_START, _said(text, 2, permissionMode="default"), _reply(3, edit=True)], f"c{n}.jsonl")
+        assert ("plan_first" in session.counts()) is counted, text
+
+
+def test_a_numbered_plan_that_mentions_a_release_is_still_a_plan_and_a_mention_is_no_release_request():
+    plan = "Do these before the release next week:\n1. add a\n2. add b\n3. add c\n4. add d\n5. add e"
+    assert prompt_shape.is_plan(plan) and not prompt_shape.asks_for_release(plan)
+    # The verb opens a sentence or a clause, behind lead words and a polite frame.
+    for text in ("merge it", "Ship it: add a footer", "ok, release it", "can you publish this", "add a, then deploy",
+                 "push it to main", "tag the release", "push to origin"):
+        assert prompt_shape.asks_for_release(text), text
+    for text in ("the merge conflict in step 3", "add a footer before the release next week", "a deploy script for it",
+                 "the push to main failed"):
+        assert not prompt_shape.asks_for_release(text), text
 
 
 def test_stopping_claude_three_times_in_twenty_minutes_is_one_loop(tmp_path):
@@ -558,9 +724,11 @@ def test_the_carried_context_thresholds_match_the_habits_page():
 
 
 def test_only_the_habits_a_coaching_note_warns_about_are_judged_against_the_notes(tmp_path):
+    assert prompting.COACHED_HABITS == ("drip_feed", "status_poll", "big_paste")
     assert set(prompting.COACHED_HABITS) <= set(cat.COACHING_HINTS)
+    # Counted here after the fact only: each live hint that was wrong more often than right was made report-only.
     assert set(prompting.HABITS) - set(prompting.COACHED_HABITS) == {
-        "repeat_ask", "stop_loop", "vague_fix", "context_carried",
+        "repeat_ask", "stop_loop", "plan_first", "vague_fix", "context_carried",
     }
     assert set(prompting.HABITS) >= set(prompting.COACHED_HABITS)
     # No live hint of any retired habit is left in the catalogue.
@@ -573,13 +741,14 @@ def test_habit_rates_count_only_the_coached_habits(tmp_path):
         *_START,
         _said("make the button bigger", 2), _reply(3, edit=True),
         _said("now move the logo", 4), _reply(5, edit=True),
-        _said("and the footer text", 6), _reply(7, edit=True),
+        _said("move the footer text", 6), _reply(7, edit=True),
         _said("still broken", 8), _reply(9, say="What do you see?"),
+        _said("how is it going?", 10), _reply(11),
     ])
     assert session.counts()["vague_fix"] == 1 and session.counts()["drip_feed"] == 1
-    # One drip run (three messages) of the two habits seen: the vague correction doesn't count.
-    habits_seen, drip_messages, messages = prompting.habit_rates(session)
-    assert (habits_seen, drip_messages, messages) == (1, 3, 5)
+    # The run of small requests and the poll are habits a live hint warns about: the vague correction is
+    # counted on the page, but notes being on can't move it. The run is three messages of the six.
+    assert prompting.habit_rates(session) == (2, 3, 6)
 
 
 # -- the section --------------------------------------------------------------------
@@ -590,7 +759,7 @@ def test_the_section_shows_each_habit_seen_with_its_cost_and_what_to_try(tmp_pat
         *_START,
         _said("make the button bigger", 2), _reply(3, edit=True),
         _said("now move the logo", 4), _reply(5, edit=True),
-        _said("and the footer text", 6), _reply(7, edit=True),
+        _said("move the footer text", 6), _reply(7, edit=True),
         _said("still broken", 8), _reply(9, say="What do you see?"),
     ])
     section = prompting.build_section([session])
@@ -627,9 +796,11 @@ _TIP = "> **ClaudeGlass tip:** Plan it."
 def test_the_tips_table_counts_the_notes_claude_passed_on(tmp_path):
     session = _session(tmp_path, [
         *_START,
-        _said("make the button bigger", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_TIP}"),
-        _said("now the logo", 4), _note_line("drip_feed", 4), _reply(5, edit=True),
+        _said("how is it going?", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_TIP}"),
+        _said("and now?", 4), _note_line("drip_feed", 4), _reply(5, edit=True),
         _said("next", 6), _note_line("quiet_output", 6), _reply(7),
+        # A note of a retired hint in an old transcript is recognised, but not counted: no tip is asked for.
+        _said("one more", 8), _note_line("plan_first", 8), _reply(9, edit=True, say=f"Done.\n\n{_TIP}"),
     ])
     assert session.notes == {"drip_feed": 2} and session.tips == {"drip_feed": 1} and not session.misfires
     tips = prompting.build_section([session]).tables[1]
@@ -668,10 +839,10 @@ def test_a_misfire_belongs_to_the_message_the_note_came_with(tmp_path):
     disowned = f"Done. That ClaudeGlass tip was a false alarm.\n\n{_TIP}"
     session = _session(tmp_path, [
         *_START,
-        _said("one", 2), _note_line("plan_first", 2), _reply(3, edit=True),
+        _said("one", 2), _note_line("drip_feed", 2), _reply(3, edit=True),
         _said("two", 4), _reply(5, edit=True, say=disowned),
     ])
-    assert session.notes == {"plan_first": 1} and not session.tips and not session.misfires
+    assert session.notes == {"drip_feed": 1} and not session.tips and not session.misfires
 
 
 def test_the_plan_mode_tips_name_the_desktop_way_and_the_terminal_key():
@@ -694,6 +865,6 @@ def test_the_tips_are_relayed_or_judged_by_whether_the_note_leaves_it_to_claude(
 
 def test_every_tip_hint_asks_for_the_highlighted_block():
     assert set(prompting.TIP_HINTS) == {
-        "plan_fresh", "plan_fresh_early", "drip_feed", "plan_first", "big_paste", "status_poll", "cold_return"}
+        "plan_fresh", "plan_fresh_early", "drip_feed", "big_paste", "status_poll", "cold_return"}
     # Report-only habits have no note, so they have no tip to count.
     assert set(prompting.HABITS) & set(cat.COACHING_HINTS) == set(prompting.COACHED_HABITS)

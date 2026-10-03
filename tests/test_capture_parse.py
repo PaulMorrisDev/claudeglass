@@ -665,7 +665,16 @@ def test_a_line_you_didnt_type_opens_no_cycle(tmp_path):
     ])
     assert [t.human_prompt_chars is not None for t in result.turns] == [True, False]
     assert len(capture.prompt_cycles(result)) == 1
-    assert [e.subkind for e in result.events if e.kind == EventKind.META] == ["not_typed"] * 3
+    # The app-quit note carries on your last message's work (resume); the other two end its reply.
+    assert [e.subkind for e in result.events if e.kind == EventKind.META] == ["resume", "not_typed", "not_typed"]
+    # Only a line that ends the reply marks the turn it came before.
+    assert [t.preceding_not_typed for t in result.turns] == [False, True]
+    assert not _parse(tmp_path, [
+        _typed("refactor the parser", 0), _reply("ok", timestamp=_at(5)),
+        user_str_line("The app was quit while you were working. Carry on.", origin={"kind": "human"},
+                      timestamp=_at(900)),
+        _reply("ok", timestamp=_at(920)),
+    ]).turns[1].preceding_not_typed
 
 
 # -- output style: a change is a signal, a repeat is not -----------------------------

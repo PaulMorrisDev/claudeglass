@@ -1101,6 +1101,29 @@ def test_privacy_message_flag_patterns_keep_a_flag_never_the_words(tmp_path: Pat
     _assert_no_violations(result)
 
 
+def test_privacy_the_change_request_flag_keeps_a_yes_never_the_words(tmp_path: Path):
+    # "Is this a change request" is read from the words you typed, a yes or a no is all that stays,
+    # with the release, paste and plan patterns the plan_first rule reads in memory.
+    typed = [
+        "now tighten the axolotl footer", "the axolotl footer is too small", "merge the axolotl branch and ship it",
+        "[Pasted text #1 +40 lines] add an axolotl page, add a yak page and add a zebra page for the app",
+    ]
+    lines = []
+    for n, text in enumerate(typed):
+        lines.append(user_str_line(text, origin={"kind": "human"}, timestamp=f"2026-09-18T12:0{n}:00.000Z"))
+        lines.append(turn_line(message_id=f"msg_{n}", timestamp=f"2026-09-18T12:0{n}:30.000Z"))
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    assert [(t.human_change, t.human_go, t.prompt_steps) for t in result.turns] == [
+        (True, False, 0), (False, False, 0), (False, False, 0), (True, False, 0),
+    ]
+    blob = json.dumps(cache.encode_result(result)) + repr(result.events) + repr(result.turns)
+    for word in ("axolotl", "yak", "zebra", "tighten", "footer", "merge", "Pasted"):
+        assert word not in blob, word
+    _assert_no_violations(result)
+
+
 def test_privacy_plan_feedback_and_denial_text_leave_a_length_and_a_word_never_the_words(tmp_path: Path):
     # What you type into a rejected plan, a declined question or a deny
     # rule's message, and the text a hook or the classifier answers with,

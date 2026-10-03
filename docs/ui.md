@@ -993,7 +993,9 @@ While capture is off the menu is hidden and a note says the first switch
 on ends by itself after `timebox_days` (14).
 
 A group folds ("Main session (3 of 12 on)") unless a metric in it needs
-a hook entry or an install. The feedback and brief skill rows show
+a hook entry or an install. A row that **Needs a hook entry** shows
+`claudeglass capture connect`, except under a settings policy that stops hooks
+running, where it isn't offered. The feedback and brief skill rows show
 **Needs installing** with their `capture ... on` command: the dashboard
 never writes Claude Code's folder. A change that asks Claude for more
 repeats the cost warning in a dialog first. Changes go to

@@ -1491,12 +1491,12 @@ def _at(minutes_ago):
 
 
 def test_hint_small_requests_one_at_a_time():
-    # Words don't matter: each short follow-up got a file change.
+    # Words don't matter: each short follow-up asked for a change and got a file change.
     tail = [_said("Build the settings page with a form and a header", 30), _reply([_use("a", "Write")], ts=_at(29)),
             _said("make the save button bigger", 15), _reply([_use("b", "Edit")], ts=_at(14)),
             _said("<command-name>/cost</command-name>", 12), _said("[Request interrupted by user]", 11),
             _said("now move the logo left", 10), _reply([_use("c", "Edit")], ts=_at(9)),
-            _said("and the footer text too", 1)]
+            _said("and make the footer text bigger", 1)]
     hint = statusline.coaching_hint({"context_window": {"used_tokens": 60_000}}, tail, NOW)
     assert hint == (30_000, "3 small asks in a row: plan them as one prompt", "drip_feed")
     # A reply that changed no file breaks the run...
@@ -1515,11 +1515,13 @@ def _did(tool_id, name, tool_input, minutes_ago):
     return _reply([block], ts=_at(minutes_ago))
 
 
-def _came_back(tool_id, *, is_error=False, edited_files=0):
+def _came_back(tool_id, *, is_error=False, edited_files=0, background=False):
     line = {"type": "user", "message": {"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": tool_id, "content": "no" if is_error else "ok", "is_error": is_error}]}}
-    if edited_files:
+    if edited_files or background:
         line["toolUseResult"] = {"toolStats": {"editFileCount": edited_files}}
+    if background:
+        line["toolUseResult"].update({"isAsync": True, "status": "async_launched"})
     return line
 
 
@@ -1528,7 +1530,7 @@ def _run_before(reply):
     ``reply``; the fourth message is what the hint is for."""
     return [_said("Build the settings page with a form and a header", 30), _reply([_use("a", "Write")], ts=_at(29)),
             _said("make the save button bigger", 15), _reply([_use("b", "Edit")], ts=_at(14)),
-            _said("now move the logo left", 10), *reply, _said("and the footer text too", 1)]
+            _said("now move the logo left", 10), *reply, _said("and make the footer text bigger", 1)]
 
 
 def test_hint_small_requests_skip_what_asks_for_no_change():
@@ -1536,13 +1538,16 @@ def test_hint_small_requests_skip_what_asks_for_no_change():
     payload = {"context_window": {"used_tokens": 60_000}}
     edit = [_did("c", "Edit", {"file_path": "/work/app/a.css"}, 9)]
     assert statusline.coaching_hint(payload, _run_before(edit), NOW) == drip
-    # A go-ahead, a thank-you, a status check and a question neither count nor end a run.
-    for between in ("go ahead", "thanks!", "how is it going?", "why is the logo on the left?"):
+    # A go-ahead, a thank-you, a status check, a question, a statement and an explain request ask for no
+    # change: none counts and none ends a run.
+    for between in ("go ahead", "thanks!", "how is it going?", "why is the logo on the left?", "the logo is too small",
+                    "it does not load", "explain how the logo works"):
         tail = _run_before(edit)
         tail[4:4] = [_said(between, 12), _reply([{"type": "text", "text": "ok"}], ts=_at(11))]
         assert statusline.coaching_hint(payload, tail, NOW) == drip, between
     # Nor is one of them the message being worked on.
-    for last in ("go ahead", "continue", "any update?", "why is the logo on the left?"):
+    for last in ("go ahead", "continue", "any update?", "why is the logo on the left?", "the footer is too small",
+                 "and the footer text too", "merge it"):
         tail = [*_run_before(edit)[:-1], _said(last, 1)]
         assert statusline.coaching_hint(payload, tail, NOW) is None, last
 
@@ -1563,6 +1568,8 @@ def test_hint_small_requests_count_only_a_change_to_a_file_of_yours():
         "a failed edit": [_did("c", "Edit", {"file_path": "/work/app/a.css"}, 9), _came_back("c", is_error=True)],
         "a command that reads": [_did("c", "Bash", {"command": "ls -la"}, 9)],
         "a failed subagent": [_did("c", "Agent", {"prompt": "go"}, 9), _came_back("c", is_error=True, edited_files=2)],
+        "a subagent sent to the background": [
+            _did("c", "Agent", {"prompt": "go"}, 9), _came_back("c", edited_files=2, background=True)],
     }
     for name, reply in counts_not.items():
         assert statusline.coaching_hint(payload, _run_before(reply), NOW) is None, name
@@ -1573,12 +1580,66 @@ def test_hint_a_question_after_a_change_is_an_offer_and_one_after_none_is_asked_
     ask = {"type": "text", "text": "Done. Want me to move the footer too?"}
     offered = [_said("make the save button bigger", 30), _reply([_use("a", "Write")], ts=_at(29)),
                _said("now move the logo left", 20), _reply([_use("b", "Edit"), ask], ts=_at(19)),
-               _said("yes, and the header too", 10), _reply([_use("c", "Edit")], ts=_at(9)),
-               _said("and the footer text too", 1)]
+               _said("yes, move the header too", 10), _reply([_use("c", "Edit")], ts=_at(9)),
+               _said("and make the footer text bigger", 1)]
     assert statusline.coaching_hint(payload, offered, NOW) == (30_000, "3 small asks in a row: plan them as one prompt", "drip_feed")
     # Claude only asked: the next message is its answer, not a request.
-    asked = [*offered[:3], _reply([ask], ts=_at(19)), *offered[4:6], _said("yes", 1)]
+    asked = [*offered[:3], _reply([ask], ts=_at(19)), _said("yes, move the header too", 1)]
     assert statusline.coaching_hint(payload, asked, NOW) is None
+
+
+def test_hint_small_requests_are_timed_between_your_messages():
+    drip = (30_000, "3 small asks in a row: plan them as one prompt", "drip_feed")
+    payload = {"context_window": {"used_tokens": 60_000}}
+    build = "Build the settings page with a form and a header"
+    edit = {"file_path": "/work/app/a.css"}
+    # Your messages are 35 minutes apart: too slow for a run, whatever Claude did in between.
+    slow = [_said(build, 60), _reply([_use("a", "Write")], ts=_at(59)),
+            _said("make the save button bigger", 55), _reply([_use("b", "Edit")], ts=_at(54)),
+            _said("now move the logo left", 20), _did("c", "Edit", edit, 19),
+            _said("and make the footer text bigger", 1)]
+    assert statusline.coaching_hint(payload, slow, NOW) is None
+    # Each within 20 minutes of the one before it.
+    quick = [_said(build, 60), _reply([_use("a", "Write")], ts=_at(59)),
+             _said("make the save button bigger", 50), _reply([_use("b", "Edit")], ts=_at(49)),
+             _said("now move the logo left", 35), _did("c", "Edit", edit, 34),
+             _said("and make the footer text bigger", 20)]
+    assert statusline.coaching_hint(payload, quick, NOW) == drip
+
+
+def test_hint_small_requests_credit_only_the_reply_a_message_started():
+    from claudeglass.capture_catalogue import APP_QUIT_PREFIX
+
+    drip = (30_000, "3 small asks in a row: plan them as one prompt", "drip_feed")
+    payload = {"context_window": {"used_tokens": 60_000}}
+    looking = _reply([{"type": "text", "text": "Looking at it."}], stop="end_turn", ts=_at(14))
+    after = _did("x", "Edit", {"file_path": "/work/app/a.css"}, 11)
+
+    def tail(*between):
+        return [_said("Build the settings page with a form and a header", 30), _reply([_use("a", "Write")], ts=_at(29)),
+                _said("make the save button bigger", 15), looking, *between, after,
+                _said("now move the logo left", 10), _did("c", "Edit", {"file_path": "/work/app/b.css"}, 9),
+                _said("and make the footer text bigger", 1)]
+
+    assert statusline.coaching_hint(payload, tail(), NOW) == drip
+    # An agent's report came back first: the edit that followed answers it, not your message.
+    report = _said("<task-notification>\n<result>done</result>\n</task-notification>", 12)
+    assert statusline.coaching_hint(payload, tail(report), NOW) is None
+    # A note that Claude went on after a limit or a quit is the same work.
+    resume = _said(APP_QUIT_PREFIX + ", so carry on", 12)
+    assert statusline.coaching_hint(payload, tail(resume), NOW) == drip
+
+
+def test_a_big_task_has_no_live_hint():
+    """Report-only (``prompting.py``): replayed over 30 days of real
+    sessions, the hint was right in none of 7 firings, and with its rules
+    tightened none fired."""
+    big_task = (
+        "Add a login page with email and password, a settings page where people change their name, email alerts "
+        "when a report is ready, and an admin screen that lists every account."
+    )
+    assert statusline.coaching_hint({}, [_said(big_task, 1)], NOW) is None
+    assert statusline._prompt_habits([_said(big_task, 1)], 30_000, NOW) == []
 
 
 def test_the_same_request_again_and_stopping_again_have_no_live_hint():

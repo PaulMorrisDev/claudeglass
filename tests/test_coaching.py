@@ -520,15 +520,28 @@ def _acted(ago_s: float, name: str, tool_input: dict, *, say: str = "Done.", ctx
     return _reply(ctx, ago_s=ago_s, content=content, message_id=f"msg_a{ago_s}", one_hour=True)
 
 
-def _came_back(call_ago_s: float, *, is_error: bool = False, edited_files: int = 0) -> dict:
+def _came_back(call_ago_s: float, *, is_error: bool = False, edited_files: int = 0, background: bool = False) -> dict:
     """The line that brings the result of ``_acted(call_ago_s, ...)`` back;
-    a subagent's also says how many files it changed."""
+    a subagent's also says how many files it changed (``background``: it
+    went to the background, so the line is only its launch message)."""
     line = {"type": "user", "message": {"role": "user", "content": [
         {"type": "tool_result", "tool_use_id": f"toolu_a{call_ago_s}", "content": "no" if is_error else "ok",
          "is_error": is_error}]}}
-    if edited_files:
+    if edited_files or background:
         line["toolUseResult"] = {"toolStats": {"editFileCount": edited_files}}
+    if background:
+        line["toolUseResult"].update({"isAsync": True, "status": "async_launched"})
     return line
+
+
+def _real(record: dict) -> dict:
+    """``record`` as Claude Code writes it: a message you typed says so, and
+    a reply names its model, which the parser needs and the hook doesn't."""
+    if record["type"] == "user" and isinstance(record["message"]["content"], str):
+        return {**record, "origin": {"kind": "human"}}
+    if record["type"] == "assistant" and not record.get("isApiErrorMessage"):
+        return {**record, "message": {**record["message"], "model": "claude-sonnet-5"}}
+    return record
 
 
 def _spoke(ago_s: float, say: str = "ok") -> dict:
@@ -543,7 +556,7 @@ _START = [_said("Build the settings page: " + "a form, a save button, a header, 
 
 
 def test_small_requests_one_at_a_time_get_the_plan_it_as_one_prompt_hint(tmp_path):
-    # No "fix" anywhere: what counts is that each short message got a file change.
+    # No "fix" anywhere: what counts is that each short message asked for a change and got a file change.
     records = [
         _said("Build the settings page from the plan we agreed: " + "a form, a save button, a header. " * 10, 1_500),
         _changed(1_000),
@@ -552,13 +565,13 @@ def test_small_requests_one_at_a_time_get_the_plan_it_as_one_prompt_hint(tmp_pat
         _stopped(650, blocks=True),
         _said("now move the logo to the left", 600), _changed(580, tool="MultiEdit"),
     ]
-    note = _send(tmp_path, records, "and the footer text should be grey")
+    note = _send(tmp_path, records, "and make the footer text grey")
     assert _kind(note) == "drip_feed" and "sent 3 small change requests in a row" in note
     # The note carries counts, never your words.
     assert "footer" not in note and "logo" not in note
     # A message Claude Code has already written to the transcript isn't counted twice.
-    written = [*records, _said("and the footer text should be grey", 2)]
-    assert "sent 3 small" in _send(tmp_path, written, "and the footer text should be grey", session="s2")
+    written = [*records, _said("and make the footer text grey", 2)]
+    assert "sent 3 small" in _send(tmp_path, written, "and make the footer text grey", session="s2")
 
 
 def test_a_run_needs_file_changes_short_messages_and_quick_follow_ups(tmp_path):
@@ -566,34 +579,50 @@ def test_a_run_needs_file_changes_short_messages_and_quick_follow_ups(tmp_path):
         return [*_START, _said("make the save button bigger", 900), first_reply,
                 _said(middle, 600), _changed(600 - gap_s)]
 
-    assert _kind(_send(tmp_path, run(_changed(880)), "and the footer too")) == "drip_feed"
+    assert _kind(_send(tmp_path, run(_changed(880)), "and make the footer grey")) == "drip_feed"
     # A reply that changed nothing (Claude only answered) breaks the run.
-    assert _send(tmp_path, run(_reply(30_000, ago_s=880, one_hour=True)), "and the footer too", session="s2") == ""
+    assert _send(tmp_path, run(_reply(30_000, ago_s=880, one_hour=True)), "and make the footer grey", session="s2") == ""
     # So does a detailed message that plans several changes at once.
     detailed = run(_changed(880), middle="Now: " + "move the logo left, grey footer, wider form; " * 8)
-    assert _send(tmp_path, detailed, "and the footer too", session="s3") == ""
-    # And a message sent long after Claude's last reply.
+    assert _send(tmp_path, detailed, "and make the footer grey", session="s3") == ""
+    # And a message sent long after your last one.
     spaced = [_said("Build the settings page: " + "a form and a header. " * 20, 9_000), _changed(8_900),
-              _said("make the save button bigger", 8_800), _changed(8_700), _said("now the logo", 8_600),
+              _said("make the save button bigger", 8_800), _changed(8_700), _said("now move the logo", 8_600),
               _changed(8_500)]
-    assert _send(tmp_path, spaced, "and the footer too", session="s4") == ""
+    assert _send(tmp_path, spaced, "and make the footer grey", session="s4") == ""
     # Your own count wins.
     two = [*_START, _said("make the save button bigger", 900), _changed(880)]
-    assert _send(tmp_path, two, "and the footer too", session="s5") == ""
+    assert _send(tmp_path, two, "and make the footer grey", session="s5") == ""
     fewer = {**ON, "thresholds": {"coaching_drip_count": 2}}
-    assert _kind(_send(tmp_path, two, "and the footer too", session="s6", config=fewer)) == "drip_feed"
+    assert _kind(_send(tmp_path, two, "and make the footer grey", session="s6", config=fewer)) == "drip_feed"
+
+
+def test_the_window_is_timed_between_your_messages_not_from_claudes_last_reply(tmp_path):
+    prompt = "and make the footer grey"
+    opening = [_said("Build the settings page: " + "a form and a header. " * 20, 4_000), _changed(3_900)]
+    # The second message came 47 minutes after the first: too slow to join a run, however quick Claude was.
+    slow = [*opening, _said("make the save button bigger", 3_800), _changed(3_700),
+            _said("now move the logo", 1_000), _changed(900)]
+    assert _send(tmp_path, slow, prompt) == ""
+    # Your own window decides what is slow.
+    wider = {**ON, "thresholds": {"coaching_drip_window_minutes": 60}}
+    assert _kind(_send(tmp_path, slow, prompt, session="s2", config=wider)) == "drip_feed"
+    # Claude's work took half an hour, but your messages came 7 and 17 minutes after the one before: a run.
+    long = [_said("Build the settings page: " + "a form and a header. " * 20, 1_500), _changed(1_450),
+            _said("make the save button bigger", 1_100), _changed(150), _said("now move the logo", 100), _changed(80)]
+    assert _kind(_send(tmp_path, long, prompt, session="s3")) == "drip_feed"
 
 
 def test_answers_to_claudes_questions_and_thanks_are_not_requests(tmp_path):
     asked = [*_START, _said("make the save button bigger", 900), _changed(880), _said("now move the logo", 600),
              _spoke(580, "Left or right of the title?")]
-    # Answering Claude's question isn't another request...
-    assert _send(tmp_path, asked, "left of the title") == ""
+    # Answering Claude's question isn't another request, even when the answer reads as a change...
+    assert _send(tmp_path, asked, "make it left of the title") == ""
     # ...and doesn't break a run either: the question followed a message that asked for nothing.
     answered = [*_START, _said("make the save button bigger", 900), _changed(880), _said("now move the logo", 800),
                 _changed(780), _said("where should the logo go?", 600), _spoke(580, "Left or right of the title?"),
                 _said("left of the title", 400), _spoke(380, "Got it.")]
-    assert _kind(_send(tmp_path, answered, "and the footer too", session="s2")) == "drip_feed"
+    assert _kind(_send(tmp_path, answered, "and make the footer grey", session="s2")) == "drip_feed"
     done = [*_START, _said("make the save button bigger", 900), _changed(880), _said("now move the logo", 600),
             _changed(580)]
     for n, thanks in enumerate(("thanks", "ok, looks good!", "perfect, thank you")):
@@ -610,22 +639,26 @@ def test_a_question_closing_a_reply_that_changed_a_file_is_an_offer_not_one_you_
     assert _send(tmp_path, asked, "yes, move the footer too", session="s2") == ""
 
 
-@pytest.mark.parametrize("between", ["go ahead", "thanks!", "how is it going?", "why is the button blue?"])
-def test_a_go_ahead_a_thank_you_a_status_check_and_a_question_do_not_end_a_run(tmp_path, between):
+@pytest.mark.parametrize("between", [
+    "go ahead", "thanks!", "how is it going?", "why is the button blue?", "the button is too small",
+    "it does not load", "explain how the header works",
+])
+def test_a_go_ahead_a_thank_you_a_status_check_a_question_and_a_statement_do_not_end_a_run(tmp_path, between):
     records = [*_START, _said("make the save button bigger", 900), _changed(880), _said(between, 700), _spoke(680),
                _said("now move the logo", 600), _changed(580)]
-    assert _kind(_send(tmp_path, records, "and the footer too")) == "drip_feed"
+    assert _kind(_send(tmp_path, records, "and make the footer too")) == "drip_feed"
 
 
 @pytest.mark.parametrize("prompt", [
     "go ahead", "continue", "how is it going?", "any update on the footer?", "why is the button blue?",
-    "what does the footer do", "can you move the logo left?",
+    "what does the footer do", "can you move the logo left?", "the footer is too small", "it does not load",
+    "explain how the footer works", "and the footer too", "merge it",
 ])
 def test_a_message_that_asks_for_no_change_is_not_one_more_small_request(tmp_path, prompt):
     done = [*_START, _said("make the save button bigger", 900), _changed(880), _said("now move the logo", 600),
             _changed(580)]
     assert _send(tmp_path, done, prompt) == "", prompt
-    assert _kind(_send(tmp_path, done, "and the footer too", session="s2")) == "drip_feed"
+    assert _kind(_send(tmp_path, done, "and make the footer too", session="s2")) == "drip_feed"
 
 
 #: The reply to a request in a run of small ones, and whether it changed a
@@ -649,6 +682,9 @@ _THIRD_REPLIES = {
     "a subagent that failed": (
         lambda: [_acted(580, "Agent", {"prompt": "go"}, say=""), _came_back(580, is_error=True, edited_files=2),
                  _spoke(570)], False),
+    "a subagent sent to the background": (
+        lambda: [_acted(580, "Agent", {"prompt": "go"}, say=""), _came_back(580, edited_files=2, background=True),
+                 _spoke(570)], False),
 }
 
 
@@ -657,20 +693,173 @@ def test_only_a_change_to_a_file_of_yours_answers_a_request_in_a_run(tmp_path, n
     reply, counts = _THIRD_REPLIES[name]
     records = [*_START, _said("make the save button bigger", 900), _changed(880), _said("now move the logo", 600),
                *reply()]
-    note = _send(tmp_path, records, "and the footer too")
+    note = _send(tmp_path, records, "and make the footer too")
     assert (note != "" and _kind(note) == "drip_feed") is counts, name
+
+
+#: What Claude does after your message was answered, in answer to a line you didn't type.
+_NOT_YOURS = [
+    "<task-notification>\n<task-id>a1</task-id>\n<result>Done.</result>\n</task-notification>",
+    "<scheduled-task>Check the build</scheduled-task>",
+    "<command-name>/cost</command-name>",
+    'Another Claude session sent a message:\n<agent-message from="a57b4a7d930e32da8">hello</agent-message>',
+]
+
+
+@pytest.mark.parametrize("line", _NOT_YOURS, ids=["agent report", "scheduled task", "slash command", "session message"])
+def test_only_the_reply_a_message_started_is_credited_to_it(tmp_path, line):
+    def run(*between):
+        # The first message was answered with words, then Claude changed a file a line later.
+        return [*_START, _said("make the save button bigger", 900), _spoke(880, "Looking at it."), *between,
+                _acted(790, "Edit", {"file_path": "/work/app/app.css"}), _said("now move the logo", 600),
+                _changed(580)]
+
+    prompt = "and make the footer too"
+    # Straight after the reply, the edit is the message's own: a run of three.
+    assert _kind(_send(tmp_path, run(), prompt)) == "drip_feed"
+    # After a line you didn't type, the edit answers that line, not your message.
+    assert _send(tmp_path, run(_said(line, 800)), prompt, session="s2") == ""
+    # The same when the line says it is not yours by its origin rather than its words.
+    by_origin = {**_said("check the build", 800), "turnOrigin": "task_notification"}
+    assert _send(tmp_path, run(by_origin), prompt, session="s3") == ""
+
+
+def test_a_resume_note_carries_on_the_work_of_your_last_message(tmp_path):
+    def run(note):
+        return [*_START, _said("make the save button bigger", 900), _spoke(880, "Working on it."), _said(note, 800),
+                _acted(790, "Edit", {"file_path": "/work/app/app.css"}), _said("now move the logo", 600),
+                _changed(580)]
+
+    prompt = "and make the footer too"
+    # You hit a usage limit, or the app was quit, and Claude went on with the same work: still your message's.
+    for n, note in enumerate((cat.LIMIT_RESUME_PREFIX + ", carry on", cat.APP_QUIT_PREFIX + ", so carry on")):
+        assert _kind(_send(tmp_path, run(note), prompt, session=f"r{n}")) == "drip_feed", note
+    assert _send(tmp_path, run("<task-notification>done</task-notification>"), prompt, session="x") == ""
+
+
+def test_a_subagents_edits_go_to_the_message_whose_reply_launched_it():
+    launch = _acted(880, "Agent", {"prompt": "go"}, say="")
+    # You typed again while it ran; the files are still the first message's, whenever its result comes back.
+    records = [_said("make the save button bigger", 900), launch, _said("now move the logo", 600),
+               _came_back(880, edited_files=2), _changed(560)]
+    exchanges, _ = HOOK._exchanges(records, cat.INTERRUPT_PREFIX, cat.EDIT_TOOLS)
+    assert [(ex["text"], ex["edits"], ex["edited"]) for ex in exchanges] == [
+        ("make the save button bigger", 2, True), ("now move the logo", 1, True)]
+
+
+def test_a_message_you_sent_again_after_stopping_it_is_not_a_request_in_its_own_right(tmp_path):
+    # Stopped before any reply and typed again: the first copy asked for nothing Claude answered.
+    records = [*_START, _said("make the save button bigger", 1_000), _stopped(990),
+               _said("make the save button bigger", 900), _changed(880), _said("now move the logo", 600),
+               _changed(580)]
+    assert _kind(_send(tmp_path, records, "and make the footer too")) == "drip_feed"
 
 
 def test_a_message_sent_while_claude_is_still_working_gets_no_run_hint(tmp_path):
     base = [*_START, _said("make the save button bigger", 900), _changed(880), _said("now move the logo", 600),
-            _changed(580), _said("and the header", 100)]
+            _changed(580), _said("and make the header blue", 100)]
     # The reply it was sent into has finished: the third small request in a row.
-    assert _kind(_send(tmp_path, [*base, _changed(60)], "and the footer too")) == "drip_feed"
+    assert _kind(_send(tmp_path, [*base, _changed(60)], "and make the footer too")) == "drip_feed"
     # Sent while Claude was mid-call, or as a tool's result came back, it is a nudge into work under way.
     working = [*base, _acted(60, "Read", {"file_path": "/work/app/a.py"}, say="")]
-    assert _send(tmp_path, working, "and the footer too", session="s2") == ""
+    assert _send(tmp_path, working, "and make the footer too", session="s2") == ""
     back = [*working, _came_back(60)]
-    assert _send(tmp_path, back, "and the footer too", session="s3") == ""
+    assert _send(tmp_path, back, "and make the footer too", session="s3") == ""
+    # A call that is long over is where work stopped, not work under way: the same message is a request.
+    def editing(ago_s):
+        block = {"type": "tool_use", "id": "toolu_z", "name": "Edit", "input": {"file_path": "/work/app/a.css"}}
+        return _reply(30_000, ago_s=ago_s, one_hour=True, content=[{"type": "text", "text": "On it."}, block])
+
+    head = [*_START, _said("make the save button bigger", 900), _changed(880), _said("now move the logo", 700)]
+    assert _send(tmp_path, [*head, editing(100)], "and make the footer too", session="s4") == ""
+    assert _kind(_send(tmp_path, [*head, editing(650)], "and make the footer too", session="s5")) == "drip_feed"
+
+
+def test_the_report_counts_the_run_the_live_hint_flags(tmp_path):
+    """The hint, the status line and the report's small-requests count read
+    a run by one rule: each scenario ends on a message, and the hook's count
+    for it is the length of the run the report puts it in (0 when none)."""
+    from claudeglass import prompting
+
+    prompt = "and make the footer grey"
+    long = "make the save button bigger and " + "keep the colours as they are, " * 12
+    notice = "<task-notification>\n<task-id>a1</task-id>\n<result>Done.</result>\n</task-notification>"
+    edit = {"file_path": "/work/app/app.css"}
+    scenarios = {
+        "three in a row": ([*_START, _said("make the save button bigger", 900), _changed(880),
+                            _said("now move the logo", 600), _changed(580)], 3),
+        "a go-ahead between": ([*_START, _said("make the save button bigger", 900), _changed(880),
+                                _said("go ahead", 700), _spoke(680), _said("now move the logo", 600),
+                                _changed(580)], 3),
+        "a status check between": ([*_START, _said("make the save button bigger", 900), _changed(880),
+                                    _said("how is it going?", 700), _spoke(680), _said("now move the logo", 600),
+                                    _changed(580)], 3),
+        "a question between": ([*_START, _said("make the save button bigger", 900), _changed(880),
+                                _said("why is the button blue?", 700), _spoke(680), _said("now move the logo", 600),
+                                _changed(580)], 3),
+        "a statement between": ([*_START, _said("make the save button bigger", 900), _changed(880),
+                                 _said("the button is too small", 700), _spoke(680), _said("now move the logo", 600),
+                                 _changed(580)], 3),
+        "a thank-you between": ([*_START, _said("make the save button bigger", 900), _changed(880),
+                                 _said("thanks!", 700), _spoke(680), _said("now move the logo", 600),
+                                 _changed(580)], 3),
+        "a reply that changed nothing": ([*_START, _said("make the save button bigger", 900), _spoke(880),
+                                          _said("now move the logo", 600), _changed(580)], 0),
+        "a subagent's edits": ([*_START, _said("make the save button bigger", 900),
+                                _acted(880, "Agent", {"prompt": "go"}, say=""), _came_back(880, edited_files=2),
+                                _spoke(870), _said("now move the logo", 600), _changed(580)], 3),
+        "a failed subagent": ([*_START, _said("make the save button bigger", 900),
+                               _acted(880, "Agent", {"prompt": "go"}, say=""),
+                               _came_back(880, is_error=True, edited_files=2), _spoke(870),
+                               _said("now move the logo", 600), _changed(580)], 0),
+        "an edit under .claude": ([*_START, _said("make the save button bigger", 900),
+                                   _acted(880, "Edit", {"file_path": "/home/me/.claude/plans/p.md"}),
+                                   _said("now move the logo", 600), _changed(580)], 0),
+        "a message that was long": ([*_START, _said(long, 900), _changed(880), _said("now move the logo", 600),
+                                     _changed(580)], 0),
+        "a slow message": ([_said("Build the settings page: " + "a form and a header. " * 20, 4_000),
+                            _changed(3_900), _said("make the save button bigger", 3_800), _changed(3_700),
+                            _said("now move the logo", 1_000), _changed(900)], 0),
+        "an answer to a question": ([*_START, _said("make the save button bigger", 900), _changed(880),
+                                     _said("now move the logo", 600), _spoke(580, "Left or right?")], 0),
+        "an offer after a change": ([*_START, _said("make the save button bigger", 900), _changed(880),
+                                     _said("now move the logo", 600),
+                                     _changed(580, say="Done. Want me to move the footer too?")], 3),
+        "an edit for an agent's report": ([*_START, _said("make the save button bigger", 900), _spoke(880),
+                                           _said(notice, 800), _acted(790, "Edit", edit),
+                                           _said("now move the logo", 600), _changed(580)], 0),
+        "an edit after a shell line you ran": ([*_START, _said("make the save button bigger", 900), _spoke(880),
+                                                _said("<bash-input>ls</bash-input>", 800), _acted(790, "Edit", edit),
+                                                _said("now move the logo", 600), _changed(580)], 0),
+        "an edit after another session's message": ([*_START, _said("make the save button bigger", 900),
+                                                     _spoke(880),
+                                                     _said("Another Claude session sent a message: hello", 800),
+                                                     _acted(790, "Edit", edit), _said("now move the logo", 600),
+                                                     _changed(580)], 0),
+        "an edit after a peer's line": ([*_START, _said("make the save button bigger", 900), _spoke(880),
+                                         {**_said("check the build", 800), "turnOrigin": "peer"},
+                                         _acted(790, "Edit", edit), _said("now move the logo", 600),
+                                         _changed(580)], 0),
+        "an edit after a resume note": ([*_START, _said("make the save button bigger", 900), _spoke(880),
+                                         _said(cat.APP_QUIT_PREFIX + ", so carry on", 800), _acted(790, "Edit", edit),
+                                         _said("now move the logo", 600), _changed(580)], 3),
+        "a failed reply between": ([*_START, _said("make the save button bigger", 900), _changed(880),
+                                    _said("tighten the footer", 700), _failed(680), _said("now move the logo", 600),
+                                    _changed(580)], 3),
+    }
+    coaching = CATALOGUE["coaching"]
+    for n, (name, (records, expected)) in enumerate(scenarios.items()):
+        at = NOW - timedelta(seconds=5)
+        hook = HOOK._drip_hint(prompt, records, coaching, cat.COACHING_THRESHOLDS, at, 30_000)
+        assert (hook[1] if hook else 0) == expected, name
+        # The report reads the same lines once Claude has answered the last message too.
+        lines = [*records, _said(prompt, 5), _changed(3)]
+        path = Path(_transcript(tmp_path, [_real(r) for r in lines], f"scenario{n}.jsonl"))
+        top = parse_transcript(path, TranscriptMeta(path=str(path)))
+        session = prompting.session_prompting(NS(top=top, session_id="s"), prompting._Prices(load_pricing()))
+        last = len(session.messages) - 1
+        runs = [run for run in prompting._drip_runs(session.messages) if last in run]
+        assert (len(runs[0]) if runs else 0) == expected, name
 
 
 def test_a_vague_correction_is_report_only_and_needs_a_bad_outcome_phrase(tmp_path):
@@ -707,11 +896,11 @@ def test_a_vague_correction_is_report_only_and_needs_a_bad_outcome_phrase(tmp_pa
 
 
 def test_one_note_at_a_time_while_the_small_requests_keep_coming(tmp_path):
-    records = [*_START, _said("fix the header", 600), _changed(580), _said("still wrong", 300), _changed(280)]
+    records = [*_START, _said("fix the header", 600), _changed(580), _said("tighten the footer", 300), _changed(280)]
     assert _kind(_send(tmp_path, records, "fix it")) == "drip_feed"
-    # The run hint is resting; the next vague fix in the same run adds nothing.
+    # The run hint is resting; the next small change in the same run adds nothing.
     more = [*records, _said("fix it", 200), _changed(180)]
-    assert _send(tmp_path, more, "broken again", now=NOW + timedelta(seconds=30)) == ""
+    assert _send(tmp_path, more, "fix the logo too", now=NOW + timedelta(seconds=30)) == ""
 
 
 def test_a_huge_paste_gets_the_paste_less_hint(tmp_path):
@@ -745,71 +934,50 @@ _BIG_TASK = (
 )
 
 
-def test_a_big_task_outside_plan_mode_gets_the_plan_first_hint(tmp_path):
-    records = [*_START]
-    note = _coach(tmp_path, {**_prompt_payload(_transcript(tmp_path, records)), "prompt": _BIG_TASK,
-                             "permission_mode": "default"})
-    assert _kind(note) == "plan_first" and "separate changes, outside plan mode" in note and "login" not in note
+def test_a_big_task_outside_plan_mode_gets_no_hint(tmp_path):
+    """Report-only: replayed over 30 days of real sessions, the hint was
+    right in none of 7 firings, and with its rules tightened every message
+    of 3 or more steps was rightly left alone. Counted after the fact
+    (``prompting.py``)."""
+    path = _transcript(tmp_path, [*_START])
+
+    def send(prompt, mode, session, config=ON):
+        payload = {**_prompt_payload(path), "prompt": prompt, "session_id": session, "permission_mode": mode}
+        return _coach(tmp_path, payload, config)
+
+    assert send(_BIG_TASK, "default", "a") == ""
     listed = "Please do these:\n1. add a login page\n2. add a settings page\n3. email alerts\n4. an admin screen\n" + (
         "Keep the existing styles and tests passing throughout, and don't touch the database schema."
     )
-    note = _coach(tmp_path, {**_prompt_payload(_transcript(tmp_path, records, "l.jsonl")), "prompt": listed,
-                             "permission_mode": "acceptEdits", "session_id": "s2"})
-    assert _kind(note) == "plan_first"
-
-
-def test_the_plan_first_hint_stays_out_of_the_way(tmp_path):
-    path = _transcript(tmp_path, [*_START])
-
-    def send(prompt, mode, session, records_path=path):
-        payload = {**_prompt_payload(records_path), "prompt": prompt, "session_id": session}
-        return _coach(tmp_path, {**payload, "permission_mode": mode} if mode else payload)
-
-    # Already in plan mode, or no mode reported.
-    assert send(_BIG_TASK, "plan", "a") == ""
-    assert send(_BIG_TASK, None, "b") == ""
-    # A message about a plan, or building one already approved.
-    assert send("Carry out the plan: " + _BIG_TASK, "default", "c") == ""
-    approved = _transcript(tmp_path, [*_START, _reply(30_000, ago_s=100, one_hour=True, content=[
-        {"type": "tool_use", "id": "toolu_p", "name": "ExitPlanMode", "input": {}}])], "approved.jsonl")
-    assert send(_BIG_TASK, "default", "d", approved) == ""
-    # A short request, or one asking for fewer changes.
-    assert send("Add login, settings, alerts and an admin screen", "default", "e") == ""
+    assert send(listed, "acceptEdits", "b") == ""
+    # Nothing in your settings brings it back: the keys are ignored.
     two_changes = (
         "Make the header sticky so it stays at the top when the page scrolls, and keep its shadow the same as it is "
         "today on the settings page."
     )
-    assert send(two_changes, "default", "f") == ""
+    looser = {**ON, "thresholds": {"coaching_plan_steps": 2, "coaching_plan_min_chars": 20}}
+    assert send(two_changes, "default", "c", looser) == ""
 
 
-def test_plan_first_counts_your_own_prose_and_skips_reviews_and_plans_and_queued_messages(tmp_path):
-    path = _transcript(tmp_path, [*_START])
-
-    def send(prompt, session, records_path=path):
-        payload = {**_prompt_payload(records_path), "prompt": prompt, "session_id": session, "permission_mode": "default"}
-        return _coach(tmp_path, payload)
-
-    # Three changes are enough.
-    three = ("Add a login page, add a settings page and add an admin screen for the app, keeping the existing styles "
-             "and every test passing as it does today across the whole of the project.")
-    assert _kind(send(three, "a")) == "plan_first"
-    # What isn't your own writing isn't a step: a fenced block, a quoted line, a pasted log.
-    fenced = ("Fix the failing test in this output:\n```\nadd the login page\nadd the settings page\nadd alerts\n"
-              "add an admin screen\n```\nplease look at it and tell me about the error that appeared")
-    assert send(fenced, "b") == ""
-    quoted = ("Take a look at this note from my manager:\n> add a login page\n> add a settings page\n> add alerts\n"
-              "> add an admin screen\nand tell me what she wants overall, in a sentence.")
-    assert send(quoted, "c") == ""
-    # A review asks for no changes.
-    assert send("Review this: " + _BIG_TASK, "d") == ""
-    # A plan already: 1,500 characters with headings, or five numbered items.
-    document = "# Work\n\n## Pages\n" + _BIG_TASK + "\n\n" + "More detail on how it should look. " * 50
-    assert len(document) > 1_500 and send(document, "e") == ""
-    five = "Do these:\n1. add a login page\n2. add a settings page\n3. add email alerts\n4. add an admin screen\n5. add a help page"
-    assert send(five, "f") == ""
-    # Sent while Claude was still working: a nudge into work under way, not a job to plan.
-    queued = _transcript(tmp_path, [*_START, _acted(100, "Read", {"file_path": "/work/app/a.py"}, say="")], "q.jsonl")
-    assert send(_BIG_TASK, "g", queued) == ""
+def test_the_hint_made_report_only_has_nothing_left_for_the_hook(tmp_path):
+    for hint in ("plan_first",):
+        # Old notes in earlier transcripts are still recognised, so what they cost is still counted.
+        assert hint in cat.RETIRED_COACHING_HINTS and hint not in cat.COACHING_HINTS, hint
+        for table in (cat.COACHING_TEXT, cat.COACHING_TIP, cat.COACHING_NOTICE, CATALOGUE["coaching"]["text"],
+                      CATALOGUE["coaching"]["notice"]):
+            assert hint not in table, hint
+    gone = ("plan_steps", "plan_min_chars")
+    # Its rule is fixed now, as the other report-only habits' are: no key of the file or the config.
+    assert not set(gone) & set(cat.COACHING_THRESHOLDS)
+    assert not set(gone) & set(CATALOGUE["coaching"]["thresholds"])
+    assert set(gone) <= set(cat.REPORT_THRESHOLDS)
+    assert HOOK.coaching_thresholds(CATALOGUE["coaching"], {"thresholds": {"coaching_plan_steps": 2}}, {}).get(
+        "plan_steps") is None
+    # drip_feed is not one of them: it stays live, with the keys that tune it.
+    assert "drip_feed" in cat.COACHING_HINTS and "drip_feed" not in cat.RETIRED_COACHING_HINTS
+    assert {"drip_count", "drip_window_minutes", "drip_chars"} <= set(cat.COACHING_THRESHOLDS)
+    assert HOOK.coaching_thresholds(CATALOGUE["coaching"], {"thresholds": {"coaching_drip_count": 2}}, {})[
+        "drip_count"] == 2
 
 
 def test_sending_the_same_request_again_gets_no_hint(tmp_path):
@@ -853,18 +1021,20 @@ def test_a_failed_reply_is_not_an_answer_to_a_run_of_small_requests(tmp_path):
 ], ids=["agent report listing files", "long agent report", "scheduled task", "subagent hand-back"])  # short: Windows caps env vars
 def test_a_message_you_didnt_type_gets_no_prompting_or_context_hint(tmp_path, prompt):
     # A background agent's report comes back as the next message: it isn't
-    # yours, however long or list-shaped it is, and even in a big context.
-    records = [*_START, _said("fix the header", 600), _changed(580, 150_000), _said("still wrong", 300),
+    # yours, however long it is, and even in a big context.
+    records = [*_START, _said("fix the header", 600), _changed(580, 150_000), _said("tighten the footer", 300),
                _changed(280, 150_000)]
     path = _transcript(tmp_path, records)
     payload = {"hook_event_name": "UserPromptSubmit", "transcript_path": path, "prompt": prompt,
                "permission_mode": "default"}
     assert HOOK.coaching_for({"session_id": "s1", "cwd": "/w", **payload}, ON, CATALOGUE, _config_dir(tmp_path),
                              now=NOW) == ("", "")
-    # The same list typed by you still gets its hint.
-    typed = "Add these: " + "".join(f"\n- add a check to mod{n}.py" for n in range(6))
-    note = _coach(tmp_path, {**payload, "prompt": typed, "session_id": "s2"})
-    assert note and _kind(note) != ""
+    # The same small change typed by you still gets its hint, and so does a paste.
+    note = _coach(tmp_path, {**payload, "prompt": "fix the logo", "session_id": "s2"})
+    assert _kind(note) == "drip_feed"
+    typed = "Why does this fail?\n" + "log line\n" * 5_000
+    note = _coach(tmp_path, {**payload, "prompt": typed, "session_id": "s3"})
+    assert _kind(note) == "big_paste"
 
 
 def test_the_status_line_and_the_parser_skip_a_failed_reply_too(tmp_path):
@@ -879,70 +1049,89 @@ def test_the_status_line_and_the_parser_skip_a_failed_reply_too(tmp_path):
     assert not any(e.detail.get("repeat") for e in result.events if e.kind.name == "HUMAN_TEXT")
 
 
-def test_the_hook_counts_steps_as_the_package_does():
-    from claudeglass import prompt_shape
-
-    samples = [
-        _BIG_TASK, "Create page.html: a simple settings page with a heading, a name field and a save button.",
-        "1. add a\n2. add b\n- c\n* d", "Why does the build fail?", "Add tests. Then rename the store and bump it.",
-        "Fix this:\n```\nadd a\nadd b\nadd c\n```\nand tell me why", "Note:\n> add a\n> add b\n> add c\nsummarise it",
-        "Review this: " + _BIG_TASK, "Carry out the plan: " + _BIG_TASK,
-        "# Work\n\n## Pages\n" + _BIG_TASK + "\n\n" + "More detail on how it should look. " * 50,
-        "Do these:\n1. add a\n2. add b\n3. add c\n4. add d\n5. add e",
-        "Traceback (most recent call last):\n  File \"a.py\", line 3, in <module>\nKeyError: 'x'\nfix it",
-    ]
-    for text in samples:
-        assert HOOK._request_steps(text, CATALOGUE["coaching"]) == prompt_shape.request_steps(text), text
-        assert HOOK._plan_steps(text, CATALOGUE["coaching"]) == prompt_shape.plan_steps(text), text
-        assert HOOK._is_plan(text, CATALOGUE["coaching"]) == prompt_shape.is_plan(text), text
-
-
+#: A message and whether it asks Claude to change something (``prompt_shape.is_change_request``):
+#: a change verb opening a sentence, and not a go-ahead, a thank-you, a status check, a question,
+#: a report, a statement or an explain request.
 _REQUESTS = [
-    "thanks", "ok, looks good!", "go ahead", "continue", "how is it going?", "any update?", "why is it blue?",
-    "What does this do", "make the button bigger", "fix line 42", "move the logo left", "can you make it bigger?",
-    "and the footer too", "yes, move the footer too", "left of the title",
+    ("thanks", False), ("ok, looks good!", False), ("go ahead", False), ("continue", False),
+    ("how is it going?", False), ("any update?", False), ("why is it blue?", False), ("What does this do", False),
+    ("make the button bigger", True), ("fix line 42", True), ("move the logo left", True),
+    ("can you make it bigger?", False), ("and the footer too", False), ("yes, move the footer too", True),
+    ("left of the title", False), ("tighten the footer", True), ("now add a footer.", True),
+    ("Can you add a footer. Thanks", True), ("Please make it wider", True), ("let's add a footer", True),
+    ("Looks good. Now add the footer", True), ("Thanks! Now rename the store", True), ("it's broken, fix it", True),
+    # A statement, a report and an explain or clarify request are no change request.
+    ("the button is too small", False), ("it does not load", False), ("this is a new bug: the page 500s", False),
+    ("explain how this works", False), ("clarify what you mean", False), ("review this and fix it", False),
+    # A change verb used as a noun or as the subject of a report is no request either.
+    ("build failed", False), ("Build is broken again", False), ("Update: it works now", False),
+    ("Install failed on windows", False), ("Style looks off", False), ("Support for tabs is missing", False),
+    ("Group chat is broken", False), ("Turn 5 was slow", False), ("Change log looks good", False),
+    ("Build script failed", False), ("add support for Windows", True),
+    # What a go-ahead is made of: the next step of work, not a change.
+    ("merge it", False), ("run the tests", False), ("ship it", False), ("commit and push", False),
+    ("carry on", False), ("yes, release it", False), ("do 1 and 2", False),
 ]
 
 
-@pytest.mark.parametrize("text", _REQUESTS)
-def test_the_hook_reads_a_request_as_the_package_does(text):
+@pytest.mark.parametrize("text, asks", _REQUESTS)
+def test_a_message_asks_for_a_change_by_the_rule_the_report_counts_it_with(text, asks):
+    assert prompt_shape.is_change_request(text) is asks
+    # The hook reads it, a question, a poll and a go-ahead as the package does.
     coaching = CATALOGUE["coaching"]
-    assert HOOK._is_request(text, coaching) == prompt_shape.is_request(text)
+    assert HOOK._is_change_request(text, coaching) is asks
     assert HOOK._is_question(text, coaching) == prompt_shape.is_question(text)
     assert HOOK._is_status(text, coaching) == prompt_shape.is_status(text)
+    assert HOOK._is_go(text, coaching) == prompt_shape.is_go(text)
 
 
 def test_the_hook_counts_a_run_of_small_requests_as_the_package_does():
     th = cat.COACHING_THRESHOLDS
     coaching = CATALOGUE["coaching"]
 
-    def ex(text, *, edited=True, answered=True, answer=False, gap=60):
-        return {"text": text, "edited": edited, "answered": answered, "answer": answer, "gap": gap}
+    def ex(text, *, edited=True, answered=True, answer=False, since=60):
+        return {"text": text, "edited": edited, "answered": answered, "answer": answer, "since": since}
 
     run = [ex("make the button bigger"), ex("move the logo")]
+    prompt = "and make the footer grey"
     cases = [
-        ([], "and the footer", 30, False),
-        (run, "and the footer", 30, False),
-        (run, "and the footer", 30, True),
-        (run, "and the footer", 9_999, False),
-        (run, "and the footer", None, False),
+        ([], prompt, 30, False),
+        (run, prompt, 30, False),
+        (run, prompt, 30, True),
+        (run, prompt, 9_999, False),
+        (run, prompt, None, False),
+        (run, "and the footer too", 30, False),
         (run, "go ahead", 30, False),
         (run, "why is it blue?", 30, False),
-        (run, "x" * 400, 30, False),
-        ([*run, ex("thanks", edited=False)], "and the footer", 30, False),
-        ([*run, ex("how is it going?", edited=False)], "and the footer", 30, False),
-        ([*run, ex("left of the title", edited=False, answer=True)], "and the footer", 30, False),
-        ([*run, ex("another one", edited=False)], "and the footer", 30, False),
-        ([*run, ex("never answered", answered=False, edited=False)], "and the footer", 30, False),
-        ([ex("x" * 400), *run], "and the footer", 30, False),
-        ([*run, ex("slow one", gap=9_999)], "and the footer", 30, False),
+        (run, "the footer is too small", 30, False),
+        (run, "make " + "x" * 400, 30, False),
+        # Asking for no change: neither counts nor ends the run.
+        ([*run, ex("thanks", edited=False)], prompt, 30, False),
+        ([*run, ex("how is it going?", edited=False)], prompt, 30, False),
+        ([*run, ex("the button is too small", edited=False)], prompt, 30, False),
+        ([*run, ex("explain the footer", edited=False)], prompt, 30, False),
+        ([*run, ex("why is it blue?", edited=False)], prompt, 30, False),
+        ([*run, ex("left of the title", edited=False, answer=True)], prompt, 30, False),
+        ([*run, ex("make it left of the title", edited=False, answer=True)], prompt, 30, False),
+        ([*run, ex("never answered, make it", answered=False, edited=False)], prompt, 30, False),
+        # A change request that got no change, or came too slowly, ends it.
+        ([*run, ex("make another one", edited=False)], prompt, 30, False),
+        ([*run, ex("make it slow", since=9_999)], prompt, 30, False),
+        ([*run, ex("make it first", since=None)], prompt, 30, False),
+        ([ex("make " + "x" * 400), *run], prompt, 30, False),
     ]
-    for earlier, prompt, gap, answer in cases:
-        assert HOOK._drip_count(earlier, prompt, gap, answer, coaching, th) == prompt_shape.drip_count(
-            earlier, prompt, gap, answer, th), (earlier, prompt, gap, answer)
-    assert prompt_shape.drip_count(run, "and the footer", 30, False, th) == 3
-    assert prompt_shape.drip_count([*run, ex("thanks", edited=False)], "and the footer", 30, False, th) == 3
-    assert prompt_shape.drip_count([*run, ex("another one", edited=False)], "and the footer", 30, False, th) == 1
+    for earlier, text, since, answer in cases:
+        assert HOOK._drip_count(earlier, text, since, answer, coaching, th) == prompt_shape.drip_count(
+            earlier, text, since, answer, th), (earlier, text, since, answer)
+    assert prompt_shape.drip_count(run, prompt, 30, False, th) == 3
+    assert prompt_shape.drip_count([*run, ex("thanks", edited=False)], prompt, 30, False, th) == 3
+    assert prompt_shape.drip_count([*run, ex("the button is too small", edited=False)], prompt, 30, False, th) == 3
+    assert prompt_shape.drip_count([*run, ex("make another one", edited=False)], prompt, 30, False, th) == 1
+    assert prompt_shape.drip_count([*run, ex("make it slow", since=9_999)], prompt, 30, False, th) == 1
+    # The prompt itself must be a short change request, sent in time and not an answer.
+    assert prompt_shape.drip_count(run, "and the footer too", 30, False, th) == 0
+    assert prompt_shape.drip_count(run, prompt, 30, True, th) == 0
+    assert prompt_shape.drip_count(run, prompt, th["drip_window_minutes"] * 60 + 1, False, th) == 0
 
 
 #: Tool calls and results as the hook, the status line and the package must each read them.
@@ -966,19 +1155,60 @@ _EXCHANGE_RECORDS = [
 def test_the_hook_and_the_status_line_read_what_claude_changed_by_the_same_rule():
     from claudeglass import statusline
 
-    hook_exchanges, _ = HOOK._exchanges(_EXCHANGE_RECORDS, cat.INTERRUPT_PREFIX, cat.EDIT_TOOLS)
+    hook_exchanges, state = HOOK._exchanges(_EXCHANGE_RECORDS, cat.INTERRUPT_PREFIX, cat.EDIT_TOOLS)
     status_exchanges = statusline._exchanges(_EXCHANGE_RECORDS, cat.INTERRUPT_PREFIX, cat.EDIT_TOOLS)
     assert hook_exchanges == status_exchanges
-    assert [(ex["text"], ex["edits"], ex["answer"]) for ex in hook_exchanges] == [
-        ("make the save button bigger", 1, False),
+    assert [(ex["text"], ex["edits"], ex["answered"], ex["answer"], ex["since"]) for ex in hook_exchanges] == [
+        ("make the save button bigger", 1, True, False, None),
         # An offer after a change isn't a question: "now the footer" answers nothing.
-        ("now the footer", 0, False),
-        ("and the header", 0, False),
+        ("now the footer", 0, True, False, 100),
+        ("and the header", 0, True, False, 100),
         # Claude asked and changed nothing, so this one answers it.
-        ("yes", 1, True),
-        ("and the logo", 2, False),
+        ("yes", 1, True, True, 100),
+        ("and the logo", 2, True, False, 100),
         # The subagent changed files, then Claude offered: not a question this one answers.
-        ("left", 0, False),
+        ("left", 0, True, False, 100),
+    ]
+    assert state["typed_at"] == hook_exchanges[-1]["at"] and state["answer"] is False
+
+
+#: Lines you didn't type, and what Claude does after them, as the hook and the status line must each read them.
+_CLOSED_RECORDS = [
+    _said("make the save button bigger", 900),
+    _spoke(880, "Looking at it."),
+    _said("<task-notification>\n<result>Done.</result>\n</task-notification>", 800),
+    _acted(790, "Edit", {"file_path": "/work/app/app.css"}, say="Applied it."),
+    _said("now move the logo", 600),
+    _acted(580, "Agent", {"prompt": "go"}, say=""), _came_back(580, edited_files=2, background=True),
+    _spoke(570, "Started it."),
+    _said("and the header", 500),
+    _acted(480, "Edit", {"file_path": "/work/app/h.css"}, say="Done."),
+    _said(cat.APP_QUIT_PREFIX + ", so carry on", 450),
+    _acted(440, "Edit", {"file_path": "/work/app/h2.css"}, say="Done."),
+    _said("and the footer", 400),
+    _acted(380, "Agent", {"prompt": "go"}, say=""), _came_back(380, edited_files=3), _spoke(370, "Done."),
+    {**_said("check the build", 300), "turnOrigin": "scheduled"},
+    _acted(290, "Edit", {"file_path": "/work/app/f.css"}, say="Done."),
+    {"type": "user", "isSidechain": True, "message": {"role": "user", "content": "do it"}},
+    {"type": "user", "isMeta": True, "message": {"role": "user", "content": "caveat"}},
+]
+
+
+def test_a_line_you_didnt_type_ends_the_reply_a_message_started_for_the_hook_and_the_status_line_alike():
+    from claudeglass import statusline
+
+    hook_exchanges, _ = HOOK._exchanges(_CLOSED_RECORDS, cat.INTERRUPT_PREFIX, cat.EDIT_TOOLS)
+    status_exchanges = statusline._exchanges(_CLOSED_RECORDS, cat.INTERRUPT_PREFIX, cat.EDIT_TOOLS)
+    assert hook_exchanges == status_exchanges
+    assert [(ex["text"], ex["edits"], ex["edited"]) for ex in hook_exchanges] == [
+        # An agent's report came after the reply, so the edit that followed answered that.
+        ("make the save button bigger", 0, False),
+        # Sent to the background: its launch message changed nothing.
+        ("now move the logo", 0, False),
+        # A resume note carries on the same work.
+        ("and the header", 2, True),
+        # The subagent's files are the message's, and the scheduled run's edit after it is not.
+        ("and the footer", 3, True),
     ]
 
 
@@ -1022,6 +1252,18 @@ def test_the_hook_reads_an_edit_call_as_the_package_does():
         assert HOOK._agent_edit_files(odd) == prompt_shape.agent_edit_files(odd) == 0, odd
 
 
+def test_the_hook_the_status_line_and_the_parser_tell_a_background_launch_from_a_report():
+    from claudeglass import statusline
+
+    for result, background in [({"isAsync": True}, True), ({"status": "async_launched"}, True),
+                               ({"status": "completed"}, False), ({"toolStats": {"editFileCount": 2}}, False),
+                               ("text", False), (None, False)]:
+        line = {"type": "user", "toolUseResult": result, "message": {"role": "user", "content": []}}
+        assert HOOK._is_async_launch(line) is background, result
+        assert statusline._is_async_launch(line) is background, result
+        assert parse._is_async_launch(line) is background, result
+
+
 def test_the_hook_reads_the_not_typed_lists_from_the_catalogue():
     assert HOOK._not_typed_prefixes() == cat.NOT_TYPED_PREFIXES
     assert HOOK._not_typed_origins() == cat.NOT_TYPED_TURN_ORIGINS
@@ -1044,9 +1286,9 @@ def test_the_hook_the_status_line_and_the_parser_agree_on_what_you_didnt_type(te
 
     line = {"type": "user", "message": {"role": "user", "content": text}, "origin": {"kind": "human"},
             "timestamp": "2026-09-18T12:00:00.000Z"}
-    hook_exchanges, _ = HOOK._exchanges([line], cat.INTERRUPT_PREFIX, ())
-    status_exchanges = statusline._exchanges([line], cat.INTERRUPT_PREFIX, ())
-    assert hook_exchanges == [] and status_exchanges == []
+    assert HOOK._typed(line, cat.INTERRUPT_PREFIX) is False
+    assert HOOK._exchanges([line], cat.INTERRUPT_PREFIX, ())[0] == []
+    assert statusline._exchanges([line], cat.INTERRUPT_PREFIX, ()) == []
     assert events.classify_line(line).kind != EventKind.HUMAN_TEXT
 
 
@@ -1070,22 +1312,28 @@ def test_the_hook_the_status_line_and_the_parser_agree_on_a_turn_origin(turn_ori
 def test_a_message_that_only_looks_like_a_resume_note_is_still_yours():
     # The prefix must start the line: a message that mentions the note does not.
     text = "why does it say " + cat.APP_QUIT_PREFIX + " when I closed it?"
-    from claudeglass import events
+    from claudeglass import events, statusline
     from claudeglass.model import EventKind
 
     line = {"type": "user", "message": {"role": "user", "content": text}, "origin": {"kind": "human"}}
     assert events.classify_line(line).kind == EventKind.HUMAN_TEXT
+    assert HOOK._typed(line, cat.INTERRUPT_PREFIX) is True
     assert len(HOOK._exchanges([line], cat.INTERRUPT_PREFIX, ())[0]) == 1
+    assert len(statusline._exchanges([line], cat.INTERRUPT_PREFIX, ())) == 1
 
 
 def test_a_prompt_hint_comes_before_the_cold_return_receipt(tmp_path):
     # Every reply on the 5-minute cache: a 1-hour write among the last five would keep it warm.
     records = [_START[0], _changed(1_100, one_hour=False), _said("fix the header", 600),
-               _changed(580, 150_000, one_hour=False), _said("still wrong", 300),
+               _changed(580, 150_000, one_hour=False), _said("tighten the footer", 300),
                _changed(280, 150_000, one_hour=False)]
     assert _kind(_send(tmp_path, records, "fix it")) == "drip_feed"
     # Half a minute on, the drip-feed hint is resting and the 5-minute cache has gone cold.
     assert _kind(_send(tmp_path, records, "fix it", now=NOW + timedelta(seconds=30))) == "cold_return"
+    # A paste comes first too.
+    paste = "Why does this fail?\n" + "log line\n" * 5_000
+    assert _kind(_send(tmp_path, records, paste, session="s2")) == "big_paste"
+    assert _kind(_send(tmp_path, records, paste, session="s2", now=NOW + timedelta(seconds=30))) == "cold_return"
 
 
 def _agent(tmp_path, records, agent_id="abc", *, nested: bool = False) -> tuple[str, Path]:
@@ -1178,17 +1426,26 @@ def test_coaching_notes_add_the_prompt_and_plan_hooks():
 # -- cold_return: the receipt for a return after the prompt cache expired -------------
 
 
-def _limit_line(ago_s: float, *, tokens: int = 0) -> dict:
+_SESSION_LIMIT = "You've hit your session limit · resets 3pm (Europe/London)"
+_WEEKLY_LIMIT = "You've hit your weekly limit · resets Mon 9am (Europe/London)"
+
+
+def _limit_line(ago_s: float, *, tokens: int = 0, text: str = _SESSION_LIMIT, resets_in_s: float | None = None) -> dict:
     """The line Claude Code writes in place of a reply when a usage limit
-    stops it: no real reply, whatever usage it carries."""
+    stops it: no real reply, whatever usage it carries. ``resets_in_s``
+    is when the limit resets, in seconds from :data:`NOW` (negative: already
+    over), as the line's ``quotaLimits.resetsAt``; left out when ``None``."""
     usage = {"input_tokens": tokens, "output_tokens": 0, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}
-    return {
+    record = {
         "type": "assistant",
         "isApiErrorMessage": True,
         "timestamp": _iso(NOW - timedelta(seconds=ago_s)),
         "message": {"id": f"msg_limit_{ago_s}", "model": "<synthetic>", "usage": usage,
-                    "content": [{"type": "text", "text": "Usage limit reached."}]},
+                    "content": [{"type": "text", "text": text}]},
     }
+    if resets_in_s is not None:
+        record["quotaLimits"] = {"resetsAt": NOW.timestamp() + resets_in_s}
+    return record
 
 
 def _compact(ago_s: float | None, uuid: str | None = None) -> dict:
@@ -1222,11 +1479,48 @@ def _replayed(first: dict, second: dict) -> list[dict]:
 
 
 def test_usage_limit_lines_after_a_reply_never_restart_the_cold_return_clock(tmp_path):
-    # The last real reply was two hours ago; the turn since ended in usage-limit lines.
-    records = [_prompt(), _reply(200_000, ago_s=7_200), _limit_line(40), _limit_line(20, tokens=5_000)]
+    # The last real reply was two hours ago; the turn since ended in usage-limit lines that reset an hour ago.
+    records = [_prompt(), _reply(200_000, ago_s=7_200), _limit_line(5_000, resets_in_s=-3_600),
+               _limit_line(4_900, tokens=5_000, resets_in_s=-3_600)]
     note = _send(tmp_path, records, "try again")
     # Timed from the real reply, and the context that reply left, less the shared start.
     assert _kind(note) == "cold_return" and "idle for 2 hours" in note and "about 158k tokens" in note
+
+
+@pytest.mark.parametrize("name, limit, expected", [
+    # You come back to a stop the limit made: the wait was the limit's, not a break you took.
+    ("a reset not known", dict(), ""),
+    ("a reset still ahead", dict(resets_in_s=1_800), ""),
+    ("a reset that just passed", dict(resets_in_s=-60), ""),
+    ("a reset a cache lifetime ago", dict(resets_in_s=-300), ""),
+    ("a weekly limit just reset", dict(text=_WEEKLY_LIMIT, resets_in_s=-120), ""),
+    # Later than that, the limit's wait is over and what follows is a break like any other.
+    ("a reset just over a cache lifetime ago", dict(resets_in_s=-301), "cold_return"),
+    ("a reset an hour ago", dict(resets_in_s=-3_600), "cold_return"),
+    ("a weekly limit that reset hours ago", dict(text=_WEEKLY_LIMIT, resets_in_s=-14_400), "cold_return"),
+    # Not a usage limit: an overload, or an unknown line, is no reason to stay silent.
+    ("an overload", dict(text="API Error: 529 Overloaded"), "cold_return"),
+    ("a line that isn't a limit", dict(text="Usage limit reached."), "cold_return"),
+])
+def test_a_return_soon_after_a_usage_limit_reset_gets_no_cold_return_receipt(tmp_path, name, limit, expected):
+    # Last real reply two hours ago, on the 5-minute cache; then a usage limit stopped Claude.
+    records = [_prompt(), _reply(200_000, ago_s=7_200), _limit_line(5_000, **limit)]
+    case = tmp_path / "case"
+    case.mkdir()
+    note = _send(case, records, "try again")
+    assert (_kind(note) if note else "") == expected, name
+
+
+def test_a_limit_line_from_before_the_reply_is_no_stop_and_a_longer_cache_waits_longer(tmp_path):
+    # A limit line from before the last real reply says nothing about the wait since it.
+    before = [_prompt(), _limit_line(9_000), _reply(200_000, ago_s=7_200)]
+    assert _kind(_send(tmp_path, before, "next", session="a")) == "cold_return"
+    # On the 1-hour cache a reset that is 30 minutes old is still within the cache's life: silent.
+    hour = [_prompt(), _reply(200_000, ago_s=10_000, one_hour=True), _limit_line(5_000, resets_in_s=-1_800)]
+    assert _send(tmp_path, hour, "next", session="b") == ""
+    # An hour and a half on it is not.
+    later = [_prompt(), _reply(200_000, ago_s=10_000, one_hour=True), _limit_line(5_000, resets_in_s=-5_400)]
+    assert _kind(_send(tmp_path, later, "next", session="c")) == "cold_return"
 
 
 def test_the_cold_return_receipt_takes_the_context_the_reply_left_less_the_shared_start(tmp_path):
@@ -1264,13 +1558,69 @@ def test_a_compaction_after_the_last_reply_leaves_no_receipt_for_that_reply(tmp_
 
 
 def test_a_message_sent_while_claude_was_working_gets_no_cold_return_receipt(tmp_path):
-    working = _reply(150_000, ago_s=7_200, content=[{"type": "tool_use", "id": "toolu_q", "name": "Read", "input": {}}])
-    assert _send(tmp_path, [_prompt(), working], "also check the footer", session="a") == ""
-    answered = {"type": "user", "message": {"role": "user", "content": [
-        {"type": "tool_result", "tool_use_id": "toolu_q", "content": "ok"}]}}
-    assert _send(tmp_path, [_prompt(), working, answered], "also check the footer", session="b") == ""
+    def call(ago_s):
+        return _reply(150_000, ago_s=ago_s, content=[{"type": "tool_use", "id": "toolu_q", "name": "Read", "input": {}}])
+
+    def result(ago_s):
+        return {"type": "user", "timestamp": _iso(NOW - timedelta(seconds=ago_s)), "message": {
+            "role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_q", "content": "ok"}]}}
+
+    # A call or a result 8 minutes old (under ``queued_minutes``) is work under way, though the 5-minute cache
+    # has gone cold: the message is a nudge, not a return.
+    assert _send(tmp_path, [_prompt(), call(480)], "also check the footer", session="a") == ""
+    assert _send(tmp_path, [_prompt(), call(500), result(480)], "also check the footer", session="b") == ""
+    # Your own number of minutes sets how long a call stays work under way.
+    shorter = {**ON, "thresholds": {"coaching_queued_minutes": 5}}
+    assert _kind(_send(tmp_path, [_prompt(), call(480)], "also check the footer", session="f", config=shorter)) == "cold_return"
     # The same break with a finished reply gets it.
     assert _kind(_send(tmp_path, [_prompt(), _reply(150_000, ago_s=7_200)], "next", session="c")) == "cold_return"
+    # And so does a message typed hours after a call or a result: that is where work stopped, not work under way.
+    assert _kind(_send(tmp_path, [_prompt(), call(7_200)], "next", session="d")) == "cold_return"
+    assert _kind(_send(tmp_path, [_prompt(), call(7_300), result(7_200)], "next", session="e")) == "cold_return"
+
+
+def test_a_subagent_call_with_no_result_yet_is_work_under_way_however_old_it_is(tmp_path):
+    def call(name, ago_s):
+        return _reply(150_000, ago_s=ago_s, content=[{"type": "tool_use", "id": "toolu_a", "name": name, "input": {}}])
+
+    prefix = CATALOGUE["coaching"]["interrupt_prefix"]
+    max_age_s = cat.COACHING_THRESHOLDS["queued_minutes"] * 60
+    # A subagent runs as long as it needs: a message typed 30 minutes into one is sent to work under way.
+    for name in cat.AGENT_TOOLS:
+        assert HOOK._queued([call(name, 1_800)], prefix, NOW, max_age_s), name
+    # Any other call that old is where work stopped.
+    assert not HOOK._queued([call("Read", 1_800)], prefix, NOW, max_age_s)
+    # Once the subagent's result is in, the age limit applies as it does to any result.
+    result = {"type": "user", "timestamp": _iso(NOW - timedelta(seconds=1_700)), "message": {
+        "role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_a", "content": "ok"}]}}
+    assert not HOOK._queued([call("Agent", 1_800), result], prefix, NOW, max_age_s)
+    # So the message gets a nudge's treatment: no cold_return receipt, 150k of context and 30 minutes on.
+    assert _send(tmp_path, [_prompt(), call("Agent", 1_800)], "also check the footer", session="a") == ""
+    assert _kind(_send(tmp_path, [_prompt(), call("Read", 1_800)], "next", session="b")) == "cold_return"
+
+
+def test_a_subagent_launched_beside_another_tool_is_work_under_way_however_old_it_is(tmp_path):
+    def call(name, tool_id, message_id, ago_s=1_800):
+        return _reply(150_000, ago_s=ago_s, message_id=message_id,
+                      content=[{"type": "tool_use", "id": tool_id, "name": name, "input": {}}])
+
+    prefix = CATALOGUE["coaching"]["interrupt_prefix"]
+    max_age_s = cat.COACHING_THRESHOLDS["queued_minutes"] * 60
+    # Each tool call of one reply is a line of its own with the reply's message id, and the results come
+    # together at the end: the newest line is the Bash call, but the subagent started on the one before.
+    for name in cat.AGENT_TOOLS:
+        beside = [call(name, "toolu_a", "msg_pair"), call("Bash", "toolu_b", "msg_pair")]
+        assert HOOK._queued(beside, prefix, NOW, max_age_s), name
+        assert _send(tmp_path, [_prompt(), *beside], "also check the footer", session=name) == ""
+    # Another reply's subagent is no part of this one: a Bash call alone that old is where work stopped.
+    other = [call("Agent", "toolu_a", "msg_one"), call("Bash", "toolu_b", "msg_two")]
+    assert not HOOK._queued(other, prefix, NOW, max_age_s)
+    assert not HOOK._queued([call("Read", "toolu_a", "msg_pair"), call("Bash", "toolu_b", "msg_pair")], prefix,
+                            NOW, max_age_s)
+    # A line with no message id can't be matched to it.
+    bare = [call("Agent", "toolu_a", "msg_pair"), call("Bash", "toolu_b", "msg_pair")]
+    bare[1]["message"].pop("id")
+    assert not HOOK._queued(bare, prefix, NOW, max_age_s)
 
 
 def test_a_message_you_did_not_type_gets_no_cold_return_receipt(tmp_path):
@@ -1630,7 +1980,14 @@ def _drip_feed_payload(tmp_path: Path) -> dict:
     records = [said("Build the settings page: " + "a form and a header. " * 20, 15), changed(14),
                said("make the save button bigger", 10), changed(9), said("now move the logo", 5), changed(4)]
     return {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": "/w",
-            "transcript_path": _transcript(tmp_path, records), "prompt": "and the footer text too"}
+            "transcript_path": _transcript(tmp_path, records), "prompt": "and make the footer text bigger"}
+
+
+def _paste_payload(tmp_path: Path) -> dict:
+    """A message of about 12k tokens, so the next message draws ``big_paste``
+    whatever the clock."""
+    return {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": "/w",
+            "transcript_path": _transcript(tmp_path, [_said("hi", 200)]), "prompt": "x" * 48_000}
 
 
 def _coaching_config(config_dir: Path) -> Path:
@@ -1647,12 +2004,19 @@ def test_a_prompting_hint_also_shows_you_a_notice_at_once(tmp_path):
     assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "drip_feed"
     assert output["systemMessage"] == cat.COACHING_NOTICE["drip_feed"].format(count=3, ctx="20k")
     assert "footer" not in out
+    # The same for a message too big to paste.
+    (tmp_path / "paste").mkdir()
+    rc, out, err = _run(_coaching_config(_config_dir(tmp_path / "paste")), _paste_payload(tmp_path / "paste"))
+    assert rc == 0 and err == ""
+    output = json.loads(out)
+    assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "big_paste"
+    assert output["systemMessage"] == cat.COACHING_NOTICE["big_paste"].format(tokens="12k")
+    assert "xxxx" not in out
 
 
 #: Every placeholder a tip or its note can carry, filled the way the hook does.
 _FIELDS = {
-    "idle": "40 minutes", "ctx": "150k", "kept": "90k", "count": 3, "steps": 5, "minutes": 20, "tokens": "12k",
-    "compacted": "",
+    "idle": "40 minutes", "ctx": "150k", "kept": "90k", "count": 3, "tokens": "12k", "compacted": "",
     **{key: variants["terminal"] for key, variants in cat.COACHING_HOW.items()},
 }
 _TIP_HINTS = [hint for hint, text in cat.COACHING_TEXT.items() if cat.TIP_LABEL in text]
@@ -1677,7 +2041,7 @@ def test_the_tip_hints_are_split_into_unconditional_and_conditional():
     assert set(cat.CONDITIONAL_TIP_HINTS) == {"big_paste"}
     assert set(cat.CONDITIONAL_TIP_HINTS) <= set(_TIP_HINTS)
     unconditional = set(_TIP_HINTS) - set(cat.CONDITIONAL_TIP_HINTS)
-    assert unconditional == {"plan_fresh", "plan_fresh_early", "drip_feed", "plan_first", "status_poll", "cold_return"}
+    assert unconditional == {"plan_fresh", "plan_fresh_early", "drip_feed", "status_poll", "cold_return"}
     # A conditional note tells Claude when to stay quiet; an unconditional one never does.
     for hint in _TIP_HINTS:
         assert ("don't mention this note" in cat.COACHING_TEXT[hint]) == (hint in cat.CONDITIONAL_TIP_HINTS), hint
@@ -1735,12 +2099,11 @@ def test_a_subagent_notice_stays_where_the_desktop_app_cannot_show_it(tmp_path, 
 
 
 def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_prompting_hints():
-    to_the_user = {"plan_fresh", "plan_fresh_early", "cold_return", "status_poll", "drip_feed", "plan_first", "big_paste"}
+    to_the_user = {"plan_fresh", "plan_fresh_early", "cold_return", "status_poll", "drip_feed", "big_paste"}
     for hint, text in cat.COACHING_TEXT.items():
         assert (cat.TIP_LABEL in text) == (hint in to_the_user), hint
     assert set(cat.COACHING_NOTICE) == {
-        "plan_fresh", "plan_fresh_early", "cold_return", "status_poll", "drip_feed", "plan_first", "big_paste",
-        "split_run"}
+        "plan_fresh", "plan_fresh_early", "cold_return", "status_poll", "drip_feed", "big_paste", "split_run"}
     # split_run tells the subagent nothing.
     assert cat.COACHING_TEXT["split_run"] == ""
     assert CATALOGUE["coaching"]["notice"] == cat.COACHING_NOTICE
@@ -1757,10 +2120,11 @@ def test_the_prompting_hints_ask_only_for_a_tip_and_never_steer_the_work():
         r"|ask one short question|set out in a few lines|carry on unless",
         re.IGNORECASE,
     )
-    for hint in ("drip_feed", "plan_first"):
+    for hint in ("drip_feed", "cold_return", "status_poll"):
         text = cat.COACHING_TEXT[hint]
         assert not steering.search(text), hint
         assert "changes nothing about the work" in text and cat.TIP_LABEL in text, hint
+    assert not steering.search(cat.COACHING_TEXT["big_paste"])
 
 
 def test_the_feedback_reminder_is_asked_for_once_a_session():
@@ -1793,10 +2157,10 @@ def test_the_notice_takes_the_same_fields_as_the_note(tmp_path):
     payload = _drip_feed_payload(tmp_path)
     note, notice = HOOK.coaching_for(payload, ON, CATALOGUE, _config_dir(tmp_path))
     assert _kind(note) == "drip_feed" and notice == cat.COACHING_NOTICE["drip_feed"].format(count=3, ctx="20k")
-    big = {**payload, "session_id": "s2", "prompt": "x" * 48_000,
-           "transcript_path": _transcript(tmp_path, [_said("hi", 200)], "big.jsonl")}
-    assert HOOK.coaching_for(big, ON, CATALOGUE, _config_dir(tmp_path), now=NOW)[1].startswith(
-        "⚠️ ClaudeGlass: Your message is about 12k tokens")
+    big = {**_paste_payload(tmp_path), "session_id": "s2"}
+    note, notice = HOOK.coaching_for(big, ON, CATALOGUE, _config_dir(tmp_path), now=NOW)
+    assert _kind(note) == "big_paste" and notice == cat.COACHING_NOTICE["big_paste"].format(tokens="12k")
+    assert notice.startswith("⚠️ ClaudeGlass: Your message is about 12k tokens")
 
 
 def test_a_capture_note_and_a_coaching_note_go_out_as_one(tmp_path):
@@ -1888,7 +2252,7 @@ def test_a_coaching_note_is_its_own_event_and_not_a_capture_note(tmp_path, _salt
     assert result.meta.cap_injections == 0 and result.meta.cap_metrics == ()
 
 
-@pytest.mark.parametrize("kind", [*cat.RETIRED_COACHING_HINTS, "plan_first"])
+@pytest.mark.parametrize("kind", cat.RETIRED_COACHING_HINTS)
 def test_a_note_for_a_retired_hint_in_an_old_transcript_keeps_its_kind(tmp_path, _salt, kind):
     result = _session(tmp_path, [_ask(0), _note_line(_coach_text(kind), "UserPromptSubmit", 1), _turn(2)])
     event = next(e for e in result.events if e.subkind == "coaching_note")
@@ -2183,16 +2547,6 @@ def test_the_hook_finds_a_closing_question_as_the_package_does():
         assert HOOK._ends_on_question(text) == prompt_shape.ends_on_question(text), text[:40]
 
 
-def test_the_hook_reads_a_go_ahead_as_the_package_does():
-    coaching = HOOK.load_catalogue()["coaching"]
-    texts = [
-        "continue", "Go ahead.", "implement the plan", "merge it", "yes, do it", "ok", "do it please",
-        "continue with the tests", "how is it going?", "", "x" * 70,
-    ]
-    for text in texts:
-        assert HOOK._is_go(text, coaching) == prompt_shape.is_go(text), text
-
-
 def test_the_hook_and_the_status_line_read_a_message_as_an_answer_by_the_same_rule():
     from claudeglass import statusline
 
@@ -2210,13 +2564,83 @@ def test_the_hook_and_the_status_line_read_a_message_as_an_answer_by_the_same_ru
         assert statusline._exchanges(said(text), cat.INTERRUPT_PREFIX, ())[0]["answer"] is answer
 
 
-def test_the_catalogue_carries_the_reply_patterns_the_hook_compiles():
+def test_the_catalogue_carries_the_patterns_the_hook_compiles():
     coaching = CATALOGUE["coaching"]
     assert coaching["reply_scan_chars"] == cat.REPLY_SCAN_CHARS
     assert coaching["reply_unit_pattern"] == cat.REPLY_UNIT_PATTERN
     assert coaching["reply_question_trim"] == cat.REPLY_QUESTION_TRIM
     for name in ("fence", "tip_block", "inline_code", "url", "quoted", "reminder_line", "tags", "list_start", "unit"):
         assert coaching[f"reply_{name}_pattern"] == getattr(cat, f"REPLY_{name.upper()}_PATTERN")
+    # What it takes to tell a change request from a statement, a question and a go-ahead.
+    for name in ("change", "ack", "review", "asks", "config_path", "shell_write"):
+        assert coaching[f"{name}_pattern"] == getattr(cat, f"{name.upper()}_PATTERN")
+        re.compile(coaching[f"{name}_pattern"])
+    assert coaching["change_scan_chars"] == cat.CHANGE_SCAN_CHARS
+    # The hook compiles them in the same way the package does: case-blind where it is.
+    assert HOOK._is_change_request("now MAKE it bigger", coaching) and prompt_shape.is_change_request("now MAKE it bigger")
+    assert not HOOK._is_change_request("the button is too small", coaching)
+
+
+def test_the_hook_reads_a_go_ahead_as_the_package_does():
+    coaching = HOOK.load_catalogue()["coaching"]
+    texts = [
+        "continue", "Go ahead.", "implement the plan", "merge it", "yes, do it", "ok", "do it please",
+        "continue with the tests", "how is it going?", "", "x" * 70,
+    ]
+    for text in texts:
+        assert HOOK._is_go(text, coaching) == prompt_shape.is_go(text), text
+
+
+#: The next step of work, as a go-ahead says it: merge, release, push, commit, run, ship, carry on, or a pick.
+_GO_AHEADS = [
+    "continue", "go ahead", "implement the plan", "yes, do it", "do it please", "ok",
+    "merge it", "merge and push", "release it", "ship it", "Ship it!", "ok, ship it", "lgtm, merge",
+    "run the tests", "run the test suite", "run it", "yes run it", "commit and push", "push it to main",
+    "push to origin", "carry on", "yes, carry on", "go ahead and merge", "go ahead and push it up",
+    "carry on and run the tests", "merge it and release a new version", "commit and merge these to main",
+    "once done - merge and push up a new version", "do 1 and 2",
+]
+#: What only looks like one: a step on something of your own, a retry, a correction, a plain request.
+_NOT_GO_AHEADS = [
+    "merge the auth logic into the helper", "commit the changes to auth.py", "push the button color to blue",
+    "run the migration on the staging database and check it", "ship the fix to the customer and write the notes",
+    "release notes for 1.2 need a rewrite", "merge conflicts in app.py, fix them", "run a full audit of the parser",
+    "carry on with the footer redesign using the new palette", "try again", "retry", "still broken",
+    "continue with the tests", "make the footer bigger", "how is it going?", "",
+]
+
+
+def test_a_go_ahead_is_the_next_step_of_the_work_and_nothing_of_your_own():
+    coaching = CATALOGUE["coaching"]
+    for text in _GO_AHEADS:
+        assert prompt_shape.is_go(text) and HOOK._is_go(text, coaching), text
+        # A go-ahead asks for no change, however its verbs read.
+        assert not prompt_shape.is_change_request(text), text
+    for text in _NOT_GO_AHEADS:
+        assert not prompt_shape.is_go(text) and not HOOK._is_go(text, coaching), text
+    # The Phase 1 reading of a retry stays: "try again" is a vague correction, not a go-ahead.
+    assert prompt_shape.is_vague_fix("try again", 80) and not prompt_shape.is_vague_fix("go ahead", 80)
+
+
+def test_the_catalogue_carries_the_go_ahead_pattern_and_the_lists_the_hook_and_the_parser_share():
+    from claudeglass import events, parse
+
+    coaching = CATALOGUE["coaching"]
+    assert coaching["go_pattern"] == cat.GO_PATTERN and coaching["go_max_chars"] == cat.GO_MAX_CHARS
+    re.compile(coaching["go_pattern"])
+    # What only the report reads is not in the file the hook loads.
+    report_only = {"release_pattern", "error_text_pattern", "plan_item_pattern", "paste_marker", "plan_long_chars"}
+    assert not report_only & set(coaching)
+    # The resume notes carry on your last message's work, for the hook as for the parser.
+    assert tuple(coaching["resume_prefixes"]) == cat.RESUME_PREFIXES == HOOK._resume_prefixes()
+    # The usage-limit lines the cold-return rule looks for are the ones the parser names.
+    assert tuple(coaching["limit_line_prefixes"]) == cat.LIMIT_LINE_PREFIXES
+    assert cat.LIMIT_LINE_PREFIXES == (cat.SESSION_LIMIT_PREFIX, cat.WEEKLY_LIMIT_PREFIX)
+    assert events.classify_synthetic_text(_SESSION_LIMIT) == "session_limit"
+    assert events.classify_synthetic_text(_WEEKLY_LIMIT) == "weekly_limit"
+    # One list of the tools that launch a subagent, for the hook, the status line and the parser.
+    assert tuple(coaching["agent_tools"]) == cat.AGENT_TOOLS == HOOK._AGENT_TOOLS == tuple(parse._AGENT_TOOL_NAMES)
+    assert "queued_minutes" in cat.COACHING_THRESHOLDS
 
 
 # -- what the parser keeps of a reply ----------------------------------------------

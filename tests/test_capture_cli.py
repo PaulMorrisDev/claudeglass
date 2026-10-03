@@ -662,7 +662,7 @@ def test_off_after_deep_says_what_the_entry_left_after_each_tool_costs(tmp_path)
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "level", "deep", "--yes")
     rc, out = _capture(config_dir, "off")
-    assert rc == 0 and "50 ms after every shell command, read and search" in out and "capture remove" in out
+    assert rc == 0 and "50 ms after every read, search and web result" in out and "capture remove" in out
 
 
 def test_off_keeps_the_entries_and_remove_takes_them_out(tmp_path):
@@ -1578,3 +1578,52 @@ def test_on_warns_when_a_settings_policy_stops_hooks_running(tmp_path):
     assert hook_health.POLICY_TEXT[hook_health.POLICY_ALL_OFF] in out
     assert "won't run them while that holds" in out
     assert out.index("won't run them") < out.index("This changes")
+
+
+# -- the coaching hook entries: every route that connects adds all of them ------
+
+
+def _coaching_hooked(config_dir) -> list[tuple[str, str, bool]]:
+    """``(event, matcher, async)`` of the capture entries settings.json holds."""
+    return [(event, matcher, bool(entry.get("async"))) for event, matcher, entry in _capture_entries(config_dir)]
+
+
+COACHING_HOOKS = [
+    ("UserPromptSubmit", "", False),
+    ("PostToolUse", "|".join(cat.COACHING_TOOLS), False),
+    # cold_return's state is kept by the Stop entry: the one entry that runs in the background.
+    ("Stop", "", True),
+]
+
+
+def test_capture_connect_adds_the_stop_entry_and_the_plan_matcher_for_coaching_notes(tmp_path):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert _coaching_hooked(config_dir) == COACHING_HOOKS
+    assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in _coaching_hooked(config_dir))["PostToolUse"]
+    assert _settings(config_dir)["model"] == "opus"
+    # Connected, it has nothing more to add.
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0 and "already runs the capture hooks" in out
+    assert _coaching_hooked(config_dir) == COACHING_HOOKS
+
+
+def test_capture_connect_brings_an_older_coaching_connection_up_to_date(tmp_path):
+    # What an earlier version wrote: the prompt hook, and a PostToolUse matcher without the plan tool.
+    config_dir = _claude(tmp_path, {})
+    commands = _commands(config_dir)
+    old = {"hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": commands[cat.HOOK_SCRIPT], "timeout": 5}]}],
+        "PostToolUse": [{"matcher": "Read|Grep|Glob|WebFetch|WebSearch", "hooks": [
+            {"type": "command", "command": commands[cat.HOOK_SCRIPT], "timeout": 5}]}],
+    }}
+    (config_dir.parent / "settings.json").write_text(json.dumps(old), encoding="utf-8")
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    assert not hook_health.check_capture(
+        hook_health.capture_specs(("coaching_notes",)), claude_root=config_dir.parent, config_dir=config_dir
+    ).ok
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert sorted(_coaching_hooked(config_dir)) == sorted(COACHING_HOOKS)

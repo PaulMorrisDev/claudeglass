@@ -1086,10 +1086,10 @@ message that only tells Claude to carry on or only asks how it is going;
 neither is a repeat or a vague correction. Habits with a live hint use that
 hint's own rule and default threshold
 (`capture_catalogue.COACHING_THRESHOLDS`), so they count whether or not
-coaching notes were on. `vague_fix`, `repeat_ask` and `stop_loop` no longer
-have a live hint and use `capture_catalogue.REPORT_THRESHOLDS`, which
-`config.toml` does not change. `context_carried` replaces the dropped
-`clear_context` hint.
+coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
+`stop_loop` no longer have a live hint and use
+`capture_catalogue.REPORT_THRESHOLDS`, which `config.toml` does not change.
+`context_carried` replaces the dropped `clear_context` hint.
 
 - `prompting_habits` — one row per habit seen in the window, the costliest
   first: `habit` (`drip_feed`, `repeat_ask`, `status_poll`, `stop_loop`, `plan_first`,
@@ -1101,11 +1101,13 @@ have a live hint and use `capture_catalogue.REPORT_THRESHOLDS`, which
   messages or more to go on), `weeks` (the rate per message by week, the
   worst week as 100, `-` for a week with fewer than three messages) and
   `try` (what to do instead). Costs: `drip_feed` is what each message after the first in a
-  run paid to take in the context (a run is of small requests, each
-  answered with a change to a file of yours: an edit or a shell write
-  outside a `.claude` folder, or a subagent's; a go-ahead, a thank-you, a
-  status check, a question and an answer to Claude's question neither
-  count nor end it); `repeat_ask` the reply before the
+  run paid to take in the context (a run is of small change requests,
+  each sent within 20 minutes of your message before it and answered, in
+  the reply it started, with a change to a file of yours: an edit or a
+  shell write outside a `.claude` folder, or a subagent's; a go-ahead, a
+  thank-you, a status check, a question, a statement, a report, an
+  explain request and an answer to Claude's question neither count nor
+  end it); `repeat_ask` the reply before the
   repeat, when it was an answer with a file change that missed (a poll, a
   go-ahead or a thank-you is never a repeat); `status_poll` the reply each
   poll drew, for every message that only asks how the work is going

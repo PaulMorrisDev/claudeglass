@@ -225,13 +225,9 @@ Capture** or `python -m claudeglass capture enable`. The second
 line shows a live hint when one applies, and otherwise the reminder to
 run `/cg-feedback`. The first line doesn't change. A hint appears for:
 
-- a large context at the end of a turn;
 - a large last tool output;
-- many reads in one message;
 - a warm cache about to go cold;
 - three small requests in a row, each its own message;
-- the same request sent again;
-- stopping Claude three times in 20 minutes;
 - a message of 10,000 tokens or more, such as a pasted log.
 
 On every refresh, Claude Code sends the status line a JSON payload. It

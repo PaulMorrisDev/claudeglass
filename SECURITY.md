@@ -357,7 +357,10 @@ the hook reads the last 4 MB of the session's transcript when you send a
 message (256 KB when a plan is approved, 64 KB after a tool call or when a
 turn ends; the first 512 KB for the plan hint's starting size, and a
 subagent's own transcript for the split hint), counting sizes, times and tool names
-only; nothing it reads is kept. To count compactions it scans the whole
+only; nothing it reads is kept. It also reads your message's words in
+memory, only to tell a change request, a go-ahead, a status check or a
+question from the rest, and a usage-limit line's opening words and reset
+time; it keeps none of them. To count compactions it scans the whole
 transcript a line at a time and keeps only the compaction markers' ids.
 To tell that work went to the background it matches the first 400
 characters of a tool result against four fixed phrases in memory and

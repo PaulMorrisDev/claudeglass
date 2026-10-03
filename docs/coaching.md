@@ -41,11 +41,10 @@ agent type's name.
 | `plan_fresh_early` | You send a message in plan mode, which Claude Code reports with the message, with at least 40,000 tokens of planning chat in the session since it started: the plan isn't written yet. Not for a message sent while Claude is working, for a session that was compacted since it started, or when the session's start can't be told. It shares its rest with `plan_fresh`, so one plan gets one of the two. | Nothing about the work. End the plan Claude submits for approval with a tip to approve it with a clear context: on the desktop, the approval option that clears the context first (or `/clear`, then asking Claude to carry out the plan in its file, if the dialog has none); in the terminal, `/clear` first, then the same. If the reply doesn't end in a plan, the tip goes on the plan submitted later. |
 | `split_run` | A subagent run passes the number of replies your own history says its type's runs are best split at (see [below](#your-own-split-points)). | Nothing: the subagent is never told. You get a one-line notice, once a run, that runs of that type cost you less when split, so next time you can give each agent a smaller piece of the work. |
 | `quiet_output` | A read, search or web result is about 8,000 tokens or more, [as measured below](#how-a-results-size-is-measured). A read already given a line limit is left alone. Never after a shell command or an MCP tool. | Next time, ask for less: read only the lines needed, narrow a search or a query. |
-| `drip_feed` | You send your third small request in a row: short messages, each sent within 20 minutes of Claude's reply, the earlier ones each answered with a change to a file of yours ("make the button bigger", "now move the logo", "and the footer too"). A go-ahead, a thank-you, a status check, a question and an answer to Claude's question are no request: they neither count nor end the run. A detailed message, a reply that changed nothing, or a longer gap starts the count again. A message sent while Claude is still working gets no hint. | Nothing about the work. End the reply with a tip that working out everything the work still needs and sending it as one message gets it done in one pass. |
-| `plan_first` | You send a request for 3 or more separate changes in your own prose, 150 characters or longer, outside plan mode, before any plan was approved in the session. A message that mentions a plan, opens by asking Claude to review, explain or check something, or is a plan already (1,500 characters or more with a heading, or five numbered items) is left alone, and so is one sent while Claude is still working. | Nothing about the work. End the reply with a tip suggesting plan mode for a job that size: on the desktop, start the message with `/plan` or pick Plan in the mode menu next to Send; in the terminal, Shift+Tab. |
+| `drip_feed` | You send your third small change request in a row: short messages, each asking for a change (a change verb opens one of its sentences) and sent within 20 minutes of your message before it, the earlier ones each answered with a change to a file of yours in the reply they started ("make the button bigger", "now move the logo", "and make the footer grey"). A go-ahead, a thank-you, a status check, a question, a statement, an explain request and an answer to Claude's question ask for no change: they neither count nor end the run. A detailed message, a reply that changed nothing, or a longer gap starts the count again. A message sent while Claude is still working gets no hint. | Nothing about the work. End the reply with a tip that working out everything the work still needs and sending it as one message gets it done in one pass. |
 | `big_paste` | You send a message of 10,000 tokens or more, such as a pasted log or file. | If most of it is a log, a file or output, suggest in a tip pasting only the part that matters, or saving it to a file and giving the path. |
 | `status_poll` | You send a message that only asks how the work is going ("how is it going?", "any updates?", "is it done yet?"), while a tool result said work went to the background and no message from that task has arrived since, and the prompt cache is still warm. A message sent while Claude is still working gets no hint. | Nothing about the work. End the reply with a tip that each check makes Claude read the whole session, about that many tokens, to say little that is new, and where to look instead: the task panel on the desktop, `/tasks` in the terminal. It never says a notification will come. |
-| `cold_return` | You send a message after the prompt cache expired (5 minutes idle, or an hour when the session uses the 1-hour cache), and the last reply left 100,000 tokens of context or more. A receipt for the break, whatever the message is. Not after a compaction since that reply, for a message sent while Claude is still working, or for one you didn't type. It rests 12 hours. | Nothing about the work. End the reply with a tip saying how long the session sat idle, that the reply wrote about that many tokens of context again (the context less the 42,000 tokens every session starts with, and "in a session already compacted twice" when it was), that the last reply or the task panel already says whether the work is done, and that `/clear` first skips the rewrite for new work. |
+| `cold_return` | You send a message after the prompt cache expired (5 minutes idle, or an hour when the session uses the 1-hour cache), and the last reply left 100,000 tokens of context or more. A receipt for the break, whatever the message is. Not after a compaction since that reply, for a message sent while Claude is still working, for one you didn't type, or when a usage limit stopped Claude and you come back within a cache lifetime of its reset (or the reset is unknown). It rests 12 hours. | Nothing about the work. End the reply with a tip saying how long the session sat idle, that the reply wrote about that many tokens of context again (the context less the 42,000 tokens every session starts with, and "in a session already compacted twice" when it was), that the last reply or the task panel already says whether the work is done, and that `/clear` first skips the rewrite for new work. |
 
 One note at most per tool result or message: the first hint in the table
 that applies. `plan_fresh` (a plan approved in the dialog), `split_run` and
@@ -53,17 +52,24 @@ that applies. `plan_fresh` (a plan approved in the dialog), `split_run` and
 (`plan_fresh` too, for a go-ahead you type). `split_run` comes from inside
 a subagent run but only
 shows you a notice; the rest show only in the main session, except
-`quiet_output`, which shows in both. The prompting hints (`drip_feed` to
-`big_paste`), `status_poll` and `cold_return` are about how you prompt, not
-about the work, so they never change what Claude does: it handles the
+`quiet_output`, which shows in both. The prompting hints (`drip_feed` and
+`big_paste`), `status_poll` and `cold_return` are about how you prompt,
+not about the work, so they never change what Claude does: it handles the
 message as it would have and only ends its reply with the tip.
 A message you didn't type gets no hint: a background agent's report
 (which Claude Code hands to Claude as the next message), a scheduled
 task, a slash command's output, another session's message, the desktop
 app's note after a usage limit or a quit. Nor does a message you send
 while Claude is still working (the last line of the transcript is a tool
-call or a tool's result): it nudges work under way, and the reply to it
-isn't one that ends the turn.
+call or a tool's result, less than 10 minutes old): it nudges work under
+way, and the reply to it isn't one that ends the turn. An older last
+line is where the work stopped, so a message typed after it is yours to
+act on. The exception is a call that launched a subagent and has no
+result yet: a subagent runs as long as it needs, so a message typed
+meanwhile is a nudge whatever the call's age. A replay of 30 days of one
+author's sessions found 5 messages
+typed 10 minutes to 2 hours after a tool result that were wrongly read
+as queued, so the hint never reached them.
 
 ## How a tip looks
 
@@ -75,17 +81,16 @@ line and before its tag, in a quote block, so it stands apart from the
 work in the terminal and in the desktop app:
 
 > **ClaudeGlass tip:** That's 3 small changes in a row, each its
-> own message, and each one re-reads the whole session. Working out
-> everything the work still needs and sending it as one message gets
-> it done in one pass, for fewer tokens.
+> own message, and each one re-reads the whole session, about 150k
+> tokens. Working out everything the work still needs and sending it as
+> one message gets it done in one pass, for fewer tokens.
 
 The reply is the one place every app shows, which is why the tip rides
 in it. Two kinds of note differ only in the first sentence:
 
 - **Relayed.** The note tells Claude to write the tip every time:
-  `drip_feed`, `plan_first`, `status_poll`, `cold_return`, `plan_fresh` and
-  `plan_fresh_early`. For
-  `plan_fresh` Claude writes it before it starts building; for
+  `drip_feed`, `status_poll`, `cold_return`, `plan_fresh` and
+  `plan_fresh_early`. For `plan_fresh` Claude writes it before it starts building; for
   `plan_fresh_early`, as the last line of the plan it submits. A plan that
   ends with the tip counts as having relayed it.
 - **Judged.** The note tells Claude to write the tip only if it judges
@@ -97,13 +102,13 @@ before Claude replies. In the terminal it reads like this, Claude Code
 adding the event's name in front:
 
 ```
-UserPromptSubmit says: ⚠️ ClaudeGlass: That's 3 small changes in a row, each its own message, and each one re-reads the whole session. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.
+UserPromptSubmit says: ⚠️ ClaudeGlass: That's 3 small changes in a row, each its own message, and each one re-reads the whole session, about 150k tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.
 ```
 
 This is the hook's `systemMessage`: Claude Code shows it to you and never
 sends it to Claude, so it costs no tokens. It has the tip's words behind
-a ⚠️ label. `plan_fresh`, `plan_fresh_early`, `drip_feed`, `plan_first`,
-`big_paste`, `status_poll` and `cold_return` have one. The figures in a
+a ⚠️ label. `plan_fresh`, `plan_fresh_early`, `drip_feed`, `big_paste`,
+`status_poll` and `cold_return` have one. The figures in a
 tip, such as the context in tokens, come from the session. The hook never
 works out a dollar amount: that would need prices it doesn't have.
 
@@ -156,47 +161,41 @@ id.
 
 ## How your messages are read
 
-The prompting hints (`drip_feed` to `big_paste`), `status_poll`,
-`cold_return` and `plan_fresh_early` read the message you're sending and
-your earlier ones at the end of the transcript: up to the last 4 MB of
-it, since a long tool result can push the last reply far back. Lines the
+`drip_feed`, `status_poll`, `cold_return` and `plan_fresh_early` read the
+message you're sending and your earlier ones at the end of the
+transcript: up to the last 4 MB of it, since a long tool result can push
+the last reply far back. Lines the
 desktop app wrote again when it resumed a session (the same `uuid`, or a
 time behind the lines already written, a message you typed aside) are
 left out first, as they would put an old reply last. No hash of your
 words is kept for any of this.
 
 - `drip_feed` goes by what happened more than by your words: each
-  message's length, how soon after Claude's reply you sent it, and whether
-  Claude changed a file of yours in answer to it. That is an edit call or
-  a shell write outside a `.claude` folder (Claude's memory, plans and
-  scripts aren't your work), or a file one of its subagents changed, less
-  an edit that failed. A small request is 300 characters or less; a
+  message's length, how soon after your message before it you sent it,
+  and whether Claude changed a file of yours in the reply that message
+  started. That is an edit call or a shell write outside a `.claude`
+  folder (Claude's memory, plans and scripts aren't your work), or a file
+  one of its subagents changed, less an edit that failed. A subagent's
+  files go to the message whose reply launched it, and what Claude does
+  after a line you didn't type (a background agent's report, a scheduled
+  run) is nobody's request. A small request is 300 characters or less; a
   longer one usually plans several changes at once, which is what the
-  hint asks for. Words matter only to leave out what asks for nothing: a
-  bare "thanks" or "ok", a go-ahead ("continue"), a status check ("how's
-  it going?") and a question (it ends in a "?" or opens with a question
-  word) are no request, so none counts and none ends the run. Nor does a
-  reply to a question Claude asked: its last reply ends on one (a "?"
-  closes one of its last two sentences or a list item that ends it, not
-  code, a link or its tag) and changed no file. A question that closes a
-  reply that changed a file is an offer, so the message after it is a
-  request like any other. A session's first message never counts: it
-  starts the work. A message you send while Claude is still working (the
-  last line of the transcript is a tool call or a tool's result) is a
-  nudge into work under way and gets no hint.
-- `plan_first` counts the separate changes a message asks for in your own
-  prose, leaving out a fenced block, a quoted line and a pasted log or
-  stack trace: its list lines, its change verbs ("add", "move", "rename"
-  and the like) and the items of one sentence that starts with one ("Add
-  login, a settings page and an admin screen" is three). A message with
-  no change verb asks for no change, whatever it lists. It stays quiet
-  for a message that mentions a plan, opens by asking to review, explain,
-  check or look at something, is a plan already (1,500 characters or more
-  with a heading, or five numbered items) or arrives while Claude is
-  working, and when Claude Code doesn't tell the hook which permission
-  mode you're in. One request written with several commas or "and"s can
-  count as three: at 3 changes, 6 of the 2,755 messages in one author's
-  221 sessions did.
+  hint asks for. Words matter only to find a request for a change: a
+  change verb opens a sentence ("make", "add", "move", "can you rename",
+  read in the first 600 characters). A bare "thanks" or "ok", a go-ahead
+  ("continue"), a status check ("how's it going?"), a question (it ends
+  in a "?" or opens with a question word), a statement or a report ("the
+  button is too small", "it doesn't load") and a request to explain or
+  look at something ask for no change, so none counts and none ends the
+  run. Nor does a reply to a question Claude asked: its last reply ends on
+  one (a "?" closes one of its last two sentences or a list item that ends
+  it, not code, a link or its tag) and changed no file. A question that
+  closes a reply that changed a file is an offer, so the message after it
+  is a request like any other. A session's first message never counts:
+  nothing came before it. A message you send while Claude is still
+  working (the last line of the transcript is a tool call or a tool's
+  result, less than 10 minutes old) is a nudge into work under way and
+  gets no hint.
 - `plan_fresh_early` goes by the permission mode Claude Code reports with
   your message (`plan`) and the planning chat so far: the last reply's
   context less what the session started with (the first reply's context,
@@ -230,6 +229,17 @@ context grows. It shares one rest with `plan_fresh` and
 `plan_fresh_early`: each says "start fresh", so one that showed rests
 the others for the cooldown.
 
+A usage limit is not a break you took. When Claude Code stops with a
+"You've hit your session limit" or "weekly limit" line after the
+last real reply, the wait was the limit's, and the cache couldn't have
+outlived it. In a replay of 30 days of one author's sessions, `cold_return`
+was right in all 10 of its firings, but 27% followed such a stop and told
+the author nothing new. So it stays quiet when you come back within
+a cache lifetime (5 minutes, or an hour on the 1-hour cache) of the
+limit's reset, or when the line doesn't say when the limit resets. Later
+than that the limit's wait is over, and the break is read like any
+other. Only the time is read from the line, never its words.
+
 The time of the last reply is not read from the transcript's end alone.
 A usage-limit line, an overload or any other line Claude Code writes in
 place of a reply is no reply, whatever tokens it carries, so a turn that
@@ -258,7 +268,7 @@ break that outlasted the cache, `cold_return` speaks instead.
 
 ## Hints that no longer show live
 
-Six hints once spoke up in the session and now don't. Their old notes are
+Seven hints once spoke up in the session and now don't. Their old notes are
 still recognised in earlier transcripts, so what they cost is still
 counted.
 
@@ -279,11 +289,30 @@ counted.
   refusals and questions far more often than on the habit, so they are
   counted after the fact only, with stricter rules (see below), and show
   no note.
+- `plan_first` was right in none of 7 firings in a replay of 30 days of
+  one author's sessions, which is more wrong than right, so it is counted
+  after the fact only, with a stricter rule (see below), and shows no
+  note. With that rule, 12 messages asked for 3 or
+  more changes and every one was left alone rightly: a long brief (5), a
+  message that mentions a plan (5), one already shaped like a plan (1)
+  and a merge request (1). That author writes plans upfront, so the hint
+  had no real chance to help. Its row keeps the advice.
 - `cache_cold` left it to Claude to judge, after any break, whether your
   message started something unrelated, with 20,000 tokens of context. It
   was mostly silent, and a break's cost is the same whatever the message
   is. `cold_return` replaced it: a receipt for every break with 100,000
   tokens or more, with the cost stated less the shared start.
+
+`drip_feed` is not one of these: it stays live, with a tighter rule. A
+replay of 30 days of one author's sessions found it right in 2 of 11
+firings with the rule it had, which is more wrong than right. With the
+tighter rule (see above and below), the same replay fired it 0 times:
+630 messages reached the check and 43 were short requests for a change,
+but no run got past one request. 23 stopped there, because there was no
+earlier request (14), the earlier one had no file change behind it (7)
+or the earlier one was too long (2). So it now speaks only on a clear
+run of small change requests, and **Tips Claude showed** counts each
+time, with any misfire.
 
 ## How a result's size is measured
 
@@ -315,9 +344,9 @@ worked out in memory from what the hook is handed, and dropped.
 
 **How you prompt**, on Work habits, counts these habits in all your
 sessions, whether or not coaching notes were on, with what each cost,
-its trend by week and what to try instead: `drip_feed`, `status_poll`,
-`plan_first` and `big_paste` (the four a live hint warns about), and four
-counted after the fact only.
+its trend by week and what to try instead: `status_poll`, `drip_feed` and
+`big_paste` (the three a live hint warns about), and five counted after
+the fact only.
 
 - **Asking how it's going** (`status_poll`): every message that only
   asks how the work is going ("how's it going?", "any updates?", "is it
@@ -326,7 +355,69 @@ counted after the fact only.
   little. The figure used to be `repeat_ask`'s: every one of its live
   firings was a poll. The row tells you to look at the last reply or the
   task panel first.
-
+- **Small requests sent one at a time** (`drip_feed`): three or more
+  short requests for a change in a row, 300 characters or less each, each
+  sent within 20 minutes of your message before it and each answered with
+  a change to a file of yours ("make the button bigger", "now move the
+  logo", "and make the footer grey"). The cost is the context each later
+  message made Claude read again. A longer message usually plans several
+  changes at once, which is what the row advises, so it ends the run.
+  - **The clock is yours.** The 20 minutes run between your own messages.
+    Claude's reply to a background agent's report or a scheduled run is
+    not a message of yours and restarts nothing.
+  - **A change is the reply's own.** A message is credited only with the
+    edits made in the reply it started, in the main session. A subagent's
+    edits go to the message whose reply launched that subagent, even if it
+    finished after the next message was sent. Edits inside a `.claude`
+    folder (memory, plans, scripts) are not your work.
+  - **Only a request for a change counts.** A change verb opens a
+    sentence: "make the button bigger", "can you add a footer", "now move
+    the logo". A statement ("the button is too small"), a report ("it
+    doesn't load"), a request to explain or clarify, a question (it ends
+    in a "?" or opens with a question word), a bare "thanks" or "ok" and a
+    status check ("how's it going?") ask for nothing to change, so none
+    counts and none ends the run.
+  - **A go-ahead is the next step.** "Continue", "go ahead", "yes, do
+    it", "merge it", "push and release", "run the tests", "ship it" and
+    "do 1 and 2" carry on work you already asked for. They neither count
+    nor end the run. Naming something of your own ("merge the auth logic
+    into the helper") is no go-ahead, but it opens with no change verb
+    either, so it neither counts nor ends the run. "Try again" is left
+    out: it says the last try went wrong.
+  - **An answer is skipped.** So is a reply to a question Claude asked:
+    its last reply ends on one (a "?" closes one of its last two
+    sentences or a list item that ends it, not code, a link or its tag)
+    and changed no file. A question that closes a reply that changed a
+    file is an offer, so the message after it is a request like any
+    other. A message stopped before any reply and sent again is skipped
+    too. The first message of a run is the first request.
+- **Big tasks without a plan** (`plan_first`): a request for 3 or more
+  separate changes in your own prose, 150 characters or longer, sent
+  outside plan mode before any plan was approved in the session. It has
+  no cost figure, so the page shows "Not priced". The changes are
+  counted in what you wrote, leaving out a fenced block, a quoted line
+  and a pasted log or stack trace: its list lines, its change verbs
+  ("add", "move", "rename" and the like) and the items of one sentence
+  that starts with one ("Add login, a settings page and an admin screen"
+  is three). A message with no change verb asks for no change, whatever
+  it lists. One request written with several commas or "and"s can count
+  as three: at 3 changes, 6 of the 2,755 messages in one author's 221
+  sessions did.
+  - **A long message is a plan.** A message of 2,000 characters or more
+    has been written out, whatever its formatting. Five listed items are
+    a plan too: lines that start "1." or "1)", lines that start "-" or
+    "*", or "1)" numbering inside one paragraph. A heading and 1,500
+    characters or more is a plan as well.
+  - **A message about a plan is left alone.** So is one that opens by
+    asking to review, explain, check or look at something.
+  - **A paste is not a request.** A message that holds a fenced block, a
+    stack trace or error line, or the "[Pasted text" marker the desktop
+    app writes for a long paste is yours to read, not a list of changes.
+  - **A merge or a release is the next step.** A message in which a
+    sentence or clause asks to merge, ship, deploy, publish or release,
+    or to push or tag something, is work you already have, not a piece
+    of work to plan first, however many steps it lists. A mention
+    further in ("before the release next week") is no such request.
 - **The same request again** (`repeat_ask`): you sent much the same
   request as one Claude answered with a file change in the last hour (80%
   of its words in common, at least 4 different words). A poll ("how's it
@@ -350,7 +441,7 @@ counted after the fact only.
   Only the message that began the piece counts, and only when at least
   20,000 tokens of earlier work were in context.
 
-The thresholds for these four are fixed, not set in `config.toml`.
+The thresholds for these five are fixed, not set in `config.toml`.
 Once there are coaching
 notes, **Tips Claude showed** says, for each hint, how many notes there
 were and how many tips showed: "relayed 4 of 5" for a hint whose note
@@ -359,7 +450,8 @@ and "judged relevant 2 of 6" for one Claude decides on, where a tip left
 out isn't a miss. A last column counts the replies that called the tip a
 misfire ("that ClaudeGlass tip doesn't apply"), which says a hint is
 firing when it shouldn't. Turning coaching notes on is a change on **Your changes**,
-measured by these habits per 100 of your messages before and after.
+measured by the habits a live hint warns about, per 100 of your messages
+before and after.
 
 Once a hint has shown, it rests for 30 minutes in that session, unless
 what's at stake has grown one and a half times since (a context grown
@@ -400,14 +492,13 @@ table, and wins over the file:
 | `coaching_plan_fresh_tokens` | 40000 | Planning context kept after a plan (or held so far, in plan mode) before `plan_fresh` and `plan_fresh_early` apply. |
 | `coaching_quiet_output_tokens` | 8000 | A result's size before `quiet_output` applies. The large-output note's 8,000 is fixed. |
 | `coaching_drip_count` | 3 | Small requests in a row before `drip_feed` applies. |
-| `coaching_drip_window_minutes` | 20 | The longest wait after Claude's reply for a message still to count. |
+| `coaching_drip_window_minutes` | 20 | The longest wait after your message before it for a message still to count. |
 | `coaching_drip_chars` | 300 | The longest message that counts as a small request. |
-| `coaching_plan_steps` | 3 | Separate changes in one request before `plan_first` applies. |
-| `coaching_plan_min_chars` | 150 | The shortest request `plan_first` looks at. |
 | `coaching_big_paste_tokens` | 10000 | A message's size before `big_paste` applies. |
 | `coaching_cold_min_tokens` | 100000 | The smallest context `cold_return` mentions. |
 | `coaching_cold_rest_hours` | 12 | How long `cold_return` rests once shown. |
 | `coaching_warm_prefix_tokens` | 42000 | The tokens every session starts with, left out of `cold_return`'s figure. |
+| `coaching_queued_minutes` | 10 | How old the last tool call or result may be for a message you send to count as sent while Claude is still working. |
 | `coaching_cooldown_minutes` | 30 | How long a hint rests once shown. |
 | `coaching_rearm_factor` | 1.5 | How much what's at stake must grow to end the rest early. |
 | `coaching_max_backoff` | 3 | The most times a hint's rest may double. |
@@ -416,8 +507,9 @@ An older `config.toml` may still hold keys for the hints that no longer show
 (`coaching_explore_reads`, `coaching_clear_context_tokens`,
 `coaching_vague_fix_chars`, `coaching_repeat_similarity`,
 `coaching_repeat_window_minutes`, `coaching_repeat_min_words`,
-`coaching_stop_loop_count` and `coaching_stop_window_minutes`). They are
-ignored: those habits are counted after the fact with fixed rules.
+`coaching_stop_loop_count`, `coaching_stop_window_minutes`,
+`coaching_plan_steps` and `coaching_plan_min_chars`). They are ignored:
+those habits are counted after the fact with fixed rules.
 
 ## What it costs
 

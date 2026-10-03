@@ -268,6 +268,20 @@ def test_missing_hook_marks_the_metrics_that_need_it():
     assert rows["result"]["needs_hook"] is True
     assert rows["task"]["needs_hook"] is False
     assert rows["size"]["needs_hook"] is False  # off
+    # The chip comes with the exact command that adds the entry; a row that needs nothing names none.
+    assert rows["result"]["hook_command"] == capture_view.CONNECT_COMMAND == "claudeglass capture connect"
+    assert rows["task"]["hook_command"] is None and rows["size"]["hook_command"] is None
+
+
+def test_the_background_stop_entry_missing_marks_coaching_notes_and_names_the_command():
+    # An earlier version's connection has no Stop entry: the coaching metric shows the chip and the command.
+    stop = HookSpec(catalogue.HOOK_SCRIPT, "Stop", "", True)
+    health = CaptureHookHealth(settings_path=Path("settings.json"), needed=(stop,), missing=(stop,))
+    config = CaptureConfig(coaching=["coaching_notes"])
+    rows = _rows(capture_view.view(config, units=API, hooks=health))
+    assert rows["coaching_notes"]["needs_hook"] is True
+    assert rows["coaching_notes"]["hook_command"] == "claudeglass capture connect"
+    assert "Run 'claudeglass capture connect' to fix it." in capture_view.hooks_block(health)["summary"]
 
 
 def test_describe_and_config_block():

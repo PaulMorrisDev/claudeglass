@@ -189,6 +189,34 @@ def test_a_rerun_keeps_deep_and_adds_its_hooks_when_connecting(tmp_path):
     assert "The /cg-feedback skill: add it." in out and _skill(config_dir).is_file()
 
 
+def test_connecting_adds_the_stop_entry_and_the_plan_matcher_when_coaching_notes_are_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    set_capture(config_dir, coaching=["coaching_notes"], now=NOW)
+    assert load_config(config_dir).capture.level == "off"
+    # A plan; connect; not at logon; go ahead. Capture is off, so there is no tips question.
+    rc, out = _run(config_dir, stdin="1\ny\nn\n\n")
+    assert rc == 0, out
+    commands = set(cli._capture_hook_commands(config_dir).values())
+    hooked = [
+        (event, group.get("matcher", ""), bool(entry.get("async")))
+        for event, groups in _settings(config_dir)["hooks"].items()
+        for group in groups
+        for entry in group["hooks"]
+        if entry["command"] in commands
+    ]
+    assert sorted(hooked) == sorted([
+        ("UserPromptSubmit", "", False),
+        ("PostToolUse", "|".join(cat.COACHING_TOOLS), False),
+        ("Stop", "", True),
+    ])
+    assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in hooked)["PostToolUse"]
+    assert hook_health.check_capture(
+        hook_health.capture_specs(load_config(config_dir).capture.hook_metrics()),
+        claude_root=config_dir.parent,
+        config_dir=config_dir,
+    ).ok
+
+
 def test_a_rerun_skips_what_is_done_and_no_to_tips_turns_essentials_off(tmp_path):
     config_dir = _claude(tmp_path, {})
     _run(config_dir, stdin="1\ny\nn\ny\n\n")

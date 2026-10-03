@@ -24,22 +24,27 @@ from .capture_catalogue import (
     ADMIT_SCAN_CHARS,
     ASKS_PATTERN,
     BAD_OUTCOME_PATTERN,
+    CHANGE_PATTERN,
+    CHANGE_SCAN_CHARS,
     CORRECTION_PATTERN,
     CONFIG_PATH_PATTERN,
     CORRECTION_SCAN_CHARS,
     EDIT_TOOLS,
+    ERROR_TEXT_PATTERN,
     GO_MAX_CHARS,
     GO_PATTERN,
     ITEM_SEPARATOR_PATTERN,
     LIST_ITEM_PATTERN,
     MISFIRE_NEAR_CHARS,
     MISFIRE_PATTERN,
+    PASTE_MARKER,
     PLAN_CRITIQUE_PATTERN,
     PLAN_DOC_CHARS,
     PLAN_DOC_ITEMS,
     PLAN_FEEDBACK_SCAN_CHARS,
     PLAN_HEADING_PATTERN,
-    PLAN_NUMBERED_PATTERN,
+    PLAN_ITEM_PATTERN,
+    PLAN_LONG_CHARS,
     PLAN_QUESTION_PATTERN,
     PLAN_UNSURE_PATTERN,
     PROSE_NOISE_PATTERN,
@@ -56,6 +61,7 @@ from .capture_catalogue import (
     REPLY_TIP_BLOCK_PATTERN,
     REPLY_UNIT_PATTERN,
     REPLY_URL_PATTERN,
+    RELEASE_PATTERN,
     REVIEW_PATTERN,
     SENTENCE_END_PATTERN,
     SHELL_WRITE_PATTERN,
@@ -91,7 +97,10 @@ _MISFIRE_RE = re.compile(MISFIRE_PATTERN, re.IGNORECASE)
 _CLAUDEGLASS_RE = re.compile(r"claudeglass", re.IGNORECASE)
 _PROSE_NOISE_RE = re.compile(PROSE_NOISE_PATTERN)
 _PLAN_HEADING_RE = re.compile(PLAN_HEADING_PATTERN)
-_PLAN_NUMBERED_RE = re.compile(PLAN_NUMBERED_PATTERN)
+_PLAN_ITEM_RE = re.compile(PLAN_ITEM_PATTERN)
+_CHANGE_RE = re.compile(CHANGE_PATTERN, re.IGNORECASE)
+_RELEASE_RE = re.compile(RELEASE_PATTERN, re.IGNORECASE)
+_ERROR_TEXT_RE = re.compile(ERROR_TEXT_PATTERN)
 _REVIEW_RE = re.compile(REVIEW_PATTERN, re.IGNORECASE)
 _CONFIG_PATH_RE = re.compile(CONFIG_PATH_PATTERN)
 _SHELL_WRITE_RE = re.compile(SHELL_WRITE_PATTERN, re.IGNORECASE)
@@ -154,21 +163,40 @@ def is_review(text: str) -> bool:
 
 
 def is_plan(text: str) -> bool:
-    """Whether ``text`` is a plan already: prose of at least
-    ``PLAN_DOC_CHARS`` characters with a heading, or ``PLAN_DOC_ITEMS``
-    numbered items."""
+    """Whether ``text`` is a plan already: at least ``PLAN_LONG_CHARS``
+    characters, whatever its formatting (a brief that long is written
+    out), or, in its own prose, at least ``PLAN_DOC_CHARS`` characters with
+    a heading, or ``PLAN_DOC_ITEMS`` listed items (numbered "1." or "1)",
+    or opening with "-", "*" or a bullet)."""
+    if len(text.strip()) >= PLAN_LONG_CHARS:
+        return True
     text = prose(text)
     return (
         len(text.strip()) >= PLAN_DOC_CHARS and _PLAN_HEADING_RE.search(text) is not None
-    ) or len(_PLAN_NUMBERED_RE.findall(text)) >= PLAN_DOC_ITEMS
+    ) or len(_PLAN_ITEM_RE.findall(text)) >= PLAN_DOC_ITEMS
+
+
+def asks_for_release(text: str) -> bool:
+    """Whether ``text`` asks to merge, release, ship or publish: the next
+    step of work you already have, not a piece of work to plan first."""
+    return _RELEASE_RE.search(text[:STEP_SCAN_CHARS]) is not None
+
+
+def is_pasted(text: str) -> bool:
+    """Whether ``text`` holds pasted code or a pasted log rather than only
+    your own words: a fenced block, a stack trace or error line, or the
+    desktop app's paste marker (the ``code`` and ``error`` words of
+    ``Turn.prompt_flags``, and a paste)."""
+    return "```" in text or PASTE_MARKER in text or _ERROR_TEXT_RE.search(text) is not None
 
 
 def plan_steps(text: str) -> int:
     """The changes ``text`` asks for that call for a plan first
     (``plan_first``): :func:`request_steps`, or 0 for a message that
-    mentions a plan (it follows one), opens by asking to review, or is a
-    plan already."""
-    if mentions_plan(text) or is_review(text) or is_plan(text):
+    mentions a plan (it follows one), opens by asking to review, is a plan
+    already, asks to merge or release, or holds a pasted log or code (the
+    steps counted in it are the paste's, not yours)."""
+    if mentions_plan(text) or is_review(text) or is_plan(text) or asks_for_release(text) or is_pasted(text):
         return 0
     return request_steps(text)
 
@@ -244,10 +272,21 @@ def is_question(text: str) -> bool:
     return text.endswith("?") or _ASKS_RE.match(text) is not None
 
 
-def is_request(text: str) -> bool:
-    """Whether ``text`` asks for something: not a thank-you, a go-ahead, a
-    status check or a question (``drip_feed`` counts requests only)."""
-    return bool(text.strip()) and not (is_ack(text) or is_go(text) or is_status(text) or is_question(text))
+def is_change_request(text: str) -> bool:
+    """Whether ``text`` asks Claude to change something: a change verb that
+    opens a sentence ("make it bigger", "now move the logo", "can you add
+    a footer.", see ``CHANGE_PATTERN``). Not a statement or a report ("the
+    button is too small", "it does not load"), an explain or clarify
+    request, a question, a go-ahead, a thank-you or a status check
+    (``drip_feed``, the live hint and the report's small-requests count,
+    counts these only: a run of small changes is what sending them as one
+    message would have saved)."""
+    text = text.strip()
+    return (
+        bool(text)
+        and _CHANGE_RE.search(text[:CHANGE_SCAN_CHARS]) is not None
+        and not (is_ack(text) or is_go(text) or is_status(text) or is_question(text) or is_review(text))
+    )
 
 
 def is_config_path(path: str) -> bool:
@@ -285,31 +324,34 @@ def agent_edit_files(record: dict) -> int:
     return count if isinstance(count, int) and not isinstance(count, bool) and count > 0 else 0
 
 
-def drip_count(earlier: list[dict], prompt: str, gap, answer: bool, th: dict) -> int:
-    """How many small requests in a row ``prompt`` makes: it and the
-    messages before it (``earlier``, each ``{"text", "answered", "answer",
-    "edited", "gap"}``, oldest first), each short and sent within
-    ``drip_window_minutes`` of Claude's reply, the earlier ones each
-    answered with a change to a file. Words matter only to leave out what
-    asks for nothing: a go-ahead, a thank-you, a status check and a
-    question are no request (``is_request``), so none counts and none
-    ends a run, nor does an answer to Claude's question or a message
-    stopped before any reply and sent again. ``prompt`` itself must be a
-    request, sent quickly and not an answer; the run it makes is ``0``
-    otherwise (``capture_hook.py`` keeps a copy of this, held to it by a
-    test)."""
+def drip_count(earlier: list[dict], prompt: str, since, answer: bool, th: dict) -> int:
+    """How many small change requests in a row ``prompt`` makes: it and
+    the messages before it (``earlier``, each ``{"text", "answered",
+    "answer", "edited", "since"}``, oldest first), each short, asking for a
+    change (:func:`is_change_request`) and sent within
+    ``drip_window_minutes`` of the message of yours before it (``since``,
+    in seconds: your messages alone set the window), the earlier ones each
+    answered with a change to a file, by the reply that message started
+    (``edited``). Whatever asks for no change (a go-ahead, a thank-you, a
+    status check, a question, a statement, a report or an explain request)
+    neither counts nor ends a run, nor does an answer to Claude's question
+    or a message stopped before any reply and sent again. ``prompt`` itself
+    must be a change request, sent in time and not an answer; the run it
+    makes is ``0`` otherwise. ``prompting._drip_runs`` counts the same runs
+    after the fact, and ``capture_hook.py`` keeps a copy of this, held to
+    it by a test."""
     window = th["drip_window_minutes"] * 60
 
     def small(text: str) -> bool:
         return len(text.strip()) <= th["drip_chars"]
 
-    if not small(prompt) or not is_request(prompt) or answer or gap is None or gap > window:
+    if not small(prompt) or not is_change_request(prompt) or answer or since is None or since > window:
         return 0
     count = 1
     for ex in reversed(earlier):
-        if ex["answer"] or not ex["answered"] or not is_request(ex["text"]):
+        if ex["answer"] or not ex["answered"] or not is_change_request(ex["text"]):
             continue
-        if not (small(ex["text"]) and ex["edited"] and ex["gap"] is not None and ex["gap"] <= window):
+        if not (small(ex["text"]) and ex["edited"] and ex["since"] is not None and ex["since"] <= window):
             break
         count += 1
     return count

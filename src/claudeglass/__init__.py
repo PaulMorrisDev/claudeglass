@@ -329,7 +329,19 @@ __version__ = "0.14.0"
 #: this change counts them.
 #:
 #: Also in 37: ``Turn.human_question``, ``config_edit_count`` and
-#: ``agent_edit_files`` for the small-requests check.
+#: ``agent_edit_files`` for the small-requests check, and
+#: ``Turn.human_change`` (the message asked for a change: a change verb
+#: opens one of its sentences, and it is no go-ahead, question, report or
+#: explain request). The window between small requests is timed from your
+#: own messages, a turn is credited only with the edits of the reply its
+#: message started (a subagent's, with the turn that launched it; a reply
+#: that began with a line you didn't type, ``Turn.preceding_not_typed``,
+#: is not the message's), a plan is also a message of 2,000 characters or
+#: more or one with five listed items, and a pasted log or code, or a merge
+#: or release request (a verb that opens a sentence), has no steps. A
+#: go-ahead also covers a merge, push, release, commit or run. A resume
+#: note is a ``META`` event of subkind ``resume``, the other lines you
+#: didn't type ``not_typed``.
 PARSER_VERSION = 37
 
 #: Bump when the model.py contract changes in a way that invalidates the

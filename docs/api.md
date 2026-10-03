@@ -1434,7 +1434,8 @@ one is built in the background.
   `title`, `what`, `why`, `powers`, `tag` (what Claude writes),
   `hooks`, `requires`, `on`, `toggle` (`false` for metrics that are
   always measured), `asks_claude`, `needs_hook` (on, but its hook
-  entry is missing), `needs_install` with `install_note` and
+  entry is missing) with `hook_command` (the command that adds it,
+  `claudeglass capture connect`), `needs_install` with `install_note` and
   `install_command` (the `/cg-feedback` skill is on but its file is
   missing, out of date or someone else's: the dashboard never writes
   Claude Code's folder, so it names the CLI command), `statusline_note`

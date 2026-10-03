@@ -483,7 +483,7 @@ COACHING_TOOLS = (*BIG_OUTPUT_TOOLS, "ExitPlanMode")
 
 #: The live hints: after a tool result (the first three) and when you
 #: send a message (the rest), most useful first when more than one
-#: applies. ``drip_feed`` to ``big_paste`` are about how you prompt.
+#: applies. ``drip_feed`` and ``big_paste`` are about how you prompt.
 #: ``plan_fresh`` also applies when you send a go-ahead after a plan you
 #: hadn't approved in the dialog, or leave plan mode. ``plan_fresh_early``
 #: is the same advice at an earlier moment: a message sent in plan mode,
@@ -499,7 +499,6 @@ COACHING_HINTS = (
     "split_run",
     "quiet_output",
     "drip_feed",
-    "plan_first",
     "big_paste",
     "status_poll",
     "cold_return",
@@ -512,7 +511,11 @@ COACHING_HINTS = (
 #: ``explore_reads`` became the habits page's "Explore cost by model"
 #: table; ``repeat_ask``, ``stop_loop`` and ``vague_fix`` are counted after
 #: the fact only (``prompting.py``), as live they fired on polls, refusals
-#: and questions far more often than on the habit. ``cache_cold`` became
+#: and questions far more often than on the habit. ``plan_first`` is
+#: counted after the fact only too: a replay of 30 days of real sessions
+#: found it right in none of 7 firings, so it never showed it could be
+#: right. (``drip_feed`` was right in 2 of 11, and stays live with a
+#: tighter rule.) ``cache_cold`` became
 #: ``cold_return``: a receipt for every return after the cache expired,
 #: where it had asked Claude to judge whether the message began new work.
 RETIRED_COACHING_HINTS = (
@@ -521,6 +524,7 @@ RETIRED_COACHING_HINTS = (
     "repeat_ask",
     "stop_loop",
     "vague_fix",
+    "plan_first",
     "cache_cold",
 )
 
@@ -630,18 +634,40 @@ REMIND_PATTERN = (
 )
 
 #: A message that only tells Claude to carry on ("continue", "go ahead",
-#: "do it", "implement the plan", "merge it", "yes, do it"), matched on
+#: "do it", "implement the plan", "merge it", "yes, do it", "commit and
+#: merge these to main", "once done - merge and push up a new version",
+#: "yes run it", "run the tests", "ship it", "do 1 and 2"), matched on
 #: the whole message, at most :data:`GO_MAX_CHARS` characters. Sent
-#: after a plan or a change, it asks for nothing new. The parser keeps
-#: only the yes/no (``Turn.human_go``).
+#: after a plan or a change, it asks for nothing new: the next step of
+#: the work is a merge, a release, a commit or a run, or a pick from the
+#: options Claude gave. A release step (:data:`_GO_STEP`) may only be
+#: followed by the small words of :data:`_GO_THING`, so naming something
+#: of your own ("merge the auth logic into the helper") is no go-ahead. A
+#: retry ("try again") is left out: it says the last try went wrong, a
+#: vague correction (:data:`CORRECTION_PATTERN`).
+#: The parser keeps only the yes/no (``Turn.human_go``).
 _GO_YES = r"yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm|looks good|sounds good"
-_GO_CORE = (
-    r"continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it"
-    r"|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan"
-    r"|(?:merge|push|ship|deploy|commit)(?: (?:it|that|this|them))?(?: and tag)?"
+_GO_STEP = r"merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run"
+_GO_THING = (
+    r"it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and"
+    r"|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work"
+    r"|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote"
 )
+_GO_RELEASE = rf"(?:{_GO_STEP})(?:[\s,]+(?:{_GO_STEP}|{_GO_THING}))*"
+_GO_PICK = (
+    r"(?:do|go with|pick|take)\s+(?:option\s+|number\s+|step\s+)?(?:\d{1,2}|one|two|three|a|b|c)"
+    r"(?:\s*(?:,|and|&)\s*(?:\d{1,2}|one|two|three|a|b|c))*(?:\s+first)?"
+)
+_GO_CORE = (
+    r"(?:continue|keep going|carry on|proceed|go ahead|go on|go)"
+    rf"(?:[\s,]+(?:and|then))?[\s,]+(?:{_GO_RELEASE})"
+    r"|continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it"
+    r"|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan"
+    rf"|{_GO_RELEASE}|{_GO_PICK}"
+)
+_GO_LEAD = r"(?:(?:once|when|after) (?:that'?s |it'?s |this is |everything is )?(?:done|complete|completed|finished|ready)[\s,\-–—:]+)?"
 GO_PATTERN = (
-    rf"(?:please\s+)?(?:(?:{_GO_YES})(?:[\s,.!]+(?:{_GO_CORE}))?|(?:{_GO_CORE}))"
+    rf"(?:please\s+)?{_GO_LEAD}(?:(?:{_GO_YES})(?:[\s,.!]+(?:{_GO_CORE}))?|(?:{_GO_CORE}))"
     r"(?:[\s,.!]+(?:please|now|thanks|thank you))*[\s!.,]*"
 )
 GO_MAX_CHARS = 60
@@ -790,6 +816,16 @@ ASKS_PATTERN = r"\s*(?:what|which|who|whom|whose|where|when|why|how)\b"
 LIMIT_RESUME_PREFIX = "I hit my usage limit while you were working, but it has reset now"
 APP_QUIT_PREFIX = "The app was quit while you were working"
 
+#: What a usage-limit stop reads, as the line Claude Code writes in place
+#: of a reply (an assistant line, marked as an API error, from the
+#: ``<synthetic>`` model). The parser names it ``session_limit`` or
+#: ``weekly_limit`` (``events.classify_synthetic_text``); the capture
+#: hook reads both, for ``cold_return``, which skips a return that follows
+#: one (:data:`LIMIT_LINE_PREFIXES`).
+SESSION_LIMIT_PREFIX = "You've hit your session limit"
+WEEKLY_LIMIT_PREFIX = "You've hit your weekly limit"
+LIMIT_LINE_PREFIXES = (SESSION_LIMIT_PREFIX, WEEKLY_LIMIT_PREFIX)
+
 #: What a background task's finishing message starts with, however Claude
 #: Code writes it: as a user line, a queued command or a queue operation.
 TASK_NOTIFICATION_PREFIX = "<task-notification"
@@ -811,6 +847,15 @@ NOT_TYPED_PREFIXES = (
 #: ``human`` proves nothing. ``sdk`` is left out: a session driven by
 #: ``claude -p`` has no other request than its own prompt.
 NOT_TYPED_TURN_ORIGINS = ("task_notification", "peer", "scheduled")
+
+#: The lines you didn't type that carry on the work of your last message
+#: rather than start work of their own: the desktop app's resume pings. A
+#: reply after one still answers that message, so ``drip_feed`` credits its
+#: edits to it; a reply after any other such line (a background agent's
+#: report, a scheduled task, a command's output, another session's message)
+#: is nobody's answer to it (``prompting._own_reply``, the hook's
+#: ``_exchanges``).
+RESUME_PREFIXES = (LIMIT_RESUME_PREFIX, APP_QUIT_PREFIX)
 
 #: How a shell line shows that it runs a project's tests. ``testrun`` (the
 #: parser, the purpose rules) and the capture hook read the same pieces,
@@ -901,6 +946,12 @@ SENTENCE_END_PATTERN = r"[.!?]+(?=\s|$)|\n+"
 #: asked for a change, whatever its words (``drip_feed``).
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
+#: Tools that launch a subagent. The files a subagent changed are credited to
+#: the reply cycle whose call launched it (``drip_feed``): the parser
+#: (``parse._AGENT_TOOL_NAMES``) and the hook (``_AGENT_TOOLS``) keep to this
+#: list, which a test holds them to.
+AGENT_TOOLS = ("Agent", "Task")
+
 #: A path inside a ``.claude`` folder: memory, plans, workflow scripts, and
 #: a project's agents, skills and settings. Claude changing one is not
 #: work on your project, so a message answered only with those is no
@@ -937,6 +988,80 @@ REVIEW_PATTERN = (
     r"|tell me|describe|walk me through|go through|examine|proofread|verify)\b"
 )
 
+#: A message that asks Claude to change something ("make the button
+#: bigger", "now move the logo", "yes, rename it", "can you add a footer",
+#: "let's switch to tabs", "I want you to drop the flag"): a change verb
+#: that opens a sentence, a clause after a comma or a line, behind the small
+#: words people lead with (:data:`_CHANGE_LEAD`: "also", "now", "yes,") and
+#: a polite frame (:data:`_CHANGE_FRAME`: "can you", "let's", "we need
+#: to"). Matched case-blind in a message's first :data:`CHANGE_SCAN_CHARS`
+#: characters. A statement ("the button is too small"), a report ("it does
+#: not load"), an explain or clarify request ("explain how this works")
+#: and a go-ahead have no such verb, so none is a change request; the
+#: verbs a go-ahead is made of (merge, push, commit, run) are left out on
+#: purpose (:data:`GO_PATTERN`). ``drip_feed`` counts only these, as a
+#: run of small changes is what batching would have saved; a message that
+#: ends in a question mark asks, and never counts. A verb that is the
+#: subject of a report is not one: one followed by a report verb, straight
+#: away or after one word ("build failed", "group chat is broken"), by a
+#: colon, or by "for" or "of". The parser keeps only the yes/no
+#: (``Turn.human_change``).
+_CHANGE_VERBS = (
+    r"add|create|build|implement|make|move|migrate|refactor|rename|remove|delete|update|change|replace|write|fix"
+    r"|set|convert|integrate|split|extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support"
+    r"|improve|tweak|adjust|enable|disable|increase|decrease|reduce|hide|use|switch|swap|put|ensure|apply|align"
+    r"|resize|restyle|polish|simplify|shorten|lengthen|expand|center|centre|style|colou?r|highlight|trim|tidy"
+    r"|reorder|sort|group|wrap|turn|bump|revert|undo|install|configure|rebuild|regenerate|reword|rephrase|relocate"
+    r"|tighten|loosen|darken|lighten|enlarge|shrink|widen|narrow|rotate|flip"
+)
+_CHANGE_LEAD = (
+    r"(?:(?:so|now|also|and|then|next|ok|okay|yes|yep|yeah|sure|right|great|nice|good|cool|thanks|thank you"
+    r"|perfect|plus|finally|first|lastly)[\s,.!:;\-\u2013\u2014]+)*"
+)
+_CHANGE_FRAME = (
+    r"(?:(?:can|could|would|will) (?:you|we)(?: please)?|please|let'?s|let us"
+    r"|(?:we|you) (?:should|need to|have to|must|can|could)"
+    r"|(?:i|we) (?:want|need|would like|would love) (?:you |us |it |this |that )?to"
+    r"|i'?d (?:like|love) (?:you |us |it )?to)"
+)
+CHANGE_PATTERN = (
+    rf"(?:^|[.!?;:,\n])\s*{_CHANGE_LEAD}(?:{_CHANGE_FRAME}\s+)?(?:{_CHANGE_VERBS})\b"
+    r"(?!\s*:|\s+(?:[\w'-]+\s+)?(?:is|isn'?t|was|wasn'?t|are|were|has|had|failed|fails|broke|breaks|works|worked|looks|seems|still"
+    r"|doesn'?t|didn'?t|won'?t)\b|\s+(?:for|of)\b)"
+)
+CHANGE_SCAN_CHARS = 600
+
+#: What a message that asks to merge, release, ship or publish says: the
+#: next step of work you already have, not a piece of work to plan first.
+#: ``plan_first`` leaves such a message alone, however many steps it lists
+#: ("merge this PR and update the tag version"). Like :data:`CHANGE_PATTERN`,
+#: the verb opens a sentence or a clause, behind the same lead words and
+#: polite frame, so a mention further in ("then we can release next week",
+#: "the merge conflict in step 3") is no request.
+_RELEASE_START = rf"(?:^|[.!?;:,\n])\s*{_CHANGE_LEAD}(?:{_CHANGE_FRAME}\s+)?"
+RELEASE_PATTERN = (
+    rf"{_RELEASE_START}(?:merge|ship|deploy|publish|release)\b"
+    rf"|{_RELEASE_START}(?:push|tag)\s+(?:it|this|that|up|out|a new|the (?:release|branch|tag|version|changes|commits?)"
+    r"|to (?:main|master|origin|github|remote|prod|production))\b"
+)
+
+#: A pasted log or a stack trace, anywhere in a message: an exception line, a
+#: Node-style ``at f (file:1:2)`` frame, ``error:`` or ``fatal:`` opening a
+#: line, ``FAILED``, ``npm ERR!`` and a non-zero exit code. Read in memory
+#: (``events.prompt_flags`` marks such a message ``error``, and ``plan_first``
+#: leaves it alone). Together with a fenced block and
+#: :data:`PASTE_MARKER` it marks a message as pasted rather than written.
+ERROR_TEXT_PATTERN = (
+    r"(?m)Traceback \(most recent call last\)"
+    r"|^\s+at [\w.$<>]+ ?\(.*:\d+(?::\d+)?\)"
+    r"|\b[A-Z]\w*(?:Error|Exception)\b(?::|\s+at\b)"
+    r"|^(?:error|fatal)(?:\[E\d+\])?: "
+    r"|\bFAILED\b|\bpanicked at\b|npm ERR!|exit code [1-9]\d*"
+)
+
+#: What the desktop app writes in place of a long paste in a message.
+PASTE_MARKER = "[Pasted text"
+
 #: What isn't your own prose in a message you typed: a fenced block (or
 #: one left open), a quoted ("> ") line, and a pasted log or stack-trace
 #: line (a date or time, a log level, "Traceback", ``File "``, ``at f (``).
@@ -947,18 +1072,23 @@ PROSE_NOISE_PATTERN = (
     r"|Traceback\b|File \"|at \S+ \().*$)"
 )
 
-#: A message that is a plan already, so it needs none first: a heading
-#: ("# Plan", "**Steps**") in prose of at least :data:`PLAN_DOC_CHARS`
-#: characters, or :data:`PLAN_DOC_ITEMS` numbered items.
+#: A message that is a plan already, so it needs none first: a message of
+#: at least :data:`PLAN_LONG_CHARS` characters, whatever its formatting (a
+#: brief that long is written out), a heading ("# Plan", "**Steps**") in
+#: prose of at least :data:`PLAN_DOC_CHARS` characters, or
+#: :data:`PLAN_DOC_ITEMS` listed items: lines numbered "1." or "1)", lines
+#: opening with "-", "*" or a bullet, or "1)" and "(1)" numbering inside
+#: one paragraph.
 PLAN_HEADING_PATTERN = r"(?m)^[ \t]*(?:#{1,6}[ \t]+\S|\*\*[^*\n]{2,80}\*\*:?[ \t]*$)"
-PLAN_NUMBERED_PATTERN = r"(?m)^[ \t]*\d{1,2}[.)][ \t]+\S"
+PLAN_ITEM_PATTERN = r"(?m)(?:^[ \t]*(?:\d{1,2}[.)]|[-*\u2022])|(?<![\w(])\(?\d{1,2}\))[ \t]+\S"
+PLAN_LONG_CHARS = 2_000
 PLAN_DOC_CHARS = 1_500
 PLAN_DOC_ITEMS = 5
 
 #: What the after-the-fact report counts for the habits that no longer
-#: show a live hint (``vague_fix``, ``repeat_ask``, ``stop_loop``): the
-#: parser and ``prompting.py`` read these, the hook never does, so they
-#: are not in ``[thresholds]``.
+#: show a live hint (``vague_fix``, ``repeat_ask``, ``stop_loop``,
+#: ``plan_first``): the parser and ``prompting.py`` read these, the hook
+#: never does, so they are not in ``[thresholds]``.
 REPORT_THRESHOLDS = {
     #: A correction this short, naming nothing specific, is vague.
     "vague_fix_chars": 80,
@@ -972,6 +1102,12 @@ REPORT_THRESHOLDS = {
     "stop_loop_count": 3,
     #: ...within this long is a loop of stops.
     "stop_window_minutes": 20,
+    #: A request asking for this many separate changes (edits, counted in
+    #: your own prose only), outside plan mode, and not already a plan or a
+    #: request to review, is a big task without a plan...
+    "plan_steps": 3,
+    #: ...when it's at least this long.
+    "plan_min_chars": 150,
 }
 
 #: When each hint applies, and how often it may repeat. Each can be
@@ -993,23 +1129,25 @@ COACHING_THRESHOLDS = {
     #: fresh-session hint applies (``plan_handoff_min_dropped_tokens``'s
     #: default).
     "plan_fresh_tokens": 40_000,
-    #: This many small requests in a row, each of which Claude answered by
-    #: changing files outside a ``.claude`` folder, get the
-    #: plan-it-as-one-prompt hint. A go-ahead, a thank-you, a status check
-    #: or a question is no request and neither counts nor ends the run...
+    #: A message sent while the transcript ends on a tool call or its
+    #: result counts as typed into work under way (queued) only when that
+    #: line is under this many minutes old. An older one is a message sent
+    #: after the work stopped.
+    "queued_minutes": 10,
+    #: This many small requests in a row, each of which asked for a change
+    #: and Claude answered by changing files outside a ``.claude`` folder,
+    #: get the plan-it-as-one-prompt hint. A go-ahead, a thank-you, a status
+    #: check, a question, a statement or an explain request asks for no
+    #: change and neither counts nor ends the run...
     "drip_count": 3,
-    #: ...when each was sent within this long of Claude's reply before it.
+    #: ...when each was sent within this long of the message of yours before
+    #: it (your messages alone set it: Claude's replies to a background
+    #: agent's report or a scheduled run neither restart nor stretch it).
     "drip_window_minutes": 20,
     #: A message longer than this isn't a small request.
     "drip_chars": 300,
     #: A message this many tokens long gets the big-paste hint.
     "big_paste_tokens": 10_000,
-    #: A request asking for this many separate changes (edits, counted in
-    #: your own prose only), outside plan mode, and not already a plan or a
-    #: request to review, gets the plan-first hint...
-    "plan_steps": 3,
-    #: ...when it's at least this long.
-    "plan_min_chars": 150,
     #: A hint that showed stays quiet this long in the same session (twice
     #: as long after the second time, and so on, up to ``max_backoff`` times
     #: this)...
@@ -1059,10 +1197,6 @@ COACHING_TIP = {
         "about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it "
         "done in one pass, for fewer tokens."
     ),
-    "plan_first": (
-        "That's a job of about {steps} separate changes, sent outside plan mode. Plan mode agrees the approach "
-        "before anything changes. {plan_how}"
-    ),
     "big_paste": (
         "Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that "
         "matters, or saving the rest to a file and giving the path, costs less."
@@ -1095,20 +1229,15 @@ def _tip_note(hint: str, *, when: str = "", then: str = "", where: str = _AT_END
 #: How to do what a tip suggests, by the app the hook runs in: ``desktop``
 #: is the desktop app's Code tab (``CLAUDE_CODE_ENTRYPOINT`` is
 #: ``claude-desktop``), ``terminal`` is everywhere else. The hook fills the
-#: four placeholders of the tips above from these: ``{plan_how}`` (start
-#: plan mode), ``{fresh_how}`` (after a plan was approved: the next time
-#: clears the context at approval), ``{clear_how}`` (before it's
-#: approved) and ``{poll_how}`` (where to see what a background task is
-#: doing without asking). The desktop app has no Shift+Tab for plan mode, and its
+#: three placeholders of the tips above from these: ``{fresh_how}`` (after a
+#: plan was approved: the next time clears the context at approval),
+#: ``{clear_how}`` (before it's approved) and ``{poll_how}`` (where to see
+#: what a background task is doing without asking). The desktop app's
 #: approval dialog has an option that clears the context; where there's no
 #: such option, ``/clear`` and asking for the saved plan does the same.
 #: ``<file>`` stays as written, in backticks so a markdown view doesn't
 #: read it as a tag: a note never carries a path.
 COACHING_HOW = {
-    "plan_how": {
-        "desktop": "Start the message with /plan, or pick Plan in the mode menu next to Send.",
-        "terminal": "Press Shift+Tab to switch to it.",
-    },
     "fresh_how": {
         "desktop": (
             "Next time, pick the approval option that clears the context first; if the dialog has none, run "
@@ -1149,10 +1278,6 @@ COACHING_TEXT = {
     "drip_feed": _tip_note(
         "drip_feed", then="The user has sent {count} small change requests in a row, one message each. " + _AS_USUAL
     ),
-    "plan_first": _tip_note(
-        "plan_first",
-        then="The user's message asks for about {steps} separate changes, outside plan mode. " + _AS_USUAL,
-    ),
     "big_paste": _tip_note(
         "big_paste",
         when="most of the user's message is a log, a file or command output",
@@ -1175,9 +1300,7 @@ COACHING_TEXT = {
 
 #: The hints that also show the tip as a notice where Claude Code shows
 #: hook messages: every hint with a tip.
-NOTICE_HINTS = (
-    "plan_fresh", "plan_fresh_early", "drip_feed", "plan_first", "big_paste", "status_poll", "cold_return",
-)
+NOTICE_HINTS = ("plan_fresh", "plan_fresh_early", "drip_feed", "big_paste", "status_poll", "cold_return")
 
 #: What the hook shows you itself, never sent to Claude, so it costs no
 #: tokens: Claude Code's hook ``systemMessage``. The desktop app shows it
@@ -1686,10 +1809,10 @@ METRICS: tuple[Metric, ...] = (
         "hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large "
         "read, search or web result, a subagent run past the point where your own history says splitting pays, a plan approved "
         "on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, "
-        "or asking how background work is going while it still runs. It also flags how "
-        "you prompt: a big task without a plan, small requests sent one at a time, or a huge paste. Vague "
-        "corrections, the same request again and stopping Claude again and again are counted after the fact "
-        "on Work habits, with no live note.",
+        "or asking how background work is going while it still runs. It also flags how you prompt: small "
+        "requests sent one at a time, or a huge paste. Vague corrections, the same request again and stopping "
+        "Claude again and again are counted after the fact on Work habits, with no live note. So is a big "
+        "task without a plan.",
         why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
         "140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each "
         "read, search or web result and each message you send. A hook after each reply runs in the background and keeps "
@@ -2388,11 +2511,12 @@ def export_json() -> dict:
             "notice": dict(COACHING_NOTICE),
             "interrupt_prefix": INTERRUPT_PREFIX,
             "not_typed_prefixes": list(NOT_TYPED_PREFIXES),
+            "agent_tools": list(AGENT_TOOLS),
             "not_typed_turn_origins": list(NOT_TYPED_TURN_ORIGINS),
-            "adjust_pattern": ADJUST_PATTERN,
-            "remind_pattern": REMIND_PATTERN,
+            "resume_prefixes": list(RESUME_PREFIXES),
             "go_pattern": GO_PATTERN,
             "go_max_chars": GO_MAX_CHARS,
+            "limit_line_prefixes": list(LIMIT_LINE_PREFIXES),
             "status_pattern": STATUS_PATTERN,
             "status_max_chars": STATUS_MAX_CHARS,
             "background_launch_pattern": BACKGROUND_LAUNCH_PATTERN,
@@ -2426,16 +2550,9 @@ def export_json() -> dict:
             "config_path_pattern": CONFIG_PATH_PATTERN,
             "shell_write_pattern": SHELL_WRITE_PATTERN,
             "review_pattern": REVIEW_PATTERN,
-            "prose_noise_pattern": PROSE_NOISE_PATTERN,
-            "plan_heading_pattern": PLAN_HEADING_PATTERN,
-            "plan_numbered_pattern": PLAN_NUMBERED_PATTERN,
-            "plan_doc_chars": PLAN_DOC_CHARS,
-            "plan_doc_items": PLAN_DOC_ITEMS,
             "ack_pattern": ACK_PATTERN,
-            "list_item_pattern": LIST_ITEM_PATTERN,
-            "action_pattern": ACTION_PATTERN,
-            "item_separator_pattern": ITEM_SEPARATOR_PATTERN,
-            "sentence_end_pattern": SENTENCE_END_PATTERN,
+            "change_pattern": CHANGE_PATTERN,
+            "change_scan_chars": CHANGE_SCAN_CHARS,
         },
     }
 

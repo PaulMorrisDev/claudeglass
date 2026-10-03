@@ -363,6 +363,7 @@ def _metric_row(
     skill_now = (feedback or {}).get(install[0]) if install else None
     needs_install = bool(on and install and skill_now not in (None, "installed"))
     no_statusline = bool(on and metric.id in STATUSLINE_NOTES and (feedback or {}).get("statusline") is False)
+    needs_hook = bool(on and kind != "derived" and set(metric.hooks) & missing_events)
     return {
         "id": metric.id,
         "kind": kind,
@@ -378,7 +379,8 @@ def _metric_row(
         "on": on,
         "toggle": kind != "derived",
         "asks_claude": asks,
-        "needs_hook": bool(on and kind != "derived" and set(metric.hooks) & missing_events),
+        "needs_hook": needs_hook,
+        "hook_command": CONNECT_COMMAND if needs_hook else None,
         "needs_install": needs_install,
         "install_note": install[1].get(skill_now) if needs_install else None,
         "install_command": install[2] if needs_install else None,

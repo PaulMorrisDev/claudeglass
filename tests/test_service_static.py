@@ -550,6 +550,14 @@ def test_capture_group_opens_for_a_metric_that_needs_you() -> None:
     assert "if (row.statusline_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
 
 
+def test_a_metric_row_that_needs_a_hook_entry_names_the_command_unless_a_policy_blocks_it() -> None:
+    row = _function_source(_app_js(), "renderMetricRow")
+    chip = row.index('chip("Needs a hook entry"')
+    assert chip < row.index('codeBlockWithCopy(row.hook_command, "Command")')
+    # A settings policy stops the hooks running: 'capture connect' can't change that, so it isn't offered.
+    assert "row.needs_hook && row.hook_command && !(data.hooks && data.hooks.blocked_by)" in row
+
+
 def test_a_metric_row_says_what_it_costs_before_no_tokens() -> None:
     row = _function_source(_app_js(), "renderMetricRow")
     assert "if (!row.asks_claude) cost = row.cost_note || (" in row
@@ -701,6 +709,12 @@ def test_habits_playbook_caps_featured_cards_and_collapses_the_rest() -> None:
     assert "PLAYBOOK_CARD_LIMIT" in body
     assert '"details"' in body and "more habit" in body, "the rest of the playbook must collapse into a <details>"
     assert "appendHabitCards" in body
+
+
+def test_the_empty_habits_state_names_every_habit_the_notes_still_warn_about() -> None:
+    """The coaching notes still warn about small requests (drip_feed), huge pastes (big_paste) and
+    checks on a background task (status_poll), so the empty state names all three."""
+    assert "small requests, huge pastes" in _static_text("page-habits.js")
 
 
 def test_habits_digest_money_cards_follow_the_billing_mode() -> None:

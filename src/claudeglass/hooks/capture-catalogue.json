@@ -612,12 +612,11 @@
    "warm_prefix_tokens": 42000,
    "quiet_output_tokens": 8000,
    "plan_fresh_tokens": 40000,
+   "queued_minutes": 10,
    "drip_count": 3,
    "drip_window_minutes": 20,
    "drip_chars": 300,
    "big_paste_tokens": 10000,
-   "plan_steps": 3,
-   "plan_min_chars": 150,
    "cooldown_minutes": 30,
    "rearm_factor": 1.5,
    "max_backoff": 3
@@ -626,7 +625,6 @@
    "cold_return": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user came back to this session after a break. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, the last reply or the task panel already says. For new work, running /clear first skips the rewrite.",
    "status_poll": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user is asking about work that is still running in the background. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** Asking how it's going while work runs in the background makes Claude read the whole session, about {ctx} tokens, to say little that is new. {poll_how}",
    "drip_feed": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user has sent {count} small change requests in a row, one message each. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** That's {count} small changes in a row, each its own message, and each one re-reads the whole session, about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
-   "plan_first": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user's message asks for about {steps} separate changes, outside plan mode. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** That's a job of about {steps} separate changes, sent outside plan mode. Plan mode agrees the approach before anything changes. {plan_how}",
    "big_paste": "If most of the user's message is a log, a file or command output, write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. Otherwise don't mention this note.\n> **ClaudeGlass tip:** Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
    "plan_fresh": "Write the tip on this note's last line, word for word, before you start building. Then carry on unless the user stops you.\n> **ClaudeGlass tip:** This plan was approved with about {kept} tokens of planning in the session, and every reply of the build reads them again. Building it in a fresh session would carry about {kept} fewer tokens on each reply. {fresh_how}",
@@ -643,7 +641,6 @@
    "plan_fresh": "⚠️ ClaudeGlass: This plan was approved with about {kept} tokens of planning in the session, and every reply of the build reads them again. Building it in a fresh session would carry about {kept} fewer tokens on each reply. {fresh_how}",
    "plan_fresh_early": "⚠️ ClaudeGlass: Approve with clear context: this session holds about {kept} tokens of planning chat, and every reply of the build would read it again. {clear_how}",
    "drip_feed": "⚠️ ClaudeGlass: That's {count} small changes in a row, each its own message, and each one re-reads the whole session, about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
-   "plan_first": "⚠️ ClaudeGlass: That's a job of about {steps} separate changes, sent outside plan mode. Plan mode agrees the approach before anything changes. {plan_how}",
    "big_paste": "⚠️ ClaudeGlass: Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
    "status_poll": "⚠️ ClaudeGlass: Asking how it's going while work runs in the background makes Claude read the whole session, about {ctx} tokens, to say little that is new. {poll_how}",
    "cold_return": "⚠️ ClaudeGlass: The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, the last reply or the task panel already says. For new work, running /clear first skips the rewrite.",
@@ -664,15 +661,25 @@
    "I hit my usage limit while you were working, but it has reset now",
    "The app was quit while you were working"
   ],
+  "agent_tools": [
+   "Agent",
+   "Task"
+  ],
   "not_typed_turn_origins": [
    "task_notification",
    "peer",
    "scheduled"
   ],
-  "adjust_pattern": "(?:(?:^|[.!?]\\s+)actually\\b|\\b(?:instead|rather than|not quite|not exactly|(?:change|set|turn|switch|swap|make) (?:it|that|this|them|these|those) (?:to|into)|rename|(?:should|needs? to|supposed to|meant to) (?:say|read|show|display|look)|(?:a (?:bit|little)|slightly) (?:more|less|bigger|smaller|longer|shorter|wider|narrower|larger|taller|higher|lower)|too (?:big|small|long|short|wide|narrow|large|tall|bright|dark|loud|quiet|busy)|move (?:it|that|this|them|these|those))\\b)",
-  "remind_pattern": "\\b(?:i (?:already |just )?(?:told you|said|asked|mentioned|wrote|specified)|as i (?:said|mentioned|told you|asked|wrote)|you (?:didn'?t|did not|never|forgot to|still haven'?t)|why (?:did|didn'?t) you)\\b",
-  "go_pattern": "(?:please\\s+)?(?:(?:yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm|looks good|sounds good)(?:[\\s,.!]+(?:continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan|(?:merge|push|ship|deploy|commit)(?: (?:it|that|this|them))?(?: and tag)?))?|(?:continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan|(?:merge|push|ship|deploy|commit)(?: (?:it|that|this|them))?(?: and tag)?))(?:[\\s,.!]+(?:please|now|thanks|thank you))*[\\s!.,]*",
+  "resume_prefixes": [
+   "I hit my usage limit while you were working, but it has reset now",
+   "The app was quit while you were working"
+  ],
+  "go_pattern": "(?:please\\s+)?(?:(?:once|when|after) (?:that'?s |it'?s |this is |everything is )?(?:done|complete|completed|finished|ready)[\\s,\\-–—:]+)?(?:(?:yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm|looks good|sounds good)(?:[\\s,.!]+(?:(?:continue|keep going|carry on|proceed|go ahead|go on|go)(?:[\\s,]+(?:and|then))?[\\s,]+(?:(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*)|continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan|(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*|(?:do|go with|pick|take)\\s+(?:option\\s+|number\\s+|step\\s+)?(?:\\d{1,2}|one|two|three|a|b|c)(?:\\s*(?:,|and|&)\\s*(?:\\d{1,2}|one|two|three|a|b|c))*(?:\\s+first)?))?|(?:(?:continue|keep going|carry on|proceed|go ahead|go on|go)(?:[\\s,]+(?:and|then))?[\\s,]+(?:(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*)|continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan|(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*|(?:do|go with|pick|take)\\s+(?:option\\s+|number\\s+|step\\s+)?(?:\\d{1,2}|one|two|three|a|b|c)(?:\\s*(?:,|and|&)\\s*(?:\\d{1,2}|one|two|three|a|b|c))*(?:\\s+first)?))(?:[\\s,.!]+(?:please|now|thanks|thank you))*[\\s!.,]*",
   "go_max_chars": 60,
+  "limit_line_prefixes": [
+   "You've hit your session limit",
+   "You've hit your weekly limit"
+  ],
   "status_pattern": "(?:(?:hi|hey|ok|okay|so|and|well)[\\s,.!]+)?(?:how(?:'?s| is| are)(?: it| this| that| everything| things| the [a-z]+(?: [a-z]+)?)? (?:going|progressing|looking|coming(?: along)?|doing)|what(?:'?s| is)(?: the)? (?:status|progress|state|remaining|left|happening|going on)|(?:is|are)(?: it| this| that| everything| they| we)? (?:all )?(?:done|finished|complete|completed|merged|running|ready|working|still (?:running|working|going))|are you (?:still )?(?:working|running|there|done|finished)|any (?:updates?|progress|news|findings|results?)|where are we(?: at| now)?|status|progress|updates?|how (?:long|much) (?:is )?(?:left|remaining|to go))(?:[\\s,.!?]+(?:now|yet|so far|please|there|at the moment|currently))*[\\s!.,?]*",
   "status_max_chars": 120,
   "background_launch_pattern": "Command running in background with ID: |was moved to the background \\(ID: |Async agent launched successfully|Workflow launched in background\\. Task ID: ",
@@ -707,10 +714,6 @@
    "NotebookEdit"
   ],
   "how": {
-   "plan_how": {
-    "desktop": "Start the message with /plan, or pick Plan in the mode menu next to Send.",
-    "terminal": "Press Shift+Tab to switch to it."
-   },
    "fresh_how": {
     "desktop": "Next time, pick the approval option that clears the context first; if the dialog has none, run /clear, then ask Claude to implement the plan in `<file>`.",
     "terminal": "Run /clear, then ask Claude to implement the plan in `<file>`."
@@ -728,15 +731,8 @@
   "config_path_pattern": "(?:^|[\\\\/])\\.claude(?:[\\\\/]|$)",
   "shell_write_pattern": "(?:\\b(?:sed|perl)\\b[^\\n|;&]*?\\s-(?:[A-Za-z]*i[A-Za-z]*(?=[\\s.]|$)|-in-place\\b)|\\b(?:Set|Add)-Content\\b|\\[(?:System\\.)?IO\\.File\\]::(?:WriteAll(?:Text|Lines|Bytes)|AppendAll(?:Text|Lines))|\\b(?:cat|echo|printf)\\b[^\\n|;&]*?(?<![\\d&])>>?(?!&)[ \\t]*(?!/dev/null|nul\\b|\\$null)[^\\s&|;>]|\\b(?:cat|echo|printf)\\b[^\\n]*\\|[ \\t]*tee\\b[ \\t]+(?:-a[ \\t]+)?(?!/dev/null|nul\\b)[^\\s&|;>-]|(?:^|[;\\n(&|])[ \\t]*(?:[\\\"'$@]|(?:echo|write-output|write|get-content|gc|cat|type)\\b)[^\\n;]*\\|[ \\t]*(?:out-file|tee-object)\\b)",
   "review_pattern": "\\s*(?:please\\s+)?(?:(?:can|could|would) you\\s+(?:please\\s+)?)?(?:review|audit|check|look (?:at|over|through|into)|read|explain|summari[sz]e|analy[sz]e|investigate|inspect|explore|compare|assess|evaluate|critique|list|show|tell me|describe|walk me through|go through|examine|proofread|verify)\\b",
-  "prose_noise_pattern": "(?s:```.*?(?:```|\\Z))|(?m:^[ \\t]*>.*$)|(?m:^[ \\t]*(?:\\[?\\d{4}-\\d\\d-\\d\\d|\\d\\d:\\d\\d:\\d\\d|(?:ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|FATAL)\\b|Traceback\\b|File \\\"|at \\S+ \\().*$)",
-  "plan_heading_pattern": "(?m)^[ \\t]*(?:#{1,6}[ \\t]+\\S|\\*\\*[^*\\n]{2,80}\\*\\*:?[ \\t]*$)",
-  "plan_numbered_pattern": "(?m)^[ \\t]*\\d{1,2}[.)][ \\t]+\\S",
-  "plan_doc_chars": 1500,
-  "plan_doc_items": 5,
   "ack_pattern": "(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no)(?:[\\s!.,]+(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no))*[\\s!.,]*",
-  "list_item_pattern": "(?m)^[ \\t]*(?:\\d{1,2}[.)]|[-*\\u2022])[ \\t]+\\S",
-  "action_pattern": "(?:^|[.;:!?\\n,]|\\band\\b|\\bthen\\b|\\balso\\b)\\s*(?:please\\s+)?(?:add|create|build|implement|make|move|migrate|refactor|rename|remove|delete|update|change|replace|write|fix|set up|convert|integrate|split|merge|extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support)\\b",
-  "item_separator_pattern": ",\\s*and\\b|,|;|\\band\\b",
-  "sentence_end_pattern": "[.!?]+(?=\\s|$)|\\n+"
+  "change_pattern": "(?:^|[.!?;:,\\n])\\s*(?:(?:so|now|also|and|then|next|ok|okay|yes|yep|yeah|sure|right|great|nice|good|cool|thanks|thank you|perfect|plus|finally|first|lastly)[\\s,.!:;\\-\\u2013\\u2014]+)*(?:(?:(?:can|could|would|will) (?:you|we)(?: please)?|please|let'?s|let us|(?:we|you) (?:should|need to|have to|must|can|could)|(?:i|we) (?:want|need|would like|would love) (?:you |us |it |this |that )?to|i'?d (?:like|love) (?:you |us |it )?to)\\s+)?(?:add|create|build|implement|make|move|migrate|refactor|rename|remove|delete|update|change|replace|write|fix|set|convert|integrate|split|extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support|improve|tweak|adjust|enable|disable|increase|decrease|reduce|hide|use|switch|swap|put|ensure|apply|align|resize|restyle|polish|simplify|shorten|lengthen|expand|center|centre|style|colou?r|highlight|trim|tidy|reorder|sort|group|wrap|turn|bump|revert|undo|install|configure|rebuild|regenerate|reword|rephrase|relocate|tighten|loosen|darken|lighten|enlarge|shrink|widen|narrow|rotate|flip)\\b(?!\\s*:|\\s+(?:[\\w'-]+\\s+)?(?:is|isn'?t|was|wasn'?t|are|were|has|had|failed|fails|broke|breaks|works|worked|looks|seems|still|doesn'?t|didn'?t|won'?t)\\b|\\s+(?:for|of)\\b)",
+  "change_scan_chars": 600
  }
 }

@@ -4204,7 +4204,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             stdout.write(
                 "The capture hooks stay in settings.json and add nothing while capture is off"
                 + (
-                    ", though one still starts Python for about 50 ms after every shell command, read and search"
+                    ", though one still starts Python for about 50 ms after every read, search and web result"
                     if every_tool else ""
                 )
                 + ". 'claudeglass capture remove' takes them out.\n"

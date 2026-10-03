@@ -320,6 +320,54 @@ def test_finish_renames_a_skill_under_an_earlier_name_and_refreshes_an_old_one(t
     assert "Up to date: the hooks, statusline and skills" in out
 
 
+def _coaching_config(tmp_path) -> None:
+    config = tmp_path / "cfg"
+    config.mkdir(exist_ok=True)
+    (config / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+
+
+def _capture_hooks(tmp_path) -> list[tuple[str, str, bool]]:
+    """``(event, matcher, async)`` of the capture entries in settings.json."""
+    commands = set(cli._capture_hook_commands(tmp_path / "cfg").values())
+    settings = json.loads((tmp_path / "claude" / "settings.json").read_text(encoding="utf-8"))
+    return [
+        (event, group.get("matcher", ""), bool(entry.get("async")))
+        for event, groups in settings.get("hooks", {}).items()
+        for group in groups
+        for entry in group["hooks"]
+        if entry.get("command") in commands
+    ]
+
+
+def test_finish_adds_the_background_stop_entry_and_the_plan_matcher_coaching_needs(tmp_path):
+    _coaching_config(tmp_path)
+    (tmp_path / "claude").mkdir(exist_ok=True)
+    settings = tmp_path / "claude" / "settings.json"
+    # What an earlier version connected: the prompt hook and a matcher without the plan tool, and no Stop hook.
+    command = cli._capture_hook_commands(tmp_path / "cfg")[capture_catalogue.HOOK_SCRIPT]
+    old = {"model": "opus", "hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": command, "timeout": 5}]}],
+        "PostToolUse": [{"matcher": "Read|Grep|Glob|WebFetch|WebSearch", "hooks": [
+            {"type": "command", "command": command, "timeout": 5}]}],
+    }}
+    settings.write_text(json.dumps(old), encoding="utf-8")
+    rc, out = _Finish(tmp_path).run("--dry-run")
+    assert "Add the capture hook" in out and "Up to date" not in out
+    assert json.loads(settings.read_text(encoding="utf-8")) == old
+    rc, out = _Finish(tmp_path).run("--yes")
+    assert rc == 0 and "Up to date" not in out
+    assert sorted(_capture_hooks(tmp_path)) == sorted([
+        ("UserPromptSubmit", "", False),
+        ("PostToolUse", "|".join(capture_catalogue.COACHING_TOOLS), False),
+        ("Stop", "", True),
+    ])
+    assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in _capture_hooks(tmp_path))["PostToolUse"]
+    assert json.loads(settings.read_text(encoding="utf-8"))["model"] == "opus"
+    # Updated, the next run has nothing left to change.
+    rc, out = _Finish(tmp_path).run()
+    assert "Up to date: the hooks, statusline and skills" in out
+
+
 def test_finish_leaves_a_skill_it_did_not_write_alone(tmp_path):
     mine = tmp_path / "claude" / "skills" / "tl-feedback" / "SKILL.md"
     mine.parent.mkdir(parents=True)
