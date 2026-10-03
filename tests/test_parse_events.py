@@ -11,8 +11,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from claudeglass import events
-from claudeglass.model import EventKind, TranscriptMeta
+from claudeglass.model import Event, EventKind, TranscriptMeta
 from claudeglass.parse import parse_transcript
 
 from helpers import (
@@ -557,7 +559,7 @@ def test_precedence_high_band_cache_signal_beats_interrupt():
 
 def test_precedence_low_band_cache_signal_loses_to_slash_command():
     kinds = [
-        events.classify_line(attachment_line("output_style")),
+        events.classify_line(attachment_line("plan_mode")),
         events.classify_line(user_str_line("<command-name>review</command-name>")),
     ]
     assert events.primary_kind(kinds) == EventKind.SLASH_COMMAND
@@ -579,6 +581,446 @@ def test_task_notification_beats_plain_attachment_regression():
         events.classify_line(attachment_line("batching_reminder_sent")),
     ]
     assert events.primary_kind(kinds) == EventKind.TASK_NOTIFICATION
+
+
+# -- Messages typed while Claude works, message flags, lines you didn't type (PARSER_VERSION 37) --
+
+
+def _queued(prompt, **attachment):
+    """A ``queued_command`` attachment the way Claude Code writes a message
+    you typed while it was working: ``commandMode`` "prompt", a human
+    origin."""
+    attachment.setdefault("commandMode", "prompt")
+    attachment.setdefault("origin", {"kind": "human"})
+    return attachment_line("queued_command", prompt=prompt, **attachment)
+
+
+def _image_block():
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AAAA"}}
+
+
+def test_a_queued_human_message_keeps_its_origin_size_and_flags_only():
+    text = "actually, rename the widget to gadget in secret_plan.md"
+    event = events.classify_line(_queued(text))
+    assert event.kind == EventKind.QUEUE_OPERATION
+    assert event.subkind == "queued_command"
+    assert event.detail["origin"] == "human"
+    assert event.detail["chars"] == len(text)
+    assert event.detail["adjust"] is True
+    assert "secret" not in repr(event) and "gadget" not in repr(event)
+
+
+def test_a_queued_message_with_no_origin_is_yours():
+    event = events.classify_line(attachment_line("queued_command", prompt="how is it going?", commandMode="prompt"))
+    assert event.detail["origin"] == "human"
+    assert event.detail["status"] is True
+
+
+def test_a_queued_message_is_never_human_text():
+    # It must not open a cycle: Claude is mid-reply when it arrives.
+    for line in (_queued("fix the bug in the parser"), _queued("continue"), _queued([_image_block()])):
+        assert events.classify_line(line).kind == EventKind.QUEUE_OPERATION
+
+
+def test_a_queued_message_is_timed_when_you_typed_it():
+    line = _queued("also add a test", timestamp="2026-09-18T11:58:30.000Z")
+    assert events.classify_line(line).ts == "2026-09-18T11:58:30.000Z"
+    # No time of its own: the line's.
+    assert events.classify_line(_queued("also add a test")).ts == "2026-09-18T12:00:00.000Z"
+    # A line that is no message keeps the line's time, whatever else it carries.
+    task = attachment_line(
+        "queued_command", prompt="<task-notification><task-id>t1</task-id></task-notification>",
+        commandMode="task-notification", timestamp="2026-09-18T11:58:30.000Z",
+    )
+    assert events.classify_line(task).ts == "2026-09-18T12:00:00.000Z"
+
+
+def test_a_queued_message_with_an_image_says_so_and_is_not_vague():
+    blocks = [{"type": "text", "text": "it's broken"}, _image_block()]
+    with_image = events.classify_line(_queued(blocks)).detail
+    assert with_image["has_image"] is True
+    assert "vague" not in with_image
+    without = events.classify_line(_queued("it's broken")).detail
+    assert without.get("vague") is True and "has_image" not in without
+
+
+def test_a_queued_message_of_only_an_image_is_still_yours():
+    detail = events.classify_line(_queued([_image_block()])).detail
+    assert detail["origin"] == "human" and detail["has_image"] is True
+
+
+def test_a_queued_peer_message_is_only_named_a_peer():
+    peer = events.classify_line(_queued("please review my branch", origin={"kind": "peer"}, isMeta=True))
+    assert peer.detail == {"origin": "peer"}
+
+
+@pytest.mark.parametrize("attachment", [
+    {"commandMode": "task-notification", "origin": None},
+    {"origin": {"kind": "task-notification"}},
+    {"isMeta": True},
+    {"origin": {"kind": "coordinator"}},
+    {"commandMode": None},
+])
+def test_a_queued_line_you_didnt_type_is_not_a_message(attachment):
+    line = _queued("<task-notification><task-id>t1</task-id><status>completed</status></task-notification>")
+    line["attachment"].update(attachment)
+    event = events.classify_line(line)
+    assert event.kind == EventKind.QUEUE_OPERATION
+    assert "origin" not in event.detail and "chars" not in event.detail
+    # Its task id and status are still read.
+    assert event.detail == {"task_id": "t1", "status": "completed"}
+
+
+def test_a_queued_prompt_that_is_not_text_is_not_a_message():
+    for prompt in (None, 7, {"a": "b"}):
+        event = events.classify_line(_queued(prompt))
+        assert event.detail == {}
+
+
+@pytest.mark.parametrize("prefix", events.NOT_TYPED_PREFIXES)
+def test_a_queued_line_that_starts_like_a_system_line_is_not_a_message(prefix):
+    event = events.classify_line(_queued(prefix + " something went on"))
+    assert "origin" not in event.detail
+
+
+def test_a_queued_skill_you_ran_is_your_message():
+    text = "<command-message>grill-me</command-message>\n<command-name>/grill-me</command-name>"
+    event = events.classify_line(_queued(text))
+    assert event.detail["origin"] == "human"
+    # A skill's own text is not what you wrote, so it gets no shape flags.
+    assert not {"steps", "vague", "ack", "go", "status", "adjust", "remind"} & event.detail.keys()
+
+
+def test_an_enqueue_line_never_carries_the_message():
+    event = events.classify_line(queue_operation_line("enqueue", content="please rename the secret file"))
+    assert event.kind == EventKind.QUEUE_OPERATION
+    assert event.subkind == "enqueue"
+    assert event.detail == {}
+    assert "secret" not in repr(event)
+
+
+_FLAG_TEXTS = [
+    "continue",
+    "go ahead",
+    "implement the plan",
+    "how is it going?",
+    "any updates",
+    "actually, make it blue",
+    "rename it to gadget",
+    "I told you to use tabs",
+    "why didn't you run the tests",
+    "thanks",
+    "it's broken",
+    "1. add login\n2. add logout\n3. add a page",
+    "no, that's wrong, fix it",
+    "Fix src/app/models.py then run the tests",
+    "ok",
+]
+
+
+@pytest.mark.parametrize("text", _FLAG_TEXTS)
+def test_a_message_gets_the_same_flags_typed_or_queued(text):
+    typed = events.classify_line(user_str_line(text, origin={"kind": "human"})).detail
+    queued = events.classify_line(_queued(text)).detail
+    shared = {k: v for k, v in typed.items() if k not in ("has_paste", "correction") or v}
+    queued_shared = {k: v for k, v in queued.items() if k not in ("origin", "chars", "has_paste")}
+    assert queued_shared == shared
+
+
+@pytest.mark.parametrize("text, key", [
+    ("continue", "go"),
+    ("Go ahead.", "go"),
+    ("do it", "go"),
+    ("how is it going?", "status"),
+    ("is it done yet", "status"),
+    ("progress?", "status"),
+    ("actually, make it blue", "adjust"),
+    ("a bit smaller please", "adjust"),
+    ("I already told you to use tabs", "remind"),
+    ("you forgot to run the tests", "remind"),
+    ("thanks", "ack"),
+])
+def test_a_typed_message_gets_its_flag(text, key):
+    detail = events.classify_line(user_str_line(text, origin={"kind": "human"})).detail
+    assert detail.get(key) is True
+    assert detail["has_paste"] is False and "correction" in detail
+
+
+@pytest.mark.parametrize("text", [
+    "continue with the migration but keep the old column and add an index on the new one",
+    "can you make it blue?",
+    "what is the status of the migration and which tables are still left to convert",
+    "fix the parser",
+])
+def test_a_typed_request_is_not_a_go_a_status_or_an_adjust(text):
+    detail = events.classify_line(user_str_line(text, origin={"kind": "human"})).detail
+    assert not {"go", "status", "adjust", "remind", "ack"} & detail.keys()
+
+
+def test_a_typed_message_with_an_image_says_so():
+    blocks = [{"type": "text", "text": "this is wrong"}, _image_block()]
+    event = events.classify_line(user_block_line(blocks, origin={"kind": "human"}))
+    assert event.kind == EventKind.HUMAN_TEXT
+    assert event.detail["has_image"] is True
+    # A desktop image message has no "[Image #" in its text.
+    assert "vague" not in event.detail
+
+
+def test_a_skill_you_ran_is_not_read_for_its_shape():
+    text = (
+        "<command-message>grill-me</command-message>\n<command-name>/grill-me</command-name>\n"
+        "<command-args>1. a\n2. b\n3. c</command-args>"
+    )
+    detail = events.classify_line(user_str_line(text)).detail
+    assert detail["command"] == "grill-me"
+    assert not {"steps", "vague", "ack", "go", "status", "adjust", "remind"} & detail.keys()
+
+
+# What a line starts with when you didn't type it.
+
+_APP_QUIT = "The app was quit while you were working. Pick up where you left off."
+_CROSS_SESSION = "<cross-session-message from=\"abc\">hello</cross-session-message>"
+
+
+@pytest.mark.parametrize("text", [
+    _APP_QUIT,
+    "  " + _APP_QUIT,
+    _CROSS_SESSION,
+    "Another Claude session sent a message: hello",
+    "[SYSTEM NOTIFICATION] the build finished",
+    "<agent-message>done</agent-message>",
+    "<<autonomous-loop>> tick",
+    "<bash-input>ls</bash-input>",
+    "<local-command-stdout>ok</local-command-stdout>",
+])
+def test_a_line_you_didnt_type_is_not_human_text(text):
+    event = events.classify_line(user_str_line(text, origin={"kind": "human"}))
+    assert event.kind != EventKind.HUMAN_TEXT
+
+
+@pytest.mark.parametrize("text", [_APP_QUIT, _CROSS_SESSION, "Another Claude session sent a message: hi"])
+def test_the_new_not_typed_lines_are_meta_not_typed(text):
+    for line in (
+        user_str_line(text, origin={"kind": "human"}),
+        user_str_line(text, promptSource="sdk", origin={"kind": "human"}),
+        user_block_line([{"type": "text", "text": text}], origin={"kind": "human"}),
+    ):
+        event = events.classify_line(line)
+        assert (event.kind, event.subkind) == (EventKind.META, "not_typed")
+
+
+def test_the_limit_resume_note_is_a_limit_resume_not_your_message():
+    text = events.LIMIT_RESUME_PREFIX + ", so carry on"
+    event = events.classify_line(user_str_line(text, promptSource="sdk", origin={"kind": "human"}))
+    assert event.kind == EventKind.LIMIT_RESUME
+    # Without the sdk source it is still no message of yours.
+    event = events.classify_line(user_str_line(text, origin={"kind": "human"}))
+    assert (event.kind, event.subkind) == (EventKind.META, "not_typed")
+
+
+@pytest.mark.parametrize("turn_origin", ["task_notification", "peer", "scheduled"])
+def test_a_turn_origin_can_rule_a_line_out(turn_origin):
+    event = events.classify_line(user_str_line("please do the thing", origin={"kind": "human"}, turnOrigin=turn_origin))
+    assert (event.kind, event.subkind) == (EventKind.META, "not_typed")
+
+
+@pytest.mark.parametrize("turn_origin", ["human", "sdk", None])
+def test_a_turn_origin_never_makes_a_line_yours(turn_origin):
+    # 38 scheduled tasks carry "human", and a "claude -p" session is "sdk":
+    # neither rules a message out.
+    line = user_str_line("please do the thing", origin={"kind": "human"}, turnOrigin=turn_origin)
+    assert events.classify_line(line).kind == EventKind.HUMAN_TEXT
+    line = user_str_line(_APP_QUIT, origin={"kind": "human"}, turnOrigin=turn_origin)
+    assert events.classify_line(line).kind == EventKind.META
+
+
+def test_a_skill_you_ran_stays_your_message_whatever_its_prefix():
+    text = "<command-message>grill-me</command-message>\n<command-name>/grill-me</command-name>"
+    assert events.classify_line(user_str_line(text)).kind == EventKind.HUMAN_TEXT
+
+
+# Attachment classes.
+
+
+def test_an_output_style_attachment_is_a_reminder():
+    event = events.classify_line(attachment_line("output_style", style="default"))
+    assert event.kind == EventKind.REMINDER and event.subkind == "output_style"
+
+
+def test_the_output_style_instructions_stay_a_cache_signal():
+    event = events.classify_line(attachment_line("output_style_instructions"))
+    assert event.kind == EventKind.CACHE_SIGNAL
+
+
+def test_an_output_style_reminder_no_longer_hides_a_queued_message():
+    kinds = [
+        events.classify_line(attachment_line("output_style", style="default")),
+        events.classify_line(_queued("also add a test")),
+    ]
+    assert events.primary_kind(kinds) == EventKind.QUEUE_OPERATION
+
+
+def test_permission_mode_and_informational_lines_are_ignorable():
+    assert events.classify_line(ignorable_line("permission-mode", permissionMode="plan")) is None
+    assert events.classify_line(system_line("informational", content="note")) is None
+
+
+# One sample of every record type seen in real transcripts.
+
+_ATTACHMENT_TYPES_SEEN = [
+    "agent_listing_delta", "auto_mode", "auto_mode_exit", "batching_reminder_sent", "budget_usd",
+    "command_permissions", "compact_file_reference", "credential_org", "date", "date_change",
+    "deferred_tools_delta", "deferred_tools_record", "directory", "edited_text_file", "environment", "file",
+    "hook_additional_context", "hook_blocking_error", "hook_cancelled", "hook_non_blocking_error",
+    "hook_success", "hook_system_message", "inlined_image_paths", "instructions", "invoked_skills",
+    "mcp_instructions_delta", "model", "nested_memory", "output_style", "output_style_instructions",
+    "plan_file_reference", "plan_mode", "plan_mode_exit", "prompt_snapshot", "queued_command",
+    "read_truncation_notice", "remote_session_change", "session_context", "silent_turn_reminder",
+    "skill_listing", "structured_output", "task_reminder", "task_status", "thinking_drop",
+    "thinking_stripped", "total_tokens_reminder", "ultra_effort_enter", "ultra_effort_exit",
+    "workflow_keyword_request",
+]
+_SYSTEM_SUBTYPES_SEEN = [
+    "api_error", "compact_boundary", "local_command", "model_refusal_fallback", "stop_hook_summary",
+]
+#: Types the parser drops on purpose, counted by name.
+_IGNORABLE_TYPES_SEEN = [
+    "agent-name", "agent-setting", "ai-title", "artifact-autoreact-ledger", "artifact-comment-monitor",
+    "atis-latch", "bridge-session", "cost-state", "custom-title", "file-history-delta",
+    "file-history-snapshot", "frame-link", "last-prompt", "mode", "permission-mode", "pr-link",
+]
+
+
+@pytest.mark.parametrize("attachment_type", _ATTACHMENT_TYPES_SEEN)
+def test_every_attachment_type_seen_is_classified(attachment_type):
+    event = events.classify_line(attachment_line(attachment_type))
+    assert event is not None and event.kind != EventKind.UNKNOWN
+
+
+@pytest.mark.parametrize("subtype", _SYSTEM_SUBTYPES_SEEN)
+def test_every_system_subtype_seen_is_classified(subtype):
+    event = events.classify_line(system_line(subtype))
+    assert event is not None and event.kind != EventKind.UNKNOWN
+
+
+def test_the_informational_system_subtype_is_ignored():
+    assert events.classify_line(system_line("informational")) is None
+
+
+@pytest.mark.parametrize("line_type", _IGNORABLE_TYPES_SEEN)
+def test_every_ignorable_type_seen_is_dropped_not_unknown(line_type):
+    assert events.classify_line(ignorable_line(line_type)) is None
+
+
+def test_every_other_record_type_seen_is_classified():
+    samples = [
+        queue_operation_line("enqueue"),
+        queue_operation_line("dequeue"),
+        user_str_line("fix the bug", origin={"kind": "human"}),
+        user_str_line("fix the bug"),
+        user_block_line([{"type": "text", "text": "fix the bug"}]),
+        user_block_line([tool_result_block("tu_1", "ok")]),
+        user_str_line("<command-name>/clear</command-name>"),
+        user_str_line("<scheduled-task>nightly</scheduled-task>"),
+        user_str_line("[Request interrupted by user]"),
+        user_str_line("<task-notification><task-id>t1</task-id></task-notification>"),
+        user_str_line("hey", origin={"kind": "peer"}),
+        user_str_line("note", isMeta=True),
+        user_str_line("summary", isCompactSummary=True),
+    ]
+    for line in samples:
+        event = events.classify_line(line)
+        assert event is not None and event.kind != EventKind.UNKNOWN, line
+    # An assistant line is not an event: the parser reads it as a turn.
+    assert events.classify_line(turn_line()) is None
+
+
+# -- Plan feedback, denial buckets and interrupt subkinds (PARSER_VERSION 37) --
+
+
+def _feedback_event(chars: int = 20, word: str = "question") -> Event:
+    return Event(kind=EventKind.PLAN_FEEDBACK, subkind=word, ts=None, size_chars=chars)
+
+
+def test_a_plan_feedback_event_ranks_below_a_message_you_typed_and_above_a_denial():
+    typed = events.classify_line(user_str_line("also add a test", origin={"kind": "human"}))
+    denial = events.classify_line(user_str_line("(denied)", toolDenialKind="user-rejected"))
+    assert events.primary_kind([denial, _feedback_event(), typed]) == EventKind.HUMAN_TEXT
+    assert events.primary_kind([denial, _feedback_event()]) == EventKind.PLAN_FEEDBACK
+    assert events.primary_kind([_feedback_event()]) == EventKind.PLAN_FEEDBACK
+    # An interrupt (and the usage limit above it) still wins.
+    stop = events.classify_line(user_str_line("[Request interrupted by user for tool use]"))
+    assert events.primary_kind([_feedback_event(), stop]) == EventKind.INTERRUPT
+
+
+def test_plan_feedback_is_never_classified_from_a_line():
+    # parse.py emits it from a plan's answer; no line is one on its own.
+    line = user_block_line([tool_result_block("tu1", "The user said:\nwhy not?", is_error=True)])
+    assert events.classify_line(line).kind != EventKind.PLAN_FEEDBACK
+    assert EventKind.PLAN_FEEDBACK in events.PRECEDENCE
+
+
+@pytest.mark.parametrize("text, subkind", [
+    ("[Request interrupted by user]", None),
+    ("[Request interrupted by user for tool use]", "tool_refusal"),
+    ("[Request interrupted: session shutdown]", "shutdown"),
+    ("[Request interrupted by shutdown]", "shutdown"),
+    ("[Request interrupted: app quit]", "shutdown"),
+])
+def test_an_interrupt_line_keeps_its_kind_and_gains_a_subkind(text, subkind):
+    for line in (
+        user_str_line(text),
+        user_block_line([{"type": "text", "text": text}]),
+    ):
+        event = events.classify_line(line)
+        assert event.kind == EventKind.INTERRUPT
+        assert event.subkind == subkind
+
+
+def test_a_stop_is_an_interrupt_that_is_not_the_sessions_end_or_the_tail_of_an_answered_dialog():
+    def interrupt(text: str, after: str | None = None) -> Event:
+        event = events.classify_line(user_str_line(text))
+        if after is not None:
+            event.detail["after"] = after
+        return event
+
+    assert events.is_stop(interrupt("[Request interrupted by user]"))
+    assert events.is_stop(interrupt("[Request interrupted by user for tool use]"))
+    for after in ("refused", "aborted"):
+        assert events.is_stop(interrupt("[Request interrupted by user for tool use]", after))
+    for after in ("plan_rejected", "question_declined", "hook_blocked", "auto_blocked", "auto_unavailable"):
+        assert not events.is_stop(interrupt("[Request interrupted by user for tool use]", after))
+    assert not events.is_stop(interrupt("[Request interrupted by shutdown]"))
+    assert not events.is_stop(events.classify_line(user_str_line("(denied)", toolDenialKind="user-rejected")))
+
+
+def test_a_stop_window_holds_only_calls_you_turned_down_or_closed_dialogs():
+    assert events.stop_window({})
+    assert events.stop_window({"refused": 2, "aborted": 1})
+    assert events.stop_window({"refused": 1, "plan_rejected": 0})
+    for bucket in ("plan_rejected", "question_declined", "hook_blocked", "auto_blocked", "auto_unavailable"):
+        assert not events.stop_window({"refused": 1, bucket: 1})
+
+
+@pytest.mark.parametrize("kind, bucket", [
+    ("permission-rule", "refused"),
+    ("user-rejected", "refused"),
+    ("automode-blocked", "auto_blocked"),
+    ("automode-unavailable", "auto_unavailable"),
+    ("saver-redirect", "hook_blocked"),
+    ("interrupted", "aborted"),
+    ("cancelled", "aborted"),
+    ("a-kind-from-a-newer-claude-code", "aborted"),
+    (None, "aborted"),
+])
+def test_a_denial_event_without_a_bucket_reads_one_off_its_kind(kind, bucket):
+    assert events.denial_bucket_for_kind(kind) == bucket
+    event = Event(kind=EventKind.TOOL_DENIAL, subkind=kind, ts=None)
+    assert events.denial_bucket_of(event) == bucket
+    event.detail["bucket"] = "plan_rejected"
+    assert events.denial_bucket_of(event) == "plan_rejected"
+    event.detail["bucket"] = "not-a-bucket"
+    assert events.denial_bucket_of(event) == bucket
 
 
 # -- Full parse_transcript pass over one fixture with everything ----------

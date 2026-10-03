@@ -464,8 +464,11 @@ the words:
   Claude answered it (you pressed Esc before any reply, and Claude Code
   put it back to edit; the new copy has the same parent line). Its turn
   counts the copy that was answered, not both.
-- ``Turn.reply_asked: bool = False`` -- this reply's last words hold a
-  question mark, so your next message answers it.
+- ``Turn.reply_asked: bool = False`` -- this reply ends on a question, so
+  your next message answers it (since ``PARSER_VERSION`` 37,
+  ``prompt_shape.ends_on_question``: a question mark in one of the last
+  two sentences or in a closing list item, not in code, a URL, a quoted
+  question, a tip, the feedback reminder or a tag).
 - ``Turn.coach_tip: bool = False`` -- this reply showed a ClaudeGlass tip
   (``capture_catalogue.TIP_LABEL``).
 
@@ -533,6 +536,155 @@ The same bump puts ``Turn.edit_kind`` on that temp test: an
 Edit/Write/MultiEdit/NotebookEdit target in any of those forms is
 "scratch". Before it, only the temp dir's own spelling matched, so a
 forward-slash path on Windows counted as a "real" edit.
+
+Parser-signals addition (``PARSER_VERSION`` 37). What the prompting
+counts need about messages the transcript carried but no counter saw, and
+about how each message reads. Counts and yes/no only; the text of a
+message is read in memory and dropped:
+
+- ``Turn.human_adjust``, ``human_go``, ``human_status``, ``human_remind``
+  (all ``bool = False``) -- the preceding message you typed tweaked the
+  work ("rename it", "a bit smaller"), only said to carry on ("continue",
+  "implement the plan"), only asked how it was going, or repeated
+  something you had said ("I told you"). ``prompt_shape.is_adjust``,
+  ``is_go``, ``is_status`` and ``is_remind``, patterns in
+  ``capture_catalogue``, kept apart from ``CORRECTION_PATTERN``.
+- ``Turn.queued_prompts: int = 0`` -- how many messages you typed while
+  Claude was working (Claude Code queues them and attaches each as a
+  ``queued_command``) arrived since the previous reply. ``queued_chars``
+  is their total length. ``queued_steps`` is the most separate changes any
+  of them asked for, when two or more. ``queued_correction``,
+  ``queued_adjust``, ``queued_go`` and ``queued_status`` (``bool =
+  False``) say whether any of them read that way. Only a message with
+  ``commandMode`` "prompt", a human or missing origin and no ``isMeta`` is
+  one; a replayed record (same ``uuid``) and a copy of a message also
+  written as a user line within 60 seconds are dropped. A queued message
+  is a ``QUEUE_OPERATION``, never ``HUMAN_TEXT``, so it never starts a
+  cycle. Its ``Event.detail`` is ``{"origin": "human"}`` with the same
+  flags a typed message gets (``has_paste``, ``correction``, ``adjust``,
+  ``go``, ``status``, ``remind``, ``has_image``, ``steps``, ``vague``,
+  ``ack``, ``flags``), or ``{"origin": "peer"}``; a flag is present only
+  when true. The attachment's own ``timestamp`` is when you typed it.
+- ``Event.detail["has_image"]`` -- the message holds an image block. A
+  desktop image message carries no "[Image #" placeholder, so ``vague``
+  no longer fires on one.
+- Lines you didn't type are one list now
+  (``capture_catalogue.NOT_TYPED_PREFIXES``, shared with the hook and the
+  status line), with ``<cross-session-message``, the desktop app's
+  usage-limit resume and app-quit notes, and a ``turnOrigin`` of
+  ``task_notification``, ``peer`` or ``scheduled`` ruling a line out
+  (``human`` never rules one in). Such a line is a ``META`` event with
+  subkind ``not_typed``.
+- An ``output_style`` attachment is a ``REMINDER`` unless the style
+  changed from the last one in the transcript, when it is the
+  ``CACHE_SIGNAL`` it was. A ``permission-mode`` line and a system
+  ``informational`` line are ignored.
+
+Plan-feedback addition (``PARSER_VERSION`` 37). How each tool call that
+didn't run was answered, and what became of each plan. Closed words and
+counts only; feedback and answer text is read in memory and dropped:
+
+- ``Event.detail["bucket"]`` on every ``TOOL_DENIAL``, a word from
+  ``events.DENIAL_BUCKETS``: ``plan_rejected`` (the plan dialog sent
+  back), ``question_declined`` (an ``AskUserQuestion`` you declined),
+  ``hook_blocked`` (a hook or guard block, also a known token saver's
+  redirect), ``auto_blocked`` / ``auto_unavailable`` (the auto mode
+  classifier), ``aborted`` (a dialog closed or cancelled with no answer)
+  and ``refused`` (a call you or a deny rule turned down). Only
+  ``refused`` is a denial in the habits, waste, quality and prompting
+  counts. ``events.denial_bucket_of`` reads it, falling back to the
+  ``toolDenialKind`` for an event built without one.
+- ``INTERRUPT`` keeps its kind and gains a subkind: ``tool_refusal`` (the
+  "for tool use" line after a call turned down) or ``shutdown`` (the
+  session's end). A refusal carries ``detail["after"]``, the bucket of the
+  denial before it. ``events.is_stop`` is true for you stopping a reply:
+  not a shutdown, and not a refusal after a plan or question you
+  answered or a call a hook or the classifier blocked.
+  ``capture.py``'s exclusion of interrupts from the typed-message count
+  still holds, as the kind is unchanged.
+- ``EventKind.PLAN_FEEDBACK`` -- the answer to a rejected plan had
+  feedback in it. ``size_chars`` is its length and ``subkind`` one word
+  from ``capture_catalogue.PLAN_FEEDBACK_CLASSES`` (``question``,
+  ``critique``, ``unsure``, ``other``; ``prompt_shape.plan_feedback_class``).
+  It never opens a cycle and ranks below ``HUMAN_TEXT`` in
+  ``events.PRECEDENCE``. A plan or question answer is not a tool error:
+  ``ExitPlanMode`` results add nothing to ``Turn.tool_error_count``,
+  unless a hook or auto mode blocked the call.
+- ``PlanStats.outcome`` is ``approved`` (the dialog), ``approved_by_message``
+  (the dialog sent it back, then a go-ahead message came before the next
+  ``ExitPlanMode`` call, or ``permissionMode`` left ``plan``) or
+  ``rejected``. ``PlanStats.rejected`` stays True once you sent a plan back,
+  and ``feedback_chars`` / ``feedback_class`` hold the feedback's length
+  and word. ``handoff._approved`` and the hook's ``plan_before`` and
+  ``plan_fresh`` read the first two.
+- ``Turn.ask_rounds: int = 0`` -- clarifying ``AskUserQuestion`` round
+  trips you answered in the turn's own calls. A declined one is not a
+  round. ``Turn.preceding_denials: dict[str, int]`` -- the denial buckets
+  among the events folded into the turn (``waste`` reads it to tell a
+  stop from a plan answer), empty when there were none.
+- ``capture.Cycle`` adds ``plan_rounds`` (plans), ``rejected_rounds``
+  (plans you sent back), ``feedback_rounds`` and the class of each
+  (``plan_feedback_classes``), and ``ask_rounds``.
+
+Assistant-and-tool-signals addition (``PARSER_VERSION`` 37). What a reply
+said about its own work, and what its tool calls read and ran. Yes/no,
+closed words and counts only; a reply's text and a command are read in
+memory and dropped:
+
+- ``Turn.admit_candidate: bool = False`` -- a text block of the reply owns
+  a mistake ("I was wrong", "my mistake", "I misread", "I should have
+  checked", "you're right"; ``capture_catalogue.ADMIT_PATTERN``, read in
+  the block's first characters, outside code, URLs and a ClaudeGlass quote
+  block). "Good catch" counts only through an admission that follows it. A
+  candidate, not a verdict: the capture tag's ``admit`` word confirms one.
+  ``Turn.admit_caught: str = ""`` is, with a candidate, ``user`` when the
+  message you typed last was a correction, an adjustment, a reminder or a
+  question, else ``self``; empty without one.
+- ``Turn.tip_disowned: bool = False`` -- the reply carries a ClaudeGlass
+  tip and says, near "ClaudeGlass" and outside the tip's quote block, that
+  it misfired, was a false positive or doesn't apply
+  (``capture_catalogue.MISFIRE_PATTERN``).
+- ``Turn.read_target_chars: tuple[int, ...] = ()`` -- the size of each
+  ``Read`` result, in the order of ``read_target_hashes``; 0 for a read
+  that failed. A result Claude Code saved to a file and answered with a
+  ``<persisted-output>`` note counts as that note's preview: what stayed
+  in context.
+- ``Turn.shell_read_count: int = 0`` and ``shell_read_chars: int = 0`` --
+  the commands of the turn's shell calls that read files and the size of
+  their results (``shell_reads``: grep, rg, ``sed -n``, cat, head, tail,
+  find, git log/show/diff, Get-Content, Select-String; not a heredoc
+  write, ``sed -i``, ls, wc or git status). A call that was blocked or
+  denied is taken back, like ``shell_write_count``.
+- ``Turn.tests_run: str = ""`` -- ``full`` when a shell call ran a whole
+  test suite, ``targeted`` when it ran chosen tests only, else empty
+  (``testrun.run_scope``, the one matcher the parser, the purpose rules
+  and the capture hook share). A call that was blocked or denied is taken
+  back. ``classify._matches_test_tool`` asks the same matcher.
+- ``Turn.reply_asked`` reads the reply's closing sentences instead of any
+  question mark in its last 300 characters (see above).
+
+Workflow-agents addition (``PARSER_VERSION`` 37). A workflow agent's
+``.meta.json`` has no ``toolUseId`` or ``parentAgentId`` (none of 682 did),
+so nothing tied it to the message that started its run. Ids only:
+
+- ``Turn.workflow_runs: dict[str, tuple[str, str]] = {}`` -- ``Workflow``
+  tool_use id -> ``(runId, taskId)`` of the run the call launched, read
+  from its result (``toolUseResult.taskType == "local_workflow"``). The
+  ``runId`` is the run's directory name, so it joins to
+  ``TranscriptMeta.workflow_run_id``; the ``taskId`` is what the run's
+  task notification names. A resumed run keeps its ``runId`` (and its
+  directory), so one ``runId`` can have several calls. A call that failed
+  or whose result has no ``runId`` records nothing.
+  ``capture.WorkflowLaunches`` joins each workflow agent (keyed on
+  ``TranscriptMeta.kind == "workflow-agent"``, never on its agent type) to
+  the latest call for its ``runId`` at or before its first priced reply,
+  else to the reply before ``WorkflowRun.started``, else to none.
+  ``capture.prompt_cycles`` and ``habits`` use it for the cycle and the
+  spawning reply.
+- ``capture.Cycle`` takes the tag of a reply to a background agent's (or
+  workflow's) report from the cycle whose call launched it, not the cycle
+  that happened to be open when the report arrived (``Cycle.late_turns``,
+  ``Cycle.handed_off``). The turns, and so the cost, stay where they ran.
 
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
@@ -640,6 +792,10 @@ class EventKind(StrEnum):
     LIMIT_HIT = "limit_hit"
     LIMIT_RESUME = "limit_resume"
     AGENT_TERMINATED = "agent_terminated"
+    #: Parser-signals addition (``PARSER_VERSION`` 37, see module
+    #: docstring): your answer to a plan Claude put up. Its length and one
+    #: class word only; it never opens a cycle.
+    PLAN_FEEDBACK = "plan_feedback"
 
 
 @dataclass(slots=True)
@@ -728,8 +884,20 @@ class PlanStats:
     steps: int = 0
     files: int = 0
     chars: int = 0
-    #: "approved" | "rejected" | None (no answer seen).
+    #: "approved" | "approved_by_message" | "rejected" | None (no answer
+    #: seen). Approved by message: you typed a go-ahead, or left plan
+    #: mode, instead of answering the dialog.
     outcome: str | None = None
+    #: Parser-signals addition (see module docstring): you rejected this
+    #: plan in the dialog. It stays True when a go-ahead message later
+    #: turns ``outcome`` into "approved_by_message".
+    rejected: bool = False
+    #: Length of the feedback you gave a rejected plan, 0 when you gave
+    #: none.
+    feedback_chars: int = 0
+    #: Parser-signals addition: how that feedback reads, a word from
+    #: ``capture_catalogue.PLAN_FEEDBACK_CLASSES``; None when none given.
+    feedback_class: str | None = None
 
 
 @dataclass(slots=True)
@@ -949,6 +1117,41 @@ class Turn:
     #: whether it showed a ClaudeGlass tip.
     reply_asked: bool = False
     coach_tip: bool = False
+    #: Parser-signals addition (see module docstring): how the preceding
+    #: message you typed reads, and the messages you typed while Claude
+    #: was working since the previous reply.
+    human_adjust: bool = False
+    human_go: bool = False
+    human_status: bool = False
+    human_remind: bool = False
+    queued_prompts: int = 0
+    queued_chars: int = 0
+    queued_steps: int = 0
+    queued_correction: bool = False
+    queued_adjust: bool = False
+    queued_go: bool = False
+    queued_status: bool = False
+    #: Parser-signals addition (see module docstring): clarifying
+    #: ``AskUserQuestion`` round trips this turn made.
+    ask_rounds: int = 0
+    #: Parser-signals addition: denial bucket word -> tool calls turned
+    #: away since the previous reply (see ``events.DENIAL_BUCKETS``).
+    preceding_denials: dict = field(default_factory=dict)
+    #: Parser-signals addition (see module docstring): what Claude said
+    #: about its own mistakes and a tip, and what its tool calls read and
+    #: ran. Yes/no, closed words and counts only.
+    admit_candidate: bool = False
+    admit_caught: str = ""
+    tip_disowned: bool = False
+    read_target_chars: tuple[int, ...] = ()
+    shell_read_count: int = 0
+    shell_read_chars: int = 0
+    tests_run: str = ""
+    #: Workflow-agents addition (``PARSER_VERSION`` 37): ``Workflow``
+    #: tool_use id -> ``(runId, taskId)`` of the run the call launched. Ids
+    #: only. A resumed run keeps its ``runId``, so one id can have several
+    #: calls.
+    workflow_runs: dict[str, tuple[str, str]] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

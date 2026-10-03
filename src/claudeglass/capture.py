@@ -21,7 +21,12 @@ for the billing mode):
 
 A *prompt cycle* (:func:`prompt_cycles`) is one message of yours and
 everything Claude did about it: the turn after a human message up to
-the next one, with the subagents those turns started, at any depth.
+the next one, with the subagents those turns started, at any depth. A
+workflow's agents join the cycle of the reply that started (or resumed)
+their run (:class:`WorkflowLaunches`). A tag written in reply to a
+background agent's or a workflow's report counts for the cycle whose call
+launched it, even when you had sent another message by then
+(``Cycle.late_turns``); the turns, and so the cost, stay where they ran.
 
 :func:`feedback_spans` ties each /cg-feedback answer to the work it
 rates: the cycles since the previous feedback (answered or declined),
@@ -30,6 +35,7 @@ or since the session started.
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 
@@ -89,6 +95,21 @@ class Cycle:
     turns: list[Turn] = field(default_factory=list)
     #: Subagent transcripts started in this cycle, at any depth.
     subs: list[TranscriptResult] = field(default_factory=list)
+    #: Replies in later cycles that answered the report of an agent (or
+    #: workflow) this cycle launched, in order. Their tags are this
+    #: cycle's; the turns still belong to the cycle they ran in.
+    late_turns: list[Turn] = field(default_factory=list)
+    #: Positions in ``turns`` of replies that answered an earlier cycle's
+    #: report: their tags are that cycle's, not this one's.
+    handed_off: set[int] = field(default_factory=set)
+
+    @property
+    def tag_turns(self) -> list[Turn]:
+        """The turns whose tags are this cycle's: its own, less the
+        replies to an earlier cycle's agents, then the later replies to
+        its own."""
+        own = [turn for n, turn in enumerate(self.turns) if n not in self.handed_off]
+        return own + self.late_turns
 
     @property
     def tag(self):
@@ -97,8 +118,10 @@ class Cycle:
         when an earlier or a later tag in the same cycle (a retry, a
         correction) left it unset (CAP-10 -- this used to keep only the
         last tag whole, silently losing a key an earlier tag answered
-        and the last one didn't). ``None`` when no turn wrote one."""
-        tags = [t.cap for t in self.turns if t.cap is not None and t.cap.has_tl]
+        and the last one didn't). A tag written in reply to the report of
+        an agent this cycle launched counts here, in whichever cycle the
+        reply ran (``tag_turns``). ``None`` when no turn wrote one."""
+        tags = [t.cap for t in self.tag_turns if t.cap is not None and t.cap.has_tl]
         if not tags:
             return None
         merged = tags[0]
@@ -120,6 +143,38 @@ class Cycle:
             judge_usd=sum(t.judge_usd for t in tags),
         )
 
+    @property
+    def plan_rounds(self) -> int:
+        """Plans Claude put up in this cycle: its ``ExitPlanMode`` calls."""
+        return sum(1 for turn in self.turns if turn.plan_stats is not None)
+
+    @property
+    def rejected_rounds(self) -> int:
+        """Plans you sent back in the dialog, even one you then approved by
+        typing a go-ahead."""
+        return sum(1 for turn in self.turns if turn.plan_stats is not None and turn.plan_stats.rejected)
+
+    @property
+    def feedback_rounds(self) -> int:
+        """Rejected plans you typed feedback for."""
+        return sum(1 for turn in self.turns if turn.plan_stats is not None and turn.plan_stats.feedback_chars)
+
+    @property
+    def plan_feedback_classes(self) -> tuple[str, ...]:
+        """How each round's feedback read, in order: one word from
+        ``capture_catalogue.PLAN_FEEDBACK_CLASSES`` per round with any."""
+        return tuple(
+            turn.plan_stats.feedback_class
+            for turn in self.turns
+            if turn.plan_stats is not None and turn.plan_stats.feedback_class
+        )
+
+    @property
+    def ask_rounds(self) -> int:
+        """Clarifying questions Claude asked you in this cycle that you
+        answered."""
+        return sum(turn.ask_rounds for turn in self.turns)
+
 
 #: ``CaptureTag`` fields about the tag itself, not what it says.
 _TAG_COST_FIELDS = ("has_tl", "chars", "judged", "judge_usd")
@@ -129,10 +184,127 @@ def _priced(result: TranscriptResult) -> list[Turn]:
     return [turn for turn in result.turns if turn.turn_index > 0]
 
 
-def prompt_cycles(top: TranscriptResult, subs=()) -> list[Cycle]:
+_FLOOR = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _moment(ts: str | None) -> datetime | None:
+    """``ts`` as an aware time (UTC when it names no zone), or ``None``."""
+    moment = _parse_ts(ts) if ts else None
+    if moment is not None and moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def _timeline(turns: list[Turn]) -> list[datetime]:
+    """One time per turn that never runs backwards, so it can be searched:
+    a turn with no time (or one stamped before the turn before it) takes
+    the earlier one's."""
+    out = []
+    last = _FLOOR
+    for turn in turns:
+        moment = _moment(turn.ts)
+        if moment is not None and moment > last:
+            last = moment
+        out.append(last)
+    return out
+
+
+def _first_moment(sub: TranscriptResult) -> datetime | None:
+    """When a subagent first spoke: its first priced turn with a time,
+    else its first turn with one."""
+    for turns in (_priced(sub), sub.turns):
+        for turn in turns:
+            moment = _moment(turn.ts)
+            if moment is not None:
+                return moment
+    return None
+
+
+class WorkflowLaunches:
+    """Which main-session reply started each workflow agent.
+
+    A workflow agent's metadata names its run (``workflow_run_id``, the
+    run's directory) but no tool call, so the join is through the
+    ``Workflow`` calls themselves (``Turn.workflow_runs``). A resumed run
+    keeps its ``runId`` and its directory, so one run can have several
+    calls; its agents are split between them by time: each agent goes to
+    the latest call at or before its first priced turn. Failing that (a
+    digest from before the parser recorded the calls, or a call whose
+    result was never logged) the agent goes to the reply before the run
+    file's ``started`` time, and failing that to none.
+
+    Only a ``kind == "workflow-agent"`` transcript is ever joined: a
+    workflow agent's ``agent_type`` is a custom name as often as
+    ``workflow-subagent``, so the kind is what says it is one.
+
+    Every answer is an index into the main session's priced turns, the
+    one :func:`prompt_cycles` and ``habits`` both use for "the reply
+    that started it".
+    """
+
+    def __init__(self, top: TranscriptResult, runs=()):
+        turns = _priced(top)
+        self.stamps = _timeline(turns)
+        #: runId -> [(priced-turn index, tool_use_id)], in turn order.
+        self._calls: dict[str, list[tuple[int, str]]] = {}
+        #: taskId -> the tool_use_id of the call that launched it.
+        self._tasks: dict[str, str] = {}
+        for i, turn in enumerate(turns):
+            for tool_use_id, (run_id, task_id) in turn.workflow_runs.items():
+                self._calls.setdefault(run_id, []).append((i, tool_use_id))
+                if task_id:
+                    self._tasks.setdefault(task_id, tool_use_id)
+        self._started: dict[str, datetime] = {}
+        for run in runs:
+            moment = _moment(run.started)
+            if run.run_id and moment is not None:
+                self._started.setdefault(run.run_id, moment)
+
+    def task_use(self, task_id: str) -> str | None:
+        """The tool_use_id of the ``Workflow`` call that launched
+        ``task_id`` (what the run's task notification names)."""
+        return self._tasks.get(task_id)
+
+    def call_for(self, sub: TranscriptResult) -> tuple[int, str] | None:
+        """``(priced-turn index, tool_use_id)`` of the ``Workflow`` call
+        that started ``sub``, or ``None`` for an agent that isn't a
+        workflow agent or whose run has no call at or before it."""
+        run_id = sub.meta.workflow_run_id
+        if sub.meta.kind != "workflow-agent" or not run_id:
+            return None
+        calls = self._calls.get(run_id)
+        if not calls:
+            return None
+        first = _first_moment(sub)
+        if first is None:
+            return calls[0]
+        found = None
+        for i, tool_use_id in calls:
+            if self.stamps[i] <= first:
+                found = (i, tool_use_id)
+        return found
+
+    def turn_index(self, sub: TranscriptResult) -> int | None:
+        """The priced turn of the main session that started ``sub``, or
+        ``None``."""
+        if sub.meta.kind != "workflow-agent":
+            return None
+        call = self.call_for(sub)
+        if call is not None:
+            return call[0]
+        started = self._started.get(sub.meta.workflow_run_id or "")
+        if started is None:
+            return None
+        i = bisect.bisect_right(self.stamps, started) - 1
+        return i if i >= 0 else None
+
+
+def prompt_cycles(top: TranscriptResult, subs=(), workflows=()) -> list[Cycle]:
     """The prompt cycles of a main-session transcript, each with the
     subagents it started. Turns before your first message (a resumed
-    session's leftovers) make no cycle."""
+    session's leftovers) make no cycle. ``workflows`` (the session's
+    ``WorkflowRun`` files) lets a workflow agent whose run has no logged
+    call still find its cycle by when the run started."""
     turns = _priced(top)
     starts = [i for i, turn in enumerate(turns) if turn.human_prompt_chars is not None]
     cycles = [
@@ -145,12 +317,60 @@ def prompt_cycles(top: TranscriptResult, subs=()) -> list[Cycle]:
         for turn in cycle.turns:
             for tool_use_id in turn.tool_use_ids:
                 cycle_of_use[tool_use_id] = n
+    launches = WorkflowLaunches(top, workflows)
+    by_workflow: dict[int, int] = {}
+    for sub in subs:
+        at = launches.turn_index(sub)
+        if at is not None and at >= starts[0]:
+            by_workflow[id(sub)] = bisect.bisect_right(starts, at) - 1
     by_agent = {agent_key(sub.meta.agent_id): sub for sub in subs if sub.meta.agent_id}
     for sub in subs:
-        n = _cycle_for(sub, cycle_of_use, by_agent)
+        n = _cycle_for(sub, cycle_of_use, by_agent, by_workflow)
         if n is not None:
             cycles[n].subs.append(sub)
+    _hand_off_tags(top, turns, starts, cycles, cycle_of_use, subs, launches)
     return cycles
+
+
+def _hand_off_tags(top, turns, starts, cycles, cycle_of_use, subs, launches) -> None:
+    """A reply to an agent's report is about that agent's work, so its tag
+    belongs to the cycle whose call launched the agent, not to the cycle
+    that happened to be open when the report arrived. The report is a
+    task notification (``task_id`` is the background agent's id, or the
+    workflow's task id); the reply is the first turn after it, when
+    nothing outranked it as the reason that turn ran
+    (``preceding_primary``): a message of yours between them starts a
+    cycle of its own and hands nothing off. The first report a reply
+    answers decides where it goes."""
+    launched = {
+        agent_key(sub.meta.agent_id): sub.meta.tool_use_id
+        for sub in subs
+        if sub.meta.agent_id and sub.meta.tool_use_id and sub.meta.kind != "workflow-agent"
+    }
+    stamps = launches.stamps
+    handed: dict[int, int] = {}
+    decided: set[int] = set()
+    for event in top.events:
+        if event.kind != EventKind.TASK_NOTIFICATION:
+            continue
+        task_id = event.detail.get("task_id")
+        if not isinstance(task_id, str):
+            continue
+        use_id = launched.get(task_id) or launches.task_use(task_id)
+        origin = cycle_of_use.get(use_id) if use_id else None
+        moment = _moment(event.ts)
+        if origin is None or moment is None:
+            continue
+        i = bisect.bisect_left(stamps, moment)
+        if i >= len(turns) or i in decided or turns[i].preceding_primary != EventKind.TASK_NOTIFICATION:
+            continue
+        decided.add(i)
+        if bisect.bisect_right(starts, i) - 1 > origin:
+            handed[i] = origin
+    for i, origin in sorted(handed.items()):
+        n = bisect.bisect_right(starts, i) - 1
+        cycles[n].handed_off.add(i - cycles[n].start)
+        cycles[origin].late_turns.append(turns[i])
 
 
 #: Which of a cycle's feedback wins: the answers read from the skill's
@@ -230,14 +450,18 @@ def feedback_spans(cycles: list[Cycle]) -> list[FeedbackSpan]:
     return spans
 
 
-def _cycle_for(sub, cycle_of_use, by_agent) -> int | None:
+def _cycle_for(sub, cycle_of_use, by_agent, by_workflow=None) -> int | None:
     """The cycle a subagent belongs to: the one whose turn started it,
-    or its parent agent's, for a nested spawn."""
+    or its parent agent's, for a nested spawn. A workflow agent has no
+    tool call to follow: ``by_workflow`` (``id(sub)`` -> cycle) says where
+    its run was started."""
     seen = set()
     while sub is not None and id(sub) not in seen:
         seen.add(id(sub))
         if sub.meta.tool_use_id in cycle_of_use:
             return cycle_of_use[sub.meta.tool_use_id]
+        if by_workflow and id(sub) in by_workflow:
+            return by_workflow[id(sub)]
         sub = by_agent.get(agent_key(sub.meta.parent_agent_id)) if sub.meta.parent_agent_id else None
     return None
 
@@ -568,10 +792,10 @@ def _cycle_cost(cycle: Cycle, pricing) -> float:
     return sum(price_turn(turn, pricing.resolve_model(turn.model)).total for turn in turns)
 
 
-def _add_feedback_runs(use: CaptureUsage, top: TranscriptResult, subs, pricing, since) -> bool:
+def _add_feedback_runs(use: CaptureUsage, top: TranscriptResult, subs, pricing, since, workflows=()) -> bool:
     """Price this session's /cg-feedback runs; ``True`` when it had any."""
     found = False
-    for cycle in prompt_cycles(top, subs):
+    for cycle in prompt_cycles(top, subs, workflows):
         if not is_feedback_run(cycle):
             continue
         moment = _parse_ts(cycle.turns[0].ts) if cycle.turns else None
@@ -606,7 +830,9 @@ def feedback_usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureU
     use = CaptureUsage(since=since)
     start = _start(since)
     for bundle in corpus.sessions:
-        if bundle.top is not None and _add_feedback_runs(use, bundle.top, bundle.subs, pricing, start):
+        if bundle.top is not None and _add_feedback_runs(
+            use, bundle.top, bundle.subs, pricing, start, getattr(bundle, "workflows", ())
+        ):
             use.spend += _spend(bundle.top, pricing, start)
     return use
 
@@ -628,7 +854,8 @@ def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
             sub for sub in bundle.subs
             if captured_top or sub.meta.cap_injections > 0 or any(t.cap is not None and t.cap.judged for t in sub.turns)
         ]
-        rated = top is not None and _add_feedback_runs(use, top, bundle.subs, pricing, start)
+        workflows = getattr(bundle, "workflows", ())
+        rated = top is not None and _add_feedback_runs(use, top, bundle.subs, pricing, start, workflows)
         if rated and not captured_top:
             # Its spend, so capture's share stays a share of what the
             # sessions it cost anything in spent.
@@ -647,7 +874,7 @@ def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
             _add_tags(use, top, carry, pricing, False, start)
             use.spend += _spend(top, pricing, start)
             top_turns = _priced(top)
-            for cycle in prompt_cycles(top):
+            for cycle in prompt_cycles(top, bundle.subs, workflows):
                 moment = _parse_ts(cycle.turns[0].ts) if cycle.turns else None
                 if start is not None and (moment is None or moment < start):
                     continue

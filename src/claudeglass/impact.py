@@ -225,7 +225,7 @@ def session_facts(corpus, pricing: Pricing) -> list[SessionFacts]:
         if start is None:
             continue
         keys = snapshots_mod.snapshot_project_keys(bundle.slug) if bundle.slug else ()
-        cycles = capture_mod.prompt_cycles(top)
+        cycles = capture_mod.prompt_cycles(top, bundle.subs, bundle.workflows)
         habit_facts = prompting.session_prompting(bundle, prices)
         habits, drip, _messages = prompting.habit_rates(habit_facts) if habit_facts else (0, 0, 0)
         task, _tagged = classify_mod.reported_task(top)

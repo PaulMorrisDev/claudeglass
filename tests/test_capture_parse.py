@@ -12,13 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import cache, capture_catalogue, capture_tags, events
+from claudeglass import cache, capture, capture_catalogue, capture_tags, events, prompt_shape
 from claudeglass.model import CaptureTag, EventKind, PlanStats, TranscriptMeta
 from claudeglass.parse import parse_transcript
 
 from helpers import (
     assert_privacy,
     attachment_line,
+    queue_operation_line,
     tool_result_block,
     tool_use_block,
     turn_line,
@@ -342,7 +343,9 @@ def test_a_plan_is_counted_and_its_answer_recorded(tmp_path, is_error, outcome):
         user_block_line([tool_result_block("tu_p", "no" if is_error else "ok", is_error=is_error)]),
         _reply("next"),
     ])
-    assert result.turns[0].plan_stats == PlanStats(steps=3, files=3, chars=len(plan), outcome=outcome)
+    assert result.turns[0].plan_stats == PlanStats(
+        steps=3, files=3, chars=len(plan), outcome=outcome, rejected=is_error
+    )
 
 
 def test_slash_commands_you_ran_are_named_on_the_next_turn(tmp_path):
@@ -439,3 +442,744 @@ def test_a_main_session_tag_drops_subagent_only_keys():
     kept, _ = capture_tags.filter_tag(cap, marker, requested={"task"}, subagent=False)
     assert kept.task == "bugfix" and kept.has_tl is True
     assert kept.fit is None and kept.rules is None
+
+
+# -- messages typed while Claude works (PARSER_VERSION 37) ---------------------------
+
+
+def _at(seconds: int) -> str:
+    """A timestamp ``seconds`` after 12:00:00 on the fixture day."""
+    minutes, secs = divmod(seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"2026-09-18T{12 + hours:02d}:{minutes:02d}:{secs:02d}.000Z"
+
+
+def _typed(text: str, at: int, **kw) -> dict:
+    return user_str_line(text, origin={"kind": "human"}, timestamp=_at(at), **kw)
+
+
+def _queued(prompt, at: int, **kw) -> dict:
+    """A message you typed while Claude was working, as its attachment is
+    written some time later (the line's own time is later than ``at``)."""
+    line = attachment_line(
+        "queued_command", prompt=prompt, commandMode="prompt", origin={"kind": "human"}, timestamp=_at(at), **kw
+    )
+    line["timestamp"] = _at(at + 15)
+    return line
+
+
+def _working(at: int) -> dict:
+    return turn_line(content=[tool_use_block("Bash", f"tu_{at}", {"command": "ls"})], timestamp=_at(at))
+
+
+def _worked(at: int, of: int = 5) -> dict:
+    return user_block_line([tool_result_block(f"tu_{of}", "ok")], timestamp=_at(at))
+
+
+def test_a_message_typed_while_claude_works_is_counted_and_opens_no_cycle(tmp_path):
+    text = "also rename the helper to build_index"
+    result = _parse(tmp_path, [
+        _typed("refactor the parser", 0),
+        _working(5),
+        _queued(text, 10),
+        _worked(30),
+        _reply("done", timestamp=_at(40)),
+    ])
+    first, last = result.turns
+    assert (first.queued_prompts, first.human_prompt_chars is not None) == (0, True)
+    assert last.queued_prompts == 1
+    assert last.queued_chars == len(text)
+    assert last.queued_adjust is True
+    assert last.human_prompt_chars is None
+    assert len(capture.prompt_cycles(result)) == 1
+    queued = [e for e in result.events if e.subkind == "queued_command"]
+    assert [e.kind for e in queued] == [EventKind.QUEUE_OPERATION]
+    # Its time is when you typed it.
+    assert queued[0].ts == _at(10)
+
+
+def test_the_queued_messages_of_one_turn_are_added_up(tmp_path):
+    result = _parse(tmp_path, [
+        _typed("refactor the parser", 0),
+        _working(5),
+        _queued("continue", 10),
+        _queued("how is it going?", 12),
+        _queued("1. add a test\n2. add a doc\n3. add a flag", 14),
+        _worked(30),
+        _reply("done", timestamp=_at(40)),
+    ])
+    turn = result.turns[-1]
+    assert turn.queued_prompts == 3
+    assert turn.queued_steps == 3
+    assert turn.queued_go and turn.queued_status
+    assert not turn.queued_correction and not turn.queued_adjust
+    assert turn.queued_chars == len("continue") + len("how is it going?") + len("1. add a test\n2. add a doc\n3. add a flag")
+
+
+def test_a_queued_correction_is_noted(tmp_path):
+    result = _parse(tmp_path, [
+        _typed("fix the parser", 0), _working(5), _queued("no, that's wrong, it's broken", 10), _worked(30),
+        _reply("done", timestamp=_at(40)),
+    ])
+    assert result.turns[-1].queued_correction is True
+
+
+def test_only_a_queued_message_you_typed_is_counted(tmp_path):
+    notification = attachment_line(
+        "queued_command",
+        prompt="<task-notification><task-id>t1</task-id><status>completed</status></task-notification>",
+        commandMode="task-notification",
+    )
+    peer = attachment_line("queued_command", prompt="please review", commandMode="prompt",
+                           origin={"kind": "peer"}, isMeta=True)
+    coordinator = attachment_line("queued_command", prompt="carry on", isMeta=True)
+    result = _parse(tmp_path, [
+        _typed("fix the parser", 0), _working(5), notification, peer, coordinator,
+        queue_operation_line("enqueue", content="please rename the secret file"), _worked(30),
+        _reply("done", timestamp=_at(40)),
+    ])
+    turn = result.turns[-1]
+    assert (turn.queued_prompts, turn.queued_chars, turn.queued_steps) == (0, 0, 0)
+    assert not (turn.queued_correction or turn.queued_adjust or turn.queued_go or turn.queued_status)
+
+
+def test_a_queue_operation_enqueue_is_never_a_message(tmp_path):
+    result = _parse(tmp_path, [
+        _typed("fix the parser", 0), _working(5),
+        queue_operation_line("enqueue", content="also add a test", timestamp=_at(10)),
+        queue_operation_line("dequeue", timestamp=_at(11)),
+        queue_operation_line("remove", timestamp=_at(12)),
+        _worked(30), _reply("done", timestamp=_at(40)),
+    ])
+    assert result.turns[-1].queued_prompts == 0
+    assert "also add a test" not in repr(result.events)
+
+
+def test_a_replay_block_of_rewritten_old_lines_counts_each_message_once(tmp_path):
+    # After a compaction or a resume, Claude Code writes its old lines again
+    # with new times and the same uuids.
+    queued = _queued("also add a test", 10)
+    typed = _typed("refactor the parser", 0)
+    work, done = _working(5), _worked(30)
+    replay = []
+    for line in (typed, work, queued, done):
+        copy = json.loads(json.dumps(line))
+        copy["timestamp"] = _at(900)
+        if "attachment" in copy:
+            copy["attachment"]["timestamp"] = _at(900)
+        replay.append(copy)
+    result = _parse(tmp_path, [typed, work, queued, done, *replay, _reply("done", timestamp=_at(1000))])
+    assert result.diagnostics.replayed_lines == 4
+    assert result.turns[-1].queued_prompts == 1
+    assert len([e for e in result.events if e.kind == EventKind.HUMAN_TEXT]) == 1
+
+
+def test_a_queued_message_also_written_as_a_user_line_counts_once(tmp_path):
+    # You typed it while Claude worked, pressed Esc, and Claude Code put it
+    # back: the same words are a queued message and then a user line.
+    text = "also add a test for the parser"
+    result = _parse(tmp_path, [
+        _typed("refactor the parser", 0), _working(5), _queued(text, 10), _worked(20),
+        user_str_line("[Request interrupted by user]", timestamp=_at(25)),
+        _typed(text, 40), _reply("done", timestamp=_at(50)),
+    ])
+    turn = result.turns[-1]
+    assert turn.queued_prompts == 0
+    assert turn.human_prompt_chars == len(text)
+
+
+def test_a_user_line_written_before_its_queued_copy_counts_once(tmp_path):
+    text = "also add a test for the parser"
+    result = _parse(tmp_path, [
+        _typed("refactor the parser", 0), _working(5), _typed(text, 10), _queued(text, 12), _worked(20),
+        _reply("done", timestamp=_at(50)),
+    ])
+    turn = result.turns[-1]
+    assert turn.queued_prompts == 0
+    assert turn.human_prompt_chars == len(text)
+
+
+def test_a_queued_copy_a_minute_later_is_another_message(tmp_path):
+    text = "also add a test for the parser"
+    result = _parse(tmp_path, [
+        _typed("refactor the parser", 0), _working(5), _typed(text, 10), _reply("ok", timestamp=_at(20)),
+        _working(30), _queued(text, 200), _worked(230, 30), _reply("done", timestamp=_at(240)),
+    ])
+    assert result.turns[-1].queued_prompts == 1
+
+
+def test_a_different_queued_message_is_not_a_copy(tmp_path):
+    result = _parse(tmp_path, [
+        _typed("refactor the parser", 0), _working(5), _typed("also add a test", 10),
+        _queued("also add a doc", 12), _worked(20), _reply("done", timestamp=_at(50)),
+    ])
+    assert result.turns[-1].queued_prompts == 1
+
+
+def test_the_typed_message_flags_reach_the_turn(tmp_path):
+    result = _parse(tmp_path, [_typed("continue", 0), _reply("ok", timestamp=_at(5))])
+    turn = result.turns[0]
+    assert turn.human_go is True
+    assert (turn.human_status, turn.human_adjust, turn.human_remind) == (False, False, False)
+    for text, field in (
+        ("how is it going?", "human_status"),
+        ("actually, make it blue", "human_adjust"),
+        ("I already told you to use tabs", "human_remind"),
+    ):
+        turn = _parse(tmp_path, [_typed(text, 0), _reply("ok", timestamp=_at(5))]).turns[0]
+        assert getattr(turn, field) is True, text
+        assert turn.human_go is False, text
+
+
+def test_a_status_poll_typed_without_an_apostrophe_is_still_a_status():
+    for text in ("whats the status", "hows it going?", "what's the status", "how's it going?"):
+        assert prompt_shape.is_status(text), text
+    assert not prompt_shape.is_status("whatsapp the team")
+
+
+def test_a_go_or_a_status_is_all_of_what_you_typed_before_a_reply(tmp_path):
+    both = _parse(tmp_path, [_typed("continue", 0), _typed("go ahead", 1), _reply("ok", timestamp=_at(5))]).turns[0]
+    assert both.human_go is True
+    mixed = _parse(tmp_path, [
+        _typed("continue", 0), _typed("fix the parser and add a test", 1), _reply("ok", timestamp=_at(5)),
+    ]).turns[0]
+    assert mixed.human_go is False
+    # An adjust or a remind is any of them.
+    assert _parse(tmp_path, [
+        _typed("fix the parser and add a test", 0), _typed("actually, make it blue", 1),
+        _reply("ok", timestamp=_at(5)),
+    ]).turns[0].human_adjust is True
+    # A turn with no message of yours has none of the flags.
+    turn = _parse(tmp_path, [_reply("ok", timestamp=_at(5))]).turns[0]
+    assert (turn.human_go, turn.human_status, turn.human_adjust, turn.human_remind) == (False,) * 4
+
+
+def test_a_line_you_didnt_type_opens_no_cycle(tmp_path):
+    result = _parse(tmp_path, [
+        _typed("refactor the parser", 0), _reply("ok", timestamp=_at(5)),
+        user_str_line("The app was quit while you were working. Carry on.", origin={"kind": "human"},
+                      timestamp=_at(900)),
+        user_str_line("<cross-session-message from=\"x\">hi</cross-session-message>", timestamp=_at(905)),
+        user_str_line("please do the thing", origin={"kind": "human"}, turnOrigin="scheduled", timestamp=_at(910)),
+        _reply("ok", timestamp=_at(920)),
+    ])
+    assert [t.human_prompt_chars is not None for t in result.turns] == [True, False]
+    assert len(capture.prompt_cycles(result)) == 1
+    assert [e.subkind for e in result.events if e.kind == EventKind.META] == ["not_typed"] * 3
+
+
+# -- output style: a change is a signal, a repeat is not -----------------------------
+
+
+def test_an_output_style_that_changes_is_a_cache_signal(tmp_path):
+    def style(name, at):
+        line = attachment_line("output_style", style=name)
+        line["timestamp"] = _at(at)
+        return line
+
+    result = _parse(tmp_path, [
+        style("default", 0), _reply("a", timestamp=_at(1)),
+        style("default", 2), _reply("b", timestamp=_at(3)),
+        style("concise", 4), _reply("c", timestamp=_at(5)),
+        style("concise", 6), _reply("d", timestamp=_at(7)),
+        style("default", 8), _reply("e", timestamp=_at(9)),
+    ])
+    seen = [(e.kind, e.subkind) for e in result.events if e.subkind == "output_style"]
+    reminder, signal = (EventKind.REMINDER, "output_style"), (EventKind.CACHE_SIGNAL, "output_style")
+    assert seen == [reminder, reminder, signal, reminder, signal]
+
+
+def test_an_output_style_with_no_name_is_never_a_change(tmp_path):
+    lines = [attachment_line("output_style", style="default"), _reply("a"),
+             attachment_line("output_style"), _reply("b"), attachment_line("output_style", style=7), _reply("c")]
+    result = _parse(tmp_path, lines)
+    assert {e.kind for e in result.events if e.subkind == "output_style"} == {EventKind.REMINDER}
+
+
+# -- images -------------------------------------------------------------------------
+
+_TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def _png_block() -> dict:
+    return {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _TINY_PNG_B64}}
+
+
+def test_an_image_in_a_tool_result_is_sized_and_never_kept(tmp_path):
+    result = _parse(tmp_path, [
+        _typed("what does the screenshot show", 0),
+        turn_line(content=[tool_use_block("Read", "tu_img", {"file_path": "shot.png"})], timestamp=_at(5)),
+        user_block_line([tool_result_block("tu_img", [_png_block()])], timestamp=_at(10)),
+        _reply("a button", timestamp=_at(15)),
+    ])
+    assert result.turns[0].tool_result_chars_by_tool == {
+        "Read": events.image_token_estimate(1, 1) * events._CHARS_PER_TOKEN_APPROX
+    }
+    assert _TINY_PNG_B64 not in repr(result.turns) + repr(result.events)
+    assert_privacy(result)
+
+
+def test_a_desktop_image_message_with_no_placeholder_text_is_flagged(tmp_path):
+    result = _parse(tmp_path, [
+        user_block_line([{"type": "text", "text": "it's broken"}, _png_block()], origin={"kind": "human"},
+                        timestamp=_at(0)),
+        _reply("looking", timestamp=_at(5)),
+    ])
+    typed = next(e for e in result.events if e.kind == EventKind.HUMAN_TEXT)
+    assert typed.detail["has_image"] is True
+    assert "vague" not in typed.detail
+    assert result.turns[0].human_vague is False
+
+
+def test_a_queued_image_message_is_flagged_and_counted(tmp_path):
+    result = _parse(tmp_path, [
+        _typed("refactor the parser", 0), _working(5),
+        _queued([{"type": "text", "text": "it looks wrong"}, _png_block()], 10),
+        _worked(30), _reply("done", timestamp=_at(40)),
+    ])
+    queued = next(e for e in result.events if e.subkind == "queued_command")
+    assert queued.detail["has_image"] is True
+    assert result.turns[-1].queued_prompts == 1
+    assert _TINY_PNG_B64 not in repr(result.events)
+
+
+# -- the digest cache keeps the new fields ------------------------------------------
+
+
+def test_the_message_fields_survive_the_digest_cache(tmp_path):
+    result = _parse(tmp_path, [
+        _typed("actually, make it blue", 0), _working(5),
+        _queued("continue", 10), _queued("how is it going?", 12), _queued("it's wrong, I told you", 14),
+        _worked(30), _reply("done", timestamp=_at(40)),
+    ])
+    decoded = cache.result_from_jsonable(json.loads(json.dumps(cache.encode_result(result))))
+    assert decoded.turns == result.turns
+    assert decoded.turns[0].human_adjust is True
+    assert (decoded.turns[-1].queued_prompts, decoded.turns[-1].queued_go, decoded.turns[-1].queued_status) == (
+        3, True, True
+    )
+
+
+# -- plan answers and denied calls (PARSER_VERSION 37) -------------------------------
+
+_SENT_BACK = (
+    "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
+    "the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+)
+_PLAN = "# Plan\n\n1. Edit src/a.py\n2. Run tests/test_a.py\n"
+_ASK = "add a retry to the fetcher"
+
+
+def _asked(text: str = _ASK, **line) -> dict:
+    return user_str_line(text, origin={"kind": "human"}, **line)
+
+
+def _calls(name: str, *ids: str, **given) -> dict:
+    return turn_line(content=[tool_use_block(name, tool_id, given or {"command": "ls"}) for tool_id in ids])
+
+
+def _plan_call(tool_id: str = "tu_p") -> dict:
+    return _calls("ExitPlanMode", tool_id, plan=_PLAN)
+
+
+def _plan_back(feedback: str = "", tool_id: str = "tu_p", **line) -> dict:
+    return user_block_line(
+        [tool_result_block(tool_id, _SENT_BACK + feedback, is_error=True)], toolDenialKind="user-rejected", **line
+    )
+
+
+def _denied(tool_id: str, text: str, kind: str | None, **line) -> dict:
+    extra = {"toolDenialKind": kind} if kind else {}
+    return user_block_line([tool_result_block(tool_id, text, is_error=True)], **extra, **line)
+
+
+def _events(result, kind: EventKind) -> list:
+    return [event for event in result.events if event.kind == kind]
+
+
+@pytest.mark.parametrize("tool, kind, text, bucket", [
+    ("ExitPlanMode", "user-rejected", _SENT_BACK + "use the other approach", "plan_rejected"),
+    ("ExitPlanMode", "user-rejected", _SENT_BACK, "plan_rejected"),
+    ("AskUserQuestion", "user-rejected", _SENT_BACK, "question_declined"),
+    ("Bash", "permission-rule", "PreToolUse:Bash hook error: [guard.sh] STOP: no rm here", "hook_blocked"),
+    ("Grep", "saver-redirect", "redirected", "hook_blocked"),
+    ("Bash", "automode-blocked", "Blocked by the auto mode classifier", "auto_blocked"),
+    ("Bash", "automode-unavailable", "The server-side auto mode classifier gave no verdict", "auto_unavailable"),
+    ("Bash", "interrupted", "", "aborted"),
+    ("Bash", "cancelled", "cancelled", "aborted"),
+    ("Bash", "user-rejected", "The permission request was aborted", "aborted"),
+    ("Bash", "permission-rule", "Permission to use Bash has been denied.", "refused"),
+    ("Edit", "user-rejected", _SENT_BACK + "not that file", "refused"),
+])
+def test_every_denial_gets_a_bucket_word_and_the_next_reply_counts_it(tmp_path, tool, kind, text, bucket):
+    given = {"plan": _PLAN} if tool == "ExitPlanMode" else None
+    result = _parse(tmp_path, [
+        _asked(), turn_line(content=[tool_use_block(tool, "tu_1", given or {"command": "ls"})]),
+        _denied("tu_1", text, kind), _reply("ok"),
+    ])
+    [denial] = _events(result, EventKind.TOOL_DENIAL)
+    assert denial.detail["bucket"] == bucket
+    assert denial.subkind == kind
+    assert result.turns[0].preceding_denials == {}
+    assert result.turns[1].preceding_denials == {bucket: 1}
+    assert "guard.sh" not in repr(result.events) + repr(result.turns)
+
+
+def test_the_denial_buckets_are_a_closed_set_and_only_one_is_a_call_you_turned_down():
+    assert set(events.DENIAL_BUCKETS) == {
+        "plan_rejected", "question_declined", "hook_blocked", "auto_blocked", "auto_unavailable", "aborted", "refused",
+    }
+
+
+def test_a_denial_with_no_tool_result_is_still_a_refusal(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _calls("Bash", "tu_1"), user_str_line("(denied)", toolDenialKind="user-rejected"), _reply("ok"),
+    ])
+    assert result.turns[1].preceding_denials == {"refused": 1}
+
+
+def test_a_plan_sent_back_with_feedback_is_one_event_of_length_and_class_only(tmp_path):
+    feedback = "why not reuse the cache in /secret/vault/notes.txt?"
+    result = _parse(tmp_path, [_asked(), _plan_call(), _plan_back(feedback), _reply("replanning")])
+    [event] = _events(result, EventKind.PLAN_FEEDBACK)
+    assert (event.size_chars, event.subkind, event.detail) == (len(feedback), "question", {})
+    assert result.turns[0].plan_stats == PlanStats(
+        steps=2, files=2, chars=len(_PLAN), outcome="rejected", rejected=True,
+        feedback_chars=len(feedback), feedback_class="question",
+    )
+    # It never opens a cycle, and it isn't a message you typed.
+    assert result.turns[1].human_prompt_chars is None
+    assert len(capture.prompt_cycles(result)) == 1
+    assert [e.kind for e in result.events].count(EventKind.HUMAN_TEXT) == 1
+    # The reply after it follows the dialog's answer, not a denial.
+    assert result.turns[1].preceding_primary == EventKind.PLAN_FEEDBACK
+    assert result.turns[1].preceding_denials == {"plan_rejected": 1}
+    assert "secret" not in repr(result)
+    assert_privacy(result)
+
+
+def test_a_plan_sent_back_with_nothing_typed_has_no_feedback_event(tmp_path):
+    result = _parse(tmp_path, [_asked(), _plan_call(), _plan_back(), _reply("replanning")])
+    assert _events(result, EventKind.PLAN_FEEDBACK) == []
+    plan = result.turns[0].plan_stats
+    assert (plan.outcome, plan.rejected, plan.feedback_chars, plan.feedback_class) == ("rejected", True, 0, None)
+    assert result.turns[1].preceding_primary == EventKind.TOOL_DENIAL
+
+
+def test_a_deny_rules_text_after_a_plan_is_its_feedback_but_a_stock_denial_is_not(tmp_path):
+    typed = _parse(tmp_path, [
+        _asked(), _plan_call(),
+        _denied("tu_p", "the second step should come first", "permission-rule"), _reply("ok"),
+    ])
+    assert typed.turns[0].plan_stats.feedback_chars == len("the second step should come first")
+    stock = _parse(tmp_path, [
+        _asked(), _plan_call(),
+        _denied("tu_p", "Permission to use ExitPlanMode has been denied.", "permission-rule"), _reply("ok"),
+    ])
+    assert stock.turns[0].plan_stats.feedback_chars == 0
+    assert stock.turns[0].plan_stats.outcome == "rejected"
+
+
+@pytest.mark.parametrize("text, word", [
+    ("why not reuse the existing cache?", "question"),
+    ("what about the tests", "question"),
+    ("I'm not sure about step 2", "unsure"),
+    ("hmm, not sure", "unsure"),
+    ("that's wrong, the helper lives in src/b.py", "critique"),
+    ("make step two a bit smaller", "critique"),
+    ("don't touch the parser", "critique"),
+    ("sounds fine", "other"),
+])
+def test_plan_feedback_reads_as_one_closed_word(text, word):
+    assert prompt_shape.plan_feedback_class(text) == word
+    assert word in capture_catalogue.PLAN_FEEDBACK_CLASSES
+
+
+def test_the_dialog_closed_or_a_hook_blocking_the_plan_gives_no_feedback_and_no_answer(tmp_path):
+    closed = _parse(tmp_path, [
+        _asked(), _plan_call(), _denied("tu_p", "The permission request was aborted", "user-rejected"), _reply("ok"),
+    ])
+    assert closed.turns[0].plan_stats.outcome is None and closed.turns[0].plan_stats.feedback_chars == 0
+    assert closed.turns[1].preceding_denials == {"aborted": 1}
+    assert _events(closed, EventKind.PLAN_FEEDBACK) == []
+
+
+def test_an_exit_plan_mode_answer_adds_no_tool_error_but_a_hook_blocking_it_does(tmp_path):
+    sent_back = _parse(tmp_path, [_asked(), _plan_call(), _plan_back("rename it"), _reply("ok")])
+    closed = _parse(tmp_path, [
+        _asked(), _plan_call(), _denied("tu_p", "The permission request was aborted", "interrupted"), _reply("ok"),
+    ])
+    for result in (sent_back, closed):
+        turn = result.turns[0]
+        assert (turn.tool_error_count, turn.tool_error_chars, turn.tool_errors_by_tool) == (0, 0, {})
+        assert turn.tool_errors_by_kind == {}
+    blocked = _parse(tmp_path, [
+        _asked(), _plan_call(),
+        _denied("tu_p", "PreToolUse:ExitPlanMode hook error: [check.sh] needs a test step", "permission-rule"),
+        _reply("ok"),
+    ])
+    assert blocked.turns[0].tool_error_count == 1
+    assert blocked.turns[0].tool_errors_by_tool == {"ExitPlanMode": 1}
+    assert blocked.turns[0].plan_stats.outcome is None
+    # Any other tool turned down is still a failed call.
+    refused = _parse(tmp_path, [
+        _asked(), _calls("Bash", "tu_1"), _denied("tu_1", "Permission to use Bash has been denied.", "permission-rule"),
+        _reply("ok"),
+    ])
+    assert refused.turns[0].tool_error_count == 1
+
+
+def test_a_go_ahead_you_type_approves_a_plan_the_dialog_sent_back(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _plan_call(), _plan_back("add a step first"), _asked("go ahead"), _reply("building"),
+    ])
+    plan = result.turns[0].plan_stats
+    assert plan.outcome == "approved_by_message"
+    assert plan.rejected is True and plan.feedback_chars == len("add a step first")
+    assert_privacy(result)
+
+
+def test_leaving_plan_mode_approves_a_plan_the_dialog_sent_back(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(permissionMode="plan"), _plan_call(), _plan_back("rename the helper", permissionMode="plan"),
+        _asked("build it with the second option", permissionMode="acceptEdits"), _reply("building"),
+    ])
+    assert result.turns[0].plan_stats.outcome == "approved_by_message"
+
+
+def test_a_mode_change_written_as_its_own_line_approves_a_plan_the_dialog_sent_back(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(permissionMode="plan"), _plan_call(), _plan_back("rename the helper", permissionMode="plan"),
+        {"type": "permission-mode", "permissionMode": "default", "sessionId": "s"}, _reply("building"),
+    ])
+    assert result.turns[0].plan_stats.outcome == "approved_by_message"
+    stays = _parse(tmp_path, [
+        _asked(permissionMode="plan"), _plan_call(), _plan_back("rename the helper", permissionMode="plan"),
+        {"type": "permission-mode", "permissionMode": "plan", "sessionId": "s"}, _reply("replanning"),
+    ])
+    assert stays.turns[0].plan_stats.outcome == "rejected"
+
+
+def test_a_message_that_isnt_a_go_ahead_or_a_mode_that_stays_in_plan_approves_nothing(tmp_path):
+    kept_planning = _parse(tmp_path, [
+        _asked(permissionMode="plan"), _plan_call(), _plan_back("make step two smaller", permissionMode="plan"),
+        _asked("also look at the cache layer", permissionMode="plan"), _reply("replanning"),
+    ])
+    assert kept_planning.turns[0].plan_stats.outcome == "rejected"
+    # Feedback that is itself a go-ahead is feedback, not your approval.
+    feedback_only = _parse(tmp_path, [_asked(), _plan_call(), _plan_back("go ahead"), _reply("ok")])
+    assert feedback_only.turns[0].plan_stats.outcome == "rejected"
+
+
+def test_a_go_ahead_after_the_next_plan_call_belongs_to_that_plan(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _plan_call("tu_p"), _plan_back("again, shorter", "tu_p"),
+        _plan_call("tu_q"), _plan_back("", "tu_q"),
+        _asked("continue"), _reply("building"),
+    ])
+    first = next(t.plan_stats for t in result.turns if t.plan_stats and t.plan_stats.feedback_chars)
+    second = result.turns[1].plan_stats
+    assert first.outcome == "rejected"
+    assert second.outcome == "approved_by_message"
+
+
+def test_a_plan_approved_in_the_dialog_stays_approved_when_you_later_say_go(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _plan_call(), user_block_line([tool_result_block("tu_p", "ok")]), _asked("continue"), _reply("ok"),
+    ])
+    assert result.turns[0].plan_stats.outcome == "approved"
+
+
+def test_an_answered_question_is_a_round_and_a_declined_one_is_not(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(),
+        _calls("AskUserQuestion", "q1", "q2", questions=[]),
+        user_block_line([tool_result_block("q1", "answered")]),
+        _denied("q2", _SENT_BACK, "user-rejected"),
+        _reply("ok"),
+        _calls("AskUserQuestion", "q3", questions=[]),
+        user_block_line([tool_result_block("q3", "answered")]),
+        _reply("done"),
+    ])
+    assert [turn.ask_rounds for turn in result.turns] == [1, 0, 1, 0]
+    assert result.turns[1].preceding_denials == {"question_declined": 1}
+    [cycle] = capture.prompt_cycles(result)
+    assert cycle.ask_rounds == 2
+
+
+def test_a_cycle_counts_its_plan_rounds_and_what_you_said_about_each(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _plan_call("tu_1"), _plan_back("why not reuse the cache?", "tu_1"),
+        _plan_call("tu_2"), _plan_back("", "tu_2"),
+        _plan_call("tu_3"), _plan_back("I'm not sure about step 2", "tu_3"),
+        _plan_call("tu_4"), user_block_line([tool_result_block("tu_4", "ok")]),
+        _reply("building"),
+    ])
+    [cycle] = capture.prompt_cycles(result)
+    assert (cycle.plan_rounds, cycle.rejected_rounds, cycle.feedback_rounds) == (4, 3, 2)
+    assert cycle.plan_feedback_classes == ("question", "unsure")
+    assert cycle.ask_rounds == 0
+
+
+def test_a_cycle_with_a_plan_approved_by_typing_still_counts_the_rejection(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _plan_call(), _plan_back("make it smaller"), _asked("go ahead"), _reply("building"),
+    ])
+    [first, second] = capture.prompt_cycles(result)
+    assert (first.plan_rounds, first.rejected_rounds, first.feedback_rounds) == (1, 1, 1)
+    assert (second.plan_rounds, second.rejected_rounds) == (0, 0)
+
+
+@pytest.mark.parametrize("answer, after, stop", [
+    (lambda: _denied("tu_1", "Permission to use Bash has been denied.", "permission-rule"), "refused", True),
+    (lambda: _denied("tu_1", "The permission request was aborted", "interrupted"), "aborted", True),
+    (lambda: _denied("tu_1", "PreToolUse:Bash hook error: [guard.sh] no", "permission-rule"), "hook_blocked", False),
+    (lambda: _denied("tu_1", "Blocked by the classifier", "automode-blocked"), "auto_blocked", False),
+])
+def test_a_tool_use_interrupt_follows_the_denial_before_it_and_only_some_are_stops(tmp_path, answer, after, stop):
+    result = _parse(tmp_path, [
+        _asked(), _calls("Bash", "tu_1"), answer(),
+        user_str_line("[Request interrupted by user for tool use]"), _reply("ok"),
+    ])
+    [interrupt] = _events(result, EventKind.INTERRUPT)
+    assert (interrupt.subkind, interrupt.detail["after"]) == ("tool_refusal", after)
+    assert events.is_stop(interrupt) is stop
+    assert events.stop_window(result.turns[1].preceding_denials) is stop
+
+
+def test_a_plan_you_answered_then_a_tool_use_interrupt_is_not_a_stop(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _plan_call(), _plan_back("rename it"),
+        user_str_line("[Request interrupted by user for tool use]"), _reply("ok"),
+    ])
+    [interrupt] = _events(result, EventKind.INTERRUPT)
+    assert interrupt.detail["after"] == "plan_rejected" and not events.is_stop(interrupt)
+    # It is still the interrupt it was for the coverage count.
+    assert result.turns[1].preceding_primary == EventKind.INTERRUPT
+
+
+def test_a_plain_interrupt_and_one_with_no_denial_before_it_are_stops(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _reply("working"), user_str_line("[Request interrupted by user for tool use]"), _reply("ok"),
+    ])
+    [interrupt] = _events(result, EventKind.INTERRUPT)
+    assert "after" not in interrupt.detail and events.is_stop(interrupt)
+    assert events.stop_window({})
+
+
+def test_the_new_plan_and_denial_fields_survive_the_digest_cache(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _plan_call("tu_1"), _plan_back("why not reuse the cache?", "tu_1"),
+        _asked("go ahead"), _reply("building"),
+        _calls("AskUserQuestion", "q1", questions=[]), user_block_line([tool_result_block("q1", "answered")]),
+        _calls("Bash", "tu_2"), _denied("tu_2", "PreToolUse:Bash hook error: [guard.sh] no", "permission-rule"),
+        user_str_line("[Request interrupted by user for tool use]"), _reply("done"),
+    ])
+    decoded = cache.result_from_jsonable(json.loads(json.dumps(cache.encode_result(result))))
+    assert decoded.turns == result.turns
+    assert decoded.events == result.events
+    assert decoded.turns[0].plan_stats.outcome == "approved_by_message"
+    assert decoded.turns[0].plan_stats.feedback_class == "question"
+    assert [turn.ask_rounds for turn in decoded.turns] == [turn.ask_rounds for turn in result.turns]
+    assert any(turn.preceding_denials == {"hook_blocked": 1} for turn in decoded.turns)
+    assert any(e.kind == EventKind.PLAN_FEEDBACK and e.subkind == "question" for e in decoded.events)
+    assert any(e.detail.get("after") == "hook_blocked" for e in decoded.events if e.kind == EventKind.INTERRUPT)
+
+
+# -- workflow runs (PARSER_VERSION 37) ----------------------------------------
+
+
+def _workflow_result(tool_use_id: str, **result) -> dict:
+    """A ``Workflow`` call's result line: the launch note in the block, the
+    run's ids (and the text that must not be kept) on ``toolUseResult``."""
+    body = {
+        "status": "async_launched",
+        "taskId": "wv62qx65p",
+        "taskType": "local_workflow",
+        "workflowName": "sentinel-workflow-name",
+        "runId": "wf_6119c640-76c",
+        "summary": "sentinel summary of the work",
+        "transcriptDir": "sentinel/transcript/dir",
+        "scriptPath": "sentinel/script/path.js",
+    }
+    body.update(result)
+    return user_block_line(
+        [tool_result_block(tool_use_id, "Workflow launched in background.")], toolUseResult=body
+    )
+
+
+def _workflow_session(tmp_path: Path, result_line: dict):
+    return _parse(tmp_path, [
+        _asked(),
+        turn_line(content=[tool_use_block("Workflow", "tu_w", {"script": "return 1"})]),
+        result_line,
+        _reply("launched"),
+    ])
+
+
+def test_a_workflow_launch_keeps_its_run_and_task_ids_on_the_reply_that_made_the_call(tmp_path):
+    result = _workflow_session(tmp_path, _workflow_result("tu_w"))
+    assert [turn.workflow_runs for turn in result.turns] == [{"tu_w": ("wf_6119c640-76c", "wv62qx65p")}, {}]
+
+
+def test_only_the_two_ids_of_a_workflow_launch_are_kept(tmp_path):
+    result = _workflow_session(tmp_path, _workflow_result("tu_w"))
+    kept = json.dumps(cache.encode_result(result))
+    for sentinel in ("sentinel", "return 1", "launched in background"):
+        assert sentinel not in kept
+    assert_privacy(result)
+
+
+@pytest.mark.parametrize("override", [
+    {"taskType": "local_agent"},
+    {"taskType": None},
+    {"runId": None},
+    {"runId": ""},
+    {"runId": "wf_has a space"},
+    {"runId": "wf_" + "x" * 80},
+    {"runId": 7},
+])
+def test_a_workflow_result_that_names_no_usable_run_records_nothing(tmp_path, override):
+    result = _workflow_session(tmp_path, _workflow_result("tu_w", **override))
+    assert all(not turn.workflow_runs for turn in result.turns)
+
+
+def test_a_workflow_call_that_failed_records_no_run(tmp_path):
+    failed = user_block_line(
+        [tool_result_block("tu_w", "Workflow failed to start", is_error=True)],
+        toolUseResult={"taskType": "local_workflow", "runId": "wf_1", "taskId": "t1"},
+    )
+    result = _workflow_session(tmp_path, failed)
+    assert all(not turn.workflow_runs for turn in result.turns)
+
+
+def test_a_missing_or_malformed_task_id_leaves_the_run_with_an_empty_one(tmp_path):
+    for task_id in (None, "has a space", 3):
+        result = _workflow_session(tmp_path, _workflow_result("tu_w", taskId=task_id))
+        assert result.turns[0].workflow_runs == {"tu_w": ("wf_6119c640-76c", "")}
+
+
+def test_a_resumed_workflow_keeps_one_run_id_under_each_of_its_calls(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(),
+        turn_line(content=[tool_use_block("Workflow", "tu_w1", {"script": "a"})]),
+        _workflow_result("tu_w1", taskId="t_first"),
+        _asked("again"),
+        turn_line(content=[tool_use_block("Workflow", "tu_w2", {"script": "a"})]),
+        _workflow_result("tu_w2", taskId="t_second"),
+        _reply("resumed"),
+    ])
+    runs = {}
+    for turn in result.turns:
+        runs.update(turn.workflow_runs)
+    assert runs == {"tu_w1": ("wf_6119c640-76c", "t_first"), "tu_w2": ("wf_6119c640-76c", "t_second")}
+
+
+def test_workflow_runs_survive_the_digest_cache_as_tuples(tmp_path):
+    result = _workflow_session(tmp_path, _workflow_result("tu_w"))
+    decoded = cache.result_from_jsonable(json.loads(json.dumps(cache.encode_result(result))))
+    assert decoded.turns == result.turns
+    assert decoded.turns[0].workflow_runs == {"tu_w": ("wf_6119c640-76c", "wv62qx65p")}
+    assert isinstance(decoded.turns[0].workflow_runs["tu_w"], tuple)

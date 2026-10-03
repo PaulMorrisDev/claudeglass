@@ -452,6 +452,8 @@ COACHING_READ_TOOLS = ("Read", "Grep", "Glob")
 #: The live hints: after a tool result (the first four) and when you
 #: send a message (the rest), most useful first when more than one
 #: applies. ``repeat_ask`` to ``big_paste`` are about how you prompt.
+#: ``plan_fresh`` also applies when you send a go-ahead after a plan you
+#: hadn't approved in the dialog, or leave plan mode.
 COACHING_HINTS = (
     "plan_fresh",
     "split_run",
@@ -516,8 +518,263 @@ SPECIFIC_PATTERN = (
     r"|\b(?:expected|instead|rather than)\b)"
 )
 
+#: Words that mark a message as adjusting Claude's work rather than
+#: correcting it ("actually, make it blue", "rename it to X", "a bit
+#: smaller"), matched case-blind in a message's first
+#: :data:`CORRECTION_SCAN_CHARS` characters. Kept apart from
+#: :data:`CORRECTION_PATTERN`, which would otherwise widen: a tweak
+#: after a plan is not a complaint. A message that ends in a question
+#: mark asks, so it never counts. The parser keeps only the yes/no
+#: (``Turn.human_adjust``).
+ADJUST_PATTERN = (
+    r"(?:(?:^|[.!?]\s+)actually\b"
+    r"|\b(?:instead|rather than|not quite|not exactly"
+    r"|(?:change|set|turn|switch|swap|make) (?:it|that|this|them|these|those) (?:to|into)"
+    r"|rename"
+    r"|(?:should|needs? to|supposed to|meant to) (?:say|read|show|display|look)"
+    r"|(?:a (?:bit|little)|slightly) (?:more|less|bigger|smaller|longer|shorter|wider|narrower|larger|taller"
+    r"|higher|lower)"
+    r"|too (?:big|small|long|short|wide|narrow|large|tall|bright|dark|loud|quiet|busy)"
+    r"|move (?:it|that|this|them|these|those))\b)"
+)
+
+#: Words that mark a message as repeating something you already said
+#: ("I told you", "as I said", "you didn't", "why did you"), matched
+#: like :data:`ADJUST_PATTERN`. The parser keeps only the yes/no
+#: (``Turn.human_remind``).
+REMIND_PATTERN = (
+    r"\b(?:"
+    r"i (?:already |just )?(?:told you|said|asked|mentioned|wrote|specified)"
+    r"|as i (?:said|mentioned|told you|asked|wrote)"
+    r"|you (?:didn'?t|did not|never|forgot to|still haven'?t)"
+    r"|why (?:did|didn'?t) you"
+    r")\b"
+)
+
+#: A message that only tells Claude to carry on ("continue", "go ahead",
+#: "do it", "implement the plan", "merge it", "yes, do it"), matched on
+#: the whole message, at most :data:`GO_MAX_CHARS` characters. Sent
+#: after a plan or a change, it asks for nothing new. The parser keeps
+#: only the yes/no (``Turn.human_go``).
+_GO_YES = r"yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm|looks good|sounds good"
+_GO_CORE = (
+    r"continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it"
+    r"|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan"
+    r"|(?:merge|push|ship|deploy|commit)(?: (?:it|that|this|them))?(?: and tag)?"
+)
+GO_PATTERN = (
+    rf"(?:please\s+)?(?:(?:{_GO_YES})(?:[\s,.!]+(?:{_GO_CORE}))?|(?:{_GO_CORE}))"
+    r"(?:[\s,.!]+(?:please|now|thanks|thank you))*[\s!.,]*"
+)
+GO_MAX_CHARS = 60
+
+#: A message that only asks how the work is going ("how is it going",
+#: "what's the status", "is it done", "any updates", "progress?"),
+#: matched on the whole message, under :data:`STATUS_MAX_CHARS`
+#: characters. It asks for no change, so it's no new request. The parser
+#: keeps only the yes/no (``Turn.human_status``).
+_STATUS_CORE = (
+    r"how(?:'?s| is| are)(?: it| this| that| everything| things| the [a-z]+(?: [a-z]+)?)?"
+    r" (?:going|progressing|looking|coming(?: along)?|doing)"
+    r"|what(?:'?s| is)(?: the)? (?:status|progress|state|remaining|left|happening|going on)"
+    r"|(?:is|are)(?: it| this| that| everything| they| we)? (?:all )?(?:done|finished|complete|completed|merged"
+    r"|running|ready|working|still (?:running|working|going))"
+    r"|are you (?:still )?(?:working|running|there|done|finished)"
+    r"|any (?:updates?|progress|news|findings|results?)"
+    r"|where are we(?: at| now)?"
+    r"|status|progress|updates?"
+    r"|how (?:long|much) (?:is )?(?:left|remaining|to go)"
+)
+STATUS_PATTERN = (
+    rf"(?:(?:hi|hey|ok|okay|so|and|well)[\s,.!]+)?(?:{_STATUS_CORE})"
+    r"(?:[\s,.!?]+(?:now|yet|so far|please|there|at the moment|currently))*[\s!.,?]*"
+)
+STATUS_MAX_CHARS = 120
+
 #: How Claude Code records that you stopped a reply (Esc).
 INTERRUPT_PREFIX = "[Request interrupted"
+
+#: What the feedback you give a rejected plan sounds like, as closed
+#: words, tried in this order: you're unsure, you ask something, you point
+#: at something wrong or to change, or none of those. The parser keeps
+#: only the word (``PlanStats.feedback_class``) and the message's length.
+#: Read in memory by ``prompt_shape.plan_feedback_class``; the hook never
+#: needs them, so they stay out of the exported catalogue.
+PLAN_FEEDBACK_CLASSES = ("question", "critique", "unsure", "other")
+PLAN_FEEDBACK_SCAN_CHARS = 400
+PLAN_UNSURE_PATTERN = (
+    r"\b(?:not (?:really )?sure|unsure|not (?:fully )?convinced|not certain|i don'?t know|no idea|i wonder"
+    r"|on the fence|torn|second thoughts?|let me think|hmm+)\b"
+)
+PLAN_QUESTION_PATTERN = (
+    r"\s*(?:what|which|who|whom|whose|where|when|why|how|can|could|would|should|do|does|did|is|are|will|isn'?t"
+    r"|aren'?t|shouldn'?t|won'?t)\b"
+)
+PLAN_CRITIQUE_PATTERN = (
+    r"\b(?:no|not|don'?t|do not|doesn'?t|shouldn'?t|never|wrong|instead|rather|too|remove|drop|skip|without"
+    r"|avoid|but|change|only|also|needs? to|must|should)\b"
+)
+
+#: How a reply's closing question is found (``prompt_shape.ends_on_question``,
+#: which the capture hook and the status line repeat step for step). The
+#: reply loses its fenced code (an unclosed fence runs to the end), a
+#: ClaudeGlass quote block (a tip, or the feedback reminder with the lines
+#: of quote after it), inline code, URLs, the reminder as a bare line, a
+#: question inside quotation marks and the ``[cg: ...]`` tag that ends it.
+#: What is left is cut into sentences and list items at
+#: :data:`REPLY_UNIT_PATTERN`, and only its last :data:`REPLY_SCAN_CHARS`
+#: characters are read: a question mark must close one of the last two
+#: sentences, or one of the list items that end it. A closing bracket,
+#: quote or emphasis mark (:data:`REPLY_QUESTION_TRIM`) may follow the
+#: question mark. A question mark in the middle of a paragraph, or a
+#: rhetorical one many sentences back, doesn't count.
+REPLY_SCAN_CHARS = 1_200
+REPLY_FENCE_PATTERN = r"(?s)```.*?(?:```|\Z)"
+REPLY_TIP_BLOCK_PATTERN = r"(?m)^[ \t]*>[ \t]*(?:\U0001F4A1\U0000FE0F?[ \t]*)?[*_]*ClaudeGlass(?: tip)?:.*(?:\n[ \t]*>.*)*\n?"
+REPLY_INLINE_CODE_PATTERN = r"`[^`\n]*`"
+REPLY_URL_PATTERN = r"https?://\S+|www\.\S+"
+REPLY_QUOTED_PATTERN = r"[\"\U0000201C][^\"\U0000201C\U0000201D\n]{0,120}[\"\U0000201D]"
+REPLY_REMINDER_LINE_PATTERN = r"(?m)^.*Finished\? Run /(?:cg|tl)-feedback.*\n?"
+REPLY_TAGS_PATTERN = r"(?i)(?:\[(?:cg|tl|result|cg-fb|tl-fb):[^\[\]\n]{0,400}\][`*_.\s]*){1,3}\s*$"
+REPLY_LIST_START_PATTERN = r"^\s*(?:[-*+\U00002022]|\d{1,3}[.)])\s+"
+REPLY_UNIT_PATTERN = r"(?<=[.!?])\s+|\n+"
+REPLY_QUESTION_TRIM = "*_`\"')]>~\u201d\u2019"
+
+#: What Claude says when it owns a mistake: first person and past tense
+#: ("I was wrong", "my mistake", "I misread", "I got it wrong", "I should
+#: have checked", "I didn't run", "you're right", "that was wrong"),
+#: matched case-blind in the first :data:`ADMIT_SCAN_CHARS` characters of
+#: a reply's text block, with its code, URLs and a ClaudeGlass quote block
+#: left out. "Good catch" and "fair point" aren't here: they thank you for
+#: the catch without owning anything, so they count only through an
+#: admission that follows ("Good catch, I missed that"). A candidate, not a
+#: verdict: about 60 in 100 are real, and the capture tag's ``admit`` word
+#: confirms one.
+#: The parser keeps only the yes/no (``Turn.admit_candidate``).
+ADMIT_PATTERN = (
+    r"\b(?:"
+    r"i(?:'m| am| was) (?:wrong|mistaken|incorrect)"
+    r"|i (?:got|had|made) (?:that|this|it|them|those|these)(?: all)? (?:wrong|incorrect)"
+    r"|i made (?:a|an|that|this|the same) (?:mistake|error)"
+    r"|my (?:mistake|bad|error|fault|oversight|misreading|misunderstanding)"
+    r"|that was (?:wrong|incorrect|a mistake|my (?:mistake|error|fault))"
+    r"|i mis(?:read|understood|stated|spoke|counted|named|labell?ed|reported|judged|interpreted|remembered|quoted"
+    r"|described)"
+    r"|i (?:incorrectly|wrongly|mistakenly) \w+"
+    r"|i(?:'d| had) (?:missed|overlooked|forgotten|misread|misunderstood)"
+    r"|i should(?:n'?t| not)? have (?!(?:a|an|the|some|more|any|no|enough)\b)"
+    r"|i (?:didn'?t|did not|failed to|forgot to|neglected to) "
+    r"(?:follow|read|check|run|apply|use|verify|test|update|include|do what|honou?r|respect|account)"
+    r"|i (?:hadn'?t|had not) (?:checked|run|read|verified|tested|looked|considered|accounted)"
+    r"|i (?:ignored|overlooked|missed|forgot) (?:that|this|it|your|the|to)"
+    r"|you(?:'re| are) (?:absolutely |completely |totally |quite |entirely )?right"
+    r"|i apologi[sz]e for (?:the |my |that |this )?(?:mistake|error|oversight|mix-?up|confusion)"
+    r"|sorry (?:about that|for the (?:mistake|error|confusion|mix-?up)|,? (?:i|that was|my))"
+    r")\b"
+)
+ADMIT_SCAN_CHARS = 600
+
+#: What Claude says when it disowns a ClaudeGlass tip it was given: the
+#: tip "misfired", was a false positive or alarm, "doesn't apply" or is
+#: not relevant. Counts only in a reply that carries a tip, within
+#: :data:`MISFIRE_NEAR_CHARS` characters of the word "ClaudeGlass" in the
+#: reply's own prose (not the tip's quote block). The parser keeps only
+#: the yes/no (``Turn.tip_disowned``).
+MISFIRE_PATTERN = (
+    r"\b(?:mis-?fire[sd]?|false (?:positive|alarm)|(?:does|do|did)(?:n'?t| not) (?:really |actually )?apply"
+    r"|(?:is |was )?not (?:really )?(?:applicable|relevant)|isn'?t (?:really )?(?:applicable|relevant))\b"
+)
+MISFIRE_NEAR_CHARS = 120
+
+#: A message of yours that asks something, for ``Turn.admit_caught``: it
+#: ends in a question mark, or opens with a question word.
+ASKS_PATTERN = r"\s*(?:what|which|who|whom|whose|where|when|why|how)\b"
+
+#: The desktop app's resume ping after a usage limit, and its note after
+#: you quit it mid-reply: a human-looking line you didn't type.
+LIMIT_RESUME_PREFIX = "I hit my usage limit while you were working, but it has reset now"
+APP_QUIT_PREFIX = "The app was quit while you were working"
+
+#: What a line written as your message starts with when you didn't type
+#: it: a slash command and its output, a ``!`` shell command, a
+#: scheduled task, a background agent's report, a message from another
+#: session, the app's own resume pings. The one list the parser, the
+#: hook and the status line share, so none of them hands such a line a
+#: hint or counts it as one of your messages.
+NOT_TYPED_PREFIXES = (
+    "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
+    "[SYSTEM NOTIFICATION", "<agent-message", "<cross-session-message", "Another Claude session sent a message",
+    LIMIT_RESUME_PREFIX, APP_QUIT_PREFIX,
+)
+
+#: ``turnOrigin`` values that rule a line out as yours. Never the other
+#: way: 38 scheduled tasks and 4 resume pings carry ``human``, so
+#: ``human`` proves nothing. ``sdk`` is left out: a session driven by
+#: ``claude -p`` has no other request than its own prompt.
+NOT_TYPED_TURN_ORIGINS = ("task_notification", "peer", "scheduled")
+
+#: How a shell line shows that it runs a project's tests. ``testrun`` (the
+#: parser, the purpose rules) and the capture hook read the same pieces,
+#: so the two always agree on what counts. A heredoc's body is dropped
+#: first (:data:`TEST_HEREDOC_PATTERN`: a script or commit message that
+#: mentions pytest runs nothing); the line is cut into commands at
+#: :data:`TEST_COMMAND_SPLIT_PATTERN`; each command loses what comes before
+#: its program (:data:`TEST_PREFIX_PATTERN`: a "(" or "&", a ``VAR=value``,
+#: ``time``, ``timeout 60``, ``uv run``, ``npx``) and the folder and
+#: ``.exe`` of its program word (:data:`TEST_PROGRAM_PATTERN`, so
+#: ``C:/Python311/python.exe`` and ``.venv/Scripts/pytest`` read as
+#: ``python`` and ``pytest``); what is left must open with a runner
+#: (:data:`TEST_RUNNER_PATTERN`), unless its arguments say nothing is run
+#: (:data:`TEST_NO_RUN_PATTERN`: ``--collect-only``, ``--help``). A path in
+#: a hook's text is redacted to ``<path>``, so that counts as a Python too.
+TEST_COMMAND_SPLIT_PATTERN = r"&&|\|\||;|\||\r?\n|[)}]"
+TEST_HEREDOC_PATTERN = (
+    r"(?s)(?<!<)<<(?!<)-?[ \t]*(?P<quote>['\"]?)(?P<tag>[A-Za-z_]\w*)(?P=quote)(?P<rest>[^\n]*)\n"
+    r".*?(?:\n[ \t]*(?P=tag)[ \t]*(?=\n|\Z)|\Z)"
+)
+TEST_PREFIX_PATTERN = (
+    r"(?:[(&{]\s*"
+    r"|(?:\$env:)?\w+=\S*\s+"
+    r"|(?:time|nohup|command|exec|sudo|do|then|else|elif|if|while|until|!)\s+"
+    r"|timeout(?:\.exe)?\s+(?:-\S+\s+)*\d+[smhd]?\s+"
+    r"|(?:uv|poetry|pipenv|pdm|hatch|rye)\s+run\s+(?:--[\w-]+\s+)*"
+    r"|(?:npx|bunx)\s+(?:(?:-y|--yes|--no-install)\s+)?"
+    r"|(?:pnpm|yarn)\s+(?:exec|dlx)\s+"
+    r"|bundle\s+exec\s+)"
+)
+TEST_PROGRAM_PATTERN = (
+    r"""^(?:"(?:[^"\n]*[/\\])?|'(?:[^'\n]*[/\\])?|(?:[^\s"']*[/\\])?)([\w.+-]+?)(?:\.(?:exe|cmd|bat))?["']?(?=\s|$)"""
+)
+TEST_RUNNER_PATTERN = (
+    r"(?:(?:python3?(?:\.\d+)?|py|<path>)(?:\s+(?:-[uBEsSqIOd]+|-[XW]\s*\S+|-\d(?:\.\d+)?))*\s+-m\s+(?:pytest|unittest)"
+    r"|pytest|py\.test|tox|nox|jest|vitest|mocha|rspec|phpunit|ctest"
+    r"|(?:npm|yarn|pnpm|bun)(?:\s+run)?\s+test(?::[\w-]+)?"
+    r"|(?:go|cargo|dotnet|deno|swift|mix|flutter|dart|rake)\s+test|cargo\s+nextest\s+run"
+    r"|mvnw?\s+test|gradlew?\s+test|playwright\s+test|make\s+test)"
+)
+TEST_NO_RUN_PATTERN = (
+    r"(?:^|\s)(?:--collect-only|--co|--help|-h|--version|--fixtures|--markers|--setup-plan|--listTests|--list-tests"
+    r"|--no-run)(?=\s|$)"
+)
+
+#: What in a test command's arguments picks particular tests: a name or
+#: path filter, a ``file::test`` id, a test file or folder, or (go, cargo:
+#: :data:`TEST_BARE_TARGET_RUNNER_PATTERN`) a package or test name. A
+#: redirection and the value of a flag like ``-n 4`` or ``--cov src`` pick
+#: nothing (:data:`TEST_NO_TARGET_PATTERN`), nor does naming the whole
+#: suite: ``tests``, ``./...``, ``.`` (:data:`TEST_WHOLE_SUITE_PATTERN`).
+TEST_TARGET_PATTERN = (
+    r"(?:^|\s)(?:-k\b|-t\b|--testNamePattern|--testPathPattern|-run\b|--grep\b|--filter\b|--tests\b|-Dtest"
+    r"|\S*::\S+|\S*tests?/\S*|\S*test_\S+|\S+_test\.\w+|\S+\.(?:test|spec)\.\w+|\S*spec/\S*)"
+)
+TEST_BARE_TARGET_PATTERN = r"(?:^|\s)(?!-)[\w./:-]+"
+TEST_BARE_TARGET_RUNNER_PATTERN = r"(?:go|cargo)\s+test"
+TEST_NO_TARGET_PATTERN = (
+    r"(?:\s*&?\d?>>?&?\s*\S*"
+    r"|(?:^|\s)(?:-n|-p|-c|-j|-o|-W|--cov(?:-report|-config)?|--maxfail|--tb|--timeout|--durations|--rootdir"
+    r"|--junitxml|--workers|--shard|--reporter|--config|--maxWorkers)(?:\s+|=)\S+)"
+)
+TEST_WHOLE_SUITE_PATTERN = r"(?:^|\s)(?:\./\.\.\.|(?:\./)?(?:tests?|specs?|__tests__|src|\.)/?)(?=\s|$)"
 
 #: A message that only acknowledges ("thanks", "ok", "looks good"): sent
 #: after a change, it isn't another request.
@@ -1097,7 +1354,9 @@ METRICS: tuple[Metric, ...] = (
         section="derived",
         title="What your messages contain",
         what="Whether each message names a file, has a code block, an error or stack trace, a URL, "
-        "done-criteria wording or numbered steps. Also whether it's short. Only yes/no is kept.",
+        "done-criteria wording or numbered steps. Also whether it's short, tweaks earlier work, repeats "
+        "something you said, only says to carry on, or only asks how it's going. Messages you typed "
+        "while Claude was working are read the same way, and counted. Only yes/no and counts are kept.",
         why="How you give Claude information, measured without asking Claude: cost per task with and "
         "without file paths or errors.",
         powers=("information",),
@@ -1117,9 +1376,23 @@ METRICS: tuple[Metric, ...] = (
         group="derived",
         section="skills_plans",
         title="Plans",
-        what="Each plan you approved or rejected: steps, files named and length.",
-        why="Plan size against what the work then cost.",
+        what="Each plan you approved or rejected: steps, files named and length. For a rejected plan, how long "
+        "your feedback was and one word for how it reads: a question, a criticism or unsure. Whether you "
+        "approved it by typing a go-ahead or by leaving plan mode.",
+        why="Plan size against what the work then cost, and how many rounds a plan took before you approved it.",
         powers=("planning",),
+    ),
+    Metric(
+        id="tool_denials",
+        group="derived",
+        section="derived",
+        title="Tool calls turned away",
+        what="Why each tool call didn't run, as one word. A plan or question you answered, a hook or auto "
+        "mode block, a closed dialog, or a call you turned down. Also how many clarifying questions Claude "
+        "asked you. Only the word and the count are kept.",
+        why="Counting only the calls you turned down when judging how often you stop Claude, not plan dialogs "
+        "or hooks.",
+        powers=("waiting", "planning"),
     ),
     Metric(
         id="skill_timing",
@@ -1869,6 +2142,36 @@ def export_json() -> dict:
             "question_pattern": QUESTION_PATTERN,
             "specific_pattern": SPECIFIC_PATTERN,
             "interrupt_prefix": INTERRUPT_PREFIX,
+            "not_typed_prefixes": list(NOT_TYPED_PREFIXES),
+            "not_typed_turn_origins": list(NOT_TYPED_TURN_ORIGINS),
+            "adjust_pattern": ADJUST_PATTERN,
+            "remind_pattern": REMIND_PATTERN,
+            "go_pattern": GO_PATTERN,
+            "go_max_chars": GO_MAX_CHARS,
+            "status_pattern": STATUS_PATTERN,
+            "status_max_chars": STATUS_MAX_CHARS,
+            "reply_scan_chars": REPLY_SCAN_CHARS,
+            "reply_fence_pattern": REPLY_FENCE_PATTERN,
+            "reply_tip_block_pattern": REPLY_TIP_BLOCK_PATTERN,
+            "reply_inline_code_pattern": REPLY_INLINE_CODE_PATTERN,
+            "reply_url_pattern": REPLY_URL_PATTERN,
+            "reply_quoted_pattern": REPLY_QUOTED_PATTERN,
+            "reply_reminder_line_pattern": REPLY_REMINDER_LINE_PATTERN,
+            "reply_tags_pattern": REPLY_TAGS_PATTERN,
+            "reply_list_start_pattern": REPLY_LIST_START_PATTERN,
+            "reply_unit_pattern": REPLY_UNIT_PATTERN,
+            "reply_question_trim": REPLY_QUESTION_TRIM,
+            "test_command_split_pattern": TEST_COMMAND_SPLIT_PATTERN,
+            "test_heredoc_pattern": TEST_HEREDOC_PATTERN,
+            "test_prefix_pattern": TEST_PREFIX_PATTERN,
+            "test_program_pattern": TEST_PROGRAM_PATTERN,
+            "test_runner_pattern": TEST_RUNNER_PATTERN,
+            "test_no_run_pattern": TEST_NO_RUN_PATTERN,
+            "test_target_pattern": TEST_TARGET_PATTERN,
+            "test_bare_target_pattern": TEST_BARE_TARGET_PATTERN,
+            "test_bare_target_runner_pattern": TEST_BARE_TARGET_RUNNER_PATTERN,
+            "test_no_target_pattern": TEST_NO_TARGET_PATTERN,
+            "test_whole_suite_pattern": TEST_WHOLE_SUITE_PATTERN,
             "edit_tools": list(EDIT_TOOLS),
             "ack_pattern": ACK_PATTERN,
             "list_item_pattern": LIST_ITEM_PATTERN,

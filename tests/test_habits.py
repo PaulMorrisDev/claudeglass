@@ -19,9 +19,9 @@ import pytest
 
 from claudeglass import capture as capture_mod, capture_catalogue as catalogue, habits, parse
 from claudeglass.habits import AgentFact, CycleFact, Habits, Item, Piece
-from claudeglass.model import CaptureTag, Recommendation, TranscriptMeta
+from claudeglass.model import CaptureTag, Recommendation, TranscriptMeta, WorkflowRun
 from claudeglass.parse import parse_transcript
-from claudeglass.pricing import load_pricing
+from claudeglass.pricing import load_pricing, price_turn
 
 from helpers import (
     old_agent_note_text,
@@ -682,6 +682,96 @@ def test_collect_turns_tags_ratings_and_agent_reports_into_facts(tmp_path, prici
     )
 
 
+def _workflow_session(tmp_path, *, agent_type: str = "workflow-subagent", runs=(), logged: bool = True):
+    """Two messages. The first reads ``src/a.py``. The second starts a
+    workflow (reported as research, hard) whose one agent reads it again."""
+    launch = [
+        _reply(11, tool_use_block("Workflow", "tu_w", {"script": "return 1"}),
+               {"type": "text", "text": "Running.\n[cg: task=research level=hard shift=redo]"}),
+        user_block_line(
+            [tool_result_block("tu_w", "Workflow launched in background.")],
+            timestamp=_ts(12),
+            toolUseResult={"status": "async_launched", "taskType": "local_workflow", "runId": "wf_a", "taskId": "t_a"},
+        ),
+    ] if logged else [_reply(11, text="Running.\n[cg: task=research level=hard shift=redo]")]
+    top = _parse(tmp_path, "top.jsonl", [
+        _note(0, ["task", "level", "shift"]),
+        user_str_line("look at the cache", origin={"kind": "human"}, timestamp=_ts(0)),
+        _reply(1, tool_use_block("Read", "toolu_r0", {"file_path": "src/a.py"}),
+               {"type": "text", "text": "Reading.\n[cg: task=research level=easy]"}),
+        user_block_line([tool_result_block("toolu_r0", "x" * 400)], timestamp=_ts(2)),
+        _reply(3, text="Done.\n[cg: task=research level=easy]"),
+        user_str_line("now do it properly", origin={"kind": "human"}, timestamp=_ts(10)),
+        *launch,
+        _reply(13, text="Waiting.\n[cg: task=research level=hard shift=redo]"),
+    ], kind="top-level")
+    agent = _parse(tmp_path, "wf-w1.jsonl", [
+        user_str_line("read it", timestamp=_ts(14)),
+        _reply(15, tool_use_block("Read", "toolu_r1", {"file_path": "src/a.py"})),
+        user_block_line([tool_result_block("toolu_r1", "y" * 400)], timestamp=_ts(16)),
+        _reply(17, text="Same as before."),
+    ], kind="workflow-agent", agent_id="agent-w1", agent_type=agent_type, workflow_run_id="wf_a")
+    return NS(sessions=[NS(top=top, subs=[agent], session_id="s1", project_dir="p", workflows=list(runs))]), agent
+
+
+def test_a_workflow_agent_is_an_agent_run_of_the_message_that_started_its_workflow(tmp_path, pricing):
+    corpus, agent = _workflow_session(tmp_path)
+    h = habits.collect(corpus, pricing)
+    (fact,) = h.agents
+    assert (fact.agent_type, fact.level, fact.task) == ("workflow-subagent", "hard", "research")
+    # It read the file the first message had already read: overlap, priced.
+    assert fact.overlap_reads == 1 and fact.overlap_cost > 0
+
+
+def test_a_workflow_agents_cost_is_in_its_messages_cost_and_in_what_a_redo_wasted(tmp_path, pricing):
+    corpus, agent = _workflow_session(tmp_path)
+    h = habits.collect(corpus, pricing)
+    first, second = h.cycles
+    spent = sum(
+        price_turn(t, pricing.resolve_model(t.model)).total for t in capture_mod._priced(agent)
+    )
+    main = sum(price_turn(t, pricing.resolve_model(t.model)).total for t in capture_mod.prompt_cycles(corpus.sessions[0].top)[1].turns)
+    assert spent > 0 and second.cost == pytest.approx(main + spent)
+    assert first.redone and first.redo_cost == pytest.approx(second.cost)
+    (shape,) = h.shapes
+    assert shape.cost == pytest.approx(first.cost + second.cost)
+
+
+def test_a_run_file_alone_places_the_agent_of_a_run_with_no_logged_call(tmp_path, pricing):
+    run = WorkflowRun(run_id="wf_a", started=_ts(11))
+    placed, _ = _workflow_session(tmp_path, runs=[run], logged=False)
+    (fact,) = habits.collect(placed, pricing).agents
+    assert (fact.level, fact.task) == ("hard", "research") and fact.overlap_reads == 1
+    # Nothing places it without one: still an agent run, of no message.
+    lost, _ = _workflow_session(tmp_path, logged=False)
+    (fact,) = habits.collect(lost, pricing).agents
+    assert (fact.level, fact.task, fact.overlap_reads) == (None, None, 0)
+
+
+def test_a_workflow_agent_named_explore_is_not_a_message_that_delegated_to_explore(tmp_path, pricing):
+    corpus, _ = _workflow_session(tmp_path, agent_type="Explore")
+    h = habits.collect(corpus, pricing)
+    assert [c.explore_agents for c in h.cycles] == [0, 0]
+    (fact,) = h.agents
+    assert fact.agent_type == "Explore" and fact.level == "hard"
+
+
+def test_the_spawn_of_an_agent_a_workflow_agent_started_is_its_workflows_reply(tmp_path):
+    corpus, agent = _workflow_session(tmp_path)
+    top = corpus.sessions[0].top
+    launches = capture_mod.WorkflowLaunches(top)
+    child = _parse(tmp_path, "agent-c1.jsonl", [user_str_line("x", timestamp=_ts(16)), _reply(17)],
+                   kind="subagent", agent_id="agent-c1", tool_use_id="toolu_inner", parent_agent_id="w1")
+    by_agent = {"w1": agent, "c1": child}
+    turns = capture_mod._priced(top)
+    main_spawn = {use: i for i, turn in enumerate(turns) for use in turn.tool_use_ids}
+    at = habits._spawn_index(child, main_spawn, by_agent, launches)
+    assert at == main_spawn["tu_w"]
+    assert habits._spawn_index(agent, main_spawn, by_agent, launches) == at
+    # Cut off from its parent, it has no workflow to follow.
+    assert habits._spawn_index(child, main_spawn, {}, launches) is None
+
+
 def _tokensave_blocked_session(tmp_path):
     """A session where tokensave's own hook turned an Explore agent call
     away -- the transcript shape ``Turn.saver_redirects``/
@@ -727,6 +817,63 @@ def test_calls_in_turns_counts_a_savers_calls_and_redirects_against_every_call()
 def test_collect_leaves_saver_active_false_without_a_redirect(tmp_path, pricing):
     h = habits.collect(_tagged_session(tmp_path), pricing)
     assert h.saver_active is False
+
+
+_SENT_BACK = (
+    "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
+    "the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+)
+
+
+def _turned_away_session(tmp_path, *, refused: int, plans: int = 0, questions: int = 0, hooks: int = 0, auto: int = 0):
+    """One message, then calls turned away: ``refused`` Bash calls a deny
+    rule stopped, ``plans`` sent back in the dialog, ``questions`` you
+    declined, ``hooks`` a hook blocked, ``auto`` the classifier blocked."""
+    steps = (
+        [("ExitPlanMode", {"plan": "1. a"}, _SENT_BACK + "smaller", "user-rejected")] * plans
+        + [("AskUserQuestion", {"questions": []}, _SENT_BACK, "user-rejected")] * questions
+        + [("Bash", {"command": "make"}, "PreToolUse:Bash hook error: [guard.sh] STOP: no make", "permission-rule")] * hooks
+        + [("Bash", {"command": "make"}, "Blocked by the auto mode classifier", "automode-blocked")] * auto
+        + [("Bash", {"command": "rm -rf build"}, "Permission to use Bash has been denied.", "permission-rule")] * refused
+    )
+    lines = [user_str_line("fix the login bug", origin={"kind": "human"}, timestamp=_ts(0))]
+    for n, (tool, given, answer, kind) in enumerate(steps):
+        lines += [
+            _reply(1 + 2 * n, tool_use_block(tool, f"tu_{n}", given)),
+            user_block_line([tool_result_block(f"tu_{n}", answer, is_error=True)], timestamp=_ts(2 + 2 * n),
+                            toolDenialKind=kind),
+        ]
+    lines.append(_reply(1 + 2 * len(steps), text="Done."))
+    top = _parse(tmp_path, "top.jsonl", lines, kind="top-level")
+    return NS(sessions=[NS(top=top, subs=[], session_id="s1", project_dir="p", slug="p")])
+
+
+def test_collect_counts_only_calls_you_or_a_deny_rule_turned_down_as_refused(tmp_path, pricing):
+    h = habits.collect(_turned_away_session(tmp_path, refused=3, plans=3, questions=2, hooks=2, auto=1), pricing)
+    [fact] = h.cycles
+    assert (fact.refused, fact.blocked) == (3, 1)
+    assert fact.refused_cost > 0 and fact.blocked_cost > 0
+
+
+def test_state_limits_ignores_plans_sent_back_questions_declined_and_hook_blocks(tmp_path, pricing):
+    only_answers = habits.collect(
+        _turned_away_session(tmp_path, refused=0, plans=3, questions=3, hooks=3), pricing
+    )
+    assert "state_limits" not in _by_key(habits.playbook(only_answers))
+    refused = habits.collect(_turned_away_session(tmp_path, refused=3, plans=3, hooks=3), pricing)
+    item = _by_key(habits.playbook(refused))["state_limits"]
+    assert item.n == 3
+    assert item.evidence.startswith("3 requests were turned down")
+
+
+def test_a_plan_or_question_dialog_is_no_permission_prompt_for_an_allow_rule_to_end():
+    h = Habits(permission_prompts=Counter({"ExitPlanMode": 9, "AskUserQuestion": 4, "Bash": 5, "Edit": 1}))
+    item = _by_key(habits.playbook(h))["allow_routine"]
+    assert "Claude asked for permission 6 times, mostly for Bash" in item.evidence
+    assert "ExitPlanMode" not in item.evidence and "AskUserQuestion" not in item.evidence
+    assert item.n == 6
+    only_dialogs = Habits(permission_prompts=Counter({"ExitPlanMode": 9, "AskUserQuestion": 4}))
+    assert "allow_routine" not in _by_key(habits.playbook(only_dialogs))
 
 
 # Weeks and days are local: a fixed offset stands in for ``config.tz`` (no

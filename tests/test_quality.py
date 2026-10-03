@@ -255,6 +255,91 @@ def test_a_token_savers_redirect_is_not_a_denial(tmp_path):
     assert run.denials == 1
 
 
+_SENT_BACK = (
+    "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
+    "the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+)
+
+
+def _turned_away(second: int, tool_use_id: str, text: str, kind: str) -> dict:
+    return user_block_line([tool_result_block(tool_use_id, text, is_error=True)], timestamp=_ts(second),
+                           toolDenialKind=kind)
+
+
+def test_only_calls_you_or_a_deny_rule_turned_down_are_denials(tmp_path):
+    run = quality.run_facts(_parse(tmp_path, [
+        user_str_line("add a retry to the fetcher", timestamp=_ts(0)),
+        _reply(1, tool_use_block("ExitPlanMode", "p1", {"plan": "1. a"})),
+        _turned_away(2, "p1", _SENT_BACK + "make step two smaller", "user-rejected"),
+        _reply(3, tool_use_block("AskUserQuestion", "q1", {"questions": []})),
+        _turned_away(4, "q1", _SENT_BACK, "user-rejected"),
+        _reply(5, tool_use_block("Bash", "b1", {"command": "make"})),
+        _turned_away(6, "b1", "PreToolUse:Bash hook error: [guard.sh] STOP: no make here", "permission-rule"),
+        _reply(7, tool_use_block("Bash", "b2", {"command": "make"})),
+        _turned_away(8, "b2", "Blocked by the auto mode classifier", "automode-blocked"),
+        _reply(9, tool_use_block("Bash", "b3", {"command": "make"})),
+        _turned_away(10, "b3", "Permission to use Bash has been denied.", "interrupted"),
+        _reply(11, tool_use_block("Bash", "b4", {"command": "rm -rf build"})),
+        _turned_away(12, "b4", "Permission to use Bash has been denied.", "permission-rule"),
+        _reply(13, tool_use_block("Edit", "e1", {"file_path": "a.py"})),
+        _turned_away(14, "e1", _SENT_BACK + "not that file", "user-rejected"),
+        _reply(15),
+    ]), None)
+    assert run.denials == 2
+
+
+def test_a_plan_you_sent_back_is_not_a_tool_error_but_a_refused_call_still_is(tmp_path):
+    run = quality.run_facts(_parse(tmp_path, [
+        user_str_line("add a retry to the fetcher", timestamp=_ts(0)),
+        _reply(1, tool_use_block("ExitPlanMode", "p1", {"plan": "1. a"})),
+        _turned_away(2, "p1", _SENT_BACK + "smaller", "user-rejected"),
+        _reply(3, tool_use_block("Bash", "b1", {"command": "make"})),
+        _turned_away(4, "b1", "Permission to use Bash has been denied.", "permission-rule"),
+        _reply(5),
+    ]), None)
+    assert (run.denials, run.tool_errors) == (1, 1)
+
+
+def test_only_you_stopping_a_reply_is_a_stop(tmp_path):
+    def stops(*middle) -> int:
+        run = quality.run_facts(_parse(tmp_path, [
+            user_str_line("add a retry to the fetcher", timestamp=_ts(0)),
+            _reply(1, tool_use_block("Bash", "b1", {"command": "make"})),
+            *middle,
+            _reply(9),
+        ]), None)
+        return run.interrupts
+
+    plain = user_str_line("[Request interrupted by user]", timestamp=_ts(3))
+    tail = user_str_line("[Request interrupted by user for tool use]", timestamp=_ts(3))
+    assert stops(plain) == 1
+    # A call you turned down, or a dialog you closed, then the tool-use line.
+    assert stops(_turned_away(2, "b1", "Permission to use Bash has been denied.", "permission-rule"), tail) == 1
+    assert stops(_turned_away(2, "b1", "Permission to use Bash has been denied.", "interrupted"), tail) == 1
+    assert stops(_turned_away(2, "b1", _SENT_BACK + "not now", "user-rejected"), tail) == 1
+    # The same line after a hook's or the classifier's block is only how the turn ended.
+    assert stops(_turned_away(2, "b1", "PreToolUse:Bash hook error: [guard.sh] no", "permission-rule"), tail) == 0
+    assert stops(_turned_away(2, "b1", "Blocked by the auto mode classifier", "automode-blocked"), tail) == 0
+    # The session's end isn't you stopping anything.
+    assert stops(user_str_line("[Request interrupted: app quit]", timestamp=_ts(3))) == 0
+
+
+def test_the_tool_use_line_after_a_plan_or_question_answer_is_not_a_stop(tmp_path):
+    tail = user_str_line("[Request interrupted by user for tool use]", timestamp=_ts(3))
+    plan = quality.run_facts(_parse(tmp_path, [
+        user_str_line("add a retry to the fetcher", timestamp=_ts(0)),
+        _reply(1, tool_use_block("ExitPlanMode", "p1", {"plan": "1. a"})),
+        _turned_away(2, "p1", _SENT_BACK + "smaller", "user-rejected"), tail, _reply(9),
+    ]), None)
+    question = quality.run_facts(_parse(tmp_path, [
+        user_str_line("add a retry to the fetcher", timestamp=_ts(0)),
+        _reply(1, tool_use_block("AskUserQuestion", "q1", {"questions": []})),
+        _turned_away(2, "q1", _SENT_BACK, "user-rejected"), tail, _reply(9),
+    ]), None)
+    assert (plan.interrupts, question.interrupts) == (0, 0)
+    assert (plan.denials, question.denials) == (0, 0)
+
+
 def test_session_runs_join_notification_outcomes_to_agent_transcripts(tmp_path):
     top = _parse(tmp_path, [
         user_str_line("go", timestamp=_ts(0)),

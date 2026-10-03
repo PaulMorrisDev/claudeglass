@@ -35,7 +35,7 @@ agent type's name.
 
 | Hint | When | What the note asks of Claude |
 |---|---|---|
-| `plan_fresh` | You approve a plan, and building it in a fresh session would drop at least 40,000 tokens of planning context. | Tell you in a tip that `/clear`, then asking Claude to carry out the saved plan, would carry that much less on every reply of the build. Then carry on. |
+| `plan_fresh` | You approve a plan, and building it in a fresh session would drop at least 40,000 tokens of planning context. You approve it in the dialog, by typing a go-ahead after the dialog sent it back, or by leaving plan mode. | Tell you in a tip that `/clear`, then asking Claude to carry out the saved plan, would carry that much less on every reply of the build. Then carry on. |
 | `split_run` | A subagent run passes the number of replies your own history says its type's runs are best split at (see [below](#your-own-split-points)). | Nothing: the subagent is never told. You get a one-line notice, once a run, that runs of that type cost you less when split, so next time you can give each agent a smaller piece of the work. |
 | `quiet_output` | A tool result is about 8,000 tokens or more. A read already given a line limit is left alone. | Next time, ask for less: read only the lines needed, use a quieter flag or a filter that keeps every error line (not a bare `head` or `tail`), narrow a search. |
 | `explore_reads` | The main session has made 8 reads and searches for one message. | If more searching is needed, hand it to an Explore agent, which searches in its own context and sends back a summary -- or, in a project [tokensave](savers.md) has indexed (a `.tokensave/` folder), use its own tools instead (`tokensave_context`, `tokensave_search`, `tokensave_files`), then read only the lines needed: its hook would otherwise just turn an Explore agent away. |
@@ -59,7 +59,8 @@ and only ends its reply with the tip.
 `vague_fix` doesn't show during a run `drip_feed` has already flagged.
 A message you didn't type gets no hint: a background agent's report
 (which Claude Code hands to Claude as the next message), a scheduled
-task, a slash command's output.
+task, a slash command's output, another session's message, the desktop
+app's note after a usage limit or a quit.
 
 ## How a tip looks
 
@@ -104,8 +105,9 @@ you're sending and your earlier ones at the end of the transcript.
   changed a file in answer to it. A small request is 300 characters or
   less; a longer one usually plans several changes at once, which is
   what the hint asks for. A reply to a question Claude asked (its last
-  words hold a "?") is skipped, and a bare "thanks" or "ok" isn't a
-  request. A session's first message never counts: it starts the work.
+  reply ends on one: a "?" closes one of its last two sentences or a
+  list item that ends it, not code, a link or its tag) is skipped, and a
+  bare "thanks" or "ok" isn't a request. A session's first message never counts: it starts the work.
 - `repeat_ask` compares the words of your message with those of your
   earlier ones Claude answered, in memory, as it runs; nothing about
   them is kept.

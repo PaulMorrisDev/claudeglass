@@ -51,6 +51,29 @@ used both by :func:`_human_text_metrics` here and by ``parse.py``'s
 export, used by ``parse.py`` for the new ``parser_notes
 ["unknown_line_types"]`` counter (SURV-6) so a corrupted/hostile ``type``
 field can never reach a diagnostic counter's key verbatim.
+
+Parser-signals batch (``PARSER_VERSION`` 37, see model.py's module
+docstring): a ``queued_command`` that carries a message you typed while
+Claude was working keeps its ``QUEUE_OPERATION`` kind, so it never opens
+a cycle, but its detail now says who sent it and how it reads
+(:func:`_queued_prompt_detail`, sharing :func:`_message_flags` with a
+typed message). A ``user`` line you didn't type -- one of
+``capture_catalogue.NOT_TYPED_PREFIXES``, or one a ``turnOrigin`` rules
+out -- is a ``META`` event with subkind ``not_typed`` (19.9), checked just
+before ``HUMAN_TEXT``. ``output_style`` is a ``REMINDER`` (``parse.py``
+promotes a change of style), and ``permission-mode`` and ``system``
+``informational`` lines are ignored.
+
+Plan-feedback batch (``PARSER_VERSION`` 37, see model.py's module
+docstring): an interrupt line gets a subkind from :func:`_interrupt_subkind`
+(``tool_refusal`` for the "for tool use" tail of a turned-down call,
+``shutdown`` for the session's end), its kind unchanged so it is still no
+typed message. ``DENIAL_BUCKETS`` names what each denied call was, set by
+``parse.py`` into ``detail["bucket"]`` (:func:`denial_bucket_of`), and
+:func:`is_stop` / :func:`stop_window` say which interrupts are you stopping
+a reply, for quality, prompting and waste. ``PLAN_FEEDBACK`` is emitted by
+``parse.py``, never classified from a line, and ranks just below
+``HUMAN_TEXT``.
 """
 
 from __future__ import annotations
@@ -68,6 +91,9 @@ from .capture_catalogue import (
     CORRECTION_PATTERN,
     CORRECTION_SCAN_CHARS,
     HOOK_SCRIPT,
+    LIMIT_RESUME_PREFIX,
+    NOT_TYPED_PREFIXES,
+    NOT_TYPED_TURN_ORIGINS,
     NOTE_MARKER,
     OLD_COACH_MARKER,
     OLD_NOTE_MARKER,
@@ -97,9 +123,16 @@ _IGNORABLE_TYPES = frozenset(
         #: "agent-setting" above -- its own totalCostUSD/hasUnknownModelCost
         #: are read directly by parse.parse_transcript instead.
         "cost-state",
+        #: Parser-signals addition (PARSER_VERSION 37): the permission
+        #: mode is already on each user line's own ``permissionMode``.
+        "permission-mode",
     }
 )
 _IGNORABLE_PREFIXES = ("file-history-", "artifact-")
+#: Parser-signals addition (PARSER_VERSION 37): ``system`` lines of these
+#: subtypes say nothing a counter uses, so they are ignored like the
+#: types above rather than left to land as ``UNKNOWN``.
+_IGNORABLE_SYSTEM_SUBTYPES = frozenset({"informational"})
 
 
 def _is_ignorable_type(line_type: str | None) -> bool:
@@ -234,7 +267,6 @@ _CACHE_SIGNAL_TYPES = frozenset(
         "plan_mode_exit",
         "auto_mode",
         "auto_mode_exit",
-        "output_style",
         "output_style_instructions",
     }
 )
@@ -264,6 +296,11 @@ _REMINDER_TYPES = frozenset(
         "task_reminder",
         "date",
         "date_change",
+        #: Parser-signals addition (PARSER_VERSION 37): Claude Code writes
+        #: one on every request, with the same style each time, so it
+        #: marks nothing. ``parse.parse_transcript`` promotes one to a
+        #: ``CACHE_SIGNAL`` when the style differs from the last.
+        "output_style",
     }
 )
 
@@ -321,19 +358,21 @@ def _user_has_text_or_image_list(d: dict) -> bool:
     )
 
 
-def _user_has_interrupt_text_block(d: dict) -> bool:
+def _interrupt_block_text(d: dict) -> str | None:
+    """The text of a ``[Request interrupted`` text block in a user line's
+    content, or ``None``. Read here for its wording and dropped."""
     message = d.get("message")
     if not isinstance(message, dict):
-        return False
+        return None
     content = message.get("content")
     if not isinstance(content, list):
-        return False
+        return None
     for block in content:
         if isinstance(block, dict) and block.get("type") == "text":
             text = block.get("text")
             if isinstance(text, str) and text.startswith("[Request interrupted"):
-                return True
-    return False
+                return text
+    return None
 
 
 def _user_has_tool_result(d: dict) -> bool:
@@ -367,6 +406,83 @@ def _is_saver_redirect(d: dict) -> bool:
         if any(isinstance(text, str) and known_savers.saver_for_text(text) for text in texts):
             return True
     return False
+
+
+#: What a denied tool call was, as ``Event.detail["bucket"]`` (set by
+#: ``parse.py``, which knows the tool and what its result said): the plan
+#: you sent back, a question you declined to answer, a hook's or guard's
+#: block, the auto mode classifier's refusal or its failure to answer, a
+#: dialog you closed without answering, and a call you turned down.
+DENIAL_BUCKETS = (
+    "plan_rejected", "question_declined", "hook_blocked", "auto_blocked", "auto_unavailable", "aborted", "refused",
+)
+
+#: The bucket of a denial by its ``toolDenialKind`` alone, when no tool or
+#: result text says more. A kind not listed here isn't a call you turned
+#: down.
+_BUCKET_BY_KIND = {
+    "permission-rule": "refused",
+    "user-rejected": "refused",
+    "automode-blocked": "auto_blocked",
+    "automode-unavailable": "auto_unavailable",
+    known_savers.REDIRECT_DENIAL_KIND: "hook_blocked",
+}
+
+
+def denial_bucket_for_kind(kind: str | None) -> str:
+    """The bucket word for a ``toolDenialKind`` alone."""
+    return _BUCKET_BY_KIND.get(kind or "", "aborted")
+
+
+def denial_bucket_of(event: Event) -> str:
+    """The bucket word of a ``TOOL_DENIAL`` event: the one ``parse.py``
+    recorded, else one from its ``toolDenialKind``."""
+    bucket = event.detail.get("bucket")
+    return bucket if bucket in DENIAL_BUCKETS else denial_bucket_for_kind(event.subkind)
+
+
+#: The wording of an interrupt that tells its ``subkind`` apart: the end
+#: of the session, or the ``for tool use`` tail of a turned-down call.
+_INTERRUPT_SHUTDOWN_RE = re.compile(r"shut ?down|session (?:ended|closed)|app (?:was )?(?:quit|closed)", re.IGNORECASE)
+_INTERRUPT_TOOL_RE = re.compile(r"for tool use", re.IGNORECASE)
+_INTERRUPT_SCAN_CHARS = 200
+
+
+def _interrupt_subkind(text: str) -> str | None:
+    """``"shutdown"`` for an interrupt the session's end wrote,
+    ``"tool_refusal"`` for the ``for tool use`` line that follows a tool
+    call turned down, else ``None`` (you stopped a reply). Read here for
+    its wording and dropped."""
+    head = text[:_INTERRUPT_SCAN_CHARS]
+    if _INTERRUPT_SHUTDOWN_RE.search(head):
+        return "shutdown"
+    if _INTERRUPT_TOOL_RE.search(head):
+        return "tool_refusal"
+    return None
+
+
+#: The buckets after which a ``for tool use`` interrupt is still you
+#: stopping Claude: a call you turned down, a dialog you closed. After a
+#: plan or question you answered, or a call a hook or the classifier
+#: blocked, the line is only how Claude Code ends that turn.
+_STOP_AFTER_BUCKETS = ("refused", "aborted")
+
+
+def is_stop(event: Event) -> bool:
+    """Whether an ``INTERRUPT`` event is you stopping a reply. Not the
+    session's end, and not the tail Claude Code writes after a plan or
+    question you answered or a call a hook or the classifier blocked
+    (``detail["after"]`` is that denial's bucket)."""
+    if event.kind != EventKind.INTERRUPT or event.subkind == "shutdown":
+        return False
+    return event.subkind != "tool_refusal" or event.detail.get("after") in (None, *_STOP_AFTER_BUCKETS)
+
+
+def stop_window(denials: dict) -> bool:
+    """Whether an interrupt among the denials since a reply
+    (``Turn.preceding_denials``) is you stopping it: there were none, or
+    only calls you turned down or dialogs you closed."""
+    return all(bucket in _STOP_AFTER_BUCKETS for bucket, count in denials.items() if count)
 
 
 #: attachment.type -> the raw attachment fields holding the text the
@@ -966,43 +1082,100 @@ def _human_text_metrics(d: dict, str_content: str | None) -> tuple[int, bool, di
     recognises (image/document) but could not size -- the caller folds
     it into ``parser_notes["unsized_blocks"]``.
     """
+    return _content_metrics(str_content, _user_content_blocks(d))
+
+
+def _content_metrics(str_content: str | None, blocks: Sequence | None) -> tuple[int, bool, dict[str, int]]:
+    """:func:`_human_text_metrics` for content already split into a plain
+    string or a list of blocks (a queued message's ``prompt`` is either)."""
     texts: list[str] = []
     block_chars = 0
     unsized_counts: dict[str, int] = {}
     if str_content is not None:
         texts.append(str_content)
-    else:
-        message = d.get("message")
-        content = message.get("content") if isinstance(message, dict) else None
-        if isinstance(content, list):
-            for block in content:
-                if not isinstance(block, dict):
-                    continue
-                if block.get("type") == "text":
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        texts.append(text)
-                    continue
-                chars, block_type = content_block_size(block)
-                if block_type is None:
-                    continue
-                if chars is not None:
-                    block_chars += chars
-                else:
-                    unsized_counts[block_type] = unsized_counts.get(block_type, 0) + 1
+    elif blocks is not None:
+        for block in blocks:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str):
+                    texts.append(text)
+                continue
+            chars, block_type = content_block_size(block)
+            if block_type is None:
+                continue
+            if chars is not None:
+                block_chars += chars
+            else:
+                unsized_counts[block_type] = unsized_counts.get(block_type, 0) + 1
     total_chars = sum(len(text) for text in texts) + block_chars
     has_paste = any(len(text) > _PASTE_CHAR_THRESHOLD or _PASTE_MARKER in text for text in texts)
     return total_chars, has_paste, unsized_counts
 
 
+def _user_content_blocks(d: dict) -> list | None:
+    """A ``user`` line's content blocks, or ``None`` for plain-string
+    content."""
+    message = d.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    return content if isinstance(content, list) else None
+
+
+def _has_image_block(blocks: Sequence | None) -> bool:
+    """Whether a list of content blocks holds an image. A desktop image
+    message has no "[Image #" placeholder in its text, so the block is
+    the only sign."""
+    return any(isinstance(block, dict) and block.get("type") == "image" for block in blocks or ())
+
+
+def _message_flags(texts: Sequence[str], *, has_image: bool = False, skill_command: bool = False) -> dict:
+    """The ``Event.detail`` flags a message you typed, or typed while
+    Claude was working, carries: ``correction``, ``adjust``, ``remind``,
+    ``go``, ``status``, ``ack``, ``vague``, ``has_image``, ``steps`` (two
+    or more, unless it mentions a plan) and ``flags``
+    (``model.PROMPT_FLAGS``). Each is there only when true. A skill you
+    ran with a slash gets ``correction``, ``has_image`` and ``flags``
+    only: the rest read what you wrote, and a skill's text is not that.
+    Flags only -- never the text."""
+    detail: dict = {}
+    if _looks_like_correction(texts):
+        detail["correction"] = True
+    flags = prompt_flags(texts)
+    if flags:
+        detail["flags"] = flags
+    if has_image:
+        detail["has_image"] = True
+    if skill_command:
+        return detail
+    # Prompting-habits addition (see model.py's module docstring): counts
+    # and flags only.
+    text = "\n".join(t for t in texts if t)
+    steps = prompt_shape.request_steps(text)
+    if steps >= 2 and not prompt_shape.mentions_plan(text):
+        detail["steps"] = steps
+    if not has_image and prompt_shape.is_vague_fix(text, int(COACHING_THRESHOLDS["vague_fix_chars"])):
+        detail["vague"] = True
+    if text.strip():
+        for key, matches in (
+            ("ack", prompt_shape.is_ack),
+            ("go", prompt_shape.is_go),
+            ("status", prompt_shape.is_status),
+            ("adjust", prompt_shape.is_adjust),
+            ("remind", prompt_shape.is_remind),
+        ):
+            if matches(text):
+                detail[key] = True
+    return detail
+
+
 def _human_text_detail(d: dict, str_content: str | None) -> tuple[int, dict]:
     """Size and the detail flags for a HUMAN_TEXT line: ``has_paste``,
-    ``unsized_blocks`` (SURV-7, only when non-empty) and (quality
-    signals) ``correction``, whether the message looks like it corrects
-    Claude. Flags only -- never the text."""
+    ``correction``, ``unsized_blocks`` (SURV-7, only when non-empty) and
+    the rest of :func:`_message_flags`. Flags only -- never the text."""
     human_chars, has_paste, unsized_counts = _human_text_metrics(d, str_content)
     texts = human_texts(d)
-    detail: dict = {"has_paste": has_paste, "correction": _looks_like_correction(texts)}
+    detail: dict = {"has_paste": has_paste, "correction": False}
     if unsized_counts:
         detail["unsized_blocks"] = unsized_counts
     retry = spawn = None
@@ -1014,24 +1187,14 @@ def _human_text_detail(d: dict, str_content: str | None) -> tuple[int, dict]:
         detail["retry"] = retry
     if spawn is not None:
         detail["spawn"] = spawn
-    flags = prompt_flags(texts)
-    if flags:
-        detail["flags"] = flags
-    if str_content is not None and str_content.startswith(_SKILL_COMMAND_PREFIX):
+    skill_command = str_content is not None and str_content.startswith(_SKILL_COMMAND_PREFIX)
+    detail.update(
+        _message_flags(texts, has_image=_has_image_block(_user_content_blocks(d)), skill_command=skill_command)
+    )
+    if skill_command:
         command = _COMMAND_NAME_RE.search(str_content)
         if command:
             detail["command"] = command.group(1)
-    else:
-        # Prompting-habits addition (see model.py's module docstring):
-        # counts and flags only.
-        text = "\n".join(t for t in texts if t)
-        steps = prompt_shape.request_steps(text)
-        if steps >= 2 and not prompt_shape.mentions_plan(text):
-            detail["steps"] = steps
-        if prompt_shape.is_vague_fix(text, int(COACHING_THRESHOLDS["vague_fix_chars"])):
-            detail["vague"] = True
-        if text.strip() and prompt_shape.is_ack(text):
-            detail["ack"] = True
     if d.get("permissionMode") == "plan":
         detail["plan_mode"] = True
     return human_chars, detail
@@ -1050,6 +1213,59 @@ def human_texts(d: dict) -> list[str]:
         for block in (content if isinstance(content, list) else ())
         if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
     ]
+
+
+def _prompt_texts(prompt: object) -> list[str]:
+    """The texts of a ``queued_command`` prompt: a string, or the text
+    blocks of a list of text and image blocks."""
+    if isinstance(prompt, str):
+        return [prompt]
+    return [
+        block.get("text")
+        for block in (prompt if isinstance(prompt, list) else ())
+        if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+    ]
+
+
+def queued_texts(d: dict) -> list[str]:
+    """The text of a ``queued_command`` attachment's message, for reading
+    one you typed while Claude was working. Never stored."""
+    attachment = d.get("attachment")
+    return _prompt_texts(attachment.get("prompt") if isinstance(attachment, dict) else None)
+
+
+def _queued_prompt_detail(attachment: dict) -> dict | None:
+    """Parser-signals addition (PARSER_VERSION 37): the detail of a
+    ``queued_command`` that carries a message, or ``None`` for one that
+    doesn't (a task notification, a coordinator's note). Only
+    ``commandMode`` "prompt" is a message: a task notification has no
+    origin at all. ``{"origin": "peer"}`` for another session's message,
+    else, for a human or missing origin, ``{"origin": "human", "chars":
+    n}`` with :func:`_message_flags`, ``has_paste`` and ``unsized_blocks``,
+    each only when true. Never the text. A line you didn't type
+    (:data:`NOT_TYPED_PREFIXES`) is no message."""
+    if attachment.get("commandMode") != "prompt":
+        return None
+    origin = attachment.get("origin")
+    kind = origin.get("kind") if isinstance(origin, dict) else None
+    if kind == "peer":
+        return {"origin": "peer"}
+    prompt = attachment.get("prompt")
+    if kind not in (None, "human") or attachment.get("isMeta") or not isinstance(prompt, (str, list)):
+        return None
+    texts = _prompt_texts(prompt)
+    first = next((text for text in texts if text), "")
+    if first.lstrip().startswith(NOT_TYPED_PREFIXES) and not first.startswith(_SKILL_COMMAND_PREFIX):
+        return None
+    blocks = prompt if isinstance(prompt, list) else None
+    chars, has_paste, unsized_counts = _content_metrics(prompt if blocks is None else None, blocks)
+    detail: dict = {"origin": "human", "chars": chars}
+    if has_paste:
+        detail["has_paste"] = True
+    if unsized_counts:
+        detail["unsized_blocks"] = unsized_counts
+    detail.update(_message_flags(texts, has_image=_has_image_block(blocks)))
+    return detail
 
 
 #: Usage-limits addition (see module docstring): the six known synthetic
@@ -1119,10 +1335,6 @@ def parse_limit_reset_clause(text: str | None) -> tuple[int | None, str | None]:
     tz = tz_raw if _IANA_TZ_RE.match(tz_raw) else None
     return minutes_of_day, tz
 
-
-#: Usage-limits addition (see module docstring): the desktop app's
-#: automatic resume ping after a usage-limit pause.
-_LIMIT_RESUME_PREFIX = "I hit my usage limit while you were working, but it has reset now"
 
 #: Usage-limits addition (see module docstring): a subagent killed
 #: mid-task by the harness, and the structured "error type X" clause
@@ -1272,6 +1484,19 @@ def _structured_output_size(attachment: dict) -> int | None:
         return None
 
 
+def _is_not_typed(d: dict, str_content: str | None) -> bool:
+    """Whether a ``user`` line that would otherwise be your message is one
+    you didn't type. ``turnOrigin`` only rules a line out (``human`` is
+    on scheduled tasks and resume pings too); a skill you ran with a slash
+    is your message, whatever its ``<command-`` prefix."""
+    if d.get("turnOrigin") in NOT_TYPED_TURN_ORIGINS:
+        return True
+    text = _first_user_text(d, str_content)
+    if text is None or text.startswith(_SKILL_COMMAND_PREFIX):
+        return False
+    return text.lstrip().startswith(NOT_TYPED_PREFIXES)
+
+
 def classify_line(d: dict) -> Event | None:
     """Classify one already-parsed JSONL line per plan Appendix A2.
 
@@ -1287,6 +1512,8 @@ def classify_line(d: dict) -> Event | None:
     if line_type == "assistant":
         return None
     if _is_ignorable_type(line_type):
+        return None
+    if line_type == "system" and d.get("subtype") in _IGNORABLE_SYSTEM_SUBTYPES:
         return None
 
     ts = d.get("timestamp")
@@ -1441,12 +1668,18 @@ def classify_line(d: dict) -> Event | None:
         )
     if attachment_type == "queued_command":
         prompt = attachment.get("prompt") if isinstance(attachment, dict) else None
+        # Parser-signals addition (PARSER_VERSION 37): a message you typed
+        # while Claude was working. Still a QUEUE_OPERATION, never
+        # HUMAN_TEXT, so it never opens a cycle; its time is when you
+        # typed it, not when Claude Code attached it.
+        queued = _queued_prompt_detail(attachment)
+        typed_at = attachment.get("timestamp")
         return Event(
             kind=EventKind.QUEUE_OPERATION,
             subkind=attachment_type,
-            ts=ts,
+            ts=typed_at if queued is not None and isinstance(typed_at, str) and typed_at else ts,
             size_chars=size_chars,
-            detail=_task_notification_detail(prompt if isinstance(prompt, str) else None),
+            detail=queued if queued is not None else _task_notification_detail(prompt if isinstance(prompt, str) else None),
         )
 
     # 10.5. TASK_STATUS / STRUCTURED_OUTPUT (parser-signals addition,
@@ -1538,9 +1771,11 @@ def classify_line(d: dict) -> Event | None:
 
     # 19. INTERRUPT
     if str_content is not None and str_content.startswith("[Request interrupted"):
-        return Event(kind=EventKind.INTERRUPT, subkind=None, ts=ts)
-    if line_type == "user" and _user_has_interrupt_text_block(d):
-        return Event(kind=EventKind.INTERRUPT, subkind=None, ts=ts)
+        return Event(kind=EventKind.INTERRUPT, subkind=_interrupt_subkind(str_content), ts=ts)
+    if line_type == "user":
+        interrupt_text = _interrupt_block_text(d)
+        if interrupt_text is not None:
+            return Event(kind=EventKind.INTERRUPT, subkind=_interrupt_subkind(interrupt_text), ts=ts)
 
     # 19.5. LIMIT_RESUME (usage-limits addition, see module docstring:
     # checked before HUMAN_TEXT so the desktop app's automatic resume
@@ -1551,8 +1786,16 @@ def classify_line(d: dict) -> Event | None:
     # this function.)
     if line_type == "user" and d.get("promptSource") == "sdk" and origin_kind == "human":
         text = _first_user_text(d, str_content)
-        if text is not None and text.startswith(_LIMIT_RESUME_PREFIX):
+        if text is not None and text.startswith(LIMIT_RESUME_PREFIX):
             return Event(kind=EventKind.LIMIT_RESUME, subkind=None, ts=ts)
+
+    # 19.9. NOT_TYPED (parser-signals addition, PARSER_VERSION 37): a line
+    # that looks like your message but isn't -- one list shared with the
+    # hook (``capture_catalogue.NOT_TYPED_PREFIXES``), and a
+    # ``turnOrigin`` that rules it out. Checked here so everything
+    # above that classified such a line more specifically still wins.
+    if line_type == "user" and _is_not_typed(d, str_content):
+        return Event(kind=EventKind.META, subkind="not_typed", ts=ts)
 
     # 20. HUMAN_TEXT
     if line_type == "user" and (
@@ -1586,6 +1829,9 @@ PRECEDENCE: tuple[EventKind, ...] = (
     EventKind.LIMIT_RESUME,
     EventKind.INTERRUPT,
     EventKind.HUMAN_TEXT,
+    # Parser-signals addition (PARSER_VERSION 37): your answer to a plan
+    # is a message of yours, ranked just below one you typed.
+    EventKind.PLAN_FEEDBACK,
     EventKind.PEER_MESSAGE,
     # Usage-limits addition: not ranked by the plan (it predates this
     # kind); placed just above TASK_NOTIFICATION -- a documented
@@ -1621,6 +1867,7 @@ _PRECEDENCE_SUBKIND_FILTER: tuple[frozenset[str] | None, ...] = (
     None,  # LIMIT_RESUME
     None,
     None,
+    None,  # PLAN_FEEDBACK
     None,
     None,  # AGENT_TERMINATED
     None,

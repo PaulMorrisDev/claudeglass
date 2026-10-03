@@ -34,14 +34,16 @@ import json
 import re
 from pathlib import Path
 
+from claudeglass import cache
 from claudeglass.discovery import load_meta
-from claudeglass.model import Column, EventKind, Recommendation, Section, Table, TranscriptMeta
+from claudeglass.model import PROMPT_FLAGS, Column, EventKind, Recommendation, Section, Table, TranscriptMeta
 from claudeglass.parse import parse_transcript
 
 from helpers import (
     assert_privacy,
     attachment_line,
     ignorable_line,
+    queue_operation_line,
     system_line,
     tool_use_block,
     tool_result_block,
@@ -1014,3 +1016,195 @@ def test_privacy_meta_phase_and_description_leave_only_the_role_word(tmp_path: P
     assert meta.description_len == len("impl:/home/someone/private/notes.txt " + sentence)
     _assert_no_violations(result)
     assert_privacy(meta)
+
+
+# -- Parser signals (PARSER_VERSION 37): a message typed while Claude works --
+
+
+_QUEUED_DETAIL_KEYS = {
+    "origin", "chars", "has_paste", "unsized_blocks", "correction", "flags", "has_image", "steps",
+    "vague", "ack", "go", "status", "adjust", "remind", "dup",
+}
+
+
+def test_privacy_queued_message_text_never_reaches_the_digest(tmp_path: Path):
+    # Words, a path, an address and a link in what you typed while Claude
+    # worked: the patterns read them in memory, and only counts and flags
+    # are kept. The same goes for a peer's message, an enqueue line, the
+    # typed copy of a queued message and a line you didn't type.
+    secrets = [
+        "zebrafish", "quokka", "narwhal", "pangolin", "axolotl", "capybara", "wombat", "ocelot",
+        "mongoose", "platypus",
+    ]
+    long_text = f"actually rename {secrets[0]} to {secrets[1]} in C:/Users/someone/private/{secrets[2]}.py " + "x" * 120
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    lines = [
+        user_str_line("refactor the parser", origin={"kind": "human"}, timestamp="2026-09-18T12:00:00.000Z"),
+        turn_line(content=[tool_use_block("Bash", "tu_q", {"command": "ls"})], timestamp="2026-09-18T12:00:05.000Z"),
+        attachment_line("queued_command", prompt=long_text, commandMode="prompt", origin={"kind": "human"},
+                        timestamp="2026-09-18T12:00:10.000Z"),
+        attachment_line("queued_command", prompt=f"I told you to email {secrets[3]}@example.com", commandMode="prompt"),
+        attachment_line("queued_command", prompt=f"see https://example.com/{secrets[4]}?q=1 and continue",
+                        commandMode="prompt", origin={"kind": "human"}),
+        attachment_line("queued_command",
+                        prompt=[{"type": "text", "text": f"it looks wrong {secrets[5]}"},
+                                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}}],
+                        commandMode="prompt", origin={"kind": "human"}),
+        attachment_line("queued_command", prompt=f"please review {secrets[6]}", commandMode="prompt",
+                        origin={"kind": "peer"}, isMeta=True),
+        attachment_line("queued_command", prompt=f"<task-notification><task-id>t1</task-id>{secrets[7]}</task-notification>",
+                        commandMode="task-notification"),
+        queue_operation_line("enqueue", content=f"also fix {secrets[8]}"),
+        user_str_line(f"The app was quit while you were working {secrets[9]}", origin={"kind": "human"}),
+        user_block_line([tool_result_block("tu_q", "ok")]),
+        turn_line(message_id="msg_q", input_tokens=50, output_tokens=5, timestamp="2026-09-18T12:00:40.000Z"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    queued = [e for e in result.events if e.subkind == "queued_command"]
+    assert [e.detail.get("origin") for e in queued] == ["human", "human", "human", "human", "peer", None]
+    assert result.turns[-1].queued_prompts == 4
+
+    encoded = json.dumps(cache.encode_result(result))
+    blob = encoded + repr(result.events) + repr(result.turns) + repr(result.diagnostics) + repr(result.meta)
+    for word in secrets + ["example.com", "someone", "private", "C:/Users", png]:
+        assert word not in blob, word
+    assert "x" * 20 not in blob
+    for event in queued:
+        assert set(event.detail) <= _QUEUED_DETAIL_KEYS | {"task_id", "status"}, event.detail
+        for value in event.detail.get("flags", ()):
+            assert value in PROMPT_FLAGS
+    _assert_no_violations(result)
+
+
+def test_privacy_message_flag_patterns_keep_a_flag_never_the_words(tmp_path: Path):
+    # The go, status, adjust and remind patterns match words you typed:
+    # what stays is a flag on the event and the turn.
+    typed = [
+        "continue", "how is it going?", "actually, rename the quokka widget", "I already told you about the narwhal",
+    ]
+    lines = []
+    for n, text in enumerate(typed):
+        lines.append(user_str_line(text, origin={"kind": "human"}, timestamp=f"2026-09-18T12:0{n}:00.000Z"))
+        lines.append(turn_line(message_id=f"msg_{n}", timestamp=f"2026-09-18T12:0{n}:30.000Z"))
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    assert [(t.human_go, t.human_status, t.human_adjust, t.human_remind) for t in result.turns] == [
+        (True, False, False, False), (False, True, False, False), (False, False, True, False),
+        (False, False, False, True),
+    ]
+    blob = json.dumps(cache.encode_result(result)) + repr(result.events) + repr(result.turns)
+    for word in ("quokka", "narwhal", "continue", "going", "rename", "already told"):
+        assert word not in blob, word
+    _assert_no_violations(result)
+
+
+def test_privacy_plan_feedback_and_denial_text_leave_a_length_and_a_word_never_the_words(tmp_path: Path):
+    # What you type into a rejected plan, a declined question or a deny
+    # rule's message, and the text a hook or the classifier answers with,
+    # is read in memory for its bucket and class: only counts, a length
+    # and a closed word are kept.
+    secrets = ["zebrafish", "quokka", "narwhal", "pangolin", "axolotl", "capybara", "wombat", "ocelot", "mongoose"]
+    sent_back = (
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file "
+        "edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+    )
+    feedback = f"why not use {secrets[0]} in C:/Users/someone/private/{secrets[1]}.py? mail {secrets[2]}@example.com"
+    lines = [
+        user_str_line("plan the change", origin={"kind": "human"}, timestamp="2026-09-18T12:00:00.000Z"),
+        turn_line(content=[tool_use_block("ExitPlanMode", "tu_p", {"plan": f"1. edit {secrets[3]}.py"}),
+                           tool_use_block("AskUserQuestion", "tu_q", {"questions": [{"question": secrets[4]}]}),
+                           tool_use_block("Bash", "tu_h", {"command": "make"}),
+                           tool_use_block("Bash", "tu_a", {"command": "make"}),
+                           tool_use_block("Bash", "tu_r", {"command": "make"})],
+                  timestamp="2026-09-18T12:00:05.000Z"),
+        user_block_line([tool_result_block("tu_p", sent_back + feedback, is_error=True)],
+                        toolDenialKind="user-rejected", timestamp="2026-09-18T12:00:10.000Z"),
+        user_block_line([tool_result_block("tu_q", sent_back + f"skip it, {secrets[5]}", is_error=True)],
+                        toolDenialKind="user-rejected", timestamp="2026-09-18T12:00:11.000Z"),
+        user_block_line([tool_result_block("tu_h", f"PreToolUse:Bash hook error: [{secrets[6]}.sh] STOP",
+                                           is_error=True)],
+                        toolDenialKind="permission-rule", timestamp="2026-09-18T12:00:12.000Z"),
+        user_block_line([tool_result_block("tu_a", f"Blocked by the classifier: {secrets[7]}", is_error=True)],
+                        toolDenialKind="automode-blocked", timestamp="2026-09-18T12:00:13.000Z"),
+        user_block_line([tool_result_block("tu_r", f"{secrets[8]}, not now", is_error=True)],
+                        toolDenialKind="permission-rule", timestamp="2026-09-18T12:00:14.000Z"),
+        user_str_line("[Request interrupted by user for tool use]", timestamp="2026-09-18T12:00:15.000Z"),
+        turn_line(message_id="msg_after", input_tokens=50, output_tokens=5, timestamp="2026-09-18T12:00:40.000Z"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+
+    [event] = [e for e in result.events if e.kind == EventKind.PLAN_FEEDBACK]
+    assert (event.size_chars, event.subkind, event.detail) == (len(feedback), "question", {})
+    buckets = [e.detail["bucket"] for e in result.events if e.kind == EventKind.TOOL_DENIAL]
+    assert buckets == ["plan_rejected", "question_declined", "hook_blocked", "auto_blocked", "refused"]
+    assert result.turns[1].preceding_denials == {
+        "plan_rejected": 1, "question_declined": 1, "hook_blocked": 1, "auto_blocked": 1, "refused": 1,
+    }
+
+    encoded = json.dumps(cache.encode_result(result))
+    blob = encoded + repr(result.events) + repr(result.turns) + repr(result.diagnostics) + repr(result.meta)
+    for word in secrets + ["example.com", "someone", "private", "C:/Users", "why not use"]:
+        assert word not in blob, word
+    for e in result.events:
+        if e.kind in (EventKind.TOOL_DENIAL, EventKind.PLAN_FEEDBACK, EventKind.INTERRUPT):
+            assert set(e.detail) <= {"bucket", "after"}, e.detail
+    _assert_no_violations(result)
+
+
+def test_privacy_reply_text_and_shell_reads_leave_yes_no_answers_and_sizes_never_the_words(tmp_path: Path):
+    # A reply that owns a mistake, asks a question and disowns a tip, the
+    # words and paths of a Read, a shell search and a test run, and what
+    # came back from them: read in memory, and only a yes/no, a count, a
+    # size and a closed word are kept.
+    from claudeglass import parse
+
+    parse.set_salt(b"p" * 32)
+    secrets = ["zebrafish", "quokka", "narwhal", "pangolin", "axolotl", "capybara", "wombat", "ocelot"]
+    persisted = (
+        f"<persisted-output>\nOutput too large (90KB). Full output saved to: /tmp/{secrets[5]}/out.txt\n\n"
+        f"Preview (first 2KB):\n{secrets[6]} line\n</persisted-output>"
+    )
+    lines = [
+        user_str_line("why did you change that?", origin={"kind": "human"}, timestamp="2026-09-18T12:00:00.000Z"),
+        turn_line(
+            message_id="msg_a",
+            content=[
+                {"type": "text", "text": f"My mistake, I misread {secrets[0]}. That ClaudeGlass tip was a false positive."},
+                tool_use_block("Read", "tu_r", {"file_path": f"C:/work/{secrets[1]}/notes.txt"}),
+                tool_use_block("Bash", "tu_g", {"command": "git status"}),
+                tool_use_block("Bash", "tu_s", {"command": f"cd C:/work/{secrets[2]} && grep -rn {secrets[3]} src/"}),
+                tool_use_block("Bash", "tu_t", {"command": f"pytest tests/test_{secrets[4]}.py -q"}),
+                {"type": "text", "text": f"Which of {secrets[7]} do you want? [cg: task=bugfix]"},
+            ],
+            timestamp="2026-09-18T12:00:05.000Z",
+        ),
+        user_block_line([tool_result_block("tu_r", persisted)], timestamp="2026-09-18T12:00:06.000Z"),
+        user_block_line([tool_result_block("tu_g", "clean")], timestamp="2026-09-18T12:00:07.000Z"),
+        user_block_line([tool_result_block("tu_s", f"src/a.py:1:{secrets[3]}")], timestamp="2026-09-18T12:00:08.000Z"),
+        user_block_line([tool_result_block("tu_t", "1 passed")], timestamp="2026-09-18T12:00:09.000Z"),
+        turn_line(message_id="msg_b", timestamp="2026-09-18T12:00:40.000Z"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+
+    turn = result.turns[0]
+    assert (turn.reply_asked, turn.admit_candidate, turn.admit_caught, turn.tip_disowned) == (True, True, "user", False)
+    assert (turn.read_target_chars, turn.shell_read_count, turn.shell_read_chars, turn.tests_run) == (
+        (len(persisted),), 1, len(f"src/a.py:1:{secrets[3]}"), "targeted",
+    )
+
+    encoded = json.dumps(cache.encode_result(result))
+    blob = encoded + repr(result.events) + repr(result.turns) + repr(result.diagnostics) + repr(result.meta)
+    for word in secrets[:3] + secrets[4:] + ["/tmp/", "C:/work", "Preview", "misread", "false positive"]:
+        assert word not in blob, word
+    # Of the commands, only the first one's first words (the existing prefix) are kept.
+    assert result.turns[0].cmd_prefix == "git status"
+    _assert_no_violations(result)
+    for t in result.turns:
+        assert t.admit_caught in ("", "user", "self") and t.tests_run in ("", "targeted", "full")

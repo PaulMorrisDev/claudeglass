@@ -86,10 +86,10 @@ then either. A run with nobody at the screen (``claude -p`` or the Agent
 SDK: ``CLAUDE_CODE_ENTRYPOINT`` starts with ``sdk``) gets no note, no
 coaching and no Haiku call, since a script reads what it prints; its
 signal lines are still logged. A message you didn't type (a background
-agent's report, a scheduled task, a command's output) gets no prompting
-or context hint. It uses only the standard library, and always exits 0
-without printing anything on an error, so it can never block or break a
-session.
+agent's report, a scheduled task, a command's output, the app's resume
+note) gets no prompting or context hint. It uses only the standard
+library, and always exits 0 without printing anything on an error, so
+it can never block or break a session.
 """
 
 from __future__ import annotations
@@ -647,9 +647,12 @@ def _is_synthetic(record: dict) -> bool:
 
 
 def _is_human_prompt(record: dict) -> bool:
-    """A message you typed: a ``user`` line that isn't meta and carries no
-    tool result (``statusline._is_human_prompt``)."""
+    """A message you typed: a ``user`` line that isn't meta, carries no
+    tool result and has no ``turnOrigin`` that rules it out
+    (``statusline._is_human_prompt``)."""
     if record.get("type") != "user" or record.get("isMeta") or "toolUseResult" in record:
+        return False
+    if record.get("turnOrigin") in _not_typed_origins():
         return False
     message = record.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -724,14 +727,27 @@ def _prompt_hints(records: list[dict], th: dict, now: datetime) -> list[tuple[st
     return out
 
 
-#: Lines written as your message that you didn't type: a slash command
+#: What a line written as your message starts with when you didn't type
+#: it, and the ``turnOrigin`` values that rule one out: a slash command
 #: and its output, a shell command run with ``!``, a scheduled task, a
-#: background agent's report (a task notification, or a subagent's
-#: hand-back sent as a message from another session).
-_NOT_TYPED_PREFIXES = (
-    "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
-    "[SYSTEM NOTIFICATION", "<agent-message", "Another Claude session sent a message",
-)
+#: background agent's report, another session's message, the desktop
+#: app's resume notes. Read once from the catalogue
+#: (``capture_catalogue.NOT_TYPED_PREFIXES``, the one list the parser and
+#: the status line share) rather than copied here.
+_NOT_TYPED: dict = {}
+
+
+def _not_typed_prefixes() -> tuple[str, ...]:
+    if "prefixes" not in _NOT_TYPED:
+        coaching = load_catalogue()["coaching"]
+        _NOT_TYPED["prefixes"] = tuple(coaching["not_typed_prefixes"])
+        _NOT_TYPED["origins"] = tuple(coaching["not_typed_turn_origins"])
+    return _NOT_TYPED["prefixes"]
+
+
+def _not_typed_origins() -> tuple[str, ...]:
+    _not_typed_prefixes()
+    return _NOT_TYPED["origins"]
 
 
 def _text_of(record: dict) -> str:
@@ -759,9 +775,42 @@ def _is_interrupt(record: dict, prefix: str) -> bool:
     )
 
 
-#: How far back from the end of Claude's last words a question mark
-#: makes your next message an answer to it, not a new request.
-_QUESTION_TAIL_CHARS = 300
+#: The patterns that find a reply's closing question, compiled on first
+#: use from the catalogue (``capture_catalogue.REPLY_*``, which
+#: ``prompt_shape.ends_on_question`` reads too).
+_REPLY: dict = {}
+
+
+def _reply_patterns() -> dict:
+    if not _REPLY:
+        coaching = load_catalogue()["coaching"]
+        for name in ("fence", "tip_block", "inline_code", "url", "quoted", "reminder_line", "tags", "list_start", "unit"):
+            _REPLY[name] = re.compile(coaching["reply_%s_pattern" % name])
+        _REPLY["scan_chars"] = coaching["reply_scan_chars"]
+        _REPLY["trim"] = coaching["reply_question_trim"]
+    return _REPLY
+
+
+def _ends_on_question(text: str) -> bool:
+    """Whether a reply ends on a question to you: the same steps as
+    ``prompt_shape.ends_on_question`` (held to it by a test)."""
+    r = _reply_patterns()
+    text = r["fence"].sub(" ", text)
+    text = r["tip_block"].sub("", text)
+    text = r["url"].sub(" ", r["inline_code"].sub(" ", text))
+    prose = r["quoted"].sub(" ", r["reminder_line"].sub("", text))
+    prose = r["tags"].sub("", prose.rstrip()).rstrip()
+    units = [unit for unit in r["unit"].split(prose[-r["scan_chars"]:]) if unit.strip()]
+
+    def asks(unit: str) -> bool:
+        return unit.rstrip().rstrip(r["trim"]).endswith("?")
+
+    end = len(units)
+    while end and r["list_start"].match(units[end - 1]):
+        if asks(units[end - 1]):
+            return True
+        end -= 1
+    return any(asks(unit) for unit in units[max(0, end - 2):end])
 
 
 def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict], dict]:
@@ -806,16 +855,16 @@ def _exchanges(records: list[dict], prefix: str, edit_tools) -> tuple[list[dict]
             if out:
                 out[-1]["stopped"] = True
             continue
-        if text.lstrip().startswith(_NOT_TYPED_PREFIXES):
+        if text.lstrip().startswith(_not_typed_prefixes()):
             continue
         at = _reply_time(record)
         out.append({
             "text": text, "at": at, "edited": False, "answered": False, "stopped": False, "failed": False,
             "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
-            "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
+            "answer": _ends_on_question(said),
         })
         said = ""
-    return out, {"replied_at": replied_at, "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:]}
+    return out, {"replied_at": replied_at, "answer": _ends_on_question(said)}
 
 
 #: How much of a message is read for its steps (``prompt_shape.STEP_SCAN_CHARS``).
@@ -912,7 +961,7 @@ def _practice_hints(
         stop = ("stop_loop", stops, {"count": stops, "minutes": round(th["stop_window_minutes"])})
     if not isinstance(prompt, str) or not prompt.strip():
         return [stop] if stop else []
-    if prompt.lstrip().startswith(_NOT_TYPED_PREFIXES):
+    if prompt.lstrip().startswith(_not_typed_prefixes()):
         # A background agent's report, a scheduled task or a command's
         # output arriving as the next message: nothing you wrote.
         return []
@@ -973,24 +1022,98 @@ def _starting_context(path: str) -> int:
     return max(0, _context(first) - (_prompt_chars(prompt) // _CHARS_PER_TOKEN if prompt else 0))
 
 
-def _plan_hint(payload: dict, th: dict) -> tuple[str, float, dict] | None:
-    """``plan_fresh``: an approved plan (a rejected one comes back as an
-    error, which PostToolUse doesn't see) after a lot of planning. What a
-    fresh start would drop: the approving reply's context less the
-    session's starting context and the plan (``handoff``'s model)."""
-    path = payload.get("transcript_path")
-    if not isinstance(path, str) or not path:
-        return None
+def _fresh_hint(path: str, plan_chars: int, th: dict) -> tuple[str, float, dict] | None:
+    """``plan_fresh`` for a plan of ``plan_chars`` characters approved
+    after a lot of planning. What a fresh start would drop: the approving
+    reply's context less the session's starting context and the plan
+    (``handoff``'s model)."""
     replies = [r for r in _tail(path) if _is_reply(r)]
     if not replies:
         return None
-    tool_input = payload.get("tool_input")
-    plan = tool_input.get("plan") if isinstance(tool_input, dict) else None
-    plan_tokens = len(plan) // _CHARS_PER_TOKEN if isinstance(plan, str) else 0
-    kept = _context(replies[-1]) - _starting_context(path) - plan_tokens
+    kept = _context(replies[-1]) - _starting_context(path) - plan_chars // _CHARS_PER_TOKEN
     if kept < th["plan_fresh_tokens"]:
         return None
     return "plan_fresh", kept, {"kept": _k(kept)}
+
+
+def _plan_hint(payload: dict, th: dict) -> tuple[str, float, dict] | None:
+    """``plan_fresh`` for a plan approved in the dialog: PostToolUse sees
+    only those (a rejected plan comes back as an error)."""
+    path = payload.get("transcript_path")
+    if not isinstance(path, str) or not path:
+        return None
+    tool_input = payload.get("tool_input")
+    plan = tool_input.get("plan") if isinstance(tool_input, dict) else None
+    return _fresh_hint(path, len(plan) if isinstance(plan, str) else 0, th)
+
+
+def _is_go(text: str, coaching: dict) -> bool:
+    """A message that only tells Claude to carry on ("continue", "go
+    ahead", "implement the plan"): the catalogue's go pattern
+    (``prompt_shape.is_go``)."""
+    text = text.strip()
+    return len(text) <= coaching["go_max_chars"] and re.fullmatch(coaching["go_pattern"], text, re.IGNORECASE) is not None
+
+
+def _plan_answers(records: list[dict], prefix: str, coaching: dict) -> tuple[list[dict], dict | None, str | None]:
+    """The plans among ``records`` (``{"chars", "approved"}``, one per
+    ``ExitPlanMode`` call, in order), the one still waiting for your word,
+    and the last ``permissionMode`` seen. A plan is approved when its call
+    came back without an error, or, when it didn't, when a message of
+    yours that only says to carry on follows before the next call, or the
+    mode leaves ``plan`` (``parse``'s ``approved_by_message``)."""
+    plans: list[dict] = []
+    by_id: dict[str, dict] = {}
+    waiting = None
+    mode = None
+    for record in records:
+        if record.get("isSidechain"):
+            continue
+        if record.get("type") == "assistant":
+            for block in _blocks(record):
+                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "ExitPlanMode":
+                    given = block.get("input") if isinstance(block.get("input"), dict) else {}
+                    plan = {"chars": len(given["plan"]) if isinstance(given.get("plan"), str) else 0, "approved": False}
+                    plans.append(plan)
+                    by_id[str(block.get("id"))] = plan
+                    waiting = None
+        elif record.get("type") == "user":
+            now = record.get("permissionMode")
+            if isinstance(now, str) and now:
+                if mode == "plan" and now != "plan" and waiting is not None:
+                    waiting["approved"], waiting = True, None
+                mode = now
+            for block in _blocks(record):
+                if not isinstance(block, dict) or block.get("type") != "tool_result":
+                    continue
+                plan = by_id.get(str(block.get("tool_use_id")))
+                if plan is None:
+                    continue
+                if block.get("is_error"):
+                    waiting = plan
+                else:
+                    plan["approved"], waiting = True, None
+            if waiting is not None and _typed(record, prefix) and _is_go(_text_of(record), coaching):
+                waiting["approved"], waiting = True, None
+    return plans, waiting, mode
+
+
+def _typed_plan_hint(payload: dict, records: list[dict], coaching: dict, th: dict) -> tuple[str, float, dict] | None:
+    """``plan_fresh`` for a plan you approve by typing a go-ahead, or by
+    leaving plan mode, instead of by the dialog. PostToolUse never sees
+    that approval, so the dialog can't be the only trigger."""
+    path = payload.get("transcript_path")
+    prompt = payload.get("prompt")
+    if not isinstance(prompt, str) or not isinstance(path, str) or not path:
+        return None
+    _plans, waiting, mode = _plan_answers(records, coaching["interrupt_prefix"], coaching)
+    if waiting is None:
+        return None
+    now = payload.get("permission_mode")
+    left_plan_mode = mode == "plan" and isinstance(now, str) and now not in ("", "plan")
+    if not (_is_go(prompt, coaching) or left_plan_mode):
+        return None
+    return _fresh_hint(path, waiting["chars"], th)
 
 
 def _reads_hint(payload: dict, raw_len: int, read_tools, advice: dict, th: dict) -> tuple[str, float, dict] | None:
@@ -1147,10 +1270,11 @@ def coaching_for(
     if event == "UserPromptSubmit":
         path = payload.get("transcript_path")
         prompt = payload.get("prompt")
-        typed = not (isinstance(prompt, str) and prompt.lstrip().startswith(_NOT_TYPED_PREFIXES))
+        typed = not (isinstance(prompt, str) and prompt.lstrip().startswith(_not_typed_prefixes()))
         if not in_agent and typed and isinstance(path, str) and path:
             records = _tail(path)
             candidates = [
+                *([_typed_plan_hint(payload, records, coaching, th)] if personal.get("plan_fresh", True) is not False else []),
                 *_practice_hints(payload.get("prompt"), records, coaching, th, now, payload.get("permission_mode")),
                 *_prompt_hints(records, th, now),
             ]
@@ -1196,6 +1320,9 @@ _JUDGE_LONG_TAIL_BYTES = 4 * 1024 * 1024
 #: The tools that start a subagent.
 _AGENT_TOOLS = ("Agent", "Task")
 
+#: The tools that run a shell command.
+_SHELL_TOOLS = ("Bash", "PowerShell")
+
 #: The most tool names the excerpt lists.
 _JUDGE_TOOL_NAMES = 10
 
@@ -1203,45 +1330,54 @@ _JUDGE_TOOL_NAMES = 10
 #: 0.12.1 (a session started before an update still does).
 _TAG_RE = re.compile(r"\[(?:cg|tl):([^\[\]\n]{0,400})\]", re.IGNORECASE)
 
-#: A shell command that runs tests, by its runner at the start of one of
-#: the command's parts (after any VAR=value, timeout or uv/poetry run):
-#: pytest, Python's unittest, tox or nox, npm/yarn/pnpm/bun test, jest,
-#: vitest, mocha, go, cargo or dotnet test, mvn or gradle test, rspec,
-#: phpunit, make test. The group is its arguments.
-_TEST_RUNNER_RE = re.compile(
-    r"^(?:\w+=\S*\s+)*(?:timeout\s+\S+\s+|(?:uv|poetry|pipenv)\s+run\s+|npx\s+|bunx\s+)*"
-    r"(?:pytest|py\.test|python3?\s+-m\s+(?:pytest|unittest)|tox|nox"
-    r"|(?:npm|yarn|pnpm|bun)(?:\s+run)?\s+test|jest|vitest|mocha"
-    r"|go\s+test|cargo\s+test|dotnet\s+test|mvnw?\s+test|(?:\./)?gradlew?\s+test|rspec|phpunit|make\s+test)"
-    r"(?=\s|$)(.*)"
-)
-_COMMAND_PARTS_RE = re.compile(r"&&|\|\||;|\|")
-#: What in a test command's arguments picks particular tests: a test file
-#: or folder, a ``file::test`` id, a name filter, or (go, cargo) a package
-#: or test name.
-_TEST_TARGET_RE = re.compile(
-    r"(?:^|\s)(?:-k\b|-t\b|--testNamePattern|--testPathPattern|-run\b|--grep\b|\S*::\S+"
-    r"|\S*tests?/\S*|\S*test_\S+|\S+_test\.\w+|\S+\.(?:test|spec)\.\w+|\S*spec/\S*)"
-)
-_BARE_ARG_RE = re.compile(r"(?:^|\s)(?!-)(?!\./\.\.\.(?:\s|$))[\w./:-]+")
+#: A shell command that runs tests, and how much of them: the same steps
+#: as ``testrun.run_scope`` (held to it by a test), with its patterns
+#: read on first use from the catalogue (``capture_catalogue.TEST_*_PATTERN``,
+#: the one set the parser and the purpose rules share). A heredoc's body is
+#: dropped, the line is cut into commands, each loses what comes before its
+#: program (a VAR=value, timeout, uv run, an interpreter's folder) and must
+#: open with a test runner whose arguments don't say nothing is run.
+_TEST: dict = {}
+
+
+def _test_patterns() -> dict:
+    if not _TEST:
+        coaching = load_catalogue()["coaching"]
+        for name in (
+            "command_split", "heredoc", "prefix", "program", "no_run", "no_target", "whole_suite", "target",
+            "bare_target", "bare_target_runner",
+        ):
+            _TEST[name] = re.compile(coaching["test_%s_pattern" % name])
+        _TEST["runner"] = re.compile(r"(?P<runner>%s)(?=\s|$)(?P<args>.*)" % coaching["test_runner_pattern"])
+    return _TEST
 
 
 def _test_scope(command: str) -> str:
-    """``"targeted"`` when ``command`` runs chosen tests, ``"full"`` when
-    it runs a whole suite, ``""`` when it runs none."""
+    """``"full"`` when ``command`` runs a whole suite (even if it also
+    runs one test), ``"targeted"`` when it runs only chosen tests, ``""``
+    when it runs none."""
+    t = _test_patterns()
     scope = ""
-    for part in _COMMAND_PARTS_RE.split(command):
-        match = _TEST_RUNNER_RE.match(part.strip())
-        if match is None:
-            continue
-        args = re.sub(r"\s+\d?>\S*", " ", match.group(1))  # redirections aren't targets
-        chosen = _TEST_TARGET_RE.search(args) or (
-            part.strip().split()[0] in ("go", "cargo") and _BARE_ARG_RE.search(args)
-        )
-        if chosen:
-            return "targeted"
-        scope = "full"
+    for part in t["command_split"].split(t["heredoc"].sub(r"\g<rest>", command)):
+        found = _part_test_scope(part, t)
+        if found == "full":
+            return "full"
+        scope = scope or found
     return scope
+
+
+def _part_test_scope(part: str, t: dict) -> str:
+    part = part.strip()
+    while (prefix := t["prefix"].match(part)) is not None:
+        part = part[prefix.end():]
+    part = t["program"].sub(r"\1", part, count=1)
+    match = t["runner"].match(part)
+    if match is None or t["no_run"].search(match["args"]):
+        return ""
+    args = t["whole_suite"].sub(" ", t["no_target"].sub(" ", match["args"]))
+    if t["target"].search(args) or (t["bare_target_runner"].fullmatch(match["runner"]) and t["bare_target"].search(args)):
+        return "targeted"
+    return "full"
 
 
 #: Files whose change alone makes the work documentation.
@@ -1257,7 +1393,7 @@ def _typed(record: dict, prefix: str) -> bool:
     if record.get("isSidechain") or record.get("isCompactSummary") or not _is_human_prompt(record):
         return False
     text = _text_of(record).lstrip()
-    return not text.startswith(prefix) and not text.startswith(_NOT_TYPED_PREFIXES)
+    return not text.startswith(prefix) and not text.startswith(_not_typed_prefixes())
 
 
 def _cut(text: str, limit: int) -> str:
@@ -1326,7 +1462,8 @@ def judge_excerpt(
     reply after it in ``records``. ``facts``, when given, gets what the
     transcript settles for :func:`grounded`: ``plan_now`` (a plan written
     this turn, by ExitPlanMode or as plan mode's plan file),
-    ``plan_before`` (one earlier), and how many ``skills`` ran, ``files``
+    ``plan_before`` (one approved earlier, in the dialog or by a message),
+    and how many ``skills`` ran, ``files``
     changed, shell ``commands`` ran and messages came ``earlier``."""
     prefix = catalogue["coaching"]["interrupt_prefix"]
     edit_tools = set(catalogue["coaching"]["edit_tools"])
@@ -1373,27 +1510,23 @@ def judge_excerpt(
                 plan_now = True
             elif name in edit_tools and isinstance(target, str) and target:
                 files[_shown_path(target, payload.get("cwd"))] = None
-            elif name == "Bash" and isinstance(given.get("command"), str):
+            elif name in _SHELL_TOOLS and isinstance(given.get("command"), str):
                 first = given["command"].strip().split("\n")[0]
                 if first and len(commands) < limits["commands"]:
                     commands.append(_cut(first, limits["command"]))
-                for line in given["command"].split("\n"):
-                    scope = _test_scope(line)
-                    if scope:
-                        tests[scope] = None
+                scope = _test_scope(given["command"])
+                if scope:
+                    tests[scope] = None
             elif name == "Skill" and isinstance(given.get("skill"), str) and _SKILL_RE.fullmatch(given["skill"]):
                 skills.append(given["skill"])
             elif name in _AGENT_TOOLS:
                 agents += 1
     if not reply:
         return "", ""
-    plan_before = any(
-        isinstance(b, dict) and b.get("type") == "tool_use" and (
-            b.get("name") == "ExitPlanMode"
-            or (b.get("name") in edit_tools and _is_plan_file((b.get("input") or {}).get("file_path")))
-        )
-        for r in main[:start] if r.get("type") == "assistant" for b in _blocks(r)
-    )
+    # An approved plan earlier, counting the message just typed: a go-ahead
+    # approves a plan the dialog sent back. A rejected plan, or a plan file
+    # nobody approved, is no plan to follow.
+    plan_before = any(plan["approved"] for plan in _plan_answers(main[:start + 1], prefix, catalogue["coaching"])[0])
     earlier = len(typed) - 1
     # Run a chosen test anywhere and the check was targeted.
     test_scope = "targeted" if "targeted" in tests else "full" if tests else ""
@@ -1606,7 +1739,7 @@ def _session_runs(records: list[dict], current: str, brief: str) -> tuple[list[d
     said = ""
     for index, record in enumerate(main):
         if record.get("type") == "user" and _is_human_prompt(record) and not _text_of(record).lstrip().startswith(
-            _NOT_TYPED_PREFIXES
+            _not_typed_prefixes()
         ):
             said = ""
         if record.get("type") != "assistant":

@@ -40,6 +40,7 @@ from datetime import datetime, timedelta, timezone
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
+from . import events as events_mod
 from .context_files import _parse_ts
 from .model import Column, EventKind, Section, Table, Turn
 from .pricing import Pricing, effective_rates, price_turn
@@ -296,7 +297,9 @@ def _stops(top, prices: _Prices) -> list[tuple[datetime, float]]:
     """Each stopped reply's time and the cost of the replies it cut short:
     those since your message before it. Stopping before any reply leaves
     no interrupt line, only a message you sent again (``detail
-    ["replaced"]``): that counts as a stop that cost nothing."""
+    ["replaced"]``): that counts as a stop that cost nothing. An interrupt
+    that only ends a turn after a plan you answered, or a call a hook
+    blocked, is not a stop (``events.is_stop``)."""
     turns = capture_mod._priced(top)
     out = []
     for event in top.events:
@@ -305,7 +308,7 @@ def _stops(top, prices: _Prices) -> list[tuple[datetime, float]]:
             if at is not None:
                 out.append((at, 0.0))
             continue
-        if event.kind != EventKind.INTERRUPT:
+        if not events_mod.is_stop(event):
             continue
         at = _moment(event.ts)
         if at is None:

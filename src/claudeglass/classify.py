@@ -103,7 +103,7 @@ import statistics
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Iterable
-from . import discovery, limits
+from . import discovery, limits, testrun
 from .model import (
     Classification,
     Column,
@@ -226,7 +226,8 @@ _LOCAL_LLM_MARKERS = (
     "/v1/chat/completions",
 )
 
-#: ``cmd_prefix`` prefixes identifying a test-runner invocation.
+#: ``cmd_prefix`` prefixes identifying a test-runner invocation at a
+#: glance; ``_matches_test_tool`` reads anything else with ``testrun``.
 _TEST_TOOL_PREFIXES = ("pytest", "dotnet test", "npm test", "npx vitest", "go test", "cargo test")
 
 
@@ -474,7 +475,12 @@ def _matches_local_llm(cmd_prefix: str) -> bool:
 
 
 def _matches_test_tool(cmd_prefix: str) -> bool:
-    return cmd_prefix.lstrip().startswith(_TEST_TOOL_PREFIXES)
+    """Whether a command starts with a test runner: one of
+    ``_TEST_TOOL_PREFIXES``, or anything ``testrun.run_scope`` (the matcher
+    the parser and the capture hook use too) reads as a run: an
+    interpreter path, an env or ``timeout`` prefix, a quoted path, a
+    leading ``cd X &&``."""
+    return cmd_prefix.lstrip().startswith(_TEST_TOOL_PREFIXES) or bool(testrun.run_scope(cmd_prefix))
 
 
 def extract_features(
@@ -579,11 +585,12 @@ def extract_features(
                 read_turns += 1
             if turn.attribution_skill and "review" in turn.attribution_skill.lower():
                 review_markers += 1
-            if turn.cmd_prefix:
-                if "Bash" in turn.tool_names and _matches_local_llm(turn.cmd_prefix):
-                    local_llm_hits += 1
-                if _matches_test_tool(turn.cmd_prefix):
-                    test_tool_hits += 1
+            if turn.cmd_prefix and "Bash" in turn.tool_names and _matches_local_llm(turn.cmd_prefix):
+                local_llm_hits += 1
+            # ``tests_run`` reads every command of the reply (parser 37);
+            # an older digest has only the first command's start.
+            if turn.tests_run or (turn.cmd_prefix and _matches_test_tool(turn.cmd_prefix)):
+                test_tool_hits += 1
 
     start_local_hour = _local_hour(first_ts, tz)
     end_local_hour = _local_hour(last_ts, tz)

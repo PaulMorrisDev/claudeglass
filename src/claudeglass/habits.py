@@ -3,7 +3,10 @@ worth trying (the ``habits`` report section and the Work habits tab).
 
 Everything is worked out per *prompt cycle* (``capture.prompt_cycles``):
 one message of yours and all the work that answered it, subagents at any
-depth included. /cg-feedback runs are left out: they rate the work, they
+depth included. A workflow's agents belong to the message whose reply
+started (or resumed) their run (``capture.WorkflowLaunches``), so their
+cost, their overlap with what was already read and the message's redo cost
+all count them. /cg-feedback runs are left out: they rate the work, they
 aren't part of it.
 
 Every playbook item says where its evidence came from, so you know how
@@ -49,6 +52,7 @@ from typing import TYPE_CHECKING
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
 from . import classify
+from . import events as events_mod
 from . import known_savers
 from . import model_gate
 from . import quality
@@ -66,10 +70,17 @@ _READ_TOOLS = ("Read", "Grep", "Glob")
 _SHELL_TOOLS = ("Bash", "PowerShell")
 #: Agent reports are counted as reports (``short_reports``), not output.
 _REPORT_TOOLS = ("Agent", "Task")
-#: A tool call stopped before it ran (``toolDenialKind``): auto mode
-#: blocked it, or a deny rule or you turned it down.
-_BLOCKED = ("automode-blocked", "automode-unavailable")
-_REFUSED = ("permission-rule", "user-rejected")
+#: A tool call stopped before it ran, by denial bucket
+#: (``events.denial_bucket_of``): auto mode blocked it or couldn't say,
+#: or a deny rule or you turned it down. Not a plan you sent back, a
+#: question you declined, a dialog you closed or a hook's block: those
+#: are no call you refused.
+_BLOCKED = ("auto_blocked", "auto_unavailable")
+_REFUSED = ("refused",)
+#: Tools whose permission prompt is a dialog Claude Code shows whatever
+#: your rules say (a plan to approve, a question to answer), so no allow
+#: rule would end it.
+_DIALOG_TOOLS = ("ExitPlanMode", "AskUserQuestion")
 _EXPLORE_AGENT = "Explore"
 _HIGH_EFFORT = ("high", "xhigh", "max")
 #: Playbook items built from the ``level`` Claude reported, whose
@@ -556,9 +567,10 @@ class CycleFact:
     redone: bool = False
     redo_cost: float = 0.0
     #: CAP-5: derived fallback for ``tag.check`` -- a test-runner command
-    #: (``classify._matches_test_tool``'s closed prefix set, the same one
-    #: ``classify_purpose`` uses) ran during this message, whether or not
-    #: Claude also self-reported ``check=``.
+    #: ran during this message (``Turn.tests_run``, or for an older digest
+    #: ``classify._matches_test_tool`` on its first command, the same one
+    #: ``classify_purpose`` uses), whether or not Claude also self-reported
+    #: ``check=``.
     checked_by_tool: bool = False
     output_cost: float = 0.0
     thinking_cost: float = 0.0
@@ -574,7 +586,9 @@ class CycleFact:
 
 @dataclass(slots=True)
 class AgentFact:
-    """One subagent run, at any depth."""
+    """One subagent run, at any depth. A workflow's agents are runs too:
+    ``level``, ``task`` and ``overlap_*`` come from the message that
+    started their workflow."""
 
     session_id: str
     agent_type: str
@@ -750,7 +764,8 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     out.saver_calls += own
     out.tool_calls += total
     out.saver_active = out.saver_calls > 0 and out.saver_calls >= known_savers.ADVICE_MIN_SHARE * out.tool_calls
-    cycles = capture_mod.prompt_cycles(top, bundle.subs)
+    workflows = getattr(bundle, "workflows", ())
+    cycles = capture_mod.prompt_cycles(top, bundle.subs, workflows)
     carry = _CarryCost(turns, rates)
     first_turn = turns[0]
     baseline = starting_context(turns)
@@ -808,11 +823,12 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
             day = local_day(facts[0].ts, out.tz) if facts and facts[0].ts else ""
             out.small_sessions.append((bundle.session_id, day, bundle.slug, premium, tag is not None))
 
-    _agents(bundle, cycles, turns, carry, first_read, rates, out)
+    _agents(bundle, cycles, turns, carry, first_read, rates, out, workflows)
 
 
 def _denials(top, turns: list[Turn]) -> dict[int, list[str]]:
-    """Each stopped tool call's kind, by the reply that came after it."""
+    """Each stopped tool call's bucket word, by the reply that came after
+    it."""
     stamps = [t.ts or "" for t in turns]
     out: dict[int, list[str]] = {}
     for event in top.events:
@@ -820,7 +836,7 @@ def _denials(top, turns: list[Turn]) -> dict[int, list[str]]:
             continue
         i = bisect.bisect_left(stamps, event.ts)
         if i < len(turns):
-            out.setdefault(i, []).append(event.subkind or "")
+            out.setdefault(i, []).append(events_mod.denial_bucket_of(event))
     return out
 
 
@@ -870,7 +886,9 @@ def _cycle_fact(
         speed=_dominant(t.speed for t in cycle.turns),
         main_cost=sum(rates.cost(t) for t in cycle.turns),
         growth_cost=sum(max(0, t.ctx - first.ctx) * carry.reads[i] for t, i in zip(cycle.turns, idx)),
-        explore_agents=sum(1 for sub in cycle.subs if sub.meta.agent_type == _EXPLORE_AGENT),
+        explore_agents=sum(
+            1 for sub in cycle.subs if sub.meta.agent_type == _EXPLORE_AGENT and sub.meta.kind != "workflow-agent"
+        ),
     )
     fb = rated.get(id(cycle)) or session_rating
     if fb is not None:
@@ -891,7 +909,11 @@ def _cycle_fact(
             fact.plan_cost = sum(carry.costs[j] for j in idx[: n + 1])
         if _shell_failed(turn):
             failing.setdefault(turn.cmd_prefix, []).append(i)
-        if turn.cmd_prefix and "Bash" in turn.tool_names and classify._matches_test_tool(turn.cmd_prefix):
+        if turn.tests_run or (
+            turn.cmd_prefix
+            and any(tool in turn.tool_names for tool in _SHELL_TOOLS)
+            and classify._matches_test_tool(turn.cmd_prefix)
+        ):
             fact.checked_by_tool = True
         by_you = set(first.commands_run)
         for name in turn.skills_invoked:
@@ -917,7 +939,7 @@ def _cycle_fact(
     return fact
 
 
-def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates, out: Habits) -> None:
+def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates, out: Habits, workflows=()) -> None:
     carries = {id(bundle.top): carry}
     reports: dict[str, tuple[_CarryCost, int, int]] = {}
     for i, turn in enumerate(turns):
@@ -938,6 +960,7 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
             main_spawn[use_id] = i
     by_agent = {agent_key(sub.meta.agent_id): sub for sub in bundle.subs if sub.meta.agent_id}
     cycle_of = {id(sub): cycle for cycle in cycles for sub in cycle.subs}
+    launches = capture_mod.WorkflowLaunches(bundle.top, workflows)
 
     for sub in bundle.subs:
         priced = sub_turns[id(sub)]
@@ -973,7 +996,7 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
             parent_carry, i, chars = found
             fact.report_tokens = chars // capture_mod.CHARS_PER_TOKEN
             fact.report_carry = parent_carry.cost(i, fact.report_tokens)
-        spawn_at = _spawn_index(sub, main_spawn, by_agent)
+        spawn_at = _spawn_index(sub, main_spawn, by_agent, launches)
         if spawn_at is not None:
             for i, turn in enumerate(priced):
                 hashes = turn.read_target_hashes
@@ -986,14 +1009,18 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
         out.agents.append(fact)
 
 
-def _spawn_index(sub, main_spawn, by_agent) -> int | None:
+def _spawn_index(sub, main_spawn, by_agent, launches=None) -> int | None:
     """The main-session reply that started ``sub``, or its top-level
-    ancestor for a nested spawn."""
+    ancestor for a nested spawn. A workflow agent has no tool call of its
+    own: ``launches`` (``capture.WorkflowLaunches``) finds the reply that
+    started or resumed its run, by ``meta.kind``, never by agent type."""
     seen = set()
     while sub is not None and id(sub) not in seen:
         seen.add(id(sub))
         if sub.meta.tool_use_id in main_spawn:
             return main_spawn[sub.meta.tool_use_id]
+        if launches is not None and sub.meta.kind == "workflow-agent":
+            return launches.turn_index(sub)
         sub = by_agent.get(agent_key(sub.meta.parent_agent_id)) if sub.meta.parent_agent_id else None
     return None
 
@@ -1557,8 +1584,11 @@ def _item_allow_routine(h: Habits) -> Item | None:
     # isn't added to `prompts` again here -- only "idle" (Claude finished
     # a turn and sat waiting for you) rides along, as evidence text: it
     # has no cost of its own (lost time, not spend), so it never enters
-    # the saving figure below.
-    prompts = sum(h.permission_prompts.values())
+    # the saving figure below. A plan to approve or a question to answer
+    # (_DIALOG_TOOLS) is a dialog no allow rule would end, so those
+    # prompts are left out of the count.
+    asked = Counter({tool: n for tool, n in h.permission_prompts.items() if tool not in _DIALOG_TOOLS})
+    prompts = sum(asked.values())
     idle = h.waits.get("idle", 0)
     blocked = [c for c in h.cycles if c.blocked]
     count = sum(c.blocked for c in blocked)
@@ -1566,7 +1596,7 @@ def _item_allow_routine(h: Habits) -> Item | None:
         return None
     parts = []
     if prompts:
-        tools = ", ".join(tool for tool, _ in h.permission_prompts.most_common(2))
+        tools = ", ".join(tool for tool, _ in asked.most_common(2))
         parts.append(f"Claude asked for permission {prompts} times, mostly for {tools}")
     if count:
         parts.append(f"auto mode blocked {count} requests and Claude had to find another way")

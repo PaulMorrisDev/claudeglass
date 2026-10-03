@@ -178,6 +178,55 @@ image/document blocks and folded in from a HUMAN_TEXT event's own
 ``detail["unsized_blocks"]`` for a top-level human-prompt image (see
 ``events.content_block_size``) -- one counter, two sources, both flagged
 "unsized" rather than guessed at when this parser can't size a block.
+
+Parser-signals batch (``PARSER_VERSION`` 37, see model.py's and
+events.py's module docstrings): a message you typed while Claude was
+working arrives as a ``queued_command`` ``QUEUE_OPERATION`` event whose
+detail says how it reads. The main loop drops one that was also written
+as a user line within a minute (:func:`_note_queued`,
+:func:`_note_message`: a hash of each in memory, the earlier event marked
+``dup``), and ``_finalize_turn`` counts the rest per reply
+(``Turn.queued_prompts`` and friends). A replayed record shares its
+``uuid`` with the first and is skipped by the check above. An
+``output_style`` reminder whose style differs from the last one seen
+becomes the ``CACHE_SIGNAL`` it used to always be.
+
+Plan-feedback batch (``PARSER_VERSION`` 37, see model.py's module
+docstring): a result that says a tool call didn't run is read where the
+tool is known. :func:`_accumulate_tool_results` works out the denial's
+bucket (:func:`_denial_bucket`, from the tool, ``toolDenialKind`` and the
+text's own wording) and, for ``ExitPlanMode``, the plan's outcome and the
+feedback's length and class (:func:`_plan_feedback_text` reads the text in
+memory and drops it), and returns them as ``_ResultNotes`` for the main
+loop to put on the denial event and to emit a ``PLAN_FEEDBACK`` event.
+``_PlanWatch`` follows the plan waiting for your word: a later
+``ExitPlanMode`` call closes it unapproved, and a go-ahead message or a
+``permissionMode`` that leaves ``plan`` approves it
+(``outcome == "approved_by_message"``). ``_finalize_turn`` counts the
+denial buckets since the last reply into ``Turn.preceding_denials``.
+
+Assistant-and-tool-signals batch (``PARSER_VERSION`` 37, see model.py's
+module docstring): each text block of a reply is read in memory and only
+a yes/no kept. The last one decides ``Turn.reply_asked``
+(``prompt_shape.ends_on_question``); any block may be an admission
+(``admit_candidate``), and ``admit_caught`` says whether the message you
+typed last pushed back (``_is_challenge``, held in ``last_human_challenge``
+by the main loop and copied onto the reply when it starts) or Claude
+caught it itself. A reply with a tip that also says, near "ClaudeGlass",
+that a tip misfired is ``tip_disowned``. A Read result's size lands in
+``read_target_chars`` beside its hash; the Bash and PowerShell commands
+are read once for the files they read (``shell_reads``: a count, and the
+size of their results in ``shell_read_chars``) and for a test run
+(``testrun.run_scope``: ``Turn.tests_run``, the widest of the reply's
+runs). A call that didn't run (``_SHELL_NOT_RUN_KINDS``) is taken back
+out of all three. The command is dropped once read.
+
+Workflow-agents batch (``PARSER_VERSION`` 37): a ``Workflow`` call's
+result, when it launched a run (``toolUseResult.taskType ==
+"local_workflow"``), puts ``(runId, taskId)`` on ``Turn.workflow_runs``
+under the call's tool_use id (``_workflow_run``: two short ids, nothing
+else of the result). A call that errored, or whose result names no
+``runId``, records nothing.
 """
 
 from __future__ import annotations
@@ -199,7 +248,9 @@ from . import events as events_mod
 from . import jsonl
 from . import known_savers
 from . import prompt_shape
+from . import shell_reads
 from . import shell_writes
+from . import testrun
 from .capture_catalogue import COACHING_THRESHOLDS
 from .model import (
     PROMPT_FLAGS,
@@ -772,10 +823,38 @@ class _PendingTurn:
     #: Prompting-habits addition: the reply's last text block holds a
     #: ClaudeGlass tip (``Turn.coach_tip``).
     last_text_tip: bool = False
+    #: Parser-signals addition (see model.py's ``Turn.reply_asked``/
+    #: ``admit_candidate``/``admit_caught``/``tip_disowned``): what the
+    #: reply's text blocks said, as yes/no only. The reply's last text
+    #: block decides whether it asked; any block may own a mistake, carry
+    #: a tip, or disown one. ``after_challenge`` is whether the message
+    #: you typed last was a correction, an adjustment, a reminder or a
+    #: question, set when the reply starts.
+    last_text_asked: bool = False
+    admit_found: bool = False
+    tip_carried: bool = False
+    tip_disown_found: bool = False
+    after_challenge: bool = False
+    #: Parser-signals addition (see model.py's ``Turn.read_target_chars``):
+    #: the size of each Read result in ``read_target_hashes`` order, and
+    #: the tool_use id -> position of the result still to come.
+    read_target_chars: list[int] = field(default_factory=list)
+    read_target_positions: dict[str, int] = field(default_factory=dict)
+    #: Parser-signals addition (see model.py's ``Turn.shell_read_count``/
+    #: ``tests_run``): each shell call's reads and test scope, keyed by
+    #: tool_use id so a call that never ran can be taken back.
+    shell_read_count: int = 0
+    shell_read_chars: int = 0
+    shell_reads_by_tool_use: dict[str, int] = field(default_factory=dict)
+    test_scopes_by_tool_use: dict[str, str] = field(default_factory=dict)
     #: Metrics-capture addition (see model.py's ``Turn.agent_result_chars``/
     #: ``Turn.plan_stats``).
     agent_result_chars: dict[str, int] = field(default_factory=dict)
     plan_stats: PlanStats | None = None
+    #: Workflow-agents addition (see model.py's ``Turn.workflow_runs``).
+    workflow_runs: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: Parser-signals addition (see model.py's ``Turn.ask_rounds``).
+    ask_rounds: int = 0
     #: Feedback addition (see model.py's ``Turn.feedback``): this turn's
     #: AskUserQuestion calls that ask /cg-feedback's questions, and what
     #: their answers said.
@@ -1010,8 +1089,14 @@ def _merge_content_blocks(
         if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str):
             # The reply's last text block decides: a marker further up
             # was quoted, not reported.
-            pending.last_text_tail = block["text"][-_TAG_TAIL_CHARS:]
-            pending.last_text_tip = _TIP_TEXT in block["text"]
+            text = block["text"]
+            pending.last_text_tail = text[-_TAG_TAIL_CHARS:]
+            pending.last_text_tip = _TIP_TEXT in text
+            # Parser-signals addition: what the block says, kept as yes/no.
+            pending.last_text_asked = prompt_shape.ends_on_question(text)
+            pending.admit_found = pending.admit_found or prompt_shape.admits_mistake(text)
+            pending.tip_carried = pending.tip_carried or pending.last_text_tip
+            pending.tip_disown_found = pending.tip_disown_found or prompt_shape.disowns_tip(text)
             continue
         if not isinstance(block, dict) or block.get("type") != "tool_use":
             continue
@@ -1081,6 +1166,10 @@ def _merge_content_blocks(
                 hashed = _read_target_hash(target_value)
                 if hashed is not None:
                     pending.read_target_hashes.append(hashed)
+                    # The result's size fills this in (``_accumulate_tool_results``).
+                    pending.read_target_chars.append(0)
+                    if isinstance(tool_use_id, str) and tool_use_id:
+                        pending.read_target_positions[tool_use_id] = len(pending.read_target_chars) - 1
         elif path_key is not None:
             target_value = tool_input.get(path_key)
             if isinstance(target_value, str) and target_value:
@@ -1090,6 +1179,21 @@ def _merge_content_blocks(
         elif name in _SHELL_TOOL_NAMES:
             command = tool_input.get("command")
             if isinstance(command, str) and command:
+                # Parser-signals addition: the files the command reads and
+                # the tests it runs, as a count and a word. Taken back when
+                # the call never ran (``_accumulate_tool_results``).
+                reads = shell_reads.read_count(command, powershell=name == "PowerShell")
+                if reads:
+                    pending.shell_read_count += reads
+                    if isinstance(tool_use_id, str) and tool_use_id:
+                        pending.shell_reads_by_tool_use[tool_use_id] = (
+                            pending.shell_reads_by_tool_use.get(tool_use_id, 0) + reads
+                        )
+                scope = testrun.run_scope(command)
+                if scope:
+                    pending.test_scopes_by_tool_use[
+                        tool_use_id if isinstance(tool_use_id, str) and tool_use_id else f"#{len(pending.tool_use_ids)}"
+                    ] = scope
                 outside_temp = 0
                 for target in shell_writes.write_targets(
                     command, powershell=name == "PowerShell", cwd=cwd if isinstance(cwd, str) else None
@@ -1527,6 +1631,78 @@ def _tool_error_kind(content) -> str:
     return "misfire"
 
 
+#: A dialog closed without an answer: Claude Code's wording when the
+#: permission request is aborted, as the result of the tool call it
+#: stood in for.
+_ERROR_ABORTED_RE = re.compile(r"AbortError|permission request (?:was )?(?:aborted|cancel+ed)", re.IGNORECASE)
+#: What Claude Code puts before the text you typed into a rejected
+#: dialog. A rejection with nothing typed ends without it.
+_USER_SAID_RE = re.compile(r"the user said:\s*", re.IGNORECASE)
+#: The buckets of a plan dialog that gave no answer to a plan or a
+#: rejection of it: a call that isn't a tool error.
+_PLAN_DIALOG_BUCKETS = ("plan_rejected", "aborted")
+
+
+def _result_text(content) -> str:
+    """The text of a tool_result's content, whole. Read here for its
+    wording and dropped; only a length or a word is kept."""
+    if isinstance(content, list):
+        return "".join(b.get("text", "") for b in content if isinstance(b, dict) and isinstance(b.get("text"), str))
+    return content if isinstance(content, str) else ""
+
+
+def _denial_bucket(kind: str | None, tool: str | None, text: str) -> str:
+    """Which of ``events.DENIAL_BUCKETS`` a denied tool call is, from its
+    ``toolDenialKind``, the tool and the start of what its result said
+    (read here and dropped). A hook's block comes first: it also carries
+    kind ``permission-rule``, which is not you turning a call down."""
+    if kind == "automode-blocked":
+        return "auto_blocked"
+    if kind == "automode-unavailable":
+        return "auto_unavailable"
+    head = text.strip()[:_ERROR_TEXT_CHARS]
+    if _tool_error_kind(head) == "blocked":
+        return "hook_blocked"
+    if kind in ("interrupted", "cancelled") or _ERROR_ABORTED_RE.search(head):
+        return "aborted"
+    if tool == "ExitPlanMode":
+        return "plan_rejected"
+    if tool == "AskUserQuestion":
+        return "question_declined"
+    return events_mod.denial_bucket_for_kind(kind)
+
+
+def _plan_feedback_text(kind: str | None, text: str) -> str:
+    """What you typed into a rejected plan's dialog, or ``""`` when you
+    typed nothing. Claude Code writes it after "the user said:", or, for
+    a rule's denial, as the whole result. Held in memory only: the caller
+    keeps its length and class word."""
+    said = _USER_SAID_RE.search(text[:_ERROR_TEXT_CHARS])
+    if said is not None:
+        return text[said.end():].strip()
+    text = text.strip()
+    if kind not in ("permission-rule", "user-rejected") or _tool_error_kind(text) in ("blocked", "denied"):
+        return ""
+    return "" if _ERROR_ABORTED_RE.search(text[:_ERROR_TEXT_CHARS]) else text
+
+
+@dataclass(slots=True)
+class _ResultNotes:
+    """What a ``tool_result`` line told ``parse_transcript`` beyond the
+    counts ``_accumulate_tool_results`` keeps, in memory only."""
+
+    #: The denial bucket of the line's first denied call.
+    bucket: str | None = None
+    #: The ``ExitPlanMode`` plan this line answered.
+    plan: PlanStats | None = None
+    #: The length and class word of the feedback you typed into that
+    #: plan's dialog, when you typed any.
+    plan_feedback: tuple[int, str] | None = None
+
+
+_NO_NOTES = _ResultNotes()
+
+
 def _accumulate_tool_results(
     d: dict,
     tool_use_names: dict[str, str],
@@ -1535,11 +1711,12 @@ def _accumulate_tool_results(
     unsized_blocks: dict[str, int],
     current: _PendingTurn | None = None,
     blocked_calls: dict[int, str] | None = None,
-) -> None:
+) -> _ResultNotes:
+    notes = _ResultNotes()
     message = d.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if not isinstance(content, list):
-        return
+        return notes
     #: A1 addition: this tool_result line's own timestamp, recorded on
     #: ``current`` only for the tool_use_ids that are actually its own
     #: (see model.py's ``Turn.tool_wait_s``/``tool_result_chars_by_tool``
@@ -1551,6 +1728,17 @@ def _accumulate_tool_results(
             continue
         tool_use_id = block.get("tool_use_id")
         name = tool_use_names.pop(tool_use_id, None) if isinstance(tool_use_id, str) else None
+        # Parser-signals addition (see model.py's module docstring): a
+        # denied call's bucket, and what a rejected plan's dialog said --
+        # worked out here, where the tool is known.
+        is_error = block.get("is_error") is True
+        denial_kind = d.get("toolDenialKind") or None
+        bucket = text = None
+        if is_error and (denial_kind or name == "ExitPlanMode"):
+            text = _result_text(block.get("content"))
+            bucket = _denial_bucket(denial_kind, name, text)
+            if denial_kind and notes.bucket is None:
+                notes.bucket = bucket
         if name is None:
             continue
         length = _tool_result_length(block.get("content"), unsized_blocks)
@@ -1566,11 +1754,23 @@ def _accumulate_tool_results(
             )
             if isinstance(ts_raw, str) and ts_raw:
                 current.tool_result_ts_values.append(ts_raw)
+            # Parser-signals addition (see model.py's ``Turn.read_target_chars``/
+            # ``shell_read_chars``): the size of a Read's result, and of a
+            # shell call that read files. A failed Read read nothing. A
+            # result Claude Code saved to a file is the preview it left in
+            # context, which is what ``length`` is.
+            read_at = current.read_target_positions.get(tool_use_id)
+            if read_at is not None and not is_error:
+                current.read_target_chars[read_at] = length
+            if tool_use_id in current.shell_reads_by_tool_use:
+                current.shell_read_chars += length
             # Wasted-turns addition (see model.py's ``Turn.
             # tool_error_count``/``tool_error_chars`` docstrings): a
             # tool_result answering this turn's own tool_use flagged
             # ``is_error: true`` -- length only, never the error content.
-            if block.get("is_error") is True:
+            # Your answer to a plan (a rejection, or a dialog closed) isn't
+            # a tool failing, so it isn't counted here.
+            if is_error and not (name == "ExitPlanMode" and bucket in _PLAN_DIALOG_BUCKETS):
                 current.tool_error_count += 1
                 current.tool_error_chars += length
                 current.tool_errors_by_tool[name] = current.tool_errors_by_tool.get(name, 0) + 1
@@ -1602,6 +1802,14 @@ def _accumulate_tool_results(
                 shell_writes_made = current.shell_writes_by_tool_use.pop(tool_use_id, 0)
                 if shell_writes_made and kind in _SHELL_NOT_RUN_KINDS:
                     current.shell_write_count -= shell_writes_made
+                # And the reads and test runs: a command that never ran
+                # read nothing and ran no tests.
+                if kind in _SHELL_NOT_RUN_KINDS:
+                    current.test_scopes_by_tool_use.pop(tool_use_id, None)
+                    shell_reads_made = current.shell_reads_by_tool_use.pop(tool_use_id, 0)
+                    if shell_reads_made:
+                        current.shell_read_count -= shell_reads_made
+                        current.shell_read_chars -= length
                 # SEC-P3: a Skill call that errored never happened as far
                 # as "known skills" is concerned -- take back its
                 # provisional name so it can't self-authorise this same
@@ -1613,18 +1821,125 @@ def _accumulate_tool_results(
             # whether a plan was approved.
             if name in _AGENT_TOOL_NAMES and not _is_async_launch(d):
                 current.agent_result_chars[tool_use_id] = current.agent_result_chars.get(tool_use_id, 0) + length
+            elif name == "Workflow" and not is_error:
+                # Workflow-agents addition: the run this call launched, as
+                # ids, so the run's agents can be joined to this reply.
+                launched = _workflow_run(d.get("toolUseResult"))
+                if launched is not None:
+                    current.workflow_runs[tool_use_id] = launched
             elif name == "ExitPlanMode" and current.plan_stats is not None:
-                current.plan_stats.outcome = "rejected" if block.get("is_error") is True else "approved"
+                _answer_plan(current.plan_stats, is_error, bucket, denial_kind, text or "", notes)
             elif name == "AskUserQuestion" and tool_use_id in current.feedback_asks:
                 # Feedback addition: the answers, matched to known labels;
                 # a declined call answers nothing.
-                if block.get("is_error") is True:
+                if is_error:
                     current.feedback = Feedback(source="skipped")
                 else:
                     answered = capture_tags.feedback_from_answers(d.get("toolUseResult"))
                     if answered is not None and current.feedback is not None and current.feedback.source == answered.source:
                         answered = capture_tags.merge_feedback(current.feedback, answered)
                     current.feedback = answered or current.feedback
+            elif name == "AskUserQuestion" and not is_error:
+                # Parser-signals addition: a question Claude asked you that
+                # you answered, a round trip.
+                current.ask_rounds += 1
+    return notes
+
+
+#: A workflow run id or task id is a short token (``wf_6119c640-76c``,
+#: ``wv62qx65p``). Anything else is not recorded: the ids are only joined
+#: to, never shown, and a malformed one is not worth a guess.
+_WORKFLOW_ID_RE = re.compile(r"^[A-Za-z0-9_.-]{1,64}$")
+
+
+def _workflow_run(tool_use_result: object) -> tuple[str, str] | None:
+    """``(runId, taskId)`` from a ``Workflow`` call's result, or ``None``
+    when it is not a launched workflow or names no run. The ``runId`` is
+    the run's directory name, so it joins to ``TranscriptMeta.
+    workflow_run_id``; the ``taskId`` is what the run's task notification
+    names (``""`` when it is missing or malformed). Ids only: the
+    workflow's name, summary, script path and directory are never read."""
+    if not isinstance(tool_use_result, dict) or tool_use_result.get("taskType") != "local_workflow":
+        return None
+    run_id = tool_use_result.get("runId")
+    if not isinstance(run_id, str) or not _WORKFLOW_ID_RE.match(run_id):
+        return None
+    task_id = tool_use_result.get("taskId")
+    if not isinstance(task_id, str) or not _WORKFLOW_ID_RE.match(task_id):
+        task_id = ""
+    return run_id, task_id
+
+
+def _answer_plan(plan: PlanStats, is_error: bool, bucket: str | None, kind: str | None, text: str, notes: _ResultNotes) -> None:
+    """Records your answer to an ``ExitPlanMode`` call on its plan: a
+    click that approves it, a rejection (with the feedback you typed, as
+    a length and a class word), or no answer when the dialog was closed
+    or a hook or the classifier stopped the call. ``notes.plan`` says
+    which plan this line answered."""
+    notes.plan = plan
+    if not is_error:
+        plan.outcome = "approved"
+    elif bucket == "plan_rejected":
+        plan.outcome = "rejected"
+        plan.rejected = True
+        feedback = _plan_feedback_text(kind, text)
+        if feedback:
+            plan.feedback_chars = len(feedback)
+            plan.feedback_class = prompt_shape.plan_feedback_class(feedback)
+            notes.plan_feedback = (plan.feedback_chars, plan.feedback_class)
+
+
+@dataclass(slots=True)
+class _PlanWatch:
+    """Which plan is waiting for your word, in memory only: the plan of
+    the latest ``ExitPlanMode`` call, the plan you haven't approved with
+    no newer call since, and the last ``permissionMode`` seen. A go-ahead
+    message, or leaving plan mode, approves the open plan
+    (``PlanStats.outcome`` "approved_by_message")."""
+
+    latest: PlanStats | None = None
+    open: PlanStats | None = None
+    mode: str | None = None
+
+    def see_call(self, pending: _PendingTurn) -> None:
+        """A newer ``ExitPlanMode`` call closes the open plan unapproved:
+        Claude is planning again."""
+        plan = pending.plan_stats
+        if plan is not None and plan is not self.latest:
+            self.latest = plan
+            self.open = None
+
+    def answered(self, plan: PlanStats | None) -> None:
+        """The dialog answered ``plan``: it stays open unless it was
+        approved."""
+        if plan is not None:
+            self.open = None if plan.outcome == "approved" else plan
+
+    def approve(self) -> None:
+        if self.open is not None:
+            self.open.outcome = "approved_by_message"
+            self.open = None
+
+    def note_mode(self, mode) -> None:
+        """A user line's, or a ``permission-mode`` line's,
+        ``permissionMode``: leaving plan approves."""
+        if isinstance(mode, str) and mode:
+            if self.mode == "plan" and mode != "plan":
+                self.approve()
+            self.mode = mode
+
+
+def _denial_before(events: list[Event]) -> str | None:
+    """The bucket of the denial an interrupt follows, among the events
+    since the last reply: a call you turned down first, then a dialog you
+    closed, else the latest. ``None`` when no call was denied."""
+    buckets = [events_mod.denial_bucket_of(event) for event in events if event.kind == EventKind.TOOL_DENIAL]
+    if not buckets:
+        return None
+    for word in ("refused", "aborted"):
+        if word in buckets:
+            return word
+    return buckets[-1]
 
 
 def _is_async_launch(d: dict) -> bool:
@@ -1695,6 +2010,13 @@ def _finalize_turn(
 
     preceding_tool, preceding_cmd_prefix = _resolve_preceding_tool(previous_turn)
     preceding_primary = events_mod.primary_kind(pending_events)
+    # Parser-signals addition (see model.py's ``Turn.preceding_denials``):
+    # the denied tool calls since the previous reply, by bucket word.
+    preceding_denials: dict[str, int] = {}
+    for event in pending_events:
+        if event.kind == EventKind.TOOL_DENIAL:
+            bucket = events_mod.denial_bucket_of(event)
+            preceding_denials[bucket] = preceding_denials.get(bucket, 0) + 1
 
     # A1: timing either side of this turn's own tool calls, from the
     # tool_result timestamp(s) ``_accumulate_tool_results`` recorded onto
@@ -1729,6 +2051,12 @@ def _finalize_turn(
     prompt_steps = 0
     prompt_plan_mode = human_vague = human_repeat = False
     human_acks: list[bool] = []
+    # Parser-signals addition (see model.py's module docstring).
+    human_adjust = human_remind = False
+    human_gos: list[bool] = []
+    human_statuses: list[bool] = []
+    queued_prompts = queued_chars = queued_steps = 0
+    queued_correction = queued_adjust = queued_go = queued_status = False
     cap_note_chars = 0
     hook_context_chars: dict[str, int] = {}
     commands_run: list[str] = []
@@ -1746,6 +2074,19 @@ def _finalize_turn(
             command = pending_event.detail.get("command")
             if isinstance(command, str) and command:
                 commands_run.append(command)
+            continue
+        if pending_event.kind == EventKind.QUEUE_OPERATION:
+            # A message you typed while Claude was working, unless it is a
+            # copy of one also written as a user line.
+            queued = pending_event.detail
+            if queued.get("origin") == "human" and not queued.get("dup"):
+                queued_prompts += 1
+                queued_chars += int(queued.get("chars") or 0)
+                queued_steps = max(queued_steps, int(queued.get("steps") or 0))
+                queued_correction = queued_correction or bool(queued.get("correction"))
+                queued_adjust = queued_adjust or bool(queued.get("adjust"))
+                queued_go = queued_go or bool(queued.get("go"))
+                queued_status = queued_status or bool(queued.get("status"))
             continue
         if pending_event.kind != EventKind.HUMAN_TEXT:
             continue
@@ -1770,6 +2111,10 @@ def _finalize_turn(
         human_vague = human_vague or bool(pending_event.detail.get("vague"))
         human_repeat = human_repeat or bool(pending_event.detail.get("repeat"))
         human_acks.append(bool(pending_event.detail.get("ack")))
+        human_adjust = human_adjust or bool(pending_event.detail.get("adjust"))
+        human_remind = human_remind or bool(pending_event.detail.get("remind"))
+        human_gos.append(bool(pending_event.detail.get("go")))
+        human_statuses.append(bool(pending_event.detail.get("status")))
 
     cap: CaptureTag | None = None
     result_marker: str | None = None
@@ -1855,6 +2200,7 @@ def _finalize_turn(
         cap_note_chars=cap_note_chars,
         spawn_marker=spawn_marker,
         agent_result_chars=dict(pending.agent_result_chars),
+        workflow_runs=dict(pending.workflow_runs),
         prompt_flags=tuple(flag for flag in PROMPT_FLAGS if flag in flags),
         plan_stats=pending.plan_stats,
         commands_run=tuple(commands_run),
@@ -1874,8 +2220,28 @@ def _finalize_turn(
         human_vague=human_vague,
         human_ack=bool(human_acks) and all(human_acks),
         human_repeat=human_repeat,
-        reply_asked="?" in (pending.last_text_tail or "").rstrip()[-_QUESTION_TAIL_CHARS:],
+        human_adjust=human_adjust,
+        human_go=bool(human_gos) and all(human_gos),
+        human_status=bool(human_statuses) and all(human_statuses),
+        human_remind=human_remind,
+        queued_prompts=queued_prompts,
+        queued_chars=queued_chars,
+        queued_steps=queued_steps,
+        queued_correction=queued_correction,
+        queued_adjust=queued_adjust,
+        queued_go=queued_go,
+        queued_status=queued_status,
+        ask_rounds=pending.ask_rounds,
+        preceding_denials=preceding_denials,
+        reply_asked=pending.last_text_asked and not pending.is_synthetic,
         coach_tip=pending.last_text_tip,
+        admit_candidate=pending.admit_found,
+        admit_caught=("user" if pending.after_challenge else "self") if pending.admit_found else "",
+        tip_disowned=pending.tip_carried and pending.tip_disown_found,
+        read_target_chars=tuple(pending.read_target_chars),
+        shell_read_count=pending.shell_read_count,
+        shell_read_chars=pending.shell_read_chars,
+        tests_run=testrun.widest(pending.test_scopes_by_tool_use.values()),
     )
     return turn, new_prev_ts, new_priced_count
 
@@ -1885,21 +2251,64 @@ def _finalize_turn(
 _REPEAT_MIN_WORDS = int(COACHING_THRESHOLDS["repeat_min_words"])
 _REPEAT_SIMILARITY = float(COACHING_THRESHOLDS["repeat_similarity"])
 _REPEAT_WINDOW_S = float(COACHING_THRESHOLDS["repeat_window_minutes"]) * 60
-#: How far back from the end of a reply a question mark counts as asking
-#: you something (``Turn.reply_asked``).
-_QUESTION_TAIL_CHARS = 300
 #: What marks a ClaudeGlass tip in a reply (``capture_catalogue.TIP_LABEL``
 #: less its quote mark, sign and bold, which Claude may drop).
 _TIP_TEXT = "ClaudeGlass tip:"
 
 
-def _note_message(event, texts: list[str], parent, recent: list[dict]) -> None:
+#: A message you typed while Claude was working and the same message
+#: written as a user line within this many seconds of each other are one
+#: message (you pressed Esc, and Claude Code put it back to edit).
+_QUEUED_DUPLICATE_WINDOW_S = 60
+
+
+def _message_digest(texts: list[str]) -> str:
+    """A hash of a message's words, to tell one written twice. Used in
+    memory only; it is never stored."""
+    return hashlib.sha256("\n".join(t.strip() for t in texts if t).encode("utf-8", "replace")).hexdigest()
+
+
+def _within_duplicate_window(a: datetime | None, b: datetime | None) -> bool:
+    return a is not None and b is not None and abs((a - b).total_seconds()) <= _QUEUED_DUPLICATE_WINDOW_S
+
+
+def _note_queued(event, texts: list[str], recent: list[dict], queued: list[dict]) -> None:
+    """Marks a message you typed while Claude was working (``event``,
+    kept by its time and a hash) ``detail["dup"]`` when it is the same as
+    one written as a user line within a minute: that copy is the one
+    counted."""
+    at = _parse_ts(event.ts) if event.ts else None
+    digest = _message_digest(texts)
+    if any(
+        m["hash"] == digest and not m["event"].detail.get("replaced") and _within_duplicate_window(at, m["at"])
+        for m in recent
+    ):
+        event.detail["dup"] = True
+    queued.append({"at": at, "hash": digest, "event": event})
+
+
+def _is_challenge(event, texts: list[str]) -> bool:
+    """Whether a message you typed pushes back on Claude's last reply: a
+    correction, an adjustment, a reminder, or a question. A skill you ran
+    with a slash, a go-ahead, a thanks and a how-is-it-going aren't. Read
+    in memory; only the yes/no is kept (``Turn.admit_caught``)."""
+    detail = event.detail
+    if detail.get("command") or detail.get("go") or detail.get("ack") or detail.get("status"):
+        return False
+    if detail.get("correction") or detail.get("adjust") or detail.get("remind"):
+        return True
+    return prompt_shape.is_question("\n".join(t for t in texts if t))
+
+
+def _note_message(event, texts: list[str], parent, recent: list[dict], queued: list[dict] | None = None) -> None:
     """Marks a message you sent again before Claude answered the first
     copy (you pressed Esc before any reply, so Claude Code put it back to
     edit): the earlier copy's event gets ``detail["replaced"]``. Then sets
     ``event.detail["repeat"]`` when this message is much the same as one
     Claude answered within the window (a copy you resent isn't an
-    attempt), and remembers it. Words are kept in memory only."""
+    attempt), and remembers it. A queued message (``queued``) that is the
+    same message within a minute is marked ``dup``: this copy counts.
+    Words are kept in memory only."""
     previous = recent[-1] if recent else None
     if previous is not None and not previous["answered"] and parent is not None and previous["parent"] == parent:
         previous["event"].detail["replaced"] = True
@@ -1911,7 +2320,11 @@ def _note_message(event, texts: list[str], parent, recent: list[dict]) -> None:
         for m in recent
     ):
         event.detail["repeat"] = True
-    recent.append({"at": at, "words": mine, "parent": parent, "answered": False, "event": event})
+    digest = _message_digest(texts)
+    for earlier in queued or ():
+        if earlier["hash"] == digest and _within_duplicate_window(at, earlier["at"]):
+            earlier["event"].detail["dup"] = True
+    recent.append({"at": at, "words": mine, "hash": digest, "parent": parent, "answered": False, "event": event})
 
 
 #: A session id safe to use as a file name: Claude Code's are UUIDs. A
@@ -2114,6 +2527,16 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     #: answered, the event), for the same-request and resent-message
     #: checks; dropped when this function returns.
     recent_messages: list[dict] = []
+    #: The messages you typed while Claude was working (time, hash, the
+    #: event), to drop a copy also written as a user line.
+    recent_queued: list[dict] = []
+    #: Whether the message you typed last was a correction, an adjustment,
+    #: a reminder or a question (``Turn.admit_caught``), for the reply
+    #: that follows it.
+    last_human_challenge = False
+    #: The last ``output_style`` seen, in memory only: a different one is
+    #: a change worth a ``CACHE_SIGNAL``.
+    output_style: str | None = None
     unknown_line_types: dict[str, int] = {}
     #: Parser-signals addition (SURV-5): the last ``cost-state`` line's
     #: own ``totalCostUSD``/``hasUnknownModelCost`` (a running total, so
@@ -2188,6 +2611,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
 
     current: _PendingTurn | None = None
     current_key: str | None = None
+    plan_watch = _PlanWatch()
     previous_turn: Turn | None = None
     previous_non_synthetic_ts: datetime | None = None
     priced_turn_count = 0
@@ -2237,6 +2661,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             key = _turn_key(d)
             if current is not None and key == current_key:
                 _merge_into_pending(current, d, tool_use_names, blocked_calls)
+                plan_watch.see_call(current)
                 continue
             if key in finalized_keys:
                 diagnostics.late_duplicate_ids += 1
@@ -2265,6 +2690,8 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             events_since_current = []
             attachments_since_current = []
             current = _new_pending(d, tool_use_names, blocked_calls)
+            current.after_challenge = last_human_challenge
+            plan_watch.see_call(current)
             (
                 current.deferred_tools_by_server,
                 current.deferred_list_chars,
@@ -2297,10 +2724,17 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
                 diagnostics.limit_hits += 1
             continue
 
+        notes = _NO_NOTES
         if line_type == "user":
-            _accumulate_tool_results(
+            notes = _accumulate_tool_results(
                 d, tool_use_names, tool_result_chars, tool_result_calls, unsized_blocks, current, blocked_calls
             )
+            # Parser-signals addition: leaving plan mode approves a plan
+            # you hadn't approved; checked before this line's own answer.
+            plan_watch.note_mode(d.get("permissionMode"))
+            plan_watch.answered(notes.plan)
+        elif line_type == "permission-mode":
+            plan_watch.note_mode(d.get("permissionMode"))
         elif line_type == "agent-setting":
             value = d.get("agentSetting")
             if isinstance(value, str) and value:
@@ -2351,6 +2785,12 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             continue
         if event.kind == EventKind.HOOK_OUTPUT and line_type == "attachment":
             _annotate_hook_event(event, d.get("attachment"), hook_context_queue)
+        if event.kind == EventKind.REMINDER and event.subkind == "output_style":
+            style = d["attachment"].get("style")
+            if isinstance(style, str):
+                if output_style is not None and style != output_style:
+                    event.kind = EventKind.CACHE_SIGNAL
+                output_style = style
         if event.kind == EventKind.COMPACT_BOUNDARY:
             compactions.append((len(turns) + (current is not None), event, None))
         elif event.kind == EventKind.COMPACT_SUMMARY and compactions:
@@ -2359,8 +2799,26 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             before, boundary, summary_chars = compactions[-1]
             if summary_chars is None and before == len(turns) + (current is not None):
                 compactions[-1] = (before, boundary, event.size_chars)
+        # Parser-signals addition (see model.py's module docstring): a
+        # denied call's bucket, which denial a "for tool use" interrupt
+        # follows, and a go-ahead message approving the open plan.
+        if event.kind == EventKind.TOOL_DENIAL:
+            event.detail["bucket"] = notes.bucket or events_mod.denial_bucket_of(event)
+        elif event.kind == EventKind.INTERRUPT and event.subkind == "tool_refusal":
+            after = _denial_before(events_since_current)
+            if after is not None:
+                event.detail["after"] = after
+        elif event.kind in (EventKind.HUMAN_TEXT, EventKind.QUEUE_OPERATION) and event.detail.get("go"):
+            plan_watch.approve()
         events.append(event)
         events_since_current.append(event)
+        if notes.plan_feedback is not None:
+            feedback_chars, feedback_class = notes.plan_feedback
+            feedback_event = Event(
+                kind=EventKind.PLAN_FEEDBACK, subkind=feedback_class, ts=event.ts, size_chars=feedback_chars
+            )
+            events.append(feedback_event)
+            events_since_current.append(feedback_event)
         if line_type == "attachment":
             attachments_since_current.append(event.subkind or "")
         if event.kind == EventKind.UNKNOWN:
@@ -2384,7 +2842,13 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
             # a resent message, and the same request again, compared in
             # memory only.
             if not event.detail.get("command"):
-                _note_message(event, events_mod.human_texts(d), d.get("parentUuid"), recent_messages)
+                _note_message(event, events_mod.human_texts(d), d.get("parentUuid"), recent_messages, recent_queued)
+            last_human_challenge = _is_challenge(event, events_mod.human_texts(d))
+        elif event.kind == EventKind.QUEUE_OPERATION and event.detail.get("origin") == "human":
+            for block_type, count in (event.detail.get("unsized_blocks") or {}).items():
+                unsized_blocks[block_type] = unsized_blocks.get(block_type, 0) + count
+            _note_queued(event, events_mod.queued_texts(d), recent_messages, recent_queued)
+            last_human_challenge = _is_challenge(event, events_mod.queued_texts(d))
         if event.kind == EventKind.ATTACHMENT:
             subkind = event.subkind or ""
             diagnostics.attachment_catch_all[subkind] = (
@@ -2508,7 +2972,8 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
 #: plus the ``file-history-*``/``artifact-*`` prefix families) is read no
 #: further than those six base keys -- ``classify_line`` returns ``None``
 #: for them before even computing ``message``. ``cost-state`` is read in
-#: the main loop itself, for its totals.
+#: the main loop itself, for its totals, and ``permission-mode`` for its
+#: ``permissionMode``.
 #:
 #: ``user``/``system``/``attachment``/``queue-operation`` all reach
 #: ``classify_line``, which unconditionally reads ``timestamp`` and
@@ -2548,8 +3013,11 @@ READ_KEYS: dict[str, frozenset[str]] = {
             "promptSource",
             "permissionMode",
             "parentUuid",
+            "turnOrigin",
+            "toolUseResult",
         }
     ),
+    "permission-mode": _BASE_READ_KEYS | frozenset({"permissionMode"}),
     "system": _BASE_READ_KEYS
     | frozenset(
         {

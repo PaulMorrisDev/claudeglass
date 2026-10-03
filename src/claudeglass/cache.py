@@ -272,11 +272,22 @@ def _decoder_for(tp):
         return _decode_list
 
     if origin is dict or tp is dict:
+        args = typing.get_args(tp)
+        value_type = args[1] if len(args) == 2 else None
+        value_decoder = _decoder_for(value_type) if value_type is not None else _identity
+        if value_decoder is _identity:
 
-        def _decode_dict(value):
-            return None if value is None else dict(value)
+            def _decode_dict(value):
+                return None if value is None else dict(value)
 
-        return _decode_dict
+            return _decode_dict
+
+        # A value that needs decoding (a tuple the JSON turned into a
+        # list: ``Turn.workflow_runs``) is decoded; one that doesn't stays.
+        def _decode_dict_values(value, _d=value_decoder):
+            return None if value is None else {k: _d(v) for k, v in value.items()}
+
+        return _decode_dict_values
 
     if tp is datetime:
 

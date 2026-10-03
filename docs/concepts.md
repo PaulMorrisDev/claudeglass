@@ -371,8 +371,8 @@ transcript: a main session or one subagent run.
 | Reported failure / Stopped | the status in the agent's task notification or result | agent runs with a recorded outcome | subagents |
 | Failed tool calls | tool results marked as an error | tool calls | all |
 | Failed shell commands | Bash and PowerShell results marked as an error | shell commands | all |
-| Denied by you | tool calls you declined | tool calls | all |
-| Stopped by you | replies you interrupted | replies | main session |
+| Denied by you | tool calls you or a deny rule turned down; not a plan you sent back, a question you declined or a call a hook blocked | tool calls | all |
+| Stopped by you | replies you interrupted; not the line Claude Code writes after a plan or question you answered | replies | main session |
 | Corrections | your messages containing a correction phrase ("that's wrong", "still broken", "why did you", "undo that"...) | your messages | main session |
 | Edited again | edits to a file already changed before your latest message | edits | main session |
 | Hit output limit | replies that stopped at the output token limit | replies | all |
@@ -542,7 +542,13 @@ you turn a level on.
 **Prompt cycle.** `capture.prompt_cycles` is the unit metrics capture's
 own numbers are counted over: one message of yours, the reply that
 answers it, and every subagent that message started, at any depth, up to
-(not including) the turn that answers your next message.
+(not including) the turn that answers your next message. A workflow's
+agents belong to the cycle of the reply that started their run; a run
+that was resumed keeps its run id, so its agents are split between the
+resuming replies by when they started. A tag Claude writes in reply to a
+background agent's or a workflow's report counts for the cycle that
+launched it, even when you sent another message in between: the cost
+stays in the cycle it was spent in, only the tag moves.
 
 **Coverage.** The share of prompt cycles whose final reply carried a
 `[cg: ...]` tag (`CaptureUsage.coverage`), and separately the share of

@@ -636,8 +636,8 @@ The three thresholds can be set in `config.toml`'s
 Full field-by-field contract: [`docs/waste.md`](waste.md#the-waste-report-section).
 
 Prices the turns whose output the user never actually benefited from —
-a failed tool call, a turn the user interrupted, one stopped by a tool
-denial, or every turn in a subagent transcript the harness killed
+a failed tool call, a turn the user interrupted, one stopped by a call
+the user turned down, or every turn in a subagent transcript the harness killed
 before it could report back — and attributes each to a cause with a
 lever, so a "recoverable spend ceiling" always points at what to change
 to stop paying for it again. Purely a reader of state `parse.py`/
@@ -822,7 +822,10 @@ test and privacy are in [concepts](concepts.md#7-quality-signals).
   failed shell commands, denied, stopped by you, corrections, edited
   again and hit the output limit, then replies and cost per run. A
   signal that doesn't apply to the group (corrections for a subagent,
-  say) is blank.
+  say) is blank. Denied counts only calls you or a deny rule turned
+  down: a plan you sent back, a question you declined and a hook's
+  block are not counted, and stopped by you leaves out the line Claude
+  Code writes after them.
 - `quality_by_setup` — per agent type, model and effort (the model and
   effort most of a run's replies used; runs that never replied are left
   out, and so are main sessions a scheduled or looped task started with
@@ -876,7 +879,12 @@ How the way you work shapes what it costs, and the habits that would
 have saved the most in your own sessions. Built per message of yours (a
 *cycle*: one message you typed and every reply and agent run that
 answered it, `capture.prompt_cycles`) and per subagent run at any
-depth. It reads what metrics capture's tags reported where they are
+depth. A workflow's agents are agent runs of the message whose reply
+started their run (a run that was resumed keeps its run id, so its agents
+are split between the resuming replies by when they started), and a tag
+Claude wrote in reply to a background agent's or a workflow's report
+counts for the message that launched it. It reads what metrics capture's
+tags reported where they are
 there, what the parser measures without asking (whether a message
 named a file or pasted an error, a command failing again and again, a
 skill loaded late), and your ratings from Spend › Sessions. Every table
@@ -933,7 +941,10 @@ capture is off or no feedback has been given.
   model, what the runs said about the model (smaller would do, right,
   needed larger) and CLAUDE.md (used, didn't use), the shares of work
   reported easy and hard, files read again that the parent had read,
-  and runs started by another agent.
+  and runs started by another agent. A workflow's agents are counted
+  here (their agent type is whatever the run named them, `workflow-subagent`
+  when it named none) and read "again" against the message that started
+  the workflow.
 - `habits_effort_fit` — per reported level and effort (`easy:high`):
   messages, per message, thinking share of output, redone, met the
   goal, and for easy work at high effort or above, what lower effort
@@ -954,7 +965,8 @@ capture is off or no feedback has been given.
   columns stay as measured. Shown on Setup › Profiles; the `tasks` profile
   goal drafts from its `all` rows.
 - `habits_agents_by_task` — `habits_agents`, split by the kind of task
-  Claude reported for the message that spawned each run: per task and
+  Claude reported for the message that spawned each run (for a workflow
+  agent, the message whose reply started the workflow): per task and
   agent type, runs, per run, finished, and what the runs said about the
   model (smaller would do, right, needed larger). Names a cheaper model
   only when at least `MIN_GROUP` runs support it, the saving clears
@@ -1052,7 +1064,10 @@ capture is off or no feedback has been given.
 Counted from what the parser keeps about each message you typed and each
 reply (`Turn.prompt_steps`, `prompt_plan_mode`, `human_vague`,
 `human_ack`, `human_repeat`, `reply_asked`, `coach_tip`): counts and
-flags, never your words. Each habit uses the live coaching hint's own
+flags, never your words. `reply_asked` means a reply ends on a question to
+you: a question mark must close one of its last two sentences or a list
+item that ends it, after code, links, a ClaudeGlass tip and the tag are
+cut. Each habit uses the live coaching hint's own
 rule and default threshold (`capture_catalogue.COACHING_THRESHOLDS`), so
 it counts whether or not coaching notes were on.
 

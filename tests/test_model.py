@@ -42,6 +42,7 @@ A2_EVENT_KIND_NAMES = {
     "AGENT_TERMINATED",
     "TASK_STATUS",
     "STRUCTURED_OUTPUT",
+    "PLAN_FEEDBACK",
 }
 
 
@@ -102,6 +103,17 @@ def test_turn_references_event_kind_by_default():
     turn = model.Turn()
     assert turn.preceding_primary is model.EventKind.UNKNOWN
     assert turn.preceding_event_kinds == ()
+
+
+def test_the_plan_and_denial_fields_default_to_nothing_seen():
+    turn = model.Turn()
+    assert (turn.ask_rounds, turn.preceding_denials) == (0, {})
+    assert model.Turn().preceding_denials is not turn.preceding_denials
+    plan = model.PlanStats(steps=2, files=1, chars=300, outcome="approved")
+    assert (plan.rejected, plan.feedback_chars, plan.feedback_class) == (False, 0, None)
+    # A digest cached before the fields existed still builds the same plan.
+    assert model.PlanStats(steps=2, files=1, chars=300) == model.PlanStats(2, 1, 300, None)
+    assert model.EventKind.PLAN_FEEDBACK == "plan_feedback"
 
 
 # -- format_cell -------------------------------------------------------

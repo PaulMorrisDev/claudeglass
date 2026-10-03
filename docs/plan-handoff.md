@@ -21,8 +21,10 @@ can be asked to carry it out, one phase per session.
 ## What it measures
 
 For every main session (scheduled checks left out) and every
-`ExitPlanMode` call whose result came back without an error
-(`Turn.plan_stats.outcome == "approved"`):
+`ExitPlanMode` call you approved: its result came back without an error
+(`Turn.plan_stats.outcome == "approved"`), or the dialog sent it back and
+you then typed a go-ahead before the next plan, or left plan mode
+(`"approved_by_message"`):
 
 - **Fresh start.** The session's starting context (its first reply's
   context less your first message, characters / 4) plus the plan

@@ -12,7 +12,15 @@ from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 
-from helpers import attachment_line, tool_use_block, turn_line, user_str_line, write_jsonl
+from helpers import (
+    attachment_line,
+    tool_result_block,
+    tool_use_block,
+    turn_line,
+    user_block_line,
+    user_str_line,
+    write_jsonl,
+)
 
 PRICING = load_pricing()
 
@@ -187,6 +195,77 @@ def test_stopping_claude_three_times_in_twenty_minutes_is_one_loop(tmp_path):
     ])
     loops = [o for o in session.occurrences if o.habit == "stop_loop"]
     assert len(loops) == 1 and loops[0].cost > 0
+
+
+_SENT_BACK = (
+    "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
+    "the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+)
+
+
+def _tool_stop(minute: float) -> dict:
+    return user_str_line("[Request interrupted by user for tool use]", timestamp=_at(minute))
+
+
+def _turned_away(minute: float, tool_use_id: str, text: str, kind: str) -> dict:
+    return user_block_line([tool_result_block(tool_use_id, text, is_error=True)], timestamp=_at(minute),
+                           toolDenialKind=kind)
+
+
+def _stopped_after(tmp_path, call: dict, answer, name: str) -> prompting.SessionPrompting:
+    """Three messages, each answered by a call turned away (``answer``
+    says how, given the minute and tool id) and then the tool-use
+    interrupt line, all within twenty minutes."""
+    lines = [*_START]
+    for at in (2, 5, 8):
+        lines += [
+            _said(f"refactor the store, part {at}", at),
+            turn_line(timestamp=_at(at + 1), content=[call["block"](at + 1)], cache_read_input_tokens=40_000,
+                      output_tokens=200),
+            answer(at + 1.5, call["id"](at + 1)),
+            _tool_stop(at + 2),
+        ]
+    lines += [_said("rename it for now", 11), _reply(12, edit=True)]
+    return _session(tmp_path, lines, name)
+
+
+_PLAN_CALL = {"block": lambda m: tool_use_block("ExitPlanMode", f"toolu_p{m}", {"plan": "1. do it"}),
+              "id": lambda m: f"toolu_p{m}"}
+_EDIT_CALL = {"block": lambda m: tool_use_block("Edit", f"toolu_e{m}"), "id": lambda m: f"toolu_e{m}"}
+_BASH_CALL = {"block": lambda m: tool_use_block("Bash", f"toolu_b{m}", {"command": "make"}),
+              "id": lambda m: f"toolu_b{m}"}
+
+
+def test_the_tool_use_line_after_a_plan_you_sent_back_is_not_a_stop(tmp_path):
+    session = _stopped_after(
+        tmp_path, _PLAN_CALL, lambda at, tool_id: _turned_away(at, tool_id, _SENT_BACK + "smaller", "user-rejected"),
+        "plan.jsonl",
+    )
+    assert "stop_loop" not in session.counts()
+
+
+def test_the_tool_use_line_after_a_declined_question_or_a_hook_block_is_not_a_stop(tmp_path):
+    asked = {"block": lambda m: tool_use_block("AskUserQuestion", f"toolu_q{m}", {"questions": []}),
+             "id": lambda m: f"toolu_q{m}"}
+    question = _stopped_after(
+        tmp_path, asked, lambda at, tool_id: _turned_away(at, tool_id, _SENT_BACK, "user-rejected"), "question.jsonl"
+    )
+    hook = _stopped_after(
+        tmp_path, _BASH_CALL,
+        lambda at, tool_id: _turned_away(at, tool_id, "PreToolUse:Bash hook error: [guard.sh] STOP: no make",
+                                         "permission-rule"),
+        "hook.jsonl",
+    )
+    assert "stop_loop" not in question.counts() and "stop_loop" not in hook.counts()
+
+
+def test_the_tool_use_line_after_a_call_you_turned_down_is_a_stop(tmp_path):
+    session = _stopped_after(
+        tmp_path, _EDIT_CALL,
+        lambda at, tool_id: _turned_away(at, tool_id, "Permission to use Edit has been denied.", "permission-rule"),
+        "refused.jsonl",
+    )
+    assert session.counts()["stop_loop"] == 1
 
 
 # -- the section --------------------------------------------------------------------

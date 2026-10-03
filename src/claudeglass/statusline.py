@@ -1814,10 +1814,17 @@ def _is_synthetic(d: dict) -> bool:
 
 
 def _is_human_prompt(d: dict) -> bool:
-    """A message you typed: a ``user`` line that isn't meta and carries no
-    tool result."""
+    """A message you typed: a ``user`` line that isn't meta, carries no
+    tool result and has no ``turnOrigin`` that rules it out."""
     if d.get("type") != "user" or d.get("isMeta") or "toolUseResult" in d:
         return False
+    if d.get("turnOrigin") is not None:
+        # Imported here, not at the top: see the FEEDBACK_NOTE import in
+        # :func:`second_line`.
+        from .capture_catalogue import NOT_TYPED_TURN_ORIGINS
+
+        if d["turnOrigin"] in NOT_TYPED_TURN_ORIGINS:
+            return False
     message = d.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
@@ -1866,15 +1873,6 @@ def _k(tokens: float) -> str:
     return f"{round(tokens / 1000.0)}k"
 
 
-#: Lines written as your message that you didn't type: a slash command
-#: and its output, a ``!`` shell command, a scheduled task, a background
-#: agent's report (as ``capture-hook.py`` skips them).
-_NOT_TYPED_PREFIXES = (
-    "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
-    "[SYSTEM NOTIFICATION", "<agent-message", "Another Claude session sent a message",
-)
-
-
 def _line_text(d: dict) -> str:
     message = d.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -1896,11 +1894,6 @@ def _line_time(d: dict) -> datetime | None:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
-#: How far back from the end of Claude's last words a question mark
-#: makes your next message an answer to it (as ``capture-hook.py``).
-_QUESTION_TAIL_CHARS = 300
-
-
 def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict]:
     """Your typed messages, oldest first, as ``capture-hook.py``'s
     ``_exchanges`` reads them: ``text``, ``at``, ``gap`` (seconds since
@@ -1908,7 +1901,14 @@ def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict
     question), ``answered`` (Claude replied at all), ``stopped`` (a stop
     marker followed it), ``failed`` (an API error, an overload or a usage
     limit came back instead of a reply) and ``edited`` (Claude changed a
-    file in reply to it)."""
+    file in reply to it). A line you didn't type
+    (``capture_catalogue.NOT_TYPED_PREFIXES``, as ``capture-hook.py``
+    skips them) isn't a message."""
+    # Imported here, not at the top: see the FEEDBACK_NOTE import in
+    # :func:`second_line`.
+    from .capture_catalogue import NOT_TYPED_PREFIXES
+    from .prompt_shape import ends_on_question
+
     out: list[dict] = []
     replied_at = None
     said = ""
@@ -1938,13 +1938,13 @@ def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict
             if out:
                 out[-1]["stopped"] = True
             continue
-        if text.lstrip().startswith(_NOT_TYPED_PREFIXES):
+        if text.lstrip().startswith(NOT_TYPED_PREFIXES):
             continue
         at = _line_time(d)
         out.append({
             "text": text, "at": at, "edited": False, "answered": False, "stopped": False, "failed": False,
             "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
-            "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
+            "answer": ends_on_question(said),
         })
         said = ""
     return out

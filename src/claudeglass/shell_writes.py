@@ -26,6 +26,8 @@ absolute one counts.
 
 The command is read here and dropped: :func:`write_targets` returns the
 paths for the caller to hash and count, then discard.
+:func:`simple_commands` hands the same reading of quotes, heredocs and
+pipelines to ``shell_reads``.
 """
 
 from __future__ import annotations
@@ -89,6 +91,19 @@ class _Command:
     fed: bool = False
 
 
+@dataclass(frozen=True, slots=True)
+class SimpleCommand:
+    """One simple command as ``shell_reads`` reads it: the program (lower
+    case, no directory or ``.exe``), its arguments as plain words,
+    whether its standard output goes to a file, and whether a heredoc or
+    here-string feeds it."""
+
+    program: str
+    args: tuple[str, ...]
+    redirected: bool
+    fed: bool
+
+
 def write_targets(command: str, *, powershell: bool, cwd: str | None) -> list[str]:
     """The files ``command`` writes (see the module docstring), each as an
     absolute path with forward slashes, in order, repeats kept."""
@@ -116,6 +131,20 @@ def write_targets(command: str, *, powershell: bool, cwd: str | None) -> list[st
                 if resolved is not None:
                     targets.append(resolved)
     return targets
+
+
+def simple_commands(command: str, *, powershell: bool) -> list[list[SimpleCommand]]:
+    """The pipelines of ``command``, each a list of its simple commands
+    in order. ``cd X && ...`` is a pipeline of its own, ahead of the
+    rest."""
+    result: list[list[SimpleCommand]] = []
+    for pipeline in _pipelines(command, powershell):
+        simple = []
+        for cmd in pipeline:
+            program, args = _program(cmd.words, powershell)
+            simple.append(SimpleCommand(program, tuple(text for text, _quoted in args), bool(cmd.writes), cmd.fed))
+        result.append(simple)
+    return result
 
 
 # -- reading the command ------------------------------------------------------------

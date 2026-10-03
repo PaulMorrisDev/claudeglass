@@ -40,6 +40,15 @@ transcript belongs to a run when its immediate parent directory is named
 ``run.run_id``, which holds regardless of what (possibly wrong, for this
 nested layout) ``session_id``/``agent_id`` ``discovery.load_meta``
 derived for it from the file's grandparent directory name.
+
+The reply that started a run is joined the other way round, from the main
+session: a ``Workflow`` call's result names the run (``Turn.
+workflow_runs``: ``runId`` and ``taskId``), and ``capture.
+WorkflowLaunches`` matches it to the agents whose ``TranscriptMeta.
+workflow_run_id`` is that ``runId`` (a resumed run has several calls, so
+the agent's own first reply picks one). A run with no ``wf_*.json`` still
+joins this way; the run file's ``started`` time is only the fallback when
+no call was logged.
 """
 
 from __future__ import annotations

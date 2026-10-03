@@ -13,13 +13,14 @@ this order:
    ``None``).
 3. **IMPLEMENTATION** if ``edit_kind == "real"``, or the turn ran a
    Bash/PowerShell command whose prefix does *not* match one of the
-   test/build tool prefixes below (an ordinary shell command in service
-   of writing code).
+   test/build tool prefixes below and that ran no tests (an ordinary
+   shell command in service of writing code).
 4. **VERIFICATION** if the turn's ``cmd_prefix`` starts with one of the
    recognised test/build tool prefixes (``pytest``, ``python -m pytest``,
    ``dotnet test``, ``dotnet build``, ``npm test``, ``npx vitest``,
    ``npx playwright``, ``go test``, ``cargo test``, ``make``, ``mvn``,
-   ``gradle``), or ``edit_kind == "scratch"`` (a throwaway/temp-dir edit,
+   ``gradle``), or ``Turn.tests_run`` says it ran tests (``testrun``,
+   parser 37), or ``edit_kind == "scratch"`` (a throwaway/temp-dir edit,
    the shape of a debug script rather than production code).
 5. **OTHER** otherwise (a fallback beyond the "no tools" case above --
    e.g. a turn that only used a subagent-spawning tool).
@@ -118,10 +119,11 @@ def classify_turn_phase(turn: Turn) -> str:
         return PHASE_DISCOVERY
 
     has_shell = any(name in _SHELL_TOOL_NAMES for name in turn.tool_names)
-    if turn.edit_kind == "real" or (has_shell and not _matches_verification_cmd(turn.cmd_prefix)):
+    verifies = _matches_verification_cmd(turn.cmd_prefix) or bool(turn.tests_run)
+    if turn.edit_kind == "real" or (has_shell and not verifies):
         return PHASE_IMPLEMENTATION
 
-    if _matches_verification_cmd(turn.cmd_prefix) or turn.edit_kind == "scratch":
+    if verifies or turn.edit_kind == "scratch":
         return PHASE_VERIFICATION
 
     return PHASE_OTHER

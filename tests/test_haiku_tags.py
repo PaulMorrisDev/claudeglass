@@ -57,10 +57,19 @@ def _transcript(tmp_path, lines, name="s.jsonl") -> Path:
     return path
 
 
-def _turn(tmp_path, *, plan=False, skill="", earlier_plan=False) -> Path:
+def _plan_result(second: int, *, is_error: bool = False, text: str = "ok", **line) -> dict:
+    """The answer to an earlier plan's ``ExitPlanMode`` call ("tp")."""
+    return {"type": "user", "timestamp": _at(second), **line, "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": "tp", "content": text, "is_error": is_error}]}}
+
+
+def _turn(tmp_path, *, plan=False, skill="", earlier_plan=False, plan_answer=None, between=()) -> Path:
     """One earlier exchange, then a message Claude answered with a test
-    run, an edit and a final reply."""
+    run, an edit and a final reply. An earlier plan is approved in the
+    dialog unless ``plan_answer`` says otherwise; ``between`` lines come
+    before your last message."""
     first = [tool_use_block("ExitPlanMode", "tp", {"plan": "1. do it"})] if earlier_plan else []
+    answer = [plan_answer or _plan_result(2)] if earlier_plan else []
     now = [tool_use_block("Bash", "t1", {"command": "pytest -q tests/test_calc.py\necho done"}),
            tool_use_block("Edit", "t2", {"file_path": "/w/calc.py"})]
     if plan:
@@ -70,6 +79,8 @@ def _turn(tmp_path, *, plan=False, skill="", earlier_plan=False) -> Path:
     return _transcript(tmp_path, [
         user_str_line("Add a calculator module", timestamp=_at(0)),
         turn_line(timestamp=_at(1), content=[*first, {"type": "text", "text": "Added."}], output_tokens=50),
+        *answer,
+        *between,
         user_str_line("add() returns the wrong sum, fix it", timestamp=_at(10)),
         turn_line(timestamp=_at(11), content=now, output_tokens=300),
         {"type": "user", "timestamp": _at(12), "message": {"role": "user", "content": [
@@ -459,6 +470,46 @@ def test_the_excerpt_cuts_long_messages_and_notes_plans_and_skills(tmp_path):
     assert job["facts"]["plan_now"] and job["facts"]["skills"] == 1 and job["facts"]["earlier"] == 0
     later = _turn(tmp_path, earlier_plan=True)
     assert "Plan mode: the user approved a plan earlier" in HOOK.judge_job(_stop(later), HAIKU, CATALOGUE)["excerpt"]
+
+
+def _earlier_plan_text(path) -> str:
+    return next(
+        line for line in HOOK.judge_job(_stop(path), HAIKU, CATALOGUE)["excerpt"].splitlines()
+        if line.startswith("Plan mode:")
+    )
+
+
+def test_a_plan_you_sent_back_is_not_a_plan_approved_earlier(tmp_path):
+    sent_back = _plan_result(2, is_error=True, text="The user doesn't want to proceed with this tool use.")
+    path = _turn(tmp_path, earlier_plan=True, plan_answer=sent_back)
+    assert _earlier_plan_text(path) == "Plan mode: not used in this session."
+    assert HOOK.judge_job(_stop(path), HAIKU, CATALOGUE)["facts"]["plan_before"] is False
+
+
+def test_a_go_ahead_you_typed_approves_a_plan_the_dialog_sent_back(tmp_path):
+    sent_back = _plan_result(2, is_error=True, text="The user doesn't want to proceed with this tool use.")
+    path = _turn(tmp_path, earlier_plan=True, plan_answer=sent_back, between=[
+        user_str_line("go ahead", timestamp=_at(5), origin={"kind": "human"})])
+    assert _earlier_plan_text(path) == "Plan mode: the user approved a plan earlier in this session."
+
+
+def test_leaving_plan_mode_approves_a_plan_the_dialog_sent_back(tmp_path):
+    sent_back = _plan_result(2, is_error=True, text="The user doesn't want to proceed with this tool use.",
+                             permissionMode="plan")
+    path = _turn(tmp_path, earlier_plan=True, plan_answer=sent_back, between=[
+        user_str_line("Looks fine, build it with the second option", timestamp=_at(5), permissionMode="acceptEdits")])
+    assert _earlier_plan_text(path) == "Plan mode: the user approved a plan earlier in this session."
+
+
+def test_a_go_ahead_after_the_next_plan_call_does_not_approve_the_earlier_plan(tmp_path):
+    sent_back = _plan_result(2, is_error=True, text="The user doesn't want to proceed with this tool use.")
+    replanned = turn_line(timestamp=_at(3), content=[tool_use_block("ExitPlanMode", "tq", {"plan": "1. again"})])
+    path = _turn(tmp_path, earlier_plan=True, plan_answer=sent_back, between=[
+        replanned,
+        {"type": "user", "timestamp": _at(4), "message": {"role": "user", "content": [
+            {"type": "tool_result", "tool_use_id": "tq", "content": "no", "is_error": True}]}},
+    ])
+    assert _earlier_plan_text(path) == "Plan mode: not used in this session."
 
 
 def test_plan_modes_plan_file_counts_as_a_plan_and_isnt_a_changed_file(tmp_path):
@@ -897,3 +948,26 @@ def test_your_changes_names_a_tagger_change():
     assert change_points._capture_label(record) == "Claude Haiku writes the tags"
     back = {"level": "standard", "changed": {"tagger": {"from": "haiku", "to": "claude"}}}
     assert change_points._capture_label(back) == "Claude writes the tags again"
+
+
+def _ran(tmp_path, tool: str, command: str) -> dict:
+    path = _transcript(tmp_path, [
+        user_str_line("run the checks", timestamp=_at(0)),
+        turn_line(timestamp=_at(1), content=[tool_use_block(tool, "c1", {"command": command}),
+                                             {"type": "text", "text": "Ran them."}]),
+    ])
+    return HOOK.judge_job(_stop(path, last_assistant_message=""), HAIKU, CATALOGUE)
+
+
+def test_the_excerpt_reads_a_whole_command_for_the_tests_it_runs(tmp_path):
+    # A heredoc's body is a message, not a run; a run on a later line counts.
+    message = "git commit -m \"$(cat <<'EOF'\nRun pytest tests/test_a.py before merging\nEOF\n)\""
+    assert _ran(tmp_path, "Bash", message)["facts"]["tests"] == ""
+    assert _ran(tmp_path, "Bash", "cd /w\npytest tests/test_a.py -q")["facts"]["tests"] == "targeted"
+    assert _ran(tmp_path, "Bash", "cd /w\npytest tests/test_a.py -q\npytest -q")["facts"]["tests"] == "full"
+
+
+def test_the_excerpt_counts_a_powershell_test_run_and_lists_its_command(tmp_path):
+    job = _ran(tmp_path, "PowerShell", "& \"C:\\Python311\\python.exe\" -m pytest tests\\test_a.py")
+    assert job["facts"]["tests"] == "targeted" and "Tests run: chosen tests." in job["excerpt"]
+    assert job["facts"]["commands"] == 1 and "Shell commands: `& " in job["excerpt"]

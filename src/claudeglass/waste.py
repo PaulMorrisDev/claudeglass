@@ -40,9 +40,16 @@ reader" convention -- see that module's docstring):
   interrupted``: i.e. the *next* priced turn's own
   ``preceding_primary == EventKind.INTERRUPT``. The turn under scrutiny
   is the one the user cut off before letting it finish, not the turn
-  that reports the interruption.
+  that reports the interruption. Not when the only denials in that
+  window are a plan or question the user answered, or a call a hook or
+  the classifier blocked: the line is then only how Claude Code ends the
+  turn (``events.stop_window``).
 - ``tool-denial`` -- same "followed by" framing as ``interrupt``, keyed
-  off the next priced turn's ``preceding_primary == EventKind.TOOL_DENIAL``.
+  off the next priced turn's ``preceding_primary == EventKind.TOOL_DENIAL``
+  and a call the user or a deny rule turned down among its
+  ``preceding_denials`` (bucket ``refused``). A plan the user sent back
+  or a question declined is an answer, not a denial; a plan with
+  feedback is ``PLAN_FEEDBACK``, never this cause.
 - ``max-turns`` -- a subagent transcript's own ``TranscriptMeta.
   stopped_by_user`` is the only truncation signal this codebase can
   observe (``topology.py``'s own module docstring: a true ``maxTurns``
@@ -155,6 +162,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from . import events as events_mod
 from .model import Column, EventKind, Recommendation, ReportModel, Section, Table, TranscriptResult, Turn, agent_type_label
 from .parse import load_or_create_salt
 from .pricing import Pricing, price_turn
@@ -507,9 +515,17 @@ class WasteStats:
                     self.failed_command_turns += 1
             if cause is None and not transcript_truncated:
                 next_turn = priced[i + 1] if i + 1 < n else None
-                if next_turn is not None and next_turn.preceding_primary == EventKind.INTERRUPT:
+                if (
+                    next_turn is not None
+                    and next_turn.preceding_primary == EventKind.INTERRUPT
+                    and events_mod.stop_window(next_turn.preceding_denials)
+                ):
                     cause = "interrupt"
-                elif next_turn is not None and next_turn.preceding_primary == EventKind.TOOL_DENIAL:
+                elif (
+                    next_turn is not None
+                    and next_turn.preceding_primary == EventKind.TOOL_DENIAL
+                    and next_turn.preceding_denials.get("refused")
+                ):
                     cause = "tool-denial"
 
             if cause is None:

@@ -103,6 +103,10 @@ def test_verification_prefix_match_is_not_anchored_to_full_string_start_only():
     assert phases.classify_turn_phase(turn) == phases.PHASE_VERIFICATION
 
 
+def test_a_test_run_any_spelling_is_verification():
+    assert phases.classify_turn_phase(_turn(tool_names=("Bash",), cmd_prefix="cd /c/x", tests_run="full")) == phases.PHASE_VERIFICATION
+
+
 def test_scratch_edit_is_verification():
     turn = _turn(tool_names=("Edit",), edit_kind="scratch")
     assert phases.classify_turn_phase(turn) == phases.PHASE_VERIFICATION

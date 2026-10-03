@@ -11,16 +11,17 @@ be worked out by hand.
 
 from __future__ import annotations
 
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture, capture_catalogue as catalogue, parse
-from claudeglass.model import TranscriptMeta
+from claudeglass import cache, capture, capture_catalogue as catalogue, parse
+from claudeglass.model import TranscriptMeta, WorkflowRun
 from claudeglass.parse import parse_transcript
-from claudeglass.pricing import load_pricing
+from claudeglass.pricing import load_pricing, price_turn
 
 from helpers import (
     old_agent_note_text,
@@ -156,6 +157,372 @@ def test_a_cycles_tags_merge_key_by_key(tmp_path):
     assert (tag.task, tag.level, tag.shift) == ("bugfix", "hard", "redo")
     assert tag.has_tl is True
     assert tag.chars == turn2.cap.chars + turn3.cap.chars
+
+
+# -- workflow agents -----------------------------------------------------------------
+
+
+def _wf_call(second: int, tool_use_id: str) -> dict:
+    return _reply(second, tool_use_block("Workflow", tool_use_id, {"script": "return 1"}))
+
+
+def _wf_launched(second: int, tool_use_id: str, run_id: str, task_id: str) -> dict:
+    body = {"status": "async_launched", "taskType": "local_workflow", "runId": run_id, "taskId": task_id}
+    return user_block_line(
+        [tool_result_block(tool_use_id, "Workflow launched in background.")],
+        timestamp=_ts(second),
+        toolUseResult=body,
+    )
+
+
+def _wf_agent(tmp_path, name: str, run_id: str, lines, *, agent_type: str = "workflow-subagent",
+              kind: str = "workflow-agent", parent: str = ""):
+    # Its .meta.json has no toolUseId and no parentAgentId: only the run.
+    return _parse(tmp_path, f"wf-{name}.jsonl", lines, kind=kind, agent_id=f"agent-{name}",
+                  agent_type=agent_type, workflow_run_id=run_id, parent_agent_id=parent or None)
+
+
+def _wf_steps(agent_second: int):
+    return [user_str_line("go", timestamp=_ts(agent_second)), _reply(agent_second + 1)]
+
+
+def _two_messages_with_a_workflow_in_the_second(tmp_path):
+    return _top(tmp_path, [
+        _ask(1, "first"),
+        _reply(2),
+        _ask(10, "second"),
+        _wf_call(11, "tu_w"),
+        _wf_launched(12, "tu_w", "wf_a", "t_a"),
+        _reply(13),
+    ])
+
+
+def test_a_workflow_agent_joins_the_cycle_whose_reply_started_its_run(tmp_path):
+    top = _two_messages_with_a_workflow_in_the_second(tmp_path)
+    agent = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(14))
+    first, second = capture.prompt_cycles(top, [agent])
+    assert (first.subs, second.subs) == ([], [agent])
+
+
+def test_a_run_with_no_run_file_still_joins_by_its_run_id(tmp_path):
+    top = _two_messages_with_a_workflow_in_the_second(tmp_path)
+    agent = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(14))
+    other = WorkflowRun(run_id="wf_unrelated", started=_ts(1))
+    for runs in ((), (other,)):
+        first, second = capture.prompt_cycles(top, [agent], runs)
+        assert (first.subs, second.subs) == ([], [agent])
+
+
+def test_a_workflow_agent_is_known_by_its_kind_not_its_agent_type(tmp_path):
+    top = _two_messages_with_a_workflow_in_the_second(tmp_path)
+    named = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(14), agent_type="Explore")
+    # The same run id and the type workflow agents usually carry, but not
+    # one of the run's own transcripts.
+    impostor = _wf_agent(tmp_path, "w2", "wf_a", _wf_steps(16), kind="subagent")
+    first, second = capture.prompt_cycles(top, [named, impostor])
+    assert (first.subs, second.subs) == ([], [named])
+
+
+def test_a_resumed_run_splits_its_agents_across_the_cycles_of_its_calls(tmp_path):
+    top = _top(tmp_path, [
+        _ask(1, "first"),
+        _wf_call(2, "tu_w1"),
+        _wf_launched(3, "tu_w1", "wf_a", "t_one"),
+        _reply(4),
+        _ask(20, "second"),
+        _wf_call(21, "tu_w2"),
+        _wf_launched(22, "tu_w2", "wf_a", "t_two"),
+        _reply(23),
+    ])
+    early = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(5))
+    # Spoke after the first call and before the resume: still the first's.
+    between = _wf_agent(tmp_path, "w2", "wf_a", _wf_steps(19))
+    late = _wf_agent(tmp_path, "w3", "wf_a", _wf_steps(25))
+    first, second = capture.prompt_cycles(top, [early, between, late])
+    assert (first.subs, second.subs) == ([early, between], [late])
+
+
+def test_a_workflow_agent_that_started_before_every_call_is_left_to_the_run_file(tmp_path):
+    top = _two_messages_with_a_workflow_in_the_second(tmp_path)
+    early = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(5))
+    assert [c.subs for c in capture.prompt_cycles(top, [early])] == [[], []]
+    run = WorkflowRun(run_id="wf_a", started=_ts(11))
+    # The reply before the run's start time is the second message's.
+    assert [c.subs for c in capture.prompt_cycles(top, [early], [run])] == [[], [early]]
+
+
+def test_a_run_with_no_logged_call_falls_back_to_the_cycle_its_run_file_started_in(tmp_path):
+    top = _top(tmp_path, [_ask(1, "first"), _reply(2), _ask(10, "second"), _reply(11), _reply(13)])
+    agent = _wf_agent(tmp_path, "w1", "wf_old", _wf_steps(14))
+    run = WorkflowRun(run_id="wf_old", started=_ts(12))
+    assert [c.subs for c in capture.prompt_cycles(top, [agent], [run])] == [[], [agent]]
+    # No run file, or one that began before the first message: no cycle.
+    assert [c.subs for c in capture.prompt_cycles(top, [agent])] == [[], []]
+    before = WorkflowRun(run_id="wf_old", started=_ts(0))
+    assert [c.subs for c in capture.prompt_cycles(top, [agent], [before])] == [[], []]
+    # A run file with no start time says nothing.
+    assert [c.subs for c in capture.prompt_cycles(top, [agent], [WorkflowRun(run_id="wf_old")])] == [[], []]
+
+
+def test_an_agent_a_workflow_agent_spawned_follows_it_to_its_cycle(tmp_path):
+    top = _two_messages_with_a_workflow_in_the_second(tmp_path)
+    parent = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(14))
+    child = _sub(tmp_path, "c2", _wf_steps(16), tool_use_id="toolu_inner", parent="w1")
+    first, second = capture.prompt_cycles(top, [parent, child])
+    assert (first.subs, second.subs) == ([], [parent, child])
+
+
+def test_a_cycle_costs_the_workflow_agents_of_its_run_too(tmp_path, pricing):
+    top = _two_messages_with_a_workflow_in_the_second(tmp_path)
+    agent = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(14))
+    _first, second = capture.prompt_cycles(top, [agent])
+    alone = capture._cycle_cost(capture.prompt_cycles(top)[1], pricing)
+    expected = sum(price_turn(t, pricing.resolve_model(t.model)).total for t in capture._priced(agent))
+    assert expected > 0
+    assert capture._cycle_cost(second, pricing) == pytest.approx(alone + expected)
+
+
+def test_a_workflow_call_in_a_digest_reaches_the_launch_lookup_as_tuples(tmp_path):
+    top = _two_messages_with_a_workflow_in_the_second(tmp_path)
+    decoded = cache.result_from_jsonable(json.loads(json.dumps(cache.encode_result(top))))
+    agent = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(14))
+    assert capture.WorkflowLaunches(decoded).call_for(agent) == capture.WorkflowLaunches(top).call_for(agent)
+    assert capture.WorkflowLaunches(decoded).call_for(agent) is not None
+
+
+def _workflow_run_on_disk(tmp_path, *, run_file: bool):
+    """A project directory as Claude Code writes one for a session that ran
+    a workflow: the main transcript, the run's directory of agent
+    transcripts (their ``.meta.json`` carries no ``toolUseId``), and, when
+    ``run_file``, the ``workflows/wf_*.json`` run summary."""
+    project = tmp_path / "proj"
+    run_dir = project / "session-wf" / "subagents" / "workflows" / "wf_a"
+    run_dir.mkdir(parents=True)
+    write_jsonl(project / "session-wf.jsonl", [
+        _ask(1, "first"),
+        _reply(2),
+        _ask(10, "second"),
+        _wf_call(11, "tu_w"),
+        _wf_launched(12, "tu_w", "wf_a", "t_a"),
+        _reply(13),
+    ])
+    write_jsonl(run_dir / "agent-w1.jsonl", _wf_steps(14))
+    (run_dir / "agent-w1.meta.json").write_text(json.dumps({"agentType": "workflow-subagent"}), encoding="utf-8")
+    if run_file:
+        (project / "session-wf" / "workflows").mkdir()
+        (project / "session-wf" / "workflows" / "wf_a.json").write_text(
+            json.dumps({"runId": "wf_a", "taskId": "t_a", "agentCount": 1, "phases": []}), encoding="utf-8"
+        )
+    return project
+
+
+@pytest.mark.parametrize("run_file", [False, True])
+def test_a_workflow_run_on_disk_joins_its_agents_to_the_cycle_whether_or_not_it_has_a_run_file(tmp_path, run_file):
+    from claudeglass.corpus import load_corpus
+
+    (bundle,) = load_corpus([_workflow_run_on_disk(tmp_path, run_file=run_file)]).sessions
+    assert len(bundle.workflows) == int(run_file)
+    (agent,) = bundle.subs
+    assert (agent.meta.kind, agent.meta.workflow_run_id, agent.meta.tool_use_id) == ("workflow-agent", "wf_a", None)
+    first, second = capture.prompt_cycles(bundle.top, bundle.subs, bundle.workflows)
+    assert (first.subs, second.subs) == ([], [agent])
+
+
+# -- tags written in reply to an agent's report --------------------------------------
+
+
+def _tagged() -> dict:
+    return _note(0, ["task", "brief", "level", "found"])
+
+
+def _report(second: int, task_id: str) -> dict:
+    text = f"<task-notification><task-id>{task_id}</task-id><status>completed</status><result>found it</result></task-notification>"
+    return user_str_line(text, origin={"kind": "task-notification"}, timestamp=_ts(second))
+
+
+def _background(second: int, tool_use_id: str, text: str = "Launched.") -> dict:
+    return _reply(second, {"type": "text", "text": text},
+                  tool_use_block("Agent", tool_use_id, {"prompt": "look", "run_in_background": True}))
+
+
+def _launched(second: int, tool_use_id: str) -> dict:
+    return user_block_line([tool_result_block(tool_use_id, "Async agent launched")], timestamp=_ts(second),
+                           toolUseResult={"status": "async_launched", "agentId": "a1"})
+
+
+def _agent_that_reports(tmp_path, agent: str, tool_use_id: str, second: int):
+    return _sub(tmp_path, agent, _wf_steps(second), tool_use_id=tool_use_id)
+
+
+def test_a_tag_in_reply_to_a_background_agents_report_counts_for_the_cycle_that_launched_it(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A"),
+        _launched(3, "toolu_A"),
+        _reply(4, text="Launched.\n[cg: task=research brief=clear]"),
+        _ask(10, "something else"),
+        _reply(11, text="Done.\n[cg: task=docs]"),
+        _report(20, "a1"),
+        _reply(21, text="It found the cause.\n[cg: task=research level=hard found=yes]"),
+    ])
+    agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    first, second = capture.prompt_cycles(top, [agent])
+    assert (first.tag.task, first.tag.brief, first.tag.level, first.tag.found) == ("research", "clear", "hard", "yes")
+    # The second message keeps the tag it wrote itself and not the report's.
+    assert (second.tag.task, second.tag.level, second.tag.found) == ("docs", None, None)
+    # The turns, and so the cost, stay where they ran.
+    assert (len(first.turns), len(second.turns)) == (2, 2)
+    assert first.late_turns == [second.turns[1]] and second.handed_off == {1}
+
+
+def test_a_cycle_that_only_answered_a_report_has_no_tag_of_its_own(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A", text="Launched.\n[cg: task=research]"),
+        _ask(10, "thanks"),
+        _reply(11, text="Welcome."),
+        _report(20, "a1"),
+        _reply(21, text="Found it.\n[cg: task=research found=yes]"),
+    ])
+    agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    first, second = capture.prompt_cycles(top, [agent])
+    assert first.tag.found == "yes" and second.tag is None
+
+
+def test_a_workflows_report_hands_its_reply_to_the_call_that_launched_it(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "run it"),
+        _wf_call(2, "tu_w"),
+        _wf_launched(3, "tu_w", "wf_a", "t_a"),
+        _reply(4, text="Running.\n[cg: task=research]"),
+        _ask(10, "meanwhile"),
+        _reply(11, text="Sure.\n[cg: task=docs]"),
+        _report(20, "t_a"),
+        _reply(21, text="It finished.\n[cg: task=research found=partial]"),
+    ])
+    first, second = capture.prompt_cycles(top)
+    assert first.tag.found == "partial" and second.tag.found is None and second.tag.task == "docs"
+
+
+def test_a_resumed_runs_report_goes_to_the_call_that_resumed_it(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "run it"),
+        _wf_call(2, "tu_w1"),
+        _wf_launched(3, "tu_w1", "wf_a", "t_one"),
+        _reply(4, text="Running.\n[cg: task=research]"),
+        _ask(10, "again"),
+        _wf_call(11, "tu_w2"),
+        _wf_launched(12, "tu_w2", "wf_a", "t_two"),
+        _reply(13, text="Resumed.\n[cg: task=research]"),
+        _ask(20, "wait"),
+        _reply(21, text="Waiting.\n[cg: task=chat]"),
+        _report(30, "t_two"),
+        _reply(31, text="Done.\n[cg: task=research found=yes]"),
+    ])
+    first, second, third = capture.prompt_cycles(top)
+    assert (first.tag.found, second.tag.found, third.tag.found) == (None, "yes", None)
+
+
+def test_a_message_of_yours_between_the_report_and_the_reply_hands_nothing_off(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A", text="Launched.\n[cg: task=research]"),
+        _ask(10, "something else"),
+        _reply(11, text="Done.\n[cg: task=docs]"),
+        _report(20, "a1"),
+        _ask(21, "and the agent?"),
+        _reply(22, text="Here.\n[cg: task=research found=yes]"),
+    ])
+    agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    first, second, third = capture.prompt_cycles(top, [agent])
+    assert first.tag.found is None and third.tag.found == "yes"
+    assert first.late_turns == [] and not (first.handed_off | second.handed_off | third.handed_off)
+
+
+def test_a_report_answered_in_the_cycle_that_launched_the_agent_hands_nothing_off(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A", text="Launched.\n[cg: task=research]"),
+        _report(8, "a1"),
+        _reply(9, text="Found it.\n[cg: task=research found=yes]"),
+        _ask(10, "next"),
+        _reply(11, text="Ok.\n[cg: task=docs]"),
+    ])
+    agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    first, second = capture.prompt_cycles(top, [agent])
+    assert first.late_turns == [] and first.handed_off == set() and second.handed_off == set()
+    assert (first.tag.found, second.tag.found) == ("yes", None)
+
+
+def test_a_report_for_an_agent_nobody_launched_hands_nothing_off(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "one"),
+        _reply(2, text="Ok.\n[cg: task=chat]"),
+        _ask(10, "two"),
+        _reply(11, text="Ok.\n[cg: task=docs]"),
+        _report(20, "zz9"),
+        _reply(21, text="A report.\n[cg: task=research]"),
+    ])
+    first, second = capture.prompt_cycles(top)
+    assert (first.tag.task, second.tag.task) == ("chat", "research")
+
+
+def test_a_reply_to_two_reports_goes_to_the_cycle_of_the_first(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "one"),
+        _background(2, "toolu_A", text="Launched.\n[cg: task=research]"),
+        _ask(10, "two"),
+        _background(11, "toolu_B", text="Launched.\n[cg: task=research]"),
+        _ask(20, "three"),
+        _reply(21, text="Waiting.\n[cg: task=chat]"),
+        _report(30, "a1"),
+        _report(31, "b2"),
+        _reply(32, text="Both done.\n[cg: task=research found=yes]"),
+    ])
+    a = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    b = _agent_that_reports(tmp_path, "b2", "toolu_B", 15)
+    first, second, third = capture.prompt_cycles(top, [a, b])
+    assert (first.tag.found, second.tag.found, third.tag.found) == ("yes", None, None)
+
+
+def test_a_reply_whose_first_report_is_its_own_cycles_keeps_its_tag(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "one"),
+        _background(2, "toolu_A", text="Launched.\n[cg: task=research]"),
+        _ask(10, "two"),
+        _background(11, "toolu_B", text="Launched.\n[cg: task=research]"),
+        _report(30, "b2"),
+        _report(31, "a1"),
+        _reply(32, text="Both done.\n[cg: task=research found=yes]"),
+    ])
+    a = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    b = _agent_that_reports(tmp_path, "b2", "toolu_B", 15)
+    first, second = capture.prompt_cycles(top, [a, b])
+    assert (first.tag.found, second.tag.found) == (None, "yes")
+
+
+def test_coverage_counts_a_cycle_tagged_only_by_a_late_reply(tmp_path, pricing):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A"),
+        _ask(10, "something else"),
+        _reply(11, text="Done."),
+        _report(20, "a1"),
+        _reply(21, text="Found it.\n[cg: task=research]"),
+    ])
+    agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    use = capture.usage(_corpus(top, agent), pricing)
+    assert (use.cycles, use.tagged_cycles) == (2, 1)
 
 
 # -- measured use ------------------------------------------------------------------
@@ -327,6 +694,24 @@ def test_an_interrupted_cycle_is_left_out_of_the_coverage_denominator(tmp_path, 
         _ask(1),
         _reply(2, text="cut off mid-thought"),
         user_str_line("[Request interrupted by user]", timestamp=_ts(3)),
+        _ask(4, "try again"),
+        _reply(5, text="Done.\n[cg: task=bugfix]"),
+    ])
+    use = capture.usage(_corpus(top), pricing)
+    assert (use.cycles, use.tagged_cycles) == (1, 1)
+    assert use.coverage == 100.0
+
+
+def test_a_tool_use_interrupt_cycle_is_left_out_of_the_coverage_denominator_too(tmp_path, pricing):
+    # The "for tool use" line is an interrupt of the same kind, now with a
+    # subkind: a call you turned down cut the cycle off before the tag.
+    top = _top(tmp_path, [
+        _note(0, ["task"]),
+        _ask(1),
+        _reply(2, tool_use_block("Bash", "toolu_d", {"command": "make"})),
+        user_block_line([tool_result_block("toolu_d", "Permission to use Bash has been denied.", is_error=True)],
+                        timestamp=_ts(3), toolDenialKind="permission-rule"),
+        user_str_line("[Request interrupted by user for tool use]", timestamp=_ts(3)),
         _ask(4, "try again"),
         _reply(5, text="Done.\n[cg: task=bugfix]"),
     ])

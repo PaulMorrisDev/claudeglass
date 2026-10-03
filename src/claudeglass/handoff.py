@@ -4,7 +4,8 @@ cost had they started from the plan alone, not from everything the
 planning read.
 
 The model, per main session and per approved plan (an ``ExitPlanMode``
-call whose result came back without an error, ``Turn.plan_stats``):
+call whose result came back without an error, or one you approved by
+typing a go-ahead or leaving plan mode, ``Turn.plan_stats``):
 
 - **What a fresh session starts with.** The session's own starting
   context (:func:`starting_context`: its first reply's context less your
@@ -142,7 +143,10 @@ def starting_context(priced: list[Turn]) -> int:
 
 
 def _approved(turn: Turn) -> bool:
-    return turn.plan_stats is not None and turn.plan_stats.outcome == "approved"
+    """Whether this reply's plan was approved: by the dialog, or by a
+    go-ahead message or leaving plan mode instead (``approved_by_message``,
+    set by ``parse.py``)."""
+    return turn.plan_stats is not None and turn.plan_stats.outcome in ("approved", "approved_by_message")
 
 
 def _fresh(start: int, plan_turn: Turn) -> int:

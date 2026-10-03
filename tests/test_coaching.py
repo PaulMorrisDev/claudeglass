@@ -224,6 +224,51 @@ def test_a_small_plan_context_gets_no_hint(tmp_path):
     assert _coach(tmp_path, plan) == ""
 
 
+def _plan_call(plan_id: str = "toolu_p", chars: int = 4_000, ctx: int = 16_000) -> dict:
+    return _reply(ctx, ago_s=300, message_id=f"msg_{plan_id}", content=[
+        {"type": "tool_use", "id": plan_id, "name": "ExitPlanMode", "input": {"plan": "p" * chars}}])
+
+
+def _plan_answer(plan_id: str = "toolu_p", *, is_error: bool, **line) -> dict:
+    return {"type": "user", **line, "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": plan_id, "content": "no" if is_error else "ok", "is_error": is_error}]}}
+
+
+def _typed_approval(tmp_path, prompt: str, *records: dict, mode: str | None = None) -> str:
+    path = _transcript(tmp_path, [_prompt("x" * 4_000), *records, _reply(90_000)])
+    payload = {"hook_event_name": "UserPromptSubmit", "transcript_path": path, "prompt": prompt}
+    return _coach(tmp_path, {**payload, "permission_mode": mode} if mode else payload)
+
+
+def test_a_go_ahead_typed_after_a_plan_was_sent_back_gets_the_fresh_session_hint(tmp_path):
+    note = _typed_approval(tmp_path, "go ahead", _plan_call(), _plan_answer(is_error=True))
+    # 90k less the 15k start (16k less the 1k message) less the 1k plan.
+    assert _kind(note) == "plan_fresh" and "about 74k tokens" in note
+
+
+def test_the_fresh_session_hint_waits_for_a_go_ahead_and_a_plan_nobody_approved(tmp_path):
+    sent_back = [_plan_call(), _plan_answer(is_error=True)]
+    assert "plan_fresh" not in _typed_approval(tmp_path, "make the second step smaller", *sent_back)
+    # Approved in the dialog, PostToolUse already had its say.
+    approved = [_plan_call(), _plan_answer(is_error=False)]
+    assert "plan_fresh" not in _typed_approval(tmp_path, "go ahead", *approved)
+    # A newer plan call is the one waiting now, and it has no answer yet.
+    replanned = [*sent_back, _plan_call("toolu_q", ctx=17_000), _plan_answer("toolu_q", is_error=False)]
+    assert "plan_fresh" not in _typed_approval(tmp_path, "continue", *replanned)
+
+
+def test_leaving_plan_mode_after_a_plan_was_sent_back_gets_the_fresh_session_hint(tmp_path):
+    sent_back = [_plan_call(), _plan_answer(is_error=True, permissionMode="plan")]
+    note = _typed_approval(tmp_path, "Build it, but keep the old name for the helper", *sent_back, mode="acceptEdits")
+    assert _kind(note) == "plan_fresh"
+    assert "plan_fresh" not in _typed_approval(tmp_path, "Keep planning, but add a step", *sent_back, mode="plan")
+
+
+def test_the_typed_approval_hint_follows_the_plan_fresh_setting(tmp_path):
+    (_config_dir(tmp_path) / cat.COACHING_FILE).write_text(json.dumps({"plan_fresh": False}), encoding="utf-8")
+    assert "plan_fresh" not in _typed_approval(tmp_path, "go ahead", _plan_call(), _plan_answer(is_error=True))
+
+
 def _said(text: str, ago_s: float, *, blocks: bool = False) -> dict:
     """A message you typed ``ago_s`` seconds before :data:`NOW`."""
     content = [{"type": "text", "text": text}] if blocks else text
@@ -507,6 +552,62 @@ def test_the_hook_counts_steps_and_likeness_as_the_package_does():
     a, b = "make the save button bigger please", "Make the save button bigger"
     assert HOOK._similarity(HOOK._words(a), HOOK._words(b)) == prompt_shape.similarity(
         prompt_shape.words(a), prompt_shape.words(b))
+
+
+def test_the_hook_reads_the_not_typed_lists_from_the_catalogue():
+    assert HOOK._not_typed_prefixes() == cat.NOT_TYPED_PREFIXES
+    assert HOOK._not_typed_origins() == cat.NOT_TYPED_TURN_ORIGINS
+    assert tuple(CATALOGUE["coaching"]["not_typed_prefixes"]) == cat.NOT_TYPED_PREFIXES
+    assert tuple(CATALOGUE["coaching"]["not_typed_turn_origins"]) == cat.NOT_TYPED_TURN_ORIGINS
+
+
+#: A message the hook, the status line and the parser must each read the same way.
+_NOT_TYPED_SAMPLES = [
+    *(prefix + " rest of the line" for prefix in cat.NOT_TYPED_PREFIXES),
+    "   " + cat.APP_QUIT_PREFIX + ", so carry on",
+    "<cross-session-message from=\"a\">hello</cross-session-message>",
+]
+
+
+@pytest.mark.parametrize("text", _NOT_TYPED_SAMPLES)
+def test_the_hook_the_status_line_and_the_parser_agree_on_what_you_didnt_type(text):
+    from claudeglass import events, statusline
+    from claudeglass.model import EventKind
+
+    line = {"type": "user", "message": {"role": "user", "content": text}, "origin": {"kind": "human"},
+            "timestamp": "2026-09-18T12:00:00.000Z"}
+    hook_exchanges, _ = HOOK._exchanges([line], cat.INTERRUPT_PREFIX, ())
+    status_exchanges = statusline._exchanges([line], cat.INTERRUPT_PREFIX, ())
+    assert hook_exchanges == [] and status_exchanges == []
+    assert events.classify_line(line).kind != EventKind.HUMAN_TEXT
+
+
+@pytest.mark.parametrize("turn_origin, typed", [
+    ("task_notification", False), ("peer", False), ("scheduled", False),
+    ("human", True), ("sdk", True), (None, True),
+])
+def test_the_hook_the_status_line_and_the_parser_agree_on_a_turn_origin(turn_origin, typed):
+    from claudeglass import events, statusline
+    from claudeglass.model import EventKind
+
+    line = {"type": "user", "message": {"role": "user", "content": "fix the header"}, "isSidechain": False,
+            "timestamp": "2026-09-18T12:00:00.000Z", "origin": {"kind": "human"}}
+    if turn_origin is not None:
+        line["turnOrigin"] = turn_origin
+    assert HOOK._is_human_prompt(line) is typed
+    assert statusline._is_human_prompt(line) is typed
+    assert (events.classify_line(line).kind == EventKind.HUMAN_TEXT) is typed
+
+
+def test_a_message_that_only_looks_like_a_resume_note_is_still_yours():
+    # The prefix must start the line: a message that mentions the note does not.
+    text = "why does it say " + cat.APP_QUIT_PREFIX + " when I closed it?"
+    from claudeglass import events
+    from claudeglass.model import EventKind
+
+    line = {"type": "user", "message": {"role": "user", "content": text}, "origin": {"kind": "human"}}
+    assert events.classify_line(line).kind == EventKind.HUMAN_TEXT
+    assert len(HOOK._exchanges([line], cat.INTERRUPT_PREFIX, ())[0]) == 1
 
 
 def test_a_prompt_hint_comes_before_the_context_hints(tmp_path):
@@ -978,3 +1079,213 @@ def test_refresh_works_the_split_points_out_now(_claude_folder):
     rc, out = _capture(config_dir, "refresh")
     assert rc == 0 and coaching.read(config_dir)["split_run"] == {}
     assert "coaching_notes" in out
+
+
+# -- what a reply says: a closing question, an admission, a disowned tip -----------
+
+_TIP = "> **ClaudeGlass tip:** Try plan mode (is it on?)\n> and a second line?"
+_REMINDER = "> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work."
+
+
+@pytest.mark.parametrize("text", [
+    "Which database do you want?",
+    "Done. Should I also update the docs?",
+    "Done.\n\nWant me to carry on?\n\n[cg: task=feature size=m]",
+    "Two options.\n- Should I keep the old name?\n- Should I drop the flag?",
+    "1. Which file?\n2. Which line?",
+    "Do you want **option A?**",
+    "Should I continue?\n\n" + _TIP,
+    "Should I continue?\n\n" + _REMINDER + "\n\n[cg: task=chat]",
+])
+def test_a_reply_that_ends_on_a_question_to_you_asks_one(text):
+    assert prompt_shape.ends_on_question(text)
+
+
+@pytest.mark.parametrize("text", [
+    "",
+    "Fixed it.",
+    "Run `grep 'a?'` and it works.",
+    "Done.\n```\nwhat?\n```",
+    "Here you go:\n```py\nx = 1  # ok?",
+    "See https://example.com/a?",
+    # Rhetorical, four sentences back.
+    "Why did it fail? The cache was cold. I cleared it. Then I reran the suite. All green now.",
+    'He asked "is it done?" and I said yes.',
+    # Only a ClaudeGlass tip or the tag carries the question mark.
+    "Done.\n\n" + _TIP,
+    "Done.\n\n" + _REMINDER,
+    "Done.\n\n[cg: task=chat]",
+])
+def test_a_question_mark_in_code_a_link_a_tip_or_far_back_is_not_a_question(text):
+    assert not prompt_shape.ends_on_question(text)
+
+
+def test_only_the_end_of_a_huge_reply_is_read_for_a_question():
+    assert prompt_shape.ends_on_question("filler. " * 5_000 + "Which one?")
+    assert not prompt_shape.ends_on_question("Which one? " + "filler. " * 5_000)
+
+
+@pytest.mark.parametrize("text", [
+    "I was wrong about the path.",
+    "My mistake, I misread the config.",
+    "Good catch, I missed that file.",
+    "You're right, I should have checked first.",
+    "You’re right, that was my mistake.",
+    "I didn't run the tests before saying it passed.",
+    "I got that wrong.",
+])
+def test_an_admission_is_first_person_and_past_tense(text):
+    assert prompt_shape.admits_mistake(text)
+
+
+@pytest.mark.parametrize("text", [
+    "Good catch.",
+    "That's a good point about caching.",
+    "I should have a look at the logs.",
+    "The test was wrong.",
+    "Fine.\n```\nI was wrong\n```",
+    "Done.\n\n> **ClaudeGlass tip:** my mistake is not yours",
+    "x" * 700 + " I was wrong",
+])
+def test_thanks_for_the_catch_a_third_person_fault_code_and_a_late_mention_are_no_admission(text):
+    assert not prompt_shape.admits_mistake(text)
+
+
+@pytest.mark.parametrize("text", [
+    "That ClaudeGlass tip was a false positive; I had already planned it.",
+    "The ClaudeGlass tip doesn't apply here.",
+    "ClaudeGlass misfired on this one.",
+    "The ClaudeGlass tip is not relevant to this change.",
+])
+def test_a_reply_that_calls_a_claudeglass_tip_a_misfire_disowns_it(text):
+    assert prompt_shape.disowns_tip(text)
+
+
+@pytest.mark.parametrize("text", [
+    "That was a false positive.",
+    "ClaudeGlass is installed. " + "x " * 100 + "a false positive.",
+    "Done.\n\n> **ClaudeGlass tip:** this may be a false positive",
+])
+def test_a_false_positive_away_from_claudeglass_or_inside_the_tip_is_not_a_disowned_tip(text):
+    assert not prompt_shape.disowns_tip(text)
+
+
+def test_the_hook_finds_a_closing_question_as_the_package_does():
+    texts = [
+        "Which database do you want?", "Done. Should I also update the docs?", "Fixed it.", "See https://example.com/a?",
+        "Two options.\n- Should I keep the old name?\n- Should I drop the flag?", "Should I continue?\n\n" + _TIP,
+        "Done.\n\n" + _REMINDER, "Done.\n\n[cg: task=chat]", "Why did it fail? The cache was cold. I cleared it. Then I reran.",
+        "Do you want **option A?**", 'He asked "is it done?" and I said yes.', "Here you go:\n```py\nx = 1  # ok?", "",
+        "filler. " * 5_000 + "Which one?", "Which one? " + "filler. " * 5_000,
+    ]
+    for text in texts:
+        assert HOOK._ends_on_question(text) == prompt_shape.ends_on_question(text), text[:40]
+
+
+def test_the_hook_reads_a_go_ahead_as_the_package_does():
+    coaching = HOOK.load_catalogue()["coaching"]
+    texts = [
+        "continue", "Go ahead.", "implement the plan", "merge it", "yes, do it", "ok", "do it please",
+        "continue with the tests", "how is it going?", "", "x" * 70,
+    ]
+    for text in texts:
+        assert HOOK._is_go(text, coaching) == prompt_shape.is_go(text), text
+
+
+def test_the_hook_and_the_status_line_read_a_message_as_an_answer_by_the_same_rule():
+    from claudeglass import statusline
+
+    def said(text):
+        return [
+            {"type": "assistant", "timestamp": "2026-09-18T12:00:00.000Z",
+             "message": {"id": "m1", "content": [{"type": "text", "text": text}]}},
+            {"type": "user", "timestamp": "2026-09-18T12:00:30.000Z", "origin": {"kind": "human"},
+             "message": {"role": "user", "content": "the second one"}},
+        ]
+
+    for text, answer in [("Which one?", True), ("Which one? I'd pick the first. It is simpler. Done.", False),
+                         ("Use `a?b` here.", False)]:
+        assert HOOK._exchanges(said(text), cat.INTERRUPT_PREFIX, ())[0][0]["answer"] is answer
+        assert statusline._exchanges(said(text), cat.INTERRUPT_PREFIX, ())[0]["answer"] is answer
+
+
+def test_the_catalogue_carries_the_reply_patterns_the_hook_compiles():
+    coaching = CATALOGUE["coaching"]
+    assert coaching["reply_scan_chars"] == cat.REPLY_SCAN_CHARS
+    assert coaching["reply_unit_pattern"] == cat.REPLY_UNIT_PATTERN
+    assert coaching["reply_question_trim"] == cat.REPLY_QUESTION_TRIM
+    for name in ("fence", "tip_block", "inline_code", "url", "quoted", "reminder_line", "tags", "list_start", "unit"):
+        assert coaching[f"reply_{name}_pattern"] == getattr(cat, f"REPLY_{name.upper()}_PATTERN")
+
+
+# -- what the parser keeps of a reply ----------------------------------------------
+
+
+def _line_at(second: int) -> str:
+    return f"2026-09-18T12:00:{second:02d}.000Z"
+
+
+def _human(text: str, second: int, **extra) -> dict:
+    return user_str_line(text, origin={"kind": "human"}, timestamp=_line_at(second), **extra)
+
+
+def _said_back(text: str, second: int, *more: str) -> dict:
+    return turn_line(content=[{"type": "text", "text": block} for block in (text, *more)], model="claude-widget-9",
+                     timestamp=_line_at(second), cache_read_input_tokens=5_000)
+
+
+def test_a_reply_that_ends_on_a_question_is_marked_asked(tmp_path):
+    result = _session(tmp_path, [
+        _human("add a flag", 0), _said_back("Which name do you want for it?", 1),
+        _human("--quiet", 2), _said_back("Done. See https://example.com/docs?", 3),
+        _human("thanks", 4), _said_back("Is it fine? I think so.", 5, "Anything else?"),
+    ])
+    assert [t.reply_asked for t in result.turns] == [True, False, True]
+
+
+def test_a_reply_asks_by_its_last_text_block_not_an_earlier_one(tmp_path):
+    result = _session(tmp_path, [
+        _human("go", 0), _said_back("Should I check the docs first?", 1, "I checked them. All fine."),
+    ])
+    assert not result.turns[0].reply_asked
+
+
+def test_an_admission_after_your_push_back_is_caught_by_you_and_after_none_by_itself(tmp_path):
+    result = _session(tmp_path, [
+        _human("rename the helper", 0), _said_back("Done.", 1),
+        _human("that's wrong, it should keep the old name", 2), _said_back("You're right, I misread it.", 3),
+        _human("continue", 4), _said_back("Careful: I was wrong earlier about the cache.", 5),
+        _human("why did you remove the flag?", 6), _said_back("My mistake, I removed it by accident.", 7),
+        _human("looks good", 8), _said_back("Thanks.", 9),
+    ])
+    assert [t.admit_candidate for t in result.turns] == [False, True, True, True, False]
+    assert [t.admit_caught for t in result.turns] == ["", "user", "self", "user", ""]
+
+
+def test_a_slash_command_or_a_go_ahead_between_is_no_push_back(tmp_path):
+    command = "<command-message>grill-me</command-message>\n<command-name>/grill-me</command-name>"
+    result = _session(tmp_path, [
+        _human("that's wrong", 0), _said_back("Done.", 1),
+        _human(command, 2), _said_back("I was wrong about that.", 3),
+        _human("why is it slow?", 4), _said_back("Done.", 5),
+        _human("go ahead", 6), _said_back("I missed that file.", 7),
+    ])
+    assert [t.admit_caught for t in result.turns] == ["", "self", "", "self"]
+
+
+def test_the_reply_after_a_queued_correction_follows_a_push_back(tmp_path):
+    queued = attachment_line("queued_command", prompt="no, that's not what I asked", commandMode="prompt",
+                             origin={"kind": "human"}, timestamp=_line_at(1))
+    result = _session(tmp_path, [_human("rename the helper", 0), queued, _said_back("My mistake.", 2)])
+    assert result.turns[0].admit_caught == "user"
+
+
+def test_a_tip_the_reply_disowns_is_marked_and_a_plain_misfire_mention_is_not(tmp_path):
+    tip = "> **ClaudeGlass tip:** Say what you saw and what you expected."
+    result = _session(tmp_path, [
+        _human("it's broken", 0), _said_back("Fixed.\n\n" + tip, 1, "That ClaudeGlass tip was a false positive."),
+        _human("again", 2), _said_back("Fixed. That ClaudeGlass tip was a false positive.", 3),
+        _human("again", 4), _said_back("Fixed.\n\n" + tip, 5),
+    ])
+    assert [t.tip_disowned for t in result.turns] == [True, False, False]
+    assert [t.coach_tip for t in result.turns] == [False, False, True]

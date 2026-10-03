@@ -249,7 +249,77 @@ __version__ = "0.14.0"
 #: write target is (a forward-slash or Git Bash path was a real edit
 #: before), so a pre-36 digest counts those scratch writes as real
 #: edits.
-PARSER_VERSION = 36
+#:
+#: Bumped to 37: how each message you typed reads -- a tweak, a repeat of
+#: what you said, a bare go-ahead, a status check (``Turn.human_adjust``,
+#: ``human_remind``, ``human_go``, ``human_status``) -- and the messages
+#: you typed while Claude was working (``Turn.queued_prompts``,
+#: ``queued_chars``, ``queued_steps`` and the flags beside them), which
+#: no counter saw before. A queued message that is a copy of one also
+#: written as a user line is dropped. An image message is no longer a
+#: vague fix. Lines you didn't type are one list now, with the desktop
+#: app's usage-limit and app-quit notes, another session's message and a
+#: ``turnOrigin`` that rules a line out. An ``output_style`` attachment is
+#: a reminder unless the style changed, and a ``permission-mode`` or
+#: system ``informational`` line is ignored. A pre-37 digest has none of
+#: these, counts every ``output_style`` as a cache change, and counts the
+#: app's quit note as something you typed.
+#:
+#: Also in 37, from how each tool call that didn't run was answered
+#: (model.py's Plan-feedback addition). Every denial event carries a
+#: bucket word in ``detail["bucket"]``: a plan you sent back, a question
+#: you declined, a hook's block, an auto mode block (or its being
+#: unavailable), a dialog you closed, or a call you or a deny rule turned
+#: down. Only that last bucket counts as a denial by habits, waste,
+#: quality and prompting. An ``INTERRUPT`` has a subkind
+#: (``tool_refusal`` or ``shutdown``) and, for a refusal, the bucket of
+#: the denial it follows. A plan you sent back with feedback is a
+#: ``PLAN_FEEDBACK`` event holding the feedback's length and one word for
+#: how it reads (never its text), and ``ExitPlanMode`` answers no longer
+#: add to ``Turn.tool_error_count``. ``PlanStats`` gains ``outcome``
+#: ``approved_by_message`` (a go-ahead you typed, or leaving plan mode,
+#: before the next plan), ``rejected`` and the feedback's length and
+#: class; ``Turn`` gains ``ask_rounds`` and ``preceding_denials``. A
+#: pre-37 digest has none of these, so it counts a plan or question you
+#: answered as a denial and a stop, and a plan approved by typing as
+#: never approved.
+#:
+#: Also in 37, from what Claude's replies and tool calls said (model.py's
+#: Assistant-and-tool-signals addition), each kept as a yes/no, a count or
+#: a size, never the words. ``Turn.reply_asked`` now means the reply ends
+#: on a question to you: code, URLs, a ClaudeGlass tip and the tag are cut,
+#: and the question mark must close one of the last two sentences or a
+#: list item that ends it, not sit anywhere in the last 300 characters.
+#: ``admit_candidate`` marks a reply that owns a mistake, with
+#: ``admit_caught`` saying whether you had pushed back first (``user``) or
+#: Claude noticed (``self``), and ``tip_disowned`` marks a reply that calls
+#: a ClaudeGlass tip a misfire. ``read_target_chars`` gives the size of
+#: each Read result beside ``read_target_hashes``. Reads made through
+#: Bash or PowerShell (``grep``, ``sed -n``, ``cat``, ``git log`` and so
+#: on) are counted in ``shell_read_count`` with their results' size in
+#: ``shell_read_chars``. ``tests_run`` says whether the reply ran the
+#: tests, ``targeted`` or ``full``, read from the whole command (an
+#: interpreter path, an env or ``timeout`` prefix, a quoted path or
+#: PowerShell no longer hides one) by the one matcher the parser, the
+#: classifier and the capture hook share (``testrun.py``). A pre-37 digest
+#: has none of these, so it reads a question mark anywhere in the last 300
+#: characters as a question and finds a test run only by its command's
+#: first words.
+#:
+#: And in 37, the join from a workflow's agents to the message that started
+#: them. A ``Workflow`` call's result names the run (``runId``, the run's
+#: directory name) and its task (``taskId``); ``Turn.workflow_runs`` keeps
+#: the two ids under the call's tool_use id, nothing else of the result.
+#: The agents of that run carry the same ``runId`` in their metadata, so
+#: ``capture.prompt_cycles`` and ``habits`` now put each in the cycle of the
+#: reply that launched (or resumed) its run: overlap, the agent list, a
+#: cycle's cost and ``redo_cost`` count them. A resumed run keeps its
+#: ``runId``, so its agents are split between the calls by time. A pre-37
+#: digest has no ``workflow_runs``, so its workflow agents join the cycle of
+#: the reply before the run's ``started`` time, or none. Also, a tag written
+#: in reply to a background agent's (or workflow's) report counts for the
+#: cycle whose call launched it, not the one open when the report arrived.
+PARSER_VERSION = 37
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

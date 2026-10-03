@@ -92,6 +92,58 @@ def test_a_rejected_plan_counts_for_nothing():
     assert stats.main_sessions == 1
 
 
+def test_a_plan_approved_by_a_message_counts_like_one_approved_in_the_dialog():
+    by_dialog = compute_handoff([_session()], PRICING)
+    by_message = compute_handoff([_session(outcome="approved_by_message")], PRICING)
+    [plan] = by_message.plans
+    assert plan.qualifies and plan.later_turns == 10
+    assert plan.saving_usd == pytest.approx(by_dialog.plans[0].saving_usd)
+
+
+def _sent_back_session(tmp_path: Path, after: list[dict]) -> TranscriptResult:
+    """A long exploration, a plan the dialog sent back with feedback, what
+    you did next (``after``), then twelve build replies."""
+    lines = [user_str_line("Plan the change", origin={"kind": "human"})]
+    lines.append(turn_line(cache_read_input_tokens=15_000, input_tokens=10))
+    for n in range(8):
+        lines.append(turn_line(cache_read_input_tokens=15_000 + 12_000 * (n + 1), input_tokens=10))
+    lines.append(
+        turn_line(
+            cache_read_input_tokens=120_000,
+            input_tokens=10,
+            content=[tool_use_block("ExitPlanMode", "tu_plan", {"plan": "1. Edit a\n2. Edit b\n" + "x" * 3_000})],
+        )
+    )
+    lines.append(
+        user_block_line(
+            [tool_result_block(
+                "tu_plan",
+                "The user doesn't want to proceed with this tool use. To tell you how to proceed, the user said:\n"
+                "keep the old name for the helper",
+                is_error=True,
+            )],
+            toolDenialKind="user-rejected",
+        )
+    )
+    lines.extend(after)
+    for _ in range(12):
+        lines.append(turn_line(cache_read_input_tokens=122_000, input_tokens=10))
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    return parse_transcript(path, TranscriptMeta(path=str(path), session_id="parsed"))
+
+
+def test_a_go_ahead_you_type_after_the_dialog_sent_the_plan_back_makes_it_an_approved_plan(tmp_path: Path):
+    stats = compute_handoff([_sent_back_session(tmp_path, [user_str_line("go ahead", origin={"kind": "human"})])], PRICING)
+    [plan] = stats.plans
+    assert plan.qualifies and plan.later_turns == 12 and plan.tokens_carried > 100_000
+
+
+def test_a_plan_the_dialog_sent_back_and_you_never_approved_counts_for_nothing(tmp_path: Path):
+    stats = compute_handoff([_sent_back_session(tmp_path, [])], PRICING)
+    assert stats.plans == [] and stats.sessions == []
+
+
 def test_the_window_ends_at_a_conversation_summary():
     stats = compute_handoff([_session(later=14, compaction_at=9)], PRICING)
     # Replies 3 to 8 only: the summary before reply 9 already dropped it.

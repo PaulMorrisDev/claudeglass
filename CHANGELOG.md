@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Queued messages counted.** A message you typed while Claude was
+  working now counts toward the turn it reached, and is never mistaken
+  for a new prompt. On the author's machine that added 431 messages
+  that no count saw before.
+- **What your prompts say.** Go-ahead, status check, adjust and
+  reminder prompts are flagged.
+- **Plan answers.** Plan feedback is sized and classed in one word. A
+  plan you approve by typing now counts as approved.
+- **Why a call didn't run.** Each denied call gets one word. Only a
+  call you turned down counts as yours.
+- **Replies.** Ending on a question, admitting a mistake and disowning
+  a tip are noticed.
+- **Shell reads and test runs.** Shell reads are counted, and a test
+  run is recognised however it is spelled: through an interpreter
+  path, behind env or timeout, or in PowerShell. The hook, the parser
+  and the status line share one matcher.
+- **Workflow agents.** A workflow agent joins the cycle that launched
+  it, matched by its run and start time, so a resumed run splits
+  across the cycles that resumed it. Before, no workflow agent landed
+  in a cycle. A tag moves to the cycle whose report it answers.
+- **One list of messages you didn't type.** It is shared by the
+  parser, the hook and the status line.
+
+### Fixed
+
+- **Output style.** The output style Claude Code repeats on every
+  request no longer counts as a cache change; only a change of style does.
+
+Parsed sessions are re-read once to pick this up.
+
 ## [0.14.0] - 2026-10-02
 
 ### Added

@@ -424,6 +424,89 @@ def test_tool_denial_cause_detected_on_the_turn_before_the_denial(tmp_path: Path
     assert stats._by_cause["interrupt"].turns == 0
 
 
+_SENT_BACK = (
+    "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
+    "the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+)
+
+
+def _answered_call(tmp_path: Path, tool: str, answer: str, kind: str, *, then: str | None = None) -> waste.WasteStats:
+    """A 3M-token turn whose call came back turned away, an optional line
+    after it (an interrupt), then the reply that follows."""
+    given = {"plan": "1. do it"} if tool == "ExitPlanMode" else {"command": "ls"}
+    lines = [
+        turn_line(message_id="msg_1", model=_MODEL, input_tokens=3_000_000, output_tokens=0,
+                  content=[tool_use_block(tool, "tu_1", given)]),
+        user_block_line([tool_result_block("tu_1", answer, is_error=True)], toolDenialKind=kind),
+        *([user_str_line(then)] if then else []),
+        turn_line(message_id="msg_2", model=_MODEL, input_tokens=100_000, output_tokens=0),
+    ]
+    stats = waste.WasteStats(config_dir=tmp_path / "cfg")
+    stats.add(_parse(tmp_path, lines), _pricing())
+    return stats
+
+
+def test_a_call_you_or_a_deny_rule_turned_down_is_a_tool_denial(tmp_path: Path):
+    for tool, answer, kind in [
+        ("Bash", "Permission to use Bash has been denied.", "permission-rule"),
+        ("Edit", _SENT_BACK + "not that file", "user-rejected"),
+    ]:
+        stats = _answered_call(tmp_path, tool, answer, kind)
+        assert stats._by_cause["tool-denial"].turns == 1, (tool, kind)
+        assert stats._by_cause["tool-denial"].cost_usd == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize("tool, answer, kind", [
+    ("ExitPlanMode", _SENT_BACK + "make step two smaller", "user-rejected"),
+    ("ExitPlanMode", _SENT_BACK, "user-rejected"),
+    ("AskUserQuestion", _SENT_BACK, "user-rejected"),
+    ("Bash", "PreToolUse:Bash hook error: [guard.sh] STOP: no rm", "permission-rule"),
+    ("Bash", "Blocked by the auto mode classifier", "automode-blocked"),
+    ("Bash", "The server-side auto mode classifier gave no verdict", "automode-unavailable"),
+    ("Bash", "Permission to use Bash has been denied.", "interrupted"),
+])
+def test_a_plan_or_question_answer_or_a_block_is_not_a_tool_denial(tmp_path: Path, tool, answer, kind):
+    stats = _answered_call(tmp_path, tool, answer, kind)
+    assert stats._by_cause["tool-denial"].turns == 0
+    assert stats._by_cause["interrupt"].turns == 0
+
+
+def test_a_plan_with_feedback_is_not_a_tool_denial_even_beside_a_refused_call(tmp_path: Path):
+    # The feedback event outranks the denial, so the plan's answer is what
+    # the next reply followed.
+    lines = [
+        turn_line(message_id="msg_1", model=_MODEL, input_tokens=3_000_000, output_tokens=0,
+                  content=[tool_use_block("ExitPlanMode", "tu_p", {"plan": "1. do it"})]),
+        user_block_line([tool_result_block("tu_p", _SENT_BACK + "why not reuse the cache?", is_error=True)],
+                        toolDenialKind="user-rejected"),
+        turn_line(message_id="msg_2", model=_MODEL, input_tokens=100_000, output_tokens=0),
+    ]
+    stats = waste.WasteStats(config_dir=tmp_path / "cfg")
+    stats.add(_parse(tmp_path, lines), _pricing())
+    assert stats._by_cause["tool-denial"].turns == 0
+
+
+def test_a_tool_use_interrupt_after_a_refused_call_or_a_closed_dialog_is_still_an_interrupt(tmp_path: Path):
+    for tool, answer, kind in [
+        ("Bash", "Permission to use Bash has been denied.", "permission-rule"),
+        ("Bash", "Permission to use Bash has been denied.", "interrupted"),
+    ]:
+        stats = _answered_call(tmp_path, tool, answer, kind, then="[Request interrupted by user for tool use]")
+        assert stats._by_cause["interrupt"].turns == 1, kind
+        assert stats._by_cause["interrupt"].cost_usd == pytest.approx(3.0)
+
+
+@pytest.mark.parametrize("tool, answer, kind", [
+    ("ExitPlanMode", _SENT_BACK + "make step two smaller", "user-rejected"),
+    ("AskUserQuestion", _SENT_BACK, "user-rejected"),
+    ("Bash", "Blocked by the auto mode classifier", "automode-blocked"),
+])
+def test_the_interrupt_line_after_a_plan_or_question_answer_is_not_you_stopping_claude(tmp_path: Path, tool, answer, kind):
+    stats = _answered_call(tmp_path, tool, answer, kind, then="[Request interrupted by user for tool use]")
+    assert stats._by_cause["interrupt"].turns == 0
+    assert stats._by_cause["tool-denial"].turns == 0
+
+
 # -- max-turns / stopped_by_user ----------------------------------------------
 
 

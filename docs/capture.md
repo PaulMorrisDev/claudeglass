@@ -54,6 +54,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 | What your messages contain (`prompt_features`) | Always measured, no hook | – | Giving Claude information |
 | What agent briefs contain (`brief_features`) | Always measured, no hook | – | Delegating to agents, Giving Claude information |
 | Plans (`plan_features`) | Always measured, no hook | – | Planning |
+| Tool calls turned away (`tool_denials`) | Always measured, no hook | – | Waiting and permissions, Planning |
 | Skill timing (`skill_timing`) | Always measured, no hook | – | Using skills |
 | Agent chains (`spawn_tree`) | Always measured, no hook | – | Delegating to agents |
 | Repeated failures (`tool_loops`) | Always measured, no hook | – | Checking changes, Tool output |
@@ -232,8 +233,8 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Plans (`plan_features`)
 
 - **Level:** Always measured, no hook
-- **Captures:** Each plan you approved or rejected: steps, files named and length.
-- **Why:** Plan size against what the work then cost.
+- **Captures:** Each plan you approved or rejected: steps, files named and length. For a rejected plan, how long your feedback was and one word for how it reads: a question, a criticism or unsure. Whether you approved it by typing a go-ahead or by leaving plan mode.
+- **Why:** Plan size against what the work then cost, and how many rounds a plan took before you approved it.
 - **Tag:** No tag. Read from the transcript Claude Code already writes; Claude is never asked, and it costs no tokens.
 - **Powers:** Planning
 
@@ -324,7 +325,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### What your messages contain (`prompt_features`)
 
 - **Level:** Always measured, no hook
-- **Captures:** Whether each message names a file, has a code block, an error or stack trace, a URL, done-criteria wording or numbered steps. Also whether it's short. Only yes/no is kept.
+- **Captures:** Whether each message names a file, has a code block, an error or stack trace, a URL, done-criteria wording or numbered steps. Also whether it's short, tweaks earlier work, repeats something you said, only says to carry on, or only asks how it's going. Messages you typed while Claude was working are read the same way, and counted. Only yes/no and counts are kept.
 - **Why:** How you give Claude information, measured without asking Claude: cost per task with and without file paths or errors.
 - **Tag:** No tag. Read from the transcript Claude Code already writes; Claude is never asked, and it costs no tokens.
 - **Powers:** Giving Claude information
@@ -336,6 +337,14 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 - **Why:** Brief quality per agent type, and long reports that weren't capped.
 - **Tag:** No tag. Read from the transcript Claude Code already writes; Claude is never asked, and it costs no tokens.
 - **Powers:** Delegating to agents, Giving Claude information
+
+### Tool calls turned away (`tool_denials`)
+
+- **Level:** Always measured, no hook
+- **Captures:** Why each tool call didn't run, as one word. A plan or question you answered, a hook or auto mode block, a closed dialog, or a call you turned down. Also how many clarifying questions Claude asked you. Only the word and the count are kept.
+- **Why:** Counting only the calls you turned down when judging how often you stop Claude, not plan dialogs or hooks.
+- **Tag:** No tag. Read from the transcript Claude Code already writes; Claude is never asked, and it costs no tokens.
+- **Powers:** Waiting and permissions, Planning
 
 ### Agent chains (`spawn_tree`)
 
