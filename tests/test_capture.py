@@ -749,7 +749,7 @@ def _history_corpus(tmp_path):
         _ask(0),
         _reply(1, tool_use_block("Agent", "toolu_A", {"prompt": "a"}), tool_use_block("Agent", "toolu_E", {"prompt": "e"})),
         user_block_line([tool_result_block("toolu_A", "a"), tool_result_block("toolu_E", "e")], timestamp=_ts(6)),
-        _reply(7, tool_use_block("Bash", "toolu_B", {"command": "make"})),
+        _reply(7, tool_use_block("Read", "toolu_B", {"file_path": "/w/big.log"})),
         user_block_line([tool_result_block("toolu_B", "x" * 40_000)], timestamp=_ts(8)),
         _reply(9),
         _ask(10),
@@ -801,13 +801,27 @@ def test_big_output_notes_are_estimated_per_call_not_per_turn(tmp_path, pricing)
     big = "x" * 35_000
     top = _top(tmp_path, [
         _ask(0),
-        _reply(1, tool_use_block("Bash", "toolu_B", {"command": "make"}),
-               tool_use_block("Bash", "toolu_C", {"command": "test"})),
+        _reply(1, tool_use_block("Read", "toolu_B", {"file_path": "/w/a.log"}),
+               tool_use_block("Read", "toolu_C", {"file_path": "/w/b.log"})),
         user_block_line([tool_result_block("toolu_B", big), tool_result_block("toolu_C", big)], timestamp=_ts(2)),
         _reply(3),
     ])
     past = capture.history(_corpus(top), pricing, days=7)
     assert past.big_outputs == 2
+
+
+def test_a_big_shell_or_mcp_result_is_not_estimated_a_note(tmp_path, pricing):
+    # The hook isn't run after the shell and MCP tools, so a big result from
+    # one of them never costs a note.
+    big = "x" * 35_000
+    top = _top(tmp_path, [
+        _ask(0),
+        _reply(1, tool_use_block("Bash", "toolu_B", {"command": "make"}),
+               tool_use_block("mcp__docs__search", "toolu_C", {"query": "q"})),
+        user_block_line([tool_result_block("toolu_B", big), tool_result_block("toolu_C", big)], timestamp=_ts(2)),
+        _reply(3),
+    ])
+    assert capture.history(_corpus(top), pricing, days=7).big_outputs == 0
 
 
 def test_estimates_rise_with_the_level_and_scale_with_sampling(tmp_path, pricing):

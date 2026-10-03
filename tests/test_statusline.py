@@ -1446,41 +1446,15 @@ def test_coaching_alone_prints_nothing_extra_when_no_hint_fires(tmp_path, monkey
     assert _lines(tmp_path, monkeypatch, capsys, {"context_window": {"used_tokens": 10000}}) == ["ctx 10k"]
 
 
-def test_hint_large_context_at_the_end_of_a_turn(tmp_path):
+def test_a_large_context_and_many_reads_have_no_live_hint(tmp_path):
+    """The ``/clear`` and Explore-agent hints are dropped: both are counted
+    after the fact on the Work habits page, so nothing speaks up here."""
     tail = [_prompt(), _reply([{"type": "text", "text": "done"}], stop="end_turn")]
-    hint = statusline.coaching_hint({"context_window": {"used_tokens": 150_000}}, tail, NOW)
-    assert hint is not None and hint[1] == "ctx 150k: new task? /clear first or it re-reads"
-    # Mid-turn (Claude still working) it waits.
-    assert statusline.coaching_hint({"context_window": {"used_tokens": 150_000}}, tail[:1] + [_reply([_use("a")])], NOW) is None
-
-
-def test_hint_many_reads_counts_only_the_current_message(tmp_path):
-    old = [_reply([_use(f"o{i}", "Read") for i in range(6)])]
-    current = [_reply([_use(f"r{i}", "Read" if i % 2 else "Grep") for i in range(5)])] + [_result(f"r{i}", 800) for i in range(5)]
-    hint = statusline.coaching_hint({}, [_prompt(), *old, _prompt("next"), *current], NOW)
-    assert hint is not None and hint[1].startswith("5 reads this msg: try an Explore agent")
-    fewer = [_reply([_use(f"r{i}", "Read") for i in range(4)])] + [_result(f"r{i}", 800) for i in range(4)]
-    assert statusline.coaching_hint({}, [_prompt(), *old, _prompt("next"), *fewer], NOW) is None
-
-
-def test_hint_many_reads_points_at_tokensave_when_the_project_is_indexed(tmp_path):
-    """A project with a ``.tokensave/`` index gets Explore agent runs
-    blocked by tokensave's own hook, so the hint's advice switches to its
-    tools instead -- read from ``workspace.project_dir`` (falling back to
-    plain ``cwd``, both as the Status hook payload may carry them)."""
-    current = [_reply([_use(f"r{i}", "Read" if i % 2 else "Grep") for i in range(5)])] + [_result(f"r{i}", 800) for i in range(5)]
-    tail = [_prompt(), *current]
+    assert statusline.coaching_hint({"context_window": {"used_tokens": 150_000}}, tail, NOW) is None
+    current = [_reply([_use(f"r{i}", "Read" if i % 2 else "Grep") for i in range(8)])] + [_result(f"r{i}", 800) for i in range(8)]
+    assert statusline.coaching_hint({}, [_prompt(), *current], NOW) is None
     (tmp_path / ".tokensave").mkdir()
-
-    hint = statusline.coaching_hint({"workspace": {"project_dir": str(tmp_path)}}, tail, NOW)
-    assert hint is not None and hint[1] == "5 reads this msg: try tokensave's tools instead"
-
-    hint = statusline.coaching_hint({"cwd": str(tmp_path)}, tail, NOW)
-    assert hint is not None and hint[1] == "5 reads this msg: try tokensave's tools instead"
-
-    # No index there: the generic Explore-agent advice.
-    hint = statusline.coaching_hint({"cwd": str(tmp_path / "not-indexed")}, tail, NOW)
-    assert hint is not None and hint[1].startswith("5 reads this msg: try an Explore agent")
+    assert statusline.coaching_hint({"cwd": str(tmp_path)}, [_prompt(), *current], NOW) is None
 
 
 def test_hint_cache_about_to_go_cold(tmp_path):
@@ -1497,14 +1471,14 @@ def test_hint_cache_about_to_go_cold(tmp_path):
 
 
 def test_the_biggest_hint_wins(tmp_path):
-    tail = [_prompt(), _reply([_use("a")]), _result("a", 140_000), _reply([{"type": "text", "text": "ok"}], stop="end_turn")]
-    hint = statusline.coaching_hint({"context_window": {"used_tokens": 120_000}}, tail, NOW)
-    # The 35k-token output outweighs a quarter of the 120k context...
+    cold = {"prompt_cache": {"warm": True, "ttl": "5m", "expires_at": NOW.timestamp() + 40}}
+    tail = [_prompt(), _reply([_use("a")]), _result("a", 140_000)]
+    # The 35k-token output outweighs a warm 30k context about to go cold...
+    hint = statusline.coaching_hint({**cold, "context_window": {"used_tokens": 30_000}}, tail, NOW)
     assert hint is not None and hint[1].startswith("last output ~35k")
-    # ...and a quarter of a 200k context outweighs a 10k output.
-    tail[2] = _result("a", 40_000)
-    hint = statusline.coaching_hint({"context_window": {"used_tokens": 200_000}}, tail, NOW)
-    assert hint is not None and hint[1].startswith("ctx 200k: new task?")
+    # ...and a 200k context about to go cold outweighs it.
+    hint = statusline.coaching_hint({**cold, "context_window": {"used_tokens": 200_000}}, tail, NOW)
+    assert hint is not None and hint[1].startswith("cache cold in 40s")
 
 
 def _said(text, minutes_ago, **extra):
@@ -1535,30 +1509,94 @@ def test_hint_small_requests_one_at_a_time():
     assert statusline.coaching_hint({}, [*tail[:8], _said("thanks!", 1)], NOW) is None
 
 
-def test_hint_the_same_request_again():
+def _did(tool_id, name, tool_input, minutes_ago):
+    """Claude's reply to a message: one ``name`` call with ``tool_input``."""
+    block = {"type": "tool_use", "id": tool_id, "name": name, "input": tool_input}
+    return _reply([block], ts=_at(minutes_ago))
+
+
+def _came_back(tool_id, *, is_error=False, edited_files=0):
+    line = {"type": "user", "message": {"role": "user", "content": [
+        {"type": "tool_result", "tool_use_id": tool_id, "content": "no" if is_error else "ok", "is_error": is_error}]}}
+    if edited_files:
+        line["toolUseResult"] = {"toolStats": {"editFileCount": edited_files}}
+    return line
+
+
+def _run_before(reply):
+    """Two small requests, each changed a file, then a third whose reply is
+    ``reply``; the fourth message is what the hint is for."""
+    return [_said("Build the settings page with a form and a header", 30), _reply([_use("a", "Write")], ts=_at(29)),
+            _said("make the save button bigger", 15), _reply([_use("b", "Edit")], ts=_at(14)),
+            _said("now move the logo left", 10), *reply, _said("and the footer text too", 1)]
+
+
+def test_hint_small_requests_skip_what_asks_for_no_change():
+    drip = (30_000, "3 small asks in a row: plan them as one prompt", "drip_feed")
+    payload = {"context_window": {"used_tokens": 60_000}}
+    edit = [_did("c", "Edit", {"file_path": "/work/app/a.css"}, 9)]
+    assert statusline.coaching_hint(payload, _run_before(edit), NOW) == drip
+    # A go-ahead, a thank-you, a status check and a question neither count nor end a run.
+    for between in ("go ahead", "thanks!", "how is it going?", "why is the logo on the left?"):
+        tail = _run_before(edit)
+        tail[4:4] = [_said(between, 12), _reply([{"type": "text", "text": "ok"}], ts=_at(11))]
+        assert statusline.coaching_hint(payload, tail, NOW) == drip, between
+    # Nor is one of them the message being worked on.
+    for last in ("go ahead", "continue", "any update?", "why is the logo on the left?"):
+        tail = [*_run_before(edit)[:-1], _said(last, 1)]
+        assert statusline.coaching_hint(payload, tail, NOW) is None, last
+
+
+def test_hint_small_requests_count_only_a_change_to_a_file_of_yours():
+    drip = (30_000, "3 small asks in a row: plan them as one prompt", "drip_feed")
+    payload = {"context_window": {"used_tokens": 60_000}}
+    counts = {
+        "an edit": [_did("c", "Edit", {"file_path": "/work/app/a.css"}, 9)],
+        "a shell write": [_did("c", "Bash", {"command": "sed -i 's/a/b/' app.css"}, 9)],
+        "a subagent's edits": [_did("c", "Agent", {"prompt": "go"}, 9), _came_back("c", edited_files=2)],
+    }
+    for name, reply in counts.items():
+        assert statusline.coaching_hint(payload, _run_before(reply), NOW) == drip, name
+    counts_not = {
+        "an edit under .claude": [_did("c", "Edit", {"file_path": "/home/me/.claude/plans/p.md"}, 9)],
+        "a shell write under .claude": [_did("c", "Bash", {"command": "echo hi > /home/me/.claude/a.md"}, 9)],
+        "a failed edit": [_did("c", "Edit", {"file_path": "/work/app/a.css"}, 9), _came_back("c", is_error=True)],
+        "a command that reads": [_did("c", "Bash", {"command": "ls -la"}, 9)],
+        "a failed subagent": [_did("c", "Agent", {"prompt": "go"}, 9), _came_back("c", is_error=True, edited_files=2)],
+    }
+    for name, reply in counts_not.items():
+        assert statusline.coaching_hint(payload, _run_before(reply), NOW) is None, name
+
+
+def test_hint_a_question_after_a_change_is_an_offer_and_one_after_none_is_asked_of_you():
+    payload = {"context_window": {"used_tokens": 60_000}}
+    ask = {"type": "text", "text": "Done. Want me to move the footer too?"}
+    offered = [_said("make the save button bigger", 30), _reply([_use("a", "Write")], ts=_at(29)),
+               _said("now move the logo left", 20), _reply([_use("b", "Edit"), ask], ts=_at(19)),
+               _said("yes, and the header too", 10), _reply([_use("c", "Edit")], ts=_at(9)),
+               _said("and the footer text too", 1)]
+    assert statusline.coaching_hint(payload, offered, NOW) == (30_000, "3 small asks in a row: plan them as one prompt", "drip_feed")
+    # Claude only asked: the next message is its answer, not a request.
+    asked = [*offered[:3], _reply([ask], ts=_at(19)), *offered[4:6], _said("yes", 1)]
+    assert statusline.coaching_hint(payload, asked, NOW) is None
+
+
+def test_the_same_request_again_and_stopping_again_have_no_live_hint():
+    """Both are report-only now (``prompting.py``): the first needs the
+    reply before it to have been an edit and still fires on mostly polls,
+    the second mostly counts stops mid-reply that were meant."""
     tail = [_said("Make the save button bigger and move it to the right", 12), _reply([_use("a", "Edit")], ts=_at(11)),
             _said("make the save button bigger and move it right", 1)]
-    hint = statusline.coaching_hint({"context_window": {"used_tokens": 40_000}}, tail, NOW)
-    assert hint == (20_000, "same ask again: say what was wrong with the last try", "repeat_ask")
-    assert statusline.coaching_hint({}, [*tail[:2], _said("now add a cancel button next to it", 1)], NOW) is None
-
-
-def test_hint_a_resent_message_is_not_the_same_ask_again():
-    sqlite = "No, use SQLite instead of JSON for the store, with the same class and docstrings."
-    tail = [_said("Write a store module with JSON persistence", 12), _reply([_use("a", "Write")], ts=_at(11)),
-            _said("[Request interrupted by user]", 10), _said(sqlite, 9), _said(sqlite, 8), _said(sqlite, 1)]
-    hint = statusline.coaching_hint({"context_window": {"used_tokens": 40_000}}, tail, NOW)
-    # One marker and two messages stopped before any reply: three stops, no repeat.
-    assert hint is not None and hint[2] == "stop_loop" and hint[1].startswith("stopped 3x")
-
-
-def test_hint_stopping_claude_again_and_again():
+    assert statusline.coaching_hint({"context_window": {"used_tokens": 40_000}}, tail, NOW) is None
     stop = "[Request interrupted by user]"
-    tail = [_said("Refactor the store", 30), _said(stop, 18), _said("no, keep the API", 17),
-            _said(stop, 9), _said("use the cache", 8), _said(stop, 1), _said(stop, 1, isSidechain=True)]
-    hint = statusline.coaching_hint({}, tail, NOW)
-    assert hint is not None and hint[1] == "stopped 3x in 20m: agree a plan first (Shift+Tab)" and hint[2] == "stop_loop"
-    assert statusline.coaching_hint({}, [tail[0], _said(stop, 25), *tail[2:5]], NOW) is None
+    stops = [_said("Refactor the store", 30), _said(stop, 18), _said("no, keep the API", 17),
+             _said(stop, 9), _said("use the cache", 8), _said(stop, 1), _said(stop, 1, isSidechain=True)]
+    assert statusline.coaching_hint({}, stops, NOW) is None
+    # A stop marker is not a message: it never joins a run of small asks.
+    sqlite = "No, use SQLite instead of JSON for the store, with the same class and docstrings."
+    resent = [_said("Write a store module with JSON persistence", 12), _reply([_use("a", "Write")], ts=_at(11)),
+              _said(stop, 10), _said(sqlite, 9), _said(sqlite, 8), _said(sqlite, 1)]
+    assert statusline.coaching_hint({"context_window": {"used_tokens": 40_000}}, resent, NOW) is None
 
 
 def test_hint_a_huge_message():
@@ -1568,9 +1606,12 @@ def test_hint_a_huge_message():
 
 
 def test_a_hint_is_capped_at_the_ux5_budget_even_for_a_huge_number(tmp_path):
-    tail = [_prompt(), _reply([{"type": "text", "text": "done"}], stop="end_turn")]
-    hint = statusline.coaching_hint({"context_window": {"used_tokens": 123_456_789}}, tail, NOW)
-    assert hint is not None and len(hint[1]) <= statusline._MAX_HINT_LEN
+    payload = {
+        "context_window": {"used_tokens": 10**15},
+        "prompt_cache": {"warm": True, "ttl": "5m", "expires_at": NOW.timestamp() + 40},
+    }
+    hint = statusline.coaching_hint(payload, [], NOW)
+    assert hint is not None and hint[1].startswith("cache cold in 40s") and len(hint[1]) <= statusline._MAX_HINT_LEN
 
 
 def test_capture_lines_is_off_past_its_until(tmp_path):
@@ -1596,9 +1637,11 @@ def _ctx_payload(tokens: int, session_id: str = "s1") -> dict:
     return {"session_id": session_id, "context_window": {"used_tokens": tokens}}
 
 
-def _clear_hint_payload(tmp_path, tokens: int, session_id: str = "s1") -> dict:
-    tail = [_prompt(), _reply([{"type": "text", "text": "done"}], stop="end_turn")]
-    return {**_ctx_payload(tokens, session_id), "transcript_path": _jsonl(tmp_path / "t.jsonl", tail)}
+def _output_hint_payload(tmp_path, chars: int, session_id: str = "s1") -> dict:
+    """A session whose last tool output is ``chars`` characters: the
+    quieter-command hint, whose stake is the output's size in tokens."""
+    tail = [_prompt(), _reply([_use("a")]), _result("a", chars)]
+    return {**_ctx_payload(30_000, session_id), "transcript_path": _jsonl(tmp_path / "t.jsonl", tail)}
 
 
 def test_hint_cooldown_suppresses_the_same_kind_then_lifts(tmp_path):
@@ -1606,9 +1649,9 @@ def test_hint_cooldown_suppresses_the_same_kind_then_lifts(tmp_path):
     on the very next refresh, but can show again once its cooldown
     elapses -- otherwise it would repeat on every single prompt."""
     config_dir = _capture_config(tmp_path, '[capture]\ncoaching = ["coaching_line"]\n')
-    payload = _clear_hint_payload(tmp_path, 150_000)
+    payload = _output_hint_payload(tmp_path, 40_000)
     first = statusline.second_line(payload, config_dir, NOW)
-    assert first == "ctx 150k: new task? /clear first or it re-reads"
+    assert first == "last output ~10k: try quieter cmd or offset read"
     soon = NOW.replace(second=1)
     assert statusline.second_line(payload, config_dir, soon) is None
     later = datetime.fromtimestamp(NOW.timestamp() + statusline._HINT_COOLDOWN_S + 1, tz=timezone.utc)
@@ -1620,14 +1663,14 @@ def test_hint_hysteresis_rearms_early_once_the_stake_grows_enough(tmp_path):
     stake has grown past _HINT_REARM_FACTOR times what it was last
     time -- a merely flickering value cannot."""
     config_dir = _capture_config(tmp_path, '[capture]\ncoaching = ["coaching_line"]\n')
-    first = statusline.second_line(_clear_hint_payload(tmp_path, 150_000), config_dir, NOW)
-    assert first == "ctx 150k: new task? /clear first or it re-reads"
+    first = statusline.second_line(_output_hint_payload(tmp_path, 40_000), config_dir, NOW)
+    assert first == "last output ~10k: try quieter cmd or offset read"
     soon = NOW.replace(second=1)
-    # 160k -> stake 40000, only ~1.07x the 37500 that just fired: still suppressed.
-    assert statusline.second_line(_clear_hint_payload(tmp_path, 160_000), config_dir, soon) is None
-    # 250k -> stake 62500, ~1.67x: past the 1.5x hysteresis margin, fires early.
-    assert statusline.second_line(_clear_hint_payload(tmp_path, 250_000), config_dir, soon) == (
-        "ctx 250k: new task? /clear first or it re-reads"
+    # 44k characters -> stake 11000, only 1.1x the 10000 that just fired: still suppressed.
+    assert statusline.second_line(_output_hint_payload(tmp_path, 44_000), config_dir, soon) is None
+    # 80k characters -> stake 20000, 2x: past the 1.5x hysteresis margin, fires early.
+    assert statusline.second_line(_output_hint_payload(tmp_path, 80_000), config_dir, soon) == (
+        "last output ~20k: try quieter cmd or offset read"
     )
 
 

@@ -225,7 +225,7 @@ with the three judges costs about $1 and takes about 3 minutes.
 
     python scripts/eval-tagger.py judge                      # judge the recorded sessions
     python scripts/eval-tagger.py score                      # the report, from the newest results
-    python scripts/eval-tagger.py judge --hook OLD/capture-hook.py --set holdout   # an older hook, to compare
+    python scripts/eval-tagger.py judge --hook OLD/capture_hook.py --set holdout   # an older hook, to compare
     python scripts/eval-tagger.py record --only NEW_ID       # record a new scenario (under a dollar with Sonnet)
 
 Run it after changing the excerpt, the key lines or the corrections, and

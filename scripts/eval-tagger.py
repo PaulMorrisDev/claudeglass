@@ -19,7 +19,7 @@ Three steps, each spending no more than it says:
         Builds the hook's excerpt of each scenario's last turn (with
         Claude's own tag taken out of the reply) and asks each judge
         configuration for the tag, --repeats times, the way the hook does
-        (capture-hook.py's ask_haiku). Each call gets a line of its own,
+        (capture_hook.py's ask_haiku). Each call gets a line of its own,
         so no run reads another's cache and costs are what real use pays.
         Writes the raw answers to scripts/tagger-eval/results/<time>.json.
         Spends a little: about $0.002 a Haiku call, $0.009 a Sonnet one.
@@ -59,10 +59,12 @@ HERE = ROOT / "scripts" / "tagger-eval"
 PROJECT = HERE / "project"
 SESSIONS = HERE / "sessions"
 RESULTS = HERE / "results"
+#: What Claude Code runs (the launcher), and the module holding the hook's code.
 HOOK_PATH = ROOT / "src" / "claudeglass" / "hooks" / "capture-hook.py"
+MODULE_PATH = HOOK_PATH.with_name("capture_hook.py")
 
 
-def _load_hook(path: Path = HOOK_PATH):
+def _load_hook(path: Path = MODULE_PATH):
     spec = importlib.util.spec_from_file_location("_capture_hook_eval", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -74,7 +76,7 @@ CATALOGUE = HOOK.load_catalogue()
 
 
 def _use_hook(path: Path) -> None:
-    """Judge with another copy of the hook script (and the catalogue
+    """Judge with another copy of the hook module (and the catalogue
     beside it), to compare a change against what it replaces."""
     global HOOK, CATALOGUE
     HOOK = _load_hook(path)
@@ -533,7 +535,7 @@ def main(argv=None) -> int:
     judge.add_argument("--jobs", type=int, default=6)
     judge.add_argument("--only", nargs="*", default=())
     judge.add_argument("--set", choices=("tuning", "holdout"), help="only the scenarios of this set")
-    judge.add_argument("--hook", help="judge with this copy of capture-hook.py (its catalogue beside it)")
+    judge.add_argument("--hook", help="judge with this copy of capture_hook.py (its catalogue beside it)")
     scored = sub.add_parser("score", help="the report (spends nothing)")
     scored.add_argument("results", nargs="?")
     scored.add_argument("--out")

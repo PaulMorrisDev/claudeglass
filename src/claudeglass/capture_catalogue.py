@@ -1,7 +1,7 @@
 """Metrics capture: the words Claude may write, and the metrics behind them.
 
 Metrics capture is opt-in. While it is on, a small hook adds a short note
-to each session and subagent start (see ``hooks/capture-hook.py``) asking
+to each session and subagent start (see ``hooks/capture_hook.py``) asking
 Claude to end its replies with a one-line tag, for example
 ``[cg: task=bugfix brief=partial level=normal]``. ClaudeGlass reads the tags
 back out of the transcripts to explain what the work was, not only what it
@@ -134,10 +134,13 @@ FEEDBACK_REMINDER_LINE = "Finished? Run /cg-feedback: a few ticks make your savi
 #: Claude copies what its context shows, and with a ⚠️ and a 💡 in these
 #: labels it began using them as markers of its own, in work that had
 #: nothing to do with ClaudeGlass. The notices shown only to you
-#: (:data:`COACHING_NOTICE`) never reach Claude, so they keep theirs.
+#: (:data:`COACHING_NOTICE`) never reach Claude, so they keep theirs. A tip is
+#: also the last line of its note, written ready for Claude to copy.
 TIP_LABEL = "> **ClaudeGlass tip:**"
 REMINDER_LABEL = "> **ClaudeGlass:**"
-_TIP_ASK = f'a blank line and then a quote block starting "{TIP_LABEL}"'
+#: What a notice shown only to you opens with. Its ⚠️ is safe because the
+#: notice never reaches Claude.
+NOTICE_LABEL = "⚠️ ClaudeGlass: "
 
 
 # -- the metrics -----------------------------------------------------------
@@ -247,8 +250,31 @@ WEB_TOOLS = ("WebFetch", "WebSearch")
 #: (Deep), as the PostToolUse matcher. Claude Code only reads a hook's
 #: note when it waits for the hook, so this entry runs in the
 #: foreground; matching only these tools keeps edits and agent calls
-#: from waiting on it.
-BIG_OUTPUT_TOOLS = ("Bash", "Read", "Grep", "Glob", *WEB_TOOLS, "mcp__.*")
+#: from waiting on it. The shell and MCP tools are left out: a replay of
+#: 30 days of sessions found the shell's note failed both the precision
+#: test and the tokens-against-time test, and the MCP note right a third
+#: of the time (half was needed). Together they were about two thirds of
+#: the spawns this entry caused.
+BIG_OUTPUT_TOOLS = ("Read", "Grep", "Glob", *WEB_TOOLS)
+
+#: The most tokens an image counts for in a tool result, and the side in
+#: pixels of the square Claude counts one token per (``ceil(width / 28) *
+#: ceil(height / 28)``, capped). An image's base64 length is not text
+#: Claude read, so it is never counted by its characters.
+RESULT_IMAGE_MAX_TOKENS = 1_600
+RESULT_IMAGE_PATCH_PX = 28
+
+#: Characters of a result past which Claude Code saves the output to a
+#: file and keeps only a short preview in context, by tool: seen in real
+#: transcripts (the largest results kept whole were 18.8k for a search,
+#: 47.9k for a fetch and 29.7k for a shell; the smallest saved ones 22.3k,
+#: 59.3k and 29.3k). A saved result counts for its preview only, as the
+#: preview is all Claude reads of it. A read is never saved.
+RESULT_PERSIST_CHARS = {"Grep": 20_000, "WebFetch": 50_000, "Bash": 30_000, "PowerShell": 30_000}
+
+#: Characters of the preview Claude Code keeps in context for a result it
+#: saved to a file (the ``<persisted-output>`` note: about 2 KB).
+RESULT_PREVIEW_CHARS = 2_200
 
 #: Hook event -> the free signal it records. ``Stop`` and ``StopFailure``
 #: both feed ``turn_signals`` (SIG-3): an independent, hook-level check
@@ -415,9 +441,13 @@ AGENT_JUDGE_VOCAB = {
     "retry": ("none", *RETRY_REASONS),
 }
 
-#: The hook script that adds capture notes, and the catalogue it reads,
-#: installed side by side under ``<config-dir>/hooks/``.
+#: The hook that adds capture notes, the catalogue it reads and the module
+#: it runs, installed side by side under ``<config-dir>/hooks/``. The
+#: script Claude Code runs is a small launcher: Python keeps no bytecode
+#: for a script it is started on, only for a module it imports, so the
+#: work lives in :data:`HOOK_MODULE`, whose bytecode is kept between calls.
 HOOK_SCRIPT = "capture-hook.py"
+HOOK_MODULE = "capture_hook.py"
 CATALOGUE_FILE = "capture-catalogue.json"
 
 
@@ -439,42 +469,84 @@ COACH_VERSION = 1
 COACHING_FILE = "coaching.json"
 
 #: What the hook keeps between calls, per session: which hint showed
-#: when, and how far each subagent run had got. In the data folder.
+#: when and how many times, the time, size and cache lifetime of the
+#: newest reply (written by ``Stop`` and ``PostToolUse``, never any
+#: words), and how far each subagent run had got. In the data folder.
 COACH_STATE_FILE = "coach-state.json"
 
 #: Tools whose results a coaching note may follow: every tool the
 #: large-output note watches, and ``ExitPlanMode`` for an approved plan.
+#: A settings.json written before the shell and MCP tools were dropped
+#: still runs the hook after them until ``capture connect``; the hook
+#: returns at once for any tool not named here.
 COACHING_TOOLS = (*BIG_OUTPUT_TOOLS, "ExitPlanMode")
 
-#: Tools the ``explore_reads`` hint counts as reads and searches.
-COACHING_READ_TOOLS = ("Read", "Grep", "Glob")
-
-#: The live hints: after a tool result (the first four) and when you
+#: The live hints: after a tool result (the first three) and when you
 #: send a message (the rest), most useful first when more than one
-#: applies. ``repeat_ask`` to ``big_paste`` are about how you prompt.
+#: applies. ``drip_feed`` to ``big_paste`` are about how you prompt.
 #: ``plan_fresh`` also applies when you send a go-ahead after a plan you
-#: hadn't approved in the dialog, or leave plan mode.
+#: hadn't approved in the dialog, or leave plan mode. ``plan_fresh_early``
+#: is the same advice at an earlier moment: a message sent in plan mode,
+#: while there is still a plan to write, so it can end the plan the dialog
+#: shows. ``cold_return`` is a receipt for a message sent after a break
+#: that outlasted the prompt cache, and ``status_poll`` is for asking how
+#: background work is going while it still runs. ``plan_fresh``,
+#: ``plan_fresh_early`` and ``cold_return`` all say "start fresh", so they
+#: share one rest stamp (``capture_hook.py``'s ``_FRESH_START_HINTS``).
 COACHING_HINTS = (
     "plan_fresh",
+    "plan_fresh_early",
     "split_run",
     "quiet_output",
+    "drip_feed",
+    "plan_first",
+    "big_paste",
+    "status_poll",
+    "cold_return",
+)
+
+#: Hints that no longer show live. Their notes are still in old
+#: transcripts, so the parser still knows the words and keeps those notes
+#: as the hint they were instead of ``other``. ``clear_context`` is now a
+#: row on the prompting section ("context carried into new pieces");
+#: ``explore_reads`` became the habits page's "Explore cost by model"
+#: table; ``repeat_ask``, ``stop_loop`` and ``vague_fix`` are counted after
+#: the fact only (``prompting.py``), as live they fired on polls, refusals
+#: and questions far more often than on the habit. ``cache_cold`` became
+#: ``cold_return``: a receipt for every return after the cache expired,
+#: where it had asked Claude to judge whether the message began new work.
+RETIRED_COACHING_HINTS = (
+    "clear_context",
     "explore_reads",
     "repeat_ask",
-    "drip_feed",
     "stop_loop",
-    "plan_first",
     "vague_fix",
-    "big_paste",
     "cache_cold",
-    "clear_context",
 )
+
+#: The tip hints whose note asks for the tip only when Claude judges it
+#: relevant to what the user asked ("if most of the message is a log").
+#: Every other hint that carries a tip asks for it every time, so Claude
+#: passing it on is a relay; for these, Claude showing it is a judgement,
+#: and a tip it doesn't show is not a miss (``prompting``'s "Tips Claude
+#: showed" counts the two differently).
+CONDITIONAL_TIP_HINTS = ("big_paste",)
+
+#: The hook events whose output reaches Claude or you (``additionalContext``
+#: or ``systemMessage``). Claude Code runs a hook registered async without
+#: waiting, and an async hook's output only arrives on the next turn, so
+#: every entry for one of these is registered in the foreground
+#: (:func:`hook_specs`, held by ``tests/test_footprint.py``). ``Stop`` is
+#: not one: with coaching on it only writes the newest reply's time to
+#: ``coach-state.json`` and prints nothing, so it runs in the background.
+OUTPUT_EVENTS = ("SessionStart", "SubagentStart", "UserPromptSubmit", "PostToolUse")
 
 #: Phrases that mark a message as correcting Claude ("that's wrong",
 #: "still broken", "why did you", "undo that"), matched case-blind in a
 #: message's first :data:`CORRECTION_SCAN_CHARS` characters. The parser
-#: keeps only the yes/no (``Turn.human_correction``); the hook uses it
-#: for the prompting hints. A bare "no" is deliberately not a match:
-#: "no, go ahead" is as common as a correction.
+#: keeps only the yes/no (``Turn.human_correction``), which the report's
+#: vague corrections (``prompting.py``) read. A bare "no" is deliberately
+#: not a match: "no, go ahead" is as common as a correction.
 CORRECTION_PATTERN = (
     r"\b(?:"
     r"that'?s (?:wrong|not right|not what|incorrect|broken)"
@@ -492,16 +564,22 @@ CORRECTION_PATTERN = (
 )
 CORRECTION_SCAN_CHARS = 200
 
-#: Words that make a short message a request to fix something, on top of
-#: :data:`CORRECTION_PATTERN`: "fix this", "still an error", "broken
-#: again". Only ``vague_fix`` uses it; ``drip_feed`` goes by what Claude
-#: did, not by your words.
-FIX_PATTERN = r"\b(?:fix|fixed|broken|wrong|incorrect|still|again|bug|error|errors|failing|fails|crash(?:es|ed)?)\b"
+#: Words that report a bad outcome, on top of :data:`CORRECTION_PATTERN`:
+#: "it errors", "fails", "no change", "still not". A bare "fix this" or
+#: "again" says nothing went wrong with the last attempt, so neither
+#: matches. Only the report's ``vague_fix`` (``prompting.py``) uses it;
+#: ``drip_feed`` goes by what Claude did, not by your words.
+BAD_OUTCOME_PATTERN = (
+    r"\b(?:broken|wrong|incorrect|bugs?|errors?|failing|fails|failed|crash(?:es|ed)?"
+    r"|not (?:working|fixed|right)|no (?:change|difference|effect)"
+    r"|still (?:the same|there|happening|not|no|fails?|failing|broken|wrong))\b"
+)
 
 #: A message that opens with a question word asks about fixes ("what
 #: problems can you fix", "how do I fix the build"), not for one, so
-#: ``vague_fix`` leaves it alone. Not "why": "why is it still broken" is
-#: the complaint the hint is for.
+#: ``vague_fix`` leaves it alone, as it does any message ending in "?".
+#: Not "why": "why is it still broken" is the complaint the report is for,
+#: unless it ends in a question mark.
 QUESTION_PATTERN = r"\s*(?:what|which|who|whom|whose|where|when|how)\b"
 
 #: Anything that makes a correction specific: a path, a file name, a
@@ -590,6 +668,22 @@ STATUS_PATTERN = (
     r"(?:[\s,.!?]+(?:now|yet|so far|please|there|at the moment|currently))*[\s!.,?]*"
 )
 STATUS_MAX_CHARS = 120
+
+#: What a tool's result says when the work it started went to the
+#: background, so Claude carries on without it: a shell command started
+#: with ``run_in_background`` or moved there after its timeout, an agent
+#: launched in the background, a workflow. Read in memory, in the first
+#: :data:`BACKGROUND_SCAN_CHARS` characters of the result's text, by the
+#: hook's ``status_poll``; the text is dropped at once. The result's own
+#: wording is matched, not the call's ``run_in_background``, which an agent
+#: or a workflow sent to the background without one.
+BACKGROUND_LAUNCH_PATTERN = (
+    r"Command running in background with ID: "
+    r"|was moved to the background \(ID: "
+    r"|Async agent launched successfully"
+    r"|Workflow launched in background\. Task ID: "
+)
+BACKGROUND_SCAN_CHARS = 400
 
 #: How Claude Code records that you stopped a reply (Esc).
 INTERRUPT_PREFIX = "[Request interrupted"
@@ -686,14 +780,19 @@ MISFIRE_PATTERN = (
 )
 MISFIRE_NEAR_CHARS = 120
 
-#: A message of yours that asks something, for ``Turn.admit_caught``: it
-#: ends in a question mark, or opens with a question word.
+#: A message of yours that asks something, for ``Turn.admit_caught`` and
+#: ``Turn.human_question``: it ends in a question mark, or opens with a
+#: question word.
 ASKS_PATTERN = r"\s*(?:what|which|who|whom|whose|where|when|why|how)\b"
 
 #: The desktop app's resume ping after a usage limit, and its note after
 #: you quit it mid-reply: a human-looking line you didn't type.
 LIMIT_RESUME_PREFIX = "I hit my usage limit while you were working, but it has reset now"
 APP_QUIT_PREFIX = "The app was quit while you were working"
+
+#: What a background task's finishing message starts with, however Claude
+#: Code writes it: as a user line, a queued command or a queue operation.
+TASK_NOTIFICATION_PREFIX = "<task-notification"
 
 #: What a line written as your message starts with when you didn't type
 #: it: a slash command and its output, a ``!`` shell command, a
@@ -702,7 +801,7 @@ APP_QUIT_PREFIX = "The app was quit while you were working"
 #: hook and the status line share, so none of them hands such a line a
 #: hint or counts it as one of your messages.
 NOT_TYPED_PREFIXES = (
-    "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
+    "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", TASK_NOTIFICATION_PREFIX,
     "[SYSTEM NOTIFICATION", "<agent-message", "<cross-session-message", "Another Claude session sent a message",
     LIMIT_RESUME_PREFIX, APP_QUIT_PREFIX,
 )
@@ -802,37 +901,67 @@ SENTENCE_END_PATTERN = r"[.!?]+(?=\s|$)|\n+"
 #: asked for a change, whatever its words (``drip_feed``).
 EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
-#: When each hint applies, and how often it may repeat. Each can be
-#: changed in ``config.toml``'s ``[thresholds]`` as ``coaching_<key>``.
-COACHING_THRESHOLDS = {
-    #: Context, in tokens, at which a message you send gets the /clear hint.
-    "clear_context_tokens": 100_000,
-    #: The smallest context the expired-cache hint is worth mentioning.
-    "cold_min_tokens": 20_000,
-    #: A tool result this many tokens long gets the narrower-output hint.
-    "quiet_output_tokens": 8_000,
-    #: This many reads and searches for one message get the Explore hint.
-    "explore_reads": 8,
-    #: Planning context, in tokens, kept after an approved plan before the
-    #: fresh-session hint applies (``plan_handoff_min_dropped_tokens``'s
-    #: default).
-    "plan_fresh_tokens": 40_000,
-    #: This many small requests in a row, each of which Claude answered by
-    #: changing files, get the plan-it-as-one-prompt hint...
-    "drip_count": 3,
-    #: ...when each was sent within this long of Claude's reply before it.
-    "drip_window_minutes": 20,
-    #: A message longer than this isn't a small request.
-    "drip_chars": 300,
-    #: A fix request this short, naming nothing specific, is vague.
+#: A path inside a ``.claude`` folder: memory, plans, workflow scripts, and
+#: a project's agents, skills and settings. Claude changing one is not
+#: work on your project, so a message answered only with those is no
+#: change request for ``drip_feed``. The parser counts them apart
+#: (``Turn.config_edit_count``), the hook and status line read this.
+CONFIG_PATH_PATTERN = r"(?:^|[\\/])\.claude(?:[\\/]|$)"
+
+#: What a shell command that changes a file looks like, for the hook, which
+#: can't read commands the way ``shell_writes`` does: an in-place ``sed``
+#: or ``perl``, PowerShell's ``Set-Content``/``Add-Content`` and
+#: ``[IO.File]::WriteAll*``, and a ``>``, ``>>`` or ``tee`` fed by ``cat``,
+#: ``echo`` or ``printf`` (or, in PowerShell, a string, a variable,
+#: ``Get-Content`` or ``echo`` piped to ``Out-File``/``Tee-Object``). Not a
+#: program's output sent to a log, a stderr redirection or a device. An
+#: approximation of ``shell_writes.write_targets`` on whole commands, held
+#: to it by a test over a corpus of commands.
+SHELL_WRITE_PATTERN = (
+    r"(?:\b(?:sed|perl)\b[^\n|;&]*?\s-(?:[A-Za-z]*i[A-Za-z]*(?=[\s.]|$)|-in-place\b)"
+    r"|\b(?:Set|Add)-Content\b"
+    r"|\[(?:System\.)?IO\.File\]::(?:WriteAll(?:Text|Lines|Bytes)|AppendAll(?:Text|Lines))"
+    r"|\b(?:cat|echo|printf)\b[^\n|;&]*?(?<![\d&])>>?(?!&)[ \t]*(?!/dev/null|nul\b|\$null)[^\s&|;>]"
+    r"|\b(?:cat|echo|printf)\b[^\n]*\|[ \t]*tee\b[ \t]+(?:-a[ \t]+)?(?!/dev/null|nul\b)[^\s&|;>-]"
+    r"|(?:^|[;\n(&|])[ \t]*(?:[\"'$@]|(?:echo|write-output|write|get-content|gc|cat|type)\b)[^\n;]*"
+    r"\|[ \t]*(?:out-file|tee-object)\b)"
+)
+
+#: A message that opens by asking Claude to look, not to change anything
+#: ("review the diff", "explain how X works", "can you check Y"). A job
+#: that opens like this is not one to plan before it starts
+#: (``plan_first``).
+REVIEW_PATTERN = (
+    r"\s*(?:please\s+)?(?:(?:can|could|would) you\s+(?:please\s+)?)?(?:review|audit|check|look (?:at|over|through|into)"
+    r"|read|explain|summari[sz]e|analy[sz]e|investigate|inspect|explore|compare|assess|evaluate|critique|list|show"
+    r"|tell me|describe|walk me through|go through|examine|proofread|verify)\b"
+)
+
+#: What isn't your own prose in a message you typed: a fenced block (or
+#: one left open), a quoted ("> ") line, and a pasted log or stack-trace
+#: line (a date or time, a log level, "Traceback", ``File "``, ``at f (``).
+#: ``plan_first`` counts the changes you ask for in what's left.
+PROSE_NOISE_PATTERN = (
+    r"(?s:```.*?(?:```|\Z))|(?m:^[ \t]*>.*$)"
+    r"|(?m:^[ \t]*(?:\[?\d{4}-\d\d-\d\d|\d\d:\d\d:\d\d|(?:ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|FATAL)\b"
+    r"|Traceback\b|File \"|at \S+ \().*$)"
+)
+
+#: A message that is a plan already, so it needs none first: a heading
+#: ("# Plan", "**Steps**") in prose of at least :data:`PLAN_DOC_CHARS`
+#: characters, or :data:`PLAN_DOC_ITEMS` numbered items.
+PLAN_HEADING_PATTERN = r"(?m)^[ \t]*(?:#{1,6}[ \t]+\S|\*\*[^*\n]{2,80}\*\*:?[ \t]*$)"
+PLAN_NUMBERED_PATTERN = r"(?m)^[ \t]*\d{1,2}[.)][ \t]+\S"
+PLAN_DOC_CHARS = 1_500
+PLAN_DOC_ITEMS = 5
+
+#: What the after-the-fact report counts for the habits that no longer
+#: show a live hint (``vague_fix``, ``repeat_ask``, ``stop_loop``): the
+#: parser and ``prompting.py`` read these, the hook never does, so they
+#: are not in ``[thresholds]``.
+REPORT_THRESHOLDS = {
+    #: A correction this short, naming nothing specific, is vague.
     "vague_fix_chars": 80,
-    #: A message this many tokens long gets the big-paste hint.
-    "big_paste_tokens": 10_000,
-    #: A request asking for this many separate changes, outside plan mode,
-    #: gets the plan-first hint...
-    "plan_steps": 4,
-    #: ...when it's at least this long.
-    "plan_min_chars": 150,
     #: A message sharing this much of its words with one you sent...
     "repeat_similarity": 0.8,
     #: ...within this long, is the same request again...
@@ -841,12 +970,54 @@ COACHING_THRESHOLDS = {
     "repeat_min_words": 4,
     #: Stopping Claude this many times...
     "stop_loop_count": 3,
-    #: ...within this long gets the agree-the-approach hint.
+    #: ...within this long is a loop of stops.
     "stop_window_minutes": 20,
-    #: A hint that showed stays quiet this long in the same session...
+}
+
+#: When each hint applies, and how often it may repeat. Each can be
+#: changed in ``config.toml``'s ``[thresholds]`` as ``coaching_<key>``.
+COACHING_THRESHOLDS = {
+    #: The smallest context the cold-return receipt is worth mentioning:
+    #: below it, rewriting the cache costs cents.
+    "cold_min_tokens": 100_000,
+    #: How long the cold-return receipt rests once shown, in hours, however
+    #: much the context has grown: one a break is plenty.
+    "cold_rest_hours": 12,
+    #: The tokens every session starts with and shares (the system prompt
+    #: and the tools), about 40 to 43k. The cold-return receipt leaves them
+    #: out, as a reply rewrites that part for everyone, break or not.
+    "warm_prefix_tokens": 42_000,
+    #: A tool result this many tokens long gets the narrower-output hint.
+    "quiet_output_tokens": 8_000,
+    #: Planning context, in tokens, kept after an approved plan before the
+    #: fresh-session hint applies (``plan_handoff_min_dropped_tokens``'s
+    #: default).
+    "plan_fresh_tokens": 40_000,
+    #: This many small requests in a row, each of which Claude answered by
+    #: changing files outside a ``.claude`` folder, get the
+    #: plan-it-as-one-prompt hint. A go-ahead, a thank-you, a status check
+    #: or a question is no request and neither counts nor ends the run...
+    "drip_count": 3,
+    #: ...when each was sent within this long of Claude's reply before it.
+    "drip_window_minutes": 20,
+    #: A message longer than this isn't a small request.
+    "drip_chars": 300,
+    #: A message this many tokens long gets the big-paste hint.
+    "big_paste_tokens": 10_000,
+    #: A request asking for this many separate changes (edits, counted in
+    #: your own prose only), outside plan mode, and not already a plan or a
+    #: request to review, gets the plan-first hint...
+    "plan_steps": 3,
+    #: ...when it's at least this long.
+    "plan_min_chars": 150,
+    #: A hint that showed stays quiet this long in the same session (twice
+    #: as long after the second time, and so on, up to ``max_backoff`` times
+    #: this)...
     "cooldown_minutes": 30,
     #: ...unless what's at stake has grown this many times since.
     "rearm_factor": 1.5,
+    #: The most times a hint's rest may double.
+    "max_backoff": 3,
 }
 
 #: What the prompting hints say about the work itself: nothing. They're
@@ -855,64 +1026,146 @@ COACHING_THRESHOLDS = {
 #: go-ahead or change its approach steered the work itself.
 _AS_USUAL = "Handle the message exactly as you would have without this note: it changes nothing about the work."
 
-#: What each hint asks of Claude; ``""`` for one that only shows you a
-#: notice. ``{placeholders}`` are filled from the session: token counts
-#: in thousands (``150k``), an idle time, a count. A note never carries a
-#: path, a command or your words.
-COACHING_TEXT = {
-    "cache_cold": (
-        "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context "
-        "again: about {ctx} tokens at the cache-write price. If the user's message starts a task unrelated to the "
-        "work so far, end your reply, before any tag, with " + _TIP_ASK + " saying so, and that /clear before a "
-        "new task after a break avoids it. If it carries on the same work, don't mention it."
+#: What each tip says, word for word. A tip reaches you through Claude's
+#: reply, the one place every app shows (the desktop app folds a hook's
+#: ``systemMessage`` into a collapsed row), so the note's *last line* is
+#: the tip itself, behind :data:`TIP_LABEL`, for Claude to copy. Where
+#: Claude Code shows hook messages, :data:`COACHING_NOTICE` shows the same
+#: words at once. One line each, so the note ends on the tip.
+#: ``{placeholders}`` are filled from the session (see
+#: :data:`COACHING_TEXT`) and, for how to do something in the app you use,
+#: from :data:`COACHING_HOW`. Written to the user: "you" is the user.
+COACHING_TIP = {
+    "plan_fresh": (
+        "This plan was approved with about {kept} tokens of planning in the session, and every reply of the "
+        "build reads them again. Building it in a fresh session would carry about {kept} fewer tokens on each "
+        "reply. {fresh_how}"
     ),
-    "clear_context": (
-        "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's "
-        "message starts a task unrelated to the work so far, end your reply, before any tag, with " + _TIP_ASK
-        + " saying that /clear before a new task would have saved that. If it carries on the same work, don't "
-        "mention it."
+    "plan_fresh_early": (
+        "Approve with clear context: this session holds about {kept} tokens of planning chat, and every reply of "
+        "the build would read it again. {clear_how}"
+    ),
+    "cold_return": (
+        "The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens "
+        "of context again{compacted}. If you came back only to see whether the work is done, the last reply or "
+        "the task panel already says. For new work, running /clear first skips the rewrite."
+    ),
+    "status_poll": (
+        "Asking how it's going while work runs in the background makes Claude read the whole session, about "
+        "{ctx} tokens, to say little that is new. {poll_how}"
     ),
     "drip_feed": (
-        "The user has sent {count} small change requests in a row, one message each, and every message re-reads "
-        "the whole context. " + _AS_USUAL + " End your reply, before any tag, with " + _TIP_ASK + " suggesting that "
-        "working out everything the work still needs and sending it as one message gets it done in one pass, for "
-        "fewer tokens."
-    ),
-    "repeat_ask": (
-        "The user has sent much the same request as one you answered earlier. " + _AS_USUAL + " End your reply, "
-        "before any tag, with " + _TIP_ASK + " suggesting that saying what was wrong with the last attempt gets a "
-        "better next one than sending the request again."
+        "That's {count} small changes in a row, each its own message, and each one re-reads the whole session, "
+        "about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it "
+        "done in one pass, for fewer tokens."
     ),
     "plan_first": (
-        "The user's message asks for about {steps} separate changes, outside plan mode. " + _AS_USUAL + " End your "
-        "reply, before any tag, with " + _TIP_ASK + " suggesting plan mode (Shift+Tab) for a job this size: it "
-        "agrees the approach before anything changes."
-    ),
-    "stop_loop": (
-        "The user has stopped you {count} times in the last {minutes} minutes. " + _AS_USUAL + " End your reply, "
-        "before any tag, with " + _TIP_ASK + " saying that plan mode (Shift+Tab) agrees the approach before any "
-        "work starts."
-    ),
-    "vague_fix": (
-        "The user says something is wrong but not what they saw or expected. " + _AS_USUAL + " End your reply, "
-        "before any tag, with " + _TIP_ASK + " saying that naming what they saw and expected, or pasting the "
-        "error, gets a fix first time."
+        "That's a job of about {steps} separate changes, sent outside plan mode. Plan mode agrees the approach "
+        "before anything changes. {plan_how}"
     ),
     "big_paste": (
-        "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a "
-        "log, a file or command output, end your reply, before any tag, with " + _TIP_ASK + " suggesting they "
-        "paste only the part that matters, or save it to a file and give the path so only what's needed is read."
+        "Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that "
+        "matters, or saving the rest to a file and giving the path, costs less."
+    ),
+}
+
+
+def _tip_line(hint: str) -> str:
+    return f"{TIP_LABEL} {COACHING_TIP[hint]}"
+
+
+#: A tip note's first sentence: write the tip. Where Claude is to judge
+#: first whether it applies (:data:`CONDITIONAL_TIP_HINTS`), the condition
+#: leads, and the sentence still ends in the order to write it.
+_WRITE_TIP = "write the tip on this note's last line, word for word, {where}."
+_AT_END = "at the end of your reply, after a blank line and before any tag"
+_BEFORE_BUILD = "before you start building"
+_ENDING_THE_PLAN = "as the last line of the plan you submit for approval"
+
+
+def _tip_note(hint: str, *, when: str = "", then: str = "", where: str = _AT_END) -> str:
+    """The note for a hint that passes a tip on: a first sentence saying
+    to write it (after ``when``, for a conditional one), what Claude
+    needs to know, then the tip as the last line."""
+    write = _WRITE_TIP.format(where=where)
+    first = f"If {when}, {write}" if when else write[0].upper() + write[1:]
+    return "\n".join((" ".join(part for part in (first, then) if part), _tip_line(hint)))
+
+
+#: How to do what a tip suggests, by the app the hook runs in: ``desktop``
+#: is the desktop app's Code tab (``CLAUDE_CODE_ENTRYPOINT`` is
+#: ``claude-desktop``), ``terminal`` is everywhere else. The hook fills the
+#: four placeholders of the tips above from these: ``{plan_how}`` (start
+#: plan mode), ``{fresh_how}`` (after a plan was approved: the next time
+#: clears the context at approval), ``{clear_how}`` (before it's
+#: approved) and ``{poll_how}`` (where to see what a background task is
+#: doing without asking). The desktop app has no Shift+Tab for plan mode, and its
+#: approval dialog has an option that clears the context; where there's no
+#: such option, ``/clear`` and asking for the saved plan does the same.
+#: ``<file>`` stays as written, in backticks so a markdown view doesn't
+#: read it as a tag: a note never carries a path.
+COACHING_HOW = {
+    "plan_how": {
+        "desktop": "Start the message with /plan, or pick Plan in the mode menu next to Send.",
+        "terminal": "Press Shift+Tab to switch to it.",
+    },
+    "fresh_how": {
+        "desktop": (
+            "Next time, pick the approval option that clears the context first; if the dialog has none, run "
+            "/clear, then ask Claude to implement the plan in `<file>`."
+        ),
+        "terminal": "Run /clear, then ask Claude to implement the plan in `<file>`.",
+    },
+    "clear_how": {
+        "desktop": (
+            "Pick the approval option that clears the context first; if the dialog has none, run /clear, then ask "
+            "Claude to implement the plan in `<file>`."
+        ),
+        "terminal": "Run /clear first, then ask Claude to implement the plan in `<file>`.",
+    },
+    # Where to look instead of asking: the desktop app's task panel, or the
+    # terminal's /tasks list. Neither promises a notification: a background
+    # run only sends one when it finishes, and not every kind does.
+    "poll_how": {
+        "desktop": "The task panel shows what is still running, with no message sent.",
+        "terminal": "Typing /tasks shows what is still running, with no message sent.",
+    },
+}
+
+#: What each hint asks of Claude; ``""`` for one that only shows you a
+#: notice. A hint that passes a tip on starts with the order to write it
+#: and ends with the tip itself (see :data:`COACHING_TIP`). ``{placeholders}``
+#: are filled from the session: token counts in thousands (``150k``), an
+#: idle time, a count. A note never carries a path, a command or your
+#: words.
+COACHING_TEXT = {
+    "cold_return": _tip_note(
+        "cold_return", then="The user came back to this session after a break. " + _AS_USUAL
+    ),
+    "status_poll": _tip_note(
+        "status_poll",
+        then="The user is asking about work that is still running in the background. " + _AS_USUAL,
+    ),
+    "drip_feed": _tip_note(
+        "drip_feed", then="The user has sent {count} small change requests in a row, one message each. " + _AS_USUAL
+    ),
+    "plan_first": _tip_note(
+        "plan_first",
+        then="The user's message asks for about {steps} separate changes, outside plan mode. " + _AS_USUAL,
+    ),
+    "big_paste": _tip_note(
+        "big_paste",
+        when="most of the user's message is a log, a file or command output",
+        then="Otherwise don't mention this note.",
     ),
     "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
-    "explore_reads": (
-        "You've made {reads} reads and searches for this message, about {tokens} tokens that every later reply "
-        "reads again. {advice}"
+    "plan_fresh": _tip_note(
+        "plan_fresh", where=_BEFORE_BUILD, then="Then carry on unless the user stops you."
     ),
-    "plan_fresh": (
-        "This plan was approved with about {kept} tokens of planning in context, which every reply of the build "
-        "reads again. Before you start building, tell the user in a quote block starting \"" + TIP_LABEL + "\" "
-        "that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry "
-        "about {kept} fewer tokens on each reply. Then carry on unless they stop you."
+    "plan_fresh_early": _tip_note(
+        "plan_fresh_early",
+        where=_ENDING_THE_PLAN,
+        then="If this reply doesn't end in a plan, add it to the plan you submit later. " + _AS_USUAL,
     ),
     # Nothing reaches the subagent: told mid-run to stop and hand back,
     # it either ignored the note (and reported it as a stray hook message)
@@ -920,55 +1173,34 @@ COACHING_TEXT = {
     "split_run": "",
 }
 
+#: The hints that also show the tip as a notice where Claude Code shows
+#: hook messages: every hint with a tip.
+NOTICE_HINTS = (
+    "plan_fresh", "plan_fresh_early", "drip_feed", "plan_first", "big_paste", "status_poll", "cold_return",
+)
+
 #: What the hook shows you itself, never sent to Claude, so it costs no
-#: tokens: Claude Code's hook ``systemMessage``. The prompting hints show
-#: it the moment you send the message, and Claude's reply still ends with
-#: the tip, for an app that doesn't show hook messages. ``split_run``
-#: shows it once, when a subagent run passes its split point, and tells
-#: the subagent nothing. Same ``{placeholders}`` as :data:`COACHING_TEXT`.
+#: tokens: Claude Code's hook ``systemMessage``. The desktop app shows it
+#: as a collapsed row that folds into the run summary, and never for a
+#: subagent, so there the tip reaches you through Claude alone and the
+#: hook sends no notice (``capture_hook.py``'s ``delivery``). Elsewhere it
+#: shows at once, with the same words as the tip. ``split_run`` shows it
+#: once, when a subagent run passes its split point, and tells the
+#: subagent nothing: with no note to Claude, the notice is all it has.
+#: Same ``{placeholders}`` as :data:`COACHING_TEXT`.
 COACHING_NOTICE = {
-    "drip_feed": "⚠️ ClaudeGlass: {count} small requests in a row, one message each. Work out everything that needs "
-    "changing and send it as one prompt: it costs less.",
-    "repeat_ask": "⚠️ ClaudeGlass: that's much the same request as before. Saying what was wrong with the last "
-    "attempt helps more than sending it again.",
-    "plan_first": "⚠️ ClaudeGlass: a {steps}-step request outside plan mode. Plan mode (Shift+Tab) agrees the "
-    "approach before anything changes.",
-    "stop_loop": "⚠️ ClaudeGlass: you've stopped Claude {count} times in {minutes} minutes. Plan mode (Shift+Tab) "
-    "agrees the approach before work starts.",
-    "vague_fix": "⚠️ ClaudeGlass: say what you saw and what you expected, or paste the error, to get a fix first "
-    "time.",
-    "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. "
-    "Paste only the part that matters, or give a file path.",
-    "split_run": "⚠️ ClaudeGlass: this {agent} run has made about {replies} replies, and each one reads the whole run "
-    "again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next time, give "
-    "each agent a smaller piece of the work.",
+    **{hint: NOTICE_LABEL + COACHING_TIP[hint] for hint in NOTICE_HINTS},
+    "split_run": NOTICE_LABEL + "this {agent} run has made about {replies} replies, and each one reads the whole "
+    "run again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next "
+    "time, give each agent a smaller piece of the work.",
 }
 
 #: ``quiet_output``'s ``{how}``, by tool; ``""`` for any other tool.
 COACHING_QUIET_HOW = {
     "Read": "read only the lines you need, with an offset and a limit",
-    # No bare head or tail: they can cut off the one error that matters.
-    "Bash": "cut the command's output down first: a quieter flag, or a filter that keeps every error and failure line",
     "Grep": "narrow the pattern or the path, or ask for file names or counts only",
     "Glob": "narrow the pattern",
     "": "ask for less: a narrower query or a smaller page",
-}
-
-#: ``explore_reads``'s ``{advice}``: what more searching should turn to.
-#: The hook switches to ``"tokensave"`` when the project holds a
-#: tokensave index (``.tokensave/``, ``known_savers.TOKENSAVE.index_dir``)
-#: -- its own hook blocks every Explore agent call there and redirects
-#: Grep/Glob/Bash search calls too, so the generic advice below would
-#: just get turned away.
-COACHING_EXPLORE_ADVICE = {
-    "explore": (
-        "If more searching is needed, hand it to an Explore agent: it searches in its own context and sends "
-        "back a short summary."
-    ),
-    "tokensave": (
-        "If more searching is needed, use tokensave's own tools instead: tokensave_context for a concept, "
-        "tokensave_search for a symbol, tokensave_files for files, then read only the lines you need."
-    ),
 }
 
 
@@ -1252,9 +1484,12 @@ METRICS: tuple[Metric, ...] = (
         group="deep",
         section="tools",
         title="Large tool outputs",
-        what=f"After a tool result of about {BIG_OUTPUT_TOKENS:,} tokens or more, how much of it Claude "
-        "needed: all, part or none. Claude Code waits for the hook after each shell, read, search, web or "
-        "MCP result. 'claudeglass capture status' shows how long that has added, measured from your own sessions.",
+        what=f"After a read, search or web result of about {BIG_OUTPUT_TOKENS:,} tokens or more, how much of it "
+        "Claude needed: all, part or none. Only what Claude reads counts. "
+        f"A picture counts for at most {RESULT_IMAGE_MAX_TOKENS:,} tokens. A result Claude Code saved to a file "
+        "counts for its preview alone. Shell and MCP results are not asked about. Claude Code waits for the hook "
+        "after each read, search or web result. 'claudeglass capture status' shows how long that has added, measured from your own "
+        "sessions.",
         why="Quieter commands, offset reads and output caps where big outputs weren't needed.",
         powers=("tool_output",),
         tag="out=needed|part|unneeded",
@@ -1417,7 +1652,8 @@ METRICS: tuple[Metric, ...] = (
         group="derived",
         section="derived",
         title="Repeated failures",
-        what="The same command failing again and again in one piece of work.",
+        what="The same command failing again and again in one piece of work. It is counted on the Savings page, "
+        "with the commands that failed; no hint speaks up while it happens.",
         why="Flaky tests and environment trouble that burn tokens.",
         powers=("verification", "tool_output"),
     ),
@@ -1436,10 +1672,10 @@ METRICS: tuple[Metric, ...] = (
         group="coaching",
         section="coaching",
         title="Coaching line",
-        what="A second status line with a live hint from your session. For example, a large context before "
-        "a new task, a large last output, many reads so far, or small requests sent one at a time.",
+        what="A second status line with a live hint from your session. For example, a cache about to expire, "
+        "a large last output, or small requests sent one at a time.",
         why="Advice where you work, at the moment it applies. The status line is never sent to Claude.",
-        powers=("context", "tool_output", "research"),
+        powers=("context", "tool_output"),
     ),
     Metric(
         id="coaching_notes",
@@ -1447,17 +1683,19 @@ METRICS: tuple[Metric, ...] = (
         section="coaching",
         title="Coaching notes from Claude",
         what="Live hints for where the status line doesn't show, such as the desktop app. When one applies, a "
-        "hook adds a short note to Claude's context, and Claude acts on it or tells you in a highlighted tip: a large "
-        "tool output, many reads for one message, a subagent run past the point where your own history says "
-        "splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired "
-        "cache when you send a message. It also flags how you prompt: the same request again, a big task "
-        "without a plan, small requests sent one at a time, a "
-        "vague correction, a huge paste, or stopping Claude again and again.",
+        "hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large "
+        "read, search or web result, a subagent run past the point where your own history says splitting pays, a plan approved "
+        "on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, "
+        "or asking how background work is going while it still runs. It also flags how "
+        "you prompt: a big task without a plan, small requests sent one at a time, or a huge paste. Vague "
+        "corrections, the same request again and stopping Claude again and again are counted after the fact "
+        "on Work habits, with no live note.",
         why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
-        "120 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each shell, read, search, web "
-        "or MCP result and each message you send.",
-        powers=("context", "tool_output", "research", "delegation", "planning"),
-        hooks=("UserPromptSubmit", "PostToolUse"),
+        "140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each "
+        "read, search or web result and each message you send. A hook after each reply runs in the background and keeps "
+        "only the time and size of Claude's newest reply, so the cache check is right after a resume.",
+        powers=("context", "tool_output", "delegation", "planning"),
+        hooks=("UserPromptSubmit", "PostToolUse", "Stop"),
     ),
     Metric(
         id="brief_templates",
@@ -1821,7 +2059,10 @@ def brief_skill_text() -> str:
 
 #: The note's fixed lines. ``{tag}`` in :data:`SUB_TAG_INTRO` is the
 #: ``[result: ...]`` shape (:data:`SUB_TAG` or :data:`SUB_TAG_WITH_KEYS`).
-NOTE_INTRO = "The user turned on ClaudeGlass metrics capture, to see where their tokens go."
+NOTE_INTRO = (
+    "The user turned on ClaudeGlass metrics capture, to see where their tokens go. "
+    "If you are a subagent, ignore this note."
+)
 MAIN_TAG_INTRO = (
     "End your final reply to each user message with one line, [cg: key=word ...], using only these keys and words:"
 )
@@ -1884,7 +2125,7 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
     on; ``""`` when none of them asks anything there. While Haiku writes
     the tags (``tagger``), the main note asks for no ``[cg: ...]`` tag.
 
-    ``hooks/capture-hook.py`` builds the same text from
+    ``hooks/capture_hook.py`` builds the same text from
     ``capture-catalogue.json`` (:func:`export_json`); a test holds the two
     to the same output.
     """
@@ -1965,7 +2206,7 @@ def judge_text(ids) -> str:
     """What Haiku is told when it writes the main session's tags
     (``tagger = "haiku"``): a line for each key the note would ask
     Claude for (:data:`JUDGE_LINES`, else the note's own); ``""`` when
-    none of ``ids`` asks for a key. ``hooks/capture-hook.py`` builds the
+    none of ``ids`` asks for a key. ``hooks/capture_hook.py`` builds the
     same text (``build_judge_prompt``)."""
     keys = set(tagged_keys(ids))
     if not keys:
@@ -1984,7 +2225,7 @@ def agent_metric_ids(ids) -> tuple[str, ...]:
 def agent_judge_text(ids) -> str:
     """What Haiku is told when it judges a finished agent run: a line for
     each agent metric in ``ids``; ``""`` when there's none.
-    ``hooks/capture-hook.py`` builds the same text
+    ``hooks/capture_hook.py`` builds the same text
     (``build_agent_judge_prompt``)."""
     lines = [METRICS_BY_ID[metric_id].sub_line for metric_id in agent_metric_ids(ids)]
     if not lines:
@@ -2001,20 +2242,19 @@ def tool_note_text(metric_id: str) -> str:
     return f"{NOTE_MARKER}{NOTE_VERSION} {metric.id}\n{metric.tool_note}"
 
 
-#: The literal tool names each PostToolUse-triggered metric matches
-#: (see ``hook_specs``'s own matchers): an MCP wildcard entry
-#: ("mcp__.*") isn't a real tool name, so it's left out.
+#: The tool names each PostToolUse-triggered metric matches (see
+#: ``hook_specs``'s own matchers).
 _POST_TOOL_USE_TOOLS = {"big_output": BIG_OUTPUT_TOOLS}
 
 
 def tool_suffix_chars(metric_id: str) -> int:
     """CAP-10: Claude Code's own PostToolUse wrap names the specific
     tool that matched, not the whole matcher pattern (its own debug log
-    shows ``"PostToolUse:Write"``, not ``"PostToolUse:Bash|Read|..."``)
+    shows ``"PostToolUse:Write"``, not ``"PostToolUse:Read|Grep|..."``)
     -- estimated here, before any real note has been measured, as the
-    average length of ``metric_id``'s own matcher's literal tool names,
-    plus the ``:`` that joins it to the event name."""
-    names = [t for t in _POST_TOOL_USE_TOOLS.get(metric_id, ()) if "*" not in t]
+    average length of ``metric_id``'s own matcher's tool names, plus the
+    ``:`` that joins it to the event name."""
+    names = _POST_TOOL_USE_TOOLS.get(metric_id, ())
     return round(sum(len(t) for t in names) / len(names)) + 1 if names else 0
 
 
@@ -2036,7 +2276,10 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     (:data:`HAIKU_TAGGER_HOOK` in ``ids``), ``Stop`` runs in the
     foreground, shared with ``turn_signals``: it only hands the turn to a
     worker of its own and returns, and ``claude -p`` exits without waiting
-    for a background hook, which would drop the turn."""
+    for a background hook, which would drop the turn. Coaching notes also
+    add a background ``Stop`` entry (unless one of those already runs it),
+    which prints nothing: it only keeps the newest reply's time and size
+    for the cold-return receipt."""
     wanted = set(ids)
     haiku = HAIKU_TAGGER_HOOK in wanted and bool(tagged_keys(wanted))
     main = any(m.id in wanted and ((m.main_line and not haiku) or m.main_extra) for m in METRICS)
@@ -2060,11 +2303,15 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
             specs.append((HOOK_SCRIPT, event, "", event != "SessionEnd" and not (haiku and event == "Stop")))
     if haiku and not any(spec[1] == "Stop" for spec in specs):
         specs.append((HOOK_SCRIPT, "Stop", "", False))
+    if coach and not any(spec[1] == "Stop" for spec in specs):
+        # Writes the newest reply's time and size to coach-state.json and
+        # prints nothing, so nothing waits on it.
+        specs.append((HOOK_SCRIPT, "Stop", "", True))
     return tuple(specs)
 
 
 def export_json() -> dict:
-    """What ``hooks/capture-hook.py`` needs from this module, as JSON-safe
+    """What ``hooks/capture_hook.py`` needs from this module, as JSON-safe
     data. The packaged ``hooks/capture-catalogue.json`` is this, written
     by :func:`catalogue_json_text` (a test keeps it in step)."""
     return {
@@ -2099,6 +2346,11 @@ def export_json() -> dict:
         "skip_agent_types": list(SKIP_AGENT_TYPES),
         "no_rules_agent_types": list(NO_RULES_AGENT_TYPES),
         "big_output_tokens": BIG_OUTPUT_TOKENS,
+        "result_tools": list(COACHING_TOOLS),
+        "result_image_max_tokens": RESULT_IMAGE_MAX_TOKENS,
+        "result_image_patch_px": RESULT_IMAGE_PATCH_PX,
+        "result_persist_chars": dict(RESULT_PERSIST_CHARS),
+        "result_preview_chars": RESULT_PREVIEW_CHARS,
         "signal_events": dict(SIGNAL_EVENTS),
         "session_end_reasons": list(SESSION_END_REASONS),
         "wait_kinds": list(WAIT_KINDS),
@@ -2130,17 +2382,10 @@ def export_json() -> dict:
             "version": COACH_VERSION,
             "file": COACHING_FILE,
             "state_file": COACH_STATE_FILE,
-            "read_tools": list(COACHING_READ_TOOLS),
             "thresholds": dict(COACHING_THRESHOLDS),
             "text": dict(COACHING_TEXT),
             "quiet_how": dict(COACHING_QUIET_HOW),
-            "explore_advice": dict(COACHING_EXPLORE_ADVICE),
             "notice": dict(COACHING_NOTICE),
-            "correction_pattern": CORRECTION_PATTERN,
-            "correction_scan_chars": CORRECTION_SCAN_CHARS,
-            "fix_pattern": FIX_PATTERN,
-            "question_pattern": QUESTION_PATTERN,
-            "specific_pattern": SPECIFIC_PATTERN,
             "interrupt_prefix": INTERRUPT_PREFIX,
             "not_typed_prefixes": list(NOT_TYPED_PREFIXES),
             "not_typed_turn_origins": list(NOT_TYPED_TURN_ORIGINS),
@@ -2150,6 +2395,9 @@ def export_json() -> dict:
             "go_max_chars": GO_MAX_CHARS,
             "status_pattern": STATUS_PATTERN,
             "status_max_chars": STATUS_MAX_CHARS,
+            "background_launch_pattern": BACKGROUND_LAUNCH_PATTERN,
+            "background_scan_chars": BACKGROUND_SCAN_CHARS,
+            "task_notification_prefix": TASK_NOTIFICATION_PREFIX,
             "reply_scan_chars": REPLY_SCAN_CHARS,
             "reply_fence_pattern": REPLY_FENCE_PATTERN,
             "reply_tip_block_pattern": REPLY_TIP_BLOCK_PATTERN,
@@ -2173,6 +2421,16 @@ def export_json() -> dict:
             "test_no_target_pattern": TEST_NO_TARGET_PATTERN,
             "test_whole_suite_pattern": TEST_WHOLE_SUITE_PATTERN,
             "edit_tools": list(EDIT_TOOLS),
+            "how": {key: dict(variants) for key, variants in COACHING_HOW.items()},
+            "asks_pattern": ASKS_PATTERN,
+            "config_path_pattern": CONFIG_PATH_PATTERN,
+            "shell_write_pattern": SHELL_WRITE_PATTERN,
+            "review_pattern": REVIEW_PATTERN,
+            "prose_noise_pattern": PROSE_NOISE_PATTERN,
+            "plan_heading_pattern": PLAN_HEADING_PATTERN,
+            "plan_numbered_pattern": PLAN_NUMBERED_PATTERN,
+            "plan_doc_chars": PLAN_DOC_CHARS,
+            "plan_doc_items": PLAN_DOC_ITEMS,
             "ack_pattern": ACK_PATTERN,
             "list_item_pattern": LIST_ITEM_PATTERN,
             "action_pattern": ACTION_PATTERN,
@@ -2289,7 +2547,8 @@ def _metric_tag_line(metric: Metric) -> str:
     if metric.id == "coaching_notes":
         return (
             "No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in a "
-            "highlighted tip. "
+            "highlighted tip: the note's first sentence says to write it and its last line is the tip, word for "
+            "word, so every app shows it. "
             "Each hint and when it applies: [coaching.md](coaching.md)."
         )
     if metric.hooks:
@@ -2354,8 +2613,10 @@ def render_markdown() -> str:
     p(
         "Costs rise with depth, so capture comes in levels, each including every metric of the levels "
         "before it. The note is added once at each session's start, `/clear` or compaction (a resumed "
-        "session already carries the note from its start, so it is not asked again). Agent runs get no note; "
-        "a level with agent metrics adds a Haiku call per agent run instead, however deep the agent is nested."
+        "session already carries the note from its start, so it is not asked again). Agent runs get no note, "
+        "and nor does a subagent's own compaction, which the hook tells from the main session's by a subagent "
+        "transcript that has just recorded one; the note also tells a subagent to ignore it. "
+        "A level with agent metrics adds a Haiku call per agent run instead, however deep the agent is nested."
     )
     p("")
     p("| Level | What it adds | Note at session start | Haiku per agent run |")
@@ -2435,7 +2696,7 @@ def render_markdown() -> str:
     p("## The tag format")
     p("")
     p(
-        f"Every note (`{HOOK_SCRIPT}` builds the same text from `{CATALOGUE_FILE}`) opens with the same two "
+        f"Every note (`{HOOK_MODULE}` builds the same text from `{CATALOGUE_FILE}`) opens with the same two "
         "lines, then the keys for whichever metrics are on:"
     )
     p("")
@@ -2589,8 +2850,8 @@ def render_markdown() -> str:
     p("## Turning it on, off or removing it")
     p("")
     p(
-        f"The hook script and its catalogue (`{HOOK_SCRIPT}`, `{CATALOGUE_FILE}`) live side by side under "
-        "`<config-dir>/hooks/`. A change that needs different hook entries (`capture on`, `level`, `enable`, "
+        f"The hook (`{HOOK_SCRIPT}`, a small launcher), the module it runs (`{HOOK_MODULE}`) and its catalogue "
+        f"(`{CATALOGUE_FILE}`) live side by side under `<config-dir>/hooks/`. A change that needs different hook entries (`capture on`, `level`, `enable`, "
         "`disable`, `tagger` or `connect`) also changes `~/.claude/settings.json`, and `capture remove` takes "
         "the entries out — each only after showing the diff and asking first, unless you pass `--yes`. "
         "`capture off` leaves the entries, which add nothing while it's off, and every other change writes "

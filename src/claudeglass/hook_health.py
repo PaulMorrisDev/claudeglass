@@ -22,8 +22,9 @@ SessionEnd, Notification and PermissionRequest for the free signals),
 described by :class:`HookSpec`. :func:`check_capture` checks them the same way;
 :func:`plan_capture` works out the change that makes settings.json run
 exactly the entries the chosen metrics need, and :func:`connect` writes
-it. :func:`install_hook_files` copies the hook scripts out of the
-package, which works inside the ``.pyz`` build too.
+it. :func:`install_hook_files` copies the hook files (the launcher
+``capture-hook.py``, the module ``capture_hook.py`` it runs and the
+catalogue) out of the package, which works inside the ``.pyz`` build too.
 
 None of the above needs a transcript. :func:`count_hook_errors` does --
 it tallies each hook event's non-blocking errors (``PreToolUse``,
@@ -66,8 +67,17 @@ HOOK_SCRIPT_NAME = "snapshot-config.py"
 #: of them belongs to capture.
 CAPTURE_SCRIPTS = (capture_catalogue.HOOK_SCRIPT,)
 
-#: Files each capture script needs next to it under ``<config-dir>/hooks``.
-CAPTURE_FILES = {capture_catalogue.HOOK_SCRIPT: (capture_catalogue.HOOK_SCRIPT, capture_catalogue.CATALOGUE_FILE)}
+#: Files each capture script needs next to it under ``<config-dir>/hooks``:
+#: the launcher Claude Code runs, the module it imports and the catalogue
+#: the module reads. The launcher comes last, as :func:`install_hook_files`
+#: writes it last: it is the file that starts using the others.
+CAPTURE_FILES = {
+    capture_catalogue.HOOK_SCRIPT: (
+        capture_catalogue.CATALOGUE_FILE,
+        capture_catalogue.HOOK_MODULE,
+        capture_catalogue.HOOK_SCRIPT,
+    )
+}
 
 #: Every file name this tool ever installs under ``<config-dir>/hooks``.
 ALL_HOOK_FILES = frozenset({HOOK_SCRIPT_NAME} | {name for names in CAPTURE_FILES.values() for name in names})
@@ -76,7 +86,7 @@ ALL_HOOK_FILES = frozenset({HOOK_SCRIPT_NAME} | {name for names in CAPTURE_FILES
 CAPTURE_TIMEOUT_S = 5
 
 #: The oldest Python a hook command can safely name: ``tomllib``, which
-#: ``capture-hook.py`` reads config.toml with, is stdlib only from here.
+#: ``capture_hook.py`` reads config.toml with, is stdlib only from here.
 _MIN_PYTHON = (3, 11)
 
 
@@ -99,7 +109,7 @@ class HookSpec:
             "SubagentStop": "when a subagent finishes",
             "UserPromptSubmit": "when you send a message",
             "PostToolUse": "after "
-            + ("web results" if tools - {"ExitPlanMode"} <= set(capture_catalogue.WEB_TOOLS) else "shell, read, search, web and MCP results")
+            + ("web results" if tools - {"ExitPlanMode"} <= set(capture_catalogue.WEB_TOOLS) else "read, search and web results")
             + (" and an approved plan" if "ExitPlanMode" in tools else ""),
             "SessionEnd": "when a session ends",
             "Notification": "when Claude waits for you, in the background",
@@ -968,13 +978,13 @@ def check_capture(
     """Compare settings.json's capture entries with ``wanted``. Never
     raises: an unreadable settings file reads as no entries.
 
-    With ``config_dir``, each entry's script and catalogue (SEC-P7/ROB-P7)
+    With ``config_dir``, each entry's launcher, module and catalogue (SEC-P7/ROB-P7)
     are also hash-stamp checked against the manifest :func:`install_hook_files`
     writes, adding to ``.outdated``/``.modified`` -- cheap (a few files
     hashed, no transcript read), so safe for a hot status path. With
     ``check_python`` too, each distinct interpreter is also asked its own
     version once (:func:`_interpreter_version`, a bounded subprocess
-    call) and flagged when older than 3.11, since ``capture-hook.py``
+    call) and flagged when older than 3.11, since the hook
     needs ``tomllib`` to read config.toml at all -- left off by default
     since spawning a process isn't free."""
     health = CaptureHookHealth(settings_path=settings_path(claude_root), needed=tuple(wanted))
@@ -1006,7 +1016,12 @@ def check_capture(
             for name in CAPTURE_FILES.get(spec.script, (spec.script,)):
                 target = script if name == spec.script else script.with_name(name)
                 state = _file_provenance(target, name, manifest)
-                if state == "missing" and name != spec.script:
+                if state == "missing" and name == capture_catalogue.HOOK_MODULE:
+                    health.problems.append(
+                        f"The module {name} next to {spec.script} is missing, so the hook does nothing. "
+                        "'claudeglass capture connect' puts it back."
+                    )
+                elif state == "missing" and name != spec.script:
                     health.problems.append(
                         f"The catalogue {name} next to {spec.script} is missing, so its notes fall back to "
                         "plain wording."
@@ -1074,14 +1089,19 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     final rename fails (ROB-P7: a locked file on Windows, say), that one
     file is skipped -- its previous copy is left running rather than the
     whole install failing -- and it keeps its old manifest stamp, so
-    :func:`check_capture` still reports it accurately. Returns the paths
-    actually written."""
+    :func:`check_capture` still reports it accurately. A capture script
+    (the launcher) is written last, and only once the module it imports is
+    there: it is the file that starts using the others, so an install cut
+    short never leaves one pointing at nothing. Returns the paths actually
+    written."""
     dest_dir = Path(config_dir) / "hooks"
     dest_dir.mkdir(parents=True, exist_ok=True)
     written = []
     manifest = _load_manifest(config_dir)
     changed = False
-    for name in names:
+    for name in sorted(names, key=lambda name: name in CAPTURE_SCRIPTS):
+        if name in CAPTURE_SCRIPTS and not (dest_dir / capture_catalogue.HOOK_MODULE).is_file():
+            continue
         data = (importlib.resources.files("claudeglass") / "hooks" / name).read_bytes()
         dest = dest_dir / name
         tmp = dest.with_name(f"{name}.{os.getpid()}.tmp")
@@ -1111,16 +1131,19 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
     starts (ROB-P7), so a newer pip install reaches the hook scripts
     Claude Code actually runs without waiting for the next ``capture
     connect``. A file nothing has installed yet, or one already current,
-    is left alone; returns the paths actually rewritten."""
+    is left alone, except that a capture script that is installed and
+    isn't hand-edited gets back any of its own files that are missing: an
+    install from before the hook moved into a module has none, and the
+    launcher that replaces its script needs one. Returns the paths
+    actually rewritten."""
     dest_dir = Path(config_dir) / "hooks"
     if not dest_dir.is_dir():
         return []
     manifest = _load_manifest(config_dir)
+    states = {name: _file_provenance(dest_dir / name, name, manifest) for name in sorted(ALL_HOOK_FILES)}
     stale = []
     healed = False
-    for name in sorted(ALL_HOOK_FILES):
-        dest = dest_dir / name
-        state = _file_provenance(dest, name, manifest)
+    for name, state in states.items():
         if state == "ok":
             packaged_hash = _sha256(_packaged_bytes(name))
             if manifest.get(name) != packaged_hash:
@@ -1128,6 +1151,10 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
                 healed = True
         elif state == "outdated":
             stale.append(name)
+    for script, names in CAPTURE_FILES.items():
+        if states.get(script) in ("missing", "modified"):
+            continue
+        stale += [name for name in names if states[name] == "missing" and name not in stale]
     if healed and not stale:
         _save_manifest(config_dir, manifest)
     if stale:

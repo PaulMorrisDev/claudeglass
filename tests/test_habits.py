@@ -56,6 +56,14 @@ def _cycle(week: str = WEEKS[0], cost: float = 1.0, tag: CaptureTag | None = Non
     return CycleFact(session_id=session_id, ts=ts, week=week, cost=cost, turns=1, tag=tag, **kw)
 
 
+def _noisy(waste: float = 1.0, week: str = WEEKS[0], **kw) -> CycleFact:
+    """A message with one big tool output that, with no tag to say it was
+    needed, makes the quiet_output habit worth ``waste`` USD (half its
+    carrying cost): a plain priced habit for tests of how habits are ranked,
+    trended and shown."""
+    return _cycle(week, big_outputs=[("Bash", habits.BIG_OUTPUT_TOKENS, 2 * waste)], **kw)
+
+
 def _agent(**kw) -> AgentFact:
     return AgentFact(**{"session_id": "s1", "agent_type": "general-purpose", "week": WEEKS[0], "cost": 1.0, **kw})
 
@@ -83,7 +91,7 @@ def _weekly(waste_per_message: list[float | None]) -> tuple[Habits, Item]:
     for week, rate in zip(WEEKS, waste_per_message):
         h.cycles.extend(_cycle(week) for _ in range(habits.TREND_MIN_CYCLES if rate is not None else 1))
         waste[week] = 3 * (rate or 0.0)
-    return h, Item("tool_loops", 1.0, 1, ("inferred",), "", waste=waste)
+    return h, Item("quiet_output", 1.0, 1, ("inferred",), "", waste=waste)
 
 
 def test_a_steady_fall_is_improving_and_prices_what_the_habit_already_saves():
@@ -132,7 +140,7 @@ def test_a_thin_week_is_a_dash_and_does_not_count():
     ],
 )
 def test_confidence_rises_with_evidence_and_inference_alone_never_reaches_high(n, sources, level):
-    assert habits.confidence(Item("tool_loops", None, n, sources, "")) == level
+    assert habits.confidence(Item("quiet_output", None, n, sources, "")) == level
 
 
 # -- the playbook ---------------------------------------------------------------------
@@ -144,13 +152,13 @@ def test_the_playbook_puts_the_largest_saving_first_and_unpriced_habits_last():
         # 5 messages (the shared effort threshold, UX-3) with thinking well
         # over the shared 30% share gate (0.2 of 0.3 output = 66.7%).
         *(_cycle(tag=easy, effort="high", thinking_cost=0.2, output_cost=0.3) for _ in range(5)),
-        _cycle(loops=1, loop_cost=1.0),
+        _noisy(),
         *(_cycle(tag=CaptureTag(skill="unneeded"), skill_calls=[("lint", False, 0, 0.0)]) for _ in range(2)),
     ])
     items = habits.playbook(h)
-    assert [i.key for i in items] == ["tool_loops", "effort_fit", "skill_unneeded"]
-    loops, effort, skill = items
-    assert loops.saving == pytest.approx(1.0) and loops.sources == ("inferred",)
+    assert [i.key for i in items] == ["quiet_output", "effort_fit", "skill_unneeded"]
+    noisy, effort, skill = items
+    assert noisy.saving == pytest.approx(1.0) and noisy.sources == ("inferred",)
     # Half the thinking on each easy ask at high effort.
     assert effort.saving == pytest.approx(5 * 0.1) and effort.sources == ("reported",)
     assert skill.saving is None and "(lint)" in skill.evidence
@@ -343,6 +351,7 @@ def test_every_table_is_there_even_with_nothing_to_show():
         "habits_briefs",
         "habits_brief_templates",
         "habits_agents",
+        "habits_explore_by_model",
         "habits_effort_fit",
         "habits_setups",
         "habits_agents_by_task",
@@ -412,30 +421,30 @@ def test_the_digest_title_ignores_how_many_days_the_messages_cover():
     """The title says the picked window's day count, whatever span the
     messages in it cover: 3 days of messages in a 7-day window is still
     "last 7 days"."""
-    three_days = [_cycle("2026-08-03", loops=1, loop_cost=1.0), _cycle("2026-08-06", loops=1, loop_cost=1.0)]
+    three_days = [_noisy(1.0, "2026-08-03"), _noisy(1.0, "2026-08-06")]
     assert Habits(cycles=three_days).span_days == pytest.approx(3.0)
     assert habits.digest_table(Habits(cycles=three_days, window="last 7 days")).title == "Weekly pace (last 7 days)"
 
-    one_day = [_cycle(loops=1, loop_cost=1.0)]
+    one_day = [_noisy()]
     assert habits.digest_table(Habits(cycles=one_day, window="last 30 days")).title == "Weekly pace (last 30 days)"
 
-    fortnight = [_cycle(WEEKS[0], loops=1, loop_cost=1.0), _cycle(WEEKS[2], loops=1, loop_cost=1.0)]
+    fortnight = [_noisy(1.0, WEEKS[0]), _noisy(1.0, WEEKS[2])]
     assert habits.digest_table(Habits(cycles=fortnight, window="all time")).title == "Weekly pace (all time)"
     assert habits.digest_table(Habits(cycles=fortnight, window="last 7 days")).title == "Weekly pace (last 7 days)"
 
 
 def test_the_digest_leads_with_the_habits_worth_most_then_what_met_goals_cost():
     h = Habits(
-        cycles=[_cycle(loops=1, loop_cost=2.0), _cycle(WEEKS[1], loops=1, loop_cost=0.0)],
+        cycles=[_noisy(2.0), _noisy(0.0, WEEKS[1])],
         agents=[_agent(report_tokens=4_000, report_carry=1.0)],
         pieces=[Piece("met", 3.0, 1, None, (), (), "your feedback"), Piece("missed", 1.0, 1, None, (), (), "x")],
     )
     rows = _rows(habits.digest_table(h))
     # P4 leftover: outcome_misses is now priced (a floor on the misses'
-    # real Piece.cost), so it joins the top-3 ranking alongside tool_loops
+    # real Piece.cost), so it joins the top-3 ranking alongside quiet_output
     # and short_reports instead of sitting out as unpriced.
     assert [r["item"] for r in rows] == ["top_1", "top_2", "top_3", "cost_per_met"]
-    assert rows[0]["what"] == habits.ITEMS["tool_loops"][1]
+    assert rows[0]["what"] == habits.ITEMS["quiet_output"][1]
     # Savings are spread over the weeks the messages cover.
     assert rows[0]["value"] == pytest.approx(2.0 / h.span_weeks)
     assert rows[1]["what"] == habits.ITEMS["short_reports"][1]
@@ -445,16 +454,16 @@ def test_the_digest_leads_with_the_habits_worth_most_then_what_met_goals_cost():
 
 
 def test_the_playbook_table_carries_the_example_the_basis_and_the_trend():
-    h = Habits(cycles=[_cycle(loops=1, loop_cost=1.0)])
+    h = Habits(cycles=[_noisy()])
     row = _rows(habits.playbook_table(h, habits.playbook(h)))[0]
-    assert row["habit"] == "tool_loops" and row["theme"] == "verification"
-    assert row["example"] == habits.EXAMPLES["tool_loops"] and row["basis"] == habits.BASES["tool_loops"]
+    assert row["habit"] == "quiet_output" and row["theme"] == "tool_output"
+    assert row["example"] == habits.EXAMPLES["quiet_output"] and row["basis"] == habits.BASES["quiet_output"]
     assert (row["source"], row["confidence"], row["trend"]) == ("inferred", "low", "new")
     # UX-8: a where/trade-off/undo entry, same three-part shape as
     # fixes.py's explainer for a Recommendation.
-    assert row["where"] == habits.WHERE["tool_loops"]
-    assert row["trade_off"] == habits.TRADE_OFFS["tool_loops"]
-    assert row["how_to_undo"] == habits.UNDO["tool_loops"]
+    assert row["where"] == habits.WHERE["quiet_output"]
+    assert row["trade_off"] == habits.TRADE_OFFS["quiet_output"]
+    assert row["how_to_undo"] == habits.UNDO["quiet_output"]
 
 
 def test_every_playbook_item_has_a_where_trade_off_and_undo_entry():
@@ -478,7 +487,7 @@ def test_apply_covered_by_drops_the_saving_and_names_the_rule_when_it_fired():
     once, by the rule, not twice."""
     from claudeglass.model import ReportModel, Recommendation, Section
 
-    h = Habits(cycles=[_cycle(loops=1, loop_cost=1.0)])
+    h = Habits(cycles=[_noisy()])
     table = habits.playbook_table(h, habits.playbook(h))
     # Graft an effort_fit row on, with a saving, so this test doesn't
     # depend on the specific facts _item_effort_fit needs to fire.
@@ -505,7 +514,7 @@ def test_apply_covered_by_drops_the_saving_and_names_the_rule_when_it_fired():
     assert covered_row[covered_rule_idx] == "effort-mismatch"
     # A row for an item not in COVERED_BY, or whose rule didn't fire, is
     # untouched.
-    uncovered_row = next(r for r in table.rows if r[key_idx] == "tool_loops")
+    uncovered_row = next(r for r in table.rows if r[key_idx] == "quiet_output")
     assert uncovered_row[covered_idx] == ""
     assert uncovered_row[covered_rule_idx] == ""
 
@@ -516,7 +525,7 @@ def test_apply_covered_by_leaves_the_saving_alone_when_the_rule_did_not_fire():
     is, so it must not be dropped."""
     from claudeglass.model import ReportModel, Section
 
-    h = Habits(cycles=[_cycle(loops=1, loop_cost=1.0)])
+    h = Habits(cycles=[_noisy()])
     table = habits.playbook_table(h, habits.playbook(h))
     key_idx = [c.key for c in table.columns].index("habit")
     saving_idx = [c.key for c in table.columns].index("saving")
@@ -754,6 +763,62 @@ def test_a_workflow_agent_named_explore_is_not_a_message_that_delegated_to_explo
     assert [c.explore_agents for c in h.cycles] == [0, 0]
     (fact,) = h.agents
     assert fact.agent_type == "Explore" and fact.level == "hard"
+
+
+def test_a_workflow_agent_is_not_a_direct_agent_and_keeps_the_context_it_read(tmp_path, pricing):
+    corpus, agent = _workflow_session(tmp_path, agent_type="Explore")
+    (fact,) = habits.collect(corpus, pricing).agents
+    assert fact.direct is False
+    assert fact.context_tokens == sum(t.ctx for t in capture_mod._priced(agent)) > 0
+    assert AgentFact(session_id="s", agent_type="x", week="", cost=0.0).direct is True
+
+
+# -- Explore cost by model (stands in for the dropped explore_reads hint) ----------------
+
+
+def test_explore_cost_is_split_by_model_with_the_costliest_first():
+    h = Habits(agents=[
+        _agent(agent_type="Explore", model="claude-opus-4-1", cost=3.0, context_tokens=300_000),
+        _agent(agent_type="Explore", model="claude-opus-4-1", cost=1.0, context_tokens=100_000),
+        _agent(agent_type="Explore", model="claude-haiku-4-5-20251001", cost=1.0, context_tokens=200_000),
+        _agent(agent_type="Explore", model="", cost=0.0),
+    ])
+    table = _table(habits.section_from(h), "habits_explore_by_model")
+    assert table.title == "Explore cost by model"
+    rows = _rows(table)
+    assert [r["model"] for r in rows] == ["opus", "haiku", "unknown"]
+    opus, haiku, unknown = rows
+    assert (opus["runs"], opus["cost"], opus["avg_cost"], opus["avg_context"]) == (2, 4.0, 2.0, 200_000)
+    assert opus["share_pct"] == pytest.approx(80.0) and haiku["share_pct"] == pytest.approx(20.0)
+    assert unknown["runs"] == 1 and unknown["cost"] == 0.0
+
+
+def test_explore_cost_leaves_out_other_agents_and_the_agents_of_a_workflow():
+    h = Habits(agents=[
+        _agent(agent_type="general-purpose", model="claude-opus-4-1", cost=9.0),
+        _agent(agent_type="Explore", model="claude-opus-4-1", cost=9.0, direct=False),
+    ])
+    assert _table(habits.section_from(h), "habits_explore_by_model").rows == []
+    assert _table(habits.section_from(Habits()), "habits_explore_by_model").rows == []
+
+
+def test_big_tool_output_is_counted_per_tool_with_what_carrying_it_cost():
+    h = Habits(cycles=[
+        _cycle(big_outputs=[("Bash", 20_000, 0.5), ("Read", 30_000, 2.0)]),
+        _cycle(big_outputs=[("Bash", 25_000, 0.25)]),
+    ])
+    table = _table(habits.section_from(h), "habits_tool_output")
+    assert [c.key for c in table.columns] == ["tool", "outputs", "tokens", "cost"]
+    assert _rows(table) == [
+        {"tool": "Read", "outputs": 1, "tokens": 30_000, "cost": 2.0},
+        {"tool": "Bash", "outputs": 2, "tokens": 45_000, "cost": 0.75},
+    ]
+
+
+def test_a_failing_command_is_no_longer_a_playbook_habit():
+    """The tool_loops habit moved into the waste page's failed-command count."""
+    assert "tool_loops" not in habits.ITEMS
+    assert not hasattr(CycleFact(session_id="s", ts=None, week="", cost=0.0, turns=1, tag=None), "loops")
 
 
 def test_the_spawn_of_an_agent_a_workflow_agent_started_is_its_workflows_reply(tmp_path):
@@ -1583,7 +1648,7 @@ def test_feedback_that_contradicts_easy_reports_lowers_effort_fits_confidence():
 
 
 def test_confidence_ignores_self_report_calibration_for_other_habits():
-    assert habits.confidence(Item("tool_loops", None, 20, ("inferred",), ""), self_report_ok=False) == "medium"
+    assert habits.confidence(Item("quiet_output", None, 20, ("inferred",), ""), self_report_ok=False) == "medium"
 
 
 # -- CAP-6: a consistency score for self-reports -----------------------------

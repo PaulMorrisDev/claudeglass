@@ -67,7 +67,11 @@ function renderPromptingSection(section, container) {
   var rows = habitsTable ? tableRowsAsObjects(habitsTable) : [];
   if (!rows.length) {
     block.appendChild(
-      emptyState("None of these habits turned up in this window.", null, "Coaching notes warn you the moment one does.")
+      emptyState(
+        "None of these habits turned up in this window.",
+        null,
+        "Coaching notes warn you about small requests, big tasks, huge pastes and checks on a background task as they happen."
+      )
     );
   } else {
     var cards = el("div", { class: "habit-cards" });

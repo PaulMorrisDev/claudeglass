@@ -32,8 +32,11 @@ reader" convention -- see that module's docstring):
 - A turn whose only errors are commands that ran and reported failure
   (``failed``: a failing test or build, a timeout) is not wasted: Claude
   reads that output and acts on it. It is counted
-  (``WasteStats.failed_command_turns``) and left out. One whose only
-  errors are denials falls through to ``tool-denial``. A digest from
+  (``WasteStats.failed_command_turns``) and left out; so is the same
+  command failing :data:`LOOP_FAILURES` or more times within one message
+  of yours, in a main session (``WasteStats.failed_command_loops``,
+  :func:`command_loops`), which once had a Work habits card of its own.
+  One whose only errors are denials falls through to ``tool-denial``. A digest from
   before ``tool_errors_by_kind`` existed counts every error as
   ``tool-error``.
 - ``interrupt`` -- a turn immediately followed by ``[Request
@@ -214,6 +217,11 @@ CAUSES: tuple[str, ...] = ("tool-error", "blocked", "interrupt", "tool-denial", 
 
 #: The count-only cause, reported alongside CAUSES but never priced.
 API_ERROR_RETRY_CAUSE = "api-error-retry"
+
+#: The same command failing this many times within one message of yours
+#: is a loop (counted, never priced: see ``WasteStats.failed_command_loops``).
+LOOP_FAILURES = 3
+_SHELL_TOOLS = ("Bash", "PowerShell")
 
 #: A blocked turn whose blocked calls were all a known token saver's own
 #: redirect -- deliberate, not waste (see the module docstring and
@@ -462,6 +470,10 @@ class WasteStats:
         #: Turns whose only failed tool calls were commands that ran and
         #: reported failure -- work, not waste (see the module docstring).
         self.failed_command_turns = 0
+        #: Commands that failed again and again within one message of
+        #: yours (:func:`command_loops`), in main sessions. Counted, not
+        #: priced and not waste.
+        self.failed_command_loops = 0
         #: REDIRECT_CAUSE turns: priced and counted, but never folded
         #: into wasted_turns/wasted_cost_usd/wasted_tokens, by_agent_type
         #: or by_session (see the module docstring).
@@ -490,6 +502,8 @@ class WasteStats:
 
         priced = _priced_turns(result)
         n = len(priced)
+        if result.meta.kind == "top-level":
+            self.failed_command_loops += command_loops(priced)
         for i, turn in enumerate(priced):
             resolved = rates.resolve_model(turn.model)
             breakdown = price_turn(turn, resolved)
@@ -583,6 +597,22 @@ class WasteStats:
         return sum(acc.tokens for acc in self._by_cause.values())
 
 
+def command_loops(turns: Sequence[Turn]) -> int:
+    """How many times a command failed :data:`LOOP_FAILURES` or more times
+    within one message of yours: the same ``cmd_prefix`` on a shell call
+    that came back as an error, counted from the reply after your message
+    to the one before your next."""
+    loops = 0
+    failing: dict[str, int] = {}
+    for turn in turns:
+        if turn.human_prompt_chars is not None:
+            loops += sum(1 for n in failing.values() if n >= LOOP_FAILURES)
+            failing = {}
+        if turn.cmd_prefix and any(turn.tool_errors_by_tool.get(tool, 0) for tool in _SHELL_TOOLS):
+            failing[turn.cmd_prefix] = failing.get(turn.cmd_prefix, 0) + 1
+    return loops + sum(1 for n in failing.values() if n >= LOOP_FAILURES)
+
+
 def compute_waste(
     results: Sequence[TranscriptResult],
     rates: Pricing,
@@ -652,6 +682,10 @@ def build_section(stats: WasteStats, thresholds: WasteThresholds | None = None) 
         "output, so they are not counted as wasted."
     )
     notes.append(
+        f"{stats.failed_command_loops} time(s) a command failed {LOOP_FAILURES} or more times within one "
+        "message of yours, in a main session. Counted only: the retries are not priced here."
+    )
+    notes.append(
         f"{stats.redirected_turns} turn(s) were a known token saver redirecting a call to its own "
         "tools on purpose. They have their own cost, but are not counted as wasted -- see the "
         "\"redirected\" row below and waste_blocked_by."
@@ -679,6 +713,7 @@ def _summary_table(stats: WasteStats) -> Table:
             Column(key="limit_pause_excluded_turns", label="Excluded (limit pause)", kind="int"),
             Column(key="api_error_retry_turns", label="API-error-retry turns (count only)", kind="int"),
             Column(key="failed_command_turns", label="Not counted (a command ran and failed)", kind="int"),
+            Column(key="failed_command_loops", label="Commands failing again and again", kind="int"),
             Column(key="redirected_turns", label="Redirected (not wasted)", kind="int"),
             Column(key="redirected_cost_usd", label="Redirected cost (not wasted)", kind="money"),
         ],
@@ -695,6 +730,7 @@ def _summary_table(stats: WasteStats) -> Table:
                 stats.limit_pause_excluded_turns,
                 stats.api_error_retry_turns,
                 stats.failed_command_turns,
+                stats.failed_command_loops,
                 stats.redirected_turns,
                 round(stats.redirected_cost_usd, 6),
             ]

@@ -319,6 +319,17 @@ __version__ = "0.14.0"
 #: the reply before the run's ``started`` time, or none. Also, a tag written
 #: in reply to a background agent's (or workflow's) report counts for the
 #: cycle whose call launched it, not the one open when the report arrived.
+#:
+#: And in 37, what counts as a vague correction or a repeated request
+#: (``Turn.human_vague``, ``human_repeat``). A vague correction needs a
+#: correction or bad-outcome phrase ("still failing", "that didn't work"):
+#: a bare "fix this", anything ending in a question mark, a go-ahead and a
+#: thank-you are no longer one. A poll ("how is it going"), a go-ahead and
+#: an acknowledgement are never a repeat. A pre-37 digest from before
+#: this change counts them.
+#:
+#: Also in 37: ``Turn.human_question``, ``config_edit_count`` and
+#: ``agent_edit_files`` for the small-requests check.
 PARSER_VERSION = 37
 
 #: Bump when the model.py contract changes in a way that invalidates the

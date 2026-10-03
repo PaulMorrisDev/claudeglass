@@ -20,7 +20,11 @@ each failed (`blocked`, `denied`, `failed` or `misfire`, read from the
 start of the error text and then dropped). A turn whose only failed
 calls are commands that ran and reported failure (a failing test or
 build) isn't wasted: Claude used that output. It is counted in
-`waste_summary`'s `failed_command_turns` and left out. Everything else is read off
+`waste_summary`'s `failed_command_turns` and left out. The same command
+failing three or more times within one message of yours (in a main
+session) is counted too, as `failed_command_loops`: a count only, neither
+priced nor wasted. It replaces the "stop retrying a failing command" habit
+that Work habits used to price. Everything else is read off
 `EventKind`/`Turn.preceding_primary`/`Turn.gap_cause`/`TranscriptMeta.
 stopped_by_user`, all of which already existed.
 

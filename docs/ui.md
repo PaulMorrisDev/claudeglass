@@ -907,13 +907,20 @@ trying** as cards (saving a week, what your sessions show, an example to
 copy, how often it was seen, its source, confidence, a weekly pace line
 and how the saving is worked out); the brief templates with Copy
 buttons; **Kinds of task**; the other breakdowns under More tables; and
-the notes. Then the `prompting` section, **How you prompt**
+the notes (More tables includes **Big tool output**, which counts big
+results per tool with what carrying them cost, and **Explore cost by
+model**, which splits what your Explore agents cost across the models they
+ran on). Then the `prompting` section, **How you prompt**
 (`renderPromptingSection`): a card per prompting habit seen (small
-requests sent one at a time, the same request again, stopping Claude
-again and again, big tasks without a plan, vague corrections, huge
-pastes) with what it cost, what to try instead, how often it happened
+requests sent one at a time, the same request again, asking how it's
+going, stopping Claude again and again, big tasks without a plan, vague
+corrections, huge pastes, context carried into new pieces) with what it cost ("Not priced"
+for a vague correction), what to try instead, how often it happened
 per 100 messages and a by-week line; then, once there are coaching
-notes, **Tips Claude showed**. Nothing here changes a setting.
+notes, **Tips Claude showed**, with how often Claude passed each tip on
+("relayed N of M" for a hint Claude is told to show every time, "judged
+relevant N of M" for one it decides on) and how often it called the tip a
+misfire. Nothing here changes a setting.
 
 ### Setup › Settings
 

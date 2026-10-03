@@ -330,7 +330,7 @@
   }
  ],
  "text": {
-  "intro": "The user turned on ClaudeGlass metrics capture, to see where their tokens go.",
+  "intro": "The user turned on ClaudeGlass metrics capture, to see where their tokens go. If you are a subagent, ignore this note.",
   "main_tag_intro": "End your final reply to each user message with one line, [cg: key=word ...], using only these keys and words:",
   "sub_tag_intro": "End your final report with one line, {tag}, using only these words:",
   "sub_tag": "[result: done|partial|blocked]",
@@ -346,6 +346,23 @@
   "Plan"
  ],
  "big_output_tokens": 8000,
+ "result_tools": [
+  "Read",
+  "Grep",
+  "Glob",
+  "WebFetch",
+  "WebSearch",
+  "ExitPlanMode"
+ ],
+ "result_image_max_tokens": 1600,
+ "result_image_patch_px": 28,
+ "result_persist_chars": {
+  "Grep": 20000,
+  "WebFetch": 50000,
+  "Bash": 30000,
+  "PowerShell": 30000
+ },
+ "result_preview_chars": 2200,
  "signal_events": {
   "SessionEnd": "session_end",
   "Notification": "waits",
@@ -589,71 +606,49 @@
   "version": 1,
   "file": "coaching.json",
   "state_file": "coach-state.json",
-  "read_tools": [
-   "Read",
-   "Grep",
-   "Glob"
-  ],
   "thresholds": {
-   "clear_context_tokens": 100000,
-   "cold_min_tokens": 20000,
+   "cold_min_tokens": 100000,
+   "cold_rest_hours": 12,
+   "warm_prefix_tokens": 42000,
    "quiet_output_tokens": 8000,
-   "explore_reads": 8,
    "plan_fresh_tokens": 40000,
    "drip_count": 3,
    "drip_window_minutes": 20,
    "drip_chars": 300,
-   "vague_fix_chars": 80,
    "big_paste_tokens": 10000,
-   "plan_steps": 4,
+   "plan_steps": 3,
    "plan_min_chars": 150,
-   "repeat_similarity": 0.8,
-   "repeat_window_minutes": 60,
-   "repeat_min_words": 4,
-   "stop_loop_count": 3,
-   "stop_window_minutes": 20,
    "cooldown_minutes": 30,
-   "rearm_factor": 1.5
+   "rearm_factor": 1.5,
+   "max_backoff": 3
   },
   "text": {
-   "cache_cold": "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context again: about {ctx} tokens at the cache-write price. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying so, and that /clear before a new task after a break avoids it. If it carries on the same work, don't mention it.",
-   "clear_context": "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that /clear before a new task would have saved that. If it carries on the same work, don't mention it.",
-   "drip_feed": "The user has sent {count} small change requests in a row, one message each, and every message re-reads the whole context. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting that working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
-   "repeat_ask": "The user has sent much the same request as one you answered earlier. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting that saying what was wrong with the last attempt gets a better next one than sending the request again.",
-   "plan_first": "The user's message asks for about {steps} separate changes, outside plan mode. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting plan mode (Shift+Tab) for a job this size: it agrees the approach before anything changes.",
-   "stop_loop": "The user has stopped you {count} times in the last {minutes} minutes. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that plan mode (Shift+Tab) agrees the approach before any work starts.",
-   "vague_fix": "The user says something is wrong but not what they saw or expected. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that naming what they saw and expected, or pasting the error, gets a fix first time.",
-   "big_paste": "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a log, a file or command output, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting they paste only the part that matters, or save it to a file and give the path so only what's needed is read.",
+   "cold_return": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user came back to this session after a break. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, the last reply or the task panel already says. For new work, running /clear first skips the rewrite.",
+   "status_poll": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user is asking about work that is still running in the background. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** Asking how it's going while work runs in the background makes Claude read the whole session, about {ctx} tokens, to say little that is new. {poll_how}",
+   "drip_feed": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user has sent {count} small change requests in a row, one message each. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** That's {count} small changes in a row, each its own message, and each one re-reads the whole session, about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
+   "plan_first": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user's message asks for about {steps} separate changes, outside plan mode. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** That's a job of about {steps} separate changes, sent outside plan mode. Plan mode agrees the approach before anything changes. {plan_how}",
+   "big_paste": "If most of the user's message is a log, a file or command output, write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. Otherwise don't mention this note.\n> **ClaudeGlass tip:** Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
-   "explore_reads": "You've made {reads} reads and searches for this message, about {tokens} tokens that every later reply reads again. {advice}",
-   "plan_fresh": "This plan was approved with about {kept} tokens of planning in context, which every reply of the build reads again. Before you start building, tell the user in a quote block starting \"> **ClaudeGlass tip:**\" that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry about {kept} fewer tokens on each reply. Then carry on unless they stop you.",
+   "plan_fresh": "Write the tip on this note's last line, word for word, before you start building. Then carry on unless the user stops you.\n> **ClaudeGlass tip:** This plan was approved with about {kept} tokens of planning in the session, and every reply of the build reads them again. Building it in a fresh session would carry about {kept} fewer tokens on each reply. {fresh_how}",
+   "plan_fresh_early": "Write the tip on this note's last line, word for word, as the last line of the plan you submit for approval. If this reply doesn't end in a plan, add it to the plan you submit later. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** Approve with clear context: this session holds about {kept} tokens of planning chat, and every reply of the build would read it again. {clear_how}",
    "split_run": ""
   },
   "quiet_how": {
    "Read": "read only the lines you need, with an offset and a limit",
-   "Bash": "cut the command's output down first: a quieter flag, or a filter that keeps every error and failure line",
    "Grep": "narrow the pattern or the path, or ask for file names or counts only",
    "Glob": "narrow the pattern",
    "": "ask for less: a narrower query or a smaller page"
   },
-  "explore_advice": {
-   "explore": "If more searching is needed, hand it to an Explore agent: it searches in its own context and sends back a short summary.",
-   "tokensave": "If more searching is needed, use tokensave's own tools instead: tokensave_context for a concept, tokensave_search for a symbol, tokensave_files for files, then read only the lines you need."
-  },
   "notice": {
-   "drip_feed": "⚠️ ClaudeGlass: {count} small requests in a row, one message each. Work out everything that needs changing and send it as one prompt: it costs less.",
-   "repeat_ask": "⚠️ ClaudeGlass: that's much the same request as before. Saying what was wrong with the last attempt helps more than sending it again.",
-   "plan_first": "⚠️ ClaudeGlass: a {steps}-step request outside plan mode. Plan mode (Shift+Tab) agrees the approach before anything changes.",
-   "stop_loop": "⚠️ ClaudeGlass: you've stopped Claude {count} times in {minutes} minutes. Plan mode (Shift+Tab) agrees the approach before work starts.",
-   "vague_fix": "⚠️ ClaudeGlass: say what you saw and what you expected, or paste the error, to get a fix first time.",
-   "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. Paste only the part that matters, or give a file path.",
+   "plan_fresh": "⚠️ ClaudeGlass: This plan was approved with about {kept} tokens of planning in the session, and every reply of the build reads them again. Building it in a fresh session would carry about {kept} fewer tokens on each reply. {fresh_how}",
+   "plan_fresh_early": "⚠️ ClaudeGlass: Approve with clear context: this session holds about {kept} tokens of planning chat, and every reply of the build would read it again. {clear_how}",
+   "drip_feed": "⚠️ ClaudeGlass: That's {count} small changes in a row, each its own message, and each one re-reads the whole session, about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
+   "plan_first": "⚠️ ClaudeGlass: That's a job of about {steps} separate changes, sent outside plan mode. Plan mode agrees the approach before anything changes. {plan_how}",
+   "big_paste": "⚠️ ClaudeGlass: Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
+   "status_poll": "⚠️ ClaudeGlass: Asking how it's going while work runs in the background makes Claude read the whole session, about {ctx} tokens, to say little that is new. {poll_how}",
+   "cold_return": "⚠️ ClaudeGlass: The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, the last reply or the task panel already says. For new work, running /clear first skips the rewrite.",
    "split_run": "⚠️ ClaudeGlass: this {agent} run has made about {replies} replies, and each one reads the whole run again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next time, give each agent a smaller piece of the work."
   },
-  "correction_pattern": "\\b(?:that'?s (?:wrong|not right|not what|incorrect|broken)|th(?:is|at) (?:is|was) (?:wrong|broken|incorrect|not (?:right|working|what))|it'?s (?:still )?(?:broken|wrong|not working|failing|incorrect)|(?:still|it still) (?:broken|failing|wrong|not working|doesn'?t work|fails)|(?:doesn'?t|does not|didn'?t|did not) work|not what (?:i|we) (?:asked|wanted|meant|said)|you (?:broke|missed|forgot|ignored|didn'?t (?:do|read|follow|check|run|fix))|why (?:did|didn'?t|would|are|is) you|(?:undo|revert|roll back) (?:that|this|it|the|your)|that broke|you'?ve broken|try again|redo (?:it|that|this)|wrong (?:file|approach|answer|place|branch|one))\\b",
-  "correction_scan_chars": 200,
-  "fix_pattern": "\\b(?:fix|fixed|broken|wrong|incorrect|still|again|bug|error|errors|failing|fails|crash(?:es|ed)?)\\b",
-  "question_pattern": "\\s*(?:what|which|who|whom|whose|where|when|how)\\b",
-  "specific_pattern": "[`\\\"/\\\\:#<>(){}\\[\\]=]|\\w\\.\\w|\\d|(?i:\\b(?:should|must|needs? to|supposed to|meant to)\\s+(?:say|show|read|print|return|display|be|use|have|look|go)\\s+(?!(?:working|fixed|right|correct|better|ok|okay|fine|done|good)\\b)\\w+|\\bmake (?:it|this|that|them) (?!(?:work|right|better|correct)\\b)\\w+|\\b(?:change|set|turn|rename)\\b[^.!?]{0,40}\\bto\\b|\\b(?:expected|instead|rather than)\\b)",
   "interrupt_prefix": "[Request interrupted",
   "not_typed_prefixes": [
    "<command-",
@@ -680,6 +675,9 @@
   "go_max_chars": 60,
   "status_pattern": "(?:(?:hi|hey|ok|okay|so|and|well)[\\s,.!]+)?(?:how(?:'?s| is| are)(?: it| this| that| everything| things| the [a-z]+(?: [a-z]+)?)? (?:going|progressing|looking|coming(?: along)?|doing)|what(?:'?s| is)(?: the)? (?:status|progress|state|remaining|left|happening|going on)|(?:is|are)(?: it| this| that| everything| they| we)? (?:all )?(?:done|finished|complete|completed|merged|running|ready|working|still (?:running|working|going))|are you (?:still )?(?:working|running|there|done|finished)|any (?:updates?|progress|news|findings|results?)|where are we(?: at| now)?|status|progress|updates?|how (?:long|much) (?:is )?(?:left|remaining|to go))(?:[\\s,.!?]+(?:now|yet|so far|please|there|at the moment|currently))*[\\s!.,?]*",
   "status_max_chars": 120,
+  "background_launch_pattern": "Command running in background with ID: |was moved to the background \\(ID: |Async agent launched successfully|Workflow launched in background\\. Task ID: ",
+  "background_scan_chars": 400,
+  "task_notification_prefix": "<task-notification",
   "reply_scan_chars": 1200,
   "reply_fence_pattern": "(?s)```.*?(?:```|\\Z)",
   "reply_tip_block_pattern": "(?m)^[ \\t]*>[ \\t]*(?:\\U0001F4A1\\U0000FE0F?[ \\t]*)?[*_]*ClaudeGlass(?: tip)?:.*(?:\\n[ \\t]*>.*)*\\n?",
@@ -708,6 +706,33 @@
    "MultiEdit",
    "NotebookEdit"
   ],
+  "how": {
+   "plan_how": {
+    "desktop": "Start the message with /plan, or pick Plan in the mode menu next to Send.",
+    "terminal": "Press Shift+Tab to switch to it."
+   },
+   "fresh_how": {
+    "desktop": "Next time, pick the approval option that clears the context first; if the dialog has none, run /clear, then ask Claude to implement the plan in `<file>`.",
+    "terminal": "Run /clear, then ask Claude to implement the plan in `<file>`."
+   },
+   "clear_how": {
+    "desktop": "Pick the approval option that clears the context first; if the dialog has none, run /clear, then ask Claude to implement the plan in `<file>`.",
+    "terminal": "Run /clear first, then ask Claude to implement the plan in `<file>`."
+   },
+   "poll_how": {
+    "desktop": "The task panel shows what is still running, with no message sent.",
+    "terminal": "Typing /tasks shows what is still running, with no message sent."
+   }
+  },
+  "asks_pattern": "\\s*(?:what|which|who|whom|whose|where|when|why|how)\\b",
+  "config_path_pattern": "(?:^|[\\\\/])\\.claude(?:[\\\\/]|$)",
+  "shell_write_pattern": "(?:\\b(?:sed|perl)\\b[^\\n|;&]*?\\s-(?:[A-Za-z]*i[A-Za-z]*(?=[\\s.]|$)|-in-place\\b)|\\b(?:Set|Add)-Content\\b|\\[(?:System\\.)?IO\\.File\\]::(?:WriteAll(?:Text|Lines|Bytes)|AppendAll(?:Text|Lines))|\\b(?:cat|echo|printf)\\b[^\\n|;&]*?(?<![\\d&])>>?(?!&)[ \\t]*(?!/dev/null|nul\\b|\\$null)[^\\s&|;>]|\\b(?:cat|echo|printf)\\b[^\\n]*\\|[ \\t]*tee\\b[ \\t]+(?:-a[ \\t]+)?(?!/dev/null|nul\\b)[^\\s&|;>-]|(?:^|[;\\n(&|])[ \\t]*(?:[\\\"'$@]|(?:echo|write-output|write|get-content|gc|cat|type)\\b)[^\\n;]*\\|[ \\t]*(?:out-file|tee-object)\\b)",
+  "review_pattern": "\\s*(?:please\\s+)?(?:(?:can|could|would) you\\s+(?:please\\s+)?)?(?:review|audit|check|look (?:at|over|through|into)|read|explain|summari[sz]e|analy[sz]e|investigate|inspect|explore|compare|assess|evaluate|critique|list|show|tell me|describe|walk me through|go through|examine|proofread|verify)\\b",
+  "prose_noise_pattern": "(?s:```.*?(?:```|\\Z))|(?m:^[ \\t]*>.*$)|(?m:^[ \\t]*(?:\\[?\\d{4}-\\d\\d-\\d\\d|\\d\\d:\\d\\d:\\d\\d|(?:ERROR|WARN(?:ING)?|INFO|DEBUG|TRACE|FATAL)\\b|Traceback\\b|File \\\"|at \\S+ \\().*$)",
+  "plan_heading_pattern": "(?m)^[ \\t]*(?:#{1,6}[ \\t]+\\S|\\*\\*[^*\\n]{2,80}\\*\\*:?[ \\t]*$)",
+  "plan_numbered_pattern": "(?m)^[ \\t]*\\d{1,2}[.)][ \\t]+\\S",
+  "plan_doc_chars": 1500,
+  "plan_doc_items": 5,
   "ack_pattern": "(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no)(?:[\\s!.,]+(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no))*[\\s!.,]*",
   "list_item_pattern": "(?m)^[ \\t]*(?:\\d{1,2}[.)]|[-*\\u2022])[ \\t]+\\S",
   "action_pattern": "(?:^|[.;:!?\\n,]|\\band\\b|\\bthen\\b|\\balso\\b)\\s*(?:please\\s+)?(?:add|create|build|implement|make|move|migrate|refactor|rename|remove|delete|update|change|replace|write|fix|set up|convert|integrate|split|merge|extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support)\\b",

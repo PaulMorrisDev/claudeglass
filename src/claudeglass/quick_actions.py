@@ -783,13 +783,15 @@ def _tool_output(ctx: Context) -> dict:
         ))
     fixes = _merge_fixes(fixes, _rec_fixes(carry_recs))
 
-    loops = next((r for r in tables.rows("habits", "habits_tool_output") if r.get("tool") == "loops"), None)
-    if loops and (whatif._num(loops.get("loops")) or 0) >= 1:
+    # The failed-command count lives on the waste summary now, and is a
+    # count only: the retries are never priced, so no amount is quoted.
+    waste_row = next(iter(tables.rows("waste", "waste_summary")), None)
+    loops = int(whatif._num((waste_row or {}).get("failed_command_loops")) or 0)
+    if loops >= 1:
         tips.append({
             "title": "Stop a failing command sooner",
-            "text": f"{int(whatif._num(loops.get('loops')) or 0)} commands failed three or more times within one "
-            f"message, costing {_money(ctx, loops.get('cost'), period=True, prefix='about ')}. Ask Claude to stop after two failed tries "
-            "at the same command and tell you what it saw.",
+            "text": f"{loops} {'command' if loops == 1 else 'commands'} failed three or more times within one "
+            "message. Ask Claude to stop after two failed tries at the same command and tell you what it saw.",
         })
 
     if not fixes:

@@ -831,7 +831,7 @@ def _waste_model(*, recommendations=None, **tables) -> NS:
 
 _PLAYBOOK = [
     {"habit": key, "saving": saving, "evidence": f"{key} evidence.", "example": f"{key} example.", "source": "inferred"}
-    for key, saving in (("tool_loops", 2.0), ("short_reports", 1.0), ("name_files", 0.5), ("quiet_output", 0.25))
+    for key, saving in (("targeted_checks", 2.0), ("short_reports", 1.0), ("name_files", 0.5), ("quiet_output", 0.25))
 ]
 
 
@@ -843,10 +843,10 @@ def test_habits_shows_the_top_of_the_playbook_as_tips(tmp_path):
     assert result["status"] == "act" and "{{page:habits}} has the rest." in result["summary"]
     tips = result["tips"][-qa.PLAYBOOK_TIPS:]
     assert [t["title"] for t in tips] == [
-        "Stop retrying a failing command", "Ask agents for short reports", "Name the files you already know",
+        "Check each change, and run the full suite once", "Ask agents for short reports", "Name the files you already know",
     ]
     assert tips[0]["text"] == (
-        f"tool_loops evidence. Try: tool_loops example. About {qa._money(_ctx(tmp_path), 2.0)} a week (inferred)."
+        f"targeted_checks evidence. Try: targeted_checks example. About {qa._money(_ctx(tmp_path), 2.0)} a week (inferred)."
     )
 
 
@@ -858,11 +858,11 @@ def test_playbook_tips_skip_a_habit_already_covered_by_a_fired_recommendation(tm
     model = _full_model()
     model.recommendations = []
     rows = [dict(row, covered_by="") for row in _PLAYBOOK]
-    rows[0]["covered_by"] = "High effort is being spent on easy work"  # tool_loops, the top saving
+    rows[0]["covered_by"] = "High effort is being spent on easy work"  # targeted_checks, the top saving
     model.sections.append(_habits_tables(habits_playbook=rows))
     result = qa.run("habits", _ctx(tmp_path, model=model))
     tips = result["tips"][-qa.PLAYBOOK_TIPS:]
-    # tool_loops is skipped; the next 3 rows take its place.
+    # targeted_checks is skipped; the next 3 rows take its place.
     assert [t["title"] for t in tips] == [
         "Ask agents for short reports", "Name the files you already know", "Keep tool output small",
     ]
@@ -875,7 +875,7 @@ def test_playbook_tips_pick_at_most_one_habit_per_theme(tmp_path):
     model = _full_model()
     model.recommendations = []
     rows = [dict(row) for row in _PLAYBOOK]
-    rows[0]["theme"] = "delegation"  # tool_loops, saving 2.0
+    rows[0]["theme"] = "delegation"  # targeted_checks, saving 2.0
     rows[1]["theme"] = "delegation"  # short_reports, saving 1.0 -- same theme, skipped
     rows[2]["theme"] = "breakdown"  # name_files, saving 0.5
     rows[3]["theme"] = "information"  # quiet_output, saving 0.25
@@ -883,7 +883,7 @@ def test_playbook_tips_pick_at_most_one_habit_per_theme(tmp_path):
     result = qa.run("habits", _ctx(tmp_path, model=model))
     tips = result["tips"][-qa.PLAYBOOK_TIPS:]
     assert [t["title"] for t in tips] == [
-        "Stop retrying a failing command", "Name the files you already know", "Keep tool output small",
+        "Check each change, and run the full suite once", "Name the files you already know", "Keep tool output small",
     ]
 
 
@@ -894,11 +894,11 @@ def test_playbook_tips_use_the_rows_own_title_when_present(tmp_path):
     model = _full_model()
     model.recommendations = []
     rows = [dict(row, title="") for row in _PLAYBOOK]
-    rows[0]["title"] = "A custom title for tool_loops"
+    rows[0]["title"] = "A custom title for targeted_checks"
     model.sections.append(_habits_tables(habits_playbook=rows))
     result = qa.run("habits", _ctx(tmp_path, model=model))
     tips = result["tips"][-qa.PLAYBOOK_TIPS:]
-    assert tips[0]["title"] == "A custom title for tool_loops"
+    assert tips[0]["title"] == "A custom title for targeted_checks"
 
 
 # -- Habits card: who blocked it, and redirects aren't waste --------------------
@@ -990,11 +990,20 @@ def test_skills_late_or_not_needed_become_tips(tmp_path):
 
 
 def test_tool_output_says_to_stop_a_failing_command_sooner(tmp_path):
+    """The count comes from the waste summary and is never priced: no amount is quoted."""
     model = _full_model()
-    model.sections.append(_habits_tables(habits_tool_output=[{"tool": "loops", "loops": 4, "cost": 1.2}]))
+    model.sections.append(_waste_tables(waste_summary=[{"metric": "all", "failed_command_loops": 4}]))
     tips = qa.run("tool-output", _ctx(tmp_path, model=model))["tips"]
     tip = next(t for t in tips if t["title"] == "Stop a failing command sooner")
-    assert tip["text"].startswith("4 commands failed three or more times within one message")
+    assert tip["text"].startswith("4 commands failed three or more times within one message.")
+    assert "USD" not in tip["text"] and "$" not in tip["text"]
+
+
+def test_tool_output_has_no_failing_command_tip_without_repeated_failures(tmp_path):
+    model = _full_model()
+    model.sections.append(_waste_tables(waste_summary=[{"metric": "all", "failed_command_loops": 0}]))
+    tips = qa.run("tool-output", _ctx(tmp_path, model=model))["tips"]
+    assert not [t for t in tips if t["title"] == "Stop a failing command sooner"]
 
 
 def test_quality_tells_you_what_came_before_work_you_said_missed(tmp_path):

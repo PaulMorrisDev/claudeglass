@@ -31,9 +31,179 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   in a cycle. A tag moves to the cycle whose report it answers.
 - **One list of messages you didn't type.** It is shared by the
   parser, the hook and the status line.
+- **A tip always reaches you.** The desktop app folds a hook's message
+  into a collapsed row, so a coaching note that carries a tip now opens
+  by telling Claude to write it and ends on the tip itself, word for
+  word. Where Claude Code shows hook messages, the same tip also appears
+  at once; in the desktop app only Claude's reply carries it. A test
+  holds every hook entry that can return output to the foreground.
+- **Relay rate.** Tips Claude showed now reads "relayed N of M" for a
+  hint Claude is told to show every time and "judged relevant N of M"
+  for the one it decides on (paste), and counts the
+  tips Claude called a misfire.
+- **Context carried into new pieces.** A new row in How you prompt
+  counts a message that began a new piece of work with 20,000 tokens or
+  more of earlier work still in context, and what its replies paid to
+  read that work again. The reply's tag says a piece is new (a new
+  task, or no earlier context needed); with no tag saying the work went
+  on, a break of over an hour does.
+- **Explore cost by model.** A new table on Work habits splits what the
+  Explore agents you started cost across the models they ran on, with
+  the context each run read. A workflow's agents are left out.
+- **Commands that keep failing.** The waste summary counts how many
+  times the same command failed three or more times within one message
+  of yours, in a main session. It is a count only: the failures are
+  work, so nothing is priced or counted as waste.
+- **Approve a plan with a clear context.** A new `plan_fresh_early`
+  hint speaks up when you send a message in plan mode with 40,000
+  tokens or more of planning chat in the session: the plan isn't
+  written yet, so its note asks Claude to end the plan it submits with a
+  tip to approve it with a clear context. The desktop wording names the
+  approval option that clears the context first and falls back to
+  `/clear` plus asking Claude to implement the plan in its file. It stays
+  quiet when the first reply is too far into the transcript to read,
+  when the session was compacted since it started, and for a message
+  sent while Claude is working. It shares its rest with `plan_fresh`,
+  and a plan that ends with the tip counts as relayed.
+
+- **A receipt for coming back after a break.** `cold_return` replaces
+  `cache_cold`. When a message arrives after the prompt cache expired
+  and the last reply left 100,000 tokens of context or more, the note
+  asks Claude to say how long the session sat idle and how many tokens
+  the reply wrote again, less the 42,000 every session starts with, with
+  a compaction count as one clause. It says the last reply or the task
+  panel already answers "is it done?", and that `/clear` first skips the
+  rewrite for new work. It is a receipt, so it no longer depends on what
+  the message is about. It is quiet after a compaction since the last
+  reply, for a message sent while Claude works or one you didn't type,
+  and for 12 hours once shown. It shares one rest with `plan_fresh` and
+  `plan_fresh_early`.
+- **The break is timed from the real last reply.** A usage-limit line, an
+  overload or any other line Claude Code writes in place of a reply is
+  never a reply, so a limit at the end of a turn can't restart the
+  clock or zero the context. The desktop app writes old lines again when
+  it resumes a session, so a line with a repeated `uuid` or a time
+  behind the ones before it is left out, and a new background `Stop`
+  entry (and each read, search or web result) keeps the newest reply's time, context
+  and cache lifetime in `coach-state.json`: three numbers, no text.
+  When nothing was kept and the transcript ends in a replay, the
+  receipt stays silent. Run `claudeglass capture connect` once to add
+  the `Stop` entry; Setup › Capture shows a "Needs a hook entry" chip
+  until you do.
+- **Asking how it's going, while work runs in the background.** A new
+  `status_poll` hint speaks up when a message only asks how the work is
+  going and a tool result said work went to the background with no
+  message from that task since. It matches the result's own wording,
+  not `run_in_background`, which an agent or a workflow goes to the
+  background without. The tip says each check makes Claude read the whole
+  session, about that many tokens, and points to the task panel (the
+  desktop) or `/tasks`. It never promises a notification. After a break
+  that outlasted the cache, `cold_return` speaks instead. After the fact,
+  How you prompt has a new row, "Asking how it's going": each poll is
+  priced from the reply it drew. That is the cost `repeat_ask` used to
+  carry, as every one of its live firings was a poll.
+
+### Changed
+
+- **A hint that keeps coming back rests longer.** Within a session, each
+  time a hint shows again its rest doubles: 30 minutes, then 1, 2 and at
+  most 4 hours (`coaching_max_backoff`). Growth still ends the rest
+  early, except for `cold_return`, which rests a flat 12 hours
+  (`coaching_cold_rest_hours`).
+- **Hints that read your history look further back.** A message's
+  hints read up to the last 4 MB of the transcript, up from 256 KB, so
+  a long tool result no longer hides the last reply. No hash of your
+  words is kept.
+- **Tips carry the context.** `drip_feed` now says how many tokens each
+  re-read covers. The notes still hold counts, times and token figures
+  only; no dollar amount comes from the hook.
+- **`drip_feed` counts requests, not messages.** A go-ahead, a
+  thank-you, a status check, a question and an answer to Claude's
+  question neither count nor end a run, and a question that closes a
+  reply that changed a file is an offer, not something the next message
+  answers. A change to a file of yours is an edit or a shell write
+  outside a `.claude` folder, or a file a subagent changed; Claude's
+  own memory, plans and scripts don't count. A message you send while
+  Claude is working gets no hint. The window stays 20 minutes.
+- **`plan_first` reads your own prose.** Steps are counted outside
+  fenced blocks, quoted lines and pasted logs, and the hint applies from
+  3 steps, down from 4 (`coaching_plan_steps`; in 2,755 messages that
+  added 6). A review-only request, a message that is a plan already
+  (1,500 characters or more with headings, or five numbered items) and a
+  message sent while Claude is working are left alone.
+- **Plan-mode wording follows the app.** The desktop says to start the
+  message with `/plan` or pick Plan in the mode menu next to Send; the
+  terminal keeps Shift+Tab. The tip in How you prompt reads the same.
+
+- **Six hints no longer speak up in the session.** `clear_context`
+  fired on almost every long session and produced almost no tips,
+  `cache_cold` is now the `cold_return` receipt above, and
+  `explore_reads` is now the Explore cost table above. `repeat_ask`,
+  `stop_loop` and `vague_fix` fired on polls, go-aheads, refusals and
+  questions far more often than on the habit, so they are counted after
+  the fact only, in How you prompt, with no live note. Their old notes
+  in earlier transcripts are still recognised, so what they cost is
+  still counted. The `config.toml` keys for them are ignored.
+- **Stricter rules for the three counted after the fact.** A repeat is
+  an answer with a file change that missed: a poll, a go-ahead and a
+  thank-you are never one, so what a poll costs is `status_poll`'s.
+  A stop is Esc on a reply: not the tail of a call you turned down, a
+  plan you sent back, a declined question or a hook's block. A vague
+  correction needs a phrase that says something went wrong ("still
+  broken", "that didn't work"), so a bare "fix this" no longer counts;
+  it also skips a question, a go-ahead, a thank-you, a status check, a
+  message with an image and a retry after a reply that failed. It shows
+  "Not priced", as what it caused can't be told apart from the fix.
+- **A result's size is what Claude reads.** The large-output note and
+  the `quiet_output` hint count a result's words, in tokens. A picture
+  counts for its own tokens, worked out from its width and height, at
+  most 1,600, never for its encoding. A result Claude Code saved to a
+  file (a search past about 20,000 characters, a web page past 50,000)
+  counts for the preview that reached Claude. A diff or a patch that is
+  only shown to you is left out. The rest after `quiet_output` is kept
+  apart for the main session and each subagent, since one's big result is
+  no reason to stay quiet to the other. In practice `quiet_output` now
+  follows a large read or web page: a search is saved to a file before it
+  is large enough.
+- **The hook skips shell and MCP results.** Claude Code waits for the
+  capture hook after every result it is registered for, and the shell
+  and MCP tools were about two thirds of them. A replay over real
+  sessions found the large-output note after a shell result failed its
+  precision and tokens-against-time checks, and was right 33% of the
+  time after an MCP result (46% with half credit; the bar was 50%). The
+  PostToolUse entry now matches `Read|Grep|Glob|WebFetch|WebSearch`, and
+  an approved plan with coaching notes. `update --finish`, `capture
+  connect` and Setup › Capture rewrite an older entry after you say yes;
+  until then it still starts the hook, which returns at once for those
+  tools. A subagent that only runs commands no longer reaches
+  `split_run`, which counts a run's replies when the hook runs.
+- **The hook starts faster.** `capture-hook.py` is now a small
+  launcher, and the code is `capture_hook.py` beside it, so Python keeps
+  its compiled form between calls instead of compiling 130 KB each time.
+  The hook imports `argparse`, `hashlib`, `hmac`, `subprocess` and
+  `tomllib` only where it uses them, and returns before anything else when
+  a result is under the size a note could apply to. On the author's
+  Windows machine a call took about 62 ms and takes about 44 (python
+  alone starts in about 12); a call an older entry still sends for a shell
+  tool takes about 31. `capture connect`, `update --finish` and the
+  dashboard's start copy the launcher, the module and the word list
+  together, the launcher last and only once the module is there. An
+  install from before the split keeps working and is brought up to date
+  by the next of them. Uninstalling takes all three out with the data
+  folder.
+- **Repeated failures left the habits playbook.** "Stop retrying a
+  failing command" is no longer a habit with a saving; the waste summary
+  counts it instead.
+- **Subagent compactions.** The hook counts a compaction as a
+  subagent's only when a subagent file recorded one in the last five
+  seconds, and the session note tells a subagent to ignore it. The key
+  names of each kind of SessionStart payload are logged once, names only.
 
 ### Fixed
 
+- **Coaching notices.** The docs now show how a notice really appears,
+  and the desktop app, which folds it into a collapsed row, no longer
+  gets one that Claude's reply already carries.
 - **Output style.** The output style Claude Code repeats on every
   request no longer counts as a cache change; only a change of style does.
 

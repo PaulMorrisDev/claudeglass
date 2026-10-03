@@ -40,4 +40,4 @@ claudeglass = "claudeglass.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-claudeglass = ["pricing.toml", "hooks/snapshot-config.py", "hooks/capture-hook.py", "hooks/capture-catalogue.json", "service/static/*", "service/static/vendor/*", "service/static/fonts/*", "profiles/catalogue/*.toml"]
+claudeglass = ["pricing.toml", "hooks/snapshot-config.py", "hooks/capture-hook.py", "hooks/capture_hook.py", "hooks/capture-catalogue.json", "service/static/*", "service/static/vendor/*", "service/static/fonts/*", "profiles/catalogue/*.toml"]

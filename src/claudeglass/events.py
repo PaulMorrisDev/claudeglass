@@ -87,7 +87,6 @@ from . import known_savers, prompt_shape
 from .capture_catalogue import (
     COACH_MARKER,
     COACHING_HINTS,
-    COACHING_THRESHOLDS,
     CORRECTION_PATTERN,
     CORRECTION_SCAN_CHARS,
     HOOK_SCRIPT,
@@ -97,6 +96,8 @@ from .capture_catalogue import (
     NOTE_MARKER,
     OLD_COACH_MARKER,
     OLD_NOTE_MARKER,
+    REPORT_THRESHOLDS,
+    RETIRED_COACHING_HINTS,
 )
 from .capture_tags import parse_brief_markers, parse_note_codes
 from .model import Event, EventKind
@@ -478,6 +479,16 @@ def is_stop(event: Event) -> bool:
     return event.subkind != "tool_refusal" or event.detail.get("after") in (None, *_STOP_AFTER_BUCKETS)
 
 
+def is_bare_stop(event: Event) -> bool:
+    """Whether an ``INTERRUPT`` event is a bare stop: Esc on a reply, with
+    no subkind. The tail of a call you turned down (``tool_refusal``,
+    whatever denial it follows) and the session's end (``shutdown``) are
+    not: a refusal is a decision about one call, not Claude being stopped
+    again and again. The stop-loop report counts these only; the waste and
+    quality sections keep :func:`is_stop`."""
+    return event.kind == EventKind.INTERRUPT and not event.subkind
+
+
 def stop_window(denials: dict) -> bool:
     """Whether an interrupt among the denials since a reply
     (``Turn.preceding_denials``) is you stopping it: there were none, or
@@ -556,6 +567,11 @@ _CAPTURE_NOTE_HOOKS = frozenset({"SessionStart", "SubagentStart", "PostToolUse",
 #: until 0.12.1).
 _COACH_RE = re.compile(f"(?:{re.escape(COACH_MARKER)}|{re.escape(OLD_COACH_MARKER)})" + r"(\d+) ([a-z_]+)")
 
+#: The hints a note's kind may name: today's, and the ones that no longer
+#: show live but are still in old transcripts, so a note from before the
+#: change keeps its kind instead of reading as ``other``.
+_KNOWN_HINTS = frozenset((*COACHING_HINTS, *RETIRED_COACHING_HINTS))
+
 
 def _find_marker(text: str, *markers: str) -> int:
     """Where the first of ``markers`` starts in ``text``, or -1."""
@@ -597,7 +613,7 @@ def _capture_note(d: dict, attachment: dict) -> tuple[str, int, dict] | None:
         match = _COACH_RE.match(text, coach_at)
         coach = {
             "v": int(match.group(1)) if match else None,
-            "kind": match.group(2) if match and match.group(2) in COACHING_HINTS else "other",
+            "kind": match.group(2) if match and match.group(2) in _KNOWN_HINTS else "other",
         }
     if note_at < 0 or note_at > coach_at >= 0:
         return "coaching_note", chars, {**coach, "hook": hook}
@@ -1132,9 +1148,11 @@ def _has_image_block(blocks: Sequence | None) -> bool:
 def _message_flags(texts: Sequence[str], *, has_image: bool = False, skill_command: bool = False) -> dict:
     """The ``Event.detail`` flags a message you typed, or typed while
     Claude was working, carries: ``correction``, ``adjust``, ``remind``,
-    ``go``, ``status``, ``ack``, ``vague``, ``has_image``, ``steps`` (two
-    or more, unless it mentions a plan) and ``flags``
-    (``model.PROMPT_FLAGS``). Each is there only when true. A skill you
+    ``go``, ``status``, ``ack``, ``question``, ``vague``, ``has_image``,
+    ``steps`` (two or more changes, ``prompt_shape.plan_steps``: none for a
+    message that mentions a plan, opens by asking to review or is a plan
+    already) and ``flags`` (``model.PROMPT_FLAGS``). Each is there only
+    when true. A skill you
     ran with a slash gets ``correction``, ``has_image`` and ``flags``
     only: the rest read what you wrote, and a skill's text is not that.
     Flags only -- never the text."""
@@ -1151,16 +1169,17 @@ def _message_flags(texts: Sequence[str], *, has_image: bool = False, skill_comma
     # Prompting-habits addition (see model.py's module docstring): counts
     # and flags only.
     text = "\n".join(t for t in texts if t)
-    steps = prompt_shape.request_steps(text)
-    if steps >= 2 and not prompt_shape.mentions_plan(text):
+    steps = prompt_shape.plan_steps(text)
+    if steps >= 2:
         detail["steps"] = steps
-    if not has_image and prompt_shape.is_vague_fix(text, int(COACHING_THRESHOLDS["vague_fix_chars"])):
+    if not has_image and prompt_shape.is_vague_fix(text, int(REPORT_THRESHOLDS["vague_fix_chars"])):
         detail["vague"] = True
     if text.strip():
         for key, matches in (
             ("ack", prompt_shape.is_ack),
             ("go", prompt_shape.is_go),
             ("status", prompt_shape.is_status),
+            ("question", prompt_shape.is_question),
             ("adjust", prompt_shape.is_adjust),
             ("remind", prompt_shape.is_remind),
         ):

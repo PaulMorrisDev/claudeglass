@@ -968,7 +968,9 @@ def _segments(result: TranscriptResult, carry: _Carry) -> list[tuple[int, int]]:
 
 def _big_output_calls(turn: Turn) -> int:
     """How many of this turn's tool calls are estimated to have crossed
-    Deep's big-output threshold (CAP-10): Claude Code fires the note
+    Deep's big-output threshold (CAP-10) among the tools the hook is run
+    after (:data:`~claudeglass.capture_catalogue.BIG_OUTPUT_TOOLS`: not
+    the shell or MCP tools): Claude Code fires the note
     once per matching *call*, but ``tool_result_chars_by_tool`` only
     totals a tool's calls for the turn, so a turn with several big
     calls of the same tool is estimated as that total split evenly
@@ -977,7 +979,7 @@ def _big_output_calls(turn: Turn) -> int:
     threshold = catalogue.BIG_OUTPUT_TOKENS * CHARS_PER_TOKEN
     total = 0
     for name, chars in turn.tool_result_chars_by_tool.items():
-        if chars < threshold:
+        if chars < threshold or name not in catalogue.BIG_OUTPUT_TOOLS:
             continue
         calls = turn.tool_calls_by_tool.get(name, 1)
         total += min(calls, chars // threshold)

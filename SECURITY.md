@@ -81,7 +81,9 @@ Everything this tool writes by itself lives under `<config-dir>`
 `usage-log.csv`, `statusline-keys.json`, `salt`, `service.db`,
 `hooks/snapshot-config.py`, `profiles/`, `backups/`,
 `active-profile`, and, once metrics capture has been turned on at
-least once: `hooks/capture-hook.py`, `hooks/capture-catalogue.json`
+least once: `hooks/capture-hook.py` (a small launcher),
+`hooks/capture_hook.py` (the hook's code, with the compiled copy Python
+keeps in `hooks/__pycache__/`), `hooks/capture-catalogue.json`
 (a copy of the packaged metric catalogue the hook reads),
 `capture-log.jsonl` (one JSON line per `[capture]` change — the level,
 sample, `until` etc. you set, never anything from a transcript) and
@@ -90,7 +92,9 @@ Claude Haiku writes the tags, `tags/YYYY-MM.jsonl` (see "Claude Haiku as
 the tagger" under "Metrics capture"), and, once
 coaching notes have been turned on, `coaching.json` (agent-type names
 and split points) and `coach-state.json` (see "Coaching notes" under
-"Metrics capture"). The only other
+"Metrics capture"), and, while capture is on, `payload-keys.json` (the
+key names of each kind of SessionStart payload, once each: names only,
+never a value). The only other
 files it writes are output files you name on the command line: for
 example `--out` (`export`, `monthly-report`, `scrub-fixture`), `report
 --html PATH` or `serve --monthly-report DIR`.
@@ -349,14 +353,28 @@ same settings.json diff and yes. When a hint applies, the capture hook
 adds a short note to Claude's context, `cg-coach v1 <hint>` and a
 sentence built only from token counts, an idle time and an agent
 type's name — never a path, command or anything you wrote. To decide,
-the hook reads the last 256 KB of the session's transcript (the first
-512 KB for the plan hint's starting size, and a subagent's own
-transcript for the split hint), counting sizes and tool names only;
-nothing it reads is kept. The split hint only shows you a notice; the
-subagent is never told anything. `coach-state.json` holds, per session, when
-each hint last showed, keyed by the same salted session hash as the
-signals, and per subagent run a byte offset and reply count; entries
-older than a day are dropped. `coaching.json` holds agent-type names
+the hook reads the last 4 MB of the session's transcript when you send a
+message (256 KB when a plan is approved, 64 KB after a tool call or when a
+turn ends; the first 512 KB for the plan hint's starting size, and a
+subagent's own transcript for the split hint), counting sizes, times and tool names
+only; nothing it reads is kept. To count compactions it scans the whole
+transcript a line at a time and keeps only the compaction markers' ids.
+To tell that work went to the background it matches the first 400
+characters of a tool result against four fixed phrases in memory and
+drops the text. At a compaction it also looks at the end of any
+subagent transcript changed in the last five seconds, for the type and
+time of its records only, to tell a subagent's compaction from the main
+session's. The note for a tip ends on the tip itself, a fixed sentence
+built from the same counts, so Claude can write it for you. The split
+hint only shows you a notice; the subagent is never told anything. A
+background `Stop` entry prints nothing: when a turn ends it only keeps
+the time, context size and cache lifetime of Claude's newest reply, as
+numbers, so the cold-return receipt is timed from a real reply. A
+usage-limit line is never taken for one. `coach-state.json` holds, per
+session, when each hint last showed, how many times and how long it
+rests, and those three numbers, keyed by the same salted session hash
+as the signals, and per subagent run a byte offset and reply count;
+entries older than a day are dropped. `coaching.json` holds agent-type names
 and numbers. Neither ever leaves `<config-dir>`. See
 [docs/coaching.md](docs/coaching.md).
 
@@ -452,8 +470,11 @@ capped at `CAPTURE_TIMEOUT_S` = 5 seconds). An async hook's
 the *next* conversation turn), but that's too late for a note about a
 tool result Claude just saw, so these stay synchronous. At the Deep
 level, the PostToolUse hook that notes an unusually large result or a
-web call (matcher `Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*`) is
-foreground too, for the same reason. Claude Code records each hook
+web call (matcher `Read|Grep|Glob|WebFetch|WebSearch`, never the shell or
+MCP tools) is foreground too, for the same reason. A settings.json
+written before they were dropped still runs the hook after them until
+the entry is rewritten; it returns at once, before it reads
+`config.toml`, a transcript or its state file. Claude Code records each hook
 call's real `durationMs`; `capture status` prints your own median and
 p90 wait for this hook over the last 7 days ("Deep's large-output/web
 hook waited...") whenever big_output or web is on (only
@@ -477,8 +498,8 @@ asynchronously (in the background) since nothing needs to read what
 they print.
 
 **Files.** See "What is written, and where" above for
-`hooks/capture-hook.py`, `hooks/capture-catalogue.json`,
-`capture-log.jsonl` and `signals/`, and the `capture` bullet there for
+`hooks/capture-hook.py`, `hooks/capture_hook.py`,
+`hooks/capture-catalogue.json`, `capture-log.jsonl` and `signals/`, and the `capture` bullet there for
 how the settings.json hook entries and the `cg-feedback`/`cg-brief`
 skill files under `~/.claude/skills/` are added (diff or full text,
 asked, backed up) and removed.

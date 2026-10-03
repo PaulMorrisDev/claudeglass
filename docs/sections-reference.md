@@ -63,7 +63,7 @@ and it's still useful when you want one section by itself.
 | `quality` | Quality signals | `quality.py` | whether the work went well: agent runs that didn't finish or likely ran out of turns, failed tool calls and shell commands, denials, corrections, edits redone, per agent type and per model and effort, with a significance test — see [`concepts.md`](concepts.md#7-quality-signals) |
 | `workstyle` | Workstyle | `workstyle.py` | one archetype per session/corpus: `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
 | `habits` | Work habits | `habits.py` | the "Weekly pace" digest (titled with the window you picked), habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/cg-feedback`) cost per piece of work that met its goal |
-| `prompting` | How you prompt | `prompting.py` | how often each prompting habit the coaching notes warn about happened (small requests sent one at a time, the same request again, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
+| `prompting` | How you prompt | `prompting.py` | how often each prompting habit happened, whether or not coaching notes were on (small requests sent one at a time, the same request again, asking how it's going, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
 | `workflows` | Workflows | `workflows.py` | per-run agent count, phase count, duration and cost from `<session>/workflows/wf_*.json` |
 | `phases` | Phases | `phases.py` | cost split across DISCOVERY (read/search only), IMPLEMENTATION (real edits or an ordinary shell command), VERIFICATION (a test/build tool, or a scratch-file edit), OTHER — in the CLI's report only when `--phases` is given; the dashboard always builds it |
 | `config` | Config | `report.py` via `snapshots.py` | one diff table per config key that changed between two snapshots of the same project (capped at 20 keys), then each project's settings in effect and drift — only present when any `snapshot-config` snapshot exists; when none applies to the projects in the report, it has only a note saying so |
@@ -652,7 +652,12 @@ since `limits.py` already owns that attribution.
   turns and their share of all priced turns, wasted cost (the
   recoverable spend ceiling) and its share of all priced cost, wasted
   tokens, the limit-pause-excluded count, and the api-error-retry count
-  (frequency only, never priced).
+  (frequency only, never priced), the turns not counted because a command
+  ran and failed, and `failed_command_loops`: how many times, in a main
+  session, the same command failed three or more times within one message
+  of yours (`waste.command_loops`). The loops are counted and not
+  priced or wasted, as the failures are work; this is what the old
+  `tool_loops` playbook habit became.
 - `waste_by_cause` — one row per cause (`tool-error`, `interrupt`,
   `tool-denial`, `max-turns`, fixed order) plus an `api-error-retry`
   row: turns, share of all priced turns, cost, share of all priced
@@ -1006,9 +1011,18 @@ capture is off or no feedback has been given.
   the tags said (helped, wasn't needed, would have helped). The
   `/cg-feedback` skill is left out.
 - `habits_tool_output` — per tool with outputs over the large-output
-  threshold: how many, their tokens and what carrying them cost; then a
-  `loops` row for commands that failed three or more times within one
-  message, and what those attempts cost.
+  threshold: how many, their tokens and what carrying them cost. Commands
+  that failed three or more times within one message are no longer a row
+  here or a habit in `habits_playbook`: they are counted as
+  `failed_command_loops` in `waste_summary`.
+- `habits_explore_by_model` — what the Explore agents you started cost,
+  per model family (`unknown` for a run that logged none): runs, cost,
+  cost per run, the context each run read (its replies' context sizes
+  added up) and the share of all Explore cost. It stands in for the
+  dropped `explore_reads` hint: an Explore run's cost is mostly the
+  context it reads again, so the model it runs on matters more than how
+  many files it opens. A workflow's agents are left out
+  (`AgentFact.direct` is false for them).
 
 ## `capture` (`habits.py`)
 
@@ -1063,32 +1077,61 @@ capture is off or no feedback has been given.
 
 Counted from what the parser keeps about each message you typed and each
 reply (`Turn.prompt_steps`, `prompt_plan_mode`, `human_vague`,
-`human_ack`, `human_repeat`, `reply_asked`, `coach_tip`): counts and
-flags, never your words. `reply_asked` means a reply ends on a question to
-you: a question mark must close one of its last two sentences or a list
-item that ends it, after code, links, a ClaudeGlass tip and the tag are
-cut. Each habit uses the live coaching hint's own
-rule and default threshold (`capture_catalogue.COACHING_THRESHOLDS`), so
-it counts whether or not coaching notes were on.
+`human_ack`, `human_go`, `human_status`, `human_repeat`, `reply_asked`,
+`coach_tip`): counts and flags, never your words. `reply_asked` means a
+reply ends on a question to you: a question mark must close one of its
+last two sentences or a list item that ends it, after code, links, a
+ClaudeGlass tip and the tag are cut. `human_go` and `human_status` mark a
+message that only tells Claude to carry on or only asks how it is going;
+neither is a repeat or a vague correction. Habits with a live hint use that
+hint's own rule and default threshold
+(`capture_catalogue.COACHING_THRESHOLDS`), so they count whether or not
+coaching notes were on. `vague_fix`, `repeat_ask` and `stop_loop` no longer
+have a live hint and use `capture_catalogue.REPORT_THRESHOLDS`, which
+`config.toml` does not change. `context_carried` replaces the dropped
+`clear_context` hint.
 
 - `prompting_habits` — one row per habit seen in the window, the costliest
-  first: `habit` (`drip_feed`, `repeat_ask`, `stop_loop`, `plan_first`,
-  `vague_fix`, `big_paste`), `times`, `per_100` (per 100 of your
-  messages), `cost` (list-price USD; empty for `plan_first`), `basis`
+  first: `habit` (`drip_feed`, `repeat_ask`, `status_poll`, `stop_loop`, `plan_first`,
+  `vague_fix`, `big_paste`, `context_carried`), `times`, `per_100` (per 100 of your
+  messages), `cost` (list-price USD; empty for `plan_first` and
+  `vague_fix`, which the page shows as "Not priced"), `basis`
   (what the cost counts), `trend` (`falling`, `rising` or `steady` over
   the last eight weeks, or `new` with fewer than three weeks of three
   messages or more to go on), `weeks` (the rate per message by week, the
   worst week as 100, `-` for a week with fewer than three messages) and
   `try` (what to do instead). Costs: `drip_feed` is what each message after the first in a
-  run paid to take in the context; `repeat_ask` the reply before the
-  repeat; `stop_loop` the replies you stopped (a message stopped before
-  any reply and sent again counts as a stop that cost nothing);
-  `vague_fix` the reply,
-  when it had to ask what was wrong; `big_paste` carrying the pasted text
-  (a cache write, then a cache read by each later reply until a summary).
+  run paid to take in the context (a run is of small requests, each
+  answered with a change to a file of yours: an edit or a shell write
+  outside a `.claude` folder, or a subagent's; a go-ahead, a thank-you, a
+  status check, a question and an answer to Claude's question neither
+  count nor end it); `repeat_ask` the reply before the
+  repeat, when it was an answer with a file change that missed (a poll, a
+  go-ahead or a thank-you is never a repeat); `status_poll` the reply each
+  poll drew, for every message that only asks how the work is going
+  (`Turn.human_status`), whether or not work was running in the
+  background: it took over the poll cost `repeat_ask` used to show;
+  `stop_loop` the replies you
+  stopped, counting only bare stops (Esc on a reply: not the tail of a call
+  you turned down, and a message stopped before any reply and sent again
+  counts as a stop that cost nothing); `vague_fix` counted only, with no
+  cost: it needs a correction or bad-outcome phrase and skips a question,
+  a go-ahead, a thank-you, a status check, an image and a retry after a
+  failed reply; `big_paste` carrying the pasted text (a cache write, then
+  a cache read by each later reply until a summary); `context_carried`
+  what the replies of a new piece of work paid to read the earlier work
+  again (a piece the reply's tag calls new, or one that follows a break of
+  over an hour with no tag saying the work went on), when at least 20,000
+  tokens of earlier work were in context.
 - `prompting_tips` — only once there are coaching notes: one row per hint
-  whose note asks Claude to pass a tip on, with `notes`, `shown` (replies
-  to that message that ended with a ClaudeGlass tip) and `shown_pct`.
+  whose note asks Claude to pass a tip on, hints told to pass it on every
+  time first, with `notes`, `shown` (replies to that message that ended
+  with a ClaudeGlass tip), `shown_pct`, `relay` (`relayed N of M` for a hint
+  whose note orders the tip every time, so a tip left out was missed;
+  `judged relevant N of M` for
+  `big_paste`, where Claude decides whether the message calls for it and
+  a tip left out is no miss) and `misfires` (notes whose replies called
+  the tip a misfire, `Turn.tip_disowned`).
 
 ## `workflows` (`workflows.py`)
 

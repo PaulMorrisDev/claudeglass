@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from claudeglass import cli, footprint, hook_health, installer, setup_flow
+from claudeglass import capture_catalogue as cat, cli, footprint, hook_health, installer, setup_flow
 from claudeglass.profiles import apply as apply_mod
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
@@ -318,3 +318,93 @@ def test_uninstall_claude_root_flag(tmp_path, monkeypatch):
     data, _decoy = _elsewhere(tmp_path)
     assert cli.main(["uninstall", "--config-dir", str(data), "--claude-root", str(other), "--yes"]) == 0
     assert "statusLine" not in json.loads((other / "settings.json").read_text(encoding="utf-8"))
+
+
+# -- every hook that can return output runs in the foreground ------------------
+
+
+def _registered(tmp_path, ids) -> list[tuple[str, dict]]:
+    """``(event, entry)`` for every hook entry settings.json would hold
+    for the capture metrics in ``ids``."""
+    config_dir = tmp_path / "claude" / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    plan = hook_health.plan_capture(hook_health.capture_specs(ids), cli._capture_hook_commands(config_dir))
+    after = json.loads(plan.new_text)
+    return [
+        (event, entry) for event, groups in after["hooks"].items() for group in groups for entry in group["hooks"]
+    ]
+
+
+_EVERYTHING = (*cat.LEVEL_METRIC_IDS, *cat.FEEDBACK_IDS, *cat.COACHING_IDS, cat.HAIKU_TAGGER_HOOK)
+_ID_SETS = {
+    **{level: (*cat.level_metrics(level), "coaching_notes") for level in cat.LEVELS[1:]},
+    "everything": _EVERYTHING,
+    "coaching alone": ("coaching_notes",),
+    "haiku tagger": (*cat.level_metrics("deep"), cat.HAIKU_TAGGER_HOOK),
+}
+
+
+@pytest.mark.parametrize("name", list(_ID_SETS))
+def test_every_hook_entry_that_can_return_output_is_registered_in_the_foreground(tmp_path, name):
+    # An async hook's additionalContext and systemMessage only arrive on the
+    # next turn: a tip written for this message would reach Claude, and the
+    # user, a whole reply late.
+    ids = _ID_SETS[name]
+    specs = cat.hook_specs(ids)
+    assert not [spec for spec in specs if spec[1] in cat.OUTPUT_EVENTS and spec[3]], specs
+    for event, entry in _registered(tmp_path, ids):
+        if event in cat.OUTPUT_EVENTS:
+            assert "async" not in entry, (event, entry)
+        else:
+            # What runs in the background is only ever a free signal.
+            assert not entry.get("async") or event in cat.SIGNAL_EVENTS, (event, entry)
+
+
+def test_the_output_events_are_all_registered_by_some_metric_set_and_none_is_a_signal(tmp_path):
+    seen = {event for name in _ID_SETS for event, _entry in _registered(tmp_path, _ID_SETS[name])}
+    assert {"SessionStart", "UserPromptSubmit", "PostToolUse"} <= seen
+    assert not set(cat.OUTPUT_EVENTS) & set(cat.SIGNAL_EVENTS)
+    # The signals really are background hooks, so the check above can fail.
+    async_events = {
+        event for name in _ID_SETS for event, entry in _registered(tmp_path, _ID_SETS[name])
+        if entry.get("async")
+    }
+    assert async_events and async_events <= set(cat.SIGNAL_EVENTS)
+
+
+@pytest.mark.parametrize("name", list(_ID_SETS))
+def test_no_hook_entry_waits_on_a_shell_or_mcp_tool(tmp_path, name):
+    # Claude Code waits for a PostToolUse hook after every call that matches,
+    # and the shell and MCP tools are most of a session's calls: the replay of
+    # real sessions found a size note after them wrong too often to pay for it.
+    config_dir = tmp_path / "claude" / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    plan = hook_health.plan_capture(hook_health.capture_specs(_ID_SETS[name]), cli._capture_hook_commands(config_dir))
+    groups = json.loads(plan.new_text)["hooks"].get("PostToolUse", [])
+    for group in groups:
+        tools = group["matcher"].split("|")
+        assert tools and set(tools) <= set(cat.COACHING_TOOLS), tools
+        assert not [tool for tool in tools if tool in ("Bash", "PowerShell") or tool.startswith("mcp__")], tools
+
+
+def test_the_launcher_its_module_and_the_word_list_are_all_one_part_of_the_footprint(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    hook_health.connect(
+        hook_health.plan_capture(hook_health.capture_specs(cat.level_metrics("essentials")), cli._capture_hook_commands(config_dir)),
+        now=NOW,
+    )
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=False)}["capture_hooks"]
+    assert "launcher" in item.what_it_does and "data folder" in item.what_it_does
+    assert "never after a shell command" in item.what_it_does
+    # Removing the settings entries and then the data folder leaves nothing behind,
+    # the launcher's cached bytecode included.
+    plan = footprint.plan_uninstall(config_dir)
+    assert plan.settings_changes and all("capture-hook.py" in line for line in plan.settings_changes)
+    footprint.remove_settings_entries(plan, now=NOW)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / "__pycache__").mkdir()
+    (hooks_dir / "__pycache__" / "capture_hook.cpython-311.pyc").write_bytes(b"pyc")
+    assert {p.name for p in hooks_dir.iterdir()} >= {cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE, "__pycache__"}
+    assert footprint.delete_data(config_dir) == []
+    assert not config_dir.exists()

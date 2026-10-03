@@ -106,8 +106,6 @@ SHORT_REPORT_TOKENS = 800
 #: One reply's tool output this size or bigger is a big output (the
 #: Deep level's own threshold).
 BIG_OUTPUT_TOKENS = catalogue.BIG_OUTPUT_TOKENS
-#: The same command failing this many times in one message is a loop.
-LOOP_FAILURES = 3
 #: Earlier work still in context worth clearing, in tokens.
 STALE_TOKENS = 20_000
 #: A break this long lets the cache go cold (the 1-hour TTL at most).
@@ -157,7 +155,6 @@ ITEMS: dict[str, tuple[str, str]] = {
     "better_briefs": ("delegation", "Give agents a complete brief"),
     "flatten_nesting": ("delegation", "Pass what you know to agents instead of re-reading"),
     "quiet_output": ("tool_output", "Keep tool output small"),
-    "tool_loops": ("verification", "Stop retrying a failing command"),
     "targeted_checks": ("verification", "Check each change, and run the full suite once"),
     "allow_routine": ("waiting", "Allow the commands you always approve"),
     "state_limits": ("waiting", "Tell Claude up front what not to do"),
@@ -205,7 +202,6 @@ EXAMPLES = {
     "flatten_nesting": "I've already read src/store.py: the part you need is save_rows(). Work from that; "
     "don't read it again.",
     "quiet_output": "Run the tests quietly and show only the failures, for example pytest -q 2>&1 | tail -30.",
-    "tool_loops": "If the same command fails twice, stop and tell me what's wrong instead of retrying.",
     "targeted_checks": "Run only the tests for the files you changed; run the full suite once at the end.",
     "allow_routine": "/permissions, then allow the commands you approve every time, for example "
     "Bash(npm test:*).",
@@ -253,7 +249,6 @@ BASES = {
     "better_briefs": "what the agent runs restarted for the brief or the task cost",
     "flatten_nesting": "carrying the files agents read again",
     "quiet_output": "carrying big outputs; half of it unless Claude said none was needed",
-    "tool_loops": "the attempts after the second at the same failing command",
     "targeted_checks": "half of what redoing or fixing unchecked changes cost",
     "allow_routine": "the replies after auto mode blocked a request",
     "state_limits": "the replies after a request was turned down",
@@ -288,10 +283,6 @@ WHERE = {
     "quiet_output": (
         "Nowhere in Claude Code's config directly. This is how you invoke tools (head/tail, a digest "
         "script). The output-length caps in settings.json's env block have their own card."
-    ),
-    "tool_loops": (
-        "Nowhere in Claude Code's config. This is stopping to explain the failure instead of retrying, "
-        "once it fails again."
     ),
     "targeted_checks": "Nowhere in Claude Code's config. This is which tests you ask Claude to run, and when.",
     "allow_routine": "/permissions, in the allow list for this project or your user settings.",
@@ -362,10 +353,6 @@ TRADE_OFFS = {
         "have changed since."
     ),
     "quiet_output": "Trimming output before it enters context can cut a detail (an error further up a long log, say) that turns out to matter.",
-    "tool_loops": (
-        "Stopping after one retry means a command that would have worked on a third try (a flaky network "
-        "call, say) gets treated as broken instead."
-    ),
     "targeted_checks": (
         "Running only the targeted tests during the work can miss a change's effect on an unrelated part "
         "of the suite. Only the final full run catches it."
@@ -403,7 +390,6 @@ UNDO = {
     "better_briefs": "Nothing to undo: go back to writing shorter briefs.",
     "flatten_nesting": "Nothing to undo: go back to letting agents re-read files themselves.",
     "quiet_output": "Nothing to undo: go back to letting full output through.",
-    "tool_loops": "Nothing to undo: go back to letting it retry as many times as it likes.",
     "targeted_checks": "Nothing to undo: go back to running the full suite after every change.",
     "allow_routine": "/permissions, then remove the rule (Claude Code shows the current allow list there).",
     "state_limits": "Nothing to undo: go back to not stating the limit, or remove it from CLAUDE.md if you added it there.",
@@ -550,9 +536,6 @@ class CycleFact:
     plan_cost: float = 0.0
     #: (tool, tokens, carry cost) per big output.
     big_outputs: list = field(default_factory=list)
-    #: USD spent on attempts after the second at one failing command.
-    loop_cost: float = 0.0
-    loops: int = 0
     #: (skill, by_you, replies before it, USD before it).
     skill_calls: list = field(default_factory=list)
     compactions: int = 0
@@ -612,6 +595,12 @@ class AgentFact:
     #: worked on.
     level: str | None = None
     task: str | None = None
+    #: False for a workflow's agent: the main session didn't spawn it, and
+    #: nothing it did is a habit of yours.
+    direct: bool = True
+    #: The context size at every reply of the run, added up: what the run
+    #: read in all, before any cache discount.
+    context_tokens: int = 0
 
 
 @dataclass(slots=True)
@@ -749,10 +738,6 @@ def _rating_feedback(rating) -> Feedback | None:
 def _dominant(values) -> str | None:
     counts = Counter(v for v in values if v)
     return counts.most_common(1)[0][0] if counts else None
-
-
-def _shell_failed(turn: Turn) -> bool:
-    return bool(turn.cmd_prefix) and any(turn.tool_errors_by_tool.get(tool, 0) for tool in _SHELL_TOOLS)
 
 
 def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
@@ -894,7 +879,6 @@ def _cycle_fact(
     if fb is not None:
         fact.outcome = fb.outcome
         fact.outcome_source = fb.source
-    failing: dict[str, list[int]] = {}
     for n, (turn, i) in enumerate(zip(cycle.turns, idx)):
         fact.reads += sum(turn.tool_calls_by_tool.get(tool, 0) for tool in _READ_TOOLS)
         tokens = sum(turn.tool_result_chars_by_tool.get(tool, 0) for tool in _READ_TOOLS) // capture_mod.CHARS_PER_TOKEN
@@ -907,8 +891,6 @@ def _cycle_fact(
         if turn.plan_stats is not None and not fact.planned:
             fact.planned = True
             fact.plan_cost = sum(carry.costs[j] for j in idx[: n + 1])
-        if _shell_failed(turn):
-            failing.setdefault(turn.cmd_prefix, []).append(i)
         if turn.tests_run or (
             turn.cmd_prefix
             and any(tool in turn.tool_names for tool in _SHELL_TOOLS)
@@ -930,10 +912,6 @@ def _cycle_fact(
         output = rates.output(turn)
         fact.output_cost += turn.output_tokens * output
         fact.thinking_cost += turn.thinking_tokens * output
-    for attempts in failing.values():
-        if len(attempts) >= LOOP_FAILURES:
-            fact.loops += 1
-            fact.loop_cost += sum(carry.costs[i] for i in attempts[2:])
     if fact.tag is not None and fact.tag.plan in ("made", "following", "deviated"):
         fact.planned = True
     return fact
@@ -976,6 +954,8 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
             cost=sum(sub_carry.costs),
             depth=max(1, sub.meta.spawn_depth or 1),
             model=_dominant(t.model for t in priced) or "",
+            direct=sub.meta.kind != "workflow-agent",
+            context_tokens=sum(t.ctx for t in priced),
             capped="short" in first.prompt_flags,
             retry=first.retry_marker,
             spawn=first.spawn_marker,
@@ -1528,20 +1508,6 @@ def _item_quiet_output(h: Habits) -> Item | None:
     )
 
 
-def _item_tool_loops(h: Habits) -> Item | None:
-    looping = [c for c in h.cycles if c.loops]
-    saving = sum(c.loop_cost for c in looping)
-    if not looping or saving <= 0:
-        return None
-    loops = sum(c.loops for c in looping)
-    return Item(
-        "tool_loops", saving, loops, ("inferred",),
-        f"A command failed {LOOP_FAILURES} or more times within one message {loops} times.",
-        waste=_by_week((c.week, c.loop_cost) for c in looping),
-        reported_share=0.0,
-    )
-
-
 def _item_targeted_checks(h: Habits) -> Item | None:
     # CAP-5: derive a fallback for ``check`` -- a test-runner command
     # actually running (``checked_by_tool``, from the same closed prefix
@@ -1678,7 +1644,7 @@ _BUILDERS = (
     _item_split_large, _item_batch_small, _item_clear_between, _item_brief_clearly, _item_name_files,
     _item_paste_errors, _item_explore_research, _item_plan_hard, _item_skip_plan_easy, _item_skill_early,
     _item_skill_unneeded, _item_short_reports, _item_better_briefs, _item_flatten_nesting, _item_quiet_output,
-    _item_tool_loops, _item_targeted_checks, _item_allow_routine, _item_state_limits, _item_effort_fit,
+    _item_targeted_checks, _item_allow_routine, _item_state_limits, _item_effort_fit,
     _item_outcome_misses,
 )
 
@@ -2398,6 +2364,42 @@ def _agents_table(h: Habits) -> Table:
     )
 
 
+def _explore_by_model_table(h: Habits) -> Table:
+    """What the Explore agents you started cost, per model. This stands in
+    for a live hint about reading files yourself: most of an Explore run's
+    cost is the context it re-reads, so the model it runs on matters more
+    than how many files it opens. A workflow's agents are left out."""
+    groups: dict[str, list[AgentFact]] = {}
+    for a in h.agents:
+        if a.agent_type == _EXPLORE_AGENT and a.direct:
+            groups.setdefault(family(a.model) if a.model else "unknown", []).append(a)
+    total = sum(a.cost for runs in groups.values() for a in runs)
+    rows = [
+        [
+            model,
+            len(runs),
+            sum(a.cost for a in runs),
+            _mean(a.cost for a in runs),
+            _mean(a.context_tokens for a in runs),
+            _pct(sum(a.cost for a in runs), total) if total else None,
+        ]
+        for model, runs in sorted(groups.items(), key=lambda kv: -sum(a.cost for a in kv[1]))
+    ]
+    return Table(
+        name="habits_explore_by_model",
+        title="Explore cost by model",
+        columns=[
+            Column(key="model", label="Model", kind="str"),
+            Column(key="runs", label="Runs", kind="int"),
+            Column(key="cost", label="Cost", kind="money"),
+            Column(key="avg_cost", label="Per run", kind="money"),
+            Column(key="avg_context", label="Context read per run", kind="tokens"),
+            Column(key="share_pct", label="Share of Explore cost", kind="pct"),
+        ],
+        rows=rows,
+    )
+
+
 def _rows_as_dicts(table: Table) -> list[dict]:
     keys = [c.key for c in table.columns]
     return [dict(zip(keys, row)) for row in table.rows]
@@ -2862,19 +2864,15 @@ def _tool_output_table(h: Habits) -> Table:
             s[0] += 1
             s[1] += tokens
             s[2] += cost
-    loops = sum(c.loops for c in h.cycles)
-    rows = [[tool, n, tokens, cost, None] for tool, (n, tokens, cost) in sorted(stats.items(), key=lambda kv: -kv[1][2])]
-    if loops:
-        rows.append(["loops", None, None, sum(c.loop_cost for c in h.cycles), loops])
+    rows = [[tool, n, tokens, cost] for tool, (n, tokens, cost) in sorted(stats.items(), key=lambda kv: -kv[1][2])]
     return Table(
         name="habits_tool_output",
-        title="Big tool output and failing commands",
+        title="Big tool output",
         columns=[
             Column(key="tool", label="Tool", kind="str"),
             Column(key="outputs", label="Big outputs", kind="int"),
             Column(key="tokens", label="Tokens", kind="tokens"),
             Column(key="cost", label="Carrying them cost", kind="money"),
-            Column(key="loops", label="Commands failing again and again", kind="int"),
         ],
         rows=rows,
     )
@@ -2932,6 +2930,7 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
             _briefs_table(h),
             _templates_table(h),
             _agents_table(h),
+            _explore_by_model_table(h),
             _effort_table(h),
             _setups_table(h),
             _agents_by_task_table(h, model_swap),
@@ -2978,7 +2977,6 @@ _CAPTURE_DEDUP_KEYS: dict[str, str] = {
     "short_reports": "agent-report-size",
     "explore_research": "discovery-share",
     "clear_between": "discovery-share",
-    "tool_loops": "tool-output-carry",
 }
 
 

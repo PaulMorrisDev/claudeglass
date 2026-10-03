@@ -20,10 +20,11 @@ from claudeglass.parse import parse_transcript
 from helpers import tool_result_block, tool_use_block, turn_line, user_block_line, user_str_line, write_jsonl
 
 SCRIPT = Path(str(resources.files("claudeglass") / "hooks" / cat.HOOK_SCRIPT))
+MODULE = SCRIPT.with_name(cat.HOOK_MODULE)
 
 
 def _load_hook_module():
-    spec = importlib.util.spec_from_file_location("_testrun_hook_under_test", SCRIPT)
+    spec = importlib.util.spec_from_file_location("_testrun_hook_under_test", MODULE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module

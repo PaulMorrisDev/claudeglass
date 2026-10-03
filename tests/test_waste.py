@@ -147,6 +147,53 @@ def test_a_failing_test_run_is_work_not_waste(tmp_path: Path):
     assert summary.rows[0][[c.key for c in summary.columns].index("failed_command_turns")] == 1
 
 
+def _failing_commands(tmp_path: Path, messages: list[list[str]], **meta) -> waste.WasteStats:
+    """One message of yours per inner list, and a reply to it for each
+    command in it: a shell call that came back as a failure."""
+    lines: list[dict] = []
+    for m, commands in enumerate(messages):
+        lines.append(user_str_line(f"message {m}", origin={"kind": "human"}))
+        for c, command in enumerate(commands):
+            use = f"tu_{m}_{c}"
+            lines.append(turn_line(
+                model=_MODEL, input_tokens=1_000_000, output_tokens=0,
+                content=[tool_use_block("Bash", use, {"command": command})],
+            ))
+            lines.append(user_block_line([tool_result_block(use, "Exit code 1\n3 failed, 40 passed", is_error=True)]))
+    stats = waste.WasteStats(config_dir=tmp_path / "cfg")
+    stats.add(_parse(tmp_path, lines, **meta), _pricing())
+    return stats
+
+
+def test_the_same_command_failing_three_times_in_one_message_is_one_loop(tmp_path: Path):
+    stats = _failing_commands(tmp_path, [["pytest -q"] * 3])
+    assert stats.failed_command_loops == 1
+    # Counted only: the failures are work, so nothing is priced as waste.
+    assert stats.wasted_turns == 0 and stats.wasted_cost_usd == 0
+    summary = _table(waste.build_section(stats), "waste_summary")
+    assert summary.rows[0][[c.key for c in summary.columns].index("failed_command_loops")] == 1
+    assert any("failed 3 or more times" in note for note in waste.build_section(stats).notes)
+
+
+def test_two_failures_or_failures_spread_over_messages_or_commands_are_not_a_loop(tmp_path: Path):
+    twice = _failing_commands(tmp_path, [["pytest -q"] * 2])
+    assert twice.failed_command_loops == 0
+    spread = _failing_commands(tmp_path, [["pytest -q"] * 2, ["pytest -q"]])
+    assert spread.failed_command_loops == 0
+    mixed = _failing_commands(tmp_path, [["pytest -q", "npm test", "pytest -q", "npm test"]])
+    assert mixed.failed_command_loops == 0
+
+
+def test_each_message_with_a_looping_command_adds_a_loop(tmp_path: Path):
+    stats = _failing_commands(tmp_path, [["pytest -q"] * 4, ["npm test"] * 3, ["pytest -q"]])
+    assert stats.failed_command_loops == 2
+
+
+def test_a_subagents_failing_commands_are_not_counted_as_loops(tmp_path: Path):
+    stats = _failing_commands(tmp_path, [["pytest -q"] * 3], kind="subagent", agent_type="reviewer")
+    assert stats.failed_command_loops == 0
+
+
 def test_a_hook_block_is_its_own_cause(tmp_path: Path):
     stats = _one_error_turn(tmp_path, "PreToolUse:Bash hook error: [guard.ps1]: BLOCKED: run the eval first")
     assert stats._by_cause["blocked"].turns == 1 and stats._by_cause["tool-error"].turns == 0

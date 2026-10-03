@@ -30,10 +30,11 @@ from claudeglass.pricing import load_pricing
 from helpers import attachment_line, tool_use_block, turn_line, user_str_line, write_jsonl
 
 SCRIPT = Path(str(resources.files("claudeglass") / "hooks" / cat.HOOK_SCRIPT))
+MODULE = SCRIPT.with_name(cat.HOOK_MODULE)
 
 
 def _load_hook():
-    spec = importlib.util.spec_from_file_location("_haiku_hook_under_test", SCRIPT)
+    spec = importlib.util.spec_from_file_location("_haiku_hook_under_test", MODULE)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -161,14 +162,14 @@ def test_the_config_knows_who_writes_the_tags(tmp_path):
 
 def test_the_large_result_note_goes_only_to_a_main_session_claude_tags():
     config = {"capture": {"level": "deep", "tagger": "haiku"}}
-    big = {"hook_event_name": "PostToolUse", "session_id": "s1", "cwd": "/w", "tool_name": "Bash"}
+    big = {"hook_event_name": "PostToolUse", "session_id": "s1", "cwd": "/w", "tool_name": "Read"}
     raw = cat.BIG_OUTPUT_TOKENS * 4
-    assert HOOK.note_for(big, config, CATALOGUE, raw_len=raw) == ""
-    assert HOOK.note_for(big, {"capture": {"level": "deep"}}, CATALOGUE, raw_len=raw)
+    assert HOOK.note_for(big, config, CATALOGUE, result_len=raw) == ""
+    assert HOOK.note_for(big, {"capture": {"level": "deep"}}, CATALOGUE, result_len=raw)
     # A subagent's report carries no tag for the word, whoever tags.
     for tagger in ("claude", "haiku"):
         assert HOOK.note_for({**big, "agent_id": "a1"}, {"capture": {"level": "deep", "tagger": tagger}}, CATALOGUE,
-                             raw_len=raw) == ""
+                             result_len=raw) == ""
 
 
 # -- agent runs -------------------------------------------------------------------

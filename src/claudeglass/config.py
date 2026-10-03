@@ -139,7 +139,7 @@ class ProjectConfig:
 class CaptureConfig:
     """``config.toml``'s ``[capture]`` table: whether metrics capture is on,
     and how much of it. See ``capture_catalogue`` for the metrics and
-    levels, and ``hooks/capture-hook.py`` for the hook that reads this.
+    levels, and ``hooks/capture_hook.py`` for the hook that reads this.
     """
 
     #: One of ``capture_catalogue.LEVELS``, or ``"custom"``.

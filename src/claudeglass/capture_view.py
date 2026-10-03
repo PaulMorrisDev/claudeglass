@@ -84,13 +84,13 @@ STATUSLINE_NOTES = {
 #: What a metric costs when it uses tokens without Claude being asked to
 #: write anything for it, in place of the Capture page's "No tokens."
 COST_NOTES = {
-    "coaching_notes": "About 50 to 120 tokens a note, only when a hint applies.",
+    "coaching_notes": "About 50 to 140 tokens a note, only when a hint applies.",
 }
 
 #: Said when ``coaching_notes`` is turned on, before the yes/no: what the
 #: notes are, when they come and what they cost.
 COACHING_NOTES_ON = (
-    "Coaching notes: when a hint applies, a hook adds a short note (about 50 to 120 tokens) to Claude's context, "
+    "Coaching notes: when a hint applies, a hook adds a short note (about 50 to 140 tokens) to Claude's context, "
     "after a tool result or when you send a message, and Claude acts on it or tells you in one line. "
     "They run at any capture level, at most one of a kind every half hour in a session. "
     "'claudeglass capture status' shows how many there were and what they cost."

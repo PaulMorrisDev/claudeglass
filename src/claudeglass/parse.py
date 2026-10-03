@@ -251,7 +251,7 @@ from . import prompt_shape
 from . import shell_reads
 from . import shell_writes
 from . import testrun
-from .capture_catalogue import COACHING_THRESHOLDS
+from .capture_catalogue import REPORT_THRESHOLDS
 from .model import (
     PROMPT_FLAGS,
     CaptureTag,
@@ -814,6 +814,14 @@ class _PendingTurn:
     #: back like ``edit_hashes_by_tool_use``.
     shell_write_count: int = 0
     shell_writes_by_tool_use: dict[str, int] = field(default_factory=dict)
+    #: Live-coaching addition (see model.py's ``Turn.config_edit_count``/
+    #: ``Turn.agent_edit_files``): the edit calls and shell write targets
+    #: inside a ``.claude`` folder (with the part each tool_use added, so a
+    #: call that failed or never ran can be taken back as the two above
+    #: are), and the files this turn's subagents changed.
+    config_edit_count: int = 0
+    config_edits_by_tool_use: dict[str, int] = field(default_factory=dict)
+    agent_edit_files: int = 0
     #: Fast-mode addition (see model.py's ``Turn.speed`` docstring).
     speed: str | None = None
     #: Quality-markers/metrics-capture addition: the end of this reply's
@@ -1132,6 +1140,12 @@ def _merge_content_blocks(
                     pending.edit_scratch_found = True
                 else:
                     pending.edit_real_found = True
+                if prompt_shape.is_config_path(path_value):
+                    pending.config_edit_count += 1
+                    if isinstance(tool_use_id, str) and tool_use_id:
+                        pending.config_edits_by_tool_use[tool_use_id] = (
+                            pending.config_edits_by_tool_use.get(tool_use_id, 0) + 1
+                        )
 
         # A2: agent-brief size -- the Agent/Task tool_use's own `prompt`
         # input length, never the prompt text itself -- plus a per-tool
@@ -1194,7 +1208,7 @@ def _merge_content_blocks(
                     pending.test_scopes_by_tool_use[
                         tool_use_id if isinstance(tool_use_id, str) and tool_use_id else f"#{len(pending.tool_use_ids)}"
                     ] = scope
-                outside_temp = 0
+                outside_temp = config_targets = 0
                 for target in shell_writes.write_targets(
                     command, powershell=name == "PowerShell", cwd=cwd if isinstance(cwd, str) else None
                 ):
@@ -1204,11 +1218,19 @@ def _merge_content_blocks(
                     # keeps no path.
                     if not _is_temp_target(target, temp_prefixes):
                         outside_temp += 1
+                        if prompt_shape.is_config_path(target):
+                            config_targets += 1
                 if outside_temp:
                     pending.shell_write_count += outside_temp
                     if isinstance(tool_use_id, str) and tool_use_id:
                         pending.shell_writes_by_tool_use[tool_use_id] = (
                             pending.shell_writes_by_tool_use.get(tool_use_id, 0) + outside_temp
+                        )
+                if config_targets:
+                    pending.config_edit_count += config_targets
+                    if isinstance(tool_use_id, str) and tool_use_id:
+                        pending.config_edits_by_tool_use[tool_use_id] = (
+                            pending.config_edits_by_tool_use.get(tool_use_id, 0) + config_targets
                         )
         if edited:
             pending.edit_target_hashes.extend(edited)
@@ -1231,6 +1253,10 @@ def _merge_content_blocks(
             plan = tool_input.get("plan")
             if isinstance(plan, str) and plan:
                 pending.plan_stats = _plan_stats(plan)
+                if _TIP_TEXT in plan:
+                    # The tip a ``plan_fresh_early`` note asked to end the
+                    # plan with: the plan is the reply that shows it.
+                    pending.last_text_tip = pending.tip_carried = True
         elif name == "AskUserQuestion" and isinstance(tool_use_id, str) and tool_use_id:
             if capture_tags.asks_for_feedback(tool_input):
                 pending.feedback_asks.append(tool_use_id)
@@ -1802,6 +1828,11 @@ def _accumulate_tool_results(
                 shell_writes_made = current.shell_writes_by_tool_use.pop(tool_use_id, 0)
                 if shell_writes_made and kind in _SHELL_NOT_RUN_KINDS:
                     current.shell_write_count -= shell_writes_made
+                # And the part of either inside a ``.claude`` folder, on the
+                # same terms as the hashes above.
+                config_made = current.config_edits_by_tool_use.pop(tool_use_id, 0)
+                if config_made and (name not in _SHELL_TOOL_NAMES or kind in _SHELL_NOT_RUN_KINDS):
+                    current.config_edit_count -= config_made
                 # And the reads and test runs: a command that never ran
                 # read nothing and ran no tests.
                 if kind in _SHELL_NOT_RUN_KINDS:
@@ -1821,6 +1852,8 @@ def _accumulate_tool_results(
             # whether a plan was approved.
             if name in _AGENT_TOOL_NAMES and not _is_async_launch(d):
                 current.agent_result_chars[tool_use_id] = current.agent_result_chars.get(tool_use_id, 0) + length
+                if not is_error:
+                    current.agent_edit_files += prompt_shape.agent_edit_files(d)
             elif name == "Workflow" and not is_error:
                 # Workflow-agents addition: the run this call launched, as
                 # ids, so the run's agents can be joined to this reply.
@@ -2055,6 +2088,7 @@ def _finalize_turn(
     human_adjust = human_remind = False
     human_gos: list[bool] = []
     human_statuses: list[bool] = []
+    human_questions: list[bool] = []
     queued_prompts = queued_chars = queued_steps = 0
     queued_correction = queued_adjust = queued_go = queued_status = False
     cap_note_chars = 0
@@ -2115,6 +2149,7 @@ def _finalize_turn(
         human_remind = human_remind or bool(pending_event.detail.get("remind"))
         human_gos.append(bool(pending_event.detail.get("go")))
         human_statuses.append(bool(pending_event.detail.get("status")))
+        human_questions.append(bool(pending_event.detail.get("question")))
 
     cap: CaptureTag | None = None
     result_marker: str | None = None
@@ -2192,6 +2227,8 @@ def _finalize_turn(
         tool_errors_by_kind=dict(pending.tool_errors_by_kind),
         edit_target_hashes=tuple(pending.edit_target_hashes),
         shell_write_count=pending.shell_write_count,
+        config_edit_count=pending.config_edit_count,
+        agent_edit_files=pending.agent_edit_files,
         human_correction=human_correction,
         speed=pending.speed,
         retry_marker=retry_marker,
@@ -2223,6 +2260,7 @@ def _finalize_turn(
         human_adjust=human_adjust,
         human_go=bool(human_gos) and all(human_gos),
         human_status=bool(human_statuses) and all(human_statuses),
+        human_question=bool(human_questions) and all(human_questions),
         human_remind=human_remind,
         queued_prompts=queued_prompts,
         queued_chars=queued_chars,
@@ -2247,10 +2285,10 @@ def _finalize_turn(
 
 
 #: The same-request check (``Turn.human_repeat``) and the "How you
-#: prompt" counts use the coaching hints' thresholds.
-_REPEAT_MIN_WORDS = int(COACHING_THRESHOLDS["repeat_min_words"])
-_REPEAT_SIMILARITY = float(COACHING_THRESHOLDS["repeat_similarity"])
-_REPEAT_WINDOW_S = float(COACHING_THRESHOLDS["repeat_window_minutes"]) * 60
+#: prompt" counts use the report's thresholds.
+_REPEAT_MIN_WORDS = int(REPORT_THRESHOLDS["repeat_min_words"])
+_REPEAT_SIMILARITY = float(REPORT_THRESHOLDS["repeat_similarity"])
+_REPEAT_WINDOW_S = float(REPORT_THRESHOLDS["repeat_window_minutes"]) * 60
 #: What marks a ClaudeGlass tip in a reply (``capture_catalogue.TIP_LABEL``
 #: less its quote mark, sign and bold, which Claude may drop).
 _TIP_TEXT = "ClaudeGlass tip:"
@@ -2306,7 +2344,8 @@ def _note_message(event, texts: list[str], parent, recent: list[dict], queued: l
     edit): the earlier copy's event gets ``detail["replaced"]``. Then sets
     ``event.detail["repeat"]`` when this message is much the same as one
     Claude answered within the window (a copy you resent isn't an
-    attempt), and remembers it. A queued message (``queued``) that is the
+    attempt), and remembers it. A poll ("how is it going"), a go-ahead and
+    an acknowledgement are the same words on purpose, so none is a repeat. A queued message (``queued``) that is the
     same message within a minute is marked ``dup``: this copy counts.
     Words are kept in memory only."""
     previous = recent[-1] if recent else None
@@ -2314,7 +2353,8 @@ def _note_message(event, texts: list[str], parent, recent: list[dict], queued: l
         previous["event"].detail["replaced"] = True
     at = _parse_ts(event.ts) if event.ts else None
     mine = prompt_shape.words("\n".join(t for t in texts if t))
-    if at is not None and not event.detail.get("ack") and len(mine) >= _REPEAT_MIN_WORDS and any(
+    asks_nothing = event.detail.get("ack") or event.detail.get("go") or event.detail.get("status")
+    if at is not None and not asks_nothing and len(mine) >= _REPEAT_MIN_WORDS and any(
         m["answered"] and m["at"] is not None and 0 <= (at - m["at"]).total_seconds() <= _REPEAT_WINDOW_S
         and prompt_shape.similarity(mine, m["words"]) >= _REPEAT_SIMILARITY
         for m in recent

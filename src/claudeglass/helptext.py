@@ -166,6 +166,7 @@ PLACEMENT: dict[str, str] = {
     "habits_briefs": "advanced",
     "habits_brief_templates": "keep",
     "habits_agents": "advanced",
+    "habits_explore_by_model": "advanced",
     "habits_effort_fit": "advanced",
     "habits_setups": "keep",
     "habits_agents_by_task": "advanced",
@@ -354,12 +355,14 @@ SECTION_COPY: dict[str, SectionCopy] = {
         title="How you prompt",
         intro="Habits in how you send messages that cost extra replies, how often they happened, and what they cost.",
         help=Help(
-            shows="Each habit the coaching notes warn about as you type, counted in your sessions whether or not "
-            "the notes were on.",
-            read="Each cost is rough, with what it counts alongside. By week is how often it happened per message, "
-            "the worst week as 100. A dash is a week with too few messages.",
+            shows="Habits in how you send messages, counted in your sessions whether or not coaching notes were on. "
+            "Notes warn about small requests, big tasks, huge pastes and checks on a background task as you type. "
+            "The rest are only counted here.",
+            read="Each cost is rough, with what it counts alongside. Some habits have no cost, because what they "
+            "led to can't be told apart from the work. By week is how often it happened per message, the worst "
+            "week as 100. A dash is a week with too few messages.",
             act="Pick the costliest habit and try its alternative for a week. Coaching notes "
-            "({{page:setup/capture}}) warn you the moment it happens.",
+            "({{page:setup/capture}}) warn you about the four they cover as they happen.",
         ),
     ),
     "capture": SectionCopy(
@@ -808,15 +811,17 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Each habit seen in this window, the costliest first.",
             read="A small request counts when it was short, sent soon after Claude's reply, and answered with a "
-            "file change. The words don't matter. Costs are at list price.",
+            "file change. A vague correction says something went wrong, with no detail. A repeat counts only when "
+            "the request before it was answered with a change. Asking how it's going counts each time, priced from "
+            "the reply to that message. Costs are at list price.",
             act="",
         ),
         columns={
             "habit": ("Habit", "The habit."),
             "times": ("Times", "How many times it happened."),
             "per_100": ("Per 100 messages", "How often it happened for every 100 messages you sent."),
-            "cost": ("What it cost", "A rough figure for what it cost, as \"Worked out from\" says. Blank for "
-                     "a big task, whose cost can't be told apart from the work."),
+            "cost": ("What it cost", "A rough figure for what it cost, as \"Worked out from\" says. \"Not priced\" "
+                     "for a big task or a vague correction, whose cost can't be told apart from the work."),
             "basis": ("Worked out from", "What the cost counts."),
             "trend": ("Trend", "Whether it's happening less or more over recent weeks."),
             "weeks": ("By week", "How often it happened per message, by week, the worst week as 100."),
@@ -825,10 +830,12 @@ TABLE_COPY: dict[str, TableCopy] = {
         value_labels={
             "drip_feed": "Small requests sent one at a time",
             "repeat_ask": "The same request again",
+            "status_poll": "Asking how it's going",
             "stop_loop": "Stopping Claude again and again",
             "plan_first": "Big tasks without a plan",
             "vague_fix": "Vague corrections",
             "big_paste": "Huge pastes",
+            "context_carried": "Context carried into new pieces",
             "falling": "Improving",
             "rising": "Getting worse",
             "steady": "Steady",
@@ -839,9 +846,10 @@ TABLE_COPY: dict[str, TableCopy] = {
     "prompting_tips": TableCopy(
         title="Tips Claude showed",
         help=Help(
-            shows="For each coaching hint that asks Claude to pass a tip on, how often it did.",
-            read="The cache and context hints ask for a tip only when your message starts something new, so "
-            "fewer of those show.",
+            shows="For each coaching hint that asks Claude to pass on a tip, how often it did, and how often "
+            "it called the tip a misfire.",
+            read="Most hints ask for the tip every time, so a tip left out is a miss. The paste hint asks only "
+            "when your message calls for it, so fewer of those show and that's no miss.",
             act="",
         ),
         columns={
@@ -849,17 +857,21 @@ TABLE_COPY: dict[str, TableCopy] = {
             "notes": ("Notes", "How many times the hint's note was added."),
             "shown": ("Tip shown", "How many of those replies ended with a ClaudeGlass tip."),
             "shown_pct": ("Shown", "The share of notes that ended with a tip."),
+            "relay": (
+                "Passed on",
+                "Relayed means Claude was told to show the tip every time. Judged relevant means Claude chose "
+                "whether your message called for it.",
+            ),
+            "misfires": ("Called a misfire", "How many times Claude said in its reply that the tip didn't apply."),
         },
         value_labels={
             "plan_fresh": "Fresh session after a plan",
-            "repeat_ask": "The same request again",
+            "plan_fresh_early": "Clear context at plan approval",
             "drip_feed": "Small requests sent one at a time",
-            "stop_loop": "Stopping Claude again and again",
             "plan_first": "Big task without a plan",
-            "vague_fix": "Vague correction",
             "big_paste": "Huge paste",
-            "cache_cold": "Cache gone cold",
-            "clear_context": "Large context",
+            "status_poll": "Asking how it's going",
+            "cold_return": "Back after a break",
         },
     ),
     "habits_playbook": TableCopy(
@@ -1077,6 +1089,27 @@ TABLE_COPY: dict[str, TableCopy] = {
         },
         lead_columns=["task", "level", "model", "effort", "avg_cost", "verdict", "saving_pct"],
     ),
+    "habits_explore_by_model": TableCopy(
+        title="Explore cost by model",
+        help=Help(
+            shows="What the Explore agents you started cost, per model: runs, cost, cost per run, and the context "
+            "each run read in all. Agents a workflow started aren't counted.",
+            read="Much of an Explore run's cost is re-reading the context it has built up. That makes the model "
+            "it runs on matter more than how many files it opens. Context read adds up the context size at "
+            "every reply, before any cache discount.",
+            act="If most of the cost sits on the largest model, ask for a smaller one when you start an Explore "
+            "agent. A search rarely needs the largest model.",
+        ),
+        columns={
+            "model": ("Model", "The model most of the run's replies used."),
+            "runs": ("Runs", "Explore agents you started on this model."),
+            "cost": ("Cost", "What those runs cost."),
+            "avg_cost": ("Per run", "The average cost of a run."),
+            "avg_context": ("Context read per run", "A typical run's context size, added up across its replies."),
+            "share_pct": ("Share of Explore cost", "This model's part of what every Explore run cost."),
+        },
+        value_labels={"opus": "Opus", "sonnet": "Sonnet", "haiku": "Haiku"},
+    ),
     "habits_agents_by_task": TableCopy(
         title="Agents by kind of task",
         help=Help(
@@ -1242,23 +1275,20 @@ TABLE_COPY: dict[str, TableCopy] = {
         lead_columns=["skill", "by_you", "by_claude", "late", "before", "helped", "unneeded"],
     ),
     "habits_tool_output": TableCopy(
-        title="Big tool output and failing commands",
+        title="Big tool output",
         help=Help(
             shows="Tool results of 8,000 tokens or more in one reply, per tool, and what keeping them in context "
-            "cost. Also commands that failed again and again within one message.",
+            "cost.",
             read="Carrying is priced from the next reply to the next compaction, a cache write and then a "
-            "read per reply, so it's a floor.",
-            act="Ask for quieter output (only failures, a tail, an offset read) and to stop after two failed "
-            "attempts at the same command.",
+            "read per reply, so it's a floor. Commands that keep failing are counted on {{page:spend/savings}}.",
+            act="Ask for quieter output: only failures, a tail, or an offset read.",
         ),
         columns={
             "tool": ("Tool", "The tool that returned it."),
             "outputs": ("Big outputs", "Replies that got 8,000 tokens or more back from it."),
             "tokens": ("Tokens", "Their size together."),
             "cost": ("Carrying them cost", "What keeping them in context cost."),
-            "loops": ("Commands failing again and again", "Commands that failed three or more times in one message."),
         },
-        value_labels={"loops": "Failing commands"},
     ),
     "capture_usage": TableCopy(
         title="What metrics capture cost",
@@ -4380,6 +4410,11 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Not wasted: a command failed",
                 "Replies whose only failed tool calls were commands that ran and reported failure, such as a "
                 "failing test or build. Claude used that output, so they aren't counted.",
+            ),
+            "failed_command_loops": (
+                "Commands failing again and again",
+                "Times one command failed three or more times within one of your messages in a main session. "
+                "Counted only: the retries aren't priced.",
             ),
             "redirected_turns": (
                 "Not wasted: redirected",

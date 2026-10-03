@@ -994,6 +994,20 @@ def test_a_stop_is_an_interrupt_that_is_not_the_sessions_end_or_the_tail_of_an_a
     assert not events.is_stop(events.classify_line(user_str_line("(denied)", toolDenialKind="user-rejected")))
 
 
+def test_a_bare_stop_is_only_esc_on_a_reply_not_the_tail_of_a_call_you_turned_down():
+    """The stop-loop report counts bare stops: a refusal is a decision about
+    one call, and the session's end is not you stopping Claude."""
+    esc = events.classify_line(user_str_line("[Request interrupted by user]"))
+    assert esc.kind == EventKind.INTERRUPT and not esc.subkind
+    assert events.is_bare_stop(esc) and events.is_stop(esc)
+    refusal = events.classify_line(user_str_line("[Request interrupted by user for tool use]"))
+    assert refusal.subkind == "tool_refusal"
+    assert events.is_stop(refusal) and not events.is_bare_stop(refusal)
+    shutdown = events.classify_line(user_str_line("[Request interrupted by shutdown]"))
+    assert not events.is_bare_stop(shutdown)
+    assert not events.is_bare_stop(events.classify_line(user_str_line("just a message")))
+
+
 def test_a_stop_window_holds_only_calls_you_turned_down_or_closed_dialogs():
     assert events.stop_window({})
     assert events.stop_window({"refused": 2, "aborted": 1})

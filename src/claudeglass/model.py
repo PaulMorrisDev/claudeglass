@@ -333,8 +333,8 @@ a flag, never text:
   front of the model just before this turn, measured from ``rendered``.
   From ``PARSER_VERSION`` 25 it counts coaching notes (``cg-coach v``)
   too: an ``Event`` of subkind ``coaching_note`` whose ``detail`` holds
-  ``v``, ``kind`` (a ``capture_catalogue.COACHING_HINTS`` word or
-  "other") and ``hook``; a capture note sharing an attachment with one
+  ``v``, ``kind`` (a ``capture_catalogue.COACHING_HINTS`` or
+  ``RETIRED_COACHING_HINTS`` word, else "other") and ``hook``; a capture note sharing an attachment with one
   carries ``detail["coach"]``/``["coach_chars"]`` and sizes only its own
   part.
 - ``Turn.spawn_marker: str | None = None`` -- on the turn that follows a
@@ -450,16 +450,23 @@ counts need about each message you typed and each reply, worked out by
 the words:
 
 - ``Turn.prompt_steps: int = 0`` -- how many separate changes the
-  preceding message asked for (``prompt_shape.request_steps``), when two
-  or more; 0 when it mentions a plan, since it's following one.
+  preceding message asked for (``prompt_shape.plan_steps``), when two or
+  more. They are counted in your own prose, without a fenced block, a
+  quoted line or pasted log lines, and need a change verb: 0 for a message
+  that mentions a plan (it follows one), opens by asking to review or
+  explain, or is a plan already (1,500 characters or more with a heading,
+  or five numbered items).
 - ``Turn.prompt_plan_mode: bool = False`` -- it was sent in plan mode
   (its line's ``permissionMode``).
-- ``Turn.human_vague: bool = False`` -- it was a short fix request that
-  names nothing specific (``prompt_shape.is_vague_fix``).
+- ``Turn.human_vague: bool = False`` -- it was a short correction that
+  names nothing specific (``prompt_shape.is_vague_fix``); since
+  ``PARSER_VERSION`` 37 it needs a correction or bad-outcome phrase and
+  is never a question, a go-ahead, a thank-you or an image message.
 - ``Turn.human_ack: bool = False`` -- it only acknowledged ("thanks").
 - ``Turn.human_repeat: bool = False`` -- it was much the same request as
   one Claude answered earlier in the same transcript, within the
   ``repeat_window_minutes`` threshold (compared in memory while parsing).
+  Since ``PARSER_VERSION`` 37 never a poll, a go-ahead or a thank-you.
 - ``Event.detail["replaced"]`` -- on a message you sent again before
   Claude answered it (you pressed Esc before any reply, and Claude Code
   put it back to edit; the new copy has the same parent line). Its turn
@@ -579,6 +586,26 @@ message is read in memory and dropped:
   changed from the last one in the transcript, when it is the
   ``CACHE_SIGNAL`` it was. A ``permission-mode`` line and a system
   ``informational`` line are ignored.
+
+Live-coaching addition (``PARSER_VERSION`` 37). What the small-requests
+check (``drip_feed``) needs to tell a request from what isn't one, and a
+change to your work from one to Claude's own folders. A yes/no and counts
+only:
+
+- ``Turn.human_question: bool = False`` -- the preceding message you typed
+  only asked something: it ended in a question mark or opened with a
+  question word (``prompt_shape.is_question``). Like ``human_go`` and
+  ``human_status``, a question asks for no change.
+- ``Turn.config_edit_count: int = 0`` -- how many of this turn's edit
+  calls and shell write targets sat inside a ``.claude`` folder
+  (``prompt_shape.is_config_path``): Claude's memory, plans and scripts, or
+  a project's agents and skills. Taken back for an edit that failed and a
+  command that was blocked or denied, as ``shell_write_count`` is. A reply
+  that only changed such files didn't change your work.
+- ``Turn.agent_edit_files: int = 0`` -- the files this turn's subagents
+  changed (``toolUseResult.toolStats.editFileCount`` of each synchronous
+  ``Agent`` result that wasn't an error): their own edits aren't main-chain
+  tool calls.
 
 Plan-feedback addition (``PARSER_VERSION`` 37). How each tool call that
 didn't run was answered, and what became of each plan. Closed words and
@@ -1124,6 +1151,9 @@ class Turn:
     human_go: bool = False
     human_status: bool = False
     human_remind: bool = False
+    #: Live-coaching addition (see module docstring): the preceding message
+    #: only asked something.
+    human_question: bool = False
     queued_prompts: int = 0
     queued_chars: int = 0
     queued_steps: int = 0
@@ -1147,6 +1177,11 @@ class Turn:
     shell_read_count: int = 0
     shell_read_chars: int = 0
     tests_run: str = ""
+    #: Live-coaching addition (see module docstring): the edit calls and
+    #: shell writes inside a ``.claude`` folder, and the files this turn's
+    #: subagents changed.
+    config_edit_count: int = 0
+    agent_edit_files: int = 0
     #: Workflow-agents addition (``PARSER_VERSION`` 37): ``Workflow``
     #: tool_use id -> ``(runId, taskId)`` of the run the call launched. Ids
     #: only. A resumed run keeps its ``runId``, so one id can have several

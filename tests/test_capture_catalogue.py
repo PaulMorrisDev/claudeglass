@@ -60,8 +60,9 @@ def test_metrics_claude_writes_have_a_tag_and_a_note_and_the_rest_have_neither()
             assert not asks, m.id
             assert m.out_chars == 0, m.id
         if m.id == "coaching_notes":
-            # The one coaching toggle that runs through the capture hook.
-            assert m.hooks == ("UserPromptSubmit", "PostToolUse")
+            # The one coaching toggle that runs through the capture hook; Stop only keeps the
+            # newest reply's time for the cold-return receipt and prints nothing.
+            assert m.hooks == ("UserPromptSubmit", "PostToolUse", "Stop")
         elif m.group in ("derived", "coaching") or m.id in ("feedback_note", "dashboard_rating"):
             assert not m.hooks, m.id
 
@@ -192,10 +193,46 @@ def test_hook_entries_follow_the_metrics():
         ("capture-hook.py", "SubagentStop", "", False),
     ) + signals
     assert cat.hook_specs(cat.level_metrics("deep"))[2] == (
-        "capture-hook.py", "PostToolUse", "Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*", False,
+        "capture-hook.py", "PostToolUse", "Read|Grep|Glob|WebFetch|WebSearch", False,
     )
     assert cat.hook_specs(["web"]) == ()
     assert cat.hook_specs(["result"]) == (("capture-hook.py", "SubagentStop", "", False),)
+
+
+def test_the_post_tool_use_matcher_leaves_out_the_shell_and_mcp_tools():
+    """A 30-day replay found the large-output note after a shell or MCP
+    result wasn't worth the wait, and those two were about two thirds of
+    the hook's spawns. Whatever metrics are on, the matcher names only
+    tools whose results the hook can use."""
+    assert cat.BIG_OUTPUT_TOOLS == ("Read", "Grep", "Glob", "WebFetch", "WebSearch")
+    assert cat.COACHING_TOOLS == (*cat.BIG_OUTPUT_TOOLS, "ExitPlanMode")
+    for ids in (cat.level_metrics("deep"), ["coaching_notes"], [*cat.level_metrics("deep"), "coaching_notes"]):
+        matchers = [spec[2] for spec in cat.hook_specs(ids) if spec[1] == "PostToolUse"]
+        assert len(matchers) == 1
+        names = matchers[0].split("|")
+        assert not {"Bash", "PowerShell"} & set(names) and not any("mcp__" in name or "*" in name for name in names)
+    exported = cat.export_json()
+    assert exported["result_tools"] == list(cat.COACHING_TOOLS)
+
+
+def test_the_size_measure_constants_are_exported_for_the_hook():
+    exported = cat.export_json()
+    assert exported["result_image_max_tokens"] == cat.RESULT_IMAGE_MAX_TOKENS == 1_600
+    assert exported["result_image_patch_px"] == cat.RESULT_IMAGE_PATCH_PX == 28
+    assert exported["result_persist_chars"] == cat.RESULT_PERSIST_CHARS
+    assert exported["result_preview_chars"] == cat.RESULT_PREVIEW_CHARS
+    # An image alone can never reach the large-output threshold; a saved result
+    # counts for its small preview, far under it.
+    threshold = cat.BIG_OUTPUT_TOKENS * 4
+    assert cat.RESULT_IMAGE_MAX_TOKENS * 4 < threshold and cat.RESULT_PREVIEW_CHARS < threshold
+
+
+def test_the_hook_is_a_launcher_beside_the_module_it_runs():
+    assert (cat.HOOK_SCRIPT, cat.HOOK_MODULE) == ("capture-hook.py", "capture_hook.py")
+    hooks = resources.files("claudeglass") / "hooks"
+    assert (hooks / cat.HOOK_MODULE).is_file() and (hooks / cat.HOOK_SCRIPT).is_file()
+    launcher = (hooks / cat.HOOK_SCRIPT).read_text(encoding="utf-8")
+    assert len(launcher.splitlines()) < 50 and "import capture_hook" in launcher
 
 
 def test_only_signals_the_transcripts_lack_get_a_hook():

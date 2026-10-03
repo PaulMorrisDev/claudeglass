@@ -163,7 +163,7 @@ UNINSTALL_COMMAND = "claudeglass uninstall --revert-changes --delete-data --dry-
 
 #: What coaching notes cost, for :func:`expectations` and the hooks row.
 COACHING_COST = (
-    "Coaching notes are on: when a hint applies, a hook adds a short note (about 50 to 120 tokens) to Claude's "
+    "Coaching notes are on: when a hint applies, a hook adds a short note (about 50 to 140 tokens) to Claude's "
     "context. {{page:setup/capture}} shows what they cost. Turn them off with "
     "'claudeglass capture disable coaching_notes'."
 )
@@ -204,7 +204,7 @@ def _hooks_token_cost(capture: CaptureConfig, level: str) -> str:
     else:
         text = "None from capture while it's off." if capture.coaching_notes_on else "None while capture is off."
     if capture.coaching_notes_on:
-        text += " Coaching notes: about 50 to 120 tokens each time a hint applies."
+        text += " Coaching notes: about 50 to 140 tokens each time a hint applies."
     if (capture.is_on and _uses_tokens(capture)) or capture.coaching_notes_on:
         text += " {{page:setup/capture}} shows the measured amount."
     return text
@@ -398,7 +398,10 @@ def inventory(
                     "this tool can tell where your tokens go. The free signals (why sessions end, when Claude "
                     "waited for you, which tools asked for permission) go to a file in this tool's data folder. "
                     "With coaching notes on, they also add a short hint to Claude's context when one applies, at "
-                    "any capture level. With capture and coaching notes off the hooks add nothing."
+                    "any capture level. With capture and coaching notes off the hooks add nothing. Claude Code runs "
+                    "a small launcher, which runs the hook's code and its word list, all three in this tool's data "
+                    "folder; removing that folder takes them all out. Claude Code waits for the hook after a read, "
+                    "search or web result and each message you send, and never after a shell command."
                 ),
                 token_cost=_hooks_token_cost(capture, level),
                 undo="claudeglass capture off, then claudeglass capture remove",

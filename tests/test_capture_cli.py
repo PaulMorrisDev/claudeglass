@@ -79,7 +79,7 @@ def test_plan_capture_adds_the_entries_a_level_needs_and_writes_nothing(tmp_path
     assert [(event, matcher) for event, matcher, _ in entries] == [
         ("SessionStart", "startup|clear|compact"),
         ("SubagentStop", ""),
-        ("PostToolUse", "Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"),
+        ("PostToolUse", "Read|Grep|Glob|WebFetch|WebSearch"),
         ("SessionEnd", ""),
         ("Notification", ""),
         ("PermissionRequest", ""),
@@ -108,6 +108,22 @@ def test_plan_capture_is_a_no_op_once_connected(tmp_path):
     assert hook_health.check_capture(ESSENTIALS).ok
 
 
+def test_an_entry_with_the_matcher_from_before_the_shell_and_mcp_tools_were_dropped_is_replaced(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    commands = _commands(config_dir)
+    old_matcher = "Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
+    old = {"hooks": {"PostToolUse": [{"matcher": old_matcher, "hooks": [
+        {"type": "command", "command": commands[cat.HOOK_SCRIPT], "timeout": 5},
+    ]}]}}
+    (config_dir.parent / "settings.json").write_text(json.dumps(old), encoding="utf-8")
+    plan = hook_health.plan_capture(DEEP, commands)
+    # The old entry still runs, so it is taken out and the entry for the new matcher put in.
+    assert any(line.startswith("Remove the capture hook") for line in plan.changes)
+    assert any(line.startswith("Update the capture hook") and "read, search and web results" in line for line in plan.changes)
+    matchers = [matcher for event, matcher, _ in _entries(json.loads(plan.new_text)) if event == "PostToolUse"]
+    assert matchers == ["Read|Grep|Glob|WebFetch|WebSearch"]
+
+
 def test_a_changed_command_is_updated_in_place_not_duplicated(tmp_path):
     config_dir = _claude(tmp_path, {})
     old = {cat.HOOK_SCRIPT: '"/old/python" "/old/hooks/capture-hook.py"'}
@@ -122,7 +138,7 @@ def test_lowering_the_level_takes_out_entries_no_metric_needs(tmp_path):
     config_dir = _claude(tmp_path, {})
     hook_health.connect(hook_health.plan_capture(DEEP, _commands(config_dir)), now=NOW)
     plan = hook_health.plan_capture(ESSENTIALS, _commands(config_dir))
-    assert plan.changes == ["Remove the capture hook that runs capture-hook.py after shell, read, search, web and MCP results."]
+    assert plan.changes == ["Remove the capture hook that runs capture-hook.py after read, search and web results."]
     assert "PostToolUse" not in json.loads(plan.new_text)["hooks"]
 
 
@@ -234,6 +250,15 @@ def test_check_capture_reports_a_missing_catalogue(tmp_path):
     assert any("catalogue" in p and "missing" in p for p in health.problems)
 
 
+def test_check_capture_reports_a_missing_module_the_launcher_runs(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    (config_dir / "hooks" / cat.HOOK_MODULE).unlink()
+    health = hook_health.check_capture(ESSENTIALS, config_dir=config_dir)
+    assert not health.ok
+    assert any(cat.HOOK_MODULE in p and "missing" in p and "capture connect" in p for p in health.problems)
+
+
 def test_check_capture_python_version_is_off_by_default_and_bounded_when_asked(tmp_path, monkeypatch):
     config_dir = _claude(tmp_path, {})
     _connect_essentials(config_dir)
@@ -261,8 +286,36 @@ def test_install_hook_files_skips_a_file_whose_replace_fails(tmp_path, monkeypat
 
     monkeypatch.setattr(hook_health.os, "replace", _boom)
     written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
-    assert [p.name for p in written] == [cat.HOOK_SCRIPT]
+    assert [p.name for p in written] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
     assert not (config_dir / "hooks" / cat.CATALOGUE_FILE).exists()
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+def test_install_hook_files_writes_the_launcher_its_module_and_the_catalogue(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    # The launcher is the file Claude Code runs and the one that starts using the others: last.
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE, cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+    for name in (cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE):
+        assert (config_dir / "hooks" / name).read_bytes() == _packaged(name)
+    manifest = json.loads((config_dir / "hooks" / ".manifest.json").read_text(encoding="utf-8"))
+    assert {cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE} <= set(manifest)
+    assert len(_packaged(cat.HOOK_SCRIPT)) < 2_000  # a launcher, not the hook itself
+
+
+def test_install_hook_files_leaves_the_launcher_out_when_its_module_cannot_be_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if Path(dst).name == cat.HOOK_MODULE:
+            raise OSError("locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hook_health.os, "replace", _boom)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE]
+    assert not (config_dir / "hooks" / cat.HOOK_SCRIPT).exists()
     assert not list((config_dir / "hooks").glob("*.tmp"))
 
 
@@ -334,8 +387,42 @@ def test_refresh_hook_files_treats_a_pre_manifest_file_as_outdated_not_modified(
     (hooks_dir / cat.CATALOGUE_FILE).write_bytes(_packaged(cat.CATALOGUE_FILE))
 
     refreshed = hook_health.refresh_hook_files(config_dir)
-    assert [p.name for p in refreshed] == [cat.HOOK_SCRIPT]
+    # The launcher, and the module it needs, which an install from before the split lacks.
+    assert [p.name for p in refreshed] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
     assert (hooks_dir / cat.HOOK_SCRIPT).read_bytes() == _packaged(cat.HOOK_SCRIPT)
+    assert (hooks_dir / cat.HOOK_MODULE).read_bytes() == _packaged(cat.HOOK_MODULE)
+
+
+def test_refresh_hook_files_upgrades_an_install_that_holds_the_whole_hook_in_one_file(tmp_path):
+    import hashlib
+
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / cat.HOOK_MODULE).unlink()
+    old = b"# the whole hook, as 0.14 wrote it\n"
+    (hooks_dir / cat.HOOK_SCRIPT).write_bytes(old)
+    manifest = json.loads((hooks_dir / ".manifest.json").read_text(encoding="utf-8"))
+    manifest[cat.HOOK_SCRIPT] = hashlib.sha256(old).hexdigest()
+    del manifest[cat.HOOK_MODULE]
+    (hooks_dir / ".manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert not hook_health.check_capture(ESSENTIALS, config_dir=config_dir).ok
+
+    refreshed = hook_health.refresh_hook_files(config_dir)
+    assert [p.name for p in refreshed] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+    assert hook_health.check_capture(ESSENTIALS, config_dir=config_dir).ok
+    assert hook_health.refresh_hook_files(config_dir) == []
+
+
+def test_refresh_hook_files_leaves_a_hand_edited_script_without_adding_a_module(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / cat.HOOK_MODULE).unlink()
+    (hooks_dir / cat.HOOK_SCRIPT).write_text("# someone edited this by hand\n", encoding="utf-8")
+    assert hook_health.refresh_hook_files(config_dir) == []
+    assert not (hooks_dir / cat.HOOK_MODULE).exists()
+    assert (hooks_dir / cat.HOOK_SCRIPT).read_text(encoding="utf-8") == "# someone edited this by hand\n"
 
 
 def test_backups_made_in_the_same_second_never_overwrite_each_other(tmp_path):

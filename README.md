@@ -69,7 +69,8 @@ answered from your own sessions:
   requests, and everything Claude did for it, into habits worth
   changing, with a rough saving for each. How you prompt counts the
   prompting habits that cost extra replies, such as small requests sent
-  one at a time or the same request sent again, and what each cost.
+  one at a time, the same request sent again or asking how it's going,
+  and what each cost.
   Turn on coaching notes and you're told the moment you send one.
 - **"Did my change work?"** It records your settings as each session
   starts, and compares the sessions before a change with those after
@@ -418,8 +419,8 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 |---|---|---|
 | A SessionStart hook (`snapshot-config.py`) that records your settings as each session starts. It runs in the background. | `init`, when you connect | None |
 | A status line that logs your usage-limit readings, if you have none. Claude Code runs it only in a terminal, not in the desktop app. | `init`, when you connect | None |
-| The capture hook (`capture-hook.py`) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep. | [Metrics capture](#metrics-capture) | See its levels |
-| The same hook on UserPromptSubmit, and on PostToolUse after shell, read, search, web and MCP tools and an approved plan. | [Coaching notes](#live-coaching) | About 50 to 120 tokens a note, only when a hint applies |
+| The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep. | [Metrics capture](#metrics-capture) | See its levels |
+| The same hook on UserPromptSubmit, and on PostToolUse after read, search and web tools and an approved plan, never after a shell or MCP tool. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
 | The `/cg-feedback` skill, for rating a piece of work when it's done. | `init`'s sharper tips, `capture feedback on`, or the Deep level | Its name and description, listed at each session start |
 | The `/cg-brief` skill, which checks a request against its checklist. | `capture brief on` | Its name and description, listed at each session start |
 
@@ -467,11 +468,11 @@ Live coaching has its own switches, on **Setup › Capture** or with
 and they work at any capture level, Off included:
 
 - **Coaching notes** (`coaching_notes`). When a hint applies, such as a
-  large tool output, an expired cache or several small requests in a
-  row, the hook adds a short note and Claude passes the tip on. For the
-  six prompting habits, you also see a one-line notice the moment you
-  send the message. They're made for the desktop app, where the status
-  line doesn't show.
+  large tool output, a return after the prompt cache expired or several
+  small requests in a row, the hook adds a short note and Claude passes
+  the tip on. Where your app shows hook messages, you also see a
+  one-line notice the moment you send the message. They're made for the
+  desktop app, where the status line doesn't show.
 - **Coaching line** (`coaching_line`). The same kind of hint in the
   status line, in a terminal. It costs no tokens.
 - **Brief templates** (`capture brief on`). Checklists per kind of task

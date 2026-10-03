@@ -1,7 +1,7 @@
 """The free signals metrics capture logs, read back.
 
 While the ``session_end``, ``waits``, ``permissions`` or ``turn_signals``
-metric is on, ``hooks/capture-hook.py`` appends one line per SessionEnd,
+metric is on, ``hooks/capture_hook.py`` appends one line per SessionEnd,
 Notification, PermissionRequest, Stop or StopFailure hook call to
 ``<config-dir>/signals/YYYY-MM.jsonl``::
 

@@ -390,5 +390,5 @@ def test_coaching_notes_say_what_a_note_costs_not_no_tokens():
     Capture page said "No tokens." beside what the notes had cost."""
     rows = _rows(capture_view.view(CaptureConfig(coaching=["coaching_notes", "coaching_line"])))
     assert rows["coaching_notes"]["asks_claude"] is False
-    assert rows["coaching_notes"]["cost_note"] == "About 50 to 120 tokens a note, only when a hint applies."
+    assert rows["coaching_notes"]["cost_note"] == "About 50 to 140 tokens a note, only when a hint applies."
     assert rows["coaching_line"]["cost_note"] is None

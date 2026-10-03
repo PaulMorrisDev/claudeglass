@@ -3,7 +3,7 @@
 each judged several times, scored key by key.
 
 The capture hook's ``SubagentStop`` entry hands Haiku an excerpt of each
-finished agent run (``agent_excerpt`` in ``hooks/capture-hook.py``) and
+finished agent run (``agent_excerpt`` in ``hooks/capture_hook.py``) and
 keeps the words it answers with: ``result``, ``retry``, ``fit``,
 ``brief`` and ``missing``. This builds each case's excerpt with the hook's
 own ``agent_excerpt``, so the text Haiku reads is the text it reads in a
@@ -31,7 +31,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from claudeglass import capture_catalogue as cat  # noqa: E402
 
-_SPEC = importlib.util.spec_from_file_location("_capture_hook", ROOT / "src" / "claudeglass" / "hooks" / cat.HOOK_SCRIPT)
+_SPEC = importlib.util.spec_from_file_location("_capture_hook", ROOT / "src" / "claudeglass" / "hooks" / cat.HOOK_MODULE)
 HOOK = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(HOOK)
 CATALOGUE = HOOK.load_catalogue()

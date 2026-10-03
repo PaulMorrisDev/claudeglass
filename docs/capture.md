@@ -8,15 +8,15 @@ It costs tokens. The note is written to the prompt cache once, then read from it
 
 ## Levels
 
-Costs rise with depth, so capture comes in levels, each including every metric of the levels before it. The note is added once at each session's start, `/clear` or compaction (a resumed session already carries the note from its start, so it is not asked again). Agent runs get no note; a level with agent metrics adds a Haiku call per agent run instead, however deep the agent is nested.
+Costs rise with depth, so capture comes in levels, each including every metric of the levels before it. The note is added once at each session's start, `/clear` or compaction (a resumed session already carries the note from its start, so it is not asked again). Agent runs get no note, and nor does a subagent's own compaction, which the hook tells from the main session's by a subagent transcript that has just recorded one; the note also tells a subagent to ignore it. A level with agent metrics adds a Haiku call per agent run instead, however deep the agent is nested.
 
 | Level | What it adds | Note at session start | Haiku per agent run |
 |---|---|---|---|
 | Off | No metrics are captured and no tokens are used for them. Live coaching and feedback have their own switches and keep working while capture is off. | – | – |
 | Free | Local signals from hooks that log to a file. Uses no Claude tokens. | – | – |
-| Essentials | Claude tags each piece of work: what kind it was, how clear the request was, how hard, how big, and when the task changed. Claude Haiku judges whether each agent run finished, and why one was run again. | ~186 tokens | ~$0.002 |
-| Standard | Adds what the request lacked, planning, skills, research, and Haiku's view of each agent run's model and brief. | ~304 tokens | ~$0.002 |
-| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /cg-feedback survey, its reminder note, and Claude's one-line reminder to run it when a piece of work is done. | ~412 tokens | ~$0.002 |
+| Essentials | Claude tags each piece of work: what kind it was, how clear the request was, how hard, how big, and when the task changed. Claude Haiku judges whether each agent run finished, and why one was run again. | ~196 tokens | ~$0.002 |
+| Standard | Adds what the request lacked, planning, skills, research, and Haiku's view of each agent run's model and brief. | ~314 tokens | ~$0.002 |
+| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /cg-feedback survey, its reminder note, and Claude's one-line reminder to run it when a piece of work is done. | ~422 tokens | ~$0.002 |
 | Custom | Any other set of metrics, turned on one by one (`capture enable`/`capture disable`). | depends what's on | depends what's on |
 
 These are rough sizes — the note's characters divided by four, plus Claude Code's own hook-wrapper overhead (the system-reminder tags around it) — and don't include the tag Claude writes back (each metric below says roughly how many output tokens its own words cost). Setup › Capture replays your last 14 days of transcripts against each level before you turn it on, and once it's on, measures the real note and tag cost from what Claude Code actually recorded — read that number, not this one, when it matters.
@@ -59,8 +59,8 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 | Agent chains (`spawn_tree`) | Always measured, no hook | – | Delegating to agents |
 | Repeated failures (`tool_loops`) | Always measured, no hook | – | Checking changes, Tool output |
 | Where research happens (`research_split`) | Always measured, no hook | – | Researching, Delegating to agents |
-| Coaching line (`coaching_line`) | Live coaching, any level | – | Clearing context, Tool output, Researching |
-| Coaching notes from Claude (`coaching_notes`) | Live coaching, any level | – | Clearing context, Tool output, Researching, Delegating to agents, Planning |
+| Coaching line (`coaching_line`) | Live coaching, any level | – | Clearing context, Tool output |
+| Coaching notes from Claude (`coaching_notes`) | Live coaching, any level | – | Clearing context, Tool output, Delegating to agents, Planning |
 | Brief templates (`brief_templates`) | Live coaching, any level | – | Giving Claude information |
 | Feedback skill (`feedback_skill`) | Feedback, any level; switching to Deep turns it on | – | Cost per finished piece of work, Planning, Profiles per kind of task |
 | Feedback reminder in the status line (`feedback_note`) | Feedback, any level; switching to Deep turns it on | – | Cost per finished piece of work |
@@ -251,7 +251,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Large tool outputs (`big_output`)
 
 - **Level:** Deep
-- **Captures:** After a tool result of about 8,000 tokens or more, how much of it Claude needed: all, part or none. Claude Code waits for the hook after each shell, read, search, web or MCP result. 'claudeglass capture status' shows how long that has added, measured from your own sessions.
+- **Captures:** After a read, search or web result of about 8,000 tokens or more, how much of it Claude needed: all, part or none. Only what Claude reads counts. A picture counts for at most 1,600 tokens. A result Claude Code saved to a file counts for its preview alone. Shell and MCP results are not asked about. Claude Code waits for the hook after each read, search or web result. 'claudeglass capture status' shows how long that has added, measured from your own sessions.
 - **Why:** Quieter commands, offset reads and output caps where big outputs weren't needed.
 - **Tag:** `out=needed|part|unneeded`
 - **Costs:** about 2 output tokens each time
@@ -357,7 +357,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Repeated failures (`tool_loops`)
 
 - **Level:** Always measured, no hook
-- **Captures:** The same command failing again and again in one piece of work.
+- **Captures:** The same command failing again and again in one piece of work. It is counted on the Savings page, with the commands that failed; no hint speaks up while it happens.
 - **Why:** Flaky tests and environment trouble that burn tokens.
 - **Tag:** No tag. Read from the transcript Claude Code already writes; Claude is never asked, and it costs no tokens.
 - **Powers:** Checking changes, Tool output
@@ -375,19 +375,19 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Coaching line (`coaching_line`)
 
 - **Level:** Live coaching, any level
-- **Captures:** A second status line with a live hint from your session. For example, a large context before a new task, a large last output, many reads so far, or small requests sent one at a time.
+- **Captures:** A second status line with a live hint from your session. For example, a cache about to expire, a large last output, or small requests sent one at a time.
 - **Why:** Advice where you work, at the moment it applies. The status line is never sent to Claude.
 - **Tag:** No tag. Shown only in the status line; Claude is never asked, and it costs no tokens.
-- **Powers:** Clearing context, Tool output, Researching
+- **Powers:** Clearing context, Tool output
 
 ### Coaching notes from Claude (`coaching_notes`)
 
 - **Level:** Live coaching, any level
-- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or tells you in a highlighted tip: a large tool output, many reads for one message, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, or a large context or an expired cache when you send a message. It also flags how you prompt: the same request again, a big task without a plan, small requests sent one at a time, a vague correction, a huge paste, or stopping Claude again and again.
-- **Why:** Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to 120 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each shell, read, search, web or MCP result and each message you send.
-- **Tag:** No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in a highlighted tip. Each hint and when it applies: [coaching.md](coaching.md).
-- **Hook:** UserPromptSubmit, PostToolUse
-- **Powers:** Clearing context, Tool output, Researching, Delegating to agents, Planning
+- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large read, search or web result, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, or asking how background work is going while it still runs. It also flags how you prompt: a big task without a plan, small requests sent one at a time, or a huge paste. Vague corrections, the same request again and stopping Claude again and again are counted after the fact on Work habits, with no live note.
+- **Why:** Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to 140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each read, search or web result and each message you send. A hook after each reply runs in the background and keeps only the time and size of Claude's newest reply, so the cache check is right after a resume.
+- **Tag:** No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in a highlighted tip: the note's first sentence says to write it and its last line is the tip, word for word, so every app shows it. Each hint and when it applies: [coaching.md](coaching.md).
+- **Hook:** UserPromptSubmit, PostToolUse, Stop
+- **Powers:** Clearing context, Tool output, Delegating to agents, Planning
 
 ### Brief templates (`brief_templates`)
 
@@ -436,9 +436,9 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 
 ## The tag format
 
-Every note (`capture-hook.py` builds the same text from `capture-catalogue.json`) opens with the same two lines, then the keys for whichever metrics are on:
+Every note (`capture_hook.py` builds the same text from `capture-catalogue.json`) opens with the same two lines, then the keys for whichever metrics are on:
 
-> The user turned on ClaudeGlass metrics capture, to see where their tokens go.
+> The user turned on ClaudeGlass metrics capture, to see where their tokens go. If you are a subagent, ignore this note.
 >
 > End your final reply to each user message with one line, [cg: key=word ...], using only these keys and words:
 
@@ -454,7 +454,7 @@ If Claude writes more than one tag, the last one wins, key by key.
 
 By default Claude writes the `[cg: ...]` tag itself, at the end of its final reply to each of your messages. `claudeglass capture tagger haiku` (or "Tags written by" on Setup › Capture) hands that to Claude Haiku instead, and `capture tagger claude` hands it back:
 
-- The session note no longer carries the tag list, and replies end as they would anyway. At Standard the note drops from ~304 to ~0 tokens.
+- The session note no longer carries the tag list, and replies end as they would anyway. At Standard the note drops from ~314 to ~0 tokens.
 - When a turn of the main session ends, the hook's `Stop` entry reads the end of the transcript, hands a short excerpt to a worker process of its own, and returns at once. The excerpt holds your message (up to 2,000 characters), your message before it and the end of Claude's reply to that, how many you sent before, what Claude did (model calls, output tokens, tools used, the files it changed, the first line of up to 6 shell commands, whether they ran tests, skills, subagents, tool errors, any plan-mode plan) and the end of its final reply (up to 1,500 characters). Tool output is never in it.
 - The worker runs `claude -p --model haiku` with no tools, settings, MCP servers or saved session, through your own Claude Code login, with the excerpt on stdin, and no thinking. Haiku gets a line for each key Claude's note would have asked for, with each word spelled out, after "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words. In them, "you" means Claude:" and before "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (found outside research or a search; shift on a first message) or the excerpt can't tell at all." It loads no settings file, so your hooks don't run inside it; a login that needs an `apiKeyHelper` from settings.json fails there, and `capture status` says so.
 - Only the tag's words are kept, checked against the same vocabularies, in `<config-dir>/tags/YYYY-MM.jsonl`, with the reply's id and what the call cost. What the transcript settles overrides Haiku: a plan-mode plan written that turn is `plan=made`; no skill run is never `skill=helped`; no file changed is `check=none`, and a test run is `check=targeted` or `full` by whether it picked tests; only documentation changed is `task=docs`; and a first message has no `shift` but `new`. A turn that got no tag says why: `no_cli`, `no_login`, `timeout`, `failed`, `no_tag`. `capture status` counts both.
@@ -481,7 +481,7 @@ Free local signals never involve Claude at all: a hook logs the session id (hash
 
 ## Turning it on, off or removing it
 
-The hook script and its catalogue (`capture-hook.py`, `capture-catalogue.json`) live side by side under `<config-dir>/hooks/`. A change that needs different hook entries (`capture on`, `level`, `enable`, `disable`, `tagger` or `connect`) also changes `~/.claude/settings.json`, and `capture remove` takes the entries out — each only after showing the diff and asking first, unless you pass `--yes`. `capture off` leaves the entries, which add nothing while it's off, and every other change writes only this tool's own `config.toml`.
+The hook (`capture-hook.py`, a small launcher), the module it runs (`capture_hook.py`) and its catalogue (`capture-catalogue.json`) live side by side under `<config-dir>/hooks/`. A change that needs different hook entries (`capture on`, `level`, `enable`, `disable`, `tagger` or `connect`) also changes `~/.claude/settings.json`, and `capture remove` takes the entries out — each only after showing the diff and asking first, unless you pass `--yes`. `capture off` leaves the entries, which add nothing while it's off, and every other change writes only this tool's own `config.toml`.
 
 - `claudeglass capture status` — the level, what's on, since when, and the cost measured so far. While big_output or web is on, it also prints Deep's actual measured wait (median and p90, over the last 7 days). It also flags any hook — ClaudeGlass's own or one of yours — that failed on most of its calls over the last 14 days, naming it (event name only, never a matcher or tool name), when it last failed, where to find it in `settings.json`, the trade-off, and the undo; this is only ever a printed prompt, never an automatic change. A hook that has stopped failing since is left out.
 - `claudeglass capture on [--level LEVEL] [--for DURATION | --until DATE | --no-limit] [--sample N] [--yes] [--dry-run]` — turn it on (default level: Essentials).
