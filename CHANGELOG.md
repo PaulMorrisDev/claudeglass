@@ -280,7 +280,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the top habit cards, says how many of your pieces of work needed changes
   after Claude delivered them, what that rework cost, and how much came
   from requests that left something out, Claude's mistakes and changes of
-  mind. It needs no feedback and no tag, which only say why: where neither
+  mind, and from failed tools, plan gaps or a mix of causes when some did.
+  It needs no feedback and no tag, which only say why: where neither
   does, the cause reads "cause not reported", never "Claude got it wrong".
   Each cause is a card that names its source (your feedback, Claude's tag,
   Haiku's tag or inferred) with a Try line and something to copy: a line to
@@ -307,6 +308,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Overview and Actions > Checks, `failed-calls`, with its own fix: a
   prompt to check a path or name first and to stop and ask when a call
   is blocked. They used to be counted inside Work habits.
+- **Session mix on the Changes page.** A change card now says when the
+  mix of sessions moved between its two sides: a warning chip and a
+  sentence when the share of scheduled runs, or of one mode, moved by 25
+  points or more between before and after the change. Cost per session
+  then compares different kinds of work, so the card says to read the
+  other measures first. `GET /api/impact` gains `mix` on each change.
+- **Cost per request.** A change of model, and a habit you started, also
+  show cost per request: a session's cost over its prompt cycles that
+  asked for something. A run of go-aheads or status checks can't move it,
+  and a scheduled run has none. `GET /api/impact` gains the measure
+  `cost_per_substantive_cycle`.
+- **Feedback changes have names.** Turning the `/cg-feedback` prompts on
+  or off, or changing which ones run, is a change of its own on the
+  Changes page, not "Changed metrics capture".
 
 ### Changed
 
@@ -351,6 +366,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   window, with no habit counted twice (one a recommendation already
   covers is left out). `GET /api/quick-actions` gains `headline`, `item`,
   `saving_usd` and `saving` on each check, and a tip gains `habit`.
+  The playbook table gains `saving_total`, each habit's saving over the
+  whole window.
+- **Changes lead with the measure the test is surest of.** A change
+  card opens with the measure whose before-and-after test is surest, not
+  the first one listed: a clear difference before a possible one before no
+  clear change, then the smaller p-value. A move under 5% reads as no
+  clear change, however sure the test is of it. The one-line verdict says
+  only what that reading allows ("fell 40%", "may have fallen", "no clear
+  change", "about the same", "too little data to judge yet"), where it used
+  to say a rise or a fall for any difference. `GET /api/impact` gains `lead`
+  on each change, and the Overview's short card shows it. An estimate of no
+  effect on the Changes page treats a move under 5% as no change.
+- **Capture changes read cost last.** For a change to metrics capture, live
+  coaching or the feedback prompts, cost per session is read after every
+  other measure with a reading, in a quieter colour, whatever it says: such
+  a change isn't meant to move cost, and the sessions around it can differ
+  more than it does. `GET /api/impact` gains `demoted` on each measure.
+- **Habit rates count requests.** For a change to coaching or a habit you
+  started, the habits and one-at-a-time small requests per 100 messages now
+  divide by the messages that asked for something (not a go-ahead, status
+  check, thank-you or plan reply), the count Work habits uses, and the same
+  count stands under both sides of the comparison.
 
 - **A hint that keeps coming back rests longer.** Within a session, each
   time a hint shows again its rest doubles: 30 minutes, then 1, 2 and at
@@ -662,10 +699,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of the others was redone, the weekly pace says "Already doing this"
   instead of a habit to try.
 - **Fixes after a plan, from the transcripts.** The plans by shape table
-  counts the corrections and adjustments after an approved plan, those you
-  typed as a message and those you typed while Claude worked, and the plans
-  fixed three times or more. It needs no feedback and stays blank below 5
-  plans. Counts only.
+  counts the corrections, adjustments and other rework after an approved
+  plan, those you typed as a message and those you typed while Claude
+  worked, and the plans fixed three times or more. It needs no feedback and
+  stays blank below 5 plans. Counts only.
 
 ### Fixed
 

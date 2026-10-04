@@ -592,6 +592,15 @@ def _capture_label(record: dict) -> str:
     tagger = changed.get("tagger") if isinstance(changed.get("tagger"), dict) else None
     if tagger is not None and set(changed) == {"tagger"}:
         return "Claude Haiku writes the tags" if tagger.get("to") == "haiku" else "Claude writes the tags again"
+    feedback = changed.get("feedback") if isinstance(changed.get("feedback"), dict) else None
+    if feedback is not None and set(changed) == {"feedback"}:
+        old = feedback.get("from") if isinstance(feedback.get("from"), list) else []
+        new = feedback.get("to") if isinstance(feedback.get("to"), list) else []
+        if new and not old:
+            return "Turned /cg-feedback on"
+        if old and not new:
+            return "Turned /cg-feedback off"
+        return "Changed /cg-feedback"
     # The label follows what changed: the log's own ``level`` is where
     # capture stands after the change, so it says "off" for any change made
     # while capture is off (which projects it runs in, say).
@@ -1015,6 +1024,16 @@ def latest(config_dir: Path | str, corpus=None) -> ChangePoint | None:
     return points[-1] if points else None
 
 
+def affects_capture(point: ChangePoint) -> bool:
+    """Whether ``point`` is a change to metrics capture, live coaching or the
+    feedback prompts (every ``[capture]`` change, keyed ``capture.<field>``).
+    Such a change adds notes and tags, or asks you for ratings: it isn't
+    meant to move what a session costs, and the sessions around it can
+    differ more than it does (:func:`impact.session_mix`), so the
+    comparison reads cost per session last."""
+    return point.source == "capture" or any(_plain_key(key).startswith("capture.") for key in point.keys)
+
+
 def applies_to(point: ChangePoint, project: str | Collection[str]) -> bool:
     """Whether ``point`` applies in ``project``: a snapshot project key, or
     every key one project goes by (``snapshots.snapshot_project_keys``).
@@ -1026,4 +1045,13 @@ def applies_to(point: ChangePoint, project: str | Collection[str]) -> bool:
     return point.project in project
 
 
-__all__ = ["ChangePoint", "SUSTAINED_SESSIONS", "applies_to", "change_points", "latest", "project_key", "summary"]
+__all__ = [
+    "ChangePoint",
+    "SUSTAINED_SESSIONS",
+    "affects_capture",
+    "applies_to",
+    "change_points",
+    "latest",
+    "project_key",
+    "summary",
+]

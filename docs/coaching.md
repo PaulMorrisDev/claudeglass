@@ -450,9 +450,10 @@ tells Claude to write the tip every time, so a tip left out was missed,
 and "judged relevant 2 of 6" for one Claude decides on, where a tip left
 out isn't a miss. A last column counts the replies that called the tip a
 misfire ("that ClaudeGlass tip doesn't apply"), which says a hint is
-firing when it shouldn't. Turning coaching notes on is a change on **Your changes**,
-measured by the habits a live hint warns about, per 100 of your messages
-before and after.
+firing when it shouldn't. Turning coaching notes on is a change on **Your changes**.
+It is measured by the habits a live hint warns about, per 100 of your
+messages that asked for something (not a go-ahead, a status check, a
+thank-you or a reply to a plan), before and after.
 
 Once a hint has shown, it rests for 30 minutes in that session, unless
 what's at stake has grown one and a half times since (a context grown

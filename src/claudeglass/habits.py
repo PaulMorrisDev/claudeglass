@@ -778,9 +778,9 @@ class PlanFix:
 
     #: ``handoff.plan_shape`` of the session.
     shape: str
-    #: Corrections and adjustments you typed after the approval, and those
-    #: you typed while Claude worked. A queued message is counted once per
-    #: reply it arrived with, however many were queued.
+    #: Corrections, adjustments and other rework you typed after the
+    #: approval, and those you typed while Claude worked. A queued message
+    #: is counted once per reply it arrived with, however many were queued.
     typed: int = 0
     queued: int = 0
     #: What the messages that held a fix cost.
@@ -801,7 +801,7 @@ class PlanFixes:
     fixed: int = 0
     fixes: int = 0
     queued: int = 0
-    #: What the messages that held a fix cost, in the plans fixed that often.
+    #: What the messages that held a fix cost, in all of them.
     cost: float = 0.0
 
 
@@ -824,8 +824,13 @@ class Habits:
     agents: list[AgentFact] = field(default_factory=list)
     pieces: list[Piece] = field(default_factory=list)
     #: Every piece of work drawn from the transcripts, rated or not
-    #: (``pieces.WorkPiece``): what :mod:`rework` is built from.
+    #: (``pieces.WorkPiece``), a session that opens with a handoff joined to
+    #: the piece it carries on (``pieces.pieces_in``): what :mod:`rework` is
+    #: built from.
     work_pieces: list = field(default_factory=list)
+    #: Each session's cycles while :func:`collect` runs, to draw
+    #: ``work_pieces`` across sessions; emptied once it has.
+    piece_sessions: list = field(default_factory=list, repr=False)
     #: One per piece of work with an approved plan (:class:`PlanFix`).
     plan_fixes: list[PlanFix] = field(default_factory=list)
     #: One per main session with a message of yours.
@@ -1030,7 +1035,15 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
         )
 
     rework, planned_after = _pieces_of_session(
-        bundle.session_id, cycles, rates, out, spans, session_rating, rated, shape
+        bundle.session_id,
+        cycles,
+        rates,
+        out,
+        spans,
+        session_rating,
+        rated,
+        shape,
+        getattr(bundle, "project_dir", "") or getattr(bundle, "slug", "") or "",
     )
 
     index_of = {id(t): i for i, t in enumerate(turns)}
@@ -1109,22 +1122,34 @@ def _carries_out_plan(cycle) -> bool:
 
 
 def _pieces_of_session(
-    session_id: str, cycles: list, rates: _Rates, out: Habits, spans: list, session_rating, rated: dict, shape: str
+    session_id: str,
+    cycles: list,
+    rates: _Rates,
+    out: Habits,
+    spans: list,
+    session_rating,
+    rated: dict,
+    shape: str,
+    project: str = "",
 ) -> tuple[set[int], set[int]]:
     """Draw the session's pieces of work (``pieces.pieces_of``) and record
     what they say: a :class:`Piece` for each one that no kept answer or
     rating covers, and a :class:`PlanFix` for each with an approved plan.
     Returns ``(ids of the rework cycles, ids of the cycles that came after
-    a plan you approved by typing, up to the end of their piece)``."""
-    found = pieces_mod.pieces_of(
-        cycles, rates, session_rating if session_rating is not None and not spans else spans, session_id=session_id
-    )
+    a plan you approved by typing, up to the end of their piece)``. The
+    session's cycles are kept on ``Habits.piece_sessions``: :func:`collect`
+    draws ``Habits.work_pieces`` from them across sessions, handoffs joined."""
+    feedback = session_rating if session_rating is not None and not spans else spans
+    found = pieces_mod.pieces_of(cycles, rates, feedback, session_id=session_id, project=project)
+    # collect() draws them again across every session, handoffs joined:
+    # those are Habits.work_pieces.
+    out.piece_sessions.append(pieces_mod.PieceSession(session_id, cycles, project, feedback))
     rework: set[int] = set()
     planned_after: set[int] = set()
     for work_piece in found:
-        out.work_pieces.append(work_piece)
         mine = [cycles[i] for _, i in work_piece.cycle_ids]
-        rework.update(id(cycles[i]) for _, i in work_piece.rework_ids)
+        redone = {id(cycles[i]) for _, i in work_piece.rework_ids}
+        rework.update(redone)
         if session_rating is None and not any(id(c) in rated for c in mine):
             out.pieces.append(
                 replace(
@@ -1141,19 +1166,23 @@ def _pieces_of_session(
             typed_go = typed_go or any(
                 t.plan_stats is not None and t.plan_stats.outcome == "approved_by_message" for t in cycle.turns
             )
-        fix = _plan_fix(mine, shape, rates)
+        fix = _plan_fix(mine, shape, rates, redone)
         if fix is not None:
             out.plan_fixes.append(fix)
     return rework, planned_after
 
 
-def _plan_fix(cycles: list, shape: str, rates: _Rates) -> PlanFix | None:
+def _plan_fix(
+    cycles: list, shape: str, rates: _Rates, rework: set[int] | frozenset[int] = frozenset()
+) -> PlanFix | None:
     """The fixes after the first plan approved in a piece's ``cycles``:
     corrections and adjustments you typed, and those you typed while Claude
     worked (``Turn.queued_correction`` and ``queued_adjust``, one count per
-    reply). A message in plan mode is a reply to a plan, no fix, and neither
-    is one you told the plan check was not a fix. ``None`` when no plan was
-    approved, or nothing came after it."""
+    reply). Any other follow-up the piece counts as rework (``rework``: ids
+    of the cycles in ``WorkPiece.rework_ids``) is a fix too, unless a message
+    you queued in it already counts. A message in plan mode is a reply to a
+    plan, no fix, and neither is one you told the plan check was not a fix.
+    ``None`` when no plan was approved, or nothing came after it."""
     for k, cycle in enumerate(cycles):
         at = next((n for n, t in enumerate(cycle.turns) if capture_mod._plan_approved(t)), None)
         if at is not None:
@@ -1170,7 +1199,9 @@ def _plan_fix(cycles: list, shape: str, rates: _Rates) -> PlanFix | None:
     for c, turns, opening in held:
         queued = sum(1 for t in turns if t.queued_correction or t.queued_adjust)
         typed = int(
-            opening and (c.turns[0].human_correction or c.turns[0].human_adjust) and _plan_word(c) != "none"
+            opening
+            and (c.turns[0].human_correction or c.turns[0].human_adjust or (id(c) in rework and not queued))
+            and _plan_word(c) != "none"
         )
         fix.typed += typed
         fix.queued += queued
@@ -1182,10 +1213,12 @@ def _plan_fix(cycles: list, shape: str, rates: _Rates) -> PlanFix | None:
 def fixes_after_plan(h: Habits, shape: str | None = None) -> PlanFixes | None:
     """How often the plans you approved had to be fixed: of the pieces of
     work with an approved plan (those of one ``shape``, or all), how many
-    had :data:`PLAN_FIXES_MIN` or more corrections and adjustments after it,
-    counting the ones you typed while Claude worked. ``None`` with fewer
-    than :data:`MIN_GROUP` plans: too few to say anything. The ``plan_build``
-    row of ``habits_by_shape`` carries the same figures."""
+    had :data:`PLAN_FIXES_MIN` or more corrections, adjustments or other
+    rework after it, counting the ones you typed while Claude worked.
+    ``None`` with fewer than :data:`MIN_GROUP` plans: too few to say
+    anything. The ``plan_build`` row of ``habits_by_shape`` carries the same
+    figures. The cost is that of the messages that held a fix, in all the
+    plans."""
     plans = [p for p in h.plan_fixes if shape is None or p.shape == shape]
     if len(plans) < MIN_GROUP:
         return None
@@ -1195,7 +1228,7 @@ def fixes_after_plan(h: Habits, shape: str | None = None) -> PlanFixes | None:
         fixed=len(fixed),
         fixes=sum(p.fixes for p in plans),
         queued=sum(p.queued for p in plans),
-        cost=sum(p.cost for p in fixed),
+        cost=sum(p.cost for p in plans),
     )
 
 
@@ -1511,6 +1544,9 @@ def collect(
         if bundle.top is None:
             continue
         _session(bundle, rates, out, (ratings or {}).get(bundle.session_id))
+    # A session that opens with a handoff joins the piece it carries on.
+    out.work_pieces = pieces_mod.pieces_in(out.piece_sessions, rates)
+    out.piece_sessions = []
     for seen in (signals or {}).values():
         out.permission_prompts.update(seen.permission_prompts)
         out.waits.update(seen.waits)
@@ -2820,6 +2856,9 @@ def playbook_table(h: Habits, items: list[Item]) -> Table:
             # not this report's variant -- it should read this column
             # instead once it has one.
             item_title(item),
+            # Additive: the saving over the whole window, before it is spread
+            # into weeks: what quick_actions adds to the Work habits check's saving.
+            _money_or_none(item.saving),
         ])
     return Table(
         name="habits_playbook",
@@ -2850,6 +2889,9 @@ def playbook_table(h: Habits, items: list[Item]) -> Table:
             #: for a caller to show instead of looking ``habit`` up in
             #: ``ITEMS`` itself.
             Column(key="title", label="Title", kind="str"),
+            #: Additive: saving before it is spread over the weeks;
+            #: apply_covered_by blanks it with saving.
+            Column(key="saving_total", label="Saving over the window", kind="money"),
         ],
         rows=rows,
         notes=[] if rows else [
@@ -2882,6 +2924,7 @@ def apply_covered_by(report: "ReportModel") -> None:
         return
     key_idx = next(i for i, c in enumerate(table.columns) if c.key == "habit")
     saving_idx = next(i for i, c in enumerate(table.columns) if c.key == "saving")
+    total_idx = next((i for i, c in enumerate(table.columns) if c.key == "saving_total"), None)
     covered_idx = next(i for i, c in enumerate(table.columns) if c.key == "covered_by")
     covered_rule_idx = next(i for i, c in enumerate(table.columns) if c.key == "covered_by_rule")
     rule_titles = {rec.id: rec.title for rec in report.recommendations}
@@ -2889,6 +2932,8 @@ def apply_covered_by(report: "ReportModel") -> None:
         rule_id = COVERED_BY.get(row[key_idx])
         if rule_id is not None and rule_id in rule_titles:
             row[saving_idx] = None
+            if total_idx is not None:
+                row[total_idx] = None
             row[covered_idx] = rule_titles[rule_id]
             row[covered_rule_idx] = rule_id
 
@@ -3092,9 +3137,14 @@ def _briefs_notes(h: Habits) -> list[str]:
             "partial and vague asks cost more than clear ones"
         )
         return [f"Compared like for like, {cost}: the same kind of task, plan builds left out.", mixed]
+    verdict = (
+        " Added up, they cost no more than clear ones."
+        if found.probability >= BRIEF_MIN_PROBABILITY
+        else " That is too few to say."
+    )
     return [
         f"Compared like for like, a partial or vague ask cost more than a clear one in "
-        f"{100 * found.probability:.0f}% of the comparisons. That is too few to say.{cardless}",
+        f"{100 * found.probability:.0f}% of the comparisons.{verdict}{cardless}",
         mixed,
     ]
 

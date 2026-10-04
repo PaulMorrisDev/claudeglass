@@ -2812,7 +2812,8 @@ def test_impact_lists_the_changes_a_window_covers_and_judges_each_on_its_whole_s
 
 def test_impact_judges_a_model_change_on_tokens_before_cost(tmp_path, monkeypatch):
     """Sonnet to Opus, with the same tokens in every session: the price per
-    token doubles, and the card leads with the tokens, which didn't move."""
+    token doubles. The tokens, which didn't move, are measured first; the
+    card leads with the price, which did."""
     now = datetime.now(timezone.utc)
     runs = [(f"s{n}", days, _SONNET) for n, days in enumerate((13, 12, 11), 1)]
     runs += [(f"s{n}", days, _OPUS) for n, days in enumerate((9, 8, 7, 6), 4)]
@@ -2823,10 +2824,15 @@ def test_impact_judges_a_model_change_on_tokens_before_cost(tmp_path, monkeypatc
         [change] = _impact_changes(handle)
         assert change["change"]["source"] == "transcript" and change["enough"]
         by_key = {row["key"]: row for row in change["measures"]}
+        # The lead first (what the ratio test is surest of), the rest as the model change lists them.
+        assert change["lead"] == "cost_per_turn" and list(by_key)[0] == "cost_per_turn"
         assert list(by_key) == [
-            "tokens_per_session", "output_per_turn", "turns_per_session", "cost_per_turn", "cost_per_session",
+            "cost_per_turn", "tokens_per_session", "output_per_turn", "turns_per_session",
+            "cost_per_substantive_cycle", "cost_per_session",
         ]
-        assert [(by_key[k]["kind"], by_key[k]["before"], by_key[k]["after"]) for k in list(by_key)[:3]] == [
+        assert [(by_key[k]["kind"], by_key[k]["before"], by_key[k]["after"]) for k in (
+            "tokens_per_session", "output_per_turn", "turns_per_session",
+        )] == [
             ("tokens", "300 tokens", "300 tokens"),
             ("tokens", "50 tokens", "50 tokens"),
             ("count", "2.0", "2.0"),
@@ -2834,9 +2840,11 @@ def test_impact_judges_a_model_change_on_tokens_before_cost(tmp_path, monkeypatc
         assert [by_key[k]["direction"] for k in ("tokens_per_session", "cost_per_turn", "cost_per_session")] == [
             "same", "higher", "higher",
         ]
-        assert change["verdict"] == (
-            "Tokens per session: about the same (300 tokens before, 300 tokens after)."
-        )
+        # A change that is about cost reads cost like any other measure, and says how the mix stands.
+        assert not any(row["demoted"] for row in change["measures"])
+        assert by_key["cost_per_substantive_cycle"]["kind"] == "money"
+        assert set(change["mix"]) == {"flagged", "kind", "before_pct", "after_pct", "shift_pts", "text"}
+        assert change["verdict"].startswith("Cost per reply rose ")
     finally:
         handle.close()
         handle.store.close()
@@ -2862,6 +2870,23 @@ def test_impact_lists_every_change_a_window_covers_with_no_cap(tmp_path, monkeyp
             stamps = [change["change"]["ts"] for change in changes]
             assert stamps == sorted(stamps, reverse=True)
         assert len(_impact_changes(handle, f"since={_stamp(now - timedelta(days=5))}")) == 5
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_impact_says_no_lead_and_no_mix_until_a_change_has_sessions_on_both_sides(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    handle = _start_server(tmp_path, monkeypatch)
+    try:
+        _log_captures(handle, [now - timedelta(days=1.5)])
+        [change] = _impact_changes(handle)
+        assert change["enough"] is False
+        assert change["lead"] is None and change["mix"] is None
+        # A capture change names cost per session as the one read last, whatever the sessions say.
+        by_key = {row["key"]: row for row in change["measures"]}
+        assert by_key["cost_per_session"]["demoted"] is True
+        assert not any(row["demoted"] for key, row in by_key.items() if key != "cost_per_session")
     finally:
         handle.close()
         handle.store.close()

@@ -957,7 +957,9 @@ columns of a table still divide by that table's own messages.
   recommendation's fix explainer), and `covered_by`: the recommendation
   already reporting this same saving, when one fired this report, in
   which case `saving` is blank rather than double-counted (UX-3,
-  `habits.COVERED_BY`/`apply_covered_by`). A fall over at least four
+  `habits.COVERED_BY`/`apply_covered_by`). `saving_total` is the same
+  saving over the whole window, before it is spread into weeks, and is
+  blank when `covered_by` is set. A fall over at least four
   known weeks counts as picked up, and the saving it implies goes into
   the digest's `adopted` row.
 
@@ -1112,13 +1114,13 @@ columns of a table still divide by that table's own messages.
   feedback: `work_pieces` (every piece of work in the shape, rated or
   not), `plans_built` (pieces with an approved plan and work after it),
   `plans_fixed` (of those, the plans with `habits.PLAN_FIXES_MIN`, three,
-  or more corrections and adjustments after them) and `plan_fixes` (all
-  of those fixes). Fixes you typed while Claude worked count with the ones
-  you typed as a message (`habits.fixes_after_plan`), a message in plan
-  mode is a reply to the plan and not a fix, and so is one you told the
-  plan check was not a fix. The last three are blank below `MIN_GROUP`
-  plans. `pieces` stays the pieces you rated. The `plan-handoff` card and
-  the suggested profile read the table by column key, and so does
+  or more corrections, adjustments or other rework after them) and
+  `plan_fixes` (all of those fixes). Fixes you typed while Claude worked
+  count with the ones you typed as a message (`habits.fixes_after_plan`), a
+  message in plan mode is a reply to the plan and not a fix, and so is one
+  you told the plan check was not a fix. The last three are blank below
+  `MIN_GROUP` plans. `pieces` stays the pieces you rated. The `plan-handoff`
+  card and the suggested profile read the table by column key, and so does
   `coaching.json` (see [coaching.md](coaching.md)).
 - `habits_self_report` — Claude's own reports against your feedback: per
   `level` word (`easy`, `normal`, `hard`) and `brief` word (`clear`,
@@ -1157,7 +1159,8 @@ columns of a table still divide by that table's own messages.
 
 How often Claude had to change work it had already delivered, why, and what
 to change in how you ask. It reads the pieces of work `habits.collect` drew
-from the transcripts (`pieces.pieces_of`, kept on `Habits.work_pieces`), so
+from the transcripts (`pieces.pieces_in`, a session that opens with a
+handoff joined to the piece it carries on, kept on `Habits.work_pieces`), so
 it needs no `/cg-feedback` answer and no tag: your answers and the tags
 only say *why*. Counts, closed words and amounts only; nothing you wrote
 reaches it. A piece of work is *delivered* once a cycle in it changed
@@ -1176,10 +1179,12 @@ Money cells hold list-price USD, and the dashboard phrases them with
   window you picked. Up to three rows. `pieces`: `text` is "{n} of your
   {total} pieces of work needed changes after Claude delivered them. That
   rework cost {amount}. {u}% came from requests that left something out,
-  {c}% from Claude's mistakes, {x}% from changes of mind." (with nothing to
-  change it reads "None of your {total} pieces of work needed changes after
-  Claude delivered them."), with `count`, `total`, `share`, `cost`,
-  `tokens` (the agents' included) and `period`. `unknown`: "We couldn't tell
+  {c}% from Claude's mistakes, {x}% from changes of mind." then "{o}% came
+  from failed tools, plan gaps or a mix of causes." when some rework had one
+  of those causes (with nothing to change it reads "None of your {total}
+  pieces of work needed changes after Claude delivered them."), with
+  `count`, `total`, `share`, `cost`, `tokens` (the agents' included) and
+  `period`. `unknown`: "We couldn't tell
   why for {k}%: run /cg-feedback after a piece of work to say", present
   when some rework cycle has no cause. `requests`: sessions with no start
   inside them can't be cut into pieces, so they are counted by the messages
@@ -1231,7 +1236,8 @@ Money cells hold list-price USD, and the dashboard phrases them with
   (empty under 5 reworked pieces), `cost`, `caught` (admitted mistakes you
   caught) and `caught_per_piece` (empty under 5 tagged pieces, and empty
   rather than 0 for a week before capture was on). Pieces we couldn't cut
-  are left out.
+  are left out of `pieces`, `reworked`, `share` and `cost`; `caught` and
+  `caught_per_piece` count every piece, as the admitted-mistakes line does.
 - `rework_by_level` — `easy`, `normal`, `hard` and `unknown` (not tagged):
   `requests` (messages that asked for something), `rework`, `rate` (rework
   per request) and `cost`. Per request, not per piece, as a hard piece has

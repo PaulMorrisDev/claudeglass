@@ -1079,8 +1079,8 @@ habits card the row points at (`#/habits?item=<item>`): `rework` when the
 headline leads, else the top habit worth trying. `saving_usd` is what its
 changes would save over the window, at list price: the largest
 recommendation it draws on, plus the playbook's habits that no
-recommendation already covers (their saving a week, times the weeks in the
-window, and never less than one week). `saving` says that in the billing
+recommendation already covers (each one's own total over the window, the
+playbook's `saving_total`). `saving` says that in the billing
 mode.
 
 ### `GET /api/quick-actions/<id>`
@@ -1245,13 +1245,13 @@ short. Only a change your sessions alone show (`source` `transcript`) can
 fall before it: every other kind is itself a recorded change, and moves
 the base back to it.
 
-`data`: `{"changes": [{"change": {"ts", "source", "label", "keys", "changes", "backup_ts", "reverted", "project", "project_name", "summary", "day"}, "before_sessions", "after_sessions", "enough", "gate", "verdict", "measures": [{"key", "label", "kind", "better", "before", "after", "before_value", "after_value", "before_n", "after_n", "change_pct", "direction", "p", "label_key", "label_text"}, ...], "quality": [{"group", "label", "before_runs", "after_runs", "verdict", "judged", "min_runs", "signals": [{"key", "label", "kind", "worse_when", "unit", "before", "after", "before_text", "after_text", "before_counts", "after_counts", "before_runs", "after_runs", "p", "label_key", "verdict"}, ...]}, ...], "without": {"paid_usd", "without_usd", "saved_usd", "fidelity", "fidelity_text", "basis", "sessions", "text", "since_text", "per_key": [{"key", "agent", "fidelity", "fidelity_text", "saved_usd", "saved_text", "basis"}, ...]} | null}, ...], "caveat", "min_sessions", "lookback_days"}`.
+`data`: `{"changes": [{"change": {"ts", "source", "label", "keys", "changes", "backup_ts", "reverted", "project", "project_name", "summary", "day"}, "before_sessions", "after_sessions", "enough", "gate", "verdict", "lead", "mix": {"flagged", "kind", "before_pct", "after_pct", "shift_pts", "text"} | null, "measures": [{"key", "label", "kind", "better", "before", "after", "before_value", "after_value", "before_n", "after_n", "change_pct", "direction", "p", "label_key", "label_text", "demoted"}, ...], "quality": [{"group", "label", "before_runs", "after_runs", "verdict", "judged", "min_runs", "signals": [{"key", "label", "kind", "worse_when", "unit", "before", "after", "before_text", "after_text", "before_counts", "after_counts", "before_runs", "after_runs", "p", "label_key", "verdict"}, ...]}, ...], "without": {"paid_usd", "without_usd", "saved_usd", "fidelity", "fidelity_text", "basis", "sessions", "text", "since_text", "per_key": [{"key", "agent", "fidelity", "fidelity_text", "saved_usd", "saved_text", "basis"}, ...]} | null}, ...], "caveat", "min_sessions", "lookback_days"}`.
 Newest change first. `change.source` is `apply`, `revert`,
 `config` (a settings change the hook saw), `capture` (a metrics
 capture change from `capture-log.jsonl`, whose keys are `capture.<field>`
 and are measured by capture's own tokens per session and the share of
-messages Claude tagged) or `transcript` (a change only the sessions
-show). `changes` lists `{"key", "agent", "old", "new"}` where the values
+messages Claude tagged), `habit` (a card you marked Trying it, keyed
+`habit.<id>`) or `transcript` (a change only the sessions show). `changes` lists `{"key", "agent", "old", "new"}` where the values
 are known: a `config` change records a setting's values only when both
 are plain values of at most 80 characters. `summary` is those changes
 in one line ("model: opus → sonnet"), then any other changed key by
@@ -1276,6 +1276,38 @@ text in the billing mode's units; `direction` is `lower`, `higher`,
 `same` or `null`. For an `apply` that is not yet undone, `backup_ts` is
 what `claudeglass apply --revert <backup_ts>` takes.
 
+**The lead, the verdict and the mix.** `measures` has the lead measure
+first and the rest in the order below; `lead` is its `key`, `null` until
+`enough` is true. The lead is the measure the ratio test is surest of
+(`impact.lead_row`): a clear difference (`lower`, `higher`) before a
+possible one (`possibly_lower`, `possibly_higher`) before `no_clear_change`,
+then the smaller `p`, then the order below. A measure with too little data
+leads only when nothing else has a reading. A difference under 5%
+(`direction` `same`) has `label_key` `no_clear_change` however sure the
+test is of it (`p` stays as tested), since with enough sessions any wobble
+tests as significant.
+`verdict` is one line about the lead and says no more than its reading
+allows: "fell 40%" or "rose 25%" for a clear difference, "may have fallen"
+or "may have risen" for a possible one, "no clear change", "about the same"
+for a difference under 5%, or "too little data to judge yet". The backtest
+reads a row the same way for an estimate of no real effect
+(`backtest._judge_row`), so a wobble is never a larger effect than estimated.
+Any other estimate is judged on the test's own reading.
+
+`demoted` is true for `cost_per_session` on a change to metrics capture,
+live coaching or the feedback prompts (any change keyed `capture.<field>`,
+`change_points.affects_capture`): such a change adds notes and tags or asks
+for ratings and isn't meant to move cost, so cost per session is read after
+every measure that has a reading, whatever it says. `mix` says whether the
+kind of session shifted between the two sides (`impact.session_mix`), and is
+`null` until `enough`. The sessions are a scheduled run, or else one of the
+modes; `kind` is the one whose share moved most, `before_pct` and
+`after_pct` its share of each side in percent, and `shift_pts` the
+difference in points. `flagged` is true when that is 25 points or more
+(`impact.MIX_SHIFT_PTS`), and `text` then says so in a sentence (it is empty
+otherwise). A flagged mix means the per-session figures compare different
+kinds of work, however the sessions are weighted.
+
 A measure's `key` says what it counts. Each is a ratio of sums over the
 sessions on a side, so a per-reply figure weighs a long session by its
 replies, and `better` is `lower` for every one except `tagged_share`:
@@ -1286,20 +1318,22 @@ replies, and `better` is `lower` for every one except `tagged_share`:
 | `output_per_turn` | `tokens` | Output tokens (thinking included) per main-session reply. |
 | `turns_per_session` | `count` | Main-session replies per session. |
 | `cost_per_turn` | `money` | Cost per main-session reply. |
+| `cost_per_substantive_cycle` | `money` | Cost per request: a session's cost over its prompt cycles that asked for something (see below). A scheduled run has none, so it leaves the figure alone. |
 | `cost_per_session` | `money` | Cost per session, the overall check. |
 | `rebuild_share` | `pct` | Share of cache writes that rebuilt expired context. |
 | `summaries` | `count` | Conversation summaries per session. |
 | `peak_context` | `tokens` | Largest context per session. |
 | `startup_tokens` | `tokens` | Context at the start of a session. |
 | `agent_cost`, `agent_startup` | `money`, `tokens` | One agent's cost, and its starting context, per spawn. |
-| `capture_tokens`, `tagged_share`, `prompting_habits`, `drip_share` | `tokens`, `pct`, `count`, `pct` | Metrics capture's own notes and tags per session, the messages Claude tagged, and the prompting habits and one-at-a-time small requests per message. |
+| `capture_tokens`, `tagged_share`, `prompting_habits`, `drip_share` | `tokens`, `pct`, `count`, `pct` | Metrics capture's own notes and tags per session, the messages Claude tagged, and the prompting habits and one-at-a-time small requests per 100 messages that asked for something (see below). |
 
 Which measures a change gets, in order (`impact.measures_for`), from the
-keys it names; `cost_per_session` is always last:
+keys it names; `cost_per_session` is always last, with `cost_per_substantive_cycle`
+just before it for a model change and a habit you started:
 
 | A change to | Measures |
 |---|---|
-| `model` | `tokens_per_session`, `output_per_turn`, `turns_per_session`, `cost_per_turn` |
+| `model` | `tokens_per_session`, `output_per_turn`, `turns_per_session`, `cost_per_turn`, `cost_per_substantive_cycle` |
 | `effortLevel`, `alwaysThinkingEnabled`, `MAX_THINKING_TOKENS` | `output_per_turn`, `cost_per_turn` |
 | `fastMode` | `cost_per_turn` |
 | `autoCompactWindow` | `summaries`, `peak_context` |
@@ -1307,6 +1341,7 @@ keys it names; `cost_per_session` is always last:
 | skills, plugins or MCP servers | `startup_tokens` |
 | an agent's setting | `agent_cost`, `agent_startup` for that agent |
 | `capture.coaching` | `prompting_habits`, `drip_share`, `capture_tokens` |
+| `habit.<id>` (a card marked Trying it) | `prompting_habits` (and `drip_share` for `drip_feed`) when the prompting report measures the habit, else `tokens_per_session`; both with `cost_per_substantive_cycle` |
 | any other `capture.<field>` | `capture_tokens`, `tagged_share` |
 | anything else (a CLAUDE.md size change) | `startup_tokens` |
 
@@ -1318,6 +1353,15 @@ come before `cost_per_turn`: a settings edit lists its keys
 alphabetically, so `effortLevel` comes before `model`, and its card would
 otherwise lead with money. `fastMode` changes the price and the speed but
 not the tokens, so it is judged on cost per reply alone.
+
+**Messages that asked for something.** The rates `prompting_habits` and
+`drip_share` and the figure `cost_per_substantive_cycle` leave out the
+messages that asked for nothing: a go-ahead, a status check, a thank-you or a
+reply to a plan (`pieces.asks`, the same count the Work habits rates use). A
+message you typed while Claude worked counts. The habit rates divide by those
+messages, and cost per request by the prompt cycles that had at least one, so
+a run of go-aheads or polls can't pass for cheaper work or fewer habits. The
+same count is used on both sides of a comparison.
 
 `without` is what the sessions after the change would have cost
 without it (`counterfactual.py`), or `null` with fewer than

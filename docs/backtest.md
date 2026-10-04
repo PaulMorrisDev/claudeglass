@@ -109,6 +109,12 @@ A predicted amount under $0.01 (either way) is treated as "predicted no
 real effect": any measurable effect at all is `larger`; no significant
 effect is `as_estimated`.
 
+"Significant" uses the Changes page's readings (`impact.SIGNIFICANT_LABELS`): a
+clear or a possible difference. For an estimate of no real effect, a difference
+under 5% also counts as no clear change however sure the test is of it
+(`impact._reading`), so a wobble isn't called a larger effect. Any other
+estimate is judged on the test's own reading.
+
 **A still-open window is never forced to a verdict.** `too_little_data`
 is deferred, not persisted, the first time a match is found with
 insufficient before/after sessions — it is only written once a *later*

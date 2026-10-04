@@ -37,7 +37,7 @@ def _ctx(tmp_path, model=None, **kw):
     (tmp_path / ".claude" / "projects").mkdir(exist_ok=True)
     return qa.Context(
         model=model if model is not None else _full_model(),
-        units=UNITS,
+        units=kw.get("units", UNITS),
         period="over the last 14 days",
         config_dir=config_dir,
         effective=kw.get("effective", {}),
@@ -832,7 +832,10 @@ def _waste_model(*, recommendations=None, **tables) -> NS:
 
 
 _PLAYBOOK = [
-    {"habit": key, "saving": saving, "evidence": f"{key} evidence.", "example": f"{key} example.", "source": "inferred"}
+    {
+        "habit": key, "saving": saving, "saving_total": 2 * saving,
+        "evidence": f"{key} evidence.", "example": f"{key} example.", "source": "inferred",
+    }
     for key, saving in (("targeted_checks", 2.0), ("short_reports", 1.0), ("name_files", 0.5), ("quiet_output", 0.25))
 ]
 
@@ -901,6 +904,16 @@ def test_playbook_tips_use_the_rows_own_title_when_present(tmp_path):
     result = qa.run("habits", _ctx(tmp_path, model=model))
     tips = result["tips"][-qa.PLAYBOOK_TIPS:]
     assert tips[0]["title"] == "A custom title for targeted_checks"
+
+
+def test_a_playbook_tip_on_a_subscription_says_the_period_on_the_list_price_equivalent(tmp_path):
+    """Without a reading of the weekly limit the amount is a list-price
+    equivalent, and a week's saving still says it is a week's."""
+    model = _full_model()
+    model.recommendations = []
+    model.sections.append(_habits_tables(habits_playbook=_PLAYBOOK))
+    result = qa.run("habits", _ctx(tmp_path, model=model, units=Units(billing_mode="subscription", currency="USD")))
+    assert "2.00 USD list-price equivalent a week" in result["tips"][0]["text"]
 
 
 # -- Habits card: who blocked it, and redirects aren't waste --------------------
@@ -1050,6 +1063,21 @@ def test_failed_calls_is_fine_when_nothing_cleared_the_bar_and_says_so_when_noth
     assert qa.run("failed-calls", _ctx(tmp_path, model=empty))["status"] == "no_data"
 
 
+def test_failed_calls_does_not_claim_waste_that_was_not_a_failed_call(tmp_path):
+    """``wasted-turns`` fires on every wasted reply, interrupts included, so
+    when the waste is all interrupts the check must not say a call failed."""
+    model = _waste_model(
+        recommendations=[_WASTED_TURNS],
+        waste_by_cause=[{"cause": "interrupt", "turns": 40, "cost_usd": 30.0, "lever": "Batch instructions."}],
+    )
+    result = qa.run("failed-calls", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    assert result["summary"].startswith(
+        "Replies that went nowhere cost a material share of spend over the last 14 days. "
+        "Most of that was not from failed or blocked tool calls."
+    )
+
+
 # -- The Overview's Work habits row: rework lead, playbook saving, item -------------
 
 
@@ -1139,7 +1167,7 @@ def _saving_model(*, covered=True):
     model.recommendations = [_HABIT_REC]
     rows = [dict(row, covered_by="") for row in _PLAYBOOK]
     if covered:
-        rows[0].update(covered_by="Tools often wait on you", saving=None)
+        rows[0].update(covered_by="Tools often wait on you", saving=None, saving_total=None)
     model.sections.append(_habits_tables(habits_playbook=rows))
     return model
 
@@ -1148,7 +1176,7 @@ def test_the_habits_saving_includes_the_playbook_saving_over_the_window(tmp_path
     two_weeks = dict(since_ts=0.0, until_ts=14 * 86400.0)
     ctx = _ctx(tmp_path, model=_saving_model(), **two_weeks)
     result = qa.run("habits", ctx)
-    # The recommendation's 4.00, and the habits it doesn't cover: 1.75 a week for two weeks.
+    # The recommendation's 4.00, and the habits it doesn't cover: 3.50 over the window.
     assert result["saving_usd"] == pytest.approx(4.0 + 1.75 * 2)
     assert result["saving"] == f"{qa._money(ctx, 7.5, period=True, prefix='About ')} if you change these habits."
     assert result["saving"] == "About 7.50 USD over the last 14 days if you change these habits."
@@ -1157,20 +1185,18 @@ def test_the_habits_saving_includes_the_playbook_saving_over_the_window(tmp_path
     assert both["saving_usd"] == pytest.approx(4.0 + 3.75 * 2)
 
 
-def test_the_playbook_saving_is_never_counted_for_less_than_a_week_or_more_than_the_window(tmp_path):
-    def saving(**window):
-        return qa.run("habits", _ctx(tmp_path, model=_saving_model(), **window))["saving_usd"]
-
-    # A day, and a window with no start (all time): one week's saving.
-    assert saving(since_ts=0.0, until_ts=86400.0) == pytest.approx(4.0 + 1.75)
-    assert saving() == pytest.approx(4.0 + 1.75)
-    # A window with no end runs to now.
-    assert saving(since_ts=0.0) > saving(since_ts=0.0, until_ts=14 * 86400.0)
+def test_the_playbook_saving_is_its_own_total_whatever_the_window(tmp_path):
+    """Each habit adds what it would have saved over the window
+    (``saving_total``), so a window longer or shorter than the sessions it
+    holds neither scales it up nor cuts it down."""
+    for window in ({}, dict(since_ts=0.0, until_ts=86400.0), dict(since_ts=0.0, until_ts=90 * 86400.0)):
+        result = qa.run("habits", _ctx(tmp_path, model=_saving_model(), **window))
+        assert result["saving_usd"] == pytest.approx(4.0 + 3.5)
 
 
 def test_an_ignored_recommendation_adds_nothing_to_the_habits_saving(tmp_path):
     ctx = _ctx(tmp_path, model=_saving_model(), since_ts=0.0, until_ts=7 * 86400.0, skip_keys=frozenset({"long-tool-waits"}))
-    assert qa.run("habits", ctx)["saving_usd"] == pytest.approx(1.75)
+    assert qa.run("habits", ctx)["saving_usd"] == pytest.approx(3.5)
 
 
 def test_a_habits_check_with_no_saving_says_none(tmp_path):

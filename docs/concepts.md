@@ -314,24 +314,38 @@ size. No text is kept (`context_files.py`).
 - **Before and after** (`impact.py`): for each change point, the
   sessions started in the 14 days before it (or since the previous
   change) are compared with those started after it, on the measures
-  that change should move, most telling first, with cost per session
-  always last as the overall check. A model change is judged on the
-  tokens it spends before what they cost, so a different price per token
+  that change should move, with cost per session always last as the
+  overall check. The card leads with the measure the ratio test is
+  surest of, not the first one listed: a clear difference, then a
+  possible one, then no clear change, the smaller p-value breaking a
+  tie, and a difference under 5% reads as no clear change. Its one-line
+  verdict says no more than that reading allows ("fell 40%", "may have
+  fallen", "no clear change", "about the same"). A model change is judged on
+  the tokens it spends before what they cost, so a different price per token
   can't pass for a different amount of work: tokens per session, output
-  tokens per reply, replies per session, cost per reply, then cost per
-  session. An effort or thinking change is judged on output tokens per
-  reply, cost per reply, then cost per session. A fast mode change
-  changes the price, not the tokens, so it is judged on cost per reply,
-  then cost per session. When one settings edit changes several keys,
-  the measures follow the order the keys are listed in (alphabetically),
-  but the token measures always come before cost per reply, even when an
-  effort, thinking or fast mode key is listed ahead of `model`. Output tokens per
-  reply counts real replies only; a conversation summary's estimated
-  request counts in tokens per session instead. Other changes use cost
-  per spawn for a change to one agent, summaries per session for
-  `autoCompactWindow`, cache rebuild share for a TTL change, and so on.
-  Each project is judged between its own neighbouring changes: a change
-  to every project is compared in each project with the changes that
+  tokens per reply, replies per session, cost per reply, cost per request
+  (a session's cost over its prompt cycles that asked for something,
+  which a run of go-aheads or status checks can't move), then cost per
+  session. A change to metrics capture, live coaching or the feedback
+  prompts isn't meant to move cost, so its cost per session is read last
+  whatever it says. A card also says when the mix of sessions moved:
+  a scheduled run or a mode whose share changed by 25 points or more
+  between the two sides, which makes the per-session figures compare
+  different kinds of work. The prompting-habit and one-at-a-time rates
+  divide by the messages that asked for something, the way the Work
+  habits rates do, with the same count on both sides. An effort or thinking
+  change is judged on output tokens per reply, cost per reply, then cost per
+  session. A fast mode change changes the price, not the tokens, so it is
+  judged on cost per reply, then cost per session. When one settings edit
+  changes several keys, the measures follow the order the keys are listed in
+  (alphabetically), but the token measures always come before cost per
+  reply, even when an effort, thinking or fast mode key is listed ahead of
+  `model`. Output tokens per reply counts real replies only; a conversation
+  summary's estimated request counts in tokens per session instead. Other
+  changes use cost per spawn for a change to one agent, summaries per
+  session for `autoCompactWindow`, cache rebuild share for a TTL change, and
+  so on. Each project is judged between its own neighbouring changes: a
+  change to every project is compared in each project with the changes that
   apply there, so a change made in one project cuts only that project's
   before and after, and the all-projects card is the project readings
   put together. The sessions after it are weighted to the mix of work
@@ -555,42 +569,42 @@ cost and tokens to the cycle that started the agent, so the cycles' costs
 still add up to the session's. A piece of work's cost labels the amount
 that came this way (`moved_cost`).
 
-**Piece of work.** The stretch of a session that was one job, drawn from
-the transcript alone by `pieces.pieces_of`, so it needs no /cg-feedback
-answer and no tag. Where it differs from a prompt cycle: a cycle is one
-message and its replies, and a piece is the run of cycles from one fresh
-start to the next. It starts only at the session start, at a /clear
-(unless the message after it is a handoff), at a settled `shift=new` on a
-message that asks for something, or, with no `shift` word at all, after a
-silence of 3 hours or more with different files (under 10% of the file
-names in common, at least two on each side) on a message that asks for
-something. That last start is the only low-confidence one. A queued
-message, a plan reply and an answer to a question Claude asked open no
-cycle, so they start nothing. A session with no start inside it is one
-*unsegmented* piece, and counts its messages that asked for something, not
-itself, in a per-piece rate. A session that opens with a handoff (a long
-first message, a paste, or a file path straight after an approved plan),
-within 72 hours of the end of the same project's previous piece, joins that
-piece. **Rework** is a cycle after the piece's first delivery that has a
-settled `shift` of `redo` or `fix`, a correction you typed or queued, an
-adjustment that changes files the piece already changed, or (inferred) a
-short message that changes the files the cycle before it did. A go-ahead,
-a thank-you, a status check and a round of plan feedback are never rework.
-Your /cg-feedback answers can rule a cycle out (`why=changed`, `plan=new`,
-a plan check of `new`) and are where the **cause** comes from first, then
-the cycle's settled `why` tag, then what the message itself says, else
-"cause not reported". Each cause carries where it came from: your
-feedback, Claude's tag, Haiku's tag, or inferred. Nothing says Claude got
-it wrong unless your answers or a tag did. The typical piece the coaching
-file holds is the median of these pieces' tokens, and the capture banner
-lists the pieces of work no rating covers. `pieces.rework_rate`,
-`rework_by_level` and `rework_by_size` normalise rework per message that
-asked for something and per piece. A `habits.Piece` is the habits tables'
-own row: the work one /cg-feedback answer or dashboard rating covers, with
-its outcome, and one row with no outcome for each piece of work no answer
-covers. Only the rows with an outcome feed the tables that need your
-answer. The `rework` section (`rework.py`) reports the rework, its causes
-and where each came from, by piece of work.
+**Piece of work.** The stretch of a session that was one job, drawn from the
+transcript alone by `pieces.pieces_of`, so it needs no /cg-feedback answer
+and no tag. Where it differs from a prompt cycle: a cycle is one message and
+its replies, and a piece is the run of cycles from one fresh start to the
+next. It starts only at the session start, at a /clear (unless the message
+after it is a handoff), at a settled `shift=new` on a message that asks for
+something, or, with no `shift` word at all, after a silence of 3 hours or
+more with different files (under 10% of the file names in common, at least
+two on each side) on a message that asks for something. That last start is
+the only low-confidence one. A queued message and an answer to a question
+Claude asked open no cycle, and a reply to a plan Claude had just put up
+asks for nothing, so none of them starts a piece. A session with no start
+inside it is one *unsegmented* piece, and counts its messages that asked for
+something, not itself, in a per-piece rate. A session that opens with a
+handoff (a long first message, a paste, or a file path straight after an
+approved plan), within 72 hours of the end of the same project's previous
+piece, joins that piece. **Rework** is a cycle after the piece's first
+delivery that has a settled `shift` of `redo` or `fix`, a correction you
+typed or queued, an adjustment that changes files the piece already changed,
+or (inferred) a short message that changes the files the cycle before it
+did. A go-ahead, a thank-you, a status check and a round of plan feedback
+are never rework. Your /cg-feedback answers can rule a cycle out
+(`why=changed`, `plan=new`, a plan check of `new`) and are where the
+**cause** comes from first, then the cycle's settled `why` tag, else "cause
+not reported". Each cause carries where it came from: your feedback,
+Claude's tag, Haiku's tag, or inferred. Nothing says Claude got it wrong
+unless your answers or a tag did. The typical piece the coaching file holds
+is the median of these pieces' tokens, and the capture banner lists the
+pieces of work no rating covers. `pieces.rework_rate`, `rework_by_level` and
+`rework_by_size` normalise rework per message that asked for something and
+per piece. A `habits.Piece` is the habits tables' own row: the work one
+/cg-feedback answer or dashboard rating covers, with its outcome, and one
+row with no outcome for each piece of work no answer covers. Only the rows
+with an outcome feed the tables that need your answer. The `rework` section
+(`rework.py`) reports the rework, its causes and where each came from, by
+piece of work.
 
 **Admission.** A reply that owns a mistake of Claude's. It counts only when
 the settled `admit` tag says so (`claim`, `change` or `instruction`: an

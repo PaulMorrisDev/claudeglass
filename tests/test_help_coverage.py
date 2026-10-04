@@ -493,7 +493,13 @@ def test_the_copy_the_failed_calls_check_and_the_work_habits_row_add_keeps_to_th
         waste_by_cause=[{"cause": "redirected", "turns": 4, "cost_usd": 1.0, "lever": "Not waste."}],
         waste_blocked_by=[row for row in _BLOCKED_BY if row["kind"] == "saver"],
     )
-    for name, model in (("found", found), ("quiet", quiet), ("none", none), ("redirects", redirects)):
+    elsewhere = _waste_model(
+        recommendations=[_WASTED_TURNS],
+        waste_by_cause=[{"cause": "interrupt", "turns": 40, "cost_usd": 30.0, "lever": "Batch instructions."}],
+    )
+    for name, model in (
+        ("found", found), ("quiet", quiet), ("none", none), ("redirects", redirects), ("elsewhere", elsewhere),
+    ):
         result = qa.run("failed-calls", _ctx(tmp_path, model=model))
         strings.append((f"{name} summary", re.sub(r"\{\{page:[a-z/-]+\}\}", "the Savings page", result["summary"])))
     habits_result = qa.run("habits", _ctx(tmp_path, model=found))
@@ -502,3 +508,69 @@ def test_the_copy_the_failed_calls_check_and_the_work_habits_row_add_keeps_to_th
     assert len(strings) >= 12
     for where, text in strings:
         _plain(text, where)
+
+
+def test_the_copy_the_changes_page_adds_keeps_to_the_help_rules(tmp_path):
+    """The mix sentence for each kind of session, the verdict for each
+    reading on every measure's label (in each billing mode's figures), the
+    labels of a change to the feedback prompts, and the two strings
+    page-changes.js adds: the same rules as the help text."""
+    from datetime import datetime, timedelta, timezone
+
+    from claudeglass import change_points, impact
+    from claudeglass import config as config_mod
+    from claudeglass.change_points import ChangePoint
+    from claudeglass.units import Units
+
+    start = datetime(2026, 9, 20, 12, tzinfo=timezone.utc)
+
+    def session(days: float, mode: str, scheduled: bool) -> impact.SessionFacts:
+        return impact.SessionFacts(
+            start=start + timedelta(days=days), main=impact._Transcript(cost=1.0, turns=4), mode=mode, scheduled=scheduled
+        )
+
+    strings: list[tuple[str, str]] = []
+    # The sentence for every kind the mix names, and for one it doesn't.
+    for kind in (*impact._MIX_SUBJECT, "unheard-of"):
+        scheduled = kind == "scheduled"
+        before = [session(-d, "interactive" if scheduled or kind == "mixed" else "mixed", False) for d in (1, 2, 3)]
+        after = [session(d, kind, scheduled) for d in (0.1, 0.2, 0.3)]
+        mix = impact.session_mix(before, after)
+        assert mix["flagged"] and mix["text"], kind
+        strings.append((f"mix {kind}", mix["text"]))
+    # Each reading's verdict, on the label of every measure a change can lead with.
+    labels = set()
+    for keys in (
+        ["model"], ["effortLevel"], ["fastMode"], ["autoCompactWindow"], ["capture.level"], ["capture.coaching"],
+        ["capture.feedback"], ["habit.drip_feed"], ["habit.split_large"], ["Explore: model"], ["spend_limit"],
+    ):
+        labels |= {m.label for m in impact.measures_for(ChangePoint(start, "apply", "x", keys=keys))}
+    for units in (Units(), Units(billing_mode="subscription")):
+        for label in sorted(labels):
+            for reading, direction in (
+                ("lower", "lower"), ("higher", "higher"), ("possibly_lower", "lower"), ("possibly_higher", "higher"),
+                ("no_clear_change", "lower"), ("no_clear_change", "same"), ("too_little_data", "lower"),
+            ):
+                row = {
+                    "key": "k", "label": label, "label_key": reading, "direction": direction, "p": 0.01,
+                    "change_pct": -30.0, "demoted": False, "before_value": 12.34, "after_value": 8.64,
+                    "before": impact._text("money", 12.34, units), "after": impact._text("money", 8.64, units),
+                }
+                strings.append((f"verdict {label} {reading}", impact._verdict([row], 3, 4, True)))
+    strings.append(("verdict empty", impact._verdict([], 3, 4, True)))
+    strings.append(("verdict few after", impact._verdict([], 3, 1, False)))
+    strings.append(("verdict few before", impact._verdict([], 1, 3, False)))
+    # What a change to the feedback prompts is called.
+    for n, ids in enumerate((["feedback_skill"], ["feedback_skill", "feedback_note"], [])):
+        config_mod.set_capture(tmp_path, feedback=ids, now=datetime(2026, 9, 1 + n, 9, tzinfo=timezone.utc))
+    strings += [(f"change {p.label}", p.label) for p in change_points.change_points(tmp_path)]
+    # The strings the card itself adds.
+    text = (Path(__file__).resolve().parents[1] / "src" / "claudeglass" / "service" / "static" / "page-changes.js").read_text(
+        encoding="utf-8"
+    )
+    for said in ("Session mix changed", "Read last: the mix of sessions changed."):
+        assert f'"{said}"' in text, said
+        strings.append(("card", said))
+    assert len(strings) > 100
+    for where, string in strings:
+        _plain(string, where)

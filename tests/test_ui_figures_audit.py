@@ -1031,3 +1031,48 @@ def test_a_tokens_row_and_a_count_row_read_by_which_way_is_better() -> None:
         preamble=_declaration_source(_static_text("page-changes.js"), "READINGS") + ";\n",
     )
     assert tones == ["good", "bad", "good", "bad", "neutral"]
+
+
+# -- the lead measure and the mix of sessions on a change card ------------------
+
+
+def _lead(item: dict) -> object:
+    """``leadMeasure`` from page-changes.js, run in Node: the key it picks, or None."""
+    expression = f"(function (m) {{ return m && m.key; }})(leadMeasure({json.dumps(item)}))"
+    return _node([("page-changes.js", "leadMeasure")], expression)
+
+
+def test_a_change_card_leads_with_the_measure_the_server_names_not_the_first_listed() -> None:
+    measures = [{"key": "tokens_per_session"}, {"key": "cost_per_turn"}, {"key": "cost_per_session"}]
+    assert _lead({"lead": "cost_per_turn", "measures": measures}) == "cost_per_turn"
+    # No lead named (too few sessions, or an older server): the first it lists.
+    assert _lead({"lead": None, "measures": measures}) == "tokens_per_session"
+    assert _lead({"measures": measures}) == "tokens_per_session"
+    # A name no measure has falls back the same way; no measures is no lead.
+    assert _lead({"lead": "nothing_like_it", "measures": measures}) == "tokens_per_session"
+    assert _lead({"lead": "cost_per_turn", "measures": []}) is None
+    assert _lead({}) is None
+
+
+_MIX_PREAMBLE = """
+function el(tag, attrs, children) {
+  return { tag: tag, attrs: attrs || {}, children: (children || []).filter(function (c) { return c !== null && c !== undefined; }) };
+}
+function chip(text, opts) { return { chip: text, opts: opts }; }
+"""
+
+
+def _mix_note(item: dict) -> object:
+    return _node([("page-changes.js", "mixNote")], f"mixNote({json.dumps(item)})", preamble=_MIX_PREAMBLE)
+
+
+def test_the_mix_note_shows_the_servers_sentence_only_when_the_mix_moved() -> None:
+    said = "Scheduled runs were 0% of the sessions before this change and 40% after."
+    note = _mix_note({"mix": {"flagged": True, "text": said}})
+    assert note["attrs"]["class"] == "change-mix"
+    chip_node, text_node = note["children"]
+    assert chip_node["chip"] == "Session mix changed" and chip_node["opts"]["tone"] == "warn"
+    assert chip_node["opts"]["icon"] == "warning"
+    assert text_node["attrs"] == {"class": "change-mix-text", "text": said}
+    for item in ({}, {"mix": None}, {"mix": {"flagged": False, "text": ""}}):
+        assert _mix_note(item) is None, item

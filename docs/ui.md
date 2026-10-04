@@ -571,9 +571,9 @@ that order, each as a heading with a one-line answer beside it.
    Requests in sessions that couldn't be cut into pieces never lead. Its
    saving is the largest recommendation it carries plus what the habits
    of the playbook would save over the window (a habit a recommendation
-   already covers isn't counted twice; the playbook's saving a week is
-   scaled to the window's weeks, with "all time" as one week, so the row
-   understates and never overstates). Its link goes to the card:
+   already covers isn't counted twice, and each habit adds what it would
+   have saved over the window, never a weekly rate scaled up). Its link
+   goes to the card:
    **See the rework**, or **See the habit** for the top habit
    (`#/habits?item=<key>`). **Failed and blocked tool calls** is a check
    of its own, with its own fix: the replies lost to tool errors and to
@@ -658,19 +658,32 @@ alone.
    and the ratio test's reading coloured by the measure's `better`
    (Lower is good news for a cost; the share of messages tagged has no
    better side and reads neutral). Which measures a card shows depends
-   on the change. The first is its lead: its reading is the chip by the
-   title, and it is the only one on the Overview's short card.
+   on the change. The first is its lead (`item.lead`, drawn by
+   `leadMeasure`): the measure the ratio test is surest of, not the first
+   one listed. A clear difference leads before a possible one, and that
+   before no clear change; a difference under 5% reads as no clear
+   change, its badge included, however sure the test is of it. Its reading
+   is the chip by the title, `/api/impact`'s one-line `verdict` is about it
+   (a card shows that line only while it waits for sessions), and it is the
+   only measure on the Overview's short card. The rest follow in the order below.
    - A **model** change is judged on the tokens it spends first: Tokens
      per session (everything read and written, subagents included),
-     Output tokens per reply and Replies per session, then Cost per reply
-     and Cost per session. A new model version can be priced differently
-     per token, so cost alone can't say whether it does the same work
-     with less; the tokens can. They stay ahead of Cost per reply even
-     when the same settings edit changes effort, thinking or fast mode, so
-     a model change made alone or with those leads with Tokens per session.
-     A settings edit lists its keys alphabetically, so another setting
-     changed with the model and listed before it, such as the compaction
-     window, a plugin or an agent, leads with its own measure.
+     Output tokens per reply and Replies per session, then Cost per reply,
+     Cost per request and Cost per session. A new model version can be
+     priced differently per token, so cost alone can't say whether it does
+     the same work with less; the tokens can. They stay ahead of Cost per
+     reply in the list even when the same settings edit changes effort,
+     thinking or fast mode. A model change whose tokens didn't move leads
+     with whichever measure did, often the cost. A settings edit lists its
+     keys alphabetically, so another setting changed with the model and
+     listed before it, such as the compaction window, a plugin or an
+     agent, can lead with its own measure.
+   - **Cost per request** (a model change, or a habit you started) is a
+     session's cost over the prompt cycles that asked for something, not
+     over every message. A go-ahead, a status check, a thank-you or a
+     reply to a plan asks for nothing, so a run of them can't pass for
+     cheaper work. A scheduled run has none and leaves the figure alone.
+     The habit rates below use the same count.
    - An **effort or thinking** change (the effort level, thinking on or
      off, the thinking budget) leads with Output tokens per reply, then
      Cost per reply and Cost per session.
@@ -679,8 +692,20 @@ alone.
      measures: its cost per spawn and its context at the start of each
      spawn.
    - Turning coaching notes on is measured by the prompting habits it
-     warns about, per 100 of your messages, and the share of messages
-     that were small requests sent one at a time.
+     warns about, per 100 of your messages that asked for something, and
+     the share of those that were small requests sent one at a time.
+   - A change to **metrics capture, live coaching or the feedback
+     prompts** isn't meant to move cost, so its Cost per session is read
+     last, in a quieter colour, whatever it says. When the mix of
+     sessions moved too, that row adds "Read last: the mix of sessions
+     changed."
+   - **Session mix changed.** When a kind of session (a scheduled run, or
+     one of the modes) was 25 points more or less of the sessions after
+     a change than before it, the card says so under its title with a
+     warning chip and the server's sentence (`item.mix`, drawn by
+     `mixNote`): the per-session figures then compare different kinds of
+     work, however the sessions are weighted, so read the other measures
+     first. It shows on every kind of change, not only capture ones.
 
    Then **Saved so far** from `without.saved_usd` ("Cost more so far"
    when it's negative) with how it was priced, a row per setting when
@@ -981,10 +1006,12 @@ pieces of work that needed changes out of all of them, and what that rework
 cost, in the billing mode and with its period) and `rework.py`'s sentences:
 "N of your M pieces of work needed changes after Claude delivered them. That
 rework cost X. U% came from requests that left something out, C% from
-Claude's mistakes, X% from changes of mind", then "We couldn't tell why for
-K%: run /cg-feedback after a piece of work to say" when some rework has no
-cause, and a sentence of its own for sessions that couldn't be cut into
-pieces (counted by messages that asked for something). Below it:
+Claude's mistakes, X% from changes of mind", then "O% came from failed
+tools, plan gaps or a mix of causes." when some rework had one of those
+causes, then "We couldn't tell why for K%: run /cg-feedback after a piece of
+work to say" when some rework has no cause, and a sentence of its own for
+sessions that couldn't be cut into pieces (counted by messages that asked
+for something). Below it:
 
 - **Why work needed changes**: a card per cause and source, your feedback
   first, then Claude's tag, Haiku's tag and what the transcript shows. Each

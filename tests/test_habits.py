@@ -569,11 +569,13 @@ def test_apply_covered_by_drops_the_saving_and_names_the_rule_when_it_fired():
     # depend on the specific facts _item_effort_fit needs to fire.
     key_idx = [c.key for c in table.columns].index("habit")
     saving_idx = [c.key for c in table.columns].index("saving")
+    total_idx = [c.key for c in table.columns].index("saving_total")
     covered_idx = [c.key for c in table.columns].index("covered_by")
     covered_rule_idx = [c.key for c in table.columns].index("covered_by_rule")
     row = list(table.rows[0])
     row[key_idx] = "effort_fit"
     row[saving_idx] = 3.5
+    row[total_idx] = 7.0
     table.rows.append(row)
 
     section = Section(key="habits", tables=[table])
@@ -584,6 +586,7 @@ def test_apply_covered_by_drops_the_saving_and_names_the_rule_when_it_fired():
 
     covered_row = next(r for r in table.rows if r[key_idx] == "effort_fit")
     assert covered_row[saving_idx] is None
+    assert covered_row[total_idx] is None
     assert covered_row[covered_idx] == "High effort is being spent on easy work"
     # Additive: the rule id itself, alongside its title, so a caller can
     # link straight to the recommendation.
@@ -593,6 +596,19 @@ def test_apply_covered_by_drops_the_saving_and_names_the_rule_when_it_fired():
     uncovered_row = next(r for r in table.rows if r[key_idx] == "quiet_output")
     assert uncovered_row[covered_idx] == ""
     assert uncovered_row[covered_rule_idx] == ""
+
+
+def test_the_playbook_saving_over_the_window_is_the_weekly_saving_times_the_weeks():
+    """``saving_total`` is what the Work habits check on the Overview adds, so
+    it is the saving before it is spread over the weeks, not a weekly rate."""
+    h = Habits(cycles=[_noisy()])
+    table = habits.playbook_table(h, habits.playbook(h))
+    keys = [c.key for c in table.columns]
+    saving_idx, total_idx = keys.index("saving"), keys.index("saving_total")
+    saved = [row for row in table.rows if row[saving_idx] is not None]
+    assert saved
+    for row in saved:
+        assert row[total_idx] == pytest.approx(row[saving_idx] * h.span_weeks)
 
 
 def test_apply_covered_by_leaves_the_saving_alone_when_the_rule_did_not_fire():
@@ -1372,6 +1388,15 @@ def test_pieces_of_work_are_drawn_with_no_feedback_at_all(tmp_path, pricing):
     assert any(note.startswith("No feedback yet") for note in section.notes)
 
 
+def test_the_pieces_of_work_join_a_session_that_opens_with_a_handoff(tmp_path, pricing):
+    first = _work_session(tmp_path, "s1", [_said(0, "add the login form to src/app.py"), *_edit_reply(0, 0)])
+    second = _work_session(tmp_path, "s2", [_said(600, "Carry on from the plan below. " * 60), *_edit_reply(600, 1)])
+    [piece] = habits.collect(NS(sessions=[first, second]), pricing).work_pieces
+    assert piece.session_ids == ("s1", "s2")
+    plain = _work_session(tmp_path, "s3", [_said(600, "add the logout button to src/app.py"), *_edit_reply(600, 2)])
+    assert len(habits.collect(NS(sessions=[first, plain]), pricing).work_pieces) == 2
+
+
 def test_a_piece_you_rated_is_not_drawn_a_second_time(tmp_path, pricing):
     h = habits.collect(NS(sessions=[_plan_session(tmp_path, "s1")]), pricing)
     (piece,) = h.pieces
@@ -1512,7 +1537,26 @@ def test_fixes_after_a_plan_count_what_you_typed_while_claude_worked_and_need_mi
 def test_a_plan_with_fewer_than_three_fixes_is_counted_but_not_called_fixed(tmp_path, pricing):
     sessions = [_fixed_plan_session(tmp_path, f"s{n}", typed=1, queued=0) for n in range(habits.MIN_GROUP)]
     found = habits.fixes_after_plan(habits.collect(NS(sessions=sessions), pricing))
-    assert (found.plans, found.fixed, found.fixes, found.queued, found.cost) == (5, 0, 5, 0, 0.0)
+    assert (found.plans, found.fixed, found.fixes, found.queued) == (5, 0, 5, 0) and found.cost > 0
+
+
+def test_fixes_after_a_plan_count_the_rework_the_piece_found_after_it(tmp_path, pricing):
+    def session(name):
+        lines = [
+            _said(0, "plan the retry for src/app.py"), _plan_call(1),
+            user_block_line([tool_result_block("tu_p", "User has approved your plan.")], timestamp=_ts(2)),
+            *_edit_reply(3, 0),
+        ]
+        for n in range(1, 4):
+            lines += [_said(10 + 10 * n, "also cover the timeout path"), *_edit_reply(10 + 10 * n, n)]
+        return _work_session(tmp_path, name, lines)
+
+    sessions = [session(f"s{n}") for n in range(habits.MIN_GROUP)]
+    # No correction or adjustment words: only the rework rule finds these.
+    assert not any(t.human_correction or t.human_adjust for t in sessions[0].top.turns)
+    h = habits.collect(NS(sessions=sessions), pricing)
+    assert [(p.typed, p.queued) for p in h.plan_fixes] == [(3, 0)] * habits.MIN_GROUP
+    assert habits.fixes_after_plan(h).fixed == habits.MIN_GROUP
 
 
 def test_a_reply_to_a_plan_and_a_plan_with_nothing_after_it_are_no_fixes(tmp_path, pricing):
@@ -3106,7 +3150,15 @@ def test_the_briefs_table_says_how_its_averages_compare_with_the_card():
     told = Habits(cycles=[*_briefed("clear", [2.0] * 5), *_briefed("vague", [3.0] * 2)],
                   pieces=[_gave(why=("left_out",), followups=2) for _ in range(3)])
     assert "no card" not in _briefs_notes(told)[0]
-    for h in (holds, fails, few, told):
+    # Dearer most of the time but cheaper in total: the share passes, the sum doesn't, and the note says so.
+    evens = Habits(cycles=[*_briefed("clear", [2.0] * 5), *_briefed("vague", [2.1] * 4), *_briefed("vague", [0.1])])
+    found = habits.brief_comparison(evens)
+    assert found.probability >= habits.BRIEF_MIN_PROBABILITY and found.saving <= 0
+    assert _briefs_notes(evens)[0] == (
+        f"Compared like for like, a partial or vague ask cost more than a clear one in {100 * found.probability:.0f}% "
+        "of the comparisons. Added up, they cost no more than clear ones. Work habits shows no card for them."
+    )
+    for h in (holds, fails, few, told, evens):
         assert all(_words(sentence) <= 25 for note in _briefs_notes(h) for sentence in note.split(". "))
     assert _table(habits.section_from(Habits()), "habits_briefs").notes == []
 

@@ -133,14 +133,15 @@ class Admitted:
 
 @dataclass(slots=True)
 class WeekRow:
-    """The pieces of one week (the Monday, ``YYYY-MM-DD``) that changed files
-    and whose start was found."""
+    """One week (the Monday, ``YYYY-MM-DD``): the pieces that changed files and
+    whose start was found, and the mistakes you caught in any piece."""
 
     week: str
     pieces: int = 0
     reworked: int = 0
     cost: float = 0.0
-    #: Pieces with any tag, and the mistakes you caught in them.
+    #: Every piece with any tag, the ones we couldn't cut included, and the
+    #: mistakes you caught in them.
     tagged: int = 0
     caught: int = 0
 
@@ -251,7 +252,9 @@ def _monday(week: str) -> date | None:
 
 def _weeks(h: habits_mod.Habits, pieces: list[WorkPiece]) -> list[WeekRow]:
     """One row per week from the first piece's to the last's, a week with no
-    piece included so the bars keep their spacing."""
+    piece included so the bars keep their spacing. ``pieces``, ``reworked``
+    and ``cost`` count ``pieces``; ``tagged`` and ``caught`` count every piece
+    of ``h``, as the admitted mistakes do."""
     by_week: dict[str, WeekRow] = {}
     for piece in pieces:
         week = habits_mod._week(habits_mod._moment(piece.end_ts or piece.start_ts), h.tz)
@@ -261,9 +264,16 @@ def _weeks(h: habits_mod.Habits, pieces: list[WorkPiece]) -> list[WeekRow]:
         row.pieces += 1
         row.reworked += int(bool(piece.rework))
         row.cost += piece.rework_cost
-        if piece.task or piece.level or piece.size:
-            row.tagged += 1
-            row.caught += piece.admitted_user
+    # Mistakes you caught are counted over every piece, as the admitted line is.
+    for piece in h.work_pieces:
+        if not (piece.task or piece.level or piece.size):
+            continue
+        week = habits_mod._week(habits_mod._moment(piece.end_ts or piece.start_ts), h.tz)
+        if not week:
+            continue
+        row = by_week.setdefault(week, WeekRow(week))
+        row.tagged += 1
+        row.caught += piece.admitted_user
     if not by_week:
         return []
     first, last = _monday(min(by_week)), _monday(max(by_week))
@@ -344,16 +354,22 @@ def _cost(units: Units, usd: float, period: str, said: str, unpriced: str = "Tha
 def headline_text(r: Rework, units: Units, period: str) -> str:
     """"N of your M pieces of work needed changes after Claude delivered
     them. That rework cost X. U% came from requests that left something
-    out, C% from Claude's mistakes, X% from changes of mind."""
+    out, C% from Claude's mistakes, X% from changes of mind." When some
+    rework had another cause: "O% came from failed tools, plan gaps or a mix
+    of causes."
+    """
     n, total = r.rate.reworked, r.rate.segmented
     pieces, them = ("piece", "it") if total == 1 else ("pieces", "them")
     if not n:
         return f"None of your {total} {pieces} of work needed changes after Claude delivered {them}."
+    other = r.share("tools") + r.share("plan_gap") + r.share("mixed")
+    rest = f" {_pct(other)}% came from failed tools, plan gaps or a mix of causes." if other > 0 else ""
     return (
         f"{n} of your {total} {pieces} of work needed changes after Claude delivered {them}. "
         + _cost(units, r.rate.rework_cost, period, "That rework cost {amount}.")
         + f" {_pct(r.share('left_out'))}% came from requests that left something out, "
         f"{_pct(r.share('missed'))}% from Claude's mistakes, {_pct(r.share('changed'))}% from changes of mind."
+        + rest
     )
 
 
@@ -481,7 +497,7 @@ def _causes_table(r: Rework) -> Table:
         rows.append([
             PLAN_FIXES, "inferred", fixes.fixed, None, fixes.fixes, None, fixes.cost, None,
             f"{fixes.fixed} of {_count(fixes.plans, 'plan')} you approved needed {habits_mod.PLAN_FIXES_MIN} or more "
-            "fixes after it.",
+            "fixes after approval.",
             TRY[PLAN_FIXES], PASTE[PLAN_FIXES],
         ])
     return Table(

@@ -95,6 +95,19 @@ def test_the_headline_is_the_plans_words_with_the_amount_and_its_period(pricing)
     assert row["cost"] == pytest.approx(REPLY) and row["tokens"] == 150
 
 
+def test_the_headline_names_the_share_from_other_causes_when_there_is_some():
+    rate = pieces.ReworkRate(pieces=4, segmented=4, reworked=4, substantive=8, rework=4)
+    rows = [
+        rework.CauseRow("tools", "inferred", 2, 2, 0.0, 0),
+        rework.CauseRow("left_out", "feedback", 1, 1, 0.0, 0),
+        rework.CauseRow("not_reported", "inferred", 1, 1, 0.0, 0),
+    ]
+    text = rework.headline_text(rework.Rework(rate=rate, piece_causes=rows), Units(), PERIOD)
+    assert text.endswith("0% from changes of mind. 50% came from failed tools, plan gaps or a mix of causes.")
+    plain = rework.headline_text(rework.Rework(rate=rate, piece_causes=rows[1:]), Units(), PERIOD)
+    assert plain.endswith("from changes of mind.")
+
+
 def test_the_title_names_the_window_and_the_section_has_the_plans_title_and_intro():
     section = rework.build_section(_h(window="last 7 days"))
     assert (section.key, section.title) == ("rework", "Rework after delivery")
@@ -327,7 +340,7 @@ def test_fixes_after_a_plan_show_as_a_card_only_once_enough_plans_were_approved(
     section = rework.build_section(_h(*work, plan_fixes=plans))
     row = _rows(_table(section, "rework_causes"))[-1]
     assert (row["cause"], row["source"], row["pieces"], row["cycles"]) == (rework.PLAN_FIXES, "inferred", 5, 15)
-    assert row["detail"] == "5 of 5 plans you approved needed 3 or more fixes after it."
+    assert row["detail"] == "5 of 5 plans you approved needed 3 or more fixes after approval."
     assert row["try"].startswith("Add details like these to the plan before approving")
     assert row["cost"] == pytest.approx(2.5)
     few = rework.build_section(_h(*work, plan_fixes=plans[:-1]))
@@ -474,6 +487,17 @@ def test_mistakes_you_caught_per_piece_need_five_tagged_pieces_and_never_read_ze
     short = rework.build_section(_h(*week))
     assert _rows(_table(short, "rework_by_week"))[0]["caught_per_piece"] is None
     assert _rows(_table(short, "rework_by_week"))[0]["caught"] == 0
+
+
+def test_the_mistakes_you_caught_by_week_count_every_piece_as_the_admitted_line_does():
+    loose = pieces.WorkPiece(
+        delivered=True, unsegmented=True, task="feature", admitted=1, admitted_user=1,
+        start_ts="2026-09-21T09:00:00.000Z", end_ts="2026-09-21T10:00:00.000Z",
+    )
+    found = rework.collect(_h(loose))
+    (week,) = found.weeks
+    assert (week.pieces, week.tagged, week.caught) == (0, 1, 1)
+    assert found.admitted.user == sum(w.caught for w in found.weeks)
 
 
 # -- by level --------------------------------------------------------------------------

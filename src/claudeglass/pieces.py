@@ -17,10 +17,11 @@ transcript said is kept.
   names with the last ones touched (at least :data:`MIN_FILES` files on
   each side), and a substantive message (low confidence).
 
-Never at a queued message, a plan reply or an AskUserQuestion answer: none
-of them opens a cycle. A *substantive* message is one that asks for
-something: not a go-ahead, a status check or a thank-you (unless a message
-you typed while it ran did ask). A /cg-feedback run is no piece's work: it
+Never at a queued message or an AskUserQuestion answer, which open no
+cycle, nor at a plan reply, which asks for nothing. A *substantive* message
+is one that asks for something: not a go-ahead, a status check, a thank-you
+or a reply to a plan Claude had just put up (unless a message you typed
+while it ran did ask). A /cg-feedback run is no piece's work: it
 stays where it ran and counts for nothing but ``rated``. A session with no
 other start is one *unsegmented* piece: it counts its substantive cycles,
 not itself, in a per-piece figure.
@@ -38,19 +39,20 @@ that changed files) that has any of: a settled ``shift`` of ``redo`` or
 ``fix``; a correction you typed or queued; an adjustment (typed or queued)
 that changes files the piece already changed; or, inferred, a short message
 (not a go-ahead, thank-you or status check) that changes the files the
-cycle before it changed. It is never rework when it is a plan-feedback
-round (you sent a plan back, or wrote in plan mode), when the plan check
-says ``new`` or ``none``, or when your /cg-feedback answers say the plan
-was ``new`` or the follow-ups were a change of mind alone (``why=changed``).
+cycle before it changed. It is never rework when it asks for nothing (a
+go-ahead, status check or thank-you, whatever its tag says), when it is a
+plan-feedback round (you sent a plan back, or wrote in plan mode), when the
+plan check says ``new`` or ``none``, or when your /cg-feedback answers say
+the plan was ``new`` or the follow-ups were a change of mind alone
+(``why=changed``).
 
 **Cause** of each rework cycle, in this order, each with the word for where
 it came from (:data:`SOURCES`): your /cg-feedback answers (the plan check,
 then ``plan``, then ``why``, with ``missed_in`` kept alongside), then the
 cycle's settled ``why`` tag (Claude's, or Haiku's when Haiku wrote every
-tag), then what the message itself says (an adjustment is ``changed``), else
-``not_reported``. ``missed``, which is Claude's mistake, only ever comes
-from your answers or a tag: a correction alone never says Claude got it
-wrong.
+tag), else ``not_reported``. ``missed``, which is Claude's mistake, only
+ever comes from your answers or a tag: a correction alone never says
+Claude got it wrong.
 
 **Admissions** are the cycles whose reply owns a mistake of Claude's: the
 settled ``admit`` word, never the bare pattern match
@@ -71,8 +73,10 @@ is one unless it is a go-ahead, a status check, a thank-you or a reply to a
 plan Claude had just put up; a queued one is one unless it was a go-ahead or
 a status check. The rates in ``habits`` and ``prompting`` divide by them.
 
-``habits.Piece`` is a different thing: a /cg-feedback answer and the work it
-rates. A :class:`WorkPiece` never needs one.
+``habits.Piece`` is the habits tables' own row: the work one /cg-feedback
+answer or dashboard rating covers, with its outcome, and one row with no
+outcome for each :class:`WorkPiece` no answer covers. A :class:`WorkPiece`
+never needs an answer.
 """
 
 from __future__ import annotations
@@ -202,7 +206,8 @@ class WorkPiece:
     #: A plan was approved in it.
     plan_approved: bool = False
     #: Some /cg-feedback answer, a skipped one too, covers it, or you ran
-    #: /cg-feedback in it, whether or not an answer was kept.
+    #: /cg-feedback in it, whether or not an answer was kept. A run before
+    #: the piece's first message rates none of it.
     rated: bool = False
     #: ``"high"`` when it starts at the session start, a /clear or a
     #: settled ``shift=new``; ``"low"`` when only the tag-free rule says so.
@@ -253,12 +258,13 @@ class _Unit:
         return self.cycle.turns[0]
 
 
-def _substantive(cycle: capture_mod.Cycle) -> bool:
+def _substantive(cycle: capture_mod.Cycle, previous: capture_mod.Cycle | None = None) -> bool:
     """Whether ``cycle`` asked for something: its message is no go-ahead,
-    status check or thank-you, or a message you typed while it ran was a
-    correction or an adjustment."""
+    status check, thank-you or reply to a plan Claude had just put up
+    (``previous`` is the cycle before it), or a message you typed while it ran
+    was a correction or an adjustment."""
     opening = cycle.turns[0]
-    if not (opening.human_go or opening.human_status or opening.human_ack):
+    if not (opening.human_go or opening.human_status or opening.human_ack or _plan_reply(cycle, previous)):
         return True
     return any(t.queued_correction or t.queued_adjust for t in cycle.turns)
 
@@ -298,7 +304,9 @@ def asks(cycle: capture_mod.Cycle, previous: capture_mod.Cycle | None = None) ->
     return int(not quiet) + sum(queued_asks(t) for t in cycle.turns)
 
 
-def _unit(index: int, cycle: capture_mod.Cycle, session_id: str, pricing) -> _Unit:
+def _unit(
+    index: int, cycle: capture_mod.Cycle, session_id: str, pricing, previous: capture_mod.Cycle | None = None
+) -> _Unit:
     turns = cycle.tag_turns
     edited = frozenset(h for t in turns for h in t.edit_target_hashes)
     read = frozenset(h for t in turns for h in t.read_target_hashes)
@@ -316,7 +324,7 @@ def _unit(index: int, cycle: capture_mod.Cycle, session_id: str, pricing) -> _Un
         cycle=cycle,
         session_id=session_id,
         run=capture_mod.is_feedback_run(cycle),
-        substantive=_substantive(cycle),
+        substantive=_substantive(cycle, previous),
         spend=capture_mod.cycle_spend(cycle, pricing),
         changed=changed,
         edited=edited,
@@ -421,7 +429,7 @@ def _segments(session: PieceSession, pricing) -> list[_Segment]:
     for index, cycle in enumerate(session.cycles):
         if not cycle.turns:
             continue
-        unit = _unit(index, cycle, session.session_id, pricing)
+        unit = _unit(index, cycle, session.session_id, pricing, session.cycles[index - 1] if index else None)
         if unit.run:
             if segments:
                 segments[-1].units.append(unit)
@@ -472,7 +480,11 @@ def _plan_round(cycle: capture_mod.Cycle) -> bool:
 def _reasons(unit: _Unit, files: set, previous: frozenset) -> bool:
     """Whether ``unit``, a cycle after the first delivery, reads as rework
     on what the transcript says alone. ``files`` are those the piece has
-    changed so far, ``previous`` those the cycle before changed."""
+    changed so far, ``previous`` those the cycle before changed. A cycle that
+    asks for nothing (a go-ahead, status check or thank-you with no correction
+    or adjustment typed while it ran) is never rework, whatever its tag says."""
+    if not unit.substantive:
+        return False
     turns = unit.cycle.turns
     opening = unit.opening
     if unit.tag is not None and unit.tag.shift in ("redo", "fix"):
@@ -488,25 +500,26 @@ def _reasons(unit: _Unit, files: set, previous: frozenset) -> bool:
     )
 
 
-def _excused(unit: _Unit, fb: Feedback | None) -> bool:
+def _excused(unit: _Unit, fb: Feedback | None, plan_before: bool = True) -> bool:
     """Whether what you said rules ``unit`` out as rework though it reads
     like it: the plan check says it was new or not a fix, your plan answer
     says the plan missed nothing it should have (``new``), or the follow-ups
-    were a change of mind alone. A mix of reasons rules nothing out."""
+    were a change of mind alone. A mix of reasons rules nothing out. The plan
+    answer speaks only for the cycles after a plan was approved
+    (``plan_before``)."""
     word = _plan_word(unit.cycle)
     if word in ("new", "none"):
         return True
     if fb is None or word in ("covered", "gap"):
         return False
-    if fb.plan == "new":
+    if fb.plan == "new" and plan_before:
         return True
     return {w for w in fb.why if w != "none"} == {"changed"}
 
 
 def _cause(unit: _Unit, fb: Feedback | None, plan_before: bool) -> tuple[str, str, str]:
     """``(cause, source, missed_in)`` of a rework cycle: your answers, then
-    the settled ``why`` tag, then what the message says, else
-    ``not_reported``."""
+    the settled ``why`` tag, else ``not_reported``."""
     word = _plan_word(unit.cycle)
     if word == "covered":
         return "missed", "feedback", "plan"
@@ -526,9 +539,6 @@ def _cause(unit: _Unit, fb: Feedback | None, plan_before: bool) -> tuple[str, st
             return words[0], "feedback", (fb.missed_in or "") if words[0] == "missed" else ""
     if tagged:
         return tagged, "Haiku tag" if unit.cycle.haiku_only else "Claude tag", ""
-    turns = unit.cycle.turns
-    if unit.opening.human_adjust or any(t.queued_adjust for t in turns):
-        return "changed", "inferred", ""
     return "not_reported", "inferred", ""
 
 
@@ -591,7 +601,7 @@ def _build(segment: _Segment, by_cycle: dict[int, Feedback], covered: set[int]) 
             delivered
             and not _plan_round(unit.cycle)
             and _reasons(unit, files, previous)
-            and not _excused(unit, fb)
+            and not _excused(unit, fb, plan_before)
         ):
             reworked = True
             cause, source, missed_in = _cause(unit, fb, plan_before)
@@ -629,6 +639,8 @@ def _build(segment: _Segment, by_cycle: dict[int, Feedback], covered: set[int]) 
     tags = [u.tag for u in work if u.tag is not None]
     tasks = Counter(t.task for t in tags if t.task)
     last_ts = next((t.ts for u in reversed(work) for t in reversed(u.cycle.turns) if t.ts), "")
+    # A /cg-feedback run held from before the piece's first message rates none of it.
+    first = next(n for n, u in enumerate(segment.units) if not u.run)
     return WorkPiece(
         session_ids=tuple(dict.fromkeys(segment.sessions)),
         project=segment.project,
@@ -671,7 +683,7 @@ def _build(segment: _Segment, by_cycle: dict[int, Feedback], covered: set[int]) 
         size=_highest((t.size for t in tags), "size"),
         task=tasks.most_common(1)[0][0] if tasks else "",
         plan_approved=segment.plan_approved,
-        rated=any(u.run or id(u.cycle) in covered for u in segment.units),
+        rated=any(id(u.cycle) in covered for u in work) or any(u.run for u in segment.units[first + 1 :]),
         confidence="low" if segment.start in LOW_CONFIDENCE else "high",
         unsegmented=segment.unsegmented,
     )
@@ -738,7 +750,9 @@ def pieces_in(sessions: Iterable[PieceSession], rates=None) -> list[WorkPiece]:
         head = segments[0]
         previous = latest.get(session.project) if session.project else None
         if previous is not None and _joins(previous, head):
-            previous.units.extend(head.units)
+            # A /cg-feedback run held from before this session's first message
+            # rated none of the piece it joins: its span is empty.
+            previous.units.extend(head.units[next(n for n, u in enumerate(head.units) if not u.run) :])
             previous.sessions.append(session.session_id)
             previous.unsegmented = previous.unsegmented and head.unsegmented
             segments = [previous, *segments[1:]]

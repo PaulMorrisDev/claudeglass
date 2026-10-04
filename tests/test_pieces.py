@@ -384,6 +384,19 @@ def test_go_ahead_runs_are_not_rework():
     assert (piece.cycles, piece.substantive, piece.rework) == (5, 1, 0)
 
 
+def test_a_go_ahead_status_check_or_thank_you_tagged_fix_is_still_not_rework():
+    cycles = [
+        _build(0),
+        _fix(10, human_correction=True, tag=_tag(shift="fix")),
+        _msg(20, files=("a",), human_go=True, human_prompt_chars=8, tag=_tag(shift="fix")),
+        _msg(30, files=("a",), human_status=True, human_prompt_chars=14, tag=_tag(shift="fix")),
+        _msg(40, files=("a",), human_ack=True, human_prompt_chars=6, tag=_tag(shift="redo")),
+    ]
+    piece = _only(cycles)
+    assert (piece.rework, piece.substantive, piece.rework_ids) == (1, 2, (("", 1),))
+    assert sum(row[2] for row in piece.levels) == piece.rework
+
+
 def test_a_correction_you_typed_is_rework_whatever_it_changed():
     piece = _only([_build(0), _msg(10, human_correction=True, human_prompt_chars=900, files=("z",))])
     assert piece.rework == 1
@@ -407,9 +420,9 @@ def test_an_adjustment_is_rework_only_when_it_changes_files_the_piece_already_ch
     assert _only([_build(0), queued]).rework == 1
 
 
-def test_an_adjustment_that_re_changes_the_pieces_files_has_changed_as_its_cause():
+def test_an_adjustment_with_no_answer_or_tag_has_no_cause_reported():
     piece = _only([_build(0), _msg(10, human_adjust=True, files=("b",), human_prompt_chars=800)])
-    assert piece.causes == (("changed", "inferred", 1),)
+    assert piece.causes == (("not_reported", "inferred", 1),)
 
 
 def test_a_settled_redo_or_fix_is_rework():
@@ -475,6 +488,15 @@ def test_a_reply_to_a_plan_you_sent_back_asks_for_nothing_but_one_to_an_approved
     assert pieces.asks(_msg(5), rejected) == 1
 
 
+def test_a_plan_reply_never_starts_a_piece_and_asks_for_nothing():
+    plan = _cycle(_turn(10, reads=("x", "y"), plan_stats=PlanStats(outcome="rejected", rejected=True)))
+    tagged = _msg(20, prompt_plan_mode=True, tag=_tag(shift="new"))
+    late = _msg(10 + 4 * HOUR, prompt_plan_mode=True, reads=("e", "f"), gap_s=4 * 3600.0)
+    for reply in (tagged, late):
+        piece = _only([_build(0), plan, reply])
+        assert piece.cycles == 3 and piece.substantive == 2
+
+
 def test_a_feedback_run_and_an_empty_cycle_ask_for_nothing():
     assert pieces.asks(_run(0)) == 0
     assert pieces.asks(Cycle(start=0, end=0, turns=[])) == 0
@@ -518,6 +540,17 @@ def test_a_plan_you_say_was_new_makes_the_later_cycles_no_rework():
     assert _only(cycles, feedback=Feedback(source="answers", plan="gap")).rework == 1
 
 
+def test_a_plan_you_say_was_new_leaves_the_rework_before_the_plan_alone():
+    cycles = [
+        _build(0),
+        _fix(10, human_correction=True),
+        _cycle(_turn(20, plan_stats=PlanStats(outcome="approved"))),
+        _build(30, files=("c", "d")),
+        _fix(40, files=("c",), human_correction=True),
+    ]
+    assert _only(cycles, feedback=Feedback(source="answers", plan="new")).rework_ids == (("", 1),)
+
+
 def test_a_plan_check_of_new_or_none_rules_a_cycle_out_and_covered_or_gap_never_does():
     def checked(word):
         return _only([_build(0), _fix(10, human_correction=True, plan_check=PlanCheck(word=word))])
@@ -542,6 +575,18 @@ def test_a_feedback_run_that_kept_no_answer_still_marks_its_piece_rated():
     # A run in a later piece does not rate the earlier one.
     first, second = pieces_of([_build(0), _msg(30, tag=_tag(shift="new"), files=("z",)), asked_nothing])
     assert (first.rated, second.rated) == (False, True)
+
+
+def test_a_feedback_run_before_any_work_does_not_rate_the_piece_after_it():
+    piece = _only([_run(0, Feedback(source="answers", worth="yes")), _build(10), _fix(20)])
+    assert not piece.rated
+
+
+def test_a_feedback_run_that_opens_a_joining_session_does_not_rate_the_piece():
+    first = _session("a", [_build(0), _fix(10, files=("a",))])
+    second = _session("b", [_run(2 * HOUR - 5, Feedback(source="answers", worth="yes")), _later(2 * HOUR, files=("a",))])
+    [piece] = pieces_in([first, second])
+    assert piece.session_ids == ("a", "b") and not piece.rated
 
 
 def test_a_skipped_rating_still_covers_the_work_before_it_and_rules_nothing_out():
@@ -570,14 +615,14 @@ def test_feedback_by_cycle_reads_each_runs_answers_for_the_cycles_it_rates():
 # -- the cause of rework ---------------------------------------------------------------
 
 
-def test_feedback_beats_the_tag_which_beats_what_the_message_says():
+def test_feedback_beats_the_tag_which_beats_cause_not_reported():
     fixing = {"human_correction": True, "tag": _tag(shift="fix", why="tools")}
     from_feedback = _only([_build(0), _fix(10, **fixing)], feedback=Feedback(source="answers", why=("left_out",)))
     assert _causes(from_feedback) == {("left_out", "feedback"): 1}
     from_tag = _only([_build(0), _fix(10, **fixing)])
     assert _causes(from_tag) == {("tools", "Claude tag"): 1}
     adjusted = _only([_build(0), _msg(10, human_adjust=True, files=("a",), human_prompt_chars=900)])
-    assert _causes(adjusted) == {("changed", "inferred"): 1}
+    assert _causes(adjusted) == {("not_reported", "inferred"): 1}
     nothing = _only([_build(0), _fix(10, human_correction=True)])
     assert _causes(nothing) == {("not_reported", "inferred"): 1}
 

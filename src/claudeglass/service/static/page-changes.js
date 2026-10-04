@@ -10,6 +10,12 @@
  * the window and the picked project; the estimates, which aren't kept per
  * project, follow only the window.
  *
+ * A card leads with the measure the ratio test is surest of (item.lead,
+ * which impact.py picks by the test's reading, not by order), and says so
+ * when the mix of sessions moved between its two sides (item.mix): cost
+ * per session then compares different jobs, and for a change to capture,
+ * coaching or the feedback prompts it is read last (measure.demoted).
+ *
  * The Overview's "Did your changes work?" draws the latest cards in
  * short (renderChangeCards with opts.compact), the ones that can be
  * judged first (opts.judgedFirst).
@@ -60,10 +66,22 @@ function readingBadge(measure) {
 
 // -- a measure, before against after ---------------------------------------------
 
+// The measure that leads a card: the one /api/impact names (the one its
+// ratio test is surest of), else the first it lists.
+function leadMeasure(item) {
+  var measures = item.measures || [];
+  var named = measures.filter(function (measure) {
+    return measure.key === item.lead;
+  })[0];
+  return named || measures[0] || null;
+}
+
 // Two bars on one scale, the before in the quieter colour, then the
 // change and how sure it is. The figures are the server's text, in the
-// billing mode's units.
-function measureRow(measure) {
+// billing mode's units. mixMoved: the mix of sessions changed, which a
+// demoted measure (cost per session of a change that isn't about cost)
+// says is why it is read last.
+function measureRow(measure, mixMoved) {
   var before = Number(measure.before_value);
   var after = Number(measure.after_value);
   var top = Math.max(isFinite(before) ? before : 0, isFinite(after) ? after : 0);
@@ -78,7 +96,7 @@ function measureRow(measure) {
     readingBadge(measure),
     el("span", { class: "change-counts", text: countsText(measure) }),
   ]);
-  return el("div", { class: "change-measure" }, [
+  return el("div", { class: "change-measure" + (measure.demoted ? " is-demoted" : "") }, [
     el("p", { class: "change-measure-label", text: measure.label }),
     el("div", { class: "change-bars" }, [
       el("span", { class: "change-bar-name", text: "Before" }),
@@ -89,6 +107,18 @@ function measureRow(measure) {
       el("span", { class: "change-bar-text", text: measure.after || "no data" }),
     ]),
     reading,
+    measure.demoted && mixMoved ? el("p", { class: "notes change-demoted", text: "Read last: the mix of sessions changed." }) : null,
+  ]);
+}
+
+// The mix of sessions moved between the two sides (impact.session_mix):
+// the server's sentence says which kind and by how much.
+function mixNote(item) {
+  var mix = item.mix;
+  if (!mix || !mix.flagged) return null;
+  return el("div", { class: "change-mix" }, [
+    chip("Session mix changed", { icon: "warning", tone: "warn", class: "change-mix-chip" }),
+    el("span", { class: "change-mix-text", text: mix.text }),
   ]);
 }
 
@@ -207,7 +237,7 @@ function changeWhere(change) {
 function changeCard(item, opts) {
   var change = item.change || {};
   var measures = item.measures || [];
-  var lead = measures[0] || null;
+  var lead = leadMeasure(item);
   var card = el("article", { class: "change-card" + (opts.compact ? " is-compact" : ""), "data-day": changeDay(change) });
   var head = el("div", { class: "change-card-head" }, [
     el("h3", { class: "change-card-title", text: change.label + (change.reverted ? " (since undone)" : "") }),
@@ -224,8 +254,21 @@ function changeCard(item, opts) {
     return card;
   }
 
+  var mixMoved = !!(item.mix && item.mix.flagged);
+  var mix = mixNote(item);
+  if (mix) card.appendChild(mix);
   var shown = opts.compact ? (lead ? [lead] : []) : measures;
-  if (shown.length) card.appendChild(el("div", { class: "change-measures" }, shown.map(measureRow)));
+  if (shown.length) {
+    card.appendChild(
+      el(
+        "div",
+        { class: "change-measures" },
+        shown.map(function (measure) {
+          return measureRow(measure, mixMoved);
+        })
+      )
+    );
+  }
   var saved = savedLine(item.without);
   if (saved) card.appendChild(saved);
   if (opts.compact) return card;

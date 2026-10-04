@@ -1608,10 +1608,35 @@ details.disclosure[open] > summary {
   font-size: var(--text-sm);
 }
 
+/* The mix of sessions moved between a change's two sides: a chip and the
+   sentence that says which kind of session and by how much. */
+.change-mix {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-5);
+  font-size: var(--text-sm);
+}
+
+.change-mix-text {
+  color: var(--ink-2);
+  max-width: var(--measure);
+}
+
 .change-measures {
   display: grid;
   gap: var(--space-6);
   margin-bottom: var(--space-5);
+}
+
+/* A measure read last (cost per session of a change that isn't about cost). */
+.change-measure.is-demoted .change-measure-label {
+  color: var(--ink-3);
+}
+
+.change-demoted {
+  margin: var(--space-2) 0 0;
 }
 
 .change-measure-label {

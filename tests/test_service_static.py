@@ -2493,6 +2493,39 @@ def test_a_change_card_says_what_changed_where_and_each_measures_reading() -> No
     assert "moneyText" not in row
 
 
+def test_a_change_card_leads_with_the_measure_the_server_names() -> None:
+    source = _app_js()
+    lead = _function_source(source, "leadMeasure")
+    # The one /api/impact names (its ratio test's surest), else the first it lists.
+    assert "measure.key === item.lead" in lead and "measures[0]" in lead
+    card = _function_source(source, "changeCard")
+    assert "var lead = leadMeasure(item);" in card
+    assert "var lead = measures[0]" not in card
+    # The compact card on the Overview shows the lead alone.
+    assert "opts.compact ? (lead ? [lead] : [])" in card
+
+
+def test_a_change_card_says_when_the_mix_of_sessions_moved_and_reads_cost_last() -> None:
+    source = _app_js()
+    mix = _function_source(source, "mixNote")
+    # The server says whether and in which words; the page only shows it.
+    assert "item.mix" in mix and "mix.flagged" in mix and "mix.text" in mix
+    # A status colour comes with an icon and words (WCAG 1.4.1).
+    assert 'chip("Session mix changed", { icon: "warning", tone: "warn"' in mix
+    assert "moneyText" not in mix
+    card = _function_source(source, "changeCard")
+    assert "var mixMoved = !!(item.mix && item.mix.flagged);" in card
+    assert "mixNote(item)" in card and "measureRow(measure, mixMoved)" in card
+    # Not on a card still waiting for sessions: the mix is only judged with enough of them.
+    assert card.index("mixNote(item)") > card.index("return card;")
+    row = _function_source(source, "measureRow")
+    assert 'measure.demoted ? " is-demoted" : ""' in row
+    assert "measure.demoted && mixMoved" in row and '"Read last: the mix of sessions changed."' in row
+    css = _static_text("app.css")
+    for selector in (".change-mix", ".change-mix-text", ".change-measure.is-demoted", ".change-demoted"):
+        assert re.search(re.escape(selector) + r"[^{]*\{", css), selector
+
+
 def test_a_change_card_says_what_the_sessions_since_saved() -> None:
     source = _app_js()
     card = _function_source(source, "changeCard")

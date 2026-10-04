@@ -15,8 +15,7 @@ never disagree. The quality check is the one with thresholds of its own
 from __future__ import annotations
 
 import re
-import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
@@ -1235,8 +1234,6 @@ REWORK_LEAD_MIN_PIECES = 5
 #: ``REWORK_ITEM``): ``#/habits?item=rework``.
 REWORK_ITEM = "rework"
 
-_SECONDS_PER_WEEK = 7 * 24 * 3600
-
 
 def _rework_lead(tables) -> str:
     """The first sentence of the rework headline ("4 of your 12 pieces of
@@ -1256,19 +1253,6 @@ def _rework_lead(tables) -> str:
     return match.group(0) if match else ""
 
 
-def _window_weeks(ctx: Context) -> float:
-    """How many weeks the window covers, to turn the playbook's saving a week
-    into a saving over the window, as a recommendation's is. Never under one,
-    as the playbook's own weekly figure isn't (``Habits.span_weeks``): under
-    a week of sessions it is the raw total. A window with no start (all time)
-    counts as one, so its playbook saving is a week's and the row understates
-    rather than overstates."""
-    if ctx.since_ts is None:
-        return 1.0
-    until = ctx.until_ts if ctx.until_ts is not None else time.time()
-    return max(1.0, (until - ctx.since_ts) / _SECONDS_PER_WEEK)
-
-
 def _recs_saving_usd(ctx: Context, recs) -> float:
     """What the largest of ``recs``' groups saves over the window, as the
     Overview counts a row's recommendations: one rule is one group (its agent
@@ -1285,16 +1269,16 @@ def _recs_saving_usd(ctx: Context, recs) -> float:
 
 
 def _playbook_saving_usd(ctx: Context, tables) -> float:
-    """What the Work habits playbook's habits would save over the window. A
-    habit a recommendation covers has no saving of its own
+    """What the Work habits playbook's habits would save over the window: each
+    habit's own total (``saving_total``), never a weekly rate scaled up to the
+    window's length. A habit a recommendation covers has no saving of its own
     (``habits.apply_covered_by`` drops it and names the rule), so it isn't
     counted again here."""
-    weekly = sum(
-        whatif._num(row.get("saving")) or 0.0
+    return sum(
+        whatif._num(row.get("saving_total")) or 0.0
         for row in tables.rows("habits", "habits_playbook")
         if not row.get("covered_by")
     )
-    return weekly * _window_weeks(ctx)
 
 
 def _habits(ctx: Context) -> dict:
@@ -1415,7 +1399,10 @@ def _failed_calls(ctx: Context) -> dict:
             f"which cost {_money(ctx, cost, prefix='about ')}."
         )
     else:
-        lost = f"Replies lost to failed or blocked tool calls cost a material share of spend {ctx.period}."
+        lost = (
+            f"Replies that went nowhere cost a material share of spend {ctx.period}. "
+            "Most of that was not from failed or blocked tool calls."
+        )
     why = f" The costliest: {top['label']} ({_cell(ctx, top['cost_usd'])})." if top and cost else ""
     return _result(
         "act",
@@ -1452,17 +1439,16 @@ def _playbook_tips(ctx: Context, tables) -> list[dict]:
         key = row.get("habit")
         title = row.get("title") or habits.ITEMS.get(key, ("", key))[1]
         saving = ""
-        if whatif._num(row.get("saving")):
-            saving = _money(ctx, row.get("saving"), prefix="About ")
-            # habits.playbook_table already normalizes ``saving`` to a
-            # per-week figure; say so explicitly for API billing, where
-            # the phrased amount is just a dollar figure. A subscription's
-            # own phrasing already says "of your weekly usage limit", so
-            # adding "a week" there would read as "weekly usage limit a
-            # week" (the same doubling this prefix already avoids for
-            # "about").
-            if saving and ctx.units.billing_mode != "subscription":
-                saving = f"{saving} a week"
+        amount = ctx.units.money(whatif._num(row.get("saving")) or 0.0)
+        if amount is not None:
+            # A week's saving (habits.playbook_table), said in every billing mode.
+            # Beside a share of the weekly usage limit the period goes on the
+            # list-price equivalent, as page-habits.js's periodMoney does.
+            if amount.secondary:
+                amount = replace(amount, secondary=f"{amount.secondary} a week")
+            else:
+                amount = replace(amount, primary=f"{amount.primary} a week")
+            saving = amount.phrase("About ")
         tips.append({
             "habit": key,
             "title": title,

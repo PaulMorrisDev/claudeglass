@@ -949,6 +949,10 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "The id of the recommendation in \"Already covered by\", for linking to it. Blank otherwise.",
             ),
             "title": ("Title", "The habit's title, resolved once here so a caller can show it without a second lookup."),
+            "saving_total": (
+                "Saving over the window",
+                "What the habit would have saved over the whole window, before it is spread into weeks.",
+            ),
         },
         value_labels={
             **{key: title for key, (_theme, title) in HABIT_ITEMS.items()},
@@ -1376,9 +1380,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "plan_new": ("Fix was new", "Fixes after the plan for something you only thought of later."),
             "work_pieces": ("Pieces of work", "Pieces of work in these sessions, rated or not."),
             "plans_built": ("Plans approved", "Pieces of work where you approved a plan and work came after it."),
-            "plans_fixed": ("Plans fixed three times or more", "Of those, the plans you corrected or adjusted "
-                            "three times or more afterwards."),
-            "plan_fixes": ("Fixes after a plan", "Corrections and adjustments after an approved plan, in all of them."),
+            "plans_fixed": ("Plans fixed three times or more", "Of those, the plans you corrected, adjusted or "
+                            "reworked three times or more afterwards."),
+            "plan_fixes": ("Fixes after a plan", "Corrections, adjustments and other rework after an approved plan, "
+                           "in all of them."),
         },
         value_labels={
             "plan_build": "Planned and built in one session",
