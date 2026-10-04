@@ -131,6 +131,128 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Scheduled tasks get no note.** A session a scheduled task started
   has no message of yours, so the parser drops every tag in it. It no
   longer gets the capture note, which spent tokens for nothing.
+- **`/cg-feedback` asks what your follow-ups were.** It asks in two
+  calls of at most four questions each, and leaves out any that don't
+  apply. The first call holds the outcome, what your follow-up messages
+  were mostly (things you hadn't said, something Claude missed, a change
+  of mind, or just questions), whether it was worth the tokens, and what
+  would have made it cheaper. The second asks where the missed thing was
+  (only after you ticked missed), whether an approved plan covered what you
+  then fixed, whether the build could have started fresh from the plan, and
+  whether a tip ClaudeGlass showed was right (only when one was). The
+  headers start `CG` and fit 12 characters. The skill reads an optional
+  `cg-fb-facts v1` line of counts and ids when one is there, to fill in its
+  numbers and skip a question that doesn't apply, and works without it. It
+  ends with a fixed "Recorded for ClaudeGlass" line, one "Next time" line
+  picked by priority, and the tag as the last line of the reply. The tag
+  gains `why`, `missed_in`, `plan`, `tip`, `tip_hint` and `from_text`, and
+  its body limit goes from 200 to 300 characters. `PARSER_VERSION` is 39,
+  so transcripts are read again.
+- **A note typed under Other is read once, then dropped.** Claude maps what
+  you typed to the closest word of that question's list (or leaves the key
+  out when nothing fits), never copies, quotes or saves it, and lists the
+  keys in `from_text`. The parser keeps a word picked that way only when
+  the `AskUserQuestion` result shows a non-label answer for that key. A
+  ticked answer always wins over the tag, and a tag with no answers behind
+  it loses its `from_text` words. The parser keeps only which questions
+  were answered that way (`Feedback.other`), never the text.
+- **Running `/cg-feedback` again replaces the answers.** A run with no work
+  since the previous one is a rerun to change that run's answers, so it
+  replaces them over the same work instead of rating nothing. A declined
+  rerun leaves them as they were.
+- **A facts line starts every `/cg-feedback` run.** The capture hook adds
+  one line of counts and ids to the message, `cg-fb-facts v1 tokens=...
+  typical=... followups=... queued=... plan=... plan_followups=...
+  plan_asked=... build=... tips=... tip=... admits=...`, and nothing else
+  that you wrote. Follow-ups leave out go-aheads and status checks. It
+  runs at any capture level, including off, while the survey is on, and
+  reads the same end of the transcript the coaching hints read, so it
+  stays far inside the hook's five seconds. It needs the
+  `UserPromptSubmit` entry that `capture connect` adds, and `capture
+  feedback on` says so while it is missing. Without it the skill works as
+  before.
+- **Your typical piece of work.** The daily service run, and `capture
+  refresh`, write `typical_piece_tokens` to `coaching.json`: the median
+  main-transcript tokens of your last 30 days' sessions, counting those
+  with at least three replies and only once there are five (`0` until
+  then). A session stands in for a piece of work until pieces are told
+  apart in the report. The run now also happens for a survey item on your
+  messages with coaching notes off.
+- **A plan check after you fix an approved plan's build.** Deep only, off
+  below it. After you approve a plan and Claude changes files, your next
+  typed message that corrects or adjusts the work gets one question
+  from Claude first, asked with `AskUserQuestion` under the header "CG
+  plan fix": did the plan already say it, did it leave it out, is it
+  something new, or not a fix. It isn't asked for a go-ahead, a
+  thank-you, a status check or a message sent while Claude was working,
+  nor when the plan's own feedback rounds already said what was wrong,
+  and at most once a plan. After two declines or answers in your own
+  words in a row it rests for 14 days. Only the one word you ticked is
+  kept (`PlanCheck`), never your message. Setup › Capture shows what the
+  check cost and how many were answered.
+  New thresholds `coaching_plan_check_declines` and
+  `coaching_plan_check_off_days`.
+- **Your `/cg-feedback` answers change the advice.** Each answer now feeds
+  the cards it bears on, and every card says what it used.
+  - *Things you hadn't said.* "Say what you want and what done looks like"
+    and the other habits about briefing Claude cite how many follow-ups were
+    things your request left out, and the first can stand on those answers
+    alone. The `/cg-brief` checklist weighs a message whose follow-ups were
+    things it left out twice.
+  - *Something Claude missed.* A new "Have Claude check its work against
+    what you asked" habit counts the fixes for it, the tokens they used, and
+    the fixes after a plan where the plan check or the plan question said the
+    plan already held it. Its line to paste, and its title, follow where it
+    was missed: your message, the plan, CLAUDE.md or memory, or earlier in the
+    chat.
+  - *A change of mind, or new to the plan.* A message that looked like a redo
+    is left out of Redone, the rework behind "Split large asks into planned
+    steps", "Plan hard work before building it" and "Check each change, and
+    run the full suite once", and the waste figures, when you called your
+    follow-ups a change of mind alone, said the fix was new to the plan, or
+    answered "new" to the plan check. Kinds of task says how many it left
+    out. A mix of reasons rules nothing out.
+  - *How you prompt.* A follow-up you called Claude's miss or a change of
+    mind is no small request, repeat or vague correction. "Big tasks without
+    a plan" is priced at half what the follow-ups cost where you said a plan
+    first would have helped, and shows how it was worked out.
+  - *Worth it, and what would have helped.* Large asks in work you called too
+    costly, or said smaller pieces would have helped, join "Split large asks
+    into planned steps"; ones you called worth it leave it. A plan first
+    would have helped feeds "Plan hard work before building it", and more up
+    front feeds the habits about briefing Claude.
+  - *The plan.* Work after a plan now counts, per kind of session, fixes that
+    the plan covered, left out, or that were new (Planning and building in one
+    session). More than half of three or more saying the plan left it out
+    turns the plan-handoff card into "Write fuller plans" with its own
+    prompt; more than half saying the plan was enough makes it say to run
+    /clear at the approval, and the fresh-session hint speaks after
+    `coaching_rearm_factor` times less planning.
+  - *The tips.* Tips Claude showed gains what you said of each tip (useful,
+    right but I knew, wrong) and a Found useful share. A tip called wrong
+    twice, by you or by Claude disowning it, waits for `coaching_rearm_factor`
+    times more where it has a number (small requests, pastes, coming back),
+    and is left out otherwise. A tip you knew more often than found useful
+    shows once a session. The daily run writes `muted`, `once` and the raised
+    numbers to `coaching.json`; `capture status` lists them.
+- **The dashboard asks what `/cg-feedback` asks.** Rate this session on
+  Spend › Sessions now shows the same questions, served from the same
+  catalogue so the words are never copied into the page, and leaves out
+  the ones the session's own facts say don't apply. The rating gains `why`,
+  `missed_in`, `plan`, `handoff` and `tip` (with `tip_hint`), and a session
+  with two or more approved plans gets a plan and handoff row for each
+  build (`session_plan_feedback`). Tip, habit and recommendation cards end
+  with Useful, Trying it, Knew it and Wrong here (`POST /api/tip-feedback`,
+  the `tip_feedback` table, store version 9). These are ratings you give,
+  never a setting. A tip card's answer joins the Tips Claude showed counts,
+  and Trying it adds a line to `habit-log.jsonl` (kind, id, `trying` and a
+  time) that becomes a change point, so the habit's effect is measured from
+  that day. A session whose mode or purpose is a rule's catch-all gets a
+  Label unsure chip. The banner lists the sessions that used at least the
+  reminder's size and have no rating, with their tokens and a Rate it
+  button, and a rating takes a session off the list. `capture prune` also
+  clears old `habit-log.jsonl` lines. Counts and closed words only: no
+  message text is read, kept or shown.
 
 ### Changed
 
@@ -372,6 +494,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still held back for an agent whose work was mostly hard or that was
   retried for the model, and the Models evidence cites the two columns
   beside the share of work reported easy.
+- **The older slowdown question is still read.** Runs from before the
+  redesign asked what slowed the work. Those `slow` answers stay readable:
+  "my request was unclear" counts as `why` = things you hadn't said (marked
+  as an older answer), "nothing" as `why` = none, and "wrong approach or
+  rework" gives no `why`, because it didn't say who caused it. Tool trouble
+  is dropped. The older `TL` headers still parse. The "CG clear" and "CG
+  notice" questions are gone, and the habits tables count `why` words
+  beside `slow` under "Slowed most by". The dashboard's session rating asks
+  the same questions (see "The dashboard asks what `/cg-feedback` asks"
+  below). The installed skill is flagged out of date and rewritten by
+  `capture feedback on` and `update --finish`. `SECURITY.md` and
+  `docs/capture.md` now say that free text is read once to pick the closest
+  word, then discarded.
+- **The rating reminder comes once a piece of work, not once a session.**
+  It replaces the line the session start note asked for. When the message
+  you send finds a piece of work that is unrated and has used at least a
+  million tokens and twice your typical piece, the hook's note asks Claude
+  to end its final reply with the /cg-feedback line, at most once a piece
+  and once every three days. A piece starts with the session, a `/clear`,
+  or a message Claude tagged `shift=new`, and starts again after a
+  /cg-feedback run. Deep only, like the other. New thresholds
+  `coaching_rating_min_tokens`, `coaching_rating_typical_factor` and
+  `coaching_rating_rest_days`. `capture status` counts the reminder and
+  the plan check and prices them from your own history as an upper bound.
+- **Feedback on its own hooks capture.** A setup with capture off and
+  only a survey item that answers your messages on counts as hooked, so
+  `capture connect` adds the entry and `capture off` and Setup's "no" to
+  tips leave it while a survey switch needs it.
 
 ### Fixed
 

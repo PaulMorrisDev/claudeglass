@@ -227,6 +227,16 @@ result, when it launched a run (``toolUseResult.taskType ==
 under the call's tool_use id (``_workflow_run``: two short ids, nothing
 else of the result). A call that errored, or whose result names no
 ``runId``, records nothing.
+
+Feedback-redesign batch (``PARSER_VERSION`` 39): an AskUserQuestion call
+with the plan check's header (``capture_tags.asks_plan_check``) is held
+with the id of the latest plan's ``ExitPlanMode`` call
+(``_PlanWatch.latest_id``); its answer becomes ``Turn.plan_check``, a
+``PlanCheck`` with one word of ``capture_catalogue.PLAN_CHECK_WORDS``
+(empty when declined or answered in your own words, which are dropped),
+and is no clarifying round (``ask_rounds``). The last text block of a
+reply is also read for the /cg-feedback reminder line
+(``capture_tags.carries_reminder``, kept as ``Turn.coach_reminder``).
 """
 
 from __future__ import annotations
@@ -251,7 +261,7 @@ from . import prompt_shape
 from . import shell_reads
 from . import shell_writes
 from . import testrun
-from .capture_catalogue import DOC_SUFFIXES, REPORT_THRESHOLDS
+from .capture_catalogue import DOC_SUFFIXES, REPORT_THRESHOLDS, TIP_TEXT_MARKER
 from .model import (
     PROMPT_FLAGS,
     CaptureTag,
@@ -259,6 +269,7 @@ from .model import (
     Event,
     EventKind,
     Feedback,
+    PlanCheck,
     PlanStats,
     Turn,
     TranscriptMeta,
@@ -879,6 +890,17 @@ class _PendingTurn:
     #: their answers said.
     feedback_asks: list[str] = field(default_factory=list)
     feedback: Feedback | None = None
+    #: Feedback redesign addition (see model.py's ``Turn.plan_check`` and
+    #: ``Turn.coach_reminder``): the id of this turn's ``ExitPlanMode``
+    #: call; its AskUserQuestion calls that ask the plan check, the plan
+    #: each was about (stamped by ``_PlanWatch.see_call``, which knows the
+    #: latest plan), and the answer; and whether the reply's last text
+    #: block carries the /cg-feedback reminder line (yes/no).
+    plan_tool_use_id: str = ""
+    plan_check_asks: list[str] = field(default_factory=list)
+    plan_check_plans: dict[str, str] = field(default_factory=dict)
+    plan_check: PlanCheck | None = None
+    last_text_reminder: bool = False
     #: Your-hooks addition (see model.py's ``Turn.hook_blocks``/
     #: ``hook_resends``): tool_use id -> a hash of its tool name and
     #: input, in memory only, so a blocked call's unchanged re-send can be
@@ -1111,6 +1133,7 @@ def _merge_content_blocks(
             text = block["text"]
             pending.last_text_tail = text[-_TAG_TAIL_CHARS:]
             pending.last_text_tip = _TIP_TEXT in text
+            pending.last_text_reminder = capture_tags.carries_reminder(text)
             # Parser-signals addition: what the block says, kept as yes/no.
             pending.last_text_asked = prompt_shape.ends_on_question(text)
             pending.admit_found = pending.admit_found or prompt_shape.admits_mistake(text)
@@ -1279,6 +1302,8 @@ def _merge_content_blocks(
             plan = tool_input.get("plan")
             if isinstance(plan, str) and plan:
                 pending.plan_stats = _plan_stats(plan)
+                if isinstance(tool_use_id, str):
+                    pending.plan_tool_use_id = tool_use_id
                 if _TIP_TEXT in plan:
                     # The tip a ``plan_fresh_early`` note asked to end the
                     # plan with: the plan is the reply that shows it.
@@ -1286,6 +1311,8 @@ def _merge_content_blocks(
         elif name == "AskUserQuestion" and isinstance(tool_use_id, str) and tool_use_id:
             if capture_tags.asks_for_feedback(tool_input):
                 pending.feedback_asks.append(tool_use_id)
+            elif capture_tags.asks_plan_check(tool_input):
+                pending.plan_check_asks.append(tool_use_id)
 
 
 def _new_pending(
@@ -1905,6 +1932,12 @@ def _accumulate_tool_results(
                     if answered is not None and current.feedback is not None and current.feedback.source == answered.source:
                         answered = capture_tags.merge_feedback(current.feedback, answered)
                     current.feedback = answered or current.feedback
+            elif name == "AskUserQuestion" and tool_use_id in current.plan_check_plans:
+                # Feedback redesign addition: the plan check's answer, as
+                # its word; a declined call, or an answer in your own
+                # words, leaves the word empty.
+                word = None if is_error else capture_tags.plan_check_from_answers(d.get("toolUseResult"))
+                current.plan_check = PlanCheck(current.plan_check_plans[tool_use_id], word or "")
             elif name == "AskUserQuestion" and not is_error:
                 # Parser-signals addition: a question Claude asked you that
                 # you answered, a round trip.
@@ -1966,14 +1999,21 @@ class _PlanWatch:
     latest: PlanStats | None = None
     open: PlanStats | None = None
     mode: str | None = None
+    #: The id of the latest plan's ``ExitPlanMode`` call, which a plan
+    #: check asked after it is about (``PlanCheck.plan_tool_use_id``).
+    latest_id: str = ""
 
     def see_call(self, pending: _PendingTurn) -> None:
         """A newer ``ExitPlanMode`` call closes the open plan unapproved:
-        Claude is planning again."""
+        Claude is planning again. A plan check this turn asked is about
+        the latest plan."""
         plan = pending.plan_stats
         if plan is not None and plan is not self.latest:
             self.latest = plan
+            self.latest_id = pending.plan_tool_use_id
             self.open = None
+        for ask in pending.plan_check_asks:
+            pending.plan_check_plans.setdefault(ask, self.latest_id)
 
     def answered(self, plan: PlanStats | None) -> None:
         """The dialog answered ``plan``: it stays open unless it was
@@ -2282,6 +2322,8 @@ def _finalize_turn(
         plan_stats=pending.plan_stats,
         commands_run=tuple(commands_run),
         feedback=feedback,
+        plan_check=pending.plan_check,
+        coach_reminder=pending.last_text_reminder,
         hook_context_chars=hook_context_chars,
         hook_blocks=dict(pending.hook_blocks),
         hook_resends=dict(pending.hook_resends),
@@ -2333,7 +2375,7 @@ _REPEAT_SIMILARITY = float(REPORT_THRESHOLDS["repeat_similarity"])
 _REPEAT_WINDOW_S = float(REPORT_THRESHOLDS["repeat_window_minutes"]) * 60
 #: What marks a ClaudeGlass tip in a reply (``capture_catalogue.TIP_LABEL``
 #: less its quote mark, sign and bold, which Claude may drop).
-_TIP_TEXT = "ClaudeGlass tip:"
+_TIP_TEXT = TIP_TEXT_MARKER
 
 
 #: A message you typed while Claude was working and the same message

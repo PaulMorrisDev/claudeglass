@@ -928,10 +928,33 @@ capture is off or no feedback has been given.
   the digest's `adopted` row. The dashboard shows the top 5 habits as
   cards; the rest collapse into a "more habits worth trying" `<details>`
   (UX-4/7).
+
+  Your /cg-feedback answers change several rows (the table "Which advice
+  each answer feeds" in the plan). `brief_clearly`, `name_files` and the
+  other habits about briefing Claude cite "N of M follow-ups were things
+  your request left out" (`why=left_out`), and the first can stand on
+  those answers alone. `check_work` (the "Have Claude check its work
+  against what you asked" habit) counts follow-ups you said fixed
+  something Claude missed (`why=missed`) and fixes the plan check or plan
+  question said the plan already covered; its title and line to paste
+  follow where the miss was (`missed_in`: your message, the plan, CLAUDE.md
+  or memory, or earlier in the chat), and its saving is half what those
+  follow-ups cost. `split_large` takes in large asks you called too costly
+  or said smaller pieces would have helped, and lets go of ones you called
+  worth it. `plan_hard` counts a plan first would have helped, and
+  `plan_first` (prompting) is priced at half the follow-ups' cost where you
+  said so. A follow-up you called a change of mind (`why=changed`), or
+  new to the plan (`plan=new`), is no rework: it is left out of `redone`
+  and the waste figures at the source (`CycleFact.excused`), so every
+  table below agrees. Answers from `slow` (the older question) count as
+  `why`.
 - `habits_by_task` — per kind of task Claude reported (`task=`), after
   an `all` row: messages, share, cost, per message, and the shares
   that were clear asks, large asks, redone by your next message (a
   `shift=redo` or `shift=fix` tag, or a correction), and met their goal.
+  A note says how many messages that looked redone are left out of
+  Redone because you called the next message a change of mind or new to
+  the plan.
 - `habits_briefs` — per brief word (`clear`, `partial`, `vague`):
   messages, per message, redone, met the goal, and the lines most
   often missing.
@@ -939,7 +962,9 @@ capture is off or no feedback has been given.
   nothing is tagged): the checklist, why those lines (the one most
   often missing from your asks, or a starting point), and the template
   to copy. The `/cg-brief` skill (`capture brief on`) asks for the same
-  lines, from `capture_catalogue.BRIEF_CHECKLISTS`.
+  lines, from `capture_catalogue.BRIEF_CHECKLISTS`. A message whose
+  follow-ups you said were things it left out counts twice when the lines
+  are ranked, and the "why" says so.
 - `habits_agents` — per agent type (and `top-level` for how hard the main
   session's work was): runs, cost, typical report size, the share
   asked for a short report, finished, retried and retried for the
@@ -984,8 +1009,9 @@ capture is off or no feedback has been given.
   agent candidates from it (vetoed again there by the quality check).
 - `habits_outcomes` — per outcome you gave (`met`, `partly`, `missed`,
   ...): pieces of work, messages, cost, per piece, the most common kind
-  of task, what slowed it most, what would have helped most, and where
-  the answers came from (`/cg-feedback` or a dashboard rating).
+  of task, what slowed it most (your follow-up reasons, `why`, or the
+  older `slow` answer), what would have helped most, and where the
+  answers came from (`/cg-feedback` or a dashboard rating).
 - `habits_by_shape` — main sessions by shape (`handoff.plan_shape`):
   `plan_build` (a plan approved with `ExitPlanMode`, then files edited in
   the same session), `plan_only` (approved, nothing edited after it) and
@@ -993,8 +1019,11 @@ capture is off or no feedback has been given.
   median planning context a fresh start would have dropped
   (`handoff.plan_carried`), the pieces of work rated, the share that met
   its goal, the shares worth it and too costly, and the /cg-feedback
-  handoff answers (`yes`, `partly`, `no`). The `plan-handoff` card and
-  the suggested profile read it.
+  handoff answers (`yes`, `partly`, `no`), and the fixes after a plan:
+  `plan_covered` (the plan said it), `plan_gap` (it left it out) and
+  `plan_new` (you thought of it later), from the plan check and the plan
+  question together. The `plan-handoff` card and the suggested profile
+  read it, and so does `coaching.json` (see [coaching.md](coaching.md)).
 - `habits_self_report` — Claude's own reports against your feedback: per
   `level` word (`easy`, `normal`, `hard`) and `brief` word (`clear`,
   `partial`, `vague`) it tagged a message with, the messages that carries,
@@ -1136,8 +1165,18 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   whose note orders the tip every time, so a tip left out was missed;
   `judged relevant N of M` for
   `big_paste`, where Claude decides whether the message calls for it and
-  a tip left out is no miss) and `misfires` (notes whose replies called
-  the tip a misfire, `Turn.tip_disowned`).
+  a tip left out is no miss), `misfires` (notes whose replies called
+  the tip a misfire, `Turn.tip_disowned`), and your own answers to the
+  tip question: `useful`, `known` (you knew it already) and `wrong`, with
+  `trust_pct`, the share of your answers and Claude's misfire calls that
+  said it was useful (empty with neither). Two wrong answers or misfires
+  raise or mute a hint, and two `known` answers, more than `useful`,
+  show it once a session (`coaching.tip_rules`, written to
+  `coaching.json` by the daily run).
+
+  The habit rows above also leave out what you excused: a drip feed, a
+  repeat or a vague correction you called Claude's miss (`why=missed`)
+  or a change of mind (`why=changed`) is no habit of yours.
 
 ## `workflows` (`workflows.py`)
 

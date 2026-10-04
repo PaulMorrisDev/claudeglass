@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import __version__, capture_catalogue, cli, hook_health, installer, upgrade
+from claudeglass import __version__, capture_catalogue, cli, footprint, hook_health, installer, upgrade
 
 _writable = cli._writable
 
@@ -316,6 +316,34 @@ def test_finish_renames_a_skill_under_an_earlier_name_and_refreshes_an_old_one(t
     assert (skills / "cg-feedback" / "SKILL.md").read_text(encoding="utf-8") == capture_catalogue.feedback_skill_text()
     assert not old.parent.exists()
     assert brief.read_text(encoding="utf-8") == capture_catalogue.brief_skill_text()
+    rc, out = _Finish(tmp_path).run()
+    assert "Up to date: the hooks, statusline and skills" in out
+
+
+#: The first lines of the skill as it was before the feedback redesign: the
+#: description, the older "TL" headers, and the tag with ``slow``.
+_SKILL_BEFORE_THE_REDESIGN = (
+    "---\nname: cg-feedback\n"
+    "description: Rate the piece of work you just finished for ClaudeGlass, with four quick checkbox questions.\n"
+    "disable-model-invocation: true\nallowed-tools: AskUserQuestion\n---\n\n"
+    "The user wants to rate the piece of work just finished, for ClaudeGlass.\n"
+    '1. Call AskUserQuestion once with header "TL outcome", "TL slowdown", "TL worth" and "TL helped".\n'
+    "   [cg-fb: outcome=<word> slow=<words> worth=<word> helped=<words> handoff=<word>]\n"
+)
+
+
+def test_finish_rewrites_a_feedback_skill_from_before_the_redesign(tmp_path):
+    path = tmp_path / "claude" / "skills" / "cg-feedback" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(_SKILL_BEFORE_THE_REDESIGN, encoding="utf-8")
+    assert footprint.skill_state("cg-feedback", tmp_path / "claude") == "outdated"
+    rc, out = _Finish(tmp_path).run("--dry-run")
+    assert "This updates the /cg-feedback skill" in out
+    assert path.read_text(encoding="utf-8") == _SKILL_BEFORE_THE_REDESIGN
+    rc, out = _Finish(tmp_path).run("--yes")
+    assert rc == 0 and "Up to date" not in out
+    assert path.read_text(encoding="utf-8") == capture_catalogue.feedback_skill_text()
+    assert footprint.skill_state("cg-feedback", tmp_path / "claude") == "installed"
     rc, out = _Finish(tmp_path).run()
     assert "Up to date: the hooks, statusline and skills" in out
 

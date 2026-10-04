@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
+from claudeglass import capture_catalogue
 from claudeglass import corpus as corpus_mod
 from claudeglass import discovery
 from claudeglass.config import ConfigError, load_config, load_session_overrides
@@ -51,7 +52,15 @@ from claudeglass.service.contracts import CodeState, ServeOptions, WatcherState,
 from claudeglass.service.store import Store
 from claudeglass.snapshots import Snapshot
 
-from helpers import assert_privacy, tool_use_block, turn_line, write_jsonl
+from helpers import (
+    assert_privacy,
+    tool_result_block,
+    tool_use_block,
+    turn_line,
+    user_block_line,
+    user_str_line,
+    write_jsonl,
+)
 
 #: Distinctive fake local-only strings -- same convention
 #: ``tests/test_service_store.py`` uses for its own path-leak guard. If
@@ -173,18 +182,25 @@ def _install_fake_rebuild(monkeypatch, corpus: corpus_mod.Corpus) -> None:
 
     fake = types.ModuleType("claudeglass.service.rebuild")
 
-    def corpus_from_store(store, *, days=None, since=None, until=None, window_by="last-reply", project_slugs=None):
-        # project_slugs (additive, project-filter work): the one argument
-        # this fake does *not* ignore -- api.py's own project filter
-        # (_project_query/_build_report_model) is what a test in this
-        # file exercises, and it can only see an effect if this stand-in
-        # actually narrows `corpus` the same way the real
+    def corpus_from_store(
+        store, *, days=None, since=None, until=None, window_by="last-reply", project_slugs=None, session_ids=None
+    ):
+        # project_slugs (additive, project-filter work) and session_ids
+        # (the session drawer's rating facts, the banner's unrated list):
+        # the arguments this fake does *not* ignore -- api.py's own
+        # project filter (_project_query/_build_report_model) is what a
+        # test in this file exercises, and it can only see an effect if
+        # this stand-in actually narrows `corpus` the same way the real
         # service.rebuild.corpus_from_store does.
-        if project_slugs is None:
+        if project_slugs is None and session_ids is None:
             return corpus
-        allowed = set(project_slugs)
+        allowed = set(project_slugs) if project_slugs is not None else None
+        wanted = set(session_ids) if session_ids is not None else None
         return corpus_mod.Corpus(
-            sessions=[b for b in corpus.sessions if b.slug in allowed],
+            sessions=[
+                b for b in corpus.sessions
+                if (allowed is None or b.slug in allowed) and (wanted is None or b.session_id in wanted)
+            ],
             total_files=corpus.total_files,
             total_bytes=corpus.total_bytes,
             cache_hits=corpus.cache_hits,
@@ -3786,8 +3802,19 @@ def test_session_detail_offers_the_rating_questions_only_while_it_is_on(server):
     _feedback_on(server, "dashboard_rating")
     resp, payload = server.get_json(f"/api/session/{server.session_id}")
     questions = payload["data"]["feedback_questions"]
-    assert [q["key"] for q in questions] == ["outcome", "slow", "worth", "helped"]
-    assert questions[1]["multi"] is True and {"word": "none", "label": "Nothing"} in questions[1]["options"]
+    # The fixture session has no follow-up, plan or tip, so only the
+    # questions that need none of them are asked.
+    assert [q["key"] for q in questions] == ["outcome", "worth", "helped"]
+    helped = questions[2]
+    assert helped["multi"] is True and "none" in [o["word"] for o in helped["options"]]
+    assert all(o["label"] and o["description"] for q in questions for o in q["options"])
+    assert all(q["needs"] == "" and q["tip_hint"] == "" and q["builds"] == [] for q in questions)
+    assert "{" not in "".join(q["question"] for q in questions)
+    # The facts the questions were left in or out by are counts and words only.
+    facts = payload["data"]["feedback_facts"]
+    assert set(facts) == set(capture_catalogue.FEEDBACK_FACT_KEYS)
+    assert facts["followups"] == 0 and facts["plan"] == "none" and facts["tip"] == "none"
+    assert payload["data"]["low_confidence"] is False
 
 
 def test_rating_a_session_saves_words_and_an_empty_rating_clears_it(server):
@@ -3812,6 +3839,21 @@ def test_rating_a_session_saves_words_and_an_empty_rating_clears_it(server):
         {"slow": "tools"},
         {"slow": ["tools", "my boss"]},
         {"worth": 5},
+        {"why": ["left_out", "because"]},
+        {"why": "missed"},
+        {"missed_in": "somewhere"},
+        {"plan": "great"},
+        {"handoff": ["yes"]},
+        {"tip": "loved it"},
+        {"tip_hint": 7},
+        {"builds": "all"},
+        {"builds": [{"build": 0, "plan": "gap"}]},
+        {"builds": [{"build": True, "plan": "gap"}]},
+        {"builds": [{"build": 1, "plan": "gap"}, {"build": 1, "plan": "covered"}]},
+        {"builds": [{"build": 1, "plan": "terrible"}]},
+        {"builds": [{"build": 1, "note": "text"}]},
+        {"builds": ["one"]},
+        {"builds": [{"build": n} for n in range(1, 34)]},
     ],
 )
 def test_rating_refuses_anything_but_known_words(server, body):
@@ -3834,6 +3876,402 @@ def test_rating_refuses_cross_site_posts(server):
     assert server.store.feedback(server.session_id) is None
 
 
+def test_rating_a_session_keeps_the_redesigned_answers(server):
+    url = f"/api/sessions/{server.session_id}/feedback"
+    body = {
+        "outcome": "partly", "why": ["left_out", "missed", "left_out"], "missed_in": "plan", "worth": "fair",
+        "helped": ["plan"], "plan": "gap", "handoff": "partly", "tip": "useful", "tip_hint": "plan_fresh",
+    }
+    resp, payload = server.post_json(url, body)
+    assert resp.status == 200
+    saved = payload["data"]["feedback"]
+    assert saved["why"] == ["left_out", "missed"] and saved["missed_in"] == "plan"
+    assert saved["tip"] == "useful" and saved["tip_hint"] == "plan_fresh"
+    # A lone plan and handoff answer is the first plan build's.
+    assert saved["plan"] == "gap" and saved["handoff"] == "partly"
+    assert saved["builds"] == [{"build": 1, "plan": "gap", "handoff": "partly"}]
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["feedback"] == saved
+    # The next rating replaces it: what it leaves out is cleared, and a tip
+    # hint without an answer is dropped.
+    resp, payload = server.post_json(url, {"outcome": "met", "tip_hint": "plan_fresh"})
+    cleared = payload["data"]["feedback"]
+    assert cleared["why"] == [] and cleared["plan"] is None and cleared["tip"] is None and cleared["tip_hint"] is None
+    assert cleared["builds"] == []
+
+
+def test_a_rating_with_nothing_ticked_clears_the_plan_builds_too(server):
+    url = f"/api/sessions/{server.session_id}/feedback"
+    server.post_json(url, {"builds": [{"build": 1, "plan": "covered", "handoff": "yes"}]})
+    assert server.store.feedback(server.session_id)["builds"]
+    resp, payload = server.post_json(url, {"builds": [{"build": 1, "plan": None, "handoff": None}]})
+    assert resp.status == 200 and payload["data"]["feedback"] is None
+    assert server.store.feedback(server.session_id) is None
+
+
+def _lines_for_two_plans() -> list[dict]:
+    """A top-level transcript with two approved plans: the first has a
+    follow-up after it, the second does not."""
+
+    def at(second: int) -> str:
+        return f"2026-09-18T12:{second // 60:02d}:{second % 60:02d}.000Z"
+
+    def ask(second: int, text: str) -> dict:
+        return user_str_line(text, origin={"kind": "human"}, timestamp=at(second))
+
+    def reply(second: int, *blocks) -> dict:
+        content = list(blocks) or [{"type": "text", "text": "ok"}]
+        return turn_line(content=content, timestamp=at(second), input_tokens=300, output_tokens=40)
+
+    def done(second: int, *ids: str) -> dict:
+        return user_block_line([tool_result_block(i, "ok") for i in ids], timestamp=at(second))
+
+    def edit(tool_id: str, path: str) -> dict:
+        return tool_use_block("Edit", tool_id, {"file_path": path})
+
+    return [
+        ask(0, "plan the change"),
+        reply(1, tool_use_block("ExitPlanMode", "tu_p1", {"plan": "1. Edit a.py"})), done(2, "tu_p1"),
+        reply(3, edit("e1", "C:/Dev/repo/a.py")), done(4, "e1"), reply(5),
+        ask(10, "the title is wrong"),
+        reply(11, edit("e2", "C:/Dev/repo/a.py")), done(12, "e2"), reply(13),
+        ask(20, "now plan the second part"),
+        reply(21, tool_use_block("ExitPlanMode", "tu_p2", {"plan": "1. Edit b.py"})), done(22, "tu_p2"),
+        reply(23, edit("e3", "C:/Dev/repo/b.py")), done(24, "e3"), reply(25),
+    ]
+
+
+def _two_plan_corpus(tmp_path: Path) -> corpus_mod.Corpus:
+    project_dir = tmp_path / "projects" / "proj-a"
+    project_dir.mkdir(parents=True)
+    write_jsonl(project_dir / "session-a.jsonl", _lines_for_two_plans())
+    return corpus_mod.load_corpus([project_dir])
+
+
+def test_a_session_with_two_plans_is_asked_about_each_build(tmp_path, monkeypatch):
+    handle = _start_server(tmp_path, monkeypatch, corpus=_two_plan_corpus(tmp_path))
+    try:
+        _feedback_on(handle, "dashboard_rating")
+        resp, payload = handle.get_json(f"/api/session/{handle.session_id}")
+        data = payload["data"]
+        assert data["feedback_facts"]["plan"] == "approved" and data["feedback_facts"]["followups"] >= 1
+        rows = {q["key"]: q for q in data["feedback_questions"]}
+        assert {"plan", "handoff", "why"} <= set(rows)
+        # The handoff is asked once for each build; the plan question for the
+        # build that had a follow-up after its approval.
+        assert [b["build"] for b in rows["handoff"]["builds"]] == [1, 2]
+        assert [b["label"] for b in rows["handoff"]["builds"]] == ["Plan 1 of 2", "Plan 2 of 2"]
+        assert [b["build"] for b in rows["plan"]["builds"]] == [1]
+        assert all(b["question"] and "{" not in b["question"] for q in rows.values() for b in q["builds"])
+        assert rows["outcome"]["builds"] == [] and rows["worth"]["builds"] == []
+
+        resp, payload = handle.post_json(
+            f"/api/sessions/{handle.session_id}/feedback",
+            {
+                "outcome": "partly",
+                "builds": [
+                    {"build": 1, "plan": "gap", "handoff": "partly"},
+                    {"build": 2, "plan": None, "handoff": "yes"},
+                ],
+            },
+        )
+        assert resp.status == 200
+        saved = payload["data"]["feedback"]
+        assert saved["builds"] == [
+            {"build": 1, "plan": "gap", "handoff": "partly"},
+            {"build": 2, "plan": None, "handoff": "yes"},
+        ]
+        assert saved["plan"] == "gap" and saved["handoff"] == "partly"
+        assert handle.store.all_feedback()[handle.session_id]["builds"] == saved["builds"]
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_session_with_no_stored_transcript_still_gets_the_questions_that_need_no_facts(server):
+    _feedback_on(server, "dashboard_rating")
+    server.corpus.sessions[0].top = None  # the fake rebuild returns the corpus as it is
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert resp.status == 200
+    data = payload["data"]
+    assert data["feedback_facts"] is None
+    keys = [q["key"] for q in data["feedback_questions"]]
+    assert keys == ["outcome", "why", "missed_in", "worth", "helped"]
+    assert all("{" not in q["question"] for q in data["feedback_questions"])
+
+
+# -- the label chip --------------------------------------------------------------
+
+
+def _set_labels(server, *, mode=None, mode_source=None, purpose=None, purpose_source=None):
+    conn = server.store._connection()
+    conn.execute("DELETE FROM session_tags WHERE session_id = ?", (server.session_id,))  # the fixture tags its purpose
+    conn.execute(
+        "UPDATE sessions SET mode = ?, mode_source = ?, purpose = ?, purpose_source = ? WHERE id = ?",
+        (mode, mode_source, purpose, purpose_source, server.session_id),
+    )
+
+
+def test_a_session_labelled_by_the_catch_all_rule_is_low_confidence(server):
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [False]
+    _set_labels(server, mode="mixed", mode_source="rule", purpose="refactor", purpose_source="intent-signature")
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [True]
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["low_confidence"] is True
+    _set_labels(server, mode="agentic", mode_source="tool-signature", purpose="general-dev", purpose_source="rule")
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [True]
+
+
+@pytest.mark.parametrize("source", ["override", "reported", "tool-signature"])
+def test_a_label_you_set_or_claude_reported_is_not_a_guess(server, source):
+    _set_labels(server, mode="mixed", mode_source=source, purpose="general-dev", purpose_source=source)
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [False]
+
+
+def test_setting_a_tag_takes_the_chip_off_straight_away(server):
+    _set_labels(server, mode="mixed", mode_source="rule", purpose="general-dev", purpose_source="rule")
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["low_confidence"] is True
+    # A tag for one label leaves the other still a guess.
+    server.post_json(f"/api/sessions/{server.session_id}/tags", {"key": "mode", "value": "interactive"})
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["low_confidence"] is True
+    server.post_json(f"/api/sessions/{server.session_id}/tags", {"key": "purpose", "value": "docs"})
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["low_confidence"] is False
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [False]
+
+
+# -- what you say about a tip, habit or recommendation card ----------------------------
+
+
+def test_tip_feedback_lists_the_answers_a_card_can_take(server):
+    resp, payload = server.get_json("/api/tip-feedback")
+    assert resp.status == 200
+    data = payload["data"]
+    assert data["answers"] == []
+    assert [o["word"] for o in data["options"]] == list(capture_catalogue.TIP_CARD_VOCAB)
+    assert [o["label"] for o in data["options"]] == ["Useful", "Trying it", "Knew it", "Wrong here"]
+    assert all(o["description"] for o in data["options"])
+
+
+def test_rating_a_card_saves_it_and_pressing_the_same_answer_again_takes_it_back(server):
+    resp, payload = server.post_json("/api/tip-feedback", {"kind": "tip", "item": "drip_feed", "answer": "useful"})
+    assert resp.status == 200
+    assert payload["data"]["answer"] == "useful" and payload["data"]["set_at"]
+    resp, payload = server.post_json("/api/tip-feedback", {"kind": "habit", "item": "split_large", "answer": "known"})
+    assert resp.status == 200
+    resp, payload = server.get_json("/api/tip-feedback")
+    rows = payload["data"]["answers"]
+    assert [(r["kind"], r["item"], r["answer"]) for r in rows] == [
+        ("habit", "split_large", "known"), ("tip", "drip_feed", "useful"),
+    ]
+    assert all(r["set_at"] for r in rows)
+    resp, payload = server.post_json("/api/tip-feedback", {"kind": "tip", "item": "drip_feed", "answer": None})
+    assert resp.status == 200 and payload["data"]["answer"] is None and payload["data"]["set_at"] is None
+    assert server.store.tip_feedback_count() == 1
+
+
+def test_a_recommendation_card_is_rated_by_its_key(server):
+    resp, payload = server.post_json(
+        "/api/tip-feedback", {"kind": "recommendation", "item": "model.default:sonnet", "answer": "wrong"}
+    )
+    assert resp.status == 200
+    assert server.store.tip_feedback()[("recommendation", "model.default:sonnet")]["answer"] == "wrong"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [],
+        {},
+        {"kind": "tip", "item": "drip_feed", "answer": "great"},
+        {"kind": "tip", "item": "drip_feed", "answer": ["useful"]},
+        {"kind": "idea", "item": "drip_feed", "answer": "useful"},
+        {"kind": "tip", "item": "not-a-tip", "answer": "useful"},
+        {"kind": "tip", "item": "split_large", "answer": "useful"},
+        {"kind": "habit", "item": "drip_feed", "answer": "useful"},
+        {"kind": "habit", "item": 3, "answer": "useful"},
+        {"kind": "recommendation", "item": "Has Spaces", "answer": "useful"},
+        {"kind": "recommendation", "item": "x" * 201, "answer": "useful"},
+        {"kind": "tip", "item": "drip_feed", "answer": "useful", "note": "free text"},
+    ],
+)
+def test_rating_a_card_refuses_anything_but_known_cards_and_words(server, body):
+    resp, payload = server.post_json("/api/tip-feedback", body)
+    assert resp.status == 400 and payload["error"]["code"] == "bad_request"
+    assert server.store.tip_feedback_count() == 0
+    assert not (server.options.config_dir / "habit-log.jsonl").exists()
+
+
+def test_rating_a_card_refuses_cross_site_posts(server):
+    body = {"kind": "tip", "item": "drip_feed", "answer": "trying"}
+    resp, _raw = server.request("POST", "/api/tip-feedback", body=body, headers={"Origin": "https://evil.example"})
+    assert resp.status == 403
+    assert server.store.tip_feedback_count() == 0
+    assert not (server.options.config_dir / "habit-log.jsonl").exists()
+
+
+def test_trying_a_card_logs_the_day_once_and_only_words_go_in_the_log(server):
+    from claudeglass.config import load_habit_log
+
+    body = {"kind": "habit", "item": "split_large", "answer": "trying"}
+    server.post_json("/api/tip-feedback", body)
+    server.post_json("/api/tip-feedback", body)  # pressing it again changes nothing
+    [record] = load_habit_log(server.options.config_dir)
+    assert set(record) == {"ts", "kind", "item", "state"}
+    assert (record["kind"], record["item"], record["state"]) == ("habit", "split_large", "trying")
+    # Other answers log nothing; trying it again after another answer logs a new start.
+    server.post_json("/api/tip-feedback", {**body, "answer": "useful"})
+    assert len(load_habit_log(server.options.config_dir)) == 1
+    server.post_json("/api/tip-feedback", body)
+    assert len(load_habit_log(server.options.config_dir)) == 2
+
+
+def test_a_card_rating_changes_no_setting(server):
+    before = {path.name for path in server.options.config_dir.iterdir()}
+    server.post_json("/api/tip-feedback", {"kind": "tip", "item": "plan_fresh", "answer": "useful"})
+    server.post_json("/api/tip-feedback", {"kind": "habit", "item": "split_large", "answer": "trying"})
+    after = {path.name for path in server.options.config_dir.iterdir()}
+    # Only the habit log is new: no config.toml, and nothing outside the folder.
+    assert after - before == {"habit-log.jsonl"}
+
+
+def test_the_number_of_rated_cards_is_capped(server, monkeypatch):
+    monkeypatch.setattr(service_api, "_MAX_TIP_FEEDBACK", 2)
+    for key in ("one", "two"):
+        resp, _payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": key, "answer": "known"})
+        assert resp.status == 200
+    resp, payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": "three", "answer": "known"})
+    assert resp.status == 400 and "at most 2" in payload["error"]["message"]
+    # A card that already holds an answer can still change it or give it back.
+    resp, _payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": "one", "answer": "wrong"})
+    assert resp.status == 200
+    resp, _payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": "two", "answer": None})
+    assert resp.status == 200
+    resp, _payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": "three", "answer": "known"})
+    assert resp.status == 200
+
+
+def test_a_card_answer_moves_the_change_token(server):
+    before = server.store.change_token()
+    server.post_json("/api/tip-feedback", {"kind": "tip", "item": "drip_feed", "answer": "known"})
+    assert server.store.change_token() != before
+
+
+# -- the banner's list of sessions to rate ----------------------------------------------------
+
+
+def _recent_session(server, days_ago: int = 1) -> None:
+    """The fixture session replied a few days ago, so it is inside the
+    banner's window whenever the suite runs."""
+    now = datetime.now(timezone.utc)
+    stamp = (now - timedelta(days=days_ago)).isoformat(timespec="seconds")
+    conn = server.store._connection()
+    conn.execute("UPDATE sessions SET first_ts = ?, last_ts = ? WHERE id = ?", (stamp, stamp, server.session_id))
+    # A re-parsed transcript is what moves the store's change token.
+    conn.execute(
+        "UPDATE transcripts SET updated_at = ? WHERE session_id = ?",
+        (now.isoformat(timespec="microseconds"), server.session_id),
+    )
+
+
+def _lower_the_reminder_threshold(server, tokens: int = 100) -> None:
+    from claudeglass import coaching
+
+    coaching.write(server.options.config_dir, {"thresholds": {"rating_min_tokens": tokens}})
+
+
+def _banner(server) -> dict:
+    resp, payload = server.get_json("/api/capture")
+    assert resp.status == 200
+    return payload["data"]["banner"]
+
+
+def test_the_banner_lists_a_session_big_enough_for_the_reminder_with_its_tokens(server):
+    _recent_session(server)
+    _feedback_on(server, "feedback_reminder")
+    # The reminder's default floor is a million tokens: this session is far below it.
+    assert _banner(server)["unrated"] is None
+    _lower_the_reminder_threshold(server)
+    unrated = _banner(server)["unrated"]
+    assert unrated["threshold"] == 100 and unrated["threshold_text"] == "100"
+    assert unrated["total"] == 1 and [p["session_id"] for p in unrated["pieces"]] == [server.session_id]
+    piece = unrated["pieces"][0]
+    assert piece["tokens"] > 100 and piece["tokens_text"] == str(piece["tokens"])
+    assert set(piece) == {"session_id", "slug", "last_ts", "tokens", "tokens_text"}
+    assert unrated["text"].startswith("1 session used at least 100 tokens and has no rating yet.")
+    # Tokens only: no money amount and no path comes with it.
+    assert "$" not in json.dumps(unrated)
+    _assert_no_leak(json.dumps(unrated).encode("utf-8"))
+
+
+def test_rating_a_session_takes_it_off_the_banner(server):
+    _recent_session(server)
+    _lower_the_reminder_threshold(server)
+    _feedback_on(server, "dashboard_rating")
+    assert _banner(server)["unrated"]["total"] == 1
+    server.post_json(f"/api/sessions/{server.session_id}/feedback", {"outcome": "met"})
+    assert _banner(server)["unrated"] is None
+    # Taking the rating back puts it on the list again.
+    server.post_json(f"/api/sessions/{server.session_id}/feedback", {})
+    assert _banner(server)["unrated"]["total"] == 1
+
+
+def test_the_banner_leaves_out_a_session_outside_the_window(server):
+    _lower_the_reminder_threshold(server)
+    _feedback_on(server, "feedback_reminder")
+    _recent_session(server, days_ago=45)
+    assert _banner(server)["unrated"] is None
+    _recent_session(server, days_ago=2)
+    assert _banner(server)["unrated"]["total"] == 1
+
+
+def test_the_banner_leaves_out_a_session_you_rated_with_a_feedback_run(tmp_path, monkeypatch):
+    from claudeglass import capture
+
+    handle = _start_server(tmp_path, monkeypatch, corpus=_two_plan_corpus(tmp_path))
+    try:
+        _recent_session(handle)
+        _lower_the_reminder_threshold(handle)
+        _feedback_on(handle, "feedback_reminder")
+        assert _banner(handle)["unrated"]["total"] == 1
+        # A /cg-feedback run in the session counts as a rating. A new
+        # threshold makes the banner read the sessions again.
+        monkeypatch.setattr(capture, "is_feedback_run", lambda cycle: True)
+        _lower_the_reminder_threshold(handle, 101)
+        assert _banner(handle)["unrated"] is None
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_there_is_no_list_while_the_reminder_and_the_dashboard_rating_are_both_off(server):
+    _recent_session(server)
+    _lower_the_reminder_threshold(server)
+    assert _banner(server)["unrated"] is None
+    _feedback_on(server, "feedback_note")
+    assert _banner(server)["unrated"] is None
+    _feedback_on(server, "dashboard_rating")
+    assert _banner(server)["unrated"]["total"] == 1
+
+
+def test_the_banner_follows_your_own_reminder_threshold(server):
+    _recent_session(server)
+    _feedback_on(server, "feedback_reminder")
+    config_path = server.options.config_dir / "config.toml"
+    held = config_path.read_text(encoding="utf-8")  # the [capture] table _feedback_on wrote
+    config_path.write_text(held + "\n[thresholds]\ncoaching_rating_min_tokens = 100\n", encoding="utf-8")
+    assert _banner(server)["unrated"]["threshold"] == 100
+    config_path.write_text(held + "\n[thresholds]\ncoaching_rating_min_tokens = 1000000\n", encoding="utf-8")
+    assert _banner(server)["unrated"] is None
+
+
 def test_capture_shows_feedback_counts_and_the_skill_install_note(server):
     import os
 
@@ -3843,7 +4281,7 @@ def test_capture_shows_feedback_counts_and_the_skill_install_note(server):
     data = payload["data"]
     rows = {row["id"]: row for section in data["sections"] for row in section["metrics"]}
     assert data["feedback"]["skill"] == "missing" and data["feedback"]["ratings"] == 1
-    assert [q["key"] for q in data["feedback"]["questions"]] == ["outcome", "slow", "worth", "helped"]
+    assert [q["key"] for q in data["feedback"]["questions"]] == [q.key for q in capture_catalogue.RATING_QUESTIONS]
     skill = rows["feedback_skill"]
     assert skill["needs_install"] is True and skill["install_command"] == "claudeglass capture feedback on"
     assert skill["actual_label"] == "Over the last 14 days"

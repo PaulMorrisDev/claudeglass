@@ -1301,6 +1301,7 @@ def build_report(
     baseline_note: str | None = None,
     config_dir: str | Path | None = None,
     ratings: dict | None = None,
+    tip_feedback: dict | None = None,
     all_projects: bool = False,
     known_slugs: tuple[str, ...] = (),
 ) -> ReportModel:
@@ -1386,7 +1387,9 @@ def build_report(
 
     ``ratings`` holds your dashboard ratings by session id
     (``Store.all_feedback``), for the ``habits`` section's outcomes; the
-    CLI and the service pass them when the store has any.
+    CLI and the service pass them when the store has any. ``tip_feedback``
+    is what you said about tip cards (``Store.tip_feedback``); it adds to
+    the ``prompting`` section's tip answers.
     """
     from . import usage as usage_mod  # local import: avoids a cycle risk with any future usage<->report coupling
     from . import statusline as statusline_mod  # local import: same rationale as usage_mod above
@@ -1893,7 +1896,11 @@ def build_report(
         sections.append(habits.section_from(_habits_built, model_swap=model_swap_stats))
 
     if _want("prompting"):
-        sections.append(prompting.build_section(prompting.collect(corpus, pricing)))
+        sections.append(
+            prompting.build_section(
+                prompting.collect(corpus, pricing, ratings=ratings), card_answers=prompting.card_answers(tip_feedback)
+            )
+        )
 
     if _want("workflows"):
         sections.append(workflows.build_section(all_workflow_runs))

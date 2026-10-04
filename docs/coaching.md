@@ -131,8 +131,9 @@ it only keeps the newest reply's time and size (see
 connect` adds it; until you run that again, `cold_return` works from the
 end of the transcript alone and Setup › Capture shows a "Needs a hook entry" chip.
 
-The /cg-feedback reminder (`feedback_reminder`) has the same look,
-labelled **ClaudeGlass:**.
+The /cg-feedback rating reminder (`feedback_reminder`) has the same look,
+labelled **ClaudeGlass:**. It comes on a message of yours, not at the
+session start (see [The survey's notes](#the-surveys-notes)).
 
 Nothing ClaudeGlass asks Claude to write carries an emoji. Claude copies
 what its context shows: with a ⚠️ and a 💡 in these labels, it began
@@ -464,7 +465,7 @@ shows once a run.
 
 ## Your own split points
 
-Two hints depend on how you work. The dashboard's service works them out
+Some hints depend on how you work. The dashboard's service works them out
 once a day, from a report of your last 30 days across every project, and
 writes them to `coaching.json` in ClaudeGlass's data folder for the hook
 to read:
@@ -476,11 +477,88 @@ to read:
 - **The plan hint.** On unless you ignored the
   [plan-handoff tip](plan-handoff.md), or most of your /cg-feedback
   answers say your builds relied on the discussion before the plan. Its
-  threshold is the tip's own, `plan_handoff_min_dropped_tokens`.
+  threshold is the tip's own, `plan_handoff_min_dropped_tokens`, divided
+  by `coaching_rearm_factor` when most of your answers say a build could
+  have started from the plan alone.
+- **Tips you answered.** The /cg-feedback tip question asks whether a tip
+  Claude showed was useful, already known, or wrong, and a reply that
+  calls a tip a misfire counts as wrong too. A hint called wrong at least
+  twice is raised or muted: `drip_feed`, `big_paste` and `cold_return`
+  have a number of their own (`drip_count`, `big_paste_tokens`,
+  `cold_min_tokens`) and wait for more, by `coaching_rearm_factor`; the
+  others are muted. A hint you knew at least twice, more often than you
+  found it useful, shows once a session. The lists are `muted` and `once`
+  in `coaching.json` as hint names, and raised numbers sit beside
+  `plan_fresh_tokens` in `thresholds`. `capture status` names them.
+  Useful answers count toward the tip's figure on the dashboard's
+  **Tips Claude showed**.
+- **Your typical piece of work** (`typical_piece_tokens`). The tokens in the
+  median session of the last 30 days, counting only sessions with at least
+  three replies and only once there are five of them; `0` until then.
+  The survey's facts line and the rating reminder read it. Until pieces
+  of work are told apart in the report, a session stands in for one.
 
 Without the service, `claudeglass capture refresh` works the file
 out now. Until there is one, no agent type gets the split hint and the
-plan hint is on. `capture status` says what the file holds.
+plan hint is on, and `typical` is `0`, which leaves the reminder at its
+million tokens. `capture status` says what the file holds. The service
+also writes the file for a survey item on your messages, with coaching
+notes off, since the facts line and the reminder read it too.
+
+## The survey's notes
+
+The /cg-feedback survey (`capture feedback on`, or Deep) uses the same hook
+for three things that happen when you send a message. They run at any
+capture level, including off, in every session the project filter leaves
+in, and never in a run with nobody at the screen. They read the same end
+of the transcript the coaching hints read, so a call stays far inside the
+hook's five seconds. Each needs the `UserPromptSubmit` entry that `claudeglass
+capture connect` adds; `capture feedback on` says so while it is missing.
+
+- **The facts line.** When you run `/cg-feedback`, the hook adds one line
+  of counts and words to the message, and nothing else:
+  `cg-fb-facts v1 tokens=... typical=... followups=... queued=... plan=...
+  plan_followups=... plan_asked=... build=... tips=... tip=... admits=...`.
+  It describes the piece of work being rated: the tokens it used, how many
+  messages you sent after the first (leaving out go-aheads and status
+  checks), how many of those you sent while Claude was working, whether a
+  plan was approved and how many messages followed it, whether the plan
+  check was already answered, whether files changed after the approval,
+  which tips Claude showed you and how many times, and how many of its own
+  replies admitted a mistake. The survey asks only the questions those
+  numbers leave open: it skips the question about your follow-up messages
+  when there were none, and the plan questions when no plan was approved.
+  `typical` is your median piece of work (see below).
+  A piece starts with the session, with a `/clear`, with a message Claude
+  tagged `shift=new`, or after your last `/cg-feedback` run if you carried
+  on. Claude's own replies to the survey are left out of its size. On the
+  desktop app a tip counts as shown only when Claude's reply carried it,
+  since the app shows you nothing else.
+- **The plan check.** Deep only. After you approve a plan, by the dialog or
+  by typing a go-ahead, and Claude changes files, your next typed message
+  that corrects or adjusts the work (not a go-ahead, a thank-you, a status
+  check or a message sent while Claude was working) gets one question from
+  Claude first: was that the plan already saying it, the plan leaving it
+  out, something new, or not a fix at all. The note tells Claude to ask it
+  with `AskUserQuestion`, headed "CG plan fix", and then carry on with your
+  message as if nothing had been asked. It is asked at most once a plan,
+  and not when the plan's own feedback rounds already carry your words about
+  what was wrong. After two declines or two answers in your own words in a
+  row, it rests for 14 days. ClaudeGlass keeps the one word you ticked, and
+  never the message.
+- **The rating reminder.** Deep only. A piece of work that hasn't been
+  rated and has used at least a million tokens, and at least twice your
+  typical piece, gets one note: Claude ends its final reply to that message
+  with the line **ClaudeGlass:** Finished? Run /cg-feedback. It comes at
+  most once a piece and once every three days, and not while Claude is
+  still working. A rating on the dashboard isn't in the transcript, so it
+  doesn't count as rated here. This replaces the reminder the session start
+  note used to ask for, once a session whatever the work.
+
+Neither note goes with a coaching tip in the same call, since a tip is the
+last line of its own note and wins. A plan check wins over the reminder.
+Your own words reach none of it: the notes hold counts and fixed text, and
+what `coach-state.json` keeps is described [below](#what-it-doesnt-do).
 
 ## Changing when they apply
 
@@ -499,8 +577,13 @@ table, and wins over the file:
 | `coaching_cold_rest_hours` | 12 | How long `cold_return` rests once shown. |
 | `coaching_warm_prefix_tokens` | 42000 | The tokens every session starts with, left out of `cold_return`'s figure. |
 | `coaching_queued_minutes` | 10 | How old the last tool call or result may be for a message you send to count as sent while Claude is still working. |
+| `coaching_rating_min_tokens` | 1000000 | The smallest piece of work the rating reminder asks about. |
+| `coaching_rating_typical_factor` | 2 | How many times your typical piece a piece must be, as well, for the rating reminder. |
+| `coaching_rating_rest_days` | 3 | The fewest days between two rating reminders. |
+| `coaching_plan_check_declines` | 2 | Declines or answers in your own words in a row before the plan check rests. |
+| `coaching_plan_check_off_days` | 14 | How long the plan check rests after that. |
 | `coaching_cooldown_minutes` | 30 | How long a hint rests once shown. |
-| `coaching_rearm_factor` | 1.5 | How much what's at stake must grow to end the rest early. |
+| `coaching_rearm_factor` | 1.5 | How much what's at stake must grow to end the rest early, and how far your answers raise a hint's number or lower the plan hint's. |
 | `coaching_max_backoff` | 3 | The most times a hint's rest may double. |
 
 An older `config.toml` may still hold keys for the hints that no longer show
@@ -515,7 +598,12 @@ those habits are counted after the fact with fixed rules.
 
 A note is about 50 to 140 tokens, written to the prompt cache once and read on
 every later reply of the session, like any other context. When Claude
-mentions a hint, that's one more line of output.
+mentions a hint, that's one more line of output. The survey's notes are
+larger and rarer: the facts line is one line a `/cg-feedback` run, the plan
+check's note about 230 tokens plus about 80 of output for the question and
+its four options, once a plan, and the reminder's note about 145 tokens
+plus about 25 of output for its line, at most once every three days.
+`capture status` prices both from your own history, as an upper bound.
 
 Claude Code also waits for the hook, a few tens of milliseconds a call,
 after each message you send and after each read, search or web result
@@ -563,4 +651,10 @@ and time only) and keeps a small state file,
 (by a salted hash of its id, as the free signals keep it), how many
 times, how long it rests, the time, context and cache lifetime of the
 newest reply (numbers only), and how many replies each subagent run has
-made. Entries older than a day are dropped.
+made. Entries older than a day are dropped. For the survey it also keeps,
+for every session together, how many plan checks in a row went unanswered
+and when the check rests until, the time of the last rating reminder, and
+short salted hashes of the plans and pieces of work it has already noted
+(at most 32 of each) and of the plan-check questions already counted (the
+last 16), so a note is never made twice and the cleanup above forgets
+nothing it needs.

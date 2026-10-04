@@ -4,6 +4,11 @@ snapshots show between one session start and the next (a change you or
 Claude made by hand, or with a prompt from the dashboard). One edit to
 your user settings shows in every project's snapshots, and is one change.
 
+Each time you mark a tip, habit or recommendation "Trying it" on the
+dashboard (``habit-log.jsonl``, written by ``config.append_habit_log``) is
+a ``source "habit"`` point at that time, for every project: the habit
+changes how you work, and the comparison measures it from then.
+
 Each change to metrics capture (``capture-log.jsonl``, written by
 ``config.set_capture``) is one too: it changes what Claude writes and
 what it costs. Turning capture on, changing what it measures or removing
@@ -33,8 +38,8 @@ and new value where both are short plain values.
 
 Used for the "Since my last change" window and for the before-and-after
 comparison in :mod:`impact`. Reads ``<config_dir>/backups/*/manifest.json``,
-``<config_dir>/snapshots/`` and ``<config_dir>/capture-log.jsonl``;
-writes nothing.
+``<config_dir>/snapshots/``, ``<config_dir>/capture-log.jsonl`` and
+``<config_dir>/habit-log.jsonl``; writes nothing.
 """
 
 from __future__ import annotations
@@ -83,7 +88,7 @@ _MAX_VALUE_CHARS = 80
 @dataclass(slots=True)
 class ChangePoint:
     ts: datetime
-    #: "apply", "revert", "config", "capture" or "transcript".
+    #: "apply", "revert", "config", "capture", "habit" or "transcript".
     source: str
     label: str
     #: Settings keys that changed, as ``key`` or ``agent: key``, when known.
@@ -134,7 +139,11 @@ def _words(value) -> str:
 
 def summary(point: ChangePoint) -> str:
     """What changed, in one line: each change with both values known as
-    "key: old → new", then any other key by name."""
+    "key: old → new", then any other key by name. A habit you marked
+    "Trying it" has no settings key to show: the line says where it came
+    from."""
+    if point.source == "habit":
+        return "You marked it as trying on the dashboard"
     parts: list[str] = []
     named: set[str] = set()
     for change in point.changes:
@@ -656,6 +665,49 @@ def _capture_points(config_dir: Path) -> list[ChangePoint]:
     return points
 
 
+def _habit_title(kind: str, item: str) -> str:
+    """What a card is called on the dashboard, or ``""`` for one with no
+    name of its own here (a recommendation: its key says which agent it is
+    for, which isn't a title)."""
+    from . import habits, prompting
+
+    if kind == "habit" and item in habits.ITEMS:
+        return habits.ITEMS[item][1]
+    if kind == "tip":
+        return prompting.TITLES.get(item) or capture_catalogue.TIP_HINT_TITLES.get(item, "")
+    return ""
+
+
+def _habit_points(config_dir: Path) -> list[ChangePoint]:
+    """A change point for each time you marked a card "Trying it"
+    (``habit-log.jsonl``). The key is ``habit.<id>``, which
+    :func:`impact.measures_for` reads to pick the measures; every project
+    sees it, since a habit is yours, not a project's."""
+    points = []
+    for record in config_mod.load_habit_log(config_dir):
+        when = _parse_iso(record["ts"])
+        if when is None or record["state"] != "trying" or record["kind"] not in capture_catalogue.TIP_CARD_KINDS:
+            continue
+        title = _habit_title(record["kind"], record["item"])
+        key = f"habit.{record['item']}"
+        if title:
+            label = f"Started trying: {title}"
+        elif record["kind"] == "recommendation":
+            label = "Started trying a recommendation"
+        else:
+            label = "Started trying a habit"
+        points.append(
+            ChangePoint(
+                ts=when,
+                source="habit",
+                label=label,
+                keys=[key],
+                changes=[{"key": key, "agent": None, "old": None, "new": "trying"}],
+            )
+        )
+    return points
+
+
 # -- EST-P9: change points a transcript itself shows -----------------------
 
 
@@ -940,7 +992,12 @@ def change_points(config_dir: Path | str, corpus=None, *, now: datetime | None =
     config_dir = Path(config_dir)
     applied = _apply_points(config_dir)
     captures = _capture_points(config_dir)
-    points = [*applied, *_one_edit(_config_points(config_dir, applied, captures, now)), *captures]
+    points = [
+        *applied,
+        *_one_edit(_config_points(config_dir, applied, captures, now)),
+        *captures,
+        *_habit_points(config_dir),
+    ]
     if corpus is not None:
         canonical = _canonical_projects(corpus)
         points = [replace(p, project=canonical.get(p.project, p.project)) if p.project else p for p in points]

@@ -7,10 +7,11 @@
  */
 
 import { clear, el, goTo, renderedViews, state, storageGet, storageSet, withCli } from "./core.js";
-import { relativeTime, shortTs, thousands, timeNode } from "./format.js";
+import { compactNumber, projectName, relativeTime, shortTs, thousands, timeNode } from "./format.js";
 import { connection, fetchJson, figures, resetFiguresAsOf, runReconnectRetries } from "./api.js";
 import { icon } from "./icons.js";
 import { captureLink, pageLink } from "./links.js";
+import { openSessionDrawer } from "./page-spend.js";
 import { button, callout, codeBlockWithCopy, prose, toast } from "./ui.js";
 
 // -- the setup checklist (setup_status.py, /api/setup/status) ------------------
@@ -504,17 +505,72 @@ function notesSignature(notes) {
   return (notes || []).join("\n");
 }
 
-// The notes list keys its own snooze to its exact current content
-// (timestamp + signature, "|"-joined) so notes that changed since the
-// dismissal -- a new warning, say -- show again immediately rather
+// The sessions waiting for a rating: their ids, so a list that changed
+// (a new session, one rated) shows again at once.
+function unratedSignature(unrated) {
+  return ((unrated && unrated.pieces) || [])
+    .map(function (piece) {
+      return piece.session_id;
+    })
+    .join(",");
+}
+
+// A list keys its own snooze to its exact current content
+// (timestamp + signature, "|"-joined) so a list that changed since the
+// dismissal -- a new warning, say -- shows again immediately rather
 // than staying suppressed for the rest of the week.
-function notesSnoozed(notes) {
-  var raw = storageGet("tls:captureNotesHidden");
+function snoozed(storeKey, signature) {
+  var raw = storageGet(storeKey);
   if (!raw) return false;
   var sep = raw.indexOf("|");
   if (sep === -1) return false;
   var ts = Number(raw.slice(0, sep));
-  return isFinite(ts) && raw.slice(sep + 1) === notesSignature(notes) && Date.now() - ts < BANNER_SNOOZE_MS;
+  return isFinite(ts) && raw.slice(sep + 1) === signature && Date.now() - ts < BANNER_SNOOZE_MS;
+}
+
+function notesSnoozed(notes) {
+  return snoozed("tls:captureNotesHidden", notesSignature(notes));
+}
+
+function unratedSnoozed(unrated) {
+  return snoozed("tls:captureUnratedHidden", unratedSignature(unrated));
+}
+
+// The banner's list of sessions big enough for the rating reminder that
+// have no rating: each opens its session, where the questions are. The
+// dashboard asks for a rating, and changes nothing.
+function unratedBlock(unrated, data) {
+  var block = el("div", { class: "capture-unrated" });
+  block.appendChild(el("p", null, prose(unrated.text)));
+  block.appendChild(
+    el(
+      "ul",
+      { class: "capture-notes capture-unrated-list" },
+      unrated.pieces.map(function (piece) {
+        var rate = el("button", { type: "button", class: "link-button", text: "Rate it" });
+        rate.setAttribute("aria-label", "Rate the " + projectName(piece.slug) + " session from " + relativeTime(piece.last_ts));
+        rate.addEventListener("click", function () {
+          openSessionDrawer(piece.session_id);
+        });
+        return el("li", null, [
+          el("span", { text: projectName(piece.slug) }),
+          " · " + relativeTime(piece.last_ts) + " · " + compactNumber(piece.tokens) + " tokens ",
+          rate,
+        ]);
+      })
+    )
+  );
+  var more = unrated.total - unrated.pieces.length;
+  if (more > 0) {
+    block.appendChild(el("p", { class: "notes" }, [thousands(more) + " more. ", pageLink("spend/sessions", "Sessions")]));
+  }
+  var dismiss = el("button", { type: "button", class: "link-button capture-hide", text: "Dismiss for a week" });
+  dismiss.addEventListener("click", function () {
+    storageSet("tls:captureUnratedHidden", Date.now() + "|" + unratedSignature(unrated));
+    renderCaptureBanner(data);
+  });
+  block.appendChild(dismiss);
+  return block;
 }
 
 function renderCaptureBanner(data) {
@@ -523,12 +579,14 @@ function renderCaptureBanner(data) {
   var info = data.banner || {};
   var notes = info.notes || [];
   var notesVisible = notes.length > 0 && !notesSnoozed(notes);
-  var hidden = !info.feedback_note && !notesVisible;
+  var unrated = info.unrated && info.unrated.pieces && info.unrated.pieces.length ? info.unrated : null;
+  var unratedVisible = !!unrated && !unratedSnoozed(unrated);
+  var hidden = !info.feedback_note && !notesVisible && !unratedVisible;
   // Same "skip the rebuild when nothing shown would change" guard as
   // renderHealthBanner -- this is an aria-live="polite" region too,
   // and gets re-rendered on every capture poll (see updateCaptureBanner),
   // not only on an actual content change.
-  var sig = hidden ? "hidden" : ["shown", info.on ? "1" : "0", info.headline || "", info.feedback_note || "", notesVisible ? notesSignature(notes) : ""].join("~");
+  var sig = hidden ? "hidden" : ["shown", info.on ? "1" : "0", info.headline || "", info.feedback_note || "", notesVisible ? notesSignature(notes) : "", unratedVisible ? unrated.text + "|" + unratedSignature(unrated) : ""].join("~");
   if (banner.getAttribute("data-render-sig") === sig) return;
   banner.setAttribute("data-render-sig", sig);
   clear(banner);
@@ -561,6 +619,7 @@ function renderCaptureBanner(data) {
     });
     banner.appendChild(dismissNotes);
   }
+  if (unratedVisible) banner.appendChild(unratedBlock(unrated, data));
   if (info.feedback_note) banner.appendChild(el("p", { class: "capture-feedback-note", text: info.feedback_note }));
   banner.hidden = false;
 }

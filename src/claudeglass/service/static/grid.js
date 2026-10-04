@@ -17,7 +17,7 @@
 
 import { clear, cli, el, highlight, listenHighlight, state, storageGet, storageSet } from "./core.js";
 import { cellSortValue, formatCell, fullValue, modelNames, moneyParts, moneyText, moneyUnit, NUMERIC_KINDS, PROJECT_KEYS, projectName, wholeKind } from "./format.js";
-import { actionIndex, findSection } from "./api.js";
+import { actionIndex, fetchJson, findSection, postJson } from "./api.js";
 import { COST_CARDS, pageLink, plainText, viewFor, viewForSection, viewForTable } from "./links.js";
 import { button, emptyState, helpButton, motionOK, popoverButton, prose, swatch, tile, tileRow } from "./ui.js";
 import { icon } from "./icons.js";
@@ -1541,3 +1541,80 @@ export function simpleTable(columns, rows, caption, id) {
 }
 
 var simpleTableCount = 0;
+
+// ======================================================================
+// What you say about a card (a tip, a habit or a recommendation): a
+// rating, never a setting. POST /api/tip-feedback keeps it in the
+// service's own store; nothing in Claude Code changes.
+// ======================================================================
+
+// The answers load once and every card on the page shares them. The page
+// keeps them up to date as you rate, and loads them again after half a
+// minute.
+var cardRatings = { loading: null, at: 0, options: [], answers: {} };
+
+function loadCardRatings() {
+  if (cardRatings.loading && Date.now() - cardRatings.at < 30000) return cardRatings.loading;
+  cardRatings.at = Date.now();
+  cardRatings.loading = fetchJson("/api/tip-feedback", null, true).then(function (res) {
+    if (res.body && res.body.ok === true && res.body.data) {
+      cardRatings.options = res.body.data.options || [];
+      cardRatings.answers = {};
+      (res.body.data.answers || []).forEach(function (row) {
+        cardRatings.answers[row.kind + "|" + row.item] = row.answer;
+      });
+    } else {
+      cardRatings.at = 0;
+    }
+    return cardRatings;
+  });
+  return cardRatings.loading;
+}
+
+// kind: "tip", "habit" or "recommendation"; item: the card's id. The row
+// stays empty when the service has no rating to offer (an older one).
+// Pressing the rating you gave takes it back.
+export function cardRating(kind, item) {
+  var row = el("div", { class: "card-rating", role: "group", "aria-label": "Your rating of this " + kind });
+  var status = el("span", { class: "notes", role: "status" });
+  row.appendChild(status);
+  loadCardRatings().then(function (ratings) {
+    if (!ratings.options.length) return;
+    var key = kind + "|" + item;
+    var buttons = {};
+    function show() {
+      Object.keys(buttons).forEach(function (word) {
+        buttons[word].setAttribute("aria-pressed", ratings.answers[key] === word ? "true" : "false");
+      });
+    }
+    function busy(on) {
+      Object.keys(buttons).forEach(function (word) {
+        buttons[word].disabled = on;
+      });
+    }
+    row.insertBefore(el("span", { class: "card-rating-label", text: "Your rating:" }), status);
+    ratings.options.forEach(function (opt) {
+      var choice = button(opt.label, { variant: "quiet", title: opt.description, class: "card-rating-button" });
+      buttons[opt.word] = choice;
+      choice.addEventListener("click", function () {
+        var next = ratings.answers[key] === opt.word ? null : opt.word;
+        busy(true);
+        status.textContent = "Saving…";
+        postJson("/api/tip-feedback", { kind: kind, item: item, answer: next }).then(function (res) {
+          busy(false);
+          if (!res.body || res.body.ok !== true) {
+            status.textContent = "Couldn't save that: " + ((res.body && res.body.error && res.body.error.message) || "the dashboard didn't answer") + ".";
+            return;
+          }
+          if (next) ratings.answers[key] = next;
+          else delete ratings.answers[key];
+          show();
+          status.textContent = next === "trying" ? "Noted. Its effect is measured from today." : next ? "Saved." : "Rating taken back.";
+        });
+      });
+      row.insertBefore(choice, status);
+    });
+    show();
+  });
+  return row;
+}

@@ -8,11 +8,12 @@ cache_read 0.2 per million tokens), as ``test_carry.py`` does.
 
 from __future__ import annotations
 
+from collections import Counter
 from pathlib import Path
 
 import pytest
 
-from claudeglass import model
+from claudeglass import fixes as fixes_mod, handoff, model
 from claudeglass.handoff import (
     RULES,
     HandoffThresholds,
@@ -192,18 +193,27 @@ def test_the_section_tables_and_privacy():
     assert_privacy(section)
 
 
-def _report(sessions: int, *, answers=(), costly=0, **kw) -> ReportModel:
+def _report(sessions: int, *, answers=(), costly=0, plans=(), checks=None, **kw) -> ReportModel:
     """``answers``: /cg-feedback handoff words on planned-and-built
-    pieces; ``costly``: how many of them said too costly."""
+    pieces; ``costly``: how many of them said too costly; ``plans``: the
+    plan question's words on pieces of their own; ``checks``: plan checks
+    by ``(shape, word)``."""
     stats = compute_handoff([_session(session_id=f"s{i}", **kw) for i in range(sessions)], PRICING)
     sections = [build_section(stats)]
-    if answers:
+    if answers or plans or checks:
         pieces = [
             Piece(outcome="met", cost=1.0, cycles=1, task=None, slow=(), helped=(), source="your feedback",
                   shape="plan_build", worth="no" if n < costly else "yes", handoff=word)
             for n, word in enumerate(answers)
+        ] + [
+            Piece(outcome="met", cost=1.0, cycles=1, task=None, slow=(), helped=(), source="your feedback",
+                  shape="plan_build", plan=word)
+            for word in plans
         ]
-        h = Habits(pieces=pieces, shapes=[SessionShape("plan_build", 1.0, 80_000) for _ in answers])
+        h = Habits(
+            pieces=pieces, shapes=[SessionShape("plan_build", 1.0, 80_000) for _ in range(max(len(pieces), 1))],
+            plan_checks=Counter(checks or {}),
+        )
         sections.append(habits.section_from(h))
     return ReportModel(sections=sections)
 
@@ -242,6 +252,80 @@ def test_too_few_answers_leave_the_card_as_it_was():
 def test_planned_builds_you_said_were_too_costly_are_cited():
     [rec] = RULES[0](_report(3, answers=("yes", "partly", "yes"), costly=2), HandoffThresholds())
     assert "67% of the planned builds you rated cost too many tokens" in rec.why
+
+
+def test_the_feedback_counts_are_read_from_the_plan_build_row():
+    fb = handoff._feedback_on_plans(
+        _report(3, answers=("yes", "no"), plans=("gap", "gap", "new"), checks={("plan_build", "covered"): 2,
+                                                                              ("no_plan", "gap"): 9})
+    )
+    assert (fb["yes"], fb["partly"], fb["no"], fb["answers"]) == (1, 0, 1, 2)
+    # The plan question and the plan check count together; a session with no plan has none to count.
+    assert (fb["covered"], fb["gap"], fb["new"], fb["plan_answers"]) == (2, 2, 1, 5)
+    empty = handoff._feedback_on_plans(ReportModel())
+    assert empty["plan_answers"] == 0 and empty["answers"] == 0 and empty["pieces"] == 0
+
+
+def test_fixes_the_plan_left_out_ask_for_fuller_plans():
+    [rec] = RULES[0](_report(3, plans=("gap", "gap", "covered")), HandoffThresholds())
+    assert rec.title == "Write fuller plans, then build in a fresh session" and rec.variant == "fuller_plans"
+    assert "You said 2 of 3 fixes after a plan were things it left out" in rec.why
+    assert "relied on the earlier discussion" not in rec.why
+    assert "decisions, file paths and constraints" in rec.action
+    assert ("Fixes after a plan that it left out", 2, "habits.habits_by_shape", "plan_build") in rec.evidence
+    assert ("Fixes after a plan you answered for", 3, "habits.habits_by_shape", "plan_build") in rec.evidence
+    # What you tell Claude to do is the fuller-plans prompt, not the plain reminder.
+    (fix,) = fixes_mod.build_fixes(rec)
+    assert "decisions, file paths and constraints" in fix["prompt"] and "done-when" in fix["prompt"]
+    plain = fixes_mod.build_fixes(RULES[0](_report(3), HandoffThresholds())[0])[0]
+    assert "decisions, file paths and constraints" not in plain["prompt"]
+
+
+def test_the_plan_check_counts_as_much_as_the_plan_question_in_telling_a_thin_plan():
+    [rec] = RULES[0](_report(3, checks={("plan_build", "gap"): 3}), HandoffThresholds())
+    assert rec.variant == "fuller_plans" and "3 of 3 fixes after a plan were things it left out" in rec.why
+    [mixed] = RULES[0](_report(3, plans=("gap",), checks={("plan_build", "gap"): 2, ("plan_build", "covered"): 1}),
+                       HandoffThresholds())
+    assert "3 of 4 fixes after a plan were things it left out" in mixed.why
+
+
+@pytest.mark.parametrize(
+    "plans",
+    [
+        # Half is not more than half.
+        ("gap", "gap", "covered", "new"),
+        ("covered", "covered", "new"),
+        # Fewer than three answers.
+        ("gap", "gap"),
+    ],
+)
+def test_a_plan_that_left_things_out_only_sometimes_leaves_the_card_as_it_was(plans):
+    plain = RULES[0](_report(3), HandoffThresholds())[0]
+    [rec] = RULES[0](_report(3, plans=plans), HandoffThresholds())
+    assert (rec.title, rec.why, rec.action, rec.variant) == (plain.title, plain.why, plain.action, "")
+    assert not any(label.startswith("Fixes after a plan") for label, *_ in rec.evidence)
+
+
+def test_builds_that_needed_the_discussion_and_a_thin_plan_say_so_once_each():
+    [rec] = RULES[0](_report(3, answers=("no", "no", "no"), plans=("gap", "gap", "gap")), HandoffThresholds())
+    assert rec.variant == "fuller_plans" and rec.title == "Write fuller plans, then build in a fresh session"
+    assert rec.why.count("You said") == 2
+    assert "3 of 3 builds relied on the earlier discussion" in rec.why
+    assert "3 of 3 fixes after a plan were things it left out" in rec.why
+    # The older answers alone keep the card's variant too.
+    [discussed] = RULES[0](_report(3, answers=("no", "no", "partly")), HandoffThresholds())
+    assert discussed.variant == "fuller_plans"
+
+
+def test_a_plan_that_was_enough_says_to_clear_when_the_plan_is_approved():
+    [rec] = RULES[0](_report(3, answers=("yes", "yes", "yes", "no")), HandoffThresholds())
+    plain = RULES[0](_report(3), HandoffThresholds())[0]
+    assert rec.variant == "" and rec.action != plain.action
+    assert rec.action.startswith("Approve the plan, then run /clear")
+    assert "plan file" in rec.action and "build one phase per session" in rec.action
+    # A plan that did not need the discussion, with too few answers, keeps the plain advice.
+    [few] = RULES[0](_report(3, answers=("yes", "yes")), HandoffThresholds())
+    assert few.action == plain.action
 
 
 def test_the_rule_needs_three_sessions_and_a_saving_share():

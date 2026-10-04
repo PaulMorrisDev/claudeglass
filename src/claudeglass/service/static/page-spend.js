@@ -6,7 +6,7 @@
 import { clear, el, goTo, onParams, state } from "./core.js";
 import { compactNumber, formatDuration, fullValue, moneyParts, projectName, shortTs, thousands } from "./format.js";
 import { fetchJson, loadInto, loadReport, postJson, withWindow } from "./api.js";
-import { button, drawer, errorNotice, loadingNode, prose, tile, tileRow, toast } from "./ui.js";
+import { button, chip, drawer, errorNotice, loadingNode, prose, tile, tileRow, toast } from "./ui.js";
 import { dataGrid, renderMappedSections, renderReportBackedSection } from "./grid.js";
 import { replaceParams, viewIntro } from "./links.js";
 import { chartError, dayLabel, holdChart } from "./charts.js";
@@ -185,9 +185,12 @@ var SESSION_COLUMNS = [
     key: "id",
     label: "Session",
     kind: "str",
-    // The short id; the whole one on hover.
+    // The short id; the whole one on hover. A chip when the labels are a
+    // guess (the service says so: low_confidence).
     render: function (row) {
-      return el("span", { class: "mono-id", title: String(row.id || ""), text: String(row.id || "").slice(0, 8) });
+      var id = el("span", { class: "mono-id", title: String(row.id || ""), text: String(row.id || "").slice(0, 8) });
+      if (!row.low_confidence) return id;
+      return el("span", { class: "nowrap" }, [id, " ", chip("Label unsure", { icon: "info" })]);
     },
   },
   { key: "slug", label: "Project", kind: "str" },
@@ -277,41 +280,148 @@ function renderSessionDetail(container, sessionId) {
 }
 
 // -- your rating (Setup, Capture: dashboard rating) -> POST /api/sessions/<id>/feedback --
+
+// One question's answers as ticks (radio buttons for a single answer) in
+// ``group``; ``chosen`` holds the words ticked now. Returns the inputs.
+function ratingOptions(group, q, name, chosen) {
+  var boxes = [];
+  q.options.forEach(function (opt) {
+    var id = "rate-" + name + "-" + opt.word;
+    var box = el("input", { type: q.multi ? "checkbox" : "radio", id: id, name: "rate-" + name, value: opt.word, checked: chosen.indexOf(opt.word) !== -1 });
+    boxes.push(box);
+    var label = el("label", { for: id, text: opt.label });
+    if (opt.description) label.title = opt.description;
+    group.appendChild(el("span", { class: "rating-option" }, [box, label]));
+  });
+  return boxes;
+}
+
+function tickedWords(boxes) {
+  return boxes
+    .filter(function (box) {
+      return box.checked;
+    })
+    .map(function (box) {
+      return box.value;
+    });
+}
+
+// The same questions /cg-feedback asks, as the service filled them and left
+// out those that don't fit this session (feedback_questions). The words
+// come from the service, not from here.
 function buildSessionRating(container, session) {
   var saved = session.feedback || {};
   var form = el("fieldset", { class: "session-rating" });
   form.appendChild(el("legend", { text: "Rate this session" }));
-  form.appendChild(el("p", { class: "notes", text: "The /cg-feedback questions as checkboxes. Kept in ClaudeGlass's own store, so it costs no tokens." }));
+  form.appendChild(
+    el("p", {
+      class: "notes",
+      text: "The same questions /cg-feedback asks, as ticks. Only the ones that fit this session show. Kept in ClaudeGlass's own store, so it costs no tokens.",
+    })
+  );
+  // inputs: a question's ticks; perBuild: the ticks of a plan question
+  // asked for each plan build (a session with two or more approved plans),
+  // by question and build; groups: each question's block.
   var inputs = {};
+  var perBuild = {};
+  var groups = {};
   session.feedback_questions.forEach(function (q) {
     var group = el("div", { class: "rating-question", role: "group", "aria-label": q.question });
     group.appendChild(el("p", { class: "rating-label", text: q.question + (q.multi ? " (tick any)" : "") }));
-    var chosen = q.multi ? saved[q.key] || [] : saved[q.key] ? [saved[q.key]] : [];
-    inputs[q.key] = [];
-    q.options.forEach(function (opt) {
-      var id = "rate-" + q.key + "-" + opt.word;
-      var box = el("input", { type: q.multi ? "checkbox" : "radio", id: id, name: "rate-" + q.key, value: opt.word, checked: chosen.indexOf(opt.word) !== -1 });
-      inputs[q.key].push(box);
-      group.appendChild(el("span", { class: "rating-option" }, [box, el("label", { for: id, text: opt.label })]));
-    });
+    if (q.builds && q.builds.length) {
+      perBuild[q.key] = {};
+      q.builds.forEach(function (item) {
+        var held = (saved.builds || []).filter(function (b) {
+          return b.build === item.build;
+        })[0];
+        var row = el("div", { class: "rating-build", role: "group", "aria-label": item.label + ". " + q.question });
+        row.appendChild(el("span", { class: "rating-build-label", text: item.label }));
+        perBuild[q.key][item.build] = ratingOptions(row, q, q.key + "-" + item.build, held && held[q.key] ? [held[q.key]] : []);
+        group.appendChild(row);
+      });
+    } else {
+      var chosen = q.multi ? saved[q.key] || [] : saved[q.key] ? [saved[q.key]] : [];
+      inputs[q.key] = ratingOptions(group, q, q.key, chosen);
+    }
+    groups[q.key] = group;
     form.appendChild(group);
   });
+
+  // A question that waits for an answer to the one before it (the
+  // follow-ups question) shows only while that answer is ticked.
+  function gate() {
+    session.feedback_questions.forEach(function (q) {
+      if (!q.needs || !inputs[q.key]) return;
+      groups[q.key].hidden = !(inputs.why || []).some(function (box) {
+        return box.checked && box.value === q.needs;
+      });
+    });
+  }
+  (inputs.why || []).forEach(function (box) {
+    box.addEventListener("change", gate);
+  });
+  gate();
+
   var save = button("Save rating", { variant: "primary" });
   var reset = button("Clear", { variant: "quiet" });
   var status = el("span", { class: "notes", role: "status" });
   if (saved.set_at) status.textContent = "Rated " + saved.set_at.slice(0, 10) + ".";
   form.appendChild(el("div", { class: "rating-actions" }, [save, reset, status]));
 
-  function send(clearAll) {
+  function payloadFor(clearAll) {
     var payload = {};
+    if (clearAll) return payload;
+    // Answers to questions this session doesn't show (the older slow-down
+    // question, say) stay as they were.
+    Object.keys(saved).forEach(function (key) {
+      if (key !== "set_at" && key !== "builds") payload[key] = saved[key];
+    });
     session.feedback_questions.forEach(function (q) {
-      var ticked = clearAll ? [] : inputs[q.key].filter(function (box) {
-        return box.checked;
-      }).map(function (box) {
-        return box.value;
-      });
+      if (perBuild[q.key]) {
+        payload[q.key] = null;
+        return;
+      }
+      var ticked = q.needs && groups[q.key].hidden ? [] : tickedWords(inputs[q.key]);
       payload[q.key] = q.multi ? ticked : ticked[0] || null;
     });
+    var asked = Object.keys(perBuild);
+    if (asked.length) {
+      // Each plan build has its own plan and handoff answers; the top-level
+      // ones are build 1's, so they are left empty here.
+      var numbers = {};
+      asked.forEach(function (key) {
+        Object.keys(perBuild[key]).forEach(function (n) {
+          numbers[n] = true;
+        });
+      });
+      payload.builds = Object.keys(numbers)
+        .map(Number)
+        .sort(function (a, b) {
+          return a - b;
+        })
+        .map(function (n) {
+          var held = (saved.builds || []).filter(function (b) {
+            return b.build === n;
+          })[0] || {};
+          var item = { build: n, plan: held.plan || null, handoff: held.handoff || null };
+          asked.forEach(function (key) {
+            if (perBuild[key][n]) item[key] = tickedWords(perBuild[key][n])[0] || null;
+          });
+          return item;
+        });
+      payload.plan = null;
+      payload.handoff = null;
+    }
+    // A tip answer is about the tip this session showed.
+    var tipQuestion = session.feedback_questions.filter(function (q) {
+      return q.key === "tip";
+    })[0];
+    if (tipQuestion) payload.tip_hint = payload.tip ? tipQuestion.tip_hint || saved.tip_hint || null : null;
+    return payload;
+  }
+
+  function send(clearAll) {
+    var payload = payloadFor(clearAll);
     save.disabled = reset.disabled = true;
     status.textContent = "Saving…";
     postJson("/api/sessions/" + encodeURIComponent(session.id) + "/feedback", payload).then(function (res) {
@@ -372,6 +482,14 @@ function buildSessionDetail(container, session) {
   loadInto(explainBox, "/api/session/" + encodeURIComponent(session.id) + "/explain", renderSessionExplain);
 
   // -- tag overrides (mode/purpose) -> POST /api/sessions/<id>/tags --
+  if (session.low_confidence) {
+    wrap.appendChild(
+      el("p", { class: "notes label-guess" }, [
+        chip("Label unsure", { icon: "info" }),
+        " No rule fit this session well, so it got the catch-all label. Set the mode or purpose below if you know it.",
+      ])
+    );
+  }
   var tagControls = el("div", { class: "tag-controls" });
   var modeLabel = el("label", { text: "Mode override" });
   var modeSelect = buildTagSelect(["", "interactive", "long-agentic", "overnight", "mixed"], (session.tags && session.tags.mode) || session.mode);

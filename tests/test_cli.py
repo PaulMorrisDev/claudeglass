@@ -2449,6 +2449,22 @@ def test_cli_reports_merge_the_dashboards_session_tags_over_sessions_toml(tmp_pa
     assert cli._merge_dashboard_marks(tmp_path / "none", overrides) == (overrides, {})
 
 
+def test_cli_reports_read_what_you_said_about_tip_cards_without_writing(tmp_path):
+    from claudeglass.service.store import Store
+
+    assert cli._dashboard_tip_feedback(tmp_path) == {}
+    store = Store(str(tmp_path / "service.db"))
+    store.open()
+    store.set_tip_feedback("tip", "drip_feed", "wrong")
+    store.set_tip_feedback("habit", "split_large", "trying")
+    expected = store.tip_feedback()
+    store.close()
+    before = (tmp_path / "service.db").read_bytes()
+    held = cli._dashboard_tip_feedback(tmp_path)
+    assert held == expected and held[("tip", "drip_feed")]["answer"] == "wrong"
+    assert (tmp_path / "service.db").read_bytes() == before
+
+
 def test_a_project_slug_may_start_with_a_dash():
     """Every slug on Linux and macOS starts with '-' (/home/alice/shop is
     -home-alice-shop); argparse alone reads it as an option."""

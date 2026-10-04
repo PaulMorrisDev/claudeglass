@@ -464,6 +464,17 @@ def measures_for(point: ChangePoint) -> list[Measure]:
         elif key.startswith("capture."):
             add(_CAPTURE)
             add(_TAGGED)
+        elif key.startswith("habit."):
+            # A habit you started: the prompting habits if it is one of
+            # those (and the small-requests share for that habit), else the
+            # tokens a session uses, with the cost check last as always.
+            habit = key[len("habit."):]
+            if habit in prompting.HABITS:
+                add(_HABITS)
+                if habit == "drip_feed":
+                    add(_DRIP)
+            else:
+                add(_TOKENS)
         elif agent:
             add(Measure("agent_cost", f"{agent}: cost per spawn", "money", agent))
             add(Measure("agent_startup", f"{agent}: context at the start of each spawn", "tokens", agent))

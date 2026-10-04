@@ -14,12 +14,19 @@ import pytest
 from claudeglass import capture_catalogue
 from claudeglass.config import (
     CAPTURE_LOG_NAME,
+    HABIT_LOG_NAME,
     SIGNAL_RETENTION_DEFAULT_DAYS,
+    FEEDBACK_OFF,
+    FEEDBACK_ON,
     CaptureConfig,
     ConfigError,
+    append_habit_log,
+    feedback_ids,
     load_capture_log,
     load_config,
+    load_habit_log,
     prune_capture_log,
+    prune_habit_log,
     set_capture,
     write_config_values,
 )
@@ -293,3 +300,108 @@ def test_describe_mentions_capture_only_when_on(tmp_path):
     assert not any(line.startswith("capture") for line in load_config(config_dir=tmp_path).describe())
     set_capture(tmp_path, level="deep", sample=10, now=NOW)
     assert "capture: deep, 10% of sessions" in load_config(config_dir=tmp_path).describe()
+
+
+# -- the survey items that answer a message of yours, with capture off --------------------
+
+
+def _capture_with(tmp_path, table: str) -> CaptureConfig:
+    _write(tmp_path, f"[capture]\n{table}\n")
+    return load_config(config_dir=tmp_path).capture
+
+
+@pytest.mark.parametrize("item", capture_catalogue.FEEDBACK_MESSAGE_IDS)
+def test_each_survey_item_on_your_messages_hooks_capture_even_while_capture_is_off(tmp_path, item):
+    capture = _capture_with(tmp_path, f'feedback = ["{item}"]')
+    assert capture.level == "off" and not capture.is_on
+    assert capture.feedback_prompts_on and capture.hooked
+    # The hook gets the item's own entry and nothing for the metrics that are off.
+    assert item in capture.hook_metrics()
+
+
+@pytest.mark.parametrize("table", [
+    "",
+    'feedback = ["feedback_note"]',
+    'feedback = ["dashboard_rating"]',
+    'feedback = ["feedback_note", "dashboard_rating"]',
+    'feedback = []\ncoaching = []',
+])
+def test_the_survey_note_and_the_dashboard_rating_leave_the_hook_alone_while_capture_is_off(tmp_path, table):
+    capture = _capture_with(tmp_path, table)
+    assert not capture.feedback_prompts_on and not capture.hooked
+
+
+def test_a_capture_that_is_on_or_coaching_notes_hook_it_whatever_the_survey_says(tmp_path):
+    assert _capture_with(tmp_path, 'level = "essentials"').hooked
+    assert not _capture_with(tmp_path, 'level = "essentials"').feedback_prompts_on
+    notes = _capture_with(tmp_path, 'coaching = ["coaching_notes"]')
+    assert notes.hooked and not notes.feedback_prompts_on and not notes.is_on
+
+
+def test_the_survey_switch_brings_the_skill_and_its_note_and_never_the_plan_check_or_the_reminder():
+    assert FEEDBACK_ON == ("feedback_skill", "feedback_note")
+    assert not set(FEEDBACK_ON) & {"plan_check", "feedback_reminder"}
+    assert "plan_check" in capture_catalogue.DEEP_FEEDBACK_IDS and "feedback_reminder" in capture_catalogue.DEEP_FEEDBACK_IDS
+    # Turning the survey off takes every one of them off, and leaves the dashboard rating as it was.
+    assert set(FEEDBACK_OFF) == set(capture_catalogue.DEEP_FEEDBACK_IDS)
+    assert feedback_ids(["dashboard_rating", *capture_catalogue.DEEP_FEEDBACK_IDS], False) == ["dashboard_rating"]
+    assert feedback_ids(["plan_check"], True) == ["plan_check", "feedback_skill", "feedback_note"]
+
+
+def test_switching_into_deep_turns_the_plan_check_and_the_reminder_on_and_the_survey_off_turns_them_off(tmp_path):
+    deep = set_capture(tmp_path, level="deep", now=NOW)
+    assert {"plan_check", "feedback_reminder"} <= set(deep.active_metrics())
+    assert deep.feedback_prompts_on
+    off = set_capture(tmp_path, feedback=feedback_ids(deep.feedback, False), now=NOW)
+    assert not off.feedback_prompts_on and "plan_check" not in off.active_metrics()
+    assert off.level == "deep" and off.hooked
+    below = set_capture(tmp_path / "below", level="standard", now=NOW)
+    assert "plan_check" not in below.active_metrics() and not below.feedback_prompts_on
+
+
+# -- the habit log: what you marked "Trying it" on the dashboard -------------------
+
+
+def test_the_habit_log_holds_one_line_of_words_and_a_time_for_each_card(tmp_path):
+    append_habit_log(tmp_path / "config", kind="habit", item="split_large", now=NOW)
+    append_habit_log(tmp_path / "config", kind="tip", item="drip_feed", state="trying", now=NOW + timedelta(hours=1))
+    records = load_habit_log(tmp_path / "config")
+    assert records == [
+        {"ts": "2026-09-24T06:00:00+00:00", "kind": "habit", "item": "split_large", "state": "trying"},
+        {"ts": "2026-09-24T07:00:00+00:00", "kind": "tip", "item": "drip_feed", "state": "trying"},
+    ]
+    # One JSON object a line, sorted keys, and nothing else in the folder.
+    lines = (tmp_path / "config" / HABIT_LOG_NAME).read_text(encoding="utf-8").splitlines()
+    assert len(lines) == 2 and list(json.loads(lines[0])) == ["item", "kind", "state", "ts"]
+    assert [p.name for p in (tmp_path / "config").iterdir()] == [HABIT_LOG_NAME]
+
+
+def test_the_habit_log_time_is_utc_whatever_zone_the_caller_gives(tmp_path):
+    zone = timezone(timedelta(hours=10))
+    append_habit_log(tmp_path, kind="habit", item="split_large", now=datetime(2026, 9, 24, 16, 0, tzinfo=zone))
+    assert load_habit_log(tmp_path)[0]["ts"] == "2026-09-24T06:00:00+00:00"
+
+
+def test_an_unreadable_habit_log_line_is_skipped(tmp_path):
+    append_habit_log(tmp_path, kind="habit", item="split_large", now=NOW)
+    with open(tmp_path / HABIT_LOG_NAME, "a", encoding="utf-8") as handle:
+        handle.write("not json\n[1, 2]\n" + json.dumps({"ts": "x", "kind": "habit", "item": 3, "state": "trying"}) + "\n")
+    assert len(load_habit_log(tmp_path)) == 1
+    assert load_habit_log(tmp_path / "missing") == []
+
+
+def test_prune_habit_log_removes_records_older_than_retention(tmp_path):
+    append_habit_log(tmp_path, kind="habit", item="split_large", now=NOW - timedelta(days=200))
+    append_habit_log(tmp_path, kind="tip", item="drip_feed", now=NOW - timedelta(days=10))
+    assert prune_habit_log(tmp_path, retention_days=180, now=NOW) == 1
+    [kept] = load_habit_log(tmp_path)
+    assert kept["item"] == "drip_feed"
+    assert prune_habit_log(tmp_path, retention_days=180, now=NOW) == 0
+    assert prune_habit_log(tmp_path / "missing", retention_days=180, now=NOW) == 0
+
+
+def test_prune_habit_log_defaults_to_the_signal_retention_default(tmp_path):
+    append_habit_log(tmp_path, kind="habit", item="split_large", now=NOW - timedelta(days=SIGNAL_RETENTION_DEFAULT_DAYS + 1))
+    append_habit_log(tmp_path, kind="habit", item="split_large", now=NOW)
+    assert prune_habit_log(tmp_path, now=NOW) == 1
+    assert len(load_habit_log(tmp_path)) == 1

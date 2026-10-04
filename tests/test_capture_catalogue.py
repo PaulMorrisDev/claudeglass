@@ -57,8 +57,10 @@ def test_metrics_claude_writes_have_a_tag_and_a_note_and_the_rest_have_neither()
             assert m.hooks == ("SubagentStop",) and m.out_chars == 0, m.id
         elif m.group in ("essentials", "standard", "deep"):
             assert asks and m.tag and m.hooks and m.out_chars > 0, m.id
-        elif m.id == "feedback_reminder":
-            assert asks and m.hooks == ("SessionStart",)
+        elif m.id in cat.FEEDBACK_ASKS:
+            # Asked for in a note on a message of yours (``FEEDBACK_NOTE_TEXT``), not at the session start.
+            assert not asks and cat.asks_claude(m.id), m.id
+            assert m.hooks == ("UserPromptSubmit",) and m.out_chars > 0, m.id
         else:
             assert not asks, m.id
             assert m.out_chars == 0, m.id
@@ -175,7 +177,8 @@ def test_free_signals_and_feedback_toggles_alone_add_no_subagent_note():
     assert cat.note_text(cat.level_metrics("free"), "main") == ""
     assert cat.note_text(cat.level_metrics("free"), "subagent") == ""
     assert cat.note_text(["feedback_reminder"], "subagent") == ""
-    reminder = cat.note_text(["feedback_reminder"], "main")
+    assert cat.note_text(["feedback_reminder"], "main") == ""
+    reminder = cat.FEEDBACK_NOTE_TEXT["rating_reminder"]
     assert "/cg-feedback" in reminder and "[cg:" not in reminder
 
 
@@ -491,3 +494,111 @@ def test_the_brief_skill_is_user_invoked_names_no_model_and_holds_every_checklis
     assert set(cat.BRIEF_CHECKLISTS) == set(cat.TAG_VOCAB["task"])
     # About one short turn: the checklist costs little when it runs.
     assert len(text) / 4 < 500
+
+
+# -- the survey items that answer a message of yours ---------------------------------------
+
+
+def _events(ids) -> list[str]:
+    return [spec[1] for spec in cat.hook_specs(ids)]
+
+
+@pytest.mark.parametrize("metric_id", cat.FEEDBACK_MESSAGE_IDS)
+def test_each_survey_item_on_your_messages_asks_for_the_prompt_hook_alone(metric_id):
+    assert cat.hook_specs((metric_id,)) == ((cat.HOOK_SCRIPT, "UserPromptSubmit", "", False),)
+    # Beside coaching notes, which use the same entry, there is still one.
+    assert _events((metric_id, "coaching_notes")).count("UserPromptSubmit") == 1
+    assert _events((metric_id, "task", "feedback_reminder", "plan_check")).count("UserPromptSubmit") == 1
+
+
+def test_the_survey_note_and_the_dashboard_rating_need_no_hook_on_your_messages():
+    assert set(cat.FEEDBACK_MESSAGE_IDS) == {"feedback_skill", "plan_check", "feedback_reminder"}
+    for metric_id in set(cat.FEEDBACK_IDS) - set(cat.FEEDBACK_MESSAGE_IDS):
+        assert "UserPromptSubmit" not in _events((metric_id,)), metric_id
+    assert _events(()) == []
+
+
+def test_the_plan_check_and_the_reminder_ask_claude_and_the_facts_line_does_not():
+    assert cat.FEEDBACK_ASKS == ("plan_check", "feedback_reminder")
+    for metric_id in cat.FEEDBACK_ASKS:
+        assert cat.asks_claude(metric_id)
+        assert cat.METRICS_BY_ID[metric_id].group == "feedback" and cat.METRICS_BY_ID[metric_id].out_chars > 0
+    # The facts line is written by the hook: it costs Claude no output.
+    assert not cat.asks_claude("feedback_skill") and cat.METRICS_BY_ID["feedback_skill"].out_chars == 0
+
+
+def test_every_feedback_note_has_its_text_and_its_metric():
+    assert set(cat.FEEDBACK_NOTE_TEXT) == set(cat.FEEDBACK_HINTS) == set(cat.FEEDBACK_NOTE_METRIC)
+    assert set(cat.FEEDBACK_NOTE_METRIC.values()) == set(cat.FEEDBACK_ASKS)
+    for hint, text in cat.FEEDBACK_NOTE_TEXT.items():
+        # Our own words only: no fill left but the reminder's token count, and no reply tag in it.
+        assert not set(re.findall(r"\{(\w+)\}", text)) - {"tokens"} and "[cg:" not in text, hint
+
+
+def test_the_plan_check_note_names_the_question_and_its_four_labels_word_for_word():
+    text = cat.FEEDBACK_NOTE_TEXT["plan_check"]
+    assert "AskUserQuestion" in text and f'header "{cat.PLAN_CHECK_HEADER}"' in text and cat.PLAN_CHECK_QUESTION in text
+    assert cat.PLAN_CHECK_HEADER.startswith("CG ") and cat.PLAN_CHECK_WORDS == ("covered", "gap", "new", "none")
+    for word, label, description in cat.PLAN_CHECK_OPTIONS:
+        assert f'"{label}" ({description})' in text and "," not in label, word
+    # It does not hold up the message, and it keeps the user's words out of what it saves.
+    assert "exactly as you would have without this note" in text and "never copy" in text
+    assert cat.PLAN_CHECK_ASK_CHARS == cat.METRICS_BY_ID["plan_check"].out_chars
+
+
+def test_the_rating_reminder_note_ends_on_the_line_for_claude_to_copy():
+    text = cat.FEEDBACK_NOTE_TEXT["rating_reminder"]
+    assert text.splitlines()[-1] == f"{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}"
+    assert cat.REMINDER_REPLY_CHARS == len(f"\n\n{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}")
+    assert cat.METRICS_BY_ID["feedback_reminder"].out_chars == cat.REMINDER_REPLY_CHARS
+    assert "/cg-feedback" in cat.FEEDBACK_REMINDER_LINE
+
+
+def test_the_facts_line_keys_are_the_closed_list_the_skill_reads():
+    assert cat.FEEDBACK_FACTS_MARKER == "cg-fb-facts v1"
+    assert cat.FEEDBACK_FACT_KEYS == (
+        "tokens", "typical", "followups", "queued", "plan", "plan_followups", "plan_asked", "build", "tips", "tip",
+        "admits",
+    )
+    assert len(set(cat.FEEDBACK_FACT_KEYS)) == len(cat.FEEDBACK_FACT_KEYS)
+
+
+def _note_tokens(hint: str) -> int:
+    """A feedback note as it reaches the context: its text and the wrapper Claude Code puts round a hook note."""
+    return round((len(cat.FEEDBACK_NOTE_TEXT[hint]) + cat.NOTE_WRAP_CHARS + len("UserPromptSubmit")) / 4)
+
+
+def test_rough_tokens_size_the_reminder_the_plan_check_and_the_note_that_asks_for_either():
+    none = cat.rough_tokens(())
+    assert none["reminder"] == 0 and none["plan_check"] == 0 and none["message_note"] == 0
+    reminder = cat.rough_tokens(("feedback_reminder",))
+    assert reminder["reminder"] == round(cat.REMINDER_REPLY_CHARS / 4) and reminder["plan_check"] == 0
+    assert reminder["message_note"] == _note_tokens("rating_reminder")
+    check = cat.rough_tokens(("plan_check",))
+    assert check["plan_check"] == round(cat.PLAN_CHECK_ASK_CHARS / 4) and check["reminder"] == 0
+    assert check["message_note"] == _note_tokens("plan_check")
+    both = cat.rough_tokens(("feedback_reminder", "plan_check"))
+    assert both["message_note"] == max(reminder["message_note"], check["message_note"])
+    # The facts line costs nothing to ask for, and neither piece adds to the tag Claude writes for each reply.
+    assert cat.rough_tokens(("feedback_skill",))["message_note"] == 0
+    tagged = cat.rough_tokens(("task",))["reply_tag"]
+    assert tagged > 0 and cat.rough_tokens(("task", "feedback_reminder", "plan_check"))["reply_tag"] == tagged
+
+
+def test_the_hook_is_given_the_survey_items_words_and_labels_it_matches_on():
+    feedback = cat.export_json()["coaching"]["feedback"]
+    assert feedback["facts_marker"] == cat.FEEDBACK_FACTS_MARKER
+    assert feedback["fact_keys"] == list(cat.FEEDBACK_FACT_KEYS)
+    assert feedback["message_ids"] == list(cat.FEEDBACK_MESSAGE_IDS)
+    assert feedback["plan_check_header"] == cat.PLAN_CHECK_HEADER and feedback["plan_check_words"] == list(cat.PLAN_CHECK_WORDS)
+    assert feedback["plan_check_labels"] == [label for _word, label, _description in cat.PLAN_CHECK_OPTIONS]
+    assert feedback["plan_headers"][-1] == cat.PLAN_CHECK_HEADER and feedback["text"] == cat.FEEDBACK_NOTE_TEXT
+    assert feedback["reminder_line"] == cat.FEEDBACK_REMINDER_LINE and feedback["hints"] == list(cat.FEEDBACK_HINTS)
+
+
+def test_the_hook_is_given_the_rating_reminder_and_plan_check_thresholds():
+    thresholds = cat.export_json()["coaching"]["thresholds"]
+    assert thresholds["rating_min_tokens"] == 1_000_000 and thresholds["rating_typical_factor"] == 2
+    assert thresholds["rating_rest_days"] == 3
+    assert thresholds["plan_check_off_days"] == 14 and thresholds["plan_check_declines"] == 2
+    assert cat.COACHING_THRESHOLDS["rating_min_tokens"] == thresholds["rating_min_tokens"]

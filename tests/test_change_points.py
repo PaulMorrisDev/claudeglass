@@ -327,6 +327,77 @@ def test_each_capture_change_is_a_change_point(tmp_path):
     assert change_points.latest(tmp_path).label == "Turned metrics capture off"
 
 
+# -- habits you marked "Trying it" ------------------------------------------------
+
+
+def _tried(tmp_path, kind, item, *, day, state="trying"):
+    from datetime import datetime, timezone
+
+    from claudeglass import config as config_mod
+
+    config_mod.append_habit_log(
+        tmp_path, kind=kind, item=item, state=state, now=datetime(2026, 9, day, 9, tzinfo=timezone.utc)
+    )
+
+
+def test_each_card_you_marked_trying_is_a_change_point_for_every_project(tmp_path):
+    _tried(tmp_path, "habit", "split_large", day=2)
+    _tried(tmp_path, "tip", "drip_feed", day=3)
+    _tried(tmp_path, "recommendation", "model.default", day=4)
+    points = change_points.change_points(tmp_path)
+    assert [p.source for p in points] == ["habit"] * 3
+    assert [p.label for p in points] == [
+        "Started trying: Split large asks into planned steps",
+        "Started trying: Small requests sent one at a time",
+        "Started trying a recommendation",
+    ]
+    assert [p.keys for p in points] == [["habit.split_large"], ["habit.drip_feed"], ["habit.model.default"]]
+    assert points[0].changes == [{"key": "habit.split_large", "agent": None, "old": None, "new": "trying"}]
+    assert [p.ts.day for p in points] == [2, 3, 4]
+    # A habit is yours, not a project's: it applies everywhere.
+    assert all(change_points.applies_to(p, "any-project") for p in points)
+    assert change_points.latest(tmp_path).label == "Started trying a recommendation"
+
+
+def test_a_habit_point_says_where_it_came_from_and_names_no_setting(tmp_path):
+    _tried(tmp_path, "tip", "plan_fresh", day=2)
+    [point] = change_points.change_points(tmp_path)
+    assert change_points.summary(point) == "You marked it as trying on the dashboard"
+    assert point.to_dict()["summary"] == "You marked it as trying on the dashboard"
+    assert point.label.startswith("Started trying: ")
+
+
+def test_a_tip_that_has_no_title_of_its_own_still_gets_a_neutral_label(tmp_path):
+    _tried(tmp_path, "tip", "something-new", day=2)
+    [point] = change_points.change_points(tmp_path)
+    assert point.label == "Started trying a habit" and point.keys == ["habit.something-new"]
+
+
+def test_only_trying_counts_and_a_broken_habit_line_is_skipped(tmp_path):
+    _tried(tmp_path, "habit", "split_large", day=2, state="useful")
+    (tmp_path / "habit-log.jsonl").write_text(
+        "not json\n"
+        + json.dumps({"ts": "never", "kind": "habit", "item": "split_large", "state": "trying"}) + "\n"
+        + json.dumps({"ts": "2026-09-03T09:00:00+00:00", "kind": "idea", "item": "x", "state": "trying"}) + "\n"
+        + json.dumps({"ts": "2026-09-04T09:00:00+00:00", "kind": "habit", "item": "split_large", "state": "trying"}) + "\n",
+        encoding="utf-8",
+    )
+    points = change_points.change_points(tmp_path)
+    assert [(p.source, p.ts.day) for p in points] == [("habit", 4)]
+
+
+def test_habit_points_sit_among_the_others_in_time_order(tmp_path):
+    from datetime import datetime, timezone
+
+    from claudeglass import config as config_mod
+
+    config_mod.set_capture(tmp_path, level="essentials", now=datetime(2026, 9, 1, 9, tzinfo=timezone.utc))
+    _tried(tmp_path, "habit", "split_large", day=5)
+    config_mod.set_capture(tmp_path, sample=50, now=datetime(2026, 9, 9, 9, tzinfo=timezone.utc))
+    points = change_points.change_points(tmp_path)
+    assert [p.source for p in points] == ["capture", "habit", "capture"]
+
+
 def test_turning_coaching_notes_on_and_off_is_named_as_such(tmp_path):
     from datetime import datetime, timezone
 

@@ -13,9 +13,13 @@ Two places carry them:
 - **The start of a brief.** ``[retry: brief]`` and ``[spawn: isolate]``
   open the brief handed to an agent, in either order.
 - **Your feedback.** ``/cg-feedback`` ends with ``[cg-fb: outcome=met
-  slow=none ...]`` on a line of its own, followed by a thank-you line.
-  The answers to its AskUserQuestion call are read too, by matching the
-  labels you ticked, for when the line is missing.
+  why=left_out ...]`` as the last line of its reply, after a short summary
+  of what it recorded. The answers to its AskUserQuestion calls are read
+  too, by matching the labels you ticked, for when the line is missing. An
+  answer you typed under "Other" is never kept: Claude picks the closest
+  word of that question's list and adds ``from_text=<keys>``, and that word
+  counts only when the AskUserQuestion result shows a non-label answer for
+  that key. A ticked answer always wins over the tag.
 
 Every value is checked against the closed vocabularies in
 ``capture_catalogue``; unknown keys and words are dropped, so nothing
@@ -32,19 +36,28 @@ from dataclasses import fields, replace
 
 from .capture_catalogue import (
     ALL_FEEDBACK_QUESTIONS,
+    FEEDBACK_ANSWER_KEYS,
     FEEDBACK_LIST_KEYS,
     FEEDBACK_REMINDER_LINE,
     FEEDBACK_TAG,
     FEEDBACK_VOCAB,
     LIST_KEYS,
     OLD_FEEDBACK_TAG,
+    PLAN_CHECK_HEADER,
+    PLAN_CHECK_OPTIONS,
     RESULT_WORDS,
     RETRY_REASONS,
     SKILL_NAME_PATTERN,
+    SLOW_TO_WHY,
     SPAWN_REASONS,
     TAG_VOCAB,
+    TIP_HINT_TITLES,
 )
 from .model import CaptureTag, Feedback
+
+#: How much of a reply's end is searched for the reminder line: the line,
+#: its quote label, a blank line and a full tag after it.
+REMINDER_SCAN_CHARS = 1024
 
 #: How much of a reply's end is searched for tags. A full Deep ``[cg:]`` tag
 #: is about 220 characters; a ``[result:]`` tag can sit next to it.
@@ -91,18 +104,31 @@ _VOCAB_SETS = {key: frozenset(words) for key, words in TAG_VOCAB.items()}
 
 #: ``[cg-fb: ...]`` (``[tl-fb: ...]`` until 0.12.1) on a line of its own,
 #: optionally in backticks or emphasis. Unlike the reply tags it needn't
-#: end the reply: the skill writes a thank-you line after it.
+#: end the reply: an older skill wrote a thank-you line after it. The
+#: longest tag the skill can write is about 250 characters, so the body
+#: may run to 300.
 _FEEDBACK_TAG_RE = re.compile(
-    r"^[ \t`*_]*\[(?:" + re.escape(FEEDBACK_TAG) + "|" + re.escape(OLD_FEEDBACK_TAG) + r"):([^\[\]\n]{0,200})\][`*_.]*[ \t]*$",
+    r"^[ \t`*_]*\[(?:" + re.escape(FEEDBACK_TAG) + "|" + re.escape(OLD_FEEDBACK_TAG) + r"):([^\[\]\n]{0,300})\][`*_.]*[ \t]*$",
     re.IGNORECASE | re.MULTILINE,
 )
 _FEEDBACK_SETS = {key: frozenset(words) for key, words in FEEDBACK_VOCAB.items()}
-#: AskUserQuestion header -> the question, and its labels -> words.
+#: AskUserQuestion header -> the question, and (by header, since two
+#: questions can share a key: the older and the current handoff) its
+#: labels -> words.
 _FEEDBACK_BY_HEADER = {q.header: q for q in ALL_FEEDBACK_QUESTIONS}
-_FEEDBACK_LABELS = {q.key: {label: word for word, label, _ in q.options} for q in ALL_FEEDBACK_QUESTIONS}
+_FEEDBACK_LABELS = {q.header: {label: word for word, label, _ in q.options} for q in ALL_FEEDBACK_QUESTIONS}
+#: The ``Feedback`` fields that hold answers: a tuple for the multi-select
+#: questions, a word for the rest.
+_FEEDBACK_WORD_KEYS = tuple(key for key in FEEDBACK_ANSWER_KEYS if key in FEEDBACK_VOCAB)
+_FEEDBACK_KEY_SET = frozenset(FEEDBACK_ANSWER_KEYS)
+#: A tip's id by the title the tip question names it with.
+_TIP_HINT_BY_TITLE = {title: hint for hint, title in TIP_HINT_TITLES.items()}
 
 #: The AskUserQuestion headers /cg-feedback asks with.
 FEEDBACK_HEADERS = frozenset(_FEEDBACK_BY_HEADER)
+
+#: The plan check's option labels -> words (``PLAN_CHECK_OPTIONS``).
+_PLAN_CHECK_LABELS = {label: word for word, label, _description in PLAN_CHECK_OPTIONS}
 
 
 def _apply_word(values: dict, key: str, value: str, skill_names: Collection[str]) -> None:
@@ -180,12 +206,104 @@ def _feedback(values: dict, source: str) -> Feedback:
 
 def merge_feedback(earlier: Feedback, later: Feedback) -> Feedback:
     """Two answers of the same kind in one /cg-feedback run, as one: the
-    handoff question comes back from a second AskUserQuestion call. A
-    later answer wins where both answered."""
+    second AskUserQuestion call's questions come back separately. A later
+    answer wins where both answered; the keys answered in your own words
+    (``other``, ``from_text``) are joined."""
     values = {
-        f.name: getattr(later, f.name) or getattr(earlier, f.name) for f in fields(Feedback) if f.name != "source"
+        f.name: getattr(later, f.name) or getattr(earlier, f.name)
+        for f in fields(Feedback)
+        if f.name not in ("source", "other", "from_text")
     }
+    for name in ("other", "from_text"):
+        values[name] = tuple(dict.fromkeys((*getattr(earlier, name), *getattr(later, name))))
     return Feedback(source=later.source, **values)
+
+
+def with_older_why(feedback: Feedback) -> Feedback:
+    """``feedback`` with ``why`` read from an older run's ``slow`` answer
+    when it has none (``why_older`` says so): ``unclear`` was "my request
+    left it out" and ``none`` was "nothing slowed it". ``rework`` didn't
+    say who was at fault and ``tools`` was never a reason you gave, so
+    neither adds a word."""
+    if feedback.why or not feedback.slow:
+        return feedback
+    why = tuple(dict.fromkeys(SLOW_TO_WHY[word] for word in feedback.slow if word in SLOW_TO_WHY))
+    return replace(feedback, why=why, why_older=True) if why else feedback
+
+
+def _has_answers(feedback: Feedback) -> bool:
+    return any(getattr(feedback, key) for key in _FEEDBACK_WORD_KEYS)
+
+
+def _only_verified(tag: Feedback) -> Feedback:
+    """A tag read with no answers behind it: the words it says came from
+    your own note can't be checked, so they're dropped."""
+    claimed = [key for key in tag.from_text if key in _FEEDBACK_WORD_KEYS]
+    if not claimed:
+        return tag
+    cleared = replace(
+        tag,
+        from_text=(),
+        **{key: () if key in FEEDBACK_LIST_KEYS else None for key in claimed},
+        **({"tip_hint": None} if "tip" in claimed else {}),
+    )
+    return cleared if _has_answers(cleared) else Feedback(source="skipped")
+
+
+def _take_from_tag(base: Feedback, tag: Feedback | None, other: frozenset[str]) -> Feedback:
+    """``base`` (answers read from the AskUserQuestion result) plus the
+    words ``tag`` gives for the keys you answered in your own words. A key
+    you ticked keeps its ticked word: only an empty single answer is
+    filled, and a multi-select answer gains the tag's words after the
+    ticked ones. A word for a key with no non-label answer is dropped."""
+    if tag is None or not other:
+        return base
+    values: dict = {}
+    taken = []
+    for key in _FEEDBACK_WORD_KEYS:
+        words = getattr(tag, key)
+        if key not in other or not words:
+            continue
+        have = getattr(base, key)
+        if key in FEEDBACK_LIST_KEYS:
+            joined = tuple(dict.fromkeys((*have, *words)))
+            if joined != have:
+                values[key] = joined
+                taken.append(key)
+        elif not have:
+            values[key] = words
+            taken.append(key)
+    if not taken:
+        return base
+    return replace(base, source="answers", from_text=tuple(dict.fromkeys((*base.from_text, *taken))), **values)
+
+
+def settle_feedback(answers: Feedback | None, tag: Feedback | None, skipped: Feedback | None) -> Feedback | None:
+    """One /cg-feedback run's feedback from what it gave: ``answers`` read
+    from its AskUserQuestion results, ``tag`` from the line ending its
+    reply, ``skipped`` for a declined question (each already merged across
+    the run's turns, ``None`` for a kind it didn't give). SEC-P1: the
+    answers outrank the tag, as Claude could write any tag but not the
+    result of the question you answered. So a tag adds a word only for a
+    key whose answer shows words you typed under "Other" (``other``), and
+    never replaces a ticked one. Without any answers the tag stands, minus
+    the words it says came from your note, which nothing can confirm. An
+    older run's ``slow`` also gives ``why``."""
+    other_keys = tuple(dict.fromkeys((*(answers.other if answers else ()), *(skipped.other if skipped else ()))))
+    other = frozenset(other_keys)
+    if answers is not None:
+        settled = replace(_take_from_tag(answers, tag, other), other=other_keys)
+    elif other and skipped is not None:
+        settled = replace(_take_from_tag(skipped, tag, other), other=other_keys)
+    elif tag is not None:
+        settled = _only_verified(tag)
+    else:
+        settled = skipped
+    if settled is None:
+        return None
+    if tag is not None and tag.tip_hint and settled.tip and not settled.tip_hint:
+        settled = replace(settled, tip_hint=tag.tip_hint)
+    return with_older_why(settled)
 
 
 def parse_feedback_tag(text: str) -> Feedback | None:
@@ -198,15 +316,25 @@ def parse_feedback_tag(text: str) -> Feedback | None:
     if not matches:
         return None
     values: dict = {}
+    claimed: tuple[str, ...] = ()
     for word in matches[-1].split():
         key, sep, value = word.partition("=")
         key = key.lower()
+        if not sep:
+            continue
+        if key == "from_text":
+            claimed = tuple(dict.fromkeys(w for w in value.strip("`*_.;").lower().split(",") if w in _FEEDBACK_KEY_SET))
+            continue
         vocab = _FEEDBACK_SETS.get(key)
-        if not sep or vocab is None:
+        if vocab is None:
             continue
         words = tuple(dict.fromkeys(w for w in value.strip("`*_.;").lower().split(",") if w in vocab))
         if words:
             values[key] = words if key in FEEDBACK_LIST_KEYS else words[0]
+    # Only a key that has a word can have come from your note.
+    from_text = tuple(key for key in claimed if key in values)
+    if from_text and values:
+        values["from_text"] = from_text
     return _feedback(values, "tag")
 
 
@@ -214,8 +342,12 @@ def feedback_from_answers(result) -> Feedback | None:
     """/cg-feedback's answers from an AskUserQuestion ``toolUseResult``
     (``{"questions": [...], "answers": {question text: answer}}``), or
     ``None`` when it asked none of the feedback questions. An answer is
-    a label, a list of labels, or labels joined with commas; anything that
-    isn't one of the question's labels (a free-text "Other") is dropped."""
+    a label, a list of labels, or labels joined with commas. Anything that
+    isn't one of the question's labels (a free-text "Other") is dropped,
+    and only its key is kept, in ``other``: that is what lets a word
+    Claude picked from the note into the tag count
+    (:func:`settle_feedback`). A single-choice question's answer is a
+    label or all "Other"; commas split only a multi-select's."""
     if not isinstance(result, dict):
         return None
     questions, answers = result.get("questions"), result.get("answers")
@@ -223,6 +355,7 @@ def feedback_from_answers(result) -> Feedback | None:
         return None
     asked = False
     values: dict = {}
+    other: list[str] = []
     for question in questions:
         if not isinstance(question, dict):
             continue
@@ -232,9 +365,12 @@ def feedback_from_answers(result) -> Feedback | None:
             continue
         asked = True
         answer = answers.get(text)
-        labels = _FEEDBACK_LABELS[spec.key]
+        labels = _FEEDBACK_LABELS[spec.header]
         if isinstance(answer, str):
-            picked = [answer] if answer in labels else [part.strip() for part in answer.split(",")]
+            if answer not in labels and spec.multi:
+                picked = [part.strip() for part in answer.split(",")]
+            else:
+                picked = [answer]
         elif isinstance(answer, list):
             picked = [part for part in answer if isinstance(part, str)]
         else:
@@ -242,7 +378,16 @@ def feedback_from_answers(result) -> Feedback | None:
         words = tuple(dict.fromkeys(labels[label] for label in picked if label in labels))
         if words:
             values[spec.key] = words if spec.multi else words[0]
-    return _feedback(values, "answers") if asked else None
+        if any(part.strip() and part not in labels for part in picked):
+            other.append(spec.key)
+        if spec.key == "tip" and "tip" in values:
+            hints = {hint for title, hint in _TIP_HINT_BY_TITLE.items() if title in text}
+            if len(hints) == 1:
+                values["tip_hint"] = hints.pop()
+    if not asked:
+        return None
+    feedback = _feedback(values, "answers")
+    return replace(feedback, other=tuple(dict.fromkeys(other))) if other else feedback
 
 
 def asks_for_feedback(tool_input) -> bool:
@@ -252,6 +397,43 @@ def asks_for_feedback(tool_input) -> bool:
     return isinstance(questions, list) and any(
         isinstance(q, dict) and q.get("header") in FEEDBACK_HEADERS for q in questions
     )
+
+
+def asks_plan_check(tool_input) -> bool:
+    """Whether an AskUserQuestion call's input asks the plan check
+    (``capture_catalogue.PLAN_CHECK_HEADER``)."""
+    questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
+    return isinstance(questions, list) and any(
+        isinstance(q, dict) and q.get("header") == PLAN_CHECK_HEADER for q in questions
+    )
+
+
+def plan_check_from_answers(result) -> str | None:
+    """The plan check's word from an AskUserQuestion ``toolUseResult``
+    (``{"questions": [...], "answers": {question text: label}}``): a word
+    of ``capture_catalogue.PLAN_CHECK_WORDS``; ``""`` when the question
+    was asked and answered in the user's own words (an "Other", read here
+    and dropped) or not at all; ``None`` when the call didn't ask the
+    plan check."""
+    if not isinstance(result, dict):
+        return None
+    questions, answers = result.get("questions"), result.get("answers")
+    if not isinstance(questions, list):
+        return None
+    for question in questions:
+        if not isinstance(question, dict) or question.get("header") != PLAN_CHECK_HEADER:
+            continue
+        text = question.get("question")
+        answer = answers.get(text) if isinstance(answers, dict) and isinstance(text, str) else None
+        return _PLAN_CHECK_LABELS.get(answer, "") if isinstance(answer, str) else ""
+    return None
+
+
+def carries_reminder(text: str) -> bool:
+    """Whether the end of a reply's text carries the /cg-feedback reminder
+    line (``capture_catalogue.FEEDBACK_REMINDER_LINE``), which a hook note
+    asks Claude to write. A yes or no; the text is not kept."""
+    return FEEDBACK_REMINDER_LINE in text[-REMINDER_SCAN_CHARS:]
 
 
 def parse_brief_markers(text: str) -> tuple[str | None, str | None]:

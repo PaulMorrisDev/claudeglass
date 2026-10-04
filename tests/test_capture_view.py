@@ -40,7 +40,7 @@ def test_off_invites_with_the_essentials_estimate():
     assert levels["essentials"]["estimate"]["usd"] < levels["deep"]["estimate"]["usd"]
     assert "Feedback reminder from Claude" in levels["deep"]["adds"]
     assert "Feedback reminder from Claude" not in levels["standard"]["adds"]
-    assert levels["deep"]["metrics"][-3:] == list(catalogue.DEEP_FEEDBACK_IDS)
+    assert levels["deep"]["metrics"][-4:] == list(catalogue.DEEP_FEEDBACK_IDS)
     assert levels["off"]["current"] is True
     rows = _rows(data)
     assert rows["task"]["on"] is False and rows["task"]["estimate"]["usd"] > 0
@@ -398,6 +398,57 @@ def test_feedback_runs_are_priced_over_the_last_days_and_counted_toward_enough()
     assert rows["dashboard_rating"]["answers"] == 4 and rows["dashboard_rating"]["actual"] is None
     assert data["feedback"]["runs"] == 3 and data["feedback"]["ratings"] == 4
     assert rows["task"]["actual_label"] == "Since it was turned on"
+
+
+def _unrated(total: int = 2, pieces: int = 2) -> dict:
+    return {
+        "threshold": 1_000_000,
+        "threshold_text": "1M",
+        "total": total,
+        "pieces": [
+            {"session_id": f"s{n}", "slug": "shop", "last_ts": f"2026-09-2{n}T10:00:00Z", "tokens": 1_200_000 + n,
+             "tokens_text": "1.2M"}
+            for n in range(pieces)
+        ],
+    }
+
+
+def test_the_banner_lists_the_sessions_waiting_for_a_rating_with_a_sentence_that_introduces_them():
+    unrated = _unrated()
+    for config in (CaptureConfig(feedback=["feedback_reminder"]), CaptureConfig(feedback=["dashboard_rating"])):
+        banner = capture_view.view(config, unrated=unrated)["banner"]
+        block = banner["unrated"]
+        assert block["text"] == (
+            "2 sessions used at least 1M tokens and have no rating yet. "
+            "Rating them makes your savings tips fit how you work."
+        )
+        assert [p["session_id"] for p in block["pieces"]] == ["s0", "s1"]
+        assert (block["threshold"], block["threshold_text"], block["total"]) == (1_000_000, "1M", 2)
+    # The figures it was given stay as they were, with the sentence added.
+    assert "text" not in unrated
+
+
+def test_the_banner_counts_more_sessions_than_it_lists_and_says_one_in_the_singular():
+    block = capture_view.view(CaptureConfig(), unrated=_unrated(total=7, pieces=5))["banner"]["unrated"]
+    assert block["total"] == 7 and len(block["pieces"]) == 5
+    assert block["text"].startswith("7 sessions used at least 1M tokens and have no rating yet.")
+    one = capture_view.view(CaptureConfig(), unrated=_unrated(total=1, pieces=1))["banner"]["unrated"]
+    assert one["text"].startswith("1 session used at least 1M tokens and has no rating yet.")
+
+
+def test_the_banner_has_no_list_without_sessions_to_rate():
+    for unrated in (None, {}, _unrated(total=0, pieces=0)):
+        assert capture_view.view(CaptureConfig(), unrated=unrated)["banner"]["unrated"] is None
+    assert capture_view.view(CaptureConfig())["banner"]["unrated"] is None
+
+
+def test_the_banner_list_is_there_whether_capture_is_on_or_off_and_holds_no_money():
+    on = capture_view.view(CaptureConfig(level="essentials"), units=API, unrated=_unrated())["banner"]
+    off = capture_view.view(CaptureConfig(), units=API, unrated=_unrated())["banner"]
+    assert on["on"] is True and off["on"] is False
+    assert on["unrated"] == off["unrated"] and on["unrated"] is not None
+    assert "$" not in str(on["unrated"]) and "USD" not in str(on["unrated"])
+    assert_privacy(on)
 
 
 def test_status_line_toggles_say_when_the_status_line_is_someone_elses():

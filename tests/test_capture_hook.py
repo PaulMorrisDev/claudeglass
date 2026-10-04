@@ -12,6 +12,7 @@ from datetime import datetime, timedelta, timezone
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -634,9 +635,11 @@ def test_the_hook_imports_nothing_a_call_may_not_need():
     assert done.stdout.decode("utf-8").strip() == "[]", done.stderr.decode("utf-8")
 
 
-def test_the_feedback_reminder_needs_capture_on(tmp_path):
+def test_the_feedback_reminder_is_not_in_the_session_start_note(tmp_path):
+    # It comes later, once a piece of work is big enough (the next message's note), not with every session.
     free = _config(tmp_path / "free", '[capture]\nlevel = "free"\nfeedback = ["feedback_reminder"]\n')
-    assert "/cg-feedback" in _note(free, _start())
+    note = _note(free, _start())
+    assert "/cg-feedback" not in note and "feedback_reminder" not in note
     off = _config(tmp_path / "off", '[capture]\nlevel = "off"\nfeedback = ["feedback_reminder"]\n')
     assert _note(off, _start()) == ""
 
@@ -786,3 +789,730 @@ def test_a_real_session_start_note_is_read_back():
     assert old.pop(-2) == retry_line
     now = f"<system-reminder>\nSessionStart hook additional context: {cat.note_text(result.meta.cap_metrics, 'main')}\n</system-reminder>"
     assert old == now.splitlines()
+
+
+# -- the /cg-feedback survey: facts line, plan check, rating reminder ----------------
+
+@pytest.fixture(autouse=True)
+def _in_a_terminal(monkeypatch):
+    """Tips count as shown by their notes, which the desktop app would not do (``CLAUDE_CODE_ENTRYPOINT``)."""
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT", raising=False)
+
+
+FB_NOW = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+FB_ALL = {"capture": {"level": "off", "feedback": list(cat.FEEDBACK_MESSAGE_IDS)}}
+FB_MARKER = CATALOGUE["coaching"]["feedback"]["facts_marker"]
+REMINDER_TEXT = f"{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}"
+_fb_ids = iter(range(1_000_000))
+
+
+def _fb_iso(ago_s: float, now: datetime = FB_NOW) -> str:
+    return (now - timedelta(seconds=ago_s)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def _timeline(*records: dict, gap: float = 20.0, now: datetime = FB_NOW) -> list[dict]:
+    """``records`` (not yet in a timeline) one after another, ``gap``
+    seconds apart, the last 50 seconds before ``now``."""
+    count = len(records)
+    out = []
+    for i, record in enumerate(records):
+        line = dict(record)
+        line.setdefault("timestamp", _fb_iso(gap * (count - 1 - i) + 50, now))
+        line.setdefault("uuid", f"fb-{next(_fb_ids)}")
+        out.append(line)
+    return out
+
+
+def _says(text: str = "ok", *, tokens: int = 1000, content=None) -> dict:
+    return {
+        "type": "assistant",
+        "message": {
+            "id": f"msg_{next(_fb_ids)}",
+            "usage": {"input_tokens": tokens, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0, "output_tokens": 0},
+            "content": content or [{"type": "text", "text": text}],
+        },
+    }
+
+
+def _types(text: str) -> dict:
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def _calls(name: str, call_id: str, tool_input: dict, *, tokens: int = 1000) -> dict:
+    return _says(tokens=tokens, content=[{"type": "tool_use", "id": call_id, "name": name, "input": tool_input}])
+
+
+def _comes_back(call_id: str, *, error: bool = False, text: str = "ok", result=None) -> dict:
+    block = {"type": "tool_result", "tool_use_id": call_id, "content": text, **({"is_error": True} if error else {})}
+    return {"type": "user", "toolUseResult": result if result is not None else {}, "message": {"role": "user", "content": [block]}}
+
+
+def _plans(plan_id: str, *, tokens: int = 1000) -> dict:
+    return _calls("ExitPlanMode", plan_id, {"plan": "Step one. Step two. Step three."}, tokens=tokens)
+
+
+def _approved(plan_id: str) -> dict:
+    return _comes_back(plan_id)
+
+
+def _edits(call_id: str = "e1", *, tokens: int = 1000) -> list[dict]:
+    return [_calls("Edit", call_id, {"file_path": "src/app.py", "old_string": "a", "new_string": "b"}, tokens=tokens),
+            _comes_back(call_id)]
+
+
+def _noted(hint: str) -> dict:
+    return {
+        "type": "attachment",
+        "attachment": {
+            "type": "hook_additional_context", "hookEvent": "UserPromptSubmit",
+            "content": [f"{cat.COACH_MARKER}{cat.COACH_VERSION} {hint}\nsome note"],
+        },
+    }
+
+
+def _queued_line(text: str) -> dict:
+    return {
+        "type": "attachment",
+        "attachment": {"type": "queued_command", "commandMode": "prompt", "prompt": text, "origin": {"kind": "human"}},
+    }
+
+
+def _ran_feedback() -> dict:
+    return _types("<command-message>cg-feedback</command-message>\n<command-name>/cg-feedback</command-name>")
+
+
+def _plan_check_asked(call_id: str, outcome: str) -> list[dict]:
+    """The plan check's question and how it came back: ``declined``, ``answered`` or ``other``."""
+    question = {"question": cat.PLAN_CHECK_QUESTION, "header": cat.PLAN_CHECK_HEADER}
+    ask = _calls("AskUserQuestion", call_id, {"questions": [question]})
+    if outcome == "declined":
+        return [ask, _comes_back(call_id, error=True, text="User rejected tool use")]
+    answer = cat.PLAN_CHECK_OPTIONS[1][1] if outcome == "answered" else "my own words"
+    result = {"questions": [question], "answers": {cat.PLAN_CHECK_QUESTION: answer}}
+    return [ask, _comes_back(call_id, result=result)]
+
+
+def _prompt_for(tmp_path: Path, records: list[dict], prompt: str, *, session: str = "s1") -> dict:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    path = tmp_path / f"{session}.jsonl"
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return {
+        "hook_event_name": "UserPromptSubmit", "session_id": session, "cwd": "/work/app",
+        "transcript_path": str(path), "prompt": prompt,
+    }
+
+
+def _fb(tmp_path: Path, records: list[dict], prompt: str, *, config=FB_ALL, now=FB_NOW, tipped=False, session="s1") -> str:
+    config_dir = tmp_path / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    payload = _prompt_for(tmp_path, records, prompt, session=session)
+    return HOOK.feedback_note_for(payload, config, CATALOGUE, config_dir, now=now, tipped=tipped)
+
+
+def _facts(note: str) -> dict:
+    assert note.startswith(FB_MARKER + " "), note
+    pairs = [part.split("=", 1) for part in note[len(FB_MARKER):].split()]
+    return {key: int(value) if value.isdigit() else value for key, value in pairs}
+
+
+def _hint(note: str) -> str:
+    assert note.startswith(cat.COACH_MARKER + str(cat.COACH_VERSION) + " "), note
+    return note.split("\n", 1)[0].rsplit(" ", 1)[1]
+
+
+FIX = "That's wrong, it still fails on empty files."
+WORK = [_types("Plan the importer"), _says("Here is the plan."), _plans("p1"), _approved("p1"), *_edits(), _says("Built it.")]
+
+
+def test_the_hook_holds_the_same_feedback_ids_as_the_catalogue():
+    assert HOOK._FEEDBACK_MESSAGE_IDS == cat.FEEDBACK_MESSAGE_IDS
+    assert tuple(CATALOGUE["coaching"]["feedback"]["message_ids"]) == cat.FEEDBACK_MESSAGE_IDS
+    assert HOOK.feedback_ids({"capture": {"feedback": ["plan_check", "feedback_note", "feedback_skill"]}}) == (
+        "feedback_skill", "plan_check",
+    )
+    for config in ({}, {"capture": {}}, {"capture": {"feedback": "plan_check"}}, {"capture": []}):
+        assert HOOK.feedback_ids(config) == ()
+
+
+def test_a_feedback_run_starts_with_the_facts_line_of_its_piece(tmp_path):
+    records = _timeline(
+        _types("Plan the importer"),
+        _says("Here is the plan.", tokens=1000),
+        _plans("p1", tokens=2000),
+        _approved("p1"),
+        *_edits(tokens=3000),
+        _types("rename the loader to reader"),
+        _noted("drip_feed"),
+        _says("Done.\n> **ClaudeGlass tip:** send bigger asks", tokens=4000),
+        _queued_line("also tweak the docs"),
+        _types("go ahead"),
+        _types("how is it going?"),
+        _types(FIX),
+        _says("You're right, my mistake.", tokens=5000),
+    )
+    note = _fb(tmp_path, records, "/cg-feedback")
+    assert note == (
+        f"{FB_MARKER} tokens=15000 typical=0 followups=3 queued=1 plan=approved plan_followups=3 plan_asked=0 "
+        "build=same tips=drip_feed:1 tip=drip_feed admits=1"
+    )
+    assert list(_facts(note)) == list(CATALOGUE["coaching"]["feedback"]["fact_keys"])
+    # With arguments too, and not for another command.
+    assert _fb(tmp_path, records, "/cg-feedback now").startswith(FB_MARKER)
+    assert _fb(tmp_path, records, "/cg-feedbacks") == ""
+    assert _fb(tmp_path, records, "cg-feedback") == ""
+
+
+def test_the_facts_line_without_a_plan_or_a_tip_says_none(tmp_path):
+    records = _timeline(_types("Add a flag"), _says(tokens=500), *_edits(tokens=700), _says(tokens=300))
+    assert _facts(_fb(tmp_path, records, "/cg-feedback")) == {
+        "tokens": 1500, "typical": 0, "followups": 0, "queued": 0, "plan": "none", "plan_followups": 0,
+        "plan_asked": 0, "build": "none", "tips": "none", "tip": "none", "admits": 0,
+    }
+
+
+def test_the_facts_line_calls_a_plan_pending_until_it_is_approved(tmp_path):
+    rejected = _comes_back("p1", error=True, text="The user doesn't want to proceed with this tool use.")
+    records = _timeline(_types("Plan it"), _plans("p1"), rejected, _says("Plan sent back."))
+    facts = _facts(_fb(tmp_path, records, "/cg-feedback"))
+    assert (facts["plan"], facts["build"], facts["plan_followups"]) == ("pending", "none", 0)
+
+
+def test_a_failed_edit_is_no_build(tmp_path):
+    failed = [_calls("Edit", "e9", {"file_path": "src/app.py"}), _comes_back("e9", error=True, text="no match")]
+    records = _timeline(_types("Plan it"), _plans("p1"), _approved("p1"), *failed, _says("It failed."))
+    assert _facts(_fb(tmp_path, records, "/cg-feedback"))["build"] == "none"
+
+
+def test_a_go_ahead_that_approves_a_plan_counts_as_the_approval(tmp_path):
+    rejected = _comes_back("p1", error=True, text="The user doesn't want to proceed with this tool use.")
+    records = _timeline(
+        _types("Plan it"), _plans("p1"), rejected, _says("Waiting."), _types("go ahead"), *_edits(), _types("and tidy up"),
+        _says("Done."),
+    )
+    facts = _facts(_fb(tmp_path, records, "/cg-feedback"))
+    # The go-ahead is no follow-up, "and tidy up" is one, after the approval.
+    assert (facts["plan"], facts["build"], facts["followups"], facts["plan_followups"]) == ("approved", "same", 1, 1)
+
+
+def test_the_plan_question_counts_as_asked_once_it_was_answered_after_the_approval(tmp_path):
+    plan_header = CATALOGUE["coaching"]["feedback"]["plan_headers"][0]
+    question = {"question": "Was the plan enough?", "header": plan_header}
+    asked = [_calls("AskUserQuestion", "q1", {"questions": [question]}),
+             _comes_back("q1", result={"questions": [question], "answers": {"Was the plan enough?": "Yes"}})]
+    declined = [_calls("AskUserQuestion", "q2", {"questions": [question]}), _comes_back("q2", error=True)]
+    base = [_types("Plan it"), _plans("p1"), _approved("p1"), *_edits()]
+    assert _facts(_fb(tmp_path, _timeline(*base, *asked, _says()), "/cg-feedback"))["plan_asked"] == 1
+    assert _facts(_fb(tmp_path, _timeline(*base, *declined, _says()), "/cg-feedback"))["plan_asked"] == 0
+    # Asked before the approval, it says nothing about the plan that was built.
+    before = [_types("Plan it"), *asked, _plans("p1"), _approved("p1"), *_edits()]
+    assert _facts(_fb(tmp_path, _timeline(*before, _says()), "/cg-feedback"))["plan_asked"] == 0
+
+
+def test_the_facts_line_names_the_tip_shown_most_and_latest(tmp_path):
+    records = _timeline(
+        _types("one"), _noted("drip_feed"), _says("a\n> **ClaudeGlass tip:** x"),
+        _types("two"), _noted("big_paste"), _says("b\n> **ClaudeGlass tip:** y"),
+        _types("three"), _noted("drip_feed"), _says("c\n> **ClaudeGlass tip:** z"),
+        _types("four"), _noted("plan_fresh"), _says("d\n> **ClaudeGlass tip:** w"),
+    )
+    facts = _facts(_fb(tmp_path, records, "/cg-feedback"))
+    # tip_hints order, not the order they came in.
+    assert facts["tips"] == "plan_fresh:1,drip_feed:2,big_paste:1"
+    assert facts["tip"] == "drip_feed"
+    tie = _timeline(_types("one"), _noted("drip_feed"), _says("a"), _types("two"), _noted("big_paste"), _says("b"))
+    assert _facts(_fb(tmp_path, tie, "/cg-feedback"))["tip"] == "big_paste"
+
+
+def test_a_tip_counts_on_the_desktop_only_when_the_reply_carried_it(tmp_path, monkeypatch):
+    records = _timeline(
+        _types("one"), _noted("drip_feed"), _says("no tip here"),
+        _types("two"), _noted("big_paste"), _says("ok\n> **ClaudeGlass tip:** y"),
+        _types("three"), _noted("status_poll"), _says("done"),
+    )
+    assert _facts(_fb(tmp_path, records, "/cg-feedback"))["tips"] == "drip_feed:1,big_paste:1,status_poll:1"
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "claude-desktop")
+    assert _facts(_fb(tmp_path, records, "/cg-feedback"))["tips"] == "big_paste:1"
+
+
+def test_a_piece_starts_where_claude_tagged_shift_new_and_tokens_count_from_there(tmp_path):
+    records = _timeline(
+        _types("first job"), _says("done [cg: task=feature size=m]", tokens=9000),
+        _types("a different job"), _says("on it [cg: task=bugfix shift=new]", tokens=2000),
+        _types("tweak it"), _says("done", tokens=1000),
+    )
+    facts = _facts(_fb(tmp_path, records, "/cg-feedback"))
+    assert (facts["tokens"], facts["followups"]) == (3000, 1)
+    # A tag on a go-ahead or a status check starts nothing.
+    go = _timeline(
+        _types("first job"), _says("done", tokens=9000), _types("go ahead"), _says("[cg: shift=new]", tokens=2000),
+        _types("how is it going?"), _says("[cg: shift=new]", tokens=1000),
+    )
+    assert _facts(_fb(tmp_path, go, "/cg-feedback"))["tokens"] == 12000
+    # Nor does a tag in a reply to a line you didn't type.
+    notified = _timeline(
+        _types("first job"), _says("done", tokens=9000),
+        _types("<task-notification><task-id>a1</task-id></task-notification>"), _says("[cg: shift=new]", tokens=2000),
+    )
+    assert _facts(_fb(tmp_path, notified, "/cg-feedback"))["tokens"] == 11000
+
+
+def test_a_run_after_a_feedback_run_rates_the_work_since_it(tmp_path):
+    first = [_types("first job"), _says("done", tokens=9000), _ran_feedback(), _says("Recorded.", tokens=500)]
+    # Nothing since the run: the same piece again, without the survey's own reply.
+    again = _facts(_fb(tmp_path, _timeline(*first), "/cg-feedback"))
+    assert (again["tokens"], again["followups"]) == (9000, 0)
+    more = _timeline(*first, _types("second job"), _says("done", tokens=2000), _types("tweak"), _says("ok", tokens=700))
+    facts = _facts(_fb(tmp_path, more, "/cg-feedback"))
+    assert (facts["tokens"], facts["followups"]) == (2700, 1)
+
+
+def test_the_facts_line_comes_from_the_typical_piece_in_coaching_json(tmp_path):
+    config_dir = tmp_path / "claudeglass"
+    config_dir.mkdir()
+    (config_dir / CATALOGUE["coaching"]["file"]).write_text(json.dumps({"typical_piece_tokens": 420_000}), encoding="utf-8")
+    records = _timeline(_types("job"), _says(tokens=1_300_000))
+    facts = _facts(_fb(tmp_path, records, "/cg-feedback"))
+    assert (facts["tokens"], facts["typical"]) == (1_300_000, 420_000)
+    (config_dir / CATALOGUE["coaching"]["file"]).write_text(json.dumps({"typical_piece_tokens": "many"}), encoding="utf-8")
+    assert _facts(_fb(tmp_path, records, "/cg-feedback"))["typical"] == 0
+
+
+def test_the_facts_line_needs_the_skill_toggle_and_the_project_filter(tmp_path):
+    records = _timeline(_types("job"), _says())
+    only_check = {"capture": {"level": "off", "feedback": ["plan_check"]}}
+    assert _fb(tmp_path, records, "/cg-feedback", config=only_check) == ""
+    assert _fb(tmp_path, records, "/cg-feedback", config={"capture": {"level": "off"}}) == ""
+    assert _fb(tmp_path, records, "/cg-feedback", config={**FB_ALL, "exclude_projects": ["-work-app"]}) == ""
+    assert _fb(tmp_path, records, "/cg-feedback", config=FB_ALL).startswith(FB_MARKER)
+    # A subagent and a session with no transcript get nothing.
+    payload = _prompt_for(tmp_path, records, "/cg-feedback")
+    config_dir = tmp_path / "claudeglass"
+    assert HOOK.feedback_note_for({**payload, "agent_id": "a1"}, FB_ALL, CATALOGUE, config_dir, now=FB_NOW) == ""
+    assert HOOK.feedback_note_for({**payload, "transcript_path": ""}, FB_ALL, CATALOGUE, config_dir, now=FB_NOW) == ""
+    assert HOOK.feedback_note_for({**payload, "hook_event_name": "PostToolUse"}, FB_ALL, CATALOGUE, config_dir) == ""
+
+
+def test_the_facts_line_reads_a_big_transcript_quickly_and_only_its_end(tmp_path):
+    import time
+
+    records = [_types("the first job")]
+    for n in range(2600):
+        records += [_says("x" * 1200, tokens=100), _calls("Read", f"r{n}", {"file_path": "a.py"}, tokens=100),
+                    _comes_back(f"r{n}", text="y" * 900)]
+    records += [_types("one more"), _says("done", tokens=700)]
+    lines = _timeline(*records, gap=1.0)
+    payload = _prompt_for(tmp_path, lines, "/cg-feedback")
+    assert Path(payload["transcript_path"]).stat().st_size > 5_000_000
+    config_dir = tmp_path / "claudeglass"
+    config_dir.mkdir()
+    started = time.perf_counter()
+    note = HOOK.feedback_note_for(payload, FB_ALL, CATALOGUE, config_dir, now=FB_NOW)
+    elapsed = time.perf_counter() - started
+    facts = _facts(note)
+    # Under the hook's 5 s timeout by a wide margin. The tail starts after the first message, so "one
+    # more" is the first it holds, and the tokens are those of the end only (2600 * 200 in all).
+    assert elapsed < 2.5, elapsed
+    assert facts["followups"] == 0 and 700 < facts["tokens"] < 2600 * 200
+
+
+def test_the_facts_line_holds_only_counts_and_words_of_a_closed_list(tmp_path):
+    secret = "zebra-passphrase-4821"
+    records = _timeline(
+        _types(f"Plan the {secret} importer"), _says(f"here is {secret}"), _plans("p1"), _approved("p1"),
+        *_edits(), _queued_line(f"also {secret}"), _types(f"{FIX} {secret}"), _says(f"You're right, {secret}", content=None),
+    )
+    note = _fb(tmp_path, records, "/cg-feedback")
+    assert secret not in note and re.fullmatch(rf"{re.escape(FB_MARKER)}( [a-z_]+=[a-z0-9_:,]+)+", note), note
+    assert not list((tmp_path / "claudeglass").glob("*"))
+
+
+# -- the plan check ---------------------------------------------------------------
+
+
+def test_a_fix_after_an_approved_plan_and_a_build_gets_the_plan_check(tmp_path):
+    note = _fb(tmp_path, _timeline(*WORK), FIX)
+    assert _hint(note) == "plan_check"
+    assert note == f"{cat.COACH_MARKER}{cat.COACH_VERSION} plan_check\n{cat.FEEDBACK_NOTE_TEXT['plan_check']}"
+    assert cat.PLAN_CHECK_HEADER in note and note.count("AskUserQuestion") == 1
+    # An adjustment that isn't a question counts as one too; a question doesn't.
+    assert _hint(_fb(tmp_path, _timeline(*WORK), "Rename the importer to loader instead.", session="s2")) == "plan_check"
+    assert _fb(tmp_path, _timeline(*WORK), "Why not rename the importer to loader instead?", session="s3") == ""
+
+
+def test_a_plan_approved_by_a_typed_go_ahead_gets_the_plan_check_too(tmp_path):
+    rejected = _comes_back("p1", error=True, text="The user doesn't want to proceed with this tool use.")
+    records = _timeline(_types("Plan it"), _plans("p1"), rejected, _says("Waiting."), _types("go ahead"), *_edits(), _says("Built."))
+    assert _hint(_fb(tmp_path, records, FIX)) == "plan_check"
+
+
+@pytest.mark.parametrize("records", [
+    pytest.param([_types("Plan it"), _plans("p1"), _approved("p1"), _says("Nothing to change.")], id="no edit since"),
+    pytest.param([_types("Add it"), *_edits(), _says("Built.")], id="no plan"),
+    pytest.param(
+        [_types("Plan it"), _plans("p1"), _comes_back("p1", error=True, text="rejected"), *_edits(), _says("x")],
+        id="plan never approved",
+    ),
+    pytest.param(
+        [_types("Plan it"), _plans("p1"), _approved("p1"), _calls("Edit", "e2", {"file_path": "a.py"}), _comes_back("e2", error=True), _says("x")],
+        id="the only edit failed",
+    ),
+    pytest.param(
+        [_types("Plan it"), _plans("p1"), _approved("p1"), _calls("Edit", "e3", {"file_path": "/home/u/.claude/plans/p.md"}),
+         _comes_back("e3"), _says("x")],
+        id="only a plan file changed",
+    ),
+])
+def test_no_plan_check_without_an_approved_plan_and_a_build(tmp_path, records):
+    assert _fb(tmp_path, _timeline(*records), FIX) == ""
+
+
+@pytest.mark.parametrize("prompt", [
+    "go ahead", "continue", "thanks", "thank you!", "how is it going?", "looks good", "Add a test for the loader",
+    "Why does it still fail?",
+])
+def test_a_go_ahead_a_thank_you_a_status_check_or_a_plain_request_gets_no_plan_check(tmp_path, prompt):
+    assert _fb(tmp_path, _timeline(*WORK), prompt) == ""
+
+
+def test_a_message_typed_while_claude_worked_gets_no_plan_check(tmp_path):
+    working = _timeline(*WORK[:-1], _calls("Read", "r1", {"file_path": "a.py"}))
+    assert _fb(tmp_path, working, FIX) == ""
+    assert _hint(_fb(tmp_path, _timeline(*WORK), FIX, session="s2")) == "plan_check"
+
+
+def test_feedback_you_typed_into_the_plan_dialog_means_no_plan_check(tmp_path):
+    said = _comes_back("p0", error=True, text="The user doesn't want to proceed. the user said: use a queue instead")
+    silent = _comes_back("p0", error=True, text="The user doesn't want to proceed. the user said: ")
+    base = [_types("Plan it"), _plans("p0"), said, _plans("p1"), _approved("p1"), *_edits(), _says("Built.")]
+    assert _fb(tmp_path, _timeline(*base), FIX) == ""
+    quiet = [_types("Plan it"), _plans("p0"), silent, _plans("p1"), _approved("p1"), *_edits(), _says("Built.")]
+    assert _hint(_fb(tmp_path, _timeline(*quiet), FIX, session="s2")) == "plan_check"
+    # A round from before this piece of work says nothing about this plan.
+    older = [_types("Old job"), _plans("p0"), said, _says("ok"), _types("New job"), _says("go [cg: task=feature shift=new]"),
+             _plans("p1"), _approved("p1"), *_edits(), _says("Built.")]
+    assert _hint(_fb(tmp_path, _timeline(*older), FIX, session="s3")) == "plan_check"
+
+
+def test_a_plan_question_already_asked_since_the_approval_means_no_plan_check(tmp_path):
+    asked = _plan_check_asked("q1", "answered")
+    assert _fb(tmp_path, _timeline(*WORK, *asked, _says("ok")), FIX) == ""
+    survey = {"question": "Was the plan enough?", "header": CATALOGUE["coaching"]["feedback"]["plan_headers"][0]}
+    ask = [_calls("AskUserQuestion", "q2", {"questions": [survey]}), _comes_back("q2", error=True)]
+    assert _fb(tmp_path, _timeline(*WORK, *ask, _says("ok")), FIX, session="s2") == ""
+    # One asked before the approval is another plan's.
+    before = [_types("Plan it"), *_plan_check_asked("q0", "answered"), _plans("p1"), _approved("p1"), *_edits(), _says("ok")]
+    assert _hint(_fb(tmp_path, _timeline(*before), FIX, session="s3")) == "plan_check"
+
+
+def test_the_plan_check_comes_once_per_plan(tmp_path):
+    records = _timeline(*WORK)
+    assert _hint(_fb(tmp_path, records, FIX)) == "plan_check"
+    # Claude ignored it (no question in the transcript): not again for this plan.
+    assert _fb(tmp_path, records, FIX) == ""
+    assert _fb(tmp_path, records, "Rename it to x instead.") == ""
+    # Another plan gets its own.
+    second = _timeline(*WORK, _types("Plan the next bit"), _plans("p2"), _approved("p2"), *_edits("e5"), _says("Built."))
+    assert _hint(_fb(tmp_path, second, FIX)) == "plan_check"
+    # Another session is its own.
+    assert _hint(_fb(tmp_path, records, FIX, session="s2")) == "plan_check"
+
+
+def test_the_plan_check_is_off_unless_its_toggle_is_on(tmp_path):
+    from claudeglass.config import FEEDBACK_ON
+
+    assert "plan_check" not in FEEDBACK_ON and "plan_check" in cat.DEEP_FEEDBACK_IDS
+    records = _timeline(*WORK)
+    for feedback in (["feedback_skill", "feedback_reminder"], [], ["feedback_note"]):
+        assert _fb(tmp_path, records, FIX, config={"capture": {"level": "off", "feedback": feedback}}) == ""
+    assert _hint(_fb(tmp_path, records, FIX, config={"capture": {"level": "off", "feedback": ["plan_check"]}})) == "plan_check"
+
+
+def test_a_coaching_tip_or_a_message_you_did_not_type_gets_no_plan_check(tmp_path):
+    records = _timeline(*WORK)
+    assert _fb(tmp_path, records, FIX, tipped=True) == ""
+    assert _fb(tmp_path, records, "<command-name>/fix</command-name> " + FIX) == ""
+    assert _fb(tmp_path, records, FIX, config={**FB_ALL, "exclude_projects": ["-work-app"]}) == ""
+
+
+def _backoff_transcript(*outcomes: str) -> list[dict]:
+    """A plan, a build and a plan check for each of ``outcomes``, then one more plan and build."""
+    records = [_types("Plan it")]
+    for n, outcome in enumerate(outcomes):
+        records += [_plans(f"p{n}"), _approved(f"p{n}"), *_edits(f"e{n}"), *_plan_check_asked(f"q{n}", outcome)]
+    return _timeline(*records, _plans("pz"), _approved("pz"), *_edits("ez"), _says("Built."))
+
+
+@pytest.mark.parametrize("outcomes, rests", [
+    (("declined", "declined"), True),
+    (("other", "declined"), True),
+    (("other", "other"), True),
+    (("declined",), False),
+    (("declined", "answered", "declined"), False),
+    (("answered", "answered"), False),
+])
+def test_two_misses_in_a_row_rest_the_plan_check_for_two_weeks(tmp_path, outcomes, rests):
+    records = _backoff_transcript(*outcomes)
+    note = _fb(tmp_path, records, FIX)
+    assert (note == "") is rests
+    if not rests:
+        return
+    state = json.loads((tmp_path / "claudeglass" / CATALOGUE["coaching"]["state_file"]).read_text(encoding="utf-8"))
+    check = state["feedback"]["plan_check"]
+    assert check["off_until"] == pytest.approx(FB_NOW.timestamp() + 14 * 86400) and check["misses"] == 0
+    # Still resting a day before the two weeks are up, on again after them.
+    assert _fb(tmp_path, records, FIX, now=FB_NOW + timedelta(days=13, hours=23), session="s2") == ""
+    assert _hint(_fb(tmp_path, records, FIX, now=FB_NOW + timedelta(days=14, minutes=1), session="s3")) == "plan_check"
+
+
+def test_the_back_off_counts_each_question_once(tmp_path):
+    records = _backoff_transcript("declined")
+    for session in ("s1", "s2", "s3"):
+        # One miss, however many messages and sessions see it.
+        assert _fb(tmp_path, records, "go ahead", session=session) == ""
+    state = json.loads((tmp_path / "claudeglass" / CATALOGUE["coaching"]["state_file"]).read_text(encoding="utf-8"))
+    assert state["feedback"]["plan_check"]["misses"] == 1 and "off_until" not in state["feedback"]["plan_check"]
+    assert len(state["feedback"]["plan_check"]["seen"]) == 1
+
+
+def test_the_back_off_keeps_only_a_short_salted_hash_of_a_question_s_call_id(tmp_path):
+    records = _backoff_transcript("declined")
+    # A salt is in place once capture has run: the hash is not the one anyone could work out from the id.
+    config_dir = tmp_path / "claudeglass"
+    config_dir.mkdir(parents=True)
+    (config_dir / HOOK.SALT_FILE).write_bytes(bytes(range(32)))
+    assert _fb(tmp_path, records, "go ahead") == ""
+    text = (config_dir / CATALOGUE["coaching"]["state_file"]).read_text(encoding="utf-8")
+    state = json.loads(text)
+    (seen,) = state["feedback"]["plan_check"]["seen"]
+    assert len(seen) == 8 and "q0" not in text
+    assert seen != HOOK._sha256_hex("q0")[:8]
+    # Another session that carries a copy of the same transcript counts the question once.
+    assert _fb(tmp_path, records, "go ahead", session="s2") == ""
+    again = json.loads((config_dir / CATALOGUE["coaching"]["state_file"]).read_text(encoding="utf-8"))
+    assert again["feedback"]["plan_check"]["seen"] == [seen] and again["feedback"]["plan_check"]["misses"] == 1
+
+
+def test_the_back_off_survives_a_session_row_being_dropped(tmp_path):
+    records = _backoff_transcript("declined", "declined")
+    assert _fb(tmp_path, records, FIX) == ""
+    # A day and a half on, the session's own row is gone, the rest is not.
+    later = FB_NOW + timedelta(hours=40)
+    assert _fb(tmp_path, records, FIX, now=later) == ""
+    state = json.loads((tmp_path / "claudeglass" / CATALOGUE["coaching"]["state_file"]).read_text(encoding="utf-8"))
+    assert state["feedback"]["plan_check"]["off_until"] == pytest.approx(FB_NOW.timestamp() + 14 * 86400)
+
+
+# -- the rating reminder -----------------------------------------------------------
+
+
+def _big(tokens: int, *, prompt: str = "Add the importer", tail: tuple = ()) -> list[dict]:
+    return _timeline(_types(prompt), _says("done", tokens=tokens), *tail)
+
+
+NEXT = "now the exporter please"
+
+
+def test_a_big_piece_that_was_not_rated_gets_the_reminder_note(tmp_path):
+    note = _fb(tmp_path, _big(1_300_000), NEXT)
+    assert _hint(note) == "rating_reminder"
+    text = note.split("\n", 1)[1]
+    assert "1.3M tokens" in text and "{tokens}" not in text
+    assert text.splitlines()[-1] == REMINDER_TEXT
+    assert "hasn't been rated" in text
+    lowered = {**FB_ALL, "thresholds": {"coaching_rating_min_tokens": 100_000}}
+    assert "420k tokens" in _fb(tmp_path / "other", _big(420_000), NEXT, config=lowered)
+
+
+@pytest.mark.parametrize("tokens, typical, reminded", [
+    (999_999, 0, False),
+    (1_000_000, 0, True),
+    (1_300_000, 800_000, False),
+    (1_600_000, 800_000, True),
+    (1_300_000, 100_000, True),
+    (5_000_000, 2_600_000, False),
+])
+def test_the_reminder_waits_for_a_million_tokens_and_twice_your_typical_piece(tmp_path, tokens, typical, reminded):
+    config_dir = tmp_path / "claudeglass"
+    config_dir.mkdir()
+    (config_dir / CATALOGUE["coaching"]["file"]).write_text(json.dumps({"typical_piece_tokens": typical}), encoding="utf-8")
+    note = _fb(tmp_path, _big(tokens), NEXT)
+    assert (note != "") is reminded
+    if reminded:
+        assert _hint(note) == "rating_reminder"
+
+
+def test_a_piece_you_rated_gets_no_reminder(tmp_path):
+    rated = [_types("Add the importer"), _says("done", tokens=1_500_000), _ran_feedback(), _says("Recorded.", tokens=300)]
+    assert _fb(tmp_path, _timeline(*rated), NEXT) == ""
+    # Work after the rating is a piece of its own: not big enough yet, then big enough.
+    small = _timeline(*rated, _types("More"), _says("done", tokens=900_000))
+    assert _fb(tmp_path / "small", small, NEXT) == ""
+    big = _timeline(*rated, _types("More"), _says("done", tokens=1_100_000))
+    note = _fb(tmp_path / "big", big, NEXT)
+    assert _hint(note) == "rating_reminder" and "1.1M tokens" in note
+
+
+def test_the_reminder_comes_once_per_piece_and_once_in_three_days(tmp_path):
+    records = _big(1_300_000)
+    assert _hint(_fb(tmp_path, records, NEXT)) == "rating_reminder"
+    # Once for this piece, whatever the time.
+    assert _fb(tmp_path, records, NEXT) == ""
+    assert _fb(tmp_path, records, NEXT, now=FB_NOW + timedelta(days=10)) == ""
+    # A new piece in another session, Claude marking it new after a message of yours.
+    other = _timeline(_types("A different job"), _says("[cg: task=feature shift=new]", tokens=1_400_000))
+    assert _fb(tmp_path, other, NEXT, now=FB_NOW + timedelta(days=2, hours=23), session="s2") == ""
+    assert _hint(_fb(tmp_path, other, NEXT, now=FB_NOW + timedelta(days=3, minutes=1), session="s2")) == "rating_reminder"
+    # And that piece, reminded, is not reminded again by the next piece's rest.
+    assert _fb(tmp_path, other, NEXT, now=FB_NOW + timedelta(days=30), session="s2") == ""
+
+
+def test_a_new_piece_in_the_same_session_can_be_reminded_after_the_rest(tmp_path):
+    first = [_types("job one"), _says("done", tokens=1_300_000)]
+    assert _hint(_fb(tmp_path, _timeline(*first), NEXT)) == "rating_reminder"
+    second = _timeline(
+        *first, _types("job two"), _says("[cg: task=feature shift=new]", tokens=500_000), _types("more"), _says("ok", tokens=700_000)
+    )
+    # 1.2M in the new piece, but the three-day rest isn't over.
+    assert _fb(tmp_path, second, NEXT, now=FB_NOW + timedelta(days=1)) == ""
+    note = _fb(tmp_path, second, NEXT, now=FB_NOW + timedelta(days=4))
+    assert _hint(note) == "rating_reminder" and "1.2M tokens" in note
+
+
+def test_the_reminders_piece_starts_at_a_message_claude_tagged_shift_new(tmp_path):
+    records = _timeline(
+        _types("job one"), _says("done", tokens=1_500_000),
+        _types("job two"), _says("started [cg: task=docs shift=new]", tokens=200_000),
+    )
+    assert _fb(tmp_path, records, NEXT) == ""
+    # Not when the tag is on a go-ahead or a status check, or on a different shift.
+    for n, (text, tag) in enumerate((("go ahead", "shift=new"), ("how is it going?", "shift=new"), ("job two", "shift=build"))):
+        kept = _timeline(_types("job one"), _says("done", tokens=1_500_000), _types(text), _says(f"[cg: {tag}]", tokens=200_000))
+        assert _hint(_fb(tmp_path / f"kept{n}", kept, NEXT)) == "rating_reminder", text
+
+
+def test_the_reminders_piece_counts_only_the_end_of_the_transcript_the_hook_reads(tmp_path):
+    # 1.2M tokens over 6 MB: the 4 MB the hook reads hold about 0.75M, a lower bound, so no reminder yet.
+    records = [_types("The job")] + [_says("x" * 1800, tokens=400) for _ in range(3000)]
+    path = tmp_path / "s1.jsonl"
+    assert _fb(tmp_path, _timeline(*records, gap=1.0), NEXT) == ""
+    assert path.stat().st_size > HOOK._COACH_PROMPT_TAIL_BYTES
+
+
+def test_the_plan_check_comes_before_the_reminder(tmp_path):
+    records = _timeline(_types("Plan it"), _plans("p1", tokens=1_500_000), _approved("p1"), *_edits(), _says("Built."))
+    assert _hint(_fb(tmp_path, records, FIX)) == "plan_check"
+    # The plan check went out for this plan, so the reminder gets its turn.
+    assert _hint(_fb(tmp_path, records, FIX)) == "rating_reminder"
+    assert _fb(tmp_path, records, FIX) == ""
+
+
+def test_a_coaching_tip_in_the_same_call_leaves_the_reminder_for_the_next_message(tmp_path):
+    records = _big(1_300_000)
+    assert _fb(tmp_path, records, NEXT, tipped=True) == ""
+    assert _hint(_fb(tmp_path, records, NEXT)) == "rating_reminder"
+
+
+def test_the_reminder_waits_for_a_finished_reply_and_a_message_you_typed(tmp_path):
+    working = _big(1_300_000, tail=(_calls("Read", "r1", {"file_path": "a.py"}),))
+    assert _fb(tmp_path, working, NEXT) == ""
+    assert _fb(tmp_path, _big(1_300_000), "<command-name>/clear</command-name>", session="s2") == ""
+    assert _fb(tmp_path, _big(1_300_000), NEXT, config={"capture": {"level": "off", "feedback": ["feedback_skill", "plan_check"]}}, session="s3") == ""
+    assert _fb(tmp_path, _big(1_300_000), NEXT, config={**FB_ALL, "exclude_projects": ["-work-app"]}, session="s4") == ""
+    assert _hint(_fb(tmp_path, _big(1_300_000), NEXT, session="s5")) == "rating_reminder"
+
+
+def test_the_reminder_uses_the_threshold_from_config_toml_and_coaching_json(tmp_path):
+    config_dir = tmp_path / "claudeglass"
+    config_dir.mkdir()
+    (config_dir / CATALOGUE["coaching"]["file"]).write_text(
+        json.dumps({"thresholds": {"rating_min_tokens": 2_000_000}}), encoding="utf-8"
+    )
+    assert _fb(tmp_path, _big(1_300_000), NEXT) == ""
+    assert _hint(_fb(tmp_path, _big(2_100_000), NEXT, session="s2")) == "rating_reminder"
+    lowered = {**FB_ALL, "thresholds": {"coaching_rating_min_tokens": 1_000}}
+    assert _hint(_fb(tmp_path / "other", _big(1_300_000), NEXT, config=lowered)) == "rating_reminder"
+
+
+def test_the_reminders_note_names_the_tokens_as_a_person_would():
+    assert HOOK._tokens_text(1_300_000) == "1.3M"
+    assert HOOK._tokens_text(1_000_000) == "1M"
+    assert HOOK._tokens_text(2_049_999) == "2M"
+    assert HOOK._tokens_text(420_000) == "420k"
+    assert HOOK._tokens_text(999_400) == "999k"
+
+
+def test_the_feedback_notes_leave_nothing_of_your_words_in_the_note_or_the_state(tmp_path):
+    secret = "zebra-passphrase-4821"
+    records = _timeline(
+        _types(f"Plan the {secret} importer"), _plans("p1", tokens=1_500_000), _approved("p1"), *_edits(),
+        _says(f"Built {secret}."),
+    )
+    seen = [_fb(tmp_path, records, f"{FIX} {secret}"), _fb(tmp_path, records, f"{FIX} {secret}")]
+    assert [_hint(n) for n in seen] == ["plan_check", "rating_reminder"]
+    assert secret not in "".join(seen)
+    for path in (tmp_path / "claudeglass").rglob("*"):
+        if path.is_file():
+            assert secret not in path.read_text(encoding="utf-8")
+
+
+# -- the whole hook ---------------------------------------------------------------------
+
+# These run the hook as a process, on the real clock: the transcript must be recent, or a coaching tip
+# about a cold cache comes first.
+
+
+def _feedback_config(tmp_path: Path, feedback: str, extra: str = "") -> Path:
+    return _config(tmp_path / "cg", f'[capture]\nlevel = "off"\nfeedback = [{feedback}]\n{extra}')
+
+
+def test_a_feedback_run_gets_its_facts_line_and_no_other_note_at_any_capture_level(tmp_path):
+    records = _timeline(_types("Add the importer"), _says("done", tokens=1_300_000), now=datetime.now(timezone.utc))
+    payload = _prompt_for(tmp_path, records, "/cg-feedback")
+    # Coaching notes on too: its tip would only be one more thing for Claude to write.
+    config_dir = _feedback_config(tmp_path, '"feedback_skill", "feedback_reminder"', 'coaching = ["coaching_notes"]\n')
+    note = _note(config_dir, payload)
+    assert note.startswith(FB_MARKER) and "\n" not in note and "tokens=1300000" in note
+    # A message that is not the command gets the reminder, then the same message gets nothing more.
+    reminder = _note(config_dir, {**payload, "prompt": NEXT})
+    assert _hint(reminder) == "rating_reminder" and reminder.splitlines()[-1] == REMINDER_TEXT
+    assert _note(config_dir, {**payload, "prompt": NEXT}) == ""
+
+
+def test_a_coaching_tip_goes_last_and_the_reminder_makes_way_for_it(tmp_path):
+    records = _timeline(_types("Add the importer"), _says("done", tokens=1_300_000), now=datetime.now(timezone.utc))
+    big = "word " * 60_000
+    config_dir = _feedback_config(tmp_path, '"feedback_reminder"', 'coaching = ["coaching_notes"]\n')
+    note = _note(config_dir, _prompt_for(tmp_path, records, big))
+    assert _hint(note) == "big_paste" and REMINDER_TEXT not in note
+    assert note.splitlines()[-1].startswith(cat.TIP_LABEL)
+
+
+def test_the_survey_items_run_with_nothing_else_on_and_not_with_nothing_asked(tmp_path):
+    records = _timeline(_types("Add the importer"), _says("done", tokens=1_300_000), now=datetime.now(timezone.utc))
+    payload = _prompt_for(tmp_path, records, "/cg-feedback")
+    assert _note(_feedback_config(tmp_path, '"feedback_skill"'), payload).startswith(FB_MARKER)
+    for body in ('', '"feedback_note"'):
+        assert _note(_config(tmp_path / f"c{len(body)}", f'[capture]\nlevel = "off"\nfeedback = [{body}]\n'), payload) == ""
+    # A subagent's prompt never carries a facts line.
+    assert _note(_feedback_config(tmp_path, '"feedback_skill"'), {**payload, "agent_id": "a1"}) == ""
+
+
+def test_a_run_with_nobody_at_the_screen_gets_no_facts_line_or_note(tmp_path):
+    records = _timeline(_types("Add the importer"), _says("done", tokens=1_300_000), now=datetime.now(timezone.utc))
+    config_dir = _feedback_config(tmp_path, '"feedback_skill", "feedback_reminder", "plan_check"')
+    for prompt in ("/cg-feedback", NEXT):
+        env = {**os.environ, "CLAUDE_CODE_ENTRYPOINT": "sdk-cli"}
+        assert _run(config_dir, _prompt_for(tmp_path, records, prompt), env=env) == (0, "", "")
+
+
+def test_a_broken_transcript_gives_no_note_and_no_error(tmp_path):
+    config_dir = _feedback_config(tmp_path, '"feedback_skill", "feedback_reminder", "plan_check"')
+    path = tmp_path / "broken.jsonl"
+    path.write_bytes(b'{"type": "user"\n\x00\xff garbage\n[1, 2]\n"text"\n')
+    payload = {"hook_event_name": "UserPromptSubmit", "session_id": "s1", "cwd": "/work/app", "transcript_path": str(path)}
+    for prompt in ("/cg-feedback", FIX):
+        rc, out, err = _run(config_dir, {**payload, "prompt": prompt})
+        assert rc == 0 and err == ""
+        assert out == "" or json.loads(out)["hookSpecificOutput"]["additionalContext"].startswith(FB_MARKER)
+    missing = {**payload, "transcript_path": str(tmp_path / "nothing.jsonl"), "prompt": "/cg-feedback"}
+    assert _run(config_dir, missing)[0] == 0

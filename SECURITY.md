@@ -87,14 +87,17 @@ least once: `hooks/capture-hook.py` (a small launcher),
 keeps in `hooks/__pycache__/`), `hooks/capture-catalogue.json`
 (a copy of the packaged metric catalogue the hook reads),
 `capture-log.jsonl` (one JSON line per `[capture]` change — the level,
-sample, `until` etc. you set, never anything from a transcript) and
-`signals/YYYY-MM.jsonl` (see "Metrics capture" below), and, while
+sample, `until` etc. you set, never anything from a transcript),
+`habit-log.jsonl` (one JSON line each time you press **Trying it** on a
+dashboard card: the card's kind, its id, the word `trying` and a time,
+nothing else) and `signals/YYYY-MM.jsonl` (see "Metrics capture" below), and, while
 Claude Haiku writes the tags or fills in a missing one, `tags/YYYY-MM.jsonl`
 (see "Claude Haiku as the tagger" and "Claude Haiku as the fallback" under
 "Metrics capture"), and, once
-coaching notes have been turned on, `coaching.json` (agent-type names
-and split points) and `coach-state.json` (see "Coaching notes" under
-"Metrics capture"), and, while capture is on, `payload-keys.json` (the
+coaching notes or a survey item that answers your messages have been turned
+on, `coaching.json` (agent-type names, split points, the names of hints
+your answers muted or limited, and your typical piece of work) and `coach-state.json` (see "Coaching notes" and "The survey's
+notes" under "Metrics capture"), and, while capture is on, `payload-keys.json` (the
 key names of each kind of SessionStart payload, once each: names only,
 never a value). The only other
 files it writes are output files you name on the command line: for
@@ -379,9 +382,48 @@ usage-limit line is never taken for one. `coach-state.json` holds, per
 session, when each hint last showed, how many times and how long it
 rests, and those three numbers, keyed by the same salted session hash
 as the signals, and per subagent run a byte offset and reply count;
-entries older than a day are dropped. `coaching.json` holds agent-type names
-and numbers. Neither ever leaves `<config-dir>`. See
+entries older than a day are dropped. A hint you said you already knew also
+carries a flag, `once`, that is true or absent. `coaching.json` holds
+agent-type names, hint ids from the fixed list in the catalogue, and numbers. Neither ever leaves `<config-dir>`. See
 [docs/coaching.md](docs/coaching.md).
+
+**The survey's notes.** `capture feedback on` (and Deep) also lets the
+capture hook answer a message you send, at any capture level, after the
+same settings.json diff and yes. It reads the same end of the transcript
+as the coaching hints, in memory, and keeps nothing it reads. When you run
+`/cg-feedback` it adds one line, `cg-fb-facts v1`, of numbers and words
+from closed lists: the tokens the piece of work used, your typical piece,
+how many follow-up messages you sent, a plan's state, a tip's hint id
+and similar counts, never a word you wrote. On Deep, a message that reads
+as a fix to work Claude did after you approved a plan gets a note that has
+Claude ask one `AskUserQuestion` (the header "CG plan fix", four fixed
+options), and a piece of work of a million tokens or more that hasn't been
+rated gets a note that has Claude end its reply with a fixed line. To
+decide, the hook matches your message's words against fixed patterns in
+memory (a correction, an adjustment, a go-ahead, a thank-you, a status
+check) and keeps none of them. The parser keeps the one word you ticked
+for the plan check (`PlanCheck.word`: covered, gap, new or none), or none
+when you declined or typed your own, and never the message. For all
+sessions together, `coach-state.json` also holds how many plan checks in
+a row went unanswered and the time the check rests until, the time of the
+last reminder, and short salted hashes of the plans and pieces of work
+already noted (at most 32 of each) and of the plan-check questions already
+counted (the last 16). `coaching.json`
+also holds your typical piece of work, a token count worked out from
+sessions you have had, and what your tip and plan answers change: the hint
+ids to leave out (`muted`) or show once a session (`once`), and the raised
+numbers for the hints that have one. Those lists come from counts of closed
+words (useful, known, wrong) in the report, never a word you wrote, and the
+hook only compares hint names against them. The checks are in
+`tests/test_capture_hook.py`
+(`test_the_facts_line_holds_only_counts_and_words_of_a_closed_list`,
+`test_the_feedback_notes_leave_nothing_of_your_words_in_the_note_or_the_state`),
+`tests/test_coaching.py`
+(`test_a_tip_you_already_knew_shows_once_a_session_however_much_grows`,
+`test_the_hook_reads_muted_and_once_only_as_lists_of_names`)
+and `tests/test_capture_parse.py`
+(`test_a_declined_plan_check_or_an_other_answer_has_no_word_and_keeps_none_of_your_words`).
+See [docs/coaching.md](docs/coaching.md#the-surveys-notes).
 
 **Claude Haiku as the tagger.** Off by default: `capture tagger haiku`
 (or "Tags written by" on Setup › Capture, after a yes) turns it on, and
@@ -511,12 +553,33 @@ its own words — an unknown key, an unknown word, a value that doesn't
 match — is dropped, never stored. The one exception is
 `skill=would-help:<name>`, and even that survives only when `<name>`
 matches a skill the same transcript already listed or invoked, not
-whatever string Claude wrote. `/cg-feedback` itself has no free-text
-field to scrub in the first place: all four of its questions (outcome,
-what slowed it, worth, what would have helped) are answered by ticking
-from a closed list of options — the same lists `POST
-/api/sessions/<id>/feedback` and the dashboard's own rating checkboxes
-accept (see "What the dashboard can change" below).
+whatever string Claude wrote. `/cg-feedback` has one place to type,
+the Other choice every `AskUserQuestion` offers, and it is handled the
+same way: the text is read once, to pick the closest word, then
+discarded. Claude maps it to a word of that question's own list (or
+leaves the key out when nothing fits), is told never to copy, quote or
+save it, and writes only the word in the tag with the question's key in
+`from_text`. The parser sees the answer in the transcript in memory only
+(`feedback_from_answers`) and keeps just which questions were answered
+that way (`Feedback.other`, keys from the closed list). A word picked
+from your note is accepted only when the `AskUserQuestion` result shows
+a non-label answer for that key, a ticked answer always wins over the
+tag, and a tag with no answers behind it loses its `from_text` words
+(`capture_tags.settle_feedback`). The checks are in
+`tests/test_capture_feedback.py`
+(`test_a_word_picked_from_your_note_counts_when_the_answer_was_not_a_label`,
+`test_a_tag_cannot_override_a_ticked_answer`,
+`test_free_text_answers_are_never_kept_only_which_question_they_answered`)
+and `tests/test_privacy.py`. The dashboard's own rating has no free-text
+field: its questions are checkboxes over the closed lists in
+`RATING_VOCAB`, which `POST /api/sessions/<id>/feedback` accepts, with
+the plan and handoff answers for each plan build. What it shows a session
+comes from counts and words worked out in memory from the stored
+transcript digest (`ratings.session_facts`): no message text is read,
+kept or sent. The Useful, Trying it, Knew it and Wrong here buttons on
+tip, habit and recommendation cards are a closed list too
+(`TIP_CARD_VOCAB`), kept with the card's id in the store's `tip_feedback`
+table (see "What the dashboard can change" below).
 
 **Signals are salted, like everything else here.** The free signals —
 why a session ended, and what kind of thing Claude was waiting on when
@@ -566,7 +629,7 @@ they print.
 
 **Files.** See "What is written, and where" above for
 `hooks/capture-hook.py`, `hooks/capture_hook.py`,
-`hooks/capture-catalogue.json`, `capture-log.jsonl` and `signals/`, and the `capture` bullet there for
+`hooks/capture-catalogue.json`, `capture-log.jsonl`, `habit-log.jsonl` and `signals/`, and the `capture` bullet there for
 how the settings.json hook entries and the `cg-feedback`/`cg-brief`
 skill files under `~/.claude/skills/` are added (diff or full text,
 asked, backed up) and removed.
@@ -720,11 +783,14 @@ recommendation or profile gives you a prompt to paste into Claude Code
 (which asks your permission before editing anything under `.claude`)
 and a `claudeglass apply ... --dry-run` command to run yourself.
 The service's few write routes touch only its own files: session tags
-(`mode`/`purpose`) and your `/cg-feedback` rating (`POST
-/api/sessions/<id>/feedback` — the same closed checkbox vocabulary the
-skill itself writes, `capture_catalogue.FEEDBACK_VOCAB`; an unknown
-field or value is `400`, and nothing ticked clears a rating) in the
-store, user profiles under `<config-dir>/profiles/` (`POST
+(`mode`/`purpose`), your `/cg-feedback` rating (`POST
+/api/sessions/<id>/feedback` — the closed checkbox vocabulary of the
+skill's questions, `capture_catalogue.RATING_VOCAB`; an unknown
+field or value is `400`, and nothing ticked clears a rating) and your
+rating of a tip, habit or recommendation card (`POST /api/tip-feedback`
+— `capture_catalogue.TIP_CARD_VOCAB`, with the card's kind and id; an
+unknown value or id is `400`, and **Trying it** also appends a line to
+`habit-log.jsonl`) in the store, user profiles under `<config-dir>/profiles/` (`POST
 /api/profiles`, and `POST /api/profiles/from-current`, which saves the
 allowlisted keys of the latest config snapshot there), and the
 `[capture]` table of ClaudeGlass's own `config.toml` (`POST

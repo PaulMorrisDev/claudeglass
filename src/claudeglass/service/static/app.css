@@ -2035,6 +2035,49 @@ details.disclosure[open] > summary {
   font-size: var(--text-md);
 }
 
+/* The rating row on a tip, habit or recommendation card. */
+.card-rating {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.card-rating-label {
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.button.card-rating-button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+/* One plan build's answers: its name, then the ticks, on one line. */
+.rating-build {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: var(--space-2);
+}
+
+.rating-build-label {
+  min-width: 7rem;
+  margin-right: var(--space-5);
+  color: var(--ink-2);
+  font-weight: var(--weight-semibold);
+}
+
+.label-guess {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
+}
+
 .rating-actions {
   display: flex;
   flex-wrap: wrap;
@@ -2756,6 +2799,19 @@ span.severity-mark {
 
 .capture-hide {
   color: var(--ink-2);
+}
+
+/* The banner's sessions waiting for a rating. */
+.capture-unrated {
+  margin-top: var(--space-3);
+}
+
+.capture-unrated p {
+  margin: 0;
+}
+
+.capture-unrated-list li {
+  margin-top: var(--space-1);
 }
 
 .capture-levels {

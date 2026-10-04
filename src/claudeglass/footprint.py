@@ -420,13 +420,13 @@ def inventory(
                 status="installed" if own_skill else "not installed",
                 where=home_label(skill_path(old_feedback, claude_root) if old_feedback else feedback_skill_path(claude_root)),
                 what_it_does=(
-                    "A skill you run after a piece of work: four checkbox questions (five after an approved plan) "
+                    "A skill you run after a piece of work: a few checkbox questions (more after an approved plan) "
                     "whose answers ClaudeGlass reads from the transcript, so its suggestions fit how you work. "
                     "Claude never runs it by itself."
                 ),
                 token_cost=(
                     "None until you run it: Claude doesn't see its description. Each run costs about two short "
-                    "turns, three after an approved plan, shown on {{page:setup/capture}}."
+                    "turns, three when a second round of questions applies, shown on {{page:setup/capture}}."
                 ),
                 undo="claudeglass capture feedback off",
             )

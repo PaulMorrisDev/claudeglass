@@ -23,11 +23,12 @@ can't serve: a recorded version newer than the running code's own, or
 an older one with no registered step. Most of the store is a derived
 cache over transcripts on disk, never the source of truth, so losing it
 to a rebuild is safe -- the next watcher tick repopulates it. The two
-tables that aren't re-derivable this way, ``session_tags`` and
-``session_feedback`` (your own tags and ratings from the Sessions tab),
-are read before a drop-and-rebuild and written straight back once the
-tables are recreated (ROB-P6, ``Store._export_marks``/
-``_reimport_marks``), so a rebuild never silently erases them either.
+tables that aren't re-derivable this way, ``session_tags``,
+``session_feedback``, ``session_plan_feedback`` and ``tip_feedback`` (your
+own tags and ratings from the dashboard), are read before a
+drop-and-rebuild and written straight back once the tables are recreated
+(ROB-P6, ``Store._export_marks``/``_reimport_marks``), so a rebuild never
+silently erases them either.
 
 Privacy rule (binding on every table below, restated from ``model.py``'s
 own module docstring and enforced here for the store specifically): no
@@ -114,10 +115,11 @@ exist.
 
 Version 6 (metrics capture feedback): a new ``session_feedback`` table
 holds the ratings you give a session on the dashboard's Sessions tab
-(``POST /api/sessions/<id>/feedback``): the same four questions as the
-``/cg-feedback`` skill, as words from ``capture_catalogue.FEEDBACK_VOCAB``
-(``slow`` and ``helped`` comma-joined), never free text. A v5 store gains
-the table in place (``store.MIGRATIONS[5]``).
+(``POST /api/sessions/<id>/feedback``): the four questions the
+``/cg-feedback`` skill asked until its redesign, as words from
+``capture_catalogue.RATING_VOCAB`` (``slow`` and ``helped`` comma-joined),
+never free text. A v5 store gains the table in place
+(``store.MIGRATIONS[5]``); Version 9 below adds the rest.
 
 Version 7 (EST-P5: predictions and back-testing): a new ``predictions``
 table holds a whatif estimate worth checking against what actually
@@ -158,12 +160,25 @@ transcript the watcher can't re-parse (its file is gone) keeps it. There
 is no index on ``bucket``: ``ALL_STATEMENTS`` runs before the ladder, so
 one declared here would fail against a v7 table, and the table is small
 enough (``idx_turns_agg_day`` narrows a windowed read first).
+
+Version 9 (the /cg-feedback redesign on the dashboard): the rating takes
+the same questions the skill asks (``capture_catalogue.RATING_QUESTIONS``).
+``session_feedback`` gains ``why`` (a comma list, like ``helped``),
+``missed_in``, ``tip`` and ``tip_hint``, all words from
+``capture_catalogue.RATING_VOCAB``. A new ``session_plan_feedback`` table
+holds the plan and handoff answers once for each approved plan in a session
+(``build`` counts them from 1), because a session with two plans has two
+answers. A new ``tip_feedback`` table holds what you said about a tip,
+habit or recommendation card (``kind`` and ``item`` name the card from a
+closed list, ``answer`` is a word from ``capture_catalogue.TIP_CARD_VOCAB``),
+one row per card. Still words and ids only, never free text. A v8 store
+gains the columns and tables in place (``store.MIGRATIONS[8]``).
 """
 
 from __future__ import annotations
 
 #: Bump when a table or index below changes shape. See module docstring.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 CREATE_META = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -348,7 +363,8 @@ CREATE TABLE IF NOT EXISTS session_tags (
 """
 
 #: Your rating of a session from the Sessions tab (v6): one row per
-#: session, words only (see module docstring).
+#: session, words only (see module docstring). ``why``, ``missed_in``,
+#: ``tip`` and ``tip_hint`` came with v9.
 CREATE_SESSION_FEEDBACK = """
 CREATE TABLE IF NOT EXISTS session_feedback (
     session_id TEXT PRIMARY KEY REFERENCES sessions(id),
@@ -356,7 +372,40 @@ CREATE TABLE IF NOT EXISTS session_feedback (
     slow       TEXT NOT NULL DEFAULT '',
     worth      TEXT,
     helped     TEXT NOT NULL DEFAULT '',
-    set_at     TEXT NOT NULL
+    set_at     TEXT NOT NULL,
+    why        TEXT NOT NULL DEFAULT '',
+    missed_in  TEXT,
+    tip        TEXT,
+    tip_hint   TEXT
+);
+"""
+
+#: What you said about each plan build of a session (v9): the plan and
+#: handoff answers, one row per approved plan, counted from 1 in the order
+#: they were approved. Words only.
+CREATE_SESSION_PLAN_FEEDBACK = """
+CREATE TABLE IF NOT EXISTS session_plan_feedback (
+    session_id TEXT NOT NULL REFERENCES sessions(id),
+    build      INTEGER NOT NULL,
+    plan       TEXT,
+    handoff    TEXT,
+    set_at     TEXT NOT NULL,
+    PRIMARY KEY (session_id, build)
+);
+"""
+
+#: What you said about a tip, habit or recommendation card (v9): one row
+#: per card. ``kind`` is one of ``capture_catalogue.TIP_CARD_KINDS``,
+#: ``item`` the card's id (a habit or hint id, or a recommendation rule
+#: id) and ``answer`` one of ``capture_catalogue.TIP_CARD_VOCAB``. No
+#: session id: it is about the card, not the work.
+CREATE_TIP_FEEDBACK = """
+CREATE TABLE IF NOT EXISTS tip_feedback (
+    kind   TEXT NOT NULL,
+    item   TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    set_at TEXT NOT NULL,
+    PRIMARY KEY (kind, item)
 );
 """
 
@@ -498,6 +547,8 @@ ALL_STATEMENTS: tuple[str, ...] = (
     CREATE_COMPACTIONS,
     CREATE_SESSION_TAGS,
     CREATE_SESSION_FEEDBACK,
+    CREATE_SESSION_PLAN_FEEDBACK,
+    CREATE_TIP_FEEDBACK,
     CREATE_PROFILES,
     CREATE_BASELINES,
     CREATE_WORKFLOW_RUNS,
@@ -518,6 +569,8 @@ __all__ = [
     "CREATE_SNAPSHOTS",
     "CREATE_SESSION_TAGS",
     "CREATE_SESSION_FEEDBACK",
+    "CREATE_SESSION_PLAN_FEEDBACK",
+    "CREATE_TIP_FEEDBACK",
     "CREATE_PROFILES",
     "CREATE_BASELINES",
     "CREATE_WORKFLOW_RUNS",

@@ -7,7 +7,7 @@ import { clear, el, state } from "./core.js";
 import { formatCell, moneyParts, moneyText } from "./format.js";
 import { findSection, loadReport } from "./api.js";
 import { chip, codeBlockWithCopy, emptyState, errorNotice, helpButton, loadingNode, prose, tile, tileRow } from "./ui.js";
-import { headRow, notesList, renderPlacedTables } from "./grid.js";
+import { cardRating, headRow, notesList, renderPlacedTables } from "./grid.js";
 import { pageLink, viewIntro } from "./links.js";
 import { habitSparkline } from "./charts-types.js";
 
@@ -108,6 +108,7 @@ function promptingCard(table, row) {
   if (spark) metaLine.appendChild(spark);
   card.appendChild(metaLine);
   if (row.basis) card.appendChild(el("p", { class: "cell-hint" }, prose("Cost worked out from " + row.basis + ".", seen)));
+  card.appendChild(cardRating("tip", String(row.habit)));
   return card;
 }
 
@@ -291,6 +292,7 @@ function appendHabitCards(table, rows, cards) {
       explainer.appendChild(list);
       card.appendChild(explainer);
     }
+    card.appendChild(cardRating("habit", String(row.habit)));
     cards.appendChild(card);
   });
 }

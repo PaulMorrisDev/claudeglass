@@ -153,9 +153,9 @@ python -m claudeglass init [--advanced] [--answers FILE] [--non-interactive] [--
      Essentials already on, the default is yes, and no turns it off and
      takes its hooks out. Capture already on at another level isn't
      asked about: a re-run never changes a level you chose, and the
-     review says `..., unchanged.` The per-reply reminder to run
-     `/cg-feedback` stays a Deep-only extra, so Essentials stays cheap;
-     the summary mentions the skill instead.
+     review says `..., unchanged.` The rating reminder after a large piece
+     of work and the plan check stay Deep-only extras, so Essentials stays
+     cheap; the summary mentions the skill instead.
    - Under `--advanced` or `--non-interactive`, or with a level from
      `--capture-level` or the answers file, the full
      [metrics capture and feedback questions](#the-full-capture-and-feedback-questions)
@@ -282,11 +282,12 @@ later with `claudeglass capture connect`.
 **Feedback** (`onboarding.ask_feedback`, through `cli.py`'s
 `_init_feedback_choice`), whatever the capture level (including off):
 whether to add the `/cg-feedback` skill — run it after a piece of work
-to tick four quick questions (did it deliver, what slowed it, was it
-worth the tokens, what would have helped; after an approved plan, a
-fifth: could the build have started fresh from the plan) and get a
-second status-line reminder that it's there. It costs nothing until you
-run it, then about two short turns (three after an approved plan). `--feedback {on,off}` or the answers file's `feedback`
+to tick a few quick questions (did it deliver, what were your follow-up
+messages, was it worth the tokens, what would have made it cheaper; after
+an approved plan, whether it covered what you then fixed and whether the
+build could have started fresh) and get a second status-line reminder
+that it's there. It costs nothing until you run it, then about two short
+turns (three when a second round of questions applies). `--feedback {on,off}` or the answers file's `feedback`
 key answers it without asking. Under `--non-interactive` with neither,
 it stays off and a `(derived) feedback: ...` line says so. Choosing Deep
 turns the survey on, so the question isn't asked then. Feedback already

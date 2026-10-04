@@ -21,6 +21,7 @@ from datetime import datetime
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
 from . import habits
+from . import ratings as ratings_mod
 from .config import CAPTURE_SAMPLES, CaptureConfig
 from .render.tables import format_cell
 from .units import NO_LIMIT_SHARE_HINT
@@ -315,12 +316,19 @@ def _kind(metric) -> str:
 
 
 def _feedback_facts(metric_id: str, feedback: dict) -> tuple[dict | None, int | None, int | None]:
-    """``(actual, answers, target)`` for the skill and the dashboard
-    rating, over the last :data:`capture.HISTORY_DAYS` days."""
+    """``(actual, answers, target)`` for the skill, the plan check and
+    the dashboard rating, over the last :data:`capture.HISTORY_DAYS`
+    days."""
     target = capture_mod.ENOUGH["feedback"]
     if metric_id == "feedback_skill" and feedback.get("use") is not None:
         use = feedback["use"]
         return _money(feedback.get("units"), use.feedback_cost), use.feedback_answered, target
+    if metric_id == "plan_check" and feedback.get("use") is not None:
+        use = feedback["use"]
+        return _money(feedback.get("units"), use.by_metric.get(metric_id, 0.0)), use.plan_checks_answered, target
+    if metric_id == "feedback_reminder" and feedback.get("use") is not None:
+        use = feedback["use"]
+        return _money(feedback.get("units"), use.by_metric.get(metric_id, 0.0)), None, None
     if metric_id == "dashboard_rating" and feedback.get("ratings") is not None:
         return None, feedback["ratings"], target
     return None, None, None
@@ -352,7 +360,7 @@ def _metric_row(
         if kind == "level":
             have, want = capture_mod.enough_data(use, metric.id, signal_sessions.get(metric.id, 0))
     skill = (feedback or {}).get("skill")
-    if on and kind == "feedback" and metric.id in ("feedback_skill", "dashboard_rating"):
+    if on and kind == "feedback" and metric.id in ("feedback_skill", "dashboard_rating", "plan_check", "feedback_reminder"):
         fb_actual, have, want = _feedback_facts(metric.id, {**(feedback or {}), "units": units})
         if fb_actual is not None:
             actual, actual_label = fb_actual, f"Over the last {capture_mod.HISTORY_DAYS} days"
@@ -529,12 +537,29 @@ def _step_down_note(capture: CaptureConfig, rows: list[dict]) -> str | None:
     )
 
 
+def _unrated_block(unrated: dict | None) -> dict | None:
+    """The banner's list of sessions waiting for a rating: ``unrated``
+    (``api.py``'s ``_capture_unrated``) with the sentence that introduces
+    it, or ``None`` when there are none."""
+    if not unrated or not unrated["pieces"]:
+        return None
+    total = unrated["total"]
+    return {
+        **unrated,
+        "text": f"{_plural(total, 'session')} used at least {unrated['threshold_text']} tokens and "
+        f"{'has' if total == 1 else 'have'} no rating yet. Rating them makes your savings tips fit how you work.",
+    }
+
+
 def _banner(
-    capture, config, levels, measured, use, rows, hooks, started_since, skill=None, brief_skill=None, roi=None
+    capture, config, levels, measured, use, rows, hooks, started_since, skill=None, brief_skill=None, roi=None,
+    unrated=None,
 ) -> dict:
-    """The banner's lines: a headline, then any notes worth acting on."""
+    """The banner's lines: a headline, then any notes worth acting on, and
+    the sessions waiting for a rating (``unrated``)."""
     notes: list[str] = []
     feedback_note = catalogue.FEEDBACK_NOTE if "feedback_note" in capture.feedback else None
+    waiting = _unrated_block(unrated)
     for metric_id, state, words in (
         ("feedback_skill", skill, SKILL_NOTES),
         ("brief_templates", brief_skill, BRIEF_SKILL_NOTES),
@@ -552,7 +577,7 @@ def _banner(
                 "Metrics capture is off. At Essentials it would have cost about "
                 f"{est['tokens_text']} tokens and {est['text']}{share}, for suggestions that fit how you work."
             )
-        return {"on": False, "headline": invite, "notes": notes, "feedback_note": feedback_note}
+        return {"on": False, "headline": invite, "notes": notes, "feedback_note": feedback_note, "unrated": waiting}
 
     parts = [f"Metrics capture: {config['title']}"]
     if capture.enabled_at:
@@ -616,7 +641,9 @@ def _banner(
             f"Enough collected for {', '.join(r['title'].lower() for r in ready)}: "
             "you could switch them off to save their cost."
         )
-    return {"on": True, "headline": " · ".join(parts), "notes": notes, "feedback_note": feedback_note}
+    return {
+        "on": True, "headline": " · ".join(parts), "notes": notes, "feedback_note": feedback_note, "unrated": waiting,
+    }
 
 
 def view(
@@ -636,6 +663,7 @@ def view(
     weekly_cost: float | None = None,
     dependent_value: float | None = None,
     coaching_use=None,
+    unrated: dict | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Everything the Capture tab and the banner show.
@@ -660,7 +688,9 @@ def view(
     ``habits.capture_dependent_value`` over the same window: together
     they're the capture-pays-for-itself figures in ``roi`` and the
     banner (``None`` while there's no measured cost to weigh anything
-    against).
+    against). ``unrated`` is the sessions big enough for the rating reminder
+    that have no rating (``None`` while the reminder and the dashboard
+    rating are both off): the banner lists them.
     """
     signal_sessions = signal_sessions or {}
     config = config_block(capture, now)
@@ -712,7 +742,7 @@ def view(
         },
         "roi": roi,
         "banner": _banner(
-            capture, config, levels, measured, use, rows, hooks_data, started_since, skill, brief_skill, roi
+            capture, config, levels, measured, use, rows, hooks_data, started_since, skill, brief_skill, roi, unrated
         ),
         "feedback": {
             "skill": skill,
@@ -723,11 +753,11 @@ def view(
             "questions": [
                 {
                     "key": q.key,
-                    "question": q.question,
+                    "question": ratings_mod.fill_question(q),
                     "multi": q.multi,
                     "options": [{"word": word, "label": label} for word, label, _text in q.options],
                 }
-                for q in catalogue.FEEDBACK_QUESTIONS
+                for q in catalogue.RATING_QUESTIONS
             ],
         },
         "commands": {

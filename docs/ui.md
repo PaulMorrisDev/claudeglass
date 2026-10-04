@@ -89,6 +89,7 @@ blocked storage still works.
 | `tls:sort:<table>` | a table's sort |
 | `tls:cols:<table>` | the columns chosen for a wide table |
 | `tls:captureNotesHidden` | when the capture banner's notes were dismissed, and which |
+| `tls:captureUnratedHidden` | when the banner's list of sessions to rate was dismissed, and which sessions it held |
 
 Two older keys are read once: `tls:activeTab` (the old tab bar's last
 tab, removed after) and `tls:overviewWindow` when `tls:window` is unset.
@@ -482,6 +483,17 @@ N tokens · <amount> (x% of spend) · tagged on P% of messages") and links
 to Setup › Capture and Work habits. **Dismiss for a week** hides the
 notes until they change.
 
+While the `/cg-feedback` reminder or the dashboard rating is on, the
+banner also lists the sessions you haven't rated that used at least the
+reminder's size (`info.unrated`, from `/api/capture`): a sentence, then up
+to five lines, each with the project, when it last replied, its tokens
+(tokens, never money) and **Rate it**, which opens the session drawer
+(`openSessionDrawer`) where the questions are. A count says how many more
+there are, with a link to Spend › Sessions. A rating, here or in
+`/cg-feedback`, takes a session off the list. Its own **Dismiss for a
+week** hides the list until it changes. The banner asks for a rating and
+changes nothing.
+
 **The Setup card** tops the Overview while a part that matters isn't
 working yet (`/api/setup/status`, `renderSetupCard`): how you pay, the
 connection to Claude Code, the dashboard at logon, and capture when it's
@@ -703,8 +715,10 @@ detail scrolls) and the one picked.
   group, picking a row shows that agent's change. Then the fixes as
   command blocks (a `scope: "managed"` card says your organisation's
   policy sets it), **The numbers behind this** as evidence links,
-  **Not for you?** with **Ignore this recommendation**, and **The check
-  this answers**.
+  **Was this useful?** with **Useful**, **Trying it**, **Knew it** and
+  **Wrong here** (a rating only, `POST /api/tip-feedback`), **Not for
+  you?** with **Ignore this recommendation**, and **The check this
+  answers**.
 - **Ignoring** (`ignores.py`, `POST /api/recommendations/ignore`) hides
   an item in the project on screen, or in every project from the
   all-projects view, while the profile `apply` last marked active stays
@@ -799,7 +813,22 @@ together. The report's `sessions` section follows.
 (`openSessionDrawer`, from `/api/session/<id>`): a summary; **Why was
 this session expensive?** (`/explain`); "Mode override" and "Purpose
 override" with **Save tags**; **Rate this session** while the dashboard
-rating is on; chart 5; and **Transcripts**, with no path. Chart 5 draws
+rating is on; chart 5; and **Transcripts**, with no path.
+
+A session whose mode or purpose is the catch-all a rule fell back to
+(`low_confidence`) shows a **Label unsure** chip beside its id in the
+list. The drawer says so above the tag controls, so you can set the right
+label.
+
+**Rate this session** asks the `/cg-feedback` questions as ticks. The
+service sends them (`feedback_questions`, from the same catalogue as the
+skill, so the words are not copied into the page) and leaves out the ones
+the session's own facts say don't apply: a question about where a missed
+detail was said shows only while "Claude missed something I had said" is
+ticked. A session with two or more approved plans gets a row for each
+plan build under the plan and handoff questions, saved as `builds`.
+Answers the page doesn't show for a session stay as they were when you
+save. **Clear** removes the whole rating. Chart 5 draws
 context size over turns with a marker shape per event (cache rebuild,
 conversation summary, subagent start, your message). Usage-limit events
 sit in lanes above, placed by time because they fall between turns. It
@@ -921,6 +950,15 @@ notes, **Tips Claude showed**, with how often Claude passed each tip on
 ("relayed N of M" for a hint Claude is told to show every time, "judged
 relevant N of M" for one it decides on) and how often it called the tip a
 misfire. Nothing here changes a setting.
+
+Each habit card and each prompting card ends with **Your rating**:
+**Useful**, **Trying it**, **Knew it** and **Wrong here** (`cardRating`
+in `grid.js`, `POST /api/tip-feedback`). Pressing the answer you gave
+takes it back. **Trying it** also marks the day you started, which
+becomes a change point on Your changes ("Started trying: ..."), so the
+habit's effect is measured from then. A recommendation's detail has the
+same row under **Was this useful?**. These are ratings you give. No
+button here writes a setting or a file in Claude Code's folders.
 
 ### Setup › Settings
 
@@ -1515,12 +1553,12 @@ hand with Playwright against a dev service.
 | `format.js` | `formatCell`, `money`, `moneyText`, `moneyNode`, `moneyParts`, `moneyUnit`, `moneyAxis`, `readableAmounts`, `compactNumber`, `signedPercent`, `fraction`, `shortTs`, `relativeTime`, `windowWhen`, `modelName`, `modelNames`, `projectName`, `setKnownProjects` |
 | `api.js` | `fetchJson`, `loadInto`, `postJson`, `withWindow`, `scopeKey`, `loadReport`, `loadProjects`, `loadRecommendations`, `loadQuickActions`, `prefetchActions`, `actionIndex`, `findSection`, the figures-as-of stamp, the connection state |
 | `ui.js` | the components in the table above, plus `prose`, `countUp`, `enterInTurn` and `motionOK` |
-| `grid.js` | `dataGrid`, `pulseRow`, `pulseNode`, `renderTable`, `renderPlacedTables`, `renderMappedSections`, `renderReportBackedSection`, `simpleTable`, `setSectionChart`, `NEWEST_LAST`, `formatEvidenceValue` |
+| `grid.js` | `dataGrid`, `pulseRow`, `pulseNode`, `renderTable`, `renderPlacedTables`, `renderMappedSections`, `renderReportBackedSection`, `simpleTable`, `setSectionChart`, `cardRating`, `NEWEST_LAST`, `formatEvidenceValue` |
 | `evidence.js` | `openEvidence`, `evidenceList`, `revealEvidence`, `tableDrawer` |
 | `charts.js` | `CHART_SPECS`, `fillSummary`, `ENTITY_COLOURS`, axes, tooltip, keyboard reading, the table view, resize, `drawChart`, `holdChart`, `chartError` |
 | `charts-types.js` | the eight forms, `renderChart`, `sectionChart`, `sessionContextChart`, `savingsLevers`, `dailyChanges`, `windowSpan`, `changeDay`, `sparkline`, `meter`, `habitSparkline` |
 | `costs.js` | pricing helpers for Actions, Cache, the Glossary and the Overview's cache tile: `modelIdFor`, `rateFor`, `pricingFacts`, `priced`, `modelSentence`, `avoidableRebuilds`, `cardRuleText` |
-| `shell.js` | on every view: the health banner, the status line, the capture banner, `RETRY_SECONDS`, `renderHealth`, the setup checklist (`renderSetupCard`, `renderSetupList`) |
+| `shell.js` | on every view: the health banner, the status line, the capture banner (with its list of sessions to rate), `RETRY_SECONDS`, `renderHealth`, the setup checklist (`renderSetupCard`, `renderSetupList`) |
 | `icons.js` | `icon(name, opts)` and `ICON_NAMES` |
 | `palette.js` | `openPalette`, `matchScore`, `GO_KEYS`, `showShortcuts`, `initPalette` |
 | `d3.js` | the one door to the vendored d3 |

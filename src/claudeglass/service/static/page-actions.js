@@ -34,7 +34,7 @@ import {
   statusMark,
   toast,
 } from "./ui.js";
-import { dataGrid, simpleTable } from "./grid.js";
+import { cardRating, dataGrid, simpleTable } from "./grid.js";
 import { modelName, modelNames, projectName } from "./format.js";
 import { formatHash, pageLink, replaceParams, scopeParams, viewIntro } from "./links.js";
 import { evidenceList } from "./evidence.js";
@@ -863,6 +863,13 @@ function renderRecommendationDetail(pane, group, memberKey, focusMember, ctx) {
   if (focus.evidence && focus.evidence.length) {
     article.appendChild(detailSection("The numbers behind this", [evidenceList(ctx.report, focus.evidence)], "detail-evidence"));
   }
+
+  article.appendChild(
+    detailSection("Was this useful?", [
+      el("p", { class: "notes", text: "A rating only. It changes no setting, and it tells ClaudeGlass how well its advice fits your work." }),
+      cardRating("recommendation", String(focus.key || focus.id || group.id)),
+    ])
+  );
 
   article.appendChild(ignoreSection(group, ctx));
 

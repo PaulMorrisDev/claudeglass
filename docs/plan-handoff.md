@@ -93,9 +93,35 @@ that planned and built (`plan_build`). Once there are at least three
   needed, so it suggests adding the decisions, file paths and
   constraints to the plan first.
 - More than half `yes`: the card cites them ("You said 5 of 6 builds
-  could have started from the plan").
+  could have started from the plan") and tells you to run `/clear` as
+  soon as you approve the plan.
 - More than half of the rated planned builds too costly (`worth=no`):
   the card says so.
+
+The fixes after a plan count too. Two answers sort a fix into three
+groups: the plan check (Claude asks it before the first correction after
+a plan is built, `plan_check`) and the plan question in `/cg-feedback`
+(`plan`: "After you approved the plan, did it cover what you then fixed or
+added?"). They show as `plan_covered`, `plan_gap` and `plan_new` in
+`habits_by_shape`:
+
+- `covered`: the plan said it, and the build missed it. These join the
+  `check_work` habit as misses in the plan, so it reads "Have Claude tick
+  off each plan step before it says done" when most are there.
+- `gap`: the plan left it out. When more than half of at least three of
+  these answers are `gap`, the card becomes "Write fuller plans, then
+  build in a fresh session" too, with its own sentence: "You said 3 of 4
+  fixes after a plan were things it left out". Its fix prompt asks Claude
+  to add the missing decisions before you approve.
+- `new`: you thought of it later. It is no rework: the message that asked
+  for it is left out of Redone and the waste figures, and no habit counts
+  it as a repeat or a vague fix.
+
+The daily run also writes your handoff answers into `coaching.json`
+(see [coaching.md](coaching.md)). With more than half `yes` the live
+`plan_fresh` hint speaks sooner, after `plan_handoff_min_dropped_tokens`
+divided by `coaching_rearm_factor`. With more than half `no` it is off,
+because a fresh start would have lost what the build needed.
 
 With fewer answers the card is as above.
 

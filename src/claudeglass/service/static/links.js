@@ -41,7 +41,7 @@ export var PAGES = [
       {
         id: "recommendations",
         label: "Recommendations",
-        intro: "Changes worth making, most important first. Each one comes with a prompt or command you can copy.",
+        intro: "Changes worth making, most important first. Each one comes with a prompt or command you can copy, and a rating you can give.",
       },
       {
         id: "checks",
@@ -64,7 +64,7 @@ export var PAGES = [
         intro:
           "What you could save: shorter tool output, earlier conversation summaries, cheaper models, and replies that did no useful work.",
       },
-      { id: "sessions", label: "Sessions", intro: "Every session, newest first. Pick one to see its replies on a timeline." },
+      { id: "sessions", label: "Sessions", intro: "Every session, newest first. Pick one to see its replies on a timeline, and to rate it." },
     ],
   },
   {
@@ -109,7 +109,7 @@ export var PAGES = [
     icon: "habits",
     group: "details",
     intro:
-      "How the way you work shapes what it costs. The habits that would have saved the most in your own sessions, each with an example to copy.",
+      "How the way you work shapes what it costs. The habits that would have saved the most in your own sessions, each with an example to copy and a rating you can give. A rating changes no setting.",
   },
   {
     id: "setup",
@@ -427,7 +427,7 @@ export var GLOSSARY = [
   ["Managed setting", "A setting your organisation's policy controls. Only your administrator can change it."],
   ["Snapshot", "A record of your Claude Code settings at one moment, taken so changes can be compared over time."],
   ["Window", "The stretch of time the numbers cover, picked at the top of the dashboard. It can be the last hour, today, the last 24 hours, 7, 30 or 90 days, all time, or since your last change. The 7, 30 and 90 day windows are whole local days, today included, from midnight. A session counts, in full, when it was last active in the window; since your last change, when it started after the change."],
-  ["Change point", "A moment your settings changed: an apply, its undo, or a change the settings snapshot saw. A model, effort or CLAUDE.md size change that held for 3 sessions in a row is one too. The dashboard compares the sessions before it with those after it."],
+  ["Change point", "A moment your settings changed: an apply, its undo, or a change the settings snapshot saw. A model, effort or CLAUDE.md size change that held for 3 sessions in a row is one too. So is a habit you marked as Trying it. The dashboard compares the sessions before it with those after it."],
   ["Quick action", "One question about a way to spend less, answered from your own sessions with the evidence and a fix you can copy. The dashboard lists them on the Actions page, under Checks."],
   ["What-if estimate", "What a change would have saved over the window, worked out from your own sessions. It is an estimate: cheaper settings can change how Claude works, which the estimate can't see."],
   ["CLAUDE.md", "Instruction files Claude reads at the start of every session, and of most subagents: yours, each project's, and rule files. Every line is paid for on every reply that re-reads it."],
@@ -438,7 +438,7 @@ export var GLOSSARY = [
   ["Tag", "The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as [cg: task=bugfix brief=clear]. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is."],
   ["Prompt cycle", "One message of yours and everything Claude did to answer it, subagents at any depth included. The unit metrics capture and the Work habits page measure by."],
   ["Work habits", "The page (and report section) that turns prompt cycles into habits worth trying, with a rough saving for each. Each shows where its evidence came from: reported by Claude, inferred from the transcript, or your own feedback."],
-  ["Feedback skill", "/cg-feedback, a skill you can add and run after a piece of work. It asks whether the work delivered, what slowed it, whether it was worth the tokens, and what would have helped. Works at any capture level, even off; picking deep turns it on, with its reminders."],
+  ["Feedback skill", "/cg-feedback, a skill you can add and run after a piece of work. It asks whether the work delivered, what your follow-up messages were, whether it was worth the tokens, and what would have made it cheaper. Works at any capture level, even off; picking deep turns it on, with its reminders."],
   ["Brief templates", "Checklists per kind of task on the Work habits page, built from what your own requests tend to lack. Turned on, it also adds a /cg-brief skill that checks a request against its checklist and asks once for anything missing before Claude starts."],
   ["Sampling", "Running metrics capture in only a share of sessions (100, 50, 25 or 10 percent, [capture] sample) to spend fewer tokens on it. Picked at random, per session."],
   ["Time-box", "The date metrics capture switches itself back off. By default it's 14 days after you turn a level on, whether at init, with capture on or level, or on the Capture page. So turning it on never means it runs unattended forever. --for or --capture-for sets another length, and --no-limit or --capture-no-limit turns the limit off. You can also say so when asked."],

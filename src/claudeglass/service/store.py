@@ -46,9 +46,10 @@ still never *silently* discards data. The store is otherwise a derived
 cache over transcripts still on disk, never the source of truth, and
 the next watcher tick repopulates a rebuilt store because
 ``known_files()`` is empty again -- except ``session_tags`` and
-``session_feedback`` (your own tags and ratings from the Sessions tab),
-which nothing else can re-derive: a drop-and-rebuild reads them before
-dropping and writes them straight back once the tables are recreated
+``session_feedback``, ``session_plan_feedback`` and ``tip_feedback`` (your
+own tags and ratings from the dashboard), which nothing else can
+re-derive: a drop-and-rebuild reads them before dropping and writes them
+straight back once the tables are recreated
 (``_export_marks``/``_reimport_marks``), so they survive even the two
 cases above that the additive ladder can't serve.
 
@@ -215,6 +216,14 @@ def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
 
 
+#: ``session_feedback``'s columns in the order the marks export reads them,
+#: and what a store from before the column existed reads as.
+_FEEDBACK_COLUMNS = (
+    "session_id", "outcome", "slow", "worth", "helped", "set_at", "why", "missed_in", "tip", "tip_hint",
+)
+_FEEDBACK_ABSENT = {"why": "''", "missed_in": "NULL", "tip": "NULL", "tip_hint": "NULL"}
+
+
 def _add_column_if_missing(conn: sqlite3.Connection, table: str, column: str, ddl_type: str) -> None:
     """``ALTER TABLE ... ADD COLUMN`` is not itself idempotent (it errors
     if the column is already there), so every ladder step in
@@ -278,6 +287,19 @@ def _migrate_7_to_8(conn: sqlite3.Connection) -> None:
     _demote_parsed(conn)
 
 
+def _migrate_8_to_9(conn: sqlite3.Connection) -> None:
+    """v8 -> v9 (``schema.py``'s "Version 9" paragraph): the redesigned
+    rating's columns on ``session_feedback`` and its two new tables. Each
+    ``ALTER`` goes through :func:`_add_column_if_missing`, so a half-applied
+    upgrade is retried in full."""
+    _add_column_if_missing(conn, "session_feedback", "why", "TEXT NOT NULL DEFAULT ''")
+    _add_column_if_missing(conn, "session_feedback", "missed_in", "TEXT")
+    _add_column_if_missing(conn, "session_feedback", "tip", "TEXT")
+    _add_column_if_missing(conn, "session_feedback", "tip_hint", "TEXT")
+    conn.execute(schema.CREATE_SESSION_PLAN_FEEDBACK)
+    conn.execute(schema.CREATE_TIP_FEEDBACK)
+
+
 #: Additive migration ladder for :meth:`Store.migrate`, keyed by the
 #: *recorded* version being migrated away from -- ``MIGRATIONS[4]`` takes
 #: a v4 store to v5. Each step may only add columns/indexes/tables, never
@@ -291,6 +313,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     5: _migrate_5_to_6,
     6: _migrate_6_to_7,
     7: _migrate_7_to_8,
+    8: _migrate_8_to_9,
 }
 
 
@@ -528,10 +551,14 @@ class Store:
             file=sys.stderr,
         )
 
-    def _export_marks(self, conn: sqlite3.Connection) -> tuple[list[tuple], list[tuple]]:
-        """``(tag_rows, feedback_rows)`` currently in ``session_tags``/
-        ``session_feedback``, or ``([], [])`` for a table that doesn't
-        exist yet (an older store, or a fresh one). ROB-P6: read before
+    def _export_marks(
+        self, conn: sqlite3.Connection
+    ) -> tuple[list[tuple], list[tuple], list[tuple], list[tuple]]:
+        """``(tag_rows, feedback_rows, plan_rows, tip_rows)`` currently in
+        ``session_tags``/``session_feedback``/``session_plan_feedback``/
+        ``tip_feedback``, or ``[]`` for a table that doesn't
+        exist yet (an older store, or a fresh one); a ``session_feedback``
+        from before v9 reads its newer columns as empty. ROB-P6: read before
         :meth:`_drop_all_tables` runs, so :meth:`_reimport_marks` can put
         them back once the tables are recreated -- unlike the rest of the
         store, a rating or a tag is never re-derivable from the
@@ -543,23 +570,47 @@ class Store:
             if "session_tags" in tables
             else []
         )
-        feedback = (
-            conn.execute(
-                "SELECT session_id, outcome, slow, worth, helped, set_at FROM session_feedback"
-            ).fetchall()
-            if "session_feedback" in tables
+        feedback = []
+        if "session_feedback" in tables:
+            held = _table_columns(conn, "session_feedback")
+            select = ", ".join(
+                column if column in held else f"{_FEEDBACK_ABSENT[column]} AS {column}"
+                for column in _FEEDBACK_COLUMNS
+            )
+            feedback = conn.execute(f"SELECT {select} FROM session_feedback").fetchall()
+        plans = (
+            conn.execute("SELECT session_id, build, plan, handoff, set_at FROM session_plan_feedback").fetchall()
+            if "session_plan_feedback" in tables
             else []
         )
-        return [tuple(row) for row in tags], [tuple(row) for row in feedback]
+        tips = (
+            conn.execute("SELECT kind, item, answer, set_at FROM tip_feedback").fetchall()
+            if "tip_feedback" in tables
+            else []
+        )
+        return (
+            [tuple(row) for row in tags],
+            [tuple(row) for row in feedback],
+            [tuple(row) for row in plans],
+            [tuple(row) for row in tips],
+        )
 
-    def _reimport_marks(self, conn: sqlite3.Connection, tags: list[tuple], feedback: list[tuple]) -> None:
+    def _reimport_marks(
+        self,
+        conn: sqlite3.Connection,
+        tags: list[tuple],
+        feedback: list[tuple],
+        plans: list[tuple] = (),
+        tips: list[tuple] = (),
+    ) -> None:
         """Put rows :meth:`_export_marks` read back into the just-recreated
-        ``session_tags``/``session_feedback`` tables. The ``sessions`` row
+        ``session_tags``/``session_feedback``/``session_plan_feedback``/
+        ``tip_feedback`` tables. The ``sessions`` row
         each one's ``session_id`` foreign key names doesn't exist again
         yet -- the next watcher tick repopulates it (same as every other
         table here) -- so this runs with foreign keys off, the same way
         :meth:`_drop_all_tables` already does for the drop itself."""
-        if not tags and not feedback:
+        if not (tags or feedback or plans or tips):
             return
         conn.execute("PRAGMA foreign_keys = OFF")
         try:
@@ -569,10 +620,23 @@ class Store:
                 tags,
             )
             conn.executemany(
-                "INSERT INTO session_feedback (session_id, outcome, slow, worth, helped, set_at) "
-                "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET outcome = excluded.outcome, "
-                "slow = excluded.slow, worth = excluded.worth, helped = excluded.helped, set_at = excluded.set_at",
+                "INSERT INTO session_feedback (session_id, outcome, slow, worth, helped, set_at, why, missed_in, "
+                "tip, tip_hint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
+                "outcome = excluded.outcome, slow = excluded.slow, worth = excluded.worth, "
+                "helped = excluded.helped, set_at = excluded.set_at, why = excluded.why, "
+                "missed_in = excluded.missed_in, tip = excluded.tip, tip_hint = excluded.tip_hint",
                 feedback,
+            )
+            conn.executemany(
+                "INSERT INTO session_plan_feedback (session_id, build, plan, handoff, set_at) "
+                "VALUES (?, ?, ?, ?, ?) ON CONFLICT(session_id, build) DO UPDATE SET plan = excluded.plan, "
+                "handoff = excluded.handoff, set_at = excluded.set_at",
+                plans,
+            )
+            conn.executemany(
+                "INSERT INTO tip_feedback (kind, item, answer, set_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(kind, item) DO UPDATE SET answer = excluded.answer, set_at = excluded.set_at",
+                tips,
             )
         finally:
             conn.execute("PRAGMA foreign_keys = ON")
@@ -595,14 +659,15 @@ class Store:
         registered ladder step (nit 24: the original ``<``-only check
         left a newer-than-code store's stale shape in place instead of
         rebuilding it -- still handled here, just via backup-then-drop
-        rather than a silent drop). Either way, ``session_tags`` and
-        ``session_feedback`` -- genuine user data, not a re-derivable
+        rather than a silent drop). Either way, ``session_tags``,
+        ``session_feedback``, ``session_plan_feedback`` and ``tip_feedback``
+        -- genuine user data, not a re-derivable
         cache over transcripts like the rest of the store -- are read
         before the drop and put back once the tables are recreated
         (ROB-P6, :meth:`_export_marks`/:meth:`_reimport_marks`)."""
         conn = self._connection()
         current = self.schema_version()
-        marks: tuple[list[tuple], list[tuple]] | None = None
+        marks: tuple[list[tuple], list[tuple], list[tuple], list[tuple]] | None = None
 
         if current is not None and current > schema.SCHEMA_VERSION:
             marks = self._export_marks(conn)
@@ -1209,6 +1274,7 @@ class Store:
                 conn.execute("DELETE FROM workflow_runs WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM session_tags WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM session_feedback WHERE session_id = ?", (session_id,))
+                conn.execute("DELETE FROM session_plan_feedback WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         return len(session_ids)
 
@@ -1239,10 +1305,10 @@ class Store:
         them, a tag write or a freshly-linked workflow run left the
         report-model cache (``api.py``'s ``_get_report_model``) serving a
         stale report until some unrelated transcript/snapshot change
-        happened to also invalidate it; ``session_feedback`` (v6) for the
-        same reason. Used by ``api.py``'s report-model cache to know when
-        a cached report needs rebuilding, without exposing anything about
-        *what* changed."""
+        happened to also invalidate it; ``session_feedback`` (v6) and, for
+        the same reason, ``session_plan_feedback`` and ``tip_feedback`` (v9).
+        Used by ``api.py``'s report-model cache to know when a cached report
+        needs rebuilding, without exposing anything about *what* changed."""
         conn = self._connection()
         transcripts_row = conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(updated_at), '') FROM transcripts"
@@ -1259,12 +1325,20 @@ class Store:
         feedback_row = conn.execute(
             "SELECT COUNT(*), COALESCE(MAX(set_at), '') FROM session_feedback"
         ).fetchone()
+        plan_feedback_row = conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(set_at), '') FROM session_plan_feedback"
+        ).fetchone()
+        tip_feedback_row = conn.execute(
+            "SELECT COUNT(*), COALESCE(MAX(set_at), '') FROM tip_feedback"
+        ).fetchone()
         return (
             f"{transcripts_row[0]}:{transcripts_row[1]}:"
             f"{snapshots_row[0]}:{snapshots_row[1]}:"
             f"{workflow_runs_row[0]}:{workflow_runs_row[1]}:"
             f"{session_tags_row[0]}:{session_tags_row[1]}:"
-            f"{feedback_row[0]}:{feedback_row[1]}"
+            f"{feedback_row[0]}:{feedback_row[1]}:"
+            f"{plan_feedback_row[0]}:{plan_feedback_row[1]}:"
+            f"{tip_feedback_row[0]}:{tip_feedback_row[1]}"
         )
 
     #: Review finding 11: an extreme-length session's turn_series could
@@ -1614,8 +1688,8 @@ class Store:
             where_params = list(project_slugs)
         query = f"""
             SELECT s.id, s.slug, s.first_ts, s.last_ts, s.span_s, s.archetype,
-                   s.mode, s.purpose, s.entrypoint, s.billing_mode, s.profile_id,
-                   s.total_cost, s.total_tokens,
+                   s.mode, s.mode_source, s.purpose, s.purpose_source, s.entrypoint,
+                   s.billing_mode, s.profile_id, s.total_cost, s.total_tokens,
                    (SELECT t.path FROM transcripts t WHERE t.session_id = s.id LIMIT 1) AS source_path
             FROM sessions s
             {where_sql}
@@ -2007,50 +2081,167 @@ class Store:
         )
 
     @staticmethod
-    def _feedback_row(row) -> dict:
+    def _feedback_row(row, builds=()) -> dict:
+        """One rating as the API shows it. ``row`` may come from a store
+        that predates version 9, which has none of the newer columns: they
+        read as empty. ``builds`` are the plan-build rows
+        (:meth:`_build_rows`); ``plan`` and ``handoff`` repeat the first
+        build's answers, so a session with one plan reads as it always did."""
+        held = row.keys()
+        first = next((b for b in builds if b["build"] == 1), None)
         return {
             "outcome": row["outcome"],
             "slow": [w for w in row["slow"].split(",") if w],
             "worth": row["worth"],
             "helped": [w for w in row["helped"].split(",") if w],
+            "why": [w for w in row["why"].split(",") if w] if "why" in held else [],
+            "missed_in": row["missed_in"] if "missed_in" in held else None,
+            "plan": first["plan"] if first else None,
+            "handoff": first["handoff"] if first else None,
+            "tip": row["tip"] if "tip" in held else None,
+            "tip_hint": row["tip_hint"] if "tip_hint" in held else None,
+            "builds": [dict(b) for b in builds],
             "set_at": row["set_at"],
         }
 
+    @staticmethod
+    def _build_rows(rows) -> dict[str, list[dict]]:
+        """``session_plan_feedback`` rows as ``{session_id: [{build, plan,
+        handoff}, ...]}``, in build order."""
+        out: dict[str, list[dict]] = {}
+        for row in sorted(rows, key=lambda r: (r["session_id"], r["build"])):
+            out.setdefault(row["session_id"], []).append(
+                {"build": row["build"], "plan": row["plan"], "handoff": row["handoff"]}
+            )
+        return out
+
     def feedback(self, session_id: str) -> dict | None:
         """Your rating of ``session_id`` from the Sessions tab
-        (``{outcome, slow, worth, helped, set_at}``), or ``None``."""
-        row = self._connection().execute(
-            "SELECT outcome, slow, worth, helped, set_at FROM session_feedback WHERE session_id = ?", (session_id,)
-        ).fetchone()
-        return self._feedback_row(row) if row is not None else None
+        (``{outcome, slow, worth, helped, why, missed_in, plan, handoff,
+        tip, tip_hint, builds, set_at}``), or ``None``."""
+        conn = self._connection()
+        row = conn.execute("SELECT * FROM session_feedback WHERE session_id = ?", (session_id,)).fetchone()
+        if row is None:
+            return None
+        plans = conn.execute(
+            "SELECT session_id, build, plan, handoff FROM session_plan_feedback WHERE session_id = ?", (session_id,)
+        ).fetchall()
+        return self._feedback_row(row, self._build_rows(plans).get(session_id, ()))
 
     def all_feedback(self) -> dict[str, dict]:
         """Every rating, by ``session_id``."""
-        rows = self._connection().execute(
-            "SELECT session_id, outcome, slow, worth, helped, set_at FROM session_feedback"
-        ).fetchall()
-        return {row["session_id"]: self._feedback_row(row) for row in rows}
+        conn = self._connection()
+        rows = conn.execute("SELECT * FROM session_feedback").fetchall()
+        builds = self._build_rows(
+            conn.execute("SELECT session_id, build, plan, handoff FROM session_plan_feedback").fetchall()
+        )
+        return {row["session_id"]: self._feedback_row(row, builds.get(row["session_id"], ())) for row in rows}
 
     def feedback_count(self) -> int:
         return self._connection().execute("SELECT COUNT(*) FROM session_feedback").fetchone()[0]
 
+    def unrated_sessions(self, *, min_tokens: int, since: str) -> list[dict]:
+        """Sessions with a last reply at or after ``since`` that used at
+        least ``min_tokens`` (their stored total, subagents included, so
+        an upper bound on the main transcript's own) and that you have not
+        rated on the dashboard, newest first: ``{id, slug, last_ts,
+        total_tokens}``, the slug redacted. The banner's candidates
+        (``ratings.unrated_piece`` has the last word)."""
+        since_dt, _until = _resolve_window(None, since, None)
+        rows = self._connection().execute(
+            "SELECT s.id, s.slug, s.last_ts, s.total_tokens FROM sessions s "
+            "WHERE s.total_tokens >= ? "
+            "AND NOT EXISTS (SELECT 1 FROM session_feedback f WHERE f.session_id = s.id) "
+            "ORDER BY s.last_ts DESC",
+            (min_tokens,),
+        ).fetchall()
+        return [
+            {**dict(row), "slug": redact_slug(row["slug"])}
+            for row in rows
+            if ts_in_window(row["last_ts"], since_dt, None)
+        ]
+
     def set_feedback(
-        self, session_id: str, *, outcome: str | None, slow=(), worth: str | None, helped=()
+        self,
+        session_id: str,
+        *,
+        outcome: str | None = None,
+        slow=(),
+        worth: str | None = None,
+        helped=(),
+        why=(),
+        missed_in: str | None = None,
+        plan: str | None = None,
+        handoff: str | None = None,
+        tip: str | None = None,
+        tip_hint: str | None = None,
+        builds=(),
     ) -> None:
         """Set (or replace) your rating of ``session_id``; a rating with
-        nothing ticked clears it. The caller checks the words
-        (``api.py``'s ``route_set_feedback``)."""
+        nothing ticked clears it, plan builds and all. ``builds`` is a list
+        of ``{"build": n, "plan": word, "handoff": word}`` (``n`` from 1);
+        ``plan`` and ``handoff`` given on their own are build 1's, unless
+        ``builds`` names it. A tip answer keeps its ``tip_hint`` only with
+        the answer. The caller checks the words (``api.py``'s
+        ``route_set_feedback``)."""
         conn = self._connection()
-        if not (outcome or slow or worth or helped):
-            conn.execute("DELETE FROM session_feedback WHERE session_id = ?", (session_id,))
-            return
+        answers: dict[int, tuple[str | None, str | None]] = {}
+        if plan or handoff:
+            answers[1] = (plan, handoff)
+        for item in builds:
+            if item.get("plan") or item.get("handoff"):
+                answers[int(item["build"])] = (item.get("plan"), item.get("handoff"))
+        ticked = outcome or slow or worth or helped or why or missed_in or tip or answers
+        now = _now()
+        with _transaction(conn):
+            conn.execute("DELETE FROM session_plan_feedback WHERE session_id = ?", (session_id,))
+            if not ticked:
+                conn.execute("DELETE FROM session_feedback WHERE session_id = ?", (session_id,))
+                return
+            conn.execute(
+                "INSERT INTO session_feedback (session_id, outcome, slow, worth, helped, set_at, why, missed_in, "
+                "tip, tip_hint) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET "
+                "outcome = excluded.outcome, slow = excluded.slow, worth = excluded.worth, "
+                "helped = excluded.helped, set_at = excluded.set_at, why = excluded.why, "
+                "missed_in = excluded.missed_in, tip = excluded.tip, tip_hint = excluded.tip_hint",
+                (
+                    session_id, outcome, ",".join(slow), worth, ",".join(helped), now, ",".join(why), missed_in,
+                    tip, tip_hint if tip else None,
+                ),
+            )
+            conn.executemany(
+                "INSERT INTO session_plan_feedback (session_id, build, plan, handoff, set_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                [(session_id, build, words[0], words[1], now) for build, words in sorted(answers.items())],
+            )
+
+    # -- what you said about a tip, habit or recommendation card (v9) ----
+
+    def tip_feedback(self) -> dict[tuple[str, str], dict]:
+        """Every card answer, by ``(kind, item)``: ``{answer, set_at}``."""
+        rows = self._connection().execute("SELECT kind, item, answer, set_at FROM tip_feedback").fetchall()
+        return {(row["kind"], row["item"]): {"answer": row["answer"], "set_at": row["set_at"]} for row in rows}
+
+    def tip_feedback_count(self) -> int:
+        return self._connection().execute("SELECT COUNT(*) FROM tip_feedback").fetchone()[0]
+
+    def set_tip_feedback(self, kind: str, item: str, answer: str | None) -> dict | None:
+        """Set (or replace) what you said about one card; ``None`` takes
+        the answer back. Returns the row as saved, or ``None`` when there
+        is none. The caller checks the words (``api.py``'s
+        ``route_set_tip_feedback``)."""
+        conn = self._connection()
+        if answer is None:
+            conn.execute("DELETE FROM tip_feedback WHERE kind = ? AND item = ?", (kind, item))
+            return None
+        stamp = _now()
         # Single statement -- see upsert_profile's comment above.
         conn.execute(
-            "INSERT INTO session_feedback (session_id, outcome, slow, worth, helped, set_at) "
-            "VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO UPDATE SET outcome = excluded.outcome, "
-            "slow = excluded.slow, worth = excluded.worth, helped = excluded.helped, set_at = excluded.set_at",
-            (session_id, outcome, ",".join(slow), worth, ",".join(helped), _now()),
+            "INSERT INTO tip_feedback (kind, item, answer, set_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(kind, item) DO UPDATE SET answer = excluded.answer, set_at = excluded.set_at",
+            (kind, item, answer, stamp),
         )
+        return {"answer": answer, "set_at": stamp}
 
     # -- EST-P5: predictions and back-testing ---------------------------
 
@@ -2167,7 +2358,8 @@ def read_session_marks(path: str | Path) -> tuple[dict[str, dict[str, str]], dic
     the store at ``path`` without writing to it, for the CLI's own
     reports: the same shapes as :meth:`Store.all_tags` and
     :meth:`Store.all_feedback`. Both empty when there is no store, it
-    predates a table, or it can't be read (a lock held too long)."""
+    predates a table, or it can't be read (a lock held too long). A store
+    from before version 9 gives ratings without the newer answers."""
     path = Path(path)
     if not path.is_file():
         return {}, {}
@@ -2185,11 +2377,41 @@ def read_session_marks(path: str | Path) -> tuple[dict[str, dict[str, str]], dic
                 for row in conn.execute("SELECT session_id, key, value FROM session_tags"):
                     tags.setdefault(row["session_id"], {})[row["key"]] = row["value"]
             if "session_feedback" in tables:
-                for row in conn.execute("SELECT session_id, outcome, slow, worth, helped, set_at FROM session_feedback"):
-                    ratings[row["session_id"]] = Store._feedback_row(row)
+                builds: dict[str, list[dict]] = {}
+                if "session_plan_feedback" in tables:
+                    builds = Store._build_rows(
+                        conn.execute("SELECT session_id, build, plan, handoff FROM session_plan_feedback").fetchall()
+                    )
+                for row in conn.execute("SELECT * FROM session_feedback"):
+                    ratings[row["session_id"]] = Store._feedback_row(row, builds.get(row["session_id"], ()))
     except sqlite3.Error:
         return {}, {}
     return tags, ratings
+
+
+def read_tip_feedback(path: str | Path) -> dict[tuple[str, str], dict]:
+    """:meth:`Store.tip_feedback`, read from the store at ``path`` without
+    writing to it, for the CLI's own reports. Empty when there is no
+    store, it predates the table, or it can't be read."""
+    path = Path(path)
+    if not path.is_file():
+        return {}
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return {}
+    conn.row_factory = sqlite3.Row
+    try:
+        with contextlib.closing(conn):
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if "tip_feedback" not in tables:
+                return {}
+            return {
+                (row["kind"], row["item"]): {"answer": row["answer"], "set_at": row["set_at"]}
+                for row in conn.execute("SELECT kind, item, answer, set_at FROM tip_feedback")
+            }
+    except sqlite3.Error:
+        return {}
 
 
 def read_predictions(path: str | Path) -> list[dict]:
@@ -2248,6 +2470,7 @@ __all__ = [
     "encode_digest_blob",
     "decode_digest_blob",
     "read_session_marks",
+    "read_tip_feedback",
     "read_predictions",
     "read_entrypoint_counts",
 ]

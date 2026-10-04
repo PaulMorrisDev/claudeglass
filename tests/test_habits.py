@@ -19,9 +19,12 @@ import pytest
 
 from claudeglass import capture as capture_mod, capture_catalogue as catalogue, habits, parse
 from claudeglass.habits import AgentFact, CycleFact, Habits, Item, Piece
-from claudeglass.model import CaptureTag, Recommendation, TranscriptMeta, WorkflowRun
+from claudeglass.capture_tags import with_older_why
+from claudeglass.model import CaptureTag, Feedback, Recommendation, TranscriptMeta, WorkflowRun
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing, price_turn
+
+from test_capture_feedback import Q as FEEDBACK_Q, T as FEEDBACK_T, _run as feedback_run
 
 from helpers import (
     old_agent_note_text,
@@ -336,6 +339,67 @@ def test_misses_you_reported_name_the_kind_of_work_and_what_slowed_it():
         "2 pieces of work missed their goal or were stopped, costing 3.0x one that met it; mostly refactor work. "
         "Slowed most by: wrong approach or rework."
     )
+
+
+def test_misses_you_reported_with_the_newer_questions_say_what_your_follow_ups_were():
+    h = Habits(pieces=[
+        Piece("missed", 4.0, 2, "refactor", (), (), "your feedback", why=("missed",)),
+        Piece("stopped", 2.0, 1, "refactor", ("rework",), (), "your feedback", why=("missed", "changed")),
+    ])
+    item = _by_key(habits.playbook(h))["outcome_misses"]
+    assert item.evidence.endswith("Slowed most by: claude missed something (it was in my request or the plan).")
+    table = habits._outcomes_table(h)
+    assert table.rows[0][6] == "Claude missed something (it was in my request or the plan)"
+
+
+def test_a_piece_keeps_why_from_the_newer_question_and_counts_an_older_slow_once():
+    rates = habits._Rates(None)
+    new = habits._piece(Feedback(outcome="missed", why=("missed", "none")), [], rates, "your feedback")
+    assert new.why == ("missed",) and new.slow == ()
+    # An older run's slow also gave a why: the piece keeps the slow only.
+    old = habits._piece(with_older_why(Feedback(outcome="missed", slow=("unclear", "none"))), [], rates, "x")
+    assert old.slow == ("unclear",) and old.why == ()
+    # The dashboard's rating is read the same way.
+    rating = habits._rating_feedback({"outcome": "partly", "slow": ["unclear"], "worth": "fair", "helped": []})
+    assert (rating.why, rating.why_older, rating.source) == (("left_out",), True, "rating")
+
+
+def test_a_dashboard_rating_with_no_outcome_or_a_stray_value_is_no_feedback():
+    assert habits._rating_feedback(None) is None
+    assert habits._rating_feedback("met") is None
+    assert habits._rating_feedback({"outcome": None, "worth": "yes"}) is None
+    assert habits._rating_feedback({"outcome": "", "plan": "gap"}) is None
+
+
+def test_a_dashboard_rating_carries_the_redesigned_answers_as_feedback():
+    rating = habits._rating_feedback({
+        "outcome": "partly", "why": ["left_out", "missed"], "missed_in": "plan", "worth": "fair", "helped": ["plan"],
+        "plan": "gap", "handoff": "partly", "tip": "useful", "tip_hint": "plan_fresh",
+        "builds": [{"build": 1, "plan": "gap", "handoff": "partly"}],
+    })
+    assert rating.why == ("left_out", "missed") and rating.missed_in == "plan" and rating.why_older is False
+    assert (rating.plan, rating.handoff, rating.tip, rating.tip_hint) == ("gap", "partly", "useful", "plan_fresh")
+    assert rating.helped == ("plan",) and rating.worth == "fair" and rating.source == "rating"
+
+
+def test_a_session_with_several_plan_builds_is_read_by_its_worst_answer():
+    rating = habits._rating_feedback({
+        "outcome": "met", "plan": "covered", "handoff": "yes",
+        "builds": [
+            {"build": 1, "plan": "covered", "handoff": "yes"},
+            {"build": 2, "plan": "gap", "handoff": "partly"},
+            {"build": 3, "plan": "new", "handoff": None},
+        ],
+    })
+    assert (rating.plan, rating.handoff) == ("gap", "partly")
+    # One build is the session's own answer, and a build with no words leaves it alone.
+    single = habits._rating_feedback({"outcome": "met", "plan": "new", "handoff": "no", "builds": [{"build": 1}]})
+    assert (single.plan, single.handoff) == ("new", "no")
+    blank = habits._rating_feedback({
+        "outcome": "met", "plan": "covered", "handoff": "yes",
+        "builds": [{"build": 1, "plan": None, "handoff": None}, {"build": 2, "plan": None, "handoff": None}],
+    })
+    assert (blank.plan, blank.handoff) == ("covered", "yes")
 
 
 # -- tables -----------------------------------------------------------------------------
@@ -1125,8 +1189,9 @@ def _plan_session(tmp_path, name: str, *, edit: bool = True, handoff: str | None
         ))
         lines.append(user_block_line([tool_result_block("tu_e", "ok")], timestamp=_ts(5)))
     lines.append(_reply(6, text="Done."))
-    core = _asked(catalogue.FEEDBACK_QUESTIONS)
-    answers = {catalogue.FEEDBACK_QUESTIONS[0].question: "Yes", catalogue.FEEDBACK_QUESTIONS[2].question: worth}
+    ask = {q.key: q for q in catalogue.FEEDBACK_QUESTIONS}
+    core = _asked(catalogue.feedback_questions()[0])
+    answers = {ask["outcome"].question: "Yes", ask["worth"].question: worth}
     lines += [
         user_str_line("<command-message>cg-feedback</command-message>\n<command-name>/cg-feedback</command-name>",
                       timestamp=_ts(10)),
@@ -1136,12 +1201,12 @@ def _plan_session(tmp_path, name: str, *, edit: bool = True, handoff: str | None
                         toolUseResult={"questions": core, "answers": answers}, timestamp=_ts(12)),
     ]
     if handoff is not None:
-        asked = _asked([catalogue.HANDOFF_QUESTION])
+        asked = _asked([ask["handoff"]])
         lines += [
             _reply(13, tool_use_block("AskUserQuestion", "tu_h", {"questions": asked})),
             user_block_line([tool_result_block("tu_h", "User has answered your questions.")],
                             toolUseResult={"questions": asked,
-                                           "answers": {catalogue.HANDOFF_QUESTION.question: handoff}},
+                                           "answers": {ask["handoff"].question: handoff}},
                             timestamp=_ts(14)),
         ]
     lines.append(_reply(15, text="Thanks: ClaudeGlass will use this for your savings tips."))
@@ -2100,3 +2165,358 @@ def test_a_setup_with_only_some_hard_work_can_still_be_named_cheaper():
     rows = {r["model"]: r for r in _rows(_table(habits.section_from(h), "habits_setups")) if r["level"] == "all"}
     assert rows["claude-sonnet-5"]["verdict"] == "cheaper"
     assert rows["claude-sonnet-5"]["saving_pct"] == pytest.approx(75.0)
+
+
+# -- which advice each /cg-feedback answer feeds ----------------------------------------
+
+
+def _say(key: str, *words: str) -> dict:
+    """Your answer to a /cg-feedback question, by the words it carries."""
+    labels = [next(label for word, label, _text in FEEDBACK_Q[key].options if word == w) for w in words]
+    return {FEEDBACK_T[key]: labels if FEEDBACK_Q[key].multi else labels[0]}
+
+
+def _feedback_session(tmp_path, name, answers, *, later=None, fix: bool = True, rate_first_only: bool = False):
+    """A message, then a second one that fixes it (the reply's tag says
+    ``shift=fix``) or builds on it, then a /cg-feedback run rating both.
+    ``rate_first_only`` puts the run between the two, so it rates the first."""
+    lines = [
+        _note(0, ["task", "brief", "level", "shift"]),
+        user_str_line("add the login form", origin={"kind": "human"}, timestamp=_ts(1)),
+        _reply(2, text="Done.\n[cg: task=feature brief=partial]"),
+    ]
+    if rate_first_only:
+        lines += feedback_run(4, answers, later=later)
+    lines += [
+        user_str_line("that fails on empty input" if fix else "add a logout button too",
+                      origin={"kind": "human"}, timestamp=_ts(20)),
+        _reply(21, text=f"Fixed.\n[cg: task=bugfix shift={'fix' if fix else 'build'}]"),
+    ]
+    if not rate_first_only:
+        lines += feedback_run(30, answers, later=later)
+    top = _parse(tmp_path, f"{name}.jsonl", lines, kind="top-level")
+    return NS(top=top, subs=[], session_id=name, project_dir="p", slug="p")
+
+
+def _plan_fix_session(tmp_path, name, word):
+    """A plan approved and built, then a fix message that answers the plan
+    check with ``word``."""
+    check = {"question": catalogue.PLAN_CHECK_QUESTION, "header": catalogue.PLAN_CHECK_HEADER}
+    label = next(label for w, label, _description in catalogue.PLAN_CHECK_OPTIONS if w == word)
+    lines = [
+        _note(0, ["task", "brief", "level", "shift"]),
+        user_str_line("plan the login change", origin={"kind": "human"}, timestamp=_ts(1)),
+        turn_line(
+            content=[tool_use_block("ExitPlanMode", "tu_p", {"plan": "1. Edit a\n2. Edit b"})],
+            model=MODEL, timestamp=_ts(2), cache_read_input_tokens=10_000, input_tokens=10,
+        ),
+        user_block_line([tool_result_block("tu_p", "User has approved your plan.")], timestamp=_ts(3)),
+        turn_line(
+            content=[tool_use_block("Edit", "tu_e", {"file_path": "src/app.py", "old_string": "a", "new_string": "b"})],
+            model=MODEL, timestamp=_ts(4), cache_read_input_tokens=12_000, input_tokens=10,
+        ),
+        user_block_line([tool_result_block("tu_e", "ok")], timestamp=_ts(5)),
+        _reply(6, text="Built.\n[cg: task=feature plan=following]"),
+        user_str_line("that breaks on empty input", origin={"kind": "human"}, timestamp=_ts(10)),
+        _reply(11, tool_use_block("AskUserQuestion", "tu_q", {"questions": [check]})),
+        user_block_line([tool_result_block("tu_q", "ok")],
+                        toolUseResult={"questions": [check], "answers": {check["question"]: label}},
+                        timestamp=_ts(12)),
+        _reply(13, text="Fixed.\n[cg: task=bugfix shift=fix]"),
+    ]
+    top = _parse(tmp_path, f"{name}.jsonl", lines, kind="top-level")
+    return NS(top=top, subs=[], session_id=name, project_dir="p", slug="p")
+
+
+def _gave(**kw) -> Piece:
+    """A piece you rated through /cg-feedback and said what the follow-ups were."""
+    base = dict(
+        outcome="partly", cost=1.0, cycles=3, task="feature", slow=(), helped=(), source="your feedback",
+        why_given=True,
+    )
+    return Piece(**{**base, **kw})
+
+
+@pytest.mark.parametrize(
+    "answers, later, rework",
+    [
+        # A change of mind alone is not rework; "none" says nothing and is dropped.
+        ({**_say("outcome", "partly"), **_say("why", "changed")}, None, False),
+        ({**_say("outcome", "partly"), **_say("why", "changed", "none")}, None, False),
+        # A mix can't be told apart, so the redo stands, as it does for anything else you said.
+        ({**_say("outcome", "partly"), **_say("why", "changed", "left_out")}, None, True),
+        ({**_say("outcome", "partly"), **_say("why", "left_out")}, None, True),
+        ({**_say("outcome", "partly"), **_say("why", "missed")}, None, True),
+        ({**_say("outcome", "partly")}, None, True),
+        # What you fixed was new to the plan, or it was in the plan.
+        ({**_say("outcome", "partly")}, ([FEEDBACK_Q["plan"]], _say("plan", "new")), False),
+        ({**_say("outcome", "partly")}, ([FEEDBACK_Q["plan"]], _say("plan", "covered")), True),
+        ({**_say("outcome", "partly")}, ([FEEDBACK_Q["plan"]], _say("plan", "gap")), True),
+    ],
+)
+def test_a_change_of_mind_or_a_fix_new_to_the_plan_is_not_rework(tmp_path, pricing, answers, later, rework):
+    bundle = _feedback_session(tmp_path, "s1", answers, later=later)
+    h = habits.collect(NS(sessions=[bundle]), pricing)
+    first, second = h.cycles
+    assert second.tag.shift == "fix"
+    assert first.redone is rework and first.excused is (not rework)
+    assert first.redo_cost == (pytest.approx(second.cost) if rework else 0.0)
+    by_task = _table(habits.section_from(h), "habits_by_task")
+    assert _rows(by_task)[0]["redo_pct"] == pytest.approx(50.0 if rework else 0.0)
+    assert bool(by_task.notes) is (not rework)
+    if not rework:
+        assert by_task.notes == [
+            "1 message that looked redone is left out of Redone: you called the next message a change of mind "
+            "or new to the plan."
+        ]
+
+
+def test_rework_stays_when_your_answers_rate_another_piece_than_the_one_redone(tmp_path, pricing):
+    """The feedback after the first message rates the first one only: the
+    fix that came after it is a message of another piece."""
+    answers = {**_say("outcome", "partly"), **_say("why", "changed")}
+    h = habits.collect(NS(sessions=[_feedback_session(tmp_path, "s1", answers, rate_first_only=True)]), pricing)
+    first, second = h.cycles
+    assert first.redone and not first.excused and second.outcome is None
+
+
+def test_a_building_message_is_not_rework_whatever_your_answers_say(tmp_path, pricing):
+    answers = {**_say("outcome", "partly"), **_say("why", "changed")}
+    h = habits.collect(NS(sessions=[_feedback_session(tmp_path, "s1", answers, fix=False)]), pricing)
+    assert not any(c.redone or c.excused for c in h.cycles)
+
+
+@pytest.mark.parametrize("word, rework", [("new", False), ("covered", True), ("gap", True), ("none", True)])
+def test_a_fix_the_plan_check_calls_new_is_not_rework_and_the_checks_are_counted(tmp_path, pricing, word, rework):
+    h = habits.collect(NS(sessions=[_plan_fix_session(tmp_path, "s1", word)]), pricing)
+    built, fix = h.cycles
+    assert fix.plan_check == word and built.plan_check == ""
+    assert built.redone is rework and built.excused is (not rework)
+    assert h.plan_checks == (Counter({("plan_build", word): 1}) if word != "none" else Counter())
+
+
+def test_a_piece_keeps_what_its_followups_cost_and_what_you_said_about_them(tmp_path, pricing):
+    answers = {
+        **_say("outcome", "partly"), **_say("why", "missed"), **_say("worth", "no"),
+        **_say("helped", "context", "smaller", "none"),
+    }
+    later = ([FEEDBACK_Q["missed_in"], FEEDBACK_Q["plan"], FEEDBACK_Q["tip"]],
+             {**_say("missed_in", "standing"), **_say("plan", "covered"), **_say("tip", "known")})
+    h = habits.collect(NS(sessions=[_feedback_session(tmp_path, "s1", answers, later=later)]), pricing)
+    first, second = h.cycles
+    (piece,) = h.pieces
+    assert (piece.why, piece.missed_in, piece.plan, piece.tip, piece.tip_hint) == (
+        ("missed",), "standing", "covered", "known", "drip_feed"
+    )
+    assert piece.followups == 1 and piece.followup_cost == pytest.approx(second.cost)
+    assert piece.followup_tokens == second.tokens and second.tokens > 0
+    assert piece.why_given and piece.reasons() == {"missed"}
+    assert piece.helped == ("context", "smaller")
+    # Every message in the piece carries the piece's own worth and helped answers.
+    assert [(c.worth, c.helped) for c in h.cycles] == [("no", ("context", "smaller"))] * 2
+    assert first.left_out is False and first.tokens > 0
+
+
+def test_the_first_message_of_a_piece_whose_followups_left_things_out_is_marked(tmp_path, pricing):
+    answers = {**_say("outcome", "partly"), **_say("why", "left_out")}
+    h = habits.collect(NS(sessions=[_feedback_session(tmp_path, "s1", answers)]), pricing)
+    first, second = h.cycles
+    assert first.left_out and not second.left_out
+    # An older run's "slow" answer that said the request was unclear is the same answer.
+    assert Piece("missed", 1.0, 1, None, ("unclear",), (), "your feedback", why_given=True).reasons() == {"left_out"}
+    assert Piece("missed", 1.0, 1, None, ("rework",), (), "your feedback", why_given=True).reasons() == set()
+
+
+def test_a_message_your_followups_said_things_were_left_out_of_weighs_double_in_the_checklist():
+    repro = _cycle(tag=CaptureTag(task="bugfix", missing=("repro",)))
+    files = _cycle(tag=CaptureTag(task="bugfix", missing=("files",)), left_out=True)
+    keys, why = habits.template_lines("bugfix", [repro, files])
+    # Tied at one each, repro would come first: your answer makes files the line to add.
+    assert keys[:2] == ["files", "repro"]
+    assert why.endswith("You said some follow-ups were things your request left out.")
+    plain = _cycle(tag=CaptureTag(task="bugfix", missing=("files",)))
+    plain_keys, plain_why = habits.template_lines("bugfix", [repro, plain])
+    assert plain_keys[:2] == ["repro", "files"] and "You said" not in plain_why
+
+
+def test_followups_that_left_things_out_make_a_brief_clearly_card_with_no_tags_at_all():
+    h = Habits(pieces=[_gave(why=("left_out",), followups=2), _gave(why=("left_out", "changed"), followups=2)])
+    item = _by_key(habits.playbook(h))["brief_clearly"]
+    assert item.sources == ("your feedback",) and item.saving is None and item.n == 4
+    assert item.evidence == "4 of 4 follow-ups were things your request left out."
+    # Too few follow-ups, a dashboard rating, or a piece you gave no cause for: nothing to go on.
+    few = Habits(pieces=[_gave(why=("left_out",), followups=1), _gave(why=("left_out",), followups=1)])
+    assert "brief_clearly" not in _by_key(habits.playbook(few))
+    rated = Habits(pieces=[_gave(why=("left_out",), followups=5, source="dashboard rating")])
+    assert "brief_clearly" not in _by_key(habits.playbook(rated))
+    silent = Habits(pieces=[_gave(why=("left_out",), followups=5, why_given=False)])
+    assert "brief_clearly" not in _by_key(habits.playbook(silent))
+    # Follow-ups that were something else don't count as left out, though they are in the total.
+    mixed = Habits(pieces=[_gave(why=("left_out",), followups=3), _gave(why=("changed",), followups=4)])
+    assert _by_key(habits.playbook(mixed))["brief_clearly"].evidence == (
+        "3 of 7 follow-ups were things your request left out."
+    )
+
+
+def test_saying_more_up_front_would_have_helped_is_cited_by_brief_clearly():
+    h = Habits(pieces=[_gave(helped=("context",)) for _ in range(3)] + [_gave(helped=("plan",))])
+    item = _by_key(habits.playbook(h))["brief_clearly"]
+    assert item.n == 3 and item.sources == ("your feedback",)
+    assert item.evidence == "You said more in your first message would have made 3 of 4 pieces cheaper."
+
+
+def test_your_answers_add_to_what_the_tags_say_about_vague_asks():
+    clear = CaptureTag(task="bugfix", brief="clear")
+    vague = CaptureTag(task="bugfix", brief="vague", missing=("repro",))
+    h = Habits(
+        cycles=[*(_cycle(tag=clear) for _ in range(3)), *(_cycle(tag=vague, cost=3.0) for _ in range(5))],
+        pieces=[_gave(why=("left_out",), followups=3)],
+    )
+    item = _by_key(habits.playbook(h))["brief_clearly"]
+    assert item.sources == ("reported", "your feedback") and item.n == 5
+    assert "5 of 8 asks were partial or vague" in item.evidence
+    assert "3 of 3 follow-ups were things your request left out" in item.evidence
+
+
+def test_the_other_habits_about_briefing_claude_cite_the_same_answers():
+    bug = CaptureTag(task="bugfix")
+    h = Habits(
+        cycles=[
+            *(_cycle(tag=bug, flags=("error",), cost=1.0) for _ in range(3)),
+            *(_cycle(tag=bug, cost=2.0) for _ in range(3)),
+        ],
+        pieces=[_gave(why=("left_out",), followups=4)],
+    )
+    items = _by_key(habits.playbook(h))
+    assert items["paste_errors"].evidence.endswith(" 4 of 4 follow-ups were things your request left out.")
+    # Only the habits about what you tell Claude cite it.
+    assert habits.ITEMS["paste_errors"][0] == "information"
+    without = _by_key(habits.playbook(Habits(cycles=h.cycles)))
+    assert "left out" not in without["paste_errors"].evidence
+    noisy = Habits(cycles=[_noisy()], pieces=h.pieces)
+    assert "left out" not in _by_key(habits.playbook(noisy))["quiet_output"].evidence
+
+
+def test_large_asks_you_rated_too_costly_join_split_large_and_ones_worth_it_leave_it():
+    h = Habits(cycles=[
+        _cycle(tag=CaptureTag(size="xl"), cost=5.0, growth_cost=2.0, worth="yes"),
+        _cycle(tag=CaptureTag(size="l"), cost=4.0, growth_cost=1.0),
+        _cycle(cost=3.0, growth_cost=2.0, worth="no"),
+        _cycle(cost=2.0, growth_cost=4.0, helped=("smaller",)),
+        _cycle(tag=CaptureTag(size="s"), cost=1.0, growth_cost=3.0, worth="yes"),
+    ])
+    item = _by_key(habits.playbook(h))["split_large"]
+    # The xl ask is left out; the unsized ones count on your word alone.
+    assert item.n == 3 and item.saving == pytest.approx(0.5 * (1.0 + 2.0 + 4.0))
+    assert item.sources == ("reported", "your feedback")
+    assert "1 were in work you rated too costly" in item.evidence
+    assert "1 were in work you said smaller pieces would have helped" in item.evidence
+    assert "left out: 1 large ask you rated worth it" in item.evidence
+    # Worth it, but you also said smaller pieces would have helped: your word to split wins.
+    both = Habits(cycles=[_cycle(tag=CaptureTag(size="xl"), growth_cost=2.0, worth="yes", helped=("smaller",))])
+    assert _by_key(habits.playbook(both))["split_large"].n == 1
+    # Only large asks you said were worth it, and nothing else: no card.
+    assert "split_large" not in _by_key(habits.playbook(Habits(cycles=h.cycles[:1])))
+
+
+def test_a_plan_first_would_have_helped_is_cited_by_plan_hard_once_enough_pieces_say_so():
+    hard = CaptureTag(level="hard")
+    cycles = [
+        *(_cycle(tag=hard, redone=True, redo_cost=2.0) for _ in range(3)),
+        *(_cycle(tag=hard, planned=True) for _ in range(3)),
+    ]
+    plain = _by_key(habits.playbook(Habits(cycles=cycles)))["plan_hard"]
+    assert plain.sources == ("reported", "inferred") and "you said" not in plain.evidence
+    told = Habits(cycles=cycles, pieces=[_gave(helped=("plan",)) for _ in range(3)] + [_gave(helped=("smaller",))])
+    item = _by_key(habits.playbook(told))["plan_hard"]
+    assert item.sources == ("reported", "inferred", "your feedback")
+    assert item.evidence.endswith("You said a plan first would have made 3 of 4 pieces cheaper.")
+    few = Habits(cycles=cycles, pieces=[_gave(helped=("plan",)) for _ in range(2)])
+    assert _by_key(habits.playbook(few))["plan_hard"].sources == ("reported", "inferred")
+
+
+def test_fixes_for_something_claude_missed_make_a_check_work_card_with_the_cost_of_those_fixes():
+    h = Habits(pieces=[
+        _gave(why=("missed",), missed_in="standing", followups=1, followup_cost=2.0, followup_tokens=2_000)
+        for _ in range(3)
+    ])
+    item = _by_key(habits.playbook(h))["check_work"]
+    assert item.n == 3 and item.sources == ("your feedback",)
+    assert item.saving == pytest.approx(0.5 * 6.0)
+    assert item.evidence == (
+        "3 times you fixed something Claude missed that your request or plan already said; "
+        "most were in CLAUDE.md or memory. Fixing them used about 6k tokens."
+    )
+    assert item.title == "Make the rule Claude missed hard to miss"
+    assert item.example == catalogue.MISSED_IN_LINES["standing"]
+    row = next(r for r in _rows(habits.playbook_table(h, habits.playbook(h))) if r["habit"] == "check_work")
+    assert row["title"] == item.title and row["example"] == item.example
+    assert row["where"] == habits._CHECK_WORK_VARIANTS["standing"][1]
+    assert habits.ITEMS["check_work"][0] == "verification"
+    for table in (habits.EXAMPLES, habits.BASES, habits.WHERE, habits.TRADE_OFFS, habits.UNDO):
+        assert "check_work" in table
+
+
+@pytest.mark.parametrize(
+    "missed_in, title",
+    [
+        ("message", "Have Claude restate your request as a checklist first"),
+        ("plan", "Have Claude tick off each plan step before it says done"),
+        ("standing", "Make the rule Claude missed hard to miss"),
+        ("earlier", "Restate details that came up earlier, or clear with a handoff"),
+        (None, ""),
+    ],
+)
+def test_check_work_says_what_to_do_about_where_the_miss_was(missed_in, title):
+    h = Habits(pieces=[_gave(why=("missed",), missed_in=missed_in, followups=1, followup_cost=1.0) for _ in range(3)])
+    item = _by_key(habits.playbook(h))["check_work"]
+    assert item.title == title
+    assert item.example == catalogue.MISSED_IN_LINES[missed_in or ""]
+    where = habits._MISSED_PLACES.get(missed_in or "")
+    assert (f"most were in {where}" in item.evidence) is bool(where)
+    assert habits.item_title(item) == (title or habits.ITEMS["check_work"][1])
+
+
+def test_a_plan_that_already_said_it_joins_the_misses_in_the_plan_and_is_counted_once():
+    plan_check = [_cycle(plan_check="covered", cost=2.0, tokens=1_000, week=WEEKS[0]) for _ in range(2)]
+    h = Habits(
+        cycles=plan_check,
+        pieces=[
+            # Asked what was missed and where: the plan. Also said the plan covered it: one miss, not two.
+            _gave(why=("missed",), missed_in="plan", plan="covered", followups=1, followup_cost=1.0),
+            # Said only that the plan covered the fix.
+            _gave(why_given=False, plan="covered", followups=1, followup_cost=1.0, followup_tokens=500),
+        ],
+    )
+    item = _by_key(habits.playbook(h))["check_work"]
+    assert item.n == 4 and item.title == "Have Claude tick off each plan step before it says done"
+    assert item.saving == pytest.approx(0.5 * (1.0 + 1.0 + 2.0 + 2.0))
+    assert "most were in the plan" in item.evidence and "about 2k tokens" in item.evidence
+    assert item.waste == {WEEKS[0]: pytest.approx(2.0)}
+
+
+def test_check_work_waits_for_enough_answers_and_ignores_a_plan_that_missed_it():
+    two = Habits(pieces=[_gave(why=("missed",), followups=1, followup_cost=1.0) for _ in range(2)])
+    assert "check_work" not in _by_key(habits.playbook(two))
+    # The plan leaving it out is a different habit: write fuller plans (plan-handoff).
+    gap = Habits(
+        pieces=[_gave(why=("changed",), plan="gap", followups=1) for _ in range(4)], cycles=[_cycle(plan_check="gap")]
+    )
+    assert "check_work" not in _by_key(habits.playbook(gap))
+    rated = Habits(pieces=[_gave(why=("missed",), source="dashboard rating") for _ in range(4)])
+    assert "check_work" not in _by_key(habits.playbook(rated))
+
+
+def test_the_shape_table_counts_the_plan_answers_and_the_plan_checks_together():
+    h = Habits(
+        shapes=[habits.SessionShape("plan_build", 3.0, 50_000), habits.SessionShape("no_plan", 1.0, None)],
+        pieces=[
+            _gave(shape="plan_build", plan="covered"), _gave(shape="plan_build", plan="gap"),
+            _gave(shape="plan_build", plan="gap"), _gave(shape="no_plan"),
+        ],
+        plan_checks=Counter({("plan_build", "gap"): 1, ("plan_build", "new"): 2, ("no_plan", "covered"): 1}),
+    )
+    rows = {r["shape"]: r for r in _rows(_table(habits.section_from(h), "habits_by_shape"))}
+    built, none = rows["plan_build"], rows["no_plan"]
+    assert (built["plan_covered"], built["plan_gap"], built["plan_new"]) == (1, 3, 2)
+    assert (none["plan_covered"], none["plan_gap"], none["plan_new"]) == (1, 0, 0)

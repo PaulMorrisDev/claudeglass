@@ -13,7 +13,10 @@ for the billing mode):
   how often Claude tagged what it was asked to (coverage), and how much
   of each metric has been collected. A /cg-feedback run is priced whole
   (every turn of the cycle it ran in), in any session, captured or not:
-  the skill works at every level.
+  the skill works at every level. So are the plan check's and the rating
+  reminder's notes, and what Claude wrote for them (the question it asked,
+  the reminder line it ended a reply with): scope ``feedback``, whatever
+  the capture level (:func:`_add_feedback_hints`).
 - :func:`history` replays your own recent sessions to price one
   character of note or tag in each place capture puts them, so
   :func:`estimate` can price any level or set of metrics before you turn
@@ -30,7 +33,8 @@ launched it, even when you had sent another message by then
 
 :func:`feedback_spans` ties each /cg-feedback answer to the work it
 rates: the cycles since the previous feedback (answered or declined),
-or since the session started.
+or since the session started. Running it again with no work since the
+previous run replaces that run's answers.
 """
 
 from __future__ import annotations
@@ -40,7 +44,7 @@ from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 
 from . import capture_catalogue as catalogue
-from .capture_tags import MAIN_TAG_FIELDS, SUB_TAG_FIELDS, merge_feedback, settle_tag
+from .capture_tags import MAIN_TAG_FIELDS, SUB_TAG_FIELDS, merge_feedback, settle_feedback, settle_tag
 from .context_files import _Carry, _parse_ts
 from .model import CaptureTag, EventKind, Feedback, TranscriptResult, Turn
 from .pricing import Pricing, effective_rates, price_turn
@@ -473,14 +477,6 @@ def _hand_off_tags(top, turns, starts, cycles, cycle_of_use, subs, launches) -> 
         cycles[origin].late_turns.append(turns[i])
 
 
-#: Which of a cycle's feedback wins: the answers read from the skill's
-#: question, then its own tag, then a declined question. Answers outrank
-#: the tag (SEC-P1): a `[cg-fb: ...]` line is free text Claude could
-#: write in any reply, but the AskUserQuestion call its answers come from
-#: is not.
-_FEEDBACK_RANK = {"answers": 3, "tag": 2, "skipped": 1}
-
-
 @dataclass(slots=True)
 class FeedbackSpan:
     """One /cg-feedback answer and the work it rates."""
@@ -496,21 +492,20 @@ class FeedbackSpan:
 def cycle_feedback(cycle: Cycle) -> Feedback | None:
     """The feedback given in ``cycle``, or ``None``. A ``[cg-fb: ...]``
     tag counts only in a genuine /cg-feedback run (SEC-P1): elsewhere it
-    could be forged or quoted reply text, so it's dropped. Answers of the
-    best kind are merged: the handoff question's come from a second
-    AskUserQuestion call, on a later turn."""
+    could be forged or quoted reply text, so it's dropped. What each kind
+    gave is merged across the turns (the second AskUserQuestion call's
+    questions come on a later turn), then :func:`settle_feedback` decides:
+    the answers read from the skill's questions outrank its tag, which
+    adds only a word for a key you answered in your own words."""
     genuine = is_feedback_run(cycle)
-    best = None
+    by_source: dict[str, Feedback] = {}
     for turn in cycle.turns:
         fb = turn.feedback
         if fb is None or (fb.source == "tag" and not genuine):
             continue
-        rank = _FEEDBACK_RANK.get(fb.source, 0)
-        if best is None or rank > _FEEDBACK_RANK.get(best.source, 0):
-            best = fb
-        elif rank == _FEEDBACK_RANK.get(best.source, 0):
-            best = merge_feedback(best, fb)
-    return best
+        earlier = by_source.get(fb.source)
+        by_source[fb.source] = fb if earlier is None else merge_feedback(earlier, fb)
+    return settle_feedback(by_source.get("answers"), by_source.get("tag"), by_source.get("skipped"))
 
 
 def is_feedback_run(cycle: Cycle) -> bool:
@@ -537,16 +532,23 @@ def _excluded_from_coverage(cycle: Cycle, all_turns: list[Turn]) -> bool:
 def feedback_spans(cycles: list[Cycle]) -> list[FeedbackSpan]:
     """Each feedback in ``cycles`` (one session's, from
     :func:`prompt_cycles`) with the cycles it rates. A declined question
-    ends a span too, so the next answer rates only what came after it."""
-    spans = []
+    ends a span too, so the next answer rates only what came after it. A
+    run with no work since the previous one is a rerun to change that
+    run's answers: it replaces them, over the same cycles, and a declined
+    rerun leaves them as they were."""
+    spans: list[FeedbackSpan] = []
     begin = 0
     for n, cycle in enumerate(cycles):
         fb = cycle_feedback(cycle)
         if fb is None:
             continue
         rated = [c for c in cycles[begin:n] if not is_feedback_run(c)]
-        spans.append(FeedbackSpan(feedback=fb, run=cycle, cycles=rated))
         begin = n + 1
+        if spans and not rated:
+            if fb.source != "skipped":
+                spans[-1] = FeedbackSpan(feedback=fb, run=cycle, cycles=spans[-1].cycles)
+            continue
+        spans.append(FeedbackSpan(feedback=fb, run=cycle, cycles=rated))
     return spans
 
 
@@ -593,8 +595,10 @@ class CaptureUsage:
     notes: int = 0
     #: ``main``, ``subagent``, ``tool`` (notes after tool results),
     #: ``brief`` (the ``[spawn: ...]``/``[retry: ...]`` words a brief
-    #: starts with) and ``haiku`` (Claude Haiku's calls, while it writes
-    #: the tags: their whole cost, as ``tag_cost``).
+    #: starts with), ``haiku`` (Claude Haiku's calls, while it writes
+    #: the tags: their whole cost, as ``tag_cost``) and ``feedback`` (the
+    #: plan check's and the rating reminder's notes and Claude's words
+    #: for them).
     scopes: dict[str, ScopeUse] = field(default_factory=dict)
     #: metric id -> USD, the note and tag cost split by each metric's share.
     by_metric: dict[str, float] = field(default_factory=dict)
@@ -621,6 +625,14 @@ class CaptureUsage:
     feedback_runs: int = 0
     feedback_cost: float = 0.0
     feedback_answered: int = 0
+    #: The plan check and the rating reminder (scope ``feedback``): notes
+    #: that asked for either, plan checks Claude asked and how many you
+    #: answered with one of the four words, and replies that ended with
+    #: the reminder line.
+    feedback_notes: int = 0
+    plan_checks: int = 0
+    plan_checks_answered: int = 0
+    reminders: int = 0
     #: SURV-3: notes that land after a compact boundary -- the carried
     #: prefix a compaction would otherwise have discounted is gone, so
     #: these notes carry at the fuller, post-compaction rate. Counted
@@ -777,12 +789,23 @@ class CoachingUsage:
         return 100.0 * self.cost / self.spend if self.spend > 0 else None
 
 
+#: Kinds of a note under the coaching marker that aren't coaching: the
+#: plan check, the rating reminder and the facts line a /cg-feedback run
+#: starts with.
+_FEEDBACK_NOTE_KINDS = frozenset((*catalogue.FEEDBACK_HINTS, "feedback_facts"))
+
+
 def _coaching_notes(result: TranscriptResult):
     """``(ts, chars, kind)`` per coaching note in ``result``, alone or
     sharing an attachment with a capture note."""
     for event in result.events:
         if event.subkind == "coaching_note" and event.size_chars:
-            yield event.ts, event.size_chars, event.detail.get("kind") or "other"
+            kind = event.detail.get("kind") or "other"
+            # The feedback notes are priced with their own metrics
+            # (:func:`_add_feedback_hints`), and the facts line with the
+            # /cg-feedback run it opens.
+            if kind not in _FEEDBACK_NOTE_KINDS:
+                yield event.ts, event.size_chars, kind
         elif event.subkind == "capture_note" and event.detail.get("coach_chars"):
             yield event.ts, event.detail["coach_chars"], event.detail.get("coach") or "other"
 
@@ -920,6 +943,71 @@ def _add_feedback_runs(use: CaptureUsage, top: TranscriptResult, subs, pricing, 
     return found
 
 
+def _add_feedback_hints(use: CaptureUsage, result: TranscriptResult, pricing, since) -> bool:
+    """Price the plan check and the rating reminder in one main
+    transcript, whatever the capture level: each note that asked for
+    either, carried until the next summary as a capture note is; the
+    question Claude asked for the plan check, and the reminder line a
+    reply ended with, as output at that turn's rate and then carried on
+    (as a tag is). Each goes to its own metric and to scope ``feedback``.
+    ``True`` when the transcript had any."""
+    notes = [
+        event for event in result.events
+        if event.subkind == "coaching_note"
+        and event.size_chars
+        and event.detail.get("kind") in catalogue.FEEDBACK_NOTE_METRIC
+    ]
+    turns = [turn for turn in _priced(result) if turn.plan_check is not None or turn.coach_reminder]
+    if not notes and not turns:
+        return False
+    carry = _Carry(result, pricing)
+    ends = _segment_ends(result, carry)
+
+    def counted(ts) -> bool:
+        if since is None:
+            return True
+        moment = _parse_ts(ts)
+        return moment is not None and moment >= since
+
+    def carried(ts, chars: int, after: int = 0) -> float:
+        start = carry.index_at(ts) + after
+        return carry.cost(chars, start, next((e for e in ends if e > start), len(carry.turns)))
+
+    found = False
+    for event in notes:
+        if not counted(event.ts):
+            continue
+        found = True
+        cost = carried(event.ts, event.size_chars)
+        metric_id = catalogue.FEEDBACK_NOTE_METRIC[event.detail["kind"]]
+        use.feedback_notes += 1
+        use._add("feedback", note_chars=event.size_chars, note_cost=cost, day=_day(event.ts))
+        use.by_metric[metric_id] = use.by_metric.get(metric_id, 0.0) + cost
+    for turn in turns:
+        if not counted(turn.ts):
+            continue
+        found = True
+        for metric_id, chars, here in (
+            ("plan_check", catalogue.PLAN_CHECK_ASK_CHARS, turn.plan_check is not None),
+            ("feedback_reminder", catalogue.REMINDER_REPLY_CHARS, turn.coach_reminder),
+        ):
+            if not here:
+                continue
+            # Output at this turn's rate; the words then stay in context
+            # from the next turn on, as a tag's do.
+            cost = chars * _output_usd_per_char(turn, pricing) + carried(turn.ts, chars, 1)
+            use._add("feedback", tag_chars=chars, tag_cost=cost, day=_day(turn.ts))
+            use.by_metric[metric_id] = use.by_metric.get(metric_id, 0.0) + cost
+            if metric_id == "plan_check":
+                use.plan_checks += 1
+                if turn.plan_check.word:
+                    use.plan_checks_answered += 1
+                    use._count("plan_check")
+            else:
+                use.reminders += 1
+    return found
+
+
 def _start(since: str):
     start = _parse_ts(since) if since else None
     if start is not None and start.tzinfo is None:
@@ -928,15 +1016,18 @@ def _start(since: str):
 
 
 def feedback_usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
-    """Only the /cg-feedback runs in ``corpus`` from ``since`` on: what
-    they cost and how many were answered. For the Capture tab, which
-    shows them whatever the capture level."""
+    """Only the /cg-feedback runs in ``corpus`` from ``since`` on, with
+    the plan check and the rating reminder: what they cost and how many
+    were answered. For the Capture tab, which shows them whatever the
+    capture level."""
     use = CaptureUsage(since=since)
     start = _start(since)
     for bundle in corpus.sessions:
-        if bundle.top is not None and _add_feedback_runs(
-            use, bundle.top, bundle.subs, pricing, start, getattr(bundle, "workflows", ())
-        ):
+        if bundle.top is None:
+            continue
+        rated = _add_feedback_runs(use, bundle.top, bundle.subs, pricing, start, getattr(bundle, "workflows", ()))
+        hinted = _add_feedback_hints(use, bundle.top, pricing, start)
+        if rated or hinted:
             use.spend += _spend(bundle.top, pricing, start)
     return use
 
@@ -944,7 +1035,8 @@ def feedback_usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureU
 def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
     """What capture cost across ``corpus`` from ``since`` (an ISO time)
     on. A session counts once its main transcript carries a capture note;
-    its subagents count with it. /cg-feedback runs count in any session."""
+    its subagents count with it. /cg-feedback runs, plan checks and rating
+    reminders count in any session."""
     use = CaptureUsage(since=since)
     start = _start(since)
     for bundle in corpus.sessions:
@@ -960,7 +1052,9 @@ def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
         ]
         workflows = getattr(bundle, "workflows", ())
         rated = top is not None and _add_feedback_runs(use, top, bundle.subs, pricing, start, workflows)
-        if rated and not captured_top:
+        # The plan check and the reminder work at every level too.
+        hinted = top is not None and _add_feedback_hints(use, top, pricing, start)
+        if (rated or hinted) and not captured_top:
             # Its spend, so capture's share stays a share of what the
             # sessions it cost anything in spent.
             use.spend += _spend(top, pricing, start)
@@ -1044,6 +1138,9 @@ class History:
     web_results: int = 0
     web_note: float = 0.0
     web_tag: float = 0.0
+    #: Sessions in which a plan was approved: the most the plan check
+    #: could ask in (once per plan).
+    plans_approved: int = 0
     #: What the replayed sessions cost.
     spend: float = 0.0
 
@@ -1111,6 +1208,8 @@ def history(corpus, pricing: Pricing | None, days: int = 14) -> History:
             for turn in _priced(top):
                 for tool_use_id in turn.tool_use_ids:
                     spawners[tool_use_id] = turn
+            if any(_plan_approved(turn) for turn in _priced(top)):
+                out.plans_approved += 1
             for cycle in prompt_cycles(top):
                 out.cycles += 1
                 tag_turn = cycle.turns[-1]
@@ -1226,23 +1325,38 @@ def estimate(past: History, ids, sample: int = 100, tagger: str = catalogue.DEFA
     reply = reply + _TAG_FRAME_CHARS if reply else 0
     report = sum(m.out_chars for m in enabled if m.sub_line)
     report = report + _TAG_FRAME_CHARS if report else 0
-    # A brief's [spawn:]/[retry:] words, per subagent (none now); the
-    # feedback reminder's line, once a session: its share of the per-reply
-    # carry is sessions over messages.
-    brief = sum(m.out_chars for m in enabled if (m.main_extra or m.sub_extra) and m.group != "feedback")
-    reminder = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
-    once = past.sessions / past.cycles if past.cycles else 0.0
+    # A brief's [spawn:]/[retry:] words, per subagent (none now).
+    brief = sum(m.out_chars for m in enabled if m.main_extra or m.sub_extra)
     cost = (
         main * past.main_note
         + sub * past.sub_note
         + no_rules * past.sub_note_no_rules
         + reply * past.reply_tag
-        + reminder * past.reply_tag * once
         + report * past.report_tag
         + brief * past.brief_tag
     )
     note_tokens = main * past.main_notes + max(sub, no_rules) * past.sub_notes
-    tag_tokens = reply * past.cycles + reminder * past.sessions + report * past.subagents + brief * past.subagents
+    tag_tokens = reply * past.cycles + report * past.subagents + brief * past.subagents
+    # The feedback notes: a note on one of your messages (carried like any
+    # note), and the words Claude writes for it, at the rate of an
+    # average reply. The reminder comes at most once in the rest period
+    # (and once a session); the plan check once per approved plan.
+    # Assumption: an upper bound, since not every plan gets edited nor
+    # every piece reaches the reminder's size.
+    th = catalogue.COACHING_THRESHOLDS
+    per_cycle = past.reply_tag / past.cycles if past.cycles else 0.0
+    per_note = past.main_note / past.main_notes if past.main_notes else 0.0
+    for metric_id, hint, count in (
+        ("feedback_reminder", "rating_reminder", min(past.sessions, past.days / th["rating_rest_days"])),
+        ("plan_check", "plan_check", past.plans_approved),
+    ):
+        if metric_id not in wanted:
+            continue
+        note = len(catalogue.FEEDBACK_NOTE_TEXT[hint]) + catalogue.NOTE_WRAP_CHARS + len("UserPromptSubmit")
+        out_chars = catalogue.METRICS_BY_ID[metric_id].out_chars
+        cost += count * (note * per_note + out_chars * per_cycle)
+        note_tokens += note * count
+        tag_tokens += out_chars * count
     if haiku:
         cost += past.cycles * catalogue.JUDGE_USD_PER_CALL
     if agents:

@@ -93,6 +93,22 @@ def test_measures_follow_the_changed_keys():
     assert impact.measures_for(ChangePoint(CHANGE, "apply", "x"))[0].key == "startup_tokens"
 
 
+def test_a_habit_you_started_is_measured_on_the_habits_it_names():
+    # A prompting habit: how often you do it, and for the small requests
+    # sent one at a time, their share as well.
+    drip = impact.measures_for(ChangePoint(CHANGE, "habit", "x", keys=["habit.drip_feed"]))
+    assert [m.key for m in drip] == ["prompting_habits", "drip_share", "cost_per_session"]
+    other = impact.measures_for(ChangePoint(CHANGE, "habit", "x", keys=["habit.plan_first"]))
+    assert [m.key for m in other] == ["prompting_habits", "cost_per_session"]
+    # A playbook item or a recommendation has no habit rate: judge it on
+    # the tokens a session uses, then on cost.
+    for key in ("habit.split_large", "habit.model.default"):
+        assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "habit", "x", keys=[key]))] == [
+            "tokens_per_session",
+            "cost_per_session",
+        ], key
+
+
 def test_compare_reports_a_drop_with_counts():
     sessions = [_session(-d, 2.0, agent_cost=1.0) for d in (1, 2, 3)] + [
         _session(d, 1.0, agent_cost=0.5) for d in (0.1, 0.2, 0.3, 0.4)

@@ -42,7 +42,9 @@ changelog):
   in your own prose (``prompt_shape.plan_steps``: not a review, not a
   plan already, not a message that mentions a plan), ``plan_min_chars``
   or longer, sent outside plan mode before any plan was approved in that
-  session.
+  session. It has a cost figure only where your /cg-feedback answers say
+  a plan first would have made the piece cheaper: half what the follow-ups
+  after that message cost.
 - ``vague_fix``: a short correction that says something went wrong but
   names nothing specific. It needs a correction or bad-outcome phrase
   (``prompt_shape.is_vague_fix``), and skips a question, a go-ahead, a
@@ -65,12 +67,21 @@ changelog):
 
 What each costs is a rough figure at list price, with its basis stated
 (:data:`BASIS`): what batching, planning or pasting less could have
-saved at most, not a forecast. A big task without a plan has no figure:
-what it led to can't be told apart from the work itself.
+saved at most, not a forecast. A big task without a plan has no figure
+of its own: what it led to can't be told apart from the work itself,
+unless you said a plan first would have helped.
+
+Your /cg-feedback answers move some of it. A follow-up in a piece where
+you said the follow-ups were mostly Claude missing what you had said, or
+a change of mind (and nothing you left out), is not your habit: it joins
+no run of small requests and is no repeat or vague correction
+(``Message.excused``).
 
 For coaching notes, it also counts how often Claude showed the tip a
 note asked for (``Turn.coach_tip``), by hint, and how often it called the
-tip a misfire (``Turn.tip_disowned``). A hint whose note asks for the tip
+tip a misfire (``Turn.tip_disowned``), beside your own answers to the tip
+question (useful, known or wrong) and the trust figure they make
+(:func:`trust_pct`). A hint whose note asks for the tip
 every time is relayed; one whose note leaves Claude to judge whether the
 message calls for it (``capture_catalogue.CONDITIONAL_TIP_HINTS``) is
 judged relevant, and a tip it doesn't show there isn't a miss.
@@ -140,7 +151,7 @@ BASIS = {
     "repeat_ask": "the reply before the repeat, the attempt that missed",
     "status_poll": "the reply to each check, which read the whole session to say little",
     "stop_loop": "the replies you stopped",
-    "plan_first": "",
+    "plan_first": "half what the follow-ups cost, where you said a plan first would have helped",
     "vague_fix": "",
     "big_paste": "carrying the pasted text through the rest of the session",
     "context_carried": "the earlier context each reply of the new piece read again",
@@ -274,13 +285,22 @@ class Message:
     carried: int = 0
     carried_cost: float = 0.0
     new_piece: str = ""
+    #: Your /cg-feedback answer on its piece says this follow-up was
+    #: Claude missing something you had said, or a change of mind: not a
+    #: habit of yours, so it adds no prompting cost.
+    excused: bool = False
+    #: The first message of a piece you said a plan first would have made
+    #: cheaper: half what its follow-ups cost, the figure ``plan_first``
+    #: otherwise lacks. ``0.0`` without that answer.
+    plan_help: float = 0.0
 
 
 @dataclass(slots=True)
 class Occurrence:
     habit: str
     at: datetime | None
-    #: USD at list price; ``None`` when there's no figure (``plan_first``).
+    #: USD at list price; ``None`` when there's no figure (``plan_first``
+    #: has one only where your feedback says a plan would have helped).
     cost: float | None
 
 
@@ -297,6 +317,9 @@ class SessionPrompting:
     notes: Counter = field(default_factory=Counter)
     tips: Counter = field(default_factory=Counter)
     misfires: Counter = field(default_factory=Counter)
+    #: Your answers to the tip question, by ``(hint, word)``: ``useful``,
+    #: ``known`` or ``wrong``.
+    tip_answers: Counter = field(default_factory=Counter)
 
     def counts(self) -> Counter:
         return Counter(o.habit for o in self.occurrences)
@@ -365,11 +388,43 @@ def _own_reply(turns: list[Turn]) -> list[Turn]:
     return turns
 
 
-def messages_of(top, prices: _Prices) -> list[Message]:
+def _excusing(reasons: set[str]) -> bool:
+    """Whether your answer to what the follow-ups were puts none of them on
+    your prompting: Claude missed something you had said, or you changed
+    your mind. A piece that also names something you left out can't be told
+    apart, so its follow-ups stay."""
+    return bool(reasons) and reasons <= {"missed", "changed"}
+
+
+def _apply_feedback(messages: list[Message], cycles, spans) -> None:
+    """Mark what your /cg-feedback answers say about each message
+    (:attr:`Message.excused`, :attr:`Message.plan_help`)."""
+    index = {id(cycle): i for i, cycle in enumerate(cycles)}
+    for span in spans:
+        fb = span.feedback
+        if fb.source == "skipped" or not span.cycles:
+            continue
+        members = [index[id(cycle)] for cycle in span.cycles]
+        # The follow-ups: every message after the first that isn't a go-ahead
+        # or a status check, as the hook counts them.
+        follow = [i for i in members[1:] if not (messages[i].go or messages[i].status)]
+        if _excusing({w for w in fb.why if w != "none"}):
+            for i in follow:
+                messages[i].excused = True
+        if "plan" in fb.helped:
+            messages[members[0]].plan_help = 0.5 * sum(messages[i].cost for i in follow)
+
+
+def messages_of(top, prices: _Prices, cycles=None, spans=None) -> list[Message]:
     """Each message of yours in a main transcript, with what the parser
-    kept about it and the work that answered it."""
+    kept about it and the work that answered it. ``cycles`` and ``spans``
+    (``capture.feedback_spans``) are the transcript's own, when the caller
+    has them already."""
     turns = capture_mod._priced(top)
-    cycles = capture_mod.prompt_cycles(top)
+    if cycles is None:
+        cycles = capture_mod.prompt_cycles(top)
+    if spans is None:
+        spans = capture_mod.feedback_spans(cycles)
     out: list[Message] = []
     replied_at: datetime | None = None
     typed_at: datetime | None = None
@@ -417,6 +472,7 @@ def messages_of(top, prices: _Prices) -> list[Message]:
         # A question that closes a reply that changed a file is an offer.
         asked = last.reply_asked and not message.edited
         planned = planned or any(turn.plan_stats is not None for turn in cycle.turns)
+    _apply_feedback(out, cycles, spans)
     return out
 
 
@@ -428,7 +484,7 @@ def _drip_runs(messages: list[Message]) -> list[list[int]]:
     runs: list[list[int]] = []
     run: list[int] = []
     for i, m in enumerate(messages):
-        if m.answers or not _asks_for_change(m):
+        if m.answers or m.excused or not _asks_for_change(m):
             continue
         if m.chars <= _TH["drip_chars"] and m.edited and m.since is not None and m.since <= window:
             run.append(i)
@@ -483,7 +539,7 @@ def occurrences(messages: list[Message], stops: list[tuple[datetime, float]]) ->
     for run in _drip_runs(messages):
         out.append(Occurrence("drip_feed", messages[run[0]].at, sum(messages[i].reread for i in run[1:])))
     for i, m in enumerate(messages):
-        if m.repeat and _asks_again(m) and i and messages[i - 1].edited:
+        if m.repeat and _asks_again(m) and i and messages[i - 1].edited and not m.excused:
             out.append(Occurrence("repeat_ask", m.at, messages[i - 1].cost))
         if m.status:
             # A message that only asks how it's going: priced from its own
@@ -493,8 +549,8 @@ def occurrences(messages: list[Message], stops: list[tuple[datetime, float]]) ->
             m.steps >= _REPORT["plan_steps"] and m.chars >= _REPORT["plan_min_chars"] and not m.plan_mode
             and not m.planned and m.chars / _CHARS_PER_TOKEN < _TH["big_paste_tokens"]
         ):
-            out.append(Occurrence("plan_first", m.at, None))
-        if m.vague and _asks_again(m) and not m.after_failed:
+            out.append(Occurrence("plan_first", m.at, m.plan_help or None))
+        if m.vague and _asks_again(m) and not m.after_failed and not m.excused:
             # No figure: what a vague correction caused can't be told apart
             # from the fix it led to.
             out.append(Occurrence("vague_fix", m.at, None))
@@ -578,7 +634,9 @@ def session_prompting(bundle, prices: _Prices) -> SessionPrompting | None:
     top = bundle.top
     if top is None:
         return None
-    messages = messages_of(top, prices)
+    cycles = capture_mod.prompt_cycles(top)
+    spans = capture_mod.feedback_spans(cycles)
+    messages = messages_of(top, prices, cycles, spans)
     if not messages:
         return None
     notes, tips, misfires = _tips(top)
@@ -590,13 +648,30 @@ def session_prompting(bundle, prices: _Prices) -> SessionPrompting | None:
         notes=notes,
         tips=tips,
         misfires=misfires,
+        tip_answers=Counter(
+            (span.feedback.tip_hint, span.feedback.tip)
+            for span in spans
+            if span.feedback.source != "skipped" and span.feedback.tip_hint in catalogue.TIP_HINT_TITLES
+            and span.feedback.tip in catalogue.FEEDBACK_VOCAB["tip"]
+        ),
     )
 
 
-def collect(corpus, pricing: Pricing | None) -> list[SessionPrompting]:
-    """Every session with a message of yours, oldest first."""
+def collect(corpus, pricing: Pricing | None, ratings: dict | None = None) -> list[SessionPrompting]:
+    """Every session with a message of yours, oldest first. ``ratings`` is
+    your Sessions-tab ratings by session id: the tip answer in one counts
+    for its hint, unless a /cg-feedback run already answered that hint."""
     prices = _Prices(pricing)
     out = [s for s in (session_prompting(bundle, prices) for bundle in corpus.sessions) if s is not None]
+    for s in out:
+        rating = (ratings or {}).get(s.session_id) or {}
+        hint, word = rating.get("tip_hint"), rating.get("tip")
+        if (
+            hint in catalogue.TIP_HINT_TITLES
+            and word in catalogue.FEEDBACK_VOCAB["tip"]
+            and not any(key[0] == hint for key in s.tip_answers)
+        ):
+            s.tip_answers[(hint, word)] += 1
     out.sort(key=lambda s: s.start or datetime.min.replace(tzinfo=timezone.utc))
     return out
 
@@ -640,12 +715,55 @@ def relay_text(hint: str, notes: int, shown: int) -> str:
     return f"{'judged relevant' if hint in catalogue.CONDITIONAL_TIP_HINTS else 'relayed'} {shown} of {notes}"
 
 
-def build_section(sessions: list[SessionPrompting]) -> Section:
+def trust_pct(useful: int, known: int, wrong: int, misfires: int) -> float | None:
+    """The tip's trust figure: of your answers to the tip question and the
+    times Claude called the tip a misfire, the share that said it was
+    useful. ``None`` without any."""
+    total = useful + known + wrong + misfires
+    return 100.0 * useful / total if total else None
+
+
+def card_answers(tip_feedback: dict | None) -> Counter:
+    """What you said about tip cards on the dashboard, as ``(hint, word)``
+    counts like :attr:`SessionPrompting.tip_answers`: "Useful" and "Trying
+    it" count as useful (``TIP_CARD_AS_TIP_ANSWER``). Only the cards of a
+    tip hint count; a habit or recommendation card has no tip row."""
+    out: Counter = Counter()
+    for (kind, item), row in (tip_feedback or {}).items():
+        word = catalogue.TIP_CARD_AS_TIP_ANSWER.get(row.get("answer"))
+        if kind == "tip" and item in catalogue.TIP_HINT_TITLES and word is not None:
+            out[(item, word)] += 1
+    return out
+
+
+def tip_tallies(report) -> dict[str, dict[str, int]]:
+    """Each tip hint's answers from a report's ``prompting_tips`` table:
+    ``{hint: {"useful", "known", "wrong", "misfires"}}``, for the daily run
+    that mutes or raises a hint you called wrong (``coaching.from_report``).
+    Empty without that table."""
+    section = next((sec for sec in getattr(report, "sections", ()) if sec.key == "prompting"), None)
+    table = next((t for t in getattr(section, "tables", ()) if t.name == "prompting_tips"), None)
+    if table is None:
+        return {}
+    keys = [col.key for col in table.columns]
+    out: dict[str, dict[str, int]] = {}
+    for row in table.rows:
+        cells = dict(zip(keys, row))
+        out[str(cells.get("hint"))] = {
+            word: cells[word] if isinstance(cells.get(word), int) else 0
+            for word in ("useful", "known", "wrong", "misfires")
+        }
+    return out
+
+
+def build_section(sessions: list[SessionPrompting], card_answers: Counter | None = None) -> Section:
     """The ``prompting`` section: a row per habit seen, most costly first
     (a habit with no figure, a big task without a plan or a vague
     correction, after those, by how often), and,
     once there are coaching notes, a row per hint that asked Claude for a
-    tip. No habit rows without a message of yours in the window."""
+    tip. No habit rows without a message of yours in the window.
+    ``card_answers`` (:func:`card_answers`) adds what you said on the
+    dashboard's tip cards to your answers."""
     messages = sum(len(s.messages) for s in sessions)
     counts: Counter = Counter()
     costs: dict[str, float] = {}
@@ -660,8 +778,8 @@ def build_section(sessions: list[SessionPrompting]) -> Section:
             continue
         word, spark = trend(sessions, habit)
         rows.append([
-            habit, counts[habit], 100.0 * counts[habit] / max(messages, 1), costs.get(habit), BASIS[habit] or None,
-            word, spark, TRY[habit],
+            habit, counts[habit], 100.0 * counts[habit] / max(messages, 1), costs.get(habit),
+            (BASIS[habit] or None) if habit in costs else None, word, spark, TRY[habit],
         ])
     rows.sort(key=lambda r: (-(r[3] or 0.0), -r[1]))
     habits_table = Table(
@@ -683,10 +801,13 @@ def build_section(sessions: list[SessionPrompting]) -> Section:
     notes: Counter = Counter()
     tips: Counter = Counter()
     misfires: Counter = Counter()
+    answers: Counter = Counter()
     for s in sessions:
         notes.update(s.notes)
         tips.update(s.tips)
         misfires.update(s.misfires)
+        answers.update(s.tip_answers)
+    answers.update(card_answers or {})
     tips_table = Table(
         name="prompting_tips",
         title="Tips Claude showed",
@@ -697,11 +818,17 @@ def build_section(sessions: list[SessionPrompting]) -> Section:
             Column(key="shown_pct", label="Shown", kind="pct"),
             Column(key="relay", label="Passed on", kind="str"),
             Column(key="misfires", label="Called a misfire", kind="int"),
+            Column(key="useful", label="You said useful", kind="int"),
+            Column(key="known", label="You knew it", kind="int"),
+            Column(key="wrong", label="You said wrong", kind="int"),
+            Column(key="trust_pct", label="Found useful", kind="pct"),
         ],
         rows=[
             [
                 hint, notes[hint], tips[hint], 100.0 * tips[hint] / notes[hint],
                 relay_text(hint, notes[hint], tips[hint]), misfires[hint],
+                answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")],
+                trust_pct(answers[(hint, "useful")], answers[(hint, "known")], answers[(hint, "wrong")], misfires[hint]),
             ]
             for hint in TIP_HINTS if notes[hint]
         ],
@@ -709,6 +836,7 @@ def build_section(sessions: list[SessionPrompting]) -> Section:
             "Relayed: Claude is told to show this tip every time, so a tip it left out was missed.",
             "Judged relevant: Claude shows the tip only when your message calls for it, so a tip it left out "
             "was not a miss.",
+            "Found useful: the share of your answers and of Claude's own misfire calls that said the tip was useful.",
         ],
     )
     tables = [habits_table] + ([tips_table] if tips_table.rows else [])

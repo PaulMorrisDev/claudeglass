@@ -887,6 +887,22 @@ def classify_session(
     )
 
 
+#: The labels a session gets when no rule claimed it (the last branch of
+#: :func:`classify_mode` and :func:`classify_purpose`).
+CATCH_ALL_MODE = "mixed"
+CATCH_ALL_PURPOSE = "general-dev"
+
+
+def is_low_confidence(mode: str, mode_source: str, purpose: str, purpose_source: str) -> bool:
+    """Whether a session's label is a guess: a rule put it in a catch-all,
+    so the label says little. A label you set yourself (``override``) or
+    Claude reported (``reported``) is never one. The dashboard shows a chip
+    on these, so you can set the right label."""
+    return (mode_source == "rule" and mode == CATCH_ALL_MODE) or (
+        purpose_source == "rule" and purpose == CATCH_ALL_PURPOSE
+    )
+
+
 # -- SessionRecord construction / grouping / report section -----------------
 
 
@@ -1133,6 +1149,9 @@ __all__ = [
     "reported_task",
     "reported_word",
     "REPORTED_PURPOSES",
+    "CATCH_ALL_MODE",
+    "CATCH_ALL_PURPOSE",
+    "is_low_confidence",
     "build_session_record",
     "group_sessions",
     "build_section",

@@ -109,11 +109,8 @@ def test_the_note_asks_claude_for_no_tag_while_haiku_writes_them(level):
     ids = cat.level_includes(level)
     note = cat.note_text(ids, "main", tagger="haiku")
     assert "[cg:" not in note and cat.MAIN_TAG_INTRO not in note
-    # Nothing left to ask at the start but the reminder, where it's on.
-    if level == "deep":
-        assert note.splitlines()[0] == f"{cat.NOTE_MARKER}{cat.NOTE_VERSION} feedback_reminder"
-    else:
-        assert note == ""
+    # Nothing is left to ask at the start (the reminder comes later, on a message of yours).
+    assert note == ""
     # The hook builds the same text, and a subagent is asked for nothing.
     assert HOOK.build_note(CATALOGUE, ids, "main", tagger="haiku") == note
     assert cat.note_text(ids, "subagent", tagger="haiku") == cat.note_text(ids, "subagent") == ""
@@ -128,10 +125,13 @@ def test_the_note_asks_claude_for_no_tag_while_haiku_writes_them(level):
         assert line.startswith(f"{key}: {'|'.join(cat.TAG_VOCAB[key])}")
 
 
-def test_the_reminder_line_says_end_your_reply_when_there_is_no_tag():
-    note = cat.note_text(("task", "feedback_reminder"), "main", tagger="haiku")
-    assert "end your reply with this" in note and "before your tag" not in note
-    assert cat.REMINDER_LABEL in note
+def test_the_reminder_note_reads_the_same_whoever_writes_the_tags():
+    # It rides on a message of yours, not the session start note, and says "before any tag" for either.
+    for tagger in cat.TAGGERS:
+        note = cat.note_text(("task", "feedback_reminder"), "main", tagger=tagger)
+        assert cat.REMINDER_LABEL not in note and "feedback_reminder" not in note
+    text = cat.FEEDBACK_NOTE_TEXT["rating_reminder"]
+    assert "before any tag" in text and text.splitlines()[-1].startswith(cat.REMINDER_LABEL)
 
 
 def test_haiku_needs_a_foreground_stop_entry():

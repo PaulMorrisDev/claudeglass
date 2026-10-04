@@ -322,3 +322,91 @@ def test_usage_log_tables_have_help_and_measured_causes_sit_on_the_cache_tab(tmp
         table = tables[name][1]
         assert table.help and table.help.shows, name
         assert all(c.help for c in table.columns), name
+
+
+def _plain(text: str, where: str) -> None:
+    """The copy rules for one string the dashboard shows or a copyable
+    prompt carries: no internal name, banned term, filler or dash aside,
+    and no sentence over 25 words."""
+    assert not SNAKE_CASE.search(text), f"{where}: internal name in {text!r}"
+    assert not BANNED.search(text), f"{where}: banned term in {text!r}"
+    assert not FILLER.search(text), f"{where}: filler word in {text!r}"
+    assert " -- " not in text, f"{where}: dash aside in {text!r}"
+    for sentence in re.split(r"(?<=[.?!])\s+", text):
+        assert len(sentence.split()) <= MAX_SENTENCE_WORDS, f"{where}: sentence over 25 words: {sentence!r}"
+
+
+def test_the_copy_the_feedback_answers_add_keeps_to_the_help_rules():
+    """What your /cg-feedback answers add to the habits, the tips table,
+    the plan-handoff card and the coaching summary: the new strings
+    follow the same rules as the help text."""
+    from claudeglass import capture_catalogue, coaching, fixes, habits, prompting
+    from claudeglass.capture_catalogue import MISSED_IN_LINES
+    from claudeglass.habits import Habits, Piece, SessionShape
+
+    strings: list[tuple[str, str]] = []
+    for word, line in MISSED_IN_LINES.items():
+        strings.append((f"missed_in line {word or 'unsaid'}", line))
+    for table in (habits.EXAMPLES, habits.BASES, habits.WHERE, habits.TRADE_OFFS, habits.UNDO):
+        value = table["check_work"]
+        strings.extend(("check_work", part) for part in ((value,) if isinstance(value, str) else value))
+    strings.append(("check_work title", habits.ITEMS["check_work"][1]))
+    for word, (title, where) in habits._CHECK_WORK_VARIANTS.items():
+        strings.extend((f"check_work {word}", part) for part in (title, where) if part)
+    strings += [(f"place {word}", place) for word, place in habits._MISSED_PLACES.items()]
+    strings.append(("plan_first basis", prompting.BASIS["plan_first"]))
+    # The explainer rows are shown; the prompt is text for Claude, which the other cards' prompts are too.
+    strings += [("plan-handoff:fuller_plans", part) for part in fixes._WORKFLOW_EXPLAINER["plan-handoff:fuller_plans"]]
+    section = prompting.build_section([prompting.SessionPrompting("s", None, notes={"drip_feed": 1})])
+    strings += [("tips table", note) for note in section.tables[1].notes]
+    data = {
+        "muted": ["status_poll"], "once": ["big_paste"], "plan_fresh": False,
+        "thresholds": {"drip_count": 9, "cold_min_tokens": 1_000_000},
+    }
+    strings += [("coaching summary", line) for line in coaching.describe(data)]
+    strings += [("excused note", note) for note in habits._excused_notes(Habits(cycles=[
+        habits.CycleFact("s", None, "", 1.0, 1, None, excused=True)]))]
+    for where, text in strings:
+        _plain(text, where)
+
+    # The evidence the cards show once there are answers.
+    gave = dict(outcome="partly", cost=1.0, cycles=3, task="feature", slow=(), source="your feedback", why_given=True)
+    pieces = [
+        Piece(**gave, why=("left_out", "missed"), missed_in="plan", plan="covered", helped=("context", "plan"),
+              followups=3, followup_cost=2.0, followup_tokens=12_000)
+        for _ in range(3)
+    ]
+    h = Habits(
+        pieces=pieces,
+        cycles=[habits.CycleFact("s", None, "", 1.0, 1, None, plan_check="covered", tokens=2_000, redone=True)],
+        shapes=[SessionShape("plan_build", 1.0, 80_000)],
+    )
+    items = habits.playbook(h)
+    assert {"brief_clearly", "check_work"} <= {item.key for item in items}
+    for item in items:
+        _plain(item.evidence, f"{item.key} evidence")
+        _plain(item.title or habits.item_title(item), f"{item.key} title")
+
+
+def test_the_plan_handoff_card_words_your_answers_add_keep_to_the_help_rules():
+    """The card's opening explanation is older and longer; what your
+    answers add to it, and the actions they change, follow the rules."""
+    from test_handoff import RULES, HandoffThresholds, _report
+
+    reports = [
+        _report(3, answers=("no", "no", "partly")),
+        _report(3, answers=("yes", "yes", "yes", "no"), costly=3),
+        _report(3, plans=("gap", "gap", "covered")),
+        _report(3, answers=("no", "no", "no"), plans=("gap", "gap", "gap"), costly=3),
+    ]
+    plain = RULES[0](_report(3), HandoffThresholds())[0]
+    for report in reports:
+        [rec] = RULES[0](report, HandoffThresholds())
+        _plain(rec.title, "plan-handoff title")
+        for label, *_ in rec.evidence:
+            _plain(label, "plan-handoff evidence")
+        for sentence in re.split(r"(?<=[.?!])\s+", rec.why):
+            if sentence.startswith("You "):
+                _plain(sentence, "plan-handoff why")
+        if rec.action != plain.action:
+            _plain(rec.action, "plan-handoff action")

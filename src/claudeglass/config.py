@@ -104,6 +104,12 @@ CAPTURE_LOG_NAME = "capture-log.jsonl"
 #: same way ``CAPTURE_LOG_NAME`` feeds ``change_points._capture_points``.
 PREDICTION_LOG_NAME = "prediction-log.jsonl"
 
+#: Each time you mark a tip, habit or recommendation card "Trying it" on the
+#: dashboard, one JSON object is appended here (:func:`append_habit_log`):
+#: the day you started, so ``change_points`` can measure its effect from
+#: then. A closed vocabulary only: the kind of card and its id.
+HABIT_LOG_NAME = "habit-log.jsonl"
+
 
 class ConfigError(Exception):
     """A config or session-overrides file could not be read or is not
@@ -196,6 +202,21 @@ class CaptureConfig:
     @property
     def coaching_notes_on(self) -> bool:
         return "coaching_notes" in self.coaching
+
+    @property
+    def feedback_prompts_on(self) -> bool:
+        """Whether a feedback item that runs on the messages you send is
+        on, whatever the level: the facts line a /cg-feedback run starts
+        with, the plan check or the rating reminder
+        (``capture_catalogue.FEEDBACK_MESSAGE_IDS``)."""
+        return any(i in self.feedback for i in capture_catalogue.FEEDBACK_MESSAGE_IDS)
+
+    @property
+    def hooked(self) -> bool:
+        """Whether the capture hook has anything to do: capture is on, or
+        coaching notes or a feedback item on your messages is, which run at
+        any level."""
+        return self.is_on or self.coaching_notes_on or self.feedback_prompts_on
 
     def expired(self, now: datetime | None = None) -> bool:
         """Whether ``until`` has passed (``False`` when unset)."""
@@ -1060,10 +1081,12 @@ def _in_catalogue_order(chosen: list[str], known: tuple[str, ...]) -> list[str]:
 
 
 #: What turning the ``/cg-feedback`` survey on turns on (``capture
-#: feedback on``, ``init``), and what turning it off turns off: the skill
-#: and the reminders to run it. The dashboard rating stays as set.
+#: feedback on``, ``init``), and what turning it off turns off: the skill,
+#: the reminders to run it and the plan check. The reminder from Claude and
+#: the plan check come with Deep, not with the survey alone. The dashboard
+#: rating stays as set.
 FEEDBACK_ON = ("feedback_skill", "feedback_note")
-FEEDBACK_OFF = ("feedback_skill", "feedback_note", "feedback_reminder")
+FEEDBACK_OFF = ("feedback_skill", "feedback_note", "feedback_reminder", "plan_check")
 
 
 def feedback_ids(current: list[str], on: bool) -> list[str]:
@@ -1223,7 +1246,12 @@ def prune_capture_log(
     how many lines were removed; a missing file, or one with nothing to
     remove, is a no-op returning 0.
     """
-    path = _resolve_config_dir(config_dir) / CAPTURE_LOG_NAME
+    return _prune_log(_resolve_config_dir(config_dir) / CAPTURE_LOG_NAME, retention_days, now)
+
+
+def _prune_log(path: Path, retention_days: int, now: datetime | None) -> int:
+    """:func:`prune_capture_log`'s work, for any of this module's JSON-lines
+    logs: keep the lines whose ``ts`` is within ``retention_days``."""
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
@@ -1255,6 +1283,54 @@ def prune_capture_log(
     text = "".join(f"{line}\n" for line in kept)
     _write_atomic(path, text)
     return removed
+
+
+def append_habit_log(
+    config_dir: str | Path, *, kind: str, item: str, state: str = "trying", now: datetime | None = None
+) -> None:
+    """Log that you started trying a tip, habit or recommendation
+    (``POST /api/tip-feedback``): ``kind`` is one of
+    ``capture_catalogue.TIP_CARD_KINDS``, ``item`` the card's id and
+    ``state`` a word from ``capture_catalogue.TIP_CARD_VOCAB``. The caller
+    checks all three: nothing else is written."""
+    resolved_dir = _resolve_config_dir(config_dir)
+    resolved_dir.mkdir(parents=True, exist_ok=True)
+    stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc).isoformat(timespec="seconds")
+    record = {"ts": stamp, "kind": kind, "item": item, "state": state}
+    with open(resolved_dir / HABIT_LOG_NAME, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
+
+
+def load_habit_log(config_dir: str | Path | None = None) -> list[dict]:
+    """Every record in ``habit-log.jsonl``, oldest first; lines that aren't
+    a record of a card you marked are skipped."""
+    path = _resolve_config_dir(config_dir) / HABIT_LOG_NAME
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    records = []
+    for line in lines:
+        try:
+            record = json.loads(line)
+        except ValueError:
+            continue
+        if (
+            isinstance(record, dict)
+            and all(isinstance(record.get(key), str) for key in ("ts", "kind", "item", "state"))
+        ):
+            records.append(record)
+    return records
+
+
+def prune_habit_log(
+    config_dir: str | Path | None = None,
+    retention_days: int = SIGNAL_RETENTION_DEFAULT_DAYS,
+    now: datetime | None = None,
+) -> int:
+    """:func:`prune_capture_log` for ``habit-log.jsonl``. Returns how many
+    lines were removed."""
+    return _prune_log(_resolve_config_dir(config_dir) / HABIT_LOG_NAME, retention_days, now)
 
 
 def append_prediction_log(
@@ -1318,6 +1394,7 @@ __all__ = [
     "CLAUDEGLASS_DIRNAME",
     "CAPTURE_LOG_NAME",
     "PREDICTION_LOG_NAME",
+    "HABIT_LOG_NAME",
     "CAPTURE_SAMPLES",
     "SIGNAL_RETENTION_DEFAULT_DAYS",
     "CaptureConfig",
@@ -1338,6 +1415,9 @@ __all__ = [
     "set_capture",
     "load_capture_log",
     "prune_capture_log",
+    "append_habit_log",
+    "load_habit_log",
+    "prune_habit_log",
     "append_prediction_log",
     "load_prediction_log",
     "load_session_overrides",

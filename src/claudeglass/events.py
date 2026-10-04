@@ -91,6 +91,8 @@ from .capture_catalogue import (
     CORRECTION_PATTERN,
     CORRECTION_SCAN_CHARS,
     ERROR_TEXT_PATTERN,
+    FEEDBACK_FACTS_MARKER,
+    FEEDBACK_HINTS,
     HOOK_SCRIPT,
     LIMIT_RESUME_PREFIX,
     NOT_TYPED_PREFIXES,
@@ -573,10 +575,16 @@ _CAPTURE_NOTE_HOOKS = frozenset({"SessionStart", "SubagentStart", "PostToolUse",
 #: until 0.12.1).
 _COACH_RE = re.compile(f"(?:{re.escape(COACH_MARKER)}|{re.escape(OLD_COACH_MARKER)})" + r"(\d+) ([a-z_]+)")
 
-#: The hints a note's kind may name: today's, and the ones that no longer
-#: show live but are still in old transcripts, so a note from before the
-#: change keeps its kind instead of reading as ``other``.
-_KNOWN_HINTS = frozenset((*COACHING_HINTS, *RETIRED_COACHING_HINTS))
+#: The kind of the line a /cg-feedback run starts with (the facts line,
+#: ``capture_catalogue.FEEDBACK_FACTS_MARKER``), kept as a coaching note's
+#: kind so it counts as ClaudeGlass's own hook context.
+FEEDBACK_FACTS_KIND = "feedback_facts"
+
+#: The hints a note's kind may name: today's, the plan check's and the
+#: rating reminder's (``capture_catalogue.FEEDBACK_HINTS``), and the ones
+#: that no longer show live but are still in old transcripts, so a note
+#: from before the change keeps its kind instead of reading as ``other``.
+_KNOWN_HINTS = frozenset((*COACHING_HINTS, *FEEDBACK_HINTS, *RETIRED_COACHING_HINTS, FEEDBACK_FACTS_KIND))
 
 
 def _find_marker(text: str, *markers: str) -> int:
@@ -590,6 +598,9 @@ def _capture_note(d: dict, attachment: dict) -> tuple[str, int, dict] | None:
     ``hook_additional_context`` line carrying ClaudeGlass's capture note
     (``capture_catalogue.NOTE_MARKER``, subkind ``capture_note``) or only
     a coaching note (``COACH_MARKER``, ``coaching_note``), else ``None``.
+    The facts line a /cg-feedback run starts with
+    (``FEEDBACK_FACTS_MARKER``) is a ``coaching_note`` of kind
+    ``feedback_facts``.
     ``chars`` is what the model was shown, from ``rendered`` when
     present. ``detail`` holds the note format version, its metric codes
     (a coaching note: its hint, ``kind``) and the hook event -- never the
@@ -606,7 +617,8 @@ def _capture_note(d: dict, attachment: dict) -> tuple[str, int, dict] | None:
     text = "\n".join(texts)
     note_at = _find_marker(text, NOTE_MARKER, OLD_NOTE_MARKER)
     coach_at = _find_marker(text, COACH_MARKER, OLD_COACH_MARKER)
-    if note_at < 0 and coach_at < 0:
+    facts = note_at < 0 and coach_at < 0 and FEEDBACK_FACTS_MARKER in text
+    if note_at < 0 and coach_at < 0 and not facts:
         return None
     chars = _rendered_size_chars(d, attachment) if d.get("rendered") is not None else None
     if chars is None:
@@ -615,6 +627,8 @@ def _capture_note(d: dict, attachment: dict) -> tuple[str, int, dict] | None:
     hook_event = attachment.get("hookEvent")
     hook = hook_event if hook_event in _CAPTURE_NOTE_HOOKS else "other"
     coach: dict = {}
+    if facts:
+        return "coaching_note", chars, {"v": 1, "kind": FEEDBACK_FACTS_KIND, "hook": hook}
     if coach_at >= 0:
         match = _COACH_RE.match(text, coach_at)
         coach = {

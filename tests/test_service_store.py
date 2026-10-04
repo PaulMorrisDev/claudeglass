@@ -622,7 +622,9 @@ def test_migrate_backs_up_and_rebuilds_a_newer_than_code_store(tmp_path) -> None
         # "session-a" doesn't exist in the freshly recreated sessions table
         # yet (the next watcher tick repopulates it).
         assert reopened.feedback("session-a") == {
-            "outcome": "delivered", "slow": [], "worth": "yes", "helped": [], "set_at": reopened.feedback("session-a")["set_at"],
+            "outcome": "delivered", "slow": [], "worth": "yes", "helped": [],
+            "why": [], "missed_in": None, "plan": None, "handoff": None, "tip": None, "tip_hint": None, "builds": [],
+            "set_at": reopened.feedback("session-a")["set_at"],
         }
         assert reopened.all_tags().get("session-a") == {"purpose": "refactor"}
     finally:
@@ -671,7 +673,7 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
 
     db_path = tmp_path / "roundtrip.db"
     store = Store(str(db_path))
-    store.open()  # built fresh at the real, current SCHEMA_VERSION (8)
+    store.open()  # built fresh at the real, current SCHEMA_VERSION (9)
     _seed(store)
     store.set_feedback("session-a", outcome="delivered", slow=("scope",), worth="yes", helped=("clearer-brief",))
     store.set_tag("session-a", "purpose", "refactor")
@@ -681,28 +683,29 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
     )
     store.close()
 
-    # "Downgrade": a build that only knows up to v7 opens this v8 store.
-    # v8 is newer than that build's own SCHEMA_VERSION, so migrate() takes
+    # "Downgrade": a build that only knows up to v8 opens this v9 store.
+    # v9 is newer than that build's own SCHEMA_VERSION, so migrate() takes
     # the backup-then-drop-and-rebuild path (same branch as the test
-    # above), stamping the store back down to "7".
+    # above), stamping the store back down to "8".
     monkeypatch.setattr(schema, "SCHEMA_VERSION", schema.SCHEMA_VERSION - 1)
     downgraded = Store(str(db_path))
     downgraded.open()
-    assert downgraded.schema_version() == 7
+    assert downgraded.schema_version() == 8
     downgraded.close()
 
-    # Upgrade back to the real, current build: v7 -> v8 walks the
+    # Upgrade back to the real, current build: v8 -> v9 walks the
     # additive MIGRATIONS ladder (it never drops a table, and finds the
-    # bucket column the rebuilt tables already carry), so this step
-    # alone was never the risk -- the ratings must already have survived
-    # the downgrade step above to still be here now.
+    # columns the rebuilt tables already carry), so this step alone was
+    # never the risk -- the ratings must already have survived the
+    # downgrade step above to still be here now.
     monkeypatch.undo()
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 8
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 9
         assert upgraded.feedback("session-a") == {
             "outcome": "delivered", "slow": ["scope"], "worth": "yes", "helped": ["clearer-brief"],
+            "why": [], "missed_in": None, "plan": None, "handoff": None, "tip": None, "tip_hint": None, "builds": [],
             "set_at": upgraded.feedback("session-a")["set_at"],
         }
         assert upgraded.all_tags().get("session-a") == {"purpose": "refactor"}
@@ -1597,6 +1600,270 @@ def test_change_token_changes_when_a_rating_is_set(store: Store) -> None:
     assert store.change_token() != before
 
 
+def test_feedback_keeps_the_redesigned_answers_and_clears_what_is_left_out(store: Store) -> None:
+    _seed(store)
+    store.set_feedback(
+        "session-a", outcome="partly", why=["left_out", "missed"], missed_in="plan", worth="fair",
+        tip="useful", tip_hint="plan_fresh",
+    )
+    saved = store.feedback("session-a")
+    assert saved["why"] == ["left_out", "missed"] and saved["missed_in"] == "plan"
+    assert saved["tip"] == "useful" and saved["tip_hint"] == "plan_fresh"
+    assert saved["plan"] is None and saved["handoff"] is None and saved["builds"] == []
+    # A rating replaces the last one: what it leaves out is cleared.
+    store.set_feedback("session-a", outcome="met")
+    again = store.feedback("session-a")
+    assert again["why"] == [] and again["missed_in"] is None and again["tip"] is None and again["tip_hint"] is None
+
+
+def test_a_tip_hint_is_kept_only_with_its_tip_answer(store: Store) -> None:
+    _seed(store)
+    store.set_feedback("session-a", outcome="met", tip_hint="drip_feed")
+    assert store.feedback("session-a")["tip_hint"] is None
+    store.set_feedback("session-a", outcome="met", tip="known", tip_hint="drip_feed")
+    assert store.feedback("session-a")["tip_hint"] == "drip_feed"
+
+
+def test_plan_and_handoff_on_their_own_are_the_first_builds_answers(store: Store) -> None:
+    _seed(store)
+    store.set_feedback("session-a", plan="covered", handoff="yes")
+    saved = store.feedback("session-a")
+    assert saved["plan"] == "covered" and saved["handoff"] == "yes"
+    assert saved["builds"] == [{"build": 1, "plan": "covered", "handoff": "yes"}]
+
+
+def test_a_rating_with_only_a_plan_answer_is_kept(store: Store) -> None:
+    _seed(store)
+    store.set_feedback("session-a", plan="gap")
+    assert store.feedback_count() == 1 and store.feedback("session-a")["plan"] == "gap"
+
+
+def test_each_plan_build_keeps_its_own_answers_in_order(store: Store) -> None:
+    _seed(store)
+    store.set_feedback(
+        "session-a",
+        outcome="met",
+        builds=[
+            {"build": 2, "plan": "gap", "handoff": "no"},
+            {"build": 1, "plan": "covered", "handoff": "yes"},
+            {"build": 3, "plan": None, "handoff": None},  # nothing said: no row
+        ],
+    )
+    saved = store.feedback("session-a")
+    assert saved["builds"] == [
+        {"build": 1, "plan": "covered", "handoff": "yes"},
+        {"build": 2, "plan": "gap", "handoff": "no"},
+    ]
+    assert saved["plan"] == "covered" and saved["handoff"] == "yes"
+    assert store.all_feedback()["session-a"] == saved
+    assert store.session("session-a")["feedback"] == saved
+    # A later rating without builds clears them, and nothing ticked clears the lot.
+    store.set_feedback("session-a", outcome="met")
+    assert store.feedback("session-a")["builds"] == []
+    store.set_feedback("session-a", builds=[{"build": 1, "plan": "new", "handoff": None}])
+    assert store.feedback("session-a")["builds"] == [{"build": 1, "plan": "new", "handoff": None}]
+    store.set_feedback("session-a")
+    assert store.feedback("session-a") is None
+    assert store._connection().execute("SELECT COUNT(*) FROM session_plan_feedback").fetchone()[0] == 0
+
+
+def test_change_token_changes_when_a_plan_build_or_a_card_answer_is_set(store: Store) -> None:
+    _seed(store)
+    store.set_feedback("session-a", outcome="met")
+    base = store.change_token()
+    store.set_feedback("session-a", outcome="met", builds=[{"build": 1, "plan": "covered", "handoff": None}])
+    with_plan = store.change_token()
+    assert with_plan != base
+    store.set_tip_feedback("tip", "plan_fresh", "useful")
+    with_card = store.change_token()
+    assert with_card != with_plan
+    store.set_tip_feedback("tip", "plan_fresh", None)
+    assert store.change_token() != with_card
+
+
+def test_retention_prune_removes_an_old_sessions_plan_builds(store: Store) -> None:
+    _seed(store)
+    store.upsert_session(
+        session_id="session-old", project_slug="proj-a", slug="proj-a",
+        first_ts="2000-01-01T00:00:00Z", last_ts="2000-01-01T01:00:00Z",
+    )
+    store.set_feedback("session-old", builds=[{"build": 1, "plan": "gap", "handoff": "no"}])
+    store.set_tip_feedback("recommendation", "model.default", "wrong")
+    assert store.retention_prune(retention_days=30) == 1
+    assert store._connection().execute("SELECT COUNT(*) FROM session_plan_feedback").fetchone()[0] == 0
+    # A card answer is not tied to one session, so the prune leaves it.
+    assert store.tip_feedback_count() == 1
+
+
+def test_tip_feedback_round_trips_replaces_and_clears(store: Store) -> None:
+    assert store.tip_feedback() == {} and store.tip_feedback_count() == 0
+    saved = store.set_tip_feedback("habit", "plan_first", "trying")
+    assert saved["answer"] == "trying" and saved["set_at"]
+    assert store.tip_feedback() == {("habit", "plan_first"): {"answer": "trying", "set_at": saved["set_at"]}}
+    # The same card, a new answer: one row, not two.
+    store.set_tip_feedback("habit", "plan_first", "useful")
+    assert store.tip_feedback_count() == 1
+    assert store.tip_feedback()[("habit", "plan_first")]["answer"] == "useful"
+    # The same item under another kind is another card.
+    store.set_tip_feedback("tip", "plan_first", "known")
+    assert store.tip_feedback_count() == 2
+    assert store.set_tip_feedback("habit", "plan_first", None) is None
+    assert set(store.tip_feedback()) == {("tip", "plan_first")}
+
+
+def test_unrated_sessions_lists_big_unrated_ones_in_the_window_newest_first(store: Store) -> None:
+    _seed(store)  # session-a: 45000 tokens, last reply 2026-09-18T13:00:00Z
+    for sid, last, tokens in (
+        ("session-b", "2026-09-19T10:00:00Z", 90000),
+        ("session-small", "2026-09-19T11:00:00Z", 100),
+        ("session-old", "2026-08-01T10:00:00Z", 90000),
+    ):
+        store.upsert_session(
+            session_id=sid, project_slug="proj-a", slug="proj-a", first_ts=last, last_ts=last, total_tokens=tokens
+        )
+    rows = store.unrated_sessions(min_tokens=1000, since="2026-09-01T00:00:00Z")
+    assert [row["id"] for row in rows] == ["session-b", "session-a"]
+    assert set(rows[0]) == {"id", "slug", "last_ts", "total_tokens"}
+    assert rows[0]["total_tokens"] == 90000
+    # A higher floor drops the smaller one, and rating a session takes it off.
+    assert [r["id"] for r in store.unrated_sessions(min_tokens=60000, since="2026-09-01T00:00:00Z")] == ["session-b"]
+    store.set_feedback("session-b", outcome="met")
+    assert [r["id"] for r in store.unrated_sessions(min_tokens=1000, since="2026-09-01T00:00:00Z")] == ["session-a"]
+
+
+def test_read_tip_feedback_reads_the_answers_without_writing(tmp_path) -> None:
+    from claudeglass.service.store import read_tip_feedback
+
+    db_path = tmp_path / "service.db"
+    assert read_tip_feedback(db_path) == {}
+    store = Store(str(db_path))
+    store.open()
+    store.set_tip_feedback("tip", "drip_feed", "wrong")
+    expected = store.tip_feedback()
+    store.close()
+    before = db_path.read_bytes()
+    assert read_tip_feedback(db_path) == expected and expected[("tip", "drip_feed")]["answer"] == "wrong"
+    assert db_path.read_bytes() == before
+
+
+def test_read_tip_feedback_of_a_store_without_the_table_is_empty(tmp_path) -> None:
+    from claudeglass.service.store import read_tip_feedback
+
+    db_path = tmp_path / "service.db"
+    store = Store(str(db_path))
+    store.open()
+    conn = store._connection()
+    conn.execute("DROP TABLE tip_feedback")
+    conn.commit()
+    store.close()
+    assert read_tip_feedback(db_path) == {}
+
+
+def test_read_session_marks_gives_plan_builds_and_reads_a_store_from_before_them(tmp_path) -> None:
+    from claudeglass.service.store import read_session_marks
+
+    db_path = tmp_path / "service.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)
+    store.set_feedback("session-a", outcome="met", builds=[{"build": 1, "plan": "covered", "handoff": "yes"}])
+    expected = store.all_feedback()
+    store.close()
+    _tags, ratings = read_session_marks(db_path)
+    assert ratings == expected and ratings["session-a"]["builds"][0]["plan"] == "covered"
+
+    # A store from before version 9 has neither the plan table nor the
+    # newer columns: its ratings still read, the newer answers empty.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute("DROP TABLE session_plan_feedback")
+    for column in ("why", "missed_in", "tip", "tip_hint"):
+        conn.execute(f"ALTER TABLE session_feedback DROP COLUMN {column}")
+    conn.commit()
+    conn.close()
+    _tags, old = read_session_marks(db_path)
+    assert old["session-a"]["outcome"] == "met"
+    assert old["session-a"]["why"] == [] and old["session-a"]["tip"] is None and old["session-a"]["builds"] == []
+
+
+def test_migrate_upgrades_a_v8_store_with_the_redesigned_rating(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v8.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)
+    store.set_feedback("session-a", outcome="met", slow=["tools"], worth="yes", helped=["context"])
+    conn = store._connection()
+    conn.execute("DROP TABLE session_plan_feedback")
+    conn.execute("DROP TABLE tip_feedback")
+    for column in ("why", "missed_in", "tip", "tip_hint"):
+        conn.execute(f"ALTER TABLE session_feedback DROP COLUMN {column}")
+    conn.execute("UPDATE meta SET value = '8' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
+    conn.commit()
+    store.close()
+
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 9
+        # The old rating is kept as it was, with the newer answers empty.
+        saved = upgraded.feedback("session-a")
+        assert saved["outcome"] == "met" and saved["slow"] == ["tools"] and saved["helped"] == ["context"]
+        assert saved["why"] == [] and saved["tip"] is None and saved["builds"] == []
+        # The new tables work.
+        upgraded.set_feedback("session-a", outcome="met", builds=[{"build": 1, "plan": "gap", "handoff": None}])
+        upgraded.set_tip_feedback("tip", "plan_fresh", "known")
+        assert upgraded.feedback("session-a")["builds"][0]["plan"] == "gap"
+        assert upgraded.tip_feedback_count() == 1
+    finally:
+        upgraded.close()
+
+
+def test_migrate_8_to_9_is_a_no_op_when_run_again(store: Store) -> None:
+    from claudeglass.service import store as store_mod
+
+    _seed(store)
+    store.set_feedback("session-a", outcome="met", why=["left_out"], builds=[{"build": 1, "plan": "gap", "handoff": None}])
+    store.set_tip_feedback("tip", "plan_fresh", "useful")
+    before = (store.feedback("session-a"), store.tip_feedback())
+    conn = store._connection()
+    store_mod._migrate_8_to_9(conn)  # every column and table is there already
+    assert (store.feedback("session-a"), store.tip_feedback()) == before
+
+
+def test_a_rating_with_plan_builds_and_a_card_answer_survive_a_rebuild(tmp_path) -> None:
+    from claudeglass.service import schema
+
+    db_path = tmp_path / "newer.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)
+    store.set_feedback(
+        "session-a", outcome="partly", why=["missed"], missed_in="standing", tip="useful", tip_hint="big_paste",
+        builds=[{"build": 1, "plan": "gap", "handoff": "partly"}, {"build": 2, "plan": "covered", "handoff": "yes"}],
+    )
+    store.set_tip_feedback("habit", "plan_first", "trying")
+    expected = (store.feedback("session-a"), store.tip_feedback())
+    store.close()
+
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        "INSERT INTO meta (key, value) VALUES ('schema_version', ?) "
+        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        (str(schema.SCHEMA_VERSION + 1),),
+    )
+    conn.commit()
+    conn.close()
+
+    reopened = Store(str(db_path))
+    reopened.open()
+    try:
+        assert (reopened.feedback("session-a"), reopened.tip_feedback()) == expected
+    finally:
+        reopened.close()
+
+
 def test_retention_prune_removes_old_ratings(store: Store) -> None:
     _seed(store)
     store.upsert_session(
@@ -1700,7 +1967,7 @@ def test_migrate_upgrades_a_v5_store_with_the_feedback_table(tmp_path) -> None:
     store = Store(str(db_path))
     store.open()
     try:
-        assert store.schema_version() == schema.SCHEMA_VERSION == 8
+        assert store.schema_version() == schema.SCHEMA_VERSION == 9
         assert store.session("session-a") is not None
         assert store.tags("session-a") == {"purpose": "refactor-override"}
         store.set_feedback("session-a", outcome="met", worth="yes")
@@ -2141,7 +2408,7 @@ def test_migrate_upgrades_a_v7_store_and_marks_every_transcript_for_a_re_parse(t
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 8
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 9
         assert "bucket" in {row["name"] for row in upgraded._connection().execute("PRAGMA table_info(turns_agg)")}
         # Every row is kept, with no bucket until its transcript is parsed again.
         assert _agg_rows(upgraded) == rows_before

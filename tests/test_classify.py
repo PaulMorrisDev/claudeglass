@@ -876,3 +876,38 @@ def test_an_override_still_wins_over_the_reported_task(tmp_path):
     overrides = {"s-tagged": {"purpose": "planning"}}
     classification = classify.classify_session(top, [], overrides=overrides, tz=None)
     assert (classification.purpose, classification.purpose_source) == ("planning", "override")
+
+
+# -- the label chip: a catch-all a rule fell back to -------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("mode", "mode_source", "purpose", "purpose_source", "expected"),
+    [
+        # The catch-all of either label, reached by a rule, is a guess.
+        ("mixed", "rule", "refactor", "intent-signature", True),
+        ("agentic", "tool-signature", "general-dev", "rule", True),
+        ("mixed", "rule", "general-dev", "rule", True),
+        # A specific label is not one, whatever its source.
+        ("agentic", "tool-signature", "refactor", "intent-signature", False),
+        ("interactive", "rule", "docs", "rule", False),
+        # A label you set or Claude reported is yours, even when it is the catch-all.
+        ("mixed", "override", "general-dev", "override", False),
+        ("mixed", "reported", "general-dev", "reported", False),
+        # One label still a guess while the other is yours.
+        ("mixed", "rule", "docs", "override", True),
+        ("agentic", "override", "general-dev", "rule", True),
+        # Nothing known: not a guess to show.
+        ("", "", "", "", False),
+    ],
+)
+def test_a_label_is_low_confidence_only_when_a_rule_chose_the_catch_all(
+    mode, mode_source, purpose, purpose_source, expected
+):
+    assert classify.is_low_confidence(mode, mode_source, purpose, purpose_source) is expected
+
+
+def test_the_catch_all_labels_are_the_ones_the_last_rules_give():
+    assert classify.CATCH_ALL_MODE == "mixed" and classify.CATCH_ALL_PURPOSE == "general-dev"
+    assert classify.is_low_confidence(classify.CATCH_ALL_MODE, "rule", "docs", "rule")
+    assert classify.is_low_confidence("interactive", "rule", classify.CATCH_ALL_PURPOSE, "rule")

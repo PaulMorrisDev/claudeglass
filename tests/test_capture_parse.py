@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from claudeglass import cache, capture, capture_catalogue, capture_tags, events, prompt_shape
-from claudeglass.model import CaptureTag, EventKind, PlanStats, TranscriptMeta
+from claudeglass.model import CaptureTag, EventKind, PlanCheck, PlanStats, TranscriptMeta
 from claudeglass.parse import parse_transcript
 
 from helpers import (
@@ -1243,3 +1243,177 @@ def test_workflow_runs_survive_the_digest_cache_as_tuples(tmp_path):
     assert decoded.turns == result.turns
     assert decoded.turns[0].workflow_runs == {"tu_w": ("wf_6119c640-76c", "wv62qx65p")}
     assert isinstance(decoded.turns[0].workflow_runs["tu_w"], tuple)
+
+
+# -- the plan check and the rating reminder (PARSER_VERSION 39) ----------------------
+
+_CHECK_Q = {"question": capture_catalogue.PLAN_CHECK_QUESTION, "header": capture_catalogue.PLAN_CHECK_HEADER}
+_REMINDER = f"{capture_catalogue.REMINDER_LABEL} {capture_catalogue.FEEDBACK_REMINDER_LINE}"
+
+
+def _plan_check_session(tmp_path, answer=None, *, declined: bool = False):
+    """A plan, a build, then a fix message and the plan check's question and how it came back."""
+    lines = [
+        _asked(), _plan_call("tu_plan"),
+        user_block_line([tool_result_block("tu_plan", "ok")]),
+        _calls("Edit", "tu_e", file_path="src/a.py"),
+        user_block_line([tool_result_block("tu_e", "ok")]),
+        _reply("built"),
+        _asked("that is wrong, it fails on empty input"),
+        turn_line(content=[tool_use_block("AskUserQuestion", "tu_q", {"questions": [_CHECK_Q]})]),
+    ]
+    if declined:
+        lines.append(user_block_line([tool_result_block("tu_q", "User rejected tool use", is_error=True)]))
+    else:
+        result = {"questions": [_CHECK_Q], "answers": {_CHECK_Q["question"]: answer}}
+        lines.append(user_block_line([tool_result_block("tu_q", "ok")], toolUseResult=result))
+    lines.append(_reply("fixed"))
+    return _parse(tmp_path, lines)
+
+
+def _plan_checks(result) -> list:
+    return [turn.plan_check for turn in result.turns if turn.plan_check is not None]
+
+
+@pytest.mark.parametrize("option", capture_catalogue.PLAN_CHECK_OPTIONS, ids=lambda o: o[0])
+def test_the_plan_checks_answer_is_read_as_its_word_and_the_plan_it_is_about(tmp_path, option):
+    word, label, _description = option
+    result = _plan_check_session(tmp_path, label)
+    assert _plan_checks(result) == [PlanCheck("tu_plan", word)]
+    assert word in capture_catalogue.PLAN_CHECK_WORDS
+    assert_privacy(result)
+
+
+@pytest.mark.parametrize("answer, declined", [("zebra-passphrase-4821 in my own words", False), (None, True)])
+def test_a_declined_plan_check_or_an_other_answer_has_no_word_and_keeps_none_of_your_words(tmp_path, answer, declined):
+    result = _plan_check_session(tmp_path, answer, declined=declined)
+    assert _plan_checks(result) == [PlanCheck("tu_plan", "")]
+    assert "zebra" not in repr(result.turns) + repr(result.events)
+    assert_privacy(result)
+
+
+def test_a_plan_check_is_about_the_latest_plan_asked_before_it(tmp_path):
+    answer = capture_catalogue.PLAN_CHECK_OPTIONS[0][1]
+    result = _parse(tmp_path, [
+        _asked(), _plan_call("tu_old"), user_block_line([tool_result_block("tu_old", "ok")]),
+        _asked("again"), _plan_call("tu_new"), user_block_line([tool_result_block("tu_new", "ok")]),
+        turn_line(content=[tool_use_block("AskUserQuestion", "tu_q", {"questions": [_CHECK_Q]})]),
+        user_block_line(
+            [tool_result_block("tu_q", "ok")],
+            toolUseResult={"questions": [_CHECK_Q], "answers": {_CHECK_Q["question"]: answer}},
+        ),
+        _reply("done"),
+    ])
+    assert _plan_checks(result) == [PlanCheck("tu_new", "covered")]
+
+
+def test_the_feedback_questions_and_other_questions_are_no_plan_check(tmp_path):
+    feedback_q = {"question": "How did it go?", "header": capture_catalogue.FEEDBACK_QUESTIONS[0].header}
+    result = _parse(tmp_path, [
+        _asked(), _plan_call("tu_plan"), user_block_line([tool_result_block("tu_plan", "ok")]),
+        turn_line(content=[tool_use_block("AskUserQuestion", "tu_f", {"questions": [feedback_q]})]),
+        user_block_line([tool_result_block("tu_f", "ok")]),
+        turn_line(content=[tool_use_block("AskUserQuestion", "tu_o", {"questions": [
+            {"question": "Which file?", "header": "File"}]})]),
+        user_block_line([tool_result_block("tu_o", "ok")]),
+        _reply("done"),
+    ])
+    assert _plan_checks(result) == []
+    assert capture_tags.asks_plan_check({"questions": [feedback_q]}) is False
+
+
+def test_the_plan_check_survives_the_digest_cache(tmp_path):
+    result = _plan_check_session(tmp_path, capture_catalogue.PLAN_CHECK_OPTIONS[1][1])
+    decoded = cache.result_from_jsonable(json.loads(json.dumps(cache.encode_result(result))))
+    assert decoded.turns == result.turns
+    assert _plan_checks(decoded) == [PlanCheck("tu_plan", "gap")]
+
+
+@pytest.mark.parametrize("tool_input, asks", [
+    ({"questions": [_CHECK_Q]}, True),
+    ({"questions": [{"question": "x", "header": "Other"}, _CHECK_Q]}, True),
+    ({"questions": [{"question": "x", "header": "Other"}]}, False),
+    ({"questions": []}, False),
+    ({"questions": "CG plan fix"}, False),
+    ({"questions": [None, 3, "CG plan fix"]}, False),
+    ({}, False),
+    (None, False),
+    ("CG plan fix", False),
+])
+def test_asks_plan_check_looks_only_at_the_header(tool_input, asks):
+    assert capture_tags.asks_plan_check(tool_input) is asks
+
+
+def _answered(answer) -> dict:
+    return {"questions": [_CHECK_Q], "answers": {_CHECK_Q["question"]: answer}}
+
+
+@pytest.mark.parametrize("result, word", [
+    (_answered("Claude missed the plan"), "covered"),
+    (_answered("The plan missed it"), "gap"),
+    (_answered("Something new"), "new"),
+    (_answered("Not a fix"), "none"),
+    (_answered("something else entirely"), ""),
+    (_answered(["Not a fix"]), ""),
+    ({"questions": [_CHECK_Q], "answers": {}}, ""),
+    ({"questions": [_CHECK_Q], "answers": None}, ""),
+    ({"questions": [{"question": "q", "header": "Other"}], "answers": {"q": "Not a fix"}}, None),
+    ({"questions": "nope", "answers": {}}, None),
+    ({}, None),
+    ("Not a fix", None),
+    (None, None),
+])
+def test_plan_check_from_answers_gives_a_word_of_the_list_or_nothing_of_your_own(result, word):
+    assert capture_tags.plan_check_from_answers(result) == word
+
+
+@pytest.mark.parametrize("text, carries", [
+    (f"Done.\n\n{_REMINDER}", True),
+    (f"Done.\n\n{_REMINDER}\n\n[cg: task=feature]", True),
+    (capture_catalogue.FEEDBACK_REMINDER_LINE, True),
+    ("Done.", False),
+    ("", False),
+    # Quoted far above the end of a long reply: not written as the reminder.
+    (f"{_REMINDER}\n" + "x" * (capture_tags.REMINDER_SCAN_CHARS + 50), False),
+])
+def test_carries_reminder_looks_at_the_end_of_the_reply_for_the_line(text, carries):
+    assert capture_tags.carries_reminder(text) is carries
+
+
+def test_a_reply_that_ends_with_the_reminder_line_is_marked_and_its_text_is_not_kept(tmp_path):
+    result = _parse(tmp_path, [
+        _asked("zebra-passphrase-4821"), _reply(f"Done with zebra-passphrase-4821.\n\n{_REMINDER}"),
+        _asked("go on"), _reply("Fine."),
+        _asked("again"), _reply(f"{_REMINDER}\n" + "y" * 2000),
+    ])
+    assert [turn.coach_reminder for turn in result.turns] == [True, False, False]
+    assert "zebra" not in repr(result.turns) + repr(result.events)
+    assert_privacy(result)
+
+
+def test_the_last_text_block_decides_whether_a_reply_carries_the_reminder(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(),
+        turn_line(content=[{"type": "text", "text": _REMINDER}, {"type": "text", "text": "Actually, one more thing."}]),
+    ])
+    assert result.turns[0].coach_reminder is False
+
+
+@pytest.mark.parametrize("text, kind", [
+    ("cg-coach v1 plan_check\nThe user approved a plan.", "plan_check"),
+    ("cg-coach v1 rating_reminder\nThis piece of work has used about 1.3M tokens.", "rating_reminder"),
+    (f"{capture_catalogue.FEEDBACK_FACTS_MARKER} tokens=1300000 typical=0 followups=2", "feedback_facts"),
+])
+def test_the_feedback_notes_and_the_facts_line_are_the_hooks_own_context(text, kind):
+    line = _note(text, hook="UserPromptSubmit")
+    event = events.classify_line(line)
+    assert (event.kind, event.subkind) == (EventKind.HOOK_OUTPUT, "coaching_note")
+    assert event.detail == {"v": 1, "kind": kind, "hook": "UserPromptSubmit"}
+    assert event.size_chars == len(line["rendered"][0]["content"])
+
+
+def test_the_facts_line_without_rendered_is_sized_with_its_wrapper():
+    text = f"{capture_catalogue.FEEDBACK_FACTS_MARKER} tokens=5 typical=0"
+    event = events.classify_line(_note(text, hook="UserPromptSubmit", rendered=False))
+    assert event.detail["kind"] == "feedback_facts"
+    assert event.size_chars == len(text) + 63 + len("UserPromptSubmit")

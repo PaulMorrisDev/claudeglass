@@ -98,6 +98,23 @@ connect``):
   projects`` leaves out. A capture note and a coaching note for the same
   call go out as one note, the capture note first, so a tip is the last
   line.
+- ``UserPromptSubmit``, for the ``/cg-feedback`` survey's items (``[capture]
+  feedback``: :func:`feedback_note_for`), at any capture level and in every
+  session ``[capture] projects`` leaves in. A message that starts
+  ``/cg-feedback`` gets one line of counts and ids for the piece of work
+  being rated (``cg-fb-facts v1 tokens=... followups=...``; no words, and no
+  coaching note beside it), which the skill reads to fill its numbers and
+  to leave out a question that doesn't apply. A message that corrects or
+  adjusts the work after a plan you approved and a build that changed
+  files gets a note asking Claude for one question first (``plan_check``,
+  Deep only, once per plan, resting for two weeks after two misses). A
+  piece of work that has grown big and hasn't been rated gets a note asking
+  Claude to end its reply with a one-line reminder to run ``/cg-feedback``
+  (``feedback_reminder``, once per piece and once every 3 days). All three
+  read the same end of the transcript the coaching hints do, shared with
+  them, and only counts, flags and positions leave it; a coaching tip in
+  the same call, or a message sent while Claude was working, gets no
+  note beside it.
 - ``Stop`` and ``PostToolUse``, also for coaching notes: the time, context
   and cache lifetime of the newest reply, written to ``coach-state.json``
   with no output (:func:`remember_reply`). A replay of old lines at the end
@@ -140,7 +157,7 @@ What the note says comes from ``capture-catalogue.json`` next to this
 module, written from ``claudeglass.capture_catalogue``;
 :func:`build_note` builds the same text as ``capture_catalogue.note_text``.
 
-Coaching notes aside, it adds nothing when capture is off, past its
+Coaching notes and the feedback items aside, it adds nothing when capture is off, past its
 ``until`` time, outside the sampled share of sessions (a hash of the
 session id, so a session's subagents follow it), or in a project left
 out by ``[capture] projects`` or ``exclude_projects``, and logs nothing
@@ -383,7 +400,7 @@ def build_note(catalogue: dict, ids, scope: str, agent_type: str = "", tagger: s
         return ""
     text = catalogue["text"]
     out = [f"{catalogue['marker']}{catalogue['version']} {','.join(codes)}", text["intro"]]
-    # CAP-1: an extra marked extra_before_tag (feedback_reminder) tells
+    # CAP-1: an extra marked extra_before_tag tells
     # Claude to end its reply with something too, so it goes before the
     # tag block, not after -- the tag instruction stays the last thing
     # the note asks for. Same split as capture_catalogue.note_text.
@@ -742,13 +759,34 @@ def coaching_on(config: dict) -> bool:
     return isinstance(coaching, list) and "coaching_notes" in coaching
 
 
+#: The feedback items that run on a message of yours (``capture_catalogue.
+#: FEEDBACK_MESSAGE_IDS``, held to it by a test): the survey's facts line, the
+#: plan check and the rating reminder.
+_FEEDBACK_MESSAGE_IDS = ("feedback_skill", "plan_check", "feedback_reminder")
+
+
+def feedback_ids(config: dict) -> tuple[str, ...]:
+    """The feedback items on your messages that ``[capture] feedback``
+    switches on, whatever the capture level."""
+    capture = config.get("capture")
+    wanted = capture.get("feedback") if isinstance(capture, dict) else None
+    return tuple(i for i in _FEEDBACK_MESSAGE_IDS if isinstance(wanted, list) and i in wanted)
+
+
 def _coaching_applies(payload: dict, config: dict) -> bool:
     """Coaching notes run at any capture level, past ``until`` and in
     every session (no sampling), but only in the projects ``[capture]
     projects`` and ``exclude_projects`` leave in."""
-    if not coaching_on(config):
+    return coaching_on(config) and _project_applies(payload, config)
+
+
+def _project_applies(payload: dict, config: dict) -> bool:
+    """Whether the project of this call is one ``[capture] projects`` and
+    ``exclude_projects`` leave in: the one filter coaching notes and the
+    feedback items share."""
+    capture = config.get("capture")
+    if not isinstance(capture, dict):
         return False
-    capture = config["capture"]
     cwd = project_dir(payload)
     if cwd:
         exclude = config.get("exclude_projects", [])
@@ -802,6 +840,12 @@ def coaching_thresholds(coaching: dict, config: dict, personal: dict) -> dict:
             if value is not None and value >= 0:
                 out[key] = value
     return out
+
+
+def _hint_names(value) -> frozenset:
+    """A list of hint ids from ``coaching.json`` (``muted``, ``once``), or
+    nothing when it is missing or not a list of strings."""
+    return frozenset(item for item in value if isinstance(item, str)) if isinstance(value, list) else frozenset()
 
 
 def _session_key(session_id: str, config_dir: Path) -> str:
@@ -862,6 +906,9 @@ def _gate(state: dict, session: str, kind: str, stake: float, now_ts: float, th:
     prior = _hint_row(row, kind) if isinstance(row, dict) else None
     if prior is None:
         return True
+    if prior.get("once"):
+        # A hint you already knew shows once a session, however much grows.
+        return False
     last_ts = _number(prior.get("ts"))
     if last_ts is not None and now_ts - last_ts >= _rest_s(prior, th):
         return True
@@ -869,11 +916,15 @@ def _gate(state: dict, session: str, kind: str, stake: float, now_ts: float, th:
     return last_stake is not None and last_stake > 0 and stake >= last_stake * th["rearm_factor"]
 
 
-def _stamp(state: dict, session: str, kind: str, stake: float, now_ts: float, th: dict, rest: float | None = None) -> None:
+def _stamp(
+    state: dict, session: str, kind: str, stake: float, now_ts: float, th: dict, rest: float | None = None,
+    once: bool = False,
+) -> None:
     """Records that ``kind`` showed. It then rests for ``rest`` seconds, or,
     unless told how long, the cooldown doubled for each earlier time it
     showed in this session (up to ``max_backoff`` doublings): a hint that
-    keeps coming back is one you have decided to ignore."""
+    keeps coming back is one you have decided to ignore. ``once`` marks it
+    as not to show again in this session (:func:`_gate`)."""
     row = _session_row(state, session, now_ts)
     if not isinstance(row.get("hints"), dict):
         row["hints"] = {}
@@ -882,6 +933,8 @@ def _stamp(state: dict, session: str, kind: str, stake: float, now_ts: float, th
     if rest is None:
         rest = th["cooldown_minutes"] * 60 * 2 ** min(shown - 1, int(th["max_backoff"]))
     row["hints"][kind] = {"ts": now_ts, "stake": stake, "n": shown, "rest": rest}
+    if once:
+        row["hints"][kind]["once"] = True
 
 
 def _rest_beside(state: dict, session: str, kind: str, now_ts: float, th: dict) -> None:
@@ -900,6 +953,8 @@ def _rest_beside(state: dict, session: str, kind: str, now_ts: float, th: dict) 
             return
     shown = int(_number(prior.get("n")) or 0) if prior else 0
     row["hints"][kind] = {"ts": now_ts, "stake": 0, "n": shown, "rest": cooldown}
+    if prior is not None and prior.get("once"):
+        row["hints"][kind]["once"] = True
 
 
 def _records(data: bytes) -> list[dict]:
@@ -1080,6 +1135,24 @@ def _ordered(records: list[dict]) -> tuple[list[dict], bool]:
         if not again:
             kept.append(record)
     return kept, replayed
+
+
+class _TailReader:
+    """The end of a transcript for a message you send, read and put in
+    order (:func:`_ordered`) the first time anything asks and kept for the
+    rest of the call: the coaching hints and the feedback items read the
+    same 4 MB, so it is read once."""
+
+    def __init__(self, path) -> None:
+        self.path = path
+        self._read: tuple[list[dict], bool] | None = None
+
+    def get(self) -> tuple[list[dict], bool]:
+        if self._read is None:
+            self._read = (
+                _ordered(_tail(self.path, _COACH_PROMPT_TAIL_BYTES)) if isinstance(self.path, str) and self.path else ([], False)
+            )
+        return self._read
 
 
 def _reply_ctx(record: dict) -> int:
@@ -1898,8 +1971,12 @@ def _plan_answers(
     records: list[dict], prefix: str, coaching: dict, keep: int = 0
 ) -> tuple[list[dict], dict | None, str | None]:
     """The plans among ``records`` (``{"chars", "approved", "said",
-    "text"}``, one per ``ExitPlanMode`` call, in order), the one still
-    waiting for your word, and the last ``permissionMode`` seen. A plan is
+    "text", "id", "at", "approved_at"}``, one per ``ExitPlanMode`` call, in
+    order), the one still waiting for your word, and the last
+    ``permissionMode`` seen. ``id`` is the call's id, ``at`` its position
+    in ``records`` and ``approved_at`` the position of the line that
+    approved it (its result, your go-ahead, or the line that left plan
+    mode; ``-1`` while it isn't). A plan is
     approved when its call came back without an error, or, when it didn't,
     when a message of yours that only says to carry on follows before the
     next call, or the mode leaves ``plan`` (``parse``'s
@@ -1912,7 +1989,7 @@ def _plan_answers(
     said = re.compile(coaching["plan_said_pattern"], re.IGNORECASE)
     waiting = None
     mode = None
-    for record in records:
+    for index, record in enumerate(records):
         if record.get("isSidechain"):
             continue
         if record.get("type") == "assistant":
@@ -1920,7 +1997,10 @@ def _plan_answers(
                 if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "ExitPlanMode":
                     given = block.get("input") if isinstance(block.get("input"), dict) else {}
                     body = given["plan"] if isinstance(given.get("plan"), str) else ""
-                    plan = {"chars": len(body), "approved": False, "said": False, "text": body[:keep]}
+                    plan = {
+                        "chars": len(body), "approved": False, "said": False, "text": body[:keep],
+                        "id": str(block.get("id")), "at": index, "approved_at": -1,
+                    }
                     plans.append(plan)
                     by_id[str(block.get("id"))] = plan
                     waiting = None
@@ -1928,7 +2008,7 @@ def _plan_answers(
             now = record.get("permissionMode")
             if isinstance(now, str) and now:
                 if mode == "plan" and now != "plan" and waiting is not None:
-                    waiting["approved"], waiting = True, None
+                    waiting["approved"], waiting["approved_at"], waiting = True, index, None
                 mode = now
             for block in _blocks(record):
                 if not isinstance(block, dict) or block.get("type") != "tool_result":
@@ -1942,9 +2022,9 @@ def _plan_answers(
                     feedback = said.search(head)
                     plan["said"] = feedback is not None and bool(head[feedback.end():].strip())
                 else:
-                    plan["approved"], waiting = True, None
+                    plan["approved"], plan["approved_at"], waiting = True, index, None
             if waiting is not None and _typed(record, prefix) and _is_go(_text_of(record), coaching):
-                waiting["approved"], waiting = True, None
+                waiting["approved"], waiting["approved_at"], waiting = True, index, None
     return plans, waiting, mode
 
 
@@ -2093,6 +2173,7 @@ def coaching_for(
     config_dir: Path,
     now: datetime | None = None,
     result_len: int | None = None,
+    tail: _TailReader | None = None,
 ) -> tuple[str, str]:
     """``(note, notice)`` for this hook call: the coaching note to add for
     Claude, and what to show you at once (Claude Code's ``systemMessage``;
@@ -2104,7 +2185,10 @@ def coaching_for(
     printing nothing). A message sent while Claude was still working
     (queued) gets no hint: it nudges work under way, and a reply to it
     isn't one that ends the turn. ``result_len`` is :func:`result_chars`
-    of a PostToolUse call when the caller already measured it."""
+    of a PostToolUse call when the caller already measured it. ``tail`` is
+    the reader of the transcript's end the caller shares with the feedback
+    items (:class:`_TailReader`); one is made when it is missing or reads
+    another file."""
     if not _coaching_applies(payload, config):
         return "", ""
     event = payload.get("hook_event_name")
@@ -2120,6 +2204,8 @@ def coaching_for(
     now_ts = now.timestamp()
     personal = _read_json(config_dir / coaching["file"])
     th = coaching_thresholds(coaching, config, personal)
+    # Tips you called wrong don't show; ones you already knew show once a session.
+    muted, once = _hint_names(personal.get("muted")), _hint_names(personal.get("once"))
     state_path = config_dir / coaching["state_file"]
     state = _read_json(state_path)
     session = _session_key(session_id, config_dir)
@@ -2131,7 +2217,7 @@ def coaching_for(
         prompt = payload.get("prompt")
         typed = not (isinstance(prompt, str) and prompt.lstrip().startswith(_not_typed_prefixes()))
         if not in_agent and typed and isinstance(path, str) and path:
-            records, replayed = _ordered(_tail(path, _COACH_PROMPT_TAIL_BYTES))
+            records, replayed = (tail if tail is not None and tail.path == path else _TailReader(path)).get()
             if not _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
                 fresh = personal.get("plan_fresh", True) is not False
                 last = _last_reply(records, state, session)
@@ -2164,14 +2250,14 @@ def coaching_for(
         if found is None:
             continue
         kind, stake, fields = found
-        if not _gate(state, session, kind, stake, now_ts, th):
-            continue
         hint = kind.split(":", 1)[0]
+        if hint in muted or not _gate(state, session, kind, stake, now_ts, th):
+            continue
         if hint == "cold_return":
             # A receipt for one break: it rests half a day, however the context grows.
-            _stamp(state, session, kind, 0, now_ts, th, rest=th["cold_rest_hours"] * 3600)
+            _stamp(state, session, kind, 0, now_ts, th, rest=th["cold_rest_hours"] * 3600, once=hint in once)
         else:
-            _stamp(state, session, kind, stake, now_ts, th)
+            _stamp(state, session, kind, stake, now_ts, th, once=hint in once)
         if hint == "split_run":
             # One notice a run: it's for you, and saying it again adds nothing.
             state["agents"][str(payload["agent_id"])]["told"] = True
@@ -2189,6 +2275,515 @@ def coaching_for(
     if dirty:
         _write_json(state_path, state)
     return "", ""
+
+
+# -- the /cg-feedback survey: facts line, plan check, rating reminder -----------
+
+#: The patterns the feedback items read, compiled on first use from the
+#: catalogue (:func:`_feedback_patterns`): a thank-you, the ``/cg-feedback``
+#: command line, a coaching note's marker and hint (``cg-coach v1
+#: <hint>``) and a tag's ``shift=new``.
+_FB: dict = {}
+
+#: The usage fields a reply's tokens are summed from: the report's own
+#: definition (``Turn`` input, cache writes, cache reads and output).
+_TOKEN_KEYS = ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens", "output_tokens")
+
+#: How many resolved plan-check questions the back-off remembers having
+#: counted (hashes of their call ids).
+_PLAN_CHECK_SEEN = 16
+
+_SECONDS_PER_DAY = 86400
+
+
+def _feedback_patterns(coaching: dict) -> dict:
+    if not _FB:
+        feedback = coaching["feedback"]
+        _FB["ack"] = re.compile(coaching["ack_pattern"], re.IGNORECASE)
+        _FB["run"] = re.compile(r"<command-name>/?" + re.escape(feedback["skill"]) + r"</command-name>")
+        _FB["coach"] = re.compile(re.escape(coaching["marker"]) + r"\d+ ([a-z_]+)")
+        _FB["shift_new"] = re.compile(r"\bshift=new\b")
+    return _FB
+
+
+def _is_feedback_prompt(prompt, skill: str) -> bool:
+    """Whether a prompt is the ``/cg-feedback`` command (with or without
+    arguments), as the UserPromptSubmit payload carries it."""
+    if not isinstance(prompt, str):
+        return False
+    head = prompt.lstrip()[: len(skill) + 2]
+    return head.startswith("/" + skill) and (len(head) == len(skill) + 1 or head[-1].isspace())
+
+
+def _attachment_text(attachment: dict) -> str:
+    """The text of a ``hook_additional_context`` attachment."""
+    content = attachment.get("content")
+    if isinstance(content, str):
+        return content
+    return "\n".join(item for item in content if isinstance(item, str)) if isinstance(content, list) else ""
+
+
+def _message(index: int, at, text: str, queued: bool, coaching: dict) -> dict:
+    """One message of yours, as the feedback items count it: where it is,
+    when it was sent and what kind it is (a go-ahead, a status check, a
+    thank-you; ``substantive`` is none of them, nor queued). Only these
+    flags are kept: its words are dropped."""
+    stripped = text.strip()
+    go = _is_go(text, coaching)
+    status = _is_status(text, coaching)
+    ack = _feedback_patterns(coaching)["ack"].fullmatch(stripped) is not None
+    return {
+        "i": index, "at": at, "queued": queued, "go": go, "status": status, "ack": ack,
+        "substantive": not (queued or go or status or ack),
+    }
+
+
+def _ask_headers(tool_input) -> list[str]:
+    """The ``header`` of each question an AskUserQuestion call asks."""
+    questions = tool_input.get("questions") if isinstance(tool_input, dict) else None
+    return [q["header"] for q in questions if isinstance(q, dict) and isinstance(q.get("header"), str)] if isinstance(questions, list) else []
+
+
+def _ask_outcome(record: dict, block: dict, header: str, feedback: dict) -> str:
+    """How an AskUserQuestion that asked ``header`` came back: ``declined``
+    (an error result), ``answered`` (one of the question's own labels; for
+    the plan check, one of its four; for the survey's plan question, any
+    answer) or ``other`` (words of yours, or none). The answer's words are
+    only compared, never kept."""
+    if block.get("is_error"):
+        return "declined"
+    result = record.get("toolUseResult")
+    questions = result.get("questions") if isinstance(result, dict) else None
+    answers = result.get("answers") if isinstance(result, dict) else None
+    if not isinstance(questions, list) or not isinstance(answers, dict):
+        return "other"
+    for question in questions:
+        if not isinstance(question, dict) or question.get("header") != header:
+            continue
+        text = question.get("question")
+        answer = answers.get(text) if isinstance(text, str) else None
+        if not isinstance(answer, str) or not answer:
+            return "other"
+        return "answered" if header != feedback["plan_check_header"] or answer in feedback["plan_check_labels"] else "other"
+    return "other"
+
+
+def _scan_pieces(records: list[dict], coaching: dict) -> dict:
+    """What the feedback items read of the end of a transcript, in one pass
+    over its main chain: the messages you typed and those you typed while
+    Claude worked (a ``queued_command``, counted once even when a line for
+    it follows), each ``/cg-feedback`` run's command line, every reply's
+    tokens (the later line of a reply's message id replaces the earlier),
+    the replies that own a mistake, the coaching tips shown, the file
+    changes, the questions asked with a plan header and how each came back,
+    and where a piece of work starts: your latest substantive message that
+    Claude's tag marked ``shift=new``, else the start of ``records``
+    (``start``; ``key`` names it: ``tail``, or that message's time). The
+    rating reminder's piece (``piece``, ``piece_key``) also starts after a
+    ``/cg-feedback`` run that came later: what was rated is done with.
+    The replies a ``/cg-feedback`` run itself makes are no part of any
+    piece. Only counts, flags and positions are kept: nothing you or
+    Claude wrote leaves this function."""
+    feedback = coaching["feedback"]
+    patterns = _feedback_patterns(coaching)
+    prefix = coaching["interrupt_prefix"]
+    edit_tools = coaching["edit_tools"]
+    plan_headers = set(feedback["plan_headers"])
+    tip_hints = feedback["tip_hints"]
+    tip_marker = feedback["tip_marker"]
+    msgs: list[dict] = []
+    queued_seen: dict[int, tuple] = {}
+    runs: list[int] = []
+    run_keys: dict[int, str] = {}
+    surveying = False
+    replies: dict[str, dict] = {}
+    tips: list[tuple[int, str]] = []
+    tip_texts: list[int] = []
+    cycle_starts: list[int] = []
+    new_starts: set[int] = set()
+    edits: dict[str, int] = {}
+    edit_ids: set[str] = set()
+    launches: dict[str, int] = {}
+    asks: dict[str, dict] = {}
+    current = None
+    for index, record in enumerate(records):
+        if record.get("isSidechain"):
+            continue
+        kind = record.get("type")
+        if kind == "attachment":
+            attachment = record.get("attachment")
+            if not isinstance(attachment, dict):
+                continue
+            if attachment.get("type") == "queued_command":
+                text = _queued_text(record)
+                if text:
+                    at = _reply_time(record)
+                    msgs.append(_message(index, at, text, True, coaching))
+                    queued_seen[hash(text.strip())] = (index, at)
+            elif attachment.get("type") == "hook_additional_context":
+                found = patterns["coach"].search(_attachment_text(attachment))
+                if found and found.group(1) in tip_hints:
+                    tips.append((index, found.group(1)))
+            continue
+        if kind == "assistant":
+            if _is_synthetic(record):
+                continue
+            message = record.get("message")
+            message_id = message.get("id") if isinstance(message, dict) else None
+            reply = None if surveying else replies.setdefault(
+                message_id if isinstance(message_id, str) and message_id else f"line:{index}",
+                {"i": index, "tokens": 0, "admit": False},
+            )
+            usage = _usage(record)
+            if usage and reply is not None:
+                reply["tokens"] = int(sum(_number(usage.get(key)) or 0 for key in _TOKEN_KEYS))
+            for block in _blocks(record):
+                if not isinstance(block, dict):
+                    continue
+                if block.get("type") == "text" and isinstance(block.get("text"), str):
+                    text = block["text"]
+                    if tip_marker in text:
+                        tip_texts.append(index)
+                    if reply is not None and _admits_mistake(text):
+                        reply["admit"] = True
+                    if current is not None:
+                        for tag in _TAG_RE.finditer(text):
+                            if patterns["shift_new"].search(tag.group(1)):
+                                new_starts.add(current)
+                elif block.get("type") == "tool_use":
+                    call = str(block.get("id"))
+                    name = block.get("name")
+                    headers = [h for h in _ask_headers(block.get("input")) if h in plan_headers] if name == "AskUserQuestion" else []
+                    if headers:
+                        asks[call] = {"i": index, "header": headers[0], "outcome": None}
+                    elif _changes_file(block, edit_tools):
+                        edits[call] = index
+                        if name in edit_tools:
+                            edit_ids.add(call)
+                    elif name in _AGENT_TOOLS:
+                        launches[call] = index
+            continue
+        if kind != "user":
+            continue
+        results = [b for b in _blocks(record) if isinstance(b, dict) and b.get("type") == "tool_result"]
+        if results:
+            for block in results:
+                call = str(block.get("tool_use_id"))
+                if block.get("is_error") and call in edit_ids:
+                    edits.pop(call, None)
+                ask = asks.get(call)
+                if ask is not None and ask["outcome"] is None:
+                    ask["outcome"] = _ask_outcome(record, block, ask["header"], feedback)
+                launched = launches.pop(call, None)
+                if launched is not None and not block.get("is_error") and not _is_async_launch(record) and _agent_edit_files(record):
+                    edits[f"agent:{call}"] = index
+            continue
+        if record.get("isMeta") or record.get("isCompactSummary"):
+            continue
+        text = _text_of(record)
+        if text.lstrip().startswith("<command-") and patterns["run"].search(text[:500]):
+            at = _reply_time(record)
+            runs.append(index)
+            run_keys[index] = f"run{int(at.timestamp()) if at else index}"
+            cycle_starts.append(index)
+            current = None
+            surveying = True
+            continue
+        if _untyped_start(record):
+            cycle_starts.append(index)
+            current = None
+            surveying = False
+            continue
+        if not _typed(record, prefix):
+            continue
+        at = _reply_time(record)
+        twin = queued_seen.pop(hash(text.strip()), None)
+        if twin is not None and (at is None or twin[1] is None or abs((at - twin[1]).total_seconds()) <= 60):
+            continue  # the queued line above is this message
+        msgs.append(_message(index, at, text, False, coaching))
+        current = len(msgs) - 1
+        cycle_starts.append(index)
+        surveying = False
+    marked = [msgs[k] for k in sorted(new_starts) if msgs[k]["substantive"]]
+    begin = marked[-1] if marked else None
+    start = begin["i"] if begin else 0
+    key = "tail" if begin is None else f"t{int(begin['at'].timestamp())}" if begin["at"] else f"t{begin['i']}"
+    piece, piece_key = (runs[-1], run_keys[runs[-1]]) if runs and runs[-1] > start else (start, key)
+    return {
+        "msgs": msgs, "runs": runs, "replies": replies, "tips": tips, "tip_texts": tip_texts,
+        "cycle_starts": cycle_starts, "edits": sorted(edits.values()), "asks": asks,
+        "start": start, "key": key, "piece": piece, "piece_key": piece_key,
+    }
+
+
+def _piece_tokens(scan: dict, since: int) -> int:
+    """The tokens of the replies from record ``since`` on."""
+    return sum(reply["tokens"] for reply in scan["replies"].values() if reply["i"] >= since)
+
+
+def _tokens_text(tokens: int) -> str:
+    """``tokens`` as a note says it: ``1.3M``, ``420k``."""
+    if tokens >= 1_000_000:
+        return f"{tokens / 1_000_000:.1f}".removesuffix(".0") + "M"
+    return f"{round(tokens / 1000)}k"
+
+
+def _tip_written(scan: dict, index: int) -> bool:
+    """Whether Claude's reply to the message a tip note at ``index`` went
+    with (up to the next message of yours) carries the tip marker: the
+    desktop app shows a tip only through the reply."""
+    from bisect import bisect_right
+
+    starts = scan["cycle_starts"]
+    after = bisect_right(starts, index)
+    end = starts[after] if after < len(starts) else None
+    written = scan["tip_texts"]
+    at = bisect_right(written, index)
+    return at < len(written) and (end is None or written[at] < end)
+
+
+def _facts_line(scan: dict, plans: list[dict], personal: dict, coaching: dict) -> str:
+    """The line a ``/cg-feedback`` run starts with: counts and ids for the
+    piece of work being rated (``capture_catalogue.FEEDBACK_FACT_KEYS``),
+    never text. The piece is the work since it started (:func:`_scan_pieces`)
+    or since your last ``/cg-feedback`` run that you carried on after; a run
+    right after another, with nothing between, rates the same piece again."""
+    feedback = coaching["feedback"]
+    begin = scan["start"]
+    for run in scan["runs"]:
+        if run > begin and any(m["i"] > run for m in scan["msgs"]):
+            begin = run
+    mine = [m for m in scan["msgs"] if m["i"] >= begin]
+    follow = [m for k, m in enumerate(mine) if k and not (m["go"] or m["status"])]
+    inside = [p for p in plans if p["at"] >= begin]
+    approved = [p for p in inside if p["approved"]]
+    latest = max(approved, key=lambda p: p["approved_at"], default=None)
+    after = latest["approved_at"] if latest else None
+    shown = [
+        (i, hint) for i, hint in scan["tips"]
+        if i >= begin and (not desktop() or _tip_written(scan, i))
+    ]
+    counts: dict[str, int] = {}
+    newest: dict[str, int] = {}
+    for i, hint in shown:
+        counts[hint] = counts.get(hint, 0) + 1
+        newest[hint] = i
+    order = [hint for hint in feedback["tip_hints"] if counts.get(hint)]
+    typical = _number(personal.get("typical_piece_tokens"))
+    values = {
+        "tokens": _piece_tokens(scan, begin),
+        "typical": int(typical) if typical is not None and typical > 0 else 0,
+        "followups": len(follow),
+        "queued": sum(1 for m in follow if m["queued"]),
+        "plan": "approved" if latest else "pending" if inside else "none",
+        "plan_followups": 0 if after is None else sum(1 for m in follow if m["i"] > after),
+        "plan_asked": int(after is not None and any(
+            a["i"] > after and a["outcome"] == "answered" for a in scan["asks"].values()
+        )),
+        "build": "same" if after is not None and any(e > after for e in scan["edits"]) else "none",
+        "tips": ",".join(f"{hint}:{counts[hint]}" for hint in order) or "none",
+        "tip": max(order, key=lambda hint: (counts[hint], newest[hint])) if order else "none",
+        "admits": sum(1 for r in scan["replies"].values() if r["i"] >= begin and r["admit"]),
+    }
+    return " ".join([feedback["facts_marker"], *(f"{key}={values[key]}" for key in feedback["fact_keys"])])
+
+
+def _feedback_state(state: dict) -> dict:
+    """The coach state's global part for the feedback items (``feedback``)."""
+    held = state.get("feedback")
+    if not isinstance(held, dict):
+        held = state["feedback"] = {}
+    return held
+
+
+#: How many plans and pieces the coach state remembers having noted.
+_FEEDBACK_REMEMBERED = 32
+
+
+def _noted_before(state: dict, name: str, session: str, key: str) -> bool:
+    """Whether the note ``name`` (``plans``, ``pieces``) already went out
+    for ``key`` in this session. Kept as short hashes in the global part of
+    the coach state, so a session's row being dropped after a day forgets
+    nothing."""
+    held = _feedback_state(state).get(name)
+    return isinstance(held, list) and _sha256_hex(f"{session}:{key}")[:16] in held
+
+
+def _note_made(state: dict, name: str, session: str, key: str) -> None:
+    held = _feedback_state(state).get(name)
+    held = [h for h in held if isinstance(h, str)] if isinstance(held, list) else []
+    held.append(_sha256_hex(f"{session}:{key}")[:16])
+    _feedback_state(state)[name] = held[-_FEEDBACK_REMEMBERED:]
+
+
+def _learn_plan_check(state: dict, scan: dict, feedback: dict, th: dict, now_ts: float, config_dir: Path) -> bool:
+    """Counts the plan-check questions that have been answered since the
+    last look. Any that was declined or answered in your own words is a
+    miss, one of the four answers clears the misses, and after
+    ``plan_check_declines`` misses in a row the check rests for
+    ``plan_check_off_days`` days. The call ids are kept as short salted
+    hashes (:func:`_session_key`'s, whatever the session, so a copy of the
+    transcript in a resumed session counts a question once). Returns
+    whether the state changed."""
+    resolved = [
+        (call, ask["outcome"]) for call, ask in scan["asks"].items()
+        if ask["header"] == feedback["plan_check_header"] and ask["outcome"] is not None
+    ]
+    held = _feedback_state(state)
+    check = held.get("plan_check")
+    if not isinstance(check, dict):
+        check = {}
+    seen = [s for s in check.get("seen", []) if isinstance(s, str)] if isinstance(check.get("seen"), list) else []
+    fresh = [(call, outcome) for call, outcome in resolved if _session_key(call, config_dir)[:8] not in seen]
+    if not fresh:
+        return False
+    misses = int(_number(check.get("misses")) or 0)
+    for call, outcome in fresh:
+        seen.append(_session_key(call, config_dir)[:8])
+        misses = 0 if outcome == "answered" else misses + 1
+        if misses >= th["plan_check_declines"]:
+            check["off_until"] = now_ts + th["plan_check_off_days"] * _SECONDS_PER_DAY
+            misses = 0
+    check["misses"] = misses
+    check["seen"] = seen[-_PLAN_CHECK_SEEN:]
+    held["plan_check"] = check
+    return True
+
+
+def _plan_check_due(prompt: str, scan: dict, plans: list[dict], coaching: dict) -> str | None:
+    """The id of the plan the plan check is due for when the message
+    you just sent calls for it: the latest approved plan of this piece of
+    work (by the dialog or by a typed go-ahead) has had a file change
+    since; no question with a plan header has been asked since it was
+    approved (this one or the survey's); no earlier round of the plan
+    already had words of yours typed in; and the message reads as a
+    correction (``correction_pattern``) or an adjustment that isn't a
+    question (``adjust_pattern``), and is not a go-ahead, a thank-you or a
+    status check. Only flags and positions are used; the message's words
+    never leave this function."""
+    text = prompt.strip()
+    if not text or _is_go(text, coaching) or _is_status(text, coaching) or _feedback_patterns(coaching)["ack"].fullmatch(text):
+        return None
+    change = _change_patterns()
+    head = text[: change["correction_scan_chars"]]
+    if not (change["correction"].search(head) or (change["adjust"].search(head) and not text.endswith("?"))):
+        return None
+    inside = [p for p in plans if p["at"] >= scan["start"]]
+    approved = [p for p in inside if p["approved"]]
+    if not approved:
+        return None
+    plan = max(approved, key=lambda p: p["approved_at"])
+    after = plan["approved_at"]
+    if not any(edit > after for edit in scan["edits"]) or any(ask["i"] > after for ask in scan["asks"].values()):
+        return None
+    if any(p["said"] for p in inside if p["at"] <= plan["at"]):
+        return None
+    return plan["id"]
+
+
+def _feedback_note(coaching: dict, hint: str, text: str) -> str:
+    return f"{coaching['marker']}{coaching['version']} {hint}\n{text}"
+
+
+def feedback_note_for(
+    payload: dict,
+    config: dict,
+    catalogue: dict,
+    config_dir: Path,
+    now: datetime | None = None,
+    tail: "_TailReader | None" = None,
+    tipped: bool = False,
+) -> str:
+    """The note for the feedback items on the message you just sent, or
+    ``""``. They run on ``UserPromptSubmit`` at any capture level (what
+    ``[capture] feedback`` switches on: ``feedback_ids``), in every session
+    the project filter leaves in, and read the end of the transcript the
+    coaching hints read (``tail``, shared with them).
+
+    - ``/cg-feedback`` (``feedback_skill``): the facts line alone
+      (:func:`_facts_line`), whatever else applies.
+    - ``plan_check``: after a plan you approved and a build that changed
+      files, a message that corrects or adjusts the work gets one question
+      from Claude first (:func:`_plan_check_due`), once per plan; it rests
+      for ``plan_check_off_days`` after ``plan_check_declines`` misses in a
+      row (:func:`_learn_plan_check`).
+    - ``feedback_reminder``: a piece of work that hasn't been rated and has
+      used at least ``rating_min_tokens`` and ``rating_typical_factor``
+      times your typical piece (``coaching.json``) gets a note asking
+      Claude to end its reply with the reminder line, once per piece and
+      once every ``rating_rest_days`` days. A piece starts with the
+      session, or with the message of yours that Claude's own tag marked
+      ``shift=new``, or after a ``/cg-feedback`` run (a ``/clear`` starts a
+      new transcript).
+
+    Neither note goes with a coaching tip (``tipped``: the tip is the last
+    line of its note, so it wins), nor with a message sent while Claude was
+    still working, and the plan check wins over the reminder. A message
+    you didn't type gets nothing. Writes ``coach-state.json`` when it
+    notes or learns something."""
+    ids = feedback_ids(config)
+    if not ids or payload.get("hook_event_name") != "UserPromptSubmit" or not _project_applies(payload, config):
+        return ""
+    session_id, path, prompt = payload.get("session_id"), payload.get("transcript_path"), payload.get("prompt")
+    if payload.get("agent_id") or not all(isinstance(v, str) and v for v in (session_id, path, prompt)):
+        return ""
+    coaching = catalogue["coaching"]
+    survey = _is_feedback_prompt(prompt, coaching["feedback"]["skill"])
+    if survey and "feedback_skill" not in ids:
+        return ""
+    if not survey and (prompt.lstrip().startswith(_not_typed_prefixes()) or not {"plan_check", "feedback_reminder"} & set(ids)):
+        return ""
+    now = now or datetime.now(timezone.utc)
+    now_ts = now.timestamp()
+    personal = _read_json(config_dir / coaching["file"])
+    th = coaching_thresholds(coaching, config, personal)
+    records, _replayed = (tail if tail is not None and tail.path == path else _TailReader(path)).get()
+    scan = _scan_pieces(records, coaching)
+    plans, _waiting, _mode = _plan_answers(records, coaching["interrupt_prefix"], coaching)
+    if survey:
+        return _facts_line(scan, plans, personal, coaching)
+    feedback = coaching["feedback"]
+    state_path = config_dir / coaching["state_file"]
+    state = _read_json(state_path)
+    session = _session_key(session_id, config_dir)
+    dirty = "plan_check" in ids and _learn_plan_check(state, scan, feedback, th, now_ts, config_dir)
+    note = ""
+    if not tipped and not _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
+        gate = _feedback_state(state)
+        check = gate.get("plan_check")
+        resting = isinstance(check, dict) and (_number(check.get("off_until")) or 0) > now_ts
+        plan_id = None if "plan_check" not in ids or resting else _plan_check_due(prompt, scan, plans, coaching)
+        if plan_id is not None and not _noted_before(state, "plans", session, plan_id):
+            _note_made(state, "plans", session, plan_id)
+            note = _feedback_note(coaching, "plan_check", feedback["text"]["plan_check"])
+        elif "feedback_reminder" in ids:
+            note = _reminder_due(scan, personal, th, coaching, state, session, now_ts)
+        dirty = dirty or bool(note)
+    if dirty:
+        _write_json(state_path, state)
+    return note
+
+
+def _reminder_due(scan: dict, personal: dict, th: dict, coaching: dict, state: dict, session: str, now_ts: float) -> str:
+    """The rating-reminder note when this piece of work is big enough and
+    hasn't been reminded, and no reminder has gone out in the last
+    ``rating_rest_days`` days; ``""`` otherwise. A piece that was rated
+    (a ``/cg-feedback`` run in the transcript; a rating on the dashboard
+    isn't there, so isn't seen) is over: the work after the run is a piece
+    of its own. Stamps the piece and the time."""
+    typical = _number(personal.get("typical_piece_tokens")) or 0
+    tokens = _piece_tokens(scan, scan["piece"])
+    if tokens < max(th["rating_min_tokens"], th["rating_typical_factor"] * typical):
+        return ""
+    gate = _feedback_state(state)
+    last = _number(gate.get("reminded_at"))
+    if (last is not None and now_ts - last < th["rating_rest_days"] * _SECONDS_PER_DAY
+            or _noted_before(state, "pieces", session, scan["piece_key"])):
+        return ""
+    _note_made(state, "pieces", session, scan["piece_key"])
+    gate["reminded_at"] = now_ts
+    text = coaching["feedback"]["text"]["rating_reminder"].replace("{tokens}", _tokens_text(tokens))
+    return _feedback_note(coaching, "rating_reminder", text)
 
 
 # -- Haiku writes the tags ------------------------------------------------------
@@ -2369,31 +2964,34 @@ def _first(text: str, limit: int) -> str:
     return flat if len(flat) <= limit else f"{flat[:limit]} [...]"
 
 
+def _queued_text(record: dict) -> str:
+    """The message of yours a ``queued_command`` line carries
+    (``events._queued_prompt_detail`` reads the same lines); ``""`` for any
+    other line, a task notification, another session's message or a line
+    you didn't type."""
+    attachment = record.get("attachment") if record.get("type") == "attachment" else None
+    if (
+        not isinstance(attachment, dict) or attachment.get("type") != "queued_command"
+        or attachment.get("commandMode") != "prompt" or attachment.get("isMeta")
+    ):
+        return ""
+    origin = attachment.get("origin")
+    if (origin.get("kind") if isinstance(origin, dict) else None) not in (None, "human"):
+        return ""
+    prompt = attachment.get("prompt")
+    texts = [prompt] if isinstance(prompt, str) else [
+        b.get("text") for b in prompt if isinstance(b, dict) and b.get("type") == "text"
+    ] if isinstance(prompt, list) else []
+    text = "\n".join(t for t in texts if isinstance(t, str) and t.strip())
+    return text if text and not text.lstrip().startswith(_not_typed_prefixes()) else ""
+
+
 def _queued_messages(records: list[dict]) -> list[str]:
     """The messages you typed while Claude worked, oldest first: the
     ``queued_command`` lines among ``records`` that carry a message of
-    yours (``events._queued_prompt_detail`` reads the same lines), not a
-    task notification, another session's message or a line you didn't
-    type. Held in memory for the excerpt; nothing of them is kept."""
-    found: list[str] = []
-    for record in records:
-        attachment = record.get("attachment") if record.get("type") == "attachment" else None
-        if (
-            not isinstance(attachment, dict) or attachment.get("type") != "queued_command"
-            or attachment.get("commandMode") != "prompt" or attachment.get("isMeta")
-        ):
-            continue
-        origin = attachment.get("origin")
-        if (origin.get("kind") if isinstance(origin, dict) else None) not in (None, "human"):
-            continue
-        prompt = attachment.get("prompt")
-        texts = [prompt] if isinstance(prompt, str) else [
-            b.get("text") for b in prompt if isinstance(b, dict) and b.get("type") == "text"
-        ] if isinstance(prompt, list) else []
-        text = "\n".join(t for t in texts if isinstance(t, str) and t.strip())
-        if text and not text.lstrip().startswith(_not_typed_prefixes()):
-            found.append(text)
-    return found
+    yours (:func:`_queued_text`). Held in memory for the excerpt; nothing
+    of them is kept."""
+    return [text for text in map(_queued_text, records) if text]
 
 
 def _minutes_since_reply(records: list[dict], at: datetime | None) -> int | None:
@@ -3753,7 +4351,8 @@ def _run(argv: list[str]) -> None:
         return  # an unreadable or half-written config reads as off
     capture = config.get("capture")
     coach = coaching_on(config)
-    if not isinstance(capture, dict) or (capture.get("level", "off") == "off" and not coach):
+    feedback = feedback_ids(config)
+    if not isinstance(capture, dict) or (capture.get("level", "off") == "off" and not coach and not feedback):
         return
     payload = json.loads(raw) if raw.strip() else {}
     if not isinstance(payload, dict):
@@ -3792,15 +4391,29 @@ def _run(argv: list[str]) -> None:
     # What Claude reads of a tool's result, measured once for both notes.
     result_len = result_chars(payload, catalogue) if payload.get("hook_event_name") == "PostToolUse" else None
     note = note_for(payload, config, catalogue, result_len=result_len, scope=scope)
-    tip = notice = ""
-    if coach:
+    tip = notice = survey = ""
+    prompting = payload.get("hook_event_name") == "UserPromptSubmit"
+    reader = _TailReader(payload.get("transcript_path")) if prompting else None
+    # A /cg-feedback run gets its facts line and no coaching note: the tip
+    # would only be one more thing for Claude to write beside the survey.
+    skip_coaching = (
+        prompting and "feedback_skill" in feedback
+        and _is_feedback_prompt(payload.get("prompt"), catalogue["coaching"]["feedback"]["skill"])
+    )
+    if coach and not skip_coaching:
         try:
-            tip, notice = coaching_for(payload, config, catalogue, config_dir, result_len=result_len)
+            tip, notice = coaching_for(payload, config, catalogue, config_dir, result_len=result_len, tail=reader)
         except Exception:  # noqa: BLE001 - a coaching fault must not cost the capture note
             tip = notice = ""
-    # One attachment for both: the capture note first, so its marker
-    # opens it, and the parser splits the two at the coaching marker.
-    text = "\n".join(part for part in (note, tip) if part)
+    if feedback and prompting:
+        try:
+            survey = feedback_note_for(payload, config, catalogue, config_dir, tail=reader, tipped=bool(tip))
+        except Exception:  # noqa: BLE001 - a feedback fault must not cost the capture note
+            survey = ""
+    # One attachment for all: the capture note first, so its marker
+    # opens it, and the parser splits the notes at the coaching marker; a
+    # tip is last, so it is the note's last line.
+    text = "\n".join(part for part in (note, survey, tip) if part)
     output: dict = {}
     if text:
         output["hookSpecificOutput"] = {"hookEventName": payload.get("hook_event_name"), "additionalContext": text}

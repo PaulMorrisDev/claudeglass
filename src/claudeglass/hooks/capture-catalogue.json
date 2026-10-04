@@ -63,6 +63,7 @@
   "feedback_skill",
   "feedback_note",
   "feedback_reminder",
+  "plan_check",
   "dashboard_rating"
  ],
  "metrics": [
@@ -303,19 +304,6 @@
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "",
-   "sub_extra": "",
-   "tool_note": ""
-  },
-  {
-   "id": "feedback_reminder",
-   "group": "feedback",
-   "requires": [],
-   "main_line": "",
-   "extra_keys": [],
-   "main_extra": "The first time in this session you finish a piece of work the user asked for, add this before your tag, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work.",
-   "extra_before_tag": true,
-   "main_extra_untagged": "The first time in this session you finish a piece of work the user asked for, end your reply with this, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work.",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
@@ -639,7 +627,12 @@
    "big_paste_tokens": 10000,
    "cooldown_minutes": 30,
    "rearm_factor": 1.5,
-   "max_backoff": 3
+   "max_backoff": 3,
+   "rating_min_tokens": 1000000,
+   "rating_typical_factor": 2,
+   "rating_rest_days": 3,
+   "plan_check_off_days": 14,
+   "plan_check_declines": 2
   },
   "text": {
    "cold_return": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user came back to this session after a break. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, the last reply or the task panel already says. For new work, running /clear first skips the rewrite.",
@@ -761,6 +754,78 @@
   "review_pattern": "\\s*(?:please\\s+)?(?:(?:can|could|would) you\\s+(?:please\\s+)?)?(?:review|audit|check|look (?:at|over|through|into)|read|explain|summari[sz]e|analy[sz]e|investigate|inspect|explore|compare|assess|evaluate|critique|list|show|tell me|describe|walk me through|go through|examine|proofread|verify)\\b",
   "ack_pattern": "(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no)(?:[\\s!.,]+(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no))*[\\s!.,]*",
   "change_pattern": "(?:^|[.!?;:,\\n])\\s*(?:(?:so|now|also|and|then|next|ok|okay|yes|yep|yeah|sure|right|great|nice|good|cool|thanks|thank you|perfect|plus|finally|first|lastly)[\\s,.!:;\\-\\u2013\\u2014]+)*(?:(?:(?:can|could|would|will) (?:you|we)(?: please)?|please|let'?s|let us|(?:we|you) (?:should|need to|have to|must|can|could)|(?:i|we) (?:want|need|would like|would love) (?:you |us |it |this |that )?to|i'?d (?:like|love) (?:you |us |it )?to)\\s+)?(?:add|create|build|implement|make|move|migrate|refactor|rename|remove|delete|update|change|replace|write|fix|set|convert|integrate|split|extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support|improve|tweak|adjust|enable|disable|increase|decrease|reduce|hide|use|switch|swap|put|ensure|apply|align|resize|restyle|polish|simplify|shorten|lengthen|expand|center|centre|style|colou?r|highlight|trim|tidy|reorder|sort|group|wrap|turn|bump|revert|undo|install|configure|rebuild|regenerate|reword|rephrase|relocate|tighten|loosen|darken|lighten|enlarge|shrink|widen|narrow|rotate|flip)\\b(?!\\s*:|\\s+(?:[\\w'-]+\\s+)?(?:is|isn'?t|was|wasn'?t|are|were|has|had|failed|fails|broke|breaks|works|worked|looks|seems|still|doesn'?t|didn'?t|won'?t)\\b|\\s+(?:for|of)\\b)",
-  "change_scan_chars": 600
+  "change_scan_chars": 600,
+  "feedback": {
+   "skill": "cg-feedback",
+   "facts_marker": "cg-fb-facts v1",
+   "fact_keys": [
+    "tokens",
+    "typical",
+    "followups",
+    "queued",
+    "plan",
+    "plan_followups",
+    "plan_asked",
+    "build",
+    "tips",
+    "tip",
+    "admits"
+   ],
+   "hints": [
+    "plan_check",
+    "rating_reminder"
+   ],
+   "text": {
+    "plan_check": "The user approved a plan, Claude changed files since, and this message reads as a fix to that work. Before you act on the message, call AskUserQuestion once with one question: header \"CG plan fix\", question \"Quick one for ClaudeGlass about the plan you approved: is this message (and any you typed while Claude was building it) mostly…\", one answer (multiSelect false), with these options, labels word for word: \"Claude missed the plan\" (The plan already said so); \"The plan missed it\" (The plan left it out); \"Something new\" (I only thought of it later); \"Not a fix\" (Nothing was wrong with the plan or the build). Ask nothing else, and ask it only this once. When the answer is back, or the user declines, handle the message exactly as you would have without this note. Say nothing about the answer, and never copy, quote or save the user's words.",
+    "rating_reminder": "This piece of work has used about {tokens} tokens and hasn't been rated. Once you have finished the work this message asks for, write the line below as the last thing in your final reply, after a blank line and before any tag, word for word. If you are still working, or waiting on the user, leave it out. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work."
+   },
+   "headers": [
+    "CG followups",
+    "CG handoff",
+    "CG missed",
+    "CG next time",
+    "CG outcome",
+    "CG plan",
+    "CG tip",
+    "CG worth",
+    "TL handoff",
+    "TL helped",
+    "TL outcome",
+    "TL slowdown",
+    "TL worth"
+   ],
+   "plan_headers": [
+    "CG plan",
+    "CG plan fix"
+   ],
+   "plan_check_header": "CG plan fix",
+   "plan_check_words": [
+    "covered",
+    "gap",
+    "new",
+    "none"
+   ],
+   "plan_check_labels": [
+    "Claude missed the plan",
+    "The plan missed it",
+    "Something new",
+    "Not a fix"
+   ],
+   "tip_hints": [
+    "plan_fresh",
+    "plan_fresh_early",
+    "drip_feed",
+    "big_paste",
+    "status_poll",
+    "cold_return"
+   ],
+   "tip_marker": "ClaudeGlass tip:",
+   "reminder_line": "Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work.",
+   "message_ids": [
+    "feedback_skill",
+    "plan_check",
+    "feedback_reminder"
+   ]
+  }
  }
 }

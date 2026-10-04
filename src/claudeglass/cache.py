@@ -128,6 +128,11 @@ def _fingerprint() -> str:
         "skill_name_pattern": capture_catalogue.SKILL_NAME_PATTERN,
         "feedback_vocab": {key: list(values) for key, values in capture_catalogue.FEEDBACK_VOCAB.items()},
         "feedback_list_keys": sorted(capture_catalogue.FEEDBACK_LIST_KEYS),
+        "plan_check": {
+            "header": capture_catalogue.PLAN_CHECK_HEADER,
+            "options": [[word, label] for word, label, _ in capture_catalogue.PLAN_CHECK_OPTIONS],
+        },
+        "reminder_line": capture_catalogue.FEEDBACK_REMINDER_LINE,
     }
     canonical = json.dumps(parts, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

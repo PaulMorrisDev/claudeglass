@@ -382,6 +382,37 @@ Feedback addition (``PARSER_VERSION`` 16):
   -- the capture note format version seen, the metric codes the notes
   asked for, and how many notes were injected.
 
+Feedback redesign addition (``PARSER_VERSION`` 39). What ``/cg-feedback``
+asks and keeps. Words from ``capture_catalogue.FEEDBACK_VOCAB`` only; what
+you type under "Other" is read in memory to pick the closest word, then
+dropped:
+
+- ``Feedback.why`` (what your follow-ups were mostly), ``missed_in``,
+  ``plan``, ``tip`` and ``tip_hint`` (the id of the tip rated). All have
+  defaults. ``slow`` stays: older runs asked it, and a run that did gets
+  ``why`` from it (``unclear`` is ``left_out``, ``none`` is ``none``;
+  ``rework`` says nothing about who caused it, so it adds nothing) with
+  ``why_older`` set.
+- ``Feedback.other`` -- the keys you answered with your own words, read
+  from the AskUserQuestion result. ``Feedback.from_text`` -- the keys whose
+  word came from the tag rather than a ticked label. A word counts as
+  picked from your note only when ``other`` shows a non-label answer for
+  that key, and a ticked answer always wins over the tag
+  (``capture_tags.settle_feedback``).
+- A /cg-feedback run with no work since the previous one replaces that
+  run's answers (``capture.feedback_spans``).
+- ``Turn.plan_check`` -- your answer to the plan check, the one question a
+  hook note has Claude ask before it acts on a message that fixes work
+  built from a plan you approved (``PlanCheck``): the id of that plan's
+  ``ExitPlanMode`` call and one word of
+  ``capture_catalogue.PLAN_CHECK_WORDS``, ``""`` when you declined or
+  answered in your own words. It rates no piece of work and cuts none. On
+  the turn that made the call. All defaults.
+- ``Turn.coach_reminder`` -- this reply's last text block carries the
+  /cg-feedback reminder line a hook note asked for
+  (``capture_catalogue.FEEDBACK_REMINDER_LINE``), so ``capture.usage``
+  prices it. Yes or no; the reply's words are never kept.
+
 Your-hooks addition (``PARSER_VERSION`` 22). Hook labels are a
 script's file name (``quarantine-guard.ps1``), or a hook command's first
 40 characters with paths redacted (the same rule as ``cmd_prefix``), or
@@ -951,7 +982,9 @@ class CaptureTag:
 @dataclass(slots=True)
 class Feedback:
     """Your /cg-feedback answers (see the module docstring). Every value is
-    a word from ``capture_catalogue.FEEDBACK_VOCAB``."""
+    a word from ``capture_catalogue.FEEDBACK_VOCAB``, except ``from_text``
+    and ``other``, which are keys. ``slow`` is the older run's question,
+    read but no longer asked."""
 
     outcome: str | None = None
     slow: tuple[str, ...] = ()
@@ -962,6 +995,40 @@ class Feedback:
     handoff: str | None = None
     #: "tag" | "answers" | "skipped".
     source: str = "tag"
+    #: Feedback redesign addition (``PARSER_VERSION`` 39, see module
+    #: docstring). What your follow-up messages were mostly: words from
+    #: ``capture_catalogue.FEEDBACK_VOCAB["why"]``.
+    why: tuple[str, ...] = ()
+    #: Where the thing Claude missed was: asked only when ``why`` has
+    #: ``missed``.
+    missed_in: str | None = None
+    #: After an approved plan: whether it covered what you then fixed.
+    plan: str | None = None
+    #: Whether a tip ClaudeGlass showed was right, and the id of that tip
+    #: (``capture_catalogue.TIP_HINT_TITLES``).
+    tip: str | None = None
+    tip_hint: str | None = None
+    #: The keys whose word Claude picked from a note you typed under
+    #: "Other", and the keys you answered that way. Keys only: the note
+    #: itself is read in memory and dropped.
+    from_text: tuple[str, ...] = ()
+    other: tuple[str, ...] = ()
+    #: ``why`` was read from an older run's ``slow`` answer.
+    why_older: bool = False
+
+
+@dataclass(slots=True)
+class PlanCheck:
+    """Your answer to the plan check (see the module docstring):
+    ``plan_tool_use_id`` is the id of the ``ExitPlanMode`` call of the
+    plan you had approved (an id only), ``word`` one of
+    ``capture_catalogue.PLAN_CHECK_WORDS``: ``covered`` (the plan said it),
+    ``gap`` (the plan left it out), ``new`` (you thought of it later) or
+    ``none`` (not a fix). ``""`` when you declined the question or
+    answered in your own words, which are read in memory and dropped."""
+
+    plan_tool_use_id: str = ""
+    word: str = ""
 
 
 @dataclass(slots=True)
@@ -1156,6 +1223,11 @@ class Turn:
     commands_run: tuple[str, ...] = ()
     #: Feedback addition (see module docstring): your /cg-feedback answers.
     feedback: Feedback | None = None
+    #: Feedback redesign addition (``PARSER_VERSION`` 39, see module
+    #: docstring): your answer to the plan check, and whether this reply
+    #: carries the /cg-feedback reminder line.
+    plan_check: PlanCheck | None = None
+    coach_reminder: bool = False
     #: Your-hooks addition (see module docstring): hook label -> characters
     #: of context your hooks added just before this turn.
     hook_context_chars: dict = field(default_factory=dict)
@@ -1820,6 +1892,7 @@ __all__ = [
     "EventKind",
     "Event",
     "CaptureTag",
+    "PlanCheck",
     "PlanStats",
     "PROMPT_FLAGS",
     "Turn",

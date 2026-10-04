@@ -15,6 +15,8 @@ from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 
+from test_capture_feedback import Q as FEEDBACK_Q, T as FEEDBACK_T, _run as feedback_run
+
 from helpers import (
     attachment_line,
     tool_result_block,
@@ -805,8 +807,11 @@ def test_the_tips_table_counts_the_notes_claude_passed_on(tmp_path):
     assert session.notes == {"drip_feed": 2} and session.tips == {"drip_feed": 1} and not session.misfires
     tips = prompting.build_section([session]).tables[1]
     assert tips.name == "prompting_tips"
-    assert [c.key for c in tips.columns] == ["hint", "notes", "shown", "shown_pct", "relay", "misfires"]
-    assert tips.rows == [["drip_feed", 2, 1, 50.0, "relayed 1 of 2", 0]]
+    assert [c.key for c in tips.columns] == [
+        "hint", "notes", "shown", "shown_pct", "relay", "misfires", "useful", "known", "wrong", "trust_pct",
+    ]
+    # No answers to the tip question and no misfire: no trust figure yet.
+    assert tips.rows == [["drip_feed", 2, 1, 50.0, "relayed 1 of 2", 0, 0, 0, 0, None]]
 
 
 def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_path):
@@ -825,9 +830,9 @@ def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_p
     assert session.misfires == {"drip_feed": 1}
     table = prompting.build_section([session]).tables[1]
     assert table.rows == [
-        ["drip_feed", 3, 2, 100.0 * 2 / 3, "relayed 2 of 3", 1],
-        ["cold_return", 1, 0, 0.0, "relayed 0 of 1", 0],
-        ["big_paste", 2, 1, 50.0, "judged relevant 1 of 2", 0],
+        ["drip_feed", 3, 2, 100.0 * 2 / 3, "relayed 2 of 3", 1, 0, 0, 0, 0.0],
+        ["cold_return", 1, 0, 0.0, "relayed 0 of 1", 0, 0, 0, 0, None],
+        ["big_paste", 2, 1, 50.0, "judged relevant 1 of 2", 0, 0, 0, 0, None],
     ]
     assert any("Relayed" in note for note in table.notes) and any("Judged relevant" in note for note in table.notes)
     # A reply that disowns a tip with no note behind it is nobody's misfire here.
@@ -868,3 +873,265 @@ def test_every_tip_hint_asks_for_the_highlighted_block():
         "plan_fresh", "plan_fresh_early", "drip_feed", "big_paste", "status_poll", "cold_return"}
     # Report-only habits have no note, so they have no tip to count.
     assert set(prompting.HABITS) & set(cat.COACHING_HINTS) == set(prompting.COACHED_HABITS)
+
+
+# -- what your /cg-feedback answers change ------------------------------------------------
+
+
+def _say(key: str, *words: str) -> dict:
+    """Your answer to a /cg-feedback question, by the words it carries."""
+    labels = [next(label for word, label, _text in FEEDBACK_Q[key].options if word == w) for w in words]
+    return {FEEDBACK_T[key]: labels if FEEDBACK_Q[key].multi else labels[0]}
+
+
+def _feedback_lines(minute: float, answers, **kw) -> list[dict]:
+    """A /cg-feedback run at ``minute``, its replies on the model the other
+    replies here use (the fixture model is not in the real price list)."""
+    lines = feedback_run(int(minute * 60), answers, **kw)
+    for line in lines:
+        if line.get("type") == "assistant":
+            line["message"]["model"] = "claude-sonnet-5"
+    return lines
+
+
+def _rated(tmp_path, lines, answers, *, later=None, declined: bool = False, name="s.jsonl"):
+    """``lines`` (all before minute 50), then a /cg-feedback run that rates
+    them with ``answers``."""
+    return _session(tmp_path, [*lines, *_feedback_lines(50, answers, later=later, declined=declined)], name)
+
+
+#: Three small requests in a row, each answered with an edit: one drip run.
+_DRIP = [
+    _said("make the button bigger", 2), _reply(3, edit=True),
+    _said("now move the logo", 4), _reply(5, edit=True),
+    _said("move the footer text", 6), _reply(7, edit=True),
+]
+
+
+@pytest.mark.parametrize(
+    "words, excused",
+    [
+        (("changed",), True),
+        (("missed",), True),
+        (("missed", "changed"), True),
+        (("missed", "changed", "none"), True),
+        # Something you hadn't said can't be told from the rest: the habit stays.
+        (("left_out",), False),
+        (("changed", "left_out"), False),
+        (("none",), False),
+    ],
+)
+def test_followups_you_say_were_claudes_miss_or_a_change_of_mind_are_not_a_drip_feed(tmp_path, words, excused):
+    answers = {**_say("outcome", "partly"), **_say("why", *words)}
+    session = _rated(tmp_path, [*_START, *_DRIP], answers)
+    assert ("drip_feed" in session.counts()) is (not excused)
+    assert [m.excused for m in session.messages[1:4]] == [excused] * 3
+    # Your first message is never a follow-up.
+    assert not session.messages[0].excused
+    # Nothing else about the messages moves.
+    assert [m.edited for m in session.messages[:4]] == [True] * 4
+
+
+def test_answers_you_declined_or_gave_no_cause_for_excuse_nothing(tmp_path):
+    declined = _rated(tmp_path, [*_START, *_DRIP], {}, declined=True)
+    assert declined.counts()["drip_feed"] == 1 and not any(m.excused for m in declined.messages)
+    no_cause = _rated(tmp_path, [*_START, *_DRIP], _say("outcome", "partly"), name="b.jsonl")
+    assert no_cause.counts()["drip_feed"] == 1 and not any(m.excused for m in no_cause.messages)
+    # The messages after the answers were never rated by them.
+    later = _session(tmp_path, [
+        *_START, *_feedback_lines(10, {**_say("outcome", "partly"), **_say("why", "changed")}),
+        _said("make the button bigger", 20), _reply(21, edit=True),
+        _said("now move the logo", 22), _reply(23, edit=True),
+        _said("move the footer text", 24), _reply(25, edit=True),
+    ], "c.jsonl")
+    assert later.counts()["drip_feed"] == 1 and not any(m.excused for m in later.messages)
+
+
+def test_a_repeat_and_a_vague_fix_you_called_claudes_miss_are_not_yours(tmp_path):
+    ask = "Make the save button bigger and move it to the right"
+    lines = [
+        *_START,
+        _said(ask, 2), _reply(3, edit=True),
+        _said("make the save button bigger and move it right", 4), _reply(5, edit=True),
+        _said("still broken", 6), _reply(7, say="What do you see?"),
+    ]
+    plain = _session(tmp_path, lines, "plain.jsonl")
+    assert {"repeat_ask", "vague_fix"} <= set(plain.counts())
+    missed = _rated(tmp_path, lines, {**_say("outcome", "partly"), **_say("why", "missed")}, name="missed.jsonl")
+    assert "repeat_ask" not in missed.counts() and "vague_fix" not in missed.counts()
+    # The one you said was left out stays.
+    left = _rated(tmp_path, lines, {**_say("outcome", "partly"), **_say("why", "left_out")}, name="left.jsonl")
+    assert {"repeat_ask", "vague_fix"} <= set(left.counts())
+
+
+def test_a_big_task_you_said_a_plan_would_have_helped_is_priced_at_half_its_followups(tmp_path):
+    big_task = (
+        "Add a login page with email and password, a settings page where people change their name, email alerts "
+        "when a report is ready, and an admin screen that lists every account."
+    )
+    lines = [
+        _said(big_task, 0, permissionMode="default"), _reply(1, edit=True),
+        _said("make the button bigger", 2), _reply(3, edit=True),
+        _said("now move the logo", 4), _reply(5, edit=True),
+        _said("how is it going?", 6), _reply(7),
+    ]
+    unpriced = _session(tmp_path, lines, "plain.jsonl")
+    assert [o.cost for o in unpriced.occurrences if o.habit == "plan_first"] == [None]
+    helped = _rated(tmp_path, lines, {**_say("outcome", "partly"), **_say("helped", "plan")}, name="plan.jsonl")
+    (plan_first,) = [o for o in helped.occurrences if o.habit == "plan_first"]
+    # The poll is no follow-up of the piece's own: the two small requests are.
+    assert plan_first.cost == pytest.approx(0.5 * (helped.messages[1].cost + helped.messages[2].cost))
+    assert plan_first.cost > 0 and helped.messages[0].plan_help == plan_first.cost
+    other = _rated(tmp_path, lines, {**_say("outcome", "partly"), **_say("helped", "context")}, name="ctx.jsonl")
+    assert [o.cost for o in other.occurrences if o.habit == "plan_first"] == [None]
+    # A price is shown with how it was worked out, and an unpriced habit shows no basis.
+    for session, basis in ((helped, prompting.BASIS["plan_first"]), (unpriced, None)):
+        row = prompting.build_section([session]).tables[0].rows
+        assert [r[4] for r in row if r[0] == "plan_first"] == [basis]
+
+
+def test_messages_are_built_without_the_callers_cycles_and_spans(tmp_path):
+    answers = {**_say("outcome", "partly"), **_say("why", "changed")}
+    top = _parse(tmp_path, [*_START, *_DRIP, *_feedback_lines(50, answers)])
+    prices = prompting._Prices(PRICING)
+    alone = prompting.messages_of(top, prices)
+    cycles = prompting.capture_mod.prompt_cycles(top)
+    given = prompting.messages_of(top, prices, cycles, prompting.capture_mod.feedback_spans(cycles))
+    assert [m.excused for m in alone] == [m.excused for m in given] == [False, True, True, True, False]
+
+
+def test_each_answer_to_the_tip_question_is_counted_under_the_tip_it_named(tmp_path):
+    later = ([FEEDBACK_Q["tip"]], _say("tip", "wrong"))
+    session = _rated(tmp_path, _START, _say("outcome", "met"), later=later)
+    assert session.tip_answers == {("drip_feed", "wrong"): 1}
+    # No answer, a declined run, or a tip that is no hint's: not counted.
+    assert not _rated(tmp_path, _START, _say("outcome", "met"), name="a.jsonl").tip_answers
+    assert not _rated(tmp_path, _START, {}, declined=True, name="b.jsonl").tip_answers
+    other = ([FEEDBACK_Q["tip"]], {FEEDBACK_T["tip"]: "Useful"})
+    assert _rated(tmp_path, _START, _say("outcome", "met"), later=other, name="c.jsonl").tip_answers == {
+        ("drip_feed", "useful"): 1
+    }
+
+
+def _answered(counts: dict) -> prompting.SessionPrompting:
+    """A session with coaching notes for each hint in ``counts``, and the
+    tip answers ``{(hint, word): n}`` it gives."""
+    session = prompting.SessionPrompting(session_id="s", start=None)
+    for (hint, word), n in counts.items():
+        session.notes[hint] += n
+        session.tip_answers[(hint, word)] += n
+    return session
+
+
+def test_the_tips_table_counts_what_you_said_of_each_tip_and_how_far_it_is_trusted():
+    sessions = [
+        _answered({("drip_feed", "useful"): 2, ("drip_feed", "known"): 1, ("drip_feed", "wrong"): 1}),
+        _answered({("big_paste", "known"): 3}),
+    ]
+    sessions[0].misfires["drip_feed"] += 1
+    table = prompting.build_section(sessions).tables[1]
+    rows = {row[0]: dict(zip([c.key for c in table.columns], row)) for row in table.rows}
+    drip = rows["drip_feed"]
+    assert (drip["useful"], drip["known"], drip["wrong"], drip["misfires"]) == (2, 1, 1, 1)
+    # Of five answers and calls, two said it was useful.
+    assert drip["trust_pct"] == pytest.approx(40.0)
+    assert rows["big_paste"]["trust_pct"] == 0.0 and rows["big_paste"]["known"] == 3
+    assert any("Found useful" in note for note in table.notes)
+
+
+def test_a_trust_figure_needs_an_answer_or_a_misfire_to_stand_on():
+    assert prompting.trust_pct(0, 0, 0, 0) is None
+    assert prompting.trust_pct(0, 0, 0, 1) == 0.0
+    assert prompting.trust_pct(3, 1, 0, 0) == pytest.approx(75.0)
+    assert prompting.trust_pct(1, 0, 1, 2) == pytest.approx(25.0)
+
+
+# -- what you say on the dashboard's cards -----------------------------------------------
+
+
+def test_a_tip_card_answer_counts_as_a_tip_answer_for_its_hint():
+    held = {
+        ("tip", "drip_feed"): {"answer": "useful", "set_at": "t"},
+        ("tip", "big_paste"): {"answer": "trying", "set_at": "t"},
+        ("tip", "status_poll"): {"answer": "known", "set_at": "t"},
+        ("tip", "plan_fresh"): {"answer": "wrong", "set_at": "t"},
+    }
+    # Trying a tip is a vote that it was useful.
+    assert prompting.card_answers(held) == {
+        ("drip_feed", "useful"): 1, ("big_paste", "useful"): 1, ("status_poll", "known"): 1, ("plan_fresh", "wrong"): 1,
+    }
+
+
+def test_only_tip_cards_of_a_tip_hint_count_as_tip_answers():
+    held = {
+        ("habit", "split_large"): {"answer": "useful", "set_at": "t"},
+        ("recommendation", "model.default"): {"answer": "wrong", "set_at": "t"},
+        ("tip", "not-a-hint"): {"answer": "useful", "set_at": "t"},
+        ("tip", "drip_feed"): {"answer": "great", "set_at": "t"},
+    }
+    assert prompting.card_answers(held) == {}
+    assert prompting.card_answers(None) == {} and prompting.card_answers({}) == {}
+
+
+def test_card_answers_add_to_the_tips_table_beside_the_ones_a_run_gave():
+    sessions = [_answered({("drip_feed", "useful"): 1})]
+    held = {("tip", "drip_feed"): {"answer": "wrong", "set_at": "t"}}
+    table = prompting.build_section(sessions, prompting.card_answers(held)).tables[1]
+    row = dict(zip([c.key for c in table.columns], next(r for r in table.rows if r[0] == "drip_feed")))
+    assert (row["useful"], row["known"], row["wrong"]) == (1, 0, 1)
+    # Without them the table reads as it did.
+    plain = prompting.build_section(sessions).tables[1]
+    plain_row = dict(zip([c.key for c in plain.columns], next(r for r in plain.rows if r[0] == "drip_feed")))
+    assert (plain_row["useful"], plain_row["wrong"]) == (1, 0)
+
+
+def test_a_card_answer_for_a_hint_with_no_notes_adds_no_row():
+    held = {("tip", "big_paste"): {"answer": "known", "set_at": "t"}}
+    section = prompting.build_section([_answered({("drip_feed", "useful"): 1})], prompting.card_answers(held))
+    assert [row[0] for row in section.tables[1].rows] == ["drip_feed"]
+    assert [t.name for t in prompting.build_section([], prompting.card_answers(held)).tables] == ["prompting_habits"]
+
+
+def test_a_session_rating_tip_answer_counts_for_its_hint_unless_a_run_answered_it(tmp_path):
+    session = _session(tmp_path, _START, "rated.jsonl")
+    plain = _session(tmp_path, _START, "plain.jsonl")
+    bundles = [NS(top=_parse(tmp_path, _START, name), session_id=name) for name in ("rated.jsonl", "plain.jsonl")]
+    corpus = NS(sessions=bundles)
+    ratings = {
+        "rated.jsonl": {"tip": "known", "tip_hint": "drip_feed"},
+        "plain.jsonl": {"tip": "great", "tip_hint": "drip_feed"},  # not a word: nothing counted
+        "unknown": {"tip": "known", "tip_hint": "drip_feed"},
+    }
+    by_id = {s.session_id: s for s in prompting.collect(corpus, PRICING, ratings)}
+    assert by_id["rated.jsonl"].tip_answers == {("drip_feed", "known"): 1}
+    assert not by_id["plain.jsonl"].tip_answers
+    assert session.tip_answers == plain.tip_answers == {}
+    # A hint that is no tip's, or a rating with no tip answer, counts for nothing.
+    none = prompting.collect(
+        corpus, PRICING,
+        {"rated.jsonl": {"tip": "known", "tip_hint": "nope"}, "plain.jsonl": {"tip": None, "tip_hint": "drip_feed"}},
+    )
+    assert not any(s.tip_answers for s in none)
+    assert not any(s.tip_answers for s in prompting.collect(corpus, PRICING))
+
+
+def test_a_run_that_answered_the_hint_wins_over_the_dashboard_rating(tmp_path):
+    later = ([FEEDBACK_Q["tip"]], _say("tip", "wrong"))
+    lines = [*_START, *_feedback_lines(50, _say("outcome", "met"), later=later)]
+    corpus = NS(sessions=[NS(top=_parse(tmp_path, lines, "run.jsonl"), session_id="run.jsonl")])
+    [session] = prompting.collect(corpus, PRICING, {"run.jsonl": {"tip": "useful", "tip_hint": "drip_feed"}})
+    assert session.tip_answers == {("drip_feed", "wrong"): 1}
+    # The dashboard answer for another hint still counts.
+    [other] = prompting.collect(corpus, PRICING, {"run.jsonl": {"tip": "known", "tip_hint": "big_paste"}})
+    assert other.tip_answers == {("drip_feed", "wrong"): 1, ("big_paste", "known"): 1}
+
+
+def test_the_tip_tallies_are_read_back_from_the_tips_table():
+    sessions = [_answered({("drip_feed", "wrong"): 2, ("drip_feed", "known"): 1})]
+    sessions[0].misfires["drip_feed"] += 1
+    report = NS(sections=[prompting.build_section(sessions)])
+    assert prompting.tip_tallies(report) == {"drip_feed": {"useful": 0, "known": 1, "wrong": 2, "misfires": 1}}
+    # No notes, no table: nothing to read, and a report with no section is no error.
+    assert prompting.tip_tallies(NS(sections=[prompting.build_section([])])) == {}
+    assert prompting.tip_tallies(NS(sections=[])) == {}
+    assert prompting.tip_tallies(NS()) == {}

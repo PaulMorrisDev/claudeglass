@@ -1351,17 +1351,68 @@ def test_enough_data_counts_answers_against_each_target():
     assert capture.enough_target("no-such-metric") == 0
 
 
-def test_estimate_prices_the_feedback_reminder_once_per_session():
+def _message_note_chars(hint: str) -> int:
+    """What a feedback note adds to the context: its text and the wrapper around a hook note on a message."""
+    return len(catalogue.FEEDBACK_NOTE_TEXT[hint]) + catalogue.NOTE_WRAP_CHARS + len("UserPromptSubmit")
+
+
+def test_estimate_prices_the_rating_reminder_at_most_once_per_session_and_once_in_the_rest_period():
     past = capture.History(days=14, sessions=2, cycles=10, subagents=3, main_notes=2, main_note=1e-6, reply_tag=2e-6,
                            brief_tag=5e-6)
     est = capture.estimate(past, ("feedback_reminder",))
-    note = len(catalogue.note_text(("feedback_reminder",), "main")) + capture._WRAP["SessionStart"]
+    note = _message_note_chars("rating_reminder")
     out = catalogue.METRICS_BY_ID["feedback_reminder"].out_chars
-    # 2 sessions of 10 messages: 2 reminders, each carried like a reply's tag.
-    assert est.cost == pytest.approx(note * 1e-6 + out * 2e-6 * 2 / 10)
-    assert est.tag_tokens == round(out * 2 / 4)
+    # 2 sessions in 14 days (the 3-day rest allows 4): 2 reminders at most. Each is a note, carried at the
+    # average price of a note (1e-6 over 2 notes), and a line at the average price of a reply's words.
+    assert est.cost == pytest.approx(2 * (note * 1e-6 / 2 + out * 2e-6 / 10))
+    assert est.tag_tokens == round(out * 2 / 4) and est.note_tokens == round(note * 2 / 4)
+    # Nothing at the session start: it comes on a message of yours.
+    assert catalogue.note_text(("feedback_reminder",), "main") == ""
     rough = catalogue.rough_tokens(("task", "feedback_reminder"))
     assert rough["reminder"] == round(out / 4) and rough["reply_tag"] == round((13 + 6) / 4)
+    assert rough["message_note"] == round(note / 4)
+    # Many short sessions are held to the rest period; none means none.
+    busy = capture.History(days=9, sessions=30, cycles=300, main_notes=30, main_note=3e-5, reply_tag=6e-5)
+    assert capture.estimate(busy, ("feedback_reminder",)).cost == pytest.approx(3 * (note * 1e-6 + out * 2e-7))
+    assert capture.estimate(capture.History(days=14), ("feedback_reminder",)).cost == 0
+
+
+def test_estimate_prices_the_plan_check_once_per_session_that_approved_a_plan():
+    past = capture.History(days=14, sessions=5, cycles=50, main_notes=5, main_note=5e-6, reply_tag=1e-5,
+                           plans_approved=3)
+    est = capture.estimate(past, ("plan_check",))
+    note = _message_note_chars("plan_check")
+    out = catalogue.METRICS_BY_ID["plan_check"].out_chars
+    assert est.cost == pytest.approx(3 * (note * 1e-6 + out * 2e-7))
+    assert est.tag_tokens == round(out * 3 / 4) and est.note_tokens == round(note * 3 / 4)
+    assert capture.estimate(capture.History(days=14, sessions=5, cycles=50), ("plan_check",)).cost == 0
+    # Both together, and a capture level beside them, add up.
+    both = capture.estimate(past, ("plan_check", "feedback_reminder"))
+    assert both.cost == pytest.approx(
+        est.cost + capture.estimate(past, ("feedback_reminder",)).cost
+    )
+    rough = catalogue.rough_tokens(("plan_check",))
+    assert rough["plan_check"] == round(out / 4) and rough["reminder"] == 0
+    assert rough["message_note"] == round(note / 4)
+
+
+def test_plans_approved_counts_the_sessions_that_had_one_approved(tmp_path):
+    plan = {"plan": "1. a\n2. b"}
+    sessions = []
+    for name, outcome_error in (("with", False), ("rejected", True), ("none", None)):
+        lines = [user_str_line("do it", origin={"kind": "human"})]
+        if outcome_error is not None:
+            lines += [
+                turn_line(content=[tool_use_block("ExitPlanMode", "tu_p", plan)]),
+                user_block_line([tool_result_block("tu_p", "ok", is_error=outcome_error)]),
+            ]
+        lines.append(turn_line(content=[{"type": "text", "text": "done"}]))
+        path = tmp_path / f"{name}.jsonl"
+        write_jsonl(path, lines)
+        top = parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level"))
+        sessions.append(NS(top=top, subs=[], session_id=name))
+    past = capture.history(NS(sessions=sessions), None, days=7)
+    assert past.sessions == 3 and past.plans_approved == 1
 
 
 # -- weekly_cost --------------------------------------------------------------------

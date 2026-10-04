@@ -23,6 +23,7 @@ hook script needs (:func:`export_json`).
 from __future__ import annotations
 
 import json
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 
 #: The marker every capture note carries, followed by the note format
@@ -130,8 +131,8 @@ SPAWN_REASONS = ("parallel", "isolate", "cheaper", "specialist", "review")
 SKILL_NAME_PATTERN = r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}"
 
 #: The line Claude writes when ``feedback_reminder`` is on (below), word
-#: for word. The note asks for it *before* the ``[cg: ...]`` tag (CAP-1),
-#: and ``capture_tags`` strips it from a reply's tail before matching the
+#: for word. The note asks for it before any ``[cg: ...]`` tag, and
+#: ``capture_tags`` strips it from a reply's tail before matching the
 #: trailing tag, so it doesn't matter if Claude writes them the other
 #: way round.
 FEEDBACK_REMINDER_LINE = "Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work."
@@ -146,9 +147,49 @@ FEEDBACK_REMINDER_LINE = "Finished? Run /cg-feedback: a few ticks make your savi
 #: also the last line of its note, written ready for Claude to copy.
 TIP_LABEL = "> **ClaudeGlass tip:**"
 REMINDER_LABEL = "> **ClaudeGlass:**"
+#: What marks a tip in a reply, less the quote mark, sign and bold Claude
+#: may drop from :data:`TIP_LABEL` (the parser and the hook look for it).
+TIP_TEXT_MARKER = "ClaudeGlass tip:"
 #: What a notice shown only to you opens with. Its ⚠️ is safe because the
 #: notice never reaches Claude.
 NOTICE_LABEL = "⚠️ ClaudeGlass: "
+
+#: The reminder's whole text as Claude writes it: the blank line before it,
+#: the label and the line (:data:`REMINDER_LABEL`,
+#: :data:`FEEDBACK_REMINDER_LINE`). What a reply that carries it costs in
+#: output (``capture.usage``) and what ``feedback_reminder`` says it costs.
+REMINDER_REPLY_CHARS = len(f"\n\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}")
+
+#: The plan check: after a plan you approved and a build that changed
+#: files, a message of yours that corrects or adjusts the work gets one
+#: question first, asked with AskUserQuestion by Claude on the hook's say
+#: (``FEEDBACK_NOTE_TEXT["plan_check"]``). ``PLAN_CHECK_HEADER`` is its
+#: chip label, starting "CG" so the answer can be told apart from any
+#: other question. The parser finds the call by it.
+PLAN_CHECK_HEADER = "CG plan fix"
+PLAN_CHECK_QUESTION = (
+    "Quick one for ClaudeGlass about the plan you approved: is this message (and any you typed while Claude "
+    "was building it) mostly…"
+)
+#: ``(word, label, description)`` per option: the word is what ClaudeGlass
+#: keeps (``PlanCheck.word``), the label is what you tick. ``covered`` is
+#: the plan already saying it (Claude missed it), ``gap`` the plan leaving
+#: it out, ``new`` a thought that came later, ``none`` not a fix at all.
+#: Labels hold no commas, as in :data:`FEEDBACK_QUESTIONS`.
+PLAN_CHECK_OPTIONS = (
+    ("covered", "Claude missed the plan", "The plan already said so"),
+    ("gap", "The plan missed it", "The plan left it out"),
+    ("new", "Something new", "I only thought of it later"),
+    ("none", "Not a fix", "Nothing was wrong with the plan or the build"),
+)
+PLAN_CHECK_WORDS = tuple(option[0] for option in PLAN_CHECK_OPTIONS)
+#: What Claude writes to ask it: the call's header, question and the four
+#: options. Output tokens for the call, as ``plan_check`` costs them.
+PLAN_CHECK_ASK_CHARS = (
+    len(PLAN_CHECK_HEADER)
+    + len(PLAN_CHECK_QUESTION)
+    + sum(len(label) + len(description) for _word, label, description in PLAN_CHECK_OPTIONS)
+)
 
 
 # -- the metrics -----------------------------------------------------------
@@ -191,7 +232,8 @@ LEVEL_SUMMARIES = {
     "and Haiku's view of each agent run's brief.",
     "deep": "Adds how much earlier context was needed, how the change was checked, and a "
     "short rating after large tool outputs. Also turns on the /cg-feedback survey, its reminder note, "
-    "and Claude's one-line reminder to run it when a piece of work is done.",
+    "Claude's one-line reminder to run it after a large piece of work, and a one-question plan check "
+    "when you fix something after approving a plan.",
 }
 
 #: Suggestion themes a metric can feed (``Metric.powers``), in the order
@@ -589,6 +631,15 @@ RETIRED_COACHING_HINTS = (
     "plan_first",
     "cache_cold",
 )
+
+#: The two notes the feedback items add to a message you send, under the
+#: coaching marker (``cg-coach v1 plan_check``) so a parsed note is told
+#: apart from a capture note. ``plan_check`` asks Claude for one question
+#: (``plan_check``), ``rating_reminder`` for a line suggesting /cg-feedback
+#: (``feedback_reminder``). They are priced with their metrics under the
+#: ``feedback`` scope, not as coaching notes, and the parser keeps their
+#: kind among the known hints.
+FEEDBACK_HINTS = ("plan_check", "rating_reminder")
 
 #: The tip hints whose note asks for the tip only when Claude judges it
 #: relevant to what the user asked ("if most of the message is a log").
@@ -1248,6 +1299,18 @@ COACHING_THRESHOLDS = {
     "rearm_factor": 1.5,
     #: The most times a hint's rest may double.
     "max_backoff": 3,
+    #: The /cg-feedback reminder (``feedback_reminder``) is for a piece of
+    #: work that used at least this many tokens...
+    "rating_min_tokens": 1_000_000,
+    #: ...and at least this many times your typical piece, whichever is
+    #: more (``coaching.json``'s ``typical_piece_tokens``)...
+    "rating_typical_factor": 2,
+    #: ...and shows at most once in this many days, whichever session.
+    "rating_rest_days": 3,
+    #: The plan check (``plan_check``) stops for this many days after
+    #: this many declined or Other answers in a row.
+    "plan_check_off_days": 14,
+    "plan_check_declines": 2,
 }
 
 #: What the prompting hints say about the work itself: nothing. They're
@@ -1408,6 +1471,43 @@ COACHING_NOTICE = {
     "split_run": NOTICE_LABEL + "this {agent} run has made about {replies} replies, and each one reads the whole "
     "run again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next "
     "time, give each agent a smaller piece of the work.",
+}
+
+def _plan_check_note() -> str:
+    """The note that has Claude ask the plan check: one AskUserQuestion
+    call before it acts on the message, then the work as usual."""
+    options = "; ".join(f'"{label}" ({description})' for _word, label, description in PLAN_CHECK_OPTIONS)
+    return (
+        "The user approved a plan, Claude changed files since, and this message reads as a fix to that work. "
+        "Before you act on the message, call AskUserQuestion once with one question: header "
+        f'"{PLAN_CHECK_HEADER}", question "{PLAN_CHECK_QUESTION}", one answer (multiSelect false), with these '
+        f"options, labels word for word: {options}. "
+        "Ask nothing else, and ask it only this once. When the answer is back, or the user declines, handle the "
+        "message exactly as you would have without this note. Say nothing about the answer, and never copy, "
+        "quote or save the user's words."
+    )
+
+
+def _reminder_note() -> str:
+    """The note that has Claude end its reply with the reminder line: the
+    line is the note's last line, for Claude to copy."""
+    return "\n".join(
+        (
+            "This piece of work has used about {tokens} tokens and hasn't been rated. Once you have finished the "
+            "work this message asks for, write the line below as the last thing in your final reply, after a blank "
+            "line and before any tag, word for word. If you are still working, or waiting on the user, leave it "
+            "out. " + _AS_USUAL,
+            f"{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
+        )
+    )
+
+
+#: What the feedback notes say, by :data:`FEEDBACK_HINTS`. The reminder's
+#: ``{tokens}`` is filled from the piece (``150k``). A note carries counts
+#: and the user's own words never.
+FEEDBACK_NOTE_TEXT = {
+    "plan_check": _plan_check_note(),
+    "rating_reminder": _reminder_note(),
 }
 
 #: ``quiet_output``'s ``{how}``, by tool; ``""`` for any other tool.
@@ -1924,13 +2024,17 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback skill",
-        what="A /cg-feedback skill you run after a piece of work. It asks four checkbox questions: the "
-        "outcome, what slowed it, whether it was worth the tokens, and what would have helped. After an "
-        "approved plan it asks a fifth: whether the build could have started fresh from the plan.",
+        what="A /cg-feedback skill you run after a piece of work. It asks a few checkbox questions: the "
+        "outcome, what your follow-up messages were, whether it was worth the tokens, and what would have made it "
+        "cheaper. After an approved plan it asks whether the plan covered what you fixed and whether the build "
+        "could have started fresh. A tip question appears only when ClaudeGlass showed a tip. When you run it, a "
+        "hook adds one line of counts and ids (no text) for the piece of work being rated, so the skill can leave "
+        "out a question that doesn't apply.",
         why="Cost per piece of work that met its goal, which outranks what Claude reports about itself. "
-        "The plan answer tells the fresh-session tip and the suggested profile how you work.",
+        "The follow-up and plan answers tell the tips and the suggested profile where the work went wrong.",
         powers=("outcome", "planning", "profiles"),
-        tag="[cg-fb: outcome=… slow=… worth=… helped=… handoff=…]",
+        tag="[cg-fb: outcome=… why=… missed_in=… worth=… helped=… plan=… handoff=… tip=…]",
+        hooks=("UserPromptSubmit",),
     ),
     Metric(
         id="feedback_note",
@@ -1947,25 +2051,41 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback reminder from Claude",
-        what="Claude adds a highlighted note suggesting /cg-feedback once a session, when it finishes its first "
-        "piece of work.",
-        why="For people without the status line, such as in the desktop app. Costs a few output tokens once a "
-        "session.",
+        what="When the piece of work you are on is large (at least 1M tokens and twice your typical piece) and "
+        "you haven't rated it, a note with your next message asks Claude to end its reply with a line suggesting "
+        "/cg-feedback. At most once per piece of work and once every 3 days. A piece starts with the session, a "
+        "/clear, or a message Claude tags as a new task.",
+        why="For people without the status line, such as in the desktop app, and only for work big enough to be "
+        "worth rating. Costs a note of about 100 tokens and a few output tokens, a few times a week at most.",
         powers=("outcome",),
-        hooks=("SessionStart",),
-        main_extra="The first time in this session you finish a piece of work the user asked for, add this before "
-        f"your tag, after a blank line, and never again after that:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
-        extra_before_tag=True,
-        main_extra_untagged="The first time in this session you finish a piece of work the user asked for, end your "
-        f"reply with this, after a blank line, and never again after that:\n{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}",
-        out_chars=103,
+        hooks=("UserPromptSubmit",),
+        out_chars=REMINDER_REPLY_CHARS,
+    ),
+    Metric(
+        id="plan_check",
+        group="feedback",
+        section="feedback",
+        title="Plan check after a fix",
+        what="After you approve a plan and Claude changes files, your next message that corrects or adjusts "
+        "the work gets one question from Claude first: did Claude miss something the plan said, did the plan "
+        "leave it out, is it something new, or is this not a fix? Asked at most once per plan. It stops for 14 "
+        "days after two declined or Other answers in a row. Only the four ticked words are kept.",
+        why="Which of your corrections the plan could have prevented, which tells the plan tips whether to "
+        "ask for fuller plans or for a closer check of the build against the plan.",
+        powers=("planning",),
+        hooks=("UserPromptSubmit",),
+        out_chars=PLAN_CHECK_ASK_CHARS,
     ),
     Metric(
         id="dashboard_rating",
         group="feedback",
         section="feedback",
         title="Rate sessions on the dashboard",
-        what="The same checkboxes on Spend › Sessions, kept in ClaudeGlass's own store.",
+        what="The /cg-feedback questions as checkboxes on Spend › Sessions. They cover the outcome, your "
+        "follow-ups, whether it was worth it and what would have made it cheaper. A question about the plan or "
+        "a tip shows only when it applies to the session. A session with two or more approved plans gets a row "
+        "for each. Tip and recommendation cards take Useful, Trying it, Knew it or Wrong here. All of it is "
+        "kept in ClaudeGlass's own store.",
         why="Feedback without spending tokens.",
         powers=("outcome",),
     ),
@@ -1980,12 +2100,17 @@ FEEDBACK_IDS = tuple(m.id for m in METRICS if m.group == "feedback")
 COACHING_IDS = tuple(m.id for m in METRICS if m.group == "coaching")
 #: The feedback items a switch into Deep turns on as well
 #: (``config.set_capture``): the /cg-feedback survey, its reminder note,
-#: and Claude's one-line reminder to run it. Deep is the level for
-#: someone who wants the fullest picture, and outcomes from the survey
-#: outrank what Claude reports about itself. Leaving Deep keeps them;
-#: ``capture feedback off`` takes them out. The dashboard rating stays a
-#: choice of its own.
-DEEP_FEEDBACK_IDS = ("feedback_skill", "feedback_note", "feedback_reminder")
+#: Claude's one-line reminder to run it, and the plan check. Deep is the
+#: level for someone who wants the fullest picture, and outcomes from the
+#: survey outrank what Claude reports about itself. Leaving Deep keeps
+#: them; ``capture feedback off`` takes them out. The dashboard rating
+#: stays a choice of its own.
+DEEP_FEEDBACK_IDS = ("feedback_skill", "feedback_note", "feedback_reminder", "plan_check")
+#: The feedback items the hook answers when you send a message: the facts
+#: line a /cg-feedback run starts with, the plan check and the rating
+#: reminder. Any one of them needs the UserPromptSubmit hook
+#: (:func:`hook_specs`).
+FEEDBACK_MESSAGE_IDS = ("feedback_skill", "plan_check", "feedback_reminder")
 
 #: CAP-5: metric ids retired from :data:`METRICS` (no longer asked, priced,
 #: or shown), kept here only so a ``config.toml`` written before the
@@ -2015,6 +2140,39 @@ FEEDBACK_TAG = "cg-fb"
 #: The tag's name until 0.12.1.
 OLD_FEEDBACK_TAG = "tl-fb"
 
+#: The line the capture hook adds when a prompt starts ``/cg-feedback``:
+#: counts and ids for the piece of work being rated, never text
+#: (``cg-fb-facts v1 tokens=1300000 typical=420000 followups=6 ...``). The
+#: skill reads it to fill its numbers and to leave out a question that
+#: doesn't apply, and works without it.
+FEEDBACK_FACTS_MARKER = "cg-fb-facts v1"
+#: The keys of that line, in the order the hook writes them.
+FEEDBACK_FACT_KEYS = (
+    "tokens",
+    "typical",
+    "followups",
+    "queued",
+    "plan",
+    "plan_followups",
+    "plan_asked",
+    "build",
+    "tips",
+    "tip",
+    "admits",
+)
+
+#: What the tip question calls each tip (``{hint title}``), by hint id:
+#: one per tip in :data:`COACHING_TIP`. The ids are the closed vocabulary
+#: of the tag's ``tip_hint``.
+TIP_HINT_TITLES: dict[str, str] = {
+    "plan_fresh": "building a plan in a fresh session",
+    "plan_fresh_early": "approving a plan with a clear context",
+    "drip_feed": "sending small requests one at a time",
+    "big_paste": "pasting a lot of text",
+    "status_poll": "asking how background work is going",
+    "cold_return": "coming back after a break",
+}
+
 
 @dataclass(frozen=True, slots=True)
 class FeedbackQuestion:
@@ -2023,9 +2181,12 @@ class FeedbackQuestion:
 
     #: The ``[cg-fb: ...]`` key its answer is written under.
     key: str
-    #: AskUserQuestion's chip label: at most 12 characters, starting "TL"
-    #: so the answers can be told apart from any other question.
+    #: AskUserQuestion's chip label: at most 12 characters, starting "CG"
+    #: so the answers can be told apart from any other question. The
+    #: questions asked until the redesign started "TL" and still parse.
     header: str
+    #: The question as Claude asks it. ``{n}``, ``{q}``, ``{tokens}``, ``{x}``
+    #: and ``{hint title}`` are filled from the facts line.
     question: str
     #: Several answers may be ticked.
     multi: bool
@@ -2034,20 +2195,157 @@ class FeedbackQuestion:
     #: because several ticked answers can come back as one comma-joined
     #: string.
     options: tuple[tuple[str, str, str], ...]
+    #: What Claude's closing line calls it ("Follow-ups").
+    short: str = ""
+    #: Which AskUserQuestion call asks it. A call holds at most four
+    #: questions, so the first four go in call 1 and the rest in call 2.
+    call: int = 1
+    #: When it is asked, as the skill words it after "Ask when"; empty
+    #: means always. :func:`feedback_questions` holds the same rules.
+    when: str = ""
+    #: The question without its numbers, for a facts line that is missing
+    #: or lacks one; empty when the question has none.
+    plain: str = ""
 
 
+_OUTCOME_OPTIONS = (
+    ("met", "Yes", "It did what I asked"),
+    ("partly", "Partly", "Some of it, or with gaps I had to fill"),
+    ("missed", "No", "It missed what I wanted"),
+    ("stopped", "Stopped early", "I stopped it or changed course"),
+)
+_WORTH_OPTIONS = (
+    ("yes", "Worth it", "Good value for what it cost"),
+    ("fair", "About right", "Roughly what I'd expect"),
+    ("no", "Too costly", "Too many tokens for the result"),
+)
+_HANDOFF_OPTIONS = (
+    ("yes", "Yes", "The plan had everything needed"),
+    ("partly", "Partly", "It needed a few things from earlier"),
+    ("no", "No", "It relied on the earlier discussion"),
+)
+
+#: The questions, in the order they are asked, each skipped when its
+#: condition fails. The first four go in call 1 and the rest in call 2;
+#: the missed question waits for the answer to the follow-ups question,
+#: so it opens call 2.
 FEEDBACK_QUESTIONS: tuple[FeedbackQuestion, ...] = (
+    FeedbackQuestion(
+        key="outcome",
+        header="CG outcome",
+        short="Outcome",
+        question="Did this piece of work deliver what you expected?",
+        multi=False,
+        options=_OUTCOME_OPTIONS,
+    ),
+    FeedbackQuestion(
+        key="why",
+        header="CG followups",
+        short="Follow-ups",
+        question="You sent {n} more messages after your first ({q} while Claude was working). "
+        "What were they mostly?",
+        plain="You sent more messages after your first. What were they mostly?",
+        when="followups is 1 or more, or there is no facts line",
+        multi=True,
+        options=(
+            ("left_out", "Things I hadn't said", "Details or wishes my first message left out"),
+            (
+                "missed",
+                "Claude missed something (it was in my request or the plan)",
+                "I had already said it, or the plan already did",
+            ),
+            ("changed", "A change of mind", "I decided on something different"),
+            ("none", "Questions or go-aheads", "Nothing was wrong with the work"),
+        ),
+    ),
+    FeedbackQuestion(
+        key="missed_in",
+        header="CG missed",
+        short="Missed in",
+        call=2,
+        question="Where was the thing Claude missed?",
+        when="your answer to CG followups includes missed, ticked or mapped from their own words",
+        multi=False,
+        options=(
+            ("message", "My message", "It was in what I asked"),
+            ("plan", "The plan", "It was in the plan I approved"),
+            ("standing", "CLAUDE.md or memory", "It was in a standing instruction"),
+            ("earlier", "Earlier in this chat", "I said it further back in the session"),
+        ),
+    ),
+    FeedbackQuestion(
+        key="worth",
+        header="CG worth",
+        short="Worth",
+        question="This work used about {tokens} tokens, about {x}× your usual piece. Was the result worth it?",
+        plain="Was the result worth the tokens it used?",
+        multi=False,
+        options=_WORTH_OPTIONS,
+    ),
+    FeedbackQuestion(
+        key="helped",
+        header="CG next time",
+        short="Next time",
+        question="What would have made it cheaper?",
+        multi=True,
+        options=(
+            ("context", "More in my first message", "Files, errors or examples up front"),
+            ("plan", "A plan first", "Agreeing the approach before any edits"),
+            ("smaller", "Smaller pieces", "One part at a time, or a fresh session per part"),
+            ("none", "Nothing", "It was fine as it was"),
+        ),
+    ),
+    FeedbackQuestion(
+        key="plan",
+        header="CG plan",
+        short="Plan",
+        call=2,
+        question="After you approved the plan, did it cover what you then fixed or added?",
+        when="plan=approved, plan_followups is 1 or more and plan_asked is 0; skip it without a facts line",
+        multi=False,
+        options=(
+            ("covered", "It was in the plan", "The plan already said so"),
+            ("gap", "The plan missed it", "The plan left it out"),
+            ("new", "It was new", "I only thought of it later"),
+        ),
+    ),
+    FeedbackQuestion(
+        key="handoff",
+        header="CG handoff",
+        short="Handoff",
+        call=2,
+        question="Could the build have started in a fresh session from just the plan?",
+        when="plan=approved and build=same; without a facts line, when you approved a plan with ExitPlanMode "
+        "during this piece of work",
+        multi=False,
+        options=_HANDOFF_OPTIONS,
+    ),
+    FeedbackQuestion(
+        key="tip",
+        header="CG tip",
+        short="Tip",
+        call=2,
+        question="ClaudeGlass showed a tip about {hint title}. Was it right for this work?",
+        when="tip names a hint id; skip it without a facts line",
+        multi=False,
+        options=(
+            ("useful", "Useful", "It was right, and I acted on it or will"),
+            ("known", "Right but I knew", "It was right, but I already knew it"),
+            ("wrong", "Wrong here", "It did not fit this work"),
+        ),
+    ),
+)
+
+#: What /cg-feedback asked until the redesign (headers start "TL"). Not
+#: asked now, but an older transcript's answers still parse through these,
+#: and the dashboard's rating still offers its four.
+LEGACY_FEEDBACK_QUESTIONS: tuple[FeedbackQuestion, ...] = (
     FeedbackQuestion(
         key="outcome",
         header="TL outcome",
         question="Did this piece of work deliver what you expected?",
         multi=False,
-        options=(
-            ("met", "Yes", "It did what I asked"),
-            ("partly", "Partly", "Some of it, or with gaps I had to fill"),
-            ("missed", "No", "It missed what I wanted"),
-            ("stopped", "Stopped early", "I stopped it or changed course"),
-        ),
+        options=_OUTCOME_OPTIONS,
     ),
     FeedbackQuestion(
         key="slow",
@@ -2066,11 +2364,7 @@ FEEDBACK_QUESTIONS: tuple[FeedbackQuestion, ...] = (
         header="TL worth",
         question="Was the result worth the tokens it used?",
         multi=False,
-        options=(
-            ("yes", "Worth it", "Good value for what it cost"),
-            ("fair", "About right", "Roughly what I'd expect"),
-            ("no", "Too costly", "Too many tokens for the result"),
-        ),
+        options=_WORTH_OPTIONS,
     ),
     FeedbackQuestion(
         key="helped",
@@ -2084,36 +2378,190 @@ FEEDBACK_QUESTIONS: tuple[FeedbackQuestion, ...] = (
             ("none", "Nothing", "It was fine as it was"),
         ),
     ),
-)
-
-#: Asked in a second AskUserQuestion call, and only when a plan was
-#: approved during the piece of work (the first call already holds four
-#: questions, AskUserQuestion's limit). Not a dashboard rating: the
-#: Sessions tab can't tell whether a plan was approved.
-HANDOFF_QUESTION = FeedbackQuestion(
-    key="handoff",
-    header="TL handoff",
-    question="Could the build have started in a fresh session from just the plan?",
-    multi=False,
-    options=(
-        ("yes", "Yes", "The plan had everything needed"),
-        ("partly", "Partly", "It needed a few things from earlier"),
-        ("no", "No", "It relied on the earlier discussion"),
+    FeedbackQuestion(
+        key="handoff",
+        header="TL handoff",
+        question="Could the build have started in a fresh session from just the plan?",
+        multi=False,
+        options=_HANDOFF_OPTIONS,
     ),
 )
 
-#: Every question a ``[cg-fb: ...]`` tag or an answer may carry.
-ALL_FEEDBACK_QUESTIONS: tuple[FeedbackQuestion, ...] = FEEDBACK_QUESTIONS + (HANDOFF_QUESTION,)
+#: Every question a ``[cg-fb: ...]`` tag or an answer may carry: the
+#: current ones, then the older ones.
+ALL_FEEDBACK_QUESTIONS: tuple[FeedbackQuestion, ...] = FEEDBACK_QUESTIONS + LEGACY_FEEDBACK_QUESTIONS
 
-#: ``[cg-fb: ...]`` key -> the words its answer may take.
-FEEDBACK_VOCAB: dict[str, tuple[str, ...]] = {q.key: tuple(o[0] for o in q.options) for q in ALL_FEEDBACK_QUESTIONS}
+#: The tag keys that hold an answer, in the order they are asked.
+FEEDBACK_ANSWER_KEYS: tuple[str, ...] = tuple(dict.fromkeys(q.key for q in ALL_FEEDBACK_QUESTIONS))
+
+#: ``[cg-fb: ...]`` key -> the words its answer may take. ``slow`` is the
+#: retired slowdown question's: read, never asked. ``tip_hint`` names the
+#: tip the ``tip`` answer is about.
+FEEDBACK_VOCAB: dict[str, tuple[str, ...]] = {
+    **{q.key: tuple(o[0] for o in q.options) for q in ALL_FEEDBACK_QUESTIONS},
+    "tip_hint": tuple(TIP_HINT_TITLES),
+}
 
 #: ``[cg-fb: ...]`` keys whose value is a comma list of words.
 FEEDBACK_LIST_KEYS = frozenset(q.key for q in ALL_FEEDBACK_QUESTIONS if q.multi)
 
-#: The words a dashboard rating (the Sessions tab's checkboxes) may
-#: take: the four questions every run asks.
-RATING_VOCAB: dict[str, tuple[str, ...]] = {q.key: FEEDBACK_VOCAB[q.key] for q in FEEDBACK_QUESTIONS}
+#: The older ``slow`` words, as the ``why`` word they mean now. ``rework``
+#: stays unattributed (it didn't say who caused it) and ``tools`` was never
+#: a reason you gave, so neither maps; an older answer's ``slow`` keeps
+#: them.
+SLOW_TO_WHY: dict[str, str] = {"unclear": "left_out", "none": "none"}
+
+#: What the dashboard's rating (the Sessions tab's checkboxes) asks: the
+#: same questions /cg-feedback asks, in the same order, served from here
+#: and never copied into the page. ``service/api.py`` leaves out the ones
+#: the session's facts say don't apply (:func:`feedback_questions`, the
+#: same rules the skill follows), and asks the plan and handoff questions
+#: once per plan build (``PER_BUILD_KEYS``).
+RATING_QUESTIONS: tuple[FeedbackQuestion, ...] = FEEDBACK_QUESTIONS
+
+#: The questions a session with two or more approved plans answers once
+#: for each plan build: whether the plan covered what was fixed after it,
+#: and whether the build could have started from the plan alone.
+PER_BUILD_KEYS = ("plan", "handoff")
+
+#: The words a dashboard rating may take. The four it has always taken
+#: come first (``slow`` is the retired slowdown question: no question asks
+#: it now, but an answer saved earlier stays readable and can be sent
+#: back); ``tip_hint`` names the tip the ``tip`` answer is about.
+RATING_VOCAB: dict[str, tuple[str, ...]] = {
+    key: FEEDBACK_VOCAB[key]
+    for key in ("outcome", "slow", "worth", "helped", "why", "missed_in", "plan", "handoff", "tip", "tip_hint")
+}
+
+#: What a tip or recommendation card on the dashboard can be marked as
+#: (``POST /api/tip-feedback``): ``(word, label, description)``. ``trying``
+#: also records a change point for the habit, so its effect is measured
+#: from that day. The answers are things you say, never a setting: the
+#: dashboard changes nothing in Claude Code itself.
+TIP_CARD_OPTIONS: tuple[tuple[str, str, str], ...] = (
+    ("useful", "Useful", "It was right for how you work"),
+    ("trying", "Trying it", "You started doing it, so its effect is measured from now"),
+    ("known", "Knew it", "It was right, but you already knew it"),
+    ("wrong", "Wrong here", "It did not fit your work"),
+)
+TIP_CARD_VOCAB: tuple[str, ...] = tuple(option[0] for option in TIP_CARD_OPTIONS)
+
+#: What kind of card an answer is about: a tip Claude relayed or a habit
+#: seen in how you prompt (``tip``), an item of the work-habits playbook
+#: (``habit``) or a recommendation (``recommendation``).
+TIP_CARD_KINDS: tuple[str, ...] = ("tip", "habit", "recommendation")
+
+#: How a tip-card answer counts in the tip tallies of the ``prompting_tips``
+#: table: the same words the tip question takes. Trying a tip means it was
+#: right and acted on, which is what ``useful`` says there.
+TIP_CARD_AS_TIP_ANSWER: dict[str, str] = {"useful": "useful", "trying": "useful", "known": "known", "wrong": "wrong"}
+
+#: What to ask for when Claude missed something that was already said, by
+#: where it was said (``missed_in``'s words); ``""`` is for an answer that
+#: didn't say. /cg-feedback's "Next time:" line, the ``check_work`` habit
+#: and the playbook all paste these lines.
+MISSED_IN_LINES: dict[str, str] = {
+    "message": "Ask Claude to restate your request as a checklist before it starts.",
+    "plan": "Ask Claude to tick off each plan step before it says done.",
+    "standing": "That rule is buried: shorten CLAUDE.md, or make it a hook or a check.",
+    "earlier": "Long sessions lose details: restate it, or save a handoff and run /clear.",
+    "": "Ask Claude to check its work against your request or plan before it says done.",
+}
+
+#: The "Next time:" line /cg-feedback ends on: ``(when, line)``, the first
+#: that holds wins.
+FEEDBACK_NEXT_TIME: tuple[tuple[str, str], ...] = (
+    ("why includes missed and missed_in=message", MISSED_IN_LINES["message"]),
+    ("why includes missed and missed_in=plan", MISSED_IN_LINES["plan"]),
+    ("why includes missed and missed_in=standing", MISSED_IN_LINES["standing"]),
+    ("why includes missed and missed_in=earlier", MISSED_IN_LINES["earlier"]),
+    ("why includes missed and there is no missed_in", MISSED_IN_LINES[""]),
+    (
+        "plan=gap",
+        "Before you approve a plan, ask for the files, the decisions and a done-when line.",
+    ),
+    (
+        "why includes left_out",
+        "Put the files, the errors and a done-when line in your first message, or run /cg-brief with your request.",
+    ),
+    ("worth=no and helped includes smaller", "Keep to one piece of work per session."),
+)
+
+#: What each answer to the tip question does to the tip it was about
+#: (``Feedback.tip``). ``wrong`` answers and the times Claude disowned the
+#: tip (``Turn.tip_disowned``) add up: at :data:`TIP_WRONG_MIN` of them the
+#: daily run raises the hint's threshold by ``rearm_factor`` where it has
+#: one (:data:`TIP_THRESHOLD_KEYS`), and mutes it where it has none. At
+#: :data:`TIP_KNOWN_MIN` ``known`` answers, with more of those than
+#: ``useful`` ones, the hint shows once a session. ``useful`` counts toward
+#: the tip's trust figure only.
+TIP_WRONG_MIN = 2
+TIP_KNOWN_MIN = 2
+#: The hints with a number of their own that decides when they speak: the
+#: key in :data:`COACHING_THRESHOLDS` the daily run raises. The two plan
+#: hints share one number, so the others' answers would move both; they are
+#: muted instead, like the hint with no number at all (``status_poll``).
+TIP_THRESHOLD_KEYS: dict[str, str] = {
+    "drip_feed": "drip_count",
+    "big_paste": "big_paste_tokens",
+    "cold_return": "cold_min_tokens",
+}
+
+
+def _fact_count(facts: Mapping[str, object], key: str) -> int:
+    value = facts.get(key, 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
+def feedback_questions(
+    facts: Mapping[str, object] | None = None, why: Collection[str] = (), *, plan_approved: bool = False
+) -> tuple[tuple[FeedbackQuestion, ...], tuple[FeedbackQuestion, ...]]:
+    """The questions /cg-feedback asks in call 1 and in call 2, each in
+    its order and each left out when its condition fails.
+
+    ``facts`` is the facts line as a mapping (``{"followups": 6, "plan":
+    "approved", "tip": "drip_feed", ...}``, the keys of
+    :data:`FEEDBACK_FACT_KEYS`), or ``None`` without a line: then only the
+    follow-ups question and, when ``plan_approved`` (an ``ExitPlanMode``
+    approval Claude saw in this piece of work), the handoff question can be
+    asked. ``why`` holds the words already answered to the follow-ups
+    question, which the missed question waits for: call 2 of a first look,
+    with ``why`` empty, leaves it out."""
+
+    def applies(q: FeedbackQuestion) -> bool:
+        if q.key == "why":
+            return facts is None or _fact_count(facts, "followups") >= 1
+        if q.key == "missed_in":
+            return "missed" in why
+        if q.key == "plan":
+            return (
+                facts is not None
+                and facts.get("plan") == "approved"
+                and _fact_count(facts, "plan_followups") >= 1
+                and _fact_count(facts, "plan_asked") == 0
+            )
+        if q.key == "handoff":
+            return plan_approved if facts is None else facts.get("plan") == "approved" and facts.get("build") == "same"
+        if q.key == "tip":
+            return facts is not None and facts.get("tip") in TIP_HINT_TITLES
+        return True
+
+    asked = [q for q in FEEDBACK_QUESTIONS if applies(q)]
+    return (
+        tuple(q for q in asked if q.call == 1),
+        tuple(q for q in asked if q.call == 2),
+    )
+
+
+def _feedback_question_lines(q: FeedbackQuestion) -> list[str]:
+    choice = "several answers allowed (multiSelect true)" if q.multi else "one answer (multiSelect false)"
+    lines = [f'   - header "{q.header}", question "{q.question}", {choice}.']
+    if q.when:
+        lines.append(f"     Ask when {q.when}.")
+    if q.plain:
+        lines.append(f'     Plain wording: "{q.plain}"')
+    lines += [f'     - "{label}" = {word}: {description}' for word, label, description in q.options]
+    return lines
 
 
 def feedback_skill_text() -> str:
@@ -2124,52 +2572,78 @@ def feedback_skill_text() -> str:
     lines = [
         "---",
         f"name: {FEEDBACK_SKILL}",
-        "description: Rate the piece of work you just finished for ClaudeGlass, with four quick "
-        "checkbox questions (five after an approved plan).",
+        "description: Rate the piece of work you just finished for ClaudeGlass, with a few quick checkbox "
+        "questions.",
         "disable-model-invocation: true",
         "allowed-tools: AskUserQuestion",
         "---",
         "",
-        "The user wants to rate the piece of work just finished, for ClaudeGlass, which turns the "
-        "answers into token-saving tips. Do only what follows: no summary of the work, no other tools.",
+        "The user wants to rate the piece of work just finished, for ClaudeGlass, which turns the answers into "
+        "token-saving tips. Do only what follows: no summary of the work, no other tools.",
         "",
-        "1. Call AskUserQuestion once, with these four questions word for word, in this order:",
+        f"Facts. This message may carry a line `{FEEDBACK_FACTS_MARKER} key=value ...` with counts and ids for "
+        f"this piece of work ({', '.join(FEEDBACK_FACT_KEYS)}). Use it to fill the {{placeholders}} below and to "
+        "skip a question that doesn't apply. Without it, or without a number a question needs, ask the plain "
+        "wording and skip the questions that need the line. Never guess a number.",
+        "",
+        "Fill {n} from followups and {q} from queued; when queued is 0, drop the brackets and what is in them. "
+        "Fill {tokens} from tokens, written like 420k or 1.3M, and {x} as tokens divided by typical, to one "
+        'decimal; when typical is missing or 0, drop ", about {x}× your usual piece". Fill {hint title} from '
+        "tip: " + "; ".join(f"{hint} = {title}" for hint, title in TIP_HINT_TITLES.items()) + ".",
+        "",
+        "Each option reads label = word: description. The label and description go in the question; the word "
+        "goes in the tag. A question without an Ask line is always asked.",
+        "",
+        "1. Call AskUserQuestion once with these questions, in this order, word for word, leaving out any that "
+        "don't apply:",
         "",
     ]
     for q in FEEDBACK_QUESTIONS:
-        choice = "several answers allowed (multiSelect true)" if q.multi else "one answer (multiSelect false)"
-        lines.append(f'   - header "{q.header}", question "{q.question}", {choice}. Options:')
-        for _word, label, description in q.options:
-            lines.append(f'     - "{label}": {description}')
-    q = HANDOFF_QUESTION
+        if q.call == 1:
+            lines += _feedback_question_lines(q)
     lines += [
         "",
-        "2. Only if you approved a plan with ExitPlanMode during this piece of work, call AskUserQuestion "
-        "a second time with this one question. Otherwise skip this step and leave the handoff key out:",
-        "",
-        f'   - header "{q.header}", question "{q.question}", one answer (multiSelect false). Options:',
-    ]
-    for _word, label, description in q.options:
-        lines.append(f'     - "{label}": {description}')
-    lines += [
-        "",
-        "3. End your reply with this one line, putting in the word for each answer ticked, joined with "
-        "commas where several were ticked. Leave out a key whose question was skipped, not asked or "
-        "answered only with free text:",
-        "",
-        f"   [{FEEDBACK_TAG}: "
-        + " ".join(f"{q.key}=<{'words' if q.multi else 'word'}>" for q in ALL_FEEDBACK_QUESTIONS)
-        + "]",
-        "",
-        "   The word for each answer:",
+        "2. When the answers are back, call AskUserQuestion a second time with these, in this order, leaving "
+        "out any that don't apply. Skip the call when none do:",
         "",
     ]
-    for q in ALL_FEEDBACK_QUESTIONS:
-        words = ", ".join(f'"{label}" = {word}' for word, label, _description in q.options)
-        lines.append(f"   - {q.key}: {words}")
+    for q in FEEDBACK_QUESTIONS:
+        if q.call == 2:
+            lines += _feedback_question_lines(q)
+    tag_parts = []
+    for q in FEEDBACK_QUESTIONS:
+        tag_parts.append(f"{q.key}=<{'words' if q.multi else 'word'}>")
+        if q.key == "tip":
+            tag_parts.append("tip_hint=<hint id>")
     lines += [
         "",
-        '4. After the tag, write one line: "Thanks: ClaudeGlass will use this for your savings tips."',
+        "3. An answer that is not one of a question's labels is the user's own words (the Other choice). Map it "
+        "to the closest word or words of that question's list and to nothing else; leave the key out when "
+        "nothing fits. Never copy, quote or save their words, in your reply, in the tag or in memory. A ticked "
+        "answer always stands as ticked.",
+        "",
+        "4. Reply with these lines and nothing else (the Next time line only when step 5 gives one). In the "
+        "first, name each recorded answer by its "
+        "question (" + ", ".join(q.short for q in FEEDBACK_QUESTIONS) + ") and the label ticked, without any "
+        "text in brackets, adding (from your note) when the word came from their words. Leave out \"Not "
+        "recorded\" when every question asked was recorded; otherwise name each one whose words matched no "
+        "option. The tag is the last line of your reply; only a [cg: ...] line the capture note asks for may "
+        "follow it. Put in the word for each answer, joined with commas where several; leave "
+        "out a key whose question was skipped, not asked or not recorded. Write tip_hint with the id from tip, "
+        "and from_text with the keys whose word came from their words:",
+        "",
+        "   Recorded for ClaudeGlass: Outcome Partly · Follow-ups Claude missed something (from your note) · "
+        "Worth Too costly · Next time A plan first. Not recorded: Plan (your note didn't match an option). "
+        "Run /cg-feedback again now to change it.",
+        "   Next time: <the line from step 5>",
+        f"   [{FEEDBACK_TAG}: " + " ".join(tag_parts) + " from_text=<keys>]",
+        "",
+        "5. The Next time line is the first of these that holds, and is left out when none does:",
+        "",
+    ]
+    for number, (when, line) in enumerate(FEEDBACK_NEXT_TIME, 1):
+        lines.append(f'   {number}) {when}: "{line}"')
+    lines += [
         "",
         'If the user declines the questions, reply only "No problem." and write no tag.',
         "",
@@ -2368,7 +2842,7 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
     if not codes:
         return ""
     out = [f"{NOTE_MARKER}{NOTE_VERSION} {','.join(codes)}", NOTE_INTRO]
-    # CAP-1: an extra marked extra_before_tag (feedback_reminder) tells
+    # CAP-1: an extra marked extra_before_tag tells
     # Claude to end its reply with something too, so it goes before the
     # tag block, not after -- the tag instruction stays the last thing
     # the note asks for.
@@ -2514,9 +2988,10 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     about, so these stay synchronous; the tool note's matcher keeps
     that wait to the tools whose results can be large. Coaching notes
     (``coaching_notes``) add the message you send and approved plans to
-    that, in one PostToolUse entry shared with the tool note. SessionEnd
-    runs as the session closes, when nothing waits on it; the other
-    signals run in the background. While Haiku writes the tags
+    that, in one PostToolUse entry shared with the tool note. The feedback
+    items that answer a message you send (:data:`FEEDBACK_MESSAGE_IDS`) add
+    that entry on their own. SessionEnd runs as the session closes, when
+    nothing waits on it; the other signals run in the background. While Haiku writes the tags
     (:data:`HAIKU_TAGGER_HOOK` in ``ids``), ``Stop`` runs in the
     foreground, shared with ``turn_signals``: it only hands the turn to a
     worker of its own and returns, and ``claude -p`` exits without waiting
@@ -2529,6 +3004,9 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     main = any(m.id in wanted and ((m.main_line and not haiku) or m.main_extra) for m in METRICS)
     agents = bool(agent_metric_ids(wanted))
     coach = "coaching_notes" in wanted
+    # The feedback items that answer a message you send: the facts line for
+    # /cg-feedback, the plan check and the rating reminder.
+    asks_on_message = bool(wanted & set(FEEDBACK_MESSAGE_IDS))
     specs: list[tuple[str, str, str, bool]] = []
     if main:
         specs.append((HOOK_SCRIPT, "SessionStart", SESSION_START_MATCHER, False))
@@ -2537,7 +3015,7 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
         # a worker and returns, and claude -p exits without waiting for a
         # background hook.
         specs.append((HOOK_SCRIPT, "SubagentStop", "", False))
-    if coach:
+    if coach or asks_on_message:
         specs.append((HOOK_SCRIPT, "UserPromptSubmit", "", False))
     tools = (*(BIG_OUTPUT_TOOLS if "big_output" in wanted else ()), *(COACHING_TOOLS if coach else ()))
     if tools:
@@ -2687,6 +3165,22 @@ def export_json() -> dict:
             "ack_pattern": ACK_PATTERN,
             "change_pattern": CHANGE_PATTERN,
             "change_scan_chars": CHANGE_SCAN_CHARS,
+            "feedback": {
+                "skill": FEEDBACK_SKILL,
+                "facts_marker": FEEDBACK_FACTS_MARKER,
+                "fact_keys": list(FEEDBACK_FACT_KEYS),
+                "hints": list(FEEDBACK_HINTS),
+                "text": dict(FEEDBACK_NOTE_TEXT),
+                "headers": sorted({q.header for q in ALL_FEEDBACK_QUESTIONS}),
+                "plan_headers": [next(q.header for q in FEEDBACK_QUESTIONS if q.key == "plan"), PLAN_CHECK_HEADER],
+                "plan_check_header": PLAN_CHECK_HEADER,
+                "plan_check_words": list(PLAN_CHECK_WORDS),
+                "plan_check_labels": [label for _word, label, _description in PLAN_CHECK_OPTIONS],
+                "tip_hints": list(TIP_HINT_TITLES),
+                "tip_marker": TIP_TEXT_MARKER,
+                "reminder_line": FEEDBACK_REMINDER_LINE,
+                "message_ids": list(FEEDBACK_MESSAGE_IDS),
+            },
         },
     }
 
@@ -2699,11 +3193,21 @@ NOTE_WRAP_CHARS = 63
 _TAG_FRAME_CHARS = 6
 
 
+#: The metric each feedback note belongs to, by :data:`FEEDBACK_HINTS`.
+FEEDBACK_NOTE_METRIC = {"plan_check": "plan_check", "rating_reminder": "feedback_reminder"}
+
+#: The feedback items that have Claude write something (the plan check's
+#: question, the reminder's line) on a note of their own.
+FEEDBACK_ASKS = ("plan_check", "feedback_reminder")
+
+
 def asks_claude(metric_id: str) -> bool:
     """Whether a metric has Claude read or write something, and so uses
     tokens."""
     m = METRICS_BY_ID.get(metric_id)
-    return bool(m and (m.main_line or m.sub_line or m.main_extra or m.sub_extra or m.tool_note))
+    return bool(
+        m and (m.main_line or m.sub_line or m.main_extra or m.sub_extra or m.tool_note or metric_id in FEEDBACK_ASKS)
+    )
 
 
 def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
@@ -2713,13 +3217,23 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     per subagent report (``report_tag``), both now always 0, as an agent
     is asked for nothing; the tag Claude writes per reply (``reply_tag``),
     none while Claude Haiku writes the tags (``tagger``); the /cg-feedback
-    reminder Claude adds once a session (``reminder``); the note after a
-    large or web tool result (``tool_note``). Amounts measured from
-    transcripts replace these once capture has run."""
+    reminder Claude adds when a large piece of work is unrated
+    (``reminder``) and the plan check's question (``plan_check``), with
+    the note that asks for either (``message_note``, the larger of the
+    two); the note after a large or web tool result (``tool_note``).
+    Amounts measured from transcripts replace these once capture has
+    run."""
     enabled = [METRICS_BY_ID[i] for i in ids if i in METRICS_BY_ID]
+    wanted_ids = {m.id for m in enabled}
     main, sub = note_text(ids, "main", tagger=tagger), note_text(ids, "subagent")
-    # The /cg-feedback reminder comes once a session, not with every reply.
-    reminder = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
+    # The reminder and the plan check come on a message of yours now and
+    # then, not with every reply.
+    reminder = sum(m.out_chars for m in enabled if m.id == "feedback_reminder")
+    plan_check = sum(m.out_chars for m in enabled if m.id == "plan_check")
+    message_note = max(
+        (len(FEEDBACK_NOTE_TEXT[hint]) for hint, metric in FEEDBACK_NOTE_METRIC.items() if metric in wanted_ids),
+        default=0,
+    )
     if tagger == "haiku" and any(m.main_line for m in enabled):
         reply = frame = 0  # no tag at all
     else:
@@ -2737,6 +3251,8 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
         "report_tag": round(report / 4),
         "tool_note": round((tool + NOTE_WRAP_CHARS + len("PostToolUse")) / 4) if tool else 0,
         "reminder": round(reminder / 4),
+        "plan_check": round(plan_check / 4),
+        "message_note": round((message_note + NOTE_WRAP_CHARS + len("UserPromptSubmit")) / 4) if message_note else 0,
         # Not tokens of Claude's: 1 when each agent run gets a Haiku call.
         "agent_judge": 1 if agent_metric_ids(ids) else 0,
     }
@@ -2772,10 +3288,14 @@ def _feedback_tag_words() -> str:
     ellipsis for the Capture page's table; the doc's "exact words"
     promise needs the real thing, so :func:`render_markdown` builds it
     here instead of using ``METRICS_BY_ID["feedback_skill"].tag``."""
-    parts = [
-        f"{q.key}=" + (",".join(o[0] for o in q.options) if q.multi else "|".join(o[0] for o in q.options))
-        for q in ALL_FEEDBACK_QUESTIONS
-    ]
+    parts = []
+    for q in FEEDBACK_QUESTIONS:
+        parts.append(
+            f"{q.key}=" + (",".join(o[0] for o in q.options) if q.multi else "|".join(o[0] for o in q.options))
+        )
+        if q.key == "tip":
+            parts.append("tip_hint=<hint id>")
+    parts.append("from_text=<keys>")
     return f"[{FEEDBACK_TAG}: " + " ".join(parts) + "]"
 
 
@@ -2786,6 +3306,13 @@ def _metric_tag_line(metric: Metric) -> str:
         return f"`{_feedback_tag_words()}`"
     if metric.tag:
         return f"`{metric.tag}`"
+    if metric.id == "plan_check":
+        return (
+            f'No tag. A hook note has Claude ask one question (header "{PLAN_CHECK_HEADER}") before it acts on '
+            f"your message; only the ticked word is kept ({', '.join(f'`{w}`' for w in PLAN_CHECK_WORDS)})."
+        )
+    if metric.id == "feedback_reminder":
+        return f'No tag. A hook note asks Claude to end its reply with a line: "{REMINDER_LABEL} {FEEDBACK_REMINDER_LINE}"'
     if metric.main_extra:
         return f'No fixed key. The note asks for a line: "{metric.main_extra}"'
     if metric.sub_extra:
@@ -2844,8 +3371,8 @@ def render_markdown() -> str:
         "writes it, see [Who writes the tags](#who-writes-the-tags)). A subagent is asked for nothing: its brief "
         "and its report are exactly what they would be, and Claude Haiku judges the run once it's done (see "
         "[Agent runs](#agent-runs)). The tag always sits at the end of the reply you already read — nothing is "
-        "hidden — and nothing free-text is ever asked for: every word comes from a closed vocabulary (see "
-        "[Privacy](#privacy) below)."
+        "hidden — and the tags ask for no free text: every word comes from a closed vocabulary (the one place "
+        "you can type is an Other answer in `/cg-feedback`; see [Privacy](#privacy) below)."
     )
     p("")
     p(
@@ -2968,6 +3495,13 @@ def render_markdown() -> str:
     )
     p("")
     p(f"The `/cg-feedback` skill ends with its own line: `{_feedback_tag_words()}`.")
+    p("")
+    p(
+        "`tip_hint` is the id of the tip the question was about. `from_text` lists the keys whose word Claude "
+        "picked from a note you typed under Other instead of a ticked box. Claude reads that note once to pick "
+        "the closest word, then drops it: only the word is kept, and a ticked answer always wins over the tag. "
+        "Runs from before the redesign asked what slowed the work (`slow`); those answers are still read."
+    )
     p("")
     p(
         "If Claude writes more than one tag, the last one wins, key by key, except `level` and `size`: the "
@@ -3173,11 +3707,23 @@ def render_markdown() -> str:
     )
     p("")
     p(
+        "The one place you can type is the Other choice in a `/cg-feedback` question. Claude reads that text "
+        "once, in the session you are already in, to pick the closest word from that question's list, and "
+        "writes only the word in the tag, with the question's key in `from_text`. It is told never to copy, "
+        "quote or save your words. The parser sees your answer in the transcript in memory only and keeps just "
+        "which questions were answered that way. A word picked from your note counts only when the answer to "
+        "that question really was typed text, and a ticked answer always wins over the tag. What you typed "
+        "never reaches the digest, the store, the dashboard or a file."
+    )
+    p("")
+    p(
         "Free local signals never involve Claude at all: a hook logs the session id (hashed with this "
         "tool's own salt), the event word, and — for a permission prompt — the tool name, never its "
-        "arguments, to a local file under `<config-dir>/signals/`. Those files, and the `capture-log.jsonl` "
-        "record of every on/off/level change, aren't kept forever: `serve`'s watcher (or `capture prune` by "
-        "hand) deletes entries past your configured retention, a default applying when none is set."
+        "arguments, to a local file under `<config-dir>/signals/`. Those files, the `capture-log.jsonl` "
+        "record of every on/off/level change, and the `habit-log.jsonl` record of each tip you marked "
+        "\"Trying it\" on the dashboard (a habit's id and the time, nothing else), aren't kept forever: "
+        "`serve`'s watcher (or `capture prune` by hand) deletes entries past your configured retention, a "
+        "default applying when none is set."
     )
     p("")
     p(
@@ -3243,7 +3789,7 @@ def render_markdown() -> str:
     p("- `claudeglass capture brief on|off` — the `/cg-brief` skill.")
     p(
         "- `claudeglass capture prune [--dry-run]` — delete signal files, Claude Haiku's tag files and "
-        "`capture-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's "
+        "`capture-log.jsonl` and `habit-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's "
         "unset); `serve`'s watcher already runs this same cleanup on every tick, so this is for anyone not "
         "running it."
     )

@@ -60,6 +60,7 @@ What else does NOT round-trip, and why:
 from __future__ import annotations
 
 import json
+from collections.abc import Collection
 
 from .. import haiku_tags
 from ..cache import result_from_jsonable
@@ -114,6 +115,7 @@ def corpus_from_store(
     until: str | None = None,
     window_by: str = "last-reply",
     project_slugs: list[str] | None = None,
+    session_ids: Collection[str] | None = None,
 ) -> Corpus:
     """Rebuild a :class:`Corpus` entirely from ``store`` — no transcript
     files read. See the module docstring for what this makes possible
@@ -140,11 +142,16 @@ def corpus_from_store(
     ``project`` query param by ``api.py``'s ``_project_query``/
     ``Store.resolve_project_slug``) to keep; ``None`` (the default) keeps
     every project, matching every existing caller exactly.
+
+    ``session_ids``: keep only these sessions, whatever the window (the
+    session drawer reads one session's facts for its rating questions);
+    ``None`` keeps every session.
     """
     conn = store._connection()
     since_dt, until_dt = _resolve_window(days, since, until)
     has_window_filter = since_dt is not None or until_dt is not None
     allowed_slugs = set(project_slugs) if project_slugs is not None else None
+    allowed_ids = set(session_ids) if session_ids is not None else None
 
     session_rows = conn.execute("SELECT id, slug, first_ts, last_ts FROM sessions").fetchall()
 
@@ -155,9 +162,11 @@ def corpus_from_store(
     for session_row in session_rows:
         session_id = session_row["id"]
         slug = session_row["slug"]
+        if allowed_ids is not None and session_id not in allowed_ids:
+            continue
         if allowed_slugs is not None and slug not in allowed_slugs:
             continue
-        if window_by in ("last-reply", "first-reply") and not ts_in_window(
+        if window_by in ("last-reply", "first-reply") and allowed_ids is None and not ts_in_window(
             session_row[window_column(window_by)], since_dt, until_dt
         ):
             continue

@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -20,7 +21,11 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture, capture_catalogue as cat, cli, coaching, hook_health, ignores, installer, parse, prompt_shape
+from claudeglass import (
+    capture, capture_catalogue as cat, cli, coaching, habits, hook_health, ignores, installer, parse, prompt_shape,
+    prompting,
+)
+from claudeglass.habits import Habits, Piece, SessionShape
 from claudeglass.config import load_config
 from claudeglass.model import Recommendation, TranscriptMeta
 from claudeglass.parse import parse_transcript
@@ -2108,8 +2113,10 @@ def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_promp
     assert cat.COACHING_TEXT["split_run"] == ""
     assert CATALOGUE["coaching"]["notice"] == cat.COACHING_NOTICE
     assert all(notice.startswith(cat.NOTICE_LABEL) for notice in cat.COACHING_NOTICE.values())
-    reminder = cat.note_text(["feedback_reminder"], "main")
-    assert f"{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}" in reminder
+    # The reminder is not in the session start note: it is a note on a message of yours, its last line the one to write.
+    assert cat.note_text(["feedback_reminder"], "main") == ""
+    reminder = cat.FEEDBACK_NOTE_TEXT["rating_reminder"]
+    assert reminder.splitlines()[-1] == f"{cat.REMINDER_LABEL} {cat.FEEDBACK_REMINDER_LINE}"
 
 
 def test_the_prompting_hints_ask_only_for_a_tip_and_never_steer_the_work():
@@ -2127,10 +2134,14 @@ def test_the_prompting_hints_ask_only_for_a_tip_and_never_steer_the_work():
     assert not steering.search(cat.COACHING_TEXT["big_paste"])
 
 
-def test_the_feedback_reminder_is_asked_for_once_a_session():
+def test_the_feedback_reminder_is_asked_for_once_a_piece_of_work_not_at_the_session_start():
     for tagger in cat.TAGGERS:
-        note = cat.note_text(["feedback_reminder"], "main", tagger=tagger)
-        assert "first time in this session" in note and "never again" in note, tagger
+        assert cat.note_text(["feedback_reminder"], "main", tagger=tagger) == "", tagger
+    text = cat.FEEDBACK_NOTE_TEXT["rating_reminder"]
+    assert "{tokens}" in text and "hasn't been rated" in text
+    # Written after the work the message asks for, once, and left out while Claude is still working.
+    assert "last thing in your final reply" in text and "If you are still working" in text
+    assert "first time in this session" not in text
 
 
 _EMOJI = re.compile("[←-⯿\U0001f000-\U0001faff️]")
@@ -2146,6 +2157,8 @@ def test_nothing_claude_reads_carries_an_emoji():
         for tagger in cat.TAGGERS:
             texts[f"{scope} note ({tagger})"] = cat.note_text(everything, scope, agent_type, tagger)
     texts["judge"] = cat.judge_text(everything)
+    for hint, text in cat.FEEDBACK_NOTE_TEXT.items():
+        texts[f"feedback {hint}"] = text
     for metric in cat.METRICS:
         texts[f"{metric.id} tool note"] = cat.tool_note_text(metric.id)
     for name, text in texts.items():
@@ -2362,6 +2375,108 @@ def test_a_failing_build_is_logged_and_never_raises(tmp_path):
     assert job.run_once() is None and "store is busy" in logged[0]
 
 
+def _replies(*sizes: int, priced_first: int = 0) -> NS:
+    """A session bundle whose main transcript made one reply per size, each of ``size`` tokens split four ways."""
+    turns = [NS(turn_index=0, input_tokens=priced_first, cache_creation_tokens=0, cache_read_tokens=0, output_tokens=0)]
+    for index, size in enumerate(sizes, start=1):
+        quarter, rest = divmod(size, 4)
+        turns.append(NS(turn_index=index, input_tokens=quarter + rest, cache_creation_tokens=quarter,
+                        cache_read_tokens=quarter, output_tokens=quarter))
+    return NS(top=NS(turns=turns))
+
+
+def test_a_sessions_tokens_are_what_its_replies_used_in_all_four_kinds():
+    assert coaching.session_tokens(_replies(1_000, 2_001, 3).top) == 3_004
+    # The turn before the first message is not a reply and is not priced.
+    assert coaching.session_tokens(_replies(100, priced_first=9_999).top) == 100
+    assert coaching.session_tokens(NS(turns=[])) == 0
+
+
+def test_the_typical_piece_is_the_median_session_once_there_are_enough_of_them():
+    corpus = NS(sessions=[_replies(*[size] * 3) for size in (100, 900, 300, 500, 700)])
+    # Five sessions of 3 replies: 300, 2700, 900, 1500, 2100 tokens.
+    assert coaching.typical_piece_tokens(corpus) == 1_500
+    # An even count takes the middle two.
+    even = NS(sessions=[*corpus.sessions, _replies(1_100, 1_100, 1_100)])
+    assert coaching.typical_piece_tokens(even) == 1_800
+    # A median between two sessions never leaves a fraction: 6 and 9 tokens a session give 7.5, so 7.
+    odd = NS(sessions=[*[_replies(2, 2, 2)] * 3, *[_replies(3, 3, 3)] * 3])
+    assert coaching.typical_piece_tokens(odd) == 7 and isinstance(coaching.typical_piece_tokens(odd), int)
+
+
+def test_the_typical_piece_needs_five_sessions_with_three_replies_and_ignores_the_rest():
+    five = [_replies(10, 20, 30) for _ in range(coaching.MIN_PIECES)]
+    assert coaching.typical_piece_tokens(NS(sessions=five)) == 60
+    assert coaching.typical_piece_tokens(NS(sessions=five[:-1])) == 0
+    # A session of two replies, and one with no main transcript, are left out: they do not fill the gap or move the median.
+    short = _replies(1_000_000, 1_000_000)
+    assert coaching.typical_piece_tokens(NS(sessions=five[:-1] + [short, NS(top=None)])) == 0
+    assert coaching.typical_piece_tokens(NS(sessions=five + [short, NS(top=None)])) == 60
+    assert coaching.typical_piece_tokens(NS(sessions=[])) == 0
+
+
+def test_the_file_holds_the_typical_piece_and_never_a_negative_one(tmp_path):
+    assert coaching.from_report(_report(), tmp_path)["typical_piece_tokens"] == 0
+    assert coaching.from_report(_report(), tmp_path, typical=420_000)["typical_piece_tokens"] == 420_000
+    assert coaching.from_report(_report(), tmp_path, typical=-5)["typical_piece_tokens"] == 0
+    written = coaching.write(tmp_path, coaching.from_report(_report(), tmp_path, now=NOW, typical=420_000))
+    assert json.loads(written.read_text(encoding="utf-8"))["typical_piece_tokens"] == 420_000
+
+
+def test_the_summary_says_what_the_typical_piece_is_or_that_it_is_not_known_yet():
+    assert "Your typical piece of work is about 420,000 tokens" in coaching.describe({"typical_piece_tokens": 420_000})[-1]
+    unknown = "Your typical piece of work isn't known yet: it needs a few more sessions."
+    for data in ({"split_run": {}}, {"typical_piece_tokens": 0}, {"typical_piece_tokens": "many"}, {"typical_piece_tokens": -3}):
+        assert coaching.describe(data)[-1] == unknown, data
+    # No file yet has its own line: nothing was worked out, the typical piece included.
+    assert coaching.describe({}) == ["No split points yet: the dashboard's service works them out from your sessions once a day."]
+
+
+def test_the_service_job_writes_the_typical_piece_beside_the_split_points(tmp_path):
+    config_dir = _config_dir(tmp_path)
+    (config_dir / "config.toml").write_text('[capture]\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    asked = []
+
+    def typical(days):
+        asked.append(days)
+        return 640_000
+
+    job = CoachingJob(NS(config_dir=config_dir), lambda days: _report(), build_typical=typical, now_fn=lambda: NOW,
+                      log=lambda text: None)
+    assert job.run_once() == coaching.path(config_dir) and asked == [coaching.DAYS]
+    assert coaching.read(config_dir)["typical_piece_tokens"] == 640_000
+    # Without a typical builder the file says 0: the hook then asks for the million alone.
+    other = tmp_path / "other"
+    other.mkdir()
+    (other / "config.toml").write_text('[capture]\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    CoachingJob(NS(config_dir=other), lambda days: _report(), now_fn=lambda: NOW, log=lambda text: None).run_once()
+    assert coaching.read(other)["typical_piece_tokens"] == 0
+
+
+@pytest.mark.parametrize("config, runs", [
+    ('[capture]\nfeedback = ["feedback_skill"]\n', True),
+    ('[capture]\nfeedback = ["feedback_note"]\n', False),
+    ('[capture]\nfeedback = ["plan_check"]\n', True),
+    ('[capture]\nfeedback = ["feedback_reminder"]\n', True),
+    ('[capture]\nfeedback = []\ncoaching = []\n', False),
+    ('[capture]\nfeedback = ["feedback_skill"]\ncoaching = ["coaching_notes"]\n', True),
+])
+def test_the_service_job_runs_for_a_survey_item_on_your_messages_without_coaching_notes(tmp_path, config, runs):
+    # The facts line (``feedback_skill``), the plan check and the reminder read ``typical_piece_tokens`` from it;
+    # the note on a reply (``feedback_note``) does not.
+    config_dir = _config_dir(tmp_path)
+    (config_dir / "config.toml").write_text(config, encoding="utf-8")
+    built = []
+
+    def build(days):
+        built.append(days)
+        return _report()
+
+    job = CoachingJob(NS(config_dir=config_dir), build, now_fn=lambda: NOW, log=lambda text: None)
+    assert (job.run_once() is not None) is runs
+    assert bool(built) is runs and coaching.path(config_dir).exists() is runs
+
+
 # -- the capture command ---------------------------------------------------------------
 
 
@@ -2444,6 +2559,22 @@ def test_refresh_works_the_split_points_out_now(_claude_folder):
     rc, out = _capture(config_dir, "refresh")
     assert rc == 0 and coaching.read(config_dir)["split_run"] == {}
     assert "coaching_notes" in out
+    assert "Your typical piece of work isn't known yet" in out and coaching.read(config_dir)["typical_piece_tokens"] == 0
+
+
+def test_refresh_writes_the_typical_piece_of_work_from_the_same_sessions(_claude_folder, monkeypatch):
+    config_dir = _claude_folder
+    seen = []
+
+    def typical(corpus):
+        seen.append(corpus)
+        return 380_000
+
+    monkeypatch.setattr(coaching, "typical_piece_tokens", typical)
+    rc, out = _capture(config_dir, "refresh")
+    assert rc == 0 and len(seen) == 1
+    assert "Your typical piece of work is about 380,000 tokens" in out
+    assert coaching.read(config_dir)["typical_piece_tokens"] == 380_000
 
 
 # -- what a reply says: a closing question, an admission, a disowned tip -----------
@@ -2729,3 +2860,184 @@ def test_a_plan_that_ends_with_the_tip_the_note_asked_for_counts_as_a_relayed_ti
         _human("make it smaller", 2), plan(3, "1. Add the screen, smaller."),
     ])
     assert [t.coach_tip for t in result.turns] == [True, False]
+
+
+# -- what your answers about the tips and the plans do to coaching.json ------------------
+
+
+def _tips_report(*rows, handoff=()) -> NS:
+    """A report whose ``prompting_tips`` table has a row for each
+    ``(hint, useful, known, wrong, misfires)``; ``handoff`` adds the handoff
+    answers of that many planned-and-built pieces to ``habits_by_shape``."""
+    sessions = []
+    for hint, useful, known, wrong, misfires in rows:
+        session = prompting.SessionPrompting(session_id=hint, start=None)
+        session.notes[hint] += useful + known + wrong + misfires + 1
+        session.misfires[hint] += misfires
+        for word, n in (("useful", useful), ("known", known), ("wrong", wrong)):
+            session.tip_answers[(hint, word)] += n
+        sessions.append(session)
+    sections = [prompting.build_section(sessions)]
+    if handoff:
+        pieces = [
+            Piece("met", 1.0, 1, None, (), (), "your feedback", shape="plan_build", handoff=word) for word in handoff
+        ]
+        sections.append(habits.section_from(Habits(pieces=pieces, shapes=[SessionShape("plan_build", 1.0, 80_000)])))
+    return NS(recommendations=[], sections=sections)
+
+
+def _rearmed(key: str, factor: float = cat.COACHING_THRESHOLDS["rearm_factor"]) -> int:
+    return math.ceil(cat.COACHING_THRESHOLDS[key] * factor)
+
+
+def test_a_tip_you_or_claude_called_wrong_twice_waits_for_more_or_is_muted(tmp_path):
+    report = _tips_report(
+        ("drip_feed", 0, 0, 1, 1),   # one answer and one disowned tip
+        ("big_paste", 1, 0, 1, 0),   # one wrong answer: not yet
+        ("status_poll", 0, 0, 2, 0),  # no number of its own to raise
+        ("cold_return", 2, 0, 2, 0),
+    )
+    data = coaching.from_report(report, tmp_path, now=NOW)
+    assert data["muted"] == ["status_poll"]
+    assert data["thresholds"] == {
+        "plan_fresh_tokens": 40_000,
+        "drip_count": _rearmed("drip_count"),
+        "cold_min_tokens": _rearmed("cold_min_tokens"),
+    }
+    assert data["once"] == []
+    # Your own factor, and none below one: a factor under it would lower what it raises.
+    twice = coaching.from_report(report, tmp_path, {"coaching_rearm_factor": 2.0})
+    assert twice["thresholds"]["drip_count"] == _rearmed("drip_count", 2.0)
+    low = coaching.from_report(report, tmp_path, {"coaching_rearm_factor": 0.5})
+    assert low["thresholds"]["drip_count"] == cat.COACHING_THRESHOLDS["drip_count"]
+    for bad in (True, "x", None):
+        odd = coaching.from_report(report, tmp_path, {"coaching_rearm_factor": bad})
+        assert odd["thresholds"]["drip_count"] == _rearmed("drip_count")
+
+
+def test_a_tip_you_knew_more_often_than_you_found_useful_shows_once_a_session(tmp_path):
+    report = _tips_report(
+        ("big_paste", 1, 2, 0, 0),    # known twice, useful once: once
+        ("status_poll", 2, 2, 0, 0),  # as often useful as known: stays
+        ("plan_fresh", 0, 1, 0, 0),   # known only once: stays
+        ("cold_return", 0, 3, 2, 0),  # known, but called wrong too: wrong comes first
+    )
+    data = coaching.from_report(report, tmp_path)
+    assert data["once"] == ["big_paste"]
+    assert data["muted"] == [] and data["thresholds"]["cold_min_tokens"] == _rearmed("cold_min_tokens")
+
+
+def test_a_hint_that_is_not_a_tip_is_left_alone_and_no_answers_change_nothing(tmp_path):
+    columns = [NS(key=key) for key in ("hint", "useful", "known", "wrong", "misfires")]
+    table = NS(name="prompting_tips", columns=columns,
+               rows=[["quiet_output", 0, 0, 5, 5], ["not_a_hint", 0, 0, 5, 5], ["status_poll", 0, 0, "x", None]])
+    report = NS(recommendations=[], sections=[NS(key="prompting", tables=[table])])
+    data = coaching.from_report(report, tmp_path)
+    assert data["muted"] == [] and data["once"] == [] and data["thresholds"] == {"plan_fresh_tokens": 40_000}
+    plain = coaching.from_report(NS(recommendations=[], sections=[]), tmp_path)
+    assert plain["muted"] == [] and plain["once"] == [] and plain["thresholds"] == {"plan_fresh_tokens": 40_000}
+    assert coaching.tip_rules(NS(), 1.5) == ([], [], {})
+
+
+def test_the_tip_rules_say_which_hints_are_muted_or_shown_once_and_which_numbers_rise():
+    report = _tips_report(("drip_feed", 0, 0, 2, 0), ("status_poll", 0, 0, 3, 0), ("big_paste", 0, 2, 0, 0))
+    assert coaching.tip_rules(report, 2.0) == (["status_poll"], ["big_paste"], {"drip_count": 6})
+
+
+def test_most_builds_that_could_have_started_from_the_plan_make_the_hint_speak_sooner(tmp_path):
+    most = _tips_report(handoff=("yes", "yes", "partly"))
+    data = coaching.from_report(most, tmp_path)
+    assert data["plan_fresh"] is True
+    assert data["thresholds"]["plan_fresh_tokens"] == int(40_000 / cat.COACHING_THRESHOLDS["rearm_factor"])
+    # From the tip's own line, and your factor.
+    assert coaching.from_report(most, tmp_path, {"plan_handoff_min_dropped_tokens": 60_000, "coaching_rearm_factor": 2.0})[
+        "thresholds"]["plan_fresh_tokens"] == 30_000
+    # Half is not most; too few answers say nothing; most saying no turns the hint off instead.
+    for answers in (("yes", "yes", "no", "partly"), ("yes", "yes"), ("no", "no", "yes")):
+        data = coaching.from_report(_tips_report(handoff=answers), tmp_path)
+        assert data["thresholds"]["plan_fresh_tokens"] == 40_000, answers
+    assert coaching.from_report(_tips_report(handoff=("no", "no", "yes")), tmp_path)["plan_fresh"] is False
+
+
+def test_the_summary_says_which_tips_are_left_out_wait_for_more_or_show_once():
+    data = {
+        "split_run": {}, "plan_fresh": True, "typical_piece_tokens": 0,
+        "muted": ["status_poll", "not_a_hint"], "once": ["big_paste"],
+        "thresholds": {"drip_count": 5, "big_paste_tokens": cat.COACHING_THRESHOLDS["big_paste_tokens"]},
+    }
+    lines = coaching.describe(data)
+    assert "Tips left out because you called them wrong: asking how background work is going." in lines
+    # A number at its default is not raised.
+    assert "Tips that now wait for more because you called them wrong: sending small requests one at a time." in lines
+    assert "Tips shown once a session because you already knew them: pasting a lot of text." in lines
+    quiet = coaching.describe({"split_run": {}, "plan_fresh": True, "typical_piece_tokens": 0})
+    assert not any("called them wrong" in line or "knew" in line for line in quiet)
+
+
+def _as_the_daily_run_writes_it(tmp_path, report) -> Path:
+    config_dir = _coaching_config(_config_dir(tmp_path))
+    coaching.write(config_dir, coaching.from_report(report, config_dir, now=NOW))
+    return config_dir
+
+
+def test_a_tip_you_called_wrong_is_not_shown_by_the_hook(tmp_path):
+    _as_the_daily_run_writes_it(tmp_path, _tips_report(("status_poll", 0, 0, 2, 0)))
+    records = [_prompt(), *_went_to_background(_LAUNCH_RESULTS["shell"])]
+    assert _send(tmp_path, records, "how is it going?") == ""
+    # Another hint is still shown: only the muted one is left out.
+    path = _transcript(tmp_path, [_prompt(), _reply(150_000, ago_s=20 * 60)], "other.jsonl")
+    assert _kind(_coach(tmp_path, {**_prompt_payload(path), "session_id": "s2"})) == "cold_return"
+
+
+def test_a_number_you_called_wrong_is_raised_where_the_hook_reads_it(tmp_path):
+    records = [_said("hi", 200), _reply(20_000, ago_s=100)]
+    paste = "Why does this fail?\n" + "log line\n" * 5_000
+    assert _kind(_send(tmp_path, records, paste, session="before")) == "big_paste"
+    _as_the_daily_run_writes_it(tmp_path, _tips_report(("big_paste", 0, 0, 2, 0)))
+    # The same paste, about 11k tokens, is now under the raised line.
+    assert _send(tmp_path, records, paste) == ""
+    assert _kind(_send(tmp_path, records, "Why?\n" + "log line\n" * 8_000, session="s3")) == "big_paste"
+
+
+def test_a_tip_you_already_knew_shows_once_a_session_however_much_grows(tmp_path):
+    cooldown = cat.COACHING_THRESHOLDS["cooldown_minutes"]
+
+    def poll(session: str, *, ctx: int, minutes: float):
+        records = [_prompt(), *_went_to_background(_LAUNCH_RESULTS["shell"], ctx=ctx, ago_s=200 - minutes * 60)]
+        return _send(tmp_path, records, "how is it going?", session=session, now=NOW + timedelta(minutes=minutes))
+
+    # As it is: back after its rest, and when the context has grown.
+    assert _kind(poll("plain", ctx=50_000, minutes=0)) == "status_poll"
+    assert _kind(poll("plain", ctx=90_000, minutes=1)) == "status_poll"
+    _as_the_daily_run_writes_it(tmp_path, _tips_report(("status_poll", 0, 2, 0, 0)))
+    assert _kind(poll("known", ctx=50_000, minutes=0)) == "status_poll"
+    assert poll("known", ctx=90_000, minutes=1) == ""
+    assert poll("known", ctx=300_000, minutes=2 + 8 * cooldown) == ""
+    # A new session shows it again, once.
+    assert _kind(poll("again", ctx=50_000, minutes=0)) == "status_poll"
+    state = json.loads((tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
+    hints = [row["hints"]["status_poll"] for row in state["sessions"].values()]
+    assert [bool(hint.get("once")) for hint in hints].count(True) == 2
+    # Numbers and a flag only.
+    assert all(set(hint) <= {"ts", "stake", "n", "rest", "once"} for hint in hints)
+
+
+def test_a_hint_you_knew_keeps_its_once_when_a_hint_like_it_rests_it_again():
+    th = HOOK.coaching_thresholds(CATALOGUE["coaching"], ON, {})
+    state: dict = {}
+    HOOK._stamp(state, "s", "plan_fresh", 100.0, 1_000.0, th, once=True)
+    assert not HOOK._gate(state, "s", "plan_fresh", 10_000.0, 10**9, th)
+    HOOK._rest_beside(state, "s", "plan_fresh", 1_100.0, th)
+    assert state["sessions"]["s"]["hints"]["plan_fresh"].get("once") is True
+    assert not HOOK._gate(state, "s", "plan_fresh", 10_000.0, 10**9, th)
+    # Not marked: it comes back after its rest, as before.
+    HOOK._stamp(state, "s", "drip_feed", 100.0, 1_000.0, th)
+    assert HOOK._gate(state, "s", "drip_feed", 0.0, 1_000.0 + 10**6, th)
+    HOOK._rest_beside(state, "s", "drip_feed", 1_100.0, th)
+    assert "once" not in state["sessions"]["s"]["hints"]["drip_feed"]
+
+
+def test_the_hook_reads_muted_and_once_only_as_lists_of_names():
+    assert HOOK._hint_names(["a", 3, None, "b"]) == frozenset({"a", "b"})
+    for odd in (None, "plan_fresh", 5, {"plan_fresh": True}):
+        assert HOOK._hint_names(odd) == frozenset()

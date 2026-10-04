@@ -192,7 +192,7 @@ function renderCaptureData(data, container) {
       nowBlock.appendChild(el("ul", { class: "notes" }, lines.map(function (line) {
         return el("li", { text: line });
       })));
-      var scopeNames = { main: "Main session", subagent: "Subagents", tool: "After tool results", brief: "Agent briefs", haiku: "Claude Haiku's calls" };
+      var scopeNames = { main: "Main session", subagent: "Subagents", tool: "After tool results", brief: "Agent briefs", haiku: "Claude Haiku's calls", feedback: "Feedback notes" };
       var scopeRows = Object.keys(measured.scopes || {}).map(function (key) {
         var scope = measured.scopes[key];
         return [scopeNames[key] || key, thousands(scope.note_tokens), thousands(scope.tag_tokens), billed(scope)];

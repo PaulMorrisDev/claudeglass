@@ -357,7 +357,11 @@ def _tips_line(before: CaptureConfig, after: CaptureConfig, setup: _Setup, uncon
         return f"{_TIPS}: off."
     parts = []
     if setup.capture is not None and setup.capture[0] == "off":
-        parts.append("turn off" + (", and take their hooks out of settings.json" if setup.touch_settings else ""))
+        # A survey or coaching switch that stays on keeps the hook entry it needs (CaptureConfig.hooked).
+        left = ", except what your other switches still need" if after.hooked else ""
+        parts.append(
+            "turn off" + (f", and take their hooks out of settings.json{left}" if setup.touch_settings else "")
+        )
     elif setup.capture is not None:
         title = capture_catalogue.LEVEL_TITLES.get(after.level, after.level)
         parts.append(f"turn on {title} " + (f"until {after.until[:10]}" if after.until else "with no end date"))
@@ -422,10 +426,8 @@ def _decide(opts: Options, tools: Tools, detection, health, *, stdin, stdout, no
     capture_line = None
     if setup.touch_settings:
         commands = None
-        if current.is_on or after.is_on or current.coaching_notes_on:
-            setup.capture_specs = (
-                hook_health.capture_specs(after.hook_metrics()) if after.is_on or after.coaching_notes_on else ()
-            )
+        if current.hooked or after.hooked:
+            setup.capture_specs = hook_health.capture_specs(after.hook_metrics()) if after.hooked else ()
             commands = tools.capture_commands
             if any(commands.get(spec.script) is None for spec in setup.capture_specs):
                 commands = None

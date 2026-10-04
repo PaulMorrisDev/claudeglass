@@ -416,6 +416,16 @@ _WORKFLOW_PROMPTS = {
         "session. Show me the diff before saving. Claude Code will ask my permission before editing files "
         "under .claude."
     ),
+    # Your answers say the builds relied on the discussion, or the plan left
+    # out what you then fixed: a thinner plan would lose even more in a fresh
+    # session, so the plan has to carry it first.
+    "plan-handoff:fuller_plans": (
+        "Please add a short instruction to my ~/.claude/CLAUDE.md: before I approve a plan, add the decisions, "
+        "file paths and constraints the build needs, and a done-when line. Then, when I approve a plan that took "
+        "a lot of exploring, remind me to run /clear and start the build from the saved plan file, one phase per "
+        "session. Show me the diff before saving. Claude Code will ask my permission before editing files under "
+        ".claude."
+    ),
     "run-split": (
         "My {agent} runs get long, and every later reply reads again all the run has read. Please add a short "
         "instruction to my ~/.claude/CLAUDE.md: when a task for {agent} "
@@ -610,6 +620,13 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "A fresh session knows only the plan and what it reads again, so a thin plan can mean re-reading "
         "files or asking again about decisions made while planning.",
         "Remove the reminder from your CLAUDE.md and keep building in the planning session.",
+    ),
+    "plan-handoff:fuller_plans": (
+        "Nowhere in Claude Code's config: how you move from planning to building in the main session. The "
+        "prompt adds a plan checklist and a reminder to your CLAUDE.md.",
+        "A fuller plan takes longer to write and approve, and Claude can still leave out a decision you had "
+        "not thought of yet.",
+        "Remove the instruction from your CLAUDE.md and approve plans as they come.",
     ),
     "run-split": (
         "Nowhere in Claude Code's config: how the main session hands work to this agent. The prompt adds an "

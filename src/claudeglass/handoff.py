@@ -424,11 +424,15 @@ def _cells(table: Table | None, row_key: str) -> dict:
 def _feedback_on_plans(report: ReportModel) -> dict:
     """What your /cg-feedback answers said about sessions you planned and
     built in (``habits_by_shape``'s ``plan_build`` row): ``yes``,
-    ``partly`` and ``no`` handoff counts, and the rated pieces and the
-    share too costly."""
+    ``partly`` and ``no`` handoff counts, the rated pieces and the share
+    too costly, and what you said about the fixes after a plan: ``covered``
+    (the plan said it), ``gap`` (it left it out) and ``new`` (you thought of
+    it later), from the plan check and the plan question together."""
     cells = _cells(_table(report, "habits", "habits_by_shape"), "plan_build")
     counts = {word: cells.get(f"handoff_{word}") for word in ("yes", "partly", "no")}
     counts = {word: n if isinstance(n, int) else 0 for word, n in counts.items()}
+    plan = {word: cells.get(f"plan_{word}") for word in ("covered", "gap", "new")}
+    plan = {word: n if isinstance(n, int) else 0 for word, n in plan.items()}
     pieces = cells.get("pieces")
     costly = cells.get("costly_pct")
     return {
@@ -436,6 +440,8 @@ def _feedback_on_plans(report: ReportModel) -> dict:
         "answers": sum(counts.values()),
         "pieces": pieces if isinstance(pieces, int) else 0,
         "costly_pct": costly if isinstance(costly, (int, float)) else None,
+        **plan,
+        "plan_answers": sum(plan.values()),
     }
 
 
@@ -447,9 +453,12 @@ def _rule_plan_handoff(report: ReportModel, th: HandoffThresholds) -> list[Recom
 
     Your /cg-feedback answers change the card once there are at least
     :data:`MIN_FEEDBACK_ANSWERS`: when more than half say the build
-    relied on the earlier discussion, it suggests writing fuller plans
-    first; when more than half say the plan was enough, it cites them;
-    when most rated planned builds were too costly, it says so."""
+    relied on the earlier discussion, or more than half of your fixes
+    after a plan were things the plan left out (the plan check and the
+    plan question), it suggests writing fuller plans first; when more than
+    half say the plan was enough, it cites them, and says the build can
+    start fresh at the approval; when most rated planned builds were too
+    costly, it says so."""
     table = _table(report, "plan_handoff", "plan_handoff_summary")
     if table is None or not table.rows:
         return []
@@ -473,6 +482,7 @@ def _rule_plan_handoff(report: ReportModel, th: HandoffThresholds) -> list[Recom
     fb = _feedback_on_plans(report)
     enough_answers = fb["answers"] >= MIN_FEEDBACK_ANSWERS
     needs_discussion = enough_answers and fb["no"] * 2 > fb["answers"]
+    plan_gaps = fb["plan_answers"] >= MIN_FEEDBACK_ANSWERS and fb["gap"] * 2 > fb["plan_answers"]
     plan_enough = enough_answers and fb["yes"] * 2 > fb["answers"]
     too_costly = (
         fb["pieces"] >= MIN_FEEDBACK_ANSWERS and fb["costly_pct"] is not None and fb["costly_pct"] > 50
@@ -487,18 +497,30 @@ def _rule_plan_handoff(report: ReportModel, th: HandoffThresholds) -> list[Recom
         "When a plan is approved after a lot of exploring, run /clear and ask Claude to carry out the plan "
         "file (Claude Code saves it under ~/.claude/plans), one phase per session."
     )
-    if needs_discussion:
+    variant = ""
+    if needs_discussion or plan_gaps:
         title = "Write fuller plans, then build in a fresh session"
-        why += (
-            f" You said {fb['no']} of {fb['answers']} builds relied on the earlier discussion, so a fresh start "
-            "would have lost what they needed. The saving needs a plan that carries it."
-        )
+        variant = "fuller_plans"
+        if needs_discussion:
+            why += (
+                f" You said {fb['no']} of {fb['answers']} builds relied on the earlier discussion, so a fresh start "
+                "would have lost what they needed. The saving needs a plan that carries it."
+            )
+        if plan_gaps:
+            why += (
+                f" You said {fb['gap']} of {fb['plan_answers']} fixes after a plan were things it left out, so a "
+                "thin plan sends you back to fix the build."
+            )
         action = (
             "Before you approve a plan, ask Claude to add the decisions, file paths and constraints the build "
             "needs. Then run /clear and ask Claude to carry out the plan file (saved under ~/.claude/plans)."
         )
     elif plan_enough:
         why += f" You said {fb['yes']} of {fb['answers']} builds could have started from the plan."
+        action = (
+            "Approve the plan, then run /clear and ask Claude to carry out the plan file. Claude Code saves it "
+            "under ~/.claude/plans; build one phase per session."
+        )
     if too_costly:
         why += f" You also said {fb['costly_pct']:.0f}% of the planned builds you rated cost too many tokens."
     why += (
@@ -518,6 +540,11 @@ def _rule_plan_handoff(report: ReportModel, th: HandoffThresholds) -> list[Recom
             _evidence("Builds you said the plan was enough for", fb["yes"], "habits", "habits_by_shape", "plan_build"),
             _evidence("Builds you said needed the discussion", fb["no"], "habits", "habits_by_shape", "plan_build"),
         ]
+    if plan_gaps:
+        evidence += [
+            _evidence("Fixes after a plan that it left out", fb["gap"], "habits", "habits_by_shape", "plan_build"),
+            _evidence("Fixes after a plan you answered for", fb["plan_answers"], "habits", "habits_by_shape", "plan_build"),
+        ]
     if too_costly:
         evidence.append(
             _evidence("Planned builds you said were too costly", fb["costly_pct"], "habits", "habits_by_shape", "plan_build")
@@ -534,6 +561,7 @@ def _rule_plan_handoff(report: ReportModel, th: HandoffThresholds) -> list[Recom
             lever=None,
             saving_usd=float(saving),
             evidence=evidence,
+            variant=variant,
         )
     ]
 

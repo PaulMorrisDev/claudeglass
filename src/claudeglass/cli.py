@@ -53,6 +53,7 @@ from .config import (
     load_config,
     load_session_overrides,
     prune_capture_log,
+    prune_habit_log,
     set_capture,
 )
 from .corpus import Corpus, load_corpus
@@ -706,7 +707,8 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         "brief on|off (the /cg-brief skill, which checks a request against its checklist); "
         "tagger claude|haiku (who writes the tags: Claude, at the end of its replies, or Claude Haiku, asked "
         "after each turn); "
-        "prune (delete signal files, capture-log.jsonl records and usage-log.csv rows older than "
+        "prune (delete signal files, capture-log.jsonl and habit-log.jsonl records and usage-log.csv rows "
+        "older than "
         f"retention_days, or {SIGNAL_RETENTION_DEFAULT_DAYS} days by default); "
         "refresh (work out the coaching notes' split points from your last 30 days now; the dashboard's "
         "service does it daily)",
@@ -1423,6 +1425,15 @@ def _print_corpus_stats(corpus: Corpus) -> None:
     )
 
 
+def _dashboard_tip_feedback(config_dir: Path) -> dict:
+    """What you said about tip cards on the dashboard, by ``(kind, item)``,
+    read from ``<config-dir>/service.db`` without writing to it."""
+    from .service.serve import STORE_FILENAME
+    from .service.store import read_tip_feedback
+
+    return read_tip_feedback(config_dir / STORE_FILENAME)
+
+
 def _merge_dashboard_marks(config_dir: Path, overrides: dict) -> tuple[dict, dict]:
     """``(overrides, ratings)``: ``overrides`` with the dashboard's
     session tags merged over it, and the dashboard's session ratings,
@@ -1730,6 +1741,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             baseline_note=baseline_note,
             config_dir=config_dir,
             ratings=ratings,
+            tip_feedback=_dashboard_tip_feedback(config_dir),
             all_projects=bool(getattr(args, "all_projects", False)),
         )
     except ScorecardError as exc:
@@ -3191,7 +3203,7 @@ def _cmd_update_finish(
     except ConfigError as exc:
         capture = None
         stdout.write(f"config.toml has a problem, so capture's hook entries weren't checked: {exc}\n")
-    if capture is not None and (capture.is_on or capture.coaching_notes_on):
+    if capture is not None and capture.hooked:
         wanted = hook_health.capture_specs(capture.hook_metrics())
         capture_health = hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir)
         if capture_health.blocked_by is not None:
@@ -3393,8 +3405,15 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
         lines.append(f"about {rough['subagent_note']} tokens of note when a subagent starts")
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
+    if rough["message_note"]:
+        lines.append(
+            f"about {rough['message_note']} tokens of note on a message of yours now and then, "
+            "when a plan check or the /cg-feedback reminder is due"
+        )
     if rough["reminder"]:
-        lines.append(f"about {rough['reminder']} tokens once a session, for the /cg-feedback reminder")
+        lines.append(f"about {rough['reminder']} tokens for the /cg-feedback reminder, at most once every 3 days")
+    if rough["plan_check"]:
+        lines.append(f"about {rough['plan_check']} tokens for the plan check's question, once per approved plan")
     if rough["report_tag"]:
         lines.append(f"about {rough['report_tag']} tokens of tag at the end of each subagent report")
     if rough["tool_note"]:
@@ -3600,14 +3619,16 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
         all_projects=True,
         config_dir=config_dir,
     )
-    data = coaching.from_report(report, config_dir, config.thresholds, now=now)
+    data = coaching.from_report(
+        report, config_dir, config.thresholds, now=now, typical=coaching.typical_piece_tokens(corpus)
+    )
     for line in coaching.describe(data):
         stdout.write(f"{line}\n")
     if args.dry_run:
         stdout.write(f"Dry run: {coaching.path(config_dir)} left unchanged.\n")
     else:
         stdout.write(f"Written to {coaching.write(config_dir, data)}.\n")
-    if not config.capture.coaching_notes_on:
+    if not (config.capture.coaching_notes_on or config.capture.feedback_prompts_on):
         stdout.write("Coaching notes are off, so nothing reads it yet: 'claudeglass capture enable coaching_notes'.\n")
     return 0
 
@@ -3822,7 +3843,9 @@ def _capture_prune(
     """``capture prune``: delete capture signal files
     (:func:`~claudeglass.signals.prune`), old
     ``capture-log.jsonl`` records (:func:`~claudeglass.config.
-    prune_capture_log`) and old ``usage-log.csv`` rows (SIG-5:
+    prune_capture_log`), old ``habit-log.jsonl`` records
+    (:func:`~claudeglass.config.prune_habit_log`) and old
+    ``usage-log.csv`` rows (SIG-5:
     :func:`~claudeglass.tools.log_usage.prune_usage_log`) older
     than ``retention_days`` (or :data:`SIGNAL_RETENTION_DEFAULT_DAYS`
     when unset) -- the same telemetry housekeeping ``serve``'s watcher
@@ -3833,17 +3856,17 @@ def _capture_prune(
     if dry_run:
         stdout.write(
             f"Dry run: nothing pruned. Run 'claudeglass capture prune' to delete signal files, "
-            f"capture-log.jsonl records and usage-log.csv rows older than {days} days.\n"
+            f"capture-log.jsonl and habit-log.jsonl records and usage-log.csv rows older than {days} days.\n"
         )
         return 0
     signals_removed = signals_mod.prune(config_dir, days, now=now)
     tags_removed = haiku_tags.prune(config_dir, days, now=now)
-    log_removed = prune_capture_log(config_dir, days, now=now)
+    log_removed = prune_capture_log(config_dir, days, now=now) + prune_habit_log(config_dir, days, now=now)
     usage_log_path = log_usage_mod.default_usage_log_path(config_dir)
     usage_rows_removed = log_usage_mod.prune_usage_log(usage_log_path, days, now=now)
     tags = f", {tags_removed} Claude Haiku tag file(s)" if tags_removed else ""
     stdout.write(
-        f"Pruned {signals_removed} signal file(s){tags}, {log_removed} capture-log record(s) and "
+        f"Pruned {signals_removed} signal file(s){tags}, {log_removed} capture-log or habit-log record(s) and "
         f"{usage_rows_removed} usage-log row(s) older than {days} days.\n"
     )
     return 0
@@ -4040,8 +4063,8 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     showing it and asking; enabling or disabling ``feedback_skill`` does
     the same. ``brief on|off`` does that for the ``/cg-brief`` skill (the
     ``brief_templates`` toggle). ``prune`` deletes signal files,
-    ``capture-log.jsonl`` records and ``usage-log.csv`` rows older than
-    ``retention_days`` (or
+    ``capture-log.jsonl`` and ``habit-log.jsonl`` records and ``usage-log.csv``
+    rows older than ``retention_days`` (or
     :data:`~claudeglass.config.SIGNAL_RETENTION_DEFAULT_DAYS` when
     unset) -- the same housekeeping ``serve``'s watcher already does on
     every tick (SEC-P8/G7), offered here for someone not running the
@@ -4147,14 +4170,23 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             stdout=stdout,
             skill=skill,
         )
+        if action == "feedback" and on and not args.dry_run and preview.hooked:
+            # The facts line a /cg-feedback run starts with comes from the capture hook's message entry,
+            # which this switch leaves to `connect` (it changes settings.json, after a yes of its own).
+            wanted = hook_health.capture_specs(preview.hook_metrics())
+            if hook_health.check_capture(wanted, claude_root=claude_root, config_dir=config_dir).missing:
+                stdout.write(
+                    "The facts line a survey run starts with comes from the capture hook, so it needs an entry in "
+                    "settings.json: 'claudeglass capture connect' adds it.\n"
+                )
         return 0
     if preview != current:
         if capture_view.describe(current) != capture_view.describe(preview):
             stdout.write(f"Metrics capture: {capture_view.describe(current)} -> {capture_view.describe(preview)}\n")
         if any(i not in current.feedback for i in preview.feedback) and preview.level == "deep":
             stdout.write(
-                "Deep also turns on the /cg-feedback survey, its reminder note, and Claude's one-line reminder "
-                "to run it. 'claudeglass capture feedback off' turns them off.\n"
+                "Deep also turns on the /cg-feedback survey with its facts line, the plan check, and Claude's "
+                "one-line reminder to run the survey. 'claudeglass capture feedback off' turns them off.\n"
             )
         if action == "disable":
             also = [m for m in current.active_metrics() if m not in preview.active_metrics() and m not in args.values]
@@ -4243,7 +4275,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
             "'claudeglass capture brief off' removes it.\n"
         )
     wanted = () if action == "remove" else hook_health.capture_specs(preview.hook_metrics())
-    if action == "connect" and not preview.is_on and not preview.coaching_notes_on:
+    if action == "connect" and not preview.hooked:
         stdout.write("Capture is off, so no hook entries are needed. 'claudeglass capture on' turns it on.\n")
         return 0
     done = _capture_settings_step(

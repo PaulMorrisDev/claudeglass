@@ -514,7 +514,9 @@ def test_levels_up_and_down_sync_the_entries(tmp_path):
     assert hook_health.check_capture(DEEP).ok
     rc, out = _capture(config_dir, "level", "essentials", "--yes")
     assert "This makes Claude use more" not in out  # lowering asks nothing about cost
-    assert [e for e, _, _ in _entries(_settings(config_dir))] == [spec.event for spec in ESSENTIALS]
+    # The feedback items Deep turned on stay, and so does the entry they need: the hook answers a message of yours.
+    events = [e for e, _, _ in _entries(_settings(config_dir))]
+    assert sorted(events) == sorted([*(spec.event for spec in ESSENTIALS), "UserPromptSubmit"])
 
 
 def test_a_settings_edit_made_while_the_question_waits_is_never_lost(tmp_path):
@@ -1216,10 +1218,23 @@ def test_feedback_on_shows_the_skill_and_writes_it_after_a_yes(tmp_path):
     assert _skill(config_dir).read_text(encoding="utf-8") == cat.feedback_skill_text()
     capture = load_config(config_dir=config_dir).capture
     assert capture.feedback == ["feedback_skill", "feedback_note"] and capture.level == "off"
-    # settings.json is never touched: the skill needs no hook.
+    # settings.json is never touched by this: the skill works without a hook, and the facts line its run
+    # starts with comes from an entry `connect` adds.
     assert _settings(config_dir) == {}
+    assert "'claudeglass capture connect' adds it." in out
     rc, out = _capture(config_dir, "feedback", "on")
     assert "Feedback is already on." in out and "The /cg-feedback skill is in place" in out
+
+
+def test_feedback_on_asks_for_the_facts_lines_hook_entry_only_while_it_is_missing(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "feedback", "on", "--yes")
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0 and [e for e, _, _ in _entries(_settings(config_dir))] == ["UserPromptSubmit"]
+    # Connected: nothing more to say, and nothing for the dry run or the switch off.
+    for args in (("on", "--yes"), ("on", "--dry-run"), ("off", "--yes")):
+        rc, out = _capture(config_dir, "feedback", *args)
+        assert rc == 0 and "needs an entry in settings.json" not in out, args
 
 
 def test_feedback_on_dry_run_and_a_no_write_no_skill(tmp_path):
@@ -1238,7 +1253,7 @@ def test_an_old_skill_is_shown_as_a_diff_and_someone_elses_is_left_alone(tmp_pat
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "feedback", "on", "--yes")
     skill = _skill(config_dir)
-    skill.write_text(cat.feedback_skill_text().replace("four quick", "three quick"), encoding="utf-8")
+    skill.write_text(cat.feedback_skill_text().replace("a few quick", "four quick"), encoding="utf-8")
     assert "out of date" in _capture(config_dir, "status")[1]
     rc, out = _capture(config_dir, "feedback", "on", "--yes")
     assert "This updates the /cg-feedback skill" in out and "-description:" in out
@@ -1543,6 +1558,31 @@ def test_prune_removes_old_signal_files_and_capture_log_records(tmp_path):
     log = load_capture_log(config_dir)
     assert len(log) == 1
     assert log[0]["ts"] == (NOW - timedelta(days=5)).isoformat(timespec="seconds")
+
+
+def test_prune_removes_old_habit_log_records_too(tmp_path):
+    from claudeglass.config import append_habit_log, load_habit_log
+
+    config_dir = _claude(tmp_path, {})
+    append_habit_log(config_dir, kind="habit", item="split_large", now=NOW - timedelta(days=200))
+    append_habit_log(config_dir, kind="tip", item="drip_feed", now=NOW - timedelta(days=5))
+
+    rc, out = _capture(config_dir, "prune")
+
+    assert rc == 0
+    assert "1 capture-log or habit-log record(s)" in out
+    assert [record["item"] for record in load_habit_log(config_dir)] == ["drip_feed"]
+
+
+def test_prune_dry_run_leaves_the_habit_log_alone(tmp_path):
+    from claudeglass.config import append_habit_log, load_habit_log
+
+    config_dir = _claude(tmp_path, {})
+    append_habit_log(config_dir, kind="habit", item="split_large", now=NOW - timedelta(days=200))
+
+    rc, _out = _capture(config_dir, "prune", "--dry-run")
+
+    assert rc == 0 and len(load_habit_log(config_dir)) == 1
 
 
 def test_prune_uses_retention_days_from_config_when_set(tmp_path):

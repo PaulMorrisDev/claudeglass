@@ -814,7 +814,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "and was answered with a file change. A big task without a plan asks for three or more separate changes in one message sent "
             "outside plan mode. A vague correction says something went wrong, with no detail. A repeat counts only when "
             "the request before it was answered with a change. Asking how it's going counts each time, priced from "
-            "the reply to that message. Costs are at list price.",
+            "the reply to that message. Costs are at list price. A follow-up you said was Claude missing something "
+            "you had said, or a change of mind, is left out of these habits.",
             act="",
         ),
         columns={
@@ -822,7 +823,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "times": ("Times", "How many times it happened."),
             "per_100": ("Per 100 messages", "How often it happened for every 100 messages you sent."),
             "cost": ("What it cost", "A rough figure for what it cost, as \"Worked out from\" says. \"Not priced\" "
-                     "for a big task or a vague correction, whose cost can't be told apart from the work."),
+                     "for a vague correction, or a big task where you didn't say a plan would have helped."),
             "basis": ("Worked out from", "What the cost counts."),
             "trend": ("Trend", "Whether it's happening less or more over recent weeks."),
             "weeks": ("By week", "How often it happened per message, by week, the worst week as 100."),
@@ -847,10 +848,12 @@ TABLE_COPY: dict[str, TableCopy] = {
     "prompting_tips": TableCopy(
         title="Tips Claude showed",
         help=Help(
-            shows="For each coaching hint that asks Claude to pass on a tip, how often it did, and how often "
-            "it called the tip a misfire.",
+            shows="For each coaching hint that asks Claude to pass on a tip, how often it did and how often "
+            "it called the tip a misfire. Your own answers about each tip sit beside them. They come from /cg-feedback, "
+            "a session rating, or the rating buttons on a card.",
             read="Most hints ask for the tip every time, so a tip left out is a miss. The paste hint asks only "
-            "when your message calls for it, so fewer of those show and that's no miss.",
+            "when your message calls for it, so fewer of those show and that's no miss. A tip you called wrong, "
+            "or that Claude called a misfire, twice is raised or muted. One you already knew shows once a session.",
             act="",
         ),
         columns={
@@ -864,6 +867,13 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "whether your message called for it.",
             ),
             "misfires": ("Called a misfire", "How many times Claude said in its reply that the tip didn't apply."),
+            "useful": ("You said useful", "Answers saying the tip was right and you acted on it. Trying it on a card counts here."),
+            "known": ("You knew it", "Answers saying the tip was right but you already knew it."),
+            "wrong": ("You said wrong", "Answers saying the tip did not fit the work."),
+            "trust_pct": (
+                "Found useful",
+                "Of your answers and Claude's misfire calls, the share that said the tip was useful.",
+            ),
         },
         value_labels={
             "plan_fresh": "Fresh session after a plan",
@@ -1163,7 +1173,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "cost": ("Cost", "What that work cost."),
             "avg_cost": ("Per piece", "The average cost of one piece."),
             "task": ("Most often", "The kind of task Claude reported most for them."),
-            "slow": ("Slowed most by", "Your most common answer to what slowed it down."),
+            "slow": ("Slowed most by", "Your most common answer to what slowed it down or what your follow-ups were."),
             "helped": ("Would have helped most", "Your most common answer to what would have helped."),
             "source": ("Source", "Where the feedback came from."),
         },
@@ -1175,9 +1185,9 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Your main sessions by whether you approved a plan and then built it in the same session. "
             "Your feedback on each kind of session sits beside it.",
-            read="Planning kept is the context from before the plan that the build carried. The last three "
+            read="Planning kept is the context from before the plan that the build carried. The next three "
             "columns count your /cg-feedback answers on whether the build could have started from the plan "
-            "alone.",
+            "alone. The last three count the fixes after a plan, from the plan check and the plan question.",
             act="If most of your sessions plan and build and the plan was enough, start the build in a fresh "
             "session. If the build needed the discussion, write fuller plans first.",
         ),
@@ -1195,6 +1205,9 @@ TABLE_COPY: dict[str, TableCopy] = {
             "handoff_yes": ("Plan was enough", "Answers saying the build could have started fresh from the plan."),
             "handoff_partly": ("Plan was partly enough", "Answers saying it needed a few things from earlier."),
             "handoff_no": ("Needed the discussion", "Answers saying it relied on the earlier discussion."),
+            "plan_covered": ("Fix was in the plan", "Fixes after the plan where the plan already said it."),
+            "plan_gap": ("Plan missed it", "Fixes after the plan where the plan left it out."),
+            "plan_new": ("Fix was new", "Fixes after the plan for something you only thought of later."),
         },
         value_labels={
             "plan_build": "Planned and built in one session",

@@ -58,9 +58,10 @@ from . import events as events_mod
 from . import known_savers
 from . import model_gate
 from . import quality
+from .capture_tags import with_older_why
 from .context_files import _parse_ts
 from .discovery import local_day, to_local
-from .handoff import plan_carried, plan_shape, starting_context
+from .handoff import MIN_FEEDBACK_ANSWERS, plan_carried, plan_shape, starting_context
 from .model import PROMPT_FLAGS, Column, EventKind, Feedback, Recommendation, Section, Table, Turn
 from .pricing import Pricing, effective_rates, price_turn
 from .topology import agent_key
@@ -162,6 +163,7 @@ ITEMS: dict[str, tuple[str, str]] = {
     "state_limits": ("waiting", "Tell Claude up front what not to do"),
     "effort_fit": ("models", "Use lower effort for easy work"),
     "outcome_misses": ("outcome", "Look at what came before the misses"),
+    "check_work": ("verification", "Have Claude check its work against what you asked"),
 }
 
 #: UX-3: habit item -> the ``recommend.py`` (or a module folded into it,
@@ -211,6 +213,7 @@ EXAMPLES = {
     "effort_fit": "Lower the effort (/effort, or your effort level setting) for quick edits, and raise it for hard "
     "problems.",
     "outcome_misses": "Before you start, tell me your plan in three lines and what done will look like.",
+    "check_work": catalogue.MISSED_IN_LINES[""],
 }
 
 #: ``explore_research``'s own title and example, when ``known_savers``
@@ -256,6 +259,7 @@ BASES = {
     "state_limits": "the replies after a request was turned down",
     "effort_fit": "half the thinking on easy asks at high effort or above",
     "outcome_misses": "not estimated",
+    "check_work": "half what the follow-ups cost that fixed something Claude missed",
 }
 
 #: UX-8: where each habit is put into practice -- a Claude Code setting
@@ -297,6 +301,10 @@ WHERE = {
         "for a single task without changing the setting."
     ),
     "outcome_misses": "Nowhere in Claude Code's config. This is reviewing your own /cg-feedback answers and messages.",
+    "check_work": (
+        "Nowhere in Claude Code's config. This is a line in your message, or in CLAUDE.md if it should apply "
+        "every time."
+    ),
 }
 
 #: UX-8: the cost of trying each habit -- what you give up, or risk, by
@@ -370,6 +378,10 @@ TRADE_OFFS = {
     ),
     "effort_fit": "Lower effort can miss things on a task that turns out to be harder than it looked.",
     "outcome_misses": "None: reviewing past work costs time but changes nothing on its own.",
+    "check_work": (
+        "Checking adds a step at the end of every piece of work, and a long checklist can slow small changes "
+        "down. Claude can also tick a step off without really checking it."
+    ),
 }
 
 #: UX-8: how to undo each habit, once tried.
@@ -400,6 +412,7 @@ UNDO = {
         "touching the setting."
     ),
     "outcome_misses": "Nothing to undo.",
+    "check_work": "Nothing to undo: stop adding the line to your messages, or remove it from CLAUDE.md.",
 }
 
 #: A ``missing`` word -> what to add to a brief, for the templates (the
@@ -411,8 +424,17 @@ _REPORT_LINE = catalogue.BRIEF_LINES["report"]
 DEFAULT_CHECKLISTS = catalogue.BRIEF_CHECKLISTS
 _DEFAULT_TEMPLATE_TASKS = ("bugfix", "feature", "refactor", "research")
 
-#: A feedback answer's word -> the label you ticked, per question.
-_ANSWER_LABELS = {q.key: {o[0]: o[1] for o in q.options} for q in catalogue.FEEDBACK_QUESTIONS}
+#: A feedback answer's word -> the label you ticked, per question. The
+#: older questions come first so the current one wins where a key is
+#: shared; ``slow`` is only in the older run's.
+_ANSWER_LABELS = {
+    q.key: {o[0]: o[1] for o in q.options}
+    for q in (*catalogue.LEGACY_FEEDBACK_QUESTIONS, *catalogue.FEEDBACK_QUESTIONS)
+}
+#: What slowed the work, in the words of both the older question (``slow``)
+#: and the current one (``why``, what your follow-ups were mostly). Their
+#: words differ, except ``none``, which a piece never keeps.
+_SLOWED_LABELS = {**_ANSWER_LABELS["slow"], **_ANSWER_LABELS["why"]}
 
 
 # -- facts ---------------------------------------------------------------------
@@ -573,6 +595,24 @@ class CycleFact:
     #: outcome, not yours.
     outcome: str | None = None
     outcome_source: str | None = None
+    #: What your feedback said about the piece this message belongs to,
+    #: for the habits that read it (``None``/empty without feedback): the
+    #: /cg-feedback worth and would-have-helped answers.
+    worth: str | None = None
+    helped: tuple[str, ...] = ()
+    #: Your answer to the plan check on this message, a word of
+    #: ``capture_catalogue.PLAN_CHECK_WORDS`` (``""`` for none).
+    plan_check: str = ""
+    #: The first message of a piece whose follow-ups you said were mostly
+    #: things it left out: what its ``missing`` words count for twice.
+    left_out: bool = False
+    #: Every token the message's work used, subagents included.
+    tokens: int = 0
+    #: Your next message would have counted as a redo, fix or correction,
+    #: but your feedback says it wasn't: a change of mind, or something you
+    #: only thought of after the plan. ``redone`` stays off for it, so
+    #: rework and waste figures leave it out.
+    excused: bool = False
 
 
 @dataclass(slots=True)
@@ -634,6 +674,34 @@ class Piece:
     worth: str | None = None
     #: The /cg-feedback handoff answer, asked after an approved plan.
     handoff: str | None = None
+    #: What your follow-ups were mostly (the current question; an older
+    #: run's ``slow`` answer is in ``slow``).
+    why: tuple[str, ...] = ()
+    #: Where the thing Claude missed was (``why`` has ``missed``).
+    missed_in: str | None = None
+    #: After an approved plan: whether it covered what you then fixed.
+    plan: str | None = None
+    #: Whether a tip ClaudeGlass showed was right, and which tip.
+    tip: str | None = None
+    tip_hint: str | None = None
+    #: The follow-up messages in the piece (every message after the first
+    #: that isn't a go-ahead or a status check, as the hook counts them),
+    #: what their replies cost, and the tokens they used.
+    followups: int = 0
+    followup_cost: float = 0.0
+    followup_tokens: int = 0
+    #: The plan check words answered in the piece (``PlanCheck.word``).
+    plan_checks: tuple[str, ...] = ()
+    #: You answered what slowed the work or what your follow-ups were, even
+    #: if the answer was nothing.
+    why_given: bool = False
+
+    def reasons(self) -> set[str]:
+        """What your follow-ups were mostly, in ``why``'s words: this
+        piece's own answer, or an older run's ``slow`` answer read as one
+        (``capture_catalogue.SLOW_TO_WHY``)."""
+        older = {catalogue.SLOW_TO_WHY[w] for w in self.slow if w in catalogue.SLOW_TO_WHY}
+        return {*self.why, *older} - {"none"}
 
 
 @dataclass(slots=True)
@@ -671,6 +739,11 @@ class Habits:
     #: Skills Claude has loaded, so a slash command can be told from one.
     skill_names: set = field(default_factory=set)
     commands_run: Counter = field(default_factory=Counter)
+    #: Plan check answers, by ``(plan_shape of the session, word)``: the
+    #: other half of the plan answers the ``habits_by_shape`` columns count
+    #: (a piece's own plan answer is in :attr:`Piece.plan`; /cg-feedback asks
+    #: it only when the plan check wasn't asked, so the two never overlap).
+    plan_checks: Counter = field(default_factory=Counter)
     #: Thinking share of output (percent) before ``effort_fit`` fires --
     #: same default as ``recommend.RecommendThresholds
     #: .effort_mismatch_thinking_share_pct``; ``build_section`` resolves
@@ -737,15 +810,43 @@ def _moment(ts: str | None) -> datetime | None:
     return moment
 
 
+#: Which answer stands for a session with several plan builds, worst first:
+#: a piece counts once, so the answer that says something went wrong wins.
+_WORST_PLAN = ("gap", "new", "covered")
+_WORST_HANDOFF = ("no", "partly", "yes")
+
+
+def _worst(words, order: tuple[str, ...]) -> str | None:
+    held = {w for w in words if w in order}
+    return next((w for w in order if w in held), None)
+
+
 def _rating_feedback(rating) -> Feedback | None:
+    """Your dashboard rating of a session (``Store.feedback``) as the same
+    :class:`Feedback` a /cg-feedback run gives. A session with several plan
+    builds answers the plan and handoff questions for each
+    (``rating["builds"]``); one answer stands for the piece."""
     if not isinstance(rating, dict) or not rating.get("outcome"):
         return None
-    return Feedback(
-        outcome=rating.get("outcome"),
-        slow=tuple(rating.get("slow") or ()),
-        worth=rating.get("worth"),
-        helped=tuple(rating.get("helped") or ()),
-        source="rating",
+    builds = [b for b in rating.get("builds") or () if isinstance(b, dict)]
+    plan, handoff = rating.get("plan"), rating.get("handoff")
+    if len(builds) > 1:
+        plan = _worst((b.get("plan") for b in builds), _WORST_PLAN) or plan
+        handoff = _worst((b.get("handoff") for b in builds), _WORST_HANDOFF) or handoff
+    return with_older_why(
+        Feedback(
+            outcome=rating.get("outcome"),
+            slow=tuple(rating.get("slow") or ()),
+            worth=rating.get("worth"),
+            helped=tuple(rating.get("helped") or ()),
+            handoff=handoff,
+            why=tuple(rating.get("why") or ()),
+            missed_in=rating.get("missed_in"),
+            plan=plan,
+            tip=rating.get("tip"),
+            tip_hint=rating.get("tip_hint"),
+            source="rating",
+        )
     )
 
 
@@ -770,19 +871,28 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     baseline = starting_context(turns)
 
     rated: dict[int, Feedback] = {}
-    for span in capture_mod.feedback_spans(cycles):
+    #: cycle -> the feedback span that rates it, so a follow-up is only read
+    #: against the answers about its own piece.
+    span_of: dict[int, int] = {}
+    #: The first message of each piece whose follow-ups were things left out.
+    left_out: set[int] = set()
+    for n, span in enumerate(capture_mod.feedback_spans(cycles)):
         if span.feedback.source != "skipped" and span.feedback.outcome and span.cycles:
             for cycle in span.cycles:
                 rated[id(cycle)] = span.feedback
+                span_of[id(cycle)] = n
+            if "left_out" in span.feedback.why:
+                left_out.add(id(span.cycles[0]))
             out.pieces.append(_piece(span.feedback, span.cycles, rates, "your feedback"))
     session_rating = _rating_feedback(rating)
     work = [c for c in cycles if not capture_mod.is_feedback_run(c)]
     if session_rating is not None and work:
         out.pieces.append(_piece(session_rating, work, rates, "dashboard rating"))
+    shape = plan_shape(turns)
     if work:
         out.shapes.append(
             SessionShape(
-                shape=plan_shape(turns),
+                shape=shape,
                 cost=sum(capture_mod._cycle_cost(c, rates.pricing) for c in cycles),
                 carried=plan_carried(turns),
             )
@@ -807,12 +917,20 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
             )
         )
     for fact, cycle, following in zip(facts, work, work[1:] + [None]):
+        fact.left_out = id(cycle) in left_out
+        fact.tokens = _cycle_tokens(cycle)
+        word = fact.plan_check
+        if word in _PLAN_ANSWERS:
+            out.plan_checks[(shape, word)] += 1
         if following is None:
             continue
         tag = following.settled
         if (tag is not None and tag.shift in ("redo", "fix")) or following.turns[0].human_correction:
-            fact.redone = True
-            fact.redo_cost = capture_mod._cycle_cost(following, rates.pricing)
+            if _not_rework(cycle, following, rated, span_of):
+                fact.excused = True
+            else:
+                fact.redone = True
+                fact.redo_cost = capture_mod._cycle_cost(following, rates.pricing)
     out.cycles.extend(facts)
 
     if len(work) == 1 and not work[0].subs and len(work[0].turns) <= 3:
@@ -839,8 +957,50 @@ def _denials(top, turns: list[Turn]) -> dict[int, list[str]]:
     return out
 
 
+#: The plan answers that say something about the plan (``none`` says the
+#: message wasn't a fix).
+_PLAN_ANSWERS = ("covered", "gap", "new")
+
+
+def _plan_word(cycle) -> str:
+    """The plan check answer on ``cycle``'s replies, or ``""``."""
+    return next((t.plan_check.word for t in cycle.turns if t.plan_check is not None and t.plan_check.word), "")
+
+
+def _not_rework(cycle, following, rated: dict, span_of: dict) -> bool:
+    """Whether what you said about ``following`` rules it out as a redo of
+    ``cycle``'s work, though it reads like one: the plan check says it was
+    new, or your feedback on their piece says the plan check missed
+    nothing (``plan=new``) or the follow-ups were a change of mind alone.
+    A mix of reasons rules nothing out: which follow-ups were which isn't
+    known."""
+    if _plan_word(following) == "new":
+        return True
+    n = span_of.get(id(following))
+    fb = rated.get(id(following))
+    if fb is None or n is None or span_of.get(id(cycle)) != n:
+        return False
+    if fb.plan == "new":
+        return True
+    return {w for w in fb.why if w != "none"} == {"changed"}
+
+
+def _cycle_tokens(cycle) -> int:
+    """Every token a message's work used, subagents included: input, cache
+    writes, cache reads and output."""
+    turns = [*cycle.turns, *(t for sub in cycle.subs for t in capture_mod._priced(sub))]
+    return sum(t.input_tokens + t.cache_creation_tokens + t.cache_read_tokens + t.output_tokens for t in turns)
+
+
+def _followups(cycles) -> list:
+    """The follow-up messages of a piece: every one after the first that
+    isn't a go-ahead or a status check, as the hook counts them."""
+    return [c for c in cycles[1:] if not (c.turns[0].human_go or c.turns[0].human_status)]
+
+
 def _piece(fb: Feedback, cycles, rates: _Rates, source: str) -> Piece:
     tags = [c.settled for c in cycles if c.settled is not None]
+    follow = _followups(cycles)
     return Piece(
         outcome=fb.outcome,
         cost=sum(capture_mod._cycle_cost(c, rates.pricing) for c in cycles),
@@ -852,6 +1012,17 @@ def _piece(fb: Feedback, cycles, rates: _Rates, source: str) -> Piece:
         shape=plan_shape([t for c in cycles for t in c.turns]),
         worth=fb.worth,
         handoff=fb.handoff,
+        # An older run's ``slow`` also gave ``why``: count it once.
+        why=() if fb.why_older else tuple(w for w in fb.why if w != "none"),
+        missed_in=fb.missed_in,
+        plan=fb.plan,
+        tip=fb.tip,
+        tip_hint=fb.tip_hint,
+        followups=len(follow),
+        followup_cost=sum(capture_mod._cycle_cost(c, rates.pricing) for c in follow),
+        followup_tokens=sum(_cycle_tokens(c) for c in follow),
+        plan_checks=tuple(w for w in (_plan_word(c) for c in cycles) if w),
+        why_given=bool(fb.why or fb.slow),
     )
 
 
@@ -894,6 +1065,9 @@ def _cycle_fact(
     if fb is not None:
         fact.outcome = fb.outcome
         fact.outcome_source = fb.source
+        fact.worth = fb.worth
+        fact.helped = tuple(w for w in fb.helped if w != "none")
+    fact.plan_check = _plan_word(cycle)
     for n, (turn, i) in enumerate(zip(cycle.turns, idx)):
         fact.reads += sum(turn.tool_calls_by_tool.get(tool, 0) for tool in _READ_TOOLS)
         tokens = sum(turn.tool_result_chars_by_tool.get(tool, 0) for tool in _READ_TOOLS) // capture_mod.CHARS_PER_TOKEN
@@ -1153,6 +1327,47 @@ def _k(tokens: float) -> str:
     return f"{tokens / 1000:.0f}k" if tokens >= 1000 else f"{tokens:.0f}"
 
 
+# -- what your /cg-feedback answers say -------------------------------------------
+
+
+def _answered(h: Habits) -> list[Piece]:
+    """The pieces of work you rated through /cg-feedback (not the dashboard's
+    rating of a whole session, whose follow-ups can't be told apart)."""
+    return [p for p in h.pieces if p.source == "your feedback"]
+
+
+def _reason_followups(h: Habits, reason: str) -> tuple[int, int]:
+    """``(n, m)``: of the ``m`` follow-ups in pieces whose cause you gave,
+    ``n`` were in pieces where ``reason`` was one of them. You answer what
+    your follow-ups were *mostly*, so a piece's follow-ups all count for
+    each reason it names."""
+    given = [p for p in _answered(h) if p.why_given]
+    return sum(p.followups for p in given if reason in p.reasons()), sum(p.followups for p in given)
+
+
+def _information_notes(h: Habits) -> list[str]:
+    """What your answers say about how much your first message held, as
+    evidence clauses for the habits about briefing Claude: follow-ups that
+    were things you hadn't said, and pieces you said more up front would
+    have made cheaper. Each shows only with at least
+    :data:`~claudeglass.handoff.MIN_FEEDBACK_ANSWERS` behind it."""
+    notes = []
+    left, followups = _reason_followups(h, "left_out")
+    if left >= MIN_FEEDBACK_ANSWERS:
+        notes.append(f"{left} of {followups} follow-ups were things your request left out")
+    wanted, rated = _helped_by(h, "context")
+    if wanted >= MIN_FEEDBACK_ANSWERS:
+        notes.append(f"you said more in your first message would have made {wanted} of {rated} pieces cheaper")
+    return notes
+
+
+def _helped_by(h: Habits, word: str) -> tuple[int, int]:
+    """``(n, m)``: of the ``m`` pieces where you said what would have made
+    them cheaper, ``n`` said ``word`` (``context``, ``plan`` or ``smaller``)."""
+    given = [p for p in _answered(h) if p.helped]
+    return sum(word in p.helped for p in given), len(given)
+
+
 #: The longest sentence an item's evidence text runs to before it starts
 #: a new one (``docs/writing-help.md``: 25 words at most).
 _MAX_SENTENCE_WORDS = 25
@@ -1177,12 +1392,22 @@ def _clauses(parts: list[str]) -> str:
 
 
 def _item_split_large(h: Habits) -> Item | None:
+    # (cycle, source): your own answers join the large asks Claude reported
+    # or the shape implies. A message in a piece you rated too costly, or
+    # said smaller pieces would have helped, is one; a large ask in a piece
+    # you said was worth it is left out.
     big = []
+    worth_it = 0
     for c in h.cycles:
         reported = c.tag is not None and c.tag.size in ("l", "xl")
         inferred = (c.tag is None or c.tag.size is None) and (c.compactions or c.turns >= LARGE_TURNS)
-        if reported or inferred:
-            big.append((c, reported))
+        told = c.worth == "no" or "smaller" in c.helped
+        if (reported or inferred) and c.worth == "yes" and not told:
+            worth_it += 1
+        elif told:
+            big.append((c, "your feedback"))
+        elif reported or inferred:
+            big.append((c, "reported" if reported else "inferred"))
     saving = sum(0.5 * c.growth_cost for c, _ in big)
     if not big or saving <= 0:
         return None
@@ -1197,9 +1422,18 @@ def _item_split_large(h: Habits) -> Item | None:
     redone = sum(1 for c, _ in big if c.redone)
     if redone:
         parts.append(f"{redone} had to be redone")
-    reported_saving = sum(0.5 * c.growth_cost for c, r in big if r)
+    costly = sum(1 for c, _ in big if c.worth == "no")
+    smaller = sum(1 for c, _ in big if "smaller" in c.helped)
+    if costly:
+        parts.append(f"{costly} were in work you rated too costly")
+    if smaller:
+        parts.append(f"{smaller} were in work you said smaller pieces would have helped")
+    if worth_it:
+        parts.append(f"left out: {worth_it} large {'ask' if worth_it == 1 else 'asks'} you rated worth it")
+    sources = {source for _, source in big}
+    reported_saving = sum(0.5 * c.growth_cost for c, source in big if source != "inferred")
     return Item(
-        "split_large", saving, len(big), _sources(any(r for _, r in big), any(not r for _, r in big)),
+        "split_large", saving, len(big), tuple(s for s in ("reported", "inferred", "your feedback") if s in sources),
         _clauses(parts), waste=_by_week((c.week, 0.5 * c.growth_cost) for c, _ in big),
         reported_share=reported_saving / saving if saving else 0.0,
     )
@@ -1275,35 +1509,57 @@ def _clear_costs(cycles) -> dict[str, float]:
     return {task: _mean(costs) for task, costs in by_task.items() if len(costs) >= 3}
 
 
+def _missing_counts(cycles) -> Counter:
+    """How often each ``missing`` word was reported, a word on a message
+    whose follow-ups you said were things it left out counting twice: your
+    answer confirms that something was missing, so those lines rank higher."""
+    counts: Counter = Counter()
+    for c in cycles:
+        if c.tag is not None:
+            for w in c.tag.missing:
+                if w != "none":
+                    counts[w] += 2 if c.left_out else 1
+    return counts
+
+
 def _top_missing(cycles, limit: int = 2) -> list[str]:
-    counts = Counter(w for c in cycles if c.tag is not None for w in c.tag.missing if w != "none")
-    return [w for w, _ in counts.most_common(limit)]
+    return [w for w, _ in _missing_counts(cycles).most_common(limit)]
 
 
 def _item_brief_clearly(h: Habits) -> Item | None:
     tagged = [c for c in h.cycles if c.tag is not None and c.tag.brief]
     unclear = [c for c in tagged if c.tag.brief in ("partial", "vague")]
-    if len(unclear) < MIN_GROUP:
+    # Your own answers can stand in for Claude's tags: the follow-ups you
+    # said were things your request left out.
+    notes = _information_notes(h)
+    told = bool(notes)
+    left, _ = _reason_followups(h, "left_out")
+    tagged_enough = len(unclear) >= MIN_GROUP
+    if not tagged_enough and not told:
         return None
     clear = _clear_costs(h.cycles)
     gaps = [
         (c, 0.5 * max(0.0, c.cost - clear[c.tag.task])) for c in unclear if c.tag.task in clear
-    ]
+    ] if tagged_enough else []
     saving = sum(usd for _, usd in gaps) if gaps else None
-    parts = [f"{len(unclear)} of {len(tagged)} asks were partial or vague"]
-    compared = [c for c, _ in gaps]
-    if compared:
-        ratio = _mean(c.cost / clear[c.tag.task] for c in compared if clear[c.tag.task])
-        if ratio:
-            parts[0] += f", costing {ratio:.1f}x a clear ask of the same kind"
-    missing = _top_missing(unclear)
+    parts = []
+    if tagged_enough:
+        parts.append(f"{len(unclear)} of {len(tagged)} asks were partial or vague")
+        compared = [c for c, _ in gaps]
+        if compared:
+            ratio = _mean(c.cost / clear[c.tag.task] for c in compared if clear[c.tag.task])
+            if ratio:
+                parts[0] += f", costing {ratio:.1f}x a clear ask of the same kind"
+    missing = _top_missing([*unclear, *(c for c in h.cycles if c.left_out and c not in unclear)])
     if missing:
         parts.append("most often missing: " + ", ".join(MISSING_LINES[w][0].lower() for w in missing if w in MISSING_LINES))
+    parts.extend(notes)
     example = EXAMPLES["brief_clearly"]
     if missing and missing[0] in MISSING_LINES:
         example = MISSING_LINES[missing[0]][1]
     return Item(
-        "brief_clearly", saving if saving else None, len(unclear), ("reported",), _clauses(parts),
+        "brief_clearly", saving if saving else None, len(unclear) if tagged_enough else max(left, _helped_by(h, "context")[0]),
+        _sources(tagged_enough, False, told), _clauses(parts),
         example=example, waste=_by_week((c.week, usd) for c, usd in gaps),
     )
 
@@ -1399,8 +1655,14 @@ def _item_plan_hard(h: Habits) -> Item | None:
     text = f"{len(unplanned)} hard asks went ahead without a plan and {rate_u:.0%} of them were redone"
     if rate_p is not None:
         text += f", against {rate_p:.0%} of the {len(planned)} planned ones"
+    parts = [text]
+    sources = ("reported", "inferred")
+    wanted, rated = _helped_by(h, "plan")
+    if wanted >= MIN_FEEDBACK_ANSWERS:
+        parts.append(f"you said a plan first would have made {wanted} of {rated} pieces cheaper")
+        sources = (*sources, "your feedback")
     return Item(
-        "plan_hard", sum(usd for _, usd in redos), len(unplanned), ("reported", "inferred"), text + ".",
+        "plan_hard", sum(usd for _, usd in redos), len(unplanned), sources, _clauses(parts),
         waste=_by_week((c.week, usd) for c, usd in redos), reported_share=0.5,
     )
 
@@ -1679,10 +1941,66 @@ def _item_outcome_misses(h: Habits) -> Item | None:
     task = _dominant(p.task for p in misses)
     if task:
         parts.append(f"mostly {catalogue.task_words(task)} work")
-    slow = Counter(w for p in misses for w in p.slow).most_common(1)
+    slow = Counter(w for p in misses for w in (*p.slow, *p.why)).most_common(1)
     if slow:
-        parts.append(f"slowed most by: {_ANSWER_LABELS['slow'].get(slow[0][0], slow[0][0]).lower()}")
+        parts.append(f"slowed most by: {_SLOWED_LABELS.get(slow[0][0], slow[0][0]).lower()}")
     return Item("outcome_misses", saving or None, len(misses), ("your feedback",), _clauses(parts))
+
+
+#: ``check_work``'s title and where it is put into practice, by where the
+#: thing Claude missed was (``missed_in``'s words; ``""`` when you didn't
+#: say). The line to paste is :data:`catalogue.MISSED_IN_LINES`.
+_CHECK_WORK_VARIANTS = {
+    "message": ("Have Claude restate your request as a checklist first", ""),
+    "plan": ("Have Claude tick off each plan step before it says done", ""),
+    "standing": (
+        "Make the rule Claude missed hard to miss",
+        "Your CLAUDE.md or memory files, or a hook in settings.json that runs the check.",
+    ),
+    "earlier": (
+        "Restate details that came up earlier, or clear with a handoff",
+        "Nowhere in Claude Code's config. This is restating the detail, or /clear after saving a handoff.",
+    ),
+}
+_MISSED_PLACES = {
+    "message": "your message",
+    "plan": "the plan",
+    "standing": "CLAUDE.md or memory",
+    "earlier": "earlier in the chat",
+}
+
+
+def _item_check_work(h: Habits) -> Item | None:
+    """Follow-ups that fixed something Claude missed although you had said
+    it: pieces where you answered that (``why`` has ``missed``), and fixes
+    after a plan where the plan check or the plan question says the plan
+    already covered it. Those two are missed in the plan, so they join the
+    pieces whose ``missed_in`` says the plan."""
+    pieces = _answered(h)
+    missed = [p for p in pieces if "missed" in p.reasons()]
+    in_plan = {id(p) for p in missed if p.missed_in == "plan"}
+    covered = [p for p in pieces if p.plan == "covered" and id(p) not in in_plan]
+    checks = [c for c in h.cycles if c.plan_check == "covered"]
+    where = Counter(p.missed_in or "" for p in missed)
+    where["plan"] += len(covered) + len(checks)
+    n = len(missed) + len(covered) + len(checks)
+    if n < MIN_FEEDBACK_ANSWERS:
+        return None
+    cost = sum(p.followup_cost for p in (*missed, *covered)) + sum(c.cost for c in checks)
+    tokens = sum(p.followup_tokens for p in (*missed, *covered)) + sum(c.tokens for c in checks)
+    top = where.most_common(1)[0][0]
+    parts = [f"{n} times you fixed something Claude missed that your request or plan already said"]
+    if top in _MISSED_PLACES:
+        parts.append(f"most were in {_MISSED_PLACES[top]}")
+    if tokens:
+        parts.append(f"fixing them used about {_k(tokens)} tokens")
+    title, where_text = _CHECK_WORK_VARIANTS.get(top, ("", ""))
+    return Item(
+        "check_work", 0.5 * cost or None, n, ("your feedback",), _clauses(parts),
+        example=catalogue.MISSED_IN_LINES.get(top, catalogue.MISSED_IN_LINES[""]),
+        title=title, where=where_text,
+        waste=_by_week((c.week, 0.5 * c.cost) for c in checks),
+    )
 
 
 _BUILDERS = (
@@ -1690,7 +2008,7 @@ _BUILDERS = (
     _item_paste_errors, _item_explore_research, _item_plan_hard, _item_skip_plan_easy, _item_skill_early,
     _item_skill_unneeded, _item_short_reports, _item_better_briefs, _item_flatten_nesting, _item_quiet_output,
     _item_targeted_checks, _item_allow_routine, _item_state_limits, _item_effort_fit,
-    _item_outcome_misses,
+    _item_outcome_misses, _item_check_work,
 )
 
 
@@ -1706,6 +2024,13 @@ def playbook(h: Habits) -> list[Item]:
                     " Your feedback says work Claude called easy missed its goal more often than normal "
                     "work, so this is low confidence."
                 )
+    notes = _information_notes(h)
+    if notes:
+        # The other habits about briefing Claude cite what your answers say
+        # too (``brief_clearly`` already did, where it is built).
+        for item in items:
+            if ITEMS[item.key][0] == "information" and item.key != "brief_clearly":
+                item.evidence += " " + _clauses(notes)
     items.sort(key=lambda i: (i.saving is None, -(i.saving or 0.0), -i.n))
     return items
 
@@ -2212,7 +2537,22 @@ def _by_task_table(h: Habits) -> Table:
             Column(key="met_pct", label="Met the goal", kind="pct"),
         ],
         rows=rows,
+        notes=_excused_notes(h),
     )
+
+
+def _excused_notes(h: Habits) -> list[str]:
+    """A note saying how many messages that looked redone are left out of
+    every rework figure because your answers say the next message was a
+    change of mind or new to the plan."""
+    excused = sum(1 for c in h.cycles if c.excused)
+    if not excused:
+        return []
+    return [
+        f"{excused} {'message that looked' if excused == 1 else 'messages that looked'} redone "
+        f"{'is' if excused == 1 else 'are'} left out of Redone: you called the next message a change of mind "
+        "or new to the plan."
+    ]
 
 
 def _task_row(task: str, cycles: list[CycleFact], total: int) -> list:
@@ -2326,13 +2666,18 @@ def _templates_table(h: Habits) -> Table:
 def template_lines(task: str, cycles=()) -> tuple[list[str], str]:
     """The checklist keys for ``task`` (your most often missing first,
     then its defaults) and why."""
-    counts = Counter(w for c in cycles if c.tag is not None for w in c.tag.missing if w in MISSING_LINES)
-    tagged = sum(1 for c in cycles if c.tag is not None and c.tag.missing)
+    # A message whose follow-ups you said were things it left out counts
+    # twice, in both the words and the messages they are shared over.
+    counts = Counter({w: n for w, n in _missing_counts(cycles).items() if w in MISSING_LINES})
+    tagged = sum(2 if c.left_out else 1 for c in cycles if c.tag is not None and c.tag.missing)
     mine = [w for w, n in counts.most_common() if tagged and n / tagged >= 0.2]
     keys = mine + [k for k in DEFAULT_CHECKLISTS.get(task, ("goal", "done")) if k not in mine]
     if mine:
         top = mine[0]
-        why = f"{MISSING_LINES[top][0]} was missing in {counts[top]} of {len(cycles)} {catalogue.task_words(task)} asks."
+        seen = sum(1 for c in cycles if c.tag is not None and top in c.tag.missing)
+        why = f"{MISSING_LINES[top][0]} was missing in {seen} of {len(cycles)} {catalogue.task_words(task)} asks."
+        if any(c.left_out and c.tag is not None and top in c.tag.missing for c in cycles):
+            why += " You said some follow-ups were things your request left out."
     else:
         why = "A starting point; metrics capture (Standard) fits it to what your asks leave out."
     return keys, why
@@ -2722,7 +3067,7 @@ def _outcomes_table(h: Habits) -> Table:
         pieces = [p for p in h.pieces if p.outcome == word]
         if not pieces:
             continue
-        slow = Counter(w for p in pieces for w in p.slow).most_common(1)
+        slow = Counter(w for p in pieces for w in (*p.slow, *p.why)).most_common(1)
         helped = Counter(w for p in pieces for w in p.helped).most_common(1)
         rows.append([
             word,
@@ -2731,7 +3076,7 @@ def _outcomes_table(h: Habits) -> Table:
             sum(p.cost for p in pieces),
             _mean(p.cost for p in pieces),
             _dominant(p.task for p in pieces) or "",
-            _ANSWER_LABELS["slow"].get(slow[0][0], slow[0][0]) if slow else "",
+            _SLOWED_LABELS.get(slow[0][0], slow[0][0]) if slow else "",
             _ANSWER_LABELS["helped"].get(helped[0][0], helped[0][0]) if helped else "",
             " + ".join(sorted({p.source for p in pieces})),
         ])
@@ -2776,6 +3121,11 @@ def _by_shape_table(h: Habits) -> Table:
         worth = [p for p in pieces if p.worth]
         carried = [s.carried for s in sessions if s.carried is not None]
         handoff = Counter(p.handoff for p in pieces if p.handoff)
+        # Your answer to the plan question, and the plan check's: one of
+        # them is asked for a piece, never both.
+        plan = Counter(p.plan for p in pieces if p.plan)
+        for word in _PLAN_ANSWERS:
+            plan[word] += h.plan_checks[(shape, word)]
         rows.append([
             shape,
             len(sessions),
@@ -2789,6 +3139,9 @@ def _by_shape_table(h: Habits) -> Table:
             handoff["yes"],
             handoff["partly"],
             handoff["no"],
+            plan["covered"],
+            plan["gap"],
+            plan["new"],
         ])
     return Table(
         name="habits_by_shape",
@@ -2806,6 +3159,9 @@ def _by_shape_table(h: Habits) -> Table:
             Column(key="handoff_yes", label="Plan was enough", kind="int"),
             Column(key="handoff_partly", label="Plan was partly enough", kind="int"),
             Column(key="handoff_no", label="Needed the discussion", kind="int"),
+            Column(key="plan_covered", label="Fix was in the plan", kind="int"),
+            Column(key="plan_gap", label="Plan missed it", kind="int"),
+            Column(key="plan_new", label="Fix was new", kind="int"),
         ],
         rows=rows,
     )

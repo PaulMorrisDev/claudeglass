@@ -443,7 +443,14 @@ Query: `limit` (default 50), `offset` (default 0), plus the optional
 sessions a report over that window counts (last reply in the window).
 Without one, every session. Newest first (by `first_ts`).
 
-`data`: `[{"id", "slug", "first_ts", "last_ts", "span_s", "archetype", "mode", "purpose", "entrypoint", "billing_mode", "profile_id", "total_cost", "total_tokens", "source", "first_day", "last_day"}, ...]`.
+`data`: `[{"id", "slug", "first_ts", "last_ts", "span_s", "archetype", "mode", "purpose", "entrypoint", "billing_mode", "profile_id", "total_cost", "total_tokens", "source", "first_day", "last_day", "low_confidence"}, ...]`.
+
+`low_confidence` (additive) is `true` when the session's mode or purpose
+is the catch-all a rule fell back to (`mixed`, `general-dev`) rather than
+a label you set or Claude reported, so the dashboard can show a chip on
+it. A mode or purpose you set on the dashboard counts as yours at once,
+before the next scan writes it to the session. It is a flag only; no text
+comes with it.
 
 `first_day` and `last_day` (additive) are the local calendar days
 (`YYYY-MM-DD`, in `config.toml`'s `tz`, else the machine's zone) of the
@@ -464,13 +471,30 @@ if `<id>` is unknown.
 
 `data`: the session-summary fields above, plus `transcripts` (list of
 `{"id", "kind", "agent_id", "agent_type", "spawn_depth", "parent_agent_id"}`
-— no `path`), `tags` (`{key: value}`) and `feedback`: your rating
-from Spend › Sessions (`{"outcome", "slow", "worth", "helped",
-"set_at"}`, words only; `null` when unrated). While the dashboard
-rating is switched on (`[capture] feedback` holds `dashboard_rating`),
-`data` also carries `feedback_questions`: the `/cg-feedback` questions
-to rate it with, each `{"key", "question", "multi", "options": [{"word",
-"label"}]}`.
+— no `path`), `tags` (`{key: value}`), `low_confidence` (as in
+`GET /api/sessions`) and `feedback`: your rating from Spend › Sessions
+(`{"outcome", "slow", "worth", "helped", "why", "missed_in", "plan",
+"handoff", "tip", "tip_hint", "builds": [{"build", "plan", "handoff"}],
+"set_at"}`, words only; `null` when unrated). `plan` and `handoff` are
+the first plan build's answers. While the dashboard rating is switched on
+(`[capture] feedback` holds `dashboard_rating`), `data` also carries:
+
+- `feedback_facts`: what the session's own transcript says, as counts and
+  words only (`tokens`, `typical`, `followups`, `queued`, `plan`,
+  `plan_followups`, `plan_asked`, `build`, `tips`, `tip`, `admits`: the
+  facts line `/cg-feedback` reads, worked out again here), or `null` when
+  no top-level transcript is stored.
+- `feedback_questions`: the `/cg-feedback` questions to rate it with,
+  from the same catalogue and in the same order, left out when the facts
+  say they don't apply. Each is `{"key", "question", "multi", "options":
+  [{"word", "label", "description"}], "needs", "tip_hint", "builds"}`.
+  `needs` is a word the `why` answer must hold for the question to show
+  (the question about where a missed detail was said waits for
+  `missed`), else `""`. `tip_hint` is the tip the tip question is about.
+  `builds` is empty, except for the plan and handoff questions of a
+  session with two or more approved plans: it then holds `[{"build",
+  "label", "question"}]`, one for each plan build the question applies to,
+  and the answers are kept for each.
 
 If the session has a stored top-level transcript digest, `data` also
 carries `turn_series` and `markers` (S1-integration fix 1.g), sourced
@@ -1476,7 +1500,17 @@ one is built in the background.
 - `banner`: `on`, `headline`, `notes` (end time passed, hook entries
   missing, no notes seen, low coverage, enough collected, the skill
   needs installing, what capture costs a week against what depends on
-  it) and `feedback_note`.
+  it), `feedback_note` and `unrated`: the sessions big enough for the
+  rating reminder that you haven't rated, or `null` when there are none
+  (or while the reminder and the dashboard rating are both off). It is
+  `{"threshold", "threshold_text", "total", "pieces": [{"session_id",
+  "slug", "last_ts", "tokens", "tokens_text"}], "text"}`: the newest
+  five of the last 30 days' sessions, with the count of them all and the
+  sentence that introduces them. The threshold is the larger of
+  `rating_min_tokens` and `rating_typical_factor` times your typical
+  piece of work (the same figures the reminder in Claude Code uses);
+  `tokens` counts the main transcript only. A rating on the dashboard
+  takes a session off the list. The banner shows tokens, not money.
 - `feedback`: `skill` (`installed`, `outdated`, `foreign`, `missing`,
   or `null` while the skill is off), `runs` and `answered` (its runs
   over the last `days` days), `ratings` (sessions rated on the
@@ -1633,23 +1667,70 @@ tag set after the write).
 ### `POST /api/sessions/<id>/feedback`
 
 Your rating of a session: the `/cg-feedback` questions as checkboxes,
-kept in this tool's own store (the `session_feedback` table), so it
-costs no tokens. The session drawer on Spend › Sessions shows the form
-while the dashboard rating is switched on; the route itself works either
-way.
+kept in this tool's own store (the `session_feedback` and
+`session_plan_feedback` tables), so it costs no tokens. The session
+drawer on Spend › Sessions shows the form while the dashboard rating is
+switched on, with the questions `GET /api/session/<id>` lists; the route
+itself works either way.
 
 Body: `{"outcome": word|null, "slow": [word], "worth": word|null,
-"helped": [word]}`, any key left out counting as nothing ticked. The
-words are `capture_catalogue.FEEDBACK_VOCAB`'s, never free text:
+"helped": [word], "why": [word], "missed_in": word|null, "plan":
+word|null, "handoff": word|null, "tip": word|null, "tip_hint": word|null,
+"builds": [{"build": n, "plan": word|null, "handoff": word|null}]}`, any
+key left out counting as nothing ticked. The words are
+`capture_catalogue.RATING_VOCAB`'s, never free text:
 `outcome` is `met`, `partly`, `missed` or `stopped`; `slow` any of
 `unclear`, `rework`, `tools`, `none`; `worth` is `yes`, `fair` or
-`no`; `helped` any of `context`, `plan`, `smaller`, `none`. A body
-with nothing ticked clears the rating. `404` if `<id>` is unknown;
-`400` if the body is not a JSON object, has another key, or a word
-isn't one of these (the cross-site checks above run first).
+`no`; `helped` any of `context`, `plan`, `smaller`, `none`; `why` any of
+`left_out`, `missed`, `changed`, `none`; `missed_in` is `message`,
+`plan`, `standing` or `earlier`; `plan` is `covered`, `gap` or `new`;
+`handoff` is `yes`, `partly` or `no`; `tip` is `useful`, `known` or
+`wrong`, and `tip_hint` names the tip it is about (a tip hint of
+`capture_catalogue.TIP_HINT_TITLES`). A tip answer keeps its `tip_hint`
+only with the answer.
+
+`builds` holds the plan and handoff answers for each plan build of a
+session with two or more approved plans (`build` from 1 to 32, each
+once, at most 32). `plan` and `handoff` on their own are build 1's, unless
+`builds` names it. A body with nothing ticked clears the rating, plan
+builds and all. `404` if `<id>` is unknown; `400` if the body is not a
+JSON object, has another key, or a word isn't one of these (the
+cross-site checks above run first).
 
 `data`: `{"session_id": str, "feedback": {...} | null}` (as in
 `GET /api/session/<id>`).
+
+### `GET /api/tip-feedback`
+
+What you have said about tip, habit and recommendation cards on the
+dashboard, and the answers a card can take.
+
+`data`: `{"answers": [{"kind", "item", "answer", "set_at"}], "options":
+[{"word", "label", "description"}]}`. `options` are `useful` (Useful),
+`trying` (Trying it), `known` (Knew it) and `wrong` (Wrong here), from
+`capture_catalogue.TIP_CARD_OPTIONS`.
+
+### `POST /api/tip-feedback`
+
+Rate one card. Body: `{"kind": "tip" | "habit" | "recommendation",
+"item": str, "answer": word|null}`. `item` is the card's id: a tip hint
+or a prompting habit for `tip`, a work-habits playbook item for `habit`,
+a recommendation's key for `recommendation`. `answer` is one of the
+words above, or `null` to take the answer back. `400` for another key, an
+unknown `kind`, an `item` that is not a card of that kind, a word that is
+not one of the four, or more than 500 cards holding an answer (the
+cross-site checks above run first).
+
+It is a rating you give, kept in the `tip_feedback` table: nothing in
+Claude Code's own settings or in `config.toml` changes. `trying` also
+adds a line (`kind`, `item`, the state `trying` and a time, no text) to
+`habit-log.jsonl` in the config folder the first time you pick it, which
+puts a change point on the Changes page from that day so the habit's
+effect can be measured. Your answer on the card of a tip hint also counts in the
+"Tips Claude showed" table of the report (`trying` counts as `useful`).
+
+`data`: `{"kind", "item", "answer", "set_at"}` (`set_at` is `null` when
+the answer was taken back).
 
 ### `POST /api/capture`
 

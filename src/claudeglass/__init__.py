@@ -352,7 +352,22 @@ __version__ = "0.14.0"
 #: ``capture_tags.settle`` applied, as the capture hook grounds Haiku's
 #: words. A cycle with several tags keeps the highest ``level`` and
 #: ``size`` among them.
-PARSER_VERSION = 38
+#:
+#: In 39, ``/cg-feedback`` asks new questions (``capture_catalogue.
+#: FEEDBACK_QUESTIONS``) and ``model.Feedback`` gains ``why``, ``missed_in``,
+#: ``plan``, ``tip``, ``tip_hint``, ``from_text``, ``other`` and
+#: ``why_older``. A word Claude picked from a note typed under "Other"
+#: counts only when the AskUserQuestion result shows a non-label answer
+#: for that key, and a ticked answer always wins over the tag
+#: (``capture_tags.settle_feedback``). An older run's ``slow`` gives
+#: ``why``, and a run with no work since the previous one replaces that
+#: run's answers (``capture.feedback_spans``). Also in 39, ``Turn.
+#: plan_check`` holds your answer to the plan check (``model.PlanCheck``:
+#: the id of the plan's ``ExitPlanMode`` call and a word of
+#: ``capture_catalogue.PLAN_CHECK_WORDS``), and ``Turn.coach_reminder``
+#: says a reply carries the /cg-feedback reminder line a hook note asked
+#: for, so ``capture.usage`` prices it.
+PARSER_VERSION = 39
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

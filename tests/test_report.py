@@ -1346,3 +1346,37 @@ def test_session_records_carry_the_profile_active_at_their_start(tmp_path, monke
     build_report(load_corpus([project_dir]), PRICING, Config(), projects=("proj",), window="w", config_dir=config_dir)
 
     assert [r.profile_id for r in seen] == ["lean"]
+
+
+def test_the_prompting_section_gets_your_dashboard_ratings_and_card_answers(tmp_path, monkeypatch):
+    from claudeglass import prompting
+
+    corpus = _corpus_of(tmp_path, "proj-a")
+    seen = {}
+    real_collect, real_build = prompting.collect, prompting.build_section
+
+    def collect(corpus, pricing, ratings=None):
+        seen["ratings"] = ratings
+        return real_collect(corpus, pricing, ratings=ratings)
+
+    def build_section(sessions, card_answers=None):
+        seen["cards"] = dict(card_answers or {})
+        return real_build(sessions, card_answers)
+
+    monkeypatch.setattr(prompting, "collect", collect)
+    monkeypatch.setattr(prompting, "build_section", build_section)
+    ratings = {"session-001": {"tip": "known", "tip_hint": "drip_feed"}}
+    tip_feedback = {
+        ("tip", "big_paste"): {"answer": "trying", "set_at": "t"},
+        ("habit", "split_large"): {"answer": "useful", "set_at": "t"},
+    }
+    build_report(
+        corpus, PRICING, Config(), projects=("proj-a",), window="w", ratings=ratings, tip_feedback=tip_feedback
+    )
+    assert seen["ratings"] == ratings
+    # Only the tip card counts as a tip answer; trying it counts as useful.
+    assert seen["cards"] == {("big_paste", "useful"): 1}
+    # Without them the section is built as it always was.
+    seen.clear()
+    build_report(corpus, PRICING, Config(), projects=("proj-a",), window="w")
+    assert seen["ratings"] is None and seen["cards"] == {}

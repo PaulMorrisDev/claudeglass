@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import backtest, capture_view, footprint, helptext, quick_actions, setup_status, skills_review
+from claudeglass import backtest, capture_catalogue, capture_view, footprint, helptext, quick_actions, setup_status, skills_review
 from claudeglass.config import CaptureConfig, Config
 from claudeglass.corpus import load_corpus
 from claudeglass.pricing import load_pricing
@@ -1157,6 +1157,13 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
         "uninstall_command": footprint.UNINSTALL_COMMAND,
     }
     canned["/api/capture"] = capture_view.view(CaptureConfig(), units=units)
+    canned["/api/tip-feedback"] = {
+        "answers": [],
+        "options": [
+            {"word": word, "label": label, "description": text}
+            for word, label, text in capture_catalogue.TIP_CARD_OPTIONS
+        ],
+    }
     setup_items = setup_status.check_setup(config_dir, is_registered=lambda: False, running=True, url=None)
     canned["/api/setup/status"] = {
         "items": [setup_status.to_jsonable(item) for item in setup_items],
@@ -2585,10 +2592,16 @@ def test_capture_banner_dismissal_is_a_seven_day_snooze_not_permanent() -> None:
     are gone: the sidebar's status line says the level instead.)"""
     app_js = _app_js()
     assert re.search(r"(?:export\s+)?(?:var|let|const) BANNER_SNOOZE_MS = 7 \* 24 \* 60 \* 60 \* 1000;", app_js)
-    notes_fn = _function_source(app_js, "notesSnoozed")
-    assert "Date.now() - ts < BANNER_SNOOZE_MS" in notes_fn
+    snooze_fn = _function_source(app_js, "snoozed")
+    assert "Date.now() - ts < BANNER_SNOOZE_MS" in snooze_fn
+    assert 'snoozed("tls:captureNotesHidden", notesSignature(notes))' in _function_source(app_js, "notesSnoozed")
     banner_fn = _function_source(app_js, "renderCaptureBanner")
     assert 'storageSet("tls:captureNotesHidden", Date.now() + "|" + notesSignature(notes))' in banner_fn
+    # The list of sessions waiting for a rating snoozes the same way.
+    assert 'snoozed("tls:captureUnratedHidden", unratedSignature(unrated))' in _function_source(app_js, "unratedSnoozed")
+    assert 'storageSet("tls:captureUnratedHidden", Date.now() + "|" + unratedSignature(unrated))' in _function_source(
+        app_js, "unratedBlock"
+    )
     # No permanent "1" write for the dismissal, and no invite left to hide.
     assert '"tls:captureNotesHidden", "1"' not in app_js
     assert "tls:captureInviteHidden" not in app_js
@@ -3245,3 +3258,109 @@ def test_models_read_by_name_on_screen() -> None:
     assert "var text = modelNames(String(cell));" in table
     assert 'el("span", { title: String(cell), text: text })' in table
     assert "return modelNames(String(value));" in _function_source(_static_text("page-actions.js"), "valueText")
+
+
+# -- the rating redesign on the dashboard (Phase 4, dashboard parity) -----------------------
+
+
+def test_the_session_rating_form_is_served_from_the_catalogue_not_copied_into_the_page() -> None:
+    """The Sessions-tab rating asks what /cg-feedback asks. The questions,
+    their words and when each applies come from the service's
+    ``feedback_questions``; the page holds none of them. A question
+    changed in the catalogue changes here with no edit to the page."""
+    spend = _static_text("page-spend.js")
+    form = _function_source(spend, "buildSessionRating")
+    assert "session.feedback_questions.forEach(function (q)" in form
+    assert 'q.question + (q.multi ? " (tick any)" : "")' in form
+    assert "ratingOptions(" in form and "q.builds" in form
+    # No question's own text, and none of the words a rating can hold, sits in the page.
+    page = "\n".join(_static_text(name) for name in ("page-spend.js", "grid.js", "links.js"))
+    for question in capture_catalogue.RATING_QUESTIONS:
+        for text in (question.question, question.plain, *(description for _word, _label, description in question.options)):
+            assert not text or text not in page, f"question text copied into the page: {text}"
+    for key, words in capture_catalogue.RATING_VOCAB.items():
+        if key == "tip_hint":
+            continue
+        for word in words:
+            assert f'"{word}"' not in form, f"rating word copied into the form: {key}={word}"
+    # The service decides which questions apply; the page only keeps what the form shows.
+    assert "feedback_questions" in spend
+    assert "session.feedback_questions) wrap.appendChild(buildSessionRating(container, session))" in _function_source(
+        spend, "buildSessionDetail"
+    )
+
+
+def test_a_session_with_several_plans_gets_a_rating_row_for_each() -> None:
+    """The plan and handoff questions come with ``builds`` when a session has
+    two or more approved plans. The form asks each build in its own row and
+    sends them as ``builds``, with the top-level answers left to build 1."""
+    form = _function_source(_static_text("page-spend.js"), "buildSessionRating")
+    assert "q.builds.forEach(function (item)" in form
+    assert 'class: "rating-build"' in form and "item.label" in form
+    assert "payload.builds = Object.keys(numbers)" in form
+    assert "payload.plan = null;" in form and "payload.handoff = null;" in form
+
+
+def test_a_follow_up_question_shows_only_while_its_answer_is_ticked() -> None:
+    form = _function_source(_static_text("page-spend.js"), "buildSessionRating")
+    gate = _function_source(form, "gate")
+    assert "q.needs" in gate and "groups[q.key].hidden" in gate
+    # A hidden question sends no answer, and a tip answer travels with the tip it was about.
+    assert 'q.needs && groups[q.key].hidden ? [] : tickedWords(inputs[q.key])' in form
+    assert "payload.tip_hint = payload.tip ?" in form
+
+
+def test_the_rating_form_keeps_answers_to_questions_it_does_not_show() -> None:
+    """A rating has more answers than one session shows. Saving from a form
+    that left a question out must not clear what was said to it."""
+    form = _function_source(_static_text("page-spend.js"), "buildSessionRating")
+    assert 'if (key !== "set_at" && key !== "builds") payload[key] = saved[key];' in form
+
+
+def test_tip_habit_and_recommendation_cards_carry_the_four_ratings() -> None:
+    """Useful, Trying it, Knew it and Wrong here come from the service
+    (``/api/tip-feedback`` options), written back to the same route. The
+    card holds no setting and no apply button: it is a rating."""
+    grid = _static_text("grid.js")
+    assert "export function cardRating(kind, item)" in grid
+    rating = _function_source(grid, "cardRating")
+    assert "/api/tip-feedback" in grid
+    assert "postJson(" in rating or "postJson(" in grid
+    for forbidden in ("config", "apply", "Apply"):
+        assert forbidden not in rating, forbidden
+    habits = _static_text("page-habits.js")
+    actions = _static_text("page-actions.js")
+    assert 'cardRating("tip", String(row.habit))' in habits
+    assert 'cardRating("habit", String(row.habit))' in habits
+    assert 'cardRating("recommendation", String(focus.key || focus.id || group.id))' in actions
+    assert "cardRating" in re.search(r"import \{[^}]*\} from \"./grid.js\";", habits).group(0)
+    assert "cardRating" in re.search(r"import \{[^}]*\} from \"./grid.js\";", actions).group(0)
+
+
+def test_the_card_rating_words_are_not_copied_into_the_page() -> None:
+    grid = _static_text("grid.js")
+    body = _function_source(grid, "cardRating")
+    for _word, label, description in capture_catalogue.TIP_CARD_OPTIONS:
+        assert label not in body and description not in grid, label
+    assert "cardRatings.options" in grid
+
+
+def test_a_low_confidence_label_gets_a_chip_in_the_list_and_the_detail() -> None:
+    spend = _static_text("page-spend.js")
+    assert spend.count('chip("Label unsure"') == 2
+    assert "row.low_confidence" in spend and "session.low_confidence" in spend
+
+
+def test_the_banner_lists_unrated_sessions_by_tokens_and_can_be_dismissed_for_a_week() -> None:
+    shell = _static_text("shell.js")
+    block = _function_source(shell, "unratedBlock")
+    # Tokens only: a count, never an amount of money.
+    assert "compactNumber(piece.tokens)" in block
+    assert "moneyText" not in block and "$" not in block
+    assert 'openSessionDrawer(piece.session_id)' in block
+    assert 'storageSet("tls:captureUnratedHidden", Date.now() + "|" + unratedSignature(unrated));' in block
+    assert 'snoozed("tls:captureUnratedHidden", unratedSignature(unrated))' in _function_source(shell, "unratedSnoozed")
+    banner = _function_source(shell, "renderCaptureBanner")
+    assert "info.unrated && info.unrated.pieces && info.unrated.pieces.length" in banner
+    assert "unratedBlock(unrated, data)" in banner
+    assert "!unratedVisible" in banner

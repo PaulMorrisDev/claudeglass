@@ -2,7 +2,7 @@
 
 Metrics capture is **opt-in**. Off by default, and off costs nothing: no tag is asked for, Claude Haiku is never asked, and no token is spent on it. Live coaching and your feedback have their own switches, and keep working while capture is off.
 
-Turned on, a hook (`capture-hook.py`) adds a short note to each session start, and asks Claude to end its replies with one line such as `[cg: task=bugfix brief=partial level=normal]` (or Claude Haiku writes it, see [Who writes the tags](#who-writes-the-tags)). A subagent is asked for nothing: its brief and its report are exactly what they would be, and Claude Haiku judges the run once it's done (see [Agent runs](#agent-runs)). The tag always sits at the end of the reply you already read — nothing is hidden — and nothing free-text is ever asked for: every word comes from a closed vocabulary (see [Privacy](#privacy) below).
+Turned on, a hook (`capture-hook.py`) adds a short note to each session start, and asks Claude to end its replies with one line such as `[cg: task=bugfix brief=partial level=normal]` (or Claude Haiku writes it, see [Who writes the tags](#who-writes-the-tags)). A subagent is asked for nothing: its brief and its report are exactly what they would be, and Claude Haiku judges the run once it's done (see [Agent runs](#agent-runs)). The tag always sits at the end of the reply you already read — nothing is hidden — and the tags ask for no free text: every word comes from a closed vocabulary (the one place you can type is an Other answer in `/cg-feedback`; see [Privacy](#privacy) below).
 
 It costs tokens. The note is written to the prompt cache once, then read from it on every later reply of that session; the tag itself is a handful of output tokens on every reply, and each agent run judged, or reply Claude ends without its tag, is a Haiku call of about $0.002. [Levels](#levels) below gives rough sizes; once capture is on, Setup › Capture measures the real cost from your own transcripts, and a banner on every page shows the running total.
 
@@ -16,7 +16,7 @@ Costs rise with depth, so capture comes in levels, each including every metric o
 | Free | Local signals from hooks that log to a file. Uses no Claude tokens. | – | – |
 | Essentials | Claude tags each piece of work: what kind it was, how clear the request was, how hard, how big, and when the task changed. For redone work it adds why, and whether Claude admitted a mistake. Claude Haiku judges whether each agent run finished, and why one was run again. | ~353 tokens | ~$0.002 |
 | Standard | Adds what the request lacked, planning and skills, and Haiku's view of each agent run's brief. | ~484 tokens | ~$0.002 |
-| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /cg-feedback survey, its reminder note, and Claude's one-line reminder to run it when a piece of work is done. | ~662 tokens | ~$0.002 |
+| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /cg-feedback survey, its reminder note, Claude's one-line reminder to run it after a large piece of work, and a one-question plan check when you fix something after approving a plan. | ~594 tokens | ~$0.002 |
 | Custom | Any other set of metrics, turned on one by one (`capture enable`/`capture disable`). | depends what's on | depends what's on |
 
 These are rough sizes — the note's characters divided by four, plus Claude Code's own hook-wrapper overhead (the system-reminder tags around it) — and don't include the tag Claude writes back (each metric below says roughly how many output tokens its own words cost). Setup › Capture replays your last 14 days of transcripts against each level before you turn it on, and once it's on, measures the real note and tag cost from what Claude Code actually recorded — read that number, not this one, when it matters.
@@ -62,7 +62,8 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 | Brief templates (`brief_templates`) | Live coaching, any level | – | Giving Claude information |
 | Feedback skill (`feedback_skill`) | Feedback, any level; switching to Deep turns it on | – | Cost per finished piece of work, Planning, Profiles per kind of task |
 | Feedback reminder in the status line (`feedback_note`) | Feedback, any level; switching to Deep turns it on | – | Cost per finished piece of work |
-| Feedback reminder from Claude (`feedback_reminder`) | Feedback, any level; switching to Deep turns it on | ~26 | Cost per finished piece of work |
+| Feedback reminder from Claude (`feedback_reminder`) | Feedback, any level; switching to Deep turns it on | ~25 | Cost per finished piece of work |
+| Plan check after a fix (`plan_check`) | Feedback, any level; switching to Deep turns it on | ~78 | Planning |
 | Rate sessions on the dashboard (`dashboard_rating`) | Feedback, any level | – | Cost per finished piece of work |
 
 ## Main session
@@ -380,9 +381,10 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Feedback skill (`feedback_skill`)
 
 - **Level:** Feedback, any level; switching to Deep turns it on
-- **Captures:** A /cg-feedback skill you run after a piece of work. It asks four checkbox questions: the outcome, what slowed it, whether it was worth the tokens, and what would have helped. After an approved plan it asks a fifth: whether the build could have started fresh from the plan.
-- **Why:** Cost per piece of work that met its goal, which outranks what Claude reports about itself. The plan answer tells the fresh-session tip and the suggested profile how you work.
-- **Tag:** `[cg-fb: outcome=met|partly|missed|stopped slow=unclear,rework,tools,none worth=yes|fair|no helped=context,plan,smaller,none handoff=yes|partly|no]`
+- **Captures:** A /cg-feedback skill you run after a piece of work. It asks a few checkbox questions: the outcome, what your follow-up messages were, whether it was worth the tokens, and what would have made it cheaper. After an approved plan it asks whether the plan covered what you fixed and whether the build could have started fresh. A tip question appears only when ClaudeGlass showed a tip. When you run it, a hook adds one line of counts and ids (no text) for the piece of work being rated, so the skill can leave out a question that doesn't apply.
+- **Why:** Cost per piece of work that met its goal, which outranks what Claude reports about itself. The follow-up and plan answers tell the tips and the suggested profile where the work went wrong.
+- **Tag:** `[cg-fb: outcome=met|partly|missed|stopped why=left_out,missed,changed,none missed_in=message|plan|standing|earlier worth=yes|fair|no helped=context,plan,smaller,none plan=covered|gap|new handoff=yes|partly|no tip=useful|known|wrong tip_hint=<hint id> from_text=<keys>]`
+- **Hook:** UserPromptSubmit
 - **Powers:** Cost per finished piece of work, Planning, Profiles per kind of task
 
 ### Feedback reminder in the status line (`feedback_note`)
@@ -396,18 +398,27 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Feedback reminder from Claude (`feedback_reminder`)
 
 - **Level:** Feedback, any level; switching to Deep turns it on
-- **Captures:** Claude adds a highlighted note suggesting /cg-feedback once a session, when it finishes its first piece of work.
-- **Why:** For people without the status line, such as in the desktop app. Costs a few output tokens once a session.
-- **Tag:** No fixed key. The note asks for a line: "The first time in this session you finish a piece of work the user asked for, add this before your tag, after a blank line, and never again after that:
-> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work."
-- **Costs:** about 26 output tokens each time
-- **Hook:** SessionStart
+- **Captures:** When the piece of work you are on is large (at least 1M tokens and twice your typical piece) and you haven't rated it, a note with your next message asks Claude to end its reply with a line suggesting /cg-feedback. At most once per piece of work and once every 3 days. A piece starts with the session, a /clear, or a message Claude tags as a new task.
+- **Why:** For people without the status line, such as in the desktop app, and only for work big enough to be worth rating. Costs a note of about 100 tokens and a few output tokens, a few times a week at most.
+- **Tag:** No tag. A hook note asks Claude to end its reply with a line: "> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work."
+- **Costs:** about 25 output tokens each time
+- **Hook:** UserPromptSubmit
 - **Powers:** Cost per finished piece of work
+
+### Plan check after a fix (`plan_check`)
+
+- **Level:** Feedback, any level; switching to Deep turns it on
+- **Captures:** After you approve a plan and Claude changes files, your next message that corrects or adjusts the work gets one question from Claude first: did Claude miss something the plan said, did the plan leave it out, is it something new, or is this not a fix? Asked at most once per plan. It stops for 14 days after two declined or Other answers in a row. Only the four ticked words are kept.
+- **Why:** Which of your corrections the plan could have prevented, which tells the plan tips whether to ask for fuller plans or for a closer check of the build against the plan.
+- **Tag:** No tag. A hook note has Claude ask one question (header "CG plan fix") before it acts on your message; only the ticked word is kept (`covered`, `gap`, `new`, `none`).
+- **Costs:** about 78 output tokens each time
+- **Hook:** UserPromptSubmit
+- **Powers:** Planning
 
 ### Rate sessions on the dashboard (`dashboard_rating`)
 
 - **Level:** Feedback, any level
-- **Captures:** The same checkboxes on Spend › Sessions, kept in ClaudeGlass's own store.
+- **Captures:** The /cg-feedback questions as checkboxes on Spend › Sessions. They cover the outcome, your follow-ups, whether it was worth it and what would have made it cheaper. A question about the plan or a tip shows only when it applies to the session. A session with two or more approved plans gets a row for each. Tip and recommendation cards take Useful, Trying it, Knew it or Wrong here. All of it is kept in ClaudeGlass's own store.
 - **Why:** Feedback without spending tokens.
 - **Tag:** No tag. Nothing is asked of Claude; see "Captures" above for how it is kept.
 - **Powers:** Cost per finished piece of work
@@ -424,7 +435,9 @@ Every note (`capture_hook.py` builds the same text from `capture-catalogue.json`
 
 A subagent gets no note, and a brief carries no marker: see [Agent runs](#agent-runs). Transcripts from before ClaudeGlass 0.11.0 may hold a subagent's own `[result: ...]` tag or a `[retry: ...]` brief marker; both are still read. Older notes also asked for `found` (whether research found what was asked), and a `fit` word judged whether a smaller model would have done an agent's task. Neither is asked for now, and older transcripts that hold them are still read.
 
-The `/cg-feedback` skill ends with its own line: `[cg-fb: outcome=met|partly|missed|stopped slow=unclear,rework,tools,none worth=yes|fair|no helped=context,plan,smaller,none handoff=yes|partly|no]`.
+The `/cg-feedback` skill ends with its own line: `[cg-fb: outcome=met|partly|missed|stopped why=left_out,missed,changed,none missed_in=message|plan|standing|earlier worth=yes|fair|no helped=context,plan,smaller,none plan=covered|gap|new handoff=yes|partly|no tip=useful|known|wrong tip_hint=<hint id> from_text=<keys>]`.
+
+`tip_hint` is the id of the tip the question was about. `from_text` lists the keys whose word Claude picked from a note you typed under Other instead of a ticked box. Claude reads that note once to pick the closest word, then drops it: only the word is kept, and a ticked answer always wins over the tag. Runs from before the redesign asked what slowed the work (`slow`); those answers are still read.
 
 If Claude writes more than one tag, the last one wins, key by key, except `level` and `size`: the highest wins (`hard` over `normal` over `easy`, `xl` over `xs`), so a trailing "easy" can't relabel a message that took hard work.
 
@@ -467,7 +480,9 @@ A subagent is never asked for a tag, and a brief never carries a marker. Asked t
 
 Claude and Haiku write closed vocabularies only. Every `[cg: ...]` and `[cg-fb: ...]` word, and every `[result: ...]`, `[retry: ...]` and `[spawn: ...]` word in an older transcript, is checked against the lists on this page; anything else — an unknown word, a key outside those lists, free text, a path — is dropped by the parser and never stored. The one exception that can carry a name is `skill=would-help:<name>`, and only when `<name>` matches a skill this transcript actually listed or invoked in the window; any other name is cut down to a bare `would-help`.
 
-Free local signals never involve Claude at all: a hook logs the session id (hashed with this tool's own salt), the event word, and — for a permission prompt — the tool name, never its arguments, to a local file under `<config-dir>/signals/`. Those files, and the `capture-log.jsonl` record of every on/off/level change, aren't kept forever: `serve`'s watcher (or `capture prune` by hand) deletes entries past your configured retention, a default applying when none is set.
+The one place you can type is the Other choice in a `/cg-feedback` question. Claude reads that text once, in the session you are already in, to pick the closest word from that question's list, and writes only the word in the tag, with the question's key in `from_text`. It is told never to copy, quote or save your words. The parser sees your answer in the transcript in memory only and keeps just which questions were answered that way. A word picked from your note counts only when the answer to that question really was typed text, and a ticked answer always wins over the tag. What you typed never reaches the digest, the store, the dashboard or a file.
+
+Free local signals never involve Claude at all: a hook logs the session id (hashed with this tool's own salt), the event word, and — for a permission prompt — the tool name, never its arguments, to a local file under `<config-dir>/signals/`. Those files, the `capture-log.jsonl` record of every on/off/level change, and the `habit-log.jsonl` record of each tip you marked "Trying it" on the dashboard (a habit's id and the time, nothing else), aren't kept forever: `serve`'s watcher (or `capture prune` by hand) deletes entries past your configured retention, a default applying when none is set.
 
 "Always measured" metrics read only what Claude Code's own transcript already contains — instruction files loaded, commands and skills run, task counts, API errors, and simple yes/no facts about a message's shape (does it name a file path, does it contain a code block) — and keep only those flags and counts, never the text itself.
 
@@ -487,5 +502,5 @@ A fresh switch from off to on — at `init`, `capture on`/`level`, or the Captur
 - `claudeglass capture remove` — switch off and take those hook entries back out.
 - `claudeglass capture feedback on|off` — the `/cg-feedback` skill and its status-line reminder.
 - `claudeglass capture brief on|off` — the `/cg-brief` skill.
-- `claudeglass capture prune [--dry-run]` — delete signal files, Claude Haiku's tag files and `capture-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's unset); `serve`'s watcher already runs this same cleanup on every tick, so this is for anyone not running it.
+- `claudeglass capture prune [--dry-run]` — delete signal files, Claude Haiku's tag files and `capture-log.jsonl` and `habit-log.jsonl` records past your configured retention (`retention_days` in `config.toml`, or a default when it's unset); `serve`'s watcher already runs this same cleanup on every tick, so this is for anyone not running it.
 - `claudeglass changes` and `claudeglass uninstall` also cover metrics capture: they list everything it installed and can remove all of it — hooks, skills and signal files included.

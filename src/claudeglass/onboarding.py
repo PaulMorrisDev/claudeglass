@@ -622,8 +622,9 @@ def ask_capture_until(
 
 FEEDBACK_INTRO = (
     "Feedback after a piece of work (optional)\n"
-    "ClaudeGlass can add a /cg-feedback skill to Claude Code. Run it when you finish a piece of work and tick four "
-    "quick questions: did it deliver, what slowed it, was it worth the tokens, and what would have helped. Your "
+    "ClaudeGlass can add a /cg-feedback skill to Claude Code. Run it when you finish a piece of work and tick a few "
+    "quick questions: did it deliver, what were your follow-up messages, was it worth the tokens, and what would "
+    "have made it cheaper. Your "
     "answers show which work paid off, so the tips fit how you work. It costs nothing until you run it, then about "
     "two short turns, and a second status line reminds you it's there. It works at any capture level, even off.\n"
 )
