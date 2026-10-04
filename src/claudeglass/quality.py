@@ -163,8 +163,9 @@ RESULT_WORDS = capture_catalogue.RESULT_WORDS
 _SKIPS_CLAUDE_MD = frozenset({"Explore", "Plan"})
 
 _SHELL_TOOLS = ("Bash", "PowerShell")
-#: Tools whose call is the agent's answer: a run that ends on one finished.
-_ANSWER_TOOLS = frozenset({"StructuredOutput"})
+#: Tools whose call is the agent's answer: a run that ends on one finished
+#: (``StructuredOutput``, a workflow agent's; ``SubagentHandback``).
+_ANSWER_TOOLS = frozenset(capture_catalogue.AGENT_ANSWER_TOOLS)
 
 #: Outcome statuses, normalised.
 _OUTCOME = {
@@ -382,8 +383,9 @@ def run_facts(
     run.scheduled = scheduled_main_session(result)
     if run.is_agent:
         # Cut off: stopped, never replied, or the last reply asked for a
-        # tool and nothing came after it. A final StructuredOutput call is
-        # a workflow agent's answer, not a cut-off. The last reply's own
+        # tool and nothing came after it. A final answer-tool call
+        # (StructuredOutput, SubagentHandback) is the agent's answer, not
+        # a cut-off. The last reply's own
         # stop_reason is often not recorded, so the tool calls decide.
         last = next((turn for turn in reversed(result.turns) if not turn.is_synthetic), None)
         if meta.stopped_by_user or last is None:

@@ -40,10 +40,11 @@ from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 
 from . import capture_catalogue as catalogue
-from .capture_tags import MAIN_TAG_FIELDS, SUB_TAG_FIELDS, merge_feedback
+from .capture_tags import MAIN_TAG_FIELDS, SUB_TAG_FIELDS, merge_feedback, settle_tag
 from .context_files import _Carry, _parse_ts
-from .model import EventKind, Feedback, TranscriptResult, Turn
+from .model import CaptureTag, EventKind, Feedback, TranscriptResult, Turn
 from .pricing import Pricing, effective_rates, price_turn
+from .testrun import widest
 from .topology import agent_key
 
 CHARS_PER_TOKEN = 4
@@ -102,6 +103,11 @@ class Cycle:
     #: Positions in ``turns`` of replies that answered an earlier cycle's
     #: report: their tags are that cycle's, not this one's.
     handed_off: set[int] = field(default_factory=set)
+    #: What the transcript says about this cycle's work, the facts
+    #: ``capture_tags.settle`` puts right the tag's words with (see its
+    #: docstring for the keys). ``prompt_cycles`` fills it; a cycle built
+    #: without it has none, and ``settled`` is then ``tag``.
+    facts: dict = field(default_factory=dict)
 
     @property
     def tag_turns(self) -> list[Turn]:
@@ -118,14 +124,22 @@ class Cycle:
         when an earlier or a later tag in the same cycle (a retry, a
         correction) left it unset (CAP-10 -- this used to keep only the
         last tag whole, silently losing a key an earlier tag answered
-        and the last one didn't). A tag written in reply to the report of
-        an agent this cycle launched counts here, in whichever cycle the
-        reply ran (``tag_turns``). ``None`` when no turn wrote one."""
-        tags = [t.cap for t in self.tag_turns if t.cap is not None and t.cap.has_tl]
+        and the last one didn't). The exception is ``level`` and ``size``:
+        a cycle's work was as hard and as big as its hardest and biggest
+        reply, so the highest word wins. A tag written in reply to the
+        report of an agent this cycle launched counts here, in whichever
+        cycle the reply ran (``tag_turns``). When Claude tagged any reply
+        of the cycle, a tag Haiku filled in for one it left untagged (a
+        reply before a background command finished, say) gives no words:
+        Claude judged the whole piece of work. ``None`` when no turn wrote
+        one. The words are as written; ``settled`` has the transcript's
+        facts applied."""
+        tags = self._tags()
         if not tags:
             return None
-        merged = tags[0]
-        for tag in tags[1:]:
+        words = [t for t in tags if not t.judged] or tags
+        merged = words[0]
+        for tag in words[1:]:
             changes = {
                 f.name: getattr(tag, f.name)
                 for f in fields(tag)
@@ -137,11 +151,43 @@ class Cycle:
         # what every tag actually cost to write, judge_usd what Haiku's did.
         return replace(
             merged,
+            level=_highest(words, "level"),
+            size=_highest(words, "size"),
             has_tl=True,
             chars=sum(t.chars for t in tags),
             judged=any(t.judged for t in tags),
             judge_usd=sum(t.judge_usd for t in tags),
+            grounded=tuple(dict.fromkeys(item for t in tags for item in t.grounded)),
         )
+
+    def _tags(self) -> list[CaptureTag]:
+        return [t.cap for t in self.tag_turns if t.cap is not None and t.cap.has_tl]
+
+    @property
+    def settled(self) -> CaptureTag | None:
+        """:attr:`tag` with what the transcript settles put right
+        (``capture_tags.settle``): a plan the cycle made, tests it ran, a
+        first message's ``shift``, a ``why`` with no redo behind it. What
+        was changed is in its ``grounded``. Read this, not ``tag``, for
+        anything that counts or compares tags; ``tag`` is for what Claude
+        wrote. Same as ``tag`` when the cycle has no facts."""
+        tag = self.tag
+        if tag is None or not self.facts:
+            return tag
+        facts = dict(self.facts)
+        # ``admit`` needs a candidate in the reply only when Haiku wrote it.
+        facts["judged"] = next((t.judged for t in reversed(self._tags()) if t.admit), False)
+        return settle_tag(tag, facts)
+
+    @property
+    def admit_possible(self) -> bool:
+        """A reply says it got something wrong (``Turn.admit_candidate``)
+        but no ``admit`` stands for it: a pattern match, not a confirmed
+        admission, so it is never added to a total."""
+        if not self.facts.get("admit_candidate"):
+            return False
+        settled = self.settled
+        return settled is None or settled.admit is None
 
     @property
     def plan_rounds(self) -> int:
@@ -177,7 +223,16 @@ class Cycle:
 
 
 #: ``CaptureTag`` fields about the tag itself, not what it says.
-_TAG_COST_FIELDS = ("has_tl", "chars", "judged", "judge_usd")
+_TAG_COST_FIELDS = ("has_tl", "chars", "judged", "judge_usd", "grounded")
+
+
+def _highest(tags: list[CaptureTag], key: str) -> str | None:
+    """The highest word any of ``tags`` gives ``key`` (``level``:
+    easy < normal < hard; ``size``: xs < s < m < l < xl), ``None`` when
+    none gives one."""
+    order = catalogue.TAG_VOCAB[key]
+    found = [word for word in (getattr(t, key) for t in tags) if word in order]
+    return max(found, key=order.index) if found else None
 
 
 def _priced(result: TranscriptResult) -> list[Turn]:
@@ -329,7 +384,52 @@ def prompt_cycles(top: TranscriptResult, subs=(), workflows=()) -> list[Cycle]:
         if n is not None:
             cycles[n].subs.append(sub)
     _hand_off_tags(top, turns, starts, cycles, cycle_of_use, subs, launches)
+    _cycle_facts(cycles, 1 if starts[0] else 0)
     return cycles
+
+
+def _plan_approved(turn: Turn) -> bool:
+    """Whether this reply's plan was approved, in the dialog or by a
+    go-ahead message (``handoff._approved``; the hook's ``plan_before``)."""
+    return turn.plan_stats is not None and turn.plan_stats.outcome in ("approved", "approved_by_message")
+
+
+def _cycle_facts(cycles: list[Cycle], before: int) -> None:
+    """Fill each cycle's ``facts`` for ``capture_tags.settle``, from what
+    the parser counted: the plan, skills, edits, subagents' and workflow
+    agents' edits, shell commands, tests, errors and admissions of the
+    turns whose tags are the cycle's (``Cycle.tag_turns``), and how the
+    message that opened it reads. ``before`` is how many messages came
+    before the first cycle (1 when the transcript starts mid-session, with
+    replies to a message it doesn't hold)."""
+    approved = False
+    last: frozenset[str] = frozenset()
+    for n, cycle in enumerate(cycles):
+        turns = cycle.tag_turns
+        opening = cycle.turns[0]
+        edits = sum(t.edit_call_count for t in turns)
+        hashes = frozenset(h for t in turns for h in t.edit_target_hashes)
+        agent_files = sum(t.agent_edit_files for t in turns)
+        for sub in cycle.subs:
+            agent_files += sum(t.edit_call_count + t.shell_write_count + t.shell_change_count for t in _priced(sub))
+        cycle.facts = {
+            "plan_now": any(t.plan_stats is not None for t in turns),
+            "plan_before": approved,
+            "skills": sum(len(t.skills_invoked) for t in turns),
+            "files": edits,
+            "agent_files": agent_files,
+            "shell_changes": sum(t.shell_write_count + t.shell_change_count for t in turns),
+            "tests": widest(t.tests_run for t in turns),
+            "docs_only": edits > 0 and sum(t.edit_doc_count for t in turns) == edits,
+            "earlier": before + n,
+            "correction": opening.human_correction,
+            "adjust": opening.human_adjust,
+            "same_files": bool(hashes & last),
+            "tool_errors": sum(t.tool_error_count for t in turns),
+            "admit_candidate": any(t.admit_candidate for t in turns),
+        }
+        approved = approved or any(_plan_approved(t) for t in turns)
+        last = hashes
 
 
 def _hand_off_tags(top, turns, starts, cycles, cycle_of_use, subs, launches) -> None:
@@ -506,10 +606,14 @@ class CaptureUsage:
     spend: float = 0.0
     cycles: int = 0
     tagged_cycles: int = 0
+    #: Tagged cycles whose only tag Claude Haiku wrote (no reply carried
+    #: one): the fallback's fills while Claude writes the tags.
+    filled_cycles: int = 0
     reports: int = 0
     tagged_reports: int = 0
     #: Turns Claude Haiku tagged: the main session's replies while it
-    #: writes the tags (``[capture] tagger = "haiku"``), and every agent
+    #: writes the tags (``[capture] tagger = "haiku"``), the replies it
+    #: filled in when Claude left them without a tag, and every agent
     #: run it judged, whoever writes them.
     judged: int = 0
     #: /cg-feedback runs, what they cost (every turn of each), and how
@@ -884,6 +988,8 @@ def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
                 tag = cycle.tag
                 if tag is not None:
                     use.tagged_cycles += 1
+                    if tag.judged and not tag.chars:
+                        use.filled_cycles += 1
         for sub in subs:
             use.subagents += 1
             carry = _Carry(sub, pricing)

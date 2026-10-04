@@ -406,7 +406,7 @@ def messages_of(top, prices: _Prices) -> list[Message]:
             reread=prices.reread(first),
             carry=prices.carry(turns, cycle.start, (first.human_prompt_chars or 0) / _CHARS_PER_TOKEN),
             carried=carried,
-            new_piece=_new_piece(cycle.tag, gap),
+            new_piece=_new_piece(cycle.settled, gap),
         )
         if message.new_piece and carried >= CARRIED_MIN_TOKENS:
             message.carried_cost = prices.reads(cycle.turns, carried)

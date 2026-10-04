@@ -321,13 +321,19 @@ a flag, never text:
 
 - ``CaptureTag`` / ``Turn.cap: CaptureTag | None = None`` -- the
   ``[cg: ...]`` tag (and the ``[result: ...]`` extras ``fit``, ``rules``,
-  ``brief``, ``missing``) ending this turn's last text block. Unknown keys
-  and words are dropped; ``skill_name`` survives only when it names a
-  skill the transcript listed or used. ``chars`` is the tag's own length,
-  for pricing the output it cost. While Claude Haiku writes the tags
-  (``[capture] tagger = "haiku"``), the parser finds none; ``haiku_tags``
-  sets ``cap`` on the tagged reply's turn after the parse instead, with
-  ``judged`` set and ``judge_usd`` what the call cost.
+  ``brief``, ``missing``) ending this turn's last text block. ``why``
+  and ``admit`` (``PARSER_VERSION`` 38) ride on ``shift``; ``found`` and
+  ``fit`` are no longer asked for but are still read from older
+  transcripts. Unknown keys and words are dropped; ``skill_name``
+  survives only when it names a skill the transcript listed or used.
+  ``chars`` is the tag's own length, for pricing the output it cost.
+  While Claude Haiku writes the tags (``[capture] tagger = "haiku"``),
+  the parser finds none; ``haiku_tags`` sets ``cap`` on the tagged
+  reply's turn after the parse instead, with ``judged`` set and
+  ``judge_usd`` what the call cost. ``grounded`` (``PARSER_VERSION`` 38)
+  lists what the hook put right in Haiku's words, ``key:from>to``, read
+  from the tag row's ``g`` field; ``capture.Cycle.settled`` adds what the
+  parsed transcript puts right, and leaves ``cap`` as written.
 - ``Turn.cap_note_chars: int = 0`` -- characters of capture notes (a
   ``hook_additional_context`` attachment carrying ``cg-cap v``) put in
   front of the model just before this turn, measured from ``rendered``.
@@ -731,6 +737,31 @@ so nothing tied it to the message that started its run. Ids only:
   that happened to be open when the report arrived (``Cycle.late_turns``,
   ``Cycle.handed_off``). The turns, and so the cost, stay where they ran.
 
+Grounding addition (``PARSER_VERSION`` 38). What the transcript says about
+what a reply changed, so ``capture_tags.settle`` can put right the words
+a tag claims. Counts only; no path or command is kept:
+
+- ``Turn.edit_call_count: int = 0`` -- how many of this turn's edit calls
+  (``Edit``, ``Write``, ``MultiEdit``, ``NotebookEdit``) aimed outside a
+  ``.claude`` folder: changes to your work. Taken back for an edit that
+  failed, as ``edit_target_hashes`` is.
+- ``Turn.edit_doc_count: int = 0`` -- how many of those were aimed at a
+  documentation file (``capture_catalogue.DOC_SUFFIXES``: ``.md``,
+  ``.rst``, ``.txt``, ``.adoc``). All of them, and at least one, means the
+  edits were to documentation only.
+- ``Turn.shell_change_count: int = 0`` -- how many of this turn's
+  Bash/PowerShell commands changed files without authoring their content
+  (``shell_writes.changes_files``: ``git merge``, ``mv``, ``rm``; not
+  ``git commit``, not a redirection to ``/dev/null``). A command is one,
+  however many files it moves. Taken back for a command that was blocked
+  or denied. A write the command authored is ``shell_write_count``.
+
+``capture.Cycle`` carries the facts these counts, ``tests_run``,
+``skills_invoked``, ``tool_error_count``, ``admit_candidate`` and the
+messages' ``human_correction``/``human_adjust`` add up to (``Cycle.facts``),
+and ``Cycle.settled`` is the cycle's tag with ``capture_tags.settle``
+applied. The tag fields stay as written.
+
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
 count, a closed word (with an "other" fallback) or a raw number off a
@@ -882,11 +913,18 @@ class CaptureTag:
     brief: str | None = None
     level: str | None = None
     shift: str | None = None
+    #: Why work was redone or fixed (``left_out|missed|changed|tools``),
+    #: and whether the reply admits an earlier mistake of Claude's
+    #: (``claim|change|instruction``). Both ride on ``shift``.
+    why: str | None = None
+    admit: str | None = None
     size: str | None = None
     missing: tuple[str, ...] = ()
     plan: str | None = None
     skill: str | None = None
     skill_name: str | None = None
+    #: ``found`` and ``fit`` are no longer asked for: only a transcript
+    #: from before they were dropped carries them.
     found: str | None = None
     fit: str | None = None
     rules: str | None = None
@@ -904,6 +942,10 @@ class CaptureTag:
     #: that call cost, in USD. Its ``chars`` are 0: no reply carried it.
     judged: bool = False
     judge_usd: float = 0.0
+    #: What grounding put right in this tag, ``key:from>to`` (``to`` empty
+    #: for a word dropped): the hook's changes to Haiku's words (the tag
+    #: row's ``g`` field), then what ``capture_tags.settle`` changed.
+    grounded: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -1204,6 +1246,10 @@ class Turn:
     #: subagents changed.
     config_edit_count: int = 0
     agent_edit_files: int = 0
+    #: Grounding addition (``PARSER_VERSION`` 38): see the module docstring.
+    edit_call_count: int = 0
+    edit_doc_count: int = 0
+    shell_change_count: int = 0
     #: Workflow-agents addition (``PARSER_VERSION`` 37): ``Workflow``
     #: tool_use id -> ``(runId, taskId)`` of the run the call launched. Ids
     #: only. A resumed run keeps its ``runId``, so one id can have several

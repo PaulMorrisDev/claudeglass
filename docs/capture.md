@@ -4,19 +4,19 @@ Metrics capture is **opt-in**. Off by default, and off costs nothing: no tag is 
 
 Turned on, a hook (`capture-hook.py`) adds a short note to each session start, and asks Claude to end its replies with one line such as `[cg: task=bugfix brief=partial level=normal]` (or Claude Haiku writes it, see [Who writes the tags](#who-writes-the-tags)). A subagent is asked for nothing: its brief and its report are exactly what they would be, and Claude Haiku judges the run once it's done (see [Agent runs](#agent-runs)). The tag always sits at the end of the reply you already read — nothing is hidden — and nothing free-text is ever asked for: every word comes from a closed vocabulary (see [Privacy](#privacy) below).
 
-It costs tokens. The note is written to the prompt cache once, then read from it on every later reply of that session; the tag itself is a handful of output tokens on every reply, and each agent run judged is a Haiku call of about $0.002. [Levels](#levels) below gives rough sizes; once capture is on, Setup › Capture measures the real cost from your own transcripts, and a banner on every page shows the running total.
+It costs tokens. The note is written to the prompt cache once, then read from it on every later reply of that session; the tag itself is a handful of output tokens on every reply, and each agent run judged, or reply Claude ends without its tag, is a Haiku call of about $0.002. [Levels](#levels) below gives rough sizes; once capture is on, Setup › Capture measures the real cost from your own transcripts, and a banner on every page shows the running total.
 
 ## Levels
 
-Costs rise with depth, so capture comes in levels, each including every metric of the levels before it. The note is added once at each session's start, `/clear` or compaction (a resumed session already carries the note from its start, so it is not asked again). Agent runs get no note, and nor does a subagent's own compaction, which the hook tells from the main session's by a subagent transcript that has just recorded one; the note also tells a subagent to ignore it. A level with agent metrics adds a Haiku call per agent run instead, however deep the agent is nested.
+Costs rise with depth, so capture comes in levels, each including every metric of the levels before it. The note is added once at each session's start, `/clear` or compaction (a resumed session already carries the note from its start, so it is not asked again). Agent runs get no note, and nor does a subagent's own compaction, which the hook tells from the main session's by a subagent transcript that has just recorded one; the note also tells a subagent to ignore it. A session a scheduled task started gets none either: it has no message of yours, so none of its tags would be read. A level with agent metrics adds a Haiku call per agent run instead, however deep the agent is nested.
 
 | Level | What it adds | Note at session start | Haiku per agent run |
 |---|---|---|---|
 | Off | No metrics are captured and no tokens are used for them. Live coaching and feedback have their own switches and keep working while capture is off. | – | – |
 | Free | Local signals from hooks that log to a file. Uses no Claude tokens. | – | – |
-| Essentials | Claude tags each piece of work: what kind it was, how clear the request was, how hard, how big, and when the task changed. Claude Haiku judges whether each agent run finished, and why one was run again. | ~196 tokens | ~$0.002 |
-| Standard | Adds what the request lacked, planning, skills, research, and Haiku's view of each agent run's model and brief. | ~314 tokens | ~$0.002 |
-| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /cg-feedback survey, its reminder note, and Claude's one-line reminder to run it when a piece of work is done. | ~422 tokens | ~$0.002 |
+| Essentials | Claude tags each piece of work: what kind it was, how clear the request was, how hard, how big, and when the task changed. For redone work it adds why, and whether Claude admitted a mistake. Claude Haiku judges whether each agent run finished, and why one was run again. | ~353 tokens | ~$0.002 |
+| Standard | Adds what the request lacked, planning and skills, and Haiku's view of each agent run's brief. | ~484 tokens | ~$0.002 |
+| Deep | Adds how much earlier context was needed, how the change was checked, and a short rating after large tool outputs. Also turns on the /cg-feedback survey, its reminder note, and Claude's one-line reminder to run it when a piece of work is done. | ~662 tokens | ~$0.002 |
 | Custom | Any other set of metrics, turned on one by one (`capture enable`/`capture disable`). | depends what's on | depends what's on |
 
 These are rough sizes — the note's characters divided by four, plus Claude Code's own hook-wrapper overhead (the system-reminder tags around it) — and don't include the tag Claude writes back (each metric below says roughly how many output tokens its own words cost). Setup › Capture replays your last 14 days of transcripts against each level before you turn it on, and once it's on, measures the real note and tag cost from what Claude Code actually recorded — read that number, not this one, when it matters.
@@ -30,15 +30,13 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 | Kind of task (`task`) | Essentials | ~3 | Profiles per kind of task, Cost per finished piece of work, Model and effort fit, Measuring your changes |
 | How clear the request was (`brief`) | Essentials | ~3 | Giving Claude information |
 | How hard the work was (`level`) | Essentials | ~3 | Model and effort fit, Profiles per kind of task, Planning, Measuring your changes |
-| Task changes (`shift`) | Essentials | ~1 | Breaking down work, Clearing context, Planning |
+| Task changes and their cause (`shift`) | Essentials | ~2 | Breaking down work, Clearing context, Planning |
 | Size of the work (`size`) | Essentials | ~2 | Breaking down work, Measuring your changes |
 | Did the agent finish (`result`) | Essentials | – | Delegating to agents, Model and effort fit, Cost per finished piece of work |
 | Why an agent was run again (`retry`) | Essentials | – | Delegating to agents, Model and effort fit |
 | What the request lacked (`missing`) | Standard | ~4 | Giving Claude information, Researching |
 | Planning (`plan`) | Standard | ~2 | Planning |
 | Skills (`skill`) | Standard | ~3 | Using skills |
-| Research result (`found`) | Standard | ~2 | Researching |
-| Agent model fit (`fit`) | Standard | – | Model and effort fit, Delegating to agents |
 | Agent brief quality (`agent_brief`) | Standard | – | Delegating to agents, Giving Claude information |
 | Earlier context needed (`prior`) | Deep | ~2 | Clearing context |
 | How changes were checked (`check`) | Deep | ~3 | Checking changes |
@@ -99,13 +97,13 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 - **Hook:** SessionStart
 - **Powers:** Model and effort fit, Profiles per kind of task, Planning, Measuring your changes
 
-### Task changes (`shift`)
+### Task changes and their cause (`shift`)
 
 - **Level:** Essentials
-- **Captures:** When the work changed: a new unrelated task, building on the last one, the scope growing, redoing earlier work, or fixing a fault in earlier work.
-- **Why:** Task switching, scope creep, rework and fixes, and when a fresh session or plan mode would have been cheaper.
-- **Tag:** `shift=new|build|grew|redo|fix`
-- **Costs:** about 1 output token each time
+- **Captures:** When the work changed: a new unrelated task, building on the last one, the scope growing, redoing work, or fixing what Claude delivered. For redone or fixed work, why: your request or the plan left it out, Claude missed something, you changed your mind, or a tool failed. Whether Claude admitted an earlier mistake: a wrong statement, a wrong change, or an instruction it didn't follow.
+- **Why:** Task switching, scope creep, rework and fixes, and when a fresh session or plan mode would have been cheaper. The cause of each redo separates what your request left out from what Claude got wrong, and admitted mistakes are counted.
+- **Tag:** `shift=new|build|grew|redo|fix why=left_out|missed|changed|tools admit=claim|change|instruction`
+- **Costs:** about 2 output tokens each time
 - **Hook:** SessionStart
 - **Powers:** Breaking down work, Clearing context, Planning
 
@@ -128,16 +126,6 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 - **Costs:** about 4 output tokens each time
 - **Hook:** SessionStart
 - **Powers:** Giving Claude information, Researching
-
-### Research result (`found`)
-
-- **Level:** Standard
-- **Captures:** For research and search work, whether Claude found what was asked.
-- **Why:** How you research: when to give Claude pointers, and when an Explore agent is cheaper.
-- **Tag:** `found=yes|partial|no`
-- **Costs:** about 2 output tokens each time
-- **Hook:** SessionStart
-- **Powers:** Researching
 
 ### Earlier context needed (`prior`)
 
@@ -166,28 +154,18 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 - **Level:** Essentials
 - **Captures:** Whether each subagent finished its task, finished part of it, or was blocked, judged by Claude Haiku from its brief and the end of its report once it's done.
 - **Why:** Which agents and models deliver, and which get re-run.
-- **Tag:** No tag. The agent is asked for nothing; Claude Haiku judges its run once it's done (see [Agent runs](#agent-runs)): "result: done|partial|blocked (done = the agent finished what its brief asked; partial = some of it; blocked = it could not go on, such as a missing file, tool or permission)"
+- **Tag:** No tag. The agent is asked for nothing; Claude Haiku judges its run once it's done (see [Agent runs](#agent-runs)): "result: done|partial|blocked (done = the agent did its own work and handed back what its brief asked for, whatever it found: findings, refuted claims and an empty list all count as done; partial = it did some of its work; blocked = it could not do its own work, such as a missing file, tool or permission)"
 - **Hook:** SubagentStop
 - **Powers:** Delegating to agents, Model and effort fit, Cost per finished piece of work
 
 ### Why an agent was run again (`retry`)
 
 - **Level:** Essentials
-- **Captures:** When an agent run redoes an earlier one in the session that fell short, the reason: model, brief, tools, scope or other, judged by Claude Haiku from the two runs.
+- **Captures:** When an agent run redoes an earlier one in the session that fell short, the reason: model, brief, tools, scope or other, judged by Claude Haiku from the two runs, or model when the same brief reruns on a higher model tier.
 - **Why:** Why agents are re-run, and a guard that stops ClaudeGlass suggesting a cheaper model for work that needed a stronger one.
 - **Tag:** No tag. The agent is asked for nothing; Claude Haiku judges its run once it's done (see [Agent runs](#agent-runs)): "retry: none|model|brief|tools|scope|other (is this run a second try at what an earlier run listed below was meant to deliver, because that run fell short? none = no, or there is no earlier run; model = it needed a stronger model; brief = the earlier brief was too vague or lacked something; tools = the earlier agent lacked a tool or a permission; scope = the task was cut too wide or changed; other)"
 - **Hook:** SubagentStop
 - **Powers:** Delegating to agents, Model and effort fit
-- **Needs:** `result` switched on too
-
-### Agent model fit (`fit`)
-
-- **Level:** Standard
-- **Captures:** Whether a smaller model would have done each subagent's task, or it needed a larger one, judged by Claude Haiku once the run is done.
-- **Why:** Agent model tuning. Used only to rule a cheaper model out, never to recommend one.
-- **Tag:** No tag. The agent is asked for nothing; Claude Haiku judges its run once it's done (see [Agent runs](#agent-runs)): "fit: smaller|right|larger (smaller = a smaller, cheaper model could plainly have done this: simple lookups or mechanical edits; right = it suited the model it ran on; larger = the agent struggled in a way a stronger model would not have)"
-- **Hook:** SubagentStop
-- **Powers:** Model and effort fit, Delegating to agents
 - **Needs:** `result` switched on too
 
 ### Agent brief quality (`agent_brief`)
@@ -442,34 +420,48 @@ Every note (`capture_hook.py` builds the same text from `capture-catalogue.json`
 >
 > End your final reply to each user message with one line, [cg: key=word ...], using only these keys and words:
 
-...and, in the main session, closes with: "Leave out a key you can't judge."
+...and, in the main session, closes with: "Leave out a key you can't judge. When carrying out a plan, judge the plan, not the go-ahead. Tag your reply to an agent's report for the request that started the agent."
 
-A subagent gets no note, and a brief carries no marker: see [Agent runs](#agent-runs). Transcripts from before ClaudeGlass 0.11.0 may hold a subagent's own `[result: ...]` tag or a `[retry: ...]` brief marker; both are still read.
+A subagent gets no note, and a brief carries no marker: see [Agent runs](#agent-runs). Transcripts from before ClaudeGlass 0.11.0 may hold a subagent's own `[result: ...]` tag or a `[retry: ...]` brief marker; both are still read. Older notes also asked for `found` (whether research found what was asked), and a `fit` word judged whether a smaller model would have done an agent's task. Neither is asked for now, and older transcripts that hold them are still read.
 
 The `/cg-feedback` skill ends with its own line: `[cg-fb: outcome=met|partly|missed|stopped slow=unclear,rework,tools,none worth=yes|fair|no helped=context,plan,smaller,none handoff=yes|partly|no]`.
 
-If Claude writes more than one tag, the last one wins, key by key.
+If Claude writes more than one tag, the last one wins, key by key, except `level` and `size`: the highest wins (`hard` over `normal` over `easy`, `xl` over `xs`), so a trailing "easy" can't relabel a message that took hard work.
+
+What the transcript says outranks the words, for either writer. ClaudeGlass applies these rules when it reads Claude's tags back, and the hook applies the same ones to Haiku's before they are stored. The tag file notes each change as `key:from>to` in an optional `g` field, from the closed words only:
+
+- **`shift`, `why`:** a first message has no `shift` but `new`, and no `why`. `why` stays only with `shift=redo` or `fix`, and `why=tools` only when a tool call failed. A `build` or `grew` becomes `fix` when your message corrects Claude, or tweaks the files Claude changed in its previous reply.
+- **`admit`:** Haiku's word stays only when the reply reads like an admission. A reply that reads like one but got no `admit` word is a possible admission, kept out of every total.
+- **`check`:** a test run sets it, `full` when the whole suite ran at any point, `targeted` when only chosen tests did. `none` is set only when Claude, its subagents and its workflow agents changed no file and no shell command did. A `git commit`, a redirected `2>&1` and `>/dev/null` change nothing; a merge, a rebase and `sed -i` do.
+- **`plan`:** `made` whenever Claude put a plan up in the turn. `following` replaces `made` once you approved a plan earlier, in the dialog or by typing a go-ahead. A plan you sent back doesn't count.
+- **`task`, `skill`, `prior`:** `task` is `docs` when only documentation changed. Files a subagent or a workflow agent changed count too, and rule `docs` out. `skill=helped` or `unneeded` becomes `none` when no skill ran, and `prior` is `none` on the first message.
 
 ## Who writes the tags
 
 By default Claude writes the `[cg: ...]` tag itself, at the end of its final reply to each of your messages. `claudeglass capture tagger haiku` (or "Tags written by" on Setup › Capture) hands that to Claude Haiku instead, and `capture tagger claude` hands it back:
 
-- The session note no longer carries the tag list, and replies end as they would anyway. At Standard the note drops from ~314 to ~0 tokens.
-- When a turn of the main session ends, the hook's `Stop` entry reads the end of the transcript, hands a short excerpt to a worker process of its own, and returns at once. The excerpt holds your message (up to 2,000 characters), your message before it and the end of Claude's reply to that, how many you sent before, what Claude did (model calls, output tokens, tools used, the files it changed, the first line of up to 6 shell commands, whether they ran tests, skills, subagents, tool errors, any plan-mode plan) and the end of its final reply (up to 1,500 characters). Tool output is never in it.
-- The worker runs `claude -p --model haiku` with no tools, settings, MCP servers or saved session, through your own Claude Code login, with the excerpt on stdin, and no thinking. Haiku gets a line for each key Claude's note would have asked for, with each word spelled out, after "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words. In them, "you" means Claude:" and before "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (found outside research or a search; shift on a first message) or the excerpt can't tell at all." It loads no settings file, so your hooks don't run inside it; a login that needs an `apiKeyHelper` from settings.json fails there, and `capture status` says so.
-- Only the tag's words are kept, checked against the same vocabularies, in `<config-dir>/tags/YYYY-MM.jsonl`, with the reply's id and what the call cost. What the transcript settles overrides Haiku: a plan-mode plan written that turn is `plan=made`; no skill run is never `skill=helped`; no file changed is `check=none`, and a test run is `check=targeted` or `full` by whether it picked tests; only documentation changed is `task=docs`; and a first message has no `shift` but `new`. A turn that got no tag says why: `no_cli`, `no_login`, `timeout`, `failed`, `no_tag`. `capture status` counts both.
+- The session note no longer carries the tag list, and replies end as they would anyway. At Standard the note drops from ~484 to ~0 tokens.
+- When a turn of the main session ends, the hook's `Stop` entry reads the end of the transcript, hands a short excerpt to a worker process of its own, and returns at once. The excerpt holds your message (up to 2,000 characters), your message before it and the end of Claude's reply to that, how many you sent before and how many minutes after Claude's last reply, the files that reply changed and how many changed again, up to 3 messages you queued while Claude worked (300 characters each), how many short follow-ups you sent in a row, what Claude did (model calls, output tokens, tools used, the files it changed, the first line of up to 6 Bash or PowerShell commands, whether they ran tests, skills, subagents, tool errors), the plan-mode state (a plan written, approved or sent back, and how often), the request the work began with (the start of the plan you approved, up to 600 characters, or else of your latest earlier message longer than 300) and the end of its final reply (up to 1,500 characters). Tool output is never in it, and nothing but the tag's words is kept.
+- The worker runs `claude -p --model haiku` with no tools, settings, MCP servers or saved session, through your own Claude Code login, with the excerpt on stdin, and no thinking. Haiku gets a line for each key Claude's note would have asked for, with each word spelled out, after "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words. In them, "you" means Claude:" and before "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (why without a redo or fix; admit without an admission; shift on a first message) or the excerpt can't tell at all. When Claude carried out a plan, judge the plan, not the user's go-ahead." It loads no settings file, so your hooks don't run inside it; a login that needs an `apiKeyHelper` from settings.json fails there, and `capture status` says so.
+- Only the tag's words are kept, checked against the same vocabularies, in `<config-dir>/tags/YYYY-MM.jsonl`, with the reply's id and what the call cost. What the transcript settles overrides Haiku, by the rules above, and the line notes what changed. A turn that got no tag says why: `no_cli`, `no_login`, `timeout`, `failed`, `no_tag`, `no_answer`. `capture status` counts both.
 - Each call costs about $0.0020 (about 1,700 tokens read, 35 written), counted as capture's cost. On a subscription it counts toward your usage like any other Haiku use.
+- While Claude writes the tags, Haiku still catches the ones it leaves out. When Claude ends a reply that finishes a piece of work with no `[cg: ...]` tag, the same `Stop` entry hands that turn to the same worker, and the tag lands in the same file with `"w":"haiku-fallback"`. It leaves alone the reply to a background agent's report, another session's message, a scheduled or looped task, a command's output or a prompt Claude Code sent itself, and a turn that starts a background agent or workflow or ends while one still runs. A session a scheduled task started is left alone too, and so is a cycle in which any reply already carries a tag. Each call costs the same as above and uses the same login, and the excerpt goes only to Haiku.
 - How well it works is measured by `scripts/eval-tagger.py`: recorded sessions with known right answers, judged by Haiku with and without thinking and by Sonnet, against Claude's own tags. [tagger-eval.md](tagger-eval.md) has the results.
 - The `Stop` entry runs in the foreground, since `claude -p` exits without waiting for a background hook, but only for as long as it takes to read the transcript's end. Deep's note after a large result isn't added, as no reply carries a tag for its word. Agent runs are Haiku's to judge whichever writes the main session's tags.
 
 ## Agent runs
 
-A subagent is never asked for a tag, and a brief never carries a marker. Asked to end its report with `[result: ...]`, a subagent added it after an answer that had to be JSON only, breaking it, and the session that started it took the line for an injected instruction. So the agent metrics (`result`, `retry`, `fit`, `agent_brief`) are judged afterwards instead:
+A subagent is never asked for a tag, and a brief never carries a marker. Asked to end its report with `[result: ...]`, a subagent added it after an answer that had to be JSON only, breaking it, and the session that started it took the line for an injected instruction. So the agent metrics (`agent_brief`, `result`, `retry`) are judged afterwards instead:
 
-- When a subagent finishes, the hook's `SubagentStop` entry reads its transcript and hands an excerpt to the same worker as above: its type, its brief (up to 2,000 characters, without the line a workflow script's harness puts before a brief it computed), what it did (model calls, tools used, the files it changed, the first line of up to 6 shell commands, tool errors), the end of its report (up to 1,500 characters), or the start of the answer it handed back as structured output when that came last, as a workflow agent's does, and up to 4 earlier agent runs of the session (their type and the start of their brief and the end of their report), so Haiku can tell a re-run. Tool output is never in it.
-- Haiku is told "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt of it: the brief the agent was given, what it did, the end of its report and the session's earlier agent runs. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words:", a line for each agent metric that is on, and "Judge only from the excerpt. Give every key; leave one out only when the excerpt can't tell at all."
+- When a subagent finishes, the hook's `SubagentStop` entry hands a small job (the agent's type and where its transcript is) to the same worker as above and returns at once. The worker first waits for the transcript to settle, since the hook fires before the agent's last lines are written: until the call of an answer tool (`StructuredOutput`, `SubagentHandback`) is there, or the file has stopped growing for 3 seconds, or 20 seconds have passed, which is a `no_answer` and no call to Haiku. Then it reads the transcript and hands Haiku an excerpt: the agent's type, its brief (up to 2,000 characters), what it did (model calls, tools used, the files it changed, the first line of up to 6 shell commands, tool errors), the end of its report (up to 1,500 characters) and up to 4 earlier agent runs of the session, read from the whole of the session's transcript (their type and the start of their brief and the end of their report), so Haiku can tell a re-run. Tool output is never in it.
+- A workflow script hands an agent two prompts: the line it was started with, relayed, and the task it computed, each under a harness line saying who wrote it. The computed task is the brief. The relayed line comes along as context (up to 300 characters), marked as not the brief, so that "Continue the plan" isn't judged as one. The harness lines are left out.
+- An agent that hands its answer back through an answer tool has it shown field by field, one `key: value` line each, a field cut at 300 characters (for `SubagentHandback`, its `message`). A closing remark of up to 300 characters after the answer is shown too, and the answer is still the report; a longer one is the report instead.
+- Haiku is told "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt of it: the brief the agent was given, what it did, the end of its report or the answer it handed back, and the session's earlier agent runs. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words:", a line for each agent metric that is on, brief and missing first, then result, then retry, and "Judge only from the excerpt. Judge the brief first, from the brief alone, whatever the result. Give every key; leave one out only when the excerpt can't tell at all." Asked for the result first, it rated the same brief by how the run ended.
 - Its words land in `<config-dir>/tags/YYYY-MM.jsonl` beside the main session's, with the id of the agent's last reply, and are read as if the agent had written them. Each call costs about $0.002. Agents that set up Claude Code itself (`statusline-setup`, `output-style-setup`) are skipped. `capture status` says how many runs were judged, what the calls cost and why any got no verdict (a `claude` command that isn't signed in, say: the desktop app keeps its own login), whoever writes the main session's tags.
-- Whether an agent used your CLAUDE.md rules (`rules`) can't be told from outside the agent, so it is no longer measured.
+- The hook puts right what the transcript settles, as it does a turn's tag. An agent that handed back its answer through an answer tool wasn't missing what done means, so `done` is taken out of `missing`. A run of the same brief as an earlier run, on a higher model tier (haiku, sonnet, opus, fable), is `retry=model` whatever Haiku said. A workflow's agents are steps of a pipeline, not retries of each other: Haiku is shown no earlier runs for them and they get no `retry`.
+- A stop that follows another stop hook's request to carry on (`stop_hook_active`) is judged too. The agent's last reply is then a newer one, and where the verdicts are read the newest verdict for a run wins, and the earlier calls' cost is added to it.
+- *Done* is what the agent's own work was, not how the news turned out: findings, claims it refuted and an empty list all count as done, and *blocked* is an agent that couldn't do its own work.
+- Whether an agent used your CLAUDE.md rules (`rules`) can't be told from outside the agent, so it is no longer measured. Haiku's model fit verdict (`fit`) said "right" every time, so it is no longer asked; the agent tables measure it instead, from how many of an agent's calls were single read-only probes and how many calls came before its first edit.
 
 ## Privacy
 

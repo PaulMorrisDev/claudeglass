@@ -81,8 +81,11 @@ def _use_hook(path: Path) -> None:
     global HOOK, CATALOGUE
     HOOK = _load_hook(path)
     CATALOGUE = HOOK.load_catalogue(path.with_name(HOOK.CATALOGUE_FILE))
-#: Every key a main-session tag can carry: the Deep level's.
-KEYS = [m["id"] for m in CATALOGUE["metrics"] if m["main_line"]]
+#: Every metric a main-session tag can carry: the Deep level's.
+METRIC_IDS = [m["id"] for m in CATALOGUE["metrics"] if m["main_line"]]
+#: Every key of such a tag: each metric's own, then the keys riding on it
+#: (why and admit on shift).
+KEYS = HOOK.tag_keys(CATALOGUE, METRIC_IDS)
 
 #: Judge configurations: the model ``claude --model`` takes, and the
 #: thinking budget (``MAX_THINKING_TOKENS``; 0 is none).
@@ -175,7 +178,7 @@ def _record_one(scenario: dict, model: str, python: str) -> str:
         config_dir = tmp_path / "cg"
         config_dir.mkdir()
         (config_dir / "config.toml").write_text(
-            '[capture]\nlevel = "custom"\nmetrics = [' + ", ".join(f'"{k}"' for k in KEYS) + ']\n'
+            '[capture]\nlevel = "custom"\nmetrics = [' + ", ".join(f'"{k}"' for k in METRIC_IDS) + ']\n'
             'tagger = "claude"\n',
             encoding="utf-8",
         )
@@ -280,7 +283,7 @@ def _job(scenario_id: str) -> tuple[dict, dict]:
                "last_assistant_message": _final_text(clean), "permission_mode": mode}
     facts: dict = {}
     excerpt, reply = HOOK.judge_excerpt(clean, payload, CATALOGUE, True, facts)
-    job = {"ts": "", "reply": reply, "keys": KEYS, "system": HOOK.build_judge_prompt(CATALOGUE, KEYS),
+    job = {"ts": "", "reply": reply, "keys": KEYS, "system": HOOK.build_judge_prompt(CATALOGUE, METRIC_IDS),
            "excerpt": excerpt, "facts": facts}
     last_human = max(i for i, r in enumerate(records) if HOOK._typed(r, CATALOGUE["coaching"]["interrupt_prefix"]))
     skill_ran = any(

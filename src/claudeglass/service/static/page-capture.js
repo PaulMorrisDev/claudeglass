@@ -184,7 +184,10 @@ function renderCaptureData(data, container) {
       ];
       if (measured.coverage_text) {
         var tagger = config.tagger === "haiku" ? "Claude Haiku" : "Claude";
-        lines.push(tagger + " tagged " + measured.coverage_text + " of your messages" + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs." : "."));
+        var tagged = (config.tagger !== "haiku" && measured.filled_text)
+          ? "Claude tagged " + measured.own_coverage_text + " of your messages, and Claude Haiku filled in " + measured.filled_text
+          : tagger + " tagged " + measured.coverage_text + " of your messages";
+        lines.push(tagged + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs." : "."));
       }
       nowBlock.appendChild(el("ul", { class: "notes" }, lines.map(function (line) {
         return el("li", { text: line });

@@ -12,10 +12,12 @@ aren't part of it.
 Every playbook item says where its evidence came from, so you know how
 far to trust it:
 
-- ``reported``: what Claude said about the work in a metrics-capture tag
-  (``[cg: task=... brief=... level=...]``, ``[result: ... fit=... rules=...]``,
-  ``[retry: ...]``). Claude judging its own work is low-trust, which is
-  why ``fit`` only ever holds a cheaper model back.
+- ``reported``: what Claude (or Claude Haiku, judging an agent run) said
+  about the work in a metrics-capture tag (``[cg: task=... brief=...
+  level=...]``, ``[result: ...]``, ``[retry: ...]``). Claude judging its
+  own work is low-trust. How well a model fits an agent's work is not
+  asked of anyone: the agent tables count it from the runs
+  (``AgentFact.probe_calls``, ``AgentFact.calls_before_edit``).
 - ``inferred``: what the transcripts show without asking anyone: what
   your messages contained, tool output sizes, reads, retries, loops,
   context size, permission prompts.
@@ -505,7 +507,13 @@ class CycleFact:
     week: str
     cost: float
     turns: int
+    #: The cycle's tag with what the transcript settles put right
+    #: (``Cycle.settled``), which everything that counts tags reads.
     tag: object = None
+    #: The tag as Claude wrote it (``Cycle.tag``), for the checks that
+    #: compare what it said with what happened; ``tag`` stands in when a
+    #: fact was built without it.
+    written: object = None
     flags: tuple[str, ...] = ()
     paste: bool = False
     #: Tokens in context when the work began beyond what a fresh session
@@ -583,12 +591,18 @@ class AgentFact:
     report_carry: float = 0.0
     capped: bool = False
     result: str | None = None
-    fit: str | None = None
     rules: str | None = None
     brief: str | None = None
     missing: tuple[str, ...] = ()
     retry: str | None = None
     spawn: str | None = None
+    #: The run's model calls (replies, one per message id), and how many of
+    #: them were a single read-only probe (:func:`_is_probe`).
+    calls: int = 0
+    probe_calls: int = 0
+    #: How many calls came before the first one that changed your files
+    #: (:func:`_calls_before_edit`); ``None`` when the run changed none.
+    calls_before_edit: int | None = None
     overlap_reads: int = 0
     overlap_cost: float = 0.0
     #: The ``level`` and ``task`` Claude gave the message the agent
@@ -795,14 +809,14 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     for fact, cycle, following in zip(facts, work, work[1:] + [None]):
         if following is None:
             continue
-        tag = following.tag
+        tag = following.settled
         if (tag is not None and tag.shift in ("redo", "fix")) or following.turns[0].human_correction:
             fact.redone = True
             fact.redo_cost = capture_mod._cycle_cost(following, rates.pricing)
     out.cycles.extend(facts)
 
     if len(work) == 1 and not work[0].subs and len(work[0].turns) <= 3:
-        tag = work[0].tag
+        tag = work[0].settled
         if tag is None or tag.size in (None, "xs", "s"):
             premium = first_turn.cache_creation_tokens * max(0.0, rates.write(first_turn) - rates.read(first_turn))
             day = local_day(facts[0].ts, out.tz) if facts and facts[0].ts else ""
@@ -826,7 +840,7 @@ def _denials(top, turns: list[Turn]) -> dict[int, list[str]]:
 
 
 def _piece(fb: Feedback, cycles, rates: _Rates, source: str) -> Piece:
-    tags = [c.tag for c in cycles if c.tag is not None]
+    tags = [c.settled for c in cycles if c.settled is not None]
     return Piece(
         outcome=fb.outcome,
         cost=sum(capture_mod._cycle_cost(c, rates.pricing) for c in cycles),
@@ -855,7 +869,8 @@ def _cycle_fact(
         week=_week(moment, tz),
         cost=capture_mod._cycle_cost(cycle, rates.pricing),
         turns=len(cycle.turns),
-        tag=cycle.tag,
+        tag=cycle.settled,
+        written=cycle.tag,
         flags=tuple(first.prompt_flags),
         paste=first.human_prompt_has_paste,
         stale_tokens=stale,
@@ -959,18 +974,20 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
             capped="short" in first.prompt_flags,
             retry=first.retry_marker,
             spawn=first.spawn_marker,
-            level=cycle.tag.level if cycle is not None and cycle.tag is not None else None,
-            task=cycle.tag.task if cycle is not None and cycle.tag is not None else None,
+            level=cycle.settled.level if cycle is not None and cycle.settled is not None else None,
+            task=cycle.settled.task if cycle is not None and cycle.settled is not None else None,
         )
         for turn in reversed(priced):
             if fact.result is None and turn.result_marker:
                 fact.result = turn.result_marker
             cap = turn.cap
             if cap is not None:
-                fact.fit = fact.fit or cap.fit
                 fact.rules = fact.rules or cap.rules
                 fact.brief = fact.brief or cap.brief
                 fact.missing = fact.missing or tuple(cap.missing)
+        fact.calls = len(priced)
+        fact.probe_calls = sum(1 for turn in priced if _is_probe(turn))
+        fact.calls_before_edit = _calls_before_edit(priced)
         found = reports.get(sub.meta.tool_use_id or "")
         if found is not None:
             parent_carry, i, chars = found
@@ -987,6 +1004,34 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
                 fact.overlap_reads += again
                 fact.overlap_cost += sub_carry.cost(i, again * per_read / capture_mod.CHARS_PER_TOKEN)
         out.agents.append(fact)
+
+
+def _is_probe(turn) -> bool:
+    """Whether a reply (one message id) only looked, once: its one tool call
+    was a Read, Grep or Glob, or a shell command that reads files
+    (``shell_reads``: grep, sed -n, cat, find, git log) and writes or moves
+    none. A reply with two calls, or with a call that did anything else,
+    is not. What a small model does as well as a large one."""
+    calls = turn.tool_calls_by_tool
+    if sum(calls.values()) != 1:
+        return False
+    if any(calls.get(tool) for tool in _READ_TOOLS):
+        return True
+    return (
+        any(calls.get(tool) for tool in _SHELL_TOOLS)
+        and turn.shell_read_count > 0
+        and not (turn.shell_write_count or turn.shell_change_count)
+    )
+
+
+def _calls_before_edit(turns) -> int | None:
+    """How many replies a run made before the first one that changed your
+    files (an edit call, or a shell command that wrote or moved them): 0
+    when its first reply did. ``None`` when it changed none."""
+    for n, turn in enumerate(turns):
+        if turn.edit_call_count or turn.shell_write_count or turn.shell_change_count:
+            return n
+    return None
 
 
 def _spawn_index(sub, main_spawn, by_agent, launches=None) -> int | None:
@@ -1529,7 +1574,7 @@ def _item_targeted_checks(h: Habits) -> Item | None:
         parts.append(f"{len(unchecked)} changes weren't checked and {len(redone)} of them were redone")
     if full:
         parts.append(f"{len(full)} ran the full suite")
-    contradicted = sum(1 for c in reported_checked if c.tag.check == "none" and c.checked_by_tool)
+    contradicted = sum(1 for c in reported_checked if (c.written or c.tag).check == "none" and c.checked_by_tool)
     if contradicted:
         parts.append(f"{contradicted} said unchecked but a test command ran anyway")
     # Every dollar of saving is earned by an *unchecked, redone* cycle,
@@ -1867,7 +1912,7 @@ def contradiction_flags(h: Habits) -> dict[str, int]:
     said ``level=easy`` but cost landed in the priciest quarter of
     same-task messages (``EASY_HIGH_EFFORT_PCT``)."""
     checked_contradicted = sum(
-        1 for c in h.cycles if c.tag is not None and c.tag.check == "none" and c.checked_by_tool
+        1 for c in h.cycles if c.tag is not None and (c.written or c.tag).check == "none" and c.checked_by_tool
     )
     pcts = _effort_percentiles(h)
     easy_high_effort = sum(
@@ -2305,7 +2350,7 @@ def _agents_table(h: Habits) -> Table:
     if levels:
         cost = sum(c.cost for c in h.cycles)
         rows.append([
-            "top-level", len(h.cycles), cost, None, None, None, None, None, None, None, None, None, None,
+            "top-level", len(h.cycles), cost, None, None, None, None, None, None, None, None, None,
             _pct(sum(c.tag.level == "easy" for c in levels), len(levels)),
             _pct(sum(c.tag.level == "hard" for c in levels), len(levels)),
             None, None,
@@ -2317,7 +2362,7 @@ def _agents_table(h: Habits) -> Table:
         reports = [a for a in runs if a.report_tokens]
         results = [a for a in runs if a.result]
         leveled = [a for a in runs if a.level]
-        fits = Counter(a.fit for a in runs if a.fit)
+        edited = [a.calls_before_edit for a in runs if a.calls_before_edit is not None]
         rules = Counter(a.rules for a in runs if a.rules)
         rows.append([
             agent_type,
@@ -2328,9 +2373,8 @@ def _agents_table(h: Habits) -> Table:
             _pct(sum(a.result == "done" for a in results), len(results)),
             sum(1 for a in runs if a.retry),
             sum(1 for a in runs if a.retry == "model"),
-            fits.get("smaller", 0),
-            fits.get("right", 0),
-            fits.get("larger", 0),
+            _pct(sum(a.probe_calls for a in runs), sum(a.calls for a in runs)),
+            statistics.median(edited) if edited else None,
             rules.get("used", 0),
             rules.get("unused", 0),
             _pct(sum(a.level == "easy" for a in leveled), len(leveled)),
@@ -2350,9 +2394,8 @@ def _agents_table(h: Habits) -> Table:
             Column(key="done_pct", label="Finished", kind="pct"),
             Column(key="retried", label="Retried", kind="int"),
             Column(key="retried_model", label="Retried for the model", kind="int"),
-            Column(key="fit_smaller", label="Smaller would do", kind="int"),
-            Column(key="fit_right", label="Model was right", kind="int"),
-            Column(key="fit_larger", label="Needed larger", kind="int"),
+            Column(key="probe_pct", label="Single read-only calls", kind="pct"),
+            Column(key="before_edit", label="Calls before the first edit", kind="float"),
             Column(key="rules_used", label="Used CLAUDE.md", kind="int"),
             Column(key="rules_unused", label="Didn't use CLAUDE.md", kind="int"),
             Column(key="easy_pct", label="Easy work", kind="pct"),
@@ -2426,10 +2469,12 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
     that spawned each run, plus the cheaper model the model-swap
     evidence supports for that agent type, when nothing vetoes it --
     the agent's corpus-wide ``unfit_agents`` reason, or this task's own
-    slice of its runs saying a larger model was needed at least as
-    often as a smaller one would do (``model_gate.row_unfit_reason``,
-    the "larger model per task" veto F9/PROF-05 added: a task can need
-    a larger model even when the agent isn't unfit overall)."""
+    slice of its runs being mostly hard or retried for the model
+    (``model_gate.row_unfit_reason``, the per-task veto F9/PROF-05 added:
+    a task can need a larger model even when the agent isn't unfit
+    overall). Beside them, what the runs did: how many of their calls
+    were a single read-only probe and how many came before the first
+    edit, the same two measures as ``habits_agents``."""
     unfit = unfit_agents(_rows_as_dicts(_agents_table(h)))
     groups: dict[str, dict[str, list[AgentFact]]] = {}
     for a in h.agents:
@@ -2442,9 +2487,14 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
         for agent_type in sorted(by_agent, key=lambda a: -sum(x.cost for x in by_agent[a])):
             runs = by_agent[agent_type]
             results = [a for a in runs if a.result]
-            fits = Counter(a.fit for a in runs if a.fit)
+            leveled = [a for a in runs if a.level]
+            edited = [a.calls_before_edit for a in runs if a.calls_before_edit is not None]
             alt = None
-            task_row = {"fit_larger": fits.get("larger", 0), "fit_smaller": fits.get("smaller", 0), "runs": len(runs)}
+            task_row = {
+                "runs": len(runs),
+                "retried_model": sum(1 for a in runs if a.retry == "model"),
+                "hard_pct": _pct(sum(a.level == "hard" for a in leveled), len(leveled)),
+            }
             if agent_type not in unfit and len(runs) >= MIN_GROUP and model_gate.row_unfit_reason(task_row) is None:
                 alt = _model_swap_alt(model_swap, agent_type)
             rows.append([
@@ -2453,9 +2503,8 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
                 len(runs),
                 _mean(a.cost for a in runs),
                 _pct(sum(a.result == "done" for a in results), len(results)),
-                fits.get("smaller", 0),
-                fits.get("right", 0),
-                fits.get("larger", 0),
+                _pct(sum(a.probe_calls for a in runs), sum(a.calls for a in runs)),
+                statistics.median(edited) if edited else None,
                 alt[0] if alt else None,
                 alt[1] if alt else None,
             ])
@@ -2468,9 +2517,8 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
             Column(key="runs", label="Runs", kind="int"),
             Column(key="avg_cost", label="Per run", kind="money"),
             Column(key="done_pct", label="Finished", kind="pct"),
-            Column(key="fit_smaller", label="Smaller would do", kind="int"),
-            Column(key="fit_right", label="Model was right", kind="int"),
-            Column(key="fit_larger", label="Needed larger", kind="int"),
+            Column(key="probe_pct", label="Single read-only calls", kind="pct"),
+            Column(key="before_edit", label="Calls before the first edit", kind="float"),
             Column(key="cheaper_model", label="Cheaper model", kind="str"),
             Column(key="cheaper_saving_pct", label="Cheaper by", kind="pct"),
         ],
@@ -2947,13 +2995,13 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
 
 def unfit_agents(rows: list[dict], *, min_sessions: int | None = None) -> dict[str, str]:
     """Agents a cheaper model shouldn't be suggested for, from the
-    ``habits_agents`` rows, with why: Claude said a larger model would
-    suit the work, most of it was hard, or a run was retried for the
-    model. The main session (``top-level``) counts by how hard its work
-    was only. The per-row reason logic is shared with the model-swap
-    veto/gate helper (``model_gate.row_unfit_reason``), which every
-    other "don't suggest this model" check now goes through too (F9);
-    ``min_sessions``, when given, is an extra floor on ``runs``."""
+    ``habits_agents`` rows, with why: most of the work was hard, or a run
+    was retried for the model. The main session (``top-level``) counts by
+    how hard its work was only. The per-row reason logic is shared with
+    the model-swap veto/gate helper (``model_gate.row_unfit_reason``),
+    which every other "don't suggest this model" check now goes through
+    too (F9); ``min_sessions``, when given, is an extra floor on
+    ``runs``."""
     out: dict[str, str] = {}
     for row in rows:
         agent = row.get("agent_type")

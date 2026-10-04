@@ -510,7 +510,7 @@ def test_model_tier_leaves_out_an_agent_often_retried_on_a_larger_model():
 
 
 
-def test_model_tier_leaves_out_an_agent_whose_runs_said_they_needed_a_larger_model():
+def test_model_tier_leaves_out_an_agent_whose_work_was_mostly_hard():
     from claudeglass import habits
 
     report = _model_swap_report(
@@ -519,14 +519,15 @@ def test_model_tier_leaves_out_an_agent_whose_runs_said_they_needed_a_larger_mod
             ["implementer", "claude-opus-5-5", "claude-sonnet-5", 20.0],
         ]
     )
-    runs = [habits.AgentFact(session_id="s", agent_type="reviewer", week="", cost=1.0, fit=fit)
-            for fit in ("larger", "larger", "larger", "smaller", "smaller")]
+    runs = [habits.AgentFact(session_id="s", agent_type="reviewer", week="", cost=1.0, level=level)
+            for level in ("hard", "hard", "hard", "easy", "easy")]
     report.sections.append(habits.section_from(habits.Habits(agents=runs)))
     snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {}})
     (tier,) = [r for r in advice.finish([_tier("reviewer"), _tier("implementer")], report, snap, Units())
                if r.id == "model-tier"]
     assert [c.agent for c in tier.changes] == ["implementer"]
-    assert "Claude said a larger model was needed: reviewer (3 runs)." in tier.why
+    assert "Much of the work reported hard: reviewer (60%)." in tier.why
+    assert "Claude said" not in tier.why
 
 
 def test_model_tier_left_out_note_groups_agents_by_reason_and_names_only_a_few():

@@ -160,8 +160,9 @@ It asks up to four questions:
    so the tips fit how you work. This turns on
    [metrics capture](#metrics-capture) at its Essentials level: about
    186 tokens when a session starts and 14 per reply, plus a Claude
-   Haiku call of about $0.002 after each subagent run. It switches
-   itself off after 14 days. It also adds the `/cg-feedback` skill, for
+   Haiku call of about $0.002 after each subagent run, and after a
+   reply Claude leaves without its tag. It switches itself off after 14
+   days. It also adds the `/cg-feedback` skill, for
    rating a piece of work when it's done.
 
 Then it lists every change and asks once: **Go ahead? [Y/n/d]**. Type
@@ -454,9 +455,11 @@ level before you pick one, and measures the real cost once it's on.
 Scripts that run `claude -p` or the Agent SDK get nothing added.
 
 **Who writes the tags.** By default, Claude writes the tag at the end of
-its reply. `python -m claudeglass capture tagger haiku` has Claude Haiku
-write it after each turn instead, for about $0.002 a turn. Claude's
-replies then carry no tag, and at Essentials and Standard its
+its reply. When it ends a piece of work without one, Claude Haiku writes
+it in the background, for about $0.002 a call. `python -m claudeglass
+capture tagger haiku` has Claude Haiku write every tag after each turn
+instead, for about $0.002 a turn. Claude's replies then carry no tag,
+and at Essentials and Standard its
 session-start note goes too. Either way, Haiku judges each finished
 subagent run, and the subagent itself is asked for nothing.
 
@@ -518,7 +521,9 @@ turns on coaching notes. See
     writes the tags.
   - With `tagger = "haiku"`, the hook also sends Haiku an excerpt of
     each turn, mainly your message and the end of Claude's reply, and
-    Haiku writes the tag.
+    Haiku writes the tag. Otherwise it sends the same excerpt only when
+    Claude ends a piece of work without its tag. Scheduled tasks and
+    turns that answer a line you didn't type are left out.
   - Only Haiku's answer is kept, in a local file: a few words from a
     fixed list, with its cost and token counts. The excerpt isn't
     kept.

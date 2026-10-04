@@ -210,3 +210,34 @@ def test_a_run_a_hook_blocked_or_you_denied_never_happened(tmp_path):
 def test_a_command_that_only_mentions_the_tests_runs_none(tmp_path):
     turns = _run(tmp_path, ("Bash", "git commit -m 'run pytest tests/test_a.py'"))
     assert turns[0].tests_run == ""
+
+
+@pytest.mark.parametrize("command, scope", COMMANDS)
+def test_the_hooks_copy_cuts_every_command_apart_as_the_package_does(command, scope):
+    assert HOOK._command_parts(command) == testrun.command_parts(command)
+
+
+@pytest.mark.parametrize("command, parts", [
+    ("git commit -m 'a' && pytest -q tests/a.py", ["git commit -m 'a'", "pytest -q tests/a.py"]),
+    ("FOO=1 timeout 60 uv run pytest", ["pytest"]),
+    ("C:\\Python311\\python.exe -m pytest; npm test", ["python -m pytest", "npm test"]),
+    ("ls | grep a", ["ls", "grep a"]),
+    # A heredoc's body is not a command.
+    ("cat > a.txt <<'EOF'\nrm -rf x\nEOF\nnpm test", ["cat > a.txt", "npm test"]),
+    ("", [""]),
+])
+def test_a_line_is_cut_into_its_commands_with_what_comes_before_each_program_removed(command, parts):
+    assert [part.strip() for part in testrun.command_parts(command)] == parts
+
+
+@pytest.mark.parametrize("part, program", [
+    ("  git merge main", "git merge main"),
+    ("(cd sub", "cd sub"),
+    ("PYTHONPATH=src BAR=2 python -m pytest", "python -m pytest"),
+    ("timeout 120 uv run pytest -x", "pytest -x"),
+    ("sudo rm -rf build", "rm -rf build"),
+    ("/usr/bin/git pull", "git pull"),
+    ("C:/Python311/python.exe -m pytest -q", "python -m pytest -q"),
+])
+def test_one_command_loses_what_comes_before_its_program_and_the_folder_and_exe_of_the_program(part, program):
+    assert testrun.normalize(part) == program

@@ -599,7 +599,8 @@ def test_the_checklists_are_the_ones_the_brief_skill_holds():
 @pytest.mark.parametrize(
     "row, reason",
     [
-        ({"agent_type": "a", "fit_larger": 2, "fit_smaller": 1}, "Claude said 2 of its runs needed a larger model"),
+        # What an old table said about the model fitting is no veto.
+        ({"agent_type": "a", "fit_larger": 2, "fit_smaller": 1}, None),
         ({"agent_type": "a", "fit_larger": 1, "fit_smaller": 3, "hard_pct": 60.0}, "60% of its work was reported hard"),
         ({"agent_type": "a", "retried_model": 1}, "a run was retried because the model wasn't enough"),
         ({"agent_type": "a", "fit_smaller": 3, "hard_pct": 10.0}, None),
@@ -686,9 +687,11 @@ def test_collect_turns_tags_ratings_and_agent_reports_into_facts(tmp_path, prici
     (agent,) = h.agents
     # rules stays None: Explore is never asked about it, so its own
     # "rules=unused" isn't trusted (SEC-P2).
-    assert (agent.agent_type, agent.result, agent.fit, agent.rules, agent.level, agent.task) == (
-        "Explore", "done", "larger", None, "hard", "bugfix"
+    # The reply's own "fit=larger" is an old word nobody reads any more.
+    assert (agent.agent_type, agent.result, agent.rules, agent.level, agent.task) == (
+        "Explore", "done", None, "hard", "bugfix"
     )
+    assert not hasattr(agent, "fit")
 
 
 def _workflow_session(tmp_path, *, agent_type: str = "workflow-subagent", runs=(), logged: bool = True):
@@ -1208,10 +1211,130 @@ def test_collect_folds_in_the_free_signals_by_session():
 def test_the_agents_table_feeds_the_model_veto(tmp_path, pricing):
     section = habits.build_section(_tagged_session(tmp_path), pricing)
     rows = {r["agent_type"]: r for r in _rows(_table(section, "habits_agents"))}
-    assert rows["Explore"]["fit_larger"] == 1 and rows["Explore"]["rules_unused"] == 0
-    assert habits.unfit_agents(list(rows.values()))["Explore"] == "Claude said 1 of its runs needed a larger model"
+    assert rows["Explore"]["rules_unused"] == 0 and not [key for key in rows["Explore"] if key.startswith("fit_")]
+    # The message was reported hard, so that is the veto; what the run said about its own model is not.
+    assert habits.unfit_agents(list(rows.values()))["Explore"] == "100% of its work was reported hard"
+    easy = {**rows["Explore"], "hard_pct": 10.0}
+    assert habits.unfit_agents([easy]) == {}
+    assert habits.unfit_agents([{**easy, "agent_type": "Plan", "retried_model": 1}]) == {
+        "Plan": "a run was retried because the model wasn't enough"
+    }
     by_task = {r["task"]: r for r in _rows(_table(section, "habits_by_task"))}
     assert by_task["all"]["cycles"] == 2 and by_task["bugfix"]["redo_pct"] == pytest.approx(50.0)
+
+
+# -- what an agent's calls looked like ------------------------------------------------------
+
+
+def _calls_session(tmp_path, *runs):
+    """A main session (research, easy) that started one agent per entry of
+    ``runs``, each a list of replies, each reply a list of tool blocks. A
+    run ends with a reply of words."""
+    top_lines = [
+        _note(0, ["task", "brief", "level", "shift"]),
+        user_str_line("find the callers", origin={"kind": "human"}, timestamp=_ts(0)),
+        _reply(1, *[tool_use_block("Agent", f"toolu_{n}", {"prompt": f"find the callers {n}"}) for n in range(len(runs))],
+               {"type": "text", "text": "Looking.\n[cg: task=research brief=clear level=easy]"}),
+        *[user_block_line([tool_result_block(f"toolu_{n}", "done")], timestamp=_ts(60 + n)) for n in range(len(runs))],
+        _reply(80, text="Found.\n[cg: task=research]"),
+    ]
+    top = _parse(tmp_path, "top.jsonl", top_lines, kind="top-level")
+    subs = []
+    for n, steps in enumerate(runs):
+        lines = [user_str_line(f"find the callers {n}", timestamp=_ts(2))]
+        for at, blocks in enumerate(steps):
+            lines.append(_reply(3 + 2 * at, *blocks))
+            lines.append(user_block_line(
+                [tool_result_block(b["id"], "ok") for b in blocks if b.get("type") == "tool_use"], timestamp=_ts(4 + 2 * at)))
+        lines.append(_reply(3 + 2 * len(steps), text="Done."))
+        subs.append(_parse(tmp_path, f"agent-a{n}.jsonl", lines, kind="subagent", agent_id=f"agent-a{n}",
+                           agent_type="Explore", tool_use_id=f"toolu_{n}"))
+    return NS(sessions=[NS(top=top, subs=subs, session_id="s1", project_dir="p")])
+
+
+def _read(name: str, n: int = 0) -> dict:
+    return tool_use_block("Read", f"r{name}{n}", {"file_path": f"/w/{name}.py"})
+
+
+def _shell(command: str, n: int = 0, tool: str = "Bash") -> dict:
+    return tool_use_block(tool, f"b{n}", {"command": command})
+
+
+_LOOKING_AND_EDITING = [
+    [_read("a")],                                   # a single read-only call
+    [tool_use_block("Grep", "g1", {"pattern": "foo"})],  # so is a Grep
+    [_read("b", 1), _read("c", 2)],                 # two calls in one message are not a single probe
+    [_shell("grep -n foo src/a.py", 4)],            # nor is a shell read less of one than a Read
+    [_shell("pytest -q", 5)],                       # a command that is no read is not
+    [tool_use_block("Edit", "e1", {"file_path": "/w/a.py"})],
+]
+
+
+def test_an_agent_run_counts_its_single_read_only_calls_and_the_calls_before_its_first_edit(tmp_path, pricing):
+    (agent,) = habits.collect(_calls_session(tmp_path, _LOOKING_AND_EDITING), pricing).agents
+    # Six calls and the closing words: three were a lone look, five came before the edit.
+    assert (agent.calls, agent.probe_calls, agent.calls_before_edit) == (7, 3, 5)
+
+
+def test_a_run_that_changed_nothing_has_no_calls_before_an_edit_and_a_message_is_one_call(tmp_path, pricing):
+    split = [
+        turn_line(message_id="msg_split", model=MODEL, timestamp=_ts(3), content=[_read("a")]),
+        turn_line(message_id="msg_split", model=MODEL, timestamp=_ts(4), content=[_read("b", 1)]),
+    ]
+    run = [[_read("c", 2)], [_shell("cat src/a.py src/b.py", 3)], [_shell("git log --oneline -5", 4)]]
+    (agent,) = habits.collect(_calls_session(tmp_path, run), pricing).agents
+    assert (agent.calls, agent.probe_calls, agent.calls_before_edit) == (4, 3, None)
+    # Two lines of one message id are one message with two calls: not a lone look.
+    top = _calls_session(tmp_path, [[_read("a")]])
+    sub = _parse(tmp_path, "agent-split.jsonl", [
+        user_str_line("find the callers 0", timestamp=_ts(2)),
+        *split,
+        {"type": "user", "timestamp": _ts(5), "message": {"role": "user", "content": [
+            tool_result_block("ra0", "ok"), tool_result_block("rb1", "ok")]}},
+        _reply(6, text="Done."),
+    ], kind="subagent", agent_id="agent-a0", agent_type="Explore", tool_use_id="toolu_0")
+    top.sessions[0].subs = [sub]
+    (agent,) = habits.collect(top, pricing).agents
+    assert (agent.calls, agent.probe_calls) == (2, 0)
+
+
+@pytest.mark.parametrize("block, probe", [
+    (_read("a"), True),
+    (tool_use_block("Glob", "g1", {"pattern": "*.py"}), True),
+    (_shell("sed -n 1,40p src/a.py"), True),
+    (_shell("Get-Content src\\a.py", tool="PowerShell"), True),  # a PowerShell read is a shell read too
+    (_shell("pytest -q"), False),
+    (_shell("echo hi > out.txt"), False),
+    (_shell("cat a.py && rm b.py"), False),         # a read that also moves a file is not a probe
+    (tool_use_block("WebFetch", "w1", {"url": "https://example.com"}), False),
+    (tool_use_block("Edit", "e1", {"file_path": "/w/a.py"}), False),
+])
+def test_what_counts_as_a_single_read_only_call(tmp_path, pricing, block, probe):
+    (agent,) = habits.collect(_calls_session(tmp_path, [[block]]), pricing).agents
+    assert agent.probe_calls == (1 if probe else 0)
+
+
+def test_both_agent_tables_carry_the_measured_columns_and_no_fit_column(tmp_path, pricing):
+    runs = [_LOOKING_AND_EDITING, [[_read("a")], [tool_use_block("Edit", "e1", {"file_path": "/w/a.py"})]]]
+    section = habits.build_section(_calls_session(tmp_path, *runs), pricing)
+    for name, row_key in (("habits_agents", "agent_type"), ("habits_agents_by_task", "agent_type")):
+        table = _table(section, name)
+        keys = [c.key for c in table.columns]
+        assert "probe_pct" in keys and "before_edit" in keys and not [k for k in keys if k.startswith("fit_")]
+        kinds = {c.key: c.kind for c in table.columns}
+        assert kinds["probe_pct"] == "pct" and kinds["before_edit"] == "float"
+        (row,) = [r for r in _rows(table) if r[row_key] == "Explore"]
+        assert row["runs"] == 2
+        # Four of the ten calls were a lone look; the typical run made 3 calls before its edit (5 and 1).
+        assert row["probe_pct"] == pytest.approx(40.0)
+        assert row["before_edit"] == pytest.approx(3.0)
+    assert not hasattr(habits.AgentFact, "fit")
+
+
+def test_a_run_of_words_alone_has_no_lone_looks_and_no_edit(tmp_path, pricing):
+    section = habits.build_section(_calls_session(tmp_path, []), pricing)
+    (row,) = [r for r in _rows(_table(section, "habits_agents")) if r["agent_type"] == "Explore"]
+    assert row["probe_pct"] == 0 and row["before_edit"] is None
 
 
 # -- agents by kind of task --------------------------------------------------------------
@@ -1235,7 +1358,7 @@ def test_agents_without_a_task_are_left_out_of_the_by_task_table():
 def test_a_cheaper_model_is_named_only_with_enough_runs_no_veto_and_a_real_saving():
     unvetoed = [_agent(agent_type="reviewer", task="bugfix", cost=2.0, result="done") for _ in range(habits.MIN_GROUP)]
     vetoed = [
-        _agent(agent_type="Explore", task="bugfix", cost=1.0, result="done", fit="larger"),
+        _agent(agent_type="Explore", task="bugfix", cost=1.0, result="done", retry="model"),
         *[_agent(agent_type="Explore", task="bugfix", cost=1.0, result="done") for _ in range(habits.MIN_GROUP - 1)],
     ]
     h = Habits(agents=[*unvetoed, *vetoed])
@@ -1246,8 +1369,8 @@ def test_a_cheaper_model_is_named_only_with_enough_runs_no_veto_and_a_real_savin
     rows = {r["agent_type"]: r for r in _rows(_table(habits.section_from(h, model_swap=model_swap), "habits_agents_by_task"))}
     assert rows["reviewer"]["task"] == "bugfix" and rows["reviewer"]["runs"] == habits.MIN_GROUP
     assert (rows["reviewer"]["cheaper_model"], rows["reviewer"]["cheaper_saving_pct"]) == ("sonnet", 30.0)
-    # Explore's runs said one of them needed a larger model: unfit_agents holds it back.
-    assert rows["Explore"]["fit_larger"] == 1 and rows["Explore"]["cheaper_model"] is None
+    # One of Explore's runs was retried because the model wasn't enough: the task's own veto holds it back.
+    assert rows["Explore"]["runs"] == habits.MIN_GROUP and rows["Explore"]["cheaper_model"] is None
 
 
 def test_too_few_runs_or_too_small_a_saving_name_no_cheaper_model():

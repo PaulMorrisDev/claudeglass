@@ -55,7 +55,7 @@ subagent type that most often answered that kind of task, when its
 `habits_agents_by_task` runs support one and nothing vetoes it — the
 same checks the corpus-wide "cheaper models where it's safe" goal uses
 (a worse setup or a retried model from the quality check, or an agent
-whose runs said, or were mostly, hard work). Every candidate's
+whose work was mostly reported hard). Every candidate's
 estimated saving is scaled to that task's own share of the window
 (`habits_by_task`'s per-task cost against the total, or the agent's
 task share against its own for an agent candidate); without a clean
@@ -75,8 +75,10 @@ subagent run says whether it used your CLAUDE.md. "Spend less on
 subagents" ticks `omitClaudeMd` for an agent type when more of its runs
 said they didn't use it than said they did, cites the count, and leaves
 it out when more said they did. Without those reports it is offered
-unticked, as before. What the runs said about the model only ever holds
-a cheaper model back.
+unticked, as before. A cheaper model is held back for an agent whose
+work was mostly reported hard, or that was retried because the model
+wasn't enough; what its runs did, the single read-only calls and the
+calls before the first edit, is shown beside it and never pushes one.
 
 The estimate reads the report's own tables and runs no new simulation:
 

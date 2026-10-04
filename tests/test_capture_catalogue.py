@@ -25,10 +25,13 @@ from helpers import attachment_line, turn_line, user_str_line, write_jsonl
 #: unnoticed.
 _BUDGETS = {
     # Essentials carries size too, since the before-and-after comparison
-    # splits by it: about 10 tokens more.
-    "essentials": (205, 95),
-    "standard": (350, 205),
-    "deep": (420, 205),
+    # splits by it: about 10 tokens more. why and admit (on the shift
+    # switch), the plan and agent-report sentences and the longer shift,
+    # missing, skill and check lines took the notes from about 177, 295
+    # and 336 to about 334, 465 and 576.
+    "essentials": (340, 95),
+    "standard": (470, 205),
+    "deep": (580, 205),
 }
 
 
@@ -78,7 +81,10 @@ def test_each_note_line_lists_only_words_the_parser_keeps_and_main_lines_list_th
                 continue
             # An agent line is what Haiku reads; its words are the agent vocabulary.
             vocab = cat.AGENT_JUDGE_VOCAB if scope == "sub" else cat.TAG_VOCAB
-            for key, words, or_none in re.findall(r"(?:^|; )([a-z]+): ([a-z|,-]+)( or none)?", line):
+            # A main line may carry the keys riding on its metric (why and admit on shift), one per line.
+            for key, words, or_none in re.findall(
+                r"(?:^|; )([a-z]+): ([a-z_|,-]+)( or none)?", line, flags=re.MULTILINE
+            ):
                 assert key in vocab, (m.id, key)
                 listed = set(re.split(r"[|,]", words.strip(","))) | ({"none"} if or_none else set())
                 assert listed == set(vocab[key]), (m.id, key)
@@ -127,13 +133,14 @@ def test_essentials_tags_what_a_change_is_judged_like_for_like_on():
 
 def test_a_subset_is_custom_and_a_subagent_extra_brings_result():
     assert cat.level_of(["task", "size"]) == "custom"
-    assert cat.with_requirements(["fit", "task"]) == ("task", "result", "fit")
+    assert cat.with_requirements(["agent_brief", "task"]) == ("task", "result", "agent_brief")
     assert cat.with_requirements(["coaching_line", "nope"]) == ()
     assert cat.active_metrics("custom", ["agent_brief"], ["feedback_reminder"]) == (
         "result", "agent_brief", "feedback_reminder"
     )
     # A retired metric in an older config.toml is dropped, not asked for.
-    assert cat.active_metrics("custom", ["rules", "fit"]) == ("result", "fit")
+    assert cat.active_metrics("custom", ["rules", "fit", "found"]) == ()
+    assert cat.active_metrics("custom", ["rules", "fit", "agent_brief"]) == ("result", "agent_brief")
     assert cat.active_metrics("essentials", ["size"]) == cat.level_metrics("essentials")
 
 
@@ -150,7 +157,8 @@ def test_notes_are_worded_as_facts_and_requests_not_orders():
     for text in texts:
         assert not re.search(r"\b(must|IMPORTANT|ALWAYS|NEVER|CRITICAL)\b", text), text
         assert "the user turned on" in text.lower() or text.startswith(cat.NOTE_MARKER)
-        assert all(len(line) <= 160 for line in text.splitlines()), text
+        # The longest are the key lines that define their words (check, shift, missing).
+        assert all(len(line) <= 320 for line in text.splitlines()), text
 
 
 def test_the_note_marker_names_exactly_the_metrics_it_asks_for():
@@ -273,6 +281,30 @@ def test_the_packaged_json_is_the_catalogue_export():
         assert set(ids) <= known
 
 
+def test_the_export_carries_what_the_agent_judge_waits_for_and_ranks_by():
+    agent = json.loads(cat.catalogue_json_text())["judge"]["agent"]
+    assert agent["answer_tools"] == list(cat.AGENT_ANSWER_TOOLS)
+    assert {"StructuredOutput", "SubagentHandback"} <= set(agent["answer_tools"])
+    assert agent["wait"] == cat.AGENT_JUDGE_WAIT
+    # Polls, then quiet, then the cap, which lies well inside the worker's own time.
+    wait = agent["wait"]
+    assert 0 < wait["poll_s"] < wait["quiet_s"] < wait["cap_s"] < cat.JUDGE_TIMEOUT_S / 2
+    assert agent["model_tiers"] == list(cat.AGENT_MODEL_TIERS)
+    # The hook ranks models as the parser does.
+    from claudeglass import workstyle
+
+    assert tuple(agent["model_tiers"]) == tuple(workstyle._TIER_FAMILIES)
+    assert agent["limits"]["relay"] < agent["limits"]["brief"]
+    assert list(agent["keys"]) == list(cat.AGENT_JUDGE_KEYS)
+
+
+def test_an_agent_with_no_answer_is_a_failure_the_status_names():
+    from claudeglass import cli
+
+    assert "no_answer" in cat.JUDGE_ERRORS
+    assert set(cli._HAIKU_ERRORS) == set(cat.JUDGE_ERRORS)
+
+
 def test_pyproject_ships_the_json():
     pyproject = Path(__file__).resolve().parent.parent / "pyproject.toml"
     assert f"hooks/{cat.CATALOGUE_FILE}" in pyproject.read_text(encoding="utf-8")
@@ -320,23 +352,35 @@ def test_the_levels_table_note_sizes_match_rough_tokens(level):
 
 def test_a_tag_written_as_the_deep_note_asks_is_read_back_whole():
     tag, _ = capture_tags.parse_reply_tags(
-        "Done.\n\n[cg: task=bugfix brief=clear level=hard shift=new size=m missing=files,repro plan=made "
-        "skill=none found=yes prior=none detour=reread check=targeted out=part useful=no]"
+        "Done.\n\n[cg: task=bugfix brief=clear level=hard shift=redo why=left_out admit=claim size=m "
+        "missing=files,repro plan=made skill=none prior=none check=targeted out=part useful=no]"
     )
-    assert (tag.task, tag.brief, tag.level, tag.shift, tag.size) == ("bugfix", "clear", "hard", "new", "m")
+    assert (tag.task, tag.brief, tag.level, tag.shift, tag.size) == ("bugfix", "clear", "hard", "redo", "m")
+    assert (tag.why, tag.admit) == ("left_out", "claim")
     assert tag.missing == ("files", "repro")
-    assert (tag.plan, tag.skill, tag.found, tag.prior, tag.detour, tag.check) == (
-        "made", "none", "yes", "none", "reread", "targeted",
-    )
+    assert (tag.plan, tag.skill, tag.prior, tag.check) == ("made", "none", "none", "targeted")
     assert (tag.out, tag.useful) == ("part", "no")
 
 
 def test_a_report_tag_written_as_the_standard_note_asks_is_read_back_whole():
+    tag, result = capture_tags.parse_reply_tags("Report.\n[result: partial brief=vague missing=goal,done]")
+    assert result == "partial"
+    assert (tag.brief, tag.missing) == ("vague", ("goal", "done"))
+
+
+def test_older_transcripts_with_found_fit_and_rules_are_still_read():
+    """found, fit and rules are no longer asked for, but a transcript written
+    while they were is read as before: their words stay in the vocabulary."""
     tag, result = capture_tags.parse_reply_tags(
         "Report.\n[result: partial fit=larger rules=unused brief=vague missing=goal,done]"
     )
     assert result == "partial"
     assert (tag.fit, tag.rules, tag.brief, tag.missing) == ("larger", "unused", "vague", ("goal", "done"))
+    tag, _ = capture_tags.parse_reply_tags("Found it.\n\n[cg: task=research found=partial detour=reread]")
+    assert (tag.task, tag.found, tag.detour) == ("research", "partial", "reread")
+    for retired in ("found", "fit", "rules"):
+        assert retired in cat.RETIRED_METRIC_IDS and retired not in cat.METRICS_BY_ID
+        assert retired in cat.TAG_VOCAB
 
 
 def test_the_session_note_is_recognised_in_a_transcript(tmp_path):
@@ -360,10 +404,73 @@ def test_the_session_note_offers_fix_for_a_fault_in_earlier_work_and_the_parser_
     note = cat.note_text(cat.level_metrics("essentials"), "main")
     assert (
         "shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the last one; "
-        "the scope grew; redoing earlier work; fixing a fault in it)"
+        "the scope grew; redoing earlier work; changing what you just delivered because it was wrong or not "
+        "what they wanted, a rename or tweak included = fix)"
     ) in note.splitlines()
     tag, _ = capture_tags.parse_reply_tags("Fixed the earlier change.\n\n[cg: task=bugfix shift=fix]")
     assert (tag.task, tag.shift) == ("bugfix", "fix")
+
+
+def test_why_and_admit_ride_on_the_shift_switch():
+    shift = cat.METRICS_BY_ID["shift"]
+    assert shift.extra_keys == ("why", "admit")
+    assert cat.TAG_VOCAB["why"] == ("left_out", "missed", "changed", "tools")
+    assert cat.TAG_VOCAB["admit"] == ("claim", "change", "instruction")
+    # They are keys, not metrics: shift on asks for all three, shift off for none of them.
+    assert "why" not in cat.METRICS_BY_ID and "admit" not in cat.METRICS_BY_ID
+    assert cat.tag_keys(["task", "shift", "size"]) == ("task", "shift", "why", "admit", "size")
+    assert cat.tagged_keys(["task", "shift", "size"]) == ("task", "shift", "size")
+    assert cat.tag_keys(["task", "size"]) == ("task", "size")
+    plain = cat.note_text(["task", "size"], "main")
+    assert "why:" not in plain and "admit:" not in plain
+    lines = cat.note_text(cat.level_metrics("essentials"), "main").splitlines()
+    assert (
+        "why: left_out|missed|changed|tools, only with shift redo or fix (their earlier request or the plan "
+        "left it out; you missed something their request or the plan said; they changed their mind; a tool or "
+        "setup failure)"
+    ) in lines
+    assert (
+        "admit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of yours: a "
+        "wrong statement; a wrong change; an instruction you were given and didn't follow)"
+    ) in lines
+    # Each rides on shift's line in the note: after it and before the next metric's.
+    keys = [line.split(":")[0] for line in lines if re.match(r"[a-z]+: ", line)]
+    assert keys[keys.index("shift"):][:3] == ["shift", "why", "admit"]
+    # The hook reads the same list from the packaged catalogue, and the marker names shift once.
+    assert [m["extra_keys"] for m in cat.export_json()["metrics"] if m["id"] == "shift"] == [["why", "admit"]]
+    _, codes = capture_tags.parse_note_codes(cat.note_text(cat.level_metrics("essentials"), "main"))
+    assert codes.count("shift") == 1 and "why" not in codes and "admit" not in codes
+
+
+def test_the_note_ends_with_the_plan_and_agent_report_rules_and_defines_files_and_scope():
+    note = cat.note_text(cat.level_metrics("deep"), "main")
+    closing = note.splitlines()[-1]
+    assert closing == (
+        "Leave out a key you can't judge. When carrying out a plan, judge the plan, not the go-ahead. "
+        "Tag your reply to an agent's report for the request that started the agent."
+    )
+    missing = next(line for line in note.splitlines() if line.startswith("missing: "))
+    assert "files = you had to search for which files" in missing
+    assert "scope = what to change and what to leave alone wasn't said" in missing
+    assert "always none on the first message" in next(line for line in note.splitlines() if line.startswith("prior: "))
+    skill = next(line for line in note.splitlines() if line.startswith("skill: "))
+    assert skill.index("if you ran a skill") < skill.index("would-help:<name>")
+
+
+def test_haiku_gets_the_same_meanings_for_every_key_including_why_and_admit():
+    ids = cat.level_metrics("deep")
+    lines = cat.judge_text(ids).splitlines()
+    for key in cat.tag_keys(ids):
+        assert any(line.startswith(f"{key}: ") for line in lines), key
+    why = next(line for line in lines if line.startswith("why: "))
+    assert all(f"{word} = " in why for word in cat.TAG_VOCAB["why"]), why
+    admit = next(line for line in lines if line.startswith("admit: "))
+    assert all(f"{word} = " in admit for word in cat.TAG_VOCAB["admit"]), admit
+    shift = next(line for line in lines if line.startswith("shift: "))
+    assert "A short message changing files Claude changed in its previous reply is fix, not build or grew." in shift
+    assert lines[-1].endswith("When Claude carried out a plan, judge the plan, not the user's go-ahead.")
+    # Haiku may leave why and admit out where they don't fit, never the retired keys in.
+    assert not any(line.startswith(("found: ", "fit: ")) for line in lines)
 
 
 # -- the /cg-brief skill -----------------------------------------------------

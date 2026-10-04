@@ -233,3 +233,106 @@ def test_the_files_a_subagent_changed_are_counted_from_its_result(tmp_path):
     assert _agent_turn(tmp_path, {}).agent_edit_files == 0
     assert _agent_turn(tmp_path, {"toolStats": {"editFileCount": "3"}}).agent_edit_files == 0
     assert _agent_turn(tmp_path, {"toolStats": {"editFileCount": 3}}, is_error=True).agent_edit_files == 0
+
+
+# -- what a reply changed (``edit_call_count``, ``edit_doc_count``, ``shell_change_count``) ---
+
+
+def test_every_edit_call_to_your_work_counts_and_the_ones_to_documentation_count_again(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": "C:/Dev/repo/a.py"}),
+        tool_use_block("Write", "t2", {"file_path": "C:/Dev/repo/README.MD"}),
+        tool_use_block("MultiEdit", "t3", {"file_path": "C:/Dev/repo/a.py"}),
+        tool_use_block("NotebookEdit", "t4", {"notebook_path": "C:/Dev/repo/n.ipynb"}),
+        tool_use_block("Edit", "t5", {"file_path": "C:/Dev/repo/notes.txt"}),
+    ], [_ok(f"t{n}") for n in range(1, 6)])
+    assert (turn.edit_call_count, turn.edit_doc_count) == (5, 2)
+
+
+def test_an_edit_inside_a_claude_folder_or_with_no_path_is_not_a_change_of_yours(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": "C:/Users/me/.claude/plans/p.md"}),
+        tool_use_block("Edit", "t2", {"file_path": ""}),
+        tool_use_block("Edit", "t3", {}),
+        tool_use_block("Read", "t4", {"file_path": "C:/Dev/repo/a.py"}),
+    ], [_ok(f"t{n}") for n in range(1, 5)])
+    assert (turn.edit_call_count, turn.edit_doc_count) == (0, 0)
+
+
+def test_an_edit_that_failed_or_was_denied_is_taken_back(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": "C:/Dev/repo/a.py"}),
+        tool_use_block("Edit", "t2", {"file_path": "C:/Dev/repo/b.md"}),
+        tool_use_block("Edit", "t3", {"file_path": "C:/Dev/repo/c.md"}),
+        tool_use_block("Edit", "t4", {"file_path": "C:/Dev/repo/d.py"}),
+    ], [
+        tool_result_block("t1", "File has not been read yet.", is_error=True),
+        tool_result_block("t2", "The user doesn't want to proceed with this tool use.", is_error=True),
+        _ok("t3"),
+        _ok("t4"),
+    ])
+    assert (turn.edit_call_count, turn.edit_doc_count) == (2, 1)
+
+
+@pytest.mark.parametrize("command", [
+    "git merge main",
+    "git pull --rebase",
+    "git restore src/a.py",
+    "mv a.py b.py",
+    "rm -rf build",
+    "mkdir -p out",
+    "FOO=1 timeout 60 git pull",
+    "npm test && sudo rm old.log",
+    "patch -p1 < fix.diff",
+])
+def test_a_command_that_moves_or_removes_files_counts_once(tmp_path, salt, command):
+    assert _turn(tmp_path, [_bash(command)], [_ok()]).shell_change_count == 1
+
+
+@pytest.mark.parametrize("command", [
+    "git status",
+    "git commit -m 'merge it' && git push",
+    "git log --merge",
+    "npm test 2>&1",
+    "pytest -q > /dev/null",
+    "cat a.py | grep rm",
+    "echo 'rm -rf build'",
+    "ls",
+])
+def test_a_command_that_changes_no_file_counts_nothing(tmp_path, salt, command):
+    assert _turn(tmp_path, [_bash(command)], [_ok()]).shell_change_count == 0
+
+
+def test_a_powershell_command_that_removes_a_file_counts(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("PowerShell", "t1", {"command": "Remove-Item -Recurse build"}),
+        tool_use_block("PowerShell", "t2", {"command": "Get-ChildItem build"}),
+    ], [_ok("t1"), _ok("t2")], cwd="C:\\Dev\\repo")
+    assert turn.shell_change_count == 1
+
+
+def test_a_file_changing_command_is_counted_once_per_command_and_taken_back_only_when_it_never_ran(
+    tmp_path, salt
+):
+    turn = _turn(tmp_path, [
+        _bash("git merge a && git merge b", "t1"),
+        _bash("git merge c", "t2"),
+        _bash("git merge d", "t3"),
+        _bash("git merge e", "t4"),
+    ], [
+        tool_result_block("t1", "The user doesn't want to proceed with this tool use.", is_error=True),
+        tool_result_block("t2", "PreToolUse:Bash hook error: [guard.sh]: not here", is_error=True),
+        tool_result_block("t3", "Exit code 1", is_error=True),
+        _ok("t4"),
+    ])
+    # The merge that ran and failed may have moved files; the two that never ran moved none.
+    assert turn.shell_change_count == 2
+
+
+def test_the_counts_are_plain_numbers_and_do_not_depend_on_the_salt(tmp_path, salt):
+    turn = _turn(tmp_path, [
+        tool_use_block("Edit", "t1", {"file_path": "C:/Dev/repo/a.py"}),
+        _bash("git mv a.py b.py", "t2"),
+    ], [_ok("t1"), _ok("t2")])
+    assert (turn.edit_call_count, turn.edit_doc_count, turn.shell_change_count) == (1, 0, 1)
+    assert all(type(n) is int for n in (turn.edit_call_count, turn.edit_doc_count, turn.shell_change_count))

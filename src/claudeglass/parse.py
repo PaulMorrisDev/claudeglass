@@ -251,7 +251,7 @@ from . import prompt_shape
 from . import shell_reads
 from . import shell_writes
 from . import testrun
-from .capture_catalogue import REPORT_THRESHOLDS
+from .capture_catalogue import DOC_SUFFIXES, REPORT_THRESHOLDS
 from .model import (
     PROMPT_FLAGS,
     CaptureTag,
@@ -822,6 +822,17 @@ class _PendingTurn:
     config_edit_count: int = 0
     config_edits_by_tool_use: dict[str, int] = field(default_factory=dict)
     agent_edit_files: int = 0
+    #: Grounding addition (see model.py's ``Turn.edit_call_count``/
+    #: ``edit_doc_count``/``shell_change_count``): the edit calls outside a
+    #: ``.claude`` folder, those aimed at documentation, and the shell
+    #: commands that change files without authoring them. The two edit
+    #: counts and the command count come with the part each tool_use added,
+    #: so a call that failed or never ran can be taken back.
+    edit_call_count: int = 0
+    edit_doc_count: int = 0
+    edit_calls_by_tool_use: dict[str, tuple[int, int]] = field(default_factory=dict)
+    shell_change_count: int = 0
+    shell_changes_by_tool_use: dict[str, int] = field(default_factory=dict)
     #: Fast-mode addition (see model.py's ``Turn.speed`` docstring).
     speed: str | None = None
     #: Quality-markers/metrics-capture addition: the end of this reply's
@@ -1146,6 +1157,14 @@ def _merge_content_blocks(
                         pending.config_edits_by_tool_use[tool_use_id] = (
                             pending.config_edits_by_tool_use.get(tool_use_id, 0) + 1
                         )
+                else:
+                    # Grounding addition: an edit to your work, and whether it
+                    # was to documentation. The path is read and dropped.
+                    is_doc = int(path_value.lower().endswith(DOC_SUFFIXES))
+                    pending.edit_call_count += 1
+                    pending.edit_doc_count += is_doc
+                    if isinstance(tool_use_id, str) and tool_use_id:
+                        pending.edit_calls_by_tool_use[tool_use_id] = (1, is_doc)
 
         # A2: agent-brief size -- the Agent/Task tool_use's own `prompt`
         # input length, never the prompt text itself -- plus a per-tool
@@ -1232,6 +1251,13 @@ def _merge_content_blocks(
                         pending.config_edits_by_tool_use[tool_use_id] = (
                             pending.config_edits_by_tool_use.get(tool_use_id, 0) + config_targets
                         )
+                # Grounding addition: a command that changes files without
+                # authoring them (``git merge``, ``mv``, ``rm``), one per
+                # command. Taken back when the call never ran.
+                if shell_writes.changes_files(command, powershell=name == "PowerShell"):
+                    pending.shell_change_count += 1
+                    if isinstance(tool_use_id, str) and tool_use_id:
+                        pending.shell_changes_by_tool_use[tool_use_id] = 1
         if edited:
             pending.edit_target_hashes.extend(edited)
             if isinstance(tool_use_id, str) and tool_use_id:
@@ -1833,6 +1859,13 @@ def _accumulate_tool_results(
                 config_made = current.config_edits_by_tool_use.pop(tool_use_id, 0)
                 if config_made and (name not in _SHELL_TOOL_NAMES or kind in _SHELL_NOT_RUN_KINDS):
                     current.config_edit_count -= config_made
+                # And the edit calls and file-changing commands, the same way.
+                calls_made, docs_made = current.edit_calls_by_tool_use.pop(tool_use_id, (0, 0))
+                current.edit_call_count -= calls_made
+                current.edit_doc_count -= docs_made
+                changes_made = current.shell_changes_by_tool_use.pop(tool_use_id, 0)
+                if changes_made and kind in _SHELL_NOT_RUN_KINDS:
+                    current.shell_change_count -= changes_made
                 # And the reads and test runs: a command that never ran
                 # read nothing and ran no tests.
                 if kind in _SHELL_NOT_RUN_KINDS:
@@ -2233,6 +2266,9 @@ def _finalize_turn(
         shell_write_count=pending.shell_write_count,
         config_edit_count=pending.config_edit_count,
         agent_edit_files=pending.agent_edit_files,
+        edit_call_count=pending.edit_call_count,
+        edit_doc_count=pending.edit_doc_count,
+        shell_change_count=pending.shell_change_count,
         human_correction=human_correction,
         speed=pending.speed,
         retry_marker=retry_marker,

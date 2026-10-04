@@ -987,13 +987,14 @@ TABLE_COPY: dict[str, TableCopy] = {
     "habits_agents": TableCopy(
         title="How agents were used",
         help=Help(
-            shows="Each subagent type: its reports, whether it finished and why it was retried. Also whether Claude "
-            "thought its model fit the work, whether it used your CLAUDE.md, and files it read again. The main "
+            shows="Each subagent type: its reports, whether it finished and why it was retried. Also how many of its "
+            "calls only looked at one thing, whether it used your CLAUDE.md, and files it read again. The main "
             "session's row says how hard its work was.",
-            read="Model fit and CLAUDE.md use are the agent's own report, so they only hold a cheaper model "
-            "back and never push one. Files read again are files the main session had already read.",
-            act="A cheaper model isn't suggested for an agent whose runs said they needed a larger one or "
-            "were mostly hard work. For long reports, ask for a short one in the brief.",
+            read="The calls that only looked and the calls before the first edit are counted from the runs. Mostly "
+            "single looks is the kind of work a smaller model is often enough for. CLAUDE.md use is the agent's own "
+            "report. Files read again are files the main session had already read.",
+            act="A cheaper model isn't suggested for an agent whose work was mostly hard or that was retried "
+            "because the model wasn't enough. For long reports, ask for a short one in the brief.",
         ),
         columns={
             "agent_type": ("Agent", "The subagent type."),
@@ -1004,9 +1005,14 @@ TABLE_COPY: dict[str, TableCopy] = {
             "done_pct": ("Finished", "Runs that said done, out of those that said."),
             "retried": ("Retried", "Runs started again with a reason."),
             "retried_model": ("Retried for the model", "Retries that said the model wasn't enough."),
-            "fit_smaller": ("Smaller would do", "Runs that said a smaller model would have done."),
-            "fit_right": ("Model was right", "Runs that said the model fit."),
-            "fit_larger": ("Needed larger", "Runs that said a larger model would have done better."),
+            "probe_pct": (
+                "Single read-only calls",
+                "Calls that made one Read, Grep, Glob or file-reading command and nothing else, out of all its calls.",
+            ),
+            "before_edit": (
+                "Calls before the first edit",
+                "A typical run's calls before its first change to your files, among the runs that made one.",
+            ),
             "rules_used": ("Used CLAUDE.md", "Runs that said they used your CLAUDE.md."),
             "rules_unused": ("Didn't use CLAUDE.md", "Runs that said they didn't."),
             "easy_pct": ("Easy work", "Runs on messages Claude called easy."),
@@ -1015,7 +1021,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "nested": ("Started by an agent", "Runs another agent started."),
         },
         value_labels={"top-level": "Main session"},
-        lead_columns=["agent_type", "runs", "cost", "done_pct", "retried", "fit_smaller", "report_tokens"],
+        lead_columns=["agent_type", "runs", "cost", "done_pct", "retried", "probe_pct", "report_tokens"],
     ),
     "habits_effort_fit": TableCopy(
         title="Effort against how hard the work was",
@@ -1114,11 +1120,11 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="Agents by kind of task",
         help=Help(
             shows="Each kind of task Claude reported, split by the subagent type that answered it. It shows the runs, "
-            "what a run cost, whether it finished, and whether its runs said the model fit.",
-            read="Finished and model fit are the agent's own reports: the same signals as How agents were used, split "
-            "by task. A cheaper model is named only when three things hold. Enough runs of that pairing point to it. "
-            "None of them said it needed a larger model or was mostly hard work. And the quality check hasn't found "
-            "that model worse for this agent.",
+            "what a run cost, whether it finished, and how its calls looked.",
+            read="Finished is judged from each run's report. The other columns are the same signals as How agents "
+            "were used, split by task. A cheaper model is named only when three things hold. Enough runs of that "
+            "pairing point to it. Its runs weren't mostly hard work, and none was retried for the model. And the "
+            "quality check hasn't found that model worse for this agent.",
             act="On {{page:setup/profiles}}, the goal A profile for one kind of task offers this cheaper model as a "
             "candidate when the evidence here supports one.",
         ),
@@ -1128,9 +1134,14 @@ TABLE_COPY: dict[str, TableCopy] = {
             "runs": ("Runs", "Its runs on this task, at any depth."),
             "avg_cost": ("Per run", "The average cost of a run."),
             "done_pct": ("Finished", "Runs that said done, out of those that said."),
-            "fit_smaller": ("Smaller would do", "Runs that said a smaller model would have done."),
-            "fit_right": ("Model was right", "Runs that said the model fit."),
-            "fit_larger": ("Needed larger", "Runs that said a larger model would have done better."),
+            "probe_pct": (
+                "Single read-only calls",
+                "Calls that made one Read, Grep, Glob or file-reading command and nothing else, out of all its calls.",
+            ),
+            "before_edit": (
+                "Calls before the first edit",
+                "A typical run's calls before its first change to your files, among the runs that made one.",
+            ),
             "cheaper_model": ("Cheaper model", "A cheaper model the evidence supports for this pairing, if any."),
             "cheaper_saving_pct": ("Cheaper by", "What that model would have saved, against the model it ran on."),
         },

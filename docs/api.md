@@ -1448,8 +1448,11 @@ one is built in the background.
 - `measured`: `null` while off; otherwise `since`, `sessions`,
   `subagents`, `notes`, `note_tokens`, `tag_tokens`, the amount and
   share of spend, coverage (`coverage_pct`: the share of messages
-  Claude tagged; `report_coverage_pct` for agent reports), `scopes`
-  (`main`, `subagent`, `tool`, `brief`) and a `daily` series.
+  Claude tagged; `report_coverage_pct` for agent reports; while Claude
+  writes the tags, `own_coverage_text` and `filled_text` split that share
+  into what Claude tagged and what Claude Haiku filled in, both empty
+  until it filled one), `scopes` (`main`, `subagent`, `tool`, `brief`)
+  and a `daily` series.
 - `history`: what the estimates replay (`days`, `sessions`,
   `subagents`, `cycles`), `null` with no history.
 - `hooks`: `ok` (`true` when nothing is missing and no settings policy

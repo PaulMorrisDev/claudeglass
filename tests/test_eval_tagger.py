@@ -43,6 +43,13 @@ def test_accepts(expected, got, ok):
     assert EVAL.accepts(expected, got) is ok
 
 
+def test_the_keys_scored_carry_why_and_admit_with_shift_and_not_the_dropped_ones():
+    assert EVAL.KEYS[EVAL.KEYS.index("shift"):][:3] == ["shift", "why", "admit"]
+    # why and admit are keys, not metrics to switch on; found is dropped.
+    assert "why" not in EVAL.METRIC_IDS and "admit" not in EVAL.METRIC_IDS
+    assert "found" not in EVAL.KEYS and "fit" not in EVAL.KEYS
+
+
 def test_scenarios_only_expect_known_keys_and_words():
     vocab = EVAL.CATALOGUE["judge"]["vocab"]
     for scenario in EVAL._scenarios():
@@ -97,8 +104,8 @@ def test_haiku_never_sees_claudes_own_tag():
 
 def test_the_report_scores_each_judge_and_claudes_own_tags():
     scenarios = {
-        "a": {"id": "a", "expect": {"task": ["bugfix"], "found": [None]}},
-        "b": {"id": "b", "expect": {"task": ["research"], "found": ["yes"]}},
+        "a": {"id": "a", "expect": {"task": ["bugfix"], "prior": [None]}},
+        "b": {"id": "b", "expect": {"task": ["research"], "prior": ["needed"]}},
     }
 
     def run(tag, raw=None):
@@ -109,15 +116,15 @@ def test_the_report_scores_each_judge_and_claudes_own_tags():
         "repeats": 2,
         "configs": {"haiku": {}},
         "scenarios": {
-            "a": {"claude": "task=bugfix found=yes", "skill_ran": False,
-                  "runs": {"haiku": [run("task=bugfix"), run("task=bugfix", "task=bugfix found=yes")]}},
-            "b": {"claude": "task=research found=yes", "skill_ran": False,
-                  "runs": {"haiku": [run("task=research found=yes"), run("task=docs found=yes")]}},
+            "a": {"claude": "task=bugfix prior=needed", "skill_ran": False,
+                  "runs": {"haiku": [run("task=bugfix"), run("task=bugfix", "task=bugfix prior=needed")]}},
+            "b": {"claude": "task=research prior=needed", "skill_ran": False,
+                  "runs": {"haiku": [run("task=research prior=needed"), run("task=docs prior=needed")]}},
         },
     }
     report = EVAL.score(results, scenarios)
     # 7 of 8 scored answers right; 6 of 8 before corrections; task differs between b's runs.
     assert "| haiku | 88% | 75% |" in report
     assert "| Claude's own tags (the session's model, one run) | 75% |" in report
-    assert "a.found: said yes, right is (left out)" in report
+    assert "a.prior: said needed, right is (left out)" in report
     assert json.dumps(results)  # stays JSON-safe

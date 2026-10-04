@@ -42,7 +42,7 @@ def test_a_capture_table_is_loaded(tmp_path):
     _write(tmp_path, """
 [capture]
 level = "custom"
-metrics = ["task", "fit"]
+metrics = ["task", "agent_brief"]
 sample = 25
 until = "2026-10-01"
 projects = ["claudeglass", "!secret"]
@@ -52,7 +52,7 @@ enabled_at = "2026-09-24T06:00:00+00:00"
 """)
     capture = load_config(config_dir=tmp_path).capture
     assert capture.level == "custom" and capture.sample == 25
-    assert capture.active_metrics() == ("task", "result", "fit", "feedback_skill", "feedback_note")
+    assert capture.active_metrics() == ("task", "result", "agent_brief", "feedback_skill", "feedback_note")
     assert capture.projects == ["claudeglass", "!secret"]
     assert not capture.expired(NOW)
     assert capture.expired(datetime(2026, 10, 1, tzinfo=timezone.utc))

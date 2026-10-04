@@ -403,12 +403,12 @@ _BY_TASK_KEYS = (
     "task", "cycles", "share", "cost", "avg_cost", "main_cost", "clear_pct", "large_pct", "redo_pct", "met_pct",
 )
 _AGENTS_BY_TASK_KEYS = (
-    "task", "agent_type", "runs", "avg_cost", "done_pct", "fit_smaller", "fit_right", "fit_larger",
+    "task", "agent_type", "runs", "avg_cost", "done_pct", "probe_pct", "before_edit",
     "cheaper_model", "cheaper_saving_pct",
 )
 _AGENTS_KEYS = (
     "agent_type", "runs", "cost", "report_tokens", "capped_pct", "done_pct", "retried", "retried_model",
-    "fit_smaller", "fit_right", "fit_larger", "rules_used", "rules_unused", "easy_pct", "hard_pct",
+    "probe_pct", "before_edit", "rules_used", "rules_unused", "easy_pct", "hard_pct",
     "overlap_reads", "nested",
 )
 
@@ -506,7 +506,7 @@ def test_agent_candidates_for_a_task_are_vetoed_by_unfit_agents():
         _SETUPS,
         agents_by_task=[{"task": "bugfix", "agent_type": "Explore", "runs": 8, "avg_cost": 1.0,
                           "cheaper_model": "haiku", "cheaper_saving_pct": 25.0}],
-        agents=[{"agent_type": "Explore", "cost": 10.0, "fit_larger": 1, "fit_smaller": 0}],
+        agents=[{"agent_type": "Explore", "runs": 8, "cost": 10.0, "hard_pct": 75.0, "retried_model": 0}],
     )
     out = goals.draft("tasks", model, UNITS, task="bugfix")
     assert not [c for c in out["candidates"] if c["agent"] == "Explore"]

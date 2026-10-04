@@ -12,9 +12,10 @@ a short note when a hint applies — this tool still never calls Claude
 directly. The
 one exception is part of the same opt-in: the capture hook runs the
 `claude` command you already use to ask Claude Haiku about each finished
-agent run, and, if you let Haiku write the main session's tags too
-(`capture tagger haiku`), about each turn (see "Claude Haiku as the
-tagger" and "Agent runs" below). This
+agent run, if you let Haiku write the main session's tags too
+(`capture tagger haiku`), about each turn, and, while Claude writes
+them, about a reply it left without a tag (see "Claude Haiku as the
+tagger", "Claude Haiku as the fallback" and "Agent runs" below). This
 document is a sign-off checklist for a corporate security review,
 written to be verifiable against the code rather than taken on trust.
 
@@ -88,8 +89,9 @@ keeps in `hooks/__pycache__/`), `hooks/capture-catalogue.json`
 `capture-log.jsonl` (one JSON line per `[capture]` change — the level,
 sample, `until` etc. you set, never anything from a transcript) and
 `signals/YYYY-MM.jsonl` (see "Metrics capture" below), and, while
-Claude Haiku writes the tags, `tags/YYYY-MM.jsonl` (see "Claude Haiku as
-the tagger" under "Metrics capture"), and, once
+Claude Haiku writes the tags or fills in a missing one, `tags/YYYY-MM.jsonl`
+(see "Claude Haiku as the tagger" and "Claude Haiku as the fallback" under
+"Metrics capture"), and, once
 coaching notes have been turned on, `coaching.json` (agent-type names
 and split points) and `coach-state.json` (see "Coaching notes" under
 "Metrics capture"), and, while capture is on, `payload-keys.json` (the
@@ -387,11 +389,18 @@ and numbers. Neither ever leaves `<config-dir>`. See
 no tag. When a turn of the main session ends, the capture hook's `Stop`
 entry builds a short excerpt of it from the transcript's end: your
 message (up to 2,000 characters) and the one before (300), how many you
-sent before, what Claude did (model calls, output tokens, tool names and
-counts, how many files it changed, the first line of up to six shell
-commands, skill names, subagent and tool-error counts, whether there was
-a plan) and the last 1,500 characters of Claude's final reply. Never a
-tool's output. It hands the excerpt to a worker (the same script with
+sent before and how many minutes after Claude's last reply, how many
+files that reply changed and how many changed again, how many short
+follow-ups you sent in a row, up to three messages you sent while Claude
+worked (300 characters each), what Claude did (model calls, output
+tokens, tool names and counts, how many files it changed, the first line
+of up to six Bash or PowerShell commands, skill names, subagent and
+tool-error counts, whether there was a plan and how often one was
+proposed and sent back), the first 600 characters of the plan you
+approved or, without one, of your latest message longer than 300, and
+the last 1,500 characters of Claude's final reply. Never a tool's
+output. All of it is held in memory and handed to the worker. It hands
+the excerpt to a worker (the same script with
 `--judge`) and returns. The worker runs `claude -p --model haiku --tools ""
 --setting-sources "" --strict-mcp-config --no-session-persistence
 --output-format json`, the excerpt on stdin (never on the command line,
@@ -406,29 +415,84 @@ closed vocabularies (a skill name after `would-help:` is dropped), in
 `<config-dir>/tags/YYYY-MM.jsonl`, with the time, the reply's API message
 id, and the call's cost, token counts and model name. `haiku_tags.load`
 checks every line again before a report uses it. The files are pruned on
-the same retention as the signals. `tests/test_haiku_tags.py`
+the same retention as the signals. Before the words are written, the
+hook settles them against the transcript. It reads your message and
+Claude's last reply for a few phrases (a correction, a tweak, an owned
+mistake) and the shell commands for ones that move or remove files, in
+memory. Only yes/no answers and counts go on to the worker, and none of
+that text is kept. When a word changed, the line holds an optional `g`
+note for each change, `key:from>to`, in closed vocabulary words only, and
+`haiku_tags.load` checks it with the rest of the line.
+`tests/test_haiku_tags.py`
 (`test_the_worker_logs_the_words_and_the_cost_never_the_excerpt`,
 `test_the_loader_checks_every_line_again`,
-`test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude`)
+`test_the_row_notes_each_word_grounding_changed_or_dropped_and_nothing_else`,
+`test_the_grounding_note_is_read_back_checked_and_an_old_row_has_none`,
+`test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude`,
+`test_what_the_user_sent_while_claude_worked_goes_to_haiku_and_is_never_kept`)
 covers this.
 
-**Agent runs.** With any agent metric on (`result`, `retry`, `fit`,
+**Claude Haiku as the fallback.** While Claude writes the tags, the
+default, a reply that ends a piece of work without one would leave it
+untagged. From Essentials up the same `Stop` entry then asks Haiku for
+it, with no setting of its own: this is part of the capture opt-in, and
+`capture tagger haiku` still moves every tag to Haiku. It is the same
+excerpt, worker, `claude -p` command, `CLAUDEGLASS_JUDGE` guard, closed
+vocabularies, grounding and tag file as above, and the line holds one
+more field, `w`, set to `haiku-fallback` so a report can tell the two
+writers apart (a line without it, and any other value, reads as the
+tagger's). The hook decides from the end of the transcript and the
+payload, in memory. It asks for none of these: a reply that has a tag,
+a piece of work in which any reply has one, a reply with no text, a turn
+that answers a line you didn't type (a background agent's report, a
+message from another session, a scheduled task, a command's output, a
+prompt Claude Code sent itself), a turn while a background agent is
+still running, a session a scheduled task started (it gets no note
+either, as the parser drops tags there), and any call from a script
+(`claude -p` or the Agent SDK). `tests/test_haiku_tags.py`
+(`test_the_fallback_asks_haiku_for_an_untagged_reply_that_ends_a_piece_of_work`,
+`test_the_fallback_leaves_a_tagged_reply_a_tagged_cycle_and_an_empty_reply_alone`,
+`test_the_fallback_skips_a_turn_that_answers_a_line_the_user_did_not_type`,
+`test_the_fallback_skips_a_session_a_scheduled_task_started`,
+`test_the_stop_hook_hands_a_fallback_to_the_worker_unless_a_script_is_running_it`,
+`test_the_worker_marks_a_fallback_line_with_its_writer`) and
+`tests/test_capture_hook.py` (`test_a_scheduled_task_session_gets_no_note`)
+cover this.
+
+**Agent runs.** With any agent metric on (`result`, `retry`,
 `agent_brief`, from Essentials up), no subagent is asked for anything and
 no brief carries a marker. When a subagent finishes, the capture hook's
-`SubagentStop` entry builds a short excerpt from its transcript and the
-session's: its type and model, its brief (up to 2,000 characters), the
-last 300 characters Claude wrote before starting it, what it did (model
+`SubagentStop` entry returns at once, handing the worker only the paths
+of the agent's transcript and the session's. The worker waits until the
+agent's answer call (`StructuredOutput` or `SubagentHandback`) is in the
+transcript or the file has stopped growing for three seconds, up to a
+cap of 20 seconds, and records `no_answer` without calling Haiku when
+the cap is reached. It then builds a short excerpt from the agent's
+transcript and the session's: its type and model, its brief (up to 2,000
+characters; a workflow agent's computed task, with the line the workflow
+was started with beside it, up to 300 characters, as context), the last
+300 characters Claude wrote before starting it, what it did (model
 calls, output tokens, tool names and counts, the files it changed, the
 first line of up to six shell commands, tool-error count), the last
-1,500 characters of its report, and up to four earlier agent runs (their
-type, the first 200 characters of their brief and the last 200 of their
-report). Never a tool's output. The same worker asks Haiku as above, and
-only the checked words (`result`, `retry`, `fit`, `brief`, `missing`)
-are kept in the same tag files, with the id of the agent's last reply.
-Agents that set up Claude Code itself are skipped. `tests/test_haiku_tags.py`
+1,500 characters of its report or, when it handed an answer back
+through an answer tool, that answer, field by field with each value cut
+at 300 characters, and up to four earlier agent runs read from the
+whole of the session's transcript (their type, model, the first 200
+characters of their brief and the last 200 of their report). Never a
+tool's output. The same worker asks Haiku as above, and only the checked
+words (`result`, `retry`, `brief`, `missing`) are kept in the same tag
+files, with the id of the agent's last reply. A run judged at more than
+one stop has a line for each, and the newest is read. Older lines may
+also hold a `fit` word, from before that verdict was dropped, and it is
+still read. Agents that set up Claude Code itself are skipped.
+`tests/test_haiku_tags.py`
 (`test_the_agent_excerpt_says_what_the_run_did_and_what_came_before`,
 `test_the_worker_logs_an_agent_runs_words_under_their_own_key`,
-`test_the_subagent_stop_hook_hands_the_run_to_a_worker`) covers this.
+`test_the_subagent_stop_hook_hands_the_run_to_a_worker`,
+`test_the_stop_hook_returns_at_once_and_leaves_the_reading_to_the_worker`,
+`test_a_workflow_agents_answer_is_shown_field_by_field_each_value_cut_on_its_own`,
+`test_a_file_that_never_stops_growing_is_given_up_on_at_the_cap_and_no_haiku_call_is_made`)
+covers this.
 
 **Scripts and the Agent SDK.** A run with nobody at the screen
 (`claude -p` or the Agent SDK: Claude Code sets `CLAUDE_CODE_ENTRYPOINT`
@@ -540,9 +604,10 @@ capture or coaching notes, which spend tokens inside your own Claude
 Code session (never a call this tool makes itself) — see "Metrics
 capture" above. From Essentials up, the capture hook starts the `claude`
 command once per finished agent run, and, while Claude Haiku writes the
-tags, once per turn; the call is Claude Code's, with your own login,
+tags, once per turn, or, while Claude writes them, once for a reply that
+ended without one; the call is Claude Code's, with your own login,
 and the hook imports no networking module (see "Claude Haiku as the
-tagger" and "Agent runs" above).
+tagger", "Claude Haiku as the fallback" and "Agent runs" above).
 
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:

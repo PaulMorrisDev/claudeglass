@@ -365,7 +365,7 @@ transcript: a main session or one subagent run.
 
 | Signal | Counted as | Out of | For |
 |---|---|---|---|
-| Didn't finish | runs that reported failure, were stopped, were ended early by Claude Code, never replied, were cut off (the last reply asked for a tool and nothing came after it; ending on a `StructuredOutput` call is a workflow agent's answer, so that counts as finished), or ended their last reply with `[result: partial]` or `[result: blocked]` (see markers below) | agent runs | subagents |
+| Didn't finish | runs that reported failure, were stopped, were ended early by Claude Code, never replied, were cut off (the last reply asked for a tool and nothing came after it; ending on a `StructuredOutput` or `SubagentHandback` call is an agent handing its answer back, so that counts as finished), or ended their last reply with `[result: partial]` or `[result: blocked]` (see markers below) | agent runs | subagents |
 | Likely out of turns | cut-off runs that ended right after a tool result came back, without being stopped: how a run ends when its `maxTurns` runs out (Claude Code doesn't record the reason) | agent runs | subagents |
 | Retried on a larger model | runs after which the same agent type, started again on a larger model family in the same session, edited one of the same files within 2 hours, or a larger model was started with a brief saying `[retry: model]` (see below) | agent runs that edited files or were retried | subagents |
 | Reported failure / Stopped | the status in the agent's task notification or result | agent runs with a recorded outcome | subagents |
@@ -559,7 +559,7 @@ wrong, so a habit built on few tagged cycles is shown with that caveat.
 **Enough data.** Each metric has a target answer count before its
 suggestions are treated as settled rather than early (`capture.ENOUGH`):
 40 tagged cycles for a main-session metric (`task`, `brief`, `level`,
-...), 25 for a subagent metric (`result`, `fit`, `rules`, `agent_brief`),
+...), 25 for a subagent metric (`result`, `agent_brief`),
 20 for a brief-start marker (`retry`, `spawn`), 15 for a tool-note metric
 (`big_output`, `web`), 20 for a free signal, 10 for a feedback answer.
 Setup › Capture uses this to suggest lowering a level once a metric has
@@ -591,6 +591,21 @@ whether you've already picked it up. Every table is always present in a
 report, empty (with a note saying why) when capture is off or nothing's
 been collected yet — a table never disappears out from under you.
 
+**A tag's words are checked against the transcript.** Claude and Haiku
+can write a word the transcript contradicts: `check=none` after a test
+run, or a `why` with no redo behind it. Before a tag counts, a fixed
+rule set (`capture_tags.settle`) puts such words right from the counts
+the parser took: files changed, tests run, plans and how you answered
+them, skills run. The capture hook applies the same rules, written again
+because it can't import the package, to Haiku's words before they are
+stored, whether it writes every tag or fills in one Claude left out. The
+tag file notes each change in an optional `g` field.
+Claude's tag is kept as it was written, and reports read the settled
+words. A reply that reads like an admission with no `admit` word is only
+a possible admission and is never added to a total. When one message
+gets several tags, `level` and `size` take the highest word. Nothing but
+counts, yes/no answers and closed words comes out of the check.
+
 **Evidence and confidence.** Each habit is labelled by where its
 evidence came from: **reported** (a capture tag), **inferred** (measured
 without asking Claude), or **your feedback**. Confidence is **high**
@@ -620,10 +635,11 @@ evidence instead of a heuristic: `recommend._rule_effort_mismatch` joins
 high effort or above, with no approximation caveat, ahead of its
 structural fallback. `advice._merge_model_tier` reads
 `habits.unfit_agents` (built from `habits_agents`) as a veto over a
-cheaper-model suggestion: an agent whose runs said a larger model would
-suit, whose work was mostly reported hard, or that was retried for the
-model, is left out of the suggestion — never added to one just because
-its runs said "smaller" would do. The `spawn-claude-md` rule adds
+cheaper-model suggestion: an agent whose work was mostly reported hard,
+or that was retried for the model, is left out of the suggestion. What
+the agent's runs did (the share of calls that were a single read-only
+look, and the calls before the first edit) is shown beside it and never
+pushes a suggestion. The `spawn-claude-md` rule adds
 `habits_agents`' reported `rules_used`/`rules_unused` counts on top of
 its structural evidence (whether every measured spawn only searched or
 read files): it holds back suggesting `omitClaudeMd: true` once most of

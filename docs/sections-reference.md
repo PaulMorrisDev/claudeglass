@@ -526,9 +526,9 @@ Every figure is a price ceiling at today's usage shape, not a
 prediction: a smaller model may need more turns or fail the task
 outright, and neither possibility is priced here. With metrics capture
 on, the agent type's `habits_agents` row is cited as evidence (the
-share of its work Claude reported easy, and runs that said a smaller
-model would do), and the merged suggestion leaves out an agent whose
-runs said it needed a larger model, whose work was mostly reported
+share of its work Claude reported easy, the share of its calls that
+were a single read-only look, and its calls before the first edit), and
+the merged suggestion leaves out an agent whose work was mostly reported
 hard, or that was retried for the model (`habits.unfit_agents`, used by
 `advice._merge_model_tier` and the Models quick action). None of these
 changes a figure.
@@ -943,10 +943,13 @@ capture is off or no feedback has been given.
 - `habits_agents` — per agent type (and `top-level` for how hard the main
   session's work was): runs, cost, typical report size, the share
   asked for a short report, finished, retried and retried for the
-  model, what the runs said about the model (smaller would do, right,
-  needed larger) and CLAUDE.md (used, didn't use), the shares of work
-  reported easy and hard, files read again that the parent had read,
-  and runs started by another agent. A workflow's agents are counted
+  model, what the runs did (the share of calls that were a single
+  read-only look: one Read, Grep, Glob or file-reading command in a
+  message and nothing else; and the typical number of calls before
+  the first edit, among runs that made one), what the runs said about
+  CLAUDE.md (used, didn't use), the shares of work reported easy and
+  hard, files read again that the parent had read, and runs started by
+  another agent. A workflow's agents are counted
   here (their agent type is whatever the run named them, `workflow-subagent`
   when it named none) and read "again" against the message that started
   the workflow.
@@ -972,11 +975,12 @@ capture is off or no feedback has been given.
 - `habits_agents_by_task` — `habits_agents`, split by the kind of task
   Claude reported for the message that spawned each run (for a workflow
   agent, the message whose reply started the workflow): per task and
-  agent type, runs, per run, finished, and what the runs said about the
-  model (smaller would do, right, needed larger). Names a cheaper model
-  only when at least `MIN_GROUP` runs support it, the saving clears
-  `CHEAPER_MODEL_MIN_PCT`, and `habits.unfit_agents` doesn't veto the
-  agent type. Shown on Setup › Profiles; the `tasks` profile goal drafts
+  agent type, runs, per run, finished, the share of calls that were a
+  single read-only look, and the typical calls before the first edit.
+  Names a cheaper model only when at least `MIN_GROUP` runs support it,
+  the saving clears `CHEAPER_MODEL_MIN_PCT`, `habits.unfit_agents`
+  doesn't veto the agent type, and this task's own runs weren't mostly
+  hard or retried for the model. Shown on Setup › Profiles; the `tasks` profile goal drafts
   agent candidates from it (vetoed again there by the quality check).
 - `habits_outcomes` — per outcome you gave (`met`, `partly`, `missed`,
   ...): pieces of work, messages, cost, per piece, the most common kind

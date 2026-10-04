@@ -1019,16 +1019,16 @@ def test_quality_tells_you_what_came_before_work_you_said_missed(tmp_path):
     )
 
 
-def test_models_check_leaves_out_an_agent_claude_said_needed_a_larger_model(tmp_path):
+def test_models_check_leaves_out_an_agent_whose_work_was_mostly_hard(tmp_path):
     model = _full_model()
     model.sections.append(_habits_tables(habits_agents=[
-        {"agent_type": "Explore", "fit_smaller": 0, "fit_larger": 2, "hard_pct": None, "retried_model": 0},
+        {"agent_type": "Explore", "runs": 6, "hard_pct": 70.0, "retried_model": 0},
     ]))
     result = qa.run("models", _ctx(tmp_path, model=model))
     assert [fix["agent"] for fix in result["fixes"]] == [None]
     [tip] = result["tips"]
     assert tip["title"] == "Explore: haiku not suggested"
-    assert tip["text"].endswith("but Claude said 2 of its runs needed a larger model.")
+    assert tip["text"].endswith("but 70% of its work was reported hard.")
 
 
 def _hooks_report(results):

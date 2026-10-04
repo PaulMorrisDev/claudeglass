@@ -1,11 +1,12 @@
 """Which files a shell command writes (``shell_writes``): only content the
-command authored counts, and relative paths resolve against where it ran."""
+command authored counts, and relative paths resolve against where it ran.
+Whether it moves or removes files is ``changes_files``."""
 
 from __future__ import annotations
 
 import pytest
 
-from claudeglass.shell_writes import write_targets
+from claudeglass.shell_writes import changes_files, write_targets
 
 CWD = "C:\\Dev\\app"
 
@@ -63,3 +64,68 @@ def test_powershell(command, expected):
 def test_a_relative_path_with_no_known_directory_is_skipped():
     assert write_targets("echo x > rel.txt", powershell=False, cwd=None) == []
     assert write_targets("echo x > /c/Dev/app/abs.txt", powershell=False, cwd=None) == ["/c/Dev/app/abs.txt"]
+
+
+@pytest.mark.parametrize("command", [
+    "git merge main",
+    "git pull --rebase origin main",
+    "git rebase -i HEAD~3",
+    "git cherry-pick abc123",
+    "git restore src/a.py",
+    "git reset --hard HEAD~1",
+    "git stash pop",
+    "git clean -fd",
+    "git mv a.py b.py",
+    "mv a.py b.py",
+    "cp -r src dist",
+    "rm -rf build",
+    "mkdir -p out/sub",
+    "touch a.txt",
+    "patch -p1 < fix.diff",
+    "ln -s a b",
+    "npm test && rm old.log",
+    "cd sub; mv a b",
+    "FOO=1 timeout 60 git pull",
+    "sudo mv a b",
+    "/usr/bin/rm a.txt",
+])
+def test_a_command_that_moves_or_removes_files_changes_them_in_bash(command):
+    assert changes_files(command, powershell=False) is True
+
+
+@pytest.mark.parametrize("command", [
+    "git status",
+    "git diff HEAD~1",
+    "git log --merge",
+    "git branch merge-notes",
+    "git commit -m 'merge it' && git push",
+    "git commit -m \"$(cat <<'EOF'\nrm -rf build\nEOF\n)\"",
+    "echo 'rm -rf build'",
+    "grep -r mv src",
+    "npm test 2>&1",
+    "pytest -q > /dev/null 2>&1",
+    "cat a.py | head",
+    "ls -la",
+    "# rm -rf build\nls",
+    "",
+])
+def test_a_command_that_only_reads_runs_or_names_one_changes_none_in_bash(command):
+    assert changes_files(command, powershell=False) is False
+
+
+@pytest.mark.parametrize("command, expected", [
+    ("Remove-Item -Recurse build", True),
+    ("Move-Item a.txt b.txt", True),
+    ("Copy-Item a b", True),
+    ("New-Item -ItemType Directory out", True),
+    ("Rename-Item a.txt b.txt", True),
+    ("del a.txt", True),
+    ("md out", True),
+    ("git merge main", True),
+    ("Get-ChildItem build", False),
+    ("Get-Content a.txt", False),
+    ("git commit -m 'remove-item'", False),
+    ("Write-Host 'Remove-Item a'", False),
+])
+def test_a_powershell_command_that_moves_or_removes_files_changes_them(command, expected):
+    assert changes_files(command, powershell=True) is expected

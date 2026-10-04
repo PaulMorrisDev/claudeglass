@@ -40,9 +40,6 @@
           "none",
           null
         ],
-        "found": [
-          null
-        ],
         "skill": "auto"
       }
     },
@@ -68,9 +65,6 @@
         ],
         "prior": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -106,9 +100,6 @@
           "manual",
           null
         ],
-        "found": [
-          null
-        ],
         "skill": "auto"
       }
     },
@@ -123,9 +114,6 @@
         ],
         "brief": [
           "clear"
-        ],
-        "found": [
-          "yes"
         ],
         "level": [
           "easy"
@@ -156,9 +144,6 @@
       "expect": {
         "task": [
           "research"
-        ],
-        "found": [
-          "no"
         ],
         "plan": [
           "none",
@@ -204,9 +189,6 @@
         "check": [
           "targeted",
           "full"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -241,9 +223,6 @@
         "check": [
           "targeted",
           "full"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -262,9 +241,6 @@
         ],
         "missing": [
           "~goal|constraints|done|scope"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -288,9 +264,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -313,9 +286,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -341,9 +311,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -366,9 +333,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -401,9 +365,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -441,9 +402,6 @@
           "none",
           null
         ],
-        "found": [
-          null
-        ],
         "size": [
           "xs",
           "s"
@@ -465,9 +423,6 @@
         ],
         "check": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -491,9 +446,6 @@
         "prior": [
           "needed",
           "some"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -513,9 +465,6 @@
         "prior": [
           "needed",
           "some"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -530,10 +479,6 @@
         ],
         "brief": [
           "clear"
-        ],
-        "found": [
-          "yes",
-          null
         ],
         "plan": [
           "none",
@@ -563,9 +508,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -580,9 +522,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -631,9 +570,6 @@
           "none",
           null
         ],
-        "found": [
-          null
-        ],
         "missing": [
           "none",
           null
@@ -658,9 +594,6 @@
         "skill": "auto",
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -693,9 +626,6 @@
           "none",
           "made",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -710,9 +640,6 @@
         ],
         "missing": [
           "~goal|done|scope|files|constraints"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -748,9 +675,6 @@
           "none",
           null
         ],
-        "found": [
-          null
-        ],
         "check": [
           "run",
           "targeted",
@@ -767,9 +691,6 @@
       "expect": {
         "task": [
           "research"
-        ],
-        "found": [
-          "yes"
         ],
         "check": [
           "none",
@@ -814,9 +735,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -842,9 +760,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -860,9 +775,6 @@
         ],
         "missing": [
           "~goal|scope|done|constraints|files"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -883,9 +795,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -914,9 +823,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -939,9 +845,6 @@
         ],
         "task": [
           "feature"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -989,9 +892,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -1010,9 +910,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -1033,9 +930,6 @@
         ],
         "missing": [
           "~done|goal|constraints|scope"
-        ],
-        "found": [
-          null
         ]
       }
     }

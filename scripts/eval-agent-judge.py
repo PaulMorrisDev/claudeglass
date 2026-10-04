@@ -4,11 +4,16 @@ each judged several times, scored key by key.
 
 The capture hook's ``SubagentStop`` entry hands Haiku an excerpt of each
 finished agent run (``agent_excerpt`` in ``hooks/capture_hook.py``) and
-keeps the words it answers with: ``result``, ``retry``, ``fit``,
-``brief`` and ``missing``. This builds each case's excerpt with the hook's
-own ``agent_excerpt``, so the text Haiku reads is the text it reads in a
-session, asks ``claude -p --model haiku`` exactly as the hook does, and
-prints, for each case and key, what Haiku said against the right answer.
+keeps the words it answers with: ``brief``, ``missing``, ``result`` and
+``retry``, asked in that order (it was also asked for ``fit``, the model
+fit, until that verdict said "right" every time). This builds each case's
+excerpt with the hook's own ``agent_excerpt``, so the text Haiku reads is
+the text it reads in a session, asks ``claude -p --model haiku`` exactly
+as the hook does, and prints, for each case and key, what Haiku said
+against the right answer. What the hook puts right itself, a
+``retry=model`` for the same brief rerun on a higher model tier and the
+``done`` it takes out of ``missing`` for an agent that handed back its
+answer, is not scored here: only Haiku's own words are.
 
 Every call costs about $0.0015 on your own Claude Code login:
 
@@ -37,19 +42,37 @@ _SPEC.loader.exec_module(HOOK)
 CATALOGUE = HOOK.load_catalogue()
 
 
-def _run(brief: str, tools: list[tuple[str, dict]], report: str, *, errors: int = 0, model: str = "claude-sonnet-5"):
+def _run(
+    brief: str, tools: list[tuple[str, dict]], report: str, *, errors: int = 0, model: str = "claude-sonnet-5",
+    relay: str = "", answer: tuple[str, dict] | None = None,
+):
     """An agent's transcript: its brief, one reply calling ``tools``, a
-    tool error for each of ``errors``, and its report."""
+    tool error for each of ``errors``, and its report. A workflow agent
+    (``relay``: the line the workflow was started with) is handed that line
+    and then its computed task by the harness, and hands its ``answer``
+    back through an answer tool, as ``(tool name, input)``, in place of a
+    report."""
     uses = [{"type": "tool_use", "id": f"t{n}", "name": name, "input": given} for n, (name, given) in enumerate(tools)]
-    records = [
-        {"type": "user", "message": {"role": "user", "content": brief}},
-        {"type": "assistant", "message": {"id": "msg_1", "model": model, "usage": {"output_tokens": 400}, "content": uses}},
-    ]
+    prompts = [brief]
+    if relay:
+        prompts = [
+            f"[Workflow harness — user request] The user typed this to start the workflow:\n  {relay}",
+            f"[Workflow harness — computed task] The task text below was computed at runtime by a workflow "
+            f"script. It was not typed by this session's user. The computed task text follows:\n  {brief}",
+        ]
+    records = [{"type": "user", "message": {"role": "user", "content": prompt}} for prompt in prompts]
+    records.append(
+        {"type": "assistant", "message": {"id": "msg_1", "model": model, "usage": {"output_tokens": 400}, "content": uses}}
+    )
     for n in range(errors):
         records.append({"type": "user", "message": {"role": "user", "content": [
             {"type": "tool_result", "tool_use_id": f"t{n}", "content": "error", "is_error": True}]}})
+    final = (
+        [{"type": "tool_use", "id": "t_answer", "name": answer[0], "input": answer[1]}]
+        if answer else [{"type": "text", "text": report}]
+    )
     records.append({"type": "assistant", "message": {"id": "msg_2", "model": model, "usage": {"output_tokens": 120},
-                                                     "content": [{"type": "text", "text": report}]}})
+                                                     "content": final}})
     return records
 
 
@@ -88,13 +111,15 @@ CASES = {
         "Fixed: parse_date dropped the UTC offset. tests/test_dates.py passes now.", model="claude-opus-5-5"),
         "The Haiku agent couldn't find the cause. Running it again on Opus, which should handle the timezone logic.",
         [{"type": "general-purpose", "brief": "Fix the failing test test_parse_dates in tests/test_dates.py without "
-          "changing the test.", "report": "I could not find why the test fails; the dates look right to me."}],
+          "changing the test.", "model": "claude-haiku-4-5",
+          "report": "I could not find why the test fails; the dates look right to me."}],
         {"result": "done", "retry": "model"}),
     "retry: tools": ("general-purpose", _run(
         "Run the database migrations with `make migrate` and report any errors.",
         [("Bash", {"command": "make migrate"})], "Migrations ran: 3 applied, no errors."),
         "The Explore agent can't run commands, so starting a general-purpose agent to run the migrations.",
         [{"type": "Explore", "brief": "Run the database migrations with `make migrate` and report any errors.",
+          "model": "claude-haiku-4-5",
           "report": "I can't run shell commands with my tools, so I couldn't run the migrations."}],
         {"result": "done", "retry": "tools"}),
     "next task, not a retry": ("general-purpose", _run(
@@ -113,6 +138,26 @@ CASES = {
         "Tests are done. Next, the release notes.",
         [{"type": "general-purpose", "brief": "Add tests for the parser's new flags.", "report": "Added 6 tests; all pass."}],
         {"result": "done", "retry": None}),
+    # A refuted claim and an empty list are findings: the agent did its own work.
+    "answer: refuted claim": ("workflow-subagent", _run(
+        "Check whether the claim that refunds skip the audit log in payments.py is true. Return a verdict and "
+        "your evidence.",
+        [("Read", {"file_path": "/w/payments.py"}), ("Grep", {"pattern": "audit_log"})], "",
+        relay="Run the review workflow on the payments module.",
+        answer=("StructuredOutput", {"verdict": "refuted", "evidence": ["refund() writes the audit log on line 41"]})),
+        "", [], {"result": "done", "brief": "clear"}),
+    "answer: empty list": ("workflow-subagent", _run(
+        "List every caller of legacy_pay() in the repo. Return the list of call sites.",
+        [("Grep", {"pattern": r"legacy_pay\("})], "",
+        relay="Find what still uses the old payment call.",
+        answer=("StructuredOutput", {"call_sites": []})),
+        "", [], {"result": "done"}),
+    "handback: could not work": ("general-purpose", _run(
+        "Run the integration tests in tests/integration and report the failures.",
+        [("Bash", {"command": "pytest tests/integration"})], "", errors=1,
+        answer=("SubagentHandback", {"message": "I could not run them: pytest is not installed and I have no "
+                                               "permission to install it, so there are no results."})),
+        "", [], {"result": "blocked"}),
 }
 
 

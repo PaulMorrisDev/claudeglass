@@ -302,10 +302,11 @@ def _tips_question(current: CaptureConfig, *, now: datetime, stdin, stdout) -> t
         "\nSharper tips (optional)\n"
         "Claude ends each reply with a short tag saying what kind of work it was, such as "
         "[cg: task=bugfix brief=clear], so the tips fit how you work. That costs about "
-        f"{cost['session_note']} tokens when a session starts and {cost['reply_tag']} per reply, plus a Claude "
-        f"Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.3f} after each subagent run, and it switches "
-        f"itself off after {days} days. It also adds the /cg-feedback skill, for rating a piece of work when it's "
-        "done.\n"
+        f"{cost['session_note']} tokens when a session starts and {cost['reply_tag']} per reply. "
+        f"A Claude Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.3f} also runs after each subagent "
+        "run, and after a reply Claude leaves without its tag. "
+        f"It switches itself off after {days} days. It also adds the /cg-feedback skill, for rating a piece "
+        "of work when it's done.\n"
     )
     yes = _yes_no("Turn on sharper tips?", essentials_on, stdin=stdin, stdout=stdout)
     feedback_on = "feedback_skill" in current.feedback

@@ -984,7 +984,9 @@ Haiku (asked after each turn, `[capture] tagger`; see
 [capture.md](capture.md#who-writes-the-tags)). Picking Haiku asks first,
 saying what the hook sends and what it keeps. While Haiku writes them,
 the tag line says "Claude Haiku tagged" and "Claude Haiku's calls" is a
-row of its own in where the tokens went.
+row of its own in where the tokens went. With Claude picked, Haiku still
+fills in a tag Claude left out, in the background. The tag line then says
+"Claude Haiku filled in", and its calls count in the same row.
 
 The end-time menu's first entry is the end already set ("In 12 days:
 2026-10-07 09:00 UTC", or "Ended: ..."). A choice saves the moment it is

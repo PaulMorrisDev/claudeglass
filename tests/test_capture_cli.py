@@ -563,16 +563,16 @@ def test_disabling_a_metric_takes_what_needs_it_along(tmp_path):
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "level", "standard", "--yes")
     rc, out = _capture(config_dir, "disable", "result", "--yes")
-    assert rc == 0 and "retry, fit, agent_brief need result, so they go too." in out
+    assert rc == 0 and "retry, agent_brief need result, so they go too." in out
     capture = load_config(config_dir=config_dir).capture
-    assert capture.level == "custom" and not {"result", "retry", "fit", "agent_brief"} & set(capture.metrics)
+    assert capture.level == "custom" and not {"result", "retry", "agent_brief"} & set(capture.metrics)
 
 
 def test_enabling_one_metric_brings_what_it_needs(tmp_path):
     config_dir = _claude(tmp_path, {})
-    rc, out = _capture(config_dir, "enable", "fit", "--yes")
+    rc, out = _capture(config_dir, "enable", "agent_brief", "--yes")
     assert rc == 0 and "Off -> Custom" in out
-    assert load_config(config_dir=config_dir).capture.metrics == ["result", "fit"]
+    assert load_config(config_dir=config_dir).capture.metrics == ["result", "agent_brief"]
 
 
 def test_feedback_toggles_are_switched_on_their_own_list(tmp_path):
@@ -843,6 +843,22 @@ def test_status_names_claude_as_the_tagger_when_haiku_only_judged_agent_runs():
     assert "  Claude tagged 100.0% of your messages; Claude Haiku judged 100.0% of agent runs" in lines
     lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=True)
     assert "  Claude Haiku tagged 100.0% of your messages; Claude Haiku judged 100.0% of agent runs" in lines
+
+
+def test_status_tells_the_replies_haiku_filled_in_from_the_ones_claude_tagged():
+    """While Claude writes the tags, a reply it left bare and Haiku's
+    fallback tagged is Haiku's, not Claude's."""
+    from claudeglass.capture import CaptureUsage
+    from claudeglass.units import Units
+
+    use = CaptureUsage(sessions=1, subagents=1, cycles=4, tagged_cycles=3, filled_cycles=1)
+    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=False)
+    assert any("Claude tagged 50.0% of your messages, and Claude Haiku filled in 25.0%" in line for line in lines)
+    # Nothing filled in: the plain line. The haiku tagger wrote every tag, so it isn't split.
+    plain = CaptureUsage(sessions=1, subagents=1, cycles=4, tagged_cycles=3)
+    assert "  Claude tagged 75.0% of your messages" in cli._capture_usage_lines(plain, Units(billing_mode="api"), haiku=False)
+    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=True)
+    assert "  Claude Haiku tagged 75.0% of your messages" in lines
 
 
 def test_status_while_on_before_any_captured_session_says_so(tmp_path):

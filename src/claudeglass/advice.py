@@ -198,7 +198,6 @@ def _model_prose(observed: str) -> str:
 _LEFT_OUT_GROUPS = (
     ("worse", "Did worse on a cheaper model"),
     ("retried", "Edits often redone on a larger model"),
-    ("larger", "Claude said a larger model was needed"),
     ("hard", "Much of the work reported hard"),
     ("retried-model", "Run again because the model wasn't enough"),
 )
@@ -239,9 +238,9 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
         return recs
     rest = [r for r in recs if r.id != "model-tier"]
     tables = whatif._Tables(ctx.report)
-    # Metrics capture: agents whose runs said a larger model would suit,
-    # whose work was mostly reported hard, or that were retried for the
-    # model. A veto only: a "smaller would do" never adds a suggestion.
+    # Metrics capture: agents whose work was mostly reported hard, or that
+    # were retried for the model. A veto only: nothing a run reports adds
+    # a suggestion.
     worse, retried, _unfit = model_gate.raw(tables)
     unfit = model_gate.unfit_kinds(tables)
     # The main session's model is a quality trade that's yours to make, so

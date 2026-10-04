@@ -102,6 +102,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   How you prompt has a new row, "Asking how it's going": each poll is
   priced from the reply it drew. That is the cost `repeat_ask` used to
   carry, as every one of its live firings was a poll.
+- **Why work was redone, and mistakes admitted.** With `shift` on, a tag
+  can carry two more words. `why=left_out|missed|changed|tools` goes
+  with a redo or a fix: your request or the plan left it out, Claude
+  missed something they said, you changed your mind, or a tool or setup
+  failed. `admit=claim|change|instruction` says the reply admits an
+  earlier mistake: a wrong statement, a wrong change, or an instruction
+  it was given and didn't follow. They ride on the `shift` switch, so
+  there is nothing new to turn on, and Haiku writes them when it writes
+  your tags. Only the closed words are kept. With them and the clearer
+  wording below, the Essentials note grows from about 196 to about 353
+  tokens, Standard from 314 to 484 and Deep from 422 to 662.
+- **Haiku fills in a tag Claude left out.** While Claude writes the
+  tags, a reply that ends a piece of work without one now gets a Claude
+  Haiku call in the background, about $0.002, through your own login.
+  The tag file's line records `"w":"haiku-fallback"`, so the two
+  writers can be told apart, and `capture status` says how many tags
+  Haiku filled in and what that cost. There is nothing new to turn on:
+  the call rides on the `Stop` entry capture already has, with the same
+  excerpt, checks and closed words as `capture tagger haiku`. It is
+  skipped for a reply that has a tag, a piece of work with a tag on any
+  reply, a turn that answers a background agent, another session, a
+  scheduled task or a prompt Claude Code sent itself, a turn that
+  starts a background agent or workflow or ends while one still runs,
+  a turn whose command went to the background and hasn't reported, and
+  a script run. When Claude tags a later reply of the same piece of
+  work, Claude's words stand and Haiku's fill-in only adds its cost.
+- **Scheduled tasks get no note.** A session a scheduled task started
+  has no message of yours, so the parser drops every tag in it. It no
+  longer gets the capture note, which spent tokens for nothing.
 
 ### Changed
 
@@ -262,6 +291,87 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   subagent's only when a subagent file recorded one in the last five
   seconds, and the session note tells a subagent to ignore it. The key
   names of each kind of SessionStart payload are logged once, names only.
+- **`found` and Haiku's agent `fit` are no longer asked for.** `found`
+  was answered 14% of the time, and "yes" 9 times in 10. `fit`, Haiku's
+  verdict on whether a smaller model would have done an agent's task,
+  was always "right". Neither is in a note or in Haiku's questions now,
+  and a `config.toml` that lists them still loads. Rows already written
+  are still read, so older sessions keep their words.
+- **The notes say more about what each word means.** `shift` counts a
+  rename or tweak of what Claude just delivered as `fix`. `check` says
+  what each word means, `none` when nothing changed, and `full` when the
+  whole suite ran at any point. `prior` is always `none` on the first
+  message, `skill` states its condition first, and `missing` says what
+  `files` and `scope` mean. A closing line asks Claude to judge a plan,
+  not the go-ahead that carried it out, and to tag its reply to an
+  agent's report for the request that started the agent. Haiku gets the
+  same meanings, plus: a short message changing files Claude changed in
+  its previous reply is `fix`, not `build` or `grew`.
+- **A tag's words are checked against the transcript.** One set of rules
+  now puts right the words the transcript contradicts, for Claude's tags
+  as they are read back and for Haiku's before they are stored. A `why`
+  needs a redo or a fix, and `tools` a failed tool call. A first message
+  has no `shift` but `new`. `build` or `grew` reads `fix` after a
+  correction, or a tweak to the files just changed. Haiku's `admit` needs
+  a reply that reads like one, and a reply that does but got no word is
+  only a possible admission, never added to a total. `check` follows the
+  tests that ran and is `none` only when no edit, subagent, workflow
+  agent or file-moving command changed anything. `plan` is `made`
+  whenever a plan went up and `following` once one was approved. Reports
+  read the settled words and the calibration counts keep Claude's own.
+  The parser now counts edit calls, documentation edits and file-moving
+  commands, so every digest is rebuilt once. Haiku's tag file notes each
+  change in an optional `g` field, in closed words only.
+- **The highest level and size win.** When one message gets several
+  tags, its `level` and `size` are the highest of them, not the last
+  one's, so a closing "easy" no longer relabels hard work. Other words
+  still go to the last tag that gave them.
+- **Haiku is told more about the turn.** Its excerpt now opens with the
+  request the work began with (the start of the plan you approved, else
+  your latest long message). It also gives the minutes since Claude's
+  last reply, the files that reply changed and how many changed again,
+  the short follow-ups you sent in a row, up to three messages you sent
+  while Claude worked (read by Haiku only, never kept), how often a plan
+  was proposed and sent back, and the rounds of feedback you gave. Lines
+  a replay wrote again are left out, and an agent's shell commands
+  include PowerShell. The plan line no longer says "not used" when the
+  plan call lies outside the end of a long session that was read.
+- **Agent runs are judged more accurately.** A workflow agent's brief
+  is the task its script computed. The line the workflow was started
+  with comes along as context, cut to 300 characters, and no longer
+  stands in for the brief. A run that hands back its answer through
+  `SubagentHandback` finishes as one that ends on `StructuredOutput`
+  does, and its `message` is read as the report. A structured answer is
+  shown field by field, each long value cut on its own, and a short
+  closing remark after the answer no longer turns it back into a
+  report. The brief and what it lacked are asked about before the
+  result, so that how a run ended doesn't colour how its brief reads,
+  and `done` is taken out of what the brief lacked when the agent was
+  told to hand an answer back. Findings, refuted claims and an
+  empty list count as done, and blocked now means the agent could not
+  do its own work. The judge also runs at a stop that follows a stop
+  hook's request to carry on, and the newest verdict for a run wins.
+- **Haiku waits for an agent's last lines.** The `SubagentStop` hook
+  fires before an agent's transcript is complete, so a workflow agent's
+  answer was often missing and the judge read its last words instead.
+  The hook now returns at once, and the background worker reads the
+  transcript after an answer appears or the file has stopped growing for
+  three seconds. If it is still growing after 20 seconds, the line
+  records `no_answer` and Haiku isn't asked. A run whose brief was
+  rerun on a higher model tier anywhere in the session, not only near
+  its end, is `retry=model`; a workflow's agents are never retries of
+  each other.
+- **Agent tables measure the work, not the model fit.** Claude's own
+  verdict that a smaller model would do was `right` every time, so the
+  `Smaller would do`, `Model was right` and `Needed larger` columns are
+  gone from How agents were used and Agents by kind of task, along with
+  the "larger model" veto on a cheaper-model suggestion. Two measured
+  columns take their place: `Single read-only calls`, the share of an
+  agent's calls that made one Read, Grep, Glob or file-reading command
+  and nothing else, and `Calls before the first edit`. A cheaper model is
+  still held back for an agent whose work was mostly hard or that was
+  retried for the model, and the Models evidence cites the two columns
+  beside the share of work reported easy.
 
 ### Fixed
 

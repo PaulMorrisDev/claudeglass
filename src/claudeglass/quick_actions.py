@@ -1374,15 +1374,17 @@ def _capture_fix(ctx: Context, tables) -> dict | None:
              "start asking Claude to end its reply to each of your messages with a one-line tag (the kind of task, "
              "how clear the ask was, how hard the work was, whether it changed course). A subagent is asked for "
              "nothing: when one finishes, Claude Haiku reads its brief and the end of its report and says whether "
-             "it finished and, for a rerun, why it was run again. This tool keeps only those words, never the text "
-             "around them."],
+             "it finished and, for a rerun, why it was run again. If Claude ends a reply without its tag, Claude "
+             "Haiku reads a short excerpt of that exchange and writes the tag. This tool keeps only those words, "
+             "never the text around them."],
             ["Why", "Without them this check guesses: a retry on a larger model counts against the cheaper one even "
              "when the brief was the problem, and an agent that stopped half-done looks finished. With them, "
              "retries and unfinished runs are counted from what Claude said, and {{page:habits}} can rank "
              "habits by kind of task."],
             ["What it costs", f"A note of about {main} tokens at each session start, read from the prompt cache "
              "after the first reply, about 15 output tokens per message, and a Claude Haiku call of about "
-             f"${capture_catalogue.JUDGE_USD_PER_CALL:.3f} per subagent run. " "{{page:setup/capture}} estimates it "
+             f"${capture_catalogue.JUDGE_USD_PER_CALL:.3f} per subagent run and per reply Claude leaves without its tag. "
+             "{{page:setup/capture}} estimates it "
              "from your own recent sessions before you turn it on, and the banner shows what it has cost while it's "
              "on."],
             ["Where and who it affects", "~/.claude/settings.json gets the hook entries (the command shows the "

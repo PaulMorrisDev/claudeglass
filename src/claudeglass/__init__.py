@@ -342,7 +342,17 @@ __version__ = "0.14.0"
 #: go-ahead also covers a merge, push, release, commit or run. A resume
 #: note is a ``META`` event of subkind ``resume``, the other lines you
 #: didn't type ``not_typed``.
-PARSER_VERSION = 37
+#:
+#: In 38, the tag's ``why`` and ``admit`` ride on the ``shift`` switch
+#: (``found`` and ``fit`` are no longer asked for), and the transcript
+#: settles what the words claim: ``Turn.edit_call_count``,
+#: ``edit_doc_count`` and ``shell_change_count`` say what a reply changed
+#: (edits to your work, those to documentation, and commands that move or
+#: remove files), and ``capture.Cycle.settled`` is a cycle's tag with
+#: ``capture_tags.settle`` applied, as the capture hook grounds Haiku's
+#: words. A cycle with several tags keeps the highest ``level`` and
+#: ``size`` among them.
+PARSER_VERSION = 38
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

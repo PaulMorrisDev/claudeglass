@@ -11,15 +11,19 @@ be worked out by hand.
 
 from __future__ import annotations
 
+import importlib.util
 import json
+import random
+from dataclasses import replace
 from datetime import datetime, timezone
+from importlib import resources
 from pathlib import Path
 from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import cache, capture, capture_catalogue as catalogue, parse
-from claudeglass.model import TranscriptMeta, WorkflowRun
+from claudeglass import cache, capture, capture_catalogue as catalogue, capture_tags, parse
+from claudeglass.model import CaptureTag, TranscriptMeta, WorkflowRun
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing, price_turn
 
@@ -157,6 +161,470 @@ def test_a_cycles_tags_merge_key_by_key(tmp_path):
     assert (tag.task, tag.level, tag.shift) == ("bugfix", "hard", "redo")
     assert tag.has_tl is True
     assert tag.chars == turn2.cap.chars + turn3.cap.chars
+
+
+# -- what the transcript settles about a cycle's tag ----------------------------------
+
+TAG_IDS = ["task", "level", "size", "shift", "plan", "skill", "prior", "check"]
+
+
+def _edit(tool_use_id: str, path: str) -> dict:
+    return tool_use_block("Edit", tool_use_id, {"file_path": path})
+
+
+def _ok(second: int, *ids: str) -> dict:
+    return user_block_line([tool_result_block(tool_use_id, "ok") for tool_use_id in ids], timestamp=_ts(second))
+
+
+def test_a_cycles_level_and_size_are_the_highest_any_of_its_tags_gave(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1),
+        _reply(2, text="Looking.\n[cg: task=debug level=hard size=l]"),
+        _reply(3, text="Narrowing it.\n[cg: task=debug level=easy size=xs]"),
+        _reply(4, text="Fixed.\n[cg: task=bugfix level=normal]"),
+    ])
+    [cycle] = capture.prompt_cycles(top)
+    assert (cycle.tag.level, cycle.tag.size) == ("hard", "l")
+    # Every other key still goes to the last tag that answered it.
+    assert cycle.tag.task == "bugfix"
+
+
+def test_claudes_own_tag_outranks_one_haiku_filled_in_for_an_earlier_reply(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1),
+        _reply(2, text="Tests are running.\n[cg: task=test level=hard size=xl check=full]"),
+        _reply(3, text="All passed.\n[cg: task=bugfix level=easy size=s]"),
+    ])
+    [cycle] = capture.prompt_cycles(top)
+    # Haiku's fill-in for the reply before the background run finished.
+    first = cycle.turns[0]
+    first.cap = replace(first.cap, judged=True, chars=0, judge_usd=0.002)
+    tag = cycle.tag
+    assert (tag.task, tag.level, tag.size, tag.check) == ("bugfix", "easy", "s", None)
+    # Its call is still paid for, and the cycle still counts as judged.
+    assert tag.judged and tag.judge_usd == pytest.approx(0.002)
+    # With no tag of Claude's in the cycle, Haiku's words are the cycle's.
+    second = cycle.turns[1]
+    second.cap = replace(second.cap, judged=True, chars=0)
+    assert (cycle.tag.task, cycle.tag.level, cycle.tag.size) == ("bugfix", "hard", "xl")
+
+
+@pytest.mark.parametrize("first, second, level, size", [
+    ("level=easy size=s", "level=hard size=xl", "hard", "xl"),
+    ("level=normal size=m", "size=s", "normal", "m"),
+    ("size=l", "level=easy", "easy", "l"),
+    ("task=debug", "task=bugfix", None, None),
+])
+def test_the_highest_word_may_come_from_either_tag_and_none_stays_none(tmp_path, first, second, level, size):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1),
+        _reply(2, text=f"One.\n[cg: {first}]"),
+        _reply(3, text=f"Two.\n[cg: {second}]"),
+    ])
+    [cycle] = capture.prompt_cycles(top)
+    assert (cycle.tag.level, cycle.tag.size) == (level, size)
+
+
+def test_a_cycles_facts_add_up_what_its_replies_did(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1, "fix it"),
+        _reply(2, _edit("e1", "C:/Dev/repo/a.py"), _edit("e2", "C:/Dev/repo/README.md"),
+               tool_use_block("Bash", "b1", {"command": "git merge main && pytest tests/test_a.py"}),
+               tool_use_block("Bash", "b2", {"command": "echo x > /home/me/out.txt"})),
+        user_block_line([
+            tool_result_block("e1", "ok"), tool_result_block("e2", "ok"), tool_result_block("b1", "ok"),
+            tool_result_block("b2", "Exit code 1", is_error=True),
+        ], timestamp=_ts(3)),
+        _reply(4, text="Fixed.\n[cg: task=bugfix check=none]"),
+    ])
+    [cycle] = capture.prompt_cycles(top)
+    facts = cycle.facts
+    assert (facts["files"], facts["docs_only"]) == (2, False)
+    # One command moved files and one wrote a file, and the failed one still did.
+    assert (facts["shell_changes"], facts["tests"], facts["tool_errors"]) == (2, "targeted", 1)
+    assert (facts["earlier"], facts["plan_now"], facts["plan_before"], facts["skills"]) == (0, False, False, 0)
+    assert not (facts["correction"] or facts["adjust"] or facts["same_files"] or facts["admit_candidate"])
+    assert facts["agent_files"] == 0
+
+
+def test_a_whole_suite_outranks_chosen_tests_in_a_cycle(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1),
+        _reply(2, tool_use_block("Bash", "b1", {"command": "pytest -q"}),
+               tool_use_block("Bash", "b2", {"command": "pytest tests/test_a.py"})),
+        _ok(3, "b1", "b2"),
+        _reply(4, text="Done."),
+        _ask(5),
+        _reply(6, tool_use_block("Bash", "b3", {"command": "pytest tests/test_a.py"})),
+        _ok(7, "b3"),
+        _reply(8, tool_use_block("Bash", "b4", {"command": "pytest -q"})),
+        _ok(9, "b4"),
+        _reply(10, text="Done."),
+    ])
+    first, second = capture.prompt_cycles(top)
+    assert (first.facts["tests"], second.facts["tests"]) == ("full", "full")
+
+
+def test_a_cycle_that_only_edited_documentation_says_so(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1),
+        _reply(2, _edit("e1", "C:/Dev/repo/README.md"), _edit("e2", "C:/Dev/repo/docs/a.rst")),
+        _ok(3, "e1", "e2"),
+        _reply(4, text="Done."),
+        _ask(5),
+        _reply(6, _edit("e3", "C:/Dev/repo/README.md"), _edit("e4", "C:/Dev/repo/src/a.py")),
+        _ok(7, "e3", "e4"),
+        _reply(8, text="Done."),
+        _ask(9),
+        _reply(10, text="Nothing to change."),
+    ])
+    facts = [cycle.facts for cycle in capture.prompt_cycles(top)]
+    assert [(f["files"], f["docs_only"]) for f in facts] == [(2, True), (2, False), (0, False)]
+
+
+def test_edits_to_a_claude_folder_are_not_changes_of_yours(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1),
+        _reply(2, _edit("e1", "C:/Users/me/.claude/plans/p.md")),
+        _ok(3, "e1"),
+        _reply(4, text="Done."),
+    ])
+    [cycle] = capture.prompt_cycles(top)
+    assert (cycle.facts["files"], cycle.facts["docs_only"]) == (0, False)
+
+
+def test_what_a_subagent_or_a_workflow_agent_changed_counts_for_the_cycle_that_started_it(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1, "first"),
+        _reply(2, tool_use_block("Agent", "toolu_A", {"prompt": "edit"})),
+        user_block_line([tool_result_block("toolu_A", "done")], timestamp=_ts(8)),
+        _reply(9, text="Done.\n[cg: task=bugfix]"),
+        _ask(10, "second"),
+        _wf_call(11, "tu_w"),
+        _wf_launched(12, "tu_w", "wf_a", "t_a"),
+        _reply(13, text="Started.\n[cg: task=ops]"),
+        _ask(20, "third"),
+        _reply(21, text="Nothing.\n[cg: task=chat]"),
+    ])
+    sub = _sub(tmp_path, "a1", [
+        user_str_line("edit", timestamp=_ts(3)),
+        _reply(4, _edit("x1", "C:/Dev/repo/a.py"), _edit("x2", "C:/Dev/repo/b.py"),
+               tool_use_block("Bash", "x3", {"command": "git merge main"})),
+        _ok(5, "x1", "x2", "x3"),
+        _reply(6, text="Edited."),
+    ], tool_use_id="toolu_A")
+    agent = _wf_agent(tmp_path, "w1", "wf_a", [
+        user_str_line("go", timestamp=_ts(14)),
+        _reply(15, tool_use_block("Bash", "w1", {"command": "rm -rf build"})),
+        _ok(16, "w1"),
+        _reply(17, text="Removed."),
+    ])
+    first, second, third = capture.prompt_cycles(top, [sub, agent])
+    assert [c.facts["files"] for c in (first, second, third)] == [0, 0, 0]
+    assert [c.facts["agent_files"] for c in (first, second, third)] == [3, 1, 0]
+
+
+def test_what_came_before_a_message_shows_in_its_facts(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1, "plan the change"),
+        _reply(2, tool_use_block("ExitPlanMode", "tu_p", {"plan": "1. Edit a.py"})),
+        _ok(3, "tu_p"),
+        _reply(4, _edit("e1", "C:/Dev/repo/a.py")),
+        _ok(5, "e1"),
+        _reply(6, text="Done.\n[cg: task=feature plan=made]"),
+        _ask(10, "that's wrong, the title is missing"),
+        _reply(11, _edit("e2", "C:/Dev/repo/a.py")),
+        _ok(12, "e2"),
+        _reply(13, text="Sorry, I got that wrong.\n[cg: task=bugfix shift=build]"),
+        _ask(20, "actually make the title blue instead"),
+        _reply(21, _edit("e3", "C:/Dev/repo/a.py")),
+        _ok(22, "e3"),
+        _reply(23, text="Done.\n[cg: shift=build]"),
+        _ask(30, "now something unrelated"),
+        _reply(31, _edit("e4", "C:/Dev/repo/b.py")),
+        _ok(32, "e4"),
+        _reply(33, text="Done.\n[cg: task=chat]"),
+    ])
+    cycles = capture.prompt_cycles(top)
+    facts = [cycle.facts for cycle in cycles]
+    assert [f["earlier"] for f in facts] == [0, 1, 2, 3]
+    assert [f["plan_now"] for f in facts] == [True, False, False, False]
+    assert [f["plan_before"] for f in facts] == [False, True, True, True]
+    assert [f["correction"] for f in facts] == [False, True, False, False]
+    assert [f["adjust"] for f in facts] == [False, False, True, False]
+    assert [f["same_files"] for f in facts] == [False, True, True, False]
+    assert [f["admit_candidate"] for f in facts] == [False, True, False, False]
+
+
+def test_a_plan_you_sent_back_is_not_one_that_was_approved(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1, "plan it"),
+        _reply(2, tool_use_block("ExitPlanMode", "tu_p", {"plan": "1. Edit a.py"})),
+        user_block_line([tool_result_block("tu_p", "no", is_error=True)], timestamp=_ts(3),
+                        toolDenialKind="user-rejected"),
+        _reply(4, text="Rethinking.\n[cg: task=plan plan=made]"),
+        _ask(10, "do something else"),
+        _reply(11, text="Ok.\n[cg: task=chat]"),
+    ])
+    first, second = capture.prompt_cycles(top)
+    assert (first.facts["plan_now"], second.facts["plan_before"]) == (True, False)
+
+
+def test_a_transcript_that_starts_inside_a_session_has_no_first_message(tmp_path):
+    top = _top(tmp_path, [
+        _reply(0, text="left over from a resumed session"),
+        _note(1, TAG_IDS),
+        _ask(2, "first I can see"),
+        _reply(3, text="Done.\n[cg: task=chat]"),
+    ])
+    [cycle] = capture.prompt_cycles(top)
+    assert cycle.facts["earlier"] == 1
+
+
+def test_the_replies_that_answered_an_agents_report_count_for_the_cycle_that_launched_it(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A"),
+        _launched(3, "toolu_A"),
+        _reply(4, text="Launched.\n[cg: task=research]"),
+        _ask(10, "something else"),
+        _reply(11, text="Done.\n[cg: task=docs]"),
+        _report(20, "a1"),
+        _reply(21, {"type": "text", "text": "Merged.\n[cg: task=ops]"}, _edit("e1", "C:/Dev/repo/a.py")),
+        _ok(22, "e1"),
+    ])
+    agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    first, second = capture.prompt_cycles(top, [agent])
+    assert first.late_turns and second.handed_off
+    assert (first.facts["files"], second.facts["files"]) == (1, 0)
+
+
+def test_a_cycles_settled_tag_has_the_facts_applied_and_its_tag_stays_as_written(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1, "document it"),
+        _reply(2, _edit("e1", "C:/Dev/repo/README.md")),
+        _ok(3, "e1"),
+        _reply(4, text="Done.\n[cg: task=feature shift=grew skill=helped check=manual prior=some level=hard]"),
+    ])
+    [cycle] = capture.prompt_cycles(top)
+    raw, settled = cycle.tag, cycle.settled
+    assert (raw.task, raw.shift, raw.skill, raw.check, raw.prior) == ("feature", "grew", "helped", "manual", "some")
+    assert raw.grounded == ()
+    # Only documentation changed, it is the first message, and no skill ran.
+    assert (settled.task, settled.shift, settled.skill, settled.check, settled.prior) == (
+        "docs", None, "none", "manual", "none"
+    )
+    assert settled.level == "hard"
+    assert settled.grounded == ("task:feature>docs", "shift:grew>", "skill:helped>none", "prior:some>none")
+
+
+def test_a_cycles_settled_tag_is_its_tag_when_nothing_is_known_or_nothing_changes(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1),
+        _reply(2, tool_use_block("Bash", "b1", {"command": "pytest -q"})),
+        _ok(3, "b1"),
+        _reply(4, text="Done.\n[cg: task=test check=full]"),
+        _ask(5),
+        _reply(6, text="Done."),
+    ])
+    first, second = capture.prompt_cycles(top)
+    assert first.settled == first.tag and first.settled.grounded == ()
+    assert second.tag is None and second.settled is None
+    first.facts = {}
+    assert first.settled == first.tag
+
+
+def test_a_judged_admission_needs_a_reply_that_owns_a_mistake(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1, "go"),
+        _reply(2, text="Done.\n[cg: task=chat]"),
+        _ask(3, "go on"),
+        _reply(4, text="Sorry, I got that wrong.\n[cg: task=bugfix shift=fix]"),
+        _ask(5, "once more"),
+        _reply(6, text="Done.\n[cg: task=bugfix shift=fix]"),
+    ])
+    first, owned, plain = capture.prompt_cycles(top)
+    for cycle in (owned, plain):
+        turn = cycle.turns[-1]
+        turn.cap = replace(turn.cap, admit="claim", judged=True)
+    assert owned.settled.admit == "claim" and owned.admit_possible is False
+    assert plain.settled.admit is None and plain.admit_possible is False
+    assert plain.settled.grounded == ("admit:claim>",)
+    # What Claude wrote itself stands, whether or not a pattern finds it.
+    plain.turns[-1].cap = replace(plain.turns[-1].cap, judged=False)
+    assert plain.settled.admit == "claim"
+
+
+def test_a_reply_that_owns_a_mistake_nobody_tagged_is_only_possible(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1, "go"),
+        _reply(2, text="Done.\n[cg: task=chat]"),
+        _ask(3, "that's wrong"),
+        _reply(4, text="Sorry, I got that wrong.\n[cg: task=bugfix shift=fix]"),
+        _ask(5, "still wrong"),
+        _reply(6, text="My mistake.\n[cg: task=bugfix shift=fix]"),
+        _ask(7, "ok"),
+        _reply(8, text="Fine.\n[cg: task=chat]"),
+    ])
+    quiet, possible, claimed, none = capture.prompt_cycles(top)
+    claimed.turns[-1].cap = replace(claimed.turns[-1].cap, admit="claim")
+    assert [c.admit_possible for c in (quiet, possible, claimed, none)] == [False, True, False, False]
+    assert claimed.settled.admit == "claim"
+    assert possible.settled.admit is None
+
+
+# -- the twin rule sets ------------------------------------------------------------------
+
+HOOK_FILE = Path(str(resources.files("claudeglass") / "hooks" / catalogue.HOOK_SCRIPT)).with_name(
+    catalogue.HOOK_MODULE
+)
+
+
+def _load_hook():
+    spec = importlib.util.spec_from_file_location("_capture_twin_hook_under_test", HOOK_FILE)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+HOOK = _load_hook()
+
+#: (words, facts, what both rule sets make of them). ``capture_hook.grounded``
+#: puts Haiku's words right from the live transcript and
+#: ``capture_tags.settle`` Claude's from the parsed one: the hook can't import
+#: the package, so the rules are written twice and this table holds them to
+#: one another and to what each rule says.
+LATER = {"earlier": 2}
+GROUNDING = [
+    # plan
+    ("plan=none", {"plan_now": True}, "plan=made"),
+    ("plan=following", {"plan_now": True}, "plan=made"),
+    ("plan=made", {"plan_before": True}, "plan=following"),
+    ("plan=made", {"plan_now": True, "plan_before": True}, "plan=made"),
+    ("plan=deviated", {"plan_before": True}, "plan=deviated"),
+    ("plan=made", {"plan_now": False, "plan_before": False, **LATER}, "plan=made"),
+    # skill
+    ("skill=helped", LATER, "skill=none"),
+    ("skill=unneeded", {"skills": 0, **LATER}, "skill=none"),
+    ("skill=helped", {"skills": 1, **LATER}, "skill=helped"),
+    ("skill=would-help", LATER, "skill=would-help"),
+    ("skill=none", LATER, "skill=none"),
+    # check: tests that ran, then nothing changed
+    ("check=manual", {"tests": "full", "files": 1, **LATER}, "check=full"),
+    ("check=none", {"tests": "targeted", **LATER}, "check=targeted"),
+    ("check=full", {"tests": "targeted", **LATER}, "check=targeted"),
+    ("check=manual", {"files": 0, **LATER}, "check=none"),
+    ("check=build", {"tests": "", **LATER}, "check=none"),
+    ("check=manual", {"agent_files": 2, **LATER}, "check=manual"),
+    ("check=manual", {"shell_changes": 1, **LATER}, "check=manual"),
+    ("check=manual", {"files": 3, **LATER}, "check=manual"),
+    ("check=none", {"files": 1, **LATER}, "check=none"),
+    # task
+    ("task=bugfix", {"files": 1, "docs_only": True, **LATER}, "task=docs"),
+    ("task=feature", {"files": 1, "docs_only": True, **LATER}, "task=docs"),
+    ("task=refactor", {"files": 1, "docs_only": True, **LATER}, "task=docs"),
+    ("task=feature", {"files": 1, "docs_only": True, "agent_files": 1, **LATER}, "task=feature"),
+    ("task=refactor", {"files": 1, "docs_only": True, "shell_changes": 1, **LATER}, "task=refactor"),
+    ("task=debug", {"files": 1, "docs_only": True, **LATER}, "task=debug"),
+    ("task=bugfix", {"files": 1, "docs_only": False, **LATER}, "task=bugfix"),
+    # a first message
+    ("shift=build prior=some", {"earlier": 0}, "prior=none"),
+    ("shift=new prior=none", {"earlier": 0}, "shift=new prior=none"),
+    ("shift=redo", {"earlier": 0}, ""),
+    ("shift=build", {"earlier": 1}, "shift=build"),
+    ("prior=needed", {"earlier": 4}, "prior=needed"),
+    ("prior=needed", {"plan_now": False}, "prior=needed"),
+    # a correction, or an adjustment to the same files
+    ("shift=build", {"correction": True, **LATER}, "shift=fix"),
+    ("shift=grew", {"adjust": True, "same_files": True, **LATER}, "shift=fix"),
+    ("shift=grew", {"adjust": True, **LATER}, "shift=grew"),
+    ("shift=grew", {"same_files": True, **LATER}, "shift=grew"),
+    ("shift=new", {"correction": True, **LATER}, "shift=new"),
+    ("shift=redo", {"correction": True, **LATER}, "shift=redo"),
+    # admit
+    ("shift=fix admit=claim", {"judged": True, **LATER}, "shift=fix"),
+    ("shift=fix admit=claim", {"judged": True, "admit_candidate": True, **LATER}, "shift=fix admit=claim"),
+    ("shift=fix admit=claim", {"admit_candidate": False, **LATER}, "shift=fix admit=claim"),
+    # why: only behind a redo or a fix, and tools only with a tool error
+    ("shift=redo why=left_out", LATER, "shift=redo why=left_out"),
+    ("shift=fix why=missed", LATER, "shift=fix why=missed"),
+    ("shift=build why=missed", LATER, "shift=build"),
+    ("shift=new why=missed", LATER, "shift=new"),
+    ("why=missed", LATER, ""),
+    ("shift=fix why=tools", LATER, "shift=fix"),
+    ("shift=fix why=tools", {"tool_errors": 2, **LATER}, "shift=fix why=tools"),
+    ("shift=build why=missed", {"correction": True, **LATER}, "shift=fix why=missed"),
+    ("why=missed shift=build", {"correction": True, **LATER}, "why=missed shift=fix"),
+    ("shift=fix why=missed", {"earlier": 0}, ""),
+    # words nothing settles
+    ("level=hard size=xl missing=goal brief=clear", {"earlier": 0}, "level=hard size=xl missing=goal brief=clear"),
+    ("task=chat", {"files": 4, "earlier": 0}, "task=chat"),
+    # several at once
+    (
+        "task=bugfix shift=build why=tools admit=claim plan=made skill=helped check=manual prior=some level=hard",
+        {"files": 1, "docs_only": True, "correction": True, "judged": True, "earlier": 3, "plan_before": True},
+        "task=docs shift=fix plan=following skill=none check=manual prior=some level=hard",
+    ),
+    # no facts, nothing to put right
+    ("task=bugfix shift=build why=missed", None, "task=bugfix shift=build why=missed"),
+    ("task=bugfix shift=build why=missed", {}, "task=bugfix shift=build why=missed"),
+    ("", {"earlier": 0}, ""),
+]
+
+
+@pytest.mark.parametrize("words, facts, expected", GROUNDING)
+def test_the_twin_rule_sets_make_the_same_of_the_same_words_and_facts(words, facts, expected):
+    assert HOOK.grounded(words, facts) == expected
+    assert capture_tags.settle(words, facts) == expected
+
+
+@pytest.mark.parametrize("words, facts, expected", GROUNDING)
+def test_the_twins_note_the_same_changes(words, facts, expected):
+    assert HOOK.grounding_changes(words, expected) == list(capture_tags.grounding_changes(words, expected))
+
+
+def test_the_twin_rule_sets_agree_on_every_kind_of_input():
+    """The same random words (in any order, some left out) and facts through both."""
+    rng = random.Random(38)
+    keys = list(capture_tags.GROUNDED_KEYS) + ["level", "size", "brief"]
+    for _ in range(4000):
+        chosen = [key for key in keys if rng.random() < 0.6]
+        rng.shuffle(chosen)
+        words = " ".join(f"{key}={rng.choice(catalogue.TAG_VOCAB[key])}" for key in chosen)
+        facts = {
+            "plan_now": rng.random() < 0.3, "plan_before": rng.random() < 0.3, "skills": rng.choice([0, 0, 1, 2]),
+            "files": rng.choice([0, 0, 1, 3]), "agent_files": rng.choice([0, 0, 0, 2]),
+            "shell_changes": rng.choice([0, 0, 0, 1]), "tests": rng.choice(["", "", "targeted", "full"]),
+            "docs_only": rng.random() < 0.4, "earlier": rng.choice([0, 1, 5]), "correction": rng.random() < 0.3,
+            "adjust": rng.random() < 0.3, "same_files": rng.random() < 0.5, "tool_errors": rng.choice([0, 0, 2]),
+            "admit_candidate": rng.random() < 0.4, "judged": rng.random() < 0.5,
+        }
+        settled = capture_tags.settle(words, facts)
+        assert HOOK.grounded(words, facts) == settled, (words, facts)
+        assert HOOK.grounding_changes(words, settled) == list(capture_tags.grounding_changes(words, settled))
+        # Settling twice changes nothing more.
+        assert capture_tags.settle(settled, facts) == settled, (words, facts)
+
+
+def test_each_twin_names_the_other():
+    assert "capture_tags.settle" in HOOK.grounded.__doc__
+    assert "capture_hook.py" in capture_tags.settle.__doc__ and "grounded" in capture_tags.settle.__doc__
+    assert "tests/test_capture.py" in HOOK.grounded.__doc__ and "tests/test_capture.py" in capture_tags.settle.__doc__
 
 
 # -- workflow agents -----------------------------------------------------------------
@@ -332,7 +800,7 @@ def test_a_workflow_run_on_disk_joins_its_agents_to_the_cycle_whether_or_not_it_
 
 
 def _tagged() -> dict:
-    return _note(0, ["task", "brief", "level", "found"])
+    return _note(0, ["task", "brief", "level", "size"])
 
 
 def _report(second: int, task_id: str) -> dict:
@@ -364,13 +832,13 @@ def test_a_tag_in_reply_to_a_background_agents_report_counts_for_the_cycle_that_
         _ask(10, "something else"),
         _reply(11, text="Done.\n[cg: task=docs]"),
         _report(20, "a1"),
-        _reply(21, text="It found the cause.\n[cg: task=research level=hard found=yes]"),
+        _reply(21, text="It found the cause.\n[cg: task=research level=hard size=m]"),
     ])
     agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
     first, second = capture.prompt_cycles(top, [agent])
-    assert (first.tag.task, first.tag.brief, first.tag.level, first.tag.found) == ("research", "clear", "hard", "yes")
+    assert (first.tag.task, first.tag.brief, first.tag.level, first.tag.size) == ("research", "clear", "hard", "m")
     # The second message keeps the tag it wrote itself and not the report's.
-    assert (second.tag.task, second.tag.level, second.tag.found) == ("docs", None, None)
+    assert (second.tag.task, second.tag.level, second.tag.size) == ("docs", None, None)
     # The turns, and so the cost, stay where they ran.
     assert (len(first.turns), len(second.turns)) == (2, 2)
     assert first.late_turns == [second.turns[1]] and second.handed_off == {1}
@@ -384,11 +852,11 @@ def test_a_cycle_that_only_answered_a_report_has_no_tag_of_its_own(tmp_path):
         _ask(10, "thanks"),
         _reply(11, text="Welcome."),
         _report(20, "a1"),
-        _reply(21, text="Found it.\n[cg: task=research found=yes]"),
+        _reply(21, text="Found it.\n[cg: task=research size=m]"),
     ])
     agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
     first, second = capture.prompt_cycles(top, [agent])
-    assert first.tag.found == "yes" and second.tag is None
+    assert first.tag.size == "m" and second.tag is None
 
 
 def test_a_workflows_report_hands_its_reply_to_the_call_that_launched_it(tmp_path):
@@ -401,10 +869,10 @@ def test_a_workflows_report_hands_its_reply_to_the_call_that_launched_it(tmp_pat
         _ask(10, "meanwhile"),
         _reply(11, text="Sure.\n[cg: task=docs]"),
         _report(20, "t_a"),
-        _reply(21, text="It finished.\n[cg: task=research found=partial]"),
+        _reply(21, text="It finished.\n[cg: task=research size=l]"),
     ])
     first, second = capture.prompt_cycles(top)
-    assert first.tag.found == "partial" and second.tag.found is None and second.tag.task == "docs"
+    assert first.tag.size == "l" and second.tag.size is None and second.tag.task == "docs"
 
 
 def test_a_resumed_runs_report_goes_to_the_call_that_resumed_it(tmp_path):
@@ -421,10 +889,10 @@ def test_a_resumed_runs_report_goes_to_the_call_that_resumed_it(tmp_path):
         _ask(20, "wait"),
         _reply(21, text="Waiting.\n[cg: task=chat]"),
         _report(30, "t_two"),
-        _reply(31, text="Done.\n[cg: task=research found=yes]"),
+        _reply(31, text="Done.\n[cg: task=research size=m]"),
     ])
     first, second, third = capture.prompt_cycles(top)
-    assert (first.tag.found, second.tag.found, third.tag.found) == (None, "yes", None)
+    assert (first.tag.size, second.tag.size, third.tag.size) == (None, "m", None)
 
 
 def test_a_message_of_yours_between_the_report_and_the_reply_hands_nothing_off(tmp_path):
@@ -436,11 +904,11 @@ def test_a_message_of_yours_between_the_report_and_the_reply_hands_nothing_off(t
         _reply(11, text="Done.\n[cg: task=docs]"),
         _report(20, "a1"),
         _ask(21, "and the agent?"),
-        _reply(22, text="Here.\n[cg: task=research found=yes]"),
+        _reply(22, text="Here.\n[cg: task=research size=m]"),
     ])
     agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
     first, second, third = capture.prompt_cycles(top, [agent])
-    assert first.tag.found is None and third.tag.found == "yes"
+    assert first.tag.size is None and third.tag.size == "m"
     assert first.late_turns == [] and not (first.handed_off | second.handed_off | third.handed_off)
 
 
@@ -450,14 +918,14 @@ def test_a_report_answered_in_the_cycle_that_launched_the_agent_hands_nothing_of
         _ask(1, "research this"),
         _background(2, "toolu_A", text="Launched.\n[cg: task=research]"),
         _report(8, "a1"),
-        _reply(9, text="Found it.\n[cg: task=research found=yes]"),
+        _reply(9, text="Found it.\n[cg: task=research size=m]"),
         _ask(10, "next"),
         _reply(11, text="Ok.\n[cg: task=docs]"),
     ])
     agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
     first, second = capture.prompt_cycles(top, [agent])
     assert first.late_turns == [] and first.handed_off == set() and second.handed_off == set()
-    assert (first.tag.found, second.tag.found) == ("yes", None)
+    assert (first.tag.size, second.tag.size) == ("m", None)
 
 
 def test_a_report_for_an_agent_nobody_launched_hands_nothing_off(tmp_path):
@@ -485,12 +953,12 @@ def test_a_reply_to_two_reports_goes_to_the_cycle_of_the_first(tmp_path):
         _reply(21, text="Waiting.\n[cg: task=chat]"),
         _report(30, "a1"),
         _report(31, "b2"),
-        _reply(32, text="Both done.\n[cg: task=research found=yes]"),
+        _reply(32, text="Both done.\n[cg: task=research size=m]"),
     ])
     a = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
     b = _agent_that_reports(tmp_path, "b2", "toolu_B", 15)
     first, second, third = capture.prompt_cycles(top, [a, b])
-    assert (first.tag.found, second.tag.found, third.tag.found) == ("yes", None, None)
+    assert (first.tag.size, second.tag.size, third.tag.size) == ("m", None, None)
 
 
 def test_a_reply_whose_first_report_is_its_own_cycles_keeps_its_tag(tmp_path):
@@ -502,12 +970,12 @@ def test_a_reply_whose_first_report_is_its_own_cycles_keeps_its_tag(tmp_path):
         _background(11, "toolu_B", text="Launched.\n[cg: task=research]"),
         _report(30, "b2"),
         _report(31, "a1"),
-        _reply(32, text="Both done.\n[cg: task=research found=yes]"),
+        _reply(32, text="Both done.\n[cg: task=research size=m]"),
     ])
     a = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
     b = _agent_that_reports(tmp_path, "b2", "toolu_B", 15)
     first, second = capture.prompt_cycles(top, [a, b])
-    assert (first.tag.found, second.tag.found) == (None, "yes")
+    assert (first.tag.size, second.tag.size) == (None, "m")
 
 
 def test_coverage_counts_a_cycle_tagged_only_by_a_late_reply(tmp_path, pricing):
@@ -860,10 +1328,22 @@ def test_metric_estimates_price_what_each_metric_adds(tmp_path, pricing):
     assert past.subagents and parts["result"] == pytest.approx(past.subagents * catalogue.JUDGE_USD_PER_CALL)
 
 
+def test_why_and_admit_are_paid_for_with_shift_and_counted_once():
+    """They ride on the shift switch, so a tag answering all three costs the
+    one metric; a retired found, with no catalogue entry, weighs nothing."""
+    shift = catalogue.METRICS_BY_ID["shift"]
+    tag = CaptureTag(task="bugfix", shift="redo", why="left_out", admit="claim", found="yes")
+    weights = capture._tag_weights(NS(cap=tag, result_marker=None), False)
+    assert weights == {"task": catalogue.METRICS_BY_ID["task"].out_chars, "shift": shift.out_chars}
+    # The note's share for shift is the length of all three of its lines.
+    note = capture._note_weights(["shift"], "main")
+    assert note == {"shift": len(shift.main_line)} and shift.main_line.count("\n") == 2
+
+
 def test_enough_data_counts_answers_against_each_target():
     use = capture.CaptureUsage(answers={"task": 12})
     assert capture.enough_data(use, "task") == (12, capture.ENOUGH["main"])
-    assert capture.enough_data(use, "fit") == (0, capture.ENOUGH["subagent"])
+    assert capture.enough_data(use, "agent_brief") == (0, capture.ENOUGH["subagent"])
     # Judged per agent run, as the rest of an agent's words are.
     assert capture.enough_data(use, "retry") == (0, capture.ENOUGH["subagent"])
     assert capture.enough_data(use, "big_output") == (0, capture.ENOUGH["tool"])

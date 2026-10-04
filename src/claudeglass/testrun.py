@@ -77,11 +77,27 @@ def widest(scopes) -> str:
     return FULL if FULL in found else TARGETED if TARGETED in found else ""
 
 
-def _part_scope(part: str) -> str:
+def command_parts(command: str) -> list[str]:
+    """The commands of a shell line, in order, as ``run_scope`` reads them:
+    heredoc bodies dropped, the line cut apart, and what comes before each
+    program (an assignment, ``timeout 60``, ``uv run``) and the folder and
+    ``.exe`` of the program word removed. ``shell_writes.changes_files``
+    reads a command's program the same way (:func:`normalize`)."""
+    return [normalize(part) for part in _SPLIT_RE.split(_HEREDOC_RE.sub(r"\g<rest>", command))]
+
+
+def normalize(part: str) -> str:
+    """One command without what comes before its program (a ``(`` or
+    ``&``, ``VAR=value``, ``time``, ``timeout 60``, ``uv run``, ``npx``)
+    and the folder and ``.exe`` of the program word."""
     part = part.strip()
     while (prefix := _PREFIX_RE.match(part)) is not None:
         part = part[prefix.end():]
-    part = _PROGRAM_RE.sub(r"\1", part, count=1)
+    return _PROGRAM_RE.sub(r"\1", part, count=1)
+
+
+def _part_scope(part: str) -> str:
+    part = normalize(part)
     match = _RUNNER_RE.match(part)
     if match is None or _NO_RUN_RE.search(match["args"]):
         return ""

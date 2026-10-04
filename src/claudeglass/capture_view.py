@@ -105,7 +105,8 @@ TAGGER_TEXT = {
     f"session no longer carries the tag list. Each call costs about ${catalogue.JUDGE_USD_PER_CALL:.4f} of Haiku, "
     "in the background, so you never wait for it. It takes effect in new sessions.",
     "claude": "Claude now writes the tags again, at the end of its final reply to each of your messages. "
-    "It takes effect in new sessions.",
+    "When it leaves one out, the hook asks Haiku for it in the background, through your own Claude Code login, "
+    f"at about ${catalogue.JUDGE_USD_PER_CALL:.4f} a call. It takes effect in new sessions.",
 }
 
 #: Below this percentage of your messages tagged, once there are
@@ -444,6 +445,12 @@ def _measured(use, units) -> dict | None:
         "tagged_cycles": use.tagged_cycles,
         "coverage_pct": use.coverage,
         "coverage_text": _pct(use.coverage),
+        # While Claude writes the tags: the share it tagged itself and the
+        # share Claude Haiku filled in, each empty until the fallback filled one.
+        "own_coverage_text": (
+            _pct(100.0 * (use.tagged_cycles - use.filled_cycles) / use.cycles) if use.cycles and use.filled_cycles else ""
+        ),
+        "filled_text": _pct(100.0 * use.filled_cycles / use.cycles) if use.cycles and use.filled_cycles else "",
         "reports": use.reports,
         "tagged_reports": use.tagged_reports,
         "judged": use.judged,

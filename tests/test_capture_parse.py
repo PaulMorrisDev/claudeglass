@@ -90,6 +90,20 @@ def test_unknown_keys_words_and_paths_are_dropped():
     assert "secret" not in repr(tag) and "Users" not in repr(tag)
 
 
+def test_why_and_admit_parse_with_their_own_words_and_unknown_words_are_dropped():
+    tag, _ = capture_tags.parse_reply_tags(
+        "Redone.\n\n[cg: task=bugfix shift=redo why=left_out admit=instruction]"
+    )
+    assert (tag.shift, tag.why, tag.admit) == ("redo", "left_out", "instruction")
+    for why in ("changed", "missed", "tools"):
+        assert capture_tags.parse_reply_tags(f"Fixed.\n[cg: shift=fix why={why}]")[0].why == why
+    for admit in ("claim", "change"):
+        assert capture_tags.parse_reply_tags(f"Fixed.\n[cg: shift=fix admit={admit}]")[0].admit == admit
+    tag, _ = capture_tags.parse_reply_tags("Fixed.\n[cg: shift=fix why=because admit=maybe]")
+    assert (tag.shift, tag.why, tag.admit) == ("fix", None, None)
+    assert "because" not in repr(tag)
+
+
 def test_a_result_tag_carries_the_subagent_extras_and_can_share_a_line_with_a_tl_tag():
     tag, result = capture_tags.parse_reply_tags(
         "Done.\n`[result: done fit=smaller rules=unused brief=vague missing=goal]` [cg: task=research]"
@@ -144,7 +158,7 @@ def test_every_vocabulary_word_is_short_and_plain():
     for key, words in capture_catalogue.TAG_VOCAB.items():
         assert key.isidentifier()
         for word in words:
-            assert len(word) <= 16 and all(c.isalnum() or c == "-" for c in word), (key, word)
+            assert len(word) <= 16 and all(c.isalnum() or c in "-_" for c in word), (key, word)
 
 
 # -- tags reach the turn --------------------------------------------------------
@@ -262,18 +276,18 @@ def test_a_pre_rendered_capture_note_still_takes_the_fallback_path(tmp_path):
     ``_attachment_content_chars``), not silently come back sized ``None``.
 
     Pinned against real numbers, not just internal consistency: the
-    essentials level's SessionStart note is exactly 711 characters, and
+    essentials level's SessionStart note is exactly 1337 characters, and
     the wrapper Claude Code puts around a hook's additional context
     (``_HOOK_CONTEXT_WRAPPER_CHARS``, 63) plus ``len("SessionStart")``
-    (12) is exactly 75, for 786 total.
+    (12) is exactly 75, for 1412 total.
     """
     text = capture_catalogue.note_text(capture_catalogue.level_metrics("essentials"), "main")
-    assert len(text) == 711
+    assert len(text) == 1337
     line = _note(text, hook="SessionStart", rendered=False)
     assert "rendered" not in line
     event = events.classify_line(line)
     assert (event.kind, event.subkind) == (EventKind.HOOK_OUTPUT, "capture_note")
-    assert event.size_chars == 786
+    assert event.size_chars == 1412
 
 
 def test_other_hook_context_is_unchanged():
@@ -442,6 +456,43 @@ def test_a_main_session_tag_drops_subagent_only_keys():
     kept, _ = capture_tags.filter_tag(cap, marker, requested={"task"}, subagent=False)
     assert kept.task == "bugfix" and kept.has_tl is True
     assert kept.fit is None and kept.rules is None
+
+
+def test_why_and_admit_are_kept_only_where_the_shift_switch_is_on():
+    cap, marker = capture_tags.parse_reply_tags("Redone.\n\n[cg: task=bugfix shift=redo why=missed admit=claim]")
+    kept, _ = capture_tags.filter_tag(cap, marker, requested={"task", "shift"}, subagent=False)
+    assert (kept.shift, kept.why, kept.admit) == ("redo", "missed", "claim")
+    # A custom config without shift never asked for any of the three.
+    kept, _ = capture_tags.filter_tag(cap, marker, requested={"task"}, subagent=False)
+    assert kept.task == "bugfix"
+    assert (kept.shift, kept.why, kept.admit) == (None, None, None)
+    # A subagent's own [cg: ...] is never trusted, why and admit included.
+    kept, _ = capture_tags.filter_tag(cap, marker, requested={"result", "shift"}, subagent=True)
+    assert kept is None
+
+
+def test_older_found_and_detour_words_are_still_kept_where_their_note_asked():
+    """Notes written before found, fit and detour were retired still name them,
+    so a transcript of that time keeps them: the switch is the note's code."""
+    cap, marker = capture_tags.parse_reply_tags("Found.\n\n[cg: task=research found=partial detour=reread]")
+    kept, _ = capture_tags.filter_tag(cap, marker, requested={"task", "found", "detour"}, subagent=False)
+    assert (kept.found, kept.detour) == ("partial", "reread")
+    kept, _ = capture_tags.filter_tag(cap, marker, requested={"task"}, subagent=False)
+    assert (kept.found, kept.detour) == (None, None)
+
+
+def test_why_and_admit_land_on_the_turn_and_survive_the_digest_cache(tmp_path):
+    result = _parse(tmp_path, [
+        _note("ClaudeGlass metrics capture (cg-cap v1 task,shift): ..."),
+        user_str_line("that is not what I asked, redo it", origin={"kind": "human"}),
+        _reply("Redone.\n[cg: task=bugfix shift=redo why=left_out admit=claim]"),
+    ])
+    cap = result.turns[0].cap
+    assert (cap.shift, cap.why, cap.admit) == ("redo", "left_out", "claim")
+    decoded = cache.result_from_jsonable(json.loads(json.dumps(cache.encode_result(result))))
+    assert decoded.turns == result.turns
+    assert (decoded.turns[0].cap.why, decoded.turns[0].cap.admit) == ("left_out", "claim")
+    assert_privacy(result)
 
 
 # -- messages typed while Claude works (PARSER_VERSION 37) ---------------------------

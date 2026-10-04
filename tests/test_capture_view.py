@@ -78,6 +78,17 @@ def test_on_headline_shows_level_tokens_amount_and_coverage():
     assert data["measured"]["scopes"]["main"]["note_tokens"] == 1000
 
 
+def test_measured_splits_the_tags_haiku_filled_in_from_claudes_own():
+    data = capture_view.view(_on(), past=_past(), units=API, use=_use(cycles=8, tagged_cycles=6, filled_cycles=2))
+    measured = data["measured"]
+    assert measured["coverage_text"] == "75.0%"
+    assert (measured["own_coverage_text"], measured["filled_text"]) == ("50.0%", "25.0%")
+    # Nothing filled in, or nothing measured: both stay empty.
+    for use in (_use(cycles=8, tagged_cycles=6), _use(cycles=0, tagged_cycles=0, filled_cycles=0)):
+        measured = capture_view.view(_on(), past=_past(), units=API, use=use)["measured"]
+        assert (measured["own_coverage_text"], measured["filled_text"]) == ("", "")
+
+
 def test_on_notes_low_coverage_enough_data_and_expiry():
     use = _use(cycles=30, tagged_cycles=6)
     use.answers = {m: 1000 for m in catalogue.level_metrics("essentials")}
@@ -297,8 +308,8 @@ def test_change_commands():
     before = _on()
     assert capture_view.change_commands(before, {"level": "off"}) == ["claudeglass capture off"]
     assert capture_view.change_commands(before, {"level": "deep"}) == ["claudeglass capture level deep"]
-    assert capture_view.change_commands(before, {"metrics": ["task", "fit"]}) == [
-        "claudeglass capture enable fit",
+    assert capture_view.change_commands(before, {"metrics": ["task", "agent_brief"]}) == [
+        "claudeglass capture enable agent_brief",
         "claudeglass capture disable brief level shift size retry session_end waits permissions turn_signals",
     ]
     assert capture_view.change_commands(before, {"feedback": ["feedback_note"], "sample": 50}) == [

@@ -3633,11 +3633,11 @@ def test_post_capture_explicit_empty_until_means_no_limit(server):
 
 
 def test_post_capture_picks_metrics_sampling_end_and_feedback(server):
-    resp, payload = server.post_json("/api/capture", {"metrics": ["task", "fit"]})
+    resp, payload = server.post_json("/api/capture", {"metrics": ["task", "agent_brief"]})
     assert resp.status == 200
     config = payload["data"]["config"]
-    # fit rides on result, so result comes with it.
-    assert config["level"] == "custom" and config["metrics"] == ["task", "result", "fit"]
+    # agent_brief rides on result, so result comes with it.
+    assert config["level"] == "custom" and config["metrics"] == ["task", "result", "agent_brief"]
     resp, payload = server.post_json(
         "/api/capture", {"sample": 25, "until": "2099-01-01T00:00:00+00:00", "feedback": ["feedback_note"]}
     )

@@ -27,7 +27,7 @@ the right facts, not more thought, so the hook runs Haiku without thinking.
 - **Right answers.** `scripts/tagger-eval/scenarios.json` gives the
   right words for each session's last turn, for the keys with a clear
   answer. Some accept more than one word (a small change is `xs` or `s`),
-  and some expect a key left out (`found` outside research).
+  and some expect a key left out (`shift` on a first message).
 - **Judges.** The last turn of each session is judged the way the hook
   does it: the same excerpt (with Claude's own tag taken out of the
   reply), the same instructions, the same word filter and corrections,
@@ -82,14 +82,29 @@ they came from what the judge was shown and told, not from the model:
   what it can't judge.
 - **Corrections from facts.** What the transcript settles now overrides
   Haiku:
-  - a plan-mode plan written this turn is `plan=made`;
-  - no file changed is `check=none`;
+  - a plan-mode plan written this turn is `plan=made`, and it reads
+    `following` once a plan was approved earlier;
+  - no file changed is `check=none`. Files a subagent or a workflow agent
+    changed, and commands that move or remove files, count as changes;
   - a test run is `targeted` or `full`, by whether the command picked
-    tests;
+    tests, and a whole suite outranks chosen tests;
   - only documentation changed is `task=docs`;
-  - a first message has no `shift` but `new`.
+  - a first message has no `shift` but `new`, no `why` and no `prior`
+    but `none`;
+  - `build` or `grew` is `fix` when your message corrects Claude, or
+    tweaks the files the last reply changed;
+  - `why` stays only with a redo or a fix, and `why=tools` only with a
+    tool error;
+  - Haiku's `admit` stays only when the reply reads like an admission;
+  - `skill=helped` or `unneeded` is `none` when no skill ran.
 
-  The old "no ExitPlanMode means no plan" correction is gone.
+  The old "no ExitPlanMode means no plan" correction is gone. The same
+  rules now also settle Claude's own tags when ClaudeGlass reads them
+  back (`capture_tags.settle`; the hook's twin is `grounded`), and a
+  table test holds the two to each other. The tag file notes what the
+  hook changed in its `g` field. The runs below came before the `why`,
+  `admit`, `fix`, `following`, `skill` and subagent rules, and haven't
+  been repeated.
 
 ## Final results
 
@@ -104,7 +119,9 @@ On the held-out set, the same sessions judged with the hook as first
 written score Haiku 75%, Haiku with thinking 83% and Sonnet 90%. So most
 of the gain holds on work the changes weren't tuned on.
 
-By key, over all 38:
+By key, over all 38. This run also scored `found`. That key has since
+been dropped, so the scenarios no longer expect it and a new run won't
+show it.
 
 | Key | Haiku | Haiku, thinking | Sonnet | Claude's own |
 |---|---|---|---|---|
@@ -217,6 +234,19 @@ named both reruns every time and still called no follow-on run a retry.
 One case stays out: a sequence you script yourself ("start an agent with
 a vague brief, then one with a precise brief") reads as your plan, not a
 rerun, and Haiku says `none`.
+
+The figures above were measured before the judge changed in the next
+release. It now asks for the brief and what it lacked before the result,
+counts findings, refuted claims and an empty list as done, reads a
+workflow agent's computed task as the brief and its answer field by
+field, and writes `retry=model` itself when the same brief reruns on a
+higher model tier. The script has three more cases for this, which the
+table doesn't count yet: a workflow agent that refutes a claim and one
+that returns an empty list (both done), and a run that hands back that
+it could not work (blocked). The hook also waits for an agent's last
+lines before it reads them, which no case here can show, because each
+hands the judge a finished transcript. Run `scripts/eval-agent-judge.py`
+to refresh the table before quoting it.
 
 ## Run it again
 

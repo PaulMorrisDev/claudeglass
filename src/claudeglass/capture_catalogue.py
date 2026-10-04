@@ -58,13 +58,21 @@ TAG_VOCAB: dict[str, tuple[str, ...]] = {
     "brief": ("clear", "partial", "vague"),
     "level": ("easy", "normal", "hard"),
     "shift": ("new", "build", "grew", "redo", "fix"),
+    # Essentials, main session: both ride on the shift switch
+    # (``Metric.extra_keys``). ``why`` is written only with shift redo or
+    # fix: the cause of the rework. ``admit`` says the reply admits an
+    # earlier mistake of Claude's.
+    "why": ("left_out", "missed", "changed", "tools"),
+    "admit": ("claim", "change", "instruction"),
     # Standard, main session
     "size": ("xs", "s", "m", "l", "xl"),
     "missing": ("files", "goal", "constraints", "done", "repro", "scope", "none"),
     "plan": ("none", "made", "following", "deviated"),
     "skill": ("helped", "unneeded", "would-help", "none"),
+    # Retired, no longer asked for (:data:`RETIRED_METRIC_IDS`): an older
+    # transcript's tag still carries them, so the parser still reads them.
+    # ``fit`` and ``rules`` were a subagent's (inside [result: ...]).
     "found": ("yes", "partial", "no"),
-    # Standard, subagent report (inside [result: ...])
     "fit": ("smaller", "right", "larger"),
     "rules": ("used", "unused"),
     # Deep, main session
@@ -177,10 +185,10 @@ LEVEL_SUMMARIES = {
     "own switches and keep working while capture is off.",
     "free": "Local signals from hooks that log to a file. Uses no Claude tokens.",
     "essentials": "Claude tags each piece of work: what kind it was, how clear the request was, how hard, "
-    "how big, and when the task changed. Claude Haiku judges whether each agent run finished, and why one was "
-    "run again.",
-    "standard": "Adds what the request lacked, planning, skills, research, "
-    "and Haiku's view of each agent run's model and brief.",
+    "how big, and when the task changed. For redone work it adds why, and whether Claude admitted a mistake. "
+    "Claude Haiku judges whether each agent run finished, and why one was run again.",
+    "standard": "Adds what the request lacked, planning and skills, "
+    "and Haiku's view of each agent run's brief.",
     "deep": "Adds how much earlier context was needed, how the change was checked, and a "
     "short rating after large tool outputs. Also turns on the /cg-feedback survey, its reminder note, "
     "and Claude's one-line reminder to run it when a piece of work is done.",
@@ -380,16 +388,37 @@ JUDGE_USD_PER_CALL = 0.002
 
 #: What the excerpt Haiku reads holds at most, in characters: your
 #: message, your message before it and the end of Claude's reply to that,
-#: the end of Claude's final reply and each shell command; and how many
-#: commands and changed files it names.
+#: the end of Claude's final reply and each shell command; how many
+#: commands and changed files it names; each message you queued while
+#: Claude worked (``queued``) and how many it shows (``queued_count``); the
+#: request the work began with (``origin``: the start of the plan you
+#: approved, else of your latest earlier message longer than ``origin_min``); and
+#: the length (``short``) up to which a message is a short follow-up.
 JUDGE_LIMITS = {
     "prompt": 2000, "previous": 300, "previous_reply": 600, "reply": 1500, "command": 100, "commands": 6, "files": 8,
+    "queued": 300, "queued_count": 3, "origin": 600, "origin_min": 300, "short": 300,
 }
+
+#: Who wrote a line of the tag files' main-session tags: Haiku, because
+#: the tagger is ``haiku`` (a line without a ``w`` field), or Haiku as the
+#: fallback for a reply Claude wrote no tag in while the tagger is
+#: ``claude`` (``"w":"haiku-fallback"``). A line's tag is read the same
+#: either way.
+JUDGE_WRITER = "haiku"
+JUDGE_FALLBACK_WRITER = "haiku-fallback"
+JUDGE_WRITERS = (JUDGE_WRITER, JUDGE_FALLBACK_WRITER)
+
+#: What Claude Code writes before the text you typed into a plan's dialog
+#: when you sent the plan back (``parse``'s plan feedback, which a test
+#: holds this to). The hook counts the rounds of feedback a plan got by it.
+PLAN_SAID_PATTERN = r"the user said:\s*"
 
 #: Why a turn got no Haiku tag, as its line in :data:`JUDGE_DIR` says:
 #: no ``claude`` command on the hook's path, it isn't signed in, Haiku took
-#: too long, the call failed otherwise, or its answer held no tag.
-JUDGE_ERRORS = ("no_cli", "no_login", "timeout", "failed", "no_tag")
+#: too long, the call failed otherwise, its answer held no tag, or (an
+#: agent run) the agent's answer never reached its transcript, so Haiku
+#: wasn't asked.
+JUDGE_ERRORS = ("no_cli", "no_login", "timeout", "failed", "no_tag", "no_answer")
 
 JUDGE_INTRO = (
     "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage "
@@ -401,40 +430,73 @@ JUDGE_INTRO = (
 #: ``SKIP_KEY_LINE``: it sees an excerpt, not the work.
 JUDGE_RULE = (
     "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that "
-    "applies. Leave one out only when it doesn't fit this work (found outside research or a search; shift on "
-    "a first message) or the excerpt can't tell at all."
+    "applies. Leave one out only when it doesn't fit this work (why without a redo or fix; admit without an "
+    "admission; shift on a first message) or the excerpt can't tell at all. When Claude carried out a plan, "
+    "judge the plan, not the user's go-ahead."
 )
 
 #: What Haiku is told when it judges a finished agent run (the agent
-#: metrics: ``result``, ``fit``, ``agent_brief``, ``retry``). A subagent
+#: metrics: ``result``, ``agent_brief``, ``retry``). A subagent
 #: asked to end its report with a tag added it after a JSON-only answer,
 #: breaking it, and the main session took the line for an injected
 #: instruction; so no agent is asked for anything, and the capture hook's
 #: ``SubagentStop`` entry hands Haiku an excerpt of the run instead.
 AGENT_JUDGE_INTRO = (
     "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt "
-    "of it: the brief the agent was given, what it did, the end of its report and the session's earlier agent "
-    "runs. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words:"
+    "of it: the brief the agent was given, what it did, the end of its report or the answer it handed back, "
+    "and the session's earlier agent runs. Answer with one line and nothing else, [cg: key=word ...], using "
+    "only these keys and words:"
 )
-AGENT_JUDGE_RULE = "Judge only from the excerpt. Give every key; leave one out only when the excerpt can't tell at all."
+AGENT_JUDGE_RULE = (
+    "Judge only from the excerpt. Judge the brief first, from the brief alone, whatever the result. Give every "
+    "key; leave one out only when the excerpt can't tell at all."
+)
 
 #: What the agent excerpt holds at most, in characters: the brief, the
-#: end of the report, each earlier run's brief and report end, and each
-#: shell command; and how many earlier runs, commands and changed files
-#: it names.
+#: line a workflow was started with (``relay``: context, not the brief),
+#: the end of the report, each earlier run's brief and report end, and
+#: each shell command; how long a closing remark after an answer can be
+#: for the answer to still be the report (``closing``) and how much of
+#: each field of an answer is shown (``answer_field``); and how many
+#: earlier runs, commands, changed files and answer fields it names.
 AGENT_JUDGE_LIMITS = {
-    "brief": 2000, "report": 1500, "earlier": 4, "earlier_brief": 200, "earlier_report": 200, "command": 100,
-    "commands": 6, "files": 8,
+    "brief": 2000, "relay": 300, "report": 1500, "earlier": 4, "earlier_brief": 200, "earlier_report": 200,
+    "command": 100, "commands": 6, "files": 8, "closing": 300, "answer_field": 300, "answer_fields": 10,
 }
 
 #: The agent metrics, each with the ``[cg: ...]`` keys Haiku answers for
-#: it, in the order it is asked.
-AGENT_JUDGE_KEYS = {"result": ("result",), "retry": ("retry",), "fit": ("fit",), "agent_brief": ("brief", "missing")}
+#: it, in the order it is asked and answers: the brief before the result,
+#: so that how the run ended doesn't colour how the brief reads (a halo
+#: Haiku showed when asked for the result first).
+AGENT_JUDGE_KEYS = {"agent_brief": ("brief", "missing"), "result": ("result",), "retry": ("retry",)}
+
+#: Tools whose call is an agent's answer, not a step of its work: a
+#: workflow agent hands its result back through ``StructuredOutput``, and
+#: an agent that was told to through ``SubagentHandback``, whose
+#: ``message`` is the answer. A run that ends on one finished
+#: (``quality``); the hook reads the answer from the last one's input.
+AGENT_ANSWER_TOOLS = ("StructuredOutput", "SubagentHandback")
+
+#: How the worker waits for an agent's transcript to settle before it
+#: reads it: the ``SubagentStop`` hook fires before the agent's last
+#: lines are flushed, and a workflow agent's answer can be among them. It
+#: polls every ``poll_s`` seconds until an answer tool's call is there or
+#: the file has stopped growing for ``quiet_s`` seconds, and gives up at
+#: ``cap_s`` (well inside :data:`JUDGE_TIMEOUT_S`) with ``no_answer``.
+AGENT_JUDGE_WAIT = {"poll_s": 0.5, "quiet_s": 3.0, "cap_s": 20.0}
+
+#: Model families from the smallest tier up (``workstyle``'s order): an
+#: agent run of the same brief on a higher tier than an earlier run is a
+#: ``retry=model``, which the hook writes itself.
+AGENT_MODEL_TIERS = ("haiku", "sonnet", "opus", "fable")
+
+#: Keys an agent verdict written before ``fit`` was dropped may still
+#: carry. They are read back (``haiku_tags``), never asked for.
+RETIRED_AGENT_KEYS = ("fit",)
 
 #: The words each of those keys takes.
 AGENT_JUDGE_VOCAB = {
     "result": RESULT_WORDS,
-    "fit": TAG_VOCAB["fit"],
     "brief": TAG_VOCAB["brief"],
     "missing": ("files", "goal", "scope", "done", "none"),
     # "none" is how Haiku says a run is no retry; it is never kept.
@@ -830,6 +892,13 @@ LIMIT_LINE_PREFIXES = (SESSION_LIMIT_PREFIX, WEEKLY_LIMIT_PREFIX)
 #: Code writes it: as a user line, a queued command or a queue operation.
 TASK_NOTIFICATION_PREFIX = "<task-notification"
 
+#: What a scheduled task's prompt starts with, as the message that begins
+#: its session (a queued line, written before the session's first hook
+#: runs). The capture hook adds no note to such a session and judges none
+#: of its replies: it has no message of yours, so the parser opens no
+#: cycle in it and every tag would be thrown away.
+SCHEDULED_TASK_PREFIX = "<scheduled-task"
+
 #: What a line written as your message starts with when you didn't type
 #: it: a slash command and its output, a ``!`` shell command, a
 #: scheduled task, a background agent's report, a message from another
@@ -837,7 +906,7 @@ TASK_NOTIFICATION_PREFIX = "<task-notification"
 #: hook and the status line share, so none of them hands such a line a
 #: hint or counts it as one of your messages.
 NOT_TYPED_PREFIXES = (
-    "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", TASK_NOTIFICATION_PREFIX,
+    "<command-", "<local-command-", "<bash-", SCHEDULED_TASK_PREFIX, "<<autonomous-loop", TASK_NOTIFICATION_PREFIX,
     "[SYSTEM NOTIFICATION", "<agent-message", "<cross-session-message", "Another Claude session sent a message",
     LIMIT_RESUME_PREFIX, APP_QUIT_PREFIX,
 )
@@ -977,6 +1046,29 @@ SHELL_WRITE_PATTERN = (
     r"|(?:^|[;\n(&|])[ \t]*(?:[\"'$@]|(?:echo|write-output|write|get-content|gc|cat|type)\b)[^\n;]*"
     r"\|[ \t]*(?:out-file|tee-object)\b)"
 )
+
+#: A shell command that changes files without handing them content, which
+#: :data:`SHELL_WRITE_PATTERN` and ``shell_writes.write_targets`` can't see:
+#: a ``git`` command that rewrites the working tree (``merge``, ``rebase``,
+#: ``cherry-pick``, ``revert``, ``pull``, ``apply``, ``am``, ``restore``,
+#: ``reset``, ``stash``, ``mv``, ``rm``, ``clean``; not ``commit``, ``add``
+#: or ``push``, which leave the files as they were), or ``mv``, ``cp``,
+#: ``rm``, ``mkdir`` and their PowerShell kin (cmdlets and aliases). Matched at the start of one
+#: command, after the steps ``testrun`` takes (heredoc bodies dropped, the
+#: line cut into commands, the prefix and the program's folder removed), so
+#: a commit message that mentions a merge changes nothing. Over-matching is
+#: the safe side: a command it counts only stops ``check=none`` being
+#: forced on a reply that did change something (``capture_tags.settle``).
+SHELL_CHANGE_PATTERN = (
+    r"(?:git(?:\s+(?:-[Cc]\s+\S+|--?[\w-]+(?:=\S+)?))*\s+"
+    r"(?:merge|rebase|cherry-pick|revert|pull|apply|am|restore|reset|stash|mv|rm|clean)"
+    r"|mv|cp|rm|rmdir|mkdir|touch|patch|truncate|ln"
+    r"|(?:remove|move|copy|new|rename)-item|del|erase|rd|md|ren|ri|mi|cpi|ni|rni)(?=\s|$)"
+)
+
+#: Files whose change alone makes the work documentation
+#: (``capture_tags.settle``: ``task=docs``).
+DOC_SUFFIXES = (".md", ".rst", ".txt", ".adoc")
 
 #: A message that opens by asking Claude to look, not to change anything
 #: ("review the diff", "explain how X works", "can you check Y"). A job
@@ -1351,10 +1443,16 @@ class Metric:
     #: Hook events it needs in Claude Code's settings.json.
     hooks: tuple[str, ...] = ()
     #: The line explaining its key in the main session's ``[cg: ...]``
-    #: tag; and, for an agent metric, the line Haiku gets for its keys
-    #: when it judges an agent run (:func:`agent_judge_text`).
+    #: tag (one line for each key in :attr:`extra_keys` after it); and,
+    #: for an agent metric, the line Haiku gets for its keys when it
+    #: judges an agent run (:func:`agent_judge_text`).
     main_line: str = ""
     sub_line: str = ""
+    #: Further ``[cg: ...]`` keys that ride on this metric's switch
+    #: (``why`` and ``admit`` on ``shift``): the note and Haiku ask for
+    #: them with it, and a tag keeps them only while it is on
+    #: (``capture_tags.MAIN_TAG_FIELDS``).
+    extra_keys: tuple[str, ...] = ()
     #: A line of its own in the main or subagent note.
     main_extra: str = ""
     sub_extra: str = ""
@@ -1425,17 +1523,27 @@ METRICS: tuple[Metric, ...] = (
         id="shift",
         group="essentials",
         section="main",
-        title="Task changes",
+        title="Task changes and their cause",
         what="When the work changed: a new unrelated task, building on the last one, the scope growing, "
-        "redoing earlier work, or fixing a fault in earlier work.",
+        "redoing work, or fixing what Claude delivered. For redone or fixed work, why: your request or the "
+        "plan left it out, Claude missed something, you changed your mind, or a tool failed. Whether Claude "
+        "admitted an earlier mistake: a wrong statement, a wrong change, or an instruction it didn't follow.",
         why="Task switching, scope creep, rework and fixes, and when a fresh session or plan mode would have "
-        "been cheaper.",
+        "been cheaper. The cause of each redo separates what your request left out from what Claude got "
+        "wrong, and admitted mistakes are counted.",
         powers=("breakdown", "context", "planning"),
-        tag="shift=new|build|grew|redo|fix",
+        tag="shift=new|build|grew|redo|fix why=left_out|missed|changed|tools admit=claim|change|instruction",
         hooks=("SessionStart",),
         main_line="shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the "
-        "last one; the scope grew; redoing earlier work; fixing a fault in it)",
-        out_chars=5,
+        "last one; the scope grew; redoing earlier work; changing what you just delivered because it was wrong "
+        "or not what they wanted, a rename or tweak included = fix)\n"
+        "why: left_out|missed|changed|tools, only with shift redo or fix (their earlier request or the plan "
+        "left it out; you missed something their request or the plan said; they changed their mind; a tool or "
+        "setup failure)\n"
+        "admit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of yours: a "
+        "wrong statement; a wrong change; an instruction you were given and didn't follow)",
+        extra_keys=("why", "admit"),
+        out_chars=9,
     ),
     Metric(
         id="size",
@@ -1462,8 +1570,9 @@ METRICS: tuple[Metric, ...] = (
         why="Which agents and models deliver, and which get re-run.",
         powers=("delegation", "models", "outcome"),
         hooks=("SubagentStop",),
-        sub_line="result: done|partial|blocked (done = the agent finished what its brief asked; partial = some "
-        "of it; blocked = it could not go on, such as a missing file, tool or permission)",
+        sub_line="result: done|partial|blocked (done = the agent did its own work and handed back what its brief "
+        "asked for, whatever it found: findings, refuted claims and an empty list all count as done; partial = it "
+        "did some of its work; blocked = it could not do its own work, such as a missing file, tool or permission)",
     ),
     Metric(
         id="retry",
@@ -1471,7 +1580,8 @@ METRICS: tuple[Metric, ...] = (
         section="subagents",
         title="Why an agent was run again",
         what="When an agent run redoes an earlier one in the session that fell short, the reason: model, "
-        "brief, tools, scope or other, judged by Claude Haiku from the two runs.",
+        "brief, tools, scope or other, judged by Claude Haiku from the two runs, or model when the same brief "
+        "reruns on a higher model tier.",
         why="Why agents are re-run, and a guard that stops ClaudeGlass suggesting a cheaper model for work "
         "that needed a stronger one.",
         powers=("delegation", "models"),
@@ -1498,7 +1608,8 @@ METRICS: tuple[Metric, ...] = (
         tag="missing=files,goal,constraints,done,repro,scope|none",
         hooks=("SessionStart",),
         main_line="missing: files,goal,constraints,done,repro,scope or none (what the request lacked that you "
-        "had to find or guess; a comma list)",
+        "had to find or guess; a comma list; files = you had to search for which files; scope = what to change "
+        "and what to leave alone wasn't said)",
         out_chars=14,
     ),
     Metric(
@@ -1527,37 +1638,9 @@ METRICS: tuple[Metric, ...] = (
         powers=("skills",),
         tag="skill=helped|unneeded|would-help[:name]|none",
         hooks=("SessionStart",),
-        main_line="skill: helped|unneeded|would-help|none (whether a skill you ran helped; would-help:<name> "
-        "if one of the listed skills would have)",
+        main_line="skill: helped|unneeded|would-help|none (if you ran a skill: helped or unneeded; if you ran "
+        "none: none, or would-help:<name> when one of the listed skills would have helped)",
         out_chars=11,
-    ),
-    Metric(
-        id="found",
-        group="standard",
-        section="main",
-        title="Research result",
-        what="For research and search work, whether Claude found what was asked.",
-        why="How you research: when to give Claude pointers, and when an Explore agent is cheaper.",
-        powers=("research",),
-        tag="found=yes|partial|no",
-        hooks=("SessionStart",),
-        main_line="found: yes|partial|no (for research or search work: whether you found what was asked)",
-        out_chars=6,
-    ),
-    Metric(
-        id="fit",
-        group="standard",
-        section="subagents",
-        title="Agent model fit",
-        what="Whether a smaller model would have done each subagent's task, or it needed a larger one, judged "
-        "by Claude Haiku once the run is done.",
-        why="Agent model tuning. Used only to rule a cheaper model out, never to recommend one.",
-        powers=("models", "delegation"),
-        hooks=("SubagentStop",),
-        sub_line="fit: smaller|right|larger (smaller = a smaller, cheaper model could plainly have done this: "
-        "simple lookups or mechanical edits; right = it suited the model it ran on; larger = the agent "
-        "struggled in a way a stronger model would not have)",
-        requires=("result",),
     ),
     Metric(
         id="agent_brief",
@@ -1585,7 +1668,8 @@ METRICS: tuple[Metric, ...] = (
         powers=("context",),
         tag="prior=needed|some|none",
         hooks=("SessionStart",),
-        main_line="prior: needed|some|none (how much of the earlier conversation this work needed)",
+        main_line="prior: needed|some|none (how much of the earlier conversation this work needed; always none "
+        "on the first message)",
         out_chars=10,
     ),
     Metric(
@@ -1599,7 +1683,10 @@ METRICS: tuple[Metric, ...] = (
         powers=("verification",),
         tag="check=targeted|full|build|run|manual|none",
         hooks=("SessionStart",),
-        main_line="check: targeted|full|build|run|manual|none (how you verified the change)",
+        main_line="check: targeted|full|build|run|manual|none (how you verified the change: targeted = ran the "
+        "tests for the part changed; full = ran the whole test suite, at any point; build = only built or "
+        "type-checked; run = ran the program itself to see it work; manual = only read it back; none = no "
+        "check, or you changed nothing)",
         out_chars=12,
     ),
     Metric(
@@ -1906,9 +1993,11 @@ DEEP_FEEDBACK_IDS = ("feedback_skill", "feedback_note", "feedback_reminder")
 #: allows them through, and ``with_requirements``/``active_metrics``
 #: silently drop them (they are not in :data:`METRICS_BY_ID`) rather than
 #: ever asking Claude for them again. Their words stay in
-#: :data:`TAG_VOCAB` (``detour``, ``useful``) and :data:`SPAWN_REASONS` so
-#: a transcript recorded before the retirement still parses.
-RETIRED_METRIC_IDS: tuple[str, ...] = ("detour", "web", "spawn", "rules")
+#: :data:`TAG_VOCAB` (``detour``, ``useful``, ``found``, ``fit``) and
+#: :data:`SPAWN_REASONS` so a transcript recorded before the retirement
+#: still parses. ``found`` (answered 14% of the time, "yes" 9 times in 10)
+#: and the agent verdict ``fit`` (always "right") were retired later.
+RETIRED_METRIC_IDS: tuple[str, ...] = ("detour", "web", "spawn", "rules", "found", "fit")
 
 #: The persistent feedback note (``feedback_note``): the status line's
 #: second line and the dashboard banner show it word for word.
@@ -2192,7 +2281,15 @@ MAIN_TAG_INTRO = (
 SUB_TAG_INTRO = "End your final report with one line, {tag}, using only these words:"
 SUB_TAG = "[result: done|partial|blocked]"
 SUB_TAG_WITH_KEYS = "[result: done|partial|blocked key=word ...]"
-SKIP_KEY_LINE = "Leave out a key you can't judge."
+#: The note's last lines: how to leave a key out, then the two replies the
+#: keys mislead on. A go-ahead that carries out a plan is judged by the
+#: plan (10 of 44 such cycles were tagged ``brief=partial`` for the short
+#: go-ahead), and a reply to an agent's report is tagged for the request
+#: that started the agent (it left 11 of 29 untagged cycles).
+SKIP_KEY_LINE = (
+    "Leave out a key you can't judge. When carrying out a plan, judge the plan, not the go-ahead. "
+    "Tag your reply to an agent's report for the request that started the agent."
+)
 
 
 def level_metrics(level: str) -> tuple[str, ...]:
@@ -2292,17 +2389,31 @@ def note_text(ids, scope: str, agent_type: str = "", tagger: str = DEFAULT_TAGGE
 
 
 def tagged_keys(ids) -> tuple[str, ...]:
-    """The ``[cg: ...]`` keys the metrics in ``ids`` ask for, in
-    catalogue order."""
+    """The metrics in ``ids`` that ask for a ``[cg: ...]`` key, in
+    catalogue order, each named by its own key. :func:`tag_keys` also
+    names the keys that ride on one."""
     wanted = set(ids)
     return tuple(m.id for m in METRICS if m.id in wanted and m.main_line)
+
+
+def tag_keys(ids) -> tuple[str, ...]:
+    """Every ``[cg: ...]`` key the metrics in ``ids`` ask for, in
+    catalogue order: a metric's own key, then the keys riding on it
+    (:attr:`Metric.extra_keys`, ``why`` and ``admit`` on ``shift``).
+    ``hooks/capture_hook.py`` builds the same list (``tag_keys``)."""
+    wanted = set(ids)
+    return tuple(
+        key for m in METRICS if m.id in wanted and m.main_line for key in (m.id, *m.extra_keys)
+    )
 
 
 #: Key lines Haiku gets in place of the note's, spelling out each word:
 #: it sees an excerpt, not the work, and ``scripts/eval-tagger.py`` found
 #: these keys read differently without them (running the tests read as
 #: ``check=run``, a README typo fix as ``task=bugfix``). The rest are
-#: the note's own lines.
+#: the note's own lines, which Haiku reads the same way (``you`` is
+#: Claude). A metric's keys riding on it (``why`` and ``admit`` on
+#: ``shift``) follow its own, on lines of their own.
 JUDGE_LINES = {
     "task": f"task: {'|'.join(TAG_VOCAB['task'])} (the kind of work asked for: docs = documentation or comments "
     "only; ops = CI, build, deploy or configuration; test = tests only; research = finding something out; "
@@ -2311,17 +2422,27 @@ JUDGE_LINES = {
     "like; partial = the goal without the details; vague = neither)",
     "shift": "shift: new|build|grew|redo|fix, only after an earlier message (new = an unrelated task; build = a "
     "next step on top of the last task; grew = more asked of the same task; redo = the same task done another "
-    "way; fix = fixing a fault in the last work)",
+    "way; fix = changing what Claude just delivered because it was wrong or not what they wanted, a rename or "
+    "tweak included). A short message changing files Claude changed in its previous reply is fix, not build or "
+    "grew.\n"
+    "why: left_out|missed|changed|tools, only with shift redo or fix (left_out = their earlier request or the "
+    "plan left it out; missed = Claude missed something their request or the plan said; changed = they changed "
+    "their mind; tools = a tool or setup failure)\n"
+    "admit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of Claude's: "
+    "claim = a wrong statement; change = a wrong change; instruction = an instruction it was given and didn't "
+    "follow)",
     "size": "size: xs|s|m|l|xl (how big the work was: xs = a line or two, or only an answer; s = a small change; "
     "m = a feature with its tests; l = many files; xl = a large change)",
     "plan": "plan: none|made|following|deviated (none = no plan; made = Claude wrote one this turn, as a plan "
     "file or as steps in its reply; following = Claude carried out one written earlier; deviated = Claude "
     "departed from one written earlier)",
     "prior": "prior: needed|some|none (how much the work relied on the earlier conversation: needed = the "
-    "message only makes sense with it; some = it helped; none = a fresh request)",
+    "message only makes sense with it; some = it helped; none = a fresh request, and always none on the first "
+    "message)",
     "check": "check: targeted|full|build|run|manual|none (how Claude verified its change: targeted = ran the "
-    "tests for the part changed; full = ran the whole test suite; build = only built or type-checked; run = "
-    "ran the program itself to see it work; manual = only read it back; none = no check, or nothing changed)",
+    "tests for the part changed; full = ran the whole test suite, at any point; build = only built or "
+    "type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check, "
+    "or nothing changed)",
 }
 
 
@@ -2339,10 +2460,10 @@ def judge_text(ids) -> str:
 
 
 def agent_metric_ids(ids) -> tuple[str, ...]:
-    """The agent metrics among ``ids`` (:data:`AGENT_JUDGE_KEYS`), in
-    catalogue order."""
+    """The agent metrics among ``ids`` (:data:`AGENT_JUDGE_KEYS`), in the
+    order Haiku is asked for them (the brief first)."""
     wanted = set(ids)
-    return tuple(m.id for m in METRICS if m.id in wanted and m.id in AGENT_JUDGE_KEYS)
+    return tuple(metric_id for metric_id in AGENT_JUDGE_KEYS if metric_id in wanted)
 
 
 def agent_judge_text(ids) -> str:
@@ -2448,6 +2569,7 @@ def export_json() -> dict:
                 "group": m.group,
                 "requires": list(m.requires),
                 "main_line": m.main_line,
+                "extra_keys": list(m.extra_keys),
                 "main_extra": m.main_extra,
                 "extra_before_tag": m.extra_before_tag,
                 "main_extra_untagged": m.main_extra_untagged,
@@ -2487,6 +2609,7 @@ def export_json() -> dict:
             "timeout_s": JUDGE_TIMEOUT_S,
             "thinking_tokens": JUDGE_THINKING_TOKENS,
             "limits": dict(JUDGE_LIMITS),
+            "fallback_writer": JUDGE_FALLBACK_WRITER,
             "intro": JUDGE_INTRO,
             "rule": JUDGE_RULE,
             "lines": dict(JUDGE_LINES),
@@ -2498,6 +2621,9 @@ def export_json() -> dict:
                 "limits": dict(AGENT_JUDGE_LIMITS),
                 "keys": {metric_id: list(keys) for metric_id, keys in AGENT_JUDGE_KEYS.items()},
                 "vocab": {key: list(words) for key, words in AGENT_JUDGE_VOCAB.items()},
+                "answer_tools": list(AGENT_ANSWER_TOOLS),
+                "wait": dict(AGENT_JUDGE_WAIT),
+                "model_tiers": list(AGENT_MODEL_TIERS),
             },
         },
         "coaching": {
@@ -2522,6 +2648,8 @@ def export_json() -> dict:
             "background_launch_pattern": BACKGROUND_LAUNCH_PATTERN,
             "background_scan_chars": BACKGROUND_SCAN_CHARS,
             "task_notification_prefix": TASK_NOTIFICATION_PREFIX,
+            "scheduled_task_prefix": SCHEDULED_TASK_PREFIX,
+            "plan_said_pattern": PLAN_SAID_PATTERN,
             "reply_scan_chars": REPLY_SCAN_CHARS,
             "reply_fence_pattern": REPLY_FENCE_PATTERN,
             "reply_tip_block_pattern": REPLY_TIP_BLOCK_PATTERN,
@@ -2549,6 +2677,12 @@ def export_json() -> dict:
             "asks_pattern": ASKS_PATTERN,
             "config_path_pattern": CONFIG_PATH_PATTERN,
             "shell_write_pattern": SHELL_WRITE_PATTERN,
+            "shell_change_pattern": SHELL_CHANGE_PATTERN,
+            "admit_pattern": ADMIT_PATTERN,
+            "admit_scan_chars": ADMIT_SCAN_CHARS,
+            "correction_pattern": CORRECTION_PATTERN,
+            "correction_scan_chars": CORRECTION_SCAN_CHARS,
+            "adjust_pattern": ADJUST_PATTERN,
             "review_pattern": REVIEW_PATTERN,
             "ack_pattern": ACK_PATTERN,
             "change_pattern": CHANGE_PATTERN,
@@ -2717,8 +2851,8 @@ def render_markdown() -> str:
     p(
         "It costs tokens. The note is written to the prompt cache once, then read from it on every later "
         "reply of that session; the tag itself is a handful of output tokens on every reply, and each agent "
-        f"run judged is a Haiku call of about ${JUDGE_USD_PER_CALL:.3f}. [Levels](#levels) below gives rough "
-        "sizes; once capture is on, Setup › Capture "
+        f"run judged, or reply Claude ends without its tag, is a Haiku call of about ${JUDGE_USD_PER_CALL:.3f}. "
+        "[Levels](#levels) below gives rough sizes; once capture is on, Setup › Capture "
         "measures the real cost from your own transcripts, and a banner on every page shows the "
         "running total."
     )
@@ -2733,6 +2867,8 @@ def render_markdown() -> str:
         "session already carries the note from its start, so it is not asked again). Agent runs get no note, "
         "and nor does a subagent's own compaction, which the hook tells from the main session's by a subagent "
         "transcript that has just recorded one; the note also tells a subagent to ignore it. "
+        "A session a scheduled task started gets none either: it has no message of yours, so none of its tags "
+        "would be read. "
         "A level with agent metrics adds a Haiku call per agent run instead, however deep the agent is nested."
     )
     p("")
@@ -2826,12 +2962,49 @@ def render_markdown() -> str:
     p(
         "A subagent gets no note, and a brief carries no marker: see [Agent runs](#agent-runs). Transcripts "
         "from before ClaudeGlass 0.11.0 may hold a subagent's own `[result: ...]` tag or a `[retry: ...]` brief "
-        "marker; both are still read."
+        "marker; both are still read. Older notes also asked for `found` (whether research found what was asked), "
+        "and a `fit` word judged whether a smaller model would have done an agent's task. Neither is asked for "
+        "now, and older transcripts that hold them are still read."
     )
     p("")
     p(f"The `/cg-feedback` skill ends with its own line: `{_feedback_tag_words()}`.")
     p("")
-    p("If Claude writes more than one tag, the last one wins, key by key.")
+    p(
+        "If Claude writes more than one tag, the last one wins, key by key, except `level` and `size`: the "
+        "highest wins (`hard` over `normal` over `easy`, `xl` over `xs`), so a trailing \"easy\" can't relabel a "
+        "message that took hard work."
+    )
+    p("")
+    p(
+        "What the transcript says outranks the words, for either writer. ClaudeGlass applies these rules when it "
+        "reads Claude's tags back, and the hook applies the same ones to Haiku's before they are stored. The "
+        "tag file notes each change as `key:from>to` in an optional `g` field, from the closed words only:"
+    )
+    p("")
+    p(
+        "- **`shift`, `why`:** a first message has no `shift` but `new`, and no `why`. `why` stays only with "
+        "`shift=redo` or `fix`, and `why=tools` only when a tool call failed. A `build` or `grew` becomes `fix` "
+        "when your message corrects Claude, or tweaks the files Claude changed in its previous reply."
+    )
+    p(
+        "- **`admit`:** Haiku's word stays only when the reply reads like an admission. A reply that reads "
+        "like one but got no `admit` word is a possible admission, kept out of every total."
+    )
+    p(
+        "- **`check`:** a test run sets it, `full` when the whole suite ran at any point, `targeted` when only "
+        "chosen tests did. `none` is set only when Claude, its subagents and its workflow agents changed no "
+        "file and no shell command did. A `git commit`, a redirected `2>&1` and `>/dev/null` change nothing; "
+        "a merge, a rebase and `sed -i` do."
+    )
+    p(
+        "- **`plan`:** `made` whenever Claude put a plan up in the turn. `following` replaces `made` once "
+        "you approved a plan earlier, in the dialog or by typing a go-ahead. A plan you sent back doesn't count."
+    )
+    p(
+        "- **`task`, `skill`, `prior`:** `task` is `docs` when only documentation changed. Files a subagent or "
+        "a workflow agent changed count too, and rule `docs` out. `skill=helped` or `unneeded` becomes `none` "
+        "when no skill ran, and `prior` is `none` on the first message."
+    )
     p("")
 
     # -- Who writes the tags ---------------------------------------------------
@@ -2853,10 +3026,17 @@ def render_markdown() -> str:
         "- When a turn of the main session ends, the hook's `Stop` entry reads the end of the transcript, hands "
         "a short excerpt to a worker process of its own, and returns at once. The excerpt holds your message "
         f"(up to {JUDGE_LIMITS['prompt']:,} characters), your message before it and the end of Claude's reply "
-        "to that, how many you sent before, what Claude did (model calls, output tokens, tools used, the files "
-        f"it changed, the first line of up to {JUDGE_LIMITS['commands']} shell commands, whether they ran tests, "
-        "skills, subagents, tool errors, any plan-mode plan) and the end of its final reply (up to "
-        f"{JUDGE_LIMITS['reply']:,} characters). Tool output is never in it."
+        "to that, how many you sent before and how many minutes after Claude's last reply, the files that reply "
+        "changed and how many changed again, up to "
+        f"{JUDGE_LIMITS['queued_count']} messages you queued while Claude worked ({JUDGE_LIMITS['queued']} "
+        "characters each), how many short follow-ups you sent in a row, what Claude did (model calls, output "
+        f"tokens, tools used, the files it changed, the first line of up to {JUDGE_LIMITS['commands']} Bash or "
+        "PowerShell commands, whether they ran tests, skills, subagents, tool errors), the plan-mode state (a "
+        "plan written, approved or sent back, and how often), the request the work began with (the start of "
+        f"the plan you approved, up to {JUDGE_LIMITS['origin']} characters, or else of your latest earlier "
+        f"message longer than {JUDGE_LIMITS['origin_min']}) and the end of its final reply (up to "
+        f"{JUDGE_LIMITS['reply']:,} characters). Tool output is never in it, and nothing but the tag's words "
+        "is kept."
     )
     p(
         f"- The worker runs `claude -p --model {JUDGE_MODEL}` with no tools, settings, MCP servers or saved "
@@ -2869,9 +3049,7 @@ def render_markdown() -> str:
     p(
         f"- Only the tag's words are kept, checked against the same vocabularies, in `<config-dir>/{JUDGE_DIR}/"
         "YYYY-MM.jsonl`, with the reply's id and what the call cost. What the transcript settles overrides "
-        "Haiku: a plan-mode plan written that turn is `plan=made`; no skill run is never `skill=helped`; no "
-        "file changed is `check=none`, and a test run is `check=targeted` or `full` by whether it picked tests; "
-        "only documentation changed is `task=docs`; and a first message has no `shift` but `new`. A turn that "
+        "Haiku, by the rules above, and the line notes what changed. A turn that "
         "got no tag says why: "
         + ", ".join(f"`{e}`" for e in JUDGE_ERRORS)
         + ". `capture status` counts both."
@@ -2879,6 +3057,16 @@ def render_markdown() -> str:
     p(
         f"- Each call costs about ${JUDGE_USD_PER_CALL:.4f} (about 1,700 tokens read, 35 written), counted as "
         "capture's cost. On a subscription it counts toward your usage like any other Haiku use."
+    )
+    p(
+        "- While Claude writes the tags, Haiku still catches the ones it leaves out. When Claude ends a reply "
+        "that finishes a piece of work with no `[cg: ...]` tag, the same `Stop` entry hands that turn to the "
+        "same worker, and the tag lands in the same file with `\"w\":\"" + JUDGE_FALLBACK_WRITER + "\"`. It "
+        "leaves alone the reply to a background agent's report, another session's message, a scheduled or "
+        "looped task, a command's output or a prompt Claude Code sent itself, and a turn that starts a "
+        "background agent or workflow or ends while one still runs. A session a scheduled task started is "
+        "left alone too, and so is a cycle in which any reply already carries a tag. Each call costs the same "
+        "as above and uses the same login, and the excerpt goes only to Haiku."
     )
     p(
         "- How well it works is measured by `scripts/eval-tagger.py`: recorded sessions with known right "
@@ -2905,19 +3093,38 @@ def render_markdown() -> str:
     )
     p("")
     p(
-        "- When a subagent finishes, the hook's `SubagentStop` entry reads its transcript and hands an excerpt "
-        f"to the same worker as above: its type, its brief (up to {AGENT_JUDGE_LIMITS['brief']:,} characters, "
-        "without the line a workflow script's harness puts before a brief it computed), "
-        "what it did (model calls, tools used, the files it changed, the first line of up to "
-        f"{AGENT_JUDGE_LIMITS['commands']} shell commands, tool errors), the end of its report (up to "
-        f"{AGENT_JUDGE_LIMITS['report']:,} characters), or the start of the answer it handed back as structured "
-        "output when that came last, as a workflow agent's does, and up to "
-        f"{AGENT_JUDGE_LIMITS['earlier']} earlier agent "
-        "runs of the session (their type and the start of their brief and the end of their report), so Haiku "
+        "- When a subagent finishes, the hook's `SubagentStop` entry hands a small job (the agent's type and "
+        "where its transcript is) to the same worker as above and returns at once. The worker first waits for "
+        "the transcript to settle, since the hook fires before the agent's last lines are written: until the "
+        "call of an answer tool ("
+        + ", ".join(f"`{t}`" for t in AGENT_ANSWER_TOOLS)
+        + f") is there, or the file has stopped growing for {AGENT_JUDGE_WAIT['quiet_s']:g} seconds, or "
+        f"{AGENT_JUDGE_WAIT['cap_s']:g} seconds have passed, which is a `no_answer` and no call to Haiku. Then "
+        "it reads the transcript and hands Haiku an excerpt: the agent's type, its brief (up to "
+        f"{AGENT_JUDGE_LIMITS['brief']:,} characters), what it did (model calls, tools used, the files it "
+        f"changed, the first line of up to {AGENT_JUDGE_LIMITS['commands']} shell commands, tool errors), the end "
+        f"of its report (up to {AGENT_JUDGE_LIMITS['report']:,} characters) and up to "
+        f"{AGENT_JUDGE_LIMITS['earlier']} earlier agent runs of the session, read from the whole of the "
+        "session's transcript (their type and the start of their brief and the end of their report), so Haiku "
         "can tell a re-run. Tool output is never in it."
     )
     p(
-        f"- Haiku is told \"{AGENT_JUDGE_INTRO}\", a line for each agent metric that is on, and \"{AGENT_JUDGE_RULE}\""
+        "- A workflow script hands an agent two prompts: the line it was started with, relayed, and the task "
+        "it computed, each under a harness line saying who wrote it. The computed task is the brief. The "
+        f"relayed line comes along as context (up to {AGENT_JUDGE_LIMITS['relay']} characters), marked as "
+        "not the brief, so that \"Continue the plan\" isn't judged as one. The harness lines are left out."
+    )
+    p(
+        "- An agent that hands its answer back through an answer tool has it shown field by field, one "
+        f"`key: value` line each, a field cut at {AGENT_JUDGE_LIMITS['answer_field']} characters (for "
+        "`SubagentHandback`, its `message`). A closing remark of up to "
+        f"{AGENT_JUDGE_LIMITS['closing']} characters after the answer is shown too, and the answer is still "
+        "the report; a longer one is the report instead."
+    )
+    p(
+        f"- Haiku is told \"{AGENT_JUDGE_INTRO}\", a line for each agent metric that is on, brief and "
+        f"missing first, then result, then retry, and \"{AGENT_JUDGE_RULE}\" Asked for the result first, it rated the "
+        "same brief by how the run ended."
     )
     p(
         f"- Its words land in `<config-dir>/{JUDGE_DIR}/YYYY-MM.jsonl` beside the main session's, with the id of "
@@ -2929,8 +3136,26 @@ def render_markdown() -> str:
         "whoever writes the main session's tags."
     )
     p(
+        "- The hook puts right what the transcript settles, as it does a turn's tag. An agent that handed back "
+        "its answer through an answer tool wasn't missing what done means, so `done` is taken out of `missing`. "
+        "A run of the same brief as an earlier run, on a higher model tier (haiku, sonnet, opus, fable), is "
+        "`retry=model` whatever Haiku said. A workflow's agents are steps of a pipeline, not retries of each "
+        "other: Haiku is shown no earlier runs for them and they get no `retry`."
+    )
+    p(
+        "- A stop that follows another stop hook's request to carry on (`stop_hook_active`) is judged too. The "
+        "agent's last reply is then a newer one, and where the verdicts are read the newest verdict for a run "
+        "wins, and the earlier calls' cost is added to it."
+    )
+    p(
+        "- *Done* is what the agent's own work was, not how the news turned out: findings, claims it refuted and "
+        "an empty list all count as done, and *blocked* is an agent that couldn't do its own work."
+    )
+    p(
         "- Whether an agent used your CLAUDE.md rules (`rules`) can't be told from outside the agent, so it is "
-        "no longer measured."
+        "no longer measured. Haiku's model fit verdict (`fit`) said \"right\" every time, so it is no longer "
+        "asked; the agent tables measure it instead, from how many of an agent's calls were single read-only "
+        "probes and how many calls came before its first edit."
     )
     p("")
 

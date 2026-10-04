@@ -162,6 +162,81 @@ def test_a_subagent_that_compacts_gets_nothing_and_the_main_session_its_note(tmp
     assert _note(config_dir, main) == cat.note_text(cat.level_metrics("essentials"), "main")
 
 
+def _session_file(tmp_path: Path, records: list[dict], name: str = "s1.jsonl") -> Path:
+    path = tmp_path / "projects" / "p" / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    return path
+
+
+def _enqueued(content, **extra) -> dict:
+    return {"type": "queue-operation", "operation": "enqueue", "timestamp": "2026-09-27T10:00:00.000Z",
+            "sessionId": "s1", "content": content, **extra}
+
+
+def _user_line(content, **extra) -> dict:
+    return {"type": "user", "timestamp": "2026-09-27T10:00:01.000Z", "message": {"role": "user", "content": content},
+            **extra}
+
+
+SCHEDULED = '<scheduled-task name="nightly" file="/home/u/.claude/scheduled-tasks/nightly/SKILL.md">\nRun the report.'
+
+
+def test_a_scheduled_task_session_gets_no_note(tmp_path):
+    """No message of yours opens a cycle there, so every tag Claude wrote
+    would be thrown away: the note would cost tokens for nothing."""
+    config_dir = _config(tmp_path / "cg", '[capture]\nlevel = "essentials"\n')
+    for name, records in {
+        # Claude Code queues the task before its first hook runs.
+        "queued": [_enqueued(SCHEDULED), {"type": "attachment", "attachment": {"type": "hook_success"}}],
+        "queued, leading space": [_enqueued("  " + SCHEDULED)],
+        # Older transcripts hold it as the first user line.
+        "user line": [_user_line(SCHEDULED)],
+        "user blocks": [_user_line([{"type": "text", "text": SCHEDULED}])],
+        # A line that isn't a message comes first.
+        "after other lines": [{"type": "summary", "summary": "x"}, _user_line("meta", isMeta=True), _enqueued(SCHEDULED)],
+    }.items():
+        path = _session_file(tmp_path, records)
+        for source in ("startup", "clear", "compact"):
+            assert _note(config_dir, _start(source=source, transcript_path=str(path))) == "", (name, source)
+
+
+def test_any_other_session_gets_its_note_whatever_its_transcript_holds(tmp_path):
+    config_dir = _config(tmp_path / "cg", '[capture]\nlevel = "essentials"\n')
+    note = cat.note_text(cat.level_metrics("essentials"), "main")
+    sessions = {
+        "typed": [_enqueued("Fix the login bug"), _user_line("Fix the login bug")],
+        "a task named later": [_user_line("Fix the login bug"), _enqueued(SCHEDULED)],
+        "a task mentioned": [_user_line("What does <scheduled-task> mean?")],
+        "empty": [],
+    }
+    for name, records in sessions.items():
+        path = _session_file(tmp_path, records)
+        assert _note(config_dir, _start(transcript_path=str(path))) == note, name
+    # No transcript to look in, an unreadable one, or no path at all.
+    assert _note(config_dir, _start()) == note
+    assert _note(config_dir, _start(transcript_path=str(tmp_path / "nowhere.jsonl"))) == note
+    assert _note(config_dir, _start(transcript_path=str(tmp_path))) == note
+    assert _note(config_dir, _start(transcript_path=7)) == note
+
+
+def test_the_scheduled_task_check_reads_only_the_first_message_and_keeps_nothing(tmp_path):
+    prefix = CATALOGUE["coaching"]["scheduled_task_prefix"]
+    assert prefix == cat.SCHEDULED_TASK_PREFIX and prefix in cat.NOT_TYPED_PREFIXES
+    path = _session_file(tmp_path, [_enqueued(SCHEDULED)])
+    assert HOOK._scheduled_session(str(path), prefix) is True
+    assert HOOK._scheduled_session(str(path), "<other") is False
+    assert HOOK._scheduled_session(None, prefix) is False and HOOK._scheduled_session("", prefix) is False
+    # A first line a dequeue or another kind of line can't stand in for.
+    path = _session_file(tmp_path, [{"type": "queue-operation", "operation": "dequeue"}, _user_line("Hi")], "t.jsonl")
+    assert HOOK._scheduled_session(str(path), prefix) is False
+    # The note hook leaves no file behind that holds the task's words.
+    _note(_config(tmp_path / "cg", '[capture]\nlevel = "essentials"\n'),
+          _start(transcript_path=str(_session_file(tmp_path, [_enqueued(SCHEDULED)], "u.jsonl"))))
+    assert not any("Run the report" in f.read_text(encoding="utf-8", errors="ignore")
+                   for f in (tmp_path / "cg").rglob("*") if f.is_file())
+
+
 # -- whose compaction a SessionStart is ------------------------------------------
 
 
@@ -692,11 +767,20 @@ def test_a_real_session_start_note_is_read_back():
     assert [turn.cap_note_chars for turn in result.turns] == [len(rendered)]
     assert (result.turns[0].cap.task, result.turns[0].cap.level) == ("research", "easy")
     # Recorded before Essentials carried size, before 0.9.0 renamed the
-    # tool, before 0.11.0 moved retry from the brief to Haiku, and before
-    # the note told a subagent to ignore it: today's note for the metrics
-    # it names, plus the retry line it had then.
+    # tool, before 0.11.0 moved retry from the brief to Haiku, before the
+    # note told a subagent to ignore it, and before shift carried why and
+    # admit and the note ended on the sentences about plans and agent
+    # reports: today's note for the metrics it names, plus the retry line
+    # it had then.
     old = rendered.replace("Token Lens", "ClaudeGlass").replace("shift,retry", "shift")
     old = old.replace("where their tokens go.", "where their tokens go. If you are a subagent, ignore this note.")
+    recorded_shift = (
+        "shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the last one; "
+        "the scope grew; redoing earlier work; fixing a fault in it)"
+    )
+    assert recorded_shift in old and "Leave out a key you can't judge.\n" in old
+    old = old.replace(recorded_shift, cat.METRICS_BY_ID["shift"].main_line)
+    old = old.replace("Leave out a key you can't judge.", cat.SKIP_KEY_LINE)
     old = old.splitlines()
     retry_line = "When you start an agent again because its last run fell short, begin the brief with [retry: model|brief|tools|scope|other]."
     assert old.pop(-2) == retry_line

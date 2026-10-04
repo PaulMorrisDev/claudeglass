@@ -163,9 +163,9 @@ ASSUMPTIONS: list[str] = [
     "token volumes, turn counts and the observed 5-minute/1-hour cache-write split stay the same when each "
     "alternative model is priced. So every saving figure is a price ceiling at today's usage, never a prediction",
     "a smaller model may need more turns to reach the same result, or fail the task outright. Neither is priced "
-    "here. With metrics capture on, the evidence cites how hard Claude reported the work and whether it said a "
-    "smaller model would do. A run that said it needed a larger model holds the suggestion back. None of this "
-    "ever changes a figure",
+    "here. With metrics capture on, the evidence cites how hard Claude reported the work, how many of the agent's "
+    "calls were a single read-only look and how many came before its first edit. A run retried because the "
+    "model wasn't enough holds the suggestion back. None of this ever changes a figure",
     "alternative columns cover every model in pricing.toml, older dated ids included. But the cheaper-model "
     "advice only ever suggests the next cheaper family's current model, never the cheapest alternative overall",
     "tier order (Fable, then Opus, then Sonnet, then Haiku) follows each model's family name, not its price",
@@ -987,7 +987,7 @@ def _rule_model_tier(
                         )
                         if count
                     ),
-                    *_reported_fit_evidence(report, agent_type),
+                    *_measured_fit_evidence(report, agent_type),
                 ],
             )
         )
@@ -1028,20 +1028,29 @@ def _set_elsewhere_action(agent_type: str, workflow_runs: int, spawn_model_runs:
     return set_elsewhere_sentence(workflow_runs, spawn_model_runs)
 
 
-def _reported_fit_evidence(report: ReportModel, agent_type: str) -> list[tuple]:
-    """Metrics-capture evidence for one agent type from the Work habits
-    section's ``habits_agents`` table: the share of its work Claude
-    reported easy, and runs that said a smaller model would have done.
-    Empty without those tags."""
+def _measured_fit_evidence(report: ReportModel, agent_type: str) -> list[tuple]:
+    """Evidence for one agent type from the Work habits section's
+    ``habits_agents`` table: the share of its work Claude reported easy
+    (metrics capture), and what its runs did, counted from the transcripts:
+    the share of its calls that were one read-only look, and how many
+    calls came before its first edit. Each is left out when it is empty,
+    but not a 0 of the last: runs whose first call was an edit are the
+    clearest sign a smaller model fits."""
     table = _table(report, "habits", "habits_agents")
     row = _row(table, agent_type) if table is not None else None
     if row is None:
         return []
     out = []
-    for key, label in (("easy_pct", "Work reported easy (%)"), ("fit_smaller", "Runs that said a smaller model would do")):
+    for key, label in (
+        ("easy_pct", "Work reported easy (%)"),
+        ("probe_pct", "Calls that were a single read-only look (%)"),
+        ("before_edit", "Calls before the first edit"),
+    ):
         idx = _col_index(table, key)
         value = row[idx] if idx is not None and idx < len(row) else None
-        if isinstance(value, (int, float)) and value > 0:
+        if isinstance(value, (int, float)) and not isinstance(value, bool) and (
+            value > 0 or (key == "before_edit" and value == 0)
+        ):
             out.append(_evidence(label, value, "habits", "habits_agents", agent_type))
     return out
 

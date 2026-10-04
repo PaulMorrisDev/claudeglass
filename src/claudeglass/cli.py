@@ -3383,7 +3383,8 @@ def _capture_until(args: argparse.Namespace, now: datetime) -> str | None:
 
 def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> list[str]:
     """Plain lines on what ``ids`` add to Claude's context and replies,
-    and the Haiku call per message while Haiku writes the tags."""
+    the Haiku call per message while Haiku writes the tags, and the one it
+    makes for a reply Claude ends without its tag otherwise."""
     rough = capture_catalogue.rough_tokens(ids, tagger)
     lines = []
     if rough["session_note"]:
@@ -3398,10 +3399,11 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
         lines.append(f"about {rough['report_tag']} tokens of tag at the end of each subagent report")
     if rough["tool_note"]:
         lines.append(f"about {rough['tool_note']} tokens of note after each large or web tool result")
-    if tagger == "haiku" and capture_catalogue.tagged_keys(ids):
+    if capture_catalogue.tagged_keys(ids):
         lines.append(
-            f"a Claude Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.4f} after each of your messages, "
-            "in the background"
+            f"a Claude Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.4f} "
+            + ("after each of your messages" if tagger == "haiku" else "after a reply Claude ends without its tag")
+            + ", in the background"
         )
     if rough["agent_judge"]:
         lines.append(
@@ -3517,7 +3519,9 @@ def _capture_estimate_lines(past, units, sample: int = 100) -> list[str]:
 def _capture_usage_lines(use, units, *, haiku: bool) -> list[str]:
     """What capture measured since it was turned on. ``haiku`` is whether
     Claude Haiku writes the main session's tags: it judges agent runs
-    either way, so a judged turn doesn't say who tagged your messages."""
+    either way, so a judged turn doesn't say who tagged your messages.
+    While Claude writes them, the replies Haiku's fallback filled in are
+    told apart from the ones Claude tagged."""
     if not use.sessions and not use.subagents:
         return [
             "No captured sessions yet: capture covers sessions, and their subagent runs, started after capture was "
@@ -3536,8 +3540,16 @@ def _capture_usage_lines(use, units, *, haiku: bool) -> list[str]:
             if use.report_coverage is not None
             else ""
         )
-        who = "Claude Haiku" if haiku else "Claude"
-        lines.append(f"  {who} tagged {format_cell(use.coverage, 'pct')} of your messages{reports}")
+        if not haiku and use.filled_cycles and use.cycles:
+            own = 100.0 * (use.tagged_cycles - use.filled_cycles) / use.cycles
+            filled = 100.0 * use.filled_cycles / use.cycles
+            lines.append(
+                f"  Claude tagged {format_cell(own, 'pct')} of your messages, and Claude Haiku filled in "
+                f"{format_cell(filled, 'pct')}{reports}"
+            )
+        else:
+            who = "Claude Haiku" if haiku else "Claude"
+            lines.append(f"  {who} tagged {format_cell(use.coverage, 'pct')} of your messages{reports}")
     return lines
 
 
@@ -3844,18 +3856,20 @@ _HAIKU_ERRORS = {
     "timeout": "Haiku took too long",
     "failed": "the call failed",
     "no_tag": "its answer had no tag",
+    "no_answer": "the agent's answer never reached its transcript",
 }
 
 
 def _haiku_lines(capture: CaptureConfig, config_dir: Path) -> list[str]:
     """What Claude Haiku has done since capture was turned on: the main
-    session's turns while it writes the tags, and the agent runs it
-    judges whoever does. How many it was asked about, how many it
-    tagged, why any got none, and what the calls cost."""
+    session's turns while it writes the tags, the replies it tags when
+    Claude leaves them without one, and the agent runs it judges whoever
+    writes the tags. How many it was asked about, how many it tagged, why
+    any got none, and what the calls cost."""
     since = datetime.fromisoformat(capture.enabled_at) if capture.enabled_at else None
     lines: list[str] = []
     if capture.haiku_tags:
-        done = haiku_tags.summary(config_dir, since=since, kind="main")
+        done = haiku_tags.summary(config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_WRITER)
         if done.calls:
             lines += _haiku_done_lines(done, "tagged", "turn", "No tag")
         else:
@@ -3863,6 +3877,14 @@ def _haiku_lines(capture: CaptureConfig, config_dir: Path) -> list[str]:
                 "Claude Haiku writes the tags, but hasn't tagged a turn yet: it starts with sessions begun after the "
                 "change, once the hook's Stop entry is in settings.json."
             )
+    elif capture.is_on and capture_catalogue.tagged_keys(capture.active_metrics()):
+        done = haiku_tags.summary(
+            config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_FALLBACK_WRITER
+        )
+        if done.calls:
+            lines += _haiku_done_lines(done, "filled in", "missing tag", "No tag")
+        else:
+            lines.append("Claude Haiku hasn't had to fill in a tag yet: it does when Claude ends a reply without one.")
     if capture.is_on and capture_catalogue.agent_metric_ids(capture.active_metrics()):
         done = haiku_tags.summary(config_dir, since=since, kind="agent")
         if done.calls:

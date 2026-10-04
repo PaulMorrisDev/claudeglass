@@ -199,12 +199,21 @@ def test_an_agent_that_answers_is_not_cut_off(tmp_path):
     assert (run.replies, run.tool_calls, run.tool_errors) == (2, 1, 0)
 
 
-def test_ending_on_structured_output_is_an_answer(tmp_path):
+@pytest.mark.parametrize("tool", ["StructuredOutput", "SubagentHandback"])
+def test_ending_on_an_answer_tool_is_an_answer(tmp_path, tool):
     run = quality.run_facts(_agent(tmp_path, [
         user_str_line("brief", timestamp=_ts(0)),
-        _reply(1, tool_use_block("StructuredOutput", "t1")),
+        _reply(1, tool_use_block(tool, "t1")),
     ]), None)
-    assert run.cut_off is False
+    assert run.cut_off is False and not run.turn_limit
+
+
+def test_an_answer_tool_beside_another_call_is_not_an_answer(tmp_path):
+    run = quality.run_facts(_agent(tmp_path, [
+        user_str_line("brief", timestamp=_ts(0)),
+        _reply(1, tool_use_block("SubagentHandback", "t1"), tool_use_block("Bash", "t2")),
+    ]), None)
+    assert run.cut_off is True
 
 
 def test_ending_on_a_tool_call_is_cut_off_and_after_its_result_likely_out_of_turns(tmp_path):

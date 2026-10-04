@@ -4,7 +4,8 @@ Two places carry them:
 
 - **The end of a reply.** ``[cg: task=bugfix brief=partial ...]`` ends the
   final reply to each of your messages in the main session, and a
-  subagent's final report ends ``[result: done fit=right rules=used]``.
+  subagent's final report ends ``[result: done fit=right rules=used]``
+  (an older transcript's: no agent is asked for a tag now).
   Only the reply's last :data:`TAIL_SCAN_CHARS` characters are read, and
   the tags must be the very last thing in it (trailing markdown aside), so
   a tag quoted further up a reply -- when Claude explains the format, say
@@ -286,14 +287,19 @@ def parse_note_codes(text: str) -> tuple[int | None, tuple[str, ...]]:
 #: and in a subagent's ``[result: ...]`` tag. :func:`filter_tag` (SEC-P2)
 #: uses these to keep only what a session's own notes asked for; the
 #: cost accounting in ``capture.py`` uses them to weigh what a tag
-#: answered.
+#: answered. ``why`` and ``admit`` ride on the ``shift`` switch
+#: (``Metric.extra_keys``), so a note that asked for ``shift`` asked for
+#: them. ``found``, ``detour`` and ``useful`` are retired metrics
+#: (``capture_catalogue.RETIRED_METRIC_IDS``): a note from before the
+#: retirement listed them, and the transcript's tags still count.
 MAIN_TAG_FIELDS = {
-    "task": "task", "brief": "brief", "level": "level", "shift": "shift", "size": "size", "missing": "missing",
-    "plan": "plan", "skill": "skill", "found": "found", "prior": "prior", "detour": "detour", "check": "check",
-    "out": "big_output", "useful": "web",
+    "task": "task", "brief": "brief", "level": "level", "shift": "shift", "why": "shift", "admit": "shift",
+    "size": "size", "missing": "missing", "plan": "plan", "skill": "skill", "found": "found", "prior": "prior",
+    "detour": "detour", "check": "check", "out": "big_output", "useful": "web",
 }
 #: ``out`` is in both: the PostToolUse note after a large result reaches
-#: subagents too, and asks them for it in their ``[result: ...]``.
+#: subagents too, and asks them for it in their ``[result: ...]``. ``fit``
+#: and ``rules`` are retired the same way.
 SUB_TAG_FIELDS = {
     "fit": "fit", "rules": "rules", "brief": "agent_brief", "missing": "agent_brief", "out": "big_output",
 }
@@ -351,3 +357,121 @@ def filter_tag(
                     changes.setdefault("skill_name", None)
                 cap = replace(cap, **changes)
     return cap, result_marker
+
+
+# -- grounding ----------------------------------------------------------------------
+
+#: The tag keys :func:`settle` can change, in a tag's own order.
+GROUNDED_KEYS = ("task", "shift", "why", "admit", "plan", "skill", "check", "prior")
+
+#: ``shift`` words that mean the work builds on the last piece, which a
+#: correction (or an adjustment to the same files) turns into ``fix``.
+_BUILDING = ("build", "grew")
+
+#: How the settled words differ from the ones written, ``key:from>to``,
+#: ``to`` empty for a word dropped. The shape ``haiku_tags`` accepts in a
+#: row's ``g`` field.
+CHANGE_PATTERN = r"[a-z]{2,8}:[a-z_-]{2,12}>[a-z_-]{0,12}"
+CHANGE_RE = re.compile(rf"^{CHANGE_PATTERN}$")
+
+
+def settle(words: str, facts: dict | None) -> str:
+    """``words`` (``task=bugfix plan=made ...``) with what the transcript
+    settles put right. This is the twin of ``grounded`` in
+    ``hooks/capture_hook.py``, which does the same for the words Haiku
+    writes from the live transcript: the hook can't import this package,
+    so the rules are written twice, in the same order, and
+    ``tests/test_capture.py`` feeds both the same table. Change one and
+    change the other.
+
+    ``facts`` keys (a missing one reads as none): ``plan_now`` (a plan was
+    written in this piece of work), ``plan_before`` (one was approved
+    earlier), ``skills`` run, ``files`` of yours edited, ``agent_files``
+    changed by subagents and workflow agents, ``shell_changes`` (commands
+    that wrote or moved files), ``tests`` (``full``, ``targeted`` or
+    none), ``docs_only`` (every edit was to documentation), ``earlier``
+    (messages of yours before this one), ``correction`` (the message
+    corrects Claude), ``adjust`` (it asks for a tweak), ``same_files`` (the
+    tweak is to the files the last reply changed), ``tool_errors``,
+    ``admit_candidate`` (the reply says it got something wrong) and
+    ``judged`` (Haiku wrote the tag, so its ``admit`` needs a candidate).
+
+    - ``plan`` is ``made`` when a plan was written, and can't be ``made``
+      after one was approved earlier (it reads ``following``).
+    - ``skill`` can't be ``helped`` or ``unneeded`` when no skill ran.
+    - ``check`` is ``targeted`` or ``full`` when tests ran (a whole suite
+      outranks chosen tests), else ``none`` only when nothing changed.
+    - ``task`` is ``docs`` when only documentation changed.
+    - A first message has no ``shift`` but ``new``, and no ``prior`` but
+      ``none``. ``build`` and ``grew`` read ``fix`` after a correction, or
+      an adjustment to the files just changed.
+    - ``admit`` from Haiku needs a candidate in the reply.
+    - ``why`` needs ``shift`` to be ``redo`` or ``fix``, and ``tools``
+      needs a tool error.
+    """
+    if not facts or not words:
+        return words
+    first = facts.get("earlier") == 0
+    changed = bool(facts.get("files") or facts.get("agent_files") or facts.get("shell_changes"))
+    docs = bool(facts.get("docs_only")) and not facts.get("agent_files") and not facts.get("shell_changes")
+    fixing = bool(facts.get("correction") or (facts.get("adjust") and facts.get("same_files")))
+    pairs: list[list[str]] = []
+    for word in words.split():
+        key, _, value = word.partition("=")
+        if key == "plan" and facts.get("plan_now"):
+            value = "made"
+        elif key == "plan" and facts.get("plan_before") and value == "made":
+            value = "following"
+        elif key == "skill" and not facts.get("skills") and value in ("helped", "unneeded"):
+            value = "none"
+        elif key == "check" and facts.get("tests"):
+            value = facts["tests"]
+        elif key == "check" and not changed:
+            value = "none"
+        elif key == "task" and docs and value in ("bugfix", "feature", "refactor"):
+            value = "docs"
+        elif key == "shift" and first and value != "new":
+            continue
+        elif key == "shift" and value in _BUILDING and fixing:
+            value = "fix"
+        elif key == "prior" and first:
+            value = "none"
+        elif key == "admit" and facts.get("judged") and not facts.get("admit_candidate"):
+            continue
+        pairs.append([key, value])
+    shift = next((value for key, value in pairs if key == "shift"), "")
+    out = []
+    for key, value in pairs:
+        if key == "why" and (shift not in ("redo", "fix") or (value == "tools" and not facts.get("tool_errors"))):
+            continue
+        out.append(f"{key}={value}")
+    return " ".join(out)
+
+
+def grounding_changes(before: str, after: str) -> tuple[str, ...]:
+    """How ``after`` differs from ``before``, as ``key:from>to`` items in
+    ``before``'s order (``to`` is empty for a word dropped), for the words
+    :func:`settle` may change. Twin of the hook's ``grounding_changes``."""
+    now = {key: value for key, _, value in (word.partition("=") for word in after.split())}
+    found = []
+    for word in before.split():
+        key, _, value = word.partition("=")
+        item = f"{key}:{value}>{now.get(key, '')}"
+        if key in GROUNDED_KEYS and now.get(key, "") != value and CHANGE_RE.match(item):
+            found.append(item)
+    return tuple(found)
+
+
+def settle_tag(cap: CaptureTag | None, facts: dict | None) -> CaptureTag | None:
+    """``cap`` with :func:`settle` applied to the words it can change,
+    and what it changed noted in ``grounded`` (after any changes already
+    noted there). ``cap`` itself when nothing changed."""
+    if cap is None or not facts:
+        return cap
+    before = " ".join(f"{key}={getattr(cap, key)}" for key in GROUNDED_KEYS if getattr(cap, key))
+    after = settle(before, facts)
+    if after == before:
+        return cap
+    now = {key: value for key, _, value in (word.partition("=") for word in after.split())}
+    changes = {key: now.get(key) for key in GROUNDED_KEYS if getattr(cap, key) != now.get(key)}
+    return replace(cap, grounded=cap.grounded + grounding_changes(before, after), **changes)
