@@ -367,6 +367,10 @@ __version__ = "0.14.0"
 #: ``capture_catalogue.PLAN_CHECK_WORDS``), and ``Turn.coach_reminder``
 #: says a reply carries the /cg-feedback reminder line a hook note asked
 #: for, so ``capture.usage`` prices it.
+#: The facts line a /cg-feedback run starts with (``capture_catalogue.
+#: FEEDBACK_FACTS_MARKER``) is a ``coaching_note`` event of kind
+#: ``feedback_facts``, ClaudeGlass's own hook context, and the plan check's
+#: question is no clarifying round (``Turn.ask_rounds``).
 PARSER_VERSION = 39
 
 #: Bump when the model.py contract changes in a way that invalidates the

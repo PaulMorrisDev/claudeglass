@@ -385,25 +385,36 @@ function buildSessionRating(container, session) {
       payload[q.key] = q.multi ? ticked : ticked[0] || null;
     });
     var asked = Object.keys(perBuild);
-    if (asked.length) {
+    var savedBuilds = saved.builds || [];
+    var keepBuilds = savedBuilds.some(function (b) {
+      return b.build > 1;
+    });
+    if (asked.length || keepBuilds) {
       // Each plan build has its own plan and handoff answers; the top-level
-      // ones are build 1's, so they are left empty here.
+      // ones are build 1's, so they go into build 1's row and are left empty
+      // here. A build the form doesn't show keeps its saved answers.
       var numbers = {};
+      savedBuilds.forEach(function (b) {
+        numbers[b.build] = true;
+      });
       asked.forEach(function (key) {
         Object.keys(perBuild[key]).forEach(function (n) {
           numbers[n] = true;
         });
       });
+      if (!asked.length && (payload.plan || payload.handoff)) numbers[1] = true;
       payload.builds = Object.keys(numbers)
         .map(Number)
         .sort(function (a, b) {
           return a - b;
         })
         .map(function (n) {
-          var held = (saved.builds || []).filter(function (b) {
+          var held = savedBuilds.filter(function (b) {
             return b.build === n;
           })[0] || {};
           var item = { build: n, plan: held.plan || null, handoff: held.handoff || null };
+          if (n === 1 && !perBuild.plan) item.plan = payload.plan || null;
+          if (n === 1 && !perBuild.handoff) item.handoff = payload.handoff || null;
           asked.forEach(function (key) {
             if (perBuild[key][n]) item[key] = tickedWords(perBuild[key][n])[0] || null;
           });
@@ -432,6 +443,7 @@ function buildSessionRating(container, session) {
         return;
       }
       toast(clearAll ? "Rating cleared." : "Rating saved.");
+      document.dispatchEvent(new CustomEvent("cg-rating-saved"));
       renderSessionDetail(container, session.id);
     });
   }

@@ -99,7 +99,7 @@ from . import capture_catalogue as catalogue
 from . import events as events_mod
 from .context_files import _parse_ts
 from .handoff import starting_context
-from .model import Column, EventKind, Section, Table, Turn
+from .model import Column, EventKind, Feedback, Section, Table, Turn
 from .pricing import Pricing, effective_rates, price_turn
 
 #: The habits, in the order the section shows them.
@@ -221,7 +221,9 @@ class _Prices:
         ``turns`` (a cache read per reply)."""
         if self.pricing is None or tokens <= 0:
             return 0.0
-        return sum(tokens * effective_rates(turn, self._resolve(turn)).cache_read / 1e6 for turn in turns)
+        rates = (effective_rates(turn, self._resolve(turn)) for turn in turns)
+        # A model missing from the price list prices nothing.
+        return sum(tokens * r.cache_read / 1e6 for r in rates if r is not None)
 
     def carry(self, turns: list[Turn], start: int, tokens: float) -> float:
         """Keeping ``tokens`` in context from reply ``start`` on: a cache
@@ -230,11 +232,15 @@ class _Prices:
             return 0.0
         first = turns[start]
         rates = effective_rates(first, self._resolve(first))
+        if rates is None:
+            return 0.0
         total = tokens * (rates.cache_write_1h if first.cc_1h > first.cc_5m else rates.cache_write_5m) / 1e6
         for turn in turns[start + 1:]:
             if EventKind.COMPACT_BOUNDARY in turn.preceding_event_kinds:
                 break
-            total += tokens * effective_rates(turn, self._resolve(turn)).cache_read / 1e6
+            later = effective_rates(turn, self._resolve(turn))
+            if later is not None:
+                total += tokens * later.cache_read / 1e6
         return total
 
 
@@ -630,12 +636,20 @@ def _tips(top) -> tuple[Counter, Counter, Counter]:
     return notes, tips, misfires
 
 
-def session_prompting(bundle, prices: _Prices) -> SessionPrompting | None:
+def session_prompting(bundle, prices: _Prices, rating: dict | None = None) -> SessionPrompting | None:
     top = bundle.top
     if top is None:
         return None
     cycles = capture_mod.prompt_cycles(top)
     spans = capture_mod.feedback_spans(cycles)
+    work = [c for c in cycles if not capture_mod.is_feedback_run(c)]
+    if (rating or {}).get("outcome") and work and not any(
+        s.feedback.source != "skipped" and s.feedback.outcome and s.cycles for s in spans
+    ):
+        # Your dashboard rating is the only answer about this session: its
+        # follow-up reasons and what would have helped count as a run's do.
+        fb = Feedback(why=tuple(rating.get("why") or ()), helped=tuple(rating.get("helped") or ()), source="rating")
+        spans = [*spans, capture_mod.FeedbackSpan(feedback=fb, run=work[-1], cycles=work)]
     messages = messages_of(top, prices, cycles, spans)
     if not messages:
         return None
@@ -660,9 +674,16 @@ def session_prompting(bundle, prices: _Prices) -> SessionPrompting | None:
 def collect(corpus, pricing: Pricing | None, ratings: dict | None = None) -> list[SessionPrompting]:
     """Every session with a message of yours, oldest first. ``ratings`` is
     your Sessions-tab ratings by session id: the tip answer in one counts
-    for its hint, unless a /cg-feedback run already answered that hint."""
+    for its hint, unless a /cg-feedback run already answered that hint; a
+    rating of a session no /cg-feedback run rated excuses its follow-ups as a
+    run's answers would (:func:`session_prompting`)."""
     prices = _Prices(pricing)
-    out = [s for s in (session_prompting(bundle, prices) for bundle in corpus.sessions) if s is not None]
+    out = [
+        s for s in (
+            session_prompting(bundle, prices, (ratings or {}).get(bundle.session_id)) for bundle in corpus.sessions
+        )
+        if s is not None
+    ]
     for s in out:
         rating = (ratings or {}).get(s.session_id) or {}
         hint, word = rating.get("tip_hint"), rating.get("tip")

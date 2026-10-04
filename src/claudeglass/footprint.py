@@ -384,7 +384,7 @@ def inventory(
     )
     installed = capture_health.needed + capture_health.extra
     installed = tuple(spec for spec in installed if spec not in capture_health.missing)
-    if installed or capture.is_on or capture.coaching_notes_on:
+    if installed or capture.hooked:
         level = capture_catalogue.LEVEL_TITLES.get(capture.level, capture.level)
         items.append(
             FootprintItem(
@@ -398,7 +398,9 @@ def inventory(
                     "this tool can tell where your tokens go. The free signals (why sessions end, when Claude "
                     "waited for you, which tools asked for permission) go to a file in this tool's data folder. "
                     "With coaching notes on, they also add a short hint to Claude's context when one applies, at "
-                    "any capture level. With capture and coaching notes off the hooks add nothing. Claude Code runs "
+                    "any capture level. With /cg-feedback on, they add a line of counts when you run it. The plan check "
+                    "and rating reminder add a note when they are on. With all of these off the hooks add nothing. "
+                    "Claude Code runs "
                     "a small launcher, which runs the hook's code and its word list, all three in this tool's data "
                     "folder; removing that folder takes them all out. Claude Code waits for the hook after a read, "
                     "search or web result and each message you send, and never after a shell command."

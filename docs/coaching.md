@@ -534,26 +534,32 @@ capture connect` adds; `capture feedback on` says so while it is missing.
   on. Claude's own replies to the survey are left out of its size. On the
   desktop app a tip counts as shown only when Claude's reply carried it,
   since the app shows you nothing else.
-- **The plan check.** Deep only. After you approve a plan, by the dialog or
-  by typing a go-ahead, and Claude changes files, your next typed message
-  that corrects or adjusts the work (not a go-ahead, a thank-you, a status
-  check or a message sent while Claude was working) gets one question from
-  Claude first: was that the plan already saying it, the plan leaving it
-  out, something new, or not a fix at all. The note tells Claude to ask it
-  with `AskUserQuestion`, headed "CG plan fix", and then carry on with your
-  message as if nothing had been asked. It is asked at most once a plan,
-  and not when the plan's own feedback rounds already carry your words about
-  what was wrong. After two declines or two answers in your own words in a
-  row, it rests for 14 days. ClaudeGlass keeps the one word you ticked, and
-  never the message.
-- **The rating reminder.** Deep only. A piece of work that hasn't been
-  rated and has used at least a million tokens, and at least twice your
-  typical piece, gets one note: Claude ends its final reply to that message
-  with the line **ClaudeGlass:** Finished? Run /cg-feedback. It comes at
-  most once a piece and once every three days, and not while Claude is
-  still working. A rating on the dashboard isn't in the transcript, so it
-  doesn't count as rated here. This replaces the reminder the session start
-  note used to ask for, once a session whatever the work.
+- **The plan check.** Deep turns it on, and it stays on if you leave Deep.
+  `claudeglass capture enable plan_check` turns it on at any level, and
+  `claudeglass capture feedback off` turns it off. After you approve a
+  plan, by the dialog or by typing a go-ahead, and Claude changes files,
+  your next typed message that corrects or adjusts the work (not a
+  go-ahead, a thank-you, a status check or a message sent while Claude was
+  working) gets one question from Claude first: was that the plan already
+  saying it, the plan leaving it out, something new, or not a fix at all.
+  The note tells Claude to ask it with `AskUserQuestion`, headed "CG plan
+  fix", and then carry on with your message as if nothing had been asked.
+  It is asked at most once a plan, and not when the plan's own feedback
+  rounds already carry your words about what was wrong. After two declines
+  or two answers in your own words in a row, it rests for 14 days.
+  ClaudeGlass keeps the one word you ticked, and never the message.
+- **The rating reminder.** Deep turns it on, and it stays on if you leave
+  Deep; `claudeglass capture feedback off` turns it off. A piece of work
+  that hasn't been rated and has used at least a million tokens, and at
+  least twice your typical piece, gets one note: Claude ends its final
+  reply to that message with the line **ClaudeGlass:** Finished? Run
+  /cg-feedback. It comes at most once a piece and once every three days,
+  and not while Claude is still working. A session you rated on the
+  dashboard after the piece started counts as rated. The hook reads only
+  that rating's time from the dashboard's store, and never writes to it. A
+  store kept elsewhere with `serve --store` isn't read. This replaces the
+  reminder the session start note used to ask for, once a session whatever
+  the work.
 
 Neither note goes with a coaching tip in the same call, since a tip is the
 last line of its own note and wins. A plan check wins over the reminder.
@@ -646,7 +652,9 @@ agent: Claude can only follow a hint within the task you gave it, or
 tell you. The hook reads the end of the session's transcript (and a
 subagent's own, for `split_run`; and, at a compaction, the end of any
 subagent file that changed in the last five seconds, for its record type
-and time only) and keeps a small state file,
+and time only; and, for the rating reminder, only the time of the
+session's dashboard rating, read from `service.db` without writing to
+it) and keeps a small state file,
 `coach-state.json`, holding when each hint last showed in each session
 (by a salted hash of its id, as the free signals keep it), how many
 times, how long it rests, the time, context and cache lifetime of the

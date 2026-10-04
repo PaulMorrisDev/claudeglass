@@ -370,7 +370,10 @@ def test_the_copy_the_feedback_answers_add_keeps_to_the_help_rules():
         _plain(text, where)
 
     # The evidence the cards show once there are answers.
-    gave = dict(outcome="partly", cost=1.0, cycles=3, task="feature", slow=(), source="your feedback", why_given=True)
+    gave = dict(
+        outcome="partly", cost=1.0, cycles=3, task="feature", slow=(), source="your feedback", why_given=True,
+        helped_given=True,
+    )
     pieces = [
         Piece(**gave, why=("left_out", "missed"), missed_in="plan", plan="covered", helped=("context", "plan"),
               followups=3, followup_cost=2.0, followup_tokens=12_000)
@@ -383,6 +386,7 @@ def test_the_copy_the_feedback_answers_add_keeps_to_the_help_rules():
     )
     items = habits.playbook(h)
     assert {"brief_clearly", "check_work"} <= {item.key for item in items}
+    assert any("pieces cheaper" in item.evidence for item in items)
     for item in items:
         _plain(item.evidence, f"{item.key} evidence")
         _plain(item.title or habits.item_title(item), f"{item.key} title")
@@ -410,3 +414,17 @@ def test_the_plan_handoff_card_words_your_answers_add_keep_to_the_help_rules():
                 _plain(sentence, "plan-handoff why")
         if rec.action != plain.action:
             _plain(rec.action, "plan-handoff action")
+
+
+def test_the_rating_questions_and_feedback_items_keep_to_the_help_rules():
+    """The questions the dashboard's session rating shows, and what the
+    Capture page says each feedback item captures and why."""
+    from claudeglass import capture_catalogue
+
+    for q in capture_catalogue.FEEDBACK_QUESTIONS:
+        for text in (q.question, q.short, *(o[1] for o in q.options), *(o[2] for o in q.options)):
+            _plain(text, f"question {q.key}")
+    for metric in capture_catalogue.METRICS:
+        if metric.group == "feedback":
+            _plain(metric.what, f"{metric.id} what")
+            _plain(metric.why, f"{metric.id} why")

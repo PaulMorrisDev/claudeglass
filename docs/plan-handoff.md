@@ -83,7 +83,7 @@ the "split large asks into planned steps" habit the same way.
 
 After a piece of work in which you approved a plan, `/cg-feedback` asks
 a fifth question in a second call: "Could the build have started in a
-fresh session from just the plan?" (`yes`, `partly`, `no`; the tag's
+fresh session from the plan alone?" (`yes`, `partly`, `no`; the tag's
 `handoff` key). `habits.habits_by_shape` counts the answers on sessions
 that planned and built (`plan_build`). Once there are at least three
 (`handoff.MIN_FEEDBACK_ANSWERS`):
@@ -113,9 +113,9 @@ added?"). They show as `plan_covered`, `plan_gap` and `plan_new` in
   build in a fresh session" too, with its own sentence: "You said 3 of 4
   fixes after a plan were things it left out". Its fix prompt asks Claude
   to add the missing decisions before you approve.
-- `new`: you thought of it later. It is no rework: the message that asked
-  for it is left out of Redone and the waste figures, and no habit counts
-  it as a repeat or a vague fix.
+- `new`: you thought of it later. It is no rework: the message it
+  followed is not counted as redone, so it stays out of Redone and the
+  waste figures.
 
 The daily run also writes your handoff answers into `coaching.json`
 (see [coaching.md](coaching.md)). With more than half `yes` the live

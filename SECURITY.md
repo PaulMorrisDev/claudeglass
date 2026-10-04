@@ -394,14 +394,18 @@ as the coaching hints, in memory, and keeps nothing it reads. When you run
 `/cg-feedback` it adds one line, `cg-fb-facts v1`, of numbers and words
 from closed lists: the tokens the piece of work used, your typical piece,
 how many follow-up messages you sent, a plan's state, a tip's hint id
-and similar counts, never a word you wrote. On Deep, a message that reads
-as a fix to work Claude did after you approved a plan gets a note that has
-Claude ask one `AskUserQuestion` (the header "CG plan fix", four fixed
-options), and a piece of work of a million tokens or more that hasn't been
-rated gets a note that has Claude end its reply with a fixed line. To
-decide, the hook matches your message's words against fixed patterns in
-memory (a correction, an adjustment, a go-ahead, a thank-you, a status
-check) and keeps none of them. The parser keeps the one word you ticked
+and similar counts, never a word you wrote. With the plan check on (Deep
+turns it on), a message that reads as a fix to work Claude did after you
+approved a plan gets a note that has Claude ask one `AskUserQuestion` (the
+header "CG plan fix", four fixed options), and with the rating reminder
+on, a piece of work of a million tokens or more that hasn't been rated
+gets a note that has Claude end its reply with a fixed line. To see
+whether you rated that session on the dashboard, the hook opens the
+dashboard's `service.db` read-only and reads only the time of that
+session's rating. To decide, the hook matches your message's words against
+fixed patterns in memory (a correction, an adjustment, a go-ahead, a
+thank-you, a status check) and keeps none of them. The parser keeps the
+one word you ticked
 for the plan check (`PlanCheck.word`: covered, gap, new or none), or none
 when you declined or typed your own, and never the message. For all
 sessions together, `coach-state.json` also holds how many plan checks in

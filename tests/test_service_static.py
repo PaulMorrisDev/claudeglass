@@ -3299,6 +3299,8 @@ def test_a_session_with_several_plans_gets_a_rating_row_for_each() -> None:
     assert 'class: "rating-build"' in form and "item.label" in form
     assert "payload.builds = Object.keys(numbers)" in form
     assert "payload.plan = null;" in form and "payload.handoff = null;" in form
+    # Saved builds the form doesn't show are sent back unchanged.
+    assert "savedBuilds.forEach(function (b)" in form and "if (asked.length || keepBuilds)" in form
 
 
 def test_a_follow_up_question_shows_only_while_its_answer_is_ticked() -> None:
@@ -3315,6 +3317,13 @@ def test_the_rating_form_keeps_answers_to_questions_it_does_not_show() -> None:
     that left a question out must not clear what was said to it."""
     form = _function_source(_static_text("page-spend.js"), "buildSessionRating")
     assert 'if (key !== "set_at" && key !== "builds") payload[key] = saved[key];' in form
+
+
+def test_saving_a_rating_asks_for_the_banner_again() -> None:
+    form = _function_source(_static_text("page-spend.js"), "buildSessionRating")
+    assert 'document.dispatchEvent(new CustomEvent("cg-rating-saved"))' in form
+    shell = _static_text("shell.js")
+    assert 'document.addEventListener("cg-rating-saved"' in shell and "capturePoll.fetchedAt = 0;" in shell
 
 
 def test_tip_habit_and_recommendation_cards_carry_the_four_ratings() -> None:

@@ -339,8 +339,10 @@ a flag, never text:
   front of the model just before this turn, measured from ``rendered``.
   From ``PARSER_VERSION`` 25 it counts coaching notes (``cg-coach v``)
   too: an ``Event`` of subkind ``coaching_note`` whose ``detail`` holds
-  ``v``, ``kind`` (a ``capture_catalogue.COACHING_HINTS`` or
-  ``RETIRED_COACHING_HINTS`` word, else "other") and ``hook``; a capture note sharing an attachment with one
+  ``v``, ``kind`` (a ``capture_catalogue.COACHING_HINTS``,
+  ``FEEDBACK_HINTS`` or ``RETIRED_COACHING_HINTS`` word; from ``PARSER_VERSION`` 39
+  ``feedback_facts`` for the facts line a /cg-feedback run starts with,
+  ``cg-fb-facts v``; else "other") and ``hook``; a capture note sharing an attachment with one
   carries ``detail["coach"]``/``["coach_chars"]`` and sizes only its own
   part.
 - ``Turn.spawn_marker: str | None = None`` -- on the turn that follows a

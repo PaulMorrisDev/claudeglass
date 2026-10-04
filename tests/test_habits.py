@@ -2198,9 +2198,9 @@ def _feedback_session(tmp_path, name, answers, *, later=None, fix: bool = True, 
     return NS(top=top, subs=[], session_id=name, project_dir="p", slug="p")
 
 
-def _plan_fix_session(tmp_path, name, word):
+def _plan_fix_session(tmp_path, name, word, *, after=()):
     """A plan approved and built, then a fix message that answers the plan
-    check with ``word``."""
+    check with ``word``; ``after`` follows it (a /cg-feedback run, say)."""
     check = {"question": catalogue.PLAN_CHECK_QUESTION, "header": catalogue.PLAN_CHECK_HEADER}
     label = next(label for w, label, _description in catalogue.PLAN_CHECK_OPTIONS if w == word)
     lines = [
@@ -2223,6 +2223,7 @@ def _plan_fix_session(tmp_path, name, word):
                         toolUseResult={"questions": [check], "answers": {check["question"]: label}},
                         timestamp=_ts(12)),
         _reply(13, text="Fixed.\n[cg: task=bugfix shift=fix]"),
+        *after,
     ]
     top = _parse(tmp_path, f"{name}.jsonl", lines, kind="top-level")
     return NS(top=top, subs=[], session_id=name, project_dir="p", slug="p")
@@ -2232,7 +2233,7 @@ def _gave(**kw) -> Piece:
     """A piece you rated through /cg-feedback and said what the follow-ups were."""
     base = dict(
         outcome="partly", cost=1.0, cycles=3, task="feature", slow=(), helped=(), source="your feedback",
-        why_given=True,
+        why_given=True, helped_given=True,
     )
     return Piece(**{**base, **kw})
 
@@ -2340,19 +2341,22 @@ def test_a_message_your_followups_said_things_were_left_out_of_weighs_double_in_
 
 
 def test_followups_that_left_things_out_make_a_brief_clearly_card_with_no_tags_at_all():
-    h = Habits(pieces=[_gave(why=("left_out",), followups=2), _gave(why=("left_out", "changed"), followups=2)])
+    h = Habits(pieces=[
+        _gave(why=("left_out",), followups=2), _gave(why=("left_out", "changed"), followups=2),
+        _gave(why=("left_out",), followups=1),
+    ])
     item = _by_key(habits.playbook(h))["brief_clearly"]
-    assert item.sources == ("your feedback",) and item.saving is None and item.n == 4
-    assert item.evidence == "4 of 4 follow-ups were things your request left out."
-    # Too few follow-ups, a dashboard rating, or a piece you gave no cause for: nothing to go on.
-    few = Habits(pieces=[_gave(why=("left_out",), followups=1), _gave(why=("left_out",), followups=1)])
+    assert item.sources == ("your feedback",) and item.saving is None and item.n == 5
+    assert item.evidence == "5 of 5 follow-ups were things your request left out."
+    # Too few answers however many follow-ups, a dashboard rating, or a piece you gave no cause for: nothing to go on.
+    few = Habits(pieces=[_gave(why=("left_out",), followups=5) for _ in range(2)])
     assert "brief_clearly" not in _by_key(habits.playbook(few))
     rated = Habits(pieces=[_gave(why=("left_out",), followups=5, source="dashboard rating")])
     assert "brief_clearly" not in _by_key(habits.playbook(rated))
     silent = Habits(pieces=[_gave(why=("left_out",), followups=5, why_given=False)])
     assert "brief_clearly" not in _by_key(habits.playbook(silent))
     # Follow-ups that were something else don't count as left out, though they are in the total.
-    mixed = Habits(pieces=[_gave(why=("left_out",), followups=3), _gave(why=("changed",), followups=4)])
+    mixed = Habits(pieces=[_gave(why=("left_out",), followups=1) for _ in range(3)] + [_gave(why=("changed",), followups=4)])
     assert _by_key(habits.playbook(mixed))["brief_clearly"].evidence == (
         "3 of 7 follow-ups were things your request left out."
     )
@@ -2370,7 +2374,7 @@ def test_your_answers_add_to_what_the_tags_say_about_vague_asks():
     vague = CaptureTag(task="bugfix", brief="vague", missing=("repro",))
     h = Habits(
         cycles=[*(_cycle(tag=clear) for _ in range(3)), *(_cycle(tag=vague, cost=3.0) for _ in range(5))],
-        pieces=[_gave(why=("left_out",), followups=3)],
+        pieces=[_gave(why=("left_out",), followups=1) for _ in range(3)],
     )
     item = _by_key(habits.playbook(h))["brief_clearly"]
     assert item.sources == ("reported", "your feedback") and item.n == 5
@@ -2385,7 +2389,8 @@ def test_the_other_habits_about_briefing_claude_cite_the_same_answers():
             *(_cycle(tag=bug, flags=("error",), cost=1.0) for _ in range(3)),
             *(_cycle(tag=bug, cost=2.0) for _ in range(3)),
         ],
-        pieces=[_gave(why=("left_out",), followups=4)],
+        pieces=[_gave(why=("left_out",), followups=2), _gave(why=("left_out",), followups=1),
+                _gave(why=("left_out",), followups=1)],
     )
     items = _by_key(habits.playbook(h))
     assert items["paste_errors"].evidence.endswith(" 4 of 4 follow-ups were things your request left out.")
@@ -2417,6 +2422,9 @@ def test_large_asks_you_rated_too_costly_join_split_large_and_ones_worth_it_leav
     assert _by_key(habits.playbook(both))["split_large"].n == 1
     # Only large asks you said were worth it, and nothing else: no card.
     assert "split_large" not in _by_key(habits.playbook(Habits(cycles=h.cycles[:1])))
+    # A message Claude sized xs or s is no large ask, whatever you said of its piece.
+    small = Habits(cycles=[_cycle(tag=CaptureTag(size="xs"), growth_cost=0.5, worth="no") for _ in range(6)])
+    assert "split_large" not in _by_key(habits.playbook(small))
 
 
 def test_a_plan_first_would_have_helped_is_cited_by_plan_hard_once_enough_pieces_say_so():
@@ -2520,3 +2528,41 @@ def test_the_shape_table_counts_the_plan_answers_and_the_plan_checks_together():
     built, none = rows["plan_build"], rows["no_plan"]
     assert (built["plan_covered"], built["plan_gap"], built["plan_new"]) == (1, 3, 2)
     assert (none["plan_covered"], none["plan_gap"], none["plan_new"]) == (1, 0, 0)
+
+
+def test_a_fix_the_plan_check_and_your_feedback_both_call_missed_counts_once(tmp_path, pricing):
+    answers = {**_say("outcome", "partly"), **_say("why", "missed")}
+    run = feedback_run(30, answers, later=([FEEDBACK_Q["missed_in"]], _say("missed_in", "plan")))
+    sessions = [_plan_fix_session(tmp_path, f"s{i}", "covered", after=run) for i in range(3)]
+    h = habits.collect(NS(sessions=sessions), pricing)
+    assert [c.in_missed_piece for c in h.cycles] == [True, True] * 3
+    item = _by_key(habits.playbook(h))["check_work"]
+    assert item.n == 3
+    assert item.saving == pytest.approx(0.5 * sum(p.followup_cost for p in h.pieces))
+
+
+def test_a_session_rated_both_ways_counts_its_plan_and_handoff_once(tmp_path, pricing):
+    rating = {"outcome": "met", "handoff": "yes", "plan": "gap"}
+    h = habits.collect(NS(sessions=[_plan_session(tmp_path, "s1", handoff="Yes")]), pricing, ratings={"s1": rating})
+    assert [p.source for p in h.pieces] == ["your feedback", "dashboard rating"]
+    assert (h.pieces[1].handoff, h.pieces[1].plan, h.pieces[1].alone) == (None, None, False)
+    built = {r["shape"]: r for r in _rows(_table(habits.section_from(h), "habits_by_shape"))}["plan_build"]
+    assert (built["handoff_yes"], built["plan_gap"]) == (1, 0)
+
+
+def test_a_dashboard_rating_alone_excuses_a_change_of_mind(tmp_path, pricing):
+    plain = habits.collect(_tagged_session(tmp_path, shift="redo"), pricing)
+    assert plain.cycles[0].redone and not plain.cycles[0].excused
+    rating = {"outcome": "partly", "why": ["changed"]}
+    h = habits.collect(_tagged_session(tmp_path, shift="redo"), pricing, ratings={"s1": rating})
+    assert h.cycles[0].excused and not h.cycles[0].redone
+    assert [p.alone for p in h.pieces] == [True]
+
+
+def test_pieces_that_answered_nothing_would_have_helped_count_in_the_total():
+    h = Habits(pieces=[_gave(helped=("context",)) for _ in range(3)] + [_gave(helped=()) for _ in range(5)])
+    item = _by_key(habits.playbook(h))["brief_clearly"]
+    assert item.evidence == "You said more in your first message would have made 3 of 8 pieces cheaper."
+    # A piece where the question wasn't answered isn't in it.
+    unasked = Habits(pieces=[_gave(helped=("context",)) for _ in range(3)] + [_gave(helped_given=False) for _ in range(5)])
+    assert _by_key(habits.playbook(unasked))["brief_clearly"].evidence.endswith("3 of 3 pieces cheaper.")

@@ -178,8 +178,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   then). A session stands in for a piece of work until pieces are told
   apart in the report. The run now also happens for a survey item on your
   messages with coaching notes off.
-- **A plan check after you fix an approved plan's build.** Deep only, off
-  below it. After you approve a plan and Claude changes files, your next
+- **A plan check after you fix an approved plan's build.** Switching to
+  Deep turns it on, and `capture enable plan_check` turns it on at any
+  level. After you approve a plan and Claude changes files, your next
   typed message that corrects or adjusts the work gets one question
   from Claude first, asked with `AskUserQuestion` under the header "CG
   plan fix": did the plan already say it, did it leave it out, is it
@@ -250,8 +251,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that day. A session whose mode or purpose is a rule's catch-all gets a
   Label unsure chip. The banner lists the sessions that used at least the
   reminder's size and have no rating, with their tokens and a Rate it
-  button, and a rating takes a session off the list. `capture prune` also
-  clears old `habit-log.jsonl` lines. Counts and closed words only: no
+  button, and a rating takes a session off the list. A session rated only
+  on the dashboard feeds the same habits and cards a /cg-feedback run
+  does; beside a run, its plan and handoff answers are left out so a
+  build isn't counted twice. `capture prune` also clears old
+  `habit-log.jsonl` lines. Counts and closed words only: no
   message text is read, kept or shown.
 
 ### Changed
@@ -514,7 +518,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   to end its final reply with the /cg-feedback line, at most once a piece
   and once every three days. A piece starts with the session, a `/clear`,
   or a message Claude tagged `shift=new`, and starts again after a
-  /cg-feedback run. Deep only, like the other. New thresholds
+  /cg-feedback run. A rating on the dashboard since the piece started
+  counts too. Deep turns it on, like the other. New thresholds
   `coaching_rating_min_tokens`, `coaching_rating_typical_factor` and
   `coaching_rating_rest_days`. `capture status` counts the reminder and
   the plan check and prices them from your own history as an upper bound.

@@ -292,3 +292,16 @@ def test_a_session_you_rated_with_a_feedback_run_is_not_listed(tmp_path, monkeyp
 
 def test_a_session_with_no_main_transcript_is_not_listed():
     assert ratings.unrated_piece(NS(top=None, subs=[], workflows=()), 1) is None
+
+
+def test_a_queued_message_written_again_as_a_user_line_is_one_followup_and_queued(tmp_path):
+    bundle = _bundle(tmp_path, [
+        _ask(0, "refactor the parser"),
+        _reply(5, tool_use_block("Bash", "tu_5", {"command": "ls"})),
+        _queued("also add a test for the parser", 10),
+        _ok(30, "tu_5"), _reply(40, text="Done."),
+        _ask(42, "also add a test for the parser"),
+        _reply(50, text="Done."),
+    ])
+    facts = ratings.session_facts(bundle)
+    assert (facts["followups"], facts["queued"]) == (1, 1)

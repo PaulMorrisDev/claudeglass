@@ -622,8 +622,10 @@ work's follow-ups were (`why`), where Claude's miss was (`missed_in`), what
 would have made it cheaper (`helped`), whether it was worth it (`worth`),
 whether the plan covered a fix (`plan`, `plan_check`), whether a build
 could have started from the plan (`handoff`), and what you thought of a
-tip (`tip`, `tip_hint`) feed the habits and cards that match. Follow-ups
-you called a change of mind, or new to the plan, are no rework: they are
+tip (`tip`, `tip_hint`) feed the habits and cards that match. The same
+answers on the dashboard's session rating count the same way when no
+/cg-feedback run rated that session. Follow-ups you called a change of
+mind, or new to the plan, are no rework: they are
 left out of `redone` and the waste figures where the cycles are built
 (`CycleFact.excused`), so every table agrees. A tip you called wrong twice
 waits for more or is muted, and one you knew twice shows once a session,

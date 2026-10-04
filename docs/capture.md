@@ -381,7 +381,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Feedback skill (`feedback_skill`)
 
 - **Level:** Feedback, any level; switching to Deep turns it on
-- **Captures:** A /cg-feedback skill you run after a piece of work. It asks a few checkbox questions: the outcome, what your follow-up messages were, whether it was worth the tokens, and what would have made it cheaper. After an approved plan it asks whether the plan covered what you fixed and whether the build could have started fresh. A tip question appears only when ClaudeGlass showed a tip. When you run it, a hook adds one line of counts and ids (no text) for the piece of work being rated, so the skill can leave out a question that doesn't apply.
+- **Captures:** A /cg-feedback skill you run after a piece of work. It asks a few checkbox questions: the outcome, what your follow-ups were, whether it was worth the tokens, and what would have made it cheaper. After an approved plan it asks whether the plan covered what you fixed and whether the build could have started fresh. A tip question appears only when ClaudeGlass showed a tip. When you run it, a hook adds one line of counts and ids for the piece of work, never any text. The skill uses it to leave out questions that don't apply.
 - **Why:** Cost per piece of work that met its goal, which outranks what Claude reports about itself. The follow-up and plan answers tell the tips and the suggested profile where the work went wrong.
 - **Tag:** `[cg-fb: outcome=met|partly|missed|stopped why=left_out,missed,changed,none missed_in=message|plan|standing|earlier worth=yes|fair|no helped=context,plan,smaller,none plan=covered|gap|new handoff=yes|partly|no tip=useful|known|wrong tip_hint=<hint id> from_text=<keys>]`
 - **Hook:** UserPromptSubmit
@@ -398,7 +398,7 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Feedback reminder from Claude (`feedback_reminder`)
 
 - **Level:** Feedback, any level; switching to Deep turns it on
-- **Captures:** When the piece of work you are on is large (at least 1M tokens and twice your typical piece) and you haven't rated it, a note with your next message asks Claude to end its reply with a line suggesting /cg-feedback. At most once per piece of work and once every 3 days. A piece starts with the session, a /clear, or a message Claude tags as a new task.
+- **Captures:** A note with your next message asks Claude to end its reply with a line suggesting /cg-feedback. It comes only for a piece of work you haven't rated that has used at least 1M tokens and twice your typical piece. A rating you give on the dashboard after the piece started counts too. At most once per piece of work and once every 3 days. A piece starts with the session, a /clear, or a message Claude tags as a new task.
 - **Why:** For people without the status line, such as in the desktop app, and only for work big enough to be worth rating. Costs a note of about 100 tokens and a few output tokens, a few times a week at most.
 - **Tag:** No tag. A hook note asks Claude to end its reply with a line: "> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work."
 - **Costs:** about 25 output tokens each time
@@ -408,8 +408,8 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Plan check after a fix (`plan_check`)
 
 - **Level:** Feedback, any level; switching to Deep turns it on
-- **Captures:** After you approve a plan and Claude changes files, your next message that corrects or adjusts the work gets one question from Claude first: did Claude miss something the plan said, did the plan leave it out, is it something new, or is this not a fix? Asked at most once per plan. It stops for 14 days after two declined or Other answers in a row. Only the four ticked words are kept.
-- **Why:** Which of your corrections the plan could have prevented, which tells the plan tips whether to ask for fuller plans or for a closer check of the build against the plan.
+- **Captures:** It comes after you approve a plan and Claude changes files. Your next message that corrects or adjusts the work gets one question from Claude first. Did Claude miss something the plan said, did the plan leave it out, is it something new, or is this not a fix? Asked at most once per plan. It stops for 14 days after two declined or Other answers in a row. Only the four ticked words are kept.
+- **Why:** Which of your corrections the plan could have prevented. That tells the plan tips whether to ask for fuller plans or for a closer check of the build against the plan.
 - **Tag:** No tag. A hook note has Claude ask one question (header "CG plan fix") before it acts on your message; only the ticked word is kept (`covered`, `gap`, `new`, `none`).
 - **Costs:** about 78 output tokens each time
 - **Hook:** UserPromptSubmit

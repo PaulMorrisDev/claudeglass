@@ -12,8 +12,8 @@ module and calls :func:`main`. Python keeps bytecode for a module it
 imports and none for the script it is started on, so keeping the work
 here saves compiling all of it on every call (about 12 ms of a 60 ms
 call). The libraries a call may not need (``hashlib``, ``hmac``,
-``subprocess``, ``tomllib``) are imported where they are used, and the
-two options are read by hand rather than by ``argparse``.
+``sqlite3``, ``subprocess``, ``tomllib``) are imported where they are
+used, and the two options are read by hand rather than by ``argparse``.
 
 It runs on these hook events, each added to Claude Code's settings.json
 only when a chosen metric needs it (``claudeglass capture
@@ -107,10 +107,13 @@ connect``):
   to leave out a question that doesn't apply. A message that corrects or
   adjusts the work after a plan you approved and a build that changed
   files gets a note asking Claude for one question first (``plan_check``,
-  Deep only, once per plan, resting for two weeks after two misses). A
+  which Deep turns on, once per plan, resting for two weeks after two
+  misses). A
   piece of work that has grown big and hasn't been rated gets a note asking
   Claude to end its reply with a one-line reminder to run ``/cg-feedback``
-  (``feedback_reminder``, once per piece and once every 3 days). All three
+  (``feedback_reminder``, once per piece and once every 3 days; a rating
+  of the session on the dashboard since the piece started counts, read
+  from ``service.db`` without writing). All three
   read the same end of the transcript the coaching hints do, shared with
   them, and only counts, flags and positions leave it; a coaching tip in
   the same call, or a message sent while Claude was working, gets no
@@ -2348,8 +2351,9 @@ def _ask_outcome(record: dict, block: dict, header: str, feedback: dict) -> str:
     """How an AskUserQuestion that asked ``header`` came back: ``declined``
     (an error result), ``answered`` (one of the question's own labels; for
     the plan check, one of its four; for the survey's plan question, any
-    answer) or ``other`` (words of yours, or none). The answer's words are
-    only compared, never kept."""
+    answer, which holds the plan check back; only the plan check sets
+    ``plan_asked``) or ``other`` (words of yours, or none). The answer's
+    words are only compared, never kept."""
     if block.get("is_error"):
         return "declined"
     result = record.get("toolUseResult")
@@ -2381,6 +2385,9 @@ def _scan_pieces(records: list[dict], coaching: dict) -> dict:
     (``start``; ``key`` names it: ``tail``, or that message's time). The
     rating reminder's piece (``piece``, ``piece_key``) also starts after a
     ``/cg-feedback`` run that came later: what was rated is done with.
+    ``piece_at`` is when that piece started (``None`` when it started
+    with or before the first record read: any dashboard rating of the
+    session then counts, as on the banner).
     The replies a ``/cg-feedback`` run itself makes are no part of any
     piece. Only counts, flags and positions are kept: nothing you or
     Claude wrote leaves this function."""
@@ -2513,6 +2520,7 @@ def _scan_pieces(records: list[dict], coaching: dict) -> dict:
         "msgs": msgs, "runs": runs, "replies": replies, "tips": tips, "tip_texts": tip_texts,
         "cycle_starts": cycle_starts, "edits": sorted(edits.values()), "asks": asks,
         "start": start, "key": key, "piece": piece, "piece_key": piece_key,
+        "piece_at": None if piece_key == "tail" else _reply_time(records[piece]),
     }
 
 
@@ -2577,8 +2585,11 @@ def _facts_line(scan: dict, plans: list[dict], personal: dict, coaching: dict) -
         "queued": sum(1 for m in follow if m["queued"]),
         "plan": "approved" if latest else "pending" if inside else "none",
         "plan_followups": 0 if after is None else sum(1 for m in follow if m["i"] > after),
+        # Only the plan check counts: the survey's own plan question, answered
+        # by an earlier run, is asked again by a rerun, which replaces it.
         "plan_asked": int(after is not None and any(
-            a["i"] > after and a["outcome"] == "answered" for a in scan["asks"].values()
+            a["i"] > after and a["outcome"] == "answered" and a["header"] == feedback["plan_check_header"]
+            for a in scan["asks"].values()
         )),
         "build": "same" if after is not None and any(e > after for e in scan["edits"]) else "none",
         "tips": ",".join(f"{hint}:{counts[hint]}" for hint in order) or "none",
@@ -2714,7 +2725,8 @@ def feedback_note_for(
       once every ``rating_rest_days`` days. A piece starts with the
       session, or with the message of yours that Claude's own tag marked
       ``shift=new``, or after a ``/cg-feedback`` run (a ``/clear`` starts a
-      new transcript).
+      new transcript). A rating of the session on the dashboard since the
+      piece started counts as rated (:func:`_dashboard_rated_at`).
 
     Neither note goes with a coaching tip (``tipped``: the tip is the last
     line of its note, so it wins), nor with a message sent while Claude was
@@ -2757,19 +2769,23 @@ def feedback_note_for(
             _note_made(state, "plans", session, plan_id)
             note = _feedback_note(coaching, "plan_check", feedback["text"]["plan_check"])
         elif "feedback_reminder" in ids:
-            note = _reminder_due(scan, personal, th, coaching, state, session, now_ts)
+            note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id)
         dirty = dirty or bool(note)
     if dirty:
         _write_json(state_path, state)
     return note
 
 
-def _reminder_due(scan: dict, personal: dict, th: dict, coaching: dict, state: dict, session: str, now_ts: float) -> str:
+def _reminder_due(
+    scan: dict, personal: dict, th: dict, coaching: dict, state: dict, session: str, now_ts: float,
+    config_dir: Path, session_id: str,
+) -> str:
     """The rating-reminder note when this piece of work is big enough and
     hasn't been reminded, and no reminder has gone out in the last
     ``rating_rest_days`` days; ``""`` otherwise. A piece that was rated
-    (a ``/cg-feedback`` run in the transcript; a rating on the dashboard
-    isn't there, so isn't seen) is over: the work after the run is a piece
+    (a ``/cg-feedback`` run in the transcript, or a rating of the
+    session on the dashboard since the piece started,
+    :func:`_dashboard_rated_at`) is over: the work after the run is a piece
     of its own. Stamps the piece and the time."""
     typical = _number(personal.get("typical_piece_tokens")) or 0
     tokens = _piece_tokens(scan, scan["piece"])
@@ -2780,10 +2796,41 @@ def _reminder_due(scan: dict, personal: dict, th: dict, coaching: dict, state: d
     if (last is not None and now_ts - last < th["rating_rest_days"] * _SECONDS_PER_DAY
             or _noted_before(state, "pieces", session, scan["piece_key"])):
         return ""
+    rated_at = _dashboard_rated_at(config_dir, session_id)
+    if rated_at is not None and (scan["piece_at"] is None or rated_at >= scan["piece_at"]):
+        return ""
     _note_made(state, "pieces", session, scan["piece_key"])
     gate["reminded_at"] = now_ts
     text = coaching["feedback"]["text"]["rating_reminder"].replace("{tokens}", _tokens_text(tokens))
     return _feedback_note(coaching, "rating_reminder", text)
+
+
+#: The dashboard's store in the config folder (``service.serve.STORE_FILENAME``).
+_STORE_FILE = "service.db"
+
+
+def _dashboard_rated_at(config_dir: Path, session_id: str) -> datetime | None:
+    """When you last rated session ``session_id`` on the dashboard, read
+    from its store (:data:`_STORE_FILE`) without writing to it; ``None``
+    when you haven't, or there is no store it can read in time. A store
+    ``serve --store`` keeps elsewhere isn't seen. Only the rating's time is
+    read, and the session id is used in memory only."""
+    path = config_dir / _STORE_FILE
+    if not path.is_file():
+        return None
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.2)
+    except sqlite3.Error:
+        return None
+    try:
+        row = conn.execute("SELECT set_at FROM session_feedback WHERE session_id = ?", (session_id,)).fetchone()
+    except sqlite3.Error:
+        return None
+    finally:
+        conn.close()
+    return _parse_time(row[0].replace("Z", "+00:00")) if row and isinstance(row[0], str) else None
 
 
 # -- Haiku writes the tags ------------------------------------------------------

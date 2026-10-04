@@ -624,12 +624,12 @@ def test_the_command_line_is_read_without_argparse(argv, parsed):
 
 
 def test_the_hook_imports_nothing_a_call_may_not_need():
-    """``argparse``, ``hashlib``, ``hmac``, ``subprocess`` and ``tomllib``
-    cost 4 to 17 ms each to import, on every call: they are imported where
-    they are used."""
+    """``argparse``, ``hashlib``, ``hmac``, ``sqlite3``, ``subprocess`` and
+    ``tomllib`` cost 4 to 17 ms each to import, on every call: they are
+    imported where they are used."""
     code = (
         "import sys; sys.path.insert(0, sys.argv[1]); import capture_hook; "
-        "print(sorted(m for m in ('argparse', 'hashlib', 'hmac', 'subprocess', 'tomllib') if m in sys.modules))"
+        "print(sorted(m for m in ('argparse', 'hashlib', 'hmac', 'sqlite3', 'subprocess', 'tomllib') if m in sys.modules))"
     )
     done = subprocess.run([sys.executable, "-I", "-S", "-c", code, str(MODULE.parent)], capture_output=True, timeout=30)
     assert done.stdout.decode("utf-8").strip() == "[]", done.stderr.decode("utf-8")
@@ -994,18 +994,21 @@ def test_a_go_ahead_that_approves_a_plan_counts_as_the_approval(tmp_path):
     assert (facts["plan"], facts["build"], facts["followups"], facts["plan_followups"]) == ("approved", "same", 1, 1)
 
 
-def test_the_plan_question_counts_as_asked_once_it_was_answered_after_the_approval(tmp_path):
-    plan_header = CATALOGUE["coaching"]["feedback"]["plan_headers"][0]
-    question = {"question": "Was the plan enough?", "header": plan_header}
-    asked = [_calls("AskUserQuestion", "q1", {"questions": [question]}),
-             _comes_back("q1", result={"questions": [question], "answers": {"Was the plan enough?": "Yes"}})]
-    declined = [_calls("AskUserQuestion", "q2", {"questions": [question]}), _comes_back("q2", error=True)]
+def test_the_plan_question_counts_as_asked_once_the_plan_check_was_answered_after_the_approval(tmp_path):
     base = [_types("Plan it"), _plans("p1"), _approved("p1"), *_edits()]
+    asked = _plan_check_asked("q1", "answered")
+    declined = _plan_check_asked("q2", "declined")
     assert _facts(_fb(tmp_path, _timeline(*base, *asked, _says()), "/cg-feedback"))["plan_asked"] == 1
     assert _facts(_fb(tmp_path, _timeline(*base, *declined, _says()), "/cg-feedback"))["plan_asked"] == 0
     # Asked before the approval, it says nothing about the plan that was built.
     before = [_types("Plan it"), *asked, _plans("p1"), _approved("p1"), *_edits()]
     assert _facts(_fb(tmp_path, _timeline(*before, _says()), "/cg-feedback"))["plan_asked"] == 0
+    # The survey's own plan question, answered by an earlier run, leaves it at 0:
+    # a rerun asks it again, and its answers replace the earlier run's.
+    question = {"question": "Was the plan enough?", "header": CATALOGUE["coaching"]["feedback"]["plan_headers"][0]}
+    survey = [_calls("AskUserQuestion", "q3", {"questions": [question]}),
+              _comes_back("q3", result={"questions": [question], "answers": {"Was the plan enough?": "It was in the plan"}})]
+    assert _facts(_fb(tmp_path, _timeline(*base, _ran_feedback(), *survey, _says()), "/cg-feedback"))["plan_asked"] == 0
 
 
 def test_the_facts_line_names_the_tip_shown_most_and_latest(tmp_path):
@@ -1350,6 +1353,42 @@ def test_a_piece_you_rated_gets_no_reminder(tmp_path):
     big = _timeline(*rated, _types("More"), _says("done", tokens=1_100_000))
     note = _fb(tmp_path / "big", big, NEXT)
     assert _hint(note) == "rating_reminder" and "1.1M tokens" in note
+
+
+def _rated_on_dashboard(tmp_path: Path, session: str, at: datetime) -> None:
+    """A dashboard store holding your rating of ``session``, set at ``at``."""
+    import sqlite3
+
+    config_dir = tmp_path / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    db = sqlite3.connect(config_dir / HOOK._STORE_FILE)
+    try:
+        with db:
+            db.execute("CREATE TABLE session_feedback (session_id TEXT PRIMARY KEY, set_at TEXT NOT NULL)")
+            db.execute("INSERT INTO session_feedback VALUES (?, ?)", (session, at.strftime("%Y-%m-%dT%H:%M:%SZ")))
+    finally:
+        db.close()
+
+
+def test_a_rating_on_the_dashboard_since_the_piece_started_stops_the_reminder(tmp_path):
+    from claudeglass.service import serve
+
+    assert HOOK._STORE_FILE == serve.STORE_FILENAME
+    _rated_on_dashboard(tmp_path, "s1", FB_NOW - timedelta(minutes=10))
+    assert _fb(tmp_path, _big(1_300_000), NEXT) == ""
+    assert _hint(_fb(tmp_path, _big(1_300_000), NEXT, session="s2")) == "rating_reminder"
+    # A rating from before the piece started is the earlier piece's.
+    work = _timeline(_types("Add the importer"), _says("done"), _types("A different job"),
+                     _says("[cg: task=feature shift=new]", tokens=1_400_000))
+    _rated_on_dashboard(tmp_path / "before", "s1", FB_NOW - timedelta(minutes=10))
+    assert _hint(_fb(tmp_path / "before", work, NEXT)) == "rating_reminder"
+    _rated_on_dashboard(tmp_path / "since", "s1", FB_NOW - timedelta(minutes=1))
+    assert _fb(tmp_path / "since", work, NEXT) == ""
+    # A store it can't read changes nothing.
+    broken = tmp_path / "broken" / "claudeglass"
+    broken.mkdir(parents=True)
+    (broken / HOOK._STORE_FILE).write_bytes(b"not a database")
+    assert _hint(_fb(tmp_path / "broken", _big(1_300_000), NEXT)) == "rating_reminder"
 
 
 def test_the_reminder_comes_once_per_piece_and_once_in_three_days(tmp_path):

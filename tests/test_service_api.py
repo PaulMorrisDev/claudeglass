@@ -24,6 +24,7 @@ S1-watcher landing first.
 from __future__ import annotations
 
 import http.client
+import itertools
 import json
 import os
 import sys
@@ -4167,6 +4168,11 @@ def test_a_card_answer_moves_the_change_token(server):
 # -- the banner's list of sessions to rate ----------------------------------------------------
 
 
+#: Windows' clock ticks every 15.6 ms, so two calls in a row could write the
+#: same time and leave the store's change token where it was.
+_TOUCHES = itertools.count(1)
+
+
 def _recent_session(server, days_ago: int = 1) -> None:
     """The fixture session replied a few days ago, so it is inside the
     banner's window whenever the suite runs."""
@@ -4177,7 +4183,7 @@ def _recent_session(server, days_ago: int = 1) -> None:
     # A re-parsed transcript is what moves the store's change token.
     conn.execute(
         "UPDATE transcripts SET updated_at = ? WHERE session_id = ?",
-        (now.isoformat(timespec="microseconds"), server.session_id),
+        ((now + timedelta(microseconds=next(_TOUCHES))).isoformat(timespec="microseconds"), server.session_id),
     )
 
 
@@ -4230,6 +4236,29 @@ def test_the_banner_leaves_out_a_session_outside_the_window(server):
     assert _banner(server)["unrated"] is None
     _recent_session(server, days_ago=2)
     assert _banner(server)["unrated"]["total"] == 1
+
+
+def test_the_banner_reads_again_only_the_sessions_that_changed(server, monkeypatch):
+    from claudeglass.service import rebuild
+
+    _lower_the_reminder_threshold(server)
+    _feedback_on(server, "feedback_reminder")
+    _recent_session(server, days_ago=2)
+    asked = []
+    real = rebuild.corpus_from_store
+
+    def spy(store, **kwargs):
+        if kwargs.get("session_ids") is not None:
+            asked.append(sorted(kwargs["session_ids"]))
+        return real(store, **kwargs)
+
+    monkeypatch.setattr(rebuild, "corpus_from_store", spy)
+    assert _banner(server)["unrated"]["total"] == 1
+    assert asked == [[server.session_id]]
+    # A change elsewhere in the store rebuilds the list without reading the session again.
+    server.store.set_tip_feedback("recommendation", "any-key", "useful")
+    assert _banner(server)["unrated"]["total"] == 1
+    assert asked == [[server.session_id]]
 
 
 def test_the_banner_leaves_out_a_session_you_rated_with_a_feedback_run(tmp_path, monkeypatch):

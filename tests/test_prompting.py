@@ -10,7 +10,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import capture_catalogue as cat, events as events_mod, habits, prompt_shape, prompting
+from claudeglass import capture, capture_catalogue as cat, events as events_mod, habits, prompt_shape, prompting
 from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
@@ -1135,3 +1135,31 @@ def test_the_tip_tallies_are_read_back_from_the_tips_table():
     assert prompting.tip_tallies(NS(sections=[prompting.build_section([])])) == {}
     assert prompting.tip_tallies(NS(sections=[])) == {}
     assert prompting.tip_tallies(NS()) == {}
+
+
+def test_a_dashboard_rating_with_no_run_excuses_the_followups_a_run_would(tmp_path):
+    bundle = NS(top=_parse(tmp_path, [*_START, *_DRIP]), session_id="s.jsonl")
+    rating = {"outcome": "partly", "why": ["missed"]}
+    [session] = prompting.collect(NS(sessions=[bundle]), PRICING, {"s.jsonl": rating})
+    assert [m.excused for m in session.messages[:4]] == [False, True, True, True]
+    assert "drip_feed" not in session.counts()
+    # With no outcome there is no rating, and a run's own answers win over one.
+    [unrated] = prompting.collect(NS(sessions=[bundle]), PRICING, {"s.jsonl": {"why": ["missed"]}})
+    assert unrated.counts()["drip_feed"] == 1
+    lines = [*_START, *_DRIP, *_feedback_lines(50, {**_say("outcome", "partly"), **_say("why", "left_out")})]
+    ran = NS(top=_parse(tmp_path, lines, "ran.jsonl"), session_id="ran.jsonl")
+    [own] = prompting.collect(NS(sessions=[ran]), PRICING, {"ran.jsonl": rating})
+    assert own.counts()["drip_feed"] == 1 and not any(m.excused for m in own.messages)
+
+
+def test_a_model_missing_from_the_price_list_prices_nothing_and_breaks_nothing(tmp_path):
+    def unpriced(minute):
+        return turn_line(timestamp=_at(minute), model="claude-unknown-1", content=[{"type": "text", "text": "Done."}],
+                         cache_read_input_tokens=40_000, output_tokens=200)
+
+    lines = [_said("make the button bigger", 2), unpriced(3), _said("now move the logo", 4), unpriced(5)]
+    session = _session(tmp_path, lines)
+    assert session is not None and len(session.messages) == 2
+    turns = capture._priced(_parse(tmp_path, lines, "u.jsonl"))
+    prices = prompting._Prices(PRICING)
+    assert prices.reads(turns, 1_000) == 0.0 and prices.carry(turns, 0, 1_000) == 0.0

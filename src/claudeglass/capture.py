@@ -1138,8 +1138,8 @@ class History:
     web_results: int = 0
     web_note: float = 0.0
     web_tag: float = 0.0
-    #: Sessions in which a plan was approved: the most the plan check
-    #: could ask in (once per plan).
+    #: Plans approved in the replayed sessions: the most times the plan check
+    #: could ask (once per plan).
     plans_approved: int = 0
     #: What the replayed sessions cost.
     spend: float = 0.0
@@ -1208,8 +1208,7 @@ def history(corpus, pricing: Pricing | None, days: int = 14) -> History:
             for turn in _priced(top):
                 for tool_use_id in turn.tool_use_ids:
                     spawners[tool_use_id] = turn
-            if any(_plan_approved(turn) for turn in _priced(top)):
-                out.plans_approved += 1
+            out.plans_approved += sum(1 for turn in _priced(top) if _plan_approved(turn))
             for cycle in prompt_cycles(top):
                 out.cycles += 1
                 tag_turn = cycle.turns[-1]

@@ -2145,11 +2145,14 @@ class Store:
         least ``min_tokens`` (their stored total, subagents included, so
         an upper bound on the main transcript's own) and that you have not
         rated on the dashboard, newest first: ``{id, slug, last_ts,
-        total_tokens}``, the slug redacted. The banner's candidates
-        (``ratings.unrated_piece`` has the last word)."""
+        total_tokens, stamp}``, the slug redacted. ``stamp`` is the latest
+        parse of its transcripts, so a caller can tell which sessions
+        changed. The banner's candidates (``ratings.unrated_piece`` has the
+        last word)."""
         since_dt, _until = _resolve_window(None, since, None)
         rows = self._connection().execute(
-            "SELECT s.id, s.slug, s.last_ts, s.total_tokens FROM sessions s "
+            "SELECT s.id, s.slug, s.last_ts, s.total_tokens, "
+            "(SELECT MAX(t.updated_at) FROM transcripts t WHERE t.session_id = s.id) AS stamp FROM sessions s "
             "WHERE s.total_tokens >= ? "
             "AND NOT EXISTS (SELECT 1 FROM session_feedback f WHERE f.session_id = s.id) "
             "ORDER BY s.last_ts DESC",

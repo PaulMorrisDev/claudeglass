@@ -2577,6 +2577,24 @@ def test_refresh_writes_the_typical_piece_of_work_from_the_same_sessions(_claude
     assert coaching.read(config_dir)["typical_piece_tokens"] == 380_000
 
 
+def test_refresh_reads_your_dashboard_ratings_and_card_answers_as_the_daily_run_does(_claude_folder, monkeypatch):
+    config_dir = _claude_folder
+    tips = {("tip", "drip_feed"): {"answer": "useful", "set_at": "2026-09-20T00:00:00Z"}}
+    monkeypatch.setattr(cli, "_merge_dashboard_marks", lambda config_dir, overrides: (overrides, {"s1": {"outcome": "met"}}))
+    monkeypatch.setattr(cli, "_dashboard_tip_feedback", lambda config_dir: tips)
+    seen = []
+    real = cli.build_report
+
+    def spy(*args, **kwargs):
+        seen.append(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(cli, "build_report", spy)
+    rc, _out = _capture(config_dir, "refresh")
+    assert rc == 0 and len(seen) == 1
+    assert seen[0]["ratings"] == {"s1": {"outcome": "met"}} and seen[0]["tip_feedback"] == tips
+
+
 # -- what a reply says: a closing question, an admission, a disowned tip -----------
 
 _TIP = "> **ClaudeGlass tip:** Try plan mode (is it on?)\n> and a second line?"

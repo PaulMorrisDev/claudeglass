@@ -68,16 +68,18 @@ def _typed_followups(work: list) -> list:
     return [c for c in work[1:] if not (c.turns[0].human_go or c.turns[0].human_status)]
 
 
-def _queued_followups(top) -> list[datetime | None]:
+def _queued_followups(top, *, dups: bool = False) -> list[datetime | None]:
     """When each message you typed while Claude was working was typed,
-    leaving out a go-ahead or a status check and a copy of a message also
-    written as a user line."""
+    leaving out a go-ahead or a status check and, unless ``dups``, a copy
+    of a message also written as a user line (that line counts as a typed
+    follow-up; the hook's ``queued`` still counts it as typed while Claude
+    worked)."""
     out = []
     for event in top.events:
         if event.kind != EventKind.QUEUE_OPERATION:
             continue
         detail = event.detail
-        if detail.get("origin") != "human" or detail.get("dup") or detail.get("go") or detail.get("status"):
+        if detail.get("origin") != "human" or (detail.get("dup") and not dups) or detail.get("go") or detail.get("status"):
             continue
         out.append(_moment(event.ts))
     return out
@@ -139,7 +141,7 @@ def session_facts(bundle, typical: int = 0) -> dict:
         "tokens": coaching.session_tokens(top),
         "typical": max(0, int(typical)),
         "followups": len(typed) + len(queued),
-        "queued": len(queued),
+        "queued": len(_queued_followups(top, dups=True)),
         "plan": "approved" if latest else "pending" if any(t.plan_stats is not None for t in turns) else "none",
         "plan_followups": latest["plan_followups"] if latest else 0,
         "plan_asked": latest["plan_asked"] if latest else 0,

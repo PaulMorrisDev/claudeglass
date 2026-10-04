@@ -536,10 +536,14 @@ says what to do.
 ## The store's schema version
 
 `service.db` records the schema version it was written under
-(`meta.schema_version`). Version 8, from 0.13.0, adds `turns_agg.bucket`:
-the UTC quarter hour each group of replies falls in. It lets the
-dashboard cut a window and its daily chart at local midnight in any time
-zone, rather than at UTC's.
+(`meta.schema_version`). Version 9 adds the redesigned rating: the
+`why`, `missed_in`, `tip` and `tip_hint` columns on `session_feedback`,
+and the `session_plan_feedback` and `tip_feedback` tables. Upgrading
+from 8 adds them in place in one transaction, keeps every row and reads
+nothing again. Version 8, from 0.13.0, adds `turns_agg.bucket`: the UTC
+quarter hour each group of replies falls in. It lets the dashboard cut a
+window and its daily chart at local midnight in any time zone, rather
+than at UTC's.
 
 - **Upgrading from 7 keeps every row.** `Store.migrate()` adds the column
   and marks every stored transcript for one re-parse, the same step a
@@ -549,16 +553,17 @@ zone, rather than at UTC's.
   transcript is read again, its rows have no bucket and count on the UTC
   day they were stored under, so a daily chart can place a late-evening
   reply a day off for that short time.
-- **Downgrading rebuilds the store.** An older version pointed at a store
-  a newer one migrated can't be served by an additive step, so `migrate()`
-  copies `service.db` aside as `service.db.bak-<version>-<timestamp>`
-  (and prints where on stderr), drops every table and recreates them. The
-  next watcher tick reads the transcripts still on disk again. Your
-  session tags and ratings are put back. Logged "what if" predictions are
+- **Downgrading rebuilds the store.** An older version pointed at a
+  store a newer one migrated can't be served by an additive step, so
+  `migrate()` copies `service.db` aside as
+  `service.db.bak-<version>-<timestamp>` (and prints where on stderr),
+  drops every table and recreates them. The next watcher tick reads the
+  transcripts still on disk again. Your session tags, session ratings
+  and card ratings are put back. Logged "what if" predictions are
   re-read from `prediction-log.jsonl` and come back unjudged, so their
-  verdicts and seen marks are lost until the dashboard judges them again.
-  Transcripts Claude Code has already removed are not rebuilt; they stay
-  in the backup file.
+  verdicts and seen marks are lost until the dashboard judges them
+  again. Transcripts Claude Code has already removed are not rebuilt;
+  they stay in the backup file.
 
 ## Time zone and `tzdata`
 

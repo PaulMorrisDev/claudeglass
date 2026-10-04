@@ -929,8 +929,8 @@ capture is off or no feedback has been given.
   cards; the rest collapse into a "more habits worth trying" `<details>`
   (UX-4/7).
 
-  Your /cg-feedback answers change several rows (the table "Which advice
-  each answer feeds" in the plan). `brief_clearly`, `name_files` and the
+  Your /cg-feedback answers change several rows, and so does a dashboard
+  rating of a session no run rated. `brief_clearly`, `name_files` and the
   other habits about briefing Claude cite "N of M follow-ups were things
   your request left out" (`why=left_out`), and the first can stand on
   those answers alone. `check_work` (the "Have Claude check its work

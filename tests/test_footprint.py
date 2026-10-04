@@ -408,3 +408,10 @@ def test_the_launcher_its_module_and_the_word_list_are_all_one_part_of_the_footp
     assert {p.name for p in hooks_dir.iterdir()} >= {cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE, "__pycache__"}
     assert footprint.delete_data(config_dir) == []
     assert not config_dir.exists()
+
+
+def test_the_capture_hooks_show_while_only_a_feedback_item_runs_them(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\nfeedback = ["feedback_skill"]\n', encoding="utf-8")
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=False)}["capture_hooks"]
+    assert item.status == "not installed" and "/cg-feedback" in item.what_it_does

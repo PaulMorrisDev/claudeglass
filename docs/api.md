@@ -317,13 +317,17 @@ can still include a session whose transcript file Claude Code's own
 `cleanupPeriodDays` retention has already removed — see "Store rebuild"
 below.
 
-`schema_version` is the store's schema: 8 as of 0.13.0, which added
-`turns_agg.bucket`, the UTC quarter hour each day's figures are split
-into, so `GET /api/daily-usage` can count a day in your own zone. A store
-at 7 gains the column in place and every transcript is read once more to
-fill it in (a transcript whose file is gone keeps its UTC day). An older
-version that opens a store already at 8 rebuilds it from the transcripts,
-after setting a copy aside; your session tags and ratings are put back.
+`schema_version` is the store's schema: 9 since the /cg-feedback
+redesign, which added the rating's `why`, `missed_in`, `tip` and
+`tip_hint` columns and the `session_plan_feedback` and `tip_feedback`
+tables. A store at 8 gains them in place and nothing is read again.
+Version 8, from 0.13.0, added `turns_agg.bucket`, the UTC quarter hour
+each day's figures are split into, so `GET /api/daily-usage` can count a
+day in your own zone. A store at 7 gains the column in place and every
+transcript is read once more to fill it in (a transcript whose file is
+gone keeps its UTC day). An older version that opens a newer store
+rebuilds it from the transcripts, after setting a copy aside; your
+session tags, session ratings and card ratings are put back.
 
 `watcher` (S1-perf) additionally carries a per-tick timing breakdown of
 its own `duration_s`: `discovery_s` (filesystem walk + diffing against
@@ -443,7 +447,11 @@ Query: `limit` (default 50), `offset` (default 0), plus the optional
 sessions a report over that window counts (last reply in the window).
 Without one, every session. Newest first (by `first_ts`).
 
-`data`: `[{"id", "slug", "first_ts", "last_ts", "span_s", "archetype", "mode", "purpose", "entrypoint", "billing_mode", "profile_id", "total_cost", "total_tokens", "source", "first_day", "last_day", "low_confidence"}, ...]`.
+`data`: `[{"id", "slug", "first_ts", "last_ts", "span_s", "archetype", "mode", "mode_source", "purpose", "purpose_source", "entrypoint", "billing_mode", "profile_id", "total_cost", "total_tokens", "source", "first_day", "last_day", "low_confidence"}, ...]`.
+
+`mode_source` and `purpose_source` (additive) say what set each label:
+`override` (a label you set), `rule` (ClaudeGlass's rules) or, for the
+purpose only, `reported` (Claude's own tag).
 
 `low_confidence` (additive) is `true` when the session's mode or purpose
 is the catch-all a rule fell back to (`mixed`, `general-dev`) rather than
@@ -1724,10 +1732,11 @@ cross-site checks above run first).
 It is a rating you give, kept in the `tip_feedback` table: nothing in
 Claude Code's own settings or in `config.toml` changes. `trying` also
 adds a line (`kind`, `item`, the state `trying` and a time, no text) to
-`habit-log.jsonl` in the config folder the first time you pick it, which
-puts a change point on the Changes page from that day so the habit's
-effect can be measured. Your answer on the card of a tip hint also counts in the
-"Tips Claude showed" table of the report (`trying` counts as `useful`).
+`habit-log.jsonl` in the config folder each time you pick it when it was
+not already your answer, which puts a change point on the Changes page
+from that day so the habit's effect can be measured. Your answer on the
+card of a tip hint also counts in the "Tips Claude showed" table of the
+report (`trying` counts as `useful`).
 
 `data`: `{"kind", "item", "answer", "set_at"}` (`set_at` is `null` when
 the answer was taken back).
@@ -2013,12 +2022,12 @@ and the CSV export keep the raw values, and the Markdown and HTML
 renderers ignore `lead_columns`.
 
 **`GET /api/session/<id>` returns a superset of the listed fields.**
-`Store.session()`'s dict includes `mode_source`/`purpose_source`
-alongside every field `/api/sessions` lists — a non-breaking addition,
-not a contradiction of the field list above (which describes the
-session-summary fields plus `transcripts`/`tags`, not an exact field
-count), and dropping fields `Store` already computes for no privacy
-reason would only lose information a client might want.
+`Store.session()`'s dict includes `turn_series`, `markers`, `truncated`
+and `limit_markers` alongside every field `/api/sessions` lists — a
+non-breaking addition, not a contradiction of the field list above
+(which describes the session-summary fields plus `transcripts`/`tags`,
+not an exact field count), and dropping fields `Store` already computes
+for no privacy reason would only lose information a client might want.
 
 **`/api/profiles/<id>/diff` and `POST /api/profiles` are real routes as
 of v0.3**, no longer the `501 not_implemented` stubs an earlier version

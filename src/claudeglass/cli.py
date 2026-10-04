@@ -3608,6 +3608,7 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
         stdout.write("The rate card can't be read, so the split points can't be worked out.\n")
         return 2
     corpus = _capture_corpus(args, config, config_dir, days=coaching.DAYS)
+    _overrides, ratings = _merge_dashboard_marks(config_dir, {})
     report = build_report(
         corpus,
         rates,
@@ -3618,6 +3619,9 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
         # daily run builds it.
         all_projects=True,
         config_dir=config_dir,
+        # Your dashboard ratings and card answers, as the daily run reads them.
+        ratings=ratings,
+        tip_feedback=_dashboard_tip_feedback(config_dir),
     )
     data = coaching.from_report(
         report, config_dir, config.thresholds, now=now, typical=coaching.typical_piece_tokens(corpus)

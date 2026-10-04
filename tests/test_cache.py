@@ -181,7 +181,7 @@ def test_fingerprint_is_pinned():
     cache entry (nothing else does -- unlike PARSER_VERSION, nobody has
     to remember to bump this by hand), not to silently ship it.
     """
-    assert FINGERPRINT == "ab724cc9020b6fd2f91a24cbbc7e0c513fe3d99bd80ec21f1740572ae31ba78c"
+    assert FINGERPRINT == "02a51b46e64100f9a0f618841a82119de2c44524c52b34cf741764a20619a999"
 
 
 # -- salt fingerprint (SEC-P8) ----------------------------------------------

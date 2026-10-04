@@ -39,9 +39,9 @@ Contract notes / deviations (reported here rather than silently, per this
 project's convention -- see e.g. ``report.py``'s own module docstring):
 
 - ``GET /api/session/<id>`` returns ``Store.session()``'s dict verbatim,
-  which includes ``mode_source``/``purpose_source`` alongside the fields
-  ``docs/api.md`` lists for ``/api/sessions``, plus (S1-integration fix
-  1.g) ``turn_series``/``markers``/``truncated``, and (v3-limits wiring)
+  which holds every field ``docs/api.md`` lists for ``/api/sessions``,
+  plus (S1-integration fix 1.g)
+  ``turn_series``/``markers``/``truncated``, and (v3-limits wiring)
   ``limit_markers``, all from ``Store.turns_for_session``. This is a
   superset, not a contradiction -- ``docs/api.md`` describes it as "the
   session-summary fields above, plus transcripts ... and tags", not an
@@ -1469,6 +1469,12 @@ def make_handler(
     #: report (see _capture_part).
     capture_parts: dict = {}
 
+    #: (session id, its transcripts' latest parse, threshold) -> the main
+    #: transcript's tokens when that session is due a rating, else None
+    #: (ratings.unrated_piece), so the banner reads again only the
+    #: sessions that changed since it was last built.
+    unrated_memo: dict = {}
+
     def _keep_capture_part(name, key, soft, build):
         started = time.monotonic()
         as_of = _now_utc_iso()
@@ -1628,22 +1634,35 @@ def make_handler(
 
         since = (datetime.now(timezone.utc) - timedelta(days=coaching.DAYS)).isoformat(timespec="seconds")
         candidates = {row["id"]: row for row in store.unrated_sessions(min_tokens=threshold, since=since)}
+
+        def memo_key(session_id):
+            return (session_id, candidates[session_id]["stamp"], threshold)
+
+        for key in list(unrated_memo):
+            if key[0] not in candidates or key != memo_key(key[0]):
+                unrated_memo.pop(key, None)
+        fresh = [session_id for session_id in candidates if memo_key(session_id) not in unrated_memo]
+        if fresh:
+            found = {
+                bundle.session_id: ratings_mod.unrated_piece(bundle, threshold)
+                for bundle in rebuild.corpus_from_store(store, session_ids=fresh).sessions
+            }
+            for session_id in fresh:
+                unrated_memo[memo_key(session_id)] = found.get(session_id)
         pieces = []
-        if candidates:
-            for bundle in rebuild.corpus_from_store(store, session_ids=list(candidates)).sessions:
-                tokens = ratings_mod.unrated_piece(bundle, threshold)
-                if tokens is None:
-                    continue
-                row = candidates[bundle.session_id]
-                pieces.append(
-                    {
-                        "session_id": bundle.session_id,
-                        "slug": row["slug"],
-                        "last_ts": row["last_ts"],
-                        "tokens": tokens,
-                        "tokens_text": ratings_mod.tokens_text(tokens),
-                    }
-                )
+        for session_id, row in candidates.items():
+            tokens = unrated_memo.get(memo_key(session_id))
+            if tokens is None:
+                continue
+            pieces.append(
+                {
+                    "session_id": session_id,
+                    "slug": row["slug"],
+                    "last_ts": row["last_ts"],
+                    "tokens": tokens,
+                    "tokens_text": ratings_mod.tokens_text(tokens),
+                }
+            )
         pieces.sort(key=lambda piece: piece["last_ts"] or "", reverse=True)
         return {
             "threshold": threshold,
@@ -1708,8 +1727,10 @@ def make_handler(
             # and the store's change token. It is also the soft key, so a
             # kept list is never served for a newer store: a session you
             # have just rated must not stay on it while a new one is built.
+            # The half-hour bucket lets a session that ages out of the window
+            # leave the list even when nothing new is stored.
             threshold = _reminder_threshold(config)
-            unrated_key = (store.change_token(), threshold, *soft)
+            unrated_key = (store.change_token(), threshold, bucket, *soft)
             unrated = _capture_part(
                 "unrated", unrated_key, unrated_key, lambda: _capture_unrated(threshold), _STALE_REPORT_MAX_AGE_S
             )

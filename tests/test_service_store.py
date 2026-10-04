@@ -1723,7 +1723,7 @@ def test_unrated_sessions_lists_big_unrated_ones_in_the_window_newest_first(stor
         )
     rows = store.unrated_sessions(min_tokens=1000, since="2026-09-01T00:00:00Z")
     assert [row["id"] for row in rows] == ["session-b", "session-a"]
-    assert set(rows[0]) == {"id", "slug", "last_ts", "total_tokens"}
+    assert set(rows[0]) == {"id", "slug", "last_ts", "total_tokens", "stamp"}
     assert rows[0]["total_tokens"] == 90000
     # A higher floor drops the smaller one, and rating a session takes it off.
     assert [r["id"] for r in store.unrated_sessions(min_tokens=60000, since="2026-09-01T00:00:00Z")] == ["session-b"]

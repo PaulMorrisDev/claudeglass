@@ -613,6 +613,10 @@ class CycleFact:
     #: only thought of after the plan. ``redone`` stays off for it, so
     #: rework and waste figures leave it out.
     excused: bool = False
+    #: The message is in a piece whose /cg-feedback answers already count
+    #: for ``check_work`` (``why`` has ``missed``, or ``plan`` is ``covered``):
+    #: its plan check answer isn't counted again.
+    in_missed_piece: bool = False
 
 
 @dataclass(slots=True)
@@ -695,6 +699,13 @@ class Piece:
     #: You answered what slowed the work or what your follow-ups were, even
     #: if the answer was nothing.
     why_given: bool = False
+    #: You answered what would have made it cheaper, even if the answer
+    #: was nothing.
+    helped_given: bool = False
+    #: A dashboard rating that is the only answer about its session's work
+    #: (no /cg-feedback run rated any of it): it counts as a /cg-feedback
+    #: piece does (:func:`_answered`).
+    alone: bool = False
 
     def reasons(self) -> set[str]:
         """What your follow-ups were mostly, in ``why``'s words: this
@@ -876,6 +887,8 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     span_of: dict[int, int] = {}
     #: The first message of each piece whose follow-ups were things left out.
     left_out: set[int] = set()
+    #: The messages of pieces check_work counts from your answers.
+    missed_pieces: set[int] = set()
     for n, span in enumerate(capture_mod.feedback_spans(cycles)):
         if span.feedback.source != "skipped" and span.feedback.outcome and span.cycles:
             for cycle in span.cycles:
@@ -883,11 +896,28 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
                 span_of[id(cycle)] = n
             if "left_out" in span.feedback.why:
                 left_out.add(id(span.cycles[0]))
-            out.pieces.append(_piece(span.feedback, span.cycles, rates, "your feedback"))
+            piece = _piece(span.feedback, span.cycles, rates, "your feedback")
+            out.pieces.append(piece)
+            if "missed" in piece.reasons() or piece.plan == "covered":
+                missed_pieces.update(id(c) for c in span.cycles)
     session_rating = _rating_feedback(rating)
     work = [c for c in cycles if not capture_mod.is_feedback_run(c)]
-    if session_rating is not None and work:
-        out.pieces.append(_piece(session_rating, work, rates, "dashboard rating"))
+    if session_rating is not None and work and rated:
+        # A /cg-feedback run already answered for this session's builds: the
+        # dashboard's plan and handoff answers would count them twice.
+        out.pieces.append(_piece(replace(session_rating, handoff=None, plan=None), work, rates, "dashboard rating"))
+    elif session_rating is not None and work:
+        # The dashboard rating is the only answer about this session's work:
+        # it rates every message, as a /cg-feedback run rates its piece.
+        piece = replace(_piece(session_rating, work, rates, "dashboard rating"), alone=True)
+        out.pieces.append(piece)
+        for cycle in work:
+            rated[id(cycle)] = session_rating
+            span_of[id(cycle)] = -1
+        if "left_out" in session_rating.why:
+            left_out.add(id(work[0]))
+        if "missed" in piece.reasons() or piece.plan == "covered":
+            missed_pieces.update(id(c) for c in work)
     shape = plan_shape(turns)
     if work:
         out.shapes.append(
@@ -918,6 +948,7 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
         )
     for fact, cycle, following in zip(facts, work, work[1:] + [None]):
         fact.left_out = id(cycle) in left_out
+        fact.in_missed_piece = id(cycle) in missed_pieces
         fact.tokens = _cycle_tokens(cycle)
         word = fact.plan_check
         if word in _PLAN_ANSWERS:
@@ -1023,6 +1054,7 @@ def _piece(fb: Feedback, cycles, rates: _Rates, source: str) -> Piece:
         followup_tokens=sum(_cycle_tokens(c) for c in follow),
         plan_checks=tuple(w for w in (_plan_word(c) for c in cycles) if w),
         why_given=bool(fb.why or fb.slow),
+        helped_given=bool(fb.helped),
     )
 
 
@@ -1331,9 +1363,10 @@ def _k(tokens: float) -> str:
 
 
 def _answered(h: Habits) -> list[Piece]:
-    """The pieces of work you rated through /cg-feedback (not the dashboard's
-    rating of a whole session, whose follow-ups can't be told apart)."""
-    return [p for p in h.pieces if p.source == "your feedback"]
+    """The pieces of work you rated through /cg-feedback, and the dashboard
+    ratings of sessions no /cg-feedback run rated (:attr:`Piece.alone`); a
+    dashboard rating beside a run would count the same follow-ups twice."""
+    return [p for p in h.pieces if p.source == "your feedback" or p.alone]
 
 
 def _reason_followups(h: Habits, reason: str) -> tuple[int, int]:
@@ -1353,7 +1386,8 @@ def _information_notes(h: Habits) -> list[str]:
     :data:`~claudeglass.handoff.MIN_FEEDBACK_ANSWERS` behind it."""
     notes = []
     left, followups = _reason_followups(h, "left_out")
-    if left >= MIN_FEEDBACK_ANSWERS:
+    named = sum(1 for p in _answered(h) if p.why_given and "left_out" in p.reasons())
+    if named >= MIN_FEEDBACK_ANSWERS and left:
         notes.append(f"{left} of {followups} follow-ups were things your request left out")
     wanted, rated = _helped_by(h, "context")
     if wanted >= MIN_FEEDBACK_ANSWERS:
@@ -1362,9 +1396,10 @@ def _information_notes(h: Habits) -> list[str]:
 
 
 def _helped_by(h: Habits, word: str) -> tuple[int, int]:
-    """``(n, m)``: of the ``m`` pieces where you said what would have made
-    them cheaper, ``n`` said ``word`` (``context``, ``plan`` or ``smaller``)."""
-    given = [p for p in _answered(h) if p.helped]
+    """``(n, m)``: of the ``m`` pieces where you answered what would have
+    made them cheaper (Nothing included), ``n`` said ``word`` (``context``,
+    ``plan`` or ``smaller``)."""
+    given = [p for p in _answered(h) if p.helped_given]
     return sum(word in p.helped for p in given), len(given)
 
 
@@ -1401,7 +1436,10 @@ def _item_split_large(h: Habits) -> Item | None:
     for c in h.cycles:
         reported = c.tag is not None and c.tag.size in ("l", "xl")
         inferred = (c.tag is None or c.tag.size is None) and (c.compactions or c.turns >= LARGE_TURNS)
-        told = c.worth == "no" or "smaller" in c.helped
+        # Your answer joins a message Claude didn't size as small: one it
+        # called xs or s is no large ask, whatever the piece cost.
+        small = c.tag is not None and c.tag.size in ("xs", "s")
+        told = not small and (c.worth == "no" or "smaller" in c.helped)
         if (reported or inferred) and c.worth == "yes" and not told:
             worth_it += 1
         elif told:
@@ -1980,7 +2018,7 @@ def _item_check_work(h: Habits) -> Item | None:
     missed = [p for p in pieces if "missed" in p.reasons()]
     in_plan = {id(p) for p in missed if p.missed_in == "plan"}
     covered = [p for p in pieces if p.plan == "covered" and id(p) not in in_plan]
-    checks = [c for c in h.cycles if c.plan_check == "covered"]
+    checks = [c for c in h.cycles if c.plan_check == "covered" and not c.in_missed_piece]
     where = Counter(p.missed_in or "" for p in missed)
     where["plan"] += len(covered) + len(checks)
     n = len(missed) + len(covered) + len(checks)

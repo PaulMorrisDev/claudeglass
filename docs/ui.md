@@ -822,13 +822,14 @@ label.
 
 **Rate this session** asks the `/cg-feedback` questions as ticks. The
 service sends them (`feedback_questions`, from the same catalogue as the
-skill, so the words are not copied into the page) and leaves out the ones
-the session's own facts say don't apply: a question about where a missed
-detail was said shows only while "Claude missed something I had said" is
-ticked. A session with two or more approved plans gets a row for each
-plan build under the plan and handoff questions, saved as `builds`.
-Answers the page doesn't show for a session stay as they were when you
-save. **Clear** removes the whole rating. Chart 5 draws
+skill, so the words are not copied into the page) and leaves out the
+ones the session's own facts say don't apply: a question about where a
+missed detail was said shows only while "Claude missed something (it was
+in my request or the plan)" is ticked. A session with two or more
+approved plans gets a row for each plan build under the plan and handoff
+questions, saved as `builds`. Answers the page doesn't show for a
+session stay as they were when you save. **Clear** removes the whole
+rating. Chart 5 draws
 context size over turns with a marker shape per event (cache rebuild,
 conversation summary, subagent start, your message). Usage-limit events
 sit in lanes above, placed by time because they fall between turns. It

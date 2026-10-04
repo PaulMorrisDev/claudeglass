@@ -1377,7 +1377,7 @@ def test_estimate_prices_the_rating_reminder_at_most_once_per_session_and_once_i
     assert capture.estimate(capture.History(days=14), ("feedback_reminder",)).cost == 0
 
 
-def test_estimate_prices_the_plan_check_once_per_session_that_approved_a_plan():
+def test_estimate_prices_the_plan_check_once_per_approved_plan():
     past = capture.History(days=14, sessions=5, cycles=50, main_notes=5, main_note=5e-6, reply_tag=1e-5,
                            plans_approved=3)
     est = capture.estimate(past, ("plan_check",))
@@ -1396,7 +1396,7 @@ def test_estimate_prices_the_plan_check_once_per_session_that_approved_a_plan():
     assert rough["message_note"] == round(note / 4)
 
 
-def test_plans_approved_counts_the_sessions_that_had_one_approved(tmp_path):
+def test_plans_approved_counts_the_approved_plans(tmp_path):
     plan = {"plan": "1. a\n2. b"}
     sessions = []
     for name, outcome_error in (("with", False), ("rejected", True), ("none", None)):

@@ -496,6 +496,13 @@ export function showCaptureData(data) {
   renderCaptureBanner(data);
 }
 
+// A rating saved on the Sessions tab can take a session off the banner's
+// list: ask for the capture figures again rather than wait for the poll.
+document.addEventListener("cg-rating-saved", function () {
+  capturePoll.fetchedAt = 0;
+  if (healthPoll.health) updateCaptureBanner(healthPoll.health.capture);
+});
+
 // UX-6/9: a notes dismissal stores its timestamp, not a bare "1", and
 // lapses after BANNER_SNOOZE_MS, so a quiet banner returns on its own
 // after a week rather than staying hidden for good.

@@ -2025,11 +2025,11 @@ METRICS: tuple[Metric, ...] = (
         section="feedback",
         title="Feedback skill",
         what="A /cg-feedback skill you run after a piece of work. It asks a few checkbox questions: the "
-        "outcome, what your follow-up messages were, whether it was worth the tokens, and what would have made it "
+        "outcome, what your follow-ups were, whether it was worth the tokens, and what would have made it "
         "cheaper. After an approved plan it asks whether the plan covered what you fixed and whether the build "
         "could have started fresh. A tip question appears only when ClaudeGlass showed a tip. When you run it, a "
-        "hook adds one line of counts and ids (no text) for the piece of work being rated, so the skill can leave "
-        "out a question that doesn't apply.",
+        "hook adds one line of counts and ids for the piece of work, never any text. The skill uses it to leave "
+        "out questions that don't apply.",
         why="Cost per piece of work that met its goal, which outranks what Claude reports about itself. "
         "The follow-up and plan answers tell the tips and the suggested profile where the work went wrong.",
         powers=("outcome", "planning", "profiles"),
@@ -2051,10 +2051,11 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Feedback reminder from Claude",
-        what="When the piece of work you are on is large (at least 1M tokens and twice your typical piece) and "
-        "you haven't rated it, a note with your next message asks Claude to end its reply with a line suggesting "
-        "/cg-feedback. At most once per piece of work and once every 3 days. A piece starts with the session, a "
-        "/clear, or a message Claude tags as a new task.",
+        what="A note with your next message asks Claude to end its reply with a line suggesting /cg-feedback. "
+        "It comes only for a piece of work you haven't rated that has used at least 1M tokens and twice your "
+        "typical piece. A rating you give on the dashboard after the piece started counts too. At most once per "
+        "piece of work and once every 3 days. A piece starts with the session, a /clear, or a message Claude "
+        "tags as a new task.",
         why="For people without the status line, such as in the desktop app, and only for work big enough to be "
         "worth rating. Costs a note of about 100 tokens and a few output tokens, a few times a week at most.",
         powers=("outcome",),
@@ -2066,12 +2067,12 @@ METRICS: tuple[Metric, ...] = (
         group="feedback",
         section="feedback",
         title="Plan check after a fix",
-        what="After you approve a plan and Claude changes files, your next message that corrects or adjusts "
-        "the work gets one question from Claude first: did Claude miss something the plan said, did the plan "
-        "leave it out, is it something new, or is this not a fix? Asked at most once per plan. It stops for 14 "
-        "days after two declined or Other answers in a row. Only the four ticked words are kept.",
-        why="Which of your corrections the plan could have prevented, which tells the plan tips whether to "
-        "ask for fuller plans or for a closer check of the build against the plan.",
+        what="It comes after you approve a plan and Claude changes files. Your next message that corrects or "
+        "adjusts the work gets one question from Claude first. Did Claude miss something the plan said, did the "
+        "plan leave it out, is it something new, or is this not a fix? Asked at most once per plan. It stops for "
+        "14 days after two declined or Other answers in a row. Only the four ticked words are kept.",
+        why="Which of your corrections the plan could have prevented. That tells the plan tips whether to ask "
+        "for fuller plans or for a closer check of the build against the plan.",
         powers=("planning",),
         hooks=("UserPromptSubmit",),
         out_chars=PLAN_CHECK_ASK_CHARS,
@@ -2314,7 +2315,7 @@ FEEDBACK_QUESTIONS: tuple[FeedbackQuestion, ...] = (
         header="CG handoff",
         short="Handoff",
         call=2,
-        question="Could the build have started in a fresh session from just the plan?",
+        question="Could the build have started in a fresh session from the plan alone?",
         when="plan=approved and build=same; without a facts line, when you approved a plan with ExitPlanMode "
         "during this piece of work",
         multi=False,
