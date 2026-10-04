@@ -27,7 +27,7 @@ import {
 } from "./ui.js";
 import { dataGrid, headRow, renderTable } from "./grid.js";
 import { icon } from "./icons.js";
-import { pageLink, viewIntro } from "./links.js";
+import { habitLink, pageLink, REWORK_ITEM, viewIntro } from "./links.js";
 import { renderSetupCard } from "./shell.js";
 import { chartError, holdChart } from "./charts.js";
 import { changeDay, dailyChanges, renderChart, savingsLevers, sparkline, tableObjects, windowSpan } from "./charts-types.js";
@@ -451,6 +451,7 @@ var CHECK_NAMES = {
   hooks: "Hooks",
   "tool-search": "MCP tool search",
   habits: "Work habits",
+  "failed-calls": "Failed and blocked tool calls",
   quality: "Agent quality",
   "cost-record": "ClaudeGlass's own figures",
 };
@@ -500,6 +501,10 @@ export function checklistRows(checks, groups) {
       row.saving = row.groups.reduce(function (most, group) {
         return Math.max(most, groupSavingUsd(group));
       }, 0);
+      // The Work habits check works out its own saving: its largest
+      // recommendation and the playbook's habits no recommendation covers
+      // (quick_actions.py). That whole stands in for the largest group's.
+      if (row.check && row.check.saving_usd > 0) row.saving = Math.max(row.saving, row.check.saving_usd);
       row.index = i;
       return row;
     })
@@ -519,19 +524,23 @@ function firstSentence(text) {
 }
 
 // One row: its state, its area and what's wrong, what fixing it saves,
-// and the way to the fix (a prompt to copy when there's one, and a link
-// to the item or the check on Actions).
+// and the way to the fix (a prompt to copy when there's one, a link to
+// the Work habits card the check points at, and a link to the item or the
+// check on Actions). A check can lead with a sentence of its own (the
+// habits check's rework headline) in place of its first finding, and say
+// its own saving, which has the playbook's habits in it.
 function checklistRow(row) {
   var check = row.check;
-  var lead = row.groups[0];
+  var headline = check && check.headline ? check.headline : "";
+  var lead = headline ? null : row.groups[0];
   var name = check ? CHECK_NAMES[check.id] || check.question : "Other";
   // "more findings", not "more": a title that lists hooks or agents
   // would read "(and 2 more)" as two more of those.
   var others = row.groups.length - 1;
-  var finding = lead ? groupTitle(lead) + (others > 0 ? " (and " + countWord(others, "more finding", "more findings") + ")" : "") : firstSentence(check && check.summary);
+  var finding = headline || (lead ? groupTitle(lead) + (others > 0 ? " (and " + countWord(others, "more finding", "more findings") + ")" : "") : firstSentence(check && check.summary));
   var text = el("div", { class: "check-row-text" }, [el("p", { class: "check-row-title" }, [el("strong", { text: name }), el("span", { text: finding })])]);
   if (row.state === "fix" || row.state === "look") {
-    var saving = lead ? listSaving(lead) : "";
+    var saving = (check && check.saving) || (lead ? listSaving(lead) : "");
     text.appendChild(
       el("p", {
         class: "check-row-detail" + (saving ? "" : " is-unestimated"),
@@ -542,6 +551,9 @@ function checklistRow(row) {
   var action = el("div", { class: "check-row-action" });
   var fix = lead && lead.members.length === 1 ? (lead.members[0].fixes || [])[0] : null;
   if (fix && fix.prompt) action.appendChild(copyPromptButton(fix.prompt, groupTitle(lead)));
+  if (check && check.item && (row.state === "look" || row.state === "fix")) {
+    action.appendChild(habitLink(check.item, check.item === REWORK_ITEM ? "See the rework" : "See the habit"));
+  }
   if (lead) action.appendChild(pageLink("actions/recommendations", lead.members.length > 1 ? "See the " + lead.members.length + " prompts" : "See the fix", { id: lead.key }));
   else if (check && (row.state === "look" || row.state === "fix")) action.appendChild(pageLink("actions/checks", "See the check", { id: check.id }));
   return el("li", { class: "check-row is-" + row.state }, [rowBadge(row.state), text, action]);

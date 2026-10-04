@@ -16,7 +16,7 @@ from claudeglass.service import serve, storelock
 from claudeglass.service.contracts import ServeOptions
 from claudeglass.service.storelock import StoreLock
 
-from helpers import turn_line, write_jsonl
+from helpers import turn_line, user_str_line, write_jsonl
 
 
 def _write_session(root: Path, slug: str, session_id: str, lines: list[dict]) -> Path:
@@ -416,8 +416,8 @@ def _recent(hours_ago: float) -> str:
 def test_once_writes_the_typical_piece_of_work_for_a_survey_that_answers_your_messages(tmp_path: Path):
     """The service's daily run builds the report and then your typical piece of
     work from one load of the store (``serve._coaching_typical``): the median
-    session of the last 30 days, here 5 sessions of 3 replies. A feedback-only
-    setup needs no coaching notes on for it to run."""
+    piece of work of the last 30 days, here 5 sessions of one message and 3
+    replies each. A feedback-only setup needs no coaching notes on for it to run."""
     import json
 
     from claudeglass import coaching
@@ -429,8 +429,13 @@ def test_once_writes_the_typical_piece_of_work_for_a_survey_that_answers_your_me
             "proj-a",
             f"sess-{index}",
             [
-                turn_line(timestamp=_recent(6 - index * 0.1 - reply * 0.01), input_tokens=100 * (index + 1), output_tokens=0)
-                for reply in range(3)
+                user_str_line("build it", origin={"kind": "human"}, timestamp=_recent(6 - index * 0.1 + 0.05)),
+                *[
+                    turn_line(
+                        timestamp=_recent(6 - index * 0.1 - reply * 0.01), input_tokens=100 * (index + 1), output_tokens=0
+                    )
+                    for reply in range(3)
+                ],
             ],
         )
     config_dir = tmp_path / "config"

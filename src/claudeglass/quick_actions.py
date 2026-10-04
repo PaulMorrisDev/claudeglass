@@ -14,6 +14,8 @@ never disagree. The quality check is the one with thresholds of its own
 
 from __future__ import annotations
 
+import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -125,8 +127,20 @@ def _table(columns: list[tuple[str, str]], rows: list[list]) -> dict | None:
     return {"columns": [{"key": k, "label": label} for k, label in columns], "rows": rows}
 
 
-def _result(status: str, summary: str, *, table=None, fixes=None, tips=None) -> dict:
-    return {"status": status, "summary": summary, "table": table, "fixes": fixes or [], "tips": tips or []}
+def _result(
+    status: str, summary: str, *, table=None, fixes=None, tips=None, headline=None, item=None, saving_usd=None,
+    saving: str = "",
+) -> dict:
+    """A check's answer. ``headline``, ``item``, ``saving_usd`` and ``saving``
+    are for the Overview's row for the check, and empty for every check but the
+    one that has them (``habits``): the sentence the row leads with in place
+    of its first finding, the Work habits card it points at (an ``item`` of
+    ``#/habits?item=<key>``), and what the check's changes save over the
+    window, as a number (USD at list price) and as a sentence."""
+    return {
+        "status": status, "summary": summary, "table": table, "fixes": fixes or [], "tips": tips or [],
+        "headline": headline, "item": item, "saving_usd": saving_usd, "saving": saving,
+    }
 
 
 def _recommendations(ctx: Context, ids: set[str]) -> list:
@@ -1134,8 +1148,13 @@ def _cost_record(ctx: Context) -> dict:
 _HABIT_RECS = {
     "batch-instructions", "long-tool-waits", "notification-invalidation", "agent-report-size", "spawn-task-prompt",
     "cache-read-dominance", "limit-pressure", "long-context-share", "subagent-volume", "discovery-share",
-    "wasted-turns",
 }
+
+#: The finding the "failed-calls" check claims: replies that cost money and
+#: produced nothing. Its lever is the dominant cause's, which is nearly
+#: always a failed or a blocked call. It sits under that check alone: a
+#: rule id in two checks' ``rule_ids`` would be one finding listed twice.
+_FAILED_CALL_RECS = {"wasted-turns"}
 
 #: The agent-model cards (``agent_models.RULES``), claimed by the "models"
 #: check: agents that wrote code or decided on a larger model than the work
@@ -1156,17 +1175,19 @@ def _blocked_by_label(row: dict) -> str:
     return f"blocked: {who}, by {blocker}"
 
 
-def _habit_rows(tables) -> list[dict]:
-    """The habits card's own "replies that went nowhere" rows:
-    ``waste_by_cause`` minus its "blocked"/"redirected" rows (a flat
-    total says less than who blocked it), plus one row per
-    ``waste_blocked_by`` breakdown row, each already labelled for
-    display. Kept as plain dicts, cost_usd still a raw number, so the
-    summary can pick out and phrase the costliest one."""
+def _waste_rows(tables) -> list[dict]:
+    """The "replies that went nowhere" rows: ``waste_by_cause`` minus its
+    "blocked"/"redirected" rows (a flat total says less than who blocked
+    it), plus one row per ``waste_blocked_by`` breakdown row, each already
+    labelled for display. Kept as plain dicts, cost_usd still a raw number,
+    so a summary can pick out and phrase the costliest one. ``failed`` marks
+    a failed or blocked tool call (``waste.CALL_FAILURE_CAUSES``): the
+    "failed-calls" check's rows; the rest are the habits check's."""
     rows = [
         {
             "label": r.get("cause"), "turns": r.get("turns"), "cost_usd": r.get("cost_usd"),
             "lever": r.get("lever") or "", "redirect": False, "blocker": None,
+            "failed": r.get("cause") in waste.CALL_FAILURE_CAUSES,
         }
         for r in tables.rows("waste", "waste_by_cause")
         if whatif._num(r.get("turns")) and r.get("cause") not in ("blocked", waste.REDIRECT_CAUSE)
@@ -1175,11 +1196,25 @@ def _habit_rows(tables) -> list[dict]:
         {
             "label": _blocked_by_label(r), "turns": r.get("turns"), "cost_usd": r.get("cost_usd"),
             "lever": r.get("lever") or "", "redirect": r.get("kind") == "saver", "blocker": r.get("blocker"),
+            "failed": True,
         }
         for r in tables.rows("waste", "waste_blocked_by")
         if whatif._num(r.get("turns"))
     ]
     return rows
+
+
+def _habit_rows(tables) -> list[dict]:
+    """The habits card's own rows: replies that went nowhere for a reason
+    other than a failed or blocked tool call (an interrupt, a denied
+    permission, a spent turn budget, an API error retried)."""
+    return [r for r in _waste_rows(tables) if not r["failed"]]
+
+
+def _failed_call_rows(tables) -> list[dict]:
+    """The "failed-calls" check's rows: tool errors, and each blocker's
+    blocked or redirected replies."""
+    return [r for r in _waste_rows(tables) if r["failed"]]
 
 
 def _recs_with_prompt_fix(recs) -> set[str]:
@@ -1188,6 +1223,78 @@ def _recs_with_prompt_fix(recs) -> set[str]:
     finding isn't said twice, once as a plain tip and once as a fix card
     offering to act on it."""
     return {rec.id for rec in recs if any((fix.get("prompt") or "") for fix in _rec_fixes([rec]))}
+
+
+#: The rework headline leads the "habits" check on the Overview when this share
+#: (percent) or more of at least this many pieces of work needed changes after
+#: Claude delivered them (``rework``'s "pieces" headline row).
+REWORK_LEAD_SHARE_PCT = 20
+REWORK_LEAD_MIN_PIECES = 5
+
+#: The Work habits card the rework section answers to (links.js's
+#: ``REWORK_ITEM``): ``#/habits?item=rework``.
+REWORK_ITEM = "rework"
+
+_SECONDS_PER_WEEK = 7 * 24 * 3600
+
+
+def _rework_lead(tables) -> str:
+    """The first sentence of the rework headline ("4 of your 12 pieces of
+    work needed changes after Claude delivered them.") when it leads the
+    habits check: :data:`REWORK_LEAD_SHARE_PCT` percent or more of at least
+    :data:`REWORK_LEAD_MIN_PIECES` pieces. ``""`` otherwise, and for a report
+    with no rework section (an older cached one). Requests in sessions that
+    couldn't be cut into pieces are a rougher count, so they never lead."""
+    row = next((r for r in tables.rows("rework", "rework_headline") if r.get("item") == "pieces"), None)
+    if row is None:
+        return ""
+    total = whatif._num(row.get("total")) or 0
+    count = whatif._num(row.get("count")) or 0
+    if total < REWORK_LEAD_MIN_PIECES or count * 100 < total * REWORK_LEAD_SHARE_PCT:
+        return ""
+    match = re.match(r".+?[.!?](?=\s|$)", str(row.get("text") or ""))
+    return match.group(0) if match else ""
+
+
+def _window_weeks(ctx: Context) -> float:
+    """How many weeks the window covers, to turn the playbook's saving a week
+    into a saving over the window, as a recommendation's is. Never under one,
+    as the playbook's own weekly figure isn't (``Habits.span_weeks``): under
+    a week of sessions it is the raw total. A window with no start (all time)
+    counts as one, so its playbook saving is a week's and the row understates
+    rather than overstates."""
+    if ctx.since_ts is None:
+        return 1.0
+    until = ctx.until_ts if ctx.until_ts is not None else time.time()
+    return max(1.0, (until - ctx.since_ts) / _SECONDS_PER_WEEK)
+
+
+def _recs_saving_usd(ctx: Context, recs) -> float:
+    """What the largest of ``recs``' groups saves over the window, as the
+    Overview counts a row's recommendations: one rule is one group (its agent
+    types together, each once), the row takes its largest group, and a card
+    you ignored counts for nothing."""
+    groups: dict = {}
+    for rec in recs:
+        usd = rec.saving_usd
+        if rec.key in ctx.skip_keys or rec.severity not in ("action", "advice") or not usd or usd <= 0:
+            continue
+        slot = (rec.id, rec.severity) if rec.agent_type else (rec.key or rec.id)
+        groups[slot] = groups.get(slot, 0.0) + usd
+    return max(groups.values(), default=0.0)
+
+
+def _playbook_saving_usd(ctx: Context, tables) -> float:
+    """What the Work habits playbook's habits would save over the window. A
+    habit a recommendation covers has no saving of its own
+    (``habits.apply_covered_by`` drops it and names the rule), so it isn't
+    counted again here."""
+    weekly = sum(
+        whatif._num(row.get("saving")) or 0.0
+        for row in tables.rows("habits", "habits_playbook")
+        if not row.get("covered_by")
+    )
+    return weekly * _window_weeks(ctx)
 
 
 def _habits(ctx: Context) -> dict:
@@ -1203,25 +1310,16 @@ def _habits(ctx: Context) -> dict:
     playbook = _playbook_tips(ctx, tables)
     tips += playbook
     fixes = _rec_fixes(recs)
+    # The rework headline leads the Overview's row for this check once
+    # enough of your pieces of work needed changes after delivery.
+    rework = _rework_lead(tables)
 
-    if not recs and not rows and not playbook:
+    if not recs and not rows and not playbook and not rework:
         return _result("no_data", "Not enough sessions in this window.")
 
-    problem_rows = [r for r in rows if not r["redirect"]]
-    redirect_rows = [r for r in rows if r["redirect"]]
-
-    if not recs and not playbook:
-        if not problem_rows and redirect_rows:
-            savers = ", ".join(sorted({r["blocker"] for r in redirect_rows if r["blocker"]}))
-            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in redirect_rows)
-            return _result(
-                "ok",
-                f"The only blocked replies {ctx.period} were {_money(ctx, cost, prefix='about ')} of on-purpose "
-                f"redirects from {savers} -- not a problem to fix.",
-                table=table,
-            )
-        if problem_rows:
-            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in problem_rows)
+    if not recs and not playbook and not rework:
+        if rows:
+            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in rows)
             return _result(
                 "ok",
                 f"{_money(ctx, cost, prefix='About ')} went to replies that went nowhere {ctx.period}, but no "
@@ -1230,16 +1328,100 @@ def _habits(ctx: Context) -> dict:
             )
         return _result("ok", "No habit stands out as costing tokens.", table=table)
 
-    ways = len(recs) + len(playbook)
-    top = max(problem_rows, key=lambda r: whatif._num(r["cost_usd"]) or 0, default=None)
+    ways = len(recs) + len(playbook) + (1 if rework else 0)
+    top = max(rows, key=lambda r: whatif._num(r["cost_usd"]) or 0, default=None)
     why = f" The costliest: {top['label']} ({_cell(ctx, top['cost_usd'])})." if top else ""
+    saving_usd = _recs_saving_usd(ctx, recs) + _playbook_saving_usd(ctx, tables)
+    saving = ""
+    if saving_usd > 0:
+        phrase = _money(ctx, saving_usd, period=True, prefix="About ")
+        saving = f"{phrase[:1].upper()}{phrase[1:]} if you change these habits."
     return _result(
         "act",
-        f"{ways} way{'s' if ways != 1 else ''} of working cost tokens {ctx.period}.{why} These are habits, not "
+        (f"{rework} " if rework else "")
+        + f"{ways} way{'s' if ways != 1 else ''} of working cost tokens {ctx.period}.{why} These are habits, not "
         "settings: nothing changes unless you change how you work. {{page:habits}} has the rest.",
         table=table,
         fixes=fixes,
         tips=tips,
+        headline=rework or None,
+        item=REWORK_ITEM if rework else (playbook[0]["habit"] if playbook else None),
+        saving_usd=saving_usd if saving_usd > 0 else None,
+        saving=saving,
+    )
+
+
+def _failed_calls_fix() -> dict:
+    """The check's own fix: a "from now on" prompt to check before a call
+    and to stop and say when one is blocked (``waste.CALL_FAILURE_FIX``)."""
+    fix = waste.CALL_FAILURE_FIX
+    return {
+        "key": None,
+        "agent": None,
+        "title": fix["title"],
+        "explainer": [
+            ["Why it's suggested", fix["why"]],
+            ["Where and who it affects", fix["where"]],
+            ["Trade-off", fix["trade_off"]],
+            ["How to undo it", fix["undo"]],
+        ],
+        "command": None,
+        "command_warning": "",
+        "prompt": f"{fix['prompt']} {PROMPT_SCOPE}",
+        "note": "scope",
+    }
+
+
+def _failed_calls(ctx: Context) -> dict:
+    """Replies lost to a tool call that failed or that a hook or a guard
+    blocked: ``waste_by_cause``'s tool errors and ``waste_blocked_by``'s rows,
+    which the habits check used to carry among its own."""
+    tables = whatif._Tables(ctx.model)
+    rows = _failed_call_rows(tables)
+    table = _table(
+        [("cause", "Failed or blocked"), ("turns", "Replies"), ("cost", "Cost"), ("lever", "What helps")],
+        [[r["label"], r["turns"], _cell(ctx, r["cost_usd"]), r["lever"]] for r in rows],
+    )
+    recs = _recommendations(ctx, _FAILED_CALL_RECS)
+    problem_rows = [r for r in rows if not r["redirect"]]
+    redirect_rows = [r for r in rows if r["redirect"]]
+    if not rows and not recs:
+        if not tables.has("waste", "waste_by_cause"):
+            return _result("no_data", "Not enough sessions in this window.")
+        return _result("ok", f"No reply was lost to a failed or blocked tool call {ctx.period}.")
+    if not recs:
+        if not problem_rows:
+            savers = ", ".join(sorted({r["blocker"] for r in redirect_rows if r["blocker"]}))
+            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in redirect_rows)
+            return _result(
+                "ok",
+                f"The only blocked replies {ctx.period} were {_money(ctx, cost, prefix='about ')} of on-purpose "
+                f"redirects from {savers}. That is not a problem to fix.",
+                table=table,
+            )
+        cost = sum(whatif._num(r["cost_usd"]) or 0 for r in problem_rows)
+        return _result(
+            "ok",
+            f"{_money(ctx, cost, prefix='About ')} went to replies lost to failed or blocked tool calls "
+            f"{ctx.period}, but not enough to flag.",
+            table=table,
+        )
+    turns = sum(int(whatif._num(r["turns"]) or 0) for r in problem_rows)
+    cost = sum(whatif._num(r["cost_usd"]) or 0 for r in problem_rows)
+    top = max(problem_rows, key=lambda r: whatif._num(r["cost_usd"]) or 0, default=None)
+    if problem_rows and cost:
+        lost = (
+            f"{turns:,} {'reply' if turns == 1 else 'replies'} went to failed or blocked tool calls {ctx.period}, "
+            f"which cost {_money(ctx, cost, prefix='about ')}."
+        )
+    else:
+        lost = f"Replies lost to failed or blocked tool calls cost a material share of spend {ctx.period}."
+    why = f" The costliest: {top['label']} ({_cell(ctx, top['cost_usd'])})." if top and cost else ""
+    return _result(
+        "act",
+        lost + why + " {{page:spend/savings}} has the wasted-replies lever.",
+        table=table,
+        fixes=_merge_fixes([_failed_calls_fix()], _rec_fixes(recs)),
     )
 
 
@@ -1282,6 +1464,7 @@ def _playbook_tips(ctx: Context, tables) -> list[dict]:
             if saving and ctx.units.billing_mode != "subscription":
                 saving = f"{saving} a week"
         tips.append({
+            "habit": key,
             "title": title,
             "text": " ".join(part for part in (
                 row.get("evidence") or "",
@@ -1659,6 +1842,9 @@ CHECKS: tuple[Check, ...] = (
           "a call away and cost a reply. This weighs what it says it saved against what it cost.", _savers),
     Check("habits", "Do any habits cost tokens?",
           "Pauses, retries and long reports cost tokens that no setting can save.", _habits, tuple(sorted(_HABIT_RECS))),
+    Check("failed-calls", "Are failed or blocked tool calls costing you replies?",
+          "A call that fails or is blocked still costs a whole reply, and Claude has to make it again.",
+          _failed_calls, tuple(sorted(_FAILED_CALL_RECS))),
     Check("quality", "Is any agent struggling?",
           "A cheaper model or a lower effort only saves money if the work still gets done.", _quality),
     Check("cost-record", "Do ClaudeGlass's figures match Claude Code's own?",
@@ -1689,7 +1875,8 @@ def run_all(ctx: Context) -> list[dict]:
     for check in CHECKS:
         result = run(check.id, ctx)
         out.append({key: result[key] for key in ("id", "question", "why", "status", "summary", "rule_ids")}
-                   | {"fix_count": len(result["fixes"]), "tip_count": len(result["tips"])})
+                   | {"fix_count": len(result["fixes"]), "tip_count": len(result["tips"])}
+                   | {key: result[key] for key in ("headline", "item", "saving_usd", "saving")})
     return out
 
 

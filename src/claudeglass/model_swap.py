@@ -364,7 +364,9 @@ def _reach_suffix(stats: "ModelSwapTypeStats") -> str:
 
 def _tier_verdict(row: "ModelSwapTypeStats", pricing: Pricing) -> TierVerdict:
     if row.key in _NO_AGENT_FILE:
-        setter = "a workflow script" if row.key == "workflow-subagent" else "Claude Code"
+        # Every run a workflow script started: its transcript's kind says so,
+        # whatever agent type the row is named for.
+        setter = "a workflow script" if row.workflow_runs and row.workflow_runs >= row.spawns else "Claude Code"
         return TierVerdict("no_lever", None, 0.0, 0.0, f"{setter} sets its model, so there is no agent file to change")
     stats = row.lever if row.lever is not None else row
     if stats.spawns == 0 and row.spawns > 0:
@@ -559,16 +561,17 @@ def compute_model_swap(
 # -- report section --------------------------------------------------------------
 
 
-def _lever_label(key: str) -> str:
+def _lever_label(key: str, workflow_only: bool = False) -> str:
     """Where this row's model is set. A built-in agent has no file to
     edit, so it takes a new same-named agent file; a workflow script sets
-    the model for its unnamed agents, and Claude Code picks it for fork
-    and untyped subagents."""
+    the model for its unnamed agents (``workflow_only``: every run in the
+    row was started by one, by the transcripts' kind), and Claude Code
+    picks it for fork and untyped subagents."""
     from .recommend import _BUILTIN_AGENT_TYPES
 
     if key == "top-level":
         return "model (settings.json)"
-    if key == "workflow-subagent":
+    if workflow_only and key in _NO_AGENT_FILE:
         return "none (the workflow script sets it)"
     if key in _NO_AGENT_FILE:
         return "none (Claude Code picks)"
@@ -631,7 +634,7 @@ def build_section(
         row_stats = stats.by_key[key]
         lever_stats = row_stats.lever if row_stats.lever is not None else row_stats
         verdict = row_stats.tier_verdict
-        lever = _lever_label(key)
+        lever = _lever_label(key, bool(row_stats.workflow_runs) and row_stats.workflow_runs >= row_stats.spawns)
         label = verdict.label
         if units is not None and verdict.state == "cheaper_available":
             saving_text = units.money_text(verdict.saving_usd)

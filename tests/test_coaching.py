@@ -27,7 +27,7 @@ from claudeglass import (
 )
 from claudeglass.habits import Habits, Piece, SessionShape
 from claudeglass.config import load_config
-from claudeglass.model import Recommendation, TranscriptMeta
+from claudeglass.model import Recommendation, TranscriptMeta, TranscriptResult, Turn
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 from claudeglass.service.coaching_job import CoachingJob
@@ -2375,14 +2375,28 @@ def test_a_failing_build_is_logged_and_never_raises(tmp_path):
     assert job.run_once() is None and "store is busy" in logged[0]
 
 
-def _replies(*sizes: int, priced_first: int = 0) -> NS:
-    """A session bundle whose main transcript made one reply per size, each of ``size`` tokens split four ways."""
-    turns = [NS(turn_index=0, input_tokens=priced_first, cache_creation_tokens=0, cache_read_tokens=0, output_tokens=0)]
+def _replies(*sizes: int, priced_first: int = 0, clear_before: tuple = (), slug: str = "", first_chars: int = 100,
+             after_hours: float = 0, session_id: str = "s") -> NS:
+    """A session bundle whose main transcript made one reply per size, each of ``size`` tokens split four ways.
+    The first reply answers a message of ``first_chars`` characters; each position in ``clear_before`` is a reply
+    that answers a message sent right after a /clear. ``after_hours`` is when the session began."""
+    began = NOW + timedelta(hours=after_hours)
+    turns = [Turn(turn_index=0, input_tokens=priced_first)]
     for index, size in enumerate(sizes, start=1):
         quarter, rest = divmod(size, 4)
-        turns.append(NS(turn_index=index, input_tokens=quarter + rest, cache_creation_tokens=quarter,
-                        cache_read_tokens=quarter, output_tokens=quarter))
-    return NS(top=NS(turns=turns))
+        opens = index == 1 or (index - 1) in clear_before
+        turns.append(Turn(
+            turn_index=index,
+            ts=_iso(began + timedelta(minutes=index)),
+            input_tokens=quarter + rest,
+            cache_creation_tokens=quarter,
+            cache_read_tokens=quarter,
+            output_tokens=quarter,
+            human_prompt_chars=(first_chars if index == 1 else 100) if opens else None,
+            commands_run=("clear",) if (index - 1) in clear_before else (),
+        ))
+    return NS(top=TranscriptResult(turns=turns), subs=[], session_id=session_id, slug=slug, project_dir="",
+              workflows=())
 
 
 def test_a_sessions_tokens_are_what_its_replies_used_in_all_four_kinds():
@@ -2392,27 +2406,49 @@ def test_a_sessions_tokens_are_what_its_replies_used_in_all_four_kinds():
     assert coaching.session_tokens(NS(turns=[])) == 0
 
 
-def test_the_typical_piece_is_the_median_session_once_there_are_enough_of_them():
+def test_the_typical_piece_is_the_median_piece_once_there_are_enough_of_them():
     corpus = NS(sessions=[_replies(*[size] * 3) for size in (100, 900, 300, 500, 700)])
-    # Five sessions of 3 replies: 300, 2700, 900, 1500, 2100 tokens.
+    # Five pieces of 3 replies: 300, 2700, 900, 1500, 2100 tokens.
     assert coaching.typical_piece_tokens(corpus) == 1_500
     # An even count takes the middle two.
     even = NS(sessions=[*corpus.sessions, _replies(1_100, 1_100, 1_100)])
     assert coaching.typical_piece_tokens(even) == 1_800
-    # A median between two sessions never leaves a fraction: 6 and 9 tokens a session give 7.5, so 7.
+    # A median between two pieces never leaves a fraction: 6 and 9 tokens a piece give 7.5, so 7.
     odd = NS(sessions=[*[_replies(2, 2, 2)] * 3, *[_replies(3, 3, 3)] * 3])
     assert coaching.typical_piece_tokens(odd) == 7 and isinstance(coaching.typical_piece_tokens(odd), int)
 
 
-def test_the_typical_piece_needs_five_sessions_with_three_replies_and_ignores_the_rest():
+def test_the_typical_piece_needs_five_pieces_with_three_replies_and_ignores_the_rest():
     five = [_replies(10, 20, 30) for _ in range(coaching.MIN_PIECES)]
     assert coaching.typical_piece_tokens(NS(sessions=five)) == 60
     assert coaching.typical_piece_tokens(NS(sessions=five[:-1])) == 0
-    # A session of two replies, and one with no main transcript, are left out: they do not fill the gap or move the median.
+    # A piece of two replies, and a session with no main transcript, are left out: they do not fill the gap or move the median.
     short = _replies(1_000_000, 1_000_000)
     assert coaching.typical_piece_tokens(NS(sessions=five[:-1] + [short, NS(top=None)])) == 0
     assert coaching.typical_piece_tokens(NS(sessions=five + [short, NS(top=None)])) == 60
     assert coaching.typical_piece_tokens(NS(sessions=[])) == 0
+
+
+def test_a_clear_ends_a_piece_so_one_session_can_be_two_of_them():
+    # Six replies with a /clear before the fourth: two pieces of three replies, 60 tokens each.
+    cleared = NS(sessions=[_replies(*[20] * 6, clear_before=(3,)) for _ in range(3)])
+    assert coaching.typical_piece_tokens(cleared) == 60
+    # With no /clear each is one piece of 120 tokens, and three are too few to trust.
+    assert coaching.typical_piece_tokens(NS(sessions=[_replies(*[20] * 6) for _ in range(3)])) == 0
+    assert coaching.typical_piece_tokens(NS(sessions=[_replies(*[20] * 6) for _ in range(5)])) == 120
+
+
+def test_a_session_that_opens_with_a_handoff_is_part_of_the_piece_it_carries_on():
+    def pair(n, first_chars):
+        return [
+            _replies(10, 10, 10, slug=f"app{n}", session_id=f"a{n}"),
+            _replies(10, 10, 10, slug=f"app{n}", session_id=f"b{n}", first_chars=first_chars, after_hours=2),
+        ]
+
+    handed = NS(sessions=[s for n in range(5) for s in pair(n, 3_000)])
+    assert coaching.typical_piece_tokens(handed) == 60
+    fresh = NS(sessions=[s for n in range(5) for s in pair(n, 200)])
+    assert coaching.typical_piece_tokens(fresh) == 30
 
 
 def test_the_file_holds_the_typical_piece_and_never_a_negative_one(tmp_path):

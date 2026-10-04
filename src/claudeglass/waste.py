@@ -257,6 +257,40 @@ LEVERS: dict[str, str] = {
     ),
 }
 
+#: The causes the "failed-calls" quick action ("Failed and blocked tool
+#: calls") is about: a tool call that errored, and a call a hook or a Claude
+#: Code guard turned away (shown per blocker, from ``waste_blocked_by``, with
+#: a token saver's on-purpose redirects said apart). The other costed causes
+#: are about how you work with Claude (an interrupt, a denied permission, a
+#: spent turn budget), so they stay with the work habits.
+CALL_FAILURE_CAUSES: tuple[str, ...] = ("tool-error", "blocked")
+
+#: The words of that quick action's own fix, kept beside the causes they
+#: answer (and LEVERS): the explainer parts, as fixes.py words them, and the
+#: prompt before its "where should this apply" question.
+CALL_FAILURE_FIX: dict[str, str] = {
+    "title": "Check first, and ask when a call is blocked",
+    "why": (
+        "A call that fails or is blocked still costs a whole reply. Claude read the context, made the call "
+        "and has to make it again."
+    ),
+    "where": (
+        "Wherever you tell Claude when it asks: this session, this project's CLAUDE.md or your own. For a "
+        "block that keeps coming back, the instructions of the agent that hits it."
+    ),
+    "trade_off": (
+        "Checking that a path exists adds a quick call each time. Asking about a block means a pause "
+        "when you are away from the screen."
+    ),
+    "undo": "Remove the line from that CLAUDE.md. A rule for this session only ends with the session.",
+    "prompt": (
+        "From now on, before a tool call that needs a path or a name, check that it exists. List the "
+        "folder or read the file. When a hook or a guard blocks a call, stop and tell me what it enforces. "
+        "Don't try another way round it. If the same block keeps coming back, offer to put what it "
+        "enforces into the instructions of the agent that hits it."
+    ),
+}
+
 #: waste_by_cause's own lever for the REDIRECT_CAUSE row: unlike every
 #: LEVERS entry, this isn't something to change -- see waste_blocked_by
 #: for which saver and how much.
@@ -1092,6 +1126,8 @@ RULES: tuple = (_rule_wasted_turns,)
 
 __all__ = [
     "ASSUMPTIONS",
+    "CALL_FAILURE_CAUSES",
+    "CALL_FAILURE_FIX",
     "CAUSES",
     "API_ERROR_RETRY_CAUSE",
     "REDIRECT_CAUSE",

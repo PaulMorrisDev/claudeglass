@@ -997,6 +997,36 @@ def test_include_restricts_to_named_sections(tmp_path):
     assert [s.key for s in report.sections] == ["overview", "recache"]
 
 
+def test_rework_follows_habits_and_is_built_from_the_same_pass_over_the_corpus(tmp_path, monkeypatch):
+    from claudeglass import habits
+
+    keys = list(_SECTION_ORDER)
+    assert keys.index("rework") == keys.index("habits") + 1
+    corpus = _corpus_of(tmp_path, "proj-a")
+    passes = []
+    real = habits.collect
+
+    def collect(*args, **kwargs):
+        passes.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(habits, "collect", collect)
+    both = build_report(
+        corpus, PRICING, Config(), projects=("proj-a",), window="last 7 days", include={"rework", "habits"}
+    )
+    assert [s.key for s in both.sections] == ["habits", "rework"]
+    assert len(passes) == 1
+    passes.clear()
+    only = build_report(corpus, PRICING, Config(), projects=("proj-a",), window="last 7 days", include={"rework"})
+    assert [s.key for s in only.sections] == ["rework"] and len(passes) == 1
+    section = only.sections[0]
+    assert (section.title, [t.name for t in section.tables]) == (
+        "Rework after delivery",
+        ["rework_headline", "rework_causes", "rework_admitted", "rework_by_week", "rework_by_level"],
+    )
+    assert_privacy(section)
+
+
 # -- v0.3 Task 2: baseline_comparison ---------------------------------------
 
 
@@ -1359,9 +1389,10 @@ def test_the_prompting_section_gets_your_dashboard_ratings_and_card_answers(tmp_
         seen["ratings"] = ratings
         return real_collect(corpus, pricing, ratings=ratings)
 
-    def build_section(sessions, card_answers=None):
+    def build_section(sessions, card_answers=None, **kwargs):
         seen["cards"] = dict(card_answers or {})
-        return real_build(sessions, card_answers)
+        seen["window"] = kwargs.get("window")
+        return real_build(sessions, card_answers, **kwargs)
 
     monkeypatch.setattr(prompting, "collect", collect)
     monkeypatch.setattr(prompting, "build_section", build_section)
@@ -1376,6 +1407,8 @@ def test_the_prompting_section_gets_your_dashboard_ratings_and_card_answers(tmp_
     assert seen["ratings"] == ratings
     # Only the tip card counts as a tip answer; trying it counts as useful.
     assert seen["cards"] == {("big_paste", "useful"): 1}
+    # The section is told the window, so its dollar totals say what they cover.
+    assert seen["window"] == "w"
     # Without them the section is built as it always was.
     seen.clear()
     build_report(corpus, PRICING, Config(), projects=("proj-a",), window="w")

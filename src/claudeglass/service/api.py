@@ -1469,9 +1469,9 @@ def make_handler(
     #: report (see _capture_part).
     capture_parts: dict = {}
 
-    #: (session id, its transcripts' latest parse, threshold) -> the main
-    #: transcript's tokens when that session is due a rating, else None
-    #: (ratings.unrated_piece), so the banner reads again only the
+    #: (session id, its transcripts' latest parse, threshold) -> the pieces
+    #: of work in that session that are due a rating, none for an empty
+    #: list (ratings.unrated_pieces), so the banner reads again only the
     #: sessions that changed since it was last built.
     unrated_memo: dict = {}
 
@@ -1624,12 +1624,15 @@ def make_handler(
         )
 
     def _capture_unrated(threshold: int) -> dict:
-        """The sessions of the last ``coaching.DAYS`` days of at least
-        ``threshold`` tokens (the rating reminder's size) that you have not
-        rated, on the dashboard or with a /cg-feedback run: newest first,
-        at most ``ratings.BANNER_LIMIT``, with the count of them all. The
-        stored total prefilters (it counts subagents too); the main
-        transcript's own tokens decide."""
+        """The pieces of work, in sessions of the last ``coaching.DAYS``
+        days, of at least ``threshold`` tokens (the rating reminder's size)
+        that you have not rated, on the dashboard or with a /cg-feedback
+        run: newest first, at most ``ratings.BANNER_LIMIT``, with the count
+        of them all. A session holding several pieces lists each one, and a
+        piece is the stretch of a session that ``pieces.pieces_of`` draws:
+        one that carries on from an earlier session counts only what ran in
+        this one. The stored total prefilters (it counts subagents too);
+        the main transcript's own tokens decide."""
         from . import rebuild
 
         since = (datetime.now(timezone.utc) - timedelta(days=coaching.DAYS)).isoformat(timespec="seconds")
@@ -1644,26 +1647,26 @@ def make_handler(
         fresh = [session_id for session_id in candidates if memo_key(session_id) not in unrated_memo]
         if fresh:
             found = {
-                bundle.session_id: ratings_mod.unrated_piece(bundle, threshold)
+                bundle.session_id: ratings_mod.unrated_pieces(bundle, threshold)
                 for bundle in rebuild.corpus_from_store(store, session_ids=fresh).sessions
             }
             for session_id in fresh:
-                unrated_memo[memo_key(session_id)] = found.get(session_id)
+                unrated_memo[memo_key(session_id)] = found.get(session_id, [])
         pieces = []
         for session_id, row in candidates.items():
-            tokens = unrated_memo.get(memo_key(session_id))
-            if tokens is None:
-                continue
-            pieces.append(
-                {
-                    "session_id": session_id,
-                    "slug": row["slug"],
-                    "last_ts": row["last_ts"],
-                    "tokens": tokens,
-                    "tokens_text": ratings_mod.tokens_text(tokens),
-                }
-            )
-        pieces.sort(key=lambda piece: piece["last_ts"] or "", reverse=True)
+            for piece in unrated_memo.get(memo_key(session_id)) or []:
+                pieces.append(
+                    {
+                        "session_id": session_id,
+                        "slug": row["slug"],
+                        "last_ts": piece["end_ts"] or row["last_ts"],
+                        "tokens": piece["tokens"],
+                        "tokens_text": ratings_mod.tokens_text(piece["tokens"]),
+                        "part": piece["part"],
+                        "label": piece["label"],
+                    }
+                )
+        pieces.sort(key=lambda piece: (piece["last_ts"] or "", piece["part"]), reverse=True)
         return {
             "threshold": threshold,
             "threshold_text": ratings_mod.tokens_text(threshold),

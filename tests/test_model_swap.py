@@ -310,6 +310,28 @@ def test_workflow_subagents_have_no_agent_file_lever():
     assert cells["lever_runs"] == 0 and cells["workflow_runs"] == 1
 
 
+def test_a_workflow_script_sets_the_model_by_the_runs_kind_and_not_by_the_agent_type_it_is_named_for():
+    """Only a run a workflow script started (the transcript's kind) has the script
+    as its lever; an agent named ``workflow-subagent`` that Claude Code started is not."""
+    script = model_swap.compute_model_swap([_run(OPUS, "workflow-subagent", kind="workflow-agent")], PRICING)
+    assert "a workflow script sets its model" in script.by_key["workflow-subagent"].tier_verdict.label
+    direct = model_swap.compute_model_swap([_run(OPUS, "workflow-subagent")], PRICING)
+    row = direct.by_key["workflow-subagent"]
+    assert row.tier_verdict.state == "no_lever" and "Claude Code sets its model" in row.tier_verdict.label
+    assert _row_cells(model_swap.build_section(direct), "workflow-subagent")["lever"] == "none (Claude Code picks)"
+    mixed = model_swap.compute_model_swap(
+        [_run(OPUS, "workflow-subagent", kind="workflow-agent"), _run(OPUS, "workflow-subagent")], PRICING
+    )
+    assert "Claude Code sets its model" in mixed.by_key["workflow-subagent"].tier_verdict.label
+    assert _row_cells(model_swap.build_section(mixed), "workflow-subagent")["lever"] == "none (Claude Code picks)"
+
+
+def test_a_fork_has_no_lever_and_claude_code_picks_its_model_whatever_runs_beside_it():
+    stats = model_swap.compute_model_swap([_run(OPUS, "fork")], PRICING)
+    assert "Claude Code sets its model" in stats.by_key["fork"].tier_verdict.label
+    assert _row_cells(model_swap.build_section(stats), "fork")["lever"] == "none (Claude Code picks)"
+
+
 # -- unknown model ---------------------------------------------------------------
 
 

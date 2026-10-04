@@ -16,6 +16,8 @@ from claudeglass import capture, capture_catalogue as catalogue, parse, ratings
 from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 
+from test_capture_feedback import _run as feedback_run
+
 from helpers import (
     attachment_line,
     tool_result_block,
@@ -277,21 +279,66 @@ def test_your_own_thresholds_move_it_the_way_the_hook_reads_them():
     )
 
 
-def test_a_session_is_listed_once_it_reaches_the_threshold(tmp_path):
+def _cleared(tmp_path, *, rated: bool = False) -> NS:
+    """Two pieces of work in one session: a /clear sits between them. With ``rated``, a /cg-feedback run
+    follows the first one."""
+    lines = [
+        _ask(0, "build the thing"),
+        _reply(1, _edit("e1")), _ok(2, "e1"), _reply(3, text="Done."),
+    ]
+    if rated:
+        # A run in which Claude asked nothing: no answer was kept, and it still rates the work.
+        lines += feedback_run(5, no_questions=True)
+    lines += [
+        user_str_line("<command-name>/clear</command-name>\n<command-message>clear</command-message>\n"
+                      "<command-args></command-args>", timestamp=_ts(10)),
+        _ask(20, "now something else entirely"),
+        _reply(21, _edit("e2")), _ok(22, "e2"), _reply(23, text="Done."),
+    ]
+    return _bundle(tmp_path, lines)
+
+
+def test_a_piece_is_listed_once_it_reaches_the_threshold(tmp_path):
     bundle = _plain(tmp_path)
     tokens = ratings.session_facts(bundle)["tokens"]
-    assert ratings.unrated_piece(bundle, tokens) == tokens
-    assert ratings.unrated_piece(bundle, tokens + 1) is None
+    [piece] = ratings.unrated_pieces(bundle, tokens)
+    assert (piece["tokens"], piece["part"]) == (tokens, 1)
+    assert ratings.unrated_pieces(bundle, tokens + 1) == []
+
+
+def test_a_piece_is_named_by_its_place_its_task_and_its_messages(tmp_path):
+    [piece] = ratings.unrated_pieces(_plain(tmp_path), 1)
+    assert set(piece) == {"tokens", "end_ts", "part", "label"}
+    assert piece["label"] == "3 messages" and piece["end_ts"] == _ts(23)
+    assert ratings.piece_label("", 0, 1, 1) == ""
+    assert ratings.piece_label("feature", 1, 1, 1) == "feature, 1 message"
+    assert ratings.piece_label("bugfix", 4, 2, 3) == "piece 2 of 3, bugfix, 4 messages"
+
+
+def test_a_session_of_two_pieces_lists_each_that_reaches_the_threshold(tmp_path):
+    bundle = _cleared(tmp_path)
+    first, second = ratings.unrated_pieces(bundle, 1)
+    assert (first["part"], second["part"]) == (1, 2)
+    assert first["label"] == "piece 1 of 2, 1 message" and second["label"] == "piece 2 of 2, 1 message"
+    # Each is a piece of its own: 2 replies of 150 tokens, not the whole session's 4.
+    assert (first["tokens"], second["tokens"]) == (300, 300)
+    assert [p["part"] for p in ratings.unrated_pieces(bundle, 301)] == []
+    assert ratings.session_facts(bundle)["tokens"] == 600
+
+
+def test_a_piece_you_rated_with_a_feedback_run_is_not_listed_but_the_one_after_it_is(tmp_path):
+    [only] = ratings.unrated_pieces(_cleared(tmp_path, rated=True), 1)
+    assert only["part"] == 2
 
 
 def test_a_session_you_rated_with_a_feedback_run_is_not_listed(tmp_path, monkeypatch):
     bundle = _plain(tmp_path)
     monkeypatch.setattr(capture, "is_feedback_run", lambda cycle: True)
-    assert ratings.unrated_piece(bundle, 1) is None
+    assert ratings.unrated_pieces(bundle, 1) == []
 
 
-def test_a_session_with_no_main_transcript_is_not_listed():
-    assert ratings.unrated_piece(NS(top=None, subs=[], workflows=()), 1) is None
+def test_a_session_with_no_main_transcript_lists_no_pieces():
+    assert ratings.unrated_pieces(NS(top=None, subs=[], workflows=()), 1) == []
 
 
 def test_a_queued_message_written_again_as_a_user_line_is_one_followup_and_queued(tmp_path):

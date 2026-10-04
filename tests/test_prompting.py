@@ -5,7 +5,7 @@ rules, what each cost, and the section built from them.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace as NS
 
 import pytest
@@ -749,8 +749,102 @@ def test_habit_rates_count_only_the_coached_habits(tmp_path):
     ])
     assert session.counts()["vague_fix"] == 1 and session.counts()["drip_feed"] == 1
     # The run of small requests and the poll are habits a live hint warns about: the vague correction is
-    # counted on the page, but notes being on can't move it. The run is three messages of the six.
-    assert prompting.habit_rates(session) == (2, 3, 6)
+    # counted on the page, but notes being on can't move it. The run is three messages of the five that asked for
+    # something: the poll asked for nothing, so it is not in the count.
+    assert prompting.habit_rates(session) == (2, 3, 5)
+
+
+def _queued(text: str, minute: float) -> dict:
+    """A message you typed while Claude worked: its attachment is written
+    a little after you typed it."""
+    line = attachment_line(
+        "queued_command", prompt=text, commandMode="prompt", origin={"kind": "human"}, timestamp=_at(minute)
+    )
+    line["timestamp"] = _at(minute + 0.25)
+    return line
+
+
+def _worked_on(minute: float, queued: list[dict]) -> list[dict]:
+    """A reply that starts a command, the messages you typed while it ran,
+    and then its result and an edit."""
+    return [
+        _call(minute, "Bash", {"command": "ls"}), *queued, _came_back(minute + 4, minute), _reply(minute + 5, edit=True),
+    ]
+
+
+def test_a_go_ahead_and_a_status_check_ask_for_nothing_and_are_not_in_the_per_100_rate(tmp_path):
+    session = _session(tmp_path, [
+        *_START,
+        _said("make the button bigger", 2), _reply(3, edit=True),
+        _said("go ahead", 4), _reply(5),
+        _said("how is it going?", 6), _reply(7),
+        _said("still broken", 8), _reply(9, say="What do you see?"),
+    ])
+    assert [m.asks for m in session.messages] == [1, 1, 0, 0, 1]
+    table = prompting.build_section([session]).tables[0]
+    cols = [c.key for c in table.columns]
+    rows = {row[0]: dict(zip(cols, row)) for row in table.rows}
+    # One vague fix in the three messages that asked for something, not in all five.
+    assert rows["vague_fix"]["per_100"] == pytest.approx(100.0 / 3)
+    assert prompting.habit_rates(session)[2] == 3
+
+
+def test_a_message_you_typed_while_claude_worked_asks_unless_it_is_a_go_ahead_or_a_status_check(tmp_path):
+    session = _session(tmp_path, [
+        *_START,
+        _said("rename the helper", 2), *_worked_on(3, [_queued("also rename it to build_index", 4)]),
+        _said("rename the loader", 10), *_worked_on(11, [_queued("continue", 12)]),
+        _said("rename the saver", 20), *_worked_on(21, [_queued("continue", 22), _queued("how is it going?", 23)]),
+        _said("rename the cache", 30),
+        *_worked_on(31, [_queued("also drop the old name", 32), _queued("and update the docs", 33)]),
+    ])
+    # The opening message and one more it was given; a go-ahead alone adds none; so does a status check.
+    assert [m.asks for m in session.messages] == [1, 2, 1, 1, 3]
+    assert prompting.habit_rates(session)[2] == 8
+
+
+def test_a_reply_to_a_plan_you_sent_back_asks_for_nothing_new(tmp_path):
+    session = _session(tmp_path, [
+        _said("Plan the settings page", 0, permissionMode="plan"), _reply(1, plan=True),
+        _turned_away(2, "toolu_p1", _SENT_BACK + "make step two smaller", "user-rejected"),
+        _said("make step two smaller", 3, permissionMode="plan"), _reply(4, say="Replanned."),
+        _said("Plan the settings page", 5, permissionMode="plan"),
+        _reply(6, plan=True), user_block_line([tool_result_block("toolu_p6", "User has approved your plan.")],
+                                              timestamp=_at(7)),
+        _said("add a test for it", 8, permissionMode="plan"), _reply(9),
+    ])
+    # A rejected plan makes the next message in plan mode a reply, not a request. An approved one does not.
+    assert [m.asks for m in session.messages] == [1, 0, 1, 1]
+
+
+def test_the_trend_divides_each_week_by_the_messages_that_asked(tmp_path):
+    def week(day: int, go_aheads: int) -> list[dict]:
+        """Three messages that ask (the last one a vague fix) and ``go_aheads`` go-aheads after the second."""
+        def at(minute: int) -> str:
+            return f"2026-09-{day:02d}T12:{minute:02d}:00.000Z"
+
+        def reply(minute: int, text: str, *content) -> dict:
+            return turn_line(timestamp=at(minute), content=[*content, {"type": "text", "text": text}],
+                             cache_read_input_tokens=40_000, output_tokens=200)
+
+        def said(text: str, minute: int) -> dict:
+            return user_str_line(text, timestamp=at(minute), origin={"kind": "human"})
+
+        out = [said("make the button bigger", 0), reply(1, "Done.", tool_use_block("Edit", f"e{day}a")),
+               said("now move the logo", 2), reply(3, "Done.", tool_use_block("Edit", f"e{day}b"))]
+        for n in range(go_aheads):
+            out += [said("go ahead", 4 + 2 * n), reply(5 + 2 * n, "Ok.")]
+        return out + [said("still broken", 30), reply(31, "What do you see?")]
+
+    # Four weeks hold the same three messages that asked and one vague fix. The last two also hold three
+    # go-aheads: divided by every message those weeks would look much better, and the trend would read falling.
+    sessions = [
+        _session(tmp_path, week(day, go_aheads), name=f"w{day}.jsonl")
+        for day, go_aheads in ((1, 0), (8, 0), (15, 3), (22, 3))
+    ]
+    assert [sum(m.asks for m in s.messages) for s in sessions] == [3, 3, 3, 3]
+    assert [len(s.messages) for s in sessions] == [3, 3, 6, 6]
+    assert prompting.trend(sessions, "vague_fix") == ("steady", "100 100 100 100")
 
 
 # -- the section --------------------------------------------------------------------
@@ -780,6 +874,53 @@ def test_the_section_shows_each_habit_seen_with_its_cost_and_what_to_try(tmp_pat
 def test_an_empty_window_still_has_the_section_with_no_rows():
     section = prompting.build_section([])
     assert section.key == "prompting" and section.tables[0].rows == []
+
+
+def test_every_cost_names_the_window_it_totals_and_an_unpriced_habit_has_none(tmp_path):
+    session = _session(tmp_path, [
+        *_START,
+        _said("make the button bigger", 2), _reply(3, edit=True),
+        _said("now move the logo", 4), _reply(5, edit=True),
+        _said("move the footer text", 6), _reply(7, edit=True),
+        _said("still broken", 8), _reply(9, say="What do you see?"),
+    ])
+    for window, period in (("last 30 days", "over the last 30 days"), ("since 2026-09-01", "since 2026-09-01"), ("", "")):
+        table = prompting.build_section([session], window=window).tables[0]
+        cols = [c.key for c in table.columns]
+        rows = {row[0]: dict(zip(cols, row)) for row in table.rows}
+        assert cols[-1] == "period" and {row["period"] for row in rows.values()} == {period}
+    # A vague fix has no cost to work out: no figure and no basis, not a zero.
+    assert rows["vague_fix"]["cost"] is None and rows["vague_fix"]["basis"] is None
+    assert rows["drip_feed"]["cost"] and rows["drip_feed"]["basis"]
+
+
+def test_a_week_starts_on_the_local_monday_in_the_trend():
+    west = timezone(timedelta(hours=-8))
+
+    def sessions(*moments):
+        return [NS(messages=[NS(at=moment, asks=1) for moment in moments], occurrences=[])]
+
+    # Sunday 23:30 at UTC-8 is already Monday in UTC: one local week with the Wednesday after it, not two.
+    sunday = [datetime(2026, 8, 10, 7, 30, tzinfo=timezone.utc)] * prompting.TREND_MIN_MESSAGES
+    wednesday = [datetime(2026, 8, 12, 12, 0, tzinfo=timezone.utc)] * prompting.TREND_MIN_MESSAGES
+    both = sessions(*sunday, *wednesday)
+    assert prompting.trend(both, "drip_feed", west)[1] == "0 0"
+    assert prompting.trend(both, "drip_feed", timezone.utc)[1] == "0"
+    assert prompting._week(sunday[0], west) == "2026-08-03" and prompting._week(sunday[0], timezone.utc) == "2026-08-10"
+
+
+def test_a_habit_is_new_until_three_weeks_are_measured_and_unmeasured_when_every_week_is_zero():
+    def week(day: int, hits: int):
+        moment = datetime(2026, 8, day, 12, 0, tzinfo=timezone.utc)
+        return [NS(messages=[NS(at=moment, asks=1)] * prompting.TREND_MIN_MESSAGES,
+                   occurrences=[NS(at=moment, habit="drip_feed")] * hits)]
+
+    weeks = [3, 10, 17, 24]
+    assert prompting.trend([s for day in weeks[:2] for s in week(day, 1)], "drip_feed", "UTC")[0] == "new"
+    assert prompting.trend([s for day in weeks[:3] for s in week(day, 0)], "drip_feed", "UTC") == ("unmeasured", "0 0 0")
+    word, spark = prompting.trend([s for day, hits in zip(weeks, (3, 3, 1, 1)) for s in week(day, hits)], "drip_feed", "UTC")
+    assert (word, spark) == ("falling", "100 100 33 33")
+    assert prompting._TREND_LABELS["unmeasured"] == "Not measured"
 
 
 def _note_line(kind, minute):

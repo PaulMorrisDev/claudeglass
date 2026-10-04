@@ -92,15 +92,18 @@ from __future__ import annotations
 import statistics
 from collections import Counter
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone, tzinfo
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
 from . import events as events_mod
+from . import pieces as pieces_mod
 from .context_files import _parse_ts
+from .habits import _week
 from .handoff import starting_context
 from .model import Column, EventKind, Feedback, Section, Table, Turn
 from .pricing import Pricing, effective_rates, price_turn
+from .rework import period_phrase
 
 #: The habits, in the order the section shows them.
 HABITS = (
@@ -185,13 +188,6 @@ def _moment(ts: str | None) -> datetime | None:
     if moment is not None and moment.tzinfo is None:
         moment = moment.replace(tzinfo=timezone.utc)
     return moment
-
-
-def _week(moment: datetime | None) -> str:
-    if moment is None:
-        return ""
-    day = moment.astimezone(timezone.utc).date()
-    return (day - timedelta(days=day.weekday())).isoformat()
 
 
 class _Prices:
@@ -299,6 +295,11 @@ class Message:
     #: cheaper: half what its follow-ups cost, the figure ``plan_first``
     #: otherwise lacks. ``0.0`` without that answer.
     plan_help: float = 0.0
+    #: How many messages of yours it holds that asked for something: its own,
+    #: unless it is a go-ahead, a status check, a thank-you or a reply to a
+    #: plan, and those you typed while it ran (``pieces.asks``). The rates
+    #: per message divide by it.
+    asks: int = 1
 
 
 @dataclass(slots=True)
@@ -437,7 +438,7 @@ def messages_of(top, prices: _Prices, cycles=None, spans=None) -> list[Message]:
     asked = planned = False
     retries = _retries(top)
     baseline = starting_context(turns)
-    for cycle in cycles:
+    for n, cycle in enumerate(cycles):
         first = cycle.turns[0]
         at = _moment(first.ts)
         gap = (at - replied_at).total_seconds() if at is not None and replied_at is not None else None
@@ -468,6 +469,7 @@ def messages_of(top, prices: _Prices, cycles=None, spans=None) -> list[Message]:
             carry=prices.carry(turns, cycle.start, (first.human_prompt_chars or 0) / _CHARS_PER_TOKEN),
             carried=carried,
             new_piece=_new_piece(cycle.settled, gap),
+            asks=pieces_mod.asks(cycle, cycles[n - 1] if n else None),
         )
         if message.new_piece and carried >= CARRIED_MIN_TOKENS:
             message.carried_cost = prices.reads(cycle.turns, carried)
@@ -697,19 +699,23 @@ def collect(corpus, pricing: Pricing | None, ratings: dict | None = None) -> lis
     return out
 
 
-def trend(sessions: list[SessionPrompting], habit: str) -> tuple[str, str]:
+def trend(sessions: list[SessionPrompting], habit: str, tz: str | tzinfo | None = None) -> tuple[str, str]:
     """``(word, weeks)``: whether ``habit`` per message is falling, rising
     or steady over the last weeks (``new`` with fewer than three weeks to
-    go on), and each week's rate scaled to 0-100, ``-`` for a week with
-    too few messages (as ``habits.trend``)."""
+    go on, ``unmeasured`` when every week is zero), and each week's rate
+    scaled to 0-100, ``-`` for a week with too few messages (as
+    ``habits.trend``). Weeks start on the Monday of ``tz`` (the machine's
+    own zone when empty), as everywhere else. A message is one that asked
+    for something: a go-ahead, a status check or a reply to a plan is not,
+    and one you typed while Claude worked is (``Message.asks``)."""
     per_week: Counter = Counter()
     hits: Counter = Counter()
     for s in sessions:
         for m in s.messages:
-            per_week[_week(m.at)] += 1
+            per_week[_week(m.at, tz)] += m.asks
         for o in s.occurrences:
             if o.habit == habit:
-                hits[_week(o.at)] += 1
+                hits[_week(o.at, tz)] += 1
     weeks = sorted(w for w in per_week if w)[-TREND_WEEKS:]
     rates = [hits[w] / per_week[w] if per_week[w] >= TREND_MIN_MESSAGES else None for w in weeks]
     top = max((r for r in rates if r is not None), default=0.0)
@@ -717,6 +723,8 @@ def trend(sessions: list[SessionPrompting], habit: str) -> tuple[str, str]:
     known = [r for r in rates if r is not None]
     if len(known) < 3:
         return "new", spark
+    if not top:
+        return "unmeasured", spark
     half = len(known) // 2
     before, after = statistics.median(known[:half]), statistics.median(known[-half:])
     if before and after <= 0.8 * before and known[-1] <= before:
@@ -726,7 +734,13 @@ def trend(sessions: list[SessionPrompting], habit: str) -> tuple[str, str]:
     return "steady", spark
 
 
-_TREND_LABELS = {"new": "Too early to say", "falling": "Improving", "rising": "Getting worse", "steady": "Steady"}
+_TREND_LABELS = {
+    "new": "Too early to say",
+    "falling": "Improving",
+    "rising": "Getting worse",
+    "steady": "Steady",
+    "unmeasured": "Not measured",
+}
 
 
 def relay_text(hint: str, notes: int, shown: int) -> str:
@@ -777,15 +791,26 @@ def tip_tallies(report) -> dict[str, dict[str, int]]:
     return out
 
 
-def build_section(sessions: list[SessionPrompting], card_answers: Counter | None = None) -> Section:
+def build_section(
+    sessions: list[SessionPrompting],
+    card_answers: Counter | None = None,
+    *,
+    window: str = "",
+    tz: str | tzinfo | None = None,
+) -> Section:
     """The ``prompting`` section: a row per habit seen, most costly first
     (a habit with no figure, a big task without a plan or a vague
     correction, after those, by how often), and,
     once there are coaching notes, a row per hint that asked Claude for a
-    tip. No habit rows without a message of yours in the window.
+    tip. No habit rows without a message of yours in the window. ``Per 100
+    messages`` divides by the messages that asked for something (``Message.asks``).
     ``card_answers`` (:func:`card_answers`) adds what you said on the
-    dashboard's tip cards to your answers."""
-    messages = sum(len(s.messages) for s in sessions)
+    dashboard's tip cards to your answers. ``window`` (``ReportMeta.window``)
+    is the period every cost is a total over, in the ``period`` column
+    ("over the last 30 days"; ``""`` when the caller didn't say), and ``tz``
+    the zone weeks start on the Monday of. A habit with no priced cost has
+    none: ``None``, never a zero."""
+    messages = sum(m.asks for s in sessions for m in s.messages)
     counts: Counter = Counter()
     costs: dict[str, float] = {}
     for s in sessions:
@@ -794,13 +819,16 @@ def build_section(sessions: list[SessionPrompting], card_answers: Counter | None
             if o.cost is not None:
                 costs[o.habit] = costs.get(o.habit, 0.0) + o.cost
     rows = []
+    period = period_phrase(window)
     for habit in HABITS:
         if not counts[habit]:
             continue
-        word, spark = trend(sessions, habit)
+        word, spark = trend(sessions, habit, tz)
+        cost = costs.get(habit)
+        priced = cost is not None and cost > 0
         rows.append([
-            habit, counts[habit], 100.0 * counts[habit] / max(messages, 1), costs.get(habit),
-            (BASIS[habit] or None) if habit in costs else None, word, spark, TRY[habit],
+            habit, counts[habit], 100.0 * counts[habit] / max(messages, 1), cost if priced else None,
+            (BASIS[habit] or None) if priced else None, word, spark, TRY[habit], period,
         ])
     rows.sort(key=lambda r: (-(r[3] or 0.0), -r[1]))
     habits_table = Table(
@@ -815,6 +843,7 @@ def build_section(sessions: list[SessionPrompting], card_answers: Counter | None
             Column(key="trend", label="Trend", kind="str"),
             Column(key="weeks", label="By week", kind="str"),
             Column(key="try", label="Try instead", kind="str"),
+            Column(key="period", label="Period", kind="str"),
         ],
         rows=rows,
         value_labels={**TITLES, **_TREND_LABELS},
@@ -866,9 +895,10 @@ def build_section(sessions: list[SessionPrompting], card_answers: Counter | None
 
 def habit_rates(session: SessionPrompting) -> tuple[int, int, int]:
     """``(habits, drip messages, messages)`` for one session, for the
-    before-and-after comparison of turning coaching notes on (``impact``).
+    before-and-after comparison of turning coaching notes on (``impact``);
+    ``messages`` are those that asked for something (``Message.asks``).
     Only the habits a live hint warns about (:data:`COACHED_HABITS`) count:
     the report-only ones can't move because notes are on."""
     drip = sum(len(run) for run in _drip_runs(session.messages))
     habits = sum(1 for o in session.occurrences if o.habit in COACHED_HABITS)
-    return habits, drip, len(session.messages)
+    return habits, drip, sum(m.asks for m in session.messages)

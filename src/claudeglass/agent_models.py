@@ -472,7 +472,8 @@ def build_table(stats: AgentModelStats) -> Table:
                 saving,
                 saving_pct,
                 group.write_turns,
-                len(group.workflow_run_ids),
+                # A workflow agent whose run file named no run still came from one.
+                max(len(group.workflow_run_ids), 1) if group.kind == "workflow" else 0,
                 group.first_seen,
                 group.last_seen,
                 group.later_compliant,

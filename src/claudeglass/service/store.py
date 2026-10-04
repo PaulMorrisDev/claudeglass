@@ -2147,7 +2147,7 @@ class Store:
         rated on the dashboard, newest first: ``{id, slug, last_ts,
         total_tokens, stamp}``, the slug redacted. ``stamp`` is the latest
         parse of its transcripts, so a caller can tell which sessions
-        changed. The banner's candidates (``ratings.unrated_piece`` has the
+        changed. The banner's candidates (``ratings.unrated_pieces`` has the
         last word)."""
         since_dt, _until = _resolve_window(None, since, None)
         rows = self._connection().execute(

@@ -9,6 +9,15 @@ cost, their overlap with what was already read and the message's redo cost
 all count them. /cg-feedback runs are left out: they rate the work, they
 aren't part of it.
 
+A *piece of work* (``pieces.pieces_of``) is drawn from the transcript, so
+``Habits.pieces`` has a row for every one, rated or not: a rated one has an
+``outcome``. A message is *redone* when the cycles straight after it are
+rework (``pieces``' rule, or your next message was a redo, a fix or a
+correction): ``redo_cost`` is the whole run of them, counted once, and
+the cycles in the run are not themselves redone. The rates per message
+(``trend``) divide by the messages that asked for something
+(``CycleFact.asks``), the ones you typed while Claude worked included.
+
 Every playbook item says where its evidence came from, so you know how
 far to trust it:
 
@@ -57,6 +66,7 @@ from . import classify
 from . import events as events_mod
 from . import known_savers
 from . import model_gate
+from . import pieces as pieces_mod
 from . import quality
 from .capture_tags import with_older_why
 from .context_files import _parse_ts
@@ -134,12 +144,30 @@ TICK_MIN_GROUP = 20
 CHEAPER_MODEL_MIN_PCT = 5.0
 #: Model families, cheapest first, for naming a setup.
 _FAMILIES = ("haiku", "sonnet", "opus", "fable")
-#: How many weeks the trend covers, and the fewest messages a week
-#: needs to count towards it.
+#: How many weeks the trend covers, and the fewest messages that asked for
+#: something a week needs to count towards it.
 TREND_WEEKS = 8
 TREND_MIN_CYCLES = 3
+#: Corrections and adjustments after an approved plan that make it a plan
+#: you had to fix (:func:`fixes_after_plan`), counting the ones you typed
+#: while Claude worked as well as the ones that opened a message.
+PLAN_FIXES_MIN = 3
 #: Known weeks before a fall counts as a habit already picked up.
 TREND_MIN_ADOPTED = 4
+#: Weeks with enough messages to measure before a trend says anything but
+#: "new".
+TREND_MIN_WEEKS = 3
+#: A habit that saves less than this much in list-price USD is too small to
+#: tell you about (``effort_fit`` over a week, ``skip_plan_easy`` over the
+#: window).
+MIN_SAVING = 1.0
+#: ``brief_clearly``: the chance that a partial or vague ask in one task
+#: cost more than a clear one of the same task, below which the card stays
+#: hidden. 0.5 is a coin toss.
+BRIEF_MIN_PROBABILITY = 0.6
+#: ``effort_fit``: points of thinking share easy work must have over hard
+#: work at the same effort before high effort on easy work is the cause.
+EFFORT_EASY_OVER_HARD_PTS = 10.0
 
 #: Playbook item -> (theme, habit to try).
 ITEMS: dict[str, tuple[str, str]] = {
@@ -242,7 +270,7 @@ BASES = {
     "split_large": "half of what re-reading the growing context cost in those asks",
     "batch_small": "the start-up cache write each extra same-day session paid",
     "clear_between": "the earlier context each reply re-read; half of it after a long break",
-    "brief_clearly": "half the gap to a clear ask of the same kind",
+    "brief_clearly": "half the gap to the median clear ask of the same kind and level, plan builds left out",
     "name_files": "half the gap in reads and searches to asks that named a file",
     "paste_errors": "half the gap to a bug report with the error in it",
     "explore_research": "carrying the reads and searches, less a short agent report",
@@ -575,8 +603,9 @@ class CycleFact:
     blocked_cost: float = 0.0
     refused: int = 0
     refused_cost: float = 0.0
-    #: Your next message redid this work (``shift=redo``), fixed a fault in
-    #: it (``shift=fix``) or corrected it.
+    #: The cycles after this work redid it (``shift=redo``), fixed a fault
+    #: in it (``shift=fix``) or corrected it, and what the whole run of
+    #: them cost. A cycle that is itself one of them is not ``redone``.
     redone: bool = False
     redo_cost: float = 0.0
     #: CAP-5: derived fallback for ``tag.check`` -- a test-runner command
@@ -608,6 +637,11 @@ class CycleFact:
     left_out: bool = False
     #: Every token the message's work used, subagents included.
     tokens: int = 0
+    #: How many messages of yours it holds that asked for something: its
+    #: own, unless it is a go-ahead, a status check, a thank-you or a reply
+    #: to a plan, and those you typed while it ran (``pieces.asks``). The
+    #: rates per message divide by it.
+    asks: int = 1
     #: Your next message would have counted as a redo, fix or correction,
     #: but your feedback says it wasn't: a change of mind, or something you
     #: only thought of after the plan. ``redone`` stays off for it, so
@@ -617,6 +651,20 @@ class CycleFact:
     #: for ``check_work`` (``why`` has ``missed``, or ``plan`` is ``covered``):
     #: its plan check answer isn't counted again.
     in_missed_piece: bool = False
+    #: The message carried out a plan you approved: it approved one in the
+    #: dialog and went on to build, came after one you approved by typing,
+    #: or Claude said it followed or departed from one. What building a plan
+    #: costs says little about how clear the ask was.
+    executes_plan: bool = False
+    #: Its opening message was a go-ahead, a thank-you or a status check.
+    quiet: bool = False
+    #: The wait before it was a usage-limit pause, not a break you took.
+    limit_pause: bool = False
+    #: The Capture banner leaves it out of its tagged share: it was sent
+    #: before capture was turned on, in a session capture never touched, or
+    #: it is one coverage can't fairly judge (cut off, or stopped at the
+    #: token limit before Claude could tag it).
+    outside_capture: bool = False
 
 
 @dataclass(slots=True)
@@ -663,10 +711,13 @@ class AgentFact:
 
 @dataclass(slots=True)
 class Piece:
-    """A piece of work you gave feedback on: the messages one
-    /cg-feedback answer rates, or a session you rated on the dashboard."""
+    """A piece of work: the messages one /cg-feedback answer rates, or a
+    session you rated on the dashboard, or, for work no answer covers, a
+    piece the transcript shows (``source`` ``transcript``, with no
+    ``outcome``)."""
 
-    outcome: str
+    #: ``None`` for a piece nobody rated.
+    outcome: str | None
     cost: float
     cycles: int
     task: str | None
@@ -706,6 +757,12 @@ class Piece:
     #: (no /cg-feedback run rated any of it): it counts as a /cg-feedback
     #: piece does (:func:`_answered`).
     alone: bool = False
+    #: Of a piece drawn from the transcript: the messages that asked for
+    #: something, those that were rework after it was delivered, and what
+    #: the rework cost (``pieces.WorkPiece``).
+    substantive: int = 0
+    rework: int = 0
+    rework_cost: float = 0.0
 
     def reasons(self) -> set[str]:
         """What your follow-ups were mostly, in ``why``'s words: this
@@ -713,6 +770,39 @@ class Piece:
         (``capture_catalogue.SLOW_TO_WHY``)."""
         older = {catalogue.SLOW_TO_WHY[w] for w in self.slow if w in catalogue.SLOW_TO_WHY}
         return {*self.why, *older} - {"none"}
+
+
+@dataclass(slots=True)
+class PlanFix:
+    """The first plan approved in a piece of work, and the fixes after it."""
+
+    #: ``handoff.plan_shape`` of the session.
+    shape: str
+    #: Corrections and adjustments you typed after the approval, and those
+    #: you typed while Claude worked. A queued message is counted once per
+    #: reply it arrived with, however many were queued.
+    typed: int = 0
+    queued: int = 0
+    #: What the messages that held a fix cost.
+    cost: float = 0.0
+
+    @property
+    def fixes(self) -> int:
+        return self.typed + self.queued
+
+
+@dataclass(frozen=True, slots=True)
+class PlanFixes:
+    """Fixes after a plan, over the plans :func:`fixes_after_plan` counted."""
+
+    plans: int = 0
+    #: Plans with :data:`PLAN_FIXES_MIN` fixes or more, and the fixes in all
+    #: of them, those you typed while Claude worked among them.
+    fixed: int = 0
+    fixes: int = 0
+    queued: int = 0
+    #: What the messages that held a fix cost, in the plans fixed that often.
+    cost: float = 0.0
 
 
 @dataclass(slots=True)
@@ -733,6 +823,11 @@ class Habits:
     cycles: list[CycleFact] = field(default_factory=list)
     agents: list[AgentFact] = field(default_factory=list)
     pieces: list[Piece] = field(default_factory=list)
+    #: Every piece of work drawn from the transcripts, rated or not
+    #: (``pieces.WorkPiece``): what :mod:`rework` is built from.
+    work_pieces: list = field(default_factory=list)
+    #: One per piece of work with an approved plan (:class:`PlanFix`).
+    plan_fixes: list[PlanFix] = field(default_factory=list)
     #: One per main session with a message of yours.
     shapes: list[SessionShape] = field(default_factory=list)
     #: (session_id, day, project, start-up premium USD) of sessions that
@@ -776,6 +871,11 @@ class Habits:
     #: caller didn't say which window this is.
     tz: str | tzinfo | None = None
     window: str = ""
+    #: When metrics capture was turned on (``config.capture.enabled_at``,
+    #: an ISO time; ``""`` when unknown): the weeks before it have no tags
+    #: to measure, and the tagged share counts from it on, as the Capture
+    #: banner does.
+    since: str = ""
 
     @property
     def weeks(self) -> list[str]:
@@ -889,7 +989,8 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
     left_out: set[int] = set()
     #: The messages of pieces check_work counts from your answers.
     missed_pieces: set[int] = set()
-    for n, span in enumerate(capture_mod.feedback_spans(cycles)):
+    spans = capture_mod.feedback_spans(cycles)
+    for n, span in enumerate(spans):
         if span.feedback.source != "skipped" and span.feedback.outcome and span.cycles:
             for cycle in span.cycles:
                 rated[id(cycle)] = span.feedback
@@ -928,6 +1029,10 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
             )
         )
 
+    rework, planned_after = _pieces_of_session(
+        bundle.session_id, cycles, rates, out, spans, session_rating, rated, shape
+    )
+
     index_of = {id(t): i for i, t in enumerate(turns)}
     denied = _denials(top, turns)
     first_read: dict[str, int] = {}
@@ -946,22 +1051,39 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
                 bundle.session_id, cycle, carry, index_of, rates, baseline, rated, session_rating, denied, out.tz
             )
         )
-    for fact, cycle, following in zip(facts, work, work[1:] + [None]):
+    captured = capture_mod.is_captured(top)
+    begun = capture_mod._start(out.since)
+    #: The nearest cycle before this one that was not rework: the work the
+    #: rework cycles after it are redoing.
+    anchor = 0
+    for n, (fact, cycle) in enumerate(zip(facts, work)):
         fact.left_out = id(cycle) in left_out
         fact.in_missed_piece = id(cycle) in missed_pieces
         fact.tokens = _cycle_tokens(cycle)
+        fact.asks = pieces_mod.asks(cycle, work[n - 1] if n else None)
+        fact.planned = fact.planned or id(cycle) in planned_after
+        fact.executes_plan = id(cycle) in planned_after or _carries_out_plan(cycle)
+        fact.outside_capture = (
+            not captured
+            or (begun is not None and (fact.ts is None or fact.ts < begun))
+            or capture_mod._excluded_from_coverage(cycle, turns)
+        )
         word = fact.plan_check
         if word in _PLAN_ANSWERS:
             out.plan_checks[(shape, word)] += 1
-        if following is None:
+        if not n:
             continue
-        tag = following.settled
-        if (tag is not None and tag.shift in ("redo", "fix")) or following.turns[0].human_correction:
-            if _not_rework(cycle, following, rated, span_of):
-                fact.excused = True
-            else:
-                fact.redone = True
-                fact.redo_cost = capture_mod._cycle_cost(following, rates.pricing)
+        tag = cycle.settled
+        reads_as_redo = (tag is not None and tag.shift in ("redo", "fix")) or cycle.turns[0].human_correction
+        if reads_as_redo and _not_rework(work[anchor], cycle, rated, span_of):
+            facts[anchor].excused = True
+        elif reads_as_redo or id(cycle) in rework:
+            # Each cycle of a run of rework adds its cost, once, to the one
+            # delivery before the run; none of them is redone itself.
+            facts[anchor].redone = True
+            facts[anchor].redo_cost += capture_mod._cycle_cost(cycle, rates.pricing)
+            continue
+        anchor = n
     out.cycles.extend(facts)
 
     if len(work) == 1 and not work[0].subs and len(work[0].turns) <= 3:
@@ -972,6 +1094,109 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
             out.small_sessions.append((bundle.session_id, day, bundle.slug, premium, tag is not None))
 
     _agents(bundle, cycles, turns, carry, first_read, rates, out, workflows)
+
+
+def _carries_out_plan(cycle) -> bool:
+    """Whether ``cycle`` carried out a plan: a reply of it had its plan
+    approved and more replies followed (the dialog's approval: the build is
+    the rest of the cycle), or Claude's tag says it followed or departed
+    from one."""
+    at = next((n for n, t in enumerate(cycle.turns) if capture_mod._plan_approved(t)), None)
+    if at is not None and at + 1 < len(cycle.turns):
+        return True
+    tag = cycle.settled
+    return tag is not None and tag.plan in ("following", "deviated")
+
+
+def _pieces_of_session(
+    session_id: str, cycles: list, rates: _Rates, out: Habits, spans: list, session_rating, rated: dict, shape: str
+) -> tuple[set[int], set[int]]:
+    """Draw the session's pieces of work (``pieces.pieces_of``) and record
+    what they say: a :class:`Piece` for each one that no kept answer or
+    rating covers, and a :class:`PlanFix` for each with an approved plan.
+    Returns ``(ids of the rework cycles, ids of the cycles that came after
+    a plan you approved by typing, up to the end of their piece)``."""
+    found = pieces_mod.pieces_of(
+        cycles, rates, session_rating if session_rating is not None and not spans else spans, session_id=session_id
+    )
+    rework: set[int] = set()
+    planned_after: set[int] = set()
+    for work_piece in found:
+        out.work_pieces.append(work_piece)
+        mine = [cycles[i] for _, i in work_piece.cycle_ids]
+        rework.update(id(cycles[i]) for _, i in work_piece.rework_ids)
+        if session_rating is None and not any(id(c) in rated for c in mine):
+            out.pieces.append(
+                replace(
+                    _piece(Feedback(), mine, rates, "transcript"),
+                    substantive=work_piece.substantive,
+                    rework=work_piece.rework,
+                    rework_cost=work_piece.rework_cost,
+                )
+            )
+        typed_go = False
+        for cycle in mine:
+            if typed_go:
+                planned_after.add(id(cycle))
+            typed_go = typed_go or any(
+                t.plan_stats is not None and t.plan_stats.outcome == "approved_by_message" for t in cycle.turns
+            )
+        fix = _plan_fix(mine, shape, rates)
+        if fix is not None:
+            out.plan_fixes.append(fix)
+    return rework, planned_after
+
+
+def _plan_fix(cycles: list, shape: str, rates: _Rates) -> PlanFix | None:
+    """The fixes after the first plan approved in a piece's ``cycles``:
+    corrections and adjustments you typed, and those you typed while Claude
+    worked (``Turn.queued_correction`` and ``queued_adjust``, one count per
+    reply). A message in plan mode is a reply to a plan, no fix, and neither
+    is one you told the plan check was not a fix. ``None`` when no plan was
+    approved, or nothing came after it."""
+    for k, cycle in enumerate(cycles):
+        at = next((n for n, t in enumerate(cycle.turns) if capture_mod._plan_approved(t)), None)
+        if at is not None:
+            break
+    else:
+        return None
+    if at + 1 >= len(cycle.turns) and k + 1 >= len(cycles):
+        return None
+    fix = PlanFix(shape=shape)
+    # The rest of the cycle that put the plan up is the build, when the
+    # dialog approved it: only what you typed while it ran can be a fix.
+    held = [(cycle, cycle.turns[at + 1 :], False)]
+    held += [(c, c.turns, not c.turns[0].prompt_plan_mode) for c in cycles[k + 1 :]]
+    for c, turns, opening in held:
+        queued = sum(1 for t in turns if t.queued_correction or t.queued_adjust)
+        typed = int(
+            opening and (c.turns[0].human_correction or c.turns[0].human_adjust) and _plan_word(c) != "none"
+        )
+        fix.typed += typed
+        fix.queued += queued
+        if typed or queued:
+            fix.cost += capture_mod._cycle_cost(c, rates.pricing)
+    return fix
+
+
+def fixes_after_plan(h: Habits, shape: str | None = None) -> PlanFixes | None:
+    """How often the plans you approved had to be fixed: of the pieces of
+    work with an approved plan (those of one ``shape``, or all), how many
+    had :data:`PLAN_FIXES_MIN` or more corrections and adjustments after it,
+    counting the ones you typed while Claude worked. ``None`` with fewer
+    than :data:`MIN_GROUP` plans: too few to say anything. The ``plan_build``
+    row of ``habits_by_shape`` carries the same figures."""
+    plans = [p for p in h.plan_fixes if shape is None or p.shape == shape]
+    if len(plans) < MIN_GROUP:
+        return None
+    fixed = [p for p in plans if p.fixes >= PLAN_FIXES_MIN]
+    return PlanFixes(
+        plans=len(plans),
+        fixed=len(fixed),
+        fixes=sum(p.fixes for p in plans),
+        queued=sum(p.queued for p in plans),
+        cost=sum(p.cost for p in fixed),
+    )
 
 
 def _denials(top, turns: list[Turn]) -> dict[int, list[str]]:
@@ -1018,9 +1243,10 @@ def _not_rework(cycle, following, rated: dict, span_of: dict) -> bool:
 
 def _cycle_tokens(cycle) -> int:
     """Every token a message's work used, subagents included: input, cache
-    writes, cache reads and output."""
-    turns = [*cycle.turns, *(t for sub in cycle.subs for t in capture_mod._priced(sub))]
-    return sum(t.input_tokens + t.cache_creation_tokens + t.cache_read_tokens + t.output_tokens for t in turns)
+    writes, cache reads and output, with a reply to an agent's report
+    counted for the message that started the agent (``cycle_spend``)."""
+    spend = capture_mod.cycle_spend(cycle, None)
+    return spend.tokens + spend.agent_tokens
 
 
 def _followups(cycles) -> list:
@@ -1080,6 +1306,8 @@ def _cycle_fact(
         stale_cost=stale * sum(carry.reads[i] for i in idx),
         stale_rewrite=stale * carry.writes[idx[0]],
         gap_s=first.gap_s,
+        quiet=first.human_go or first.human_status or first.human_ack,
+        limit_pause=first.gap_cause == "limit",
         # The dominant effort across the cycle's own turns, not just the
         # first reply's (F6): a message answered over several turns can
         # change effort mid-way, and the first turn alone isn't
@@ -1087,7 +1315,7 @@ def _cycle_fact(
         effort=_dominant(t.effort for t in cycle.turns) or first.effort,
         model=_dominant(t.model for t in cycle.turns) or "",
         speed=_dominant(t.speed for t in cycle.turns),
-        main_cost=sum(rates.cost(t) for t in cycle.turns),
+        main_cost=sum(rates.cost(t) for t in cycle.tag_turns),
         growth_cost=sum(max(0, t.ctx - first.ctx) * carry.reads[i] for t, i in zip(cycle.turns, idx)),
         explore_agents=sum(
             1 for sub in cycle.subs if sub.meta.agent_type == _EXPLORE_AGENT and sub.meta.kind != "workflow-agent"
@@ -1109,7 +1337,7 @@ def _cycle_fact(
             big = chars // capture_mod.CHARS_PER_TOKEN
             if big >= BIG_OUTPUT_TOKENS and tool not in _REPORT_TOOLS:
                 fact.big_outputs.append((tool, big, carry.cost(i, big)))
-        if turn.plan_stats is not None and not fact.planned:
+        if (turn.plan_stats is not None or turn.tool_calls_by_tool.get("ExitPlanMode")) and not fact.planned:
             fact.planned = True
             fact.plan_cost = sum(carry.costs[j] for j in idx[: n + 1])
         if turn.tests_run or (
@@ -1265,6 +1493,7 @@ def collect(
     effort_share_threshold_pct: float = 30.0,
     tz: str | tzinfo | None = None,
     window: str = "",
+    since: str = "",
 ) -> Habits:
     """Work out the facts for every session in ``corpus``. ``ratings``
     holds your dashboard ratings by session id (``Store.all_feedback``);
@@ -1273,8 +1502,10 @@ def collect(
     ``Habits.effort_share_threshold_pct``. ``tz`` (``config.tz``; the
     machine's own zone when empty) is the zone weeks and days are counted
     in, and ``window`` the report's window label (``ReportMeta.window``),
-    which titles ``digest_table`` -- see ``Habits.tz``."""
-    out = Habits(effort_share_threshold_pct=effort_share_threshold_pct, tz=tz, window=window)
+    which titles ``digest_table`` -- see ``Habits.tz``. ``since``
+    (``config.capture.enabled_at``) is when metrics capture was turned on:
+    see ``Habits.since``."""
+    out = Habits(effort_share_threshold_pct=effort_share_threshold_pct, tz=tz, window=window, since=since)
     rates = _Rates(pricing)
     for bundle in corpus.sessions:
         if bundle.top is None:
@@ -1322,6 +1553,10 @@ class Item:
     #: ``capture_dependent_value`` can weight instead of gating
     #: all-or-nothing (A3).
     reported_share: float = 1.0
+    #: Every dollar of ``saving`` comes from a message Claude tagged, so the
+    #: trend divides by the tagged messages of a week, not all of them: an
+    #: untagged week would otherwise read as a week with nothing to fix.
+    tagged: bool = False
 
     @property
     def source(self) -> str:
@@ -1378,17 +1613,24 @@ def _reason_followups(h: Habits, reason: str) -> tuple[int, int]:
     return sum(p.followups for p in given if reason in p.reasons()), sum(p.followups for p in given)
 
 
+def left_out_note(h: Habits) -> str:
+    """"N of M follow-ups were things your request left out", from your
+    answers, or ``""`` with fewer than
+    :data:`~claudeglass.handoff.MIN_FEEDBACK_ANSWERS` pieces naming it."""
+    left, followups = _reason_followups(h, "left_out")
+    named = sum(1 for p in _answered(h) if p.why_given and "left_out" in p.reasons())
+    if named >= MIN_FEEDBACK_ANSWERS and left:
+        return f"{left} of {followups} follow-ups were things your request left out"
+    return ""
+
+
 def _information_notes(h: Habits) -> list[str]:
     """What your answers say about how much your first message held, as
     evidence clauses for the habits about briefing Claude: follow-ups that
     were things you hadn't said, and pieces you said more up front would
     have made cheaper. Each shows only with at least
     :data:`~claudeglass.handoff.MIN_FEEDBACK_ANSWERS` behind it."""
-    notes = []
-    left, followups = _reason_followups(h, "left_out")
-    named = sum(1 for p in _answered(h) if p.why_given and "left_out" in p.reasons())
-    if named >= MIN_FEEDBACK_ANSWERS and left:
-        notes.append(f"{left} of {followups} follow-ups were things your request left out")
+    notes = [note for note in (left_out_note(h),) if note]
     wanted, rated = _helped_by(h, "context")
     if wanted >= MIN_FEEDBACK_ANSWERS:
         notes.append(f"you said more in your first message would have made {wanted} of {rated} pieces cheaper")
@@ -1503,10 +1745,17 @@ def _item_clear_between(h: Habits) -> Item | None:
         if c.stale_tokens < STALE_TOKENS:
             continue
         tag = c.tag
-        if tag is not None and (tag.shift == "new" or tag.prior == "none"):
+        # A new task that needed the earlier work (``prior`` needed or some)
+        # is no reason to clear: the context was wanted.
+        if tag is not None and ((tag.shift == "new" and tag.prior not in ("needed", "some")) or tag.prior == "none"):
             reported.append((c, c.stale_cost))
-        elif (c.gap_s or 0) >= LONG_BREAK_S and not (
-            tag is not None and (tag.shift in ("build", "grew", "redo", "fix") or tag.prior in ("needed", "some"))
+        elif (
+            (c.gap_s or 0) >= LONG_BREAK_S
+            # A thank-you, a status check or a go-ahead carries on the same work,
+            # and so does a message after a usage-limit pause: neither is a new task.
+            and not c.quiet
+            and not c.limit_pause
+            and not (tag is not None and (tag.shift in ("build", "grew", "redo", "fix") or tag.prior in ("needed", "some")))
         ):
             inferred.append((c, 0.5 * (c.stale_rewrite + c.stale_cost)))
     found = reported + inferred
@@ -1539,14 +1788,6 @@ def _item_clear_between(h: Habits) -> Item | None:
     )
 
 
-def _clear_costs(cycles) -> dict[str, float]:
-    by_task: dict[str, list[float]] = {}
-    for c in cycles:
-        if c.tag is not None and c.tag.brief == "clear" and c.tag.task:
-            by_task.setdefault(c.tag.task, []).append(c.cost)
-    return {task: _mean(costs) for task, costs in by_task.items() if len(costs) >= 3}
-
-
 def _missing_counts(cycles) -> Counter:
     """How often each ``missing`` word was reported, a word on a message
     whose follow-ups you said were things it left out counting twice: your
@@ -1564,6 +1805,101 @@ def _top_missing(cycles, limit: int = 2) -> list[str]:
     return [w for w, _ in _missing_counts(cycles).most_common(limit)]
 
 
+#: Fewest clear asks of one kind of work and level before they are the
+#: baseline for a partial or vague ask of that level; fewer, and the whole
+#: kind of task is.
+_BRIEF_LEVEL_MIN = 3
+
+
+@dataclass(frozen=True, slots=True)
+class BriefComparison:
+    """What partial and vague asks cost against clear ones of the same kind
+    of task (:func:`brief_comparison`)."""
+
+    #: Partial or vague messages compared, clear ones compared against, and
+    #: the kinds of task they come from.
+    unclear: int
+    clear: int
+    tasks: int
+    #: The chance that a partial or vague ask cost more than a clear one of
+    #: its kind, and how much more the median one cost.
+    probability: float
+    ratio: float | None
+    #: ``(message, USD)``: half of how far each partial or vague ask went
+    #: over, or under, the median clear ask of its kind and level.
+    gaps: tuple = ()
+
+    @property
+    def saving(self) -> float:
+        return sum(usd for _, usd in self.gaps)
+
+    @property
+    def holds(self) -> bool:
+        """Partial and vague asks cost more, often enough to say so, and in
+        all."""
+        return self.probability >= BRIEF_MIN_PROBABILITY and self.saving > 0
+
+
+def _brief_cost(c: CycleFact) -> float:
+    """What a message's own work cost: its cost less re-reading the context
+    it began with, so a message late in a long session isn't dearer for
+    where it sat."""
+    return max(0.0, c.cost - c.stale_cost)
+
+
+def brief_comparison(h: Habits) -> BriefComparison | None:
+    """Partial and vague asks against clear ones, like for like: within one
+    kind of task, with at least :data:`MIN_GROUP` messages on each side, and
+    leaving out the messages that carried out a plan, whose cost is the
+    plan's build, not the ask. Each unclear ask is set against the median
+    clear ask of its level (the median clear ask of the task when fewer
+    than three share its level), at what the work itself cost
+    (:func:`_brief_cost`). ``None`` when no kind of task has enough on both
+    sides."""
+    kinds: dict[str, tuple[list, list]] = {}
+    for c in h.cycles:
+        if c.tag is None or not c.tag.brief or not c.tag.task or c.executes_plan:
+            continue
+        clear, unclear = kinds.setdefault(c.tag.task, ([], []))
+        (clear if c.tag.brief == "clear" else unclear).append(c)
+    gaps, baselines, tasks = [], [], 0
+    wins, pairs, clear_n = 0.0, 0, 0
+    for clear, unclear in kinds.values():
+        if len(clear) < MIN_GROUP or len(unclear) < MIN_GROUP:
+            continue
+        tasks += 1
+        clear_n += len(clear)
+        everyone = [_brief_cost(c) for c in clear]
+        by_level: dict[str, list[float]] = {}
+        for c in clear:
+            by_level.setdefault(c.tag.level or "", []).append(_brief_cost(c))
+        for c in unclear:
+            same = by_level.get(c.tag.level or "", [])
+            costs = same if len(same) >= _BRIEF_LEVEL_MIN else everyone
+            base, cost = statistics.median(costs), _brief_cost(c)
+            gaps.append((c, 0.5 * (cost - base)))
+            baselines.append(base)
+            wins += sum((cost > k) + 0.5 * (cost == k) for k in costs)
+            pairs += len(costs)
+    if not gaps:
+        return None
+    middle = statistics.median(baselines)
+    ratio = statistics.median(_brief_cost(c) for c, _ in gaps) / middle if middle else None
+    return BriefComparison(
+        unclear=len(gaps), clear=clear_n, tasks=tasks, probability=wins / pairs, ratio=ratio, gaps=tuple(gaps),
+    )
+
+
+def brief_card_shown(h: Habits, items: list[Item] | None = None) -> bool:
+    """Whether Work habits shows the ``brief_clearly`` card: partial and
+    vague asks cost more than clear ones like for like, or your own answers
+    say your requests left things out, and the habit isn't one you already
+    picked up. /cg-brief is offered only while it does. ``items`` is
+    :func:`playbook`'s, when the caller has it."""
+    items = playbook(h) if items is None else items
+    return any(item.key == "brief_clearly" for item in _worth_trying(h, items))
+
+
 def _item_brief_clearly(h: Habits) -> Item | None:
     tagged = [c for c in h.cycles if c.tag is not None and c.tag.brief]
     unclear = [c for c in tagged if c.tag.brief in ("partial", "vague")]
@@ -1572,22 +1908,15 @@ def _item_brief_clearly(h: Habits) -> Item | None:
     notes = _information_notes(h)
     told = bool(notes)
     left, _ = _reason_followups(h, "left_out")
-    tagged_enough = len(unclear) >= MIN_GROUP
-    if not tagged_enough and not told:
+    found = brief_comparison(h)
+    compared = found if found is not None and found.holds else None
+    if compared is None and not told:
         return None
-    clear = _clear_costs(h.cycles)
-    gaps = [
-        (c, 0.5 * max(0.0, c.cost - clear[c.tag.task])) for c in unclear if c.tag.task in clear
-    ] if tagged_enough else []
-    saving = sum(usd for _, usd in gaps) if gaps else None
     parts = []
-    if tagged_enough:
+    if compared is not None:
         parts.append(f"{len(unclear)} of {len(tagged)} asks were partial or vague")
-        compared = [c for c, _ in gaps]
-        if compared:
-            ratio = _mean(c.cost / clear[c.tag.task] for c in compared if clear[c.tag.task])
-            if ratio:
-                parts[0] += f", costing {ratio:.1f}x a clear ask of the same kind"
+        if compared.ratio:
+            parts[0] += f"; the median one cost {compared.ratio:.1f}x a clear ask of the same kind"
     missing = _top_missing([*unclear, *(c for c in h.cycles if c.left_out and c not in unclear)])
     if missing:
         parts.append("most often missing: " + ", ".join(MISSING_LINES[w][0].lower() for w in missing if w in MISSING_LINES))
@@ -1595,10 +1924,12 @@ def _item_brief_clearly(h: Habits) -> Item | None:
     example = EXAMPLES["brief_clearly"]
     if missing and missing[0] in MISSING_LINES:
         example = MISSING_LINES[missing[0]][1]
+    weeks = _by_week((c.week, usd) for c, usd in compared.gaps) if compared is not None else {}
     return Item(
-        "brief_clearly", saving if saving else None, len(unclear) if tagged_enough else max(left, _helped_by(h, "context")[0]),
-        _sources(tagged_enough, False, told), _clauses(parts),
-        example=example, waste=_by_week((c.week, usd) for c, usd in gaps),
+        "brief_clearly", compared.saving if compared is not None else None,
+        len(unclear) if compared is not None else max(left, _helped_by(h, "context")[0]),
+        _sources(compared is not None, False, told), _clauses(parts),
+        example=example, waste={w: max(0.0, usd) for w, usd in weeks.items()}, tagged=True,
     )
 
 
@@ -1640,7 +1971,7 @@ def _item_paste_errors(h: Habits) -> Item | None:
         f"{len(without)} bug reports came without the error or its output; they cost {avg_without / avg_with:.1f}x "
         "the ones that had it.",
         waste=_by_week((c.week, usd) for c, usd in gaps),
-        reported_share=0.5,
+        reported_share=0.5, tagged=True,
     )
 
 
@@ -1701,18 +2032,36 @@ def _item_plan_hard(h: Habits) -> Item | None:
         sources = (*sources, "your feedback")
     return Item(
         "plan_hard", sum(usd for _, usd in redos), len(unplanned), sources, _clauses(parts),
-        waste=_by_week((c.week, usd) for c, usd in redos), reported_share=0.5,
+        waste=_by_week((c.week, usd) for c, usd in redos), reported_share=0.5, tagged=True,
     )
+
+
+def plan_hard_already(h: Habits) -> tuple[int, int] | None:
+    """``(planned, hard)`` when ``plan_hard`` has nothing to tell you
+    because you already plan hard work: at least :data:`MIN_GROUP` hard
+    asks, most of them planned (a plan you wrote in plan mode, one you
+    approved, or the build after a plan you approved by typing), and none of
+    the ones that weren't was redone. ``None`` otherwise."""
+    hard = [c for c in h.cycles if c.tag is not None and c.tag.level == "hard"]
+    planned = [c for c in hard if c.planned]
+    if len(hard) < MIN_GROUP or 2 * len(planned) <= len(hard):
+        return None
+    if any(c.redone for c in hard if not c.planned):
+        return None
+    return len(planned), len(hard)
 
 
 def _item_skip_plan_easy(h: Habits) -> Item | None:
     easy = [c for c in h.cycles if c.tag is not None and c.tag.level == "easy" and c.planned and c.plan_cost]
-    if len(easy) < 2:
+    saving = sum(c.plan_cost for c in easy)
+    # Two easy asks that went through plan mode are no pattern, and a few
+    # cents of planning is not worth a habit.
+    if len(easy) < MIN_GROUP or saving < MIN_SAVING:
         return None
     return Item(
-        "skip_plan_easy", sum(c.plan_cost for c in easy), len(easy), ("reported", "inferred"),
+        "skip_plan_easy", saving, len(easy), ("reported", "inferred"),
         f"{len(easy)} easy asks went through plan mode first.",
-        waste=_by_week((c.week, c.plan_cost) for c in easy), reported_share=0.5,
+        waste=_by_week((c.week, c.plan_cost) for c in easy), reported_share=0.5, tagged=True,
     )
 
 
@@ -1884,7 +2233,7 @@ def _item_targeted_checks(h: Habits) -> Item | None:
     return Item(
         "targeted_checks", sum(0.5 * c.redo_cost for c in redone) or None, len(checked),
         _sources(bool(reported_checked), bool(inferred_checked)),
-        _clauses(parts), waste=_by_week((c.week, 0.5 * c.redo_cost) for c in redone),
+        _clauses(parts), waste=_by_week((c.week, 0.5 * c.redo_cost) for c in redone), tagged=True,
     )
 
 
@@ -1938,21 +2287,40 @@ def _effort_waste(c: CycleFact) -> float:
     return 0.5 * c.thinking_cost if c.thinking_cost else 0.25 * c.output_cost
 
 
+def _thinking_share(cycles) -> float | None:
+    """The share of ``cycles``' output that was thinking, in percent."""
+    output = sum(c.output_cost for c in cycles)
+    return _pct(sum(c.thinking_cost for c in cycles), output) if output else None
+
+
 def _item_effort_fit(h: Habits) -> Item | None:
     """UX-3: gated the same way as the ``effort-mismatch`` rule this item
     is ``COVERED_BY`` (:data:`_EFFORT_MIN_MESSAGES` messages, more than
     ``h.effort_share_threshold_pct`` of output spent thinking) -- one
-    shared effort threshold, not two that can disagree."""
+    shared effort threshold, not two that can disagree. Three more gates
+    keep it to a case where lowering effort for easy work is the fix:
+    easy work must think :data:`EFFORT_EASY_OVER_HARD_PTS` points more than
+    hard work does at the same effort (when effort is flat, easy work
+    isn't wasting any), and the habit must be worth at least
+    :data:`MIN_SAVING` a week."""
     easy = [c for c in h.cycles if c.tag is not None and c.tag.level == "easy" and c.effort in _HIGH_EFFORT]
     if len(easy) < _EFFORT_MIN_MESSAGES:
         return None
-    output = sum(c.output_cost for c in easy)
-    share = _pct(sum(c.thinking_cost for c in easy), output) if output else None
+    share = _thinking_share(easy)
     if share is None or share <= h.effort_share_threshold_pct:
         return None
+    hard = [c for c in h.cycles if c.tag is not None and c.tag.level == "hard" and c.effort in _HIGH_EFFORT]
+    against = _thinking_share(hard) if len(hard) >= _EFFORT_MIN_MESSAGES else None
+    if against is None or share < against + EFFORT_EASY_OVER_HARD_PTS:
+        return None
+    saving = sum(_effort_waste(c) for c in easy)
+    if saving / h.span_weeks < MIN_SAVING:
+        return None
     return Item(
-        "effort_fit", sum(_effort_waste(c) for c in easy), len(easy), ("reported",),
-        f"{len(easy)} easy asks ran at high effort or above.", waste=_by_week((c.week, _effort_waste(c)) for c in easy),
+        "effort_fit", saving, len(easy), ("reported",),
+        f"{len(easy)} easy asks ran at high effort or above, and {share:.0f}% of their output was thinking, "
+        f"against {against:.0f}% for hard work.",
+        waste=_by_week((c.week, _effort_waste(c)) for c in easy), tagged=True,
     )
 
 
@@ -2073,25 +2441,55 @@ def playbook(h: Habits) -> list[Item]:
     return items
 
 
+def _asks_per_week(h: Habits, tagged: bool = False) -> Counter:
+    """The messages that asked for something, by week: what a weekly rate
+    per message divides by (``CycleFact.asks``). With ``tagged``, only those
+    Claude tagged: what a habit that is built from tags divides by."""
+    per_week: Counter = Counter()
+    for c in h.cycles:
+        if c.week and (c.tag is not None or not tagged):
+            per_week[c.week] += c.asks
+    return per_week
+
+
+def _capture_week(h: Habits) -> str:
+    """The Monday of the week capture was turned on (``""`` when that isn't
+    known): the weeks before it have no tags to measure."""
+    return _week(_moment(h.since), h.tz) if h.since else ""
+
+
 def _weekly_rates(h: Habits, item: Item) -> list[float | None]:
-    per_week = Counter(c.week for c in h.cycles if c.week)
+    """What ``item`` addresses per message in each of the last weeks, ``None``
+    for a week that can't be measured: one with too few messages (only the
+    tagged ones, for a habit built from tags), or, for a habit whose dollars
+    need capture or your feedback, one before capture was turned on."""
+    per_week = _asks_per_week(h, item.tagged)
+    start = _capture_week(h) if item.reported_share > 0 else ""
     weeks = h.weeks[-TREND_WEEKS:]
     return [
-        item.waste.get(w, 0.0) / per_week[w] if per_week[w] >= TREND_MIN_CYCLES else None for w in weeks
+        None if (start and w < start) or per_week[w] < TREND_MIN_CYCLES else item.waste.get(w, 0.0) / per_week[w]
+        for w in weeks
     ]
 
 
 def trend(h: Habits, item: Item) -> tuple[str, str, float]:
     """``(word, weeks, adopted)``: whether what the habit addresses per
     message is falling, rising or steady over the last weeks; each week's
-    value scaled to 0-100 (``-`` for a week with too few messages); and
-    the weekly saving the fall already makes."""
+    value scaled to 0-100 (``-`` for a week that can't be measured: too few
+    messages, or before capture was turned on); and the weekly saving the
+    fall already makes. A message here is one that asked for something, one
+    you typed while Claude worked included (``CycleFact.asks``): a go-ahead,
+    a status check or a reply to a plan is not one. The word is ``new``
+    until :data:`TREND_MIN_WEEKS` weeks are measured, and ``unmeasured`` when
+    every measured week is zero: nothing to follow."""
     rates = _weekly_rates(h, item)
     top = max((r for r in rates if r is not None), default=0.0)
     weeks = " ".join("-" if r is None else str(round(100 * r / top)) if top else "0" for r in rates)
     known = [r for r in rates if r is not None]
-    if len(known) < 3:
+    if len(known) < TREND_MIN_WEEKS:
         return "new", weeks, 0.0
+    if not top:
+        return "unmeasured", weeks, 0.0
     half = len(known) // 2
     # Medians, so one unusual week doesn't make or break a trend; and the
     # latest week must not be back above the earlier level.
@@ -2099,8 +2497,8 @@ def trend(h: Habits, item: Item) -> tuple[str, str, float]:
     if before and after <= 0.8 * before and known[-1] <= before:
         if len(known) < TREND_MIN_ADOPTED:
             return "falling", weeks, 0.0
-        per_week = Counter(c.week for c in h.cycles if c.week)
-        recent = [per_week[w] for w in h.weeks[-TREND_WEEKS:]][-half:]
+        per_week = _asks_per_week(h, item.tagged)
+        recent = [per_week[w] for w, r in zip(h.weeks[-TREND_WEEKS:], rates) if r is not None][-half:]
         return "falling", weeks, (before - after) * (_mean(recent) or 0.0)
     if after >= 1.2 * before and after > 0:
         return "rising", weeks, 0.0
@@ -2364,7 +2762,22 @@ def _money_or_none(usd: float | None) -> float | None:
     return round(usd, 6) if isinstance(usd, (int, float)) and usd > 0 else None
 
 
+def _picked_up(h: Habits, items: list[Item]) -> list[tuple[Item, float]]:
+    """The habits whose trend says you already picked them up, with the
+    weekly saving each fall makes."""
+    found = [(item, trend(h, item)[2]) for item in items]
+    return [(item, usd) for item, usd in found if usd > 0]
+
+
+def _worth_trying(h: Habits, items: list[Item]) -> list[Item]:
+    """``items`` less the habits you already picked up: one is never both
+    "worth trying" and "already picked up"."""
+    picked = {item.key for item, _ in _picked_up(h, items)}
+    return [item for item in items if item.key not in picked]
+
+
 def playbook_table(h: Habits, items: list[Item]) -> Table:
+    items = _worth_trying(h, items)
     weeks = h.span_weeks
     calibration = _self_report_calibration(h)
     self_report_ok = None if calibration is None else not calibration["contradicts"]
@@ -2516,25 +2929,35 @@ def digest_table(h: Habits, items: list[Item] | None = None) -> Table:
     items = playbook(h) if items is None else items
     weeks = h.span_weeks
     rows = []
-    for n, item in enumerate([i for i in items if i.saving][:3], start=1):
+    for n, item in enumerate([i for i in _worth_trying(h, items) if i.saving][:3], start=1):
         rows.append([f"top_{n}", item_title(item), _money_or_none(item.saving / weeks), item.evidence])
-    adopted = [(item, trend(h, item)[2]) for item in items]
-    adopted = [(item, usd) for item, usd in adopted if usd > 0]
+    adopted = _picked_up(h, items)
     if adopted:
         rows.append([
             "adopted", "Habits you already picked up",
             _money_or_none(sum(usd for _, usd in adopted)),
             ", ".join(item_title(item) for item, _ in adopted),
         ])
-    met = [p for p in h.pieces if p.outcome == "met"]
+    already = plan_hard_already(h)
+    if already:
+        rows.append([
+            "plan_hard", "Planning hard work first", "Already doing this",
+            f"{already[0]} of {already[1]} hard asks were planned, and none of the others was redone",
+        ])
+    rated = [p for p in h.pieces if p.outcome]
+    met = [p for p in rated if p.outcome == "met"]
     if met:
         rows.append([
             "cost_per_met", "A piece of work that met its goal", _money_or_none(_mean(p.cost for p in met)),
-            f"{len(met)} of {len(h.pieces)} pieces you gave feedback on",
+            f"{len(met)} of {len(rated)} pieces you gave feedback on",
         ])
-    tagged = sum(1 for c in h.cycles if c.tag is not None)
+    # The share the Capture banner shows: messages from when capture was
+    # turned on, in sessions it reached.
+    counted = [c for c in h.cycles if not c.outside_capture]
+    tagged = sum(1 for c in counted if c.tag is not None)
     if tagged:
-        rows.append(["tagged", "Messages Claude tagged", _pct(tagged, len(h.cycles)), f"{tagged} of {len(h.cycles)}"])
+        detail = f"{tagged} of {len(counted)}" + (" since you turned capture on" if h.since else "")
+        rows.append(["tagged", "Messages Claude tagged", _pct(tagged, len(counted)), detail])
     return Table(
         name="habits_digest",
         title=_digest_title(h.window),
@@ -2645,7 +3068,35 @@ def _briefs_table(h: Habits) -> Table:
             Column(key="missing", label="Most often missing", kind="str"),
         ],
         rows=rows,
+        notes=_briefs_notes(h) if rows else [],
     )
+
+
+def _briefs_notes(h: Habits) -> list[str]:
+    """What the plain averages in the briefs table leave out, and what the
+    like-for-like comparison behind the ``brief_clearly`` card says, so the
+    table and the card agree: the table mixes plan builds, kinds of task and
+    levels together, which can make clear asks look dearer."""
+    mixed = "The averages above mix in plan builds and every kind of work, so they can read differently."
+    found = brief_comparison(h)
+    # Your own answers can show the card when the tags can't.
+    cardless = " Work habits shows no card for them." if _item_brief_clearly(h) is None else ""
+    if found is None:
+        return [
+            "There are too few clear and unclear asks of one kind of task to compare them like for like."
+            + cardless,
+            mixed,
+        ]
+    if found.holds:
+        cost = f"the median partial or vague ask cost {found.ratio:.1f}x a clear one" if found.ratio else (
+            "partial and vague asks cost more than clear ones"
+        )
+        return [f"Compared like for like, {cost}: the same kind of task, plan builds left out.", mixed]
+    return [
+        f"Compared like for like, a partial or vague ask cost more than a clear one in "
+        f"{100 * found.probability:.0f}% of the comparisons. That is too few to say.{cardless}",
+        mixed,
+    ]
 
 
 def _prompt_flags_table(h: Habits) -> Table:
@@ -2678,7 +3129,14 @@ def _prompt_flags_table(h: Habits) -> Table:
     )
 
 
-def _templates_table(h: Habits) -> Table:
+#: The one place the /cg-brief skill is offered, shown with the brief
+#: templates while the ``brief_clearly`` card shows.
+BRIEF_OFFER = "The optional /cg-brief skill gives Claude the same checklists: claudeglass capture brief on."
+
+
+def _templates_table(h: Habits, brief_offer: bool = False) -> Table:
+    """``brief_offer``: Work habits shows the ``brief_clearly`` card, so the
+    table also offers the /cg-brief skill."""
     rows = []
     groups: dict[str, list[CycleFact]] = {}
     for c in h.cycles:
@@ -2698,6 +3156,7 @@ def _templates_table(h: Habits) -> Table:
             Column(key="template", label="Template", kind="str"),
         ],
         rows=rows,
+        notes=[BRIEF_OFFER] if brief_offer else [],
     )
 
 
@@ -2954,7 +3413,7 @@ def family(model_id: str | None) -> str:
 
 def went_well(c: CycleFact) -> bool:
     """Your feedback on the message's work where you gave it, otherwise
-    whether your next message redid, fixed or corrected it."""
+    whether the messages after it redid, fixed or corrected it."""
     if c.outcome:
         return c.outcome == "met"
     return not c.redone
@@ -3155,8 +3614,10 @@ def _by_shape_table(h: Habits) -> Table:
         sessions = [s for s in h.shapes if s.shape == shape]
         if not sessions:
             continue
-        pieces = [p for p in h.pieces if p.shape == shape]
+        work = [p for p in h.pieces if p.shape == shape]
+        pieces = [p for p in work if p.outcome]
         worth = [p for p in pieces if p.worth]
+        fixes = fixes_after_plan(h, shape)
         carried = [s.carried for s in sessions if s.carried is not None]
         handoff = Counter(p.handoff for p in pieces if p.handoff)
         # Your answer to the plan question, and the plan check's: one of
@@ -3180,6 +3641,10 @@ def _by_shape_table(h: Habits) -> Table:
             plan["covered"],
             plan["gap"],
             plan["new"],
+            len(work),
+            fixes.plans if fixes else None,
+            fixes.fixed if fixes else None,
+            fixes.fixes if fixes else None,
         ])
     return Table(
         name="habits_by_shape",
@@ -3200,6 +3665,10 @@ def _by_shape_table(h: Habits) -> Table:
             Column(key="plan_covered", label="Fix was in the plan", kind="int"),
             Column(key="plan_gap", label="Plan missed it", kind="int"),
             Column(key="plan_new", label="Fix was new", kind="int"),
+            Column(key="work_pieces", label="Pieces of work", kind="int"),
+            Column(key="plans_built", label="Plans approved", kind="int"),
+            Column(key="plans_fixed", label="Plans fixed three times or more", kind="int"),
+            Column(key="plan_fixes", label="Fixes after a plan", kind="int"),
         ],
         rows=rows,
     )
@@ -3223,7 +3692,7 @@ def _self_report_table(h: Habits) -> Table:
     """Claude's own reports against your feedback: for each ``level`` and
     ``brief`` word it tagged a message with, how many messages your
     feedback covers, the share that met or missed its goal, and the
-    share your next message redid -- so a report that doesn't hold up
+    share the messages after it redid -- so a report that doesn't hold up
     against what you actually said shows up here, not just as a hunch."""
     rows = []
     for word in catalogue.TAG_VOCAB["level"]:
@@ -3244,7 +3713,7 @@ def _self_report_table(h: Habits) -> Table:
             Column(key="rated", label="With your feedback", kind="int"),
             Column(key="met_pct", label="Met the goal", kind="pct"),
             Column(key="missed_pct", label="Missed", kind="pct"),
-            Column(key="redone_pct", label="Redone by your next message", kind="pct"),
+            Column(key="redone_pct", label="Redone afterwards", kind="pct"),
         ],
         rows=rows,
         notes=[note] if note else [],
@@ -3330,6 +3799,7 @@ def build_section(
     effort_share_threshold_pct: float = 30.0,
     tz: str | tzinfo | None = None,
     window: str = "",
+    since: str = "",
 ) -> Section:
     """The "habits" report section. Every table is always there, empty
     when there's nothing to show, so the report keeps its shape.
@@ -3339,12 +3809,12 @@ def build_section(
     caller's resolved ``recommend.RecommendThresholds
     .effort_mismatch_thinking_share_pct`` (UX-3's shared effort
     threshold), so ``effort_fit`` and the ``effort-mismatch`` rule agree
-    on when there's enough to say something. ``tz`` and ``window`` are
-    ``collect``'s: the zone weeks are counted in and the window label the
-    digest is titled with."""
+    on when there's enough to say something. ``tz``, ``window`` and
+    ``since`` are ``collect``'s: the zone weeks are counted in, the window
+    label the digest is titled with and when capture was turned on."""
     h = collect(
         corpus, pricing, ratings=ratings, signals=signals, effort_share_threshold_pct=effort_share_threshold_pct,
-        tz=tz, window=window,
+        tz=tz, window=window, since=since,
     )
     return section_from(h, model_swap=model_swap)
 
@@ -3357,7 +3827,7 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
             "Nothing here was reported by Claude yet. Turn on metrics capture ({{page:setup/capture}} or "
             "claudeglass capture on) to see kinds of task, brief quality and how hard the work was."
         )
-    if h.cycles and not h.pieces:
+    if h.cycles and not any(p.outcome for p in h.pieces):
         notes.append(
             "No feedback yet: rate sessions on {{page:spend/sessions}} or run /cg-feedback to see cost per piece of "
             "work that met its goal."
@@ -3370,7 +3840,7 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
             playbook_table(h, items),
             _by_task_table(h),
             _briefs_table(h),
-            _templates_table(h),
+            _templates_table(h, brief_card_shown(h, items)),
             _agents_table(h),
             _explore_by_model_table(h),
             _effort_table(h),
@@ -3668,7 +4138,7 @@ def capture_section(
     use = capture_mod.usage(corpus, pricing, since=since)
     weekly = capture_mod.weekly_cost(use)
     if h is None or h.effort_share_threshold_pct != 30.0:
-        h = collect(corpus, pricing, ratings=ratings, tz=tz)
+        h = collect(corpus, pricing, ratings=ratings, tz=tz, since=since)
     value = capture_dependent_value(h, since=since)
     suggestion = capture_step_down_suggestion(h, capture_config, use)
     rows = [
@@ -3747,7 +4217,7 @@ def patch_capture_recommend_value(
     ``tz`` as there."""
     since = getattr(capture_config, "enabled_at", "") or ""
     if h is None or h.effort_share_threshold_pct != 30.0:
-        h = collect(corpus, pricing, ratings=ratings, tz=tz)
+        h = collect(corpus, pricing, ratings=ratings, tz=tz, since=since)
     items = playbook(h)
     value = capture_dependent_value(h, items, with_habits=with_habits, without_habits=without_habits, since=since)
     held_back = capture_value_breakdown(items, with_habits, without_habits)["held_back"]

@@ -600,7 +600,7 @@ has the detail.
 The dashboard's Glossary page uses the same words, term for term.
 
 <details>
-<summary>All 40 terms</summary>
+<summary>All 44 terms</summary>
 
 - **Session**: One conversation with Claude Code, from start to exit. Resuming it continues the same session.
 - **Main session**: The conversation you type into, as opposed to the subagents it starts.
@@ -637,6 +637,10 @@ The dashboard's Glossary page uses the same words, term for term.
 - **Capture level**: How much metrics capture asks for: `off`, `free`, `essentials`, `standard` or `deep`, each adding more of it. Set at `init` or with `claudeglass capture level`.
 - **Tag**: The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as `[cg: task=bugfix brief=clear]`. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is.
 - **Prompt cycle**: One message of yours and everything Claude did to answer it, subagents at any depth included. The unit metrics capture and the Work habits page measure by.
+- **Piece of work**: One job, drawn from a session's transcript alone. It runs from a fresh start (the session start, a `/clear`, or a message about something new) to the next. It needs no feedback and no tag.
+- **Rework**: A follow-up that changes work Claude had already delivered: a redo, a fix, a correction you typed, or an adjustment to files it had changed. Each has a cause, and the dashboard says where that cause came from.
+- **Status check**: A short message that only asks how the work is going, or whether it is done. It asks for nothing new, so it is never rework.
+- **Plan round**: A message you send while a plan is being made: you sent the plan back with changes, or wrote in plan mode. It is feedback on the plan, so it is never rework.
 - **Work habits**: The page (and report section) that turns prompt cycles into habits worth trying, with a rough saving for each. Each shows where its evidence came from: reported by Claude, inferred from the transcript, or your own feedback.
 - **Feedback skill**: `/cg-feedback`, a skill you can add and run after a piece of work. It asks whether the work delivered, what your follow-up messages were, whether it was worth the tokens, and what would have made it cheaper. Works at any capture level, even off; picking `deep` turns it on, with its reminders.
 - **Brief templates**: Checklists per kind of task on the Work habits page, built from what your own requests tend to lack. Turned on, it also adds a `/cg-brief` skill that checks a request against its checklist and asks once for anything missing before Claude starts.

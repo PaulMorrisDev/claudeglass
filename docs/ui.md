@@ -89,7 +89,7 @@ blocked storage still works.
 | `tls:sort:<table>` | a table's sort |
 | `tls:cols:<table>` | the columns chosen for a wide table |
 | `tls:captureNotesHidden` | when the capture banner's notes were dismissed, and which |
-| `tls:captureUnratedHidden` | when the banner's list of sessions to rate was dismissed, and which sessions it held |
+| `tls:captureUnratedHidden` | when the banner's list of pieces to rate was dismissed, and which pieces it held |
 
 Two older keys are read once: `tls:activeTab` (the old tab bar's last
 tab, removed after) and `tls:overviewWindow` when `tls:window` is unset.
@@ -325,7 +325,7 @@ click outside closes it.
 ### Addresses
 
 ```
-#/<page>[/<segment>][?w=<window>&project=<slug>&id=&t=&row=&term=&card=&day=&split=]
+#/<page>[/<segment>][?w=<window>&project=<slug>&id=&item=&t=&row=&term=&card=&day=&split=]
 ```
 
 `formatHash` writes `w` first, then `project` (left out for all
@@ -337,6 +337,7 @@ of lower-case words joined by hyphens.
 | `w` | the window: `1h`, `today`, `24h`, `7`, `30`, `90`, `all` or `change` |
 | `project` | the one project shown; absent for all projects |
 | `id` | the inbox item picked: a recommendation's `key` (its id, plus the agent type for a per-agent rule) or a check id |
+| `item` | on Work habits, the card to show: a habit of the playbook (`brief_clearly`), a prompting habit (`drip_feed`) or `rework`, the rework section. The page scrolls to it, opens the fold it sits in ("more habits") and pulses it. A key this window has no card for leaves the page as it is |
 | `t`, `row` | a report table (`section.table`) and the row to open at |
 | `term`, `card` | a glossary term or a How costs work card |
 | `day` | a local day, as the service counts it: Spend › Sessions lists the sessions active that day, Your changes pulses the card of the change made that day |
@@ -484,13 +485,14 @@ to Setup › Capture and Work habits. **Dismiss for a week** hides the
 notes until they change.
 
 While the `/cg-feedback` reminder or the dashboard rating is on, the
-banner also lists the sessions you haven't rated that used at least the
-reminder's size (`info.unrated`, from `/api/capture`): a sentence, then up
-to five lines, each with the project, when it last replied, its tokens
-(tokens, never money) and **Rate it**, which opens the session drawer
-(`openSessionDrawer`) where the questions are. A count says how many more
-there are, with a link to Spend › Sessions. A rating, here or in
-`/cg-feedback`, takes a session off the list. Its own **Dismiss for a
+banner also lists the pieces of work you haven't rated that used at least
+the reminder's size (`info.unrated`, from `/api/capture`): a sentence, then
+up to five lines, each with the project, when it last replied, its tokens
+(tokens, never money), a short label (`piece 2 of 3, feature, 4 messages`)
+and **Rate it**, which opens the session drawer (`openSessionDrawer`) where
+the questions are; the rating there is of the whole session. A count says
+how many more there are, with a link to Spend › Sessions. A rating, here or
+in `/cg-feedback`, takes the work it covers off the list. Its own **Dismiss for a
 week** hides the list until it changes. The banner asks for a rating and
 changes nothing.
 
@@ -561,6 +563,23 @@ that order, each as a heading with a one-line answer beside it.
    that is For your information isn't a problem, so it stays off the
    checklist. Its prompt is among the check's fixes, and it is an item
    on Actions › Recommendations like any other card.
+
+   Two rows are worked out from more than the recommendations. **Work
+   habits** leads with the rework sentence ("4 of your 12 pieces of work
+   needed changes after Claude delivered them.") when 20% or more of 5 or
+   more pieces were reworked; below that it keeps its usual lead.
+   Requests in sessions that couldn't be cut into pieces never lead. Its
+   saving is the largest recommendation it carries plus what the habits
+   of the playbook would save over the window (a habit a recommendation
+   already covers isn't counted twice; the playbook's saving a week is
+   scaled to the window's weeks, with "all time" as one week, so the row
+   understates and never overstates). Its link goes to the card:
+   **See the rework**, or **See the habit** for the top habit
+   (`#/habits?item=<key>`). **Failed and blocked tool calls** is a check
+   of its own, with its own fix: the replies lost to tool errors and to
+   calls a hook or a guard blocked, which used to be counted in Work
+   habits. Its fix is a prompt to check a path or name first and to stop
+   and ask when a call is blocked, and its link opens the check.
 3. **Did your changes work?** The changes made in the window, from
    `/api/impact` for the window and project picked, judged first
    (`renderChangeCards` with `compact` and `judgedFirst`): the newest 2
@@ -935,7 +954,11 @@ an hour, today, 24 hours or since your last change) and whose weeks, here
 and in the by-week lines, start on your local Monday; **Habits worth
 trying** as cards (saving a week, what your sessions show, an example to
 copy, how often it was seen, its source, confidence, a weekly pace line
-and how the saving is worked out); the brief templates with Copy
+and how the saving is worked out; a habit you already picked up isn't
+listed here, and a week that can't be measured is a gap in the pace line,
+read out as an en dash); then **Rework after delivery** (the
+`rework` section, `renderRework`), straight after the top habit cards
+and before the brief templates; the brief templates with Copy
 buttons; **Kinds of task**; the other breakdowns under More tables; and
 the notes (More tables includes **Big tool output**, which counts big
 results per tool with what carrying them cost, and **Explore cost by
@@ -944,13 +967,58 @@ ran on). Then the `prompting` section, **How you prompt**
 (`renderPromptingSection`): a card per prompting habit seen (small
 requests sent one at a time, the same request again, asking how it's
 going, stopping Claude again and again, big tasks without a plan, vague
-corrections, huge pastes, context carried into new pieces) with what it cost ("Not priced"
-for a vague correction), what to try instead, how often it happened
+corrections, huge pastes, context carried into new pieces) with what it cost over the
+window ("over the last 30 days", or "Not priced" for a vague correction), what to try instead, how often it happened
 per 100 messages and a by-week line; then, once there are coaching
 notes, **Tips Claude showed**, with how often Claude passed each tip on
 ("relayed N of M" for a hint Claude is told to show every time, "judged
 relevant N of M" for one it decides on) and how often it called the tip a
 misfire. Nothing here changes a setting.
+
+**Rework after delivery** answers "How often did Claude have to change
+work it had already delivered, and why?" It opens with two tiles (the
+pieces of work that needed changes out of all of them, and what that rework
+cost, in the billing mode and with its period) and `rework.py`'s sentences:
+"N of your M pieces of work needed changes after Claude delivered them. That
+rework cost X. U% came from requests that left something out, C% from
+Claude's mistakes, X% from changes of mind", then "We couldn't tell why for
+K%: run /cg-feedback after a piece of work to say" when some rework has no
+cause, and a sentence of its own for sessions that couldn't be cut into
+pieces (counted by messages that asked for something). Below it:
+
+- **Why work needed changes**: a card per cause and source, your feedback
+  first, then Claude's tag, Haiku's tag and what the transcript shows. Each
+  card has what the rework cost, the counts behind it, a **Try** line and
+  something to copy (a line to say more up front for a request that left
+  something out, `/cg-brief` while Work habits shows its brief card; a
+  re-read, check and test line for Claude's mistakes, or the line for where
+  you said it missed; "Plan this first" for a change of mind; the checks
+  for tool calls that failed). A cause from several sources says its Try
+  line once. **Fixes after a plan you approved** shows once 5 plans were
+  approved and some needed 3 or more fixes. A follow-up with no cause
+  reads "Cause not reported", never "Claude got it wrong". Five cards show;
+  the rest fold under "N more causes".
+- **Mistakes Claude admitted**: how many, who caught each, how many were an
+  instruction it had been given and what the rework after yours cost, with
+  the change to make and a line to copy. A reply that only reads like an
+  admission is "possible", said apart and never in a total.
+- **Rework by week**: a bar for the share of pieces that needed changes
+  (only for a week with 5 or more that did; a dash is too few to say), a bar
+  for mistakes you caught per piece (a week with 5 tagged pieces), and the
+  figures under "Week by week".
+- **Rework by how hard the work was**: the rework per message that asked
+  for something, by the level Claude tagged the work.
+
+Nothing in it writes a setting: each line is something to copy.
+
+**Linking to a card.** Each habit card, each prompting card and the
+rework section carries its key (`data-item`). `#/habits?item=<key>` scrolls
+to that card once the page is drawn, opens the "more habits" fold when the
+card sits under it, and pulses it (`showHabitItem`, the same pulse as a
+change on Your changes). `links.js` is the one place that knows the
+parameter (`habitLink`, `goToHabit`, `habitItem`, `REWORK_ITEM`): the
+Overview's Work habits row, the habit tips on Actions › Checks
+(**See the habit**) and search all use it.
 
 Each habit card and each prompting card ends with **Your rating**:
 **Useful**, **Trying it**, **Knew it** and **Wrong here** (`cardRating`
@@ -1071,7 +1139,8 @@ CLI commands instead.
 
 **Answers:** "What does this word mean?" The same for every window.
 
-`GLOSSARY` in `links.js`, word for word the README's glossary. **Find a
+`GLOSSARY` in `links.js`, word for word the README's glossary (44 terms,
+among them Piece of work, Rework, Status check and Plan round). **Find a
 term** above the list narrows it as you type: an entry stays when every
 word typed is in its term or definition. A status line counts the
 matches; with none, the page says so and offers **Show every term**.
@@ -1187,6 +1256,7 @@ their table view with it), so `app.js` hands it `sectionChart` through
 | Pages | every page and segment |
 | Commands | Set window: …, Show all projects, the three themes, Show keyboard shortcuts, Copy prompt: … |
 | Recommendations, Checks | the item, selected in its inbox (`?id=`) |
+| Work habits | a playbook habit, a prompting habit or the rework section, at its card on Work habits (`?item=`) |
 | Sections and tables | a section at its first table; a table where it is shown, or in the table drawer |
 | Glossary | terms (`?term=`) and How costs work cards (`?card=`) |
 | Recent sessions | the window's 20 newest, each in its drawer |

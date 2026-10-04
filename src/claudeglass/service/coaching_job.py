@@ -43,7 +43,8 @@ class CoachingJob:
     directly); :meth:`start`/:meth:`stop` run it on a background thread.
     ``build_report`` builds a report over ``days`` days from the store,
     ``build_typical`` the tokens of your typical piece of work over the same
-    days (``coaching.typical_piece_tokens``; 0 without it); ``ready`` says
+    days (``coaching.typical_piece_tokens``, the median of the pieces
+    ``pieces.corpus_pieces`` draws; 0 without it); ``ready`` says
     whether the store is filled enough to start."""
 
     def __init__(

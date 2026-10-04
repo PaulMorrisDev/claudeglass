@@ -4199,7 +4199,7 @@ def _banner(server) -> dict:
     return payload["data"]["banner"]
 
 
-def test_the_banner_lists_a_session_big_enough_for_the_reminder_with_its_tokens(server):
+def test_the_banner_lists_a_piece_of_work_big_enough_for_the_reminder_with_its_tokens(server):
     _recent_session(server)
     _feedback_on(server, "feedback_reminder")
     # The reminder's default floor is a million tokens: this session is far below it.
@@ -4210,8 +4210,10 @@ def test_the_banner_lists_a_session_big_enough_for_the_reminder_with_its_tokens(
     assert unrated["total"] == 1 and [p["session_id"] for p in unrated["pieces"]] == [server.session_id]
     piece = unrated["pieces"][0]
     assert piece["tokens"] > 100 and piece["tokens_text"] == str(piece["tokens"])
-    assert set(piece) == {"session_id", "slug", "last_ts", "tokens", "tokens_text"}
-    assert unrated["text"].startswith("1 session used at least 100 tokens and has no rating yet.")
+    assert set(piece) == {"session_id", "slug", "last_ts", "tokens", "tokens_text", "part", "label"}
+    # One piece in the session, named by its messages and not by a part of several.
+    assert piece["part"] == 1 and isinstance(piece["label"], str) and "piece 1 of" not in piece["label"]
+    assert unrated["text"].startswith("1 piece of work used at least 100 tokens and has no rating yet.")
     # Tokens only: no money amount and no path comes with it.
     assert "$" not in json.dumps(unrated)
     _assert_no_leak(json.dumps(unrated).encode("utf-8"))
@@ -4259,6 +4261,79 @@ def test_the_banner_reads_again_only_the_sessions_that_changed(server, monkeypat
     server.store.set_tip_feedback("recommendation", "any-key", "useful")
     assert _banner(server)["unrated"]["total"] == 1
     assert asked == [[server.session_id]]
+
+
+def _cleared_corpus(tmp_path: Path, *, more_in_second: int = 0) -> corpus_mod.Corpus:
+    """One session of two pieces of work: a /clear sits between them. The second has ``more_in_second``
+    extra replies, so it is the bigger."""
+
+    def at(second: int) -> str:
+        return f"2026-09-18T12:{second // 60:02d}:{second % 60:02d}.000Z"
+
+    def reply(second: int, *blocks) -> dict:
+        content = list(blocks) or [{"type": "text", "text": "ok"}]
+        return turn_line(content=content, timestamp=at(second), input_tokens=300, output_tokens=40)
+
+    lines = [
+        user_str_line("build the title", origin={"kind": "human"}, timestamp=at(0)),
+        reply(1, tool_use_block("Edit", "e1", {"file_path": "C:/Dev/repo/a.py"})),
+        user_block_line([tool_result_block("e1", "ok")], timestamp=at(2)),
+        reply(3),
+        user_str_line("<command-name>/clear</command-name>\n<command-message>clear</command-message>\n"
+                      "<command-args></command-args>", timestamp=at(10)),
+        user_str_line("now build the footer", origin={"kind": "human"}, timestamp=at(20)),
+        reply(21, tool_use_block("Edit", "e2", {"file_path": "C:/Dev/repo/b.py"})),
+        user_block_line([tool_result_block("e2", "ok")], timestamp=at(22)),
+        reply(23),
+        *[reply(24 + n) for n in range(more_in_second)],
+    ]
+    project_dir = tmp_path / "projects" / "proj-a"
+    project_dir.mkdir(parents=True)
+    write_jsonl(project_dir / "session-a.jsonl", lines)
+    return corpus_mod.load_corpus([project_dir])
+
+
+def test_a_session_with_a_clear_in_it_lists_each_piece_that_is_big_enough(tmp_path, monkeypatch):
+    handle = _start_server(tmp_path, monkeypatch, corpus=_cleared_corpus(tmp_path, more_in_second=1))
+    try:
+        _recent_session(handle)
+        _feedback_on(handle, "feedback_reminder")
+        # The first piece is two replies of 340 tokens, the second three.
+        _lower_the_reminder_threshold(handle, 100)
+        unrated = _banner(handle)["unrated"]
+        assert unrated["total"] == 2
+        rows = unrated["pieces"]
+        assert [p["session_id"] for p in rows] == [handle.session_id] * 2
+        # Newest first: the later piece, then the earlier.
+        assert [(p["part"], p["tokens"], p["label"]) for p in rows] == [
+            (2, 1020, "piece 2 of 2, 1 message"),
+            (1, 680, "piece 1 of 2, 1 message"),
+        ]
+        assert unrated["text"].startswith("2 pieces of work used at least 100 tokens and have no rating yet.")
+        # The stored total only prefilters: the pieces' own tokens decide which are listed.
+        handle.store._connection().execute(
+            "UPDATE sessions SET total_tokens = 5000 WHERE id = ?", (handle.session_id,)
+        )
+        _lower_the_reminder_threshold(handle, 700)
+        assert [p["part"] for p in _banner(handle)["unrated"]["pieces"]] == [2]
+        assert _banner(handle)["unrated"]["total"] == 1
+        assert "$" not in json.dumps(_banner(handle)["unrated"])
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_piece_of_a_session_is_named_by_its_messages(tmp_path, monkeypatch):
+    handle = _start_server(tmp_path, monkeypatch, corpus=_two_plan_corpus(tmp_path))
+    try:
+        _recent_session(handle)
+        _lower_the_reminder_threshold(handle)
+        _feedback_on(handle, "feedback_reminder")
+        [piece] = _banner(handle)["unrated"]["pieces"]
+        assert (piece["part"], piece["label"]) == (1, "3 messages")
+    finally:
+        handle.close()
+        handle.store.close()
 
 
 def test_the_banner_leaves_out_a_session_you_rated_with_a_feedback_run(tmp_path, monkeypatch):

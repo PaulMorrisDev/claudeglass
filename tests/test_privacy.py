@@ -1231,3 +1231,59 @@ def test_privacy_reply_text_and_shell_reads_leave_yes_no_answers_and_sizes_never
     _assert_no_violations(result)
     for t in result.turns:
         assert t.admit_caught in ("", "user", "self") and t.tests_run in ("", "targeted", "full")
+
+
+def test_privacy_rework_after_delivery_holds_counts_closed_words_and_amounts_never_the_words(tmp_path: Path):
+    # A request, a correction, and a reply that owns a mistake and carries a
+    # tag, every one full of words: the pieces of work, the causes and the
+    # admitted mistakes are counted from them, and none of the words, nor a
+    # file name, reaches the section, the pieces or their JSON.
+    from types import SimpleNamespace as NS
+
+    from claudeglass import habits, parse, rework
+    from claudeglass.pricing import load_pricing
+    from claudeglass.units import Units
+    from test_capture import _note
+    from test_habits import MODEL, _edit_reply, _said, _ts, _work_session
+
+    parse.set_salt(b"p" * 32)
+    secrets = ["marmoset", "tapir", "lemur", "okapi", "dugong", "gecko", "manatee", "pika"]
+    lines = [
+        _note(0, ["task", "shift", "why", "admit"]),
+        _said(1, f"add the {secrets[0]} form to src/{secrets[1]}.py"),
+        *_edit_reply(1, 0, path=f"src/{secrets[1]}.py"),
+        _said(20, f"no, that's wrong, it's broken: {secrets[2]}"),
+        turn_line(
+            content=[
+                tool_use_block(
+                    "Edit", "tu_e1",
+                    {"file_path": f"src/{secrets[1]}.py", "old_string": secrets[3], "new_string": secrets[4]},
+                ),
+                {"type": "text", "text": f"My mistake, I misread {secrets[5]}."},
+            ],
+            model=MODEL, timestamp=_ts(21), output_tokens=800,
+        ),
+        user_block_line([tool_result_block("tu_e1", f"ok {secrets[6]}")], timestamp=_ts(22)),
+        turn_line(
+            content=[{"type": "text", "text": f"Fixed {secrets[7]}. [cg: task=bugfix shift=fix why=missed admit=claim]"}],
+            model=MODEL, timestamp=_ts(23), output_tokens=800,
+        ),
+    ]
+    pricing = load_pricing(path=Path(__file__).resolve().parent / "fixtures" / "pricing_min.toml")
+    h = habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing, window="last 30 days")
+    (piece,) = h.work_pieces
+    assert (piece.rework, piece.admitted, piece.admitted_user) == (1, 1, 1)
+    section = rework.build_section(h, Units())
+    rows = {table.name: table.rows for table in section.tables}
+    assert rows["rework_causes"] and rows["rework_admitted"] and rows["rework_by_level"]
+
+    blob = repr(section) + repr(h.work_pieces) + json.dumps([dataclasses.asdict(p) for p in h.work_pieces], default=str)
+    for word in [*secrets, "misread", "it's broken"]:
+        assert word not in blob, word
+    assert_privacy(section)
+    # A piece holds numbers, closed words and the salted hashes of what it touched, never text.
+    for name, value in dataclasses.asdict(piece).items():
+        parts = value if isinstance(value, (tuple, list)) else [value]
+        flat = [x for part in parts for x in (part if isinstance(part, (tuple, list)) else [part])]
+        assert all(isinstance(x, (int, float, str, bool, type(None))) for x in flat), name
+        assert all(len(x) <= _MAX_STR_LEN for x in flat if isinstance(x, str)), name

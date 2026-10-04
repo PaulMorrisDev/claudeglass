@@ -67,6 +67,18 @@ def _noisy(waste: float = 1.0, week: str = WEEKS[0], **kw) -> CycleFact:
     return _cycle(week, big_outputs=[("Bash", habits.BIG_OUTPUT_TOKENS, 2 * waste)], **kw)
 
 
+def _effort_cycles(n: int, level: str = "easy", thinking_cost: float = 0.5, output_cost: float = 0.6,
+                   week: str = WEEKS[0], **kw) -> list[CycleFact]:
+    """``n`` messages Claude called ``level`` that ran at high effort and spent
+    ``thinking_cost`` of ``output_cost`` thinking: the 83% default clears the
+    shared 30% gate, and half the thinking on five of them is worth over $1."""
+    tag = CaptureTag(level=level)
+    return [
+        _cycle(week, tag=tag, effort="high", thinking_cost=thinking_cost, output_cost=output_cost, **kw)
+        for _ in range(n)
+    ]
+
+
 def _agent(**kw) -> AgentFact:
     return AgentFact(**{"session_id": "s1", "agent_type": "general-purpose", "week": WEEKS[0], "cost": 1.0, **kw})
 
@@ -150,20 +162,21 @@ def test_confidence_rises_with_evidence_and_inference_alone_never_reaches_high(n
 
 
 def test_the_playbook_puts_the_largest_saving_first_and_unpriced_habits_last():
-    easy = CaptureTag(level="easy")
     h = Habits(cycles=[
         # 5 messages (the shared effort threshold, UX-3) with thinking well
-        # over the shared 30% share gate (0.2 of 0.3 output = 66.7%).
-        *(_cycle(tag=easy, effort="high", thinking_cost=0.2, output_cost=0.3) for _ in range(5)),
-        _noisy(),
+        # over the shared 30% share gate (0.5 of 0.6 output = 83%), and hard
+        # work at the same effort that thinks far less (0.1 of 0.3 = 33%).
+        *_effort_cycles(5),
+        *_effort_cycles(5, "hard", thinking_cost=0.1, output_cost=0.3),
+        _noisy(2.0),
         *(_cycle(tag=CaptureTag(skill="unneeded"), skill_calls=[("lint", False, 0, 0.0)]) for _ in range(2)),
     ])
     items = habits.playbook(h)
     assert [i.key for i in items] == ["quiet_output", "effort_fit", "skill_unneeded"]
     noisy, effort, skill = items
-    assert noisy.saving == pytest.approx(1.0) and noisy.sources == ("inferred",)
+    assert noisy.saving == pytest.approx(2.0) and noisy.sources == ("inferred",)
     # Half the thinking on each easy ask at high effort.
-    assert effort.saving == pytest.approx(5 * 0.1) and effort.sources == ("reported",)
+    assert effort.saving == pytest.approx(5 * 0.25) and effort.sources == ("reported",)
     assert skill.saving is None and "(lint)" in skill.evidence
 
 
@@ -172,28 +185,26 @@ def test_effort_fit_uses_the_same_message_count_and_share_gate_as_effort_mismatc
     rule it's ``COVERED_BY`` -- ``_EFFORT_MIN_MESSAGES`` messages and more
     than the configured thinking-share percent, not the old bare
     ``len(easy) < 3`` count with no share check at all."""
-    easy = CaptureTag(level="easy")
-
-    def _easy_cycles(n, thinking_cost=0.2, output_cost=0.3):
-        return [_cycle(tag=easy, effort="high", thinking_cost=thinking_cost, output_cost=output_cost) for _ in range(n)]
+    floor = habits._EFFORT_MIN_MESSAGES
+    hard = _effort_cycles(floor, "hard", thinking_cost=0.1, output_cost=0.3)
 
     # Below the shared message-count floor, even with a high share.
-    below_count = Habits(cycles=_easy_cycles(habits._EFFORT_MIN_MESSAGES - 1))
+    below_count = Habits(cycles=[*_effort_cycles(floor - 1), *hard])
     assert "effort_fit" not in _by_key(habits.playbook(below_count))
 
     # At the message-count floor but the thinking share doesn't clear the
     # gate (0.1 of 1.0 output = 10%, under the default 30%).
-    below_share = Habits(cycles=_easy_cycles(habits._EFFORT_MIN_MESSAGES, thinking_cost=0.1, output_cost=1.0))
+    below_share = Habits(cycles=[*_effort_cycles(floor, thinking_cost=0.1, output_cost=1.0), *hard])
     assert "effort_fit" not in _by_key(habits.playbook(below_share))
 
-    # Both gates cleared: fires, at the class default 30% threshold.
-    fires = Habits(cycles=_easy_cycles(habits._EFFORT_MIN_MESSAGES))
+    # Every gate cleared: fires, at the class default 30% threshold.
+    fires = Habits(cycles=[*_effort_cycles(floor), *hard])
     assert "effort_fit" in _by_key(habits.playbook(fires))
 
     # A configured (non-default) threshold, resolved via
     # ``Habits.effort_share_threshold_pct``, is honoured too: a share that
-    # clears 30% but not a stricter 70% configured gate doesn't fire.
-    stricter = Habits(cycles=_easy_cycles(habits._EFFORT_MIN_MESSAGES), effort_share_threshold_pct=70.0)
+    # clears 30% but not a stricter 90% configured gate doesn't fire.
+    stricter = Habits(cycles=[*_effort_cycles(floor), *hard], effort_share_threshold_pct=90.0)
     assert "effort_fit" not in _by_key(habits.playbook(stricter))
 
 
@@ -297,10 +308,11 @@ def test_clear_between_says_nothing_about_clears_when_none_were_logged():
 def test_vague_asks_are_compared_with_clear_ones_of_the_same_kind():
     clear = CaptureTag(task="bugfix", brief="clear")
     vague = CaptureTag(task="bugfix", brief="vague", missing=("repro", "files"))
-    h = Habits(cycles=[*(_cycle(tag=clear) for _ in range(3)), *(_cycle(tag=vague, cost=3.0) for _ in range(5))])
+    h = Habits(cycles=[*(_cycle(tag=clear) for _ in range(5)), *(_cycle(tag=vague, cost=3.0) for _ in range(5))])
     item = _by_key(habits.playbook(h))["brief_clearly"]
     assert item.saving == pytest.approx(5 * 0.5 * (3.0 - 1.0)) and item.n == 5
-    assert "costing 3.0x a clear ask of the same kind" in item.evidence
+    assert item.sources == ("reported",)
+    assert "the median one cost 3.0x a clear ask of the same kind" in item.evidence
     assert "most often missing: reproduce, files" in item.evidence
     # The example is the line your asks most often lacked.
     assert item.example == catalogue.BRIEF_LINES["repro"][1]
@@ -1288,6 +1300,308 @@ def test_the_agents_table_feeds_the_model_veto(tmp_path, pricing):
     assert by_task["all"]["cycles"] == 2 and by_task["bugfix"]["redo_pct"] == pytest.approx(50.0)
 
 
+# -- pieces of work, rework chains, planning and rates -----------------------------------------
+
+
+_PLAN_TEXT = "# Plan\n\n1. Edit src/app.py\n2. Run tests/test_app.py\n"
+_PLAN_INPUT = {"plan": _PLAN_TEXT}
+_CORRECTION = "no, that's wrong, it's broken"
+
+
+def _said(second: int, text: str, **kw) -> dict:
+    return user_str_line(text, origin={"kind": "human"}, timestamp=_ts(second), **kw)
+
+
+def _edit_reply(second: int, n: int, *, output: int = 500, path: str = "src/app.py") -> list[dict]:
+    """A reply that edits ``path``, then says it is done. ``output`` tokens
+    set what the cycle costs, so each cycle of a test has its own amount."""
+    return [
+        turn_line(content=[tool_use_block("Edit", f"tu_e{n}", {"file_path": path, "old_string": "a", "new_string": "b"})],
+                  model=MODEL, timestamp=_ts(second + 1), output_tokens=output),
+        user_block_line([tool_result_block(f"tu_e{n}", "ok")], timestamp=_ts(second + 2)),
+        turn_line(content=[{"type": "text", "text": "Done."}], model=MODEL, timestamp=_ts(second + 3),
+                  output_tokens=output),
+    ]
+
+
+def _plan_call(second: int, plan: dict | None = None) -> dict:
+    return turn_line(content=[tool_use_block("ExitPlanMode", "tu_p", _PLAN_INPUT if plan is None else plan)],
+                     model=MODEL, timestamp=_ts(second))
+
+
+def _queued(second: int, text: str) -> dict:
+    """A message you typed while Claude worked: the attachment's own line is
+    written some time after you typed it."""
+    line = attachment_line("queued_command", prompt=text, commandMode="prompt", origin={"kind": "human"},
+                           timestamp=_ts(second))
+    line["timestamp"] = _ts(second + 15)
+    return line
+
+
+def _work_session(tmp_path, name: str, lines: list[dict]):
+    top = _parse(tmp_path, f"{name}.jsonl", lines, kind="top-level")
+    return NS(top=top, subs=[], session_id=name, project_dir="p", slug="p")
+
+
+def _corrected_session(tmp_path, corrections: int = 3):
+    """A change delivered by an edit, then ``corrections`` typed corrections, each
+    answered with another edit of the same file; each cycle costs more."""
+    lines = [_said(0, "add the login form to src/app.py"), *_edit_reply(0, 0, output=500)]
+    for n in range(1, corrections + 1):
+        lines += [_said(20 * n, _CORRECTION), *_edit_reply(20 * n, n, output=500 * (n + 1))]
+    return NS(sessions=[_work_session(tmp_path, "s1", lines)])
+
+
+def test_pieces_of_work_are_drawn_with_no_feedback_at_all(tmp_path, pricing):
+    h = habits.collect(_corrected_session(tmp_path), pricing)
+    (piece,) = h.pieces
+    # Nobody rated it: it has no outcome, and says where it came from.
+    assert (piece.outcome, piece.source, piece.alone) == (None, "transcript", False)
+    assert (piece.cycles, piece.substantive, piece.rework, piece.shape) == (4, 4, 3, "no_plan")
+    assert piece.cost == pytest.approx(sum(c.cost for c in h.cycles))
+    assert piece.rework_cost == pytest.approx(sum(c.cost for c in h.cycles[1:]))
+    assert (piece.slow, piece.helped, piece.worth, piece.handoff, piece.plan) == ((), (), None, None, None)
+
+    section = habits.section_from(h)
+    # Every row not keyed on an outcome shows without feedback: the shape's row counts the piece.
+    (row,) = _rows(_table(section, "habits_by_shape"))
+    assert (row["shape"], row["work_pieces"], row["pieces"], row["met_pct"]) == ("no_plan", 1, 0, None)
+    # What is keyed on an outcome waits for one.
+    assert _rows(_table(section, "habits_outcomes")) == []
+    assert "cost_per_met" not in {r["item"] for r in _rows(_table(section, "habits_digest"))}
+    assert any(note.startswith("No feedback yet") for note in section.notes)
+
+
+def test_a_piece_you_rated_is_not_drawn_a_second_time(tmp_path, pricing):
+    h = habits.collect(NS(sessions=[_plan_session(tmp_path, "s1")]), pricing)
+    (piece,) = h.pieces
+    assert (piece.source, piece.outcome) == ("your feedback", "met")
+    # A rated piece is one piece of work, and the one rated piece.
+    (row,) = _rows(_table(habits.section_from(h), "habits_by_shape"))
+    assert (row["work_pieces"], row["pieces"]) == (1, 1)
+    # A dashboard rating covers the whole session the same way.
+    rated = habits.collect(_corrected_session(tmp_path), pricing, ratings={"s1": {"outcome": "partly"}})
+    assert [(p.source, p.outcome) for p in rated.pieces] == [("dashboard rating", "partly")]
+
+
+def test_the_whole_chain_of_corrections_is_the_redo_cost_of_the_work_before_it(tmp_path, pricing):
+    h = habits.collect(_corrected_session(tmp_path, corrections=3), pricing)
+    delivered, *chain = h.cycles
+    assert len(chain) == 3
+    # Three corrections after one delivery: that work was redone, at what all three cost.
+    assert delivered.redone
+    assert delivered.redo_cost == pytest.approx(sum(c.cost for c in chain))
+    # A correction is rework, not work that was redone: nothing is counted twice.
+    assert [(c.redone, c.redo_cost) for c in chain] == [(False, 0.0)] * 3
+    assert sum(c.redo_cost for c in h.cycles) == pytest.approx(h.pieces[0].rework_cost)
+    by_task = {r["task"]: r for r in _rows(_table(habits.section_from(h), "habits_by_task"))}
+    assert by_task["all"]["redo_pct"] == pytest.approx(25.0)
+
+
+def test_a_chain_of_rework_ends_at_the_next_message_that_is_not_rework(tmp_path, pricing):
+    lines = [_said(0, "add the login form to src/app.py"), *_edit_reply(0, 0)]
+    lines += [_said(20, _CORRECTION), *_edit_reply(20, 1, output=700)]
+    lines += [_said(40, "now write the docs for it in docs/app.md"), *_edit_reply(40, 2, path="docs/app.md")]
+    lines += [_said(60, _CORRECTION), *_edit_reply(60, 3, path="docs/app.md", output=900)]
+    h = habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing)
+    first, fix, docs, docs_fix = h.cycles
+    assert (first.redone, fix.redone, docs.redone, docs_fix.redone) == (True, False, True, False)
+    assert first.redo_cost == pytest.approx(fix.cost) and docs.redo_cost == pytest.approx(docs_fix.cost)
+
+
+def test_a_cycle_that_called_exit_plan_mode_is_planned_whatever_came_back(tmp_path, pricing):
+    lines = [
+        _said(0, "plan the retry for src/app.py"),
+        # No plan text in the call: the parser keeps no plan, but Claude did call ExitPlanMode.
+        _plan_call(1, {}),
+        user_block_line([tool_result_block("tu_p", "ok")], timestamp=_ts(2)),
+        _reply(3, text="Planned."),
+        _said(10, "write the docs for it"),
+        _reply(11, text="Done."),
+    ]
+    session = _work_session(tmp_path, "s1", lines)
+    assert session.top.turns[0].plan_stats is None and session.top.turns[0].tool_calls_by_tool == {"ExitPlanMode": 1}
+    first, second = habits.collect(NS(sessions=[session]), pricing).cycles
+    assert first.planned and first.plan_cost > 0
+    # An approval in the dialog says nothing about later messages.
+    assert not second.planned
+
+
+def test_the_build_after_a_typed_approval_is_planned_until_the_piece_ends(tmp_path, pricing):
+    sent_back = user_block_line(
+        [tool_result_block("tu_p", _SENT_BACK + "add a step for the docs", is_error=True)],
+        toolDenialKind="user-rejected", timestamp=_ts(2),
+    )
+    clear = "<command-name>/clear</command-name>\n<command-message>clear</command-message>\n<command-args></command-args>"
+    lines = [
+        _said(0, "plan the retry for src/app.py"), _plan_call(1), sent_back,
+        _said(10, "go ahead"), *_edit_reply(10, 1),
+        _said(30, "now add the docs for it"), *_edit_reply(30, 2, path="docs/app.md"),
+        _said(50, clear), _said(60, "refactor the parser module"), *_edit_reply(60, 3, path="src/parser.py"),
+    ]
+    session = _work_session(tmp_path, "s1", lines)
+    assert session.top.turns[0].plan_stats.outcome == "approved_by_message"
+    planned, go, docs, other = habits.collect(NS(sessions=[session]), pricing).cycles
+    assert planned.planned and go.planned and docs.planned
+    # A /clear starts another piece: the plan was for the one before it.
+    assert not other.planned
+
+
+def test_plan_hard_stays_quiet_and_says_so_when_most_hard_work_is_already_planned():
+    hard = CaptureTag(level="hard")
+    planned = [_cycle(tag=hard, planned=True) for _ in range(24)]
+    unplanned = [_cycle(tag=hard) for _ in range(5)]
+    h = Habits(cycles=[*planned, *unplanned])
+    assert habits.plan_hard_already(h) == (24, 29)
+    # It is no playbook card with an amount, so it never becomes a tip.
+    assert "plan_hard" not in _by_key(habits.playbook(h))
+    rows = {r["item"]: r for r in _rows(habits.digest_table(h))}
+    assert (rows["plan_hard"]["what"], rows["plan_hard"]["value"]) == ("Planning hard work first", "Already doing this")
+    assert rows["plan_hard"]["detail"] == "24 of 29 hard asks were planned, and none of the others was redone"
+    # One of the others redone, too few hard asks, or most of them not planned: nothing to say.
+    redone = Habits(cycles=[*planned, _cycle(tag=hard, redone=True), *unplanned[:4]])
+    assert habits.plan_hard_already(redone) is None
+    assert habits.plan_hard_already(Habits(cycles=[*planned[:3], *unplanned[:1]])) is None
+    assert habits.plan_hard_already(Habits(cycles=[*planned[:5], *unplanned])) is None
+    assert "plan_hard" not in {r["item"] for r in _rows(habits.digest_table(redone))}
+
+
+def _fixed_plan_session(tmp_path, name: str, *, typed: int, queued: int):
+    """A plan approved in the dialog, a build in which you typed ``queued``
+    corrections while Claude worked, then ``typed`` more as messages."""
+    lines = [
+        _said(0, "plan the retry for src/app.py"), _plan_call(1),
+        user_block_line([tool_result_block("tu_p", "User has approved your plan.")], timestamp=_ts(2)),
+    ]
+    at = 3
+    for n in range(queued):
+        lines += [
+            turn_line(content=[tool_use_block("Bash", f"tu_b{n}", {"command": "ls"})], model=MODEL, timestamp=_ts(at)),
+            _queued(at + 1, _CORRECTION),
+            user_block_line([tool_result_block(f"tu_b{n}", "ok")], timestamp=_ts(at + 30)),
+        ]
+        at += 40
+    lines += _edit_reply(at, 0)
+    at += 10
+    for n in range(typed):
+        lines += [_said(at, _CORRECTION), *_edit_reply(at, 10 + n)]
+        at += 10
+    return _work_session(tmp_path, name, lines)
+
+
+def test_fixes_after_a_plan_count_what_you_typed_while_claude_worked_and_need_min_group_plans(tmp_path, pricing):
+    sessions = [_fixed_plan_session(tmp_path, f"s{n}", typed=1, queued=2) for n in range(habits.MIN_GROUP)]
+    assert [t.queued_correction for t in sessions[0].top.turns].count(True) == 2
+    h = habits.collect(NS(sessions=sessions), pricing)
+    # One typed correction and two queued: three fixes a plan, which typed messages alone would miss.
+    assert [(p.typed, p.queued, p.fixes) for p in h.plan_fixes] == [(1, 2, 3)] * habits.MIN_GROUP
+    found = habits.fixes_after_plan(h)
+    assert (found.plans, found.fixed, found.fixes, found.queued) == (5, 5, 15, 10)
+    assert found.cost == pytest.approx(sum(p.cost for p in h.plan_fixes)) and found.cost > 0
+    assert habits.fixes_after_plan(h, "plan_build") == found and habits.fixes_after_plan(h, "plan_only") is None
+    (row,) = _rows(_table(habits.section_from(h), "habits_by_shape"))
+    assert (row["plans_built"], row["plans_fixed"], row["plan_fixes"]) == (5, 5, 15)
+    # Under MIN_GROUP plans it says nothing, in the figure or in the table.
+    few = habits.collect(NS(sessions=sessions[:-1]), pricing)
+    assert len(few.plan_fixes) == habits.MIN_GROUP - 1 and habits.fixes_after_plan(few) is None
+    (thin,) = _rows(_table(habits.section_from(few), "habits_by_shape"))
+    assert (thin["plans_built"], thin["plans_fixed"], thin["plan_fixes"]) == (None, None, None)
+    assert thin["work_pieces"] == habits.MIN_GROUP - 1
+
+
+def test_a_plan_with_fewer_than_three_fixes_is_counted_but_not_called_fixed(tmp_path, pricing):
+    sessions = [_fixed_plan_session(tmp_path, f"s{n}", typed=1, queued=0) for n in range(habits.MIN_GROUP)]
+    found = habits.fixes_after_plan(habits.collect(NS(sessions=sessions), pricing))
+    assert (found.plans, found.fixed, found.fixes, found.queued, found.cost) == (5, 0, 5, 0, 0.0)
+
+
+def test_a_reply_to_a_plan_and_a_plan_with_nothing_after_it_are_no_fixes(tmp_path, pricing):
+    lines = [
+        _said(0, "plan the retry for src/app.py", permissionMode="plan"), _plan_call(1),
+        user_block_line([tool_result_block("tu_p", "User has approved your plan.")], timestamp=_ts(2)),
+    ]
+    session = _work_session(tmp_path, "s1", lines)
+    assert habits.collect(NS(sessions=[session]), pricing).plan_fixes == []
+    replied = [
+        *lines, _reply(3, text="Built."),
+        _said(10, _CORRECTION, permissionMode="plan"), _reply(11, text="Replanning."),
+    ]
+    (fix,) = habits.collect(NS(sessions=[_work_session(tmp_path, "s2", replied)]), pricing).plan_fixes
+    assert fix.fixes == 0
+
+
+def test_a_correction_you_told_the_plan_check_was_not_a_fix_is_not_counted(tmp_path, pricing):
+    check = {"question": catalogue.PLAN_CHECK_QUESTION, "header": catalogue.PLAN_CHECK_HEADER}
+
+    def build(name: str, word: str):
+        label = next(label for w, label, _description in catalogue.PLAN_CHECK_OPTIONS if w == word)
+        lines = [
+            _said(0, "plan the retry for src/app.py"), _plan_call(1),
+            user_block_line([tool_result_block("tu_p", "User has approved your plan.")], timestamp=_ts(2)),
+            *_edit_reply(3, 0),
+            _said(10, _CORRECTION),
+            _reply(11, tool_use_block("AskUserQuestion", "tu_q", {"questions": [check]})),
+            user_block_line([tool_result_block("tu_q", "ok")],
+                            toolUseResult={"questions": [check], "answers": {check["question"]: label}},
+                            timestamp=_ts(12)),
+            _reply(13, text="Fixed."),
+        ]
+        return habits.collect(NS(sessions=[_work_session(tmp_path, name, lines)]), pricing)
+
+    assert [p.fixes for p in build("a", "gap").plan_fixes] == [1]
+    assert [p.fixes for p in build("b", "none").plan_fixes] == [0]
+
+
+def test_cycles_hold_the_messages_that_asked_for_something(tmp_path, pricing):
+    lines = [
+        _said(0, "add the login form to src/app.py"), *_edit_reply(0, 0),
+        _said(10, "go ahead"), _reply(11),
+        _said(20, "how is it going?"), _reply(21),
+        _said(30, "rename the helper in src/app.py"),
+        turn_line(content=[tool_use_block("Bash", "tu_w", {"command": "ls"})], model=MODEL, timestamp=_ts(31)),
+        _queued(32, "also rename it to build_index"),
+        user_block_line([tool_result_block("tu_w", "ok")], timestamp=_ts(50)),
+        *_edit_reply(50, 1),
+        _said(70, "plan the cleanup", permissionMode="plan"), _plan_call(71),
+        user_block_line([tool_result_block("tu_p", _SENT_BACK + "make step two smaller", is_error=True)],
+                        toolDenialKind="user-rejected", timestamp=_ts(72)),
+        _said(80, "make step two smaller", permissionMode="plan"), _reply(81, text="Replanned."),
+    ]
+    h = habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing)
+    # A message, a go-ahead, a status check, a message with one typed while it ran, a plan, a reply to a plan.
+    assert [c.asks for c in h.cycles] == [1, 0, 0, 2, 1, 0]
+    assert CycleFact(session_id="s", ts=None, week="", cost=0.0, turns=1).asks == 1
+
+
+def test_rates_per_message_divide_by_the_messages_that_asked_for_something():
+    h = Habits()
+    waste = {}
+    for week in WEEKS[:4]:
+        # Four messages a week, one of them a go-ahead: three asked for something.
+        h.cycles.extend([_cycle(week), _cycle(week), _cycle(week), _cycle(week, asks=0)])
+        waste[week] = 3.0
+    item = Item("quiet_output", 1.0, 1, ("inferred",), "", waste=waste)
+    assert habits._weekly_rates(h, item) == [1.0, 1.0, 1.0, 1.0]
+    # A week with too few that asked for something is a dash, however many messages it holds.
+    thin = Habits(cycles=[_cycle(WEEKS[0]), _cycle(WEEKS[0]), *[_cycle(WEEKS[0], asks=0) for _ in range(3)]])
+    assert habits._weekly_rates(thin, Item("quiet_output", 1.0, 1, ("inferred",), "", waste={WEEKS[0]: 2.0})) == [None]
+    # A message with two typed while Claude worked counts as three.
+    busy = Habits(cycles=[_cycle(WEEKS[0], asks=3)])
+    assert habits._weekly_rates(busy, Item("quiet_output", 1.0, 1, ("inferred",), "", waste={WEEKS[0]: 3.0})) == [1.0]
+
+
+def test_what_a_habit_already_saves_is_worked_out_per_message_that_asked():
+    h = Habits()
+    waste = {}
+    for week, rate in zip(WEEKS, [1.0, 1.0, 0.1, 0.1]):
+        # Three that asked for something and a go-ahead a week: the saving is that rate over the three.
+        h.cycles.extend([_cycle(week), _cycle(week, asks=2), _cycle(week, asks=0)])
+        waste[week] = 3 * rate
+    word, weeks, adopted = habits.trend(h, Item("quiet_output", 1.0, 1, ("inferred",), "", waste=waste))
+    assert (word, weeks) == ("falling", "100 100 10 10")
+    assert adopted == pytest.approx(0.9 * 3)
+
+
 # -- what an agent's calls looked like ------------------------------------------------------
 
 
@@ -1819,9 +2133,11 @@ def test_feedback_that_contradicts_easy_reports_lowers_effort_fits_confidence():
     easy, normal = CaptureTag(level="easy"), CaptureTag(level="normal")
     h = Habits(cycles=[
         # thinking_cost/output_cost keep the combined thinking share well
-        # over the shared 30% gate (0.2 of 0.3 output = 66.7%, UX-3).
-        *(_cycle(tag=easy, effort="high", thinking_cost=0.2, output_cost=0.3, outcome="missed") for _ in range(5)),
-        *(_cycle(tag=easy, effort="high", thinking_cost=0.2, output_cost=0.3, outcome="met") for _ in range(3)),
+        # over the shared 30% gate (0.5 of 0.6 output = 83%, UX-3), and over
+        # hard work at the same effort.
+        *_effort_cycles(5, outcome="missed"),
+        *_effort_cycles(3, outcome="met"),
+        *_effort_cycles(5, "hard", thinking_cost=0.1, output_cost=0.3),
         *(_cycle(tag=normal, outcome="missed") for _ in range(1)),
         *(_cycle(tag=normal, outcome="met") for _ in range(4)),
     ])
@@ -2373,12 +2689,12 @@ def test_your_answers_add_to_what_the_tags_say_about_vague_asks():
     clear = CaptureTag(task="bugfix", brief="clear")
     vague = CaptureTag(task="bugfix", brief="vague", missing=("repro",))
     h = Habits(
-        cycles=[*(_cycle(tag=clear) for _ in range(3)), *(_cycle(tag=vague, cost=3.0) for _ in range(5))],
+        cycles=[*(_cycle(tag=clear) for _ in range(5)), *(_cycle(tag=vague, cost=3.0) for _ in range(5))],
         pieces=[_gave(why=("left_out",), followups=1) for _ in range(3)],
     )
     item = _by_key(habits.playbook(h))["brief_clearly"]
     assert item.sources == ("reported", "your feedback") and item.n == 5
-    assert "5 of 8 asks were partial or vague" in item.evidence
+    assert "5 of 10 asks were partial or vague" in item.evidence
     assert "3 of 3 follow-ups were things your request left out" in item.evidence
 
 
@@ -2566,3 +2882,428 @@ def test_pieces_that_answered_nothing_would_have_helped_count_in_the_total():
     # A piece where the question wasn't answered isn't in it.
     unasked = Habits(pieces=[_gave(helped=("context",)) for _ in range(3)] + [_gave(helped_given=False) for _ in range(5)])
     assert _by_key(habits.playbook(unasked))["brief_clearly"].evidence.endswith("3 of 3 pieces cheaper.")
+
+
+def test_a_reply_to_an_agents_report_counts_for_the_message_that_started_the_agent(tmp_path, pricing):
+    import test_capture as tc
+
+    top = tc._top(tmp_path, [
+        tc._tagged(),
+        tc._ask(1, "research this"),
+        tc._background(2, "toolu_A"),
+        tc._launched(3, "toolu_A"),
+        tc._reply(4, text="Launched."),
+        tc._ask(10, "something else"),
+        tc._reply(11, text="Done."),
+        tc._report(20, "a1"),
+        tc._reply(21, text="It found the cause."),
+    ])
+    agent = tc._agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    corpus = NS(sessions=[NS(top=top, subs=[agent], session_id="s1", workflows=(), project_dir="", slug="s")])
+    first, second = habits.collect(corpus, pricing).cycles
+    reply = tc.REPLY_USD
+    # Its own two replies and the late reply; the agent's turn is in the cost, not main_cost.
+    assert first.main_cost == pytest.approx(3 * reply) and first.cost == pytest.approx(4 * reply)
+    assert second.main_cost == pytest.approx(reply) and second.cost == pytest.approx(reply)
+    assert (first.tokens, second.tokens) == (4 * tc.REPLY_TOKENS, tc.REPLY_TOKENS)
+    # The timeline is still the cycle's own turns.
+    assert (first.turns, second.turns) == (2, 2)
+
+
+# -- what each message is flagged with ---------------------------------------------------
+
+
+def _human(second: int, text: str) -> dict:
+    return user_str_line(text, origin={"kind": "human"}, timestamp=_ts(second))
+
+
+def test_a_thank_you_and_a_message_after_a_limit_pause_are_flagged_quiet_and_paused(tmp_path, pricing):
+    """``quiet`` marks a message that asks for nothing (a thank-you, a
+    go-ahead, a status check) and ``limit_pause`` one that came after a
+    usage-limit pause: neither starts a new task, so neither is a reason to
+    clear."""
+    limit = turn_line(
+        message_id="msg_synth", model="<synthetic>", isApiErrorMessage=True, input_tokens=0, output_tokens=0,
+        content=[{"type": "text", "text": "You've hit your session limit · resets 3pm (Europe/London)"}],
+        timestamp=_ts(30),
+    )
+    lines = [
+        _note(0, ["task"]),
+        _human(1, "fix the login bug"), _reply(2, text="Fixed.\n[cg: task=bugfix]"),
+        _human(10, "thanks"), _reply(11, text="You're welcome."),
+        _human(20, "any updates?"), _reply(21, text="Nothing running."),
+        limit,
+        _human(40, "now fix the logout bug as well"), _reply(41),
+    ]
+    top = _parse(tmp_path, "top.jsonl", lines, kind="top-level")
+    bundle = NS(top=top, subs=[], session_id="s1", project_dir="p", slug="p")
+    first, thanks, status, resumed = habits.collect(NS(sessions=[bundle]), pricing).cycles
+    assert [c.quiet for c in (first, thanks, status, resumed)] == [False, True, True, False]
+    assert [c.limit_pause for c in (first, thanks, status, resumed)] == [False, False, False, True]
+
+
+def test_a_message_is_outside_capture_when_its_session_or_its_day_came_before_capture(tmp_path, pricing):
+    tag = "Done.\n[cg: task=bugfix]"
+    reached = _parse(tmp_path, "a.jsonl", [
+        _note(0, ["task"]),
+        _human(1, "first"), _reply(2, text=tag),
+        _human(10, "second"), _reply(11, text=tag),
+    ], kind="top-level")
+    plain = _parse(tmp_path, "b.jsonl", [_human(20, "third"), _reply(21)], kind="top-level")
+    corpus = NS(sessions=[
+        NS(top=reached, subs=[], session_id="a", project_dir="p", slug="p"),
+        NS(top=plain, subs=[], session_id="b", project_dir="p", slug="p"),
+    ])
+    everything = habits.collect(corpus, pricing, tz="UTC")
+    assert [c.outside_capture for c in everything.cycles] == [False, False, True]
+    after_first = habits.collect(corpus, pricing, tz="UTC", since="2026-09-18T12:00:05Z")
+    assert after_first.since == "2026-09-18T12:00:05Z"
+    assert [c.outside_capture for c in after_first.cycles] == [True, False, True]
+
+
+def test_a_message_that_carried_out_an_approved_plan_is_flagged_as_the_build(tmp_path, pricing):
+    """A plan's approval is part of the message that built it: what that
+    message cost is the plan's work, not how the ask was worded."""
+    carrying = habits.CycleFact(session_id="s", ts=None, week="", cost=1.0, turns=1, tag=CaptureTag(plan="following"))
+    assert habits._carries_out_plan(NS(turns=[], settled=carrying.tag))
+    for word in (None, "none", "made"):
+        assert not habits._carries_out_plan(NS(turns=[], settled=CaptureTag(plan=word) if word else None))
+    approved = NS(plan_stats=NS(outcome="approved"))
+    asked = NS(plan_stats=None)
+    built = NS(turns=[approved, asked], settled=None)
+    assert habits._carries_out_plan(built)
+    # An approval in the cycle's last reply has nothing after it to build.
+    assert not habits._carries_out_plan(NS(turns=[asked, approved], settled=None))
+
+
+# -- brief_clearly: partial and vague asks against clear ones, like for like ----------------
+
+
+def _briefed(brief: str, costs, *, task: str = "bugfix", level: str | None = None, **kw) -> list[CycleFact]:
+    """One message per cost in ``costs``, each Claude called ``brief`` (and ``level``)."""
+    tag = CaptureTag(task=task, brief=brief, level=level)
+    return [_cycle(cost=cost, tag=tag, **kw) for cost in costs]
+
+
+def test_each_unclear_ask_is_set_against_the_median_clear_ask_of_its_level():
+    h = Habits(cycles=[
+        *_briefed("clear", [1.0] * 3, level="easy"), *_briefed("clear", [4.0] * 3, level="hard"),
+        *_briefed("vague", [2.0] * 3, level="easy"), *_briefed("partial", [5.0] * 2, level="hard"),
+    ])
+    found = habits.brief_comparison(h)
+    assert (found.unclear, found.clear, found.tasks) == (5, 6, 1)
+    # Half of how far each went over its own level's median clear ask.
+    assert found.saving == pytest.approx(3 * 0.5 * 1.0 + 2 * 0.5 * 1.0)
+    assert found.probability == pytest.approx(1.0)
+    assert found.ratio == pytest.approx(2.0) and found.holds
+
+
+def test_a_level_with_fewer_than_three_clear_asks_uses_the_whole_kind_of_task():
+    h = Habits(cycles=[
+        *_briefed("clear", [1.0] * 2, level="easy"), *_briefed("clear", [3.0] * 3, level="normal"),
+        *_briefed("vague", [4.0] * 5, level="easy"),
+    ])
+    # The median of all five clear asks is 3.0; the two easy ones alone would say 1.0.
+    assert habits.brief_comparison(h).saving == pytest.approx(5 * 0.5 * (4.0 - 3.0))
+
+
+def test_a_message_that_carried_out_a_plan_is_left_out_of_both_sides():
+    plan_builds = dict(executes_plan=True)
+    h = Habits(cycles=[
+        *_briefed("clear", [1.0] * 5), *_briefed("clear", [100.0] * 2, **plan_builds),
+        *_briefed("vague", [3.0] * 5), *_briefed("vague", [50.0] * 3, **plan_builds),
+    ])
+    found = habits.brief_comparison(h)
+    assert (found.unclear, found.clear) == (5, 5)
+    assert found.saving == pytest.approx(5 * 0.5 * (3.0 - 1.0))
+    # With only plan builds on one side there is nothing to compare.
+    only_builds = Habits(cycles=[*_briefed("clear", [1.0] * 5), *_briefed("vague", [3.0] * 5, **plan_builds)])
+    assert habits.brief_comparison(only_builds) is None
+
+
+def test_an_ask_is_compared_at_what_its_own_work_cost_not_the_context_it_began_with():
+    late = dict(stale_cost=2.0)
+    h = Habits(cycles=[*_briefed("clear", [1.0] * 5), *_briefed("vague", [3.0] * 5, **late)])
+    found = habits.brief_comparison(h)
+    assert found.saving == pytest.approx(0.0) and found.ratio == pytest.approx(1.0) and not found.holds
+
+
+def test_the_sum_is_signed_and_the_comparison_needs_the_unclear_asks_to_cost_more_most_of_the_time():
+    clear = _briefed("clear", [2.0] * 5)
+    # Three dearer and two cheaper: 3 x 0.5 - 2 x 0.5 is a saving, and 15 of 25 comparisons (0.6) is enough.
+    enough = habits.brief_comparison(Habits(cycles=[*clear, *_briefed("vague", [3.0] * 3), *_briefed("vague", [1.0] * 2)]))
+    assert enough.saving == pytest.approx(0.5)
+    assert enough.probability == pytest.approx(habits.BRIEF_MIN_PROBABILITY) and enough.holds
+    # Two dearer and three cheaper cost less overall, and win only 10 of 25.
+    fewer = habits.brief_comparison(Habits(cycles=[*clear, *_briefed("vague", [3.0] * 2), *_briefed("vague", [1.0] * 3)]))
+    assert fewer.saving == pytest.approx(-0.5) and fewer.probability == pytest.approx(0.4) and not fewer.holds
+    # One very dear ask makes the sum positive, but it won 5 of 25: not often enough.
+    outlier = Habits(cycles=[*clear, *_briefed("vague", [20.0]), *_briefed("vague", [1.9] * 4)])
+    found = habits.brief_comparison(outlier)
+    assert found.saving == pytest.approx(0.5 * 18.0 - 4 * 0.5 * 0.1) and found.probability == pytest.approx(0.2)
+    assert not found.holds and "brief_clearly" not in _by_key(habits.playbook(outlier))
+    assert not habits.brief_card_shown(outlier)
+
+
+def test_a_kind_of_task_needs_min_group_clear_and_unclear_asks_to_count():
+    short_clear = Habits(cycles=[*_briefed("clear", [1.0] * 4), *_briefed("vague", [3.0] * 6)])
+    short_unclear = Habits(cycles=[*_briefed("clear", [1.0] * 6), *_briefed("vague", [3.0] * 4)])
+    assert habits.MIN_GROUP == 5
+    assert habits.brief_comparison(short_clear) is None and habits.brief_comparison(short_unclear) is None
+    both = Habits(cycles=[
+        *_briefed("clear", [1.0] * 5), *_briefed("vague", [3.0] * 5),
+        *_briefed("clear", [1.0] * 4, task="feature"), *_briefed("vague", [9.0] * 9, task="feature"),
+    ])
+    found = habits.brief_comparison(both)
+    # Feature has too few clear asks, so only bugfix is compared.
+    assert (found.tasks, found.unclear, found.clear) == (1, 5, 5)
+
+
+def test_the_brief_card_shows_when_the_comparison_holds_or_your_answers_say_requests_left_things_out():
+    holds = Habits(cycles=[*_briefed("clear", [1.0] * 5), *_briefed("vague", [3.0] * 5)])
+    item = _by_key(habits.playbook(holds))["brief_clearly"]
+    assert item.saving == pytest.approx(5.0) and item.tagged
+    assert habits.brief_card_shown(holds)
+    assert not habits.brief_card_shown(Habits(cycles=[*_briefed("clear", [1.0] * 5), *_briefed("vague", [1.0] * 5)]))
+    assert not habits.brief_card_shown(Habits())
+    told = Habits(pieces=[_gave(why=("left_out",), followups=2) for _ in range(3)])
+    assert habits.brief_card_shown(told)
+
+
+def _briefs_notes(h: Habits) -> list[str]:
+    return _table(habits.section_from(h), "habits_briefs").notes
+
+
+def _words(sentence: str) -> int:
+    return len(sentence.split())
+
+
+def test_the_briefs_table_says_how_its_averages_compare_with_the_card():
+    holds = Habits(cycles=[*_briefed("clear", [1.0] * 5), *_briefed("vague", [3.0] * 5)])
+    first, mixed = _briefs_notes(holds)
+    assert first == "Compared like for like, the median partial or vague ask cost 3.0x a clear one: the same kind of task, plan builds left out."
+    assert mixed.startswith("The averages above mix in plan builds and every kind of work")
+    # The plain averages are of every message, plan builds too: the clear ones can look the dearer.
+    mixed_up = Habits(cycles=[*_briefed("clear", [1.0] * 5), *_briefed("clear", [100.0] * 2, executes_plan=True),
+                              *_briefed("vague", [3.0] * 5)])
+    rows = {r["brief"]: r for r in _rows(_table(habits.section_from(mixed_up), "habits_briefs"))}
+    assert rows["clear"]["avg_cost"] > rows["vague"]["avg_cost"]
+    assert _briefs_notes(mixed_up)[0] == first
+
+    fails = Habits(cycles=[*_briefed("clear", [2.0] * 5), *_briefed("vague", [3.0] * 2), *_briefed("vague", [1.0] * 3)])
+    first, mixed = _briefs_notes(fails)
+    assert first == (
+        "Compared like for like, a partial or vague ask cost more than a clear one in 40% of the comparisons. "
+        "That is too few to say. Work habits shows no card for them."
+    )
+    few = Habits(cycles=[*_briefed("clear", [2.0] * 5), *_briefed("vague", [3.0] * 2)])
+    first, mixed = _briefs_notes(few)
+    assert first == (
+        "There are too few clear and unclear asks of one kind of task to compare them like for like. "
+        "Work habits shows no card for them."
+    )
+    # Your own answers can show the card with no comparison, and the note doesn't say it hides.
+    told = Habits(cycles=[*_briefed("clear", [2.0] * 5), *_briefed("vague", [3.0] * 2)],
+                  pieces=[_gave(why=("left_out",), followups=2) for _ in range(3)])
+    assert "no card" not in _briefs_notes(told)[0]
+    for h in (holds, fails, few, told):
+        assert all(_words(sentence) <= 25 for note in _briefs_notes(h) for sentence in note.split(". "))
+    assert _table(habits.section_from(Habits()), "habits_briefs").notes == []
+
+
+def test_the_brief_skill_is_offered_with_the_templates_only_while_the_brief_card_shows():
+    holds = Habits(cycles=[*_briefed("clear", [1.0] * 5), *_briefed("vague", [3.0] * 5)])
+    shown = _table(habits.section_from(holds), "habits_brief_templates")
+    assert shown.notes == [habits.BRIEF_OFFER]
+    hidden = _table(habits.section_from(Habits(cycles=[*_briefed("clear", [1.0] * 5), *_briefed("vague", [1.0] * 5)])),
+                    "habits_brief_templates")
+    assert hidden.notes == []
+    assert all("/cg-brief" not in row["template"] and "/cg-brief" not in row["why"] for row in _rows(hidden))
+
+
+# -- trends ---------------------------------------------------------------------------------
+
+
+def _in_weeks(per_week: list[int], *, tagged: int | None = None) -> list[CycleFact]:
+    """``per_week[n]`` messages in week ``n`` of ``WEEKS``; the first ``tagged`` of each week (all, when
+    ``None``) carry a tag."""
+    cycles = []
+    for week, count in zip(WEEKS, per_week):
+        for n in range(count):
+            marked = tagged is None or n < tagged
+            cycles.append(_cycle(week, tag=CaptureTag(task="bugfix") if marked else None))
+    return cycles
+
+
+def test_the_weeks_before_capture_was_turned_on_are_dashes_for_what_needs_it():
+    h = Habits(cycles=_in_weeks([3] * 5), tz="UTC", since="2026-08-19T10:00:00+00:00")
+    waste = dict(zip(WEEKS, [3.0, 3.0, 3.0, 1.5, 0.3]))
+    # Its dollars come from a tag: the two weeks before the one capture began in can't be measured.
+    reported = Item("effort_fit", 1.0, 1, ("reported",), "", waste=waste)
+    assert habits.trend(h, reported) == ("falling", "- - 100 50 10", 0.0)
+    # What a transcript shows without capture reads the same weeks.
+    inferred = Item("quiet_output", 1.0, 1, ("inferred",), "", waste=waste, reported_share=0.0)
+    assert habits.trend(h, inferred)[1] == "100 100 100 50 10"
+    # With no start time recorded nothing is dashed.
+    assert habits.trend(Habits(cycles=_in_weeks([3] * 5), tz="UTC"), reported)[1] == "100 100 100 50 10"
+
+
+def test_a_habit_is_new_until_three_weeks_are_measured():
+    def _word(rates):
+        h, item = _weekly(rates)
+        return habits.trend(h, item)[0]
+
+    assert habits.TREND_MIN_WEEKS == 3
+    assert _word([1.0, 1.0]) == "new"
+    # A thin week doesn't count as measured.
+    assert _word([1.0, None, 1.0]) == "new"
+    assert _word([1.0, None, 1.0, 1.0]) == "steady"
+    assert _word([1.0, 0.5, 0.1]) == "falling"
+
+
+def test_a_habit_whose_every_week_is_zero_is_not_measured_rather_than_steady():
+    h, item = _weekly([0.0, 0.0, 0.0, 0.0])
+    assert habits.trend(h, item) == ("unmeasured", "0 0 0 0", 0.0)
+
+
+def test_a_habit_built_from_tags_divides_by_the_tagged_messages_of_a_week():
+    cycles = _in_weeks([3, 6, 6, 6, 6], tagged=3)
+    h = Habits(cycles=[*cycles[:3], *(c for c in cycles[3:])])
+    waste = {week: 3.0 for week in WEEKS}
+    tagged = Item("effort_fit", 1.0, 1, ("reported",), "", waste=waste, tagged=True)
+    # Three tagged messages a week: 1.0 each, however many others there were.
+    assert habits.trend(h, tagged) == ("steady", "100 100 100 100 100", 0.0)
+    everyone = Item("quiet_output", 1.0, 1, ("inferred",), "", waste=waste, reported_share=0.0)
+    assert habits.trend(h, everyone)[1] == "100 50 50 50 50"
+    # A week with nothing tagged has nothing to divide: a dash, not a zero.
+    untagged = Habits(cycles=[*(_cycle(WEEKS[0]) for _ in range(3)), *_in_weeks([0, 3, 3, 3, 3])[:12]])
+    assert habits.trend(untagged, tagged)[1] == "- 100 100 100 100"
+
+
+def test_the_habits_built_from_tags_say_so():
+    h = Habits(cycles=[
+        *_effort_cycles(5), *_effort_cycles(5, "hard", thinking_cost=0.1, output_cost=0.3),
+        *(_cycle(tag=CaptureTag(level="easy"), planned=True, plan_cost=0.5) for _ in range(5)),
+        *_briefed("clear", [1.0] * 5), *_briefed("vague", [3.0] * 5),
+    ])
+    items = _by_key(habits.playbook(h))
+    assert {key for key, item in items.items() if item.tagged} >= {"effort_fit", "skip_plan_easy", "brief_clearly"}
+    assert not any(item.tagged for key, item in items.items() if key in ("quiet_output", "clear_between"))
+
+
+# -- Work habits digest ---------------------------------------------------------------------
+
+
+def _digest(h: Habits) -> dict[str, dict]:
+    return {r["item"]: r for r in _rows(habits.digest_table(h))}
+
+
+def test_the_digest_counts_tagged_messages_from_the_day_capture_was_turned_on():
+    tag = CaptureTag(task="bugfix")
+    cycles = [
+        _cycle(tag=tag), _cycle(tag=tag), _cycle(), _cycle(),
+        # Before capture was on, or in a session it never reached.
+        _cycle(tag=tag, outside_capture=True), _cycle(outside_capture=True),
+    ]
+    row = _digest(Habits(cycles=cycles, since="2026-08-01T00:00:00+00:00"))["tagged"]
+    assert row["value"] == pytest.approx(50.0) and row["detail"] == "2 of 4 since you turned capture on"
+    assert _digest(Habits(cycles=cycles))["tagged"]["detail"] == "2 of 4"
+    assert "tagged" not in _digest(Habits(cycles=[_cycle(outside_capture=True)]))
+
+
+def test_a_habit_is_worth_trying_or_already_picked_up_never_both():
+    h, item = _weekly([1.0, 1.0, 0.1, 0.1])
+    assert habits.trend(h, item)[2] > 0
+    assert [i.key for i in habits._worth_trying(h, [item])] == [] and habits._picked_up(h, [item])
+    assert habits.playbook_table(h, [item]).rows == []
+    digest = {r[0]: r for r in habits.digest_table(h, [item]).rows}
+    assert "adopted" in digest and "top_1" not in digest
+    assert digest["adopted"][3] == habits.item_title(item)
+
+    steady, held = _weekly([0.5, 0.5, 0.5, 0.5])
+    assert [i.key for i in habits._worth_trying(steady, [held])] == ["quiet_output"]
+    assert len(habits.playbook_table(steady, [held]).rows) == 1
+    rows = {r[0]: r for r in habits.digest_table(steady, [held]).rows}
+    assert "top_1" in rows and "adopted" not in rows
+
+
+# -- the other cards -----------------------------------------------------------------------------
+
+
+def _stale(**kw) -> CycleFact:
+    return _cycle(stale_tokens=habits.STALE_TOKENS, stale_cost=0.4, stale_rewrite=0.2, **kw)
+
+
+def test_a_thank_you_a_status_check_and_a_limit_pause_are_not_a_reason_to_clear():
+    after_break = dict(gap_s=habits.LONG_BREAK_S)
+    for flag in ({"quiet": True}, {"limit_pause": True}):
+        assert "clear_between" not in _by_key(habits.playbook(Habits(cycles=[_stale(**after_break, **flag)])))
+    item = _by_key(habits.playbook(Habits(cycles=[_stale(**after_break)])))["clear_between"]
+    assert item.n == 1 and item.saving == pytest.approx(0.5 * (0.2 + 0.4))
+
+
+@pytest.mark.parametrize("prior", ["needed", "some"])
+def test_a_new_task_that_needed_the_earlier_work_is_not_a_reason_to_clear(prior):
+    tag = CaptureTag(shift="new", prior=prior)
+    h = Habits(cycles=[_stale(tag=tag, gap_s=habits.LONG_BREAK_S), _stale(tag=CaptureTag(shift="new"))])
+    item = _by_key(habits.playbook(h))["clear_between"]
+    # Only the new task that needed nothing of the earlier work counts.
+    assert item.n == 1 and item.sources == ("reported",)
+
+
+def test_a_task_that_needed_nothing_of_the_earlier_work_is_worth_a_clear_whatever_it_is_called():
+    h = Habits(cycles=[_stale(tag=CaptureTag(shift="build", prior="none"))])
+    assert _by_key(habits.playbook(h))["clear_between"].sources == ("reported",)
+
+
+def test_effort_fit_needs_easy_work_to_think_clearly_more_than_hard_work():
+    floor = habits._EFFORT_MIN_MESSAGES
+    assert habits.EFFORT_EASY_OVER_HARD_PTS == 10.0
+
+    def _fits(hard_thinking: float, hard_count: int = floor) -> bool:
+        h = Habits(cycles=[
+            *_effort_cycles(floor, thinking_cost=0.8, output_cost=1.0),
+            *_effort_cycles(hard_count, "hard", thinking_cost=hard_thinking, output_cost=1.0),
+        ])
+        return "effort_fit" in _by_key(habits.playbook(h))
+
+    # 80% against 68%: 12 points more. Against 72%: 8 points, and flat effort isn't wasted on easy work.
+    assert _fits(0.68) and not _fits(0.72) and not _fits(0.8)
+    # Nothing to compare against without enough hard work at that effort.
+    assert not _fits(0.1, hard_count=floor - 1) and not _fits(0.1, hard_count=0)
+    item = _by_key(habits.playbook(Habits(cycles=[
+        *_effort_cycles(floor, thinking_cost=0.8, output_cost=1.0),
+        *_effort_cycles(floor, "hard", thinking_cost=0.1, output_cost=1.0),
+    ])))["effort_fit"]
+    assert item.evidence == f"{floor} easy asks ran at high effort or above, and 80% of their output was thinking, against 10% for hard work."
+
+
+def test_effort_fit_needs_a_dollar_a_week_to_show():
+    floor = habits._EFFORT_MIN_MESSAGES
+
+    def _item(scale: float):
+        h = Habits(cycles=[
+            *_effort_cycles(floor, thinking_cost=0.5 * scale, output_cost=1.0 * scale),
+            *_effort_cycles(floor, "hard", thinking_cost=0.3 * scale, output_cost=1.0 * scale),
+        ])
+        return _by_key(habits.playbook(h)).get("effort_fit")
+
+    # Half the thinking of five easy asks: 5 x 0.25 over one week.
+    assert habits.MIN_SAVING == 1.0
+    assert _item(1.0).saving == pytest.approx(5 * 0.25)
+    assert _item(0.5) is None
+
+
+def test_skip_plan_easy_needs_min_group_easy_asks_and_a_dollar():
+    def _planned(count: int, cost: float):
+        h = Habits(cycles=[
+            _cycle(tag=CaptureTag(level="easy"), planned=True, plan_cost=cost) for _ in range(count)
+        ])
+        return _by_key(habits.playbook(h)).get("skip_plan_easy")
+
+    # Four planned easy asks are no pattern, however much planning they cost.
+    assert _planned(habits.MIN_GROUP - 1, 5.0) is None
+    # Five that cost 50 cents between them are not worth a habit.
+    assert _planned(habits.MIN_GROUP, 0.1) is None
+    item = _planned(habits.MIN_GROUP, 0.25)
+    assert item.saving == pytest.approx(1.25) and item.n == habits.MIN_GROUP and item.tagged

@@ -35,7 +35,7 @@ subcommands and the `/api/profiles*`, `/api/profile-schema` and
 or above. It reads the Work habits section's `habits_setups` table: for
 each kind of task Claude reported, the model and effort the main
 session ran on, the cost per message, and how often the work went well
-(your feedback where you gave it, otherwise whether your next message
+(your feedback where you gave it, otherwise whether the messages after it
 redid it). Your usual setup is the one used most. The cheaper setup is
 the cheapest with at least 5 messages that cost less and went well
 within 5 points of your usual one (`habits.SETUP_OK_TOLERANCE`),

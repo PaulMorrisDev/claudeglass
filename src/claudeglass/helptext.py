@@ -176,6 +176,11 @@ PLACEMENT: dict[str, str] = {
     "habits_prompt_flags": "advanced",
     "habits_skills": "advanced",
     "habits_tool_output": "advanced",
+    "rework_headline": "keep",
+    "rework_causes": "keep",
+    "rework_admitted": "keep",
+    "rework_by_week": "keep",
+    "rework_by_level": "keep",
     "capture_usage": "report",
     # workstyle / workflows
     "workstyle_archetypes": "advanced",
@@ -349,6 +354,19 @@ SECTION_COPY: dict[str, SectionCopy] = {
             "included. Evidence is labelled inferred, reported by Claude or your feedback.",
             act="Try the top habit for a week and watch its trend. Metrics capture ({{page:setup/capture}}) and "
             "feedback fill in the rest of the tables.",
+        ),
+    ),
+    "rework": SectionCopy(
+        title="Rework after delivery",
+        intro="How often Claude had to change work it had already delivered, why, and what to change in how you ask.",
+        help=Help(
+            shows="How many pieces of work needed changes after Claude delivered them, what that cost, and why. It "
+            "also counts the mistakes Claude admitted.",
+            read="A piece of work is one job, drawn from your sessions without asking you. A change counts only "
+            "after Claude had changed files. Each cause says where it came from: your feedback, Claude's tag, "
+            "Haiku's tag, or inferred from the transcript.",
+            act="Start with the first cause. Copy its line into your next message of that kind, and run "
+            "/cg-feedback after a piece of work so we can tell why.",
         ),
     ),
     "prompting": SectionCopy(
@@ -780,7 +798,11 @@ TABLE_COPY: dict[str, TableCopy] = {
             "saving. Also what a piece of work that met its goal cost.",
             read="Savings are a week's worth at your recent pace once there's a week of it. Under 7 days, it's the "
             "raw total so far, not stretched into a weekly rate. A habit counts as picked up when what it addresses "
-            "per message fell by a fifth or more over recent weeks.",
+            "per message fell by a fifth or more over recent weeks. Per message counts the messages that asked for "
+            "something, including those you typed while Claude worked. Go-aheads, status checks and replies to a plan "
+            "don't count. Planning hard work shows when you already plan most of it and the rest wasn't redone. "
+            "A habit you already picked up is not also listed as worth trying. Messages tagged counts from the day "
+            "you turned capture on, as the Capture page does.",
             act="Start with the first habit: Habits worth trying below has an example to copy for each.",
         ),
         columns={
@@ -794,6 +816,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "top_2": "Next",
             "top_3": "Then",
             "adopted": "Already saving",
+            "plan_hard": "Planning hard work",
             "cost_per_met": "Cost per goal met",
             "tagged": "Messages tagged",
         },
@@ -802,6 +825,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "top_2": "money",
             "top_3": "money",
             "adopted": "money",
+            "plan_hard": "str",
             "cost_per_met": "money",
             "tagged": "pct",
         },
@@ -814,7 +838,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "and was answered with a file change. A big task without a plan asks for three or more separate changes in one message sent "
             "outside plan mode. A vague correction says something went wrong, with no detail. A repeat counts only when "
             "the request before it was answered with a change. Asking how it's going counts each time, priced from "
-            "the reply to that message. Costs are at list price. A follow-up you said was Claude missing something "
+            "the reply to that message. Costs are at list price, totalled over the window the report covers, and weeks "
+            "start on Monday in your time zone. A follow-up you said was Claude missing something "
             "you had said, or a change of mind, is left out of these habits.",
             act="",
         ),
@@ -828,6 +853,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "trend": ("Trend", "Whether it's happening less or more over recent weeks."),
             "weeks": ("By week", "How often it happened per message, by week, the worst week as 100."),
             "try": ("Try instead", "What to do instead."),
+            "period": ("Period", "The window the cost is a total over."),
         },
         value_labels={
             "drip_feed": "Small requests sent one at a time",
@@ -842,6 +868,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "rising": "Getting worse",
             "steady": "Steady",
             "new": "Too early to say",
+            "unmeasured": "Not measured",
         },
         lead_columns=["habit", "times", "per_100", "cost", "trend", "try"],
     ),
@@ -892,7 +919,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             read="Each saving is rough, with how it was worked out alongside. Source says where the evidence came "
             "from: inferred from the transcripts, reported by Claude in metrics-capture tags, or your own feedback. "
             "Your feedback outranks the rest. By week shows what the habit addresses per message over recent weeks, "
-            "scaled so the worst week is 100. A dash is a week with too few messages.",
+            "scaled so the worst week is 100. A dash is a week that can't be measured: too few messages, or before "
+            "you turned capture on. A trend needs three measured weeks, and reads Not measured when every week is zero.",
             act="Copy the example into your next message of that kind. Turning on metrics capture adds the "
             "reported evidence and makes the estimates firmer.",
         ),
@@ -907,7 +935,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "source": ("Source", "Inferred from the transcripts, reported by Claude, or your feedback."),
             "confidence": ("Confidence", "High with 20 or more cases, medium with 8 or more, else low."),
             "trend": ("Trend", "Whether it's getting better or worse over recent weeks."),
-            "weeks": ("By week", "What it addresses per message, by week, the worst week as 100."),
+            "weeks": ("By week", "What it addresses per message, by week, the worst week as 100. A dash is a week "
+                      "that can't be measured."),
             "where": ("Where and who it affects", "Where trying this habit shows up and who it affects."),
             "trade_off": ("Trade-off", "What trying this habit costs or risks."),
             "how_to_undo": ("How to undo it", "How to go back if it doesn't work out."),
@@ -931,8 +960,142 @@ TABLE_COPY: dict[str, TableCopy] = {
             "rising": "Getting worse",
             "steady": "Steady",
             "new": "Too early to say",
+            "unmeasured": "Not measured",
         },
         lead_columns=["habit", "saving", "evidence", "example", "confidence", "trend", "theme"],
+    ),
+    "rework_headline": TableCopy(
+        title="",  # the builder's title names the picked window
+        help=Help(
+            shows="How many pieces of work needed changes after Claude delivered them, what that rework cost, and "
+            "how often we could not tell why.",
+            read="Only a piece where Claude changed files can need changes afterwards. A follow-up counts when you "
+            "corrected Claude, adjusted work it had changed, or asked again for a change to the same files. "
+            "Follow-ups you said were new work, or only a change of mind, are left out. The cost and the shares are "
+            "those of the pieces of work. Sessions we could not split into pieces are counted by their messages, "
+            "in a line of their own.",
+            act="Read the first line, then the causes below it. They say what to change in how you ask.",
+        ),
+        columns={
+            "item": ("", "Which figure this is."),
+            "text": ("", "The figure, in words."),
+            "count": ("Needed changes", "Pieces, requests or follow-ups that needed changes, as the row says."),
+            "total": ("Out of", "The number it is counted out of."),
+            "share": ("Share", "The count as a percent of the number it is out of."),
+            "cost": ("What the rework cost", "What the follow-ups after delivery cost, the agents they started included."),
+            "tokens": ("Tokens", "The tokens those follow-ups used, the agents' included."),
+            "period": ("Period", "The window these figures are from."),
+        },
+        value_labels={
+            "pieces": "Pieces needing changes",
+            "unknown": "Cause unknown",
+            "requests": "Requests needing changes",
+        },
+        lead_columns=["item", "text", "count", "total", "share", "cost"],
+    ),
+    "rework_causes": TableCopy(
+        title="Why work needed changes",
+        help=Help(
+            shows="Each cause of the rework, from each source, with what it cost and something to try.",
+            read="Your feedback comes first, then Claude's tag, Haiku's tag and what the transcript shows. A "
+            "follow-up with no cause reads \"cause not reported\". It never means Claude got it wrong. Fixes after "
+            "a plan show once enough plans were approved to say anything.",
+            act="Copy the line on the first card into your next message of that kind, and watch whether the "
+            "follow-ups drop.",
+        ),
+        columns={
+            "cause": ("Cause", "Why the work needed changes."),
+            "source": ("Where it came from", "Your feedback, Claude's tag, Haiku's tag, or inferred from the transcript."),
+            "pieces": ("Pieces", "How many pieces of work had a follow-up with this cause."),
+            "sessions": (
+                "Sessions we couldn't split",
+                "How many sessions had a follow-up with this cause but could not be cut into pieces of work.",
+            ),
+            "cycles": ("Follow-ups", "How many follow-up messages had this cause."),
+            "share": ("Share", "The percent of all follow-ups that had this cause."),
+            "cost": ("What the rework cost", "What those follow-ups cost, the agents they started included."),
+            "tokens": ("Tokens", "The tokens those follow-ups used, the agents' included."),
+            "detail": ("Detail", "The counts behind the cause, in words."),
+            "try": ("Try", "What to change in how you ask."),
+            "paste": ("Copy", "A line to paste into your next message, or a command to run."),
+        },
+        value_labels={
+            "left_out": "Requests that left something out",
+            "missed": "Claude's mistakes",
+            "changed": "Changes of mind",
+            "tools": "Tool calls that failed",
+            "plan_gap": "Plans that left something out",
+            "mixed": "More than one reason",
+            "not_reported": "Cause not reported",
+            "plan_fixes": "Fixes after a plan you approved",
+            "feedback": "Your feedback",
+            "Claude tag": "Claude's tag",
+            "Haiku tag": "Haiku's tag",
+            "inferred": "Inferred from the transcript",
+        },
+        lead_columns=["cause", "source", "cycles", "share", "cost", "try"],
+    ),
+    "rework_admitted": TableCopy(
+        title="Mistakes Claude admitted",
+        help=Help(
+            shows="Mistakes Claude owned up to in its replies, who found them, and what the rework after yours cost.",
+            read="Only a reply that metrics capture tagged as an admission counts. A reply that reads like one, "
+            "with no tag, is a possible one and stays out of every figure. An instruction is one Claude had been "
+            "given and did not follow.",
+            act="The line to change comes from where you said Claude missed things. Copy it into your next message "
+            "of that kind.",
+        ),
+        columns={
+            "item": ("", "Which figure this is."),
+            "text": ("", "The figure, in words."),
+            "count": ("Replies", "How many replies admitted a mistake, or read like they did."),
+            "pieces": ("Pieces", "How many pieces of work had one."),
+            "user": ("You caught", "Mistakes you pointed out before Claude owned up."),
+            "itself": ("Claude caught", "Mistakes Claude owned up to without you pointing them out."),
+            "instruction": ("Instructions it had", "Mistakes that were an instruction Claude had been given."),
+            "cost": ("Rework after yours", "What the follow-ups after the mistakes you caught cost, each counted once."),
+            "fix": ("What to change", "The change to make, from where you said Claude missed it."),
+            "paste": ("Copy", "A line to paste into your next message."),
+            "period": ("Period", "The window these figures are from."),
+        },
+        value_labels={"admitted": "Admitted mistakes", "possible": "Possible admissions"},
+        lead_columns=["item", "text", "count", "pieces", "user", "itself", "cost"],
+    ),
+    "rework_by_week": TableCopy(
+        title="Rework by week",
+        help=Help(
+            shows="By week, how many pieces needed changes, what the rework cost and how many mistakes you caught "
+            "per piece.",
+            read="A week shows its share only with 5 or more pieces that needed changes. Mistakes caught per piece "
+            "needs 5 tagged pieces. A dash is a week with too few, never a zero.",
+            act="Look for a drop in the weeks after you tried a line from the causes above.",
+        ),
+        columns={
+            "week": ("Week of", "The Monday of the week, in your time zone."),
+            "pieces": ("Pieces", "Pieces of work that ended that week and changed files."),
+            "reworked": ("Needed changes", "How many of them needed changes after Claude delivered."),
+            "share": ("Share", "The percent of the week's pieces that needed changes."),
+            "cost": ("What the rework cost", "What those follow-ups cost, the agents they started included."),
+            "caught": ("Mistakes you caught", "Mistakes Claude admitted after you pointed them out."),
+            "caught_per_piece": ("Caught per piece", "Mistakes you caught for each tagged piece of work."),
+        },
+    ),
+    "rework_by_level": TableCopy(
+        title="Rework by how hard the work was",
+        help=Help(
+            shows="How often work needed changes, by how hard Claude tagged it.",
+            read="Counted per request, not per piece, because a hard piece usually has more requests. Work with no "
+            "tag is under Not tagged.",
+            act="If hard work needs changes far more often, plan it first and ask for a done-when line.",
+        ),
+        columns={
+            "level": ("How hard", "How hard Claude tagged the work."),
+            "requests": ("Requests", "Messages in them that asked for something."),
+            "rework": ("Needed changes", "Follow-ups that needed changes after Claude delivered."),
+            "rate": ("Per request", "Follow-ups that needed changes as a percent of requests."),
+            "cost": ("What the rework cost", "What those follow-ups cost, the agents they started included."),
+        },
+        value_labels={"easy": "Easy", "normal": "Normal", "hard": "Hard", "unknown": "Not tagged"},
     ),
     "habits_by_task": TableCopy(
         title="Kinds of task",
@@ -940,7 +1103,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="What each kind of task cost, as Claude reported it in metrics-capture tags, with every message "
             "in the first row.",
             read="Clear asks and large asks are shares of the messages Claude rated for them. Redone counts "
-            "messages whose next message redid the work, fixed a fault in it or corrected Claude. Met the goal "
+            "messages whose work the messages after it redid, fixed a fault in or corrected Claude on. Met the goal "
             "needs your feedback.",
             act="The costliest kinds are where the brief templates and the habits above pay off most.",
         ),
@@ -954,7 +1117,7 @@ TABLE_COPY: dict[str, TableCopy] = {
                           "any subagents it spawned."),
             "clear_pct": ("Clear asks", "Messages Claude called clear, out of those it rated."),
             "large_pct": ("Large asks", "Messages Claude sized large or extra large."),
-            "redo_pct": ("Redone", "Messages whose work was redone, fixed or corrected by your next message."),
+            "redo_pct": ("Redone", "Messages whose work was redone, fixed or corrected by the messages after it."),
             "met_pct": ("Met the goal", "Pieces you said met their goal, out of those you gave feedback on."),
         },
         value_labels={"all": "All messages"},
@@ -964,8 +1127,9 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="How clear your asks were",
         help=Help(
             shows="Your messages by how clear Claude said they were, and what each cost.",
-            read="Claude judges your message, so treat it as a sign. A vague ask that costs much more than a "
-            "clear one is the pattern to look for.",
+            read="Claude judges your message, so treat it as a sign. These are plain averages over every message, so "
+            "plan builds and different kinds of work are mixed in. The note under the table compares partial and vague "
+            "asks with clear ones like for like.",
             act="Most often missing names what to add; Brief templates has a checklist per kind of task.",
         ),
         columns={
@@ -984,8 +1148,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="A checklist per kind of task, built from what your own asks most often left out.",
             read="Without metrics capture these are starting points; with it, the lines your asks miss most "
             "come first.",
-            act="Copy the template into your message and fill it in. The optional /cg-brief skill gives Claude "
-            "the same checklists: claudeglass capture brief on.",
+            act="Copy the template into your message and fill it in.",
         ),
         columns={
             "task": ("Task", "The kind of task."),
@@ -1070,8 +1233,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="Each kind of task Claude reported, all together and by how hard it said the work was. Each is "
             "split by the exact model, effort and speed that answered it. It shows what a message cost and how often "
             "the work went well.",
-            read="Went well is your feedback where you gave it, otherwise whether your next message redid, fixed or "
-            "corrected the work. "
+            read="Went well is your feedback where you gave it, otherwise whether the messages after it redid, fixed "
+            "or corrected the work. "
             "The last message of each session is left out, since nothing after it confirms how it went. Shown from 5 "
             "messages each side. A cheaper setup that's mostly hard work at the all-levels row is held back, even if "
             "nothing else looks wrong. The hard work is what made it look cheap, not the setup itself. A cheaper "
@@ -1089,7 +1252,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "avg_cost": ("Per message", "The average cost of the work, subagents included."),
             "main_avg_cost": ("Per message (main session only)", "The average cost of the main session's own "
                                "share of the work, leaving out any subagents it spawned."),
-            "ok_pct": ("Went well", "Met its goal by your feedback, or not redone by your next message."),
+            "ok_pct": ("Went well", "Met its goal by your feedback, or not redone by the messages after it."),
             "rated": ("With your feedback", "Messages your feedback covers."),
             "verdict": ("Setup", "Your usual setup, and the cheaper one that did as well."),
             "saving_pct": ("Cheaper by", "Per message, against your usual setup, level for level."),
@@ -1187,7 +1350,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "Your feedback on each kind of session sits beside it.",
             read="Planning kept is the context from before the plan that the build carried. The next three "
             "columns count your /cg-feedback answers on whether the build could have started from the plan "
-            "alone. The last three count the fixes after a plan, from the plan check and the plan question.",
+            "alone. The next three count the fixes after a plan, from the plan check and the plan question. "
+            "The last four come from the transcripts, with no feedback needed. Fixes are corrections and "
+            "adjustments you typed after the plan, including those typed while Claude worked. They show from "
+            "5 plans.",
             act="If most of your sessions plan and build and the plan was enough, start the build in a fresh "
             "session. If the build needed the discussion, write fuller plans first.",
         ),
@@ -1208,6 +1374,11 @@ TABLE_COPY: dict[str, TableCopy] = {
             "plan_covered": ("Fix was in the plan", "Fixes after the plan where the plan already said it."),
             "plan_gap": ("Plan missed it", "Fixes after the plan where the plan left it out."),
             "plan_new": ("Fix was new", "Fixes after the plan for something you only thought of later."),
+            "work_pieces": ("Pieces of work", "Pieces of work in these sessions, rated or not."),
+            "plans_built": ("Plans approved", "Pieces of work where you approved a plan and work came after it."),
+            "plans_fixed": ("Plans fixed three times or more", "Of those, the plans you corrected or adjusted "
+                            "three times or more afterwards."),
+            "plan_fixes": ("Fixes after a plan", "Corrections and adjustments after an approved plan, in all of them."),
         },
         value_labels={
             "plan_build": "Planned and built in one session",
@@ -1220,8 +1391,7 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="Claude's reports against your feedback",
         help=Help(
             shows="Each level and brief quality Claude reported, against your feedback. It shows how many messages "
-            "each covers, the share that met or missed its goal, and the share your next message redid, fixed or "
-            "corrected.",
+            "each covers, the share that met or missed its goal, and the share redone afterwards.",
             read="Met and missed are out of the messages your feedback covers. Redone counts every message tagged "
             "this way, feedback or not. A note below the table says whether work Claude called easy missed its goal "
             "more often than normal work. It appears once there is enough feedback on both to tell.",
@@ -1234,8 +1404,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "rated": ("With your feedback", "Of those, the messages your feedback covers."),
             "met_pct": ("Met the goal", "Of the rated messages, the share that met its goal."),
             "missed_pct": ("Missed", "Of the rated messages, the share that missed its goal."),
-            "redone_pct": ("Redone by your next message", "Of all messages tagged this way, the share your "
-                           "next message redid, fixed or corrected."),
+            "redone_pct": ("Redone afterwards", "Of all messages tagged this way, the share the messages after "
+                           "it redid, fixed or corrected."),
         },
         value_labels={
             "level:easy": "Called easy",

@@ -307,6 +307,8 @@ export var SECTION_PAGE_MAP = {
   hooks: "agents/hooks",
   habits: "habits",
   prompting: "habits",
+  // Rework after delivery sits on the Work habits page, after its top habit cards.
+  rework: "habits",
   // Setup. Settings draws the config section's tables once, from
   // /api/config-diff?auto_keys=1, and skips the section itself.
   config: "setup/settings",
@@ -368,6 +370,32 @@ export function pageLink(key, text, params) {
     goTo(key, { focus: !params, params: params || null });
   });
   return link;
+}
+
+// A card on the Work habits page, by key: a habit of the playbook
+// ("brief_clearly"), a habit of How you prompt ("drip_feed") or the rework
+// section (REWORK_ITEM). The address is #/habits?item=<key>. This is the one
+// place that knows the parameter: the Overview, the quick-action tips and the
+// palette build the address here, and the page reads it back with habitItem.
+export var REWORK_ITEM = "rework";
+
+export function habitParams(item) {
+  return { item: item };
+}
+
+export function habitItem(params) {
+  return params && params.item ? String(params.item) : "";
+}
+
+// A link that scrolls to the card, opens it out of "more habits" if it is
+// folded there, and highlights it. Without text it reads "Work habits".
+export function habitLink(item, text) {
+  return pageLink("habits", text, habitParams(item));
+}
+
+// The same, for a control that isn't a link (a palette entry).
+export function goToHabit(item) {
+  goTo("habits", { params: habitParams(item) });
 }
 
 // Say in the address what the view on screen has open (the selected
@@ -437,6 +465,10 @@ export var GLOSSARY = [
   ["Capture level", "How much metrics capture asks for: off, free, essentials, standard or deep, each adding more of it. Set at init or with claudeglass capture level."],
   ["Tag", "The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as [cg: task=bugfix brief=clear]. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is."],
   ["Prompt cycle", "One message of yours and everything Claude did to answer it, subagents at any depth included. The unit metrics capture and the Work habits page measure by."],
+  ["Piece of work", "One job, drawn from a session's transcript alone. It runs from a fresh start (the session start, a /clear, or a message about something new) to the next. It needs no feedback and no tag."],
+  ["Rework", "A follow-up that changes work Claude had already delivered: a redo, a fix, a correction you typed, or an adjustment to files it had changed. Each has a cause, and the dashboard says where that cause came from."],
+  ["Status check", "A short message that only asks how the work is going, or whether it is done. It asks for nothing new, so it is never rework."],
+  ["Plan round", "A message you send while a plan is being made: you sent the plan back with changes, or wrote in plan mode. It is feedback on the plan, so it is never rework."],
   ["Work habits", "The page (and report section) that turns prompt cycles into habits worth trying, with a rough saving for each. Each shows where its evidence came from: reported by Claude, inferred from the transcript, or your own feedback."],
   ["Feedback skill", "/cg-feedback, a skill you can add and run after a piece of work. It asks whether the work delivered, what your follow-up messages were, whether it was worth the tokens, and what would have made it cheaper. Works at any capture level, even off; picking deep turns it on, with its reminders."],
   ["Brief templates", "Checklists per kind of task on the Work habits page, built from what your own requests tend to lack. Turned on, it also adds a /cg-brief skill that checks a request against its checklist and asks once for anything missing before Claude starts."],
@@ -498,6 +530,8 @@ export var JARGON = [
   ["Capture level", "capture levels?"],
   ["Managed setting", "managed settings?"],
   ["Prompt cycle", "prompt cycles?"],
+  ["Piece of work", "pieces? of work"],
+  ["Rework", "rework"],
   ["Change point", "change points?"],
   ["Effort level", "effort levels?"],
   ["Billing mode", "billing mode"],

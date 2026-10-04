@@ -727,9 +727,172 @@ def test_habits_digest_money_cards_follow_the_billing_mode() -> None:
     app_js = _app_js()
     body = _function_source(app_js, "renderHabitsDigest")
     assert 'kind === "money" ? moneyParts(' in body
-    assert "unit: amount ? amount.unit || null : null" in body and "amount.secondary" in body
+    assert "unit: unit || null" in body and "amount.secondary" in body
     # The habits the playbook shows as cards aren't repeated above them.
     assert "carded" in body and "if (rows.length && !own.length) return;" in body
+
+
+def test_every_money_figure_on_the_habits_page_carries_the_period_it_covers() -> None:
+    """A habit's saving is a week's worth and a prompting habit's cost is a
+    window's total, so each says so (also on a plan, where the period rides
+    with the list-price equivalent, not after "weekly usage limit"). A
+    habit with nothing priced says "Not priced", never a bare zero."""
+    app_js = _app_js()
+    digest = _declaration_source(app_js, "DIGEST_PERIODS")
+    for item in ("top_1", "top_2", "top_3", "adopted"):
+        assert f'{item}: "a week"' in digest
+    assert 'cost_per_met: "per piece of work"' in digest
+    tiles = _function_source(app_js, "renderHabitsDigest")
+    assert "moneyParts(Number(row.value), { period: period })" in tiles
+    assert "!amount.secondary && period" in tiles
+    money = _function_source(app_js, "periodMoney")
+    assert "amount.secondary" in money and 'amount.secondary + " " + period' in money
+    assert "moneyText(usd, { period: period, prefix: prefix })" in money
+    cards = _function_source(app_js, "appendHabitCards")
+    assert 'periodMoney(row.saving, "a week", "About ")' in cards and '"Saving not priced"' in cards
+    assert "savingPeriod" not in cards
+    prompting = _function_source(app_js, "promptingCard")
+    assert 'typeof row.cost === "number" && row.cost > 0' in prompting
+    assert 'periodMoney(row.cost, row.period, "About ")' in prompting and '"Not priced"' in prompting
+
+
+def test_a_week_that_could_not_be_measured_reads_as_an_en_dash_in_the_charts_label() -> None:
+    """The by-week string marks a week before capture, or with too few
+    messages, as "-"; the sparkline draws it as a gap and its label says
+    an en dash, not a hyphen a screen reader skips."""
+    app_js = _app_js()
+    words = _function_source(app_js, "weeksLabel")
+    assert 'part === "-"' in words and "\u2013" in words
+    for card in ("appendHabitCards", "promptingCard"):
+        assert "weeksLabel(row.weeks)" in _function_source(app_js, card)
+
+
+def test_the_brief_templates_show_their_notes_where_the_brief_skill_is_offered() -> None:
+    """The /cg-brief offer is one note under the templates, written only
+    while the brief card shows, so the page renders whatever notes arrive."""
+    body = _function_source(_app_js(), "renderBriefTemplates")
+    assert "table.notes && table.notes.length" in body
+    assert "notesList(table.notes, new Set(), true)" in body
+
+
+_REWORK_RENDERERS = (
+    "renderRework",
+    "renderReworkHeadline",
+    "renderReworkCauses",
+    "reworkCauseCard",
+    "renderReworkAdmitted",
+    "renderReworkWeeks",
+    "renderReworkLevels",
+)
+
+
+def test_rework_renders_after_the_top_habit_cards_and_before_the_brief_templates() -> None:
+    """The rework section is its own report section but sits on the Work
+    habits page: straight after the playbook's cards (the habits the page
+    leads with), before the brief templates. With no habits section it
+    still shows, ahead of How you prompt."""
+    app_js = _app_js()
+    body = _function_source(app_js, "renderHabitsSection")
+    playbook = body.index("renderHabitsPlaybook(")
+    rework = body.index("renderRework(rework, container)")
+    templates = body.index("renderBriefTemplates(")
+    assert playbook < rework < templates
+    page = _function_source(app_js, "renderHabits")
+    assert 'findSection(result.report, "rework")' in page
+    assert "renderHabitsSection(section, container, rework)" in page
+    assert "} else if (rework) {" in page and "renderRework(rework, container);" in page
+    assert page.index("renderRework(rework, container);") < page.index("renderPromptingSection(prompting, container)")
+    # One empty state when nothing was delivered, not five empty blocks.
+    assert "emptyState(" in _function_source(app_js, "renderRework")
+    mapping = _js_string_map(app_js, "SECTION_PAGE_MAP")
+    assert mapping["rework"] == "habits"
+
+
+def test_rework_amounts_follow_the_billing_mode_and_carry_their_period() -> None:
+    """Amounts are formatted here, not written as dollars: a cause card
+    through moneyText with the section's period ("over the last 30 days"),
+    the tile through moneyParts. A cost that is nothing we could price reads
+    "not priced" in rework.py's own words, never a bare zero."""
+    from claudeglass import rework
+    from claudeglass.habits import Habits
+
+    app_js = _app_js()
+    card = _function_source(app_js, "reworkCauseCard")
+    assert 'moneyText(row.cost, { period: period, prefix: "That rework cost " })' in card
+    assert "Number(row.cost) > 0" in card
+    headline = _function_source(app_js, "renderReworkHeadline")
+    assert "moneyParts(Number(lead.cost))" in headline and "caption: lead.period || null" in headline
+    assert "Not priced" in headline
+    for phrase in ("That rework was not priced.", "That rework cost "):
+        assert phrase in card
+    section = rework.build_section(Habits())
+    assert section.tables[0].columns[-1].key == "period"
+    assert _function_source(app_js, "renderRework").count("period") >= 2
+
+
+def test_rework_cards_say_each_try_line_once_and_only_offer_something_to_copy() -> None:
+    """A cause that came from several places has one Try line and one line
+    to copy. The page only shows prompts and commands: nothing in the
+    rework renderers sends a request or writes a setting."""
+    app_js = _app_js()
+    card = _function_source(app_js, "reworkCauseCard")
+    assert "row.try && !told.has(row.cause)" in card and "told.add(row.cause)" in card
+    assert "codeBlockWithCopy(row.paste" in card
+    limit = re.search(r"var CAUSE_CARD_LIMIT = (\d+);", app_js)
+    assert limit and int(limit.group(1)) == 5
+    assert "CAUSE_CARD_LIMIT" in _function_source(app_js, "renderReworkCauses")
+    for name in _REWORK_RENDERERS:
+        source = _function_source(app_js, name)
+        assert not re.search(r"fetch\(|apiPost|apiGet|XMLHttpRequest|localStorage", source), name
+
+
+def test_rework_weeks_draw_a_bar_only_where_the_table_gave_a_share() -> None:
+    """A week with fewer than 5 pieces that needed changes has no share,
+    and the page draws a dash for it (habitSparkline's "-"), never a zero
+    bar; the minimum on the page is rework.py's."""
+    from claudeglass import rework
+
+    app_js = _app_js()
+    limit = re.search(r"var WEEK_MIN_REWORKED = (\d+);", app_js)
+    assert limit and int(limit.group(1)) == rework.MIN_WEEK_REWORKED
+    body = _function_source(app_js, "renderReworkWeeks")
+    assert 'row.share === null || row.share === undefined ? "-"' in body
+    assert 'row.caught_per_piece === null || row.caught_per_piece === undefined' in body
+    assert "habitSparkline(shares" in body and "habitSparkline(caught" in body
+    # The numbers behind the bars stay one click away.
+    assert "Week by week" in body and "renderTable(table" in body
+
+
+def test_the_rework_page_reads_only_columns_the_tables_have() -> None:
+    """Each field the renderers read from a row is a column rework.py's
+    tables declare, so a renamed column fails here, not as an empty card."""
+    from claudeglass import rework
+    from claudeglass.habits import Habits
+
+    section = rework.build_section(Habits())
+    columns = {column.key for table in section.tables for column in table.columns}
+    app_js = _app_js()
+    source = "\n".join(_function_source(app_js, name) for name in _REWORK_RENDERERS)
+    read = set(re.findall(r"\b(?:row|lead|said)\.([a-z_]+)", source)) | set(re.findall(r"\]\.(period|week)\b", source))
+    assert read, "the rework renderers read no row fields"
+    assert read <= columns, read - columns
+    # The items it picks sentences by are the ones the headline and admitted tables write.
+    for item in ("pieces", "requests", "unknown", "admitted", "possible"):
+        assert f'"{item}"' in source or f"byItem.{item}" in source, item
+
+
+def test_the_glossary_names_the_rework_words() -> None:
+    """Piece of work, Rework, Status check and Plan round are glossary
+    terms, in both the dashboard and the README; Piece of work and Rework
+    open a popover where prose() meets them."""
+    app_js = _app_js()
+    glossary = dict(re.findall(r'\["([^"]+)", "([^"]+)"\]', _declaration_source(app_js, "GLOSSARY")))
+    jargon = dict(re.findall(r'\["([^"]+)", "([^"]+)"\]', _declaration_source(app_js, "JARGON")))
+    for term in ("Piece of work", "Rework", "Status check", "Plan round"):
+        assert term in glossary and term in _readme_glossary_terms(), term
+    assert re.search(r"\b(?:" + jargon["Piece of work"] + r")\b", "pieces of work")
+    assert re.search(r"\b(?:" + jargon["Rework"] + r")\b", "rework")
+    assert f"All {len(glossary)} terms" in README_MD.read_text(encoding="utf-8")
 
 
 def test_a_profile_estimate_scales_by_its_normalised_tasks() -> None:
@@ -3006,6 +3169,115 @@ def test_an_overview_row_counts_its_other_findings_as_findings() -> None:
     overview = _function_source(_app_js(), "checklistRow")
     assert 'countWord(others, "more finding", "more findings")' in overview
     assert '" more)"' not in overview
+
+
+def test_the_habit_link_scrolls_to_a_card_opens_its_fold_and_highlights_it() -> None:
+    """#/habits?item=<key>: the page reads the item once it is drawn, finds
+    the card by its data-item, opens every <details> it sits in (the playbook's
+    "more habits" fold among them) and pulses it. The playbook's cards, both
+    the featured and the folded, the prompting cards and the rework section
+    all carry the key."""
+    page = _static_text("page-habits.js")
+    imports = page[: page.index("export function renderHabits(")]
+    for name in ("onParams", "pulseNode", "habitItem", "REWORK_ITEM"):
+        assert name in imports, name
+    draw = _function_source(page, "renderHabits")
+    assert "var drawn = loadReport().then(" in draw
+    assert 'onParams("habits", function (params) {' in draw
+    assert "var item = habitItem(params);" in draw
+    # Only once the page's cards exist, so a link that opens the page cold works.
+    assert "drawn.then(function () {" in draw and "showHabitItem(container, item);" in draw
+    show = _function_source(page, "showHabitItem")
+    assert "container.querySelector('[data-item=\"' + CSS.escape(item) + '\"]')" in show
+    assert 'closest("details")' in show and "fold.open = true;" in show
+    assert "while (fold) {" in show, "every fold the card sits in opens, not only the nearest"
+    assert 'pulseNode(node, "block-target");' in show
+    assert show.index("fold.open = true;") < show.index("pulseNode(")
+    # The folded cards are built by the same function as the featured ones.
+    playbook = _function_source(page, "renderHabitsPlaybook")
+    assert "appendHabitCards(table, featured, cards);" in playbook
+    assert "appendHabitCards(table, rest, restCards);" in playbook
+    assert playbook.index("more.appendChild(restCards)") < playbook.index("block.appendChild(more)")
+    assert "more.appendChild(restCards);" in playbook
+    assert '"data-item": row.habit' in _function_source(page, "appendHabitCards")
+    assert '"data-item": row.habit' in _function_source(page, "promptingCard")
+    assert '"data-item": REWORK_ITEM' in _function_source(page, "renderRework")
+    # The card a link names exists whichever way it was drawn: no page-level
+    # lookup by id or by index.
+    assert "getElementById" not in show
+
+
+def test_the_habit_link_lives_in_one_helper_and_every_caller_uses_it() -> None:
+    """links.js is the one place that knows the parameter. The Overview, the
+    quick-action tips and the palette go through it, and no other module
+    builds a Work habits address of its own."""
+    links = _static_text("links.js")
+    for name in ("habitParams", "habitItem", "habitLink", "goToHabit"):
+        assert "export function " + name + "(" in links, name
+    assert 'export var REWORK_ITEM = "rework";' in links
+    assert 'return pageLink("habits", text, habitParams(item));' in _function_source(links, "habitLink")
+    assert 'goTo("habits", { params: habitParams(item) });' in _function_source(links, "goToHabit")
+    assert "return { item: item };" in _function_source(links, "habitParams")
+    overview = _function_source(_static_text("page-overview.js"), "checklistRow")
+    assert "habitLink(check.item," in overview
+    assert 'check.item === REWORK_ITEM ? "See the rework" : "See the habit"' in overview
+    tips = _function_source(_static_text("ui.js"), "renderTips")
+    assert 'habitLink(tip.habit, "See the habit")' in tips
+    palette = _static_text("palette.js")
+    entries = _function_source(palette, "habitEntries")
+    assert "goToHabit(key);" in entries and "goToHabit(REWORK_ITEM);" in entries
+    assert 'cards("habits", "habits_playbook"' in entries and 'cards("prompting", "prompting_habits"' in entries
+    assert "habitEntries(result && result.report)" in _function_source(palette, "loadEntries")
+    assert '{ kind: "habit", label: "Work habits" }' in palette
+    for path in _js_modules():
+        if path.name == "links.js":
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r'(?:pageLink|goTo|formatHash)\(\s*"habits"[^;]*item', text), path.name
+
+
+def test_the_habit_item_keys_agree_between_the_page_and_the_checks() -> None:
+    """The rework section's key is the same string on the page (links.js)
+    and in the check that links to it, and no habit's key is the same as it
+    or as another habit's, so one ``item`` names one card."""
+    from claudeglass import habits, prompting
+
+    match = re.search(r'export var REWORK_ITEM = "([a-z_]+)";', _static_text("links.js"))
+    assert match and match.group(1) == quick_actions.REWORK_ITEM
+    keys = list(habits.ITEMS) + list(prompting.HABITS) + [quick_actions.REWORK_ITEM]
+    assert len(keys) == len(set(keys))
+
+
+def test_every_check_has_a_name_on_the_overview_and_the_new_one_reads_as_its_own_row() -> None:
+    """The Overview names each check; the tool-error and blocked rows moved
+    out of Work habits to a check of their own, "Failed and blocked tool
+    calls"."""
+    source = _declaration_source(_static_text("page-overview.js"), "CHECK_NAMES")
+    names = dict(re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*"([^"]*)"', source, re.MULTILINE))
+    assert set(names) <= set(quick_actions.CHECK_IDS)
+    assert names["failed-calls"] == "Failed and blocked tool calls"
+    assert names["habits"] == "Work habits"
+    order = list(names)
+    assert order.index("failed-calls") == order.index("habits") + 1
+
+
+def test_an_overview_row_leads_with_the_rework_headline_and_its_own_saving() -> None:
+    """The Work habits row: when the check has a headline (the rework
+    headline, once enough pieces were reworked) it is the finding, and the
+    row's saving is the check's own (the playbook's saving counted with the
+    largest recommendation group, never both for one habit); every other
+    check keeps its first group's lead and saving."""
+    app_js = _app_js()
+    row = _function_source(app_js, "checklistRow")
+    assert 'var headline = check && check.headline ? check.headline : "";' in row
+    assert "var lead = headline ? null : row.groups[0];" in row
+    assert "var finding = headline || (" in row
+    assert "(check && check.saving) ||" in row
+    rows = _function_source(app_js, "checklistRows")
+    assert "row.check.saving_usd > 0" in rows
+    assert "row.saving = Math.max(row.saving, row.check.saving_usd)" in rows
+    # The saving is the check's: the page doesn't sum anything it already counted.
+    assert "habits_playbook" not in rows
 
 
 # -- Phase 9: the Spend and Cache pages --------------------------------------

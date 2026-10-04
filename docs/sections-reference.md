@@ -11,7 +11,7 @@ in this order: `overview`, `usage`, `elasticity` (only under
 subscription billing with usage-log readings), `sessions`, `recache`, `ttl`,
 `limits`, `carry`, `compaction_sim`, `plan_handoff`, `model_swap`, `waste`,
 `compactions`, `agent_startup`, `agents`, `run_split`, `hooks`, `quality`, `workstyle`, `habits`,
-`prompting`, `workflows`, `phases` (CLI only with `--phases`; the dashboard always has it), `config` (only when config
+`rework`, `prompting`, `workflows`, `phases` (CLI only with `--phases`; the dashboard always has it), `config` (only when config
 snapshots exist), `context_budget`, `tool_search`, `capture`, `cost_record`, `scorecard`, and
 `baseline_comparison` (only with `--baseline`). `claudeglass
 report` prints it. This file groups sections by topic, so its order
@@ -63,6 +63,7 @@ and it's still useful when you want one section by itself.
 | `quality` | Quality signals | `quality.py` | whether the work went well: agent runs that didn't finish or likely ran out of turns, failed tool calls and shell commands, denials, corrections, edits redone, per agent type and per model and effort, with a significance test — see [`concepts.md`](concepts.md#7-quality-signals) |
 | `workstyle` | Workstyle | `workstyle.py` | one archetype per session/corpus: `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
 | `habits` | Work habits | `habits.py` | the "Weekly pace" digest (titled with the window you picked), habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/cg-feedback`) cost per piece of work that met its goal |
+| `rework` | Rework after delivery | `rework.py` | how often Claude had to change work it had already delivered, what that cost and why (your feedback, Claude's tag, Haiku's tag, or inferred from the transcript), the mistakes Claude admitted and who caught them, and the rework by week and by how hard the work was — pieces of work are drawn from the transcripts alone (`pieces.py`) |
 | `prompting` | How you prompt | `prompting.py` | how often each prompting habit happened, whether or not coaching notes were on (small requests sent one at a time, the same request again, asking how it's going, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
 | `workflows` | Workflows | `workflows.py` | per-run agent count, phase count, duration and cost from `<session>/workflows/wf_*.json` |
 | `phases` | Phases | `phases.py` | cost split across DISCOVERY (read/search only), IMPLEMENTATION (real edits or an ordinary shell command), VERIFICATION (a test/build tool, or a scratch-file edit), OTHER — in the CLI's report only when `--phases` is given; the dashboard always builds it |
@@ -896,11 +897,43 @@ skill loaded late), and your ratings from Spend › Sessions. Every table
 is always there, empty when there's nothing to show; the notes say when
 capture is off or no feedback has been given.
 
+Each session is also drawn into pieces of work (`pieces.pieces_of`), with
+no feedback and no tag needed. A piece you rated is a `Piece` with its
+outcome; one nothing rated is a `Piece` with no outcome
+(`source` is `transcript`), so the tables that need your answer read only
+the ones with an outcome (`habits_outcomes`, `cost_per_met`). A message is
+*redone* when a redo or fix tag, a correction, or later rework of its piece
+followed it, and `redo_cost` is what the whole chain of rework cost,
+counted once on the message that delivered the work. Rates per message
+(the trends here and the per-100 rates in `prompting`) divide by the
+messages that asked for something (`CycleFact.asks`, `pieces.asks`): a
+go-ahead, a status check, a thank-you and a reply to a plan don't count,
+and each message you typed while Claude worked does. The percentage
+columns of a table still divide by that table's own messages.
+
 - `habits_digest` — "Weekly pace (last N days)": the three habits worth the most (saving
   a week, `top_1` to `top_3`), what the habits you already picked up
   save (`adopted`), the average cost of a piece of work that met its
   goal (`cost_per_met`), and the share of messages Claude tagged
-  (`tagged`). The monthly report carries the same digest. The title names
+  (`tagged`). The `tagged` share is the Capture banner's: it counts from
+  the day capture was turned on (`config.capture.enabled_at`, as
+  `Habits.since`), only in sessions capture reached (`capture.is_captured`,
+  a capture note or a tag Claude Haiku wrote), and leaves out the messages
+  the banner leaves out (a `/cg-feedback` run, a reply cut off by
+  `max_tokens`, an interrupted message). Its detail reads "N of M since you
+  turned capture on". Every money tile says its period: a habit's saving is
+  per week (a plan shows the period beside the list-price equivalent), and
+  `cost_per_met` is per piece of work. A habit is in `top_1` to `top_3` or
+  in `adopted`, never both (`habits._worth_trying`, `habits._picked_up`).
+  The `plan_hard` row ("Already doing this") shows when at
+  least `MIN_GROUP` asks Claude reported as hard were mostly planned and
+  none of the unplanned ones was redone (`habits.plan_hard_already`): a
+  message is planned when it was written in plan mode, called
+  `ExitPlanMode`, or came after a plan you approved by typing, until its
+  piece of work ends. It is a digest row and not a playbook habit, as
+  there is nothing to save. `cost_per_met` averages only the pieces you
+  gave feedback on. The monthly report carries the same digest. The
+  title names
   the window you picked: `N` is that window's own day count ("last 7
   days" stays 7 even when your messages in it cover 3), and a window with
   no day count reads "Weekly pace (all time)" or "Weekly pace (this
@@ -915,9 +948,10 @@ capture is off or no feedback has been given.
   sessions show, an example to copy, how the saving is worked out, how
   often it was seen, the source (`reported`, `inferred`, `your
   feedback`), confidence (`high` from 20 cases, `medium` from 8; inferred
-  alone is never `high`), trend (`new`, `falling`, `rising`, `steady`)
-  and the rate per message over the last eight weeks scaled to 0-100
-  (`-` for a week with fewer than three messages), then where trying it
+  alone is never `high`), trend (`new`, `falling`, `rising`, `steady`,
+  `unmeasured`) and the rate per message over the last eight weeks scaled
+  to 0-100 (`-` for a week that can't be measured, drawn as an en dash),
+  then where trying it
   affects things, its trade-off and how to undo it (`where`,
   `trade_off`, `how_to_undo` -- UX-8, the same three-part shape as a
   recommendation's fix explainer), and `covered_by`: the recommendation
@@ -925,9 +959,53 @@ capture is off or no feedback has been given.
   which case `saving` is blank rather than double-counted (UX-3,
   `habits.COVERED_BY`/`apply_covered_by`). A fall over at least four
   known weeks counts as picked up, and the saving it implies goes into
-  the digest's `adopted` row. The dashboard shows the top 5 habits as
+  the digest's `adopted` row.
+
+  Trends only say what they can measure (`habits.trend`). A week is `-`
+  with fewer than `TREND_MIN_CYCLES` (3) messages that asked for something
+  and, for a habit built from tags, fewer than that many tagged ones: the
+  rate divides by the tagged messages of the week, so a week Claude wasn't
+  tagging reads as unmeasured, not as nothing to fix. A habit whose dollars
+  need capture or your answers also reads `-` for the weeks before the one
+  capture was turned on. The word is `new` until `TREND_MIN_WEEKS` (3) weeks
+  are measured, and `unmeasured` ("Not measured") when every measured week
+  is zero: there is nothing to follow.
+
+  The dashboard shows the top 5 habits as
   cards; the rest collapse into a "more habits worth trying" `<details>`
   (UX-4/7).
+
+  Several habits only show when the comparison behind them holds:
+
+  - `brief_clearly` compares partial and vague asks with clear ones like
+    for like (`habits.brief_comparison`): within one kind of task, with at
+    least `MIN_GROUP` (5) messages on each side, leaving out the messages
+    that carried out a plan (their cost is the plan's build, not the ask).
+    Each partial or vague ask is set against the median clear ask of its
+    level, or of the whole kind of task when fewer than three clear asks
+    share the level, at what its own work cost (its cost less re-reading
+    the context it began with). The saving is the signed sum of half those
+    gaps. The card shows only when a partial or vague ask cost more than a
+    clear one in at least 60% of the comparisons (`BRIEF_MIN_PROBABILITY`)
+    and the sum is positive, or when your own answers say requests left
+    things out. The evidence quotes the median ratio ("the median one cost
+    3.6x a clear ask of the same kind"). The `habits_briefs` table carries a
+    note that says the same, and that its plain averages mix in plan builds
+    and every kind of work, so it never reads the other way unexplained.
+    The `/cg-brief` skill is offered in one place, a note under
+    `habits_brief_templates` (`habits.BRIEF_OFFER`), and on the rework
+    `left_out` card, only while this card shows.
+  - `clear_between` skips a thank-you, a go-ahead and a status check
+    (`CycleFact.quiet`) and a message after a usage-limit pause
+    (`limit_pause`) when it infers a new task from a long break, and a new
+    task Claude reported as needing the earlier work (`prior` of `needed`
+    or `some`) is no reason to clear.
+  - `effort_fit` needs easy work to think at least 10 points more of its
+    output than hard work does at the same effort
+    (`EFFORT_EASY_OVER_HARD_PTS`), a hard baseline of at least five
+    messages, and a saving of at least $1 a week (`MIN_SAVING`).
+  - `skip_plan_easy` needs at least `MIN_GROUP` easy asks that went through
+    plan mode and $1 of planning between them.
 
   Your /cg-feedback answers change several rows, and so does a dashboard
   rating of a session no run rated. `brief_clearly`, `name_files` and the
@@ -943,26 +1021,33 @@ capture is off or no feedback has been given.
   or said smaller pieces would have helped, and lets go of ones you called
   worth it. `plan_hard` counts a plan first would have helped, and
   `plan_first` (prompting) is priced at half the follow-ups' cost where you
-  said so. A follow-up you called a change of mind (`why=changed`), or
+  said so. With most hard asks already planned, `plan_hard` has no row
+  and the digest's "Already doing this" says so. A follow-up you called
+  a change of mind (`why=changed`), or
   new to the plan (`plan=new`), is no rework: it is left out of `redone`
   and the waste figures at the source (`CycleFact.excused`), so every
   table below agrees. Answers from `slow` (the older question) count as
   `why`.
 - `habits_by_task` — per kind of task Claude reported (`task=`), after
   an `all` row: messages, share, cost, per message, and the shares
-  that were clear asks, large asks, redone by your next message (a
-  `shift=redo` or `shift=fix` tag, or a correction), and met their goal.
+  that were clear asks, large asks, redone afterwards (a `shift=redo` or
+  `shift=fix` tag or a correction on the next message, or later rework of
+  the same piece of work), and met their goal.
   A note says how many messages that looked redone are left out of
   Redone because you called the next message a change of mind or new to
   the plan.
 - `habits_briefs` — per brief word (`clear`, `partial`, `vague`):
   messages, per message, redone, met the goal, and the lines most
-  often missing.
+  often missing. The notes give the like-for-like comparison behind the
+  `brief_clearly` card (its median ratio, or how often a partial or vague
+  ask cost more) and say the averages above mix in plan builds and every
+  kind of work.
 - `habits_brief_templates` — per kind of task (the defaults while
   nothing is tagged): the checklist, why those lines (the one most
   often missing from your asks, or a starting point), and the template
   to copy. The `/cg-brief` skill (`capture brief on`) asks for the same
-  lines, from `capture_catalogue.BRIEF_CHECKLISTS`. A message whose
+  lines, from `capture_catalogue.BRIEF_CHECKLISTS`; a note offers it only
+  while the `brief_clearly` card shows. A message whose
   follow-ups you said were things it left out counts twice when the lines
   are ranked, and the "why" says so.
 - `habits_agents` — per agent type (and `top-level` for how hard the main
@@ -987,7 +1072,7 @@ capture is off or no feedback has been given.
   together and then by how hard it said the work was (`all`, `easy`,
   `normal`, `hard`): each model family and effort the main session ran
   on, messages, per message, the share that went well (your feedback's
-  `met` where you gave it, otherwise not redone by your next message),
+  `met` where you gave it, otherwise not redone afterwards),
   the messages your feedback covers, and the verdict: `usual` (the most
   used) and `cheaper` (the cheapest with at least 5 messages that cost
   less and went well within 5 points of the usual one), with how much
@@ -1011,7 +1096,8 @@ capture is off or no feedback has been given.
   ...): pieces of work, messages, cost, per piece, the most common kind
   of task, what slowed it most (your follow-up reasons, `why`, or the
   older `slow` answer), what would have helped most, and where the
-  answers came from (`/cg-feedback` or a dashboard rating).
+  answers came from (`/cg-feedback` or a dashboard rating). A piece of
+  work the transcripts alone drew has no outcome and is not a row.
 - `habits_by_shape` — main sessions by shape (`handoff.plan_shape`):
   `plan_build` (a plan approved with `ExitPlanMode`, then files edited in
   the same session), `plan_only` (approved, nothing edited after it) and
@@ -1022,13 +1108,23 @@ capture is off or no feedback has been given.
   handoff answers (`yes`, `partly`, `no`), and the fixes after a plan:
   `plan_covered` (the plan said it), `plan_gap` (it left it out) and
   `plan_new` (you thought of it later), from the plan check and the plan
-  question together. The `plan-handoff` card and the suggested profile
-  read it, and so does `coaching.json` (see [coaching.md](coaching.md)).
+  question together. Four columns come from the transcripts and need no
+  feedback: `work_pieces` (every piece of work in the shape, rated or
+  not), `plans_built` (pieces with an approved plan and work after it),
+  `plans_fixed` (of those, the plans with `habits.PLAN_FIXES_MIN`, three,
+  or more corrections and adjustments after them) and `plan_fixes` (all
+  of those fixes). Fixes you typed while Claude worked count with the ones
+  you typed as a message (`habits.fixes_after_plan`), a message in plan
+  mode is a reply to the plan and not a fix, and so is one you told the
+  plan check was not a fix. The last three are blank below `MIN_GROUP`
+  plans. `pieces` stays the pieces you rated. The `plan-handoff` card and
+  the suggested profile read the table by column key, and so does
+  `coaching.json` (see [coaching.md](coaching.md)).
 - `habits_self_report` — Claude's own reports against your feedback: per
   `level` word (`easy`, `normal`, `hard`) and `brief` word (`clear`,
   `partial`, `vague`) it tagged a message with, the messages that carries,
   how many your feedback covers, the shares that met or missed their
-  goal, and the share your next message redid, fixed or corrected. A
+  goal, and the share redone afterwards. A
   note says whether work Claude called easy missed its goal more often
   than normal work, once there is enough rated feedback on both sides to
   tell (`habits.MIN_GROUP`); when it does, the habits built from the
@@ -1056,6 +1152,90 @@ capture is off or no feedback has been given.
   context it reads again, so the model it runs on matters more than how
   many files it opens. A workflow's agents are left out
   (`AgentFact.direct` is false for them).
+
+## `rework` (`rework.py`)
+
+How often Claude had to change work it had already delivered, why, and what
+to change in how you ask. It reads the pieces of work `habits.collect` drew
+from the transcripts (`pieces.pieces_of`, kept on `Habits.work_pieces`), so
+it needs no `/cg-feedback` answer and no tag: your answers and the tags
+only say *why*. Counts, closed words and amounts only; nothing you wrote
+reaches it. A piece of work is *delivered* once a cycle in it changed
+files, and only a delivered piece can need changes afterwards. Rework, the
+causes and where each came from are defined in
+[`concepts.md`](concepts.md#9-work-habits). A follow-up you called a change
+of mind alone (`why=changed`), or new to the plan (`plan=new`), is no
+rework and is not counted here.
+
+Every amount goes through `Units.money`, so it follows the billing mode and
+carries its period ("over the last 30 days"; `period` on the rows below).
+Money cells hold list-price USD, and the dashboard phrases them with
+`moneyText`.
+
+- `rework_headline` — "Rework after delivery (last N days)" with the
+  window you picked. Up to three rows. `pieces`: `text` is "{n} of your
+  {total} pieces of work needed changes after Claude delivered them. That
+  rework cost {amount}. {u}% came from requests that left something out,
+  {c}% from Claude's mistakes, {x}% from changes of mind." (with nothing to
+  change it reads "None of your {total} pieces of work needed changes after
+  Claude delivered them."), with `count`, `total`, `share`, `cost`,
+  `tokens` (the agents' included) and `period`. `unknown`: "We couldn't tell
+  why for {k}%: run /cg-feedback after a piece of work to say", present
+  when some rework cycle has no cause. `requests`: sessions with no start
+  inside them can't be cut into pieces, so they are counted by the messages
+  that asked for something, in their own sentence with their own cost,
+  never mixed into the piece rate, cost or shares above it. `unknown`
+  counts the rework cycles of those pieces with no cause reported (or, with
+  none reworked, every session's), so it reads beside the shares.
+- `rework_causes` — one row per cause and source: `cause` (`left_out`,
+  `missed`, `changed`, `tools`, `plan_gap`, `mixed`, `not_reported`, or
+  `plan_fixes`), `source` (`feedback`, `Claude tag`, `Haiku tag`,
+  `inferred`), `pieces` and `sessions` (the pieces with any, and the
+  sessions we couldn't cut into pieces with any, kept apart so a session
+  is never called a piece), `cycles`, `share` (of all rework cycles),
+  `cost`, `tokens`, `detail` (the counts in words; `left_out` also cites "N of M
+  follow-ups were things your request left out" once 3 of your answers
+  say so, and `missed` names where you said Claude missed it),
+  `try` and `paste`. Rows run your feedback first, then Claude's tag,
+  Haiku's tag and inferred, the biggest first. The paste lines: `left_out`
+  "Here is what I want, the files it involves and what done looks like: <say
+  it here>." (`/cg-brief`, with a Try line that names the skill, while Work
+  habits shows its `brief_clearly` card); `missed` "Before you finish, re-read my request, check each
+  point is done, and run the tests for what you changed." (its `try` line
+  is the one `capture_catalogue.MISSED_IN_LINES` gives for where you said
+  Claude missed it: the message restated as a checklist, the plan ticked
+  off step by step, a rule that is buried, or details lost in a long
+  session); `changed` "Plan this first and wait for my go-ahead before
+  changing any files."; `tools` none, a link to the checks;
+  `plan_gap` asks for the files, the decisions and a done-when line.
+  `plan_fixes` ("Fixes after a plan you approved", source `inferred`) is
+  added when `habits.fixes_after_plan` has 5 plans (`MIN_GROUP`) and some
+  needed `PLAN_FIXES_MIN` or more fixes. `not_reported` reads "Cause not
+  reported" and says to run `/cg-feedback`; no row says Claude got it wrong
+  unless your answers or a tag did.
+- `rework_admitted` — Claude's admitted mistakes. `admitted`: "Claude
+  admitted {n} mistakes in {m} pieces: you caught {u}, it caught {s}
+  itself. {i} were instructions it had been given. The rework after the
+  ones you caught cost {amount}." (singular for one; the instructions
+  sentence only when there are some). It counts the settled `admit` words
+  (`claim`, `change`, `instruction`) and who found each
+  (`Turn.admit_caught`, else your message before it); `cost` is the
+  admitting cycle (when it was rework) and the run of rework after it, each
+  cycle once. `fix` and `paste` are the `MISSED_IN_LINES` line for where you
+  said Claude missed things. `possible`: replies that read like an
+  admission nobody tagged (`Cycle.admit_possible`), said apart and never in
+  a total; it says "more" and "above" only when confirmed admissions sit
+  above it.
+- `rework_by_week` — weeks (Monday, in your time zone) from the first piece's
+  to the last, a week with no piece kept: `pieces`, `reworked`, `share`
+  (empty under 5 reworked pieces), `cost`, `caught` (admitted mistakes you
+  caught) and `caught_per_piece` (empty under 5 tagged pieces, and empty
+  rather than 0 for a week before capture was on). Pieces we couldn't cut
+  are left out.
+- `rework_by_level` — `easy`, `normal`, `hard` and `unknown` (not tagged):
+  `requests` (messages that asked for something), `rework`, `rate` (rework
+  per request) and `cost`. Per request, not per piece, as a hard piece has
+  more requests; each request counts under its own level.
 
 ## `capture` (`habits.py`)
 
@@ -1128,12 +1308,17 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   first: `habit` (`drip_feed`, `repeat_ask`, `status_poll`, `stop_loop`, `plan_first`,
   `vague_fix`, `big_paste`, `context_carried`), `times`, `per_100` (per 100 of your
   messages), `cost` (list-price USD; empty for `plan_first` and
-  `vague_fix`, which the page shows as "Not priced"), `basis`
+  `vague_fix`, and for any habit with nothing priced, which the page shows
+  as "Not priced", never as a zero), `basis`
   (what the cost counts), `trend` (`falling`, `rising` or `steady` over
-  the last eight weeks, or `new` with fewer than three weeks of three
-  messages or more to go on), `weeks` (the rate per message by week, the
-  worst week as 100, `-` for a week with fewer than three messages) and
-  `try` (what to do instead). Costs: `drip_feed` is what each message after the first in a
+  the last eight weeks, `new` with fewer than three weeks of three
+  messages or more to go on, or `unmeasured` when every week is zero),
+  `weeks` (the rate per message by week, the worst week as 100, `-` for a
+  week with fewer than three messages), `try` (what to do instead) and
+  `period` (what `cost` totals over, as the rework section words it: "over
+  the last 30 days"; empty when the caller named no window). Weeks start
+  on the Monday of `config.tz`, as everywhere else, not on a UTC Monday.
+  Costs: `drip_feed` is what each message after the first in a
   run paid to take in the context (a run is of small change requests,
   each sent within 20 minutes of your message before it and answered, in
   the reply it started, with a change to a file of yours: an edit or a

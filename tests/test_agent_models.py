@@ -365,6 +365,18 @@ def test_a_workflow_agent_with_an_agent_type_follows_its_file_but_files_under_th
     assert set(_verdicts([run])) == {("workflow-subagent", "inherited")}
 
 
+def test_a_workflow_agent_counts_as_a_workflow_run_by_its_kind_even_when_its_run_is_unnamed():
+    """The run id says which run; the kind says it came from one at all."""
+    unnamed = _workflow(role_word="implement", real_edits=1, workflow_run_id=None)
+    assert unnamed.meta.workflow_run_id is None
+    assert _verdicts([unnamed])[("workflow-subagent", "inherited")]["workflow_runs"] == 1
+    named = [_workflow(role_word="implement", real_edits=1, workflow_run_id=f"wf_{n}") for n in range(2)]
+    assert _verdicts(named)[("workflow-subagent", "inherited")]["workflow_runs"] == 2
+    # A direct agent never counts, whatever its agent type is called.
+    direct = _agent(agent_type="general-purpose", role_word="implement", real_edits=1)
+    assert _verdicts([direct])[("general-purpose", "inherited")]["workflow_runs"] == 0
+
+
 def test_a_model_named_in_the_call_is_asked_not_inherited():
     run = _agent(agent_type="claude-implementer", role_word="implement", real_edits=2, alias="opus")
     rows = _verdicts([run])

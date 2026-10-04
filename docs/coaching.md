@@ -493,10 +493,15 @@ to read:
   Useful answers count toward the tip's figure on the dashboard's
   **Tips Claude showed**.
 - **Your typical piece of work** (`typical_piece_tokens`). The tokens in the
-  median session of the last 30 days, counting only sessions with at least
-  three replies and only once there are five of them; `0` until then.
-  The survey's facts line and the rating reminder read it. Until pieces
-  of work are told apart in the report, a session stands in for one.
+  median piece of work of the last 30 days, counting only pieces with at
+  least three replies and only once there are five of them; `0` until
+  then. The survey's facts line and the rating reminder read it. A piece
+  of work is drawn from the transcripts, with no rating or tag needed: a
+  session starts one, a `/clear` or a new task starts another, and a
+  session that opens with a handoff joins the piece it carries on (see
+  "Piece of work" in `docs/concepts.md`). The tokens are the main
+  session's own, as the hook counts them, and a reply to an agent's report
+  counts for the piece that started the agent.
 
 Without the service, `claudeglass capture refresh` works the file
 out now. Until there is one, no agent type gets the split hint and the

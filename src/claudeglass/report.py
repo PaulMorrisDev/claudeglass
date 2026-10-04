@@ -17,8 +17,9 @@ under subscription billing with usage-log readings, see
 ``ttl``, ``limits``, ``carry``, ``compaction_sim``, ``plan_handoff``,
 ``model_swap``, ``waste``, ``compactions``, ``agent_startup``, ``agents``, ``run_split``,
 ``hooks``, ``quality``,
-``workstyle``, ``habits``, ``prompting`` (how you prompt, from
-``prompting.py``),
+``workstyle``, ``habits``, ``rework`` (rework after delivery, from
+``rework.py``, built from the pieces of work ``habits`` drew),
+``prompting`` (how you prompt, from ``prompting.py``),
 ``workflows``, ``phases`` (only when ``phases=True``), ``config`` (only
 when snapshots are supplied), ``context_budget``, ``tool_search``, ``capture``,
 ``cost_record`` (Claude Code's own cost record against this tool's, from
@@ -157,6 +158,7 @@ from . import (
     quality,
     recache,
     reconcile,
+    rework,
     run_split,
     scorecard,
     snapshots as snapshots_mod,
@@ -215,6 +217,7 @@ _SECTION_ORDER: tuple[str, ...] = (
     "quality",
     "workstyle",
     "habits",
+    "rework",
     "prompting",
     "workflows",
     "phases",
@@ -1887,18 +1890,27 @@ def build_report(
     # instead of each calling habits.build_section()/capture_section()
     # with their own independent collect() pass over the same corpus.
     _habits_built: habits.Habits | None = None
-    if _want("habits"):
+    if _want("habits") or _want("rework"):
         _habits_built = habits.collect(
             corpus, pricing, ratings=ratings, signals=capture_signals,
             effort_share_threshold_pct=_effort_mismatch_share_threshold(config),
-            tz=config.tz, window=window,
+            tz=config.tz, window=window, since=config.capture.enabled_at,
         )
+    if _want("habits"):
         sections.append(habits.section_from(_habits_built, model_swap=model_swap_stats))
+
+    # The pieces of work habits drew: rework is built from them, not from
+    # a second pass over the corpus.
+    if _want("rework"):
+        sections.append(rework.build_section(_habits_built, units=units))
 
     if _want("prompting"):
         sections.append(
             prompting.build_section(
-                prompting.collect(corpus, pricing, ratings=ratings), card_answers=prompting.card_answers(tip_feedback)
+                prompting.collect(corpus, pricing, ratings=ratings),
+                card_answers=prompting.card_answers(tip_feedback),
+                window=window,
+                tz=config.tz,
             )
         )
 

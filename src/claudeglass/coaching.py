@@ -32,12 +32,14 @@ recent sessions, what depends on your history, and writes it to
   once a session.
 - **typical_piece_tokens**: the tokens in your median piece of work, for the
   facts line (``typical=``) and the rating reminder's size threshold
-  (twice this, at least a million). Until pieces of work are told apart
-  in the parser, a session stands for one: a session starts, and
-  ``/clear`` starts a new one. The median of your sessions' main
-  transcripts (input, cache writes, cache reads and output), over those
-  with at least :data:`MIN_PIECE_REPLIES` replies, and only once there
-  are :data:`MIN_PIECES` of them; ``0`` before that.
+  (twice this, at least a million). A piece of work is what
+  ``pieces.corpus_pieces`` draws from the transcripts, with no rating or
+  tag needed: a session starts one, a /clear or a new task starts
+  another, and a session that opens with a handoff joins the piece it
+  carries on. The median of the pieces' main-transcript tokens (input,
+  cache writes, cache reads and output), over those with at least
+  :data:`MIN_PIECE_REPLIES` replies, and only once there are
+  :data:`MIN_PIECES` of them; ``0`` before that.
 
 The file holds agent-type names, hint ids and numbers only: no paths,
 prompts or session ids. The dashboard's service rewrites it once a day
@@ -54,7 +56,7 @@ import statistics
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import capture_catalogue, handoff, ignores, prompting
+from . import capture_catalogue, handoff, ignores, pieces, prompting
 from .config import _write_atomic
 
 #: Days of sessions the file is worked out from.
@@ -62,8 +64,8 @@ DAYS = 30
 #: The service rewrites the file once it is this old.
 MAX_AGE_HOURS = 24
 _VERSION = 1
-#: Fewest replies a session needs to stand for a piece of work, and fewest
-#: such sessions before their median is trusted.
+#: Fewest replies a piece of work needs to count towards the typical one,
+#: and fewest such pieces before their median is trusted.
 MIN_PIECE_REPLIES = 3
 MIN_PIECES = 5
 
@@ -108,16 +110,14 @@ def session_tokens(top) -> int:
 
 
 def typical_piece_tokens(corpus) -> int:
-    """The median of ``corpus``'s sessions' main-transcript tokens
-    (:func:`session_tokens`), over the sessions with at least
+    """The median of the main-session tokens of ``corpus``'s pieces of work
+    (``pieces.corpus_pieces``: a reply to an agent's report counts for the
+    piece that started the agent, and a session that opens with a handoff
+    is part of the piece it carries on), over the pieces with at least
     :data:`MIN_PIECE_REPLIES` replies; ``0`` with fewer than
     :data:`MIN_PIECES` of them. Counts only: nothing of a transcript is
     kept."""
-    sizes = [
-        session_tokens(bundle.top)
-        for bundle in corpus.sessions
-        if bundle.top is not None and sum(1 for turn in bundle.top.turns if turn.turn_index > 0) >= MIN_PIECE_REPLIES
-    ]
+    sizes = [piece.tokens for piece in pieces.corpus_pieces(corpus) if piece.replies >= MIN_PIECE_REPLIES]
     return int(statistics.median(sizes)) if len(sizes) >= MIN_PIECES else 0
 
 
@@ -250,7 +250,7 @@ def describe(data: dict) -> list[str]:
         lines.append("Tips shown once a session because you already knew them: " + ", ".join(_hint_name(hint) for hint in once) + ".")
     typical = data.get("typical_piece_tokens")
     if isinstance(typical, int) and typical > 0:
-        lines.append(f"Your typical piece of work is about {typical:,} tokens (the median session of your last {DAYS} days).")
+        lines.append(f"Your typical piece of work is about {typical:,} tokens (the median piece of your last {DAYS} days).")
     else:
         lines.append("Your typical piece of work isn't known yet: it needs a few more sessions.")
     return lines

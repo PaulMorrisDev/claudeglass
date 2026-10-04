@@ -10,8 +10,9 @@ out from the stored transcripts instead, with the same keys
 (``capture_catalogue.FEEDBACK_FACT_KEYS``) and the same reading of each:
 
 - ``tokens`` is what the main transcript used (``coaching.session_tokens``)
-  and ``typical`` the median piece of work in ``coaching.json``. A session
-  stands for one piece of work until pieces are told apart.
+  and ``typical`` the median piece of work in ``coaching.json``
+  (``pieces.corpus_pieces``). The rating is of the whole session, which
+  may hold more than one piece of work.
 - ``followups`` counts the messages after the first that are not a
   go-ahead or a status check, those you typed while Claude was working
   included (``queued``). A /cg-feedback run is no message.
@@ -26,8 +27,9 @@ for each (:func:`session_builds`), and the plan and handoff questions are
 asked once for each plan build.
 
 Only counts, flags and ids are worked out: nothing a transcript said is
-kept. :func:`unrated_piece` says whether a session is one the banner lists:
-one the capture hook's rating reminder would have spoken up for.
+kept. :func:`unrated_pieces` says which pieces of work in a session the
+banner lists: those the capture hook's rating reminder would have spoken
+up for (at least the reminder's size) that no /cg-feedback answer covers.
 """
 
 from __future__ import annotations
@@ -38,7 +40,7 @@ from datetime import datetime
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
-from . import coaching, prompting
+from . import coaching, pieces as pieces_mod, prompting
 from .model import EventKind
 
 #: The most unrated sessions the banner names.
@@ -280,31 +282,57 @@ def reminder_tokens(thresholds: Mapping[str, float], typical: int) -> int:
     return int(max(thresholds["rating_min_tokens"], thresholds["rating_typical_factor"] * max(0, typical)))
 
 
-def unrated_piece(bundle, threshold: int) -> int | None:
-    """The tokens of a session's main transcript when it is a piece of work
-    the rating reminder would have spoken up for and you have not rated: at
-    least ``threshold`` tokens and no /cg-feedback run in it. ``None``
-    otherwise. A session stands for a piece of work until pieces are told
-    apart."""
+def piece_label(task: str, messages: int, part: int, parts: int) -> str:
+    """How the banner names a piece of work in a session: ``piece 2 of
+    3`` when the session holds several, the task word its messages mostly
+    had, and how many messages asked for something."""
+    words = [f"piece {part} of {parts}"] if parts > 1 else []
+    if task:
+        words.append(task)
+    if messages:
+        words.append(f"{messages} message{'' if messages == 1 else 's'}")
+    return ", ".join(words)
+
+
+def unrated_pieces(bundle, threshold: int) -> list[dict]:
+    """The pieces of work in a session that the rating reminder would have
+    spoken up for and you have not rated: each at least ``threshold`` tokens
+    (the main transcript's own, as the hook counts them) and covered by no
+    /cg-feedback answer or run (``pieces.WorkPiece``). One dict each, oldest
+    first, of counts and words only: ``tokens``, ``end_ts``, ``part``
+    (its place in the session, from 1) and ``label``. A piece that carries
+    on from an earlier session counts only what ran in this one. A
+    transcript with no message of yours in it (a resumed session's
+    leftovers) has no piece to draw, so it is one piece whole, as the
+    banner always listed such a session."""
     if bundle.top is None:
-        return None
-    tokens = coaching.session_tokens(bundle.top)
-    if tokens < threshold:
-        return None
+        return []
     cycles = capture_mod.prompt_cycles(bundle.top, bundle.subs, getattr(bundle, "workflows", ()))
-    if any(capture_mod.is_feedback_run(cycle) for cycle in cycles):
-        return None
-    return tokens
+    if not cycles:
+        tokens = coaching.session_tokens(bundle.top)
+        return [{"tokens": tokens, "end_ts": "", "part": 1, "label": ""}] if tokens >= threshold else []
+    found = pieces_mod.pieces_of(cycles, session_id=bundle.session_id)
+    return [
+        {
+            "tokens": piece.tokens,
+            "end_ts": piece.end_ts,
+            "part": part,
+            "label": piece_label(piece.task, piece.substantive, part, len(found)),
+        }
+        for part, piece in enumerate(found, start=1)
+        if piece.tokens >= threshold and not piece.rated
+    ]
 
 
 __all__ = [
     "BANNER_LIMIT",
     "coaching_thresholds",
     "fill_question",
+    "piece_label",
     "question_rows",
     "reminder_tokens",
     "session_builds",
     "session_facts",
     "tokens_text",
-    "unrated_piece",
+    "unrated_pieces",
 ]

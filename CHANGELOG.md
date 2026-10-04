@@ -257,8 +257,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   build isn't counted twice. `capture prune` also clears old
   `habit-log.jsonl` lines. Counts and closed words only: no
   message text is read, kept or shown.
+- **Pieces of work.** A session's messages are now grouped into the pieces
+  of work you did. A piece starts at the session start, at a /clear (unless
+  the next message is a handoff), at a message Claude tagged `shift=new`
+  that no one contradicted, or, with no tag, after a gap of 3 hours or
+  more on files that share under a tenth of the last piece's. Never at a
+  queued message, a plan reply or the answer to a question. A session
+  that opens with a handoff within 72 hours joins the piece it continues,
+  and a session with no start inside it is one unsegmented piece. Each
+  piece counts its replies, tokens and cost, how sure the start is, and
+  how many cycles were rework: a cycle after the first delivery that
+  redoes or fixes it, a correction you typed or queued, an adjustment
+  that changes the piece's files again or, when nothing else says, a
+  short message that changes the files the last reply changed. Plan
+  rounds, go-aheads and status checks are never rework, and neither is
+  work you rated as a changed mind or a new plan. The cause comes from
+  your feedback first, then the reply's `why` tag, then it reads "cause
+  not reported"; the source is one of feedback, Claude tag, Haiku tag or
+  inferred. Rework rates are counted per cycle and per piece, split by
+  level and size. Counts and closed words only.
+- **Rework after delivery.** A new section on the Work habits page, after
+  the top habit cards, says how many of your pieces of work needed changes
+  after Claude delivered them, what that rework cost, and how much came
+  from requests that left something out, Claude's mistakes and changes of
+  mind. It needs no feedback and no tag, which only say why: where neither
+  does, the cause reads "cause not reported", never "Claude got it wrong".
+  Each cause is a card that names its source (your feedback, Claude's tag,
+  Haiku's tag or inferred) with a Try line and something to copy: a line to
+  say more up front for a request that left something out (`/cg-brief`
+  while the brief card shows), a re-read-and-check line for
+  Claude's mistakes (or the line for where you said it missed), "Plan this
+  first" for a change of mind, and the checks for tool calls that failed.
+  After a plan you approved, fixes show as a card once 5 plans were. Claude's
+  admitted mistakes are counted from the tags, with who caught each, how many
+  were an instruction it had been given, and what the rework after yours
+  cost; a reply that only reads like an admission is said apart and never
+  counted. Weekly bars appear for a week with 5 or more pieces that needed
+  changes, and rework per request is split by how hard the work was. The
+  glossary gains Piece of work, Rework, Status check and Plan round.
+  Counts, closed words and amounts only.
+- **A link to a habit.** `#/habits?item=<key>` opens Work habits at that
+  card: it scrolls there, opens "more habits" when the card is folded
+  under it, and highlights it. The rework section is an item too
+  (`item=rework`). The Overview, the habit tips on Actions > Checks
+  (**See the habit**) and search (a new Work habits group) all link
+  through the one helper in `links.js`.
+- **Failed and blocked tool calls.** The replies lost to tool errors and
+  to calls a hook or a guard blocked are a check of their own on
+  Overview and Actions > Checks, `failed-calls`, with its own fix: a
+  prompt to check a path or name first and to stop and ask when a call
+  is blocked. They used to be counted inside Work habits.
 
 ### Changed
+
+- **The brief card compares like for like.** Partial and vague asks are
+  now set against the median clear ask of the same kind of task and level
+  (the whole kind of task when fewer than 3 clear asks share the level),
+  at what their own work cost, and the messages that carried out a plan
+  are left out of both sides. The sum is signed, needs at least 5 messages
+  on each side, and the card shows only when a partial or vague ask cost
+  more in at least 60% of the comparisons. Its evidence quotes the median,
+  for example "the median one cost 3.6x a clear ask of the same kind". The
+  "How clear your asks were" table says what its plain averages mix in
+  and gives the same comparison, so the two agree. The optional /cg-brief
+  skill is offered only while the card shows, in one note under the brief
+  templates and on the rework card for a request that left something out.
+- **Trends say only what they can measure.** A week before capture was
+  turned on reads as a dash, not a zero, for a habit that needs the tags.
+  A habit reads "new" until 3 weeks are measured and "Not measured" when
+  every week is zero. A habit built from tags divides by the tagged
+  messages of a week, so a week Claude wasn't tagging is a dash and not a
+  week with nothing to fix.
+- **One tagged share, and a period on every figure.** The Work habits
+  digest counts the share of messages tagged from the day capture was
+  turned on, in the sessions capture reached, the same as the Capture
+  banner. Its money tiles and cards say what they cover: a saving a week,
+  a cost of a piece of work, and in How you prompt a total over the
+  window, with the period beside the list-price equivalent on a plan. A
+  habit with nothing priced reads "Not priced", never a bare $0.00. Weeks
+  in How you prompt start on your local Monday, not a UTC one.
+- **Stricter cards.** Clearing between tasks no longer counts a thank-you,
+  a status check, a message after a usage-limit pause, or a new task you
+  said needed the earlier work. Lowering effort for easy work needs easy
+  work to think at least 10 points more of its output than hard work does
+  at the same effort, and a saving of at least $1 a week. Skipping plan
+  mode for easy work needs 5 easy asks and $1. A habit you already picked
+  up is no longer also listed as worth trying.
+- **The Work habits row leads with the rework.** When 20% or more of 5 or
+  more pieces of work needed changes after delivery, the Overview's Work
+  habits row opens with that sentence and links to the rework section;
+  otherwise it keeps its lead, now linked to the habit it names. Its
+  saving now includes what the playbook's habits would save over the
+  window, with no habit counted twice (one a recommendation already
+  covers is left out). `GET /api/quick-actions` gains `headline`, `item`,
+  `saving_usd` and `saving` on each check, and a tip gains `habit`.
 
 - **A hint that keeps coming back rests longer.** Within a session, each
   time a hint shows again its rest doubles: 30 minutes, then 1, 2 and at
@@ -527,6 +619,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   only a survey item that answers your messages on counts as hooked, so
   `capture connect` adds the entry and `capture off` and Setup's "no" to
   tips leave it while a survey switch needs it.
+- **A reply to an agent's report costs the message that started the
+  agent.** When an agent or a workflow reports back and Claude answers,
+  that reply, and the rest of its turns, now count toward the cycle that
+  launched the agent, not the cycle it landed in. The reply stays in the
+  timeline where it happened, and a piece's cost says how much moved.
+  The parser, the habits and the pieces share one count, so a turn is
+  charged once.
+- **"Typical" is the median piece of work.** The daily run writes the
+  median tokens of a piece of the last 30 days to `coaching.json`, where
+  it wrote the median session, so one long session of several tasks no
+  longer reads as one big task.
+- **The banner lists pieces, not sessions.** The unrated banner on the
+  dashboard counts the pieces of work that used at least the reminder's
+  size, and a session with two shows two rows, each with the piece's
+  label. A piece you ran /cg-feedback in, or rated on the dashboard, is
+  off the list.
+- **A workflow's agents are told apart by kind.** The agent model
+  table, the model swap verdict and the advice cards now split a
+  workflow's agents from the ones you started by the run's kind, not by
+  the agent's type name, so a custom agent type that a workflow starts
+  is no longer taken for yours.
+- **Rates per message count what you asked.** A go-ahead, a status
+  check, a thank-you and a reply to a plan no longer count as a message
+  in a rate, and each message you typed while Claude worked now does. The
+  habit trends and the prompting rates per 100 messages divide by that, so
+  rates step down now that queued messages count, and a rate in an old
+  report is not comparable with a new one. The percentage columns of a
+  table still divide by that table's own messages.
+- **Redone covers the whole chain of rework.** A message counts as redone
+  when its piece of work reworked it later, not only when the next message
+  did, and its redo cost adds every cycle of the chain once, even a cycle
+  that is both a redo and rework. The Redone columns now read "redone
+  afterwards".
+- **Habits keep every piece of work.** A piece no answer or rating covers
+  is a row with no outcome, built from the transcript alone. The tables
+  that need your answer, such as the outcomes and the cost of a piece that
+  met its goal, still read only the rated ones.
+- **Hard work you already plan.** A message is planned when it was written
+  in plan mode, called `ExitPlanMode`, or came after a plan you approved by
+  typing, until its piece ends. When most hard asks were planned and none
+  of the others was redone, the weekly pace says "Already doing this"
+  instead of a habit to try.
+- **Fixes after a plan, from the transcripts.** The plans by shape table
+  counts the corrections and adjustments after an approved plan, those you
+  typed as a message and those you typed while Claude worked, and the plans
+  fixed three times or more. It needs no feedback and stays blank below 5
+  plans. Counts only.
 
 ### Fixed
 

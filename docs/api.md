@@ -1057,17 +1057,31 @@ been captured. `capture_status.summary` is the same one-line status
 
 One answer per way of saving tokens (`quick_actions.CHECKS`): models,
 effort, compaction, cache, tools, skills, claude-md, tool-output,
-hooks, tool-search, known-savers, habits, quality and cost-record. Each check always answers, including "nothing to
+hooks, tool-search, known-savers, habits, failed-calls, quality and cost-record. Each check always answers, including "nothing to
 do". The last, cost-record, checks ClaudeGlass's own figures against the
-cost Claude Code records for a session.
+cost Claude Code records for a session. failed-calls ("Failed and blocked
+tool calls") holds the replies lost to a tool call that failed or that a hook
+or a guard blocked; habits keeps the other replies that went nowhere.
 
 Query: the windowing params above.
 
-`data`: `{"period", "checks": [{"id", "question", "why", "status", "summary", "rule_ids", "fix_count", "tip_count"}, ...]}`.
+`data`: `{"period", "checks": [{"id", "question", "why", "status", "summary", "rule_ids", "fix_count", "tip_count", "headline", "item", "saving_usd", "saving"}, ...]}`.
 `period` is the window as a phrase ("over the last 30 days", "in the
 last hour"). `status` is `act` (worth a look), `ok` (nothing to do) or
 `no_data`. `rule_ids` (additive) lists the `/api/recommendations` rule
 ids this check draws on -- `[]` for a check with no rule behind it.
+`headline`, `item`, `saving_usd` and `saving` (additive) are for the
+Overview's row for the check, and `null`, `null`, `null` and `""` for every
+check but `habits`. `headline` is the sentence the row leads with in place
+of its first finding: the rework headline, once 20% or more of at least 5
+pieces of work needed changes after Claude delivered them. `item` is the Work
+habits card the row points at (`#/habits?item=<item>`): `rework` when the
+headline leads, else the top habit worth trying. `saving_usd` is what its
+changes would save over the window, at list price: the largest
+recommendation it draws on, plus the playbook's habits that no
+recommendation already covers (their saving a week, times the weeks in the
+window, and never less than one week). `saving` says that in the billing
+mode.
 
 ### `GET /api/quick-actions/<id>`
 
@@ -1075,14 +1089,17 @@ One check in full. `404` for an unknown id.
 
 Query: the windowing params above.
 
-`data`: `{"id", "question", "why", "period", "rule_ids", "status", "summary", "table": {"columns": [{"key", "label"}, ...], "rows": [[cell, ...], ...]}|null, "fixes": [Fix, ...], "tips": [{"title", "text"}, ...]}`,
+`data`: `{"id", "question", "why", "period", "rule_ids", "status", "summary", "table": {"columns": [{"key", "label"}, ...], "rows": [[cell, ...], ...]}|null, "fixes": [Fix, ...], "tips": [{"title", "text"}, ...], "headline", "item", "saving_usd", "saving"}`,
 where each row is a list of display values in column order, `table` is
 `null` when there is nothing to show, and a `Fix` is the `fixes.py`
 shape `/api/recommendations` uses, plus an optional `title`. Environment-variable fixes (`BASH_MAX_OUTPUT_LENGTH`,
 `MAX_MCP_OUTPUT_TOKENS`) carry a prompt and no command: this tool never
 writes the `env` block. `rule_ids` (additive, same list as
 `/api/quick-actions`'s own) names the recommendation rule ids this
-check relates to; `[]` when none does.
+check relates to; `[]` when none does. `headline`, `item`, `saving_usd` and
+`saving` are the same four fields as in the list. A tip from the `habits`
+check that comes from the Work habits playbook also carries `habit`, its key
+for `#/habits?item=<habit>`.
 
 ### `GET /api/claude-md`
 
@@ -1508,13 +1525,18 @@ one is built in the background.
 - `banner`: `on`, `headline`, `notes` (end time passed, hook entries
   missing, no notes seen, low coverage, enough collected, the skill
   needs installing, what capture costs a week against what depends on
-  it), `feedback_note` and `unrated`: the sessions big enough for the
+  it), `feedback_note` and `unrated`: the pieces of work big enough for the
   rating reminder that you haven't rated, or `null` when there are none
   (or while the reminder and the dashboard rating are both off). It is
   `{"threshold", "threshold_text", "total", "pieces": [{"session_id",
-  "slug", "last_ts", "tokens", "tokens_text"}], "text"}`: the newest
-  five of the last 30 days' sessions, with the count of them all and the
-  sentence that introduces them. The threshold is the larger of
+  "slug", "last_ts", "tokens", "tokens_text", "part", "label"}], "text"}`:
+  the newest five pieces of the last 30 days' sessions, with the count of
+  them all and the sentence that introduces them. A piece is a stretch of a
+  session that was one job (`pieces.pieces_of`), so one session can hold
+  several: `part` is its place in the session, from 1, `last_ts` is when
+  it last replied, and `label` names it by words and counts only (`piece 2
+  of 3, feature, 4 messages`; empty for a session whose messages are not
+  in the transcript). The threshold is the larger of
   `rating_min_tokens` and `rating_typical_factor` times your typical
   piece of work (the same figures the reminder in Claude Code uses);
   `tokens` counts the main transcript only. A rating on the dashboard

@@ -1003,9 +1003,17 @@ def _agent_model_facts(rec: Recommendation) -> _AgentModelFacts | None:
     )
 
 
-def _agent_noun(agent_type: str | None, count: int) -> str:
+def _started_by_workflow(facts: _AgentModelFacts) -> bool:
+    """Whether a card's agents were started by a workflow script. The table
+    counts them as ``Workflow runs`` from the transcript's kind
+    (``TranscriptMeta.kind == "workflow-agent"``): a workflow agent's agent
+    type is any name its script gave it, so the type never says."""
+    return facts.workflow_runs > 0
+
+
+def _agent_noun(agent_type: str | None, count: int, workflow: bool = False) -> str:
     """``workflow agents`` for the workflow card, else ``<type> agents``."""
-    kind = "workflow" if agent_type == "workflow-subagent" else (agent_type or "")
+    kind = "workflow" if workflow else (agent_type or "")
     return " ".join(part for part in (kind, "agent" if count == 1 else "agents") if part)
 
 
@@ -1065,10 +1073,11 @@ def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:
     if facts is None:
         return
     count = facts.agents
-    noun = _agent_noun(rec.agent_type, count)
+    workflow = _started_by_workflow(facts)
+    noun = _agent_noun(rec.agent_type, count, workflow)
     model = _model_prose(facts.model) if facts.model else "a larger model"
     when = _most_recently(facts.last_seen, ctx.report)
-    if rec.agent_type == "workflow-subagent":
+    if workflow:
         runs = max(facts.workflow_runs, 1)
         started = (
             f"{_roles_phrase(facts, noun)} in {runs} workflow run{'s' if runs != 1 else ''} started with no "
@@ -1089,7 +1098,7 @@ def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:
             f"Since then, {facts.later} agent{'s' if facts.later != 1 else ''} that wrote code ran on Sonnet or "
             "a smaller model, so this looks fixed."
         )
-    if rec.agent_type not in (None, "workflow-subagent") and model_gate.build(whatif._Tables(ctx.report)).vetoed(
+    if not workflow and rec.agent_type is not None and model_gate.build(whatif._Tables(ctx.report)).vetoed(
         rec.agent_type, "sonnet"
     ):
         rec.severity = "info"
@@ -1111,7 +1120,7 @@ def _explain_agent_model_asked(rec: Recommendation, ctx: _Context) -> None:
     if facts is None:
         return
     count = facts.agents
-    noun = _agent_noun(rec.agent_type, count)
+    noun = _agent_noun(rec.agent_type, count, _started_by_workflow(facts))
     model = _model_prose(facts.model) if facts.model else "a larger model"
     family = _family_name(facts.model)
     many = count != 1
@@ -1136,7 +1145,7 @@ def _explain_agent_decide_apply(rec: Recommendation, ctx: _Context) -> None:
     if facts is None:
         return
     count = facts.agents
-    noun = _agent_noun(rec.agent_type, count)
+    noun = _agent_noun(rec.agent_type, count, _started_by_workflow(facts))
     model = _model_prose(facts.model) if facts.model else "a larger model"
     family = _family_name(facts.model)
     verbs = []

@@ -12,7 +12,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import agent_models, capture_catalogue, discovery, known_savers, quality
+from claudeglass import agent_models, capture_catalogue, discovery, known_savers, quality, waste
 from claudeglass import quick_actions as qa
 from claudeglass.fixes import PROMPT_RESTART, SCOPE_NOTE, RESTART_NOTE
 from claudeglass.model import Recommendation
@@ -42,6 +42,9 @@ def _ctx(tmp_path, model=None, **kw):
         config_dir=config_dir,
         effective=kw.get("effective", {}),
         effective_agents=kw.get("effective_agents", {}),
+        skip_keys=kw.get("skip_keys", frozenset()),
+        since_ts=kw.get("since_ts"),
+        until_ts=kw.get("until_ts"),
     )
 
 
@@ -510,18 +513,17 @@ def test_habits_are_tips_not_settings(tmp_path):
 
 
 def test_a_rec_whose_fix_already_has_a_prompt_is_not_also_a_tip(tmp_path):
-    """UX: a rec like wasted-turns already gets a fix card with a prompt
+    """UX: a rec like long-tool-waits already gets a fix card with a prompt
     (fixes._WORKFLOW_PROMPTS) -- listing it as a tip too would say the
     same finding twice."""
     model = _full_model()
     model.recommendations = [
-        Recommendation(id="wasted-turns", title="A material share of spend went to turns with no benefit",
-                        action="10.0% of priced cost went to turns whose output was never used."),
+        Recommendation(id="long-tool-waits", title="Tools often wait on you", action="Pre-approve routine tools."),
     ]
     result = qa.run("habits", _ctx(tmp_path, model=model))
     assert result["tips"] == []
     [fix] = result["fixes"]
-    assert fix["prompt"] and "flag it before you start rather than after" in fix["prompt"]
+    assert fix["prompt"]
 
 
 def test_markdown_carries_the_table_tips_and_fixes(tmp_path):
@@ -912,21 +914,36 @@ _BLOCKED_BY = [
 ]
 
 
-def test_habits_replaces_the_blocked_row_with_the_blocked_by_breakdown(tmp_path):
-    model = _waste_model(
-        waste_by_cause=[
-            {"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."},
-            {"cause": "blocked", "turns": 5, "cost_usd": 3.0, "lever": "Put the rule a hook enforces..."},
-            {"cause": "redirected", "turns": 4, "cost_usd": 1.0, "lever": "Not waste: a token saver's own hook..."},
-        ],
-        waste_blocked_by=_BLOCKED_BY,
-    )
-    result = qa.run("habits", _ctx(tmp_path, model=model))
+_WASTE_BY_CAUSE = [
+    {"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."},
+    {"cause": "blocked", "turns": 5, "cost_usd": 3.0, "lever": "Put the rule a hook enforces..."},
+    {"cause": "redirected", "turns": 4, "cost_usd": 1.0, "lever": "Not waste: a token saver's own hook..."},
+    {"cause": "interrupt", "turns": 3, "cost_usd": 0.75, "lever": "Batch instructions."},
+    {"cause": "tool-denial", "turns": 0, "cost_usd": 0.0, "lever": "Allow it."},
+]
+
+
+def test_failed_calls_replaces_the_blocked_row_with_the_blocked_by_breakdown(tmp_path):
+    model = _waste_model(waste_by_cause=_WASTE_BY_CAUSE, waste_blocked_by=_BLOCKED_BY)
+    result = qa.run("failed-calls", _ctx(tmp_path, model=model))
     labels = [row[0] for row in result["table"]["rows"]]
     assert "tool-error" in labels
     assert "blocked" not in labels and "redirected" not in labels
     assert "blocked: claude-implementer, by Claude Code's worktree guard" in labels
     assert "redirected by tokensave (not waste)" in labels
+    # The replies that went nowhere for another reason stay with the habits.
+    assert "interrupt" not in labels
+
+
+def test_the_failed_and_blocked_rows_are_not_in_the_habits_check(tmp_path):
+    """The Work habits row on the Overview was built from these rows (the
+    tool errors and every blocker's blocked replies); they have a check of
+    their own, and the habits check keeps the causes that are about how
+    you work."""
+    model = _waste_model(waste_by_cause=_WASTE_BY_CAUSE, waste_blocked_by=_BLOCKED_BY)
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert [row[0] for row in result["table"]["rows"]] == ["interrupt"]
+    assert "interrupt" not in [row[0] for row in qa.run("failed-calls", _ctx(tmp_path, model=model))["table"]["rows"]]
 
 
 def test_a_window_of_only_redirects_reads_as_fine_not_a_problem(tmp_path):
@@ -942,10 +959,17 @@ def test_a_window_of_only_redirects_reads_as_fine_not_a_problem(tmp_path):
              "tokens": 8_000, "lever": "Not waste: tokensave sent these calls..."},
         ],
     )
-    result = qa.run("habits", _ctx(tmp_path, model=model))
+    result = qa.run("failed-calls", _ctx(tmp_path, model=model))
     assert result["status"] == "ok"
     assert "not a problem" in result["summary"]
     assert "tokensave" in result["summary"]
+    assert qa.run("habits", _ctx(tmp_path, model=model))["status"] == "no_data"
+
+
+_WASTED_TURNS = Recommendation(
+    id="wasted-turns", severity="advice", title="A material share of spend went to turns with no benefit",
+    action="10.0% of priced cost went to turns whose output was never used.",
+)
 
 
 def test_the_act_summary_says_the_costliest_cause_found(tmp_path):
@@ -954,14 +978,13 @@ def test_the_act_summary_says_the_costliest_cause_found(tmp_path):
             Recommendation(id="cache-read-dominance", title="Cache reads dominate cost", action="Batch work."),
         ],
         waste_by_cause=[
-            {"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."},
-            {"cause": "blocked", "turns": 5, "cost_usd": 3.0, "lever": "Put the rule a hook enforces..."},
+            {"cause": "interrupt", "turns": 2, "cost_usd": 0.5, "lever": "Batch instructions."},
+            {"cause": "max-turns", "turns": 5, "cost_usd": 3.0, "lever": "Raise the budget."},
         ],
-        waste_blocked_by=_BLOCKED_BY[:1],
     )
     result = qa.run("habits", _ctx(tmp_path, model=model))
     assert result["status"] == "act"
-    assert "The costliest: blocked: claude-implementer, by Claude Code's worktree guard" in result["summary"]
+    assert "The costliest: max-turns" in result["summary"]
 
 
 def test_a_problem_that_did_not_clear_the_bar_still_says_its_cost(tmp_path):
@@ -969,11 +992,204 @@ def test_a_problem_that_did_not_clear_the_bar_still_says_its_cost(tmp_path):
     wasted-reply cost, so the "ok" summary should say so instead of a
     blanket "no habit stands out"."""
     model = _waste_model(
-        waste_by_cause=[{"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."}],
+        waste_by_cause=[{"cause": "interrupt", "turns": 2, "cost_usd": 0.5, "lever": "Batch instructions."}],
     )
     result = qa.run("habits", _ctx(tmp_path, model=model))
     assert result["status"] == "ok"
     assert "went to replies that went nowhere" in result["summary"]
+
+
+# -- Failed and blocked tool calls ----------------------------------------------
+
+
+def test_failed_calls_is_its_own_check_after_habits_and_claims_the_wasted_turns_finding(tmp_path):
+    ids = list(qa.CHECK_IDS)
+    assert ids.index("failed-calls") == ids.index("habits") + 1
+    check = next(c for c in qa.CHECKS if c.id == "failed-calls")
+    assert check.rule_ids == ("wasted-turns",)
+    # One finding is one check's: the habits check no longer claims it.
+    assert "wasted-turns" not in next(c for c in qa.CHECKS if c.id == "habits").rule_ids
+
+
+def test_failed_calls_says_what_the_failed_and_blocked_calls_cost_and_offers_its_own_fix(tmp_path):
+    model = _waste_model(
+        recommendations=[_WASTED_TURNS],
+        waste_by_cause=_WASTE_BY_CAUSE,
+        waste_blocked_by=_BLOCKED_BY,
+    )
+    result = qa.run("failed-calls", _ctx(tmp_path, model=model))
+    assert result["id"] == "failed-calls" and result["rule_ids"] == ["wasted-turns"]
+    assert result["status"] == "act"
+    # 2 tool errors and the 5 blocked replies; the redirects are on purpose.
+    assert result["summary"].startswith("7 replies went to failed or blocked tool calls over the last 14 days")
+    assert "The costliest: blocked: claude-implementer, by Claude Code's worktree guard" in result["summary"]
+    assert "{{page:spend/savings}}" in result["summary"]
+    own, found = result["fixes"]
+    assert set(own) >= FIX_KEYS and own["key"] is None and own["note"] == "scope"
+    assert own["title"] == waste.CALL_FAILURE_FIX["title"]
+    assert own["prompt"].startswith(waste.CALL_FAILURE_FIX["prompt"]) and "AskUserQuestion" in own["prompt"]
+    assert [heading for heading, _ in own["explainer"]] == [
+        "Why it's suggested", "Where and who it affects", "Trade-off", "How to undo it",
+    ]
+    # The finding's own fix follows it, and is not also a tip.
+    assert "flag it before you start rather than after" in found["prompt"]
+    assert result["tips"] == []
+
+
+def test_failed_calls_is_fine_when_nothing_cleared_the_bar_and_says_so_when_nothing_failed(tmp_path):
+    quiet = _waste_model(waste_by_cause=[{"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths."}])
+    result = qa.run("failed-calls", _ctx(tmp_path, model=quiet))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert "went to replies lost to failed or blocked tool calls over the last 14 days, but not enough to flag" in result["summary"]
+    none = _waste_model(waste_by_cause=[{"cause": "interrupt", "turns": 2, "cost_usd": 0.5, "lever": "Batch."}])
+    result = qa.run("failed-calls", _ctx(tmp_path, model=none))
+    assert result["status"] == "ok"
+    assert result["summary"] == "No reply was lost to a failed or blocked tool call over the last 14 days."
+    # No waste section at all: too little to say.
+    empty = NS(sections=[], context_files={}, recommendations=[])
+    assert qa.run("failed-calls", _ctx(tmp_path, model=empty))["status"] == "no_data"
+
+
+# -- The Overview's Work habits row: rework lead, playbook saving, item -------------
+
+
+def _rework_model(count, total, *, item="pieces"):
+    model = _full_model()
+    model.recommendations = []
+    text = (
+        f"{count} of your {total} pieces of work needed changes after Claude delivered them. "
+        "That rework cost $1.00 over the last 14 days. 50% came from requests that left something out."
+    )
+    rows = [{
+        "item": item, "text": text, "count": count, "total": total, "share": 100.0 * count / total,
+        "cost": 1.0, "tokens": 1000, "period": "over the last 14 days",
+    }]
+    model.sections.append(NS(key="rework", tables=[_table("rework_headline", rows)]))
+    return model
+
+
+@pytest.mark.parametrize(
+    ("count", "total", "leads"),
+    [
+        (1, 5, True),     # exactly 20% of exactly 5 pieces
+        (2, 10, True),
+        (4, 19, True),    # 21%
+        (3, 4, False),    # 75%, but under 5 pieces
+        (1, 6, False),    # 17% of 6
+        (4, 21, False),   # 19% of 21
+        (0, 5, False),
+    ],
+)
+def test_the_rework_headline_leads_at_a_fifth_of_five_or_more_pieces(tmp_path, count, total, leads):
+    result = qa.run("habits", _ctx(tmp_path, model=_rework_model(count, total)))
+    if not leads:
+        assert result["headline"] is None and result["item"] is None
+        assert result["status"] == "no_data"
+        return
+    sentence = f"{count} of your {total} pieces of work needed changes after Claude delivered them."
+    # The first sentence only: the cost and the causes are on the Work habits page.
+    assert result["headline"] == sentence
+    assert result["item"] == qa.REWORK_ITEM == "rework"
+    assert result["status"] == "act"
+    assert result["summary"].startswith(sentence + " 1 way of working cost tokens over the last 14 days.")
+
+
+def test_requests_in_sessions_that_were_not_cut_into_pieces_never_lead(tmp_path):
+    result = qa.run("habits", _ctx(tmp_path, model=_rework_model(10, 10, item="requests")))
+    assert result["headline"] is None and result["status"] == "no_data"
+
+
+def test_the_row_keeps_its_current_lead_when_too_little_was_reworked(tmp_path):
+    """Under the threshold the check answers as it did: no headline, and
+    the item to open is the top habit worth trying."""
+    model = _rework_model(1, 6)
+    model.sections.append(_habits_tables(habits_playbook=_PLAYBOOK))
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["headline"] is None and result["status"] == "act"
+    assert result["item"] == "targeted_checks"
+    assert result["summary"].startswith("3 ways of working cost tokens")
+    # Over it, the headline leads and the rework section is the item.
+    model = _rework_model(2, 6)
+    model.sections.append(_habits_tables(habits_playbook=_PLAYBOOK))
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["headline"].startswith("2 of your 6 pieces") and result["item"] == "rework"
+    assert result["summary"].startswith("2 of your 6 pieces of work needed changes after Claude delivered them. 4 ways")
+
+
+def test_playbook_tips_carry_their_habit_for_the_link_to_its_card(tmp_path):
+    model = _full_model()
+    model.recommendations = []
+    model.sections.append(_habits_tables(habits_playbook=_PLAYBOOK))
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert [tip["habit"] for tip in result["tips"]] == ["targeted_checks", "short_reports", "name_files"]
+    assert result["item"] == "targeted_checks"
+
+
+_HABIT_REC = Recommendation(
+    id="long-tool-waits", key="long-tool-waits", severity="advice", title="Tools often wait on you",
+    action="Pre-approve routine tools.", saving_usd=4.0,
+)
+
+
+def _saving_model(*, covered=True):
+    """One habit recommendation saving 4.00 over the window, and a playbook
+    of 2.00, 1.00, 0.50 and 0.25 a week: the top one covered by a fired
+    rule, so ``apply_covered_by`` left it with no saving of its own."""
+    model = _full_model()
+    model.recommendations = [_HABIT_REC]
+    rows = [dict(row, covered_by="") for row in _PLAYBOOK]
+    if covered:
+        rows[0].update(covered_by="Tools often wait on you", saving=None)
+    model.sections.append(_habits_tables(habits_playbook=rows))
+    return model
+
+
+def test_the_habits_saving_includes_the_playbook_saving_over_the_window(tmp_path):
+    two_weeks = dict(since_ts=0.0, until_ts=14 * 86400.0)
+    ctx = _ctx(tmp_path, model=_saving_model(), **two_weeks)
+    result = qa.run("habits", ctx)
+    # The recommendation's 4.00, and the habits it doesn't cover: 1.75 a week for two weeks.
+    assert result["saving_usd"] == pytest.approx(4.0 + 1.75 * 2)
+    assert result["saving"] == f"{qa._money(ctx, 7.5, period=True, prefix='About ')} if you change these habits."
+    assert result["saving"] == "About 7.50 USD over the last 14 days if you change these habits."
+    # A covered habit is in the recommendation's saving already: uncovered, it adds its 2.00 a week.
+    both = qa.run("habits", _ctx(tmp_path, model=_saving_model(covered=False), **two_weeks))
+    assert both["saving_usd"] == pytest.approx(4.0 + 3.75 * 2)
+
+
+def test_the_playbook_saving_is_never_counted_for_less_than_a_week_or_more_than_the_window(tmp_path):
+    def saving(**window):
+        return qa.run("habits", _ctx(tmp_path, model=_saving_model(), **window))["saving_usd"]
+
+    # A day, and a window with no start (all time): one week's saving.
+    assert saving(since_ts=0.0, until_ts=86400.0) == pytest.approx(4.0 + 1.75)
+    assert saving() == pytest.approx(4.0 + 1.75)
+    # A window with no end runs to now.
+    assert saving(since_ts=0.0) > saving(since_ts=0.0, until_ts=14 * 86400.0)
+
+
+def test_an_ignored_recommendation_adds_nothing_to_the_habits_saving(tmp_path):
+    ctx = _ctx(tmp_path, model=_saving_model(), since_ts=0.0, until_ts=7 * 86400.0, skip_keys=frozenset({"long-tool-waits"}))
+    assert qa.run("habits", ctx)["saving_usd"] == pytest.approx(1.75)
+
+
+def test_a_habits_check_with_no_saving_says_none(tmp_path):
+    model = _full_model()
+    model.recommendations = [Recommendation(id="cache-read-dominance", title="Cache reads dominate cost", action="Batch work.")]
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["status"] == "act" and result["saving_usd"] is None and result["saving"] == ""
+
+
+def test_the_list_carries_what_the_overview_row_needs(tmp_path):
+    rows = {row["id"]: row for row in qa.run_all(_ctx(tmp_path, model=_saving_model(), since_ts=0.0, until_ts=14 * 86400.0))}
+    habits = rows["habits"]
+    assert habits["saving_usd"] == pytest.approx(7.5) and habits["saving"].startswith("About 7.50 USD over the last 14 days")
+    assert habits["headline"] is None and habits["item"] == "short_reports"
+    # Every other check answers with the four fields empty.
+    for check_id, row in rows.items():
+        assert {"headline", "item", "saving_usd", "saving"} <= set(row), check_id
+        if check_id != "habits":
+            assert (row["headline"], row["item"], row["saving_usd"], row["saving"]) == (None, None, None, ""), check_id
 
 
 def test_skills_late_or_not_needed_become_tips(tmp_path):

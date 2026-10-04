@@ -538,15 +538,15 @@ def _step_down_note(capture: CaptureConfig, rows: list[dict]) -> str | None:
 
 
 def _unrated_block(unrated: dict | None) -> dict | None:
-    """The banner's list of sessions waiting for a rating: ``unrated``
-    (``api.py``'s ``_capture_unrated``) with the sentence that introduces
-    it, or ``None`` when there are none."""
+    """The banner's list of pieces of work waiting for a rating: ``unrated``
+    (``api.py``'s ``_capture_unrated``, each piece with its ``label``) with
+    the sentence that introduces it, or ``None`` when there are none."""
     if not unrated or not unrated["pieces"]:
         return None
     total = unrated["total"]
     return {
         **unrated,
-        "text": f"{_plural(total, 'session')} used at least {unrated['threshold_text']} tokens and "
+        "text": f"{_plural(total, 'piece')} of work used at least {unrated['threshold_text']} tokens and "
         f"{'has' if total == 1 else 'have'} no rating yet. Rating them makes your savings tips fit how you work.",
     }
 

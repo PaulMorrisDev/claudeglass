@@ -512,12 +512,13 @@ function notesSignature(notes) {
   return (notes || []).join("\n");
 }
 
-// The sessions waiting for a rating: their ids, so a list that changed
-// (a new session, one rated) shows again at once.
+// The pieces of work waiting for a rating: their session ids and places
+// in the session, so a list that changed (a new piece, one rated) shows
+// again at once.
 function unratedSignature(unrated) {
   return ((unrated && unrated.pieces) || [])
     .map(function (piece) {
-      return piece.session_id;
+      return piece.session_id + "#" + (piece.part || 1);
     })
     .join(",");
 }
@@ -543,9 +544,10 @@ function unratedSnoozed(unrated) {
   return snoozed("tls:captureUnratedHidden", unratedSignature(unrated));
 }
 
-// The banner's list of sessions big enough for the rating reminder that
-// have no rating: each opens its session, where the questions are. The
-// dashboard asks for a rating, and changes nothing.
+// The banner's list of pieces of work big enough for the rating reminder
+// that have no rating: each opens its session, where the questions are,
+// and says which piece it is. The dashboard asks for a rating, and
+// changes nothing.
 function unratedBlock(unrated, data) {
   var block = el("div", { class: "capture-unrated" });
   block.appendChild(el("p", null, prose(unrated.text)));
@@ -555,13 +557,16 @@ function unratedBlock(unrated, data) {
       { class: "capture-notes capture-unrated-list" },
       unrated.pieces.map(function (piece) {
         var rate = el("button", { type: "button", class: "link-button", text: "Rate it" });
-        rate.setAttribute("aria-label", "Rate the " + projectName(piece.slug) + " session from " + relativeTime(piece.last_ts));
+        rate.setAttribute(
+          "aria-label",
+          "Rate the " + projectName(piece.slug) + (piece.label ? " (" + piece.label + ")" : "") + " session from " + relativeTime(piece.last_ts)
+        );
         rate.addEventListener("click", function () {
           openSessionDrawer(piece.session_id);
         });
         return el("li", null, [
           el("span", { text: projectName(piece.slug) }),
-          " · " + relativeTime(piece.last_ts) + " · " + compactNumber(piece.tokens) + " tokens ",
+          (piece.label ? " · " + piece.label : "") + " · " + relativeTime(piece.last_ts) + " · " + compactNumber(piece.tokens) + " tokens ",
           rate,
         ]);
       })

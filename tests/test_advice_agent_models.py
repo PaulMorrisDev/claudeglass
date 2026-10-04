@@ -283,6 +283,19 @@ def test_the_asked_card_says_the_model_was_named_in_the_call(units):
     assert card.saving_usd == 49.5
 
 
+def test_a_card_is_a_workflow_card_by_the_runs_a_script_started_and_not_by_its_agent_type_name():
+    """The table counts ``Workflow runs`` from the transcripts' kind. An agent type that merely
+    carries the placeholder's name is named like any other when no script started the runs."""
+    workflow = _finish(_rec("agent-model-asked", agent_type="renamed-by-a-script", agents=2, roles="fix 2",
+                            severity="info", workflow_runs=1))
+    assert workflow.title == "2 workflow agents that wrote code were started on Opus 5.5"
+    direct = _finish(_rec("agent-model-asked", agent_type="workflow-subagent", agents=2, roles="fix 2",
+                          severity="info", workflow_runs=0))
+    assert direct.title == "2 workflow-subagent agents that wrote code were started on Opus 5.5"
+    inherited = _finish(_rec(agent_type="renamed-by-a-script", workflow_runs=3))
+    assert inherited.why.startswith("4 implementers and 1 fixer in 3 workflow runs started with no model")
+
+
 def test_the_asked_card_reads_in_the_singular():
     card = _finish(_rec("agent-model-asked", agents=1, roles="fix 1", severity="info"))
     assert card.title == "1 workflow agent that wrote code was started on Opus 5.5"

@@ -839,7 +839,7 @@ def test_a_tag_in_reply_to_a_background_agents_report_counts_for_the_cycle_that_
     assert (first.tag.task, first.tag.brief, first.tag.level, first.tag.size) == ("research", "clear", "hard", "m")
     # The second message keeps the tag it wrote itself and not the report's.
     assert (second.tag.task, second.tag.level, second.tag.size) == ("docs", None, None)
-    # The turns, and so the cost, stay where they ran.
+    # The turns stay in the cycle they ran in, in the timeline; the tag and the cost move.
     assert (len(first.turns), len(second.turns)) == (2, 2)
     assert first.late_turns == [second.turns[1]] and second.handed_off == {1}
 
@@ -978,6 +978,138 @@ def test_a_reply_whose_first_report_is_its_own_cycles_keeps_its_tag(tmp_path):
     assert (first.tag.size, second.tag.size) == (None, "m")
 
 
+# -- what a cycle is charged ---------------------------------------------------------
+
+#: One reply of 100 input and 50 output tokens (``turn_line``'s defaults).
+REPLY_USD = 100 / 1e6 * 1.0 + 50 / 1e6 * 2.0
+REPLY_TOKENS = 150
+
+
+def _spend_after_a_report(tmp_path, pricing, *, continues=False):
+    """The cycle that started an agent and the one that was open when its
+    report came: the reply to the report is in the second."""
+    lines = [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A"),
+        _launched(3, "toolu_A"),
+        _reply(4, text="Launched."),
+        _ask(10, "something else"),
+        _reply(11, text="Done."),
+        _report(20, "a1"),
+    ]
+    if continues:
+        lines += [
+            _reply(21, tool_use_block("Read", "toolu_R", {"file_path": "notes.md"})),
+            user_block_line([tool_result_block("toolu_R", "text")], timestamp=_ts(22)),
+            _reply(23, text="It found the cause."),
+        ]
+    else:
+        lines.append(_reply(21, text="It found the cause."))
+    top = _top(tmp_path, lines)
+    first, second = capture.prompt_cycles(top, [_agent_that_reports(tmp_path, "a1", "toolu_A", 6)])
+    return first, second, [capture.cycle_spend(c, pricing) for c in (first, second)]
+
+
+def test_a_reply_to_an_agents_report_is_charged_to_the_cycle_that_started_the_agent(tmp_path, pricing):
+    first, second, (one, two) = _spend_after_a_report(tmp_path, pricing)
+    # Its own two replies, the agent's one, and the reply to the report.
+    assert one.cost == pytest.approx(4 * REPLY_USD) and one.moved_in == pytest.approx(REPLY_USD)
+    assert (one.replies, one.tokens, one.agent_tokens) == (3, 3 * REPLY_TOKENS, REPLY_TOKENS)
+    assert one.moved_out == 0.0
+    # The second keeps the reply it ran for itself and gives the other away.
+    assert two.cost == pytest.approx(REPLY_USD) and two.moved_in == 0.0
+    assert two.moved_out == pytest.approx(REPLY_USD)
+    assert (two.replies, two.tokens, two.agent_tokens) == (1, REPLY_TOKENS, 0)
+    # It still ran there: the timeline is the cycle's own turns.
+    assert (len(first.turns), len(second.turns)) == (2, 2)
+
+
+def test_every_turn_of_a_reply_to_a_report_is_charged_with_it(tmp_path, pricing):
+    _first, second, (one, two) = _spend_after_a_report(tmp_path, pricing, continues=True)
+    assert second.handed_off == {1, 2}
+    assert one.replies == 4 and one.moved_in == pytest.approx(2 * REPLY_USD)
+    assert two.replies == 1 and two.moved_out == pytest.approx(2 * REPLY_USD)
+
+
+def test_each_turn_is_charged_once_over_a_session(tmp_path, pricing):
+    for continues in (False, True):
+        first, second, spends = _spend_after_a_report(tmp_path, pricing, continues=continues)
+        turns = len(first.turns) + len(second.turns) + sum(len(capture._priced(s)) for s in first.subs + second.subs)
+        assert sum(s.cost for s in spends) == pytest.approx(turns * REPLY_USD)
+        assert sum(s.replies for s in spends) == len(first.turns) + len(second.turns)
+        assert sum(s.moved_in for s in spends) == pytest.approx(sum(s.moved_out for s in spends))
+
+
+def test_a_cycles_cost_is_what_usage_and_the_cost_helper_share(tmp_path, pricing):
+    first, second, (one, two) = _spend_after_a_report(tmp_path, pricing)
+    assert capture._cycle_cost(first, pricing) == one.cost
+    assert capture._cycle_cost(second, pricing) == two.cost
+
+
+def test_a_workflows_report_reply_is_charged_to_the_cycle_that_launched_it(tmp_path, pricing):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "run it"),
+        _wf_call(2, "tu_w"),
+        _wf_launched(3, "tu_w", "wf_a", "t_a"),
+        _reply(4, text="Running."),
+        _ask(10, "meanwhile"),
+        _reply(11, text="Sure."),
+        _report(20, "t_a"),
+        _reply(21, text="It finished."),
+    ])
+    agent = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(6))
+    first, second = capture.prompt_cycles(top, [agent])
+    one, two = capture.cycle_spend(first, pricing), capture.cycle_spend(second, pricing)
+    assert one.cost == pytest.approx(4 * REPLY_USD) and one.moved_in == pytest.approx(REPLY_USD)
+    assert two.cost == pytest.approx(REPLY_USD) and two.moved_out == pytest.approx(REPLY_USD)
+    assert one.agent_tokens == REPLY_TOKENS
+
+
+def test_a_report_answered_by_the_cycle_that_started_the_agent_moves_nothing(tmp_path, pricing):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A"),
+        _report(8, "a1"),
+        _reply(9, text="Found it."),
+    ])
+    [cycle] = capture.prompt_cycles(top, [_agent_that_reports(tmp_path, "a1", "toolu_A", 6)])
+    spend = capture.cycle_spend(cycle, pricing)
+    assert (spend.moved_in, spend.moved_out) == (0.0, 0.0)
+    assert spend.cost == pytest.approx(3 * REPLY_USD)
+
+
+def test_with_no_price_table_a_cycle_costs_nothing_but_still_counts_its_tokens(tmp_path, pricing):
+    _first, _second, _ = _spend_after_a_report(tmp_path, pricing)
+    first, second = capture.prompt_cycles(
+        _top(tmp_path, [_tagged(), _ask(1), _reply(2), _ask(10), _reply(11)]), []
+    )
+    spend = capture.cycle_spend(first, None)
+    assert (spend.cost, spend.moved_in, spend.moved_out) == (0.0, 0.0, 0.0)
+    assert (spend.tokens, spend.replies) == (REPLY_TOKENS, 1)
+
+
+def test_a_cycle_whose_tags_were_all_written_by_haiku_is_haiku_only(tmp_path):
+    top = _top(tmp_path, [
+        _note(0, TAG_IDS),
+        _ask(1),
+        _reply(2, text="One.\n[cg: task=test]"),
+        _reply(3, text="Two.\n[cg: task=bugfix]"),
+        _ask(10),
+        _reply(11, text="No tag."),
+    ])
+    first, second = capture.prompt_cycles(top)
+    assert not first.haiku_only and not second.haiku_only
+    for turn in first.turns:
+        turn.cap = replace(turn.cap, judged=True, chars=0)
+    assert first.haiku_only
+    # One tag of Claude's among them is enough to make it Claude's.
+    first.turns[0].cap = replace(first.turns[0].cap, judged=False)
+    assert not first.haiku_only
+
+
 def test_coverage_counts_a_cycle_tagged_only_by_a_late_reply(tmp_path, pricing):
     top = _top(tmp_path, [
         _tagged(),
@@ -1112,6 +1244,17 @@ def test_usage_since_leaves_out_what_came_before(tmp_path, pricing):
     assert (use.notes, use.cycles, use.tagged_cycles, use.reports) == (0, 2, 0, 0)
     assert use.cost == 0.0
     assert use.spend > 0
+
+
+def test_a_session_counts_as_captured_for_its_note_or_for_a_tag_haiku_wrote(tmp_path):
+    """One definition for the banner and Work habits: the main transcript
+    carried a capture note, or Claude Haiku tagged one of its turns."""
+    noted = _top(tmp_path, [_note(0, ["task"]), _ask(1), _reply(2, text="Done.")])
+    assert capture.is_captured(noted)
+    plain = _top(tmp_path, [_ask(1), _reply(2, text="Done.\n[cg: task=bugfix]")])
+    assert not capture.is_captured(plain)
+    plain.turns[0].cap = CaptureTag(task="bugfix", judged=True)
+    assert capture.is_captured(plain)
 
 
 def test_sessions_without_a_capture_note_are_not_counted(tmp_path, pricing):

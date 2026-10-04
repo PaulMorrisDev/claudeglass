@@ -428,3 +428,77 @@ def test_the_rating_questions_and_feedback_items_keep_to_the_help_rules():
         if metric.group == "feedback":
             _plain(metric.what, f"{metric.id} what")
             _plain(metric.why, f"{metric.id} why")
+
+
+def test_the_copy_the_rework_section_builds_keeps_to_the_help_rules():
+    """Every sentence, Try line, line to copy and note rework.py writes,
+    for the API and for a subscription, from a section with every row: the
+    same rules as the help text."""
+    from claudeglass import capture_catalogue, habits, pieces, rework
+    from claudeglass.model import Feedback
+    from claudeglass.units import Units
+    from test_rework import _admitting, _h, _pieces, _week_piece
+    from test_pieces import _build, _fix, _msg, _tag
+
+    pricing_min = load_pricing(path=Path(__file__).resolve().parent / "fixtures" / "pricing_min.toml")
+    work = [
+        *_pieces(fixes=[{"tag": _tag(shift="fix", why=why)} for why in ("left_out", "missed", "changed", "tools")]),
+        *_pieces(fixes=[{"human_correction": True}], feedback=Feedback(source="answers", why=("missed",), missed_in="plan")),
+        *pieces.pieces_of([_build(0), _fix(10, human_correction=True, admit_caught="user", **_admitting())], rates=pricing_min),
+        *pieces.pieces_of([_build(0), _fix(10, human_correction=True), _fix(20, human_correction=True), _msg(30)], rates=pricing_min),
+        *[_week_piece(0, reworked=True) for _ in range(rework.MIN_WEEK_REWORKED)],
+    ]
+    possible = _msg(10, files=("c",), human_prompt_chars=400)
+    possible.facts = {"admit_candidate": True}
+    work += pieces.pieces_of([_build(0), possible, _msg(20, tag=_tag(shift="new"))])
+    plans = [habits.PlanFix(shape="plan_build", typed=3, cost=0.5) for _ in range(habits.MIN_GROUP)]
+    strings: list[tuple[str, str]] = [(f"try {cause}", line) for cause, line in rework.TRY.items()]
+    strings += [(f"paste {cause}", line) for cause, line in rework.PASTE.items() if line]
+    strings += [(f"missed_in {word or 'unsaid'}", line) for word, line in capture_catalogue.MISSED_IN_LINES.items()]
+    strings += [("possible", rework.possible_text(n)) for n in (1, 3)]
+    for units in (Units(), Units(billing_mode="subscription")):
+        section = rework.build_section(_h(*work, plan_fixes=plans), units)
+        strings += [("note", note) for note in section.notes]
+        for table in section.tables:
+            texts = [c.key for c in table.columns if c.key in ("text", "detail", "try", "fix")]
+            for row in table.rows:
+                cells = dict(zip((c.key for c in table.columns), row))
+                strings += [(f"{table.name}.{key}", cells[key]) for key in texts if cells[key]]
+    assert {w for w, _ in strings} >= {"rework_headline.text", "rework_causes.detail", "rework_admitted.text"}
+    for where, text in strings:
+        _plain(text, where)
+
+
+def test_the_copy_the_failed_calls_check_and_the_work_habits_row_add_keeps_to_the_help_rules(tmp_path):
+    """The "Failed and blocked tool calls" check: its question and why, the
+    fix's explainer and the prompt to copy, and what it says when it finds
+    something, when it finds little and when it finds nothing; and the
+    sentence the Work habits row adds under its rework lead and its saving."""
+    from claudeglass import quick_actions as qa
+    from claudeglass import waste
+    from test_quick_actions import _BLOCKED_BY, _WASTE_BY_CAUSE, _WASTED_TURNS, _ctx, _waste_model
+
+    check = next(c for c in qa.CHECKS if c.id == "failed-calls")
+    strings = [("question", check.question), ("why", check.why)]
+    fix = qa._failed_calls_fix()
+    strings += [(f"fix {key}", text) for key, text in waste.CALL_FAILURE_FIX.items()]
+    strings += [(f"explainer {heading}", text) for heading, text in fix["explainer"]]
+    # The scope question every prompt ends with is the shared wording's, not this check's.
+    assert fix["prompt"].endswith(qa.PROMPT_SCOPE)
+    strings += [("fix title", fix["title"]), ("fix prompt", fix["prompt"].removesuffix(" " + qa.PROMPT_SCOPE))]
+    found = _waste_model(recommendations=[_WASTED_TURNS], waste_by_cause=_WASTE_BY_CAUSE, waste_blocked_by=_BLOCKED_BY)
+    quiet = _waste_model(waste_by_cause=[{"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."}])
+    none = _waste_model(waste_by_cause=[{"cause": "interrupt", "turns": 2, "cost_usd": 0.5, "lever": "Batch instructions."}])
+    redirects = _waste_model(
+        waste_by_cause=[{"cause": "redirected", "turns": 4, "cost_usd": 1.0, "lever": "Not waste."}],
+        waste_blocked_by=[row for row in _BLOCKED_BY if row["kind"] == "saver"],
+    )
+    for name, model in (("found", found), ("quiet", quiet), ("none", none), ("redirects", redirects)):
+        result = qa.run("failed-calls", _ctx(tmp_path, model=model))
+        strings.append((f"{name} summary", re.sub(r"\{\{page:[a-z/-]+\}\}", "the Savings page", result["summary"])))
+    habits_result = qa.run("habits", _ctx(tmp_path, model=found))
+    if habits_result["saving"]:
+        strings.append(("habits saving", habits_result["saving"]))
+    assert len(strings) >= 12
+    for where, text in strings:
+        _plain(text, where)

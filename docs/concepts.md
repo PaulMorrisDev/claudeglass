@@ -547,8 +547,88 @@ agents belong to the cycle of the reply that started their run; a run
 that was resumed keeps its run id, so its agents are split between the
 resuming replies by when they started. A tag Claude writes in reply to a
 background agent's or a workflow's report counts for the cycle that
-launched it, even when you sent another message in between: the cost
-stays in the cycle it was spent in, only the tag moves.
+launched it, even when you sent another message in between. The whole
+reply goes with it: its tag, and every turn it took, from the one that read
+the report to the last tool call it made. The reply keeps its place in the
+cycle's own turns, the timeline, but `capture.cycle_spend` charges its
+cost and tokens to the cycle that started the agent, so the cycles' costs
+still add up to the session's. A piece of work's cost labels the amount
+that came this way (`moved_cost`).
+
+**Piece of work.** The stretch of a session that was one job, drawn from
+the transcript alone by `pieces.pieces_of`, so it needs no /cg-feedback
+answer and no tag. Where it differs from a prompt cycle: a cycle is one
+message and its replies, and a piece is the run of cycles from one fresh
+start to the next. It starts only at the session start, at a /clear
+(unless the message after it is a handoff), at a settled `shift=new` on a
+message that asks for something, or, with no `shift` word at all, after a
+silence of 3 hours or more with different files (under 10% of the file
+names in common, at least two on each side) on a message that asks for
+something. That last start is the only low-confidence one. A queued
+message, a plan reply and an answer to a question Claude asked open no
+cycle, so they start nothing. A session with no start inside it is one
+*unsegmented* piece, and counts its messages that asked for something, not
+itself, in a per-piece rate. A session that opens with a handoff (a long
+first message, a paste, or a file path straight after an approved plan),
+within 72 hours of the end of the same project's previous piece, joins that
+piece. **Rework** is a cycle after the piece's first delivery that has a
+settled `shift` of `redo` or `fix`, a correction you typed or queued, an
+adjustment that changes files the piece already changed, or (inferred) a
+short message that changes the files the cycle before it did. A go-ahead,
+a thank-you, a status check and a round of plan feedback are never rework.
+Your /cg-feedback answers can rule a cycle out (`why=changed`, `plan=new`,
+a plan check of `new`) and are where the **cause** comes from first, then
+the cycle's settled `why` tag, then what the message itself says, else
+"cause not reported". Each cause carries where it came from: your
+feedback, Claude's tag, Haiku's tag, or inferred. Nothing says Claude got
+it wrong unless your answers or a tag did. The typical piece the coaching
+file holds is the median of these pieces' tokens, and the capture banner
+lists the pieces of work no rating covers. `pieces.rework_rate`,
+`rework_by_level` and `rework_by_size` normalise rework per message that
+asked for something and per piece. A `habits.Piece` is the habits tables'
+own row: the work one /cg-feedback answer or dashboard rating covers, with
+its outcome, and one row with no outcome for each piece of work no answer
+covers. Only the rows with an outcome feed the tables that need your
+answer. The `rework` section (`rework.py`) reports the rework, its causes
+and where each came from, by piece of work.
+
+**Admission.** A reply that owns a mistake of Claude's. It counts only when
+the settled `admit` tag says so (`claim`, `change` or `instruction`: an
+instruction Claude had been given and did not follow); a reply that only
+reads like one (`Cycle.admit_possible`) is a possible admission and is
+never in a total. It is *caught by you* when a message of yours pushed back
+before it (`Turn.admit_caught`, else a correction or adjustment typed or
+queued before it), else *by Claude itself*. The rework after an admission
+you caught is the admitting cycle, when it was rework, and the run of
+rework cycles after it, each counted once.
+
+**Messages that asked for something.** A message asks for something
+(`pieces.asks`, `CycleFact.asks`) unless it is a go-ahead, a status
+check, a thank-you, or your reply to a plan you sent back. Each message
+you typed while Claude worked adds one, less a go-ahead or a status check
+among them, and a /cg-feedback run asks nothing. The habit rates per
+message and the weekly trends divide by these. A habit built from
+Claude's tags divides by the tagged ones, so a week it wasn't tagging is a
+dash, not a week with nothing to fix. A trend is "new" until 3 weeks are
+measured and "Not measured" when every week is zero. The percentage columns
+of a table divide by the messages in that table's own group.
+
+**Partial and vague asks.** The `brief_clearly` card compares them with clear
+asks like for like: within one kind of task and level, leaving out the
+messages that carried out a plan, with at least 5 messages on each side. It
+shows when a partial or vague ask cost more than a clear one in at least 60%
+of the comparisons. The plain averages in "How clear your asks were" mix in
+plan builds and every kind of work, so that table carries a note saying so.
+
+**Redone and planned.** A message is *redone* when a settled `shift`
+of `redo` or `fix` or a correction followed it (unless you called that a
+change of mind or new to the plan), or when the piece of work reworked it
+afterwards. The whole chain of rework is charged to the message that
+delivered the work (`redo_cost`), once, even when a cycle is both a redo and
+rework. A message is *planned* when it was written in plan mode, called
+`ExitPlanMode`, or came after a plan you approved by typing, until its piece
+of work ends. When most of your hard asks were planned and none of the others
+was redone, the digest says you are already doing this.
 
 **Coverage.** The share of prompt cycles whose final reply carried a
 `[cg: ...]` tag (`CaptureUsage.coverage`), and separately the share of
@@ -610,8 +690,9 @@ counts, yes/no answers and closed words comes out of the check.
 evidence came from: **reported** (a capture tag), **inferred** (measured
 without asking Claude), or **your feedback**. Confidence is **high**
 from 20 supporting cases, **medium** from 8; inferred evidence alone is
-never high, since it's the weakest of the three. **Trend** is **new**,
-**falling**, **rising** or **steady**, from the habit's rate per message
+never high, since it's the weakest of the three. **Trend** is **new**
+(until 3 weeks are measured), **falling**, **rising**, **steady** or **not
+measured** (every week is zero), from the habit's rate per message
 over the last eight weeks; a fall sustained over at least four known
 weeks counts as **picked up**, and the saving that implies moves into
 the "Weekly pace" digest's `adopted` figure instead of still being
@@ -637,8 +718,7 @@ the words you type under Other are read once and dropped.
 for a kind of task, the model and effort you used most (`usual`) against
 the cheapest setup that cost less, went at least as well within 5
 points, and has 5 or more messages (`cheaper`). "Went well" is your
-feedback's `met` where you gave it, else not redone by your next
-message. The two are compared level for level, on only the capture
+feedback's `met` where you gave it, else not redone afterwards. The two are compared level for level, on only the capture
 levels both setups ran, weighted by the usual setup's own mix
 (`habits._like_for_like`), and only once those shared levels hold at
 least half the usual setup's messages — comparing a setup that mostly

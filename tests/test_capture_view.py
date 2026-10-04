@@ -5,15 +5,21 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace as NS
 
-from claudeglass import capture, capture_catalogue as catalogue, capture_view, habits
+import pytest
+
+from claudeglass import capture, capture_catalogue as catalogue, capture_view, habits, parse
 from claudeglass.config import CaptureConfig
 from claudeglass.hook_health import CaptureHookHealth, HookSpec
+from claudeglass.pricing import load_pricing
 from claudeglass.units import Units
 
 from helpers import assert_privacy, elasticity_with_slope
+from test_capture import _ask, _note, _reply, _top
 
 API = Units(billing_mode="api")
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def _past() -> capture.History:
@@ -407,36 +413,38 @@ def _unrated(total: int = 2, pieces: int = 2) -> dict:
         "total": total,
         "pieces": [
             {"session_id": f"s{n}", "slug": "shop", "last_ts": f"2026-09-2{n}T10:00:00Z", "tokens": 1_200_000 + n,
-             "tokens_text": "1.2M"}
+             "tokens_text": "1.2M", "part": 1, "label": "feature, 3 messages"}
             for n in range(pieces)
         ],
     }
 
 
-def test_the_banner_lists_the_sessions_waiting_for_a_rating_with_a_sentence_that_introduces_them():
+def test_the_banner_lists_the_pieces_of_work_waiting_for_a_rating_with_a_sentence_that_introduces_them():
     unrated = _unrated()
     for config in (CaptureConfig(feedback=["feedback_reminder"]), CaptureConfig(feedback=["dashboard_rating"])):
         banner = capture_view.view(config, unrated=unrated)["banner"]
         block = banner["unrated"]
         assert block["text"] == (
-            "2 sessions used at least 1M tokens and have no rating yet. "
+            "2 pieces of work used at least 1M tokens and have no rating yet. "
             "Rating them makes your savings tips fit how you work."
         )
         assert [p["session_id"] for p in block["pieces"]] == ["s0", "s1"]
+        # Each piece keeps the words that name it, so a session with two of them reads as two.
+        assert [(p["part"], p["label"]) for p in block["pieces"]] == [(1, "feature, 3 messages")] * 2
         assert (block["threshold"], block["threshold_text"], block["total"]) == (1_000_000, "1M", 2)
     # The figures it was given stay as they were, with the sentence added.
     assert "text" not in unrated
 
 
-def test_the_banner_counts_more_sessions_than_it_lists_and_says_one_in_the_singular():
+def test_the_banner_counts_more_pieces_than_it_lists_and_says_one_in_the_singular():
     block = capture_view.view(CaptureConfig(), unrated=_unrated(total=7, pieces=5))["banner"]["unrated"]
     assert block["total"] == 7 and len(block["pieces"]) == 5
-    assert block["text"].startswith("7 sessions used at least 1M tokens and have no rating yet.")
+    assert block["text"].startswith("7 pieces of work used at least 1M tokens and have no rating yet.")
     one = capture_view.view(CaptureConfig(), unrated=_unrated(total=1, pieces=1))["banner"]["unrated"]
-    assert one["text"].startswith("1 session used at least 1M tokens and has no rating yet.")
+    assert one["text"].startswith("1 piece of work used at least 1M tokens and has no rating yet.")
 
 
-def test_the_banner_has_no_list_without_sessions_to_rate():
+def test_the_banner_has_no_list_without_pieces_to_rate():
     for unrated in (None, {}, _unrated(total=0, pieces=0)):
         assert capture_view.view(CaptureConfig(), unrated=unrated)["banner"]["unrated"] is None
     assert capture_view.view(CaptureConfig())["banner"]["unrated"] is None
@@ -468,3 +476,42 @@ def test_coaching_notes_say_what_a_note_costs_not_no_tokens():
     assert rows["coaching_notes"]["asks_claude"] is False
     assert rows["coaching_notes"]["cost_note"] == "About 50 to 140 tokens a note, only when a hint applies."
     assert rows["coaching_line"]["cost_note"] is None
+
+
+# -- one tagged share ----------------------------------------------------------------
+
+
+def _session(tmp_path, name: str, lines) -> NS:
+    folder = tmp_path / name
+    folder.mkdir()
+    return NS(top=_top(folder, lines), subs=[], session_id=name, project_dir="p", slug="p")
+
+
+def test_the_banners_tagged_share_is_the_one_work_habits_shows(tmp_path):
+    """The Capture banner and the Work habits digest count the same messages:
+    those from when capture was turned on, in sessions it reached. A session
+    with no capture note, and a message before capture was on, count in
+    neither."""
+    parse.set_salt(b"v" * 32)
+    pricing = load_pricing(path=FIXTURES / "pricing_min.toml")
+    tag = "Done.\n[cg: task=bugfix]"
+    reached = _session(tmp_path, "reached", [
+        _note(0, ["task"]),
+        _ask(1), _reply(2, text=tag),
+        _ask(3), _reply(4, text=tag),
+        _ask(5), _reply(6, text="Done."),
+        _ask(7), _reply(8, text=tag),
+    ])
+    missed = _session(tmp_path, "missed", [_ask(10), _reply(11), _ask(12), _reply(13), _ask(14), _reply(15)])
+    corpus = NS(sessions=[reached, missed])
+    since = "2026-09-18T12:00:03Z"
+
+    use = capture.usage(corpus, pricing, since=since)
+    assert (use.cycles, use.tagged_cycles) == (3, 2)
+    h = habits.collect(corpus, pricing, tz="UTC", since=since)
+    (row,) = [r for r in habits.digest_table(h).rows if r[0] == "tagged"]
+    assert row[2] == pytest.approx(use.coverage) == pytest.approx(200 / 3)
+    assert row[3] == "2 of 3 since you turned capture on"
+    # Without a start time the digest counts every message of a session capture reached.
+    (row,) = [r for r in habits.digest_table(habits.collect(corpus, pricing, tz="UTC")).rows if r[0] == "tagged"]
+    assert row[3] == "3 of 4"
