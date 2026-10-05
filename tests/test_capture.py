@@ -978,6 +978,291 @@ def test_a_reply_whose_first_report_is_its_own_cycles_keeps_its_tag(tmp_path):
     assert (first.tag.size, second.tag.size) == (None, "m")
 
 
+# -- hand-offs carry through ---------------------------------------------------------
+
+
+def _workflow_chain(tmp_path):
+    """"Continue the plan" starts a workflow. You type a side question, then
+    the report comes: the reply to it starts the next workflow, and you type
+    another question before that one's report, which the last reply answers.
+    Returns the cycles and the two workflows' agents."""
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "continue the plan"),
+        _wf_call(2, "tu_w1"),
+        _wf_launched(3, "tu_w1", "wf_a", "t_a"),
+        _reply(4, text="Phase one running."),
+        _ask(10, "a side question"),
+        _reply(11, text="Answer.\n[cg: task=docs]"),
+        _report(20, "t_a"),
+        _wf_call(21, "tu_w2"),
+        _wf_launched(22, "tu_w2", "wf_b", "t_b"),
+        _reply(23, text="Phase two running."),
+        _ask(30, "another question"),
+        _reply(31, text="Answer.\n[cg: task=chat]"),
+        _report(40, "t_b"),
+        _reply(41, text="Phase two done.\n[cg: task=research size=l]"),
+    ])
+    one = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(6))
+    two = _wf_agent(tmp_path, "w2", "wf_b", _wf_steps(25))
+    return capture.prompt_cycles(top, [one, two]), one, two
+
+
+def _agent_chain(tmp_path):
+    """The same, with background agents: the reply to the first agent's
+    report starts the second, which starts one of its own."""
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "continue the plan"),
+        _background(2, "toolu_A"),
+        _launched(3, "toolu_A"),
+        _reply(4, text="Launched."),
+        _ask(10, "a side question"),
+        _reply(11, text="Answer.\n[cg: task=docs]"),
+        _report(20, "a1"),
+        _background(21, "toolu_B"),
+        _launched(22, "toolu_B"),
+        _reply(23, text="Launched the next."),
+        _ask(30, "another question"),
+        _reply(31, text="Answer.\n[cg: task=chat]"),
+        _report(40, "b2"),
+        _reply(41, text="Done.\n[cg: task=research size=l]"),
+    ])
+    one = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    two = _agent_that_reports(tmp_path, "b2", "toolu_B", 25)
+    child = _sub(tmp_path, "c3", _wf_steps(27), tool_use_id="toolu_inner", parent="b2")
+    return capture.prompt_cycles(top, [one, two, child]), one, two, child
+
+
+def test_a_reply_handed_back_that_starts_a_workflow_takes_that_workflows_agents_with_it(tmp_path):
+    (first, second, third), one, two = _workflow_chain(tmp_path)
+    assert (first.subs, second.subs, third.subs) == ([one, two], [], [])
+
+
+def test_the_reply_to_that_workflows_report_is_handed_back_too(tmp_path):
+    (first, second, third), _one, _two = _workflow_chain(tmp_path)
+    # Both replies to the first report (the call and the turn after it), then the last reply.
+    assert first.late_turns == [second.turns[1], second.turns[2], third.turns[1]]
+    assert (second.handed_off, third.handed_off) == ({1, 2}, {1})
+    # The tag of the whole plan is the first message's; the side questions keep their own.
+    assert first.tag.size == "l" and (second.tag.task, third.tag.task) == ("docs", "chat")
+    assert second.tag.size is None and third.tag.size is None
+
+
+def test_a_reply_handed_back_that_starts_a_background_agent_takes_it_and_its_children_with_it(tmp_path):
+    (first, second, third), one, two, child = _agent_chain(tmp_path)
+    assert (first.subs, second.subs, third.subs) == ([one, two, child], [], [])
+    assert first.late_turns == [second.turns[1], second.turns[2], third.turns[1]]
+    assert (second.handed_off, third.handed_off) == ({1, 2}, {1})
+    assert first.tag.size == "l" and third.tag.size is None
+
+
+def test_a_workflow_started_from_a_handed_reply_with_no_logged_call_follows_the_reply(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "continue the plan"),
+        _wf_call(2, "tu_w1"),
+        _wf_launched(3, "tu_w1", "wf_a", "t_a"),
+        _reply(4, text="Running."),
+        _ask(10, "a side question"),
+        _reply(11, text="Answer."),
+        _report(20, "t_a"),
+        # The call's result was never logged: only the run file says when it started.
+        _wf_call(21, "tu_w2"),
+        _ask(30, "another question"),
+        _reply(31, text="Answer."),
+    ])
+    one = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(6))
+    two = _wf_agent(tmp_path, "w2", "wf_b", _wf_steps(25))
+    run = WorkflowRun(run_id="wf_b", started=_ts(22))
+    first, second, third = capture.prompt_cycles(top, [one, two], [run])
+    assert (first.subs, second.subs, third.subs) == ([one, two], [], [])
+
+
+def test_a_workflow_a_typed_message_starts_stays_in_its_own_cycle(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A"),
+        _launched(3, "toolu_A"),
+        _reply(4, text="Launched."),
+        _ask(10, "a side question"),
+        _reply(11, text="Answer."),
+        _report(20, "a1"),
+        _reply(21, text="Agent done.\n[cg: task=research size=m]"),
+        _ask(30, "also run the workflow"),
+        _wf_call(31, "tu_w"),
+        _wf_launched(32, "tu_w", "wf_a", "t_a"),
+        _reply(33, text="Running."),
+        _ask(40, "another question"),
+        _reply(41, text="Answer."),
+        _report(50, "t_a"),
+        _reply(51, text="Workflow done.\n[cg: task=docs size=l]"),
+    ])
+    agent = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    workflow = _wf_agent(tmp_path, "w1", "wf_a", _wf_steps(35))
+    first, second, third, fourth = capture.prompt_cycles(top, [agent, workflow])
+    # The first reply is handed back to the first message; the workflow the
+    # third message started is the third's, and so is the reply to its report.
+    assert (first.subs, second.subs, third.subs, fourth.subs) == ([agent], [], [workflow], [])
+    assert first.late_turns == [second.turns[1]] and third.late_turns == [fourth.turns[1]]
+    assert (first.tag.size, third.tag.size) == ("m", "l")
+
+
+def test_a_report_answered_in_the_cycle_that_took_the_launching_reply_is_handed_back_too(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "continue the plan"),
+        _background(2, "toolu_A"),
+        _launched(3, "toolu_A"),
+        _reply(4, text="Launched."),
+        _ask(10, "a side question"),
+        _reply(11, text="Answer."),
+        _report(20, "a1"),
+        _background(21, "toolu_B"),
+        _launched(22, "toolu_B"),
+        _reply(23, text="Launched the next."),
+        _report(30, "b2"),
+        _reply(31, text="Done.\n[cg: task=research size=l]"),
+    ])
+    one = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    two = _agent_that_reports(tmp_path, "b2", "toolu_B", 25)
+    first, second = capture.prompt_cycles(top, [one, two])
+    # Nothing of the side question's own is left past its first reply.
+    assert second.handed_off == {1, 2, 3} and first.late_turns == second.turns[1:]
+    assert (first.subs, second.subs) == ([one, two], []) and first.tag.size == "l"
+
+
+def test_a_message_between_the_report_and_the_reply_stops_the_chain_there(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "continue the plan"),
+        _background(2, "toolu_A"),
+        _launched(3, "toolu_A"),
+        _reply(4, text="Launched."),
+        _ask(10, "a side question"),
+        _reply(11, text="Answer."),
+        _report(20, "a1"),
+        _ask(21, "and the agent?"),
+        _background(22, "toolu_B"),
+        _launched(23, "toolu_B"),
+        _reply(24, text="Launched the next."),
+        _ask(30, "another question"),
+        _reply(31, text="Answer."),
+        _report(40, "b2"),
+        _reply(41, text="Done.\n[cg: task=research size=l]"),
+    ])
+    one = _agent_that_reports(tmp_path, "a1", "toolu_A", 6)
+    two = _agent_that_reports(tmp_path, "b2", "toolu_B", 25)
+    first, second, third, fourth = capture.prompt_cycles(top, [one, two])
+    # The typed message started the second agent, so its report goes to that message.
+    assert (first.subs, third.subs) == ([one], [two])
+    assert first.late_turns == [] and third.late_turns == [fourth.turns[1]]
+    assert first.tag is None and third.tag.size == "l"
+
+
+# -- cycles that ran beside background work -------------------------------------------
+
+
+def _foreground_result(second: int, tool_use_id: str, agent_id: str) -> dict:
+    """The result of an agent that held the session, with the agent's id."""
+    return user_block_line(
+        [tool_result_block(tool_use_id, "Done.")],
+        timestamp=_ts(second),
+        toolUseResult={"agentId": agent_id, "status": "completed"},
+    )
+
+
+def test_a_cycle_asked_while_a_workflow_ran_says_which_cycle_launched_it(tmp_path):
+    (first, second, third), _one, _two = _workflow_chain(tmp_path)
+    # The first message launched the run; the side question came while it ran.
+    assert (first.running, second.running) == ((), (0,))
+    # The reply to the first report launched the second run, which is still the first message's.
+    assert third.running == (0,)
+
+
+def test_a_cycle_asked_while_a_background_agent_ran_says_which_cycle_launched_it(tmp_path):
+    (first, second, third), _one, _two, _child = _agent_chain(tmp_path)
+    assert (first.running, second.running, third.running) == ((), (0,), (0,))
+
+
+def test_a_cycle_asked_after_the_report_arrived_has_nothing_running(tmp_path):
+    top = _top(tmp_path, [
+        _tagged(),
+        _ask(1, "research this"),
+        _background(2, "toolu_A"),
+        _launched(3, "toolu_A"),
+        _reply(4, text="Launched."),
+        _report(20, "a1"),
+        _reply(21, text="Found it."),
+        _ask(30, "a question"),
+        _reply(31, text="Answer."),
+    ])
+    first, second = capture.prompt_cycles(top, [_agent_that_reports(tmp_path, "a1", "toolu_A", 6)])
+    assert (first.running, second.running) == ((), ())
+
+
+def test_a_cycle_made_by_hand_has_nothing_running():
+    assert capture.Cycle(start=0, end=0).running == ()
+
+
+def test_a_workflow_call_with_no_logged_result_is_never_counted_as_running(tmp_path):
+    top = _top(tmp_path, [
+        _ask(1, "run it"),
+        _wf_call(2, "tu_w"),
+        _reply(4, text="Running."),
+        _ask(10, "a question"),
+        _reply(11, text="Answer."),
+    ])
+    first, second = capture.prompt_cycles(top, [_wf_agent(tmp_path, "w1", "wf_a", _wf_steps(6))])
+    assert (first.running, second.running) == ((), ())
+
+
+def test_a_run_whose_end_never_shows_counts_only_while_its_agents_were_speaking(tmp_path):
+    def cycles(question: int):
+        top = _top(tmp_path, [
+            _ask(1, "run it"),
+            _wf_call(2, "tu_w"),
+            _wf_launched(3, "tu_w", "wf_a", "t_a"),
+            _reply(4, text="Running."),
+            _ask(question, "a question"),
+            _reply(question + 1, text="Answer."),
+        ])
+        # The agent spoke at second 7: no report ever came.
+        return capture.prompt_cycles(top, [_wf_agent(tmp_path, "w1", "wf_a", _wf_steps(6))])
+
+    assert [c.running for c in cycles(5)] == [(), (0,)]
+    assert [c.running for c in cycles(10)] == [(), ()]
+
+
+def test_a_foreground_agent_whose_result_came_before_the_next_message_is_not_running(tmp_path):
+    top = _top(tmp_path, [
+        _ask(1, "look into it"),
+        _reply(2, tool_use_block("Agent", "toolu_F", {"prompt": "look"})),
+        _foreground_result(3, "toolu_F", "a1"),
+        _reply(4, text="Found it."),
+        _ask(10, "a question"),
+        _reply(11, text="Answer."),
+    ])
+    first, second = capture.prompt_cycles(top, [_agent_that_reports(tmp_path, "a1", "toolu_F", 3)])
+    assert (first.running, second.running) == ((), ())
+
+
+def test_a_foreground_agent_runs_until_its_result_arrives(tmp_path):
+    top = _top(tmp_path, [
+        _ask(1, "look into it"),
+        _reply(2, tool_use_block("Agent", "toolu_F", {"prompt": "look"})),
+        _ask(10, "a question"),
+        _reply(11, text="Answer."),
+        _foreground_result(15, "toolu_F", "a1"),
+        _reply(16, text="Found it."),
+        _ask(20, "later"),
+        _reply(21, text="Later."),
+    ])
+    first, second, third = capture.prompt_cycles(top, [_agent_that_reports(tmp_path, "a1", "toolu_F", 3)])
+    assert (first.running, second.running, third.running) == ((), (0,), ())
+
+
 # -- what a cycle is charged ---------------------------------------------------------
 
 #: One reply of 100 input and 50 output tokens (``turn_line``'s defaults).
@@ -1079,6 +1364,32 @@ def test_a_report_answered_by_the_cycle_that_started_the_agent_moves_nothing(tmp
     spend = capture.cycle_spend(cycle, pricing)
     assert (spend.moved_in, spend.moved_out) == (0.0, 0.0)
     assert spend.cost == pytest.approx(3 * REPLY_USD)
+
+
+def test_a_chain_of_hand_offs_charges_the_whole_plan_to_the_cycle_that_began_it(tmp_path, pricing):
+    for cycles in (_workflow_chain(tmp_path)[0], _agent_chain(tmp_path)[0]):
+        one, two, three = (capture.cycle_spend(c, pricing) for c in cycles)
+        agents = len(cycles[0].subs)
+        # Its own two replies, the three handed back, and the agents' turns.
+        assert one.cost == pytest.approx((5 + agents) * REPLY_USD) and one.moved_in == pytest.approx(3 * REPLY_USD)
+        assert (one.replies, one.agent_tokens) == (5, agents * REPLY_TOKENS)
+        # Each side question keeps its own reply and nothing else.
+        assert (two.cost, two.agent_tokens, two.moved_out) == (pytest.approx(REPLY_USD), 0, pytest.approx(2 * REPLY_USD))
+        assert (three.cost, three.agent_tokens, three.moved_out) == (pytest.approx(REPLY_USD), 0, pytest.approx(REPLY_USD))
+
+
+def test_hand_offs_that_carry_through_change_no_total(tmp_path, pricing):
+    for cycles in (_workflow_chain(tmp_path)[0], _agent_chain(tmp_path)[0]):
+        spends = [capture.cycle_spend(c, pricing) for c in cycles]
+        turns = sum(len(c.turns) for c in cycles) + sum(len(capture._priced(s)) for c in cycles for s in c.subs)
+        # Seven replies of the main session and the agents' own: each turn is charged once.
+        assert turns == 7 + sum(len(c.subs) for c in cycles)
+        assert sum(s.cost for s in spends) == pytest.approx(turns * REPLY_USD)
+        assert sum(s.replies for s in spends) == sum(len(c.turns) for c in cycles)
+        assert sum(s.moved_in for s in spends) == pytest.approx(sum(s.moved_out for s in spends))
+        # Every agent is in exactly one cycle.
+        placed = [id(s) for c in cycles for s in c.subs]
+        assert len(placed) == len(set(placed))
 
 
 def test_with_no_price_table_a_cycle_costs_nothing_but_still_counts_its_tokens(tmp_path, pricing):

@@ -102,7 +102,9 @@ def _build(minutes: float = 10, files=("a", "b")) -> Cycle:
 
 
 def _fix(minutes: float, files=("a",), **kw) -> Cycle:
-    """A short message that changes the files the cycle before it did."""
+    """A short message that changes the files the cycle before it did. It is
+    no rework on that alone: ``kw`` adds the correction, adjustment or tag
+    that makes it one."""
     kw.setdefault("human_prompt_chars", 40)
     return _msg(minutes, files=files, **kw)
 
@@ -110,6 +112,22 @@ def _fix(minutes: float, files=("a",), **kw) -> Cycle:
 def _run(minutes: float, fb: Feedback | None = None) -> Cycle:
     """A /cg-feedback run that gave ``fb``."""
     return _msg(minutes, commands_run=("cg-feedback",), feedback=fb or Feedback(source="answers"))
+
+
+def _during(minutes: float, running=(0,), **kw) -> Cycle:
+    """A message sent while background work ran: at its first reply the work
+    cycle ``running`` started was still going (the cycle index in its
+    session). It changes the files ``kw`` says, so it is no aside when it
+    changes any."""
+    cycle = _msg(minutes, **kw)
+    cycle.running = tuple(running)
+    return cycle
+
+
+def _aside(minutes: float, running=(0,), **kw) -> Cycle:
+    """A message sent while background work ran that asks for something and
+    changes no files: a side question, or one that steers the running work."""
+    return _during(minutes, running, **kw)
 
 
 def _only(cycles, **kw) -> WorkPiece:
@@ -168,9 +186,13 @@ def test_a_shift_new_on_the_first_message_of_a_session_is_not_a_second_piece():
 def test_a_clear_starts_a_piece_unless_the_message_after_it_is_a_handoff():
     short = pieces_of([_build(0), _msg(30, commands_run=("clear",), human_prompt_chars=80)])
     assert [p.cycles for p in short] == [1, 1] and short[1].confidence == "high"
-    pasted = pieces_of([_build(0), _msg(30, commands_run=("clear",), human_prompt_chars=80, human_prompt_has_paste=True)])
-    long = pieces_of([_build(0), _msg(30, commands_run=("clear",), human_prompt_chars=pieces.HANDOFF_CHARS)])
+    # A long message or a paste that picks up the piece's files carries it on.
+    pasted = pieces_of([_build(0), _msg(30, commands_run=("clear",), human_prompt_chars=80, human_prompt_has_paste=True, reads=("a",))])
+    long = pieces_of([_build(0), _msg(30, commands_run=("clear",), human_prompt_chars=pieces.HANDOFF_CHARS, files=("b",))])
     assert [p.cycles for p in pasted] == [2] and [p.cycles for p in long] == [2]
+    # One that touches none of them is another job's.
+    other = pieces_of([_build(0), _msg(30, commands_run=("clear",), human_prompt_chars=pieces.HANDOFF_CHARS, reads=("q",))])
+    assert [p.cycles for p in other] == [1, 1]
 
 
 def test_a_clear_then_a_message_naming_a_path_after_an_approved_plan_is_a_handoff():
@@ -231,7 +253,7 @@ def test_a_gap_is_the_transcripts_own_reading_when_it_has_one():
 
 
 def test_a_feedback_run_is_no_pieces_work_and_never_starts_one():
-    piece = _only([_build(0), _run(5), _fix(10, files=("a",))])
+    piece = _only([_build(0), _run(5), _fix(10, human_correction=True)])
     assert (piece.cycles, piece.substantive, piece.rework) == (2, 2, 1)
     assert piece.cycle_ids == (("", 0), ("", 2))
     # It costs nothing here: it is what rates the work, not part of it.
@@ -250,8 +272,10 @@ def _session(name, cycles, project="proj", **kw) -> PieceSession:
 
 
 def _later(minutes, **kw) -> Cycle:
-    """A session's first cycle, ``minutes`` after the base time: a handoff message."""
+    """A session's first cycle, ``minutes`` after the base time: a handoff
+    message, long, that reads a file ``_build`` edited."""
     kw.setdefault("human_prompt_chars", 2500)
+    kw.setdefault("reads", ("a",))
     return _cycle(_turn(minutes, **kw))
 
 
@@ -298,7 +322,7 @@ def test_a_handoff_joins_only_the_same_known_project(project):
 
 def test_a_session_after_a_handoff_joins_the_last_piece_of_its_project_not_an_older_one():
     one = _session("a", [_build(0), _msg(100, files=("z", "y"), tag=_tag(shift="new"))])
-    two = _session("b", [_later(3 * HOUR)])
+    two = _session("b", [_later(3 * HOUR, reads=("z",))])
     pieces_ = pieces_in([one, two])
     assert [p.session_ids for p in pieces_] == [("a",), ("a", "b")]
 
@@ -310,9 +334,91 @@ def test_the_handoff_names_a_plan_file_after_an_approved_plan():
     assert len(pieces_in([_session("a", [_build(10)]), _session("b", [named])])) == 2
 
 
+def _head(**kw) -> Cycle:
+    """A session's first cycle, an hour after the base time, whose message is
+    a handoff only as ``kw`` makes it one."""
+    kw.setdefault("human_prompt_chars", 90)
+    return _cycle(_turn(HOUR, **kw))
+
+
+def _joined(head: Cycle, *, plan: bool = False) -> bool:
+    """Whether the session that opens with ``head`` joins the piece before
+    it, which built ``a`` and ``b`` (after an approved plan when ``plan``)."""
+    before = [_build(10)]
+    if plan:
+        before.insert(0, _msg(0, plan_stats=PlanStats(outcome="approved"), prompt_plan_mode=True))
+    return len(pieces_in([_session("a", before), _session("b", [head])])) == 1
+
+
+@pytest.mark.parametrize(
+    "plan, kw, joined",
+    [
+        # A path joins after an approved plan, whatever the first cycle touched.
+        (True, {}, True),
+        (True, {"reads": ("q",)}, True),
+        (True, {"human_prompt_chars": pieces.HANDOFF_CHARS - 1}, True),
+        # Or when the first cycle reads or edits a file the piece edited.
+        (False, {"reads": ("a",)}, True),
+        (False, {"files": ("b",)}, True),
+        # With no plan and no file in common it is a path to something else.
+        (False, {}, False),
+        (False, {"reads": ("q",)}, False),
+        (False, {"files": ("q",), "reads": ("r",)}, False),
+    ],
+)
+def test_a_path_joins_after_an_approved_plan_or_when_it_picks_up_a_file_the_piece_edited(plan, kw, joined):
+    assert _joined(_head(prompt_flags=("path",), **kw), plan=plan) is joined
+
+
+@pytest.mark.parametrize("plan", [False, True])
+@pytest.mark.parametrize("flags", [(), ("path",)])
+@pytest.mark.parametrize("long", [{"human_prompt_chars": pieces.HANDOFF_CHARS}, {"human_prompt_has_paste": True}])
+def test_a_long_message_or_a_paste_joins_only_with_a_file_the_piece_edited(plan, flags, long):
+    # No file in common: another job's paste, plan or no plan, paths named or not.
+    assert not _joined(_head(prompt_flags=flags, **long), plan=plan)
+    assert not _joined(_head(prompt_flags=flags, reads=("q",), files=("r",), **long), plan=plan)
+    # One read or one edit in common carries the piece on.
+    assert _joined(_head(prompt_flags=flags, reads=("a",), **long), plan=plan)
+    assert _joined(_head(prompt_flags=flags, files=("b",), **long), plan=plan)
+
+
+def test_a_long_paste_naming_paths_after_an_approved_plan_with_no_shared_file_is_a_new_piece():
+    """The replay's wrong join: a pasted brief for different work that names
+    paths, straight after a piece whose plan was approved."""
+    paste = _head(prompt_flags=("path",), human_prompt_chars=4000, human_prompt_has_paste=True, reads=("q",))
+    assert not _joined(paste, plan=True)
+    [first, second] = pieces_in([
+        _session("a", [_msg(0, plan_stats=PlanStats(outcome="approved"), prompt_plan_mode=True), _build(10)]),
+        _session("b", [paste]),
+    ])
+    assert (first.session_ids, second.session_ids) == (("a",), ("b",))
+
+
+def test_a_short_path_message_after_an_approved_plan_joins_and_a_long_paste_with_a_shared_file_does_too():
+    short = _head(prompt_flags=("path",), human_prompt_chars=120, reads=("q",))
+    assert _joined(short, plan=True)
+    paste = _head(prompt_flags=("path",), human_prompt_chars=4000, human_prompt_has_paste=True, reads=("a",))
+    assert _joined(paste, plan=True) and _joined(paste, plan=False)
+
+
+def test_a_short_message_with_no_path_is_no_handoff_even_when_it_reads_the_pieces_files():
+    assert not _joined(_head(reads=("a", "b")))
+    assert not _joined(_head(reads=("a", "b")), plan=True)
+
+
+def test_a_file_the_first_cycle_reads_counts_but_one_the_piece_only_read_does_not():
+    read_only = _session("a", [_msg(0, reads=("a",)), _msg(5, files=("b",))])
+    carried = _session("b", [_head(prompt_flags=("path",), reads=("a",))])
+    assert len(pieces_in([read_only, carried])) == 2
+    edited = _session("b", [_head(prompt_flags=("path",), reads=("b",))])
+    assert len(pieces_in([read_only, edited])) == 1
+
+
 def test_rework_in_a_joined_piece_counts_from_the_delivery_in_the_earlier_session():
     delivered = _session("a", [_build(0)])
-    correction = _cycle(_turn(HOUR, human_prompt_chars=2500), _turn(HOUR + 5, human_correction=True, files=("q",)))
+    correction = _cycle(
+        _turn(HOUR, human_prompt_chars=2500, reads=("a",)), _turn(HOUR + 5, human_correction=True, files=("q",))
+    )
     again = _msg(HOUR + 20, human_correction=True, files=("q",), human_prompt_chars=50)
     [joined] = pieces_in([delivered, _session("b", [correction, again])])
     assert (joined.cycles, joined.rework) == (3, 1)
@@ -336,6 +442,166 @@ def test_pieces_across_sessions_come_out_oldest_first():
     assert [p.session_ids for p in pieces_in([late, early])] == [("early",), ("late",)]
 
 
+# -- asides: messages sent while background work runs -----------------------------------
+
+
+@pytest.mark.parametrize("shift", ["new", "fix", "redo"])
+def test_an_aside_never_starts_a_piece_and_is_never_rework(pricing, shift):
+    piece = _only([_build(0), _aside(10, tag=_tag(shift=shift, why="missed"))], rates=pricing)
+    assert (piece.cycles, piece.substantive, piece.aside_cycles) == (2, 1, 1)
+    assert piece.aside_ids == (("", 1),)
+    assert piece.rework == 0 and piece.causes == ()
+    assert piece.aside_cost == pytest.approx(REPLY) and piece.cost == pytest.approx(2 * REPLY)
+    assert piece.unsegmented
+
+
+@pytest.mark.parametrize("shift, count, rework", [("new", 2, 0), ("fix", 1, 1), ("redo", 1, 1)])
+def test_the_same_message_with_nothing_running_is_an_ordinary_one(pricing, shift, count, rework):
+    found = pieces_of([_build(0), _msg(10, tag=_tag(shift=shift))], rates=pricing)
+    assert len(found) == count
+    assert sum(p.rework for p in found) == rework
+    assert sum(p.aside_cycles for p in found) == 0 and sum(p.aside_cost for p in found) == 0.0
+
+
+def test_an_aside_is_left_out_of_the_requests_the_mixes_and_the_pieces_labels_but_its_cost_stays(pricing):
+    asked = _tag(task="chat", level="hard", size="xl")
+    piece = _only(
+        [
+            _msg(0, files=("a",), tag=_tag(task="feature", level="easy", size="s")),
+            _aside(10, tag=asked),
+            _aside(20, tag=asked),
+        ],
+        rates=pricing,
+    )
+    assert piece.substantive == 1
+    assert piece.levels == (("easy", 1, 0, 0.0),) and piece.sizes == (("s", 1, 0, 0.0),)
+    assert (piece.task, piece.level, piece.size) == ("feature", "easy", "s")
+    assert piece.cost == pytest.approx(3 * REPLY) and piece.replies == 3
+    assert (piece.aside_cycles, piece.aside_cost) == (2, pytest.approx(2 * REPLY))
+
+
+def test_a_message_that_asks_for_nothing_is_no_aside_however_much_is_running():
+    piece = _only([
+        _build(0),
+        _aside(10, human_go=True, human_prompt_chars=3),
+        _aside(20, human_status=True, human_prompt_chars=9),
+    ])
+    assert (piece.aside_cycles, piece.aside_cost) == (0, 0.0)
+
+
+@pytest.mark.parametrize("changes", [{"files": ("q",)}, {"shell_write_count": 1}])
+def test_a_message_that_changes_files_while_work_runs_is_no_aside(changes):
+    ordinary = pieces_of([_build(0), _aside(10, tag=_tag(shift="new"), **changes)])
+    assert [p.cycles for p in ordinary] == [1, 1]
+    assert sum(p.aside_cycles for p in ordinary) == 0
+    fix = _only([_build(0), _aside(10, tag=_tag(shift="fix"), **changes)])
+    assert (fix.rework, fix.aside_cycles) == (1, 0)
+
+
+def test_only_work_an_earlier_cycle_of_the_same_piece_started_makes_an_aside():
+    # The run started in the first piece; the third message is in the second.
+    first, second = pieces_of([_build(0), _msg(10, files=("x",), tag=_tag(shift="new")), _aside(20, running=(0,))])
+    assert (first.cycles, second.cycles, second.aside_cycles) == (1, 2, 0)
+    # Started by the second piece's own first cycle, it is an aside there.
+    _, second = pieces_of([_build(0), _msg(10, files=("x",), tag=_tag(shift="new")), _aside(20, running=(1,))])
+    assert second.aside_cycles == 1
+    # A cycle can not be an aside to work it is itself running.
+    assert _only([_aside(0, running=(0,))]).aside_cycles == 0
+
+
+def test_a_clear_still_starts_a_piece_when_work_is_running():
+    first, second = pieces_of([_build(0), _aside(30, commands_run=("clear",), human_prompt_chars=80)])
+    assert (first.cycles, second.cycles) == (1, 1)
+    assert (first.aside_cycles, second.aside_cycles) == (0, 0)
+
+
+def test_an_aside_never_decides_where_the_next_piece_starts_by_its_files():
+    # With no tag, a long gap and different files start a piece...
+    cycles = [_msg(0, files=("a", "b")), _msg(3 * HOUR, reads=("c", "d"))]
+    assert len(pieces_of(cycles)) == 2
+    # ...but not for an aside, which is part of the piece it was asked in.
+    assert len(pieces_of([_msg(0, files=("a", "b")), _aside(3 * HOUR, reads=("c", "d"))])) == 1
+
+
+def test_an_asides_reads_do_not_join_a_later_session_to_the_piece():
+    first = _session("a", [_build(0), _aside(10, reads=("q",))])
+    head = _head(prompt_flags=("path",), reads=("q",))
+    assert len(pieces_in([first, _session("b", [head])])) == 2
+
+
+# -- a short message re-changing the last cycle's files is no rework on its own ---------
+
+
+@pytest.mark.parametrize(
+    "kw, files",
+    [
+        ({}, ("a",)),
+        ({}, ("a", "b")),
+        ({"human_prompt_chars": 12}, ("a",)),
+        ({"human_prompt_chars": 1200}, ("a",)),
+        ({}, ("c",)),
+    ],
+)
+def test_a_message_that_changes_files_with_no_flag_or_tag_is_not_rework(kw, files):
+    piece = _only([_build(0), _fix(10, files=files, **kw)])
+    assert (piece.cycles, piece.substantive, piece.delivered) == (2, 2, True)
+    assert piece.rework == 0 and piece.rework_ids == () and piece.causes == ()
+
+
+def test_a_short_message_that_changes_the_last_cycles_files_is_not_rework_even_in_a_run_of_them():
+    cycles = [_build(0), _fix(10), _fix(20), _fix(30)]
+    piece = _only(cycles)
+    assert (piece.cycles, piece.rework, piece.rework_cost) == (4, 0, 0.0)
+
+
+def test_a_short_message_that_changes_the_last_cycles_files_is_not_rework_while_background_work_runs_either():
+    # It changes files, so it is no aside: an ordinary cycle that steers the running work.
+    piece = _only([_build(0), _during(10, files=("a",), human_prompt_chars=40)])
+    assert (piece.cycles, piece.substantive, piece.aside_cycles) == (2, 2, 0)
+    assert piece.rework == 0 and piece.causes == ()
+
+
+@pytest.mark.parametrize(
+    "kw",
+    [
+        {"human_correction": True},
+        {"human_adjust": True},
+        {"queued_correction": True},
+        {"queued_adjust": True},
+        {"tag": _tag(shift="fix")},
+        {"tag": _tag(shift="redo")},
+    ],
+)
+def test_the_same_short_message_is_rework_once_a_flag_or_a_tag_says_so(kw):
+    piece = _only([_build(0), _fix(10, **kw)])
+    assert (piece.rework, piece.rework_ids) == (1, (("", 1),))
+    assert _causes(piece) == {("not_reported", "inferred"): 1}
+
+
+@pytest.mark.parametrize(
+    "kw, files",
+    [
+        ({"human_correction": True}, ("z",)),
+        ({"human_adjust": True}, ("a",)),
+        ({"tag": _tag(shift="fix")}, ("z",)),
+        ({"tag": _tag(shift="redo")}, ("z",)),
+    ],
+)
+def test_a_flagged_follow_up_that_changes_files_while_background_work_runs_is_still_rework(kw, files):
+    piece = _only([_build(0), _during(10, files=files, human_prompt_chars=40, **kw)])
+    assert (piece.rework, piece.aside_cycles) == (1, 0)
+
+
+def test_a_correction_queued_while_background_work_runs_is_still_rework():
+    working = _cycle(_turn(10, files=("a",), human_go=True, human_prompt_chars=3), _turn(12, queued_correction=True))
+    working.running = (0,)
+    assert _only([_build(0), working]).rework == 1
+
+
+def test_an_adjustment_that_changes_other_files_while_background_work_runs_is_not_rework():
+    assert _only([_build(0), _during(10, human_adjust=True, files=("q",), human_prompt_chars=40)]).rework == 0
+
+
 # -- rework -------------------------------------------------------------------------
 
 
@@ -343,9 +609,9 @@ def test_a_plan_a_build_and_three_short_corrections_are_one_piece_with_three_rew
     cycles = [
         _msg(0, plan_stats=PlanStats(outcome="approved", steps=3, files=2), prompt_plan_mode=True),
         _build(10),
-        _fix(20),
-        _fix(25),
-        _fix(30),
+        _fix(20, human_correction=True),
+        _fix(25, human_correction=True),
+        _fix(30, human_correction=True),
     ]
     piece = _only(cycles)
     assert (piece.cycles, piece.substantive, piece.rework) == (5, 5, 3)
@@ -353,14 +619,6 @@ def test_a_plan_a_build_and_three_short_corrections_are_one_piece_with_three_rew
     # No tag, no answer: nothing says why, and nothing blames Claude.
     assert piece.causes == (("not_reported", "inferred", 3),)
     assert piece.missed_in == ()
-
-
-def test_a_short_message_that_changes_other_files_than_the_last_cycle_is_not_rework():
-    assert _only([_build(0), _fix(10, files=("c",))]).rework == 0
-
-
-def test_a_long_message_that_changes_the_same_files_is_not_inferred_rework():
-    assert _only([_build(0), _fix(10, files=("a",), human_prompt_chars=1200)]).rework == 0
 
 
 def test_a_short_message_that_changes_nothing_is_not_rework():
@@ -450,20 +708,25 @@ def test_a_rejected_plan_with_no_feedback_typed_is_not_a_plan_round():
 
 
 def test_rework_costs_what_its_cycles_cost(pricing):
-    piece = _only([_build(0), _fix(10), _fix(20)], rates=pricing)
+    piece = _only([_build(0), _fix(10, human_correction=True), _fix(20, human_correction=True)], rates=pricing)
     assert piece.cost == pytest.approx(3 * REPLY)
     assert piece.rework_cost == pytest.approx(2 * REPLY)
-    assert _only([_build(0), _fix(10)]).cost == 0.0
+    assert _only([_build(0), _fix(10, human_correction=True)]).cost == 0.0
 
 
 def test_a_piece_lists_the_ids_of_its_rework_cycles_in_the_order_they_came():
-    piece = _only([_build(0), _fix(10), _build(15, files=("c",)), _fix(20, files=("c",)), _fix(30, files=("c",))])
+    again = {"human_correction": True}
+    piece = _only(
+        [_build(0), _fix(10, **again), _build(15, files=("c",)), _fix(20, files=("c",), **again), _fix(30, files=("c",), **again)]
+    )
     assert piece.rework_ids == (("", 1), ("", 3), ("", 4))
     assert len(piece.rework_ids) == piece.rework
-    assert _only([_build(0), _fix(10, files=("c",))]).rework_ids == ()
+    assert _only([_build(0), _fix(10, files=("c",), human_adjust=True)]).rework_ids == ()
     # Across a handoff the ids name the session each cycle is in.
-    first = _session("a", [_build(0), _fix(10, files=("a",))])
-    second = _session("b", [_cycle(_turn(2 * HOUR, human_prompt_chars=2500, files=("a",))), _fix(2 * HOUR + 10)])
+    first = _session("a", [_build(0), _fix(10, files=("a",), **again)])
+    second = _session(
+        "b", [_cycle(_turn(2 * HOUR, human_prompt_chars=2500, files=("a",))), _fix(2 * HOUR + 10, **again)]
+    )
     [joined] = pieces_in([first, second])
     assert [sid for sid, _n in joined.rework_ids] == ["a", "b"]
 
@@ -597,7 +860,7 @@ def test_a_skipped_rating_still_covers_the_work_before_it_and_rules_nothing_out(
 
 def test_a_rating_covers_only_the_cycles_before_it():
     spans = capture.feedback_spans([_build(0), _run(5, Feedback(source="answers", why=("changed",))), _fix(10)])
-    piece = _only([_build(0), _fix(10)], feedback=spans)
+    piece = _only([_build(0), _fix(10, human_correction=True)], feedback=spans)
     # The run never ran in this list; the spans name their own cycles.
     assert piece.rework == 1
 
@@ -605,7 +868,13 @@ def test_a_rating_covers_only_the_cycles_before_it():
 def test_feedback_by_cycle_reads_each_runs_answers_for_the_cycles_it_rates():
     changed = Feedback(source="answers", why=("changed",))
     left = Feedback(source="answers", why=("left_out",))
-    cycles = [_build(0), _fix(10), _run(20, changed), _fix(30), _run(40, left)]
+    cycles = [
+        _build(0),
+        _fix(10, human_correction=True),
+        _run(20, changed),
+        _fix(30, human_correction=True),
+        _run(40, left),
+    ]
     piece = _only(cycles)
     # The first correction was a change of mind; the second was something left out.
     assert (piece.rework, piece.rated) == (1, True)
@@ -638,7 +907,6 @@ def test_a_correction_alone_never_says_claude_got_it_wrong():
         {"human_correction": True},
         {"queued_correction": True, "human_go": True, "human_prompt_chars": 3},
         {"tag": _tag(shift="redo")},
-        {},
     ):
         piece = _only([_build(0), _fix(10, **kw)])
         assert piece.rework == 1
@@ -646,7 +914,10 @@ def test_a_correction_alone_never_says_claude_got_it_wrong():
 
 
 def test_missed_comes_only_from_your_answers_or_a_tag():
-    answered = _only([_build(0), _fix(10)], feedback=Feedback(source="answers", why=("missed",), missed_in="message"))
+    answered = _only(
+        [_build(0), _fix(10, human_correction=True)],
+        feedback=Feedback(source="answers", why=("missed",), missed_in="message"),
+    )
     assert answered.causes == (("missed", "feedback", 1),)
     assert answered.missed_in == (("message", 1),)
     tagged = _only([_build(0), _fix(10, tag=_tag(shift="fix", why="missed"))])
@@ -842,10 +1113,16 @@ def test_a_piece_holds_tokens_and_replies_apart_from_what_agents_used(pricing):
 # -- cost: a reply to an agent's report is charged to the cycle that started the agent --
 
 
+def _edits(second: int, text: str) -> dict:
+    """One reply that says ``text`` and edits a file."""
+    return _reply(second, {"type": "text", "text": text}, tool_use_block("Edit", f"toolu_E{second}", {"file_path": "b.md"}))
+
+
 def _agent_chain(tmp_path, *, tags=True):
     """Two messages. The first starts a background agent; a second, with a
-    tag that starts a new piece, runs while it works; its report arrives
-    after the second message, and the reply to it is the first piece's."""
+    tag that starts a new piece, runs while it works (it edits a file, so it
+    is no aside); its report arrives after the second message, and
+    the reply to it is the first piece's."""
     second = "Done.\n[cg: task=docs shift=new]" if tags else "Done."
     top = _top(tmp_path, [
         _note(0, TAG_IDS),
@@ -854,7 +1131,7 @@ def _agent_chain(tmp_path, *, tags=True):
         _launched(3, "toolu_A"),
         _reply(4, text="Launched.\n[cg: task=research]"),
         _ask(10, "something else"),
-        _reply(11, text=second),
+        _edits(11, second),
         _report(20, "a1"),
         _reply(21, text="It found the cause.\n[cg: task=research]"),
     ])
@@ -870,7 +1147,7 @@ def _workflow_chain(tmp_path, *, tags=True):
         _wf_launched(3, "tu_w", "wf_a", "t_a"),
         _reply(4, text="Running.\n[cg: task=research]"),
         _ask(10, "meanwhile"),
-        _reply(11, text=second),
+        _edits(11, second),
         _report(20, "t_a"),
         _reply(21, text="It finished.\n[cg: task=research]"),
     ])
@@ -930,7 +1207,7 @@ def test_every_turn_of_a_reply_to_a_report_goes_with_it(tmp_path, pricing):
         _launched(3, "toolu_A"),
         _reply(4, text="Launched.\n[cg: task=research]"),
         _ask(10, "something else"),
-        _reply(11, text="Done.\n[cg: task=docs shift=new]"),
+        _edits(11, "Done.\n[cg: task=docs shift=new]"),
         _report(20, "a1"),
         _reply(21, tool_use_block("Read", "toolu_R", {"file_path": "notes.md"})),
         user_block_line([tool_result_block("toolu_R", "text")], timestamp=_ts(22)),
@@ -949,6 +1226,109 @@ def test_a_piece_with_no_price_table_has_no_cost_but_still_has_its_tokens(tmp_pa
     first, second = pieces_of(capture.prompt_cycles(top, subs))
     assert (first.cost, first.moved_cost, second.cost) == (0.0, 0.0, 0.0)
     assert (first.tokens, second.tokens) == (450, 150)
+
+
+# -- asides, on real transcripts ---------------------------------------------------------
+
+
+def _aside_chain(tmp_path, shift: str, *, edits: bool = False, after_report: bool = False):
+    """A message edits a file and starts a workflow. A second message, tagged
+    ``shift``, comes while it runs (it edits a file when ``edits``) or once its
+    report has been answered (``after_report``)."""
+    text = f"Sure.\n[cg: task=chat shift={shift}]"
+    reply = _edits(11, text) if edits else _reply(11, text=text)
+    lines = [
+        _note(0, TAG_IDS),
+        _ask(1, "build it"),
+        _reply(2, {"type": "text", "text": "Building."}, tool_use_block("Edit", "toolu_E0", {"file_path": "a.md"})),
+        _wf_call(3, "tu_w"),
+        _wf_launched(4, "tu_w", "wf_a", "t_a"),
+        _reply(5, text="Running.\n[cg: task=feature]"),
+    ]
+    if after_report:
+        lines += [
+            _report(8, "t_a"),
+            _reply(9, text="It finished.\n[cg: task=feature]"),
+            _ask(30, "a question"),
+            _reply(31, text=text),
+        ]
+    else:
+        lines += [_ask(10, "a question"), reply, _report(20, "t_a"), _reply(21, text="It finished.\n[cg: task=feature]")]
+    return capture.prompt_cycles(_top(tmp_path, lines), [_wf_agent(tmp_path, "w1", "wf_a", _wf_steps(6))])
+
+
+@pytest.mark.parametrize("shift", ["new", "fix"])
+def test_a_question_asked_while_a_workflow_runs_is_neither_a_boundary_nor_rework(tmp_path, pricing, shift):
+    cycles = _aside_chain(tmp_path, shift)
+    assert [c.running for c in cycles] == [(), (0,)]
+    piece = _only(cycles, rates=pricing)
+    assert (piece.cycles, piece.substantive, piece.aside_cycles) == (2, 1, 1)
+    assert piece.rework == 0
+    # Its one reply is the aside's cost; the piece holds every reply.
+    assert piece.aside_cost == pytest.approx(REPLY)
+    assert piece.cost == pytest.approx(6 * REPLY)
+
+
+@pytest.mark.parametrize("shift, count, rework", [("new", 2, 0), ("fix", 1, 1)])
+def test_the_same_question_after_the_workflows_report_is_an_ordinary_cycle(tmp_path, pricing, shift, count, rework):
+    cycles = _aside_chain(tmp_path, shift, after_report=True)
+    assert [c.running for c in cycles] == [(), ()]
+    found = pieces_of(cycles, rates=pricing)
+    assert len(found) == count
+    assert sum(p.rework for p in found) == rework
+    assert sum(p.aside_cycles for p in found) == 0 and sum(p.aside_cost for p in found) == 0.0
+
+
+@pytest.mark.parametrize("shift, count, rework", [("new", 2, 0), ("fix", 1, 1)])
+def test_a_cycle_that_edits_a_file_while_the_workflow_runs_is_not_an_aside(tmp_path, pricing, shift, count, rework):
+    cycles = _aside_chain(tmp_path, shift, edits=True)
+    assert [c.running for c in cycles] == [(), (0,)]
+    found = pieces_of(cycles, rates=pricing)
+    assert len(found) == count
+    assert sum(p.rework for p in found) == rework
+    assert sum(p.aside_cycles for p in found) == 0 and sum(p.aside_cost for p in found) == 0.0
+
+
+def _steer_chain(tmp_path, kind: str, *, after_report: bool = False):
+    """A message edits ``a.md`` and starts a background agent or workflow
+    (``kind``). A short second message, with no tag, edits ``a.md`` again
+    while it runs, or once its report has been answered (``after_report``)."""
+    edit = tool_use_block("Edit", "toolu_E0", {"file_path": "a.md"})
+    again = tool_use_block("Edit", "toolu_E1", {"file_path": "a.md"})
+    if kind == "agent":
+        start = [_background(3, "toolu_A", text="Launched."), _launched(4, "toolu_A"), _reply(5, text="Launched.")]
+        subs = [_agent_that_reports(tmp_path, "a1", "toolu_A", 6)]
+        report = "a1"
+    else:
+        start = [_wf_call(3, "tu_w"), _wf_launched(4, "tu_w", "wf_a", "t_a"), _reply(5, text="Running.")]
+        subs = [_wf_agent(tmp_path, "w1", "wf_a", _wf_steps(6))]
+        report = "t_a"
+    lines = [_note(0, TAG_IDS), _ask(1, "build it"), _reply(2, {"type": "text", "text": "Building."}, edit), *start]
+    if after_report:
+        lines += [_report(8, report), _reply(9, text="It finished.")]
+        lines += [_ask(30, "one more pass"), _reply(31, {"type": "text", "text": "Done."}, again)]
+    else:
+        lines += [_ask(10, "one more pass"), _reply(11, {"type": "text", "text": "Done."}, again)]
+        lines += [_report(20, report), _reply(21, text="It finished.")]
+    return capture.prompt_cycles(_top(tmp_path, lines), subs)
+
+
+@pytest.mark.parametrize("kind", ["agent", "workflow"])
+def test_a_short_message_that_re_edits_a_file_while_background_work_runs_is_not_rework(tmp_path, pricing, kind):
+    cycles = _steer_chain(tmp_path, kind)
+    assert [c.running for c in cycles] == [(), (0,)]
+    piece = _only(cycles, rates=pricing)
+    assert (piece.cycles, piece.substantive, piece.aside_cycles) == (2, 2, 0)
+    assert piece.rework == 0 and piece.causes == ()
+
+
+@pytest.mark.parametrize("kind", ["agent", "workflow"])
+def test_the_same_message_once_the_report_has_arrived_is_not_rework_either(tmp_path, pricing, kind):
+    cycles = _steer_chain(tmp_path, kind, after_report=True)
+    assert [c.running for c in cycles] == [(), ()]
+    piece = _only(cycles, rates=pricing)
+    assert (piece.cycles, piece.rework, piece.aside_cycles) == (2, 0, 0)
+    assert piece.causes == ()
 
 
 # -- real transcripts ------------------------------------------------------------------

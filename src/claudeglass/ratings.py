@@ -317,7 +317,7 @@ def unrated_pieces(bundle, threshold: int) -> list[dict]:
             "tokens": piece.tokens,
             "end_ts": piece.end_ts,
             "part": part,
-            "label": piece_label(piece.task, piece.substantive, part, len(found)),
+            "label": piece_label(piece.task, piece.substantive + piece.aside_cycles, part, len(found)),
         }
         for part, piece in enumerate(found, start=1)
         if piece.tokens >= threshold and not piece.rated

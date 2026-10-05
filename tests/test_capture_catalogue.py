@@ -28,10 +28,14 @@ _BUDGETS = {
     # splits by it: about 10 tokens more. why and admit (on the shift
     # switch), the plan and agent-report sentences and the longer shift,
     # missing, skill and check lines took the notes from about 177, 295
-    # and 336 to about 334, 465 and 576.
-    "essentials": (340, 95),
-    "standard": (470, 205),
-    "deep": (580, 205),
+    # and 336 to about 334, 465 and 576. Saying that level and size cover
+    # the work a message's cost holds (agents and workflows it started,
+    # the reply to their reports, nothing left for a later reply), and
+    # that a question or remark gets no shift, took them to about 416,
+    # 547 and 658.
+    "essentials": (420, 95),
+    "standard": (550, 205),
+    "deep": (660, 205),
 }
 
 
@@ -350,6 +354,20 @@ def test_the_levels_table_note_sizes_match_rough_tokens(level):
     assert row.rstrip().endswith(f"~${cat.JUDGE_USD_PER_CALL:.3f} |"), row
 
 
+@pytest.mark.parametrize("level", ["essentials", "standard", "deep"])
+def test_the_readme_gives_the_note_and_tag_sizes_rough_tokens_gives(level):
+    """The README's levels table, and its setup step for Essentials, give the
+    note's and the reply tag's sizes too. They once stayed at 0.11.0's figures
+    while the note grew to more than twice that."""
+    text = (Path(__file__).resolve().parent.parent / "README.md").read_text(encoding="utf-8")
+    sizes = cat.rough_tokens(cat.level_includes(level))
+    row = next(line for line in text.splitlines() if line.startswith(f"| {cat.LEVEL_TITLES[level]} |"))
+    assert f"| ~{sizes['session_note']} tokens | ~{sizes['reply_tag']} tokens |" in row, row
+    if level == "essentials":
+        said = re.search(r"about\s+(\d+)\s+tokens when a session starts and (\d+) per reply", text)
+        assert said and (int(said[1]), int(said[2])) == (sizes["session_note"], sizes["reply_tag"])
+
+
 # -- round trip: what the note asks for is what the parser reads ----------
 
 
@@ -408,7 +426,8 @@ def test_the_session_note_offers_fix_for_a_fault_in_earlier_work_and_the_parser_
     assert (
         "shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the last one; "
         "the scope grew; redoing earlier work; changing what you just delivered because it was wrong or not "
-        "what they wanted, a rename or tweak included = fix)"
+        "what they wanted, a rename or tweak included = fix; a question or remark about the work or tag "
+        "mid-work = no shift)"
     ) in note.splitlines()
     tag, _ = capture_tags.parse_reply_tags("Fixed the earlier change.\n\n[cg: task=bugfix shift=fix]")
     assert (tag.task, tag.shift) == ("bugfix", "fix")
@@ -470,10 +489,79 @@ def test_haiku_gets_the_same_meanings_for_every_key_including_why_and_admit():
     admit = next(line for line in lines if line.startswith("admit: "))
     assert all(f"{word} = " in admit for word in cat.TAG_VOCAB["admit"]), admit
     shift = next(line for line in lines if line.startswith("shift: "))
-    assert "A short message changing files Claude changed in its previous reply is fix, not build or grew." in shift
+    assert "fix = changing what Claude just delivered because it was wrong or not what they wanted" in shift
+    # A short follow-up that changes the same files is not called fix on that alone: right 1 time in 12.
+    assert "previous reply is fix" not in shift
     assert lines[-1].endswith("When Claude carried out a plan, judge the plan, not the user's go-ahead.")
     # Haiku may leave why and admit out where they don't fit, never the retired keys in.
     assert not any(line.startswith(("found: ", "fit: ")) for line in lines)
+
+
+def _key_lines(text: str) -> dict[str, str]:
+    """The ``key: words (...)`` lines of a note or of Haiku's text, by key."""
+    return {line.split(":")[0]: line for line in text.splitlines() if re.match(r"[a-z]+: ", line)}
+
+
+def test_level_and_size_cover_the_work_a_messages_cost_holds_in_both_writers_words():
+    """``capture.prompt_cycles`` charges a message with its reply, the agents and workflows it started and
+    the reply to their reports. So a level or size tag covers all of that, and none of the work left for a
+    later reply. Claude's note and Haiku's text say it alike, for level and for size."""
+    ids = cat.level_metrics("essentials")
+    note, judge = _key_lines(cat.note_text(ids, "main")), _key_lines(cat.judge_text(ids))
+    for key in ("level", "size"):
+        for who, line in (("note", note[key]), ("haiku", judge[key])):
+            assert "agents or workflows this reply started in the background" in line, (who, line)
+            assert "reply to their reports" in line, (who, line)
+            assert "not work left for a later reply" in line, (who, line)
+    # The word meanings Haiku has for size stay, after the new scope.
+    assert judge["size"].index("not work left for a later reply") < judge["size"].index("xs = a line or two")
+    for word, meaning in (("xs", "a line or two"), ("xl", "a large change")):
+        assert f"{word} = {meaning}" in judge["size"]
+    # Level has no line of Haiku's own, so Haiku reads the note's and the two can't drift apart.
+    assert "level" not in cat.JUDGE_LINES and judge["level"] == cat.METRICS_BY_ID["level"].main_line
+    # The packaged JSON the hook reads carries both.
+    exported = cat.export_json()
+    by_id = {m["id"]: m["main_line"] for m in exported["metrics"]}
+    assert by_id["level"] == note["level"] and by_id["size"] == note["size"]
+    assert exported["judge"]["lines"]["size"] == judge["size"]
+    # Said again on the Capture page, which tells the user what each tag covers.
+    for metric_id in ("level", "size"):
+        what = cat.METRICS_BY_ID[metric_id].what
+        assert "agents or workflows it started in the background" in what and "later reply" in what, what
+
+
+def test_a_question_or_remark_about_the_work_or_the_tag_gets_no_shift_in_both_writers_words():
+    ids = cat.level_metrics("essentials")
+    note, judge = _key_lines(cat.note_text(ids, "main")), _key_lines(cat.judge_text(ids))
+    assert note["shift"].endswith("a question or remark about the work or tag mid-work = no shift)")
+    assert (
+        "A question or remark about the work, or about the tag, while the work goes on gets no shift: "
+        "shift describes a change to the work."
+    ) in judge["shift"]
+    # The words that already defined shift are still there; a short follow-up alone is not called fix.
+    assert "a rename or tweak included = fix" in note["shift"]
+    assert "previous reply is fix" not in judge["shift"]
+    # why and admit still follow on lines of their own, and the new words stay on the shift line.
+    assert list(_key_lines(cat.note_text(ids, "main")))[3:6] == ["shift", "why", "admit"]
+    assert "question or remark" not in note["why"] + note["admit"] + judge["why"] + judge["admit"]
+    assert "question or remark" in cat.METRICS_BY_ID["shift"].what
+    assert "shift on a first message, or on a question or remark while the work goes on" in cat.JUDGE_RULE
+    assert cat.JUDGE_RULE in cat.judge_text(ids)
+
+
+def test_the_tag_wording_keeps_to_the_help_rules_where_the_capture_page_shows_it():
+    """The Capture page and ``docs/capture.md`` show each metric's ``what``: sentences of 25 words or fewer."""
+    for metric_id in ("level", "shift", "size"):
+        what = cat.METRICS_BY_ID[metric_id].what
+        for sentence in re.split(r"(?<=[.!?])\s+", what):
+            assert len(sentence.split()) <= 25, (metric_id, sentence)
+        assert " -- " not in what and not re.search(r"\b(just|simply)\b", what, re.I), what
+
+
+def test_a_tag_is_described_by_the_work_on_one_message_not_a_piece_of_work():
+    """A piece of work is a glossary term for a job of many messages; a tag covers one message's work."""
+    assert "piece of work" not in cat.METRICS_BY_ID["size"].what
+    assert "piece of work" not in cat.LEVEL_SUMMARIES["essentials"]
 
 
 # -- the /cg-brief skill -----------------------------------------------------

@@ -315,6 +315,14 @@ def test_a_piece_is_named_by_its_place_its_task_and_its_messages(tmp_path):
     assert ratings.piece_label("bugfix", 4, 2, 3) == "piece 2 of 3, bugfix, 4 messages"
 
 
+def test_a_pieces_label_counts_the_messages_sent_while_background_work_ran(tmp_path, monkeypatch):
+    # A message sent while background work ran is out of the piece's requests, but you still typed it.
+    piece = ratings.pieces_mod.WorkPiece(tokens=500, substantive=2, aside_cycles=3, task="feature")
+    monkeypatch.setattr(ratings.pieces_mod, "pieces_of", lambda *args, **kwargs: [piece])
+    [listed] = ratings.unrated_pieces(_plain(tmp_path), 1)
+    assert listed["label"] == "feature, 5 messages"
+
+
 def test_a_session_of_two_pieces_lists_each_that_reaches_the_threshold(tmp_path):
     bundle = _cleared(tmp_path)
     first, second = ratings.unrated_pieces(bundle, 1)

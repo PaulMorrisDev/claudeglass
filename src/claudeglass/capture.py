@@ -30,8 +30,13 @@ their run (:class:`WorkflowLaunches`). A tag written in reply to a
 background agent's or a workflow's report counts for the cycle whose call
 launched it, even when you had sent another message by then
 (``Cycle.late_turns``), and so does what that reply cost
-(:func:`cycle_spend`). The turns stay where they ran, so the timeline is
-unchanged; only the charge moves.
+(:func:`cycle_spend`). Hand-offs carry through: an agent or workflow that
+such a reply starts, and the reply to its report, are that cycle's too, so
+a plan that goes on from one workflow to the next stays in the cycle that
+began it. The turns stay where they ran, so the timeline is unchanged;
+only the charge moves. A cycle also says which earlier cycles still had an
+agent or a workflow running when it began (``Cycle.running``), so a message
+sent while background work ran can be told from a new job.
 
 :func:`feedback_spans` ties each /cg-feedback answer to the work it
 rates: the cycles since the previous feedback (answered or declined),
@@ -93,17 +98,23 @@ def enough_target(metric_id: str) -> int:
 
 @dataclass(slots=True)
 class Cycle:
-    """One message of yours and the work that answered it."""
+    """One message of yours and the work that answered it. A reply to the
+    report of an agent (or workflow) the cycle launched is the cycle's work
+    even when it ran after you sent another message, and hand-offs carry
+    through: what that reply launched in turn, and the reply to its
+    report, are the cycle's too (``_hand_off_replies``)."""
 
     #: Indexes into the transcript's priced turns: ``start`` is the turn
     #: after your message, ``end`` the first turn of the next cycle.
     start: int
     end: int
     turns: list[Turn] = field(default_factory=list)
-    #: Subagent transcripts started in this cycle, at any depth.
+    #: Subagent transcripts started in this cycle, at any depth, and those
+    #: started by a reply handed to it (``late_turns``).
     subs: list[TranscriptResult] = field(default_factory=list)
     #: Replies in later cycles that answered the report of an agent (or
-    #: workflow) this cycle launched, in order. Their tags and their cost
+    #: workflow) this cycle launched, in order, or the report of one that a
+    #: reply already handed to it launched. Their tags and their cost
     #: are this cycle's; the turns still belong to the cycle they ran in.
     #: A reply is every turn from the one that read the report to the last
     #: of the tool calls it made (``_hand_off_replies``).
@@ -111,6 +122,14 @@ class Cycle:
     #: Positions in ``turns`` of replies that answered an earlier cycle's
     #: report: their tags and their cost are that cycle's, not this one's.
     handed_off: set[int] = field(default_factory=set)
+    #: Indexes (into ``prompt_cycles``' list, so earlier than this cycle) of
+    #: the cycles that had an agent or a workflow still running when this
+    #: cycle's first turn ran: launched, with no report (or, for a run that
+    #: held the session, no result) yet. A launch a handed-back reply made
+    #: counts for the cycle it was handed to. ``pieces`` reads it to tell a
+    #: message sent while background work ran from one that was not
+    #: (``_running_at_starts``).
+    running: tuple[int, ...] = ()
     #: What the transcript says about this cycle's work, the facts
     #: ``capture_tags.settle`` puts right the tag's words with (see its
     #: docstring for the keys). ``prompt_cycles`` fills it; a cycle built
@@ -388,18 +407,23 @@ def prompt_cycles(top: TranscriptResult, subs=(), workflows=()) -> list[Cycle]:
             for tool_use_id in turn.tool_use_ids:
                 cycle_of_use[tool_use_id] = n
     launches = WorkflowLaunches(top, workflows)
+    # Hand-offs first: a reply handed back to an earlier cycle takes the
+    # agents and workflows it starts with it, so they must be settled before
+    # any agent is placed.
+    handed = _hand_off_replies(top, turns, starts, cycles, cycle_of_use, subs, launches)
     by_workflow: dict[int, int] = {}
     for sub in subs:
         at = launches.turn_index(sub)
         if at is not None and at >= starts[0]:
-            by_workflow[id(sub)] = bisect.bisect_right(starts, at) - 1
+            by_workflow[id(sub)] = handed.get(at, bisect.bisect_right(starts, at) - 1)
     by_agent = {agent_key(sub.meta.agent_id): sub for sub in subs if sub.meta.agent_id}
     for sub in subs:
         n = _cycle_for(sub, cycle_of_use, by_agent, by_workflow)
         if n is not None:
             cycles[n].subs.append(sub)
-    _hand_off_replies(top, turns, starts, cycles, cycle_of_use, subs, launches)
     _cycle_facts(cycles, 1 if starts[0] else 0)
+    for cycle, running in zip(cycles, _running_at_starts(top, turns, starts, cycle_of_use, subs, by_agent, launches)):
+        cycle.running = running
     return cycles
 
 
@@ -468,7 +492,7 @@ _REPLY_CONTINUES = frozenset(
 )
 
 
-def _hand_off_replies(top, turns, starts, cycles, cycle_of_use, subs, launches) -> None:
+def _hand_off_replies(top, turns, starts, cycles, cycle_of_use, subs, launches) -> dict[int, int]:
     """A reply to an agent's report is about that agent's work, so its tag
     and its cost belong to the cycle whose call launched the agent, not to
     the cycle that happened to be open when the report arrived. The report
@@ -479,12 +503,18 @@ def _hand_off_replies(top, turns, starts, cycles, cycle_of_use, subs, launches) 
     cycle of its own and hands nothing off. It goes on through the turns
     that follow its tool calls (:data:`_REPLY_CONTINUES`) to the end of the
     cycle it ran in, because the answer and its ``[cg: ...]`` line come
-    last. The first report a reply answers decides where it goes."""
-    launched = {
-        agent_key(sub.meta.agent_id): sub.meta.tool_use_id
-        for sub in subs
-        if sub.meta.agent_id and sub.meta.tool_use_id and sub.meta.kind != "workflow-agent"
-    }
+    last. The first report a reply answers decides where it goes.
+
+    Hand-offs carry through. The reports are taken in the order they
+    arrived, and every tool call of a handed reply is moved to the cycle
+    it is handed to (``cycle_of_use`` is updated in place), so an agent or
+    workflow that reply starts is that cycle's too, and so is the reply to
+    its report: a plan that goes on from one workflow's report to the next
+    stays one cycle's work, whatever you typed in between. Returns each
+    handed turn's index (into ``turns``) with the cycle it was handed to,
+    so a workflow that a handed turn started (which has no tool call to
+    follow) is placed with it."""
+    launched = _launched_agents(subs)
     stamps = launches.stamps
     handed: dict[int, int] = {}
     decided: set[int] = set()
@@ -510,6 +540,8 @@ def _hand_off_replies(top, turns, starts, cycles, cycle_of_use, subs, launches) 
         j = i
         while True:
             handed[j] = origin
+            for tool_use_id in turns[j].tool_use_ids:
+                cycle_of_use[tool_use_id] = origin
             j += 1
             if j >= end or turns[j].preceding_primary not in _REPLY_CONTINUES:
                 break
@@ -517,6 +549,106 @@ def _hand_off_replies(top, turns, starts, cycles, cycle_of_use, subs, launches) 
         n = bisect.bisect_right(starts, i) - 1
         cycles[n].handed_off.add(i - cycles[n].start)
         cycles[origin].late_turns.append(turns[i])
+    return handed
+
+
+def _launched_agents(subs) -> dict[str, str]:
+    """Agent id (``agent_key``) -> the ``tool_use_id`` of the call that
+    started it, for the agents that have a transcript. A workflow's agents
+    have no call to follow (``WorkflowLaunches``)."""
+    return {
+        agent_key(sub.meta.agent_id): sub.meta.tool_use_id
+        for sub in subs
+        if sub.meta.agent_id and sub.meta.tool_use_id and sub.meta.kind != "workflow-agent"
+    }
+
+
+def _last_moment(sub: TranscriptResult) -> datetime | None:
+    """When a subagent last spoke: its last priced turn with a time, else
+    its last turn with one."""
+    for turns in (_priced(sub), sub.turns):
+        for turn in reversed(turns):
+            moment = _moment(turn.ts)
+            if moment is not None:
+                return moment
+    return None
+
+
+def _launch_of(sub, calls, by_agent, launches) -> str | None:
+    """The ``tool_use_id`` (one of ``calls``) of the call that started
+    ``sub``: its own, its workflow's, or its parent agent's for a nested
+    spawn."""
+    seen = set()
+    while sub is not None and id(sub) not in seen:
+        seen.add(id(sub))
+        if sub.meta.tool_use_id in calls:
+            return sub.meta.tool_use_id
+        call = launches.call_for(sub)
+        if call is not None and call[1] in calls:
+            return call[1]
+        sub = by_agent.get(agent_key(sub.meta.parent_agent_id)) if sub.meta.parent_agent_id else None
+    return None
+
+
+def _running_at_starts(top, turns, starts, cycle_of_use, subs, by_agent, launches) -> list[tuple[int, ...]]:
+    """For each cycle, the earlier cycles that had an agent or a workflow
+    still running when its first turn ran (``Cycle.running``): the call came
+    before that turn and the run's end had not arrived by then. A background
+    agent's or a workflow's end is its task notification (or a termination
+    notice); a foreground agent's is its result. Calls are placed with the
+    cycle they belong to after the hand-offs (``cycle_of_use``). A run whose
+    end the transcript never shows counts as running only while one of its
+    agents was still speaking at that turn, so a run that was stopped without
+    a word does not make every later message look like it ran beside one.
+    Times only; no text is read."""
+    agents = _launched_agents(subs)
+    agent_calls = set(agents.values())
+    calls: dict[str, int] = {}
+    for i, turn in enumerate(turns):
+        for tool_use_id in turn.tool_use_ids:
+            if tool_use_id in agent_calls:
+                calls[tool_use_id] = i
+        for tool_use_id, (_run_id, task_id) in turn.workflow_runs.items():
+            if task_id:
+                calls[tool_use_id] = i
+    if not calls:
+        return [() for _ in starts]
+    ended: dict[str, datetime] = {}
+    for event in top.events:
+        if event.kind in (EventKind.TASK_NOTIFICATION, EventKind.AGENT_TERMINATED):
+            keys = [event.detail.get("task_id")]
+        elif event.kind == EventKind.TOOL_RESULT:
+            # A foreground agent's result: ``[agent id, status]`` pairs.
+            keys = [agent_key(str(pair[0])) for pair in event.detail.get("agents") or () if pair]
+        else:
+            continue
+        moment = _moment(event.ts)
+        for key in keys:
+            tool_use_id = (agents.get(key) or launches.task_use(key)) if isinstance(key, str) else None
+            if tool_use_id in calls and moment is not None:
+                ended.setdefault(tool_use_id, moment)
+    spoke: dict[str, datetime] = {}
+    for sub in subs:
+        tool_use_id = _launch_of(sub, calls, by_agent, launches)
+        last = _last_moment(sub) if tool_use_id is not None else None
+        if last is not None and last > spoke.get(tool_use_id, _FLOOR):
+            spoke[tool_use_id] = last
+    out = []
+    for n, start in enumerate(starts):
+        at = launches.stamps[start]
+        found = set()
+        for tool_use_id, i in calls.items():
+            origin = cycle_of_use.get(tool_use_id)
+            if origin is None or origin >= n or i >= start:
+                continue
+            if tool_use_id in ended:
+                running = ended[tool_use_id] > at
+            else:
+                running = tool_use_id in spoke and spoke[tool_use_id] >= at
+            if running:
+                found.add(origin)
+        out.append(tuple(sorted(found)))
+    return out
 
 
 @dataclass(slots=True)
@@ -598,7 +730,9 @@ def _cycle_for(sub, cycle_of_use, by_agent, by_workflow=None) -> int | None:
     """The cycle a subagent belongs to: the one whose turn started it,
     or its parent agent's, for a nested spawn. A workflow agent has no
     tool call to follow: ``by_workflow`` (``id(sub)`` -> cycle) says where
-    its run was started."""
+    its run was started. Both maps already follow the hand-offs
+    (``_hand_off_replies``): a call made in a reply that was handed back
+    to an earlier cycle is that cycle's."""
     seen = set()
     while sub is not None and id(sub) not in seen:
         seen.add(id(sub))

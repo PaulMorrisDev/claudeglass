@@ -421,8 +421,9 @@ function renderRework(section, container) {
 }
 
 // Tiles for the figures, then rework.py's sentences as they are: the
-// pieces, the sessions we couldn't cut into pieces, and the share we
-// couldn't tell the cause of.
+// pieces, the sessions we couldn't cut into pieces, the share we couldn't
+// tell the cause of, and the messages sent while background work ran left
+// out of the count.
 function renderReworkHeadline(rows, block) {
   var byItem = {};
   rows.forEach(function (row) {
@@ -450,8 +451,8 @@ function renderReworkHeadline(rows, block) {
       { class: "metric-tiles-fit" }
     )
   );
-  ["pieces", "requests", "unknown"].forEach(function (item) {
-    if (byItem[item]) block.appendChild(el("p", { class: item === "unknown" ? "cell-hint" : null }, prose(byItem[item].text, seen)));
+  ["pieces", "requests", "unknown", "asides"].forEach(function (item) {
+    if (byItem[item]) block.appendChild(el("p", { class: item === "unknown" || item === "asides" ? "cell-hint" : null }, prose(byItem[item].text, seen)));
   });
 }
 

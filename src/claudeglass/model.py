@@ -770,8 +770,11 @@ so nothing tied it to the message that started its run. Ids only:
   that happened to be open when the report arrived (``Cycle.late_turns``,
   ``Cycle.handed_off``). The reply is the turn that read the report and
   the turns that follow its tool calls, and its cost goes to that cycle
-  too (``capture.cycle_spend``). The turns stay where they ran, so the
-  timeline is unchanged.
+  too (``capture.cycle_spend``). Hand-offs carry through: an agent or
+  workflow such a reply starts, and the reply to its report, go to that
+  cycle as well. The turns stay where they ran, so the timeline is
+  unchanged. ``Cycle.running`` holds the earlier cycles that still had an
+  agent or workflow running when the cycle's first reply ran (times only).
 
 Grounding addition (``PARSER_VERSION`` 38). What the transcript says about
 what a reply changed, so ``capture_tags.settle`` can put right the words

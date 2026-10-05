@@ -2376,10 +2376,11 @@ def test_a_failing_build_is_logged_and_never_raises(tmp_path):
 
 
 def _replies(*sizes: int, priced_first: int = 0, clear_before: tuple = (), slug: str = "", first_chars: int = 100,
-             after_hours: float = 0, session_id: str = "s") -> NS:
+             after_hours: float = 0, session_id: str = "s", first_edits: tuple = (), first_reads: tuple = ()) -> NS:
     """A session bundle whose main transcript made one reply per size, each of ``size`` tokens split four ways.
-    The first reply answers a message of ``first_chars`` characters; each position in ``clear_before`` is a reply
-    that answers a message sent right after a /clear. ``after_hours`` is when the session began."""
+    The first reply answers a message of ``first_chars`` characters and edits ``first_edits`` and reads
+    ``first_reads`` (file hashes); each position in ``clear_before`` is a reply that answers a message sent right
+    after a /clear. ``after_hours`` is when the session began."""
     began = NOW + timedelta(hours=after_hours)
     turns = [Turn(turn_index=0, input_tokens=priced_first)]
     for index, size in enumerate(sizes, start=1):
@@ -2394,6 +2395,8 @@ def _replies(*sizes: int, priced_first: int = 0, clear_before: tuple = (), slug:
             output_tokens=quarter,
             human_prompt_chars=(first_chars if index == 1 else 100) if opens else None,
             commands_run=("clear",) if (index - 1) in clear_before else (),
+            edit_target_hashes=first_edits if index == 1 else (),
+            read_target_hashes=first_reads if index == 1 else (),
         ))
     return NS(top=TranscriptResult(turns=turns), subs=[], session_id=session_id, slug=slug, project_dir="",
               workflows=())
@@ -2439,16 +2442,20 @@ def test_a_clear_ends_a_piece_so_one_session_can_be_two_of_them():
 
 
 def test_a_session_that_opens_with_a_handoff_is_part_of_the_piece_it_carries_on():
-    def pair(n, first_chars):
+    def pair(n, first_chars, reads=("f",)):
         return [
-            _replies(10, 10, 10, slug=f"app{n}", session_id=f"a{n}"),
-            _replies(10, 10, 10, slug=f"app{n}", session_id=f"b{n}", first_chars=first_chars, after_hours=2),
+            _replies(10, 10, 10, slug=f"app{n}", session_id=f"a{n}", first_edits=("f",)),
+            _replies(10, 10, 10, slug=f"app{n}", session_id=f"b{n}", first_chars=first_chars, after_hours=2,
+                     first_reads=reads),
         ]
 
     handed = NS(sessions=[s for n in range(5) for s in pair(n, 3_000)])
     assert coaching.typical_piece_tokens(handed) == 60
     fresh = NS(sessions=[s for n in range(5) for s in pair(n, 200)])
     assert coaching.typical_piece_tokens(fresh) == 30
+    # A long message that picks up none of the file the piece edited is another job's.
+    elsewhere = NS(sessions=[s for n in range(5) for s in pair(n, 3_000, reads=("g",))])
+    assert coaching.typical_piece_tokens(elsewhere) == 30
 
 
 def test_the_file_holds_the_typical_piece_and_never_a_negative_one(tmp_path):

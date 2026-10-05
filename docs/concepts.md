@@ -563,10 +563,15 @@ resuming replies by when they started. A tag Claude writes in reply to a
 background agent's or a workflow's report counts for the cycle that
 launched it, even when you sent another message in between. The whole
 reply goes with it: its tag, and every turn it took, from the one that read
-the report to the last tool call it made. The reply keeps its place in the
-cycle's own turns, the timeline, but `capture.cycle_spend` charges its
-cost and tokens to the cycle that started the agent, so the cycles' costs
-still add up to the session's. A piece of work's cost labels the amount
+the report to the last tool call it made. Hand-offs carry through: an agent
+or workflow that such a reply starts belongs to the same cycle, with all its
+agents, and so does the reply to its report. A plan that goes on from one
+workflow's report to the next therefore stays in the cycle that began it,
+whatever you typed in between, while a workflow a message of yours starts
+stays with that message. The reply keeps its place in the cycle's own turns,
+the timeline, but `capture.cycle_spend` charges its cost and tokens to the
+cycle that started the agent, so the cycles' costs still add up to the
+session's. A piece of work's cost labels the amount
 that came this way (`moved_cost`).
 
 **Piece of work.** The stretch of a session that was one job, drawn from the
@@ -583,28 +588,50 @@ Claude asked open no cycle, and a reply to a plan Claude had just put up
 asks for nothing, so none of them starts a piece. A session with no start
 inside it is one *unsegmented* piece, and counts its messages that asked for
 something, not itself, in a per-piece rate. A session that opens with a
-handoff (a long first message, a paste, or a file path straight after an
-approved plan), within 72 hours of the end of the same project's previous
-piece, joins that piece. **Rework** is a cycle after the piece's first
+handoff, within 72 hours of the end of the same project's previous piece,
+joins that piece. A handoff is a first message that carries the previous
+piece on. A long first message (1,500 characters or more) or a paste does so
+only when the first cycle reads or edits a file that piece edited, whatever
+paths it names and whether or not a plan was approved. Any other first
+message does so when it names a file path and either the previous piece's
+plan was approved or the first cycle reads or edits a file that piece
+edited. A long message or a paste for other files, or a short path with
+nothing carried over and no approved plan, is a new piece. An **aside** is a
+message you sent while background work ran: a cycle that asks for something
+(not a go-ahead, a status check or a thank-you) and changes no files,
+at whose first reply an agent or workflow an earlier cycle of the piece
+launched is still running (its report has not come back). Most are side
+questions or remarks, and some steer the running work with a requirement, a
+clarification or a correction. An aside never starts a piece, whatever its
+`shift` says, and is never rework. It is left out of the piece's message
+count and of the rework rates, but its cost stays in the piece
+(`aside_cycles`, `aside_cost`). A cycle that changes a file while the work
+runs is an ordinary one, and so is the same message once the report is in.
+**Rework** is a cycle after the piece's first
 delivery that has a settled `shift` of `redo` or `fix`, a correction you
-typed or queued, an adjustment that changes files the piece already changed,
-or (inferred) a short message that changes the files the cycle before it
-did. A go-ahead, a thank-you, a status check and a round of plan feedback
-are never rework. Your /cg-feedback answers can rule a cycle out
+typed or queued, or an adjustment that changes files the piece already
+changed. A short message that changes the files the cycle before it did is
+no rework on that alone: a hand-check found it right for 1 message in 12,
+so with no such flag or tag it is not rework. A go-ahead, a thank-you,
+a status check, a round of plan feedback and an aside are never rework. Your
+/cg-feedback answers can rule a cycle out
 (`why=changed`, `plan=new`, a plan check of `new`) and are where the
 **cause** comes from first, then the cycle's settled `why` tag, else "cause
 not reported". Each cause carries where it came from: your feedback,
-Claude's tag, Haiku's tag, or inferred. Nothing says Claude got it wrong
-unless your answers or a tag did. The typical piece the coaching file holds
+Claude's tag, Haiku's tag, or inferred (nothing gave the cause, so the
+follow-up was read from your message or the tag's `shift` alone). Nothing
+says Claude got it wrong unless your answers or a tag did. The typical piece the coaching file holds
 is the median of these pieces' tokens, and the capture banner lists the
 pieces of work no rating covers. `pieces.rework_rate`, `rework_by_level` and
-`rework_by_size` normalise rework per message that asked for something and
-per piece. A `habits.Piece` is the habits tables' own row: the work one
+`rework_by_size` normalise rework per message that asked for something
+(asides left out) and per piece. A `habits.Piece` is the habits tables' own
+row: the work one
 /cg-feedback answer or dashboard rating covers, with its outcome, and one
 row with no outcome for each piece of work no answer covers. Only the rows
 with an outcome feed the tables that need your answer. The `rework` section
 (`rework.py`) reports the rework, its causes and where each came from, by
-piece of work.
+piece of work, with one line under its headline for the asides it left out
+(how many, and what they cost).
 
 **Admission.** A reply that owns a mistake of Claude's. It counts only when
 the settled `admit` tag says so (`claim`, `change` or `instruction`: an
@@ -636,7 +663,8 @@ plan builds and every kind of work, so that table carries a note saying so.
 
 **Redone and planned.** A message is *redone* when a settled `shift`
 of `redo` or `fix` or a correction followed it (unless you called that a
-change of mind or new to the plan), or when the piece of work reworked it
+change of mind or new to the plan, or the follow-up was an aside), or
+when the piece of work reworked it
 afterwards. The whole chain of rework is charged to the message that
 delivered the work (`redo_cost`), once, even when a cycle is both a redo and
 rework. A message is *planned* when it was written in plan mode, called

@@ -262,14 +262,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the next message is a handoff), at a message Claude tagged `shift=new`
   that no one contradicted, or, with no tag, after a gap of 3 hours or
   more on files that share under a tenth of the last piece's. Never at a
-  queued message, a plan reply or the answer to a question. A session
-  that opens with a handoff within 72 hours joins the piece it continues,
-  and a session with no start inside it is one unsegmented piece. Each
+  queued message, a plan reply, the answer to a question or a message you
+  sent while background work ran that changes no files. A session that
+  opens within 72 hours
+  with a handoff that carries something over joins the piece it continues:
+  a short message naming a file path after an approved plan or with a read
+  or edit of a file that piece edited, or a long message or a paste that
+  reads or edits such a file. A long message or a paste that shares no
+  file starts a new piece, whatever paths it names and whether or not a
+  plan was approved, and so does a path with nothing to tie it to the
+  piece. A session with no start inside it is one unsegmented piece. Each
   piece counts its replies, tokens and cost, how sure the start is, and
   how many cycles were rework: a cycle after the first delivery that
-  redoes or fixes it, a correction you typed or queued, an adjustment
-  that changes the piece's files again or, when nothing else says, a
-  short message that changes the files the last reply changed. Plan
+  redoes or fixes it (a settled `redo` or `fix`), a correction you typed
+  or queued, or an adjustment that changes the piece's files again. A
+  short message that only changes the files the last reply changed is
+  not rework: a hand-check found that guess right 1 time in 12, so it
+  needs one of those flags or tags. Plan
   rounds, go-aheads and status checks are never rework, and neither is
   work you rated as a changed mind or a new plan. The cause comes from
   your feedback first, then the reply's `why` tag, then it reads "cause
@@ -297,6 +306,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   changes, and rework per request is split by how hard the work was. The
   glossary gains Piece of work, Rework, Status check and Plan round.
   Counts, closed words and amounts only.
+- **Messages sent during background work are not rework.** A message that
+  asks for something (not a go-ahead, a status check or a thank-you) and
+  changes no files, sent while an agent or workflow an earlier message of
+  the same piece started was still running, is now an aside. Most are side
+  questions or remarks, and some steer the running work with a requirement,
+  a clarification or a correction. It never starts a piece, whatever its
+  `shift` word says, and is never rework. It is left out of the piece's
+  count of requests and of the rework rates, but its cost stays in the
+  piece (`aside_cycles` and `aside_cost` on a piece of work). The same
+  message after the report came back is an ordinary one, and so is one
+  that changes a file while the work runs. Either is rework only when a
+  settled redo or fix, a correction or an adjustment says so, never just
+  because a short one changes the last reply's files. An aside is not a
+  fix after a plan you approved either, and never marks the message
+  before it as redone. When a delivered piece has any,
+  one line under the rework headline says how many messages you sent
+  while background work ran and what they cost. Counts and amounts only.
 - **A link to a habit.** `#/habits?item=<key>` opens Work habits at that
   card: it scrolls there, opens "more habits" when the card is folded
   under it, and highlights it. The rework section is an item too
@@ -560,8 +586,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `files` and `scope` mean. A closing line asks Claude to judge a plan,
   not the go-ahead that carried it out, and to tag its reply to an
   agent's report for the request that started the agent. Haiku gets the
-  same meanings, plus: a short message changing files Claude changed in
-  its previous reply is `fix`, not `build` or `grew`.
+  same meanings.
+- **`level` and `size` cover the work a message's cost holds.** Their
+  lines now say they count the reply, the agents or workflows it started
+  in the background and the reply to their report, and not work left for
+  a later reply, so a message that only starts a workflow is sized by the
+  work it sets going. That is the work a prompt cycle charges to the
+  message. Haiku reads the same words. `shift` also says that a question
+  or remark about the work or the tag, made while the work goes on, gets
+  no shift. The Essentials note grows from about 353 to about 435
+  tokens, Standard from 484 to 566 and Deep from 594 to 676.
 - **A tag's words are checked against the transcript.** One set of rules
   now puts right the words the transcript contradicts, for Claude's tags
   as they are read back and for Haiku's before they are stored. A `why`
@@ -641,17 +675,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `docs/capture.md` now say that free text is read once to pick the closest
   word, then discarded.
 - **The rating reminder comes once a piece of work, not once a session.**
-  It replaces the line the session start note asked for. When the message
-  you send finds a piece of work that is unrated and has used at least a
-  million tokens and twice your typical piece, the hook's note asks Claude
-  to end its final reply with the /cg-feedback line, at most once a piece
-  and once every three days. A piece starts with the session, a `/clear`,
-  or a message Claude tagged `shift=new`, and starts again after a
-  /cg-feedback run. A rating on the dashboard since the piece started
-  counts too. Deep turns it on, like the other. New thresholds
-  `coaching_rating_min_tokens`, `coaching_rating_typical_factor` and
-  `coaching_rating_rest_days`. `capture status` counts the reminder and
-  the plan check and prices them from your own history as an upper bound.
+  It replaces the line the session start note asked for. The Deep note
+  shrinks from about 662 to about 594 tokens. When the message you send
+  finds a piece of work that is unrated and has used at least a million
+  tokens and twice your typical piece, the hook's note asks Claude to end
+  its final reply with the /cg-feedback line, at most once a piece and once
+  every three days. A piece starts with the session, a `/clear`, or a
+  message Claude tagged `shift=new`, and starts again after a /cg-feedback
+  run. A rating on the dashboard since the piece started counts too. Deep
+  turns it on, like the other. New thresholds `coaching_rating_min_tokens`,
+  `coaching_rating_typical_factor` and `coaching_rating_rest_days`.
+  `capture status` counts the reminder and the plan check and prices them
+  from your own history as an upper bound.
 - **Feedback on its own hooks capture.** A setup with capture off and
   only a survey item that answers your messages on counts as hooked, so
   `capture connect` adds the entry and `capture off` and Setup's "no" to
@@ -663,6 +698,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   timeline where it happened, and a piece's cost says how much moved.
   The parser, the habits and the pieces share one count, so a turn is
   charged once.
+- **A hand-off carries through.** When the reply to a report starts the
+  next agent or workflow, that run and the reply to its report now count
+  toward the same message too, however many questions you typed in
+  between. Before, a plan that went from one workflow to the next sent
+  the later runs' agents and replies to whatever message you had typed
+  last. A workflow that a message of yours starts still counts for that
+  message. Costs move between messages, and the total is unchanged.
 - **"Typical" is the median piece of work.** The daily run writes the
   median tokens of a piece of the last 30 days to `coaching.json`, where
   it wrote the median session, so one long session of several tasks no

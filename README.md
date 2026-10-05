@@ -159,7 +159,7 @@ It asks up to four questions:
    each reply with a short tag, such as `[cg: task=bugfix brief=clear]`,
    so the tips fit how you work. This turns on
    [metrics capture](#metrics-capture) at its Essentials level: about
-   186 tokens when a session starts and 14 per reply, plus a Claude
+   435 tokens when a session starts and 15 per reply, plus a Claude
    Haiku call of about $0.002 after each subagent run, and after a
    reply Claude leaves without its tag. It switches itself off after 14
    days. It also adds the `/cg-feedback` skill, for
@@ -442,9 +442,9 @@ one before it:
 |---|---|---|---|---|
 | Off | Nothing. | – | – | – |
 | Free | Signals from hooks, logged to a local file. | – | – | – |
-| Essentials | A tag on each piece of work: what kind it was, how clear the request was, how hard and how big. Haiku judges whether each subagent run finished, and why one was run again. | ~186 tokens | ~14 tokens | ~$0.002 |
-| Standard | What the request lacked, planning, skills and research, and Haiku's view of each subagent's model and brief. | ~304 tokens | ~24 tokens | ~$0.002 |
-| Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~412 tokens | ~30 tokens | ~$0.002 |
+| Essentials | A tag on each message's work: what kind it was, how clear the request was, how hard and how big. Haiku judges whether each subagent run finished, and why one was run again. | ~435 tokens | ~15 tokens | ~$0.002 |
+| Standard | What the request lacked, planning, skills and research, and Haiku's view of each subagent's model and brief. | ~566 tokens | ~24 tokens | ~$0.002 |
+| Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~676 tokens | ~29 tokens | ~$0.002 |
 
 The note is written to the prompt cache once, then read from it on each
 later reply. Capture switches itself off 14 days after you turn it on:
@@ -635,10 +635,10 @@ The dashboard's Glossary page uses the same words, term for term.
 - **Quality signal**: A sign of whether the work went well, not only what it cost: tool calls that failed, agent runs that didn't finish, your corrections. Compared across models and efforts, and before and after each change you make.
 - **Metrics capture**: An opt-in feature, off by default: a one-line tag, written by Claude or Claude Haiku, saying what the work was and how it went. It costs tokens while it's on. `init`'s last questions and `claudeglass capture` turn it on, change what it asks for, or turn it off.
 - **Capture level**: How much metrics capture asks for: `off`, `free`, `essentials`, `standard` or `deep`, each adding more of it. Set at `init` or with `claudeglass capture level`.
-- **Tag**: The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as `[cg: task=bugfix brief=clear]`. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is.
+- **Tag**: The one-line, closed-vocabulary note metrics capture keeps about the work on one message or one subagent run, such as `[cg: task=bugfix brief=clear]`. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is.
 - **Prompt cycle**: One message of yours and everything Claude did to answer it, subagents at any depth included. The unit metrics capture and the Work habits page measure by.
 - **Piece of work**: One job, drawn from a session's transcript alone. It runs from a fresh start (the session start, a `/clear`, or a message about something new) to the next. It needs no feedback and no tag.
-- **Rework**: A follow-up that changes work Claude had already delivered: a redo, a fix, a correction you typed, or an adjustment to files it had changed. Each has a cause, and the dashboard says where that cause came from.
+- **Rework**: A follow-up that changes work Claude had already delivered: a redo, a fix, a correction you typed, or an adjustment to files it had changed. A message you send that changes no files while background work runs is not rework. Each rework has a cause, and the dashboard says where that cause came from.
 - **Status check**: A short message that only asks how the work is going, or whether it is done. It asks for nothing new, so it is never rework.
 - **Plan round**: A message you send while a plan is being made: you sent the plan back with changes, or wrote in plan mode. It is feedback on the plan, so it is never rework.
 - **Work habits**: The page (and report section) that turns prompt cycles into habits worth trying, with a rough saving for each. Each shows where its evidence came from: reported by Claude, inferred from the transcript, or your own feedback.

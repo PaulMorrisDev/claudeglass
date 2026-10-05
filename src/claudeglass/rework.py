@@ -18,7 +18,9 @@ too.
 
 **Causes** are :data:`pieces.CAUSES`, each with the word for where it came
 from (:data:`pieces.SOURCES`), your feedback answers first. A correction that
-nothing explains reads "cause not reported", never "Claude got it wrong".
+nothing explains reads "cause not reported" (source ``inferred``: the
+follow-up was read from your message or the tag's ``shift``, not from an
+answer), never "Claude got it wrong".
 Each has a Try line and, mostly, something to copy. Fixes after a plan you
 approved (:func:`habits.fixes_after_plan`) show as a card of their own, only
 once enough plans were approved to say anything.
@@ -37,6 +39,13 @@ pieces. A week with fewer is a dash, never a zero.
 **By level**: rework cycles per request (``WorkPiece.substantive``), by how
 hard the work was tagged: a hard piece has more requests, so the bare count
 would only say it was bigger.
+
+**Asides**: messages you sent while background work ran, side questions
+and messages that steer the running work alike (``WorkPiece.aside_cycles``),
+are never rework and are not among the requests the rates divide by. When a
+delivered piece has any, one line under the headline says how many and what
+they cost, so the missing follow-ups are accounted for
+(:func:`asides_text`).
 """
 
 from __future__ import annotations
@@ -173,6 +182,10 @@ class Rework:
     weeks: list[WeekRow] = field(default_factory=list)
     levels: dict[str, ReworkRate] = field(default_factory=dict)
     plan_fixes: habits_mod.PlanFixes | None = None
+    #: Messages you sent while background work ran, in the pieces that
+    #: changed files, and what they cost: not counted as rework.
+    asides: int = 0
+    aside_cost: float = 0.0
     #: "N of M follow-ups were things your request left out", or ``""``.
     left_out_note: str = ""
     #: Whether Work habits shows its brief card, so /cg-brief is on offer.
@@ -310,6 +323,8 @@ def collect(h: habits_mod.Habits) -> Rework:
         admitted=_admitted(h.work_pieces),
         weeks=_weeks(h, segmented),
         levels=pieces_mod.rework_by_level(delivered),
+        asides=sum(p.aside_cycles for p in delivered),
+        aside_cost=sum(p.aside_cost for p in delivered),
         plan_fixes=_plan_fixes(h),
         left_out_note=habits_mod.left_out_note(h),
         brief_offer=habits_mod.brief_card_shown(h),
@@ -356,17 +371,22 @@ def headline_text(r: Rework, units: Units, period: str) -> str:
     them. That rework cost X. U% came from requests that left something
     out, C% from Claude's mistakes, X% from changes of mind." When some
     rework had another cause: "O% came from failed tools, plan gaps or a mix
-    of causes."
+    of causes." When no rework had a cause reported, the shares are left out:
+    the unknown line says so on its own.
     """
     n, total = r.rate.reworked, r.rate.segmented
     pieces, them = ("piece", "it") if total == 1 else ("pieces", "them")
     if not n:
         return f"None of your {total} {pieces} of work needed changes after Claude delivered {them}."
+    text = f"{n} of your {total} {pieces} of work needed changes after Claude delivered {them}. " + _cost(
+        units, r.rate.rework_cost, period, "That rework cost {amount}."
+    )
     other = r.share("tools") + r.share("plan_gap") + r.share("mixed")
+    if not other and not any(r.share(cause) for cause in ("left_out", "missed", "changed")):
+        return text
     rest = f" {_pct(other)}% came from failed tools, plan gaps or a mix of causes." if other > 0 else ""
     return (
-        f"{n} of your {total} {pieces} of work needed changes after Claude delivered {them}. "
-        + _cost(units, r.rate.rework_cost, period, "That rework cost {amount}.")
+        text
         + f" {_pct(r.share('left_out'))}% came from requests that left something out, "
         f"{_pct(r.share('missed'))}% from Claude's mistakes, {_pct(r.share('changed'))}% from changes of mind."
         + rest
@@ -386,6 +406,14 @@ def requests_text(r: Rework, units: Units, period: str) -> str:
     return f"{u.rework} of {_count(u.substantive, 'request')} {where} needed changes after Claude delivered. " + _cost(
         units, u.rework_cost, period, "That rework cost {amount}."
     )
+
+
+def asides_text(r: Rework, units: Units, period: str) -> str:
+    """"Not counted as rework: N messages you sent while background work ran
+    (X)." The amount is left out when there is no price for it."""
+    text = f"Not counted as rework: {_count(r.asides, 'message')} you sent while background work ran"
+    amount = units.money(r.aside_cost, period=period)
+    return f"{text} ({amount.primary})." if amount is not None else f"{text}."
 
 
 def admitted_text(a: Admitted, units: Units, period: str) -> str:
@@ -464,6 +492,8 @@ def _headline_table(r: Rework, units: Units, period: str, title: str) -> Table:
             "requests", requests_text(r, units, period), u.rework, u.substantive, 100.0 * u.rework / u.substantive,
             u.rework_cost, r.unsegmented_tokens, period,
         ])
+    if r.asides and rows:
+        rows.append(["asides", asides_text(r, units, period), r.asides, None, None, r.aside_cost, None, period])
     return Table(
         name="rework_headline",
         title=title,
@@ -650,6 +680,7 @@ __all__ = [
     "TRY",
     "WeekRow",
     "admitted_text",
+    "asides_text",
     "build_section",
     "collect",
     "headline_text",

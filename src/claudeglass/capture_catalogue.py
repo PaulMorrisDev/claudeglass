@@ -225,7 +225,7 @@ LEVEL_SUMMARIES = {
     "off": "No metrics are captured and no tokens are used for them. Live coaching and feedback have their "
     "own switches and keep working while capture is off.",
     "free": "Local signals from hooks that log to a file. Uses no Claude tokens.",
-    "essentials": "Claude tags each piece of work: what kind it was, how clear the request was, how hard, "
+    "essentials": "Claude tags each message's work: what kind it was, how clear the request was, how hard, "
     "how big, and when the task changed. For redone work it adds why, and whether Claude admitted a mistake. "
     "Claude Haiku judges whether each agent run finished, and why one was run again.",
     "standard": "Adds what the request lacked, planning and skills, "
@@ -473,8 +473,8 @@ JUDGE_INTRO = (
 JUDGE_RULE = (
     "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that "
     "applies. Leave one out only when it doesn't fit this work (why without a redo or fix; admit without an "
-    "admission; shift on a first message) or the excerpt can't tell at all. When Claude carried out a plan, "
-    "judge the plan, not the user's go-ahead."
+    "admission; shift on a first message, or on a question or remark while the work goes on) or the excerpt "
+    "can't tell at all. When Claude carried out a plan, judge the plan, not the user's go-ahead."
 )
 
 #: What Haiku is told when it judges a finished agent run (the agent
@@ -1610,13 +1610,21 @@ METRICS: tuple[Metric, ...] = (
         group="essentials",
         section="main",
         title="How hard the work was",
-        what="Whether the work was easy, normal or hard.",
+        what="Whether the work was easy, normal or hard. It covers the work whose cost lands on your message: "
+        "the reply, plus any agents or workflows it started in the background. The reply to their report "
+        "counts too, but work left for a later reply does not.",
         why="Whether your model and effort fit the work: a lighter setup for easy work, and no cheaper-model "
         "suggestion for hard work.",
         powers=("models", "profiles", "planning", "measuring"),
         tag="level=easy|normal|hard",
         hooks=("SessionStart",),
-        main_line="level: easy|normal|hard (how hard the work was)",
+        # Level and size cover the same work: what lands on this message's
+        # cost in ``capture.prompt_cycles`` (the reply, the agents and
+        # workflows it started and the reply to their reports). Haiku reads
+        # this line for level; ``JUDGE_LINES["size"]`` words size the same
+        # way, and shift's lines say a question or remark gets no shift.
+        main_line="level: easy|normal|hard (how hard the work was, counting agents or workflows this reply "
+        "started in the background and your reply to their reports, not work left for a later reply)",
         out_chars=12,
     ),
     Metric(
@@ -1625,7 +1633,8 @@ METRICS: tuple[Metric, ...] = (
         section="main",
         title="Task changes and their cause",
         what="When the work changed: a new unrelated task, building on the last one, the scope growing, "
-        "redoing work, or fixing what Claude delivered. For redone or fixed work, why: your request or the "
+        "redoing work, or fixing what Claude delivered. A question or remark about the work isn't a change, "
+        "so it gets no shift. For redone or fixed work, why: your request or the "
         "plan left it out, Claude missed something, you changed your mind, or a tool failed. Whether Claude "
         "admitted an earlier mistake: a wrong statement, a wrong change, or an instruction it didn't follow.",
         why="Task switching, scope creep, rework and fixes, and when a fresh session or plan mode would have "
@@ -1636,7 +1645,8 @@ METRICS: tuple[Metric, ...] = (
         hooks=("SessionStart",),
         main_line="shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the "
         "last one; the scope grew; redoing earlier work; changing what you just delivered because it was wrong "
-        "or not what they wanted, a rename or tweak included = fix)\n"
+        "or not what they wanted, a rename or tweak included = fix; a question or remark about the work or tag "
+        "mid-work = no shift)\n"
         "why: left_out|missed|changed|tools, only with shift redo or fix (their earlier request or the plan "
         "left it out; you missed something their request or the plan said; they changed their mind; a tool or "
         "setup failure)\n"
@@ -1650,14 +1660,17 @@ METRICS: tuple[Metric, ...] = (
         group="essentials",
         section="main",
         title="Size of the work",
-        what="How big each piece of work was, from xs to xl.",
+        what="How big the work on each message was, from xs to xl. It covers the work whose cost lands on your "
+        "message: the reply, plus any agents or workflows it started in the background. The reply to their "
+        "report counts too, but work left for a later reply does not.",
         why="How you break work down: big asks that end in compaction or rework, and tiny asks that each "
         "pay the start-up cost. With the kind and difficulty of the work, it lets a change be judged on "
         "like-for-like work before and after it.",
         powers=("breakdown", "measuring"),
         tag="size=xs|s|m|l|xl",
         hooks=("SessionStart",),
-        main_line="size: xs|s|m|l|xl (how big the work was)",
+        main_line="size: xs|s|m|l|xl (how big the work was, counting agents or workflows this reply started in "
+        "the background and your reply to their reports, not work left for a later reply)",
         out_chars=7,
     ),
     Metric(
@@ -2887,8 +2900,9 @@ def tag_keys(ids) -> tuple[str, ...]:
 #: these keys read differently without them (running the tests read as
 #: ``check=run``, a README typo fix as ``task=bugfix``). The rest are
 #: the note's own lines, which Haiku reads the same way (``you`` is
-#: Claude). A metric's keys riding on it (``why`` and ``admit`` on
-#: ``shift``) follow its own, on lines of their own.
+#: Claude, and level, whose line says the same of the work it covers as
+#: size's does, has none here). A metric's keys riding on it (``why``
+#: and ``admit`` on ``shift``) follow its own, on lines of their own.
 JUDGE_LINES = {
     "task": f"task: {'|'.join(TAG_VOCAB['task'])} (the kind of work asked for: docs = documentation or comments "
     "only; ops = CI, build, deploy or configuration; test = tests only; research = finding something out; "
@@ -2898,16 +2912,17 @@ JUDGE_LINES = {
     "shift": "shift: new|build|grew|redo|fix, only after an earlier message (new = an unrelated task; build = a "
     "next step on top of the last task; grew = more asked of the same task; redo = the same task done another "
     "way; fix = changing what Claude just delivered because it was wrong or not what they wanted, a rename or "
-    "tweak included). A short message changing files Claude changed in its previous reply is fix, not build or "
-    "grew.\n"
+    "tweak included). A question or remark about the work, or about the tag, while the work goes on gets no "
+    "shift: shift describes a change to the work.\n"
     "why: left_out|missed|changed|tools, only with shift redo or fix (left_out = their earlier request or the "
     "plan left it out; missed = Claude missed something their request or the plan said; changed = they changed "
     "their mind; tools = a tool or setup failure)\n"
     "admit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of Claude's: "
     "claim = a wrong statement; change = a wrong change; instruction = an instruction it was given and didn't "
     "follow)",
-    "size": "size: xs|s|m|l|xl (how big the work was: xs = a line or two, or only an answer; s = a small change; "
-    "m = a feature with its tests; l = many files; xl = a large change)",
+    "size": "size: xs|s|m|l|xl (how big the work was, counting agents or workflows this reply started in the "
+    "background and Claude's reply to their reports, not work left for a later reply: xs = a line or two, or "
+    "only an answer; s = a small change; m = a feature with its tests; l = many files; xl = a large change)",
     "plan": "plan: none|made|following|deviated (none = no plan; made = Claude wrote one this turn, as a plan "
     "file or as steps in its reply; following = Claude carried out one written earlier; deviated = Claude "
     "departed from one written earlier)",

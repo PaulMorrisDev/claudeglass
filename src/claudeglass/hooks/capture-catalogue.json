@@ -97,7 +97,7 @@
    "id": "level",
    "group": "essentials",
    "requires": [],
-   "main_line": "level: easy|normal|hard (how hard the work was)",
+   "main_line": "level: easy|normal|hard (how hard the work was, counting agents or workflows this reply started in the background and your reply to their reports, not work left for a later reply)",
    "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
@@ -110,7 +110,7 @@
    "id": "shift",
    "group": "essentials",
    "requires": [],
-   "main_line": "shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the last one; the scope grew; redoing earlier work; changing what you just delivered because it was wrong or not what they wanted, a rename or tweak included = fix)\nwhy: left_out|missed|changed|tools, only with shift redo or fix (their earlier request or the plan left it out; you missed something their request or the plan said; they changed their mind; a tool or setup failure)\nadmit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of yours: a wrong statement; a wrong change; an instruction you were given and didn't follow)",
+   "main_line": "shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the last one; the scope grew; redoing earlier work; changing what you just delivered because it was wrong or not what they wanted, a rename or tweak included = fix; a question or remark about the work or tag mid-work = no shift)\nwhy: left_out|missed|changed|tools, only with shift redo or fix (their earlier request or the plan left it out; you missed something their request or the plan said; they changed their mind; a tool or setup failure)\nadmit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of yours: a wrong statement; a wrong change; an instruction you were given and didn't follow)",
    "extra_keys": [
     "why",
     "admit"
@@ -126,7 +126,7 @@
    "id": "size",
    "group": "essentials",
    "requires": [],
-   "main_line": "size: xs|s|m|l|xl (how big the work was)",
+   "main_line": "size: xs|s|m|l|xl (how big the work was, counting agents or workflows this reply started in the background and your reply to their reports, not work left for a later reply)",
    "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
@@ -407,12 +407,12 @@
   },
   "fallback_writer": "haiku-fallback",
   "intro": "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words. In them, \"you\" means Claude:",
-  "rule": "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (why without a redo or fix; admit without an admission; shift on a first message) or the excerpt can't tell at all. When Claude carried out a plan, judge the plan, not the user's go-ahead.",
+  "rule": "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (why without a redo or fix; admit without an admission; shift on a first message, or on a question or remark while the work goes on) or the excerpt can't tell at all. When Claude carried out a plan, judge the plan, not the user's go-ahead.",
   "lines": {
    "task": "task: feature|bugfix|refactor|debug|docs|review|test|research|plan|ops|chat (the kind of work asked for: docs = documentation or comments only; ops = CI, build, deploy or configuration; test = tests only; research = finding something out; review = judging existing work; debug = finding a fault's cause; chat = no work asked for)",
    "brief": "brief: clear|partial|vague (how complete the request was: clear = what to change and what done looks like; partial = the goal without the details; vague = neither)",
-   "shift": "shift: new|build|grew|redo|fix, only after an earlier message (new = an unrelated task; build = a next step on top of the last task; grew = more asked of the same task; redo = the same task done another way; fix = changing what Claude just delivered because it was wrong or not what they wanted, a rename or tweak included). A short message changing files Claude changed in its previous reply is fix, not build or grew.\nwhy: left_out|missed|changed|tools, only with shift redo or fix (left_out = their earlier request or the plan left it out; missed = Claude missed something their request or the plan said; changed = they changed their mind; tools = a tool or setup failure)\nadmit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of Claude's: claim = a wrong statement; change = a wrong change; instruction = an instruction it was given and didn't follow)",
-   "size": "size: xs|s|m|l|xl (how big the work was: xs = a line or two, or only an answer; s = a small change; m = a feature with its tests; l = many files; xl = a large change)",
+   "shift": "shift: new|build|grew|redo|fix, only after an earlier message (new = an unrelated task; build = a next step on top of the last task; grew = more asked of the same task; redo = the same task done another way; fix = changing what Claude just delivered because it was wrong or not what they wanted, a rename or tweak included). A question or remark about the work, or about the tag, while the work goes on gets no shift: shift describes a change to the work.\nwhy: left_out|missed|changed|tools, only with shift redo or fix (left_out = their earlier request or the plan left it out; missed = Claude missed something their request or the plan said; changed = they changed their mind; tools = a tool or setup failure)\nadmit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of Claude's: claim = a wrong statement; change = a wrong change; instruction = an instruction it was given and didn't follow)",
+   "size": "size: xs|s|m|l|xl (how big the work was, counting agents or workflows this reply started in the background and Claude's reply to their reports, not work left for a later reply: xs = a line or two, or only an answer; s = a small change; m = a feature with its tests; l = many files; xl = a large change)",
    "plan": "plan: none|made|following|deviated (none = no plan; made = Claude wrote one this turn, as a plan file or as steps in its reply; following = Claude carried out one written earlier; deviated = Claude departed from one written earlier)",
    "prior": "prior: needed|some|none (how much the work relied on the earlier conversation: needed = the message only makes sense with it; some = it helped; none = a fresh request, and always none on the first message)",
    "check": "check: targeted|full|build|run|manual|none (how Claude verified its change: targeted = ran the tests for the part changed; full = ran the whole test suite, at any point; build = only built or type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check, or nothing changed)"

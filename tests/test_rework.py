@@ -23,7 +23,7 @@ from claudeglass.units import Units
 
 from helpers import assert_privacy
 from test_habits import _corrected_session, _cycle, _gave
-from test_pieces import BASE, REPLY, _build, _fix, _msg, _only, _tag
+from test_pieces import BASE, REPLY, _aside, _build, _fix, _msg, _only, _tag
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 WINDOW = "last 30 days"
@@ -108,6 +108,16 @@ def test_the_headline_names_the_share_from_other_causes_when_there_is_some():
     assert plain.endswith("from changes of mind.")
 
 
+def test_the_headline_leaves_the_shares_out_when_no_rework_had_a_cause():
+    # "0% ... 0% ... 0%" says nothing the unknown line under it doesn't.
+    work = _pieces(fixes=[{"human_correction": True}])
+    rows = {r["item"]: r for r in _rows(_table(rework.build_section(_h(*work)), "rework_headline"))}
+    assert rows["pieces"]["text"] == (
+        "1 of your 2 pieces of work needed changes after Claude delivered them. That rework was not priced."
+    )
+    assert rows["unknown"]["text"] == "We couldn't tell why for 100%: run /cg-feedback after a piece of work to say."
+
+
 def test_the_title_names_the_window_and_the_section_has_the_plans_title_and_intro():
     section = rework.build_section(_h(window="last 7 days"))
     assert (section.key, section.title) == ("rework", "Rework after delivery")
@@ -142,6 +152,17 @@ def test_no_rework_says_none_and_one_piece_reads_as_one():
     single = pieces.pieces_of([_build(0), _fix(10, human_correction=True), _msg(50, tag=_tag(shift="new"))])[0]
     text = rework.headline_text(rework.collect(_h(single)), Units(), PERIOD)
     assert text.startswith("1 of your 1 piece of work needed changes after Claude delivered it. ")
+
+
+def test_a_short_message_re_changing_the_files_with_no_flag_or_tag_is_no_rework_in_the_section():
+    # Only a flag or a tag makes a follow-up rework; the size of the message and the files it changes do not.
+    plain = rework.build_section(_h(*_pieces(fixes=[{}, {}])))
+    (row,) = _rows(_table(plain, "rework_headline"))
+    assert row["text"] == "None of your 2 pieces of work needed changes after Claude delivered them."
+    assert _rows(_table(plain, "rework_causes")) == []
+    flagged = rework.build_section(_h(*_pieces(fixes=[{}, {"human_correction": True}])))
+    causes = _rows(_table(flagged, "rework_causes"))
+    assert [(r["cause"], r["source"], r["cycles"]) for r in causes] == [("not_reported", "inferred", 1)]
 
 
 def test_work_nothing_delivered_has_no_rework_and_says_why():
@@ -208,6 +229,70 @@ def test_with_no_rework_in_a_piece_the_unknown_share_is_every_sessions():
     rows = {r["item"]: r for r in _rows(_table(rework.build_section(_h(*quiet, *loose)), "rework_headline"))}
     assert rows["unknown"]["text"] == "We couldn't tell why for 100%: run /cg-feedback after a piece of work to say."
     assert (rows["unknown"]["count"], rows["unknown"]["total"]) == (2, 2)
+
+
+def _aside_pieces(asides: int = 2, **kw) -> list[pieces.WorkPiece]:
+    """One session of two pieces: the first delivers and is sent ``asides``
+    messages while work runs, the second delivers and is left alone."""
+    cycles = [_build(0)] + [_aside(5 + n, tag=_tag(shift="fix")) for n in range(asides)]
+    cycles.append(_msg(100, files=("x", "y"), tag=_tag(shift="new"), human_prompt_chars=400))
+    return pieces.pieces_of(cycles, **kw)
+
+
+def test_the_messages_sent_while_background_work_ran_are_a_line_under_the_headline(pricing):
+    work = _aside_pieces(2, rates=pricing)
+    section = rework.build_section(_h(*work))
+    rows = {r["item"]: r for r in _rows(_table(section, "rework_headline"))}
+    assert list(rows) == ["pieces", "asides"]
+    amount = Units().money(2 * REPLY, period=PERIOD).primary
+    assert PERIOD in amount
+    assert rows["asides"]["text"] == (
+        f"Not counted as rework: 2 messages you sent while background work ran ({amount})."
+    )
+    assert (rows["asides"]["count"], rows["asides"]["total"], rows["asides"]["share"]) == (2, None, None)
+    assert rows["asides"]["cost"] == pytest.approx(2 * REPLY) and rows["asides"]["period"] == PERIOD
+    # They are not the rework the headline counts, and the pieces' own row is as it was.
+    assert rows["pieces"]["text"] == "None of your 2 pieces of work needed changes after Claude delivered them."
+    r = rework.collect(_h(*work))
+    assert (r.asides, r.aside_cost, r.rate.reworked, r.cycles) == (2, pytest.approx(2 * REPLY), 0, 0)
+
+
+def test_one_message_reads_as_one_and_an_unpriced_one_has_no_amount():
+    section = rework.build_section(_h(*_aside_pieces(1)))
+    row = {r["item"]: r for r in _rows(_table(section, "rework_headline"))}["asides"]
+    assert row["text"] == "Not counted as rework: 1 message you sent while background work ran."
+    assert row["cost"] == 0.0 and row["count"] == 1
+
+
+def test_a_subscription_amount_in_the_background_work_line_is_not_nested(pricing):
+    section = rework.build_section(_h(*_aside_pieces(2, rates=pricing)), Units(billing_mode="subscription"))
+    row = {r["item"]: r for r in _rows(_table(section, "rework_headline"))}["asides"]
+    assert row["text"].startswith("Not counted as rework: 2 messages you sent while background work ran (")
+    assert f"list-price equivalent {PERIOD}" in row["text"]
+    assert row["text"].count("(") == 1 and row["text"].endswith(").")
+
+
+def test_the_background_work_line_is_there_only_when_a_delivered_piece_has_some(pricing):
+    # None sent: no line, whatever else the headline says.
+    plain = rework.build_section(_h(*_pieces(fixes=[{"human_correction": True}], rates=pricing)))
+    assert [r["item"] for r in _rows(_table(plain, "rework_headline"))] == ["pieces", "unknown"]
+    assert rework.collect(_h(*_pieces())).asides == 0
+    # A piece that changed nothing has no rework to leave them out of.
+    quiet = pieces.pieces_of([_msg(0), _aside(10)])
+    assert quiet[0].aside_cycles == 1 and not quiet[0].delivered
+    assert rework.collect(_h(*quiet)).asides == 0
+    assert _table(rework.build_section(_h(*quiet)), "rework_headline").rows == []
+    # The same pieces with a message sent while work ran among them do.
+    both = rework.build_section(_h(*_pieces(), *_aside_pieces(3, rates=pricing)))
+    rows = {r["item"]: r for r in _rows(_table(both, "rework_headline"))}
+    assert rows["asides"]["count"] == 3 and list(rows)[-1] == "asides"
+
+
+def test_a_message_sent_during_background_work_that_says_fix_is_no_rework_in_the_headline_or_the_causes(pricing):
+    work = _aside_pieces(2, rates=pricing)
+    section = rework.build_section(_h(*work))
+    assert _table(section, "rework_causes").rows == []
+    assert _table(section, "rework_by_level").rows[0][1:4] == [2, 0, 0.0]
 
 
 # -- the causes ------------------------------------------------------------------------

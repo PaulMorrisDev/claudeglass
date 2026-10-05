@@ -773,8 +773,9 @@ def test_a_real_session_start_note_is_read_back():
     # tool, before 0.11.0 moved retry from the brief to Haiku, before the
     # note told a subagent to ignore it, and before shift carried why and
     # admit and the note ended on the sentences about plans and agent
-    # reports: today's note for the metrics it names, plus the retry line
-    # it had then.
+    # reports, and before level and size said they cover the agents and
+    # workflows a reply started: today's note for the metrics it names,
+    # plus the retry line it had then.
     old = rendered.replace("Token Lens", "ClaudeGlass").replace("shift,retry", "shift")
     old = old.replace("where their tokens go.", "where their tokens go. If you are a subagent, ignore this note.")
     recorded_shift = (
@@ -783,6 +784,9 @@ def test_a_real_session_start_note_is_read_back():
     )
     assert recorded_shift in old and "Leave out a key you can't judge.\n" in old
     old = old.replace(recorded_shift, cat.METRICS_BY_ID["shift"].main_line)
+    recorded_level = "level: easy|normal|hard (how hard the work was)"
+    assert recorded_level in old
+    old = old.replace(recorded_level, cat.METRICS_BY_ID["level"].main_line)
     old = old.replace("Leave out a key you can't judge.", cat.SKIP_KEY_LINE)
     old = old.splitlines()
     retry_line = "When you start an agent again because its last run fell short, begin the brief with [retry: model|brief|tools|scope|other]."

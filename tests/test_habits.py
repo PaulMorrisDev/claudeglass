@@ -20,11 +20,12 @@ import pytest
 from claudeglass import capture as capture_mod, capture_catalogue as catalogue, habits, parse
 from claudeglass.habits import AgentFact, CycleFact, Habits, Item, Piece
 from claudeglass.capture_tags import with_older_why
-from claudeglass.model import CaptureTag, Feedback, Recommendation, TranscriptMeta, WorkflowRun
+from claudeglass.model import CaptureTag, Feedback, PlanStats, Recommendation, TranscriptMeta, WorkflowRun
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing, price_turn
 
 from test_capture_feedback import Q as FEEDBACK_Q, T as FEEDBACK_T, _run as feedback_run
+from test_pieces import _aside as _piece_aside, _cycle as _piece_cycle, _msg as _piece_msg, _turn as _piece_turn
 
 from helpers import (
     old_agent_note_text,
@@ -1393,8 +1394,18 @@ def test_the_pieces_of_work_join_a_session_that_opens_with_a_handoff(tmp_path, p
     second = _work_session(tmp_path, "s2", [_said(600, "Carry on from the plan below. " * 60), *_edit_reply(600, 1)])
     [piece] = habits.collect(NS(sessions=[first, second]), pricing).work_pieces
     assert piece.session_ids == ("s1", "s2")
-    plain = _work_session(tmp_path, "s3", [_said(600, "add the logout button to src/app.py"), *_edit_reply(600, 2)])
+    # A message that names a path joins when it edits a file the piece edited...
+    named = _work_session(tmp_path, "s3", [_said(600, "add the logout button to src/app.py"), *_edit_reply(600, 2)])
+    assert len(habits.collect(NS(sessions=[first, named]), pricing).work_pieces) == 1
+    # ...and is another job's when it carries nothing over, or a long message touches none of its files.
+    plain = _work_session(
+        tmp_path, "s4", [_said(600, "add the logout button to src/lib.py"), *_edit_reply(600, 3, path="src/lib.py")]
+    )
     assert len(habits.collect(NS(sessions=[first, plain]), pricing).work_pieces) == 2
+    long = _work_session(
+        tmp_path, "s5", [_said(600, "Carry on from the plan below. " * 60), *_edit_reply(600, 4, path="src/lib.py")]
+    )
+    assert len(habits.collect(NS(sessions=[first, long]), pricing).work_pieces) == 2
 
 
 def test_a_piece_you_rated_is_not_drawn_a_second_time(tmp_path, pricing):
@@ -1541,22 +1552,76 @@ def test_a_plan_with_fewer_than_three_fixes_is_counted_but_not_called_fixed(tmp_
 
 
 def test_fixes_after_a_plan_count_the_rework_the_piece_found_after_it(tmp_path, pricing):
-    def session(name):
+    def session(name, shift):
         lines = [
-            _said(0, "plan the retry for src/app.py"), _plan_call(1),
-            user_block_line([tool_result_block("tu_p", "User has approved your plan.")], timestamp=_ts(2)),
-            *_edit_reply(3, 0),
+            _note(0, ["task", "shift"]),
+            _said(1, "plan the retry for src/app.py"), _plan_call(2),
+            user_block_line([tool_result_block("tu_p", "User has approved your plan.")], timestamp=_ts(3)),
+            *_edit_reply(4, 0),
         ]
         for n in range(1, 4):
-            lines += [_said(10 + 10 * n, "also cover the timeout path"), *_edit_reply(10 + 10 * n, n)]
+            *work, _done = _edit_reply(10 + 10 * n, n)
+            done = turn_line(
+                content=[{"type": "text", "text": f"Done.\n[cg: task=bugfix shift={shift}]"}],
+                model=MODEL, timestamp=_ts(13 + 10 * n), output_tokens=500,
+            )
+            lines += [_said(10 + 10 * n, "also cover the timeout path"), *work, done]
         return _work_session(tmp_path, name, lines)
 
-    sessions = [session(f"s{n}") for n in range(habits.MIN_GROUP)]
-    # No correction or adjustment words: only the rework rule finds these.
+    sessions = [session(f"s{n}", "fix") for n in range(habits.MIN_GROUP)]
+    # No correction or adjustment words: only a settled shift of fix finds these.
     assert not any(t.human_correction or t.human_adjust for t in sessions[0].top.turns)
     h = habits.collect(NS(sessions=sessions), pricing)
     assert [(p.typed, p.queued) for p in h.plan_fixes] == [(3, 0)] * habits.MIN_GROUP
     assert habits.fixes_after_plan(h).fixed == habits.MIN_GROUP
+    # The same short messages re-changing the same file with no flag or tag are no fixes.
+    plain = [session(f"p{n}", "build") for n in range(habits.MIN_GROUP)]
+    h = habits.collect(NS(sessions=plain), pricing)
+    assert [(p.typed, p.queued) for p in h.plan_fixes] == [(0, 0)] * habits.MIN_GROUP
+    assert habits.fixes_after_plan(h).fixed == 0
+
+
+def test_a_message_sent_while_background_work_ran_is_no_fix_after_a_plan(pricing):
+    # The plan is approved and built; a correction typed while the build's run still goes changes no files.
+    plan = _piece_cycle(_piece_turn(0, plan_stats=PlanStats(outcome="approved")), _piece_turn(1, files=("a",)))
+    out = Habits()
+    aside = _piece_aside(10, human_correction=True)
+    habits._pieces_of_session("s1", [plan, aside], habits._Rates(pricing), out, [], None, {}, "plan_build")
+    assert [(p.typed, p.queued, p.cost) for p in out.plan_fixes] == [(0, 0, 0.0)]
+    # The same correction with nothing running is a fix.
+    out = Habits()
+    typed = _piece_msg(10, human_correction=True)
+    habits._pieces_of_session("s1", [plan, typed], habits._Rates(pricing), out, [], None, {}, "plan_build")
+    assert [(p.typed, p.queued) for p in out.plan_fixes] == [(1, 0)]
+
+
+@pytest.mark.parametrize("shift", ["fix", "redo"])
+def test_a_message_sent_while_background_work_ran_never_marks_the_work_before_it_redone(tmp_path, pricing, shift):
+    import test_pieces as tp
+
+    def collect(name, after_report):
+        start = [
+            tp._note(0, tp.TAG_IDS), tp._ask(1, "build it"),
+            tp._reply(2, {"type": "text", "text": "Building."}, tp.tool_use_block("Edit", "toolu_E0", {"file_path": "a.md"})),
+            tp._wf_call(3, "tu_w"), tp._wf_launched(4, "tu_w", "wf_a", "t_a"), tp._reply(5, text="Running.\n[cg: task=feature]"),
+        ]
+        ask = [tp._ask(30 if after_report else 10, "a question"), tp._reply(31 if after_report else 11, text=f"Sure.\n[cg: task=chat shift={shift}]")]
+        report = [tp._report(8 if after_report else 20, "t_a"), tp._reply(9 if after_report else 21, text="It finished.\n[cg: task=feature]")]
+        lines = [*start, *report, *ask] if after_report else [*start, *ask, *report]
+        folder = tmp_path / name
+        folder.mkdir()
+        bundle = NS(top=tp._top(folder, lines), subs=[tp._wf_agent(folder, "w1", "wf_a", tp._wf_steps(6))], session_id="s1", project_dir="p", slug="p")
+        return habits.collect(NS(sessions=[bundle]), pricing)
+
+    h = collect("running", after_report=False)
+    [piece] = h.work_pieces
+    assert (piece.aside_cycles, piece.rework) == (1, 0)
+    assert [(c.redone, c.redo_cost) for c in h.cycles] == [(False, 0.0), (False, 0.0)]
+    # The same message once the report is in is rework, and the work before it is redone.
+    h = collect("reported", after_report=True)
+    [piece] = h.work_pieces
+    assert (piece.aside_cycles, piece.rework) == (0, 1)
+    assert h.cycles[0].redone and h.cycles[0].redo_cost > 0
 
 
 def test_a_reply_to_a_plan_and_a_plan_with_nothing_after_it_are_no_fixes(tmp_path, pricing):

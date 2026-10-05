@@ -974,19 +974,29 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="How many pieces of work needed changes after Claude delivered them, what that rework cost, and "
             "how often we could not tell why.",
             read="Only a piece where Claude changed files can need changes afterwards. A follow-up counts when you "
-            "corrected Claude, adjusted work it had changed, or asked again for a change to the same files. "
+            "corrected Claude, adjusted work it had changed, or its tag called it a fix or a redo. "
+            "A short message that only changes the same files again does not count on its own. "
             "Follow-ups you said were new work, or only a change of mind, are left out. The cost and the shares are "
             "those of the pieces of work. Sessions we could not split into pieces are counted by their messages, "
-            "in a line of their own.",
+            "in a line of their own. Messages you sent while background work ran that changed no files are never "
+            "counted as rework. A line under the first one says how many there were.",
             act="Read the first line, then the causes below it. They say what to change in how you ask.",
         ),
         columns={
             "item": ("", "Which figure this is."),
             "text": ("", "The figure, in words."),
-            "count": ("Needed changes", "Pieces, requests or follow-ups that needed changes, as the row says."),
+            "count": (
+                "Needed changes",
+                "Pieces, requests or follow-ups that needed changes, as the row says. "
+                "On the row for messages you sent while background work ran, how many there were.",
+            ),
             "total": ("Out of", "The number it is counted out of."),
             "share": ("Share", "The count as a percent of the number it is out of."),
-            "cost": ("What the rework cost", "What the follow-ups after delivery cost, the agents they started included."),
+            "cost": (
+                "What the rework cost",
+                "What the follow-ups after delivery cost, the agents they started included. "
+                "On that same row, what those messages cost, which is not rework.",
+            ),
             "tokens": ("Tokens", "The tokens those follow-ups used, the agents' included."),
             "period": ("Period", "The window these figures are from."),
         },
@@ -994,6 +1004,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "pieces": "Pieces needing changes",
             "unknown": "Cause unknown",
             "requests": "Requests needing changes",
+            "asides": "Messages sent while work ran",
         },
         lead_columns=["item", "text", "count", "total", "share", "cost"],
     ),
@@ -1094,7 +1105,11 @@ TABLE_COPY: dict[str, TableCopy] = {
         ),
         columns={
             "level": ("How hard", "How hard Claude tagged the work."),
-            "requests": ("Requests", "Messages in them that asked for something."),
+            "requests": (
+                "Requests",
+                "Messages in them that asked for something. "
+                "Messages you sent while background work ran that changed no files are left out.",
+            ),
             "rework": ("Needed changes", "Follow-ups that needed changes after Claude delivered."),
             "rate": ("Per request", "Follow-ups that needed changes as a percent of requests."),
             "cost": ("What the rework cost", "What those follow-ups cost, the agents they started included."),

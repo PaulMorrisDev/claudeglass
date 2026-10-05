@@ -1034,7 +1034,7 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
             )
         )
 
-    rework, planned_after = _pieces_of_session(
+    rework, planned_after, asides = _pieces_of_session(
         bundle.session_id,
         cycles,
         rates,
@@ -1066,8 +1066,8 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
         )
     captured = capture_mod.is_captured(top)
     begun = capture_mod._start(out.since)
-    #: The nearest cycle before this one that was not rework: the work the
-    #: rework cycles after it are redoing.
+    #: The nearest cycle before this one that was neither rework nor an
+    #: aside: the work the rework cycles after it are redoing.
     anchor = 0
     for n, (fact, cycle) in enumerate(zip(facts, work)):
         fact.left_out = id(cycle) in left_out
@@ -1085,6 +1085,10 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
         if word in _PLAN_ANSWERS:
             out.plan_checks[(shape, word)] += 1
         if not n:
+            continue
+        if id(cycle) in asides:
+            # A message sent while background work ran is never rework, and the
+            # work it ran beside stays the delivery later rework redoes.
             continue
         tag = cycle.settled
         reads_as_redo = (tag is not None and tag.shift in ("redo", "fix")) or cycle.turns[0].human_correction
@@ -1131,12 +1135,13 @@ def _pieces_of_session(
     rated: dict,
     shape: str,
     project: str = "",
-) -> tuple[set[int], set[int]]:
+) -> tuple[set[int], set[int], set[int]]:
     """Draw the session's pieces of work (``pieces.pieces_of``) and record
     what they say: a :class:`Piece` for each one that no kept answer or
     rating covers, and a :class:`PlanFix` for each with an approved plan.
     Returns ``(ids of the rework cycles, ids of the cycles that came after
-    a plan you approved by typing, up to the end of their piece)``. The
+    a plan you approved by typing, up to the end of their piece, ids of the
+    asides, the messages sent while background work ran)``. The
     session's cycles are kept on ``Habits.piece_sessions``: :func:`collect`
     draws ``Habits.work_pieces`` from them across sessions, handoffs joined."""
     feedback = session_rating if session_rating is not None and not spans else spans
@@ -1146,9 +1151,12 @@ def _pieces_of_session(
     out.piece_sessions.append(pieces_mod.PieceSession(session_id, cycles, project, feedback))
     rework: set[int] = set()
     planned_after: set[int] = set()
+    aside_ids: set[int] = set()
     for work_piece in found:
         mine = [cycles[i] for _, i in work_piece.cycle_ids]
         redone = {id(cycles[i]) for _, i in work_piece.rework_ids}
+        asides = {id(cycles[i]) for _, i in work_piece.aside_ids}
+        aside_ids.update(asides)
         rework.update(redone)
         if session_rating is None and not any(id(c) in rated for c in mine):
             out.pieces.append(
@@ -1166,22 +1174,31 @@ def _pieces_of_session(
             typed_go = typed_go or any(
                 t.plan_stats is not None and t.plan_stats.outcome == "approved_by_message" for t in cycle.turns
             )
-        fix = _plan_fix(mine, shape, rates, redone)
+        fix = _plan_fix(mine, shape, rates, redone, asides)
         if fix is not None:
             out.plan_fixes.append(fix)
-    return rework, planned_after
+    return rework, planned_after, aside_ids
 
 
 def _plan_fix(
-    cycles: list, shape: str, rates: _Rates, rework: set[int] | frozenset[int] = frozenset()
+    cycles: list,
+    shape: str,
+    rates: _Rates,
+    rework: set[int] | frozenset[int] = frozenset(),
+    asides: set[int] | frozenset[int] = frozenset(),
 ) -> PlanFix | None:
     """The fixes after the first plan approved in a piece's ``cycles``:
     corrections and adjustments you typed, and those you typed while Claude
     worked (``Turn.queued_correction`` and ``queued_adjust``, one count per
     reply). Any other follow-up the piece counts as rework (``rework``: ids
-    of the cycles in ``WorkPiece.rework_ids``) is a fix too, unless a message
-    you queued in it already counts. A message in plan mode is a reply to a
+    of the cycles in ``WorkPiece.rework_ids``, which needs a correction, an
+    adjustment or a settled ``redo`` or ``fix``, never just a short message
+    re-changing the last reply's files) is a fix too, unless a message you
+    queued in it already counts. A message in plan mode is a reply to a
     plan, no fix, and neither is one you told the plan check was not a fix.
+    A message sent while background work ran (``asides``: ids of the cycles
+    in ``WorkPiece.aside_ids``) is never rework, so it is no fix, and nothing
+    queued in it is either.
     ``None`` when no plan was approved, or nothing came after it."""
     for k, cycle in enumerate(cycles):
         at = next((n for n, t in enumerate(cycle.turns) if capture_mod._plan_approved(t)), None)
@@ -1197,6 +1214,8 @@ def _plan_fix(
     held = [(cycle, cycle.turns[at + 1 :], False)]
     held += [(c, c.turns, not c.turns[0].prompt_plan_mode) for c in cycles[k + 1 :]]
     for c, turns, opening in held:
+        if id(c) in asides:
+            continue
         queued = sum(1 for t in turns if t.queued_correction or t.queued_adjust)
         typed = int(
             opening

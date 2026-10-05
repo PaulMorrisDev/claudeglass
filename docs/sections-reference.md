@@ -889,7 +889,8 @@ depth. A workflow's agents are agent runs of the message whose reply
 started their run (a run that was resumed keeps its run id, so its agents
 are split between the resuming replies by when they started), and a tag
 Claude wrote in reply to a background agent's or a workflow's report
-counts for the message that launched it. It reads what metrics capture's
+counts for the message that launched it (and so do the agents and the
+report replies that reply leads to). It reads what metrics capture's
 tags reported where they are
 there, what the parser measures without asking (whether a message
 named a file or pasted an error, a command failing again and again, a
@@ -903,7 +904,8 @@ outcome; one nothing rated is a `Piece` with no outcome
 (`source` is `transcript`), so the tables that need your answer read only
 the ones with an outcome (`habits_outcomes`, `cost_per_met`). A message is
 *redone* when a redo or fix tag, a correction, or later rework of its piece
-followed it, and `redo_cost` is what the whole chain of rework cost,
+followed it (never an aside: a message you sent while background work ran
+that changed no files), and `redo_cost` is what the whole chain of rework cost,
 counted once on the message that delivered the work. Rates per message
 (the trends here and the per-100 rates in `prompting`) divide by the
 messages that asked for something (`CycleFact.asks`, `pieces.asks`): a
@@ -1118,8 +1120,10 @@ columns of a table still divide by that table's own messages.
   `plan_fixes` (all of those fixes). Fixes you typed while Claude worked
   count with the ones you typed as a message (`habits.fixes_after_plan`), a
   message in plan mode is a reply to the plan and not a fix, and so is one
-  you told the plan check was not a fix. The last three are blank below
-  `MIN_GROUP` plans. `pieces` stays the pieces you rated. The `plan-handoff`
+  you told the plan check was not a fix, or a message you sent while
+  background work ran that changed no files (an aside, never rework). The
+  last three are blank
+  below `MIN_GROUP` plans. `pieces` stays the pieces you rated. The `plan-handoff`
   card and the suggested profile read the table by column key, and so does
   `coaching.json` (see [coaching.md](coaching.md)).
 - `habits_self_report` — Claude's own reports against your feedback: per
@@ -1160,7 +1164,9 @@ columns of a table still divide by that table's own messages.
 How often Claude had to change work it had already delivered, why, and what
 to change in how you ask. It reads the pieces of work `habits.collect` drew
 from the transcripts (`pieces.pieces_in`, a session that opens with a
-handoff joined to the piece it carries on, kept on `Habits.work_pieces`), so
+handoff joined to the piece it carries on only when its first cycle carries
+over a file, or a short first message names a path after an approved plan,
+kept on `Habits.work_pieces`), so
 it needs no `/cg-feedback` answer and no tag: your answers and the tags
 only say *why*. Counts, closed words and amounts only; nothing you wrote
 reaches it. A piece of work is *delivered* once a cycle in it changed
@@ -1168,7 +1174,16 @@ files, and only a delivered piece can need changes afterwards. Rework, the
 causes and where each came from are defined in
 [`concepts.md`](concepts.md#9-work-habits). A follow-up you called a change
 of mind alone (`why=changed`), or new to the plan (`plan=new`), is no
-rework and is not counted here.
+rework and is not counted here. Nor is an *aside*, a message you sent that
+asked for something and changed no files while an agent or workflow an
+earlier message of the same piece started was still running
+(`WorkPiece.aside_cycles`; most are side questions, some steer
+the running work): it never starts a piece, is left out of the requests the
+rates divide by, and its cost stays in the piece. Only a settled `redo` or
+`fix`, a correction or an adjustment that re-changes the piece's files makes
+a follow-up rework. A short message that re-changes the last reply's files
+with none of those is not rework, whether or not background work was still
+running.
 
 Every amount goes through `Units.money`, so it follows the billing mode and
 carries its period ("over the last 30 days"; `period` on the rows below).
@@ -1176,12 +1191,13 @@ Money cells hold list-price USD, and the dashboard phrases them with
 `moneyText`.
 
 - `rework_headline` — "Rework after delivery (last N days)" with the
-  window you picked. Up to three rows. `pieces`: `text` is "{n} of your
+  window you picked. Up to four rows. `pieces`: `text` is "{n} of your
   {total} pieces of work needed changes after Claude delivered them. That
   rework cost {amount}. {u}% came from requests that left something out,
   {c}% from Claude's mistakes, {x}% from changes of mind." then "{o}% came
   from failed tools, plan gaps or a mix of causes." when some rework had one
-  of those causes (with nothing to change it reads "None of your {total}
+  of those causes (the shares are left out when no rework had a cause
+  reported; with nothing to change it reads "None of your {total}
   pieces of work needed changes after Claude delivered them."), with
   `count`, `total`, `share`, `cost`, `tokens` (the agents' included) and
   `period`. `unknown`: "We couldn't tell
@@ -1191,11 +1207,16 @@ Money cells hold list-price USD, and the dashboard phrases them with
   that asked for something, in their own sentence with their own cost,
   never mixed into the piece rate, cost or shares above it. `unknown`
   counts the rework cycles of those pieces with no cause reported (or, with
-  none reworked, every session's), so it reads beside the shares.
+  none reworked, every session's), so it reads beside the shares. `asides`:
+  "Not counted as rework: {n} messages you sent while background work ran
+  ({amount})." present when a delivered piece has any, with `count` the
+  messages and `cost` what they cost (the parenthesis is left out when
+  there is no price), and no `total`, `share` or `tokens`.
 - `rework_causes` — one row per cause and source: `cause` (`left_out`,
   `missed`, `changed`, `tools`, `plan_gap`, `mixed`, `not_reported`, or
   `plan_fixes`), `source` (`feedback`, `Claude tag`, `Haiku tag`,
-  `inferred`), `pieces` and `sessions` (the pieces with any, and the
+  `inferred`: no answer or tag gave the cause, so the follow-up was read
+  from your message or the tag's `shift` alone), `pieces` and `sessions` (the pieces with any, and the
   sessions we couldn't cut into pieces with any, kept apart so a session
   is never called a piece), `cycles`, `share` (of all rework cycles),
   `cost`, `tokens`, `detail` (the counts in words; `left_out` also cites "N of M
@@ -1239,9 +1260,11 @@ Money cells hold list-price USD, and the dashboard phrases them with
   are left out of `pieces`, `reworked`, `share` and `cost`; `caught` and
   `caught_per_piece` count every piece, as the admitted-mistakes line does.
 - `rework_by_level` — `easy`, `normal`, `hard` and `unknown` (not tagged):
-  `requests` (messages that asked for something), `rework`, `rate` (rework
-  per request) and `cost`. Per request, not per piece, as a hard piece has
-  more requests; each request counts under its own level.
+  `requests` (messages that asked for something, messages you sent while
+  background work ran that changed no files left out), `rework`, `rate`
+  (rework per request) and
+  `cost`. Per request, not per piece, as a hard piece has more requests;
+  each request counts under its own level.
 
 ## `capture` (`habits.py`)
 

@@ -830,6 +830,30 @@ def test_rework_amounts_follow_the_billing_mode_and_carry_their_period() -> None
     assert _function_source(app_js, "renderRework").count("period") >= 2
 
 
+def test_the_rework_headline_shows_the_background_work_line_as_a_hint_after_its_sentences() -> None:
+    """rework.py's "Not counted as rework" sentence is a row of its own, so
+    the page prints it in its words, last and quieter than the figures."""
+    headline = _function_source(_app_js(), "renderReworkHeadline")
+    assert '["pieces", "requests", "unknown", "asides"]' in headline
+    assert 'item === "unknown" || item === "asides" ? "cell-hint" : null' in headline
+    # The tiles still lead with the pieces or requests row, which the line never replaces.
+    assert "var lead = byItem.pieces || byItem.requests;" in headline
+
+
+def test_the_rework_glossary_entry_calls_asides_messages_you_send_while_background_work_runs() -> None:
+    """The Rework entry (and the README's copy of it) says "message", not
+    "side question": an aside can steer the running work as well as ask about
+    it."""
+    app_js = _app_js()
+    glossary = dict(re.findall(r'\["([^"]+)", "([^"]+)"\]', _declaration_source(app_js, "GLOSSARY")))
+    assert "A message you send that changes no files while background work runs is not rework." in glossary["Rework"]
+    assert "side question" not in glossary["Rework"].lower()
+    assert "side question" not in _function_source(app_js, "renderReworkHeadline").lower()
+    assert "A message you send that changes no files while background work runs is not rework." in README_MD.read_text(
+        encoding="utf-8"
+    )
+
+
 def test_rework_cards_say_each_try_line_once_and_only_offer_something_to_copy() -> None:
     """A cause that came from several places has one Try line and one line
     to copy. The page only shows prompts and commands: nothing in the

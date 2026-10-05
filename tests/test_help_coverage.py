@@ -438,7 +438,7 @@ def test_the_copy_the_rework_section_builds_keeps_to_the_help_rules():
     from claudeglass.model import Feedback
     from claudeglass.units import Units
     from test_rework import _admitting, _h, _pieces, _week_piece
-    from test_pieces import _build, _fix, _msg, _tag
+    from test_pieces import _aside, _build, _fix, _msg, _tag
 
     pricing_min = load_pricing(path=Path(__file__).resolve().parent / "fixtures" / "pricing_min.toml")
     work = [
@@ -451,6 +451,7 @@ def test_the_copy_the_rework_section_builds_keeps_to_the_help_rules():
     possible = _msg(10, files=("c",), human_prompt_chars=400)
     possible.facts = {"admit_candidate": True}
     work += pieces.pieces_of([_build(0), possible, _msg(20, tag=_tag(shift="new"))])
+    work += pieces.pieces_of([_build(0), _aside(5), _aside(6)], rates=pricing_min)
     plans = [habits.PlanFix(shape="plan_build", typed=3, cost=0.5) for _ in range(habits.MIN_GROUP)]
     strings: list[tuple[str, str]] = [(f"try {cause}", line) for cause, line in rework.TRY.items()]
     strings += [(f"paste {cause}", line) for cause, line in rework.PASTE.items() if line]
@@ -465,8 +466,36 @@ def test_the_copy_the_rework_section_builds_keeps_to_the_help_rules():
                 cells = dict(zip((c.key for c in table.columns), row))
                 strings += [(f"{table.name}.{key}", cells[key]) for key in texts if cells[key]]
     assert {w for w, _ in strings} >= {"rework_headline.text", "rework_causes.detail", "rework_admitted.text"}
+    assert any(text.startswith("Not counted as rework: 2 messages you sent while background work ran") for _, text in strings)
     for where, text in strings:
         _plain(text, where)
+
+
+def test_the_rework_help_says_what_makes_a_follow_up_rework_and_what_does_not():
+    """A flag or a tag makes a follow-up rework. A short message that only
+    changes the same files again does not, and the help no longer says it
+    asks for a change to the same files."""
+    read = helptext.TABLE_COPY["rework_headline"].help.read
+    assert "corrected Claude, adjusted work it had changed, or its tag called it a fix or a redo." in read
+    assert "A short message that only changes the same files again does not count on its own." in read
+    assert "asked again for a change to the same files" not in read
+
+
+def test_the_rework_help_calls_asides_messages_you_sent_while_background_work_ran():
+    """Asides are side questions and messages that steer the running work, so
+    no help text calls them side questions."""
+    headline = helptext.TABLE_COPY["rework_headline"]
+    by_level = helptext.TABLE_COPY["rework_by_level"]
+    texts = [
+        headline.help.read,
+        *(text for _label, text in headline.columns.values()),
+        *headline.value_labels.values(),
+        *(text for _label, text in by_level.columns.values()),
+    ]
+    assert "Messages you sent while background work ran that changed no files" in headline.help.read
+    assert "messages you sent while background work ran" in headline.columns["count"][1]
+    assert "Messages you sent while background work ran that changed no files are left out." in by_level.columns["requests"][1]
+    assert not [text for text in texts if "side question" in text.lower()]
 
 
 def test_the_copy_the_failed_calls_check_and_the_work_habits_row_add_keeps_to_the_help_rules(tmp_path):

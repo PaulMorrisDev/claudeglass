@@ -1008,10 +1008,13 @@ cost, in the billing mode and with its period) and `rework.py`'s sentences:
 rework cost X. U% came from requests that left something out, C% from
 Claude's mistakes, X% from changes of mind", then "O% came from failed
 tools, plan gaps or a mix of causes." when some rework had one of those
-causes, then "We couldn't tell why for K%: run /cg-feedback after a piece of
+causes (the shares are left out when no rework had a cause reported), then
+"We couldn't tell why for K%: run /cg-feedback after a piece of
 work to say" when some rework has no cause, and a sentence of its own for
 sessions that couldn't be cut into pieces (counted by messages that asked
-for something). Below it:
+for something), and, when a delivered piece has any, "Not counted as rework:
+N messages you sent while background work ran (X)." in a quieter
+line. Below it:
 
 - **Why work needed changes**: a card per cause and source, your feedback
   first, then Claude's tag, Haiku's tag and what the transcript shows. Each

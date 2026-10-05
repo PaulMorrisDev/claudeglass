@@ -18,41 +18,68 @@ transcript said is kept.
   each side), and a substantive message (low confidence).
 
 Never at a queued message or an AskUserQuestion answer, which open no
-cycle, nor at a plan reply, which asks for nothing. A *substantive* message
-is one that asks for something: not a go-ahead, a status check, a thank-you
-or a reply to a plan Claude had just put up (unless a message you typed
-while it ran did ask). A /cg-feedback run is no piece's work: it
-stays where it ran and counts for nothing but ``rated``. A session with no
-other start is one *unsegmented* piece: it counts its substantive cycles,
-not itself, in a per-piece figure.
+cycle, nor at a plan reply, which asks for nothing, nor at an aside (below).
+A *substantive* message is one that asks for something: not a go-ahead, a
+status check, a thank-you or a reply to a plan Claude had just put up
+(unless a message you typed while it ran did ask). A /cg-feedback run is no
+piece's work: it stays where it ran and counts for nothing but ``rated``. A
+session with no other start is one *unsegmented* piece: it counts its
+substantive cycles, not itself, in a per-piece figure.
+
+**Asides.** A cycle is an *aside*, a message you sent while background
+work ran, when its message asks for something, it changes no files (no edit
+of the main session's, of a subagent's or of a workflow's, and no shell
+command that changes files: the ``changed`` facts the tag's grounding reads)
+and, at its first reply, an agent or a workflow that an earlier cycle of the
+same piece launched was still running (``Cycle.running``: launched, with no
+report yet, or for a run that held the session no result). Most are side
+questions or remarks; some steer the running work with a requirement, a
+clarification or a correction. An aside never starts a piece, whatever its
+``shift`` says, and is never rework, whatever its ``shift`` or ``why`` says.
+It is left out of ``WorkPiece.substantive``, of the per-cycle rates and of
+the piece's ``task``, ``level`` and ``size``, but what it cost stays in the
+piece (``aside_cycles``, ``aside_cost``). A /clear still starts a piece,
+aside or not. An aside's files do not stand for the piece's, so they never
+change the files a later silence is compared with. A cycle that changes
+files while the work runs is no aside: it is an ordinary cycle.
 
 **Handoffs.** A session that opens with a handoff, within
 :data:`HANDOFF_WITHIN_S` of the end of the same project's previous piece,
-joins that piece (:func:`pieces_in`, the one place that sees two sessions).
-A handoff is a long first message (a paste, or :data:`HANDOFF_CHARS`
-characters), or one that names a file path straight after a plan was
-approved: the transcript keeps no flag for "names a plan file", so a path
-in the message is taken to be one.
+joins that piece (:func:`pieces_in`, the one place that sees two sessions);
+so does the message after a /clear. A first message is a handoff only when
+it carries the previous piece on, in one of two ways. A long one (a paste,
+or :data:`HANDOFF_CHARS` characters) carries it on only when the first cycle
+reads or edits a file the piece edited, whatever paths it names. Any other
+one names a file path (the transcript keeps no flag for "names a plan file",
+so a path in the message is taken to be one) and either the piece had a plan
+approved or the first cycle reads or edits a file the piece edited. A long
+brief that touches none of the piece's files is a new piece's, a plan
+approved before it or not. Files are compared as the salted hashes the
+units carry: reads and edits are hashed the same way with the same salt
+(``parse.path_hash``), so they are in one space.
 
 **Rework** is a cycle after the piece's first delivery (the first cycle
 that changed files) that has any of: a settled ``shift`` of ``redo`` or
-``fix``; a correction you typed or queued; an adjustment (typed or queued)
-that changes files the piece already changed; or, inferred, a short message
-(not a go-ahead, thank-you or status check) that changes the files the
-cycle before it changed. It is never rework when it asks for nothing (a
-go-ahead, status check or thank-you, whatever its tag says), when it is a
-plan-feedback round (you sent a plan back, or wrote in plan mode), when the
-plan check says ``new`` or ``none``, or when your /cg-feedback answers say
-the plan was ``new`` or the follow-ups were a change of mind alone
-(``why=changed``).
+``fix``; a correction you typed or queued; or an adjustment (typed or
+queued) that changes files the piece already changed. Each reads what you
+said or Claude tagged. A short message that changes the files the cycle
+before it changed is no rework on that alone: it was right for 1 of 12
+cycles on a hand-check, the rest being a resumed run, a permission, an
+answer, a new instruction or a further step. It is never rework when it
+asks for nothing (a go-ahead, status check or thank-you, whatever its tag
+says), when it is an aside, when it is a plan-feedback round (you sent a plan
+back, or wrote in plan mode), when the plan check says ``new`` or ``none``,
+or when your /cg-feedback answers say the plan was ``new`` or the follow-ups
+were a change of mind alone (``why=changed``).
 
 **Cause** of each rework cycle, in this order, each with the word for where
 it came from (:data:`SOURCES`): your /cg-feedback answers (the plan check,
 then ``plan``, then ``why``, with ``missed_in`` kept alongside), then the
 cycle's settled ``why`` tag (Claude's, or Haiku's when Haiku wrote every
-tag), else ``not_reported``. ``missed``, which is Claude's mistake, only
-ever comes from your answers or a tag: a correction alone never says
-Claude got it wrong.
+tag), else ``not_reported``, with the source ``inferred``: the follow-up was
+read from your message or the tag's ``shift`` alone. ``missed``, which is
+Claude's mistake, only ever comes from your answers or a tag: a correction
+alone never says Claude got it wrong.
 
 **Admissions** are the cycles whose reply owns a mistake of Claude's: the
 settled ``admit`` word, never the bare pattern match
@@ -106,7 +133,9 @@ MIN_FILES = 2
 HANDOFF_WITHIN_S = 72 * 3600
 
 #: A first message of this many characters, or one flagged as a paste
-#: (``Turn.human_prompt_has_paste``), is a handoff.
+#: (``Turn.human_prompt_has_paste``), is a handoff only when its first cycle
+#: reads or edits a file the piece edited, whatever paths it names and
+#: whether or not a plan was approved (:func:`_is_handoff`).
 HANDOFF_CHARS = 1500
 
 #: Where a piece started, and how sure that start is.
@@ -122,7 +151,10 @@ CONFIDENCE = ("high", "low")
 #: nothing says.
 CAUSES = ("left_out", "missed", "changed", "tools", "plan_gap", "mixed", "not_reported")
 
-#: Where a cause came from.
+#: Where a cause came from. ``inferred`` is for a follow-up that no answer
+#: and no tag gave a cause: the follow-up itself was read from what you said
+#: (a correction, an adjustment) or from the tag's ``shift`` alone, so its
+#: cause is ``not_reported``.
 SOURCES = ("feedback", "Claude tag", "Haiku tag", "inferred")
 
 #: The words ``levels`` and ``sizes`` are counted under: the tag's, and
@@ -157,9 +189,17 @@ class WorkPiece:
     #: sent another message, charged to the cycle that started the agent.
     moved_cost: float = 0.0
     #: Cycles in it, and those that asked for something (see the module
-    #: docstring).
+    #: docstring), the asides left out.
     cycles: int = 0
     substantive: int = 0
+    #: Messages you sent while background work ran (the module docstring's
+    #: asides), and what they cost: part of ``cost``, left out of
+    #: ``substantive`` and of the rework counts.
+    aside_cycles: int = 0
+    aside_cost: float = 0.0
+    #: ``(session id, cycle index)`` of each aside, the same ids as
+    #: ``cycle_ids``.
+    aside_ids: tuple[tuple[str, int], ...] = ()
     #: A cycle after the first delivery needed rework, and what those
     #: cycles cost.
     rework: int = 0
@@ -199,7 +239,8 @@ class WorkPiece:
     levels: tuple[tuple[str, int, int, float], ...] = ()
     sizes: tuple[tuple[str, int, int, float], ...] = ()
     #: The hardest ``level`` and biggest ``size`` a cycle of it had, and the
-    #: ``task`` most of its cycles had (``""`` when none was tagged).
+    #: ``task`` most of its cycles had (``""`` when none was tagged); an
+    #: aside's tag is no part of them.
     level: str = ""
     size: str = ""
     task: str = ""
@@ -252,6 +293,14 @@ class _Unit:
     #: A plan was approved in it.
     approved: bool = False
     tag: object = None
+    #: At its first reply, an agent or workflow that an earlier cycle of the
+    #: piece it would carry on launched was still running. Set by
+    #: :func:`_segments`, which knows that piece.
+    beside: bool = False
+    #: A message sent while background work ran (the module docstring's
+    #: asides): a ``beside`` cycle that asks for something and changes no
+    #: files. Set by :func:`_segments`.
+    aside: bool = False
 
     @property
     def opening(self) -> Turn:
@@ -344,12 +393,21 @@ def _plan_word(cycle: capture_mod.Cycle) -> str:
     return next((t.plan_check.word for t in cycle.turns if t.plan_check is not None and t.plan_check.word), "")
 
 
-def _is_handoff(opening: Turn, plan_approved: bool) -> bool:
-    """Whether a message opens by handing work over: a long one or a
-    paste, or one with a file path in it straight after an approved plan."""
+def _is_handoff(unit: _Unit, previous: _Segment) -> bool:
+    """Whether ``unit``, the first cycle after a fresh start, carries
+    ``previous``, the piece before it, on. A long message (or a paste) does
+    only when the cycle reads or edits a file ``previous`` edited: a long brief
+    for other files is a new job's, with a path in it and a plan approved
+    before it or not. Any other message does when it names a file path and
+    either ``previous`` had a plan approved or the cycle reads or edits a file
+    ``previous`` edited; a path with nothing to tie it to the piece is a new
+    job's. Both sides are salted hashes of the same kind
+    (``parse.path_hash``), so they compare."""
+    opening = unit.opening
+    carried = bool(unit.touched & previous.edited)
     if (opening.human_prompt_chars or 0) >= HANDOFF_CHARS or opening.human_prompt_has_paste:
-        return True
-    return plan_approved and "path" in opening.prompt_flags
+        return carried
+    return "path" in opening.prompt_flags and (previous.plan_approved or carried)
 
 
 # -- where pieces start ----------------------------------------------------------
@@ -372,6 +430,11 @@ class _Segment:
     @property
     def plan_approved(self) -> bool:
         return any(u.approved for u in self.work)
+
+    @property
+    def edited(self) -> frozenset:
+        """Every file (salted hash) the piece edited."""
+        return frozenset().union(*(u.edited for u in self.work))
 
     def opening_moment(self):
         for u in self.work:
@@ -399,11 +462,28 @@ def _gap_s(unit: _Unit, before: _Unit | None) -> float | None:
     return (now - last).total_seconds() if now is not None and last is not None else None
 
 
-def _start_of(unit: _Unit, before: _Unit | None, last_files: frozenset, plan_approved: bool) -> str | None:
+def _is_beside(unit: _Unit, members: set[int]) -> bool:
+    """Whether an agent or workflow launched by a cycle in ``members`` (the
+    piece ``unit`` would carry on) was still running at ``unit``'s first
+    reply."""
+    return not members.isdisjoint(unit.cycle.running)
+
+
+def _is_aside(unit: _Unit) -> bool:
+    """Whether ``unit`` is a message sent while background work ran (the
+    module docstring's asides): it asks for something and changes no files,
+    with work of its piece running beside it."""
+    return unit.substantive and not unit.changed and unit.beside
+
+
+def _start_of(unit: _Unit, before: _Unit | None, last_files: frozenset, previous: _Segment) -> str | None:
     """The word in :data:`STARTS` for the piece ``unit`` starts, or
-    ``None`` when it carries on the one before."""
+    ``None`` when it carries on ``previous``, the one before. An aside starts
+    nothing, but a /clear is a fresh start whatever is running."""
     if "clear" in unit.opening.commands_run:
-        return None if _is_handoff(unit.opening, plan_approved) else "clear"
+        return None if _is_handoff(unit, previous) else "clear"
+    if unit.aside:
+        return None
     shift = unit.tag.shift if unit.tag is not None else None
     if shift == "new" and unit.substantive:
         return "new"
@@ -426,6 +506,9 @@ def _segments(session: PieceSession, pricing) -> list[_Segment]:
     held: list[_Unit] = []
     before: _Unit | None = None
     last_files: frozenset = frozenset()
+    #: The indexes of the cycles in the piece being built: what an aside
+    #: ran beside has to have been launched by one of them.
+    members: set[int] = set()
     for index, cycle in enumerate(session.cycles):
         if not cycle.turns:
             continue
@@ -436,13 +519,19 @@ def _segments(session: PieceSession, pricing) -> list[_Segment]:
             else:
                 held.append(unit)
             continue
-        start = "start" if not segments else _start_of(unit, before, last_files, segments[-1].plan_approved)
+        unit.beside = _is_beside(unit, members)
+        unit.aside = _is_aside(unit)
+        start = "start" if not segments else _start_of(unit, before, last_files, segments[-1])
         if start is not None:
             segments.append(_Segment(units=held, sessions=[session.session_id], project=session.project, start=start))
             held = []
+            members = set()
+            # Nothing of an earlier piece's runs beside the first cycle of a new one.
+            unit.beside = unit.aside = False
         segments[-1].units.append(unit)
+        members.add(index)
         before = unit
-        if unit.touched:
+        if unit.touched and not unit.aside:
             last_files = unit.touched
     if len(segments) == 1:
         segments[0].unsegmented = True
@@ -477,13 +566,18 @@ def _plan_round(cycle: capture_mod.Cycle) -> bool:
     return cycle.feedback_rounds > 0 or cycle.turns[0].prompt_plan_mode
 
 
-def _reasons(unit: _Unit, files: set, previous: frozenset) -> bool:
+def _reasons(unit: _Unit, files: set) -> bool:
     """Whether ``unit``, a cycle after the first delivery, reads as rework
-    on what the transcript says alone. ``files`` are those the piece has
-    changed so far, ``previous`` those the cycle before changed. A cycle that
-    asks for nothing (a go-ahead, status check or thank-you with no correction
-    or adjustment typed while it ran) is never rework, whatever its tag says."""
-    if not unit.substantive:
+    on what you said or Claude tagged: a settled ``redo`` or ``fix``, a
+    correction, or an adjustment re-changing the piece's files (``files``,
+    those it has changed so far). The size of the message and the files it
+    changes say nothing on their own: a short message that changes the files
+    the cycle before it changed, with no such flag or tag, is no rework. A
+    cycle that asks for nothing (a go-ahead, status check or thank-you with
+    no correction or adjustment typed while it ran) is never rework, whatever
+    its tag says; nor is an aside, a message sent while background work
+    ran."""
+    if not unit.substantive or unit.aside:
         return False
     turns = unit.cycle.turns
     opening = unit.opening
@@ -491,13 +585,7 @@ def _reasons(unit: _Unit, files: set, previous: frozenset) -> bool:
         return True
     if opening.human_correction or any(t.queued_correction for t in turns):
         return True
-    if (opening.human_adjust or any(t.queued_adjust for t in turns)) and unit.edited & files:
-        return True
-    return (
-        (opening.human_prompt_chars or 0) <= catalogue.JUDGE_LIMITS["short"]
-        and unit.substantive
-        and bool(unit.edited & previous)
-    )
+    return bool(opening.human_adjust or any(t.queued_adjust for t in turns)) and bool(unit.edited & files)
 
 
 def _excused(unit: _Unit, fb: Feedback | None, plan_before: bool = True) -> bool:
@@ -519,7 +607,8 @@ def _excused(unit: _Unit, fb: Feedback | None, plan_before: bool = True) -> bool
 
 def _cause(unit: _Unit, fb: Feedback | None, plan_before: bool) -> tuple[str, str, str]:
     """``(cause, source, missed_in)`` of a rework cycle: your answers, then
-    the settled ``why`` tag, else ``not_reported``."""
+    the settled ``why`` tag, else ``not_reported`` with the source
+    ``inferred``."""
     word = _plan_word(unit.cycle)
     if word == "covered":
         return "missed", "feedback", "plan"
@@ -585,7 +674,6 @@ def _build(segment: _Segment, by_cycle: dict[int, Feedback], covered: set[int]) 
     delivered = False
     plan_before = False
     files: set = set()
-    previous: frozenset = frozenset()
     rework = 0
     rework_cost = 0.0
     rework_ids: list[tuple[str, int]] = []
@@ -600,7 +688,7 @@ def _build(segment: _Segment, by_cycle: dict[int, Feedback], covered: set[int]) 
         if (
             delivered
             and not _plan_round(unit.cycle)
-            and _reasons(unit, files, previous)
+            and _reasons(unit, files)
             and not _excused(unit, fb, plan_before)
         ):
             reworked = True
@@ -614,7 +702,7 @@ def _build(segment: _Segment, by_cycle: dict[int, Feedback], covered: set[int]) 
             rework += 1
             rework_cost += unit.spend.cost
             rework_ids.append((unit.session_id, unit.index))
-        if unit.substantive:
+        if unit.substantive and not unit.aside:
             for key in ("level", "size"):
                 word = getattr(unit.tag, key, None) if unit.tag is not None else None
                 row = mixes[key].setdefault(word if word in catalogue.TAG_VOCAB[key] else UNKNOWN, [0, 0, 0.0])
@@ -625,7 +713,6 @@ def _build(segment: _Segment, by_cycle: dict[int, Feedback], covered: set[int]) 
         delivered = delivered or unit.changed
         plan_before = plan_before or unit.approved
         files |= unit.edited
-        previous = unit.edited
     admits = [_admission(u) for u in work]
     # The rework after an admission you caught: its own cycle when that was
     # rework, then the run of rework cycles that follows. Each counts once.
@@ -636,7 +723,8 @@ def _build(segment: _Segment, by_cycle: dict[int, Feedback], covered: set[int]) 
             while k < len(work) and flags[k]:
                 after_caught.add(k)
                 k += 1
-    tags = [u.tag for u in work if u.tag is not None]
+    # What the piece is called comes from the work, not from a message sent while it ran.
+    tags = [u.tag for u in work if u.tag is not None and not u.aside]
     tasks = Counter(t.task for t in tags if t.task)
     last_ts = next((t.ts for u in reversed(work) for t in reversed(u.cycle.turns) if t.ts), "")
     # A /cg-feedback run held from before the piece's first message rates none of it.
@@ -653,7 +741,10 @@ def _build(segment: _Segment, by_cycle: dict[int, Feedback], covered: set[int]) 
         cost=sum(u.spend.cost for u in work),
         moved_cost=sum(u.spend.moved_in for u in work),
         cycles=len(work),
-        substantive=sum(1 for u in work if u.substantive),
+        substantive=sum(1 for u in work if u.substantive and not u.aside),
+        aside_cycles=sum(1 for u in work if u.aside),
+        aside_cost=sum(u.spend.cost for u in work if u.aside),
+        aside_ids=tuple((u.session_id, u.index) for u in work if u.aside),
         rework=rework,
         rework_cost=rework_cost,
         rework_ids=tuple(rework_ids),
@@ -717,14 +808,15 @@ def pieces_of(
 def _joins(previous: _Segment, head: _Segment) -> bool:
     """Whether ``head``, the first piece of a session, carries on
     ``previous``: the same known project, within :data:`HANDOFF_WITHIN_S`
-    of where it ended, and ``head`` opens with a handoff."""
+    of where it ended, and ``head`` opens with a handoff
+    (:func:`_is_handoff`)."""
     if not head.project or head.project != previous.project:
         return False
     began = head.opening_moment()
     ended = previous.closing_moment()
     if began is None or ended is None or not timedelta(0) <= began - ended <= timedelta(seconds=HANDOFF_WITHIN_S):
         return False
-    return _is_handoff(head.work[0].opening, previous.plan_approved)
+    return _is_handoff(head.work[0], previous)
 
 
 def pieces_in(sessions: Iterable[PieceSession], rates=None) -> list[WorkPiece]:

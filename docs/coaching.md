@@ -499,7 +499,9 @@ to read:
   then. The survey's facts line and the rating reminder read it. A piece
   of work is drawn from the transcripts, with no rating or tag needed: a
   session starts one, a `/clear` or a new task starts another, and a
-  session that opens with a handoff joins the piece it carries on (see
+  session that opens with a handoff, a first message that carries the piece
+  on, joins it, while a message sent as background work ran that changes no
+  files starts none (see
   "Piece of work" in `docs/concepts.md`). The tokens are the main
   session's own, as the hook counts them, and a reply to an agent's report
   counts for the piece that started the agent.
