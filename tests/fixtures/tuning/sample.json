@@ -1,0 +1,169 @@
+{
+  "kind": "claudeglass-tuning",
+  "format": 1,
+  "tool_version": "0.14.0",
+  "parser_version": 40,
+  "generated_on": "2026-09-19",
+  "window_days": 30,
+  "capture": {
+    "level": "standard",
+    "tagger": "claude",
+    "sample_percent": 100,
+    "metrics": ["task", "level", "shift", "plan"],
+    "coaching": ["coaching_line"],
+    "thresholds": {
+      "cold_min_tokens": 100000.0,
+      "drip_count": 3.0
+    },
+    "hints": {
+      "plan_fresh": {
+        "notes": 4,
+        "tips": 3,
+        "misfires": 1,
+        "useful": 2,
+        "known": 1,
+        "wrong": 0
+      }
+    }
+  },
+  "prompting": {
+    "totals": {
+      "typed": 120,
+      "queued": 9,
+      "go_aheads": 14,
+      "status_checks": 6,
+      "corrections": 11,
+      "adjustments": 5,
+      "reminders": 2
+    },
+    "weeks": {
+      "2026-W37": {
+        "messages": 40,
+        "habits": {"vague_fix": 4, "context_carried": 2},
+        "rates": {"vague_fix": 10.0, "context_carried": 5.0}
+      },
+      "2026-W38": {
+        "messages": 7,
+        "habits": {"drip_feed": 1}
+      }
+    },
+    "plans": {
+      "approved": 8,
+      "rounds": {"one": 5, "two": 2, "three": 1},
+      "rejected_rounds": 4,
+      "feedback_rounds": {"question": 2, "critique": 1, "other": 1}
+    },
+    "denials": {"plan_rejected": 4, "question_declined": 1}
+  },
+  "tags": {
+    "tagged": {"claude": 90, "haiku": 12, "haiku-fallback": 3},
+    "words": {
+      "task": {
+        "claude": {"feature": 40, "bugfix": 30, "docs": 20},
+        "haiku": {"feature": 8, "chat": 4}
+      },
+      "level": {
+        "claude": {"easy": 30, "normal": 40, "hard": 20}
+      }
+    },
+    "grounding": {"task:chat>research": 2},
+    "settling": {"plan:following>made": 1},
+    "shift": {
+      "new": {"cycles": 30, "corrections": 2, "adjustments": 0, "rework": 0},
+      "fix": {"cycles": 10, "corrections": 8, "adjustments": 1, "rework": 7}
+    },
+    "admissions": {
+      "claim": {
+        "user": {"claude": 5, "haiku": 1},
+        "self": {"claude": 2}
+      }
+    },
+    "unconfirmed_admissions": 3,
+    "feedback": {
+      "answered": 6,
+      "skipped": 2,
+      "answers": {
+        "outcome": {"met": 4, "partly": 1, "missed": 1}
+      },
+      "mapped_from_text": {"outcome": 1},
+      "missed_in": {"message": 2}
+    }
+  },
+  "pieces": {
+    "total": 67,
+    "delivered": 60,
+    "segmented": 55,
+    "reworked": 10,
+    "rework_cycles": 14,
+    "rework_usd": 31.25,
+    "rounds": {"one": 30, "two": 15, "three": 6, "four_to_six": 3, "seven_or_more": 1},
+    "rework_by_cause": {
+      "left_out": {"cycles": 5, "cost_usd": 12.5},
+      "missed": {"cycles": 4, "cost_usd": 10.75}
+    },
+    "rework_by_level": {
+      "easy": {"pieces": 20, "reworked": 1, "requests": 24, "rework_cycles": 1},
+      "hard": {"pieces": 12, "reworked": 6, "requests": 30, "rework_cycles": 9},
+      "unknown": {"pieces": 35, "reworked": 3, "requests": 50, "rework_cycles": 4}
+    },
+    "rework_by_week": {
+      "2026-W37": {"pieces": 20, "reworked": 4},
+      "2026-W38": {"pieces": 15, "reworked": 2}
+    },
+    "modes": {"interactive": 30, "overnight": 2, "one-shot": 8},
+    "unattended_nights": {"to_4h": 1, "over_8h": 1},
+    "drip_runs": {
+      "by_length": {"three": 3, "four_to_six": 1},
+      "by_gap": {"to_1m": 1, "to_5m": 3}
+    },
+    "cold_returns": {"count": 6, "cache_write_tokens": 900000},
+    "wake_ups": {"count": 2, "cache_write_tokens": 260000}
+  },
+  "agents": {
+    "verdicts": {
+      "structured": {"done": 10, "partial": 2},
+      "handback": {"done": 3, "blocked": 1},
+      "text": {"none": 5}
+    },
+    "raced": 2,
+    "judge": {
+      "main": {"calls": 15, "tagged": 14, "cost_usd": 0.0231, "errors": {"timeout": 1}},
+      "agent": {"calls": 12, "tagged": 10, "cost_usd": 0.0184, "errors": {"no_answer": 2}}
+    },
+    "runs": {
+      "direct": {"runs": 21, "cost_usd": 14.5},
+      "workflow": {"runs": 9, "cost_usd": 6.25}
+    },
+    "types": {"Explore": 12, "general-purpose": 6, "workflow-subagent": 9, "custom": 3},
+    "models": {
+      "haiku": {"runs": 10, "cost_usd": 0.8},
+      "sonnet": {"runs": 15, "cost_usd": 9.4},
+      "opus": {"runs": 5, "cost_usd": 10.55}
+    }
+  },
+  "overhead": {
+    "entrypoints": {"cli": 40, "claude-desktop": 12, "sdk-cli": 2},
+    "hooks": {
+      "SessionStart": {"runs": 54, "recorded": 20, "median_ms": 140.0},
+      "Stop": {"runs": 800, "recorded": 0}
+    },
+    "capture_usd": 4.2,
+    "coaching_usd": 0.35,
+    "limits": {
+      "five_hour": {
+        "episodes": 3,
+        "kept_working": 0,
+        "cut_off_direct": 2,
+        "cut_off_workflow": 1,
+        "cut_off_usd": 5.5
+      },
+      "weekly": {
+        "episodes": 1,
+        "kept_working": 1,
+        "cut_off_direct": 0,
+        "cut_off_workflow": 0,
+        "cut_off_usd": 0.0
+      }
+    }
+  }
+}

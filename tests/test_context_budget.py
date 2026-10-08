@@ -598,3 +598,77 @@ def test_baseline_table_reads_the_newest_snapshot_of_a_project_filed_under_both_
         data={"project_slug": legacy, "content_layers": {"agents_summary": {"count": 7}}},
     )
     assert _custom_agents_est(stats, [old, new, newer_legacy, other]) == pytest.approx(7 * 60)
+
+
+# -- statusline table: a window with no terminal session ------------------
+
+
+def _statusline_table(stats, usage_log_rows=None):
+    section = context_budget.build_section(stats, usage_log_rows=usage_log_rows)
+    return next(t for t in section.tables if t.name == "context_budget_statusline")
+
+
+def _stats_for(tmp_path, entrypoints):
+    """Stats over one main session per ``entrypoint`` (``None`` when the
+    transcript recorded none)."""
+    stats = context_budget.ContextBudgetStats()
+    for i, entrypoint in enumerate(entrypoints):
+        top = _build_session(tmp_path, f"s{i}", session_id=f"sess_{i}")
+        top.meta.entrypoint = entrypoint
+        stats.add_session("proj-a", top)
+    return stats
+
+
+def test_desktop_only_is_true_only_when_every_session_ran_in_the_desktop_app(tmp_path):
+    assert _stats_for(tmp_path, ["claude-desktop", "claude-desktop"]).desktop_only is True
+    assert _stats_for(tmp_path, ["claude-desktop", "cli"]).desktop_only is False
+    assert _stats_for(tmp_path, ["cli"]).desktop_only is False
+    # A session with no recorded entrypoint is not known to be desktop.
+    assert _stats_for(tmp_path, ["claude-desktop", None]).desktop_only is False
+    assert context_budget.ContextBudgetStats().desktop_only is False
+
+
+def test_stats_count_main_sessions_by_entrypoint(tmp_path):
+    stats = _stats_for(tmp_path, ["claude-desktop", "claude-desktop", "cli", None])
+    assert stats.entrypoints == {"claude-desktop": 2, "cli": 1, "": 1}
+
+
+def test_an_empty_statusline_table_for_desktop_sessions_says_so_and_takes_the_desktop_variant(tmp_path):
+    table = _statusline_table(_stats_for(tmp_path, ["claude-desktop"]))
+    assert table.rows == []
+    assert table.empty_variant == "desktop" == context_budget.DESKTOP_EMPTY_VARIANT
+    assert table.notes == [context_budget.DESKTOP_EMPTY_NOTE]
+    assert "doesn't run status lines" in table.notes[0]
+    # It no longer tells the reader to install a logger that cannot work.
+    assert "Install" not in table.notes[0] and "install" not in table.notes[0]
+
+
+@pytest.mark.parametrize("entrypoints", [["cli"], ["claude-desktop", "cli"], ["claude-desktop", None], [None]])
+def test_an_empty_statusline_table_keeps_the_install_note_when_a_session_may_have_run_a_status_line(
+    tmp_path, entrypoints
+):
+    table = _statusline_table(_stats_for(tmp_path, entrypoints))
+    assert table.empty_variant == ""
+    assert table.notes and "Install the status line logger" in table.notes[0]
+
+
+def test_a_statusline_table_with_rows_has_no_variant_even_for_desktop_sessions(tmp_path):
+    stats = _stats_for(tmp_path, ["claude-desktop"])
+    rows = [
+        {
+            "session_id": "sess_0",
+            "context_window_used_tokens": 143_000,
+            "context_window_size": 200_000,
+            "context_window_used_percentage": 71.5,
+        }
+    ]
+    table = _statusline_table(stats, rows)
+    assert len(table.rows) == 1 and table.empty_variant == "" and not table.notes
+
+
+def test_the_desktop_variant_reaches_the_json_output(tmp_path):
+    from claudeglass.render.json_out import to_jsonable
+
+    table = _statusline_table(_stats_for(tmp_path, ["claude-desktop"]))
+    assert to_jsonable(table)["empty_variant"] == "desktop"
+    assert to_jsonable(_statusline_table(_stats_for(tmp_path, ["cli"])))["empty_variant"] == ""

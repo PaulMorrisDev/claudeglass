@@ -43,7 +43,10 @@ Three tables (:func:`build_section`, section key ``"context_budget"``):
 - ``context_budget_statusline`` -- one real, non-estimated line per
   session, present only once at least one usage-log row carries
   ``context_window`` fields (see :mod:`statusline`'s module docstring for
-  how those columns get there).
+  how those columns get there). When every session in the report ran in
+  the desktop app, which runs no status line, its empty table says so
+  (``Table.empty_variant``) and points to the baseline table's
+  transcript sizes.
 
 Every chars/bytes-to-tokens conversion in this module uses the same
 ``chars / 4`` approximation the rest of the codebase already documents
@@ -92,6 +95,20 @@ from .tools import log_usage
 #: module docstring. Duplicated from ``topology._CHARS_PER_TOKEN_APPROX``
 #: per this project's small-constant-duplication convention.
 _CHARS_PER_TOKEN_APPROX = 4
+
+#: The ``entrypoint`` Claude Code records for the desktop app, which never
+#: runs a status line (``hook_health.TERMINAL_ENTRYPOINTS`` names the
+#: ones that do), so a window of only these sessions has no readings to
+#: log. Duplicated per the convention above.
+DESKTOP_ENTRYPOINT = "claude-desktop"
+
+#: ``Table.empty_variant`` of an empty statusline table in such a window:
+#: the dashboard's ``grid.js`` keys its own empty sentence on it.
+DESKTOP_EMPTY_VARIANT = "desktop"
+DESKTOP_EMPTY_NOTE = (
+    "Every session in this report ran in the desktop app, which doesn't run status lines, so there is nothing to "
+    "log. The baseline table's first-call sizes come from the transcripts instead."
+)
 
 #: Per-agent-listing token constant for the ``custom_agents_est`` bucket
 #: (a snapshot's ``content_layers.agents_summary.count`` names how many
@@ -402,6 +419,17 @@ class ContextBudgetStats:
 
     projects: dict[str, _ProjectAcc] = field(default_factory=dict)
     agents: dict[str, _AgentStartupAcc] = field(default_factory=dict)
+    #: Where each main session ran (its transcript's ``entrypoint``, ``""``
+    #: when none was recorded) -> sessions, for :attr:`desktop_only`.
+    entrypoints: dict[str, int] = field(default_factory=dict)
+
+    @property
+    def desktop_only(self) -> bool:
+        """Whether every main session here ran in the desktop app, which
+        never runs a status line. ``False`` with no session, and with any
+        session of another kind or of none recorded: only a clear answer
+        is worth a table's own empty sentence."""
+        return set(self.entrypoints) == {DESKTOP_ENTRYPOINT}
 
     def add_subagent(
         self, sub: TranscriptResult, parent_ctx_at_spawn: int | None = None, pricing: "Pricing | None" = None
@@ -484,6 +512,8 @@ class ContextBudgetStats:
         if raw_slug and not acc.snapshot_keys:
             acc.snapshot_keys = snapshots_mod.snapshot_project_keys(raw_slug)
         acc.sessions += 1
+        entrypoint = top.meta.entrypoint or ""
+        self.entrypoints[entrypoint] = self.entrypoints.get(entrypoint, 0) + 1
         if top.meta.session_id:
             acc.session_ids.append(top.meta.session_id)
 
@@ -848,7 +878,11 @@ def _build_autocompact_table(
     )
 
 
-def _build_statusline_table(usage_log_rows: list[dict] | None) -> Table:
+def _build_statusline_table(usage_log_rows: list[dict] | None, desktop_only: bool = False) -> Table:
+    """The statusline table. ``desktop_only`` (every session ran in the
+    desktop app, ``ContextBudgetStats.desktop_only``) changes what an empty
+    table says: the app runs no status line, so there is nothing to install
+    and the baseline table's transcript sizes are the ones to read."""
     columns = [
         Column(key="session", label="Session", kind="str"),
         Column(key="used_tokens", label="Last used tokens", kind="tokens"),
@@ -879,7 +913,11 @@ def _build_statusline_table(usage_log_rows: list[dict] | None) -> Table:
     ]
 
     notes: list[str] = []
-    if not rows:
+    variant = ""
+    if not rows and desktop_only:
+        variant = DESKTOP_EMPTY_VARIANT
+        notes.append(DESKTOP_EMPTY_NOTE)
+    elif not rows:
         notes.append(
             "The status line log has no context sizes yet. Install the "
             "status line logger (claudeglass statusline "
@@ -892,6 +930,7 @@ def _build_statusline_table(usage_log_rows: list[dict] | None) -> Table:
         columns=columns,
         rows=rows,
         notes=notes,
+        empty_variant=variant,
     )
 
 
@@ -949,7 +988,7 @@ def build_section(
     tables = [
         _build_baseline_table(stats, latest_snapshots),
         _build_autocompact_table(stats, latest_snapshots, usage_log_rows, pricing),
-        _build_statusline_table(usage_log_rows),
+        _build_statusline_table(usage_log_rows, stats.desktop_only),
     ]
 
     return Section(key="context_budget", title="Context budget", tables=tables, notes=[])

@@ -128,7 +128,7 @@ __version__ = "0.14.0"
 #: recorded one (CAP-9/F10: this used to be dropped), and, only when
 #: ``True``, whether the call ran ClaudeGlass's own capture hook script
 #: (``capture``, never the command string itself). ``hook_health.py``'s
-#: new ``count_hook_errors``/``measure_deep_wait`` both read these
+#: new ``count_hook_errors``/``measure_hook_overhead`` both read these
 #: straight off already-parsed events; a pre-18 digest has none of them,
 #: so every transcript is re-parsed once to pick them up.
 #: Bumped to 19 by the parser-signals batch (SURV-4/5/6/7): ``thinking_drop``

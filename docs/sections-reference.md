@@ -1763,7 +1763,13 @@ when the corpus has no top-level transcripts at all.
   get there — `python -m claudeglass.statusline` appends them to
   the same usage-log CSV `usage_windows` already reads, as three new
   trailing columns old-format rows simply don't have). Empty with a note
-  otherwise. `claudeglass report` (S1-exports) now loads
+  otherwise. When every main session in the report ran in the desktop app
+  (`claude-desktop`), which runs no status line, the empty table's note
+  says so instead of asking for the logger, and the table carries
+  `empty_variant = "desktop"` (`""` otherwise): the dashboard then reads
+  "The desktop app doesn't run status lines; first-call sizes come from
+  transcripts instead." A window with any session of another kind, or one
+  with no recorded entrypoint, keeps the install note. `claudeglass report` (S1-exports) now loads
   `<config_dir>/usage-log.csv`, when present, with a tolerant reader and
   passes the resulting rows into `build_report` as `usage_log_rows` —
   so both this table and `cache_ground_truth` above populate for the

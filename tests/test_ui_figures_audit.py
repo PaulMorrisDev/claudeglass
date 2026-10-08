@@ -1171,3 +1171,112 @@ def test_a_session_chart_dot_has_a_colour_only_for_a_mode_the_palette_colours() 
     # The tooltip and the chart's table say the session's own word.
     said = _session_words('[modeText({ mode: "mixed" }), modeText({ mode: "one-shot" }), modeText({})]')
     assert said == ["Mixed", "One-shot", "Not classified"]
+
+
+# -- Phase 7: the overhead line and the empty status-line table, run in Node ---
+
+
+def _overhead_line(overhead: dict, billing: str) -> str:
+    """``overheadLine`` from page-capture.js, run in Node with the real
+    money formatting of format.js."""
+    preamble = (
+        'var MINUS = "\u2212";\n'
+        'var state = { currency: "USD", units: {} };\n'
+        f"var captureBilling = {json.dumps(billing)};\n"
+    )
+    functions = [
+        ("format.js", "signed"),
+        ("format.js", "moneyNumber"),
+        ("format.js", "currencyAmount"),
+        ("page-capture.js", "billed"),
+        ("page-capture.js", "overheadAmount"),
+        ("page-capture.js", "overheadLine"),
+    ]
+    return _node(functions, f"overheadLine({json.dumps(_as_fetched(overhead))})", preamble=preamble)
+
+
+def _as_the_page_writes_it(text: str) -> str:
+    """The service's text as ``fetchJson`` brings it in line: "0.40 USD" -> "$0.40"."""
+    return re.sub(r"(\d[\d,]*(?:\.\d+)?) USD\b", r"$\1", text)
+
+
+def _as_fetched(value):
+    """``value`` as the page has it after ``fetchJson``: every text in line."""
+    if isinstance(value, str):
+        return _as_the_page_writes_it(value)
+    if isinstance(value, dict):
+        return {key: _as_fetched(item) for key, item in value.items()}
+    return value
+
+
+def _overhead(units: Units, capture_usd, coaching_usd, hooks: str = "ClaudeGlass's hooks ran about 6 times.") -> dict:
+    from claudeglass import capture_view
+    from claudeglass.config import CaptureConfig
+
+    window = capture_view.overhead_window(CaptureConfig(), datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc))
+    return capture_view.overhead_block(
+        window, hooks_text=hooks, capture_usd=capture_usd, coaching_usd=coaching_usd, units=units
+    )
+
+
+def test_the_overhead_line_reads_the_same_on_the_page_as_in_capture_status_on_the_api() -> None:
+    block = _overhead(Units(billing_mode="api"), 0.4, 0.1)
+    line = _overhead_line(block, "api")
+    assert line == (
+        "Over your last 7 days: ClaudeGlass's hooks ran about 6 times. "
+        "Capture cost about $0.40 and coaching notes cost about $0.10 in the same stretch."
+    )
+    assert line == _as_the_page_writes_it(block["text"])
+
+
+def test_the_overhead_line_keeps_a_tiny_or_zero_amount_as_the_service_words_it() -> None:
+    block = _overhead(Units(billing_mode="api"), 0.001, 0.0)
+    line = _overhead_line(block, "api")
+    assert "Capture cost under $0.01 and coaching notes cost nothing in the same stretch." in line
+    assert "<" not in line
+    assert line == _as_the_page_writes_it(block["text"])
+
+
+def test_the_overhead_line_on_a_plan_uses_the_services_own_phrase() -> None:
+    block = _overhead(Units(billing_mode="subscription"), 0.4, 0.1)
+    line = _overhead_line(block, "subscription")
+    # Not the pay-per-token money formatting: the service's phrase stands.
+    assert line == _as_the_page_writes_it(block["text"])
+    assert block["capture"]["text"].split(" USD")[-1].strip() == "list-price equivalent"
+    assert "list-price equivalent" in line
+
+
+def test_the_overhead_line_says_so_when_no_run_shows_and_leaves_out_unpriced_costs() -> None:
+    block = _overhead(Units(billing_mode="api"), None, None, hooks="")
+    assert block["capture"] is None
+    assert _overhead_line(block, "api") == (
+        "Over your last 7 days: No run of ClaudeGlass's hooks shows in your sessions."
+    )
+
+
+def _empty_text(table: dict, units: dict | None = None) -> list:
+    """``emptyText`` from grid.js, run in Node over the table's JSON."""
+    preamble = _declaration_source(_static_text("grid.js"), "EMPTY_TEXT").removeprefix("export ") + ";\n"
+    preamble += f"var state = {{ units: {json.dumps(units or {})} }};\n"
+    return _node([("grid.js", "emptyText")], f"emptyText({json.dumps(table)})", preamble=preamble)
+
+
+def test_an_empty_status_line_table_reads_by_why_it_is_empty() -> None:
+    from claudeglass import context_budget
+    from claudeglass.render.json_out import to_jsonable
+
+    desktop = to_jsonable(context_budget._build_statusline_table(None, True))
+    assert desktop["empty_variant"] == "desktop"
+    assert _empty_text(desktop) == [
+        "No status line readings in this window.",
+        "The desktop app doesn't run status lines; first-call sizes come from transcripts instead.",
+    ]
+    other = to_jsonable(context_budget._build_statusline_table(None, False))
+    assert other["empty_variant"] == ""
+    assert _empty_text(other) == [
+        "No status line readings in this window.",
+        "This table fills once the status line logger is installed and has logged a session.",
+    ]
+    # A word the grid has no sentence for falls back to the table's plain one, never to nothing.
+    assert _empty_text({"name": "context_budget_statusline", "empty_variant": "elsewhere"}) == _empty_text(other)
+    assert _empty_text({"name": "habits_by_shape", "empty_variant": "desktop"})[0].startswith("No main sessions")

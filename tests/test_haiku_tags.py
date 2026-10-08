@@ -23,7 +23,7 @@ import pytest
 
 from claudeglass import capture, capture_catalogue as cat, cli, haiku_tags, hook_health
 from claudeglass.config import CaptureConfig, ConfigError, load_config, set_capture
-from claudeglass.model import TranscriptMeta
+from claudeglass.model import TranscriptMeta, Turn
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 
@@ -1443,6 +1443,65 @@ def test_the_loader_checks_every_line_again(tmp_path):
     assert (done.calls, done.tagged, done.errors) == (5, 2, {"no_tag": 2, "timeout": 1})
 
 
+def _legacy_judge_lines(config_dir: Path) -> None:
+    """Lines as logged before the ``agent`` mark: an agent run that got no
+    words (msg_a1) looks like a main-session turn's line (msg_m1)."""
+    _tag_file(
+        config_dir,
+        {"ts": "2026-09-27T10:00:00Z", "reply": "msg_a1", "err": "no_login"},
+        {"ts": "2026-09-27T10:01:00Z", "reply": "msg_m1", "err": "timeout"},
+        {"ts": "2026-09-27T10:02:00Z", "reply": "msg_a2", "agent": "", "err": "no_login"},
+        {"ts": "2026-09-27T10:03:00Z", "reply": "msg_a3", "tl": "task=bugfix brief=clear", "usd": 0.001},
+    )
+
+
+def test_a_legacy_judge_line_on_an_agents_reply_moves_to_the_agent_runs(tmp_path):
+    _legacy_judge_lines(tmp_path)
+    agent_ids = frozenset({"msg_a1", "msg_a2", "msg_a3"})
+    loaded = {j.reply: j for j in haiku_tags.load(tmp_path, agent_reply_ids=agent_ids)}
+    assert loaded["msg_a1"].kind == "agent" and loaded["msg_a1"].tag is None and loaded["msg_a1"].error == "no_login"
+    assert loaded["msg_a1"].writer == cat.JUDGE_WRITER
+    main = haiku_tags.summary(tmp_path, kind="main", agent_reply_ids=agent_ids)
+    agent = haiku_tags.summary(tmp_path, kind="agent", agent_reply_ids=agent_ids)
+    assert (main.calls, main.errors) == (2, {"timeout": 1})
+    assert (agent.calls, agent.errors) == (2, {"no_login": 2})
+    # A line that holds a tag is a tag's, whatever reply it names.
+    assert loaded["msg_a3"].kind == "main" and loaded["msg_a3"].tag.task == "bugfix"
+    assert main.tagged == 1 and agent.tagged == 0
+
+
+def test_a_judge_line_on_a_main_sessions_reply_stays_with_the_main_session(tmp_path):
+    _legacy_judge_lines(tmp_path)
+    main_ids = frozenset({"msg_a1"})  # the agent's alone: msg_m1 is not in it
+    loaded = {j.reply: j for j in haiku_tags.load(tmp_path, agent_reply_ids=main_ids)}
+    assert loaded["msg_m1"].kind == "main" and loaded["msg_a1"].kind == "agent"
+    # An id that both a main turn and an agent turn hold is left out of the
+    # set, so its line stays main (see agent_replies).
+    shared = haiku_tags.agent_replies(
+        NS(sessions=[NS(top=NS(turns=[Turn(message_id="msg_a1")]), subs=[NS(turns=[Turn(message_id="msg_a1")])])])
+    )
+    assert {j.reply: j.kind for j in haiku_tags.load(tmp_path, agent_reply_ids=shared)}["msg_a1"] == "main"
+
+
+def test_without_the_agent_replies_a_judge_line_counts_as_it_always_did(tmp_path):
+    _legacy_judge_lines(tmp_path)
+    for ids in (None, frozenset(), set()):
+        main = haiku_tags.summary(tmp_path, kind="main", agent_reply_ids=ids)
+        agent = haiku_tags.summary(tmp_path, kind="agent", agent_reply_ids=ids)
+        assert (main.calls, main.tagged, main.errors) == (3, 1, {"no_login": 1, "timeout": 1})
+        assert (agent.calls, agent.errors) == (1, {"no_login": 1})
+    assert [j.kind for j in haiku_tags.load(tmp_path)] == ["main", "main", "agent", "main"]
+
+
+def test_the_agent_replies_are_every_agent_turn_no_main_turn_holds():
+    main = NS(turns=[Turn(message_id="msg_m1"), Turn(message_id="msg_shared")])
+    sub = NS(turns=[Turn(message_id="msg_a1"), Turn(message_id="msg_a2"), Turn(message_id="msg_shared"), Turn(message_id="")])
+    workflow = NS(turns=[Turn(message_id="msg_w1")])
+    corpus = NS(sessions=[NS(top=main, subs=[sub, workflow]), NS(top=None, subs=[NS(turns=[Turn(message_id="msg_a3")])])])
+    assert haiku_tags.agent_replies(corpus) == frozenset({"msg_a1", "msg_a2", "msg_w1", "msg_a3"})
+    assert haiku_tags.agent_replies(NS(sessions=[])) == frozenset()
+
+
 def test_the_grounding_note_is_read_back_checked_and_an_old_row_has_none(tmp_path):
     base = {"ts": "2026-09-27T10:00:00Z", "tl": "task=bugfix shift=fix"}
     _tag_file(
@@ -1632,8 +1691,43 @@ def test_capture_status_says_how_agent_runs_were_judged_whoever_writes_the_tags(
     )
     rc, out = _capture(claude_dir, "status")
     assert "Claude Haiku judged 1 of the 3 agent runs it was asked about: $0.0015 ($0.0015 a call)" in out
-    assert "No verdict for 2 (the claude command isn't signed in: run 'claude auth login')" in out
+    assert f"No verdict for 2 ({cat.NO_LOGIN_REASON})" in out
+    assert "sign in to the claude command in a terminal (the desktop app keeps its own login)" in out
     assert "turns it was asked about" not in out
+
+
+def test_capture_status_counts_a_legacy_judge_line_on_an_agents_reply_as_an_agent_run(claude_dir):
+    """A run judged before the ``agent`` mark left an error line that read
+    as a main-session turn's; the agent run in your sessions settles it."""
+    set_capture(claude_dir, level="essentials", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    _agent_run(claude_dir.parent / "projects" / "C--work")
+    _tag_file(
+        claude_dir,
+        {"ts": "2026-09-27T10:00:30Z", "reply": "msg_a2", "err": "no_login"},
+        {"ts": "2026-09-27T10:00:40Z", "reply": "m2", "err": "timeout", "w": "haiku-fallback"},
+    )
+    rc, out = _capture(claude_dir, "status")
+    assert "Claude Haiku judged 0 of the 1 agent run it was asked about" in out
+    assert f"No verdict for 1 ({cat.NO_LOGIN_REASON})" in out
+    assert "Claude Haiku filled in 0 of the 1 missing tag it was asked about" in out
+    assert "No tag for 1 (Haiku took too long)" in out
+    assert "No tag for 1 (the claude command" not in out
+
+
+def test_capture_status_reads_your_sessions_for_agent_replies_only_when_a_turn_got_no_tag(claude_dir):
+    set_capture(claude_dir, level="essentials", now=datetime(2026, 9, 1, tzinfo=timezone.utc))
+    config = load_config(config_dir=claude_dir).capture
+
+    def read_sessions():
+        raise AssertionError("read the sessions")
+
+    _tag_file(claude_dir, {"ts": "2026-09-27T10:00:00Z", "reply": "msg_1", "tl": "task=bugfix"})
+    cli._haiku_lines(config, claude_dir, read_sessions)
+    _tag_file(claude_dir, {"ts": "2026-09-27T10:00:00Z", "reply": "msg_2", "err": "timeout"})
+    with pytest.raises(AssertionError):
+        cli._haiku_lines(config, claude_dir, read_sessions)
+    # Without a way to read them, an error line is what it always was.
+    assert cli._haiku_lines(config, claude_dir)
 
 
 def test_your_changes_names_a_tagger_change():

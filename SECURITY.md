@@ -101,8 +101,8 @@ notes" under "Metrics capture"), and, while capture is on, `payload-keys.json` (
 key names of each kind of SessionStart payload, once each: names only,
 never a value). The only other
 files it writes are output files you name on the command line: for
-example `--out` (`export`, `monthly-report`, `scrub-fixture`), `report
---html PATH` or `serve --monthly-report DIR`.
+example `--out` (`export`, `monthly-report`, `tuning export`,
+`scrub-fixture`), `report --html PATH` or `serve --monthly-report DIR`.
 
 Five commands change something outside `<config-dir>`. Each prints the
 change before making it:
@@ -608,13 +608,18 @@ web call (matcher `Read|Grep|Glob|WebFetch|WebSearch`, never the shell or
 MCP tools) is foreground too, for the same reason. A settings.json
 written before they were dropped still runs the hook after them until
 the entry is rewritten; it returns at once, before it reads
-`config.toml`, a transcript or its state file. Claude Code records each hook
-call's real `durationMs`; `capture status` prints your own median and
-p90 wait for this hook over the last 7 days ("Deep's large-output/web
-hook waited...") whenever big_output or web is on (only
-`WebFetch|WebSearch` matter when a custom set turns on the web metric
-alone); without either metric nothing is registered on PostToolUse at
-all.
+`config.toml`, a transcript or its state file. Claude Code records the
+real `durationMs` of the hook calls that printed something, which is few
+of them. `capture status` therefore counts how often each installed hook
+ran from the transcripts instead (the tool calls its matcher selects, the
+messages you sent, the turns that ended, the sessions and the agent
+runs), takes the median of the times that were recorded, and prints one
+sentence over your last 7 days, or since capture was turned on if that
+was later ("ClaudeGlass's hooks ran about..."). It is counts and
+durations only, and an event with no recorded time is named as left out,
+never shown as zero. Without the big_output and web metrics nothing is
+registered on PostToolUse at all (only `WebFetch|WebSearch` matter when a
+custom set turns on the web metric alone).
 
 **Hook health is bucketed, not named.** `hook_health.count_hook_errors`
 tallies every hook attachment Claude Code writes to a transcript —
@@ -897,6 +902,67 @@ present when `--hash-slugs` is in effect (`tests/helpers.assert_privacy`
 also fails on any slug-shaped `Users-`/`home-`-anchored username segment
 anywhere in a scanned string, not just in export output). Full
 column-by-column detail: [`docs/exports.md`](docs/exports.md).
+
+## Tuning export (`tuning`)
+
+`claudeglass tuning export` (`src/claudeglass/tuning.py`) writes the
+figures that show how you work with Claude, to take to another machine, and
+`claudeglass tuning summary FILE` reads one back. Export works over the same
+in-memory corpus every other subcommand does, and `summary` reads one local
+file and nothing else. Export also reads your dashboard ratings and tip-card
+answers from `<config-dir>/service.db`, read-only, as `report` does; only
+their counts reach the file. Neither makes a network call. Export writes only
+to the terminal or the single file `--out` names. The properties below are the
+ones the code enforces, not promises about intent:
+
+- **Only counts, list-price amounts and words from fixed lists.** The
+  document never holds a name, a path, a hash, a session id, a project name,
+  a skill name, a custom agent name (it counts as `custom`), a model id (it
+  is reduced to a family) or any text of yours or Claude's. Any new pattern
+  that reads a transcript's text runs in memory and the text is dropped.
+- **A closed description of what may appear.** `tuning.spec()` names every
+  key. Every string must be one of the words it lists or match a tight
+  pattern (a version, a date, an ISO week). Every number must be finite, 0
+  or more and no more than a trillion. The keys of every map come from fixed lists
+  built from the packaged catalogues, never from the data, so nothing in a
+  transcript can become a key.
+- **A second scan of the whole text.** Whatever the description says, the
+  serialised document is refused if it holds a drive path, `home/`,
+  `Users\`, a Git Bash `/c/` path, an `@`, `://` or `www.`. At read, the scan
+  also covers the file's own text, and a key repeated in one object is
+  refused, so nothing can hide in a value the parser would drop.
+- **A size limit.** The document is 256 KB or less. The fullest one the
+  description allows is about 165 KB, so a valid document always fits, and
+  a real one is about 10 KB.
+- **Fail closed, at write and at read.** `tuning.build` validates what it
+  built and `tuning.dumps` validates again before it returns text, so a
+  document that fails produces no file and no JSON on stdout: `tuning
+  export` prints the problems to stderr and exits `2`. `tuning summary` validates the file it reads and, when it
+  fails, prints no figure from it and exits `2`. A file is stat-ed first, and
+  one over twice the limit is refused without being read.
+- **Problem lines never repeat what they found.** A line names a key path
+  and the check it failed ("`capture.level`: must be one of the words the
+  spec allows"). It never prints a value or a key from the document, so
+  printing a refusal can't leak what caused it. A refusal prints at most 20
+  lines and counts the rest.
+- **The file is written whole or not at all.** With `--out`, the text is
+  written to a temporary file in the same folder and renamed into place
+  (`cli._write_file_atomic`), so a failure leaves any file already there as it
+  was and leaves no partial file or leftover.
+- **Nothing is imported.** No command copies a tuning file into
+  `<config-dir>`, the dashboard's store or `config.toml`, and the dashboard
+  never reads one. A file you receive from someone else is only ever read by
+  `summary`, which validates it first.
+
+`tests/test_tuning.py` changes the sample document one thing at a time and
+checks that each unknown key, key given twice, free text, path, address, URL
+and oversize file fails and that no value or key is echoed. It also runs
+`build` over a world on disk and scans the result with
+`tests/helpers.assert_privacy_deep` and for every private string it wrote.
+`tests/test_cli_tuning.py` holds the command's side: an invalid build leaves
+no file and prints no JSON, a tampered file prints no figure, and the refusal
+text holds no path. Full detail:
+[`docs/exports.md`](docs/exports.md#claudeglass-tuning).
 
 ## Statusline
 

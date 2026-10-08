@@ -1128,8 +1128,10 @@ cost?" The same for every window.
 far, how often Claude tagged); its weekly cost against what depends on
 it (`roi`); a warning with `capture connect` when a hook entry is
 missing; the level cards (Off, Free, Essentials, Standard, Deep, Custom)
-with weekly estimates; sampling, who writes the tags, and end time; and
-every metric grouped by where it is captured.
+with weekly estimates; sampling, who writes the tags, and end time;
+every metric grouped by where it is captured; the overhead line
+(`overhead`); and the block "Take your figures to another machine"
+(`tuning`).
 
 "Tags written by" picks Claude (at the end of its replies) or Claude
 Haiku (asked after each turn, `[capture] tagger`; see
@@ -1152,9 +1154,48 @@ a hook entry or an install. A row that **Needs a hook entry** shows
 running, where it isn't offered. The feedback and brief skill rows show
 **Needs installing** with their `capture ... on` command: the dashboard
 never writes Claude Code's folder. A change that asks Claude for more
-repeats the cost warning in a dialog first. Changes go to
+repeats the cost warning in a dialog first. It is the warning of the
+level or the metric chosen: each says only what that choice makes Claude
+read and write. The Free level reads "uses none of your Claude tokens";
+a level where Claude writes the tags names the note at the start of a
+session (and after `/clear` or a compaction), the tag you will see at the
+end of each reply, and, at Deep, the note after a large result. While
+Claude Haiku writes the tags, none of those is asked of Claude: the
+warning says Haiku writes them in the background. No level asks a
+subagent, or an agent a workflow starts, for anything: the agent metrics
+are one Claude Haiku call after each agent run. With capture off, the
+page's own warning is the general one. Changes go to
 `POST /api/capture`; when the file can't be written, the view shows the
 CLI commands instead.
+
+**Overhead line.** Under where capture stands, one line, shown whenever
+any ClaudeGlass hook is in Claude Code's `settings.json`, capture on or
+not: "Over your last 7 days: ClaudeGlass's hooks ran about 2,400 times,
+about 40 ms each, about 1.6 min summed (calls overlap). Capture cost
+about 0.12 USD and coaching notes cost about 0.03 USD in the same
+stretch." It opens "Since capture was turned on" when that was within the
+week. Only the runs from the start of that stretch count, as the costs do.
+The runs and the median time come from your own sessions, so they
+are measured, not a guess at how long Claude waits; the costs use your
+billing mode (a share of your limit on a plan). `claudeglass capture
+status` prints the same line.
+
+**Status-line features.** The rows for the second status line and the
+coaching line follow where your sessions ran, because Claude Code runs a
+status line in a terminal only and the desktop app runs none. With no
+session in a terminal, the row says "All 204 of your sessions ran outside
+a terminal, and the desktop app doesn't run status lines"; with most
+outside one, "Only 1 of your 205 sessions ran in a terminal ..."; and a
+status line that isn't ClaudeGlass's is still named. `capture status`
+says the same.
+
+**Take your figures to another machine.** The last block: a sentence
+saying the file holds counts and words from fixed lists only, never a
+name, a path or any text of yours or Claude's, then two commands with
+Copy, `claudeglass tuning export --out claudeglass-tuning.json` and
+`claudeglass tuning summary claudeglass-tuning.json`. The page runs and
+writes nothing; [exports.md](exports.md#claudeglass-tuning) says what the
+file holds.
 
 ### Data quality
 

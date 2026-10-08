@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import capture_catalogue, discovery, hook_health
+from . import capture_catalogue, capture_view, discovery, hook_health
 from .config import CaptureConfig, ConfigError, load_config
 from .profiles import apply as apply_mod
 
@@ -136,9 +136,9 @@ EXPECTATIONS: tuple[tuple[str, str], ...] = (
     ),
     (
         "A change takes effect in new sessions",
-        "Claude Code reads settings when a session starts, and every session builds its cache from scratch anyway, "
-        "so a change costs nothing extra to switch on. Switching model inside a running session (/model) does "
-        "rebuild that session's cache once.",
+        "Claude Code reads settings when a session starts. Each session writes its own part of the prompt cache, "
+        "and a change to the tool set rewrites the shared part once. Switching model inside a running session "
+        "(/model) does rebuild that session's cache once.",
     ),
     (
         "Cheaper isn't free",
@@ -179,10 +179,13 @@ def expectations(capture: CaptureConfig | None = None) -> tuple[tuple[str, str],
         return (("It uses a few of your Claude tokens while coaching notes are on", COACHING_COST),) + EXPECTATIONS[1:]
     level = capture_catalogue.LEVEL_TITLES.get(capture.level, capture.level)
     if _uses_tokens(capture):
+        # The warning opens with "Metrics capture uses your tokens." and this says that already.
+        detail = capture_view.warning_text(capture.active_metrics(), capture.tagger).removeprefix(
+            "Metrics capture uses your tokens. "
+        )
         text = (
-            f"Metrics capture is on ({level}). Claude reads a short note when a session or subagent starts and "
-            "writes a one-line tag at the end of its replies, so it uses some of your tokens. {{page:setup/capture}} "
-            "shows how many. Turn it off with 'claudeglass capture off'."
+            f"Metrics capture is on ({level}). {detail} {{{{page:setup/capture}}}} shows how many. "
+            "Turn it off with 'claudeglass capture off'."
         )
     else:
         text = (
@@ -393,9 +396,12 @@ def inventory(
                 status="installed" if installed else "not installed",
                 where=home_label(settings_path),
                 what_it_does=(
-                    "While metrics capture is on, adds a short note when a session or subagent starts asking Claude "
-                    "to end its replies with a one-line tag (task kind, how clear the request was, and so on), so "
-                    "this tool can tell where your tokens go. The free signals (why sessions end, when Claude "
+                    "While metrics capture is on above the free level, adds a short note when a session starts "
+                    "(and after /clear or a compaction) asking Claude to end its replies with a one-line tag (task "
+                    "kind, how clear the request was, and so on), so this tool can tell where your tokens go. "
+                    "With Claude Haiku writing the tags it adds no start note, and Haiku writes them in the "
+                    "background. Subagents and the agents a workflow starts are asked for nothing: Claude Haiku "
+                    "judges each agent run in the background. The free signals (why sessions end, when Claude "
                     "waited for you, which tools asked for permission) go to a file in this tool's data folder. "
                     "With coaching notes on, they also add a short hint to Claude's context when one applies, at "
                     "any capture level. With /cg-feedback on, they add a line of counts when you run it. The plan check "
@@ -482,8 +488,8 @@ def inventory(
                 where=f"{_scope_label(backup.scope)}; backup in {home_label(config_dir / 'backups' / backup.ts)}",
                 what_it_does="Changed Claude Code settings or agent files. This changes how Claude works from the next session.",
                 token_cost=(
-                    "None by itself: Claude Code reads settings when a session starts, and every session builds "
-                    "its cache from scratch anyway. After that it saves or costs what its estimate said."
+                    "None by itself. Each session writes its own part of the prompt cache, and a change to the "
+                    "tool set rewrites the shared part once."
                 ),
                 undo=f"claudeglass apply --revert {backup.ts}",
             )

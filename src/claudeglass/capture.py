@@ -1596,7 +1596,8 @@ def estimate(past: History, ids, sample: int = 100, tagger: str = catalogue.DEFA
         ("big_output", past.big_outputs, past.big_output_note, past.big_output_tag),
         ("web", past.web_results, past.web_note, past.web_tag),
     ):
-        if metric_id in wanted:
+        # No note after a tool result while Claude Haiku writes the tags.
+        if metric_id in wanted and tagger != "haiku":
             chars = (
                 len(catalogue.tool_note_text(metric_id))
                 + _WRAP["PostToolUse"]

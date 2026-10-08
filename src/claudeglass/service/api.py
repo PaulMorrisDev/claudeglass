@@ -1616,6 +1616,24 @@ def make_handler(
         corpus = rebuild.corpus_from_store(store, days=capture_mod.HISTORY_DAYS)
         return capture_mod.coaching_usage(corpus, _capture_rates(config), since=since)
 
+    def _capture_overhead(config, specs, window):
+        """``capture_view.build_overhead`` over ``window``'s sessions: how
+        often ClaudeGlass's hooks ran, and what capture's notes and the
+        coaching notes cost, in the same stretch."""
+        from .. import capture_view
+        from ..report import _report_units
+        from ..units import Units
+        from . import rebuild
+
+        rates = _capture_rates(config)
+        corpus = rebuild.corpus_from_store(store, **window["corpus"])
+        units = (
+            _report_units(corpus, rates, config, options.config_dir)
+            if rates is not None
+            else Units(billing_mode=config.billing)
+        )
+        return capture_view.build_overhead(corpus, specs, rates, units, window)
+
     def _reminder_threshold(config) -> int:
         """How many tokens a piece of work needs for the rating reminder,
         from the same thresholds and typical piece the hook reads."""
@@ -1746,6 +1764,20 @@ def make_handler(
             except (OSError, ValueError):
                 settings = None
             statusline = footprint.is_own_statusline(settings if isinstance(settings, dict) else None)
+        # Where your sessions ran decides whether a status line runs at all.
+        entrypoints = store.entrypoint_counts() if statusline is not None else None
+        overhead = None
+        specs = hook_health.installed_specs()
+        if specs:
+            window = capture_view.overhead_window(capture)
+            where = tuple(sorted(window["corpus"].items()))
+            overhead = _capture_part(
+                "overhead",
+                (store.change_token(), bucket, where, specs, *soft),
+                (where, specs, *soft),
+                lambda: _capture_overhead(config, specs, window),
+                _STALE_REPORT_MAX_AGE_S,
+            )
         hooks = hook_health.check_capture(
             hook_health.capture_specs(capture.hook_metrics()), config_dir=options.config_dir
         )
@@ -1753,7 +1785,7 @@ def make_handler(
             capture, past=past, units=units, use=use, hooks=hooks, signal_sessions=signal_sessions,
             started_since=started, feedback_use=feedback_use, skill=skill, brief_skill=brief_skill, ratings=ratings,
             statusline=statusline, weekly_cost=weekly_cost, dependent_value=dependent_value,
-            coaching_use=coaching_use, unrated=unrated,
+            coaching_use=coaching_use, unrated=unrated, entrypoints=entrypoints, overhead=overhead,
         )
 
     def _capture_conflict(message: str, commands: list[str]) -> tuple[int, dict]:

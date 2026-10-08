@@ -4255,8 +4255,7 @@ def capture_section(
         notes.append(
             f"Every metric {catalogue.LEVEL_TITLES[level]} adds over {catalogue.LEVEL_TITLES[target]} "
             f"has enough evidence of its own ({metric_list(dropped)}), and Claude's self-reports have settled. "
-            f"Stepping down would save about {suggestion['session_note_tokens_saved']} tokens per session start "
-            f"and {suggestion['subagent_note_tokens_saved']} per subagent start. "
+            f"Stepping down would save about {suggestion['session_note_tokens_saved']} tokens per session start. "
             + step_down_terms(level, target)
         )
     table = Table(

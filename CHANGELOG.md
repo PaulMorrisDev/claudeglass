@@ -393,6 +393,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   script's concurrency. The tip adds how much of the spend ran with 3 or
   more agents at once only when that is 10 points or more above your
   share across all your work.
+- **Tuning export.** `claudeglass tuning export` writes the figures that
+  show how you work with Claude (how you prompt, how replies were tagged,
+  how pieces of work went, what agents cost, what ClaudeGlass costs) as a
+  small JSON file of counts and words from fixed lists, to take to another
+  machine. `--days` sets the window (30 by default, 1 to 365), every project
+  is included unless you name some, and `--out` writes the file whole or not
+  at all; without it the JSON is printed. `claudeglass tuning summary FILE`
+  reads one back in plain words. Names, paths, hashes, session ids and text
+  are never in it, custom agents count as `custom` and models as a family.
+  Your dashboard ratings and tip-card answers count as they do on the
+  dashboard, as counts only. The file is checked against a fixed list of
+  what it may hold: an unknown key, a key given twice, free text, a path, an
+  address, a URL or a file over 256 KB is
+  refused. `export` then prints the problems, which name a key and a check
+  and never a value, writes nothing and exits 2, and `summary` prints no
+  figure from a file that fails the same checks. See
+  [docs/exports.md](docs/exports.md#claudeglass-tuning).
+- **Take your figures to another machine.** Setup › Capture ends with the
+  `tuning export` and `tuning summary` commands to copy. They are commands,
+  not a button.
 
 ### Changed
 
@@ -864,6 +884,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Limit messages are named as messages.** The diagnostics label for the
   count of limit lines reads "Usage-limit messages", since one stop writes
   many of them.
+- **Hook time is counted, not guessed.** Claude Code records a hook's time
+  only for the runs that printed something: in one measured week (7.7
+  days), 484 of 26,602 matched tool calls. `capture status` took the median
+  and p90 of those and called it Deep's wait. It now counts how often each
+  installed hook ran from the transcripts (the tool calls its matcher
+  selects, the messages you sent, the turns that ended, the sessions and
+  the agent runs), takes the median of the times that were recorded, and
+  prints "ClaudeGlass's hooks ran about N times, about M ms each, about K
+  min summed (calls overlap)" over your last 7 days, or since capture was
+  turned on if that was later. An event with no recorded time is named as
+  left out, never shown as zero. The coaching docs' "a few tens of
+  milliseconds a call" gives way to this too.
+- **The desktop app doesn't run status lines, and the page says so.**
+  Setup › Capture keys the features that rely on a status line on the mix
+  of entry points, so they no longer show as active when every session is a
+  desktop one. In that case the context budget's status-line table stays
+  empty, and its empty text reads "The desktop app doesn't run status
+  lines; first-call sizes come from transcripts instead."
+- **Sign in to the claude command.** When Haiku can't judge because the
+  `claude` command isn't signed in, the error now reads "the claude command
+  isn't signed in: sign in to the claude command in a terminal (the desktop
+  app keeps its own login)". The stored word is still `no_login`.
+- **A change costs nothing by itself, and the page says why.** An applied
+  change's token cost now reads: "None by itself. Each session writes its
+  own part of the prompt cache, and a change to the tool set rewrites the
+  shared part once." The "A change takes effect in new sessions" note says
+  the same about the prompt cache. Both used to say every session builds its
+  cache from scratch, which isn't so.
+- **The overhead line is on Setup › Capture.** One line, whenever any
+  ClaudeGlass hook is installed, with capture on or off: how often the hooks
+  ran, the median time each and the time summed, from your own sessions, then
+  what capture and coaching notes cost over the same stretch. It replaces the
+  Deep-only figure, and `capture status` prints the same line.
 
 ### Fixed
 
@@ -892,6 +945,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   limit reset no longer counts those three hours as the limit's pause. A
   resume at the reset no longer reads as a long silence, so it no longer
   starts a new piece of work on its own.
+- **Old judge errors went to the wrong column.** Haiku's log lines from
+  before the `agent` marker existed (two from 28 Sep) were counted as errors
+  on your replies, though they were on agent runs. A line with no marker and
+  no tag now counts as an agent line when its reply id belongs to an agent's
+  turn; a line that holds a tag, or one whose id a main turn also holds,
+  stays where it was. `capture status` and the tuning export both read the
+  logs this way.
+- **The capture warning said more than a level does.** It told you Claude
+  reads a note "when a session or subagent starts", at every level. No level
+  asks a subagent, or an agent a workflow starts, for anything: the note goes
+  in at the start of a session (and after `/clear` or a compaction) at
+  Essentials, Standard and Deep, and only while Claude writes the tags, and
+  the agent metrics are one Claude Haiku call after each run. Each level and
+  each metric now carries a warning of its own, worked out from the same sizes
+  the page shows, so the Free level says it uses none of your Claude tokens
+  and a level with Haiku tagging says Claude reads and writes nothing for the
+  tags. The Setup page, the footprint notes, the onboarding question and the
+  docs say the same.
+- **The estimate counted a tool note Haiku never sends.** While Claude Haiku
+  writes the tags the hook adds no note after a large read, search or web
+  result, but the rough sizes and the replayed estimate still counted one.
+  They no longer do.
+- **The step-down tip no longer counts a subagent note.** It said stepping
+  down would save "0 per subagent start". It names the session start only.
 
 Parsed sessions are re-read once to pick this up.
 

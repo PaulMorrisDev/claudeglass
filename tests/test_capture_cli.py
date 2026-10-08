@@ -478,6 +478,25 @@ def test_on_dry_run_shows_the_cost_and_the_diff_and_writes_nothing(tmp_path):
     assert not (config_dir / "config.toml").exists() and not (config_dir / "hooks").exists()
 
 
+def test_the_cost_note_names_no_note_or_tag_while_haiku_writes_the_tags(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ntagger = "haiku"\n', encoding="utf-8")
+    rc, out = _capture(config_dir, "on", "--level", "standard", "--dry-run", stdin="y\ny\n")
+    assert rc == 0
+    assert "This makes Claude use more of your tokens. It adds " in out
+    assert "Claude Haiku writes the tags in the background" in out
+    assert "one-line tag such as" not in out and "reads a short note" not in out
+
+
+def test_the_cost_note_for_an_agent_metric_names_the_judge_only(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "free"\n', encoding="utf-8")
+    rc, out = _capture(config_dir, "enable", "result", "--dry-run", stdin="y\ny\n")
+    assert rc == 0
+    assert "It adds result. Claude Haiku judges each agent run in the background" in out
+    assert "reads a short note" not in out and "one-line tag" not in out
+
+
 def test_a_no_to_the_cost_question_changes_nothing(tmp_path):
     config_dir = _claude(tmp_path, {})
     rc, out = _capture(config_dir, "on", stdin="n\n")
@@ -972,52 +991,98 @@ def test_status_never_prints_a_raw_matcher_or_tool_name(tmp_path):
     assert "PreToolUse" in out
 
 
-# -- CAP-9/F10: Deep's measured wait in capture status -----------------------
+# -- CAP-9/F10, Phase 7: how often the hooks ran, in capture status ----------
 
 
-def test_status_shows_deeps_measured_wait_when_its_tool_note_metrics_are_on(tmp_path):
-    config_dir = _claude(tmp_path, {})
-    from claudeglass.config import set_capture
-    from helpers import attachment_line, turn_line, user_str_line, write_jsonl
+_HOOK_COMMAND = (
+    '"python.exe" -I -S "C:\\Users\\me\\scratch\\tl\\hooks\\capture-hook.py" '
+    '--config-dir "C:\\Users\\me\\scratch\\tl"'
+)
 
-    set_capture(config_dir, level="deep", now=datetime.now(timezone.utc) - timedelta(days=2))
-    start = datetime.now(timezone.utc) - timedelta(days=1)
+
+def _hooked_session(config_dir, *, recorded_ms=(), reads=6, days_ago=1.0):
+    """One recent session with ``reads`` Read calls in a turn, a reply
+    that ended, and a PostToolUse hook call of ClaudeGlass's for each
+    time in ``recorded_ms``."""
+    from helpers import attachment_line, tool_use_block, turn_line, user_str_line, write_jsonl
+
+    start = datetime.now(timezone.utc) - timedelta(days=days_ago)
 
     def ts(second):
         return (start + timedelta(seconds=second)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-    command = (
-        '"python.exe" -I -S "C:\\Users\\me\\scratch\\tl\\hooks\\capture-hook.py" '
-        '--config-dir "C:\\Users\\me\\scratch\\tl"'
-    )
+    reply = turn_line(content=[{"type": "text", "text": "Fixed."}], timestamp=ts(3), input_tokens=2000, output_tokens=400)
+    reply["message"]["stop_reason"] = "end_turn"
     lines = [
         user_str_line("fix the failing test", origin={"kind": "human"}, timestamp=ts(0)),
-        turn_line(content=[{"type": "text", "text": "Fixed."}], timestamp=ts(1), input_tokens=2000, output_tokens=400),
+        turn_line(
+            content=[tool_use_block("Read", f"r{i}", {"file_path": f"/w/f{i}.py"}) for i in range(reads)],
+            timestamp=ts(1),
+        ),
+        reply,
     ]
-    for i, ms in enumerate([100] * 8 + [900] * 2):
-        line = attachment_line("hook_success", hookName="PostToolUse:Bash", durationMs=ms, command=command)
-        line["timestamp"] = ts(2 + i)
+    for i, ms in enumerate(recorded_ms):
+        line = attachment_line("hook_success", hookName="PostToolUse:Read", durationMs=ms, command=_HOOK_COMMAND)
+        line["timestamp"] = ts(4 + i)
         lines.append(line)
     project = config_dir.parent / "projects" / "C--work-app"
     project.mkdir(parents=True, exist_ok=True)
     write_jsonl(project / "s1.jsonl", lines)
 
+
+def _hooks_on(config_dir, *, days_on: float = 10, level: str = "deep"):
+    """Capture on since ``days_on`` days ago, its hooks in settings.json."""
+    from claudeglass.config import set_capture
+
+    set_capture(config_dir, level=level, now=datetime.now(timezone.utc) - timedelta(days=days_on))
+    specs = hook_health.capture_specs(cat.level_metrics(level))
+    hook_health.connect(hook_health.plan_capture(specs, _commands(config_dir)), now=NOW)
+
+
+def test_status_says_how_often_the_hooks_ran_and_what_that_added_up_to(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir)
+    # 6 Read calls, but Claude Code wrote a time for 3 of the hook's runs.
+    _hooked_session(config_dir, recorded_ms=(100, 120, 140))
     rc, out = _capture(config_dir, "status")
     assert rc == 0
-    assert "Deep's large-output/web hook waited \u22480.1s (median, p90 \u22480.9s) over 10 calls this week." in out
+    # Runs come from the transcript (6 Reads), not the 3 recorded; the
+    # median is of the 3. The events that ran with no time are named.
+    assert (
+        "Over your last 7 days: ClaudeGlass's hooks ran about 6 times, about 120 ms each, about 1 s summed "
+        "(calls overlap). Left out, with no run time recorded: SessionStart, SessionEnd, Stop."
+    ) in out
+    assert "hook waited" not in out
 
 
-def test_status_hides_deep_wait_when_its_tool_note_metrics_are_off(tmp_path):
+def test_status_counts_from_when_capture_was_turned_on_if_that_was_this_week(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir, days_on=2)
+    _hooked_session(config_dir, recorded_ms=(100,))
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "Since capture was turned on: ClaudeGlass's hooks ran about 6 times, about 100 ms each" in out
+    assert "Over your last 7 days" not in out
+
+
+def test_status_shows_no_hook_line_when_no_hook_is_installed(tmp_path):
     config_dir = _claude(tmp_path, {})
     from claudeglass.config import set_capture
 
-    # Standard doesn't turn on big_output/web, so there's nothing to show
-    # even though there's a session in the window.
-    set_capture(config_dir, level="standard", now=datetime.now(timezone.utc) - timedelta(days=2))
-    _session(config_dir)
+    set_capture(config_dir, level="deep", now=datetime.now(timezone.utc) - timedelta(days=10))
+    _hooked_session(config_dir, recorded_ms=(100, 120))
     rc, out = _capture(config_dir, "status")
     assert rc == 0
-    assert "hook waited" not in out
+    assert "ClaudeGlass's hooks ran" not in out
+
+
+def test_status_shows_no_hook_line_when_nothing_ran_in_the_window(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir)
+    _hooked_session(config_dir, recorded_ms=(100,), days_ago=30)  # a month ago: outside the 7 days
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "ClaudeGlass's hooks ran" not in out
 
 
 def _init_args(config_dir, *argv):
@@ -1683,3 +1748,121 @@ def test_capture_connect_brings_an_older_coaching_connection_up_to_date(tmp_path
     rc, out = _capture(config_dir, "connect", "--yes")
     assert rc == 0, out
     assert sorted(_coaching_hooked(config_dir)) == sorted(COACHING_HOOKS)
+
+
+# -- Phase 7: the overhead line's costs, and status-line features by entrypoint --
+
+
+def test_status_overhead_line_adds_what_capture_and_coaching_notes_cost(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir)
+    _hooked_session(config_dir, recorded_ms=(100, 120, 140))
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    (line,) = [text for text in out.splitlines() if text.startswith("Over your last 7 days: ClaudeGlass's hooks ran")]
+    # The hook sentence first, then the two costs over the same stretch.
+    assert "(calls overlap)." in line
+    assert line.index("(calls overlap).") < line.index(" Capture cost ")
+    assert line.index(" Capture cost ") < line.index(" and coaching notes cost ") < line.index(" in the same stretch.")
+    assert line.endswith(" in the same stretch.")
+
+
+def test_status_overhead_line_is_the_one_the_capture_page_shows(tmp_path):
+    """``capture status`` and Setup > Capture print the same line, from
+    ``capture_view.build_overhead`` over ``capture_view.overhead_window``."""
+    from claudeglass import capture_view
+
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir, days_on=2)
+    _hooked_session(config_dir, recorded_ms=(100,))
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    window = capture_view.overhead_window(load_config(config_dir).capture)
+    assert window["label"] == "Since capture was turned on" and window["recent"] is True
+    (line,) = [text for text in out.splitlines() if text.startswith(window["label"] + ": ")]
+    hooks = line[len(window["label"]) + 2 :].split(" Capture cost ")[0]
+    assert hooks.startswith("ClaudeGlass's hooks ran about 6 times") and line.endswith("in the same stretch.")
+
+
+def test_status_says_so_when_no_hook_run_shows_in_the_window(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir)
+    _hooked_session(config_dir, recorded_ms=(100,), days_ago=30)  # a month ago: outside the 7 days
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "Over your last 7 days: No run of ClaudeGlass's hooks shows in your sessions." in out
+
+
+def test_status_has_no_overhead_line_while_no_hook_is_installed(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    from claudeglass.config import set_capture
+
+    set_capture(config_dir, level="deep", now=datetime.now(timezone.utc) - timedelta(days=10))
+    _hooked_session(config_dir, recorded_ms=(100, 120))
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "in the same stretch" not in out and "No run of ClaudeGlass's hooks" not in out
+
+
+def _sessions_ran_in(config_dir, *entrypoints):
+    """A data-folder store with one session for each of ``entrypoints``."""
+    from claudeglass.service.serve import STORE_FILENAME
+    from claudeglass.service.store import Store
+
+    store = Store(config_dir / STORE_FILENAME)
+    store.open()
+    for i, entrypoint in enumerate(entrypoints):
+        store.upsert_session(
+            session_id=f"s{i}", project_slug="proj", last_ts=f"2026-09-2{i % 10}T10:00:00Z", entrypoint=entrypoint
+        )
+    store.close()
+
+
+def _lines_on(config_dir) -> None:
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "off"\nfeedback = ["feedback_note"]\ncoaching = ["coaching_line"]\n', encoding="utf-8"
+    )
+
+
+def test_status_says_the_status_line_features_never_show_when_no_session_ran_in_a_terminal(tmp_path):
+    config_dir = _claude(tmp_path, {"statusLine": {"type": "command", "command": "claudeglass statusline"}})
+    _lines_on(config_dir)
+    _sessions_ran_in(config_dir, "claude-desktop", "claude-desktop", "claude-desktop")
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    notes = [text for text in out.splitlines() if text.startswith("All 3 of your sessions ran outside a terminal")]
+    # One for each feature, each in its own words, and the desktop app's reason.
+    assert len(notes) == 2 and len(set(notes)) == 2
+    assert all("doesn't run status lines" in note for note in notes)
+    assert "This second line never shows" in out and "This line never shows" in out
+    # Even a status line that is ClaudeGlass's runs nowhere here.
+    assert "Your status line isn't" not in out
+
+
+def test_status_names_how_few_sessions_ran_in_a_terminal(tmp_path):
+    config_dir = _claude(tmp_path, {"statusLine": {"type": "command", "command": "claudeglass statusline"}})
+    _lines_on(config_dir)
+    _sessions_ran_in(config_dir, "claude-desktop", "claude-desktop", "claude-desktop", "cli")
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "Only 1 of your 4 sessions ran in a terminal, and the desktop app doesn't run status lines" in out
+    assert "ran outside a terminal" not in out
+
+
+def test_status_keeps_saying_the_status_line_is_someone_elses_without_a_store(tmp_path):
+    config_dir = _claude(tmp_path, {"statusLine": {"type": "command", "command": "my-own-line"}})
+    _lines_on(config_dir)
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "Your status line isn't ClaudeGlass's, so this second line won't show there" in out
+    assert "ran outside a terminal" not in out and "Only " not in out.split("Your status line")[-1]
+
+
+def test_status_cost_lines_ask_a_subagent_for_nothing(tmp_path):
+    lines = cli._capture_cost_lines(cat.level_metrics("deep"))
+    text = "\n".join(lines)
+    assert "when a subagent starts" not in text and "each subagent report" not in text
+    assert "about 56 tokens of note after each large or web tool result" in text
+    # While Haiku writes the tags the hook sends no note after a large result either.
+    haiku = "\n".join(cli._capture_cost_lines(cat.level_metrics("deep"), "haiku"))
+    assert "after each large or web tool result" not in haiku

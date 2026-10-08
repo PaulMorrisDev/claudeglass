@@ -487,7 +487,7 @@ CAPTURE_INTRO = (
     "Metrics capture (optional)\n"
     "ClaudeGlass can have Claude note a few words about each piece of work, such as the kind of task, how clear "
     "the request was and whether an agent finished, so its suggestions fit how you work. This uses your tokens: "
-    "Claude reads a short note when a session or subagent starts, and ends each reply with a one-line tag such as "
+    "Claude reads a short note when a session starts, and ends each reply with a one-line tag such as "
     "[cg: task=bugfix brief=clear], which you will see. The free level only logs a few events to a local file.\n"
 )
 

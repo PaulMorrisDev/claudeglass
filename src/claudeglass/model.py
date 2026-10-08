@@ -1652,7 +1652,8 @@ class Table:
     render time).
 
     Readability additions (all defaulted): ``help``, ``value_labels``,
-    ``row_groups``, ``row_kinds``, ``lead_columns`` and ``dashboard``.
+    ``row_groups``, ``row_kinds``, ``lead_columns``, ``dashboard`` and
+    ``empty_variant``.
     ``value_labels`` maps a raw string cell value (a row
     key such as ``"full-expiry"``) to its display label; it is display
     only -- ``rows`` keep their raw values, which ``recommend.py``'s
@@ -1682,6 +1683,11 @@ class Table:
     lead_columns: list[str] = field(default_factory=list)
     #: One of :data:`DASHBOARD_PLACEMENTS`.
     dashboard: str = "keep"
+    #: Display only: a word the dashboard keys a different empty-table
+    #: sentence on (``name:variant`` in ``grid.js``'s ``EMPTY_TEXT``), for a
+    #: table that is empty for a reason its builder knows. Empty means the
+    #: table's usual sentence.
+    empty_variant: str = ""
 
 
 @dataclass(slots=True)

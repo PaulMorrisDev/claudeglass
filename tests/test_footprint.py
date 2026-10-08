@@ -415,3 +415,79 @@ def test_the_capture_hooks_show_while_only_a_feedback_item_runs_them(tmp_path):
     (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\nfeedback = ["feedback_skill"]\n', encoding="utf-8")
     item = {item.key: item for item in footprint.inventory(config_dir, service_registered=False)}["capture_hooks"]
     assert item.status == "not installed" and "/cg-feedback" in item.what_it_does
+
+
+# -- Phase 7: what a change costs, and what capture's start note says --------
+
+_CACHE_COST = (
+    "None by itself. Each session writes its own part of the prompt cache, and a change to the tool set "
+    "rewrites the shared part once."
+)
+
+
+def test_an_applied_change_costs_nothing_by_itself_and_says_why_in_cache_terms(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _fake_backup(config_dir, "20260920T000000Z")
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=None)}["apply:20260920T000000Z"]
+    assert item.token_cost == _CACHE_COST
+    # The old line said every session builds its cache from scratch, and that a change then saves or costs more.
+    assert "from scratch" not in item.token_cost and "estimate" not in item.token_cost
+
+
+def test_the_settings_expectation_says_the_same_about_the_cache():
+    (text,) = [text for title, text in footprint.EXPECTATIONS if title == "A change takes effect in new sessions"]
+    assert "Each session writes its own part of the prompt cache" in text
+    assert "a change to the tool set rewrites the shared part once" in text
+    assert "from scratch" not in text and "costs nothing extra" not in text
+    assert "(/model) does rebuild that session's cache once" in text
+
+
+def _expect_text(**capture_args) -> str:
+    from claudeglass.config import CaptureConfig
+
+    (first, *_) = footprint.expectations(CaptureConfig(**capture_args))
+    assert first[0] == "It uses a few of your Claude tokens while capture is on"
+    return first[1]
+
+
+def test_the_expectation_for_capture_is_the_warning_for_what_is_on():
+    from claudeglass import capture_view
+    from claudeglass.config import CaptureConfig
+
+    config = CaptureConfig(level="standard")
+    text = _expect_text(level="standard")
+    assert text.startswith("Metrics capture is on (Standard). Claude reads a short note at the start of a session")
+    assert capture_view.warning_text(config.active_metrics(), config.tagger).removeprefix(
+        "Metrics capture uses your tokens. "
+    ) in text
+    # Claude reads no note when a subagent starts, and the line no longer says it does.
+    assert "subagent starts" not in text and "or subagent" not in text
+    assert "subagents and workflow agents are asked for nothing" in text
+    assert text.endswith("shows how many. Turn it off with 'claudeglass capture off'.")
+
+
+def test_the_expectation_for_capture_follows_the_tagger():
+    text = _expect_text(level="essentials", tagger="haiku")
+    assert "Claude Haiku writes the tags in the background" in text
+    assert "Claude reads" not in text and "one-line tag you will see" not in text
+
+
+def test_the_expectation_for_capture_names_the_tool_note_at_deep_only():
+    assert "after a large read, search or web result" in _expect_text(level="deep")
+    assert "after a large read" not in _expect_text(level="essentials")
+
+
+def test_the_capture_hooks_item_says_what_the_start_note_and_the_agents_get(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    hook_health.connect(
+        hook_health.plan_capture(hook_health.capture_specs(cat.level_metrics("essentials")), cli._capture_hook_commands(config_dir)),
+        now=NOW,
+    )
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=False)}["capture_hooks"]
+    text = item.what_it_does
+    assert "adds a short note when a session starts (and after /clear or a compaction)" in text
+    assert "adds no start note" in text and "Claude Haiku writing the tags" in text
+    assert "Subagents and the agents a workflow starts are asked for nothing" in text
+    assert "Claude Haiku judges each agent run in the background" in text
+    assert "session or subagent starts" not in text

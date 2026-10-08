@@ -469,11 +469,12 @@ These two markers were first asked for by adding two lines to
 `~/.claude/CLAUDE.md` (commit 30f930b, `quality.MARKER_LINES`, about 115
 tokens, sent with every session and most subagents whether or not any
 agent ran that day). [Metrics capture](#8-metrics-capture) now supersedes
-that: at its Essentials level it asks for the same `[retry: ...]` and
-`[result: ...]` words, plus everything else Essentials and the levels
-above it capture, from a note the hook adds only at each session and
-subagent start — never a permanent CLAUDE.md addition, and nothing at
-all while capture is off. See [`docs/capture.md`](capture.md) for the
+that: at its Essentials level it records the same `[retry: ...]` and
+`[result: ...]` words, from a Claude Haiku call that judges each agent
+run in the background (the agent is asked for nothing), plus everything
+else Essentials and the levels above it capture, from a note the hook
+adds only at each session start — never a permanent CLAUDE.md addition,
+and nothing at all while capture is off. See [`docs/capture.md`](capture.md) for the
 full catalogue. The old CLAUDE.md lines still parse exactly as above if
 you already added them, or if Claude keeps writing the markers on its
 own after capture is off. The check "Is any agent struggling?" on
@@ -527,10 +528,11 @@ floor.
 ## 8. Metrics capture
 
 Metrics capture is an opt-in feature: while it's on, a hook adds a short
-note to each session and subagent start, and Claude ends its replies
-with a one-line tag (`[cg: task=bugfix brief=partial level=normal]`; a
-subagent's report ends `[result: done]` plus whatever extra words its
-level asks for). It costs tokens, and levels trade depth of insight for
+note to each session start, and Claude ends its replies with a one-line
+tag (`[cg: task=bugfix brief=partial level=normal]`; unless Claude Haiku
+writes the tags, then it sends no note and the replies carry no tag). A
+Claude Haiku call judges each agent run in the background, so no
+subagent or workflow agent is asked for anything. It costs tokens, and levels trade depth of insight for
 that cost: Free (local signals only, no Claude tokens), Essentials,
 Standard and Deep, each including the levels below it, plus Custom. The
 full catalogue — every metric's id, level, what it captures, why, its

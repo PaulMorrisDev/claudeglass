@@ -241,7 +241,7 @@ is written before it.
 **Metrics capture** (`onboarding.ask_capture_level`, then
 `onboarding.ask_capture_until`, through `cli.py`'s
 `_init_capture_choice`). It warns that capture uses tokens: Claude reads
-a short note when a session or subagent starts, and ends each reply
+a short note when a session starts, and ends each reply
 with a one-line tag you will see. It then shows what each level would
 have cost over your last 14 days, from every project's sessions
 (`capture.history`, amounts in your billing units; not under

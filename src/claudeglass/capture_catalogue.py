@@ -1,11 +1,12 @@
 """Metrics capture: the words Claude may write, and the metrics behind them.
 
 Metrics capture is opt-in. While it is on, a small hook adds a short note
-to each session and subagent start (see ``hooks/capture_hook.py``) asking
-Claude to end its replies with a one-line tag, for example
-``[cg: task=bugfix brief=partial level=normal]``. ClaudeGlass reads the tags
-back out of the transcripts to explain what the work was, not only what it
-cost.
+to each session start (see ``hooks/capture_hook.py``) asking Claude to end
+its replies with a one-line tag, for example
+``[cg: task=bugfix brief=partial level=normal]``. A subagent, or an agent a
+workflow starts, is asked for nothing: Claude Haiku judges each agent run in
+the background. ClaudeGlass reads the tags back out of the transcripts to
+explain what the work was, not only what it cost.
 
 This module is the single source of truth for what those tags may say.
 Every value is a closed vocabulary: a word outside it is dropped by the
@@ -461,6 +462,13 @@ PLAN_SAID_PATTERN = r"the user said:\s*"
 #: agent run) the agent's answer never reached its transcript, so Haiku
 #: wasn't asked.
 JUDGE_ERRORS = ("no_cli", "no_login", "timeout", "failed", "no_tag", "no_answer")
+
+#: How ``capture status`` words the ``no_login`` error. The desktop app keeps
+#: its own login, so the ``claude`` command the hook runs can have none.
+NO_LOGIN_REASON = (
+    "the claude command isn't signed in: sign in to the claude command in a terminal "
+    "(the desktop app keeps its own login)"
+)
 
 JUDGE_INTRO = (
     "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage "
@@ -1811,8 +1819,8 @@ METRICS: tuple[Metric, ...] = (
         "Claude needed: all, part or none. Only what Claude reads counts. "
         f"A picture counts for at most {RESULT_IMAGE_MAX_TOKENS:,} tokens. A result Claude Code saved to a file "
         "counts for its preview alone. Shell and MCP results are not asked about. Claude Code waits for the hook "
-        "after each read, search or web result. 'claudeglass capture status' shows how long that has added, measured from your own "
-        "sessions.",
+        "after each read, search or web result. Setup > Capture and 'claudeglass capture status' show how many runs, "
+        "the median time each and the time summed, from your own sessions.",
         why="Quieter commands, offset reads and output caps where big outputs weren't needed.",
         powers=("tool_output",),
         tag="out=needed|part|unneeded",
@@ -2015,8 +2023,10 @@ METRICS: tuple[Metric, ...] = (
         "task without a plan.",
         why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
         "140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each "
-        "read, search or web result and each message you send. A hook after each reply runs in the background and keeps "
-        "only the time and size of Claude's newest reply, so the cache check is right after a resume.",
+        "read, search or web result and each message you send. Setup > Capture and 'claudeglass capture status' show "
+        "how many runs, the median time each and the time summed, from your own sessions. A hook after each reply "
+        "runs in the background and keeps only the time and size of Claude's newest reply, so the cache check is "
+        "right after a resume.",
         powers=("context", "tool_output", "delegation", "planning"),
         hooks=("UserPromptSubmit", "PostToolUse", "Stop"),
     ),
@@ -3236,9 +3246,9 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
     reminder Claude adds when a large piece of work is unrated
     (``reminder``) and the plan check's question (``plan_check``), with
     the note that asks for either (``message_note``, the larger of the
-    two); the note after a large or web tool result (``tool_note``).
-    Amounts measured from transcripts replace these once capture has
-    run."""
+    two); the note after a large or web tool result (``tool_note``), none
+    while Claude Haiku writes the tags. Amounts measured from transcripts
+    replace these once capture has run."""
     enabled = [METRICS_BY_ID[i] for i in ids if i in METRICS_BY_ID]
     wanted_ids = {m.id for m in enabled}
     main, sub = note_text(ids, "main", tagger=tagger), note_text(ids, "subagent")
@@ -3256,7 +3266,9 @@ def rough_tokens(ids, tagger: str = DEFAULT_TAGGER) -> dict[str, int]:
         reply = sum(m.out_chars for m in enabled if m.main_line or (m.main_extra and m.group != "feedback"))
         frame = _TAG_FRAME_CHARS
     report = sum(m.out_chars for m in enabled if m.sub_line or m.sub_extra)
-    tool = max(
+    # The hook sends no note after a tool result while Claude Haiku writes
+    # the tags: there is no tag for the note's word to go in.
+    tool = 0 if tagger == "haiku" else max(
         (len(tool_note_text(m.id)) + tool_suffix_chars(m.id) for m in enabled if m.tool_note),
         default=0,
     )
@@ -3682,8 +3694,8 @@ def render_markdown() -> str:
         f"${JUDGE_USD_PER_CALL:.3f}. Agents that set up Claude Code itself ("
         + ", ".join(f"`{t}`" for t in SKIP_AGENT_TYPES)
         + ") are skipped. `capture status` says how many runs were judged, what the calls cost and why any "
-        "got no verdict (a `claude` command that isn't signed in, say: the desktop app keeps its own login), "
-        "whoever writes the main session's tags."
+        "got no verdict, whoever writes the main session's tags. A `claude` command that isn't signed in is "
+        f"`no_login`, shown as \"{NO_LOGIN_REASON}\"."
     )
     p(
         "- The hook puts right what the transcript settles, as it does a turn's tag. An agent that handed back "
@@ -3764,8 +3776,10 @@ def render_markdown() -> str:
     p("")
     p(
         "- `claudeglass capture status` — the level, what's on, since when, and the cost measured so "
-        "far. While big_output or web is on, it also prints Deep's actual measured wait (median and p90, "
-        "over the last 7 days). It also flags any hook — ClaudeGlass's own or one of yours — that failed on "
+        "far. Whenever a ClaudeGlass hook is installed, it also prints the overhead line Setup › Capture shows: "
+        "how often the hooks ran over your last 7 days (or since capture was turned on, if that was later), "
+        "about how long a run took and the time summed, then what capture and coaching notes cost in the same "
+        "stretch. It also flags any hook — ClaudeGlass's own or one of yours — that failed on "
         "most of its calls over the last 14 days, naming it (event name only, never a matcher or tool name), "
         "when it last failed, where to find it in `settings.json`, the trade-off, and the undo; this is only "
         "ever a printed prompt, never an automatic change. A hook that has stopped failing since is left out."

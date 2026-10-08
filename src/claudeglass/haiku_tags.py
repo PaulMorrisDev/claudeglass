@@ -34,7 +34,9 @@ id of the agent's last reply. A run is judged at each stop, so one that
 carried on after a stop hook asked it to has a line for each, each on
 the reply the run ended on then: the newest verdict is the run's. A line
 with ``err`` ``no_answer`` is a run whose answer never reached its
-transcript, which Haiku wasn't asked about.
+transcript, which Haiku wasn't asked about. A run judged before lines
+carried ``agent`` left an error line with none; :func:`summary` reads it as
+an agent's when told which replies are the agent runs' (:func:`agent_replies`).
 
 :func:`apply` puts each tag on its reply's turn in a loaded corpus, as if
 the parser had found it at the end of the reply (``CaptureTag.judged``
@@ -228,9 +230,41 @@ def _agent_tag(words) -> tuple[CaptureTag | None, str, str]:
     return CaptureTag(has_tl=False, chars=0, **values), result, retry
 
 
-def load(config_dir: str | Path, *, since: datetime | None = None) -> list[Judged]:
+def agent_replies(corpus) -> frozenset[str]:
+    """The reply ids of every turn of an agent run in ``corpus`` (a
+    subagent or a workflow agent), for ``load``'s and ``summary``'s
+    ``agent_reply_ids``. A run's verdict sits on the reply it ended on
+    when it was judged, which is its last one or, for a run judged at
+    more than one stop, an earlier one (:func:`_apply_run`). An id a
+    main-session turn also holds is left out, so a main-session error
+    is never counted as an agent's."""
+    main = {
+        turn.message_id
+        for bundle in corpus.sessions
+        if bundle.top is not None
+        for turn in bundle.top.turns
+    }
+    return frozenset(
+        turn.message_id
+        for bundle in corpus.sessions
+        for sub in bundle.subs
+        for turn in sub.turns
+        if turn.message_id and turn.message_id not in main
+    )
+
+
+def load(
+    config_dir: str | Path, *, since: datetime | None = None, agent_reply_ids: frozenset[str] | set[str] | None = None
+) -> list[Judged]:
     """Every well-formed line, oldest first (from ``since`` on, when
-    given). Unreadable files and malformed lines are skipped."""
+    given). Unreadable files and malformed lines are skipped.
+
+    A run judged before lines carried the ``agent`` mark has its error
+    line read as a main-session turn's. Given ``agent_reply_ids`` (the
+    replies of the agent runs: :func:`agent_replies`), an error line with no
+    mark whose reply is one of them is an agent line instead. A line that
+    holds a tag, or whose reply isn't in the set (a main-session turn's, or
+    one the set doesn't cover), is left as it was."""
     out: list[Judged] = []
     for start, path in _month_files(config_dir):
         if since is not None and _next_month(start) <= since:
@@ -245,6 +279,8 @@ def load(config_dir: str | Path, *, since: datetime | None = None) -> list[Judge
             except ValueError:
                 continue
             if judged is not None and (since is None or judged.at >= since):
+                if agent_reply_ids and judged.kind == "main" and judged.tag is None and judged.reply in agent_reply_ids:
+                    judged = replace(judged, kind="agent", writer=JUDGE_WRITER)
                 out.append(judged)
     out.sort(key=lambda j: j.at)
     return out
@@ -350,16 +386,23 @@ class Summary:
 
 
 def summary(
-    config_dir: str | Path | None, *, since: datetime | None = None, kind: str | None = None, writer: str | None = None
+    config_dir: str | Path | None,
+    *,
+    since: datetime | None = None,
+    kind: str | None = None,
+    writer: str | None = None,
+    agent_reply_ids: frozenset[str] | set[str] | None = None,
 ) -> Summary:
     """:class:`Summary` of the tag files from ``since`` on: the main
     session's turns (``kind="main"``), agent runs (``"agent"``) or both,
     and, given a ``writer`` (a word of ``capture_catalogue.JUDGE_WRITERS``),
-    only the lines it asked for."""
+    only the lines it asked for. ``agent_reply_ids`` moves the error lines of
+    runs logged before the ``agent`` mark to the agent runs (see
+    :func:`load`); without it they count as main-session turns."""
     out = Summary()
     if config_dir is None:
         return out
-    for judged in load(config_dir, since=since):
+    for judged in load(config_dir, since=since, agent_reply_ids=agent_reply_ids):
         if (kind is not None and judged.kind != kind) or (writer is not None and judged.writer != writer):
             continue
         out.calls += 1
@@ -389,4 +432,4 @@ def prune(config_dir: str | Path, retention_days: int, now: datetime | None = No
     return removed
 
 
-__all__ = ["Judged", "Summary", "apply", "load", "prune", "summary", "tags_dir"]
+__all__ = ["Judged", "Summary", "agent_replies", "apply", "load", "prune", "summary", "tags_dir"]

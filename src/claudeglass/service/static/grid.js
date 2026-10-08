@@ -1208,8 +1208,11 @@ var TOTAL_KEY = /^(all|total)$/i;
 
 // A table's own empty state where "a longer window" is the wrong reason:
 // [what happened, why or what next].
+// A table can name a reason of its own (Table.empty_variant): its text is
+// keyed "table:reason".
 var EMPTY_TEXT = {
   context_budget_statusline: ["No status line readings in this window.", "This table fills once the status line logger is installed and has logged a session."],
+  "context_budget_statusline:desktop": ["No status line readings in this window.", "The desktop app doesn't run status lines; first-call sizes come from transcripts instead."],
   habits_outcomes: ["No feedback on your work in this window.", "Answer /cg-feedback, or rate a session on {{page:spend/sessions}}, to fill this table."],
   habits_by_shape: ["No main sessions with a message of yours in this window.", "A longer window may include some."],
 };
@@ -1245,7 +1248,8 @@ function emptyText(table) {
   if (table.name === "five_hour_blocks" && (state.units || {}).mode !== "subscription") {
     return ["Five-hour blocks exist only on a Pro or Max plan.", "Your billing is set to pay per token (API), so there are none to show."];
   }
-  return EMPTY_TEXT[table.name] || ["Nothing to show for this window.", "A longer window may include some."];
+  var variant = table.empty_variant ? EMPTY_TEXT[table.name + ":" + table.empty_variant] : null;
+  return variant || EMPTY_TEXT[table.name] || ["Nothing to show for this window.", "A longer window may include some."];
 }
 
 // options.heading false: the caller has already titled the table (a

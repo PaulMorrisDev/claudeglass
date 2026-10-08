@@ -11,6 +11,10 @@ asking every team member to run claudeglass by hand:
 Both are read-only over an already-loaded corpus — neither writes
 anywhere except the file(s) you point them at.
 
+A third command, [`tuning`](#claudeglass-tuning), is for moving your own
+figures to another machine so you can tune from them there. It writes a
+small checked file of counts and fixed words, and reads one back.
+
 ## `claudeglass export`
 
 ```bash
@@ -307,6 +311,131 @@ full disk), `serve` prints one line to stderr saying why and tries again
 at the next check; it never stops. An empty month is written with
 zeroed tables, and a line says so. `serve --once --monthly-report DIR`
 checks once after its watcher tick, which suits a cron job.
+
+## `claudeglass tuning`
+
+```bash
+python -m claudeglass tuning export --out my-figures.json
+python -m claudeglass tuning export --days 90 --out my-figures.json
+python -m claudeglass tuning summary my-figures.json
+```
+
+`tuning export` writes the figures that show how you work with Claude: how
+you prompt, how your replies were tagged, how pieces of work went, what
+agents cost, and what ClaudeGlass itself costs. `tuning summary FILE` reads
+a file back in plain words. Use them to take your figures to another
+machine, or to hand them to someone helping you tune your setup. It is not
+the team comparison: for that, see
+[`export --aggregate`](#--aggregate-team-documents) and
+[docs/team.md](team.md). There is no import into the dashboard. The file is
+for reading with `summary`, or for a person or Claude to read.
+
+### `tuning export`
+
+| Flag | What it does |
+| --- | --- |
+| `--out PATH` | Write the file to `PATH`. Without it the JSON goes to the terminal |
+| `--days N` | How far back to look: whole local days, today and the `N - 1` before it, as the dashboard's Last N days does. Default 30, from 1 to 365 |
+| `--project SLUG`, `--project-family REGEX` | Narrow to some projects. Without either, **every** project is included, unlike `export`, which defaults to the current directory's project |
+| `--claude-root PATH` | The Claude Code folder holding `settings.json`, to find which of ClaudeGlass's hooks are installed. Default as for `init` |
+
+`--since`, `--until` and `--limit` are refused: the window is `--days`
+alone, so the file's `window_days` is always what it covered. Where the
+dashboard shows a figure, the file counts it with the same code, but over
+the file's own window rather than the period a page is set to. The overhead
+block covers that window too, from when capture was turned on if that was
+later, not the Capture page's last 7 days. Session modes are the rules' own,
+without an override you set. Money is list price, whatever you pay, and the
+keys that hold it end in `_usd`.
+
+With `--out`, the file is written whole or not at all: ClaudeGlass writes a
+temporary file beside it and renames it into place, so a failure leaves any
+file already there as it was. Exit `0` is a written file, `1` means no
+projects or no sessions matched, and `2` is a bad flag, a file that can't be
+written, or figures that failed the checks below.
+
+### What the file holds
+
+A header (`kind`, `format`, `tool_version`, `parser_version`,
+`generated_on` and `window_days`) and six blocks. A map lists only the words
+that were counted, so a missing word reads as zero.
+
+| Block | Holds |
+| --- | --- |
+| `capture` | The setup: capture level, who writes the tags, the share of sessions, which metrics and coaching notes are on and the thresholds in force. For each tip: the notes that asked for it, the replies that showed it, the ones Claude called a misfire, and your useful, known and wrong answers |
+| `prompting` | Messages you typed, ones you typed while Claude worked, go-aheads, status checks, corrections, adjustments and reminders. Per week: messages and the times each habit showed. Plans approved, rounds sent back and how your feedback to them read. Tool calls that were turned away, by reason |
+| `tags` | Each tag word as written, by who wrote it (Claude, Haiku, or Haiku filling a reply Claude left bare). Words put right by the hook and by the transcript. The shift Claude wrote against corrections, adjustments and rework. Mistakes Claude admitted, by kind and who caught them. Your `/cg-feedback` answers as counts |
+| `pieces` | Pieces of work, how many requests each took, rework by cause, level and week. Sessions by mode, and the unattended night time of those with some. Runs of small requests sent one at a time. Returns after a break and wake-ups by a background task, with the cache tokens they wrote again |
+| `agents` | The result word agents left, by how their last reply answered. Haiku's judge calls, cost and errors. Direct and workflow runs and their cost, by built-in type (everything else counts as `custom`) and model family |
+| `overhead` | How sessions were started. How often each ClaudeGlass hook ran, for the events the transcripts can count, and the median time Claude Code recorded. What capture and coaching notes cost. Hook runs and both costs count from when capture was turned on, if that was inside the window. Usage-limit stops by kind |
+
+Your session ratings and tip-card answers on the dashboard count as they do
+there. They are read from its database without writing to it, and only their
+counts reach the file.
+
+### What it never holds
+
+Names, paths and hashes. No session id, project name, skill name or custom
+agent name (a custom agent counts as `custom`). No model id (models are
+reduced to a family). No prompt, reply, tool result or other text of yours or
+Claude's. The words in the file come from fixed lists in ClaudeGlass, never
+from your data: every key of every map is one of those words, so a key can't
+carry anything either. See [SECURITY.md](../SECURITY.md#tuning-export-tuning)
+for the same guarantees as security properties.
+
+### The checks, at write and at read
+
+The file is checked against a fixed description of everything it may hold,
+and the check fails closed:
+
+- every key must be one the description names, and every string one of its
+  allowed words or a tight pattern (a version, a date, an ISO week);
+- every number must be finite and 0 or more;
+- no key may appear twice in one object, since a reader keeps only the last
+  and the others would go unchecked;
+- a second scan of the whole text refuses a drive path, `home/`, `Users\`,
+  a Git Bash `/c/` path, an `@`, `://` or `www.`;
+- the file must be 256 KB or less. A real one is about 10 KB.
+
+`tuning export` runs the checks before it writes anything. If they fail it
+prints the problems to stderr and exits `2`, with no file and no JSON on
+stdout. `tuning summary` runs the same checks on the file it is given, so a
+file edited to hold anything the checks refuse, made by something else or
+too big prints no figure and exits `2`. The checks hold no checksum, so an
+edit they allow, such as a changed count, is not caught. A problem line
+gives the key path and the check, never the value or the key it found:
+
+```
+claudeglass tuning summary: this file fails the checks, so none of its figures are shown:
+  capture.level: must be one of the words the spec allows
+  document: holds a Users folder path
+```
+
+A newer ClaudeGlass may add blocks. A file made by an older one still reads,
+but a file with a block your version doesn't know is refused, so read a file
+with the same ClaudeGlass that made it or a newer one.
+
+### `tuning summary`
+
+`tuning summary FILE` prints a line or two for each block. It reads the file
+alone, so it works on a machine with no Claude Code projects, and `--out`,
+`--days`, `--since` and `--until` are refused because the file holds its own
+window. An example, with made-up figures from the test fixture, cut short:
+
+```
+Tuning figures made on 2026-09-19 for the last 30 days, by ClaudeGlass 0.14.0.
+Capture: level standard, tags written by claude, 100% of sessions, 4 metrics on.
+Tips: 4 notes asked for one, 3 shown, 1 called a misfire.
+Prompting: 120 messages typed, plus 9 typed while Claude worked.
+Plans: 8 approved, 4 rounds sent back.
+Pieces of work: 67.
+Of the 55 delivered pieces with a clear start, 10 needed changes after delivery.
+Rework: 14 follow-ups after delivery, $31.25 at list prices, most often left out.
+Cold returns: 6, rewriting 900,000 cache tokens. Wake-ups: 2, rewriting 260,000.
+Agent runs: 21 direct costing $14.50, 9 from workflows costing $6.25.
+Hooks: SessionStart ran 54 times, median 140 ms; Stop ran 800 times, no time recorded.
+Limits: 3 five-hour stops and 1 weekly stop.
+```
 
 ## Statusline payload key recording (`statusline-keys.json`)
 

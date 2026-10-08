@@ -245,9 +245,9 @@ def _hook_output_detail(attachment: dict) -> dict:
     ``True``, whether the call ran ClaudeGlass's own hook script. That
     last check never keeps the command string itself -- only whether it
     names ``capture_catalogue.HOOK_SCRIPT``, the same substring check
-    ``hook_health.py`` already uses on settings.json commands -- so a
-    measured "Deep waited" figure can find its own PostToolUse calls
-    among a settings.json that may run other PostToolUse hooks too.
+    ``hook_health.py`` already uses on settings.json commands -- so the
+    measured hook overhead can find ClaudeGlass's own calls among a
+    settings.json that may run other hooks on the same events too.
     """
     detail: dict = {"hookName": _hook_name_bucket(attachment)}
     duration = attachment.get("durationMs")
@@ -1674,7 +1674,7 @@ def classify_line(d: dict) -> Event | None:
         # never the matcher/tool-name suffix -- see _hook_name_bucket),
         # its real durationMs, and whether it was ClaudeGlass's own hook
         # -- see _hook_output_detail -- so hook_health.count_hook_errors
-        # and hook_health.measure_deep_wait can both work from this one
+        # and hook_health.measure_hook_overhead can both work from this one
         # parse, without a second read of the transcript.
         return Event(
             kind=EventKind.HOOK_OUTPUT,

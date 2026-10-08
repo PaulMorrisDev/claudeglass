@@ -562,6 +562,11 @@ has the detail.
   OpenTelemetry collector. By default it's aggregate-only, with project
   names hashed. See
   [`docs/exports.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/exports.md).
+- **Tuning figures.** `tuning export` writes a small checked file of
+  counts and fixed words, with no names, paths or text, to take to another
+  machine. `tuning summary FILE` reads it back and refuses a file that
+  fails the checks. See
+  [`docs/exports.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/exports.md#claudeglass-tuning).
 - **Team comparison.** `export --aggregate`, `import` and `team-report`
   compare several people's machines without collecting anyone's
   sessions. Nobody is included unless they export and hand over the

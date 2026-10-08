@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
-from claudeglass import capture_catalogue
+from claudeglass import capture_catalogue, capture_view
 from claudeglass import corpus as corpus_mod
 from claudeglass import discovery
 from claudeglass.config import ConfigError, load_config, load_session_overrides
@@ -399,10 +399,11 @@ class _Clock:
 def _freeze_clock(monkeypatch, now: datetime = _PINNED) -> _Clock:
     """Pin "now" for the window code and return the clock to move it.
 
-    A calendar window is worked out in two modules, each with its own
+    A calendar window is worked out in three modules, each with its own
     ``datetime``: ``discovery.window_start`` (where ``window_days`` and
-    "today" start) and ``service.api`` (the other named windows, a period's
-    bounds), so both are patched. The store's own clock (the legacy rows'
+    "today" start), ``service.api`` (the other named windows, a period's
+    bounds) and ``capture_view.overhead_window`` (the Capture page's last 7
+    days), so all three are patched. The store's own clock (the legacy rows'
     upper bound) and the report cache's monotonic one are not."""
     clock = _Clock(now)
 
@@ -414,6 +415,7 @@ def _freeze_clock(monkeypatch, now: datetime = _PINNED) -> _Clock:
 
     monkeypatch.setattr(discovery, "datetime", _Frozen)
     monkeypatch.setattr(service_api, "datetime", _Frozen)
+    monkeypatch.setattr(capture_view, "datetime", _Frozen)
     return clock
 
 
@@ -5842,3 +5844,111 @@ def test_a_named_zone_counts_a_clock_change_in_the_window(server, monkeypatch):
     assert (period["tz"], period["since"], period["first_day"]) == ("Europe/London", "2026-10-24T23:00:00Z", "2026-10-25")
     period = _summary_data(server, "window_days=2&previous=1")["period"]
     assert (period["since"], period["until"]) == ("2026-10-22T23:00:00Z", "2026-10-24T11:00:00Z")
+
+
+# -- Phase 7: the Capture tab's overhead line, tuning block and warnings -----
+
+
+def _capture_hooks_installed(server, level: str = "essentials") -> None:
+    """settings.json (the fake Claude folder's) runs the capture hooks of
+    ``level``."""
+    from claudeglass import capture_catalogue, cli, hook_health
+
+    specs = hook_health.capture_specs(capture_catalogue.level_metrics(level))
+    plan = hook_health.plan_capture(specs, cli._capture_hook_commands(server.options.config_dir))
+    hook_health.connect(plan, now=datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc))
+
+
+def test_capture_offers_the_commands_that_take_your_figures_to_another_machine(server):
+    resp, payload = server.get_json("/api/capture")
+    data = payload["data"]
+    assert data["tuning"] == {
+        "title": "Take your figures to another machine",
+        "text": "The file holds counts and words from fixed lists only, never a name, a path or any text of yours or Claude's.",
+        "export_command": "claudeglass tuning export --out claudeglass-tuning.json",
+        "summary_command": "claudeglass tuning summary claudeglass-tuning.json",
+    }
+    assert data["commands"]["tuning_export"] == data["tuning"]["export_command"]
+    assert data["commands"]["tuning_summary"] == data["tuning"]["summary_command"]
+
+
+def test_capture_has_no_overhead_line_while_no_claudeglass_hook_is_installed(server):
+    resp, payload = server.get_json("/api/capture")
+    assert payload["data"]["overhead"] is None
+    server.post_json("/api/capture", {"level": "essentials"})
+    # On, but settings.json still runs nothing of ours.
+    resp, payload = server.get_json("/api/capture")
+    assert payload["data"]["overhead"] is None
+
+
+def test_capture_overhead_line_appears_once_a_hook_is_installed_even_with_capture_off(server, monkeypatch):
+    # The seeded turns are stamped 2026-09-18; the last 7 days are counted back from two days after.
+    _freeze_clock(monkeypatch, datetime(2026, 9, 20, tzinfo=timezone.utc))
+    _capture_hooks_installed(server)
+    resp, payload = server.get_json("/api/capture")
+    overhead = payload["data"]["overhead"]
+    assert payload["data"]["config"]["on"] is False
+    assert overhead["label"] == "Over your last 7 days" and overhead["days"] == 7 and overhead["recent"] is False
+    # The hook sentence is the one the CLI prints, counted from the sessions' own tool calls.
+    assert overhead["hooks"].startswith("ClaudeGlass's hooks ran about ")
+    assert overhead["text"].startswith("Over your last 7 days: " + overhead["hooks"])
+    assert "Capture cost " in overhead["text"] and overhead["text"].endswith("in the same stretch.")
+    assert overhead["capture"]["usd"] == 0 and overhead["coaching"]["usd"] == 0
+    assert_privacy(overhead)
+
+
+def test_capture_overhead_line_counts_from_when_capture_was_turned_on(server):
+    _capture_hooks_installed(server)
+    server.post_json("/api/capture", {"level": "essentials"})
+    resp, payload = server.get_json("/api/capture")
+    overhead = payload["data"]["overhead"]
+    assert overhead["label"] == "Since capture was turned on" and overhead["recent"] is True
+    assert overhead["text"].startswith("Since capture was turned on: ")
+
+
+def test_capture_levels_and_rows_carry_the_warning_for_what_they_do(server):
+    resp, payload = server.get_json("/api/capture")
+    data = payload["data"]
+    levels = {level["id"]: level for level in data["levels"]}
+    assert levels["free"]["warning"].startswith("This level uses none of your Claude tokens")
+    assert "after a large read, search or web result" in levels["deep"]["warning"]
+    assert "after a large read" not in levels["essentials"]["warning"]
+    for level in ("essentials", "standard", "deep"):
+        assert "subagents and workflow agents are asked for nothing" in levels[level]["warning"]
+        assert "subagent starts" not in levels[level]["warning"]
+    rows = {row["id"]: row for section in data["sections"] for row in section["metrics"]}
+    assert "tag you will see" in rows["task"]["warning"] and rows["session_end"]["warning"] == ""
+    # Capture off: the page's own is the general one.
+    assert "uses your tokens above the free level" in data["warning"]
+
+
+def test_capture_page_warning_follows_the_level_and_the_tagger_in_force(server):
+    resp, payload = server.post_json("/api/capture", {"level": "essentials"})
+    warning = payload["data"]["warning"]
+    assert "Claude reads a short note at the start of a session" in warning
+    assert "such as [cg: task=bugfix brief=clear]" in warning
+    resp, payload = server.post_json("/api/capture", {"level": "essentials", "tagger": "haiku"})
+    warning = payload["data"]["warning"]
+    assert "Claude Haiku writes the tags in the background" in warning and "Claude reads" not in warning
+    resp, payload = server.post_json("/api/capture", {"level": "free"})
+    assert payload["data"]["warning"].startswith("This level uses none of your Claude tokens")
+
+
+def test_capture_status_line_features_follow_where_the_sessions_ran(server):
+    _feedback_on(server, "feedback_note")
+    assert server.post_json("/api/capture", {"coaching": ["coaching_line"]})[0].status == 200
+    rows = lambda: {  # noqa: E731 - a local reader
+        row["id"]: row
+        for section in server.get_json("/api/capture")[1]["data"]["sections"]
+        for row in section["metrics"]
+    }
+    # The fixture's session ran in a terminal: only the status line being someone else's is to say.
+    assert rows()["feedback_note"]["statusline_note"].startswith("Your status line isn't ClaudeGlass's")
+    server.store._connection().execute(
+        "UPDATE sessions SET entrypoint = 'claude-desktop' WHERE id = ?", (server.session_id,)
+    )
+    after = rows()
+    for metric_id in ("feedback_note", "coaching_line"):
+        note = after[metric_id]["statusline_note"]
+        assert note.startswith("All 1 of your sessions ran outside a terminal"), metric_id
+        assert "doesn't run status lines" in note

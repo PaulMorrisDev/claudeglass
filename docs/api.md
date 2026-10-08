@@ -1508,18 +1508,23 @@ last 14 days replayed as if capture had been on (`capture.estimate`),
 and the notes and tags measured in transcripts since `enabled_at`
 (`capture.usage`). The replay is kept for 30 minutes and the measured
 part until the store changes; an older copy is served while a fresh
-one is built in the background.
+one is built in the background. The overhead line is kept the same way.
 
-`data`: `{"config", "warning", "samples", "levels", "sections", "measured", "history", "hooks", "billing", "roi", "banner", "feedback", "commands"}`:
+`data`: `{"config", "warning", "samples", "levels", "sections", "measured", "history", "hooks", "billing", "roi", "banner", "feedback", "commands", "overhead", "tuning"}`:
 
 - `config`: the same block as `/api/health`'s `capture`, without `hooks_ok`.
-- `warning`: the cost warning the dashboard repeats before any change
-  that uses more tokens.
+- `warning`: what the choice now in force makes Claude read and write
+  (`capture_view.warning_text`), the general one (`capture_view.WARNING`)
+  while capture is off. The dashboard repeats the warning of the level or
+  the metric chosen, from that card's or row's own `warning`, before any
+  change that uses more tokens.
 - `samples`: the allowed sampling percentages, `[100, 50, 25, 10]`.
 - `levels`: one card each for `off`, `free`, `essentials`, `standard`,
   `deep` and `custom`: `title`, `summary`, `adds` (metric titles over
   the level before), `metrics`, `asks_claude`, `current`, `rough`
-  (token sizes from the catalogue) and `estimate` (`tokens_per_week`,
+  (token sizes from the catalogue), `warning` (what that level makes
+  Claude read and write, worked out from `rough` and the tagger, so a
+  level that asks Claude for nothing says so) and `estimate` (`tokens_per_week`,
   `tokens_text`, `usd`, `text`, `share_pct`, `share_text`; `null`
   when it costs nothing or there is no history).
 - `sections`: the metrics grouped as on the page. Each has `id`,
@@ -1531,9 +1536,13 @@ one is built in the background.
   `claudeglass capture connect`), `needs_install` with `install_note` and
   `install_command` (the `/cg-feedback` skill is on but its file is
   missing, out of date or someone else's: the dashboard never writes
-  Claude Code's folder, so it names the CLI command), `statusline_note`
-  (a status-line toggle is on but Claude Code's status line isn't this
-  tool's), `estimate` and `actual` (`{usd, text}` a week, and over
+  Claude Code's folder, so it names the CLI command), `warning` (what
+  switching it on makes Claude read and write, with the metrics it needs;
+  empty for a row that asks Claude for nothing), `statusline_note` (a
+  status-line toggle is on but won't show: no session of yours ran in a
+  terminal, where Claude Code runs a status line and the desktop app does
+  not, or few did, or the status line isn't this tool's; `null` otherwise),
+  `estimate` and `actual` (`{usd, text}` a week, and over
   `actual_label`: since it was turned on, or the last 14 days for the
   skill and, with how many there were, for coaching notes), and `answers`/`target`/`enough` (whether enough has been
   collected for firm suggestions; for the skill and the dashboard
@@ -1593,7 +1602,24 @@ one is built in the background.
   (the `/cg-brief` skill's file, in the same words as `skill`, or
   `null` while brief templates are off).
 - `commands`: the `status`, `connect`, `feedback` and `brief` CLI
-  commands.
+  commands, and the `tuning_export` and `tuning_summary` ones.
+- `overhead`: the overhead line, `null` while no ClaudeGlass hook is in
+  `settings.json` (it is there with capture off too). `{"label", "days",
+  "recent", "hooks", "capture", "coaching", "text"}`: the stretch it
+  covers (`label` is "Over your last 7 days", or "Since capture was
+  turned on" when that was within them, `recent`), `hooks` the sentence
+  `hook_health.measure_hook_overhead` writes from your own transcripts, from
+  the start of that stretch (how many runs, the median time each, the time
+  summed; empty when none shows),
+  `capture` and `coaching` what capture's notes and tags and the coaching
+  notes cost over the same stretch (`{usd, text}`; `null` while the rate
+  card can't be read) and `text`, the line as `claudeglass capture status`
+  prints it.
+- `tuning`: the block "Take your figures to another machine":
+  `{"title", "text", "export_command", "summary_command"}`. The commands
+  are `claudeglass tuning export --out claudeglass-tuning.json` and
+  `claudeglass tuning summary claudeglass-tuning.json`; the dashboard
+  runs and writes nothing.
 
 `409` with the `claudeglass capture status` command in
 `error.commands` when `config.toml` can't be read.
@@ -2078,7 +2104,11 @@ and `notes`, the fields `helptext.annotate` fills in for the dashboard:
 `help` (`{shows, read, act}`), `value_labels` (raw cell value -> display
 label), `row_groups` and `row_kinds` (for a long "metric / value"
 table), `dashboard` (`keep`, `advanced` or `report`) and, additive,
-`lead_columns`. `lead_columns` lists column keys in the order the
+`lead_columns` and `empty_variant`. `empty_variant` is a word that says
+why a table is empty when the grid has a sentence of its own for it
+(`"desktop"` on `context_budget_statusline` when every session in the
+window ran in the desktop app, which runs no status line; `""`
+otherwise). `lead_columns` lists column keys in the order the
 dashboard shows them first: on a wide table at most 7, the row key
 first, with the rest behind the grid's column chooser; on a one-row
 summary table (such as `waste_summary`) at most 4 headline values, shown

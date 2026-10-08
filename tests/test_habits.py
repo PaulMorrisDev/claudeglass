@@ -2025,7 +2025,8 @@ def test_the_capture_section_surfaces_a_step_down_suggestion_when_ready_and_stab
     assert habits.metric_list(dropped) in note
     assert "stops collecting them" in note and "writes nothing" in note
     assert "config.toml" in note and "settings.json" in note
-    assert "per session start" in note and "per subagent start" in note
+    # Only the session-start note is Claude's to read: a subagent is asked for nothing.
+    assert "per session start" in note and "subagent start" not in note
 
 
 # -- CAP-5: a derived fallback for check -------------------------------------

@@ -690,3 +690,38 @@ def test_the_hook_is_given_the_rating_reminder_and_plan_check_thresholds():
     assert thresholds["rating_rest_days"] == 3
     assert thresholds["plan_check_off_days"] == 14 and thresholds["plan_check_declines"] == 2
     assert cat.COACHING_THRESHOLDS["rating_min_tokens"] == thresholds["rating_min_tokens"]
+
+
+def test_rough_tokens_give_no_tool_note_while_claude_haiku_writes_the_tags():
+    """The hook sends no note after a large result when Haiku writes the
+    tags (there is no tag for its word to go in), so the sizes carry none."""
+    ids = ("task", "big_output")
+    assert cat.rough_tokens(ids, "claude")["tool_note"] > 0
+    assert cat.rough_tokens(ids, "haiku")["tool_note"] == 0
+    assert cat.rough_tokens(("big_output",), "haiku")["tool_note"] == 0
+    # What stays: the agent judge, which runs whoever writes the main session's tags.
+    assert cat.rough_tokens(("task", "result"), "haiku")["agent_judge"] == 1
+
+
+def test_no_level_asks_a_subagent_or_a_workflow_agent_for_anything():
+    """The note goes in at SessionStart only; the agent metrics are a Haiku
+    judge after the run. So the sizes for a subagent's start and report are
+    0 at every level, and no level installs a SubagentStart entry."""
+    for level in cat.LEVELS[1:]:
+        sizes = cat.rough_tokens(cat.level_includes(level))
+        assert sizes["subagent_note"] == 0 and sizes["report_tag"] == 0, level
+        assert "SubagentStart" not in {spec[1] for spec in cat.hook_specs(cat.level_includes(level))}, level
+
+
+def test_the_catalogue_points_to_the_measured_hook_time_not_a_guess():
+    """Setup > Capture and 'capture status' show how many runs, the median
+    time each and the time summed, from the user's own sessions; the
+    catalogue says so rather than quoting a figure of its own."""
+    sentence = (
+        "Setup > Capture and 'claudeglass capture status' show how many runs, the median time each and the time "
+        "summed, from your own sessions."
+    )
+    assert sentence in cat.METRICS_BY_ID["big_output"].what
+    assert sentence in cat.METRICS_BY_ID["coaching_notes"].why
+    assert sentence in cat.render_markdown()
+    assert "a few tens of milliseconds" not in cat.render_markdown()

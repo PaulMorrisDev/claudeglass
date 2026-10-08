@@ -29,6 +29,7 @@ import os
 import re
 import sys
 import types
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import available_timezones
@@ -94,6 +95,7 @@ SUBCOMMANDS: tuple[str, ...] = (
     "statusline",
     "export",
     "monthly-report",
+    "tuning",
     "compare",
     "reconcile",
     "init",
@@ -451,6 +453,37 @@ def _add_export_args(sub: argparse.ArgumentParser) -> None:
         dest="include_projects",
         help="with --aggregate, add a 'projects' list of hashed project slugs "
         "(default: omitted -- opt in per person)",
+    )
+
+
+#: The two things ``tuning`` does: build the checked file of counts and fixed
+#: words (``export``), and read one back in plain words (``summary``).
+TUNING_ACTIONS: tuple[str, ...] = ("export", "summary")
+#: How far back ``tuning export`` looks when ``--days`` is left out, and the
+#: most it takes (a longer window makes a document the size limit can't hold).
+TUNING_DEFAULT_DAYS = 30
+TUNING_MAX_DAYS = 365
+
+
+def _add_tuning_args(sub: argparse.ArgumentParser) -> None:
+    """Arguments for ``tuning`` (Phase 7, :mod:`tuning`): ``export`` builds
+    the document over the last ``--days`` days (the shared option, 30 by
+    default, 1 to 365) and ``summary FILE`` reads one back. Both check the
+    document against the fixed list of what it may hold and refuse, exit 2,
+    when it fails."""
+    _add_claude_root_arg(sub)
+    sub.add_argument(
+        "action",
+        choices=TUNING_ACTIONS,
+        help="export (build the figures from your sessions: counts and words from fixed lists, no names, paths "
+        "or text) or summary FILE (check a file made by export and print it in plain words)",
+    )
+    sub.add_argument("path", nargs="?", metavar="FILE", help="for 'summary': the file to read")
+    sub.add_argument(
+        "--out",
+        metavar="PATH",
+        help=f"for 'export': write to PATH instead of the terminal. --days is {TUNING_DEFAULT_DAYS} by default, "
+        f"at most {TUNING_MAX_DAYS}; every project is included unless --project or --project-family narrows it",
     )
 
 
@@ -1131,6 +1164,8 @@ def _make_parser() -> argparse.ArgumentParser:
             "statusline": "Claude Code statusLine handler (reads stdin JSON)",
             "export": "export digests as csv-flat, json or otel-jsonl (aggregate-only by default)",
             "monthly-report": "write a monthly Markdown/HTML finance report",
+            "tuning": "export a checked file of counts and fixed words to tune from another machine, or read one "
+            "with 'summary FILE'",
             "compare": "A/B compare two arms of sessions (window/key/profile/project), stratified by purpose+mode",
             "reconcile": "compare local usage/cost accounting against an Admin API CSV export, offline",
             "scrub-fixture": "scrub a real session into a privacy-safe test fixture",
@@ -1195,6 +1230,8 @@ def _make_parser() -> argparse.ArgumentParser:
             _add_export_args(sub)
         if name == "monthly-report":
             _add_monthly_report_args(sub)
+        if name == "tuning":
+            _add_tuning_args(sub)
         if name == "compare":
             _add_compare_args(sub)
         if name == "reconcile":
@@ -2441,6 +2478,151 @@ def _cmd_monthly_report(args: argparse.Namespace) -> int:
     return 0
 
 
+# -- tuning export / summary (Phase 7) --------------------------------------
+
+#: The most problem lines a refusal prints; a tampered file can have thousands.
+_TUNING_PROBLEMS_SHOWN = 20
+
+
+def _tuning_refuse(command: str, headline: str, problems: list[str]) -> int:
+    """Print why a tuning document was refused (``headline``, then one line
+    per problem) and return 2. The lines name a key path and the check it
+    failed, never a value or a key (:func:`tuning.validate`), so printing
+    them can't leak what they found."""
+    print(f"claudeglass {command}: {headline}", file=sys.stderr)
+    for line in problems[:_TUNING_PROBLEMS_SHOWN]:
+        print(f"  {line}", file=sys.stderr)
+    if len(problems) > _TUNING_PROBLEMS_SHOWN:
+        print(f"  and {len(problems) - _TUNING_PROBLEMS_SHOWN} more", file=sys.stderr)
+    return 2
+
+
+def _write_file_atomic(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` through a temporary file in the same
+    folder and a rename, so the file is the whole document or not there:
+    never half of it. Line breaks are written as they are (no ``\\r\\n`` on
+    Windows), so the file is the text that was checked."""
+    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_bytes(text.encode("utf-8"))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _cmd_tuning(args: argparse.Namespace) -> int:
+    """``tuning export|summary`` (:mod:`tuning`): the checked file of counts
+    and fixed words, and its plain-words reading."""
+    command = f"tuning {args.action}"
+    if args.action == "summary":
+        return _tuning_summary(args, command)
+    return _tuning_export(args, command)
+
+
+def _tuning_summary(args: argparse.Namespace, command: str) -> int:
+    """``tuning summary FILE``: print the file in plain words, after the same
+    checks ``export`` makes. A file that is over the size limit, isn't JSON or
+    fails them prints none of its figures (exit 2)."""
+    from . import tuning as tuning_mod
+
+    if not args.path:
+        print(f"claudeglass {command}: needs the file to read", file=sys.stderr)
+        return 2
+    for flag, given in (("--out", args.out), ("--days", args.days), ("--since", args.since), ("--until", args.until)):
+        if given:
+            print(f"claudeglass {command}: {flag} does not apply; the file holds its own window", file=sys.stderr)
+            return 2
+    try:
+        text = tuning_mod.summary_text(tuning_mod.read_file(args.path))
+    except tuning_mod.TuningError as exc:
+        return _tuning_refuse(command, "this file fails the checks, so none of its figures are shown:", exc.problems)
+    print(text)
+    return 0
+
+
+def _tuning_export(args: argparse.Namespace, command: str) -> int:
+    """``tuning export``: load the sessions of the last ``--days`` days the way
+    ``export`` does, build the document, check it and write it. Every
+    project is included unless ``--project`` or ``--project-family`` narrows
+    it, as the dashboard and capture do. A document that fails the checks is
+    printed as problem lines and nothing is written (exit 2). With ``--out``
+    the file is written whole or not at all; without it the JSON is printed.
+    Your dashboard ratings and tip-card answers are read from its store
+    without writing to it, as ``report`` reads them."""
+    from . import tuning as tuning_mod
+
+    if args.path:
+        print(f"claudeglass {command}: takes --out PATH, not a file name (that is for 'summary')", file=sys.stderr)
+        return 2
+    if args.since or args.until or args.limit is not None:
+        print(
+            f"claudeglass {command}: the window is --days only ({TUNING_DEFAULT_DAYS} by default, "
+            f"1 to {TUNING_MAX_DAYS}); --since, --until and --limit do not apply",
+            file=sys.stderr,
+        )
+        return 2
+    days = TUNING_DEFAULT_DAYS if args.days is None else args.days
+    if not 1 <= days <= TUNING_MAX_DAYS:
+        print(f"claudeglass {command}: --days must be between 1 and {TUNING_MAX_DAYS}, got {days}", file=sys.stderr)
+        return 2
+    args.days = days
+
+    config, rates, config_dir, err = _load_config_and_pricing(args)
+    if err is not None:
+        return err
+    err = _resolve_window_start(args, config, command)
+    if err is not None:
+        return err
+    if not (args.project or args.project_family):
+        args.all_projects = True
+    root, project_dirs = _resolve_project_dirs_for_args(args, config)
+    window = _window_description(args, config)
+    if not project_dirs:
+        print(f"claudeglass {command}: no matching project directories under {root}", file=sys.stderr)
+        return 1
+    corpus = _load_corpus_for_args(args, config, config_dir, project_dirs)
+    if not corpus.sessions:
+        print(f"claudeglass {command}: no sessions found under {root} for window {window!r}", file=sys.stderr)
+        return 1
+
+    _overrides, ratings = _merge_dashboard_marks(config_dir, {})
+    today = discovery.to_local(datetime.now(timezone.utc), config.tz).date()
+    try:
+        text = tuning_mod.dumps(
+            tuning_mod.build(
+                corpus,
+                config,
+                rates,
+                config_dir=config_dir,
+                days=days,
+                today=today,
+                claude_root=_resolve_claude_root(args.claude_root),
+                ratings=ratings,
+                tip_feedback=_dashboard_tip_feedback(config_dir),
+            )
+        )
+    except tuning_mod.TuningError as exc:
+        return _tuning_refuse(command, "the figures fail the checks, so nothing was written:", exc.problems)
+
+    if not args.out:
+        sys.stdout.write(text)
+        return 0
+    out = Path(args.out)
+    try:
+        _write_file_atomic(out, text)
+    except OSError as exc:
+        print(f"claudeglass {command}: cannot write {args.out}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
+    read_back = invocation.shell_line(["claudeglass", "tuning", "summary", str(out)])
+    print(
+        invocation.rewrite_rendered(
+            f"Wrote the tuning figures to {out} ({len(text):,} bytes). To read them in plain words, run: {read_back}",
+            "markdown",
+        )
+    )
+    return 0
+
+
 def _cmd_scrub_fixture(args: argparse.Namespace) -> int:
     forward: list[str] = []
     if args.verify:
@@ -3401,8 +3583,6 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
     lines = []
     if rough["session_note"]:
         lines.append(f"about {rough['session_note']} tokens of note when a session starts, is cleared or compacts")
-    if rough["subagent_note"]:
-        lines.append(f"about {rough['subagent_note']} tokens of note when a subagent starts")
     if rough["reply_tag"]:
         lines.append(f"about {rough['reply_tag']} tokens of tag at the end of each reply")
     if rough["message_note"]:
@@ -3414,8 +3594,6 @@ def _capture_cost_lines(ids, tagger: str = capture_catalogue.DEFAULT_TAGGER) -> 
         lines.append(f"about {rough['reminder']} tokens for the /cg-feedback reminder, at most once every 3 days")
     if rough["plan_check"]:
         lines.append(f"about {rough['plan_check']} tokens for the plan check's question, once per approved plan")
-    if rough["report_tag"]:
-        lines.append(f"about {rough['report_tag']} tokens of tag at the end of each subagent report")
     if rough["tool_note"]:
         lines.append(f"about {rough['tool_note']} tokens of note after each large or web tool result")
     if capture_catalogue.tagged_keys(ids):
@@ -3468,12 +3646,7 @@ def _capture_history(args: argparse.Namespace, config: Config, config_dir: Path)
 def _flatten_corpus(corpus: Corpus) -> list[TranscriptResult]:
     """Every parsed transcript in ``corpus`` (top-level session plus its
     subagents), for a hook_health scan that reads events, not turns."""
-    results: list[TranscriptResult] = []
-    for bundle in corpus.sessions:
-        if bundle.top is None:
-            continue
-        results.extend([bundle.top, *bundle.subs])
-    return results
+    return hook_health.corpus_results(corpus)
 
 
 def _scan_hook_errors(args: argparse.Namespace, config: Config, config_dir: Path) -> hook_health.HookErrorHealth:
@@ -3490,19 +3663,28 @@ def _scan_hook_errors(args: argparse.Namespace, config: Config, config_dir: Path
     return hook_health.count_hook_errors(results, stopped=stopped)
 
 
-#: "This week" for :func:`_measure_deep_wait` -- independent of
-#: :data:`CAPTURE_HISTORY_DAYS`, which is a cost-estimate window, not a
-#: latency one.
-_DEEP_WAIT_DAYS = 7
+def _hook_overhead_line(
+    args: argparse.Namespace, config: Config, config_dir: Path, claude_root: Path, capture: CaptureConfig
+) -> str | None:
+    """The overhead line the Capture tab shows (CAP-9/F10, Phase 7): how
+    often ClaudeGlass's installed hooks ran over the last
+    :data:`capture_view.OVERHEAD_DAYS` days and what that added up to, then
+    what capture's notes and coaching notes cost in the same stretch, or
+    ``None`` with no hook installed. The count comes from the transcripts'
+    tool calls, prompts and turn ends, not from the runs Claude Code
+    recorded a time for, which are few. Capture turned on within the
+    stretch cuts it short: its hooks weren't there before."""
+    from .report import _report_units
 
-
-def _measure_deep_wait(args: argparse.Namespace, config: Config, config_dir: Path) -> hook_health.DeepWaitStats:
-    """Deep's big_output/web PostToolUse hook's real median/p90 wait
-    (CAP-9/F10), over the last :data:`_DEEP_WAIT_DAYS` days -- "this
-    week", the same window :meth:`hook_health.DeepWaitStats.summary`
-    names."""
-    corpus = _capture_corpus(args, config, config_dir, days=_DEEP_WAIT_DAYS)
-    return hook_health.measure_deep_wait(_flatten_corpus(corpus))
+    specs = hook_health.installed_specs(claude_root)
+    if not specs:
+        return None
+    window = capture_view.overhead_window(capture)
+    corpus = _capture_corpus(args, config, config_dir, **window["corpus"])
+    rates = _capture_pricing(args, config, config_dir)
+    units = _report_units(corpus, rates, config, config_dir) if rates is not None else None
+    block = capture_view.build_overhead(corpus, specs, rates, units, window)
+    return block["text"] if block is not None else None
 
 
 def _plural(count: int, word: str) -> str:
@@ -3879,7 +4061,7 @@ def _capture_prune(
 #: Why a turn got no tag from Claude Haiku, in words.
 _HAIKU_ERRORS = {
     "no_cli": "no claude command on the hook's path",
-    "no_login": "the claude command isn't signed in: run 'claude auth login'",
+    "no_login": capture_catalogue.NO_LOGIN_REASON,
     "timeout": "Haiku took too long",
     "failed": "the call failed",
     "no_tag": "its answer had no tag",
@@ -3887,16 +4069,28 @@ _HAIKU_ERRORS = {
 }
 
 
-def _haiku_lines(capture: CaptureConfig, config_dir: Path) -> list[str]:
+def _haiku_lines(
+    capture: CaptureConfig, config_dir: Path, agent_replies: Callable[[], frozenset[str]] | None = None
+) -> list[str]:
     """What Claude Haiku has done since capture was turned on: the main
     session's turns while it writes the tags, the replies it tags when
     Claude leaves them without one, and the agent runs it judges whoever
     writes the tags. How many it was asked about, how many it tagged, why
-    any got none, and what the calls cost."""
+    any got none, and what the calls cost. ``agent_replies`` reads the reply
+    ids of the agent runs from your sessions, only when a turn got no tag:
+    a run logged before the ``agent`` mark left an error line that reads as
+    a main-session turn's until its reply is known to be an agent's."""
     since = datetime.fromisoformat(capture.enabled_at) if capture.enabled_at else None
+    agent_ids = (
+        agent_replies()
+        if agent_replies is not None and haiku_tags.summary(config_dir, since=since, kind="main").errors
+        else None
+    )
     lines: list[str] = []
     if capture.haiku_tags:
-        done = haiku_tags.summary(config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_WRITER)
+        done = haiku_tags.summary(
+            config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_WRITER, agent_reply_ids=agent_ids
+        )
         if done.calls:
             lines += _haiku_done_lines(done, "tagged", "turn", "No tag")
         else:
@@ -3906,14 +4100,14 @@ def _haiku_lines(capture: CaptureConfig, config_dir: Path) -> list[str]:
             )
     elif capture.is_on and capture_catalogue.tagged_keys(capture.active_metrics()):
         done = haiku_tags.summary(
-            config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_FALLBACK_WRITER
+            config_dir, since=since, kind="main", writer=capture_catalogue.JUDGE_FALLBACK_WRITER, agent_reply_ids=agent_ids
         )
         if done.calls:
             lines += _haiku_done_lines(done, "filled in", "missing tag", "No tag")
         else:
             lines.append("Claude Haiku hasn't had to fill in a tag yet: it does when Claude ends a reply without one.")
     if capture.is_on and capture_catalogue.agent_metric_ids(capture.active_metrics()):
-        done = haiku_tags.summary(config_dir, since=since, kind="agent")
+        done = haiku_tags.summary(config_dir, since=since, kind="agent", agent_reply_ids=agent_ids)
         if done.calls:
             lines += _haiku_done_lines(done, "judged", "agent run", "No verdict")
         else:
@@ -3922,6 +4116,17 @@ def _haiku_lines(capture: CaptureConfig, config_dir: Path) -> list[str]:
                 "hook's SubagentStop entry is in settings.json."
             )
     return lines
+
+
+def _agent_reply_ids(
+    args: argparse.Namespace, config: Config, config_dir: Path, capture: CaptureConfig
+) -> frozenset[str]:
+    """The reply ids of the agent runs in your sessions since capture was
+    turned on (your last :data:`CAPTURE_HISTORY_DAYS` days without a start
+    time): what tells a judge line logged before the ``agent`` mark that it
+    belongs to an agent run (``haiku_tags.agent_replies``)."""
+    window = {"since": capture.enabled_at} if capture.enabled_at else {"days": CAPTURE_HISTORY_DAYS}
+    return haiku_tags.agent_replies(_capture_corpus(args, config, config_dir, **window))
 
 
 def _haiku_done_lines(done: haiku_tags.Summary, verb: str, what: str, none: str) -> list[str]:
@@ -3971,17 +4176,20 @@ def _capture_status(
             stdout.write(f"  - {line}\n")
     elif capture.is_on:
         stdout.write("It adds nothing to Claude's context at this level.\n")
-    for line in _haiku_lines(capture, config_dir):
+    # Read only if a turn got no tag; see _haiku_lines.
+    agent_replies = (
+        (lambda: _agent_reply_ids(args, config, config_dir, capture)) if args is not None and config is not None else None
+    )
+    for line in _haiku_lines(capture, config_dir, agent_replies):
         stdout.write(f"{line}\n")
     if args is not None and config is not None:
         for line in _capture_measured(capture, args=args, config=config, config_dir=config_dir):
             stdout.write(f"{line}\n")
-        if "big_output" in ids or "web" in ids:
-            # CAP-9/F10: a real measured figure, replacing the old
-            # unsourced "a fraction of a second" guess.
-            deep_wait = _measure_deep_wait(args, config, config_dir).summary()
-            if deep_wait:
-                stdout.write(f"{deep_wait}\n")
+        # CAP-9/F10: how often the hooks ran and a real measured time, not
+        # the old unsourced "a fraction of a second" guess.
+        overhead = _hook_overhead_line(args, config, config_dir, claude_root, capture)
+        if overhead:
+            stdout.write(f"{overhead}\n")
         # SURV-HE: a hook failing on most calls is a prompt here, never
         # an automatic edit -- settings.json is only ever changed after
         # a shown diff and a yes, elsewhere in this command.
@@ -4015,13 +4223,19 @@ def _capture_status(
     lines_on = [m for m in ("feedback_note", "coaching_line") if m in capture.feedback or m in capture.coaching]
     if lines_on:
         from . import footprint
+        from .service.serve import STORE_FILENAME
+        from .service.store import read_entrypoint_counts
 
         try:
             settings = json.loads(hook_health.settings_path(claude_root).read_text(encoding="utf-8"))
         except (OSError, ValueError):
             settings = None
-        if not footprint.is_own_statusline(settings if isinstance(settings, dict) else None):
-            stdout.write(f"{capture_view.STATUSLINE_NOTES[lines_on[-1]]}\n")
+        # Claude Code runs a status line in a terminal only: where your
+        # sessions ran decides whether these lines can show at all.
+        entrypoints = read_entrypoint_counts(config_dir / STORE_FILENAME)
+        own = footprint.is_own_statusline(settings if isinstance(settings, dict) else None)
+        for note in filter(None, dict.fromkeys(capture_view.statusline_note(m, own, entrypoints) for m in lines_on)):
+            stdout.write(f"{note}\n")
     stdout.write(
         "\nChange it: claudeglass capture level " + "|".join(capture_catalogue.LEVELS)
         + ", capture enable|disable METRIC..., or " + pages.plain("{{page:setup/capture}}") + " on the dashboard.\n"
@@ -4205,9 +4419,12 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
         if preview.tagger != current.tagger:
             stdout.write(f"\n{capture_view.TAGGER_TEXT[preview.tagger]}\n")
         if costly:
+            # What the added metrics do, in the words of the page's warning: no note or tag while Haiku tags.
+            does = capture_view.warning_text(costly, preview.tagger)
+            opener = "Metrics capture uses your tokens. "
+            lead = "This makes Claude use more of your tokens. " if does.startswith(opener) else ""
             stdout.write(
-                "\nThis makes Claude use more of your tokens. It adds " + ", ".join(costly) + ", and Claude then "
-                "reads a short note and ends its replies with a one-line tag such as [cg: task=bugfix brief=clear].\n"
+                "\n" + lead + "It adds " + ", ".join(costly) + ". " + does.removeprefix(opener) + "\n"
                 "At this setting, roughly:\n"
             )
             for line in _capture_cost_lines(preview.active_metrics(), preview.tagger):
@@ -5089,8 +5306,9 @@ def _insert_default_subcommand(argv: list[str]) -> list[str]:
 
 
 #: Subcommands whose output is data for another program (Claude Code's
-#: statusline, a settings.json fragment, an export), printed as written.
-_DATA_OUTPUT = frozenset({"statusline", "snapshot-config", "export", "scrub-fixture"})
+#: statusline, a settings.json fragment, an export, the tuning figures),
+#: printed as written.
+_DATA_OUTPUT = frozenset({"statusline", "snapshot-config", "export", "tuning", "scrub-fixture"})
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -5150,6 +5368,8 @@ def _run(args: argparse.Namespace) -> int:
         return _cmd_export(args)
     if command == "monthly-report":
         return _cmd_monthly_report(args)
+    if command == "tuning":
+        return _cmd_tuning(args)
     if command == "compare":
         return _cmd_compare(args)
     if command == "reconcile":

@@ -24,7 +24,7 @@ each command adds.
 - [Changing settings](#changing-settings): `apply`
 - [Metrics capture](#metrics-capture): `capture`
 - [Team use and exports](#team-use-and-exports): `export`,
-  `monthly-report`, `import`, `team-report`
+  `monthly-report`, `tuning`, `import`, `team-report`
 - [Comparing and checking estimates](#comparing-and-checking-estimates):
   `compare`, `reconcile`, `backtest`, `config-diff`
 - [Diagnostics](#diagnostics): `snapshot-config`, `probe-config`,
@@ -410,6 +410,27 @@ python -m claudeglass monthly-report --out reports
 | `--generated-at ISO8601` | Fix the trailing "Generated at" line, so a rerun is byte-identical. `SOURCE_DATE_EPOCH` works too |
 
 A running `serve --monthly-report DIR` writes it for you each month.
+
+### `tuning`
+
+Writes your figures as a small checked file of counts and fixed words, to
+take to another machine, and reads one back in plain words. The file holds
+no names, paths, hashes or text, and both actions refuse a file that fails
+the checks. [`exports.md`](exports.md#claudeglass-tuning) says what it holds.
+
+```powershell
+python -m claudeglass tuning export --out my-figures.json
+python -m claudeglass tuning summary my-figures.json
+```
+
+| Action or flag | What it does |
+|---|---|
+| `export` | Build the figures from your sessions and your dashboard ratings, and check them. Exit 2, with the problems on stderr and nothing written, if they fail |
+| `summary FILE` | Check the file, then print a few lines for each block. Exit 2 and no figures if it fails the checks, is not JSON or is over 256 KB |
+| `--out PATH` | With `export`: write the file to `PATH`, whole or not at all. Without it the JSON goes to the terminal |
+| `--days N` | With `export`: the last `N` local days. Default 30, from 1 to 365. `--since`, `--until` and `--limit` are refused |
+| `--project`, `--project-family` | With `export`: narrow the projects. Without either, every project is included |
+| `--claude-root PATH` | As for `init`. With `export`, where `settings.json` is, to find the hooks installed |
 
 ### `import`
 

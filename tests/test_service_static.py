@@ -3895,3 +3895,80 @@ def test_the_override_menu_offers_every_word_but_not_classified() -> None:
     choices = _function_source(_static_text("charts-types.js"), "sessionWordChoices")
     assert 'word.key !== "unknown"' in choices
     assert '"docs"' not in _static_text("page-spend.js")
+
+
+# -- Phase 7: the Capture segment's overhead line, tuning block and warnings --
+
+
+def test_capture_segment_confirms_with_the_warning_of_the_level_or_row_chosen() -> None:
+    """A level's and a metric's own warning says what that choice does;
+    the page-wide one is the fallback only. The sample confirm, which keeps
+    the level, uses the page's."""
+    app_js = _app_js()
+    assert "level.warning || data.warning" in _function_source(app_js, "renderCaptureLevels")
+    assert "row.warning || data.warning" in _function_source(app_js, "renderMetricRow")
+    assert "data.warning" in _function_source(app_js, "renderCaptureControls")
+
+
+def test_capture_segment_no_longer_claims_a_subagent_is_asked_for_anything() -> None:
+    capture_js = _static_text("page-capture.js")
+    rough = _function_source(capture_js, "roughLine")
+    assert "subagent_note" not in rough and "report_tag" not in rough
+    assert "when a subagent starts" not in capture_js and "per agent report" not in capture_js
+    assert "the agent is asked for nothing" in rough
+    # And the Python side no longer words a warning that way.
+    assert "subagent starts" not in capture_view.WARNING and "when a session or subagent" not in capture_view.WARNING
+
+
+def test_capture_segment_shows_one_overhead_line_whenever_the_server_sends_one() -> None:
+    capture_js = _static_text("page-capture.js")
+    render = _function_source(capture_js, "renderCaptureData")
+    assert 'if (data.overhead) nowBlock.appendChild(el("p", { class: "notes capture-overhead"' in render
+    line = _function_source(capture_js, "overheadLine")
+    assert "overhead.label" in line and "overhead.hooks" in line
+    # Both costs go through the page's money helper, so they follow the billing mode.
+    assert "overheadAmount(overhead.capture)" in line and "overheadAmount(overhead.coaching)" in line
+    assert 'return billed(amount, "", "about ");' in _function_source(capture_js, "overheadAmount")
+    assert "if (overhead.capture && overhead.coaching)" in line
+
+
+def test_capture_overhead_line_is_worded_as_capture_status_words_it() -> None:
+    """``capture status`` prints ``capture_view.overhead_text``; the page
+    composes the same sentences from the same fields."""
+    line = _function_source(_static_text("page-capture.js"), "overheadLine")
+    for piece in (
+        "No run of ClaudeGlass's hooks shows in your sessions.",
+        " Capture cost ",
+        " and coaching notes cost ",
+        " in the same stretch.",
+    ):
+        assert piece in line, piece
+    text = capture_view.overhead_text("L", "", "C", "N")
+    assert text == "L: No run of ClaudeGlass's hooks shows in your sessions. Capture cost C and coaching notes cost N in the same stretch."
+
+
+def test_capture_segment_ends_with_the_tuning_block_of_copyable_commands() -> None:
+    capture_js = _static_text("page-capture.js")
+    render = _function_source(capture_js, "renderCaptureData")
+    assert render.rstrip().endswith("renderCaptureTuning(data, container);\n}")
+    tuning = _function_source(capture_js, "renderCaptureTuning")
+    assert "captureBlock(container, tuning.title)" in tuning
+    assert 'el("p", { class: "notes", text: tuning.text })' in tuning
+    assert "codeBlockWithCopy(tuning.export_command," in tuning
+    assert "codeBlockWithCopy(tuning.summary_command," in tuning
+    # The dashboard only offers the commands: nothing here runs or writes.
+    for forbidden in ("postJson", "postCapture", "fetch(", 'el("button"', "download", "Blob"):
+        assert forbidden not in tuning, forbidden
+
+
+def test_grid_words_an_empty_status_line_table_for_desktop_sessions() -> None:
+    grid_js = _static_text("grid.js")
+    assert (
+        '"context_budget_statusline:desktop": ["No status line readings in this window.", '
+        '"The desktop app doesn\'t run status lines; first-call sizes come from transcripts instead."]'
+    ) in grid_js
+    # The plain key stays for a window that may have run one.
+    assert "context_budget_statusline: [" in grid_js
+    empty = _function_source(grid_js, "emptyText")
+    assert 'EMPTY_TEXT[table.name + ":" + table.empty_variant]' in empty
+    assert empty.index("empty_variant") < empty.index("EMPTY_TEXT[table.name] ||")

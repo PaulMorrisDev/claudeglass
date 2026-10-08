@@ -619,10 +619,12 @@ its four options, once a plan, and the reminder's note about 145 tokens
 plus about 25 of output for its line, at most once every three days.
 `capture status` prices both from your own history, as an upper bound.
 
-Claude Code also waits for the hook, a few tens of milliseconds a call,
-after each message you send and after each read, search or web result
-and approved plan. It is never run after a shell command or an MCP tool.
-Those were about two thirds of the calls it waited for, and a replay over
+Claude Code also waits for the hook after each message you send and after
+each read, search or web result and approved plan. Setup > Capture and
+`claudeglass capture status` show how many runs, the median time each and
+the time summed, from your own sessions. It is never run after a shell
+command or an MCP tool. Those were about two thirds of the calls it waited
+for, and a replay over
 real sessions found a size note after them wrong too often: after a shell
 result it failed the precision and the tokens-against-time checks, and
 after an MCP result it was right 33% of the time (46% counting half

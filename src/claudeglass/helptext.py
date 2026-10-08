@@ -5163,7 +5163,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="The last context size your status line logged for each session. These are Claude Code's "
             "own numbers, not estimates.",
             read="\"Used\" is how full the context window was at the last status line update. The table stays "
-            "empty until you install the status line logger.",
+            "empty until you install the status line logger. The desktop app doesn't run status lines, so its "
+            "sessions leave the table empty either way.",
             act="If sessions often end near full, start a new session for each new task instead of carrying "
             "old context.",
         ),

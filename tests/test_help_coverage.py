@@ -680,3 +680,44 @@ def test_the_mix_sentence_calls_a_one_message_session_one_shot():
     from claudeglass import impact
 
     assert impact._MIX_SUBJECT["one-shot"] == "One-shot sessions"
+
+
+def test_the_copy_the_capture_page_and_status_add_keeps_to_the_help_rules():
+    """The warning for each level and tagger, the status-line notes, the
+    overhead line's fixed sentences, the tuning block and the empty
+    status-line table: new strings the dashboard and `capture status`
+    show follow the same rules as the help text."""
+    from claudeglass import capture_catalogue, capture_view, context_budget, footprint
+    from claudeglass.config import CaptureConfig
+
+    strings: list[tuple[str, str]] = [("general warning", capture_view.WARNING)]
+    for tagger in ("claude", "haiku"):
+        for level in capture_catalogue.LEVELS:
+            strings.append((f"{level} warning ({tagger})", capture_view.warning_text(capture_catalogue.level_metrics(level), tagger)))
+        for metric_id in capture_catalogue.METRICS_BY_ID:
+            strings.append((f"{metric_id} warning ({tagger})", capture_view.warning_text((metric_id,), tagger)))
+    strings.append(("every feedback metric", capture_view.warning_text(capture_catalogue.DEEP_FEEDBACK_IDS)))
+    strings.append(("deep with its feedback", capture_view.warning_text(capture_catalogue.level_includes("deep") + capture_catalogue.DEEP_FEEDBACK_IDS)))
+    for metric_id, text in capture_view.DESKTOP_STATUSLINE_NOTES.items():
+        strings.append((f"{metric_id} desktop note", text.format(total="204")))
+    mix = {"claude-desktop": {"count": 204, "last_ts": ""}, "cli": {"count": 1, "last_ts": ""}}
+    for metric_id in capture_view.STATUSLINE_NOTES:
+        strings.append((f"{metric_id} status line", capture_view.STATUSLINE_NOTES[metric_id]))
+        strings.append((f"{metric_id} mix", capture_view.statusline_note(metric_id, False, mix) or ""))
+    strings.append(("overhead line", capture_view.overhead_text("Over your last 7 days", "", "about 0.40 USD", "nothing")))
+    strings.append(("tuning title", capture_view.TUNING_TITLE))
+    strings.append(("tuning text", capture_view.TUNING_TEXT))
+    strings.append(("desktop empty note", context_budget.DESKTOP_EMPTY_NOTE))
+    strings += [
+        (f"capture on, {level}", footprint.expectations(CaptureConfig(level=level))[0][1])
+        for level in ("free", "essentials", "standard", "deep")
+    ]
+    for where, text in strings:
+        assert text, where
+        _plain(text.replace("{{page:setup/capture}}", "Setup > Capture"), where)
+
+
+def test_the_status_line_table_help_says_the_desktop_app_runs_no_status_line():
+    help_ = helptext.TABLE_COPY["context_budget_statusline"].help
+    assert "The desktop app doesn't run status lines" in help_.read
+    assert "stays empty" not in help_.read or "install the status line logger" in help_.read

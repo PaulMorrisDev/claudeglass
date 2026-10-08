@@ -1892,3 +1892,21 @@ def test_weekly_cost_is_none_less_than_a_day_after_it_began():
     use = _priced_use("2026-09-24T00:00:00+00:00", note_cost=1.0)
     now = datetime(2026, 9, 24, 12, tzinfo=timezone.utc)
     assert capture.weekly_cost(use, now=now) is None
+
+
+def test_an_estimate_adds_no_tool_note_while_claude_haiku_writes_the_tags():
+    """The hook sends no note after a large read or web result when Haiku
+    writes the tags, so the estimate prices none either."""
+    past = capture.History(
+        days=14, sessions=5, cycles=50, main_notes=5, main_note=1e-6, reply_tag=2e-6,
+        big_outputs=10, big_output_note=2e-6, big_output_tag=3e-6, web_results=4, web_note=2e-6, web_tag=3e-6,
+        spend=10.0,
+    )
+    claude = capture.estimate(past, ("big_output",))
+    assert claude.cost > 0 and claude.note_tokens > 0
+    haiku = capture.estimate(past, ("big_output",), tagger="haiku")
+    assert haiku.cost == 0.0 and haiku.note_tokens == 0 and haiku.tag_tokens == 0
+    # Alongside a tagged metric, only the tool note drops out.
+    both = capture.estimate(past, ("task", "big_output"), tagger="haiku")
+    task = capture.estimate(past, ("task",), tagger="haiku")
+    assert both.cost == pytest.approx(task.cost) and both.note_tokens == task.note_tokens
