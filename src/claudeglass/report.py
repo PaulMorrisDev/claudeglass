@@ -170,6 +170,7 @@ from . import (
     workflows,
     workstyle,
 )
+from .calibration import Calibration
 from .config import Config
 from .corpus import Corpus, SessionBundle
 from .model import (
@@ -443,11 +444,15 @@ def ttl_mix_by_agent_type_metric(sections: list[Section]) -> dict[str, dict[str,
 def session_baseline_size_metric(sections: list[Section]) -> float | None:
     """Mean top-level first-turn cache-creation ("session baseline"),
     from the "agents" section's single-row "topology_session_baseline"
-    table."""
+    table's "written by the session" column. The table's own mean first
+    call also counts the tool definitions read from cache, which differ
+    by model (51.5k tokens on Haiku 4.5, 69.4k on Sonnet 5), so a stored
+    baseline from before that column existed stays comparable only on the
+    session's own write."""
     table = _section_table(sections, "agents", "topology_session_baseline")
     if table is None or not table.rows:
         return None
-    index = _col_index(table, "mean_baseline")
+    index = _col_index(table, "mean_write")
     if index is None:
         return None
     value = table.rows[0][index]
@@ -1307,6 +1312,35 @@ def _apply_autocompact_pct_override(configured_window: int, snap: Snapshot) -> i
     return configured_window
 
 
+#: Later than any snapshot, so ``snapshot_for`` finds a project's newest.
+_END_OF_TIME = "9999-12-31T00:00:00Z"
+
+
+def _current_window_of(snapshots: list[Snapshot] | None, keys_by_session: dict[str, tuple[str, ...]]):
+    """A function from a transcript to the auto-compact window now in
+    force for its project: the newest snapshot that project has (the one
+    that sets ``autoCompactWindow``, less any
+    ``CLAUDE_AUTOCOMPACT_PCT_OVERRIDE``), or ``None`` when that snapshot
+    sets none. A project with no snapshot takes the newest window any
+    snapshot sets; with no snapshots at all it is always ``None``, so
+    nothing is taken for an older setting."""
+
+    def window(snap: Snapshot | None) -> int | None:
+        value = snapshots_mod.auto_compact_window(snap)
+        return None if value is None else _apply_autocompact_pct_override(value, snap)
+
+    anywhere = next((w for w in (window(snap) for snap in reversed(snapshots or [])) if w is not None), None)
+
+    def current(tr: TranscriptResult) -> int | None:
+        if not snapshots:
+            return None
+        keys = keys_by_session.get(tr.meta.session_id)
+        snap = snapshots_mod.snapshot_for(_END_OF_TIME, snapshots, keys) if keys else None
+        return window(snap) if snap is not None else anywhere
+
+    return current
+
+
 # -- build_report -----------------------------------------------------------
 
 
@@ -1501,9 +1535,15 @@ def build_report(
     ls = limits.LimitStats()
     ts = ttl.TtlStats()
     cs = compaction.CompactionStats()
-    tp = topology.TopologyStats()
-    cb = context_budget.ContextBudgetStats()
-    cf = context_files.ContextFileStats()
+    # Characters per token, measured on this corpus's own subagent first
+    # calls before any module turns characters into tokens (every
+    # transcript is already in memory, so the pre-pass is one cheap walk).
+    calibration = Calibration.from_calls(
+        call for bundle in corpus.sessions for sub in bundle.subs if (call := context_budget.first_call(sub))
+    )
+    tp = topology.TopologyStats(calibration=calibration)
+    cb = context_budget.ContextBudgetStats(calibration=calibration)
+    cf = context_files.ContextFileStats(calibration=calibration)
     ph = PhaseStats() if phases else None
     # v4 wiring round: waste.WasteStats accumulates per-transcript like
     # ls/ts/cs above (mirrors that shape); carry/model_swap/compaction_sim
@@ -1745,12 +1785,18 @@ def build_report(
     handoff_stats = handoff.compute_handoff(
         all_results, pricing, handoff_th, compaction_sim_stats.rediscovery_allowance_usd
     )
+    # Delegation figures that depend on long runs count only the runs the
+    # window now in force allows (a longer one ran under an older setting).
     run_split_stats = run_split.compute_run_split(
-        all_results, pricing, run_split_th, compaction_sim_stats.rediscovery_allowance_usd
+        all_results,
+        pricing,
+        run_split_th,
+        compaction_sim_stats.rediscovery_allowance_usd,
+        current_window=_current_window_of(snapshots, session_snapshot_key),
     )
     hook_stats = hook_costs.compute_hook_costs(all_results, pricing, hooks_th)
     tool_search_stats = tool_search.compute_tool_search(
-        all_results, pricing, tool_search_th, snapshots=snapshots, all_projects=all_projects
+        all_results, pricing, tool_search_th, snapshots=snapshots, all_projects=all_projects, calibration=calibration
     )
 
     # How amounts are phrased (billing mode, and under subscription the
@@ -2018,7 +2064,13 @@ def build_report(
 
     if _want("context_budget"):
         sections.append(
-            context_budget.build_section(cb, snapshots=snapshots, usage_log_rows=usage_log_rows, pricing=pricing)
+            context_budget.build_section(
+                cb,
+                snapshots=snapshots,
+                usage_log_rows=usage_log_rows,
+                pricing=pricing,
+                mcp_servers=tool_search_stats.mcp_servers,
+            )
         )
 
     if _want("tool_search"):

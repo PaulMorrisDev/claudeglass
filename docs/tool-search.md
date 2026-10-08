@@ -64,7 +64,11 @@ For each reply requested with tools deferred:
   counted at the average definition size of its own MCP server, measured
   from the definitions loaded anywhere in the window. A server none of
   whose tools was loaded takes the average of every server. Sizes are
-  characters / 4, as everywhere else in the report.
+  characters divided by the characters per token measured on your own
+  first calls for that reply's model (`calibration.py`; 4.0 until a
+  model has ten first calls). A definition uses the tool-definition
+  figure and the name list the text figure. The report's "Characters
+  per token" table shows both.
 - **Priced** at that reply's own rate for the front of the prompt: its
   cache read rate when it read the cache, its cache write rate when it
   wrote the cache from the start, its input rate when it cached nothing.
@@ -98,8 +102,10 @@ the name list and $1.03 for 16 replies that only searched: $5.58 net.
 
 `tool_search_servers` lists every MCP server the window's transcripts or
 your config snapshots name, whatever its status, uncapped. Nothing in
-the code names a server: what a server is, and whether it was used,
-comes from generic evidence only.
+the classifier names a server: what a server is, and whether it was used,
+comes from generic evidence only. The one exception is a short closed
+list of the servers the desktop app brings itself
+([`desktop_servers.py`](../src/claudeglass/desktop_servers.py)).
 
 - **Offered** when a reply's name list, instructions or tools sent in
   full include it. Your config alone never counts, so a server that
@@ -113,12 +119,24 @@ comes from generic evidence only.
   `claude_ai_<name>`. An ID-named server with exactly the same tools as
   a named one is merged into it, and a use under either name counts.
 - **Kind**, from positive evidence only: a claude.ai connector (by name,
-  and in the desktop app by an ID matched to that name), a plugin's
-  server (`plugin_...`), or a server in a config snapshot's local
+  and in the desktop app by an ID matched to that name, or an ID-named
+  server that only desktop-app sessions and subagent runs ever named), a
+  plugin's server (`plugin_...`), a server in a config snapshot's local
   (`~/.claude.json`, per project), project (`.mcp.json`), managed or
-  user list. With `managedMcpServers` set, a server only the merged
-  list has may be your organisation's, so it counts as managed.
-  Anything else is of unknown kind.
+  user list, or one of the servers the desktop app brings itself. With
+  `managedMcpServers` set, a server only the merged list has may be
+  your organisation's, so it counts as managed. Anything else is of
+  unknown kind.
+- **Built into the desktop app.** A desktop session is offered servers
+  nobody added: computer use, the visualiser, the built-in browser and
+  preview, the app's own session, window and settings servers (`ccd_...`),
+  the scheduler, the terminal and the connector registry. A name from
+  that closed list counts as built in when a desktop-app session
+  offered it and your config doesn't list it. It is shown with its cost
+  and the status `built in`, and is never marked `remove`: there is no
+  connector to disconnect and no config entry to delete. The table's
+  "How to turn it off" cell is filled only where a switch is known (the
+  computer use setting, marked as not verified).
 - **Priced** per reply at the front-of-prompt rate: its share of the
   name list by length, its instructions, and its tools sent in full.
   That is a lower bound: a reply that rebuilt the cache paid its write
@@ -129,7 +147,8 @@ below one of the bars), `all-projects view only` (a server every
 project loads, or one the desktop app names by ID, whose claude.ai
 name may only show up in another project's sessions: judged only in
 the all-projects view), `kind unknown`,
-`managed`, `subagents only` (left to `spawn-unused-mcp`), `used`,
+`managed`, `built in` (a desktop-app server, never
+removed), `subagents only` (left to `spawn-unused-mcp`), `used`,
 `needs sign-in`, `failed to connect`, `pending`, and `configured, not
 seen`.
 
@@ -176,10 +195,14 @@ since a server loaded up front isn't deferred.
   `prompt_snapshot` with its tools.
 - A server's `@` resource mentions leave no mark in a transcript, so a
   server you use only that way looks unused.
-- In the desktop app, a connector is recognised only once it has also
-  appeared under its `claude_ai_<name>`. Until then its ID-named server
-  is of unknown kind and gets no card: ID-named servers in the desktop
-  app are usually connectors, listed under + > Connectors.
+- In the desktop app, a connector is recognised by an ID when it has also
+  appeared under its `claude_ai_<name>`, or when only desktop-app
+  sessions (and their subagents) ever named it. An ID-named server that
+  a terminal session also named, or that no transcript gave an
+  entrypoint for, is of unknown kind and gets no card. A connector
+  recognised by its ID alone has no readable name, so its card calls it
+  "Connector" and the first eight characters of the ID; the table's
+  "Some of its tools" column helps tell which it is.
 - Two raw names that normalise to the same key are counted as one
   server.
 - "Saved by keeping them out" falls when you turn a server off: there

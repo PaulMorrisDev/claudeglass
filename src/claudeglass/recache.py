@@ -9,7 +9,7 @@ thresholds, which read the tables built here). It depends only on
 Three things live here:
 
 - :class:`RecacheThresholds` — the four tunable numbers that decide
-  whether a turn counts as a re-cache, plus its two signatures.
+  whether a turn counts as a re-cache, plus its signatures.
 - :func:`detect` — the pure classifier: given a transcript's turns and a
   set of thresholds, which turns are re-caches, and which signature.
 - :func:`gap_bucket` — buckets a turn's inter-turn gap for the gap-cause
@@ -23,20 +23,45 @@ Three things live here:
 Definitions (plan "RE-CACHE" section):
 
 A turn is a **re-cache** when it is not the transcript's first priced
-turn, its context is above ``ctx_floor``, and the fraction of that
-context actually served from cache read falls below ``cr_ratio`` — i.e.
-the model had to pay to write most of its own context again instead of
-reading it from a warm cache entry. Every re-cache turn gets one of two
-**signatures**:
+turn, its context is above ``ctx_floor``, and the part of that context
+that is the session's own was not read from the cache -- the model had to
+pay to write it again instead of reading it from a warm cache entry.
 
-- ``full-expiry`` — ``cache_read_tokens`` is below ``full_expiry_cr``: the
-  cache entry had essentially nothing left to hit, consistent with its
-  TTL having fully expired since the previous turn.
-- ``prefix-invalidated`` — ``cache_read_tokens`` is between
-  ``full_expiry_cr`` and ``cr_ratio * ctx``: there was a partial hit, so
-  the TTL had not expired but something upstream of the cached prefix
-  changed (a notification, an attachment, a model switch, ...) and broke
-  it anyway.
+Every context starts with a prefix the sessions of one kind share (the
+tool definitions, written once and read by every later session), so the
+first priced call's ``cache_read_tokens`` (``cr0``) is the size of that
+shared start and it survives an expiry: an expired cache still reads
+about ``cr0``. A rebuild is therefore judged on what lies beyond ``cr0``
+(Phase 8 "Cache rebuild labels"). A flagged turn is one of:
+
+- the original test: it read under ``cr_ratio`` of its whole context; or
+- its session part was lost: it read no more than ``cr0`` +
+  ``SESSION_READ_MARGIN`` while the previous call had left meaningfully
+  more than that warm, and its context did not shrink (a shrink is a
+  compaction or a ``/clear``, which replaces the session part rather
+  than letting it expire); or
+- it read under ``cr_ratio`` of the part beyond ``cr0``.
+
+Every re-cache turn gets one of three **signatures**, tested in this
+order, the first that applies winning:
+
+1. ``limit-expiry`` -- the gap spanned a usage-cap pause (below).
+2. ``full-expiry`` -- the gap was at or past the time the previous call's
+   cache lasted: 1 hour when its 1-hour write exceeded its 5-minute
+   write, else 5 minutes (carried forward from the last call that wrote
+   when it wrote nothing). The cache entry timed out.
+3. ``full-expiry`` -- the turn read no more than ``cr0`` +
+   ``SESSION_READ_MARGIN`` (or under ``full_expiry_cr`` outright): the
+   session part had gone even though the gap was shorter than the
+   lifetime, so for this purpose it expired.
+4. ``prefix-invalidated`` -- only then: part of the session was read, so
+   it had not expired, but something upstream of the cached prefix
+   changed (a notification, an attachment, a model switch, ...) and broke
+   it anyway.
+
+When ``cr0`` or the previous call is not known (a list that does not
+start at the transcript's first turn), only the original test and the
+``full_expiry_cr`` floor apply, as before.
 
 A turn's **avoidable cost** is what its own cache-creation tokens cost at
 the write rate they were actually billed at, minus what those same
@@ -112,18 +137,36 @@ GAP_BUCKETS: tuple[str, ...] = ("<1m", "1-5m", "5-15m", "15-60m", ">60m", "unkno
 #: priority over the other two.
 SIGNATURES: tuple[str, ...] = ("full-expiry", "prefix-invalidated", "limit-expiry")
 
+#: How far past the shared start (the first call's cache read, ``cr0``) a
+#: read may go and still be an expiry of the session part. A warm call
+#: reads everything the previous call left cached, so a read this close to
+#: ``cr0`` means the session's own part was not read; the margin absorbs
+#: the few thousand tokens a re-sent harness block adds to that prefix.
+SESSION_READ_MARGIN: int = 3_000
+
+#: How long a cache entry lasts, by the TTL the call wrote it at.
+_TTL_5M_S: float = 300.0
+_TTL_1H_S: float = 3600.0
+
 #: This module's own detection/costing assumptions, printed verbatim in
 #: the report's "## Assumptions" block (``ReportMeta.assumptions`` —
 #: see ``report.py``) alongside ``ttl.ASSUMPTIONS``.
 ASSUMPTIONS: tuple[str, ...] = (
     "a turn's own ctx/cache_read_tokens fields are the whole story: a "
-    "large context with a low cache-read ratio is treated as a re-cache "
-    "regardless of what caused it",
+    "large context with little of its own part read from the cache is "
+    "treated as a re-cache regardless of what caused it",
     "the first priced turn of a transcript is never itself a re-cache "
-    "(nothing existed to invalidate yet)",
-    "a flagged turn's signature (full-expiry vs prefix-invalidated) is "
-    "decided purely by cache_read_tokens against full_expiry_cr, not by "
-    "the actual elapsed TTL window",
+    "(nothing existed to invalidate yet), and its cache read is the "
+    "prefix every session of that kind shares, which an expired cache "
+    "still reads",
+    "a flagged turn is an expiry when its wait reached the time the "
+    "previous call's cache lasted (1 hour if that call wrote more at 1 "
+    "hour than at 5 minutes, else 5 minutes, carried forward when it "
+    "wrote nothing), or when it read no more than the shared start plus "
+    f"{SESSION_READ_MARGIN:,} tokens; only a turn that read more of its "
+    "session than that is called broken by a change",
+    "a context that shrank since the previous call is a compaction or a "
+    "/clear, not an expiry, so only the original read-ratio test can flag it",
     "avoidable cost is computed by re-pricing the same turn as if its "
     "cache-creation tokens had instead been a cache read, holding every "
     "other component of the turn fixed",
@@ -190,12 +233,55 @@ class RecacheThresholds:
         (and this module's table notes)."""
         return [
             f"A reply only counts as a cache rebuild when its context is over {self.ctx_floor:,} tokens.",
-            f"It counts when it read less than {self.cr_ratio:.0%} of that context from the cache.",
-            f"A rebuild that read under {self.full_expiry_cr:,} tokens from the cache is \"Cache expired\"; "
-            "one that read more is \"Cache broken by a change\".",
+            f"It counts when it read less than {self.cr_ratio:.0%} of that context's own part from the cache, "
+            "or when it read only the start every session shares although the previous reply had left more "
+            "than that cached. Compactions and /clear, which shrink the context, are not counted this way.",
+            "A rebuild is \"Cache expired\" when the wait since the previous reply reached the time its cache "
+            f"lasts (5 minutes, or 1 hour for an hour-long write), or when it read no more than "
+            f"{SESSION_READ_MARGIN:,} tokens beyond the shared start (or under {self.full_expiry_cr:,} tokens "
+            "in all). Any other rebuild is \"Cache broken by a change\".",
             f"A context counts as very large at {self.huge_ctx:,} tokens when its model's own context "
             "window isn't known.",
         ]
+
+
+def _write_ttl_s(turn: Turn) -> float | None:
+    """How long the cache entry this call wrote lasts, or ``None`` when it
+    wrote nothing. 1 hour when its 1-hour write exceeds its 5-minute
+    write, else 5 minutes; a call whose JSONL recorded no TTL split
+    (``ttl_split_unknown``) is 5 minutes, as ``ttl.normalize_ttl_split``
+    assumes."""
+    if turn.cc_1h > turn.cc_5m:
+        return _TTL_1H_S
+    if turn.cc_5m > 0 or turn.cc_1h > 0:
+        return _TTL_5M_S
+    if turn.cache_creation_tokens > 0 and turn.ttl_split_unknown:
+        return _TTL_5M_S
+    return None
+
+
+def _is_rebuild(turn: Turn, prev: Turn | None, cr0: int | None, th: RecacheThresholds) -> bool:
+    """Whether ``turn`` paid to write again context that should have been
+    read. The original test is kept as it was; the two widenings need
+    ``cr0`` and the previous call, and say nothing without them."""
+    cr = turn.cache_read_tokens
+    if cr < th.cr_ratio * turn.ctx:
+        return True
+    if cr0 is None or prev is None:
+        return False
+    if turn.ctx < prev.ctx:
+        # Shrunk: a compaction or /clear replaced the session part. The
+        # shared start is all a fresh context reads, but nothing expired.
+        return False
+    # What a warm cache would have served: everything the previous call
+    # read or wrote. If that was little more than the shared start, a warm
+    # read and an expired one look the same, so neither is flagged here.
+    if prev.cache_read_tokens + prev.cache_creation_tokens - cr <= SESSION_READ_MARGIN:
+        return False
+    if cr <= cr0 + SESSION_READ_MARGIN:
+        return True
+    own_part = turn.ctx - cr0
+    return own_part > 0 and cr - cr0 < th.cr_ratio * own_part
 
 
 def detect(turns: Sequence[Turn], th: RecacheThresholds) -> list[Turn]:
@@ -204,28 +290,52 @@ def detect(turns: Sequence[Turn], th: RecacheThresholds) -> list[Turn]:
 
     Pure: never mutates ``turns`` or any ``Turn`` in it. A turn qualifies
     when it is not the transcript's first priced turn (``turn_index >
-    1``), is not synthetic, its ``ctx`` exceeds ``th.ctx_floor``, and its
-    ``cache_read_tokens`` is below ``th.cr_ratio * ctx``. The returned
-    list contains only the qualifying turns (as new objects, via
-    ``dataclasses.replace``), in the same relative order as ``turns`` —
-    callers that need the full turn list with these substituted in
+    1``), is not synthetic, its ``ctx`` exceeds ``th.ctx_floor``, and
+    :func:`_is_rebuild` finds that it did not read its own part of the
+    context (see the module docstring). Its signature is the first that
+    applies of: ``limit-expiry`` (the gap spanned a usage-cap pause);
+    ``full-expiry`` when the gap reached the TTL the previous call wrote
+    at; ``full-expiry`` when it read no more than ``cr0`` +
+    :data:`SESSION_READ_MARGIN` (or under ``th.full_expiry_cr``);
+    otherwise ``prefix-invalidated``. ``cr0`` is the cache read of the
+    transcript's first priced turn when ``turns`` includes it.
+
+    The returned list contains only the qualifying turns (as new objects,
+    via ``dataclasses.replace``), in the same relative order as ``turns``
+    -- callers that need the full turn list with these substituted in
     should index by ``message_id`` (unique within one transcript).
     """
     detected: list[Turn] = []
+    cr0 = next((t.cache_read_tokens for t in turns if t.turn_index == 1 and not t.is_synthetic), None)
+    prev: Turn | None = None
+    ttl_s: float | None = None
     for turn in turns:
-        if turn.is_synthetic or turn.turn_index <= 1:
+        if turn.is_synthetic:
+            continue
+        # The previous call and the TTL it wrote at are updated after this
+        # turn is judged, whichever way it falls.
+        before, before_ttl = prev, ttl_s
+        prev = turn
+        ttl_s = _write_ttl_s(turn) or ttl_s
+        if turn.turn_index <= 1:
             continue
         if turn.ctx <= th.ctx_floor:
             continue
-        if turn.cache_read_tokens >= th.cr_ratio * turn.ctx:
+        if not _is_rebuild(turn, before, cr0, th):
             continue
         if turn.gap_cause == "limit":
             # Usage-limits addition (see module docstring): the cache had
             # nothing left to hit because a usage-cap pause intervened,
             # not because of ordinary TTL expiry or an invalidation.
             signature = "limit-expiry"
+        elif turn.gap_s is not None and before_ttl is not None and turn.gap_s >= before_ttl:
+            signature = "full-expiry"
+        elif turn.cache_read_tokens < th.full_expiry_cr or (
+            cr0 is not None and turn.cache_read_tokens <= cr0 + SESSION_READ_MARGIN
+        ):
+            signature = "full-expiry"
         else:
-            signature = "full-expiry" if turn.cache_read_tokens < th.full_expiry_cr else "prefix-invalidated"
+            signature = "prefix-invalidated"
         detected.append(dataclasses.replace(turn, is_recache=True, recache_signature=signature))
     return detected
 
@@ -533,8 +643,9 @@ def _signature_table(recache_turns: list[Turn], recache_records: list[_Record]) 
         ],
         rows=rows,
         notes=[
-            "Cache expired: the reply read almost nothing from the cache. Cache broken by a change: it "
-            "read part of it, so the cache hadn't expired, but something earlier in the context "
+            "Cache expired: the wait reached the time the cache lasts, or the reply read only the start "
+            "every session shares and none of its own part. Cache broken by a change: it read part of "
+            "its own part, so the cache hadn't expired, but something earlier in the context "
             "changed. Expired during a usage-limit pause: the wait before the reply spanned a pause "
             "for a usage limit. That last row is shown here but left out of every other table's causes.",
         ],

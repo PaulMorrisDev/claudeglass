@@ -36,6 +36,7 @@ from collections import Counter
 from dataclasses import dataclass, field, replace
 
 from . import compaction_sim, impact, ttl
+from .calibration import FALLBACK
 from .change_points import ChangePoint
 from .context_files import _Carry
 from .pricing import Pricing, price_turn
@@ -250,17 +251,25 @@ def _carried(key: str, change: dict | None, before_facts, after_facts, after, pr
         removed_chars = change["old"] - change["new"]
         source = "the CLAUDE.md size change"
     else:
-        if len(before_facts) < impact.MIN_SESSIONS or len(after_facts) < impact.MIN_SESSIONS:
+        # The start of a session is a different size on each model (the
+        # tools alone are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5),
+        # so both sides are read on one model, never a mix.
+        family = impact._held_model(impact._STARTUP, before_facts, after_facts)
+        if family is None:
             return None
-        before_start = sum(s.main.startup_tokens for s in before_facts) / len(before_facts)
-        after_start = sum(s.main.startup_tokens for s in after_facts) / len(after_facts)
-        removed_chars = int(round((before_start - after_start) * 4))
+        before_on = [s for s in before_facts if s.main.model == family and s.main.startup_tokens]
+        after_on = [s for s in after_facts if s.main.model == family and s.main.startup_tokens]
+        if len(before_on) < impact.MIN_SESSIONS or len(after_on) < impact.MIN_SESSIONS:
+            return None
+        before_start = sum(s.main.startup_tokens for s in before_on) / len(before_on)
+        after_start = sum(s.main.startup_tokens for s in after_on) / len(after_on)
+        removed_chars = int(round((before_start - after_start) * FALLBACK))
         source = "the change in context at session start"
     results = _mains(after)
     paid = _cost(results, pricing)
     carried = sum(_Carry(result, pricing).cost(abs(removed_chars), 0, len(_priced(result))) for result in results)
     without = paid + carried if removed_chars > 0 else paid - carried
-    tokens = abs(removed_chars) // 4
+    tokens = int(abs(removed_chars) / FALLBACK)
     word = "more" if removed_chars > 0 else "less"
     return KeyResult(
         key, None, "approximate", paid, without, f"About {tokens:,} tokens {word} carried on every reply, from {source}."

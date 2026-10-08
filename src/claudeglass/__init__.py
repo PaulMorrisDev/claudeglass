@@ -381,7 +381,16 @@ __version__ = "0.14.0"
 #: 9am") sets the reset's day. A usage-limit pause ends at the reset when
 #: you came back later (``limits.limit_pause_intervals``). A pre-40 digest
 #: has no reset for those lines, so its pauses run to your return.
-PARSER_VERSION = 40
+#:
+#: In 41, a prompt snapshot's detail also records each built-in tool's
+#: definition size by name and each MCP server's total
+#: (``tool_chars``, ``server_chars``). The startup breakdown takes the
+#: first snapshot that lists tools, which a subagent's transcript writes
+#: after its first call, and counts the agent roster and MCP instructions
+#: that arrive before its second call as startup too. A pre-41 digest
+#: has no per-tool sizes, and its subagent startup shows tool
+#: definitions as 0.
+PARSER_VERSION = 41
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

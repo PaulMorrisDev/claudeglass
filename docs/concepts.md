@@ -160,27 +160,48 @@ Two practical consequences worth designing around:
 ## 3. Cache rebuild definitions and signatures
 
 A turn is a **cache rebuild** (called a *re-cache* in the code and the JSON output; [`recache.py`](../src/claudeglass/recache.py))
-when all of the following hold:
+when it is not the transcript's first priced turn, its context (`ctx`)
+exceeds `ctx_floor` (default 20,000 tokens), and the model had to pay to
+write its own part of that context again instead of reading a warm cache
+entry, for no correctness reason.
 
-- it is not the transcript's first priced turn,
-- its context (`ctx`) exceeds `ctx_floor` (default 20,000 tokens), and
-- the fraction of that context actually served from cache read falls
-  below `cr_ratio` (default 0.2, i.e. less than 20% of context came from
-  a cache hit) —
+Every context starts with a prefix the sessions of one kind share (the
+tool definitions, about 43,000 tokens in the desktop app). It is written
+once and read by every later session, and it survives an expiry. So the
+first priced call's cache read (`cr0`) is the size of that shared start,
+and a rebuild is judged on what lies beyond it. A turn is a rebuild when
+any of these holds:
 
-in other words: the model had to pay to write most of its own context
-again, instead of reading a warm cache entry, for no correctness reason.
-Every re-cache turn is assigned one of two **signatures**:
+- it read less than `cr_ratio` (default 0.2) of its whole context from
+  the cache (the original test);
+- it read no more than `cr0` + 3,000 tokens although the previous call
+  had left more than that cached, and its context did not shrink (a
+  shrink is a compaction or `/clear`, which replaces the session part
+  rather than letting it expire); or
+- it read less than `cr_ratio` of the part beyond `cr0`.
 
-- **`full-expiry`** — `cache_read_tokens` is below `full_expiry_cr`
-  (default 2,000 tokens): the cache entry had essentially nothing left
-  to hit, consistent with its TTL having simply run out since the
-  previous turn.
-- **`prefix-invalidated`** — `cache_read_tokens` sits between
-  `full_expiry_cr` and `cr_ratio × ctx`: there was a partial hit, so the
-  TTL had *not* expired, but something upstream of the cached prefix
-  changed anyway (a notification, an attachment, a model switch, a
-  compaction, ...) and broke it regardless.
+Every re-cache turn is assigned one of three **signatures**, tested in
+this order, the first that applies winning:
+
+1. **`limit-expiry`** — the wait spanned a usage-limit pause (see
+   [limits.md](limits.md)).
+2. **`full-expiry`**, by the clock — the wait since the previous call
+   reached the time its cache lasts: one hour when that call wrote more
+   at the 1-hour rate than at the 5-minute rate, else five minutes. A
+   call that wrote nothing keeps the lifetime of the last call that did.
+3. **`full-expiry`**, by the read — the turn read no more than `cr0` +
+   3,000 tokens (or under `full_expiry_cr`, default 2,000 tokens,
+   outright): the session part was gone even though the wait was shorter
+   than the lifetime.
+4. **`prefix-invalidated`** — only then: part of the session was read, so
+   the cache had *not* expired, but something upstream of the cached
+   prefix changed anyway (a notification, an attachment, a model switch,
+   ...) and broke it regardless.
+
+When the first call or the previous call is not known, only the original
+test and the `full_expiry_cr` floor apply. The old rule called a turn
+"broken by a change" whenever the shared start pushed its read above 20%
+of the context, which filed most cold returns under the wrong label.
 
 A re-cache turn's **avoidable cost** is what its own cache-creation
 tokens cost at the write rate they were actually billed at, minus what

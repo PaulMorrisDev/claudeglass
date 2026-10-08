@@ -395,8 +395,8 @@ only cite the report's own tables" convention `recommend.py`'s
 | `recache_share_pct` | `recache` section's `recache_summary` table (`report.recache_share_pct_metric`) |
 | `compactions_per_session` | `compactions` section's `compactions_summary` table (`report.compactions_per_session_metric`) |
 | `ttl_mix_top_level` / `ttl_mix_by_agent_type` | `ttl` section's `ttl_by_agent_type` table (`report.ttl_mix_by_agent_type_metric`) |
-| `session_baseline_size` | `agents` section's `topology_session_baseline` table (`report.session_baseline_size_metric`) |
-| `mean_spawn_write_by_agent_type` | `agents` section's `topology_spawn_write` table (`report.mean_spawn_write_by_agent_type_metric`) |
+| `session_baseline_size` | `agents` section's `topology_session_baseline` table, `mean_write` column: what the session wrote itself, so a stored baseline stays comparable across models (`report.session_baseline_size_metric`) |
+| `mean_spawn_write_by_agent_type` | `agents` section's `topology_spawn_write` table, `mean_write` column (`report.mean_spawn_write_by_agent_type_metric`) |
 | `scorecard_dimensions` | `scorecard` section's `dimensions` table (`report.scorecard_dimensions_metric`) |
 | `by_mode` | cost/re-cache/compactions per session, recomputed once per distinct mode over a session-filtered sub-corpus (see below) |
 

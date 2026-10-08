@@ -57,10 +57,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import fixes as fixes_mod
-from .context_files import _CHARS_PER_TOKEN_APPROX, _parse_ts
+from .context_files import _parse_ts
 from .footprint import home_label
 from .model import Recommendation, SettingChange
 from .units import Units
+
+#: Duplicated per this package's small-constant convention: a skill's
+#: listing line is sized at the uncalibrated characters per token.
+_CHARS_PER_TOKEN_APPROX = 4
 
 #: Listed in at least this many sessions or spawns with no use before a
 #: skill counts as unused.

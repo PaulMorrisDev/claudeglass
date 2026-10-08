@@ -946,20 +946,12 @@ class _PendingTurn:
 
 
 #: A tool name kept as a key (``TranscriptResult.tool_definition_chars``):
-#: the API's own tool-name alphabet, so never a path or free text.
-_TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
-
-#: The server of a deferred tool that isn't an MCP tool.
-BUILT_IN_TOOLS = "built-in"
-
-
-def tool_server(name: str) -> str:
-    """The MCP server a tool comes from (``mcp__<server>__<tool>``), or
-    :data:`BUILT_IN_TOOLS` for one of Claude Code's own."""
-    parts = name.split("__")
-    if len(parts) >= 3 and parts[0] == "mcp" and parts[1]:
-        return parts[1][:64]
-    return BUILT_IN_TOOLS
+#: the API's own tool-name alphabet, so never a path or free text. Defined
+#: in :mod:`events` (which sizes a snapshot's tools by the same rule) and
+#: re-exported here, with :data:`BUILT_IN_TOOLS` and :func:`tool_server`.
+_TOOL_NAME_RE = events_mod.TOOL_NAME_RE
+BUILT_IN_TOOLS = events_mod.BUILT_IN_TOOLS
+tool_server = events_mod.tool_server
 
 
 _MCP_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_-]")

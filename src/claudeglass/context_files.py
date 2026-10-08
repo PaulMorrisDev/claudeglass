@@ -14,8 +14,9 @@ Cost of carrying text is an estimate: each time a file or listing is
 sent, it is written to the prompt cache once, then read from cache on
 every later turn of that transcript until it is sent again (after a
 conversation summary), plus written again on each turn that rebuilt the
-cache (:func:`recache.detect`). Sizes use the same ``chars / 4``
-approximation as the rest of the package; no tokenizer is run.
+cache (:func:`recache.detect`). Sizes are characters over the characters
+per token measured on the corpus's own first calls (:mod:`calibration`,
+``chars / 4`` until a model has ten); no tokenizer is run.
 """
 
 from __future__ import annotations
@@ -26,12 +27,9 @@ from datetime import datetime
 from typing import Iterable
 
 from . import recache
+from .calibration import Calibration
 from .model import Event, EventKind, TranscriptResult, Turn
 from .pricing import Pricing, effective_rates
-
-#: Duplicated per this package's small-constant convention (see
-#: ``context_budget._CHARS_PER_TOKEN_APPROX``).
-_CHARS_PER_TOKEN_APPROX = 4
 
 #: Key used for the main conversation in the per-reach counts.
 MAIN = "main"
@@ -106,8 +104,13 @@ class _Carry:
     correction for ``start`` itself when it isn't already counted via
     ``rebuilt_ids`` membership."""
 
-    def __init__(self, result: TranscriptResult, pricing: Pricing | None) -> None:
+    def __init__(
+        self, result: TranscriptResult, pricing: Pricing | None, calibration: Calibration | None = None
+    ) -> None:
         self.turns = [turn for turn in result.turns if turn.turn_index > 0]
+        self.calibration = calibration or Calibration()
+        #: The model the text was sent to, for its characters per token.
+        self.model = next((turn.model for turn in self.turns if turn.model), None)
         self.times = [_parse_ts(turn.ts) for turn in self.turns]
         rebuilt = recache.detect(self.turns, recache.RecacheThresholds())
         self.rebuilt_ids = {turn.message_id for turn in rebuilt if turn.message_id}
@@ -178,7 +181,7 @@ class _Carry:
         end = min(end, len(self.turns))
         if start >= end:
             return 0.0
-        tokens_m = chars / _CHARS_PER_TOKEN_APPROX / 1_000_000
+        tokens_m = self.calibration.text_tokens(chars, self.model) / 1_000_000
         rate = (self._prefix_read[end] - self._prefix_read[start]) + (
             self._prefix_rebuilt_extra[end] - self._prefix_rebuilt_extra[start]
         )
@@ -200,11 +203,14 @@ class ContextFileStats:
     skills: dict[str, _SkillAcc] = field(default_factory=dict)
     #: reach -> transcripts seen (main sessions, spawns per agent type).
     transcripts: dict[str, int] = field(default_factory=dict)
+    #: Characters per token by model family (``report.py`` sets it before
+    #: any transcript is added).
+    calibration: Calibration = field(default_factory=Calibration)
 
     def add(self, result: TranscriptResult, pricing: Pricing | None = None, *, is_main: bool) -> None:
         reach = MAIN if is_main else (result.meta.agent_type or "(unknown)")
         self.transcripts[reach] = self.transcripts.get(reach, 0) + 1
-        carry = _Carry(result, pricing)
+        carry = _Carry(result, pricing, self.calibration)
         self._add_files(result, carry, reach)
         self._add_skills(result, carry, reach)
 
@@ -291,7 +297,7 @@ class ContextFileStats:
                 "hash": acc.hash,
                 "type": acc.type,
                 "scoped": acc.scoped,
-                "tokens": round(acc.chars / _CHARS_PER_TOKEN_APPROX),
+                "tokens": round(self.calibration.text_tokens(acc.chars)),
                 "sends": acc.sends,
                 "reach": dict(sorted(acc.transcripts.items())),
                 "cost_usd": round(acc.cost_usd, 6),
@@ -303,12 +309,12 @@ class ContextFileStats:
         skills = [
             {
                 "name": acc.name,
-                "listing_tokens": round(acc.listing_chars / _CHARS_PER_TOKEN_APPROX),
+                "listing_tokens": round(self.calibration.text_tokens(acc.listing_chars)),
                 "listed": dict(sorted(acc.listed.items())),
                 "listing_cost_usd": round(acc.listing_cost_usd, 6),
                 "invoked": acc.invoked,
                 "invoked_by": dict(sorted(acc.invoked_by.items())),
-                "resent_tokens": round(acc.resent_chars / _CHARS_PER_TOKEN_APPROX),
+                "resent_tokens": round(self.calibration.text_tokens(acc.resent_chars)),
                 "resent_cost_usd": round(acc.resent_cost_usd, 6),
                 "attributed_turns": acc.attributed_turns,
                 "attributed_cost_usd": round(acc.attributed_cost_usd, 6),

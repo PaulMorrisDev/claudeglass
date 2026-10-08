@@ -122,6 +122,7 @@ PLACEMENT: dict[str, str] = {
     "agent_startup_breakdown": "keep",
     "agent_startup_unused": "keep",
     "agent_startup_shared": "keep",
+    "agent_startup_tools": "report",
     # agents
     "topology_spawn_write": "advanced",
     "topology_session_baseline": "advanced",
@@ -203,6 +204,7 @@ PLACEMENT: dict[str, str] = {
     "env-levers": "keep",
     # context budget
     "context_budget_baseline": "keep",
+    "context_budget_calibration": "report",
     "context_budget_autocompact": "advanced",
     "context_budget_statusline": "advanced",
     # scorecard
@@ -613,7 +615,8 @@ SECTION_COPY: dict[str, SectionCopy] = {
             shows="Each agent type's runs split every so many replies, and the interval that saves most. Also what "
             "each interval saves across every agent type.",
             read="An upper bound: a thin note can send the next run back over old ground. Each split's note, cache "
-            "write and an allowance for re-reading files are taken off.",
+            "write and an allowance for re-reading files are taken off. Runs that grew past your current "
+            "auto-compact window ran under an older setting and aren't counted.",
             act="Give an agent that pays one part of a large task per run. Start a fresh one for the next part with "
             "a short note.",
         ),
@@ -708,8 +711,8 @@ SECTION_COPY: dict[str, SectionCopy] = {
         help=Help(
             shows="What the main session's startup context is made of, when conversation summaries "
             "(compactions) start, and real context use where your status line logs it.",
-            read="Columns marked (est.) are rough estimates from text length, about 4 characters per token. "
-            "Claude Code's /context command gives the exact breakdown.",
+            read="Columns marked (est.) are rough estimates from text length, at the characters per token "
+            "measured on your own sessions. Claude Code's /context command gives the exact breakdown.",
             act="If startup context is large, trim its biggest part first. {{page:actions/recommendations}} names it.",
         ),
     ),
@@ -723,13 +726,19 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="One row per agent type. Each column is the average size of one part of the startup "
             "context, in tokens per spawn.",
             read="Startup size is everything the first reply had to read. The parts to its right add up "
-            "to \"Share explained\"; the rest is \"Not recorded\".",
+            "to \"Share explained\"; the rest is \"Not recorded\". Each row averages the spawns on one model, "
+            "because the same tools are bigger on some models than on others.",
             act="A part that is large and repeated on every spawn is the cheapest thing to cut. CLAUDE.md "
             "can be switched off per agent; skills and tools can be narrowed in the agent file.",
         ),
         columns={
             "spawns": ("", "How many times this agent type started."),
             "fork_spawns": ("", "Spawns that copied the main conversation instead of starting fresh. Left out of the averages."),
+            "model": ("", "The model most of this agent type's spawns ran on. Only those spawns are averaged."),
+            "other_model_spawns": (
+                "",
+                "Spawns on any other model. Left out, because the same tools measure differently on each model.",
+            ),
             "startup_tokens": ("", "Everything the first reply read: task, instructions, tools and system prompt."),
             "task_prompt": ("", "The instructions the parent wrote when it started this agent."),
             "claude_md": ("", "Your CLAUDE.md files and auto memory, as sent to this agent."),
@@ -738,13 +747,30 @@ TABLE_COPY: dict[str, TableCopy] = {
             "hook_context": ("", "Text your hooks added before the first reply."),
             "other_attachments": ("", "Claude Code's own notes: environment, model, date and settings."),
             "system_prompt": ("", "Claude Code's system prompt and the agent's own prompt, when recorded."),
-            "tool_definitions": ("", "The definitions of every tool the agent could call, when recorded."),
-            "not_recorded": ("", "Startup size minus every part above. Mostly tool definitions and system prompt."),
+            "tool_definitions": (
+                "",
+                "The definitions of every tool the agent could call. Claude Code records them right after the "
+                "first reply.",
+            ),
+            "not_recorded": (
+                "",
+                "Startup size minus every part above. Mostly tool definitions of spawns with no snapshot recorded.",
+            ),
             "measured_pct": ("", "How much of the startup size the parts to the left account for."),
             "write_price": (
                 "",
                 "List price of writing a million tokens into the cache for this agent's model. "
                 "Used to put a price on each part.",
+            ),
+            "claude_md_managed": (
+                "",
+                "The part of CLAUDE.md and memory that is a managed policy file. It loads whatever the agent's "
+                "own setting says.",
+            ),
+            "removable_tools": (
+                "",
+                "Tool definitions and MCP servers this agent was offered and rarely or never called. A tools "
+                "list on the agent would leave them out.",
             ),
         },
         lead_columns=[
@@ -1891,29 +1917,61 @@ TABLE_COPY: dict[str, TableCopy] = {
     ),
     # -- agents ------------------------------------------------------------
     "topology_spawn_write": TableCopy(
-        title="Cache written when each subagent starts",
+        title="What each subagent reads and writes when it starts",
         help=Help(
-            shows="The tokens each agent type writes to the cache on its first reply.",
-            read="This is the startup cost you pay once per spawn, before any work.",
+            shows="The tokens each agent type reads on its first reply, and the part it writes to the cache itself.",
+            read="This is the startup cost you pay once per spawn, before any work. Each row averages the spawns "
+            "on one model, because the same tools are bigger on some models than on others.",
             act="If one type is much higher than the rest, see its breakdown in \"What each agent type is given at startup\".",
         ),
         columns={
+            "model": ("", "The model most of this agent type's spawns ran on. Only those spawns are averaged."),
+            "other_model_spawns": (
+                "",
+                "Spawns on any other model. Left out, because the same tools measure differently on each model.",
+            ),
+            "mean_first_call": (
+                "Average first call",
+                "Average tokens the first reply read: new input, cache writes and cache reads.",
+            ),
+            "mean_shared_prefix": (
+                "Average shared prefix",
+                "Average tokens read from the cache. Mostly Claude Code's own tool definitions.",
+            ),
+            "mean_first_prompt": ("Average first prompt", "Average tokens of the task that went in uncached."),
             "mean_write": ("Average startup write", "Average tokens written to the cache on the first reply."),
             "median_write": ("Typical startup write", "The middle value, less affected by a few very large spawns."),
             "mean_briefing_chars": ("Average task prompt (characters)", "Length of the task the parent wrote when starting the agent."),
         },
+        lead_columns=[
+            "agent_type", "spawns", "mean_first_call", "mean_shared_prefix", "mean_write", "mean_first_prompt",
+            "mean_briefing_chars",
+        ],
     ),
     "topology_session_baseline": TableCopy(
-        title="Main session startup write",
+        title="Main session first call",
         help=Help(
-            shows="The tokens your main session writes to the cache on its first reply.",
-            read="This is the fixed cost of opening a session: system prompt, tools, CLAUDE.md and your first message.",
+            shows="The tokens your main session's first reply read, and the part it wrote to the cache itself.",
+            read="This is the fixed cost of opening a session: system prompt, tools, CLAUDE.md and your first message. "
+            "Most of it is Claude Code's own tool definitions, read from the cache.",
             act="",
         ),
         columns={
             "metric": ("", "Which sessions this row covers."),
-            "mean_baseline": ("Average startup write", "Average tokens written on the first reply."),
-            "median_baseline": ("Typical startup write", "The middle value."),
+            "mean_baseline": (
+                "Average first call",
+                "Average tokens the first reply read: new input, cache writes and cache reads.",
+            ),
+            "median_baseline": ("Typical first call", "The middle value."),
+            "mean_shared_prefix": (
+                "Average shared prefix",
+                "Average tokens read from the cache. Mostly Claude Code's own tool definitions.",
+            ),
+            "mean_write": (
+                "Average written by the session",
+                "Average tokens the session wrote to the cache itself: system prompt and CLAUDE.md.",
+            ),
+            "mean_first_prompt": ("Average first prompt", "Average tokens of your first message that went in uncached."),
         },
         value_labels={"all": "All sessions"},
         lead_columns=["median_baseline", "mean_baseline", "sessions"],
@@ -2816,9 +2874,10 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="Why the cache was rebuilt",
         help=Help(
             shows="Cache rebuilds split by what had happened to the cache.",
-            read="\"Cache expired\" means almost nothing was left to read: the cache lifetime ran out. \"Cache "
-            "broken by a change\" means part was read, but something early in the context changed. \"Expired "
-            "during a usage-limit pause\" means you were waiting for a limit to reset.",
+            read="\"Cache expired\" means the wait reached the cache lifetime, or the reply read only the start "
+            "every session shares and none of its own part. \"Cache broken by a change\" means part of its own "
+            "was read, but something early in the context changed. \"Expired during a usage-limit pause\" "
+            "means you were waiting for a limit to reset.",
             act="Expired caches respond to a longer cache lifetime. Broken ones don't: check what came right before "
             "them in the causes table.",
         ),
@@ -4458,7 +4517,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="Every subagent run in this window, and what splitting the long ones at each agent type's best "
             "interval could have saved.",
             read="Only agent types where splitting pays are counted. The saving overlaps with the auto-compact "
-            "saving.",
+            "saving. Runs from before your current auto-compact window are left out of every figure.",
             act="",
         ),
         columns={
@@ -4477,7 +4536,12 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Those runs split, less what splitting adds back, at list price.",
             ),
             "saving_pct": ("Share of subagent cost", "That saving as a share of all subagent cost."),
-            "agent_usd": ("Subagent cost", "Cost of every subagent run in this window, at list price."),
+            "agent_usd": ("Subagent cost", "Cost of every counted subagent run in this window, at list price."),
+            "older_runs": (
+                "Runs left out (older setting)",
+                "Runs whose context grew past your current auto-compact window. Your setting couldn't allow that now.",
+            ),
+            "older_usd": ("Cost of those runs", "What the runs left out cost, at list price."),
         },
         value_labels={"subagent runs": "Subagent runs"},
         lead_columns=["saving_usd", "paying_agents", "long_runs", "saving_pct"],
@@ -4733,7 +4797,11 @@ TABLE_COPY: dict[str, TableCopy] = {
         ),
         columns={
             "server": ("MCP server", "The server's name in your sessions."),
-            "kind": ("Kind", "Where it comes from: a claude.ai connector, a plugin, or your config at some scope."),
+            "kind": (
+                "Kind",
+                "Where it comes from: a claude.ai connector, a plugin, your config at some scope, or the desktop "
+                "app itself.",
+            ),
             "status": (
                 "Status",
                 "Whether Claude used it. An unused server is flagged once many main sessions over a week or more "
@@ -4752,6 +4820,11 @@ TABLE_COPY: dict[str, TableCopy] = {
             "instructions_usd": ("Its instructions", "Its own instructions to Claude, at the cache read rate."),
             "definitions_usd": ("Its tools sent in full", "Its tools sent with full definitions, at the cache read rate."),
             "removable_usd": ("Cost of keeping it", "The three amounts added up: what turning it off would have saved."),
+            "how_to_turn_off": (
+                "How to turn it off",
+                "Where to switch it off, for a kind whose switch is known. A server the desktop app brings itself "
+                "has one only where it is known, and says when that is not verified.",
+            ),
         },
         value_labels={
             "remove": "Never used: turn it off",
@@ -4764,8 +4837,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             "configured, not seen": "In your config, never offered",
             "kind unknown": "Kind unknown",
             "managed": "Set by your organisation",
+            "built in": "Built into the desktop app",
             "all-projects view only": "Shown in the all-projects view",
             "claude.ai connector (desktop app)": "Claude.ai connector, desktop app",
+            "built into the desktop app": "Built into the desktop app",
             "claude.ai connector": "Claude.ai connector",
             "plugin": "Plugin",
             "user (every project)": "Your config, every project",
@@ -5080,22 +5155,38 @@ TABLE_COPY: dict[str, TableCopy] = {
     "context_budget_baseline": TableCopy(
         title="What the main session starts with",
         help=Help(
-            shows="One row per project, plus one for all projects: the main session's startup context and "
+            shows="One row per project, plus one for all projects: the main session's first call and "
             "an estimate of what it is made of, in tokens.",
-            read="Startup context is measured: it is the cache write on the first reply. The parts to its "
+            read="The first call is measured: everything the first reply read. About 43,000 tokens of it are "
+            "Claude Code's own tool definitions and system prompt, which no setting removes. The parts to the "
             "right are estimates. \"System prompt and tools\" is whatever the other parts don't explain, so "
             "it also holds anything that could not be estimated.",
-            act="If one project's startup context is much larger than the rest, run /context in that "
-            "project to see the exact breakdown. Then trim the biggest part.",
+            act="Look at \"What you can change\" first. If one project's is much larger than the rest, run /context "
+            "in that project to see the exact breakdown. Then trim the biggest part.",
         ),
         columns={
             "project": ("", "The project folder. \"All projects\" combines every session."),
             "sessions": ("", "Main sessions in this project."),
             "mean_baseline": (
-                "Average startup context",
-                "Tokens written to the cache on the main session's first reply, averaged. Measured.",
+                "Average first call",
+                "Tokens the main session's first reply read: new input, cache writes and cache reads, averaged. "
+                "Measured.",
             ),
-            "median_baseline": ("Typical startup context", "The middle value, less affected by a few very large sessions."),
+            "median_baseline": ("Typical first call", "The middle value, less affected by a few very large sessions."),
+            "shared_prefix": (
+                "Shared prefix",
+                "Tokens the first reply read from the cache, averaged. Mostly Claude Code's own tool definitions. "
+                "Measured.",
+            ),
+            "session_written": (
+                "Written by the session",
+                "Tokens the session wrote to the cache on its first reply, averaged: system prompt and CLAUDE.md. "
+                "Measured.",
+            ),
+            "first_prompt": (
+                "First prompt",
+                "Tokens of your first message that went in uncached, averaged. Measured.",
+            ),
             "human_prompt_est": ("Your first message (est.)", "Your first message, estimated from its length."),
             "skills_listing_est": ("Skills list (est.)", "The list of skills Claude Code sent, estimated from its length."),
             "memory_files_est": (
@@ -5106,16 +5197,35 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Agent list (est.)",
                 "Your custom agents, at about 60 tokens each. Blank without a settings snapshot.",
             ),
-            "mcp_tools_est": ("MCP tools", "Whether MCP servers are configured. Their size can't be measured here."),
+            "mcp_tools_est": (
+                "MCP servers offered",
+                "How many MCP servers the sessions were offered, and how many you can turn off. Servers built "
+                "into the desktop app are counted apart. Without that, only whether servers are configured.",
+            ),
+            "mcp_servers_usd": (
+                "Cost of those servers (est.)",
+                "What offering those MCP servers cost, priced as the tool search section prices them. "
+                "A server built into the desktop app is included but has nothing to remove.",
+            ),
+            "mcp_tools_tokens": (
+                "MCP tools in the first call (est.)",
+                "The definitions, tool names and instructions of your MCP servers that the first reply carried, "
+                "estimated from their length. Blank when no MCP server showed up.",
+            ),
+            "controllable_est": (
+                "What you can change (est.)",
+                "The skills list, CLAUDE.md and rules, and MCP tools together. The part of the first call a "
+                "setting can shrink.",
+            ),
             "system_prompt_and_tools_est": (
                 "System prompt and tools (rest)",
-                "Average startup context minus every estimate to its left. Blank when the estimates add up "
+                "Average first call minus every estimate to its left. Blank when the estimates add up "
                 "to more than the measurement.",
             ),
         },
-        value_labels={"all": "All projects", "present, size unknown": "Yes, size unknown"},
+        value_labels={"all": "All projects", "present, size unknown": "Yes, configured"},
         lead_columns=[
-            "project", "sessions", "median_baseline", "memory_files_est", "skills_listing_est", "custom_agents_est",
+            "project", "sessions", "median_baseline", "controllable_est", "memory_files_est", "skills_listing_est",
             "system_prompt_and_tools_est",
         ],
     ),

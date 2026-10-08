@@ -68,6 +68,13 @@ kind of session (a scheduled run, or a mode) whose share changed by
 :data:`MIX_SHIFT_PTS` points or more makes the per-session figures
 compare different jobs, however the sessions are weighted.
 
+The context at the start (a session's, or an agent's per spawn) is
+compared on one model: the same tools are 51.5k tokens on Haiku 4.5 and
+69.4k on Sonnet 5, so a before and an after on different models would
+read the model as the change (:func:`_held_model`). It uses the model
+family both sides ran on, the one with most transcripts, and has no
+figure when they share none. The row names the model it held.
+
 Each change is also checked for quality (:mod:`quality`): the runs of the
 agent it changed (or the main session, for any other setting) before and
 after, on every quality signal, each marked worse, better, no clear
@@ -81,13 +88,14 @@ from __future__ import annotations
 
 import math
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 from . import capture as capture_mod
 from . import classify as classify_mod
 from . import pieces as pieces_mod
 from . import prompting, quality, recache
+from .calibration import model_family
 from .change_points import ChangePoint, affects_capture, applies_to
 from .model import EventKind, TranscriptResult, scheduled_main_session
 from .pricing import Pricing, price_turn
@@ -144,6 +152,10 @@ class _Transcript:
     turns: int = 0
     startup_tokens: int = 0
     peak_context: int = 0
+    #: The model family (:func:`calibration.model_family`) of the first
+    #: priced reply, ``""`` when it names none: what a start-of-context
+    #: comparison holds fixed.
+    model: str = ""
     #: Output tokens of the replies ``turns`` counts, so output per reply
     #: divides like by like: a compaction's estimated request
     #: (``Turn.estimated``) is spend, not a reply. The API's
@@ -238,6 +250,7 @@ def _transcript(result: TranscriptResult, pricing: Pricing) -> _Transcript:
     if turns:
         first = turns[0]
         facts.startup_tokens = first.input_tokens + first.cache_creation_tokens + first.cache_read_tokens
+        facts.model = model_family(first.model)
     rebuilt = {t.message_id for t in recache.detect(turns, recache.RecacheThresholds()) if t.message_id}
     for turn in turns:
         resolved = pricing.resolve_model(turn.model)
@@ -348,6 +361,38 @@ class Measure:
     #: "money" or "tokens" or "pct" or "count".
     kind: str
     agent: str | None = None
+    #: Only the transcripts on this model family count (``None``: all).
+    #: Set by :func:`_measure_row` for the measures in :data:`_MODEL_SENSITIVE`.
+    model: str | None = None
+
+
+#: The measures whose size depends on the model that read them: the tool
+#: definitions alone are a different size on each.
+_MODEL_SENSITIVE = ("startup_tokens", "agent_startup")
+
+#: A model no transcript has (a family never starts with "<"), for a
+#: comparison that shares none.
+_NO_MODEL = "<none>"
+
+
+def _startup_transcripts(measure: Measure, sessions: list[SessionFacts]) -> list[_Transcript]:
+    """The transcripts whose start-of-context ``measure`` reads."""
+    if measure.agent is not None:
+        return [facts for s in sessions for agent, facts in s.spawns if agent == measure.agent]
+    return [s.main for s in sessions]
+
+
+def _held_model(measure: Measure, before: list[SessionFacts], after: list[SessionFacts]) -> str | None:
+    """The model family a start-of-context comparison holds fixed: the one
+    both sides ran on with the most transcripts between them. ``None``
+    when they share none, where there is no figure to give."""
+    counts: list[Counter] = []
+    for side in (before, after):
+        counts.append(Counter(facts.model for facts in _startup_transcripts(measure, side) if facts.startup_tokens))
+    shared = set(counts[0]) & set(counts[1])
+    if not shared:
+        return None
+    return max(sorted(shared), key=lambda family: counts[0][family] + counts[1][family])
 
 
 def _mean(values: list[float]) -> float | None:
@@ -364,7 +409,7 @@ def _pairs(measure: Measure, sessions: list[SessionFacts]) -> list[tuple[float, 
         spawns = [facts for s in sessions for agent, facts in s.spawns if agent == measure.agent]
         if measure.key == "agent_cost":
             return [(f.cost, 1.0) for f in spawns]
-        return [(float(f.startup_tokens), 1.0) for f in spawns]
+        return [(float(f.startup_tokens), 1.0) for f in spawns if measure.model in (None, f.model)]
     if measure.key == "cost_per_session":
         return [(s.cost, 1.0) for s in sessions]
     if measure.key == "cost_per_substantive_cycle":
@@ -384,7 +429,7 @@ def _pairs(measure: Measure, sessions: list[SessionFacts]) -> list[tuple[float, 
     if measure.key == "peak_context":
         return [(float(s.main.peak_context), 1.0) for s in sessions]
     if measure.key == "startup_tokens":
-        return [(float(s.main.startup_tokens), 1.0) for s in sessions]
+        return [(float(s.main.startup_tokens), 1.0) for s in sessions if measure.model in (None, s.main.model)]
     if measure.key == "capture_tokens":
         return [
             (
@@ -591,6 +636,10 @@ def _enough_estimate(est: quality.Estimate) -> bool:
 
 
 def _measure_row(measure: Measure, before: list[SessionFacts], after: list[SessionFacts], units: Units) -> dict:
+    held: str | None = None
+    if measure.key in _MODEL_SENSITIVE:
+        held = _held_model(measure, before, after)
+        measure = replace(measure, model=_NO_MODEL if held is None else held)
     old = _ratio_estimate(_pairs(measure, before))
     new = _stratified_estimate(measure, before, after)
     change_pct = (new.value - old.value) / old.value * 100.0 if old.value and new.value is not None else None
@@ -616,6 +665,9 @@ def _measure_row(measure: Measure, before: list[SessionFacts], after: list[Sessi
         "p": None,
         "label_key": "too_little_data",
     }
+    if measure.key in _MODEL_SENSITIVE:
+        # The model both sides were held to (empty when they shared none).
+        row["model"] = held or None
     if _enough_estimate(old) and _enough_estimate(new):
         variance = (old.variance or 0.0) + (new.variance or 0.0)
         diff = new.value - old.value

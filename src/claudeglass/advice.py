@@ -733,7 +733,8 @@ def _explain_run_split(rec: Recommendation, ctx: _Context) -> None:
     rec.estimated_saving = ctx.money(rec.saving_usd, prefix="At most ")
     rec.saving_basis = ctx.basis(
         "This agent's long runs repriced as fresh runs at the interval that saves most, less each split's note, "
-        "cache write and an allowance for re-reading files. At list price."
+        "cache write and an allowance for re-reading files. Only runs your current auto-compact window allows are "
+        "counted. At list price."
     )
 
 
@@ -757,13 +758,20 @@ def _explain_baseline_bloat(rec: Recommendation, ctx: _Context) -> None:
                   if t.name == "topology_session_baseline"), None)
     row_key = table.rows[0][0] if table is not None and table.rows else None
     baseline = ctx.cell("agents", "topology_session_baseline", row_key, "mean_baseline")
+    changeable = _evidence_value(rec, "What you can change at the start of a session (est)")
     rec.title = "Every session starts with a large context"
-    rec.why = (
-        f"Each main session writes about {_tokens(baseline)} tokens to the cache before your first message, "
-        "and MCP servers and plugins you load everywhere add to it."
-        if isinstance(baseline, (int, float))
-        else "MCP servers and plugins you load everywhere add to every session's startup context."
-    )
+    if isinstance(changeable, (int, float)):
+        rec.why = (
+            f"About {_tokens(changeable)} tokens of every session's first call come from settings you control: "
+            "the skills list, your memory files, and the MCP servers and plugins you load everywhere."
+        )
+    elif isinstance(baseline, (int, float)):
+        rec.why = (
+            f"Each main session's first call reads about {_tokens(baseline)} tokens before your first message, "
+            "and MCP servers and plugins you load everywhere add to it."
+        )
+    else:
+        rec.why = "MCP servers and plugins you load everywhere add to every session's startup context."
     rec.action = "Turn off MCP servers and plugins in the projects that don't use them."
 
 
@@ -777,18 +785,23 @@ def _explain_mcp_unused_server(rec: Recommendation, ctx: _Context) -> None:
 
 
 def _explain_spawn_cost(rec: Recommendation, ctx: _Context) -> None:
-    write = _evidence_value(rec, "first-turn write")
+    first_call = _evidence_value(rec, "Mean first call")
+    unused = _evidence_value(rec, "Tool definitions it rarely or never uses")
     agent = rec.agent_type or "this agent"
     rec.title = f"Starting {agent} is expensive before it does any work"
     rec.action = (
-        f"Check what {agent} is given when it starts: its agent file, the CLAUDE.md files it receives and "
-        "the task prompt you send it. Trim what it doesn't need."
+        f"Check what {agent} is given when it starts: its agent file and tools list, the CLAUDE.md files it "
+        "receives and the task prompt you send it. Trim what it doesn't need."
     )
-    rec.why = (
-        f"Each {agent} spawn writes about {_tokens(write)} tokens to the cache on its first reply."
-        if isinstance(write, (int, float))
-        else f"Each {agent} spawn writes a lot to the cache on its first reply."
-    )
+    if isinstance(first_call, (int, float)) and isinstance(unused, (int, float)):
+        rec.why = (
+            f"Each {agent} spawn reads about {_tokens(first_call)} tokens on its first reply, and about "
+            f"{_tokens(unused)} of those are tool definitions it rarely or never calls."
+        )
+    elif isinstance(first_call, (int, float)):
+        rec.why = f"Each {agent} spawn reads about {_tokens(first_call)} tokens on its first reply."
+    else:
+        rec.why = f"Each {agent} spawn reads a lot on its first reply."
 
 
 def _explain_agent_report_size(rec: Recommendation, ctx: _Context) -> None:

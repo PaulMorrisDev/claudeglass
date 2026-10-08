@@ -8,8 +8,8 @@ Claude Code's own ``/context`` view breaks the context window into
 system prompt, system tools, MCP tools, custom agents, memory files
 (the ``CLAUDE.md`` family), skills, messages, free space and the
 autocompact buffer. A transcript never carries those sizes directly --
-this module reconstructs an approximation from what IS captured (a
-first-turn ``cache_creation`` baseline, HUMAN_TEXT/attachment
+this module reconstructs an approximation from what IS captured (the
+first call's size, HUMAN_TEXT/attachment
 ``size_chars``, a schema-2 config snapshot's ``content_layers``) and
 says, in every column label and table note, that it is an estimate, not
 Claude Code's own accounting. Where a genuine measurement exists (the
@@ -17,18 +17,22 @@ statusline payload's own ``context_window`` object, once
 :mod:`statusline` has logged it -- see that module's docstring), this
 module surfaces it as a separate, unlabelled-as-"est" table instead.
 
-Three tables (:func:`build_section`, section key ``"context_budget"``):
+Four tables (:func:`build_section`, section key ``"context_budget"``):
 
 - ``context_budget_baseline`` -- per project, plus one "all" row summing
-  every project: the measured mean/median top-level first-turn
-  ``cache_creation`` (:mod:`topology`'s own "session baseline" metric,
-  duplicated here rather than read back off that section's table so this
-  module works from ``TranscriptResult`` objects directly, matching the
-  rest of this package's convention of small per-module accumulators),
-  next to estimated buckets in tokens for human prompt, skills listing,
-  memory files, custom agents and MCP tools, then a residual
-  "system prompt and tools" bucket (the baseline minus every other known
-  bucket, floored at 0).
+  every project: the measured mean/median top-level first call (P0 =
+  uncached input + cache write + cache read, :mod:`topology`'s own
+  "session baseline" metric, duplicated here rather than read back off
+  that section's table so this module works from ``TranscriptResult``
+  objects directly, matching the rest of this package's convention of
+  small per-module accumulators), split into the shared prefix the call
+  read from cache, what the session wrote itself and the first prompt
+  that went in uncached, next to estimated buckets in tokens for human
+  prompt, skills listing, memory files, custom agents and MCP tools, then
+  a residual "system prompt and tools" bucket (P0 minus every other known
+  bucket, floored at 0). The part you can change (skills list, memory
+  files, MCP tools) is summed in its own column, since most of P0 is
+  Claude Code's own tool JSON, which no setting removes.
 - ``context_budget_autocompact`` -- per project: the configured
   ``autoCompactWindow`` from the latest schema-2 snapshot (or
   ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, which overrides it), the model's
@@ -47,15 +51,25 @@ Three tables (:func:`build_section`, section key ``"context_budget"``):
   the desktop app, which runs no status line, its empty table says so
   (``Table.empty_variant``) and points to the baseline table's
   transcript sizes.
+- ``context_budget_calibration`` -- the characters per token measured
+  for each model (:mod:`calibration`), which every figure above built from
+  characters is divided by.
 
-Every chars/bytes-to-tokens conversion in this module uses the same
-``chars / 4`` approximation the rest of the codebase already documents
-(``topology._CHARS_PER_TOKEN_APPROX``, duplicated here as
-:data:`_CHARS_PER_TOKEN_APPROX` per this project's established
-"small helper constants are duplicated, not imported across modules"
-convention -- see e.g. ``compaction.py``'s and ``usage.py``'s own module
-docstrings for the same convention stated explicitly). No tokenizer is
-ever run over transcript content.
+Every chars/bytes-to-tokens conversion in this module goes through a
+:class:`calibration.Calibration` (characters per token measured on your
+own first calls, by model family, ``chars / 4`` until a family has ten
+of them). No tokenizer is ever run over transcript content. A subagent's
+first call is compared across agent types on one model only: the same
+tool set is 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5, so a mean
+over both would measure the mix of models, not the agent.
+
+Subagent transcripts write their tools snapshot, agent roster and MCP
+instructions after the first call, not before it. The startup breakdown
+therefore takes the first snapshot that lists tools wherever it sits,
+and counts the roster and MCP instructions that arrive before the second
+call (:func:`_startup_events`). It keeps each built-in tool's definition
+size and each MCP server's total (never a description) to find what an
+agent type is offered and never uses.
 
 Accumulator pattern: :class:`ContextBudgetStats` is fed one top-level
 session at a time via :meth:`ContextBudgetStats.add_session` (mirroring
@@ -86,15 +100,14 @@ from typing import Sequence
 
 from . import compaction
 from . import snapshots as snapshots_mod
+from . import tool_search
+from .calibration import Calibration, FirstCall, model_family
+from .capture_catalogue import AGENT_ANSWER_TOOLS
+from .events import BUILT_IN_TOOLS, tool_server
 from .model import Column, Event, EventKind, Section, Table, TranscriptResult, Turn
 from .pricing import Pricing
 from .snapshots import Snapshot
 from .tools import log_usage
-
-#: No tokenizer is run over transcript content (privacy rule) -- see the
-#: module docstring. Duplicated from ``topology._CHARS_PER_TOKEN_APPROX``
-#: per this project's small-constant-duplication convention.
-_CHARS_PER_TOKEN_APPROX = 4
 
 #: The ``entrypoint`` Claude Code records for the desktop app, which never
 #: runs a status line (``hook_health.TERMINAL_ENTRYPOINTS`` names the
@@ -147,6 +160,13 @@ _ASSUMED_CONTEXT_WINDOW_DEFAULT = 200_000
 def _first_priced_turn(result: TranscriptResult) -> Turn | None:
     for turn in result.turns:
         if turn.turn_index == 1:
+            return turn
+    return None
+
+
+def _second_priced_turn(result: TranscriptResult) -> Turn | None:
+    for turn in result.turns:
+        if turn.turn_index == 2:
             return turn
     return None
 
@@ -213,7 +233,7 @@ def _events_before_first_turn(top: TranscriptResult, first_turn: Turn | None) ->
     return result
 
 
-def _human_prompt_est_tokens(first_turn: Turn | None, events_before: list[Event]) -> float:
+def _human_prompt_chars(first_turn: Turn | None, events_before: list[Event]) -> float:
     """The first HUMAN_TEXT event's own ``size_chars`` found among
     ``events_before``, else ``first_turn.human_prompt_chars`` (already
     the summed length of every human-text line preceding that turn --
@@ -223,26 +243,37 @@ def _human_prompt_est_tokens(first_turn: Turn | None, events_before: list[Event]
     module doesn't specifically look for)."""
     for event in events_before:
         if event.kind == EventKind.HUMAN_TEXT and event.size_chars is not None:
-            return event.size_chars / _CHARS_PER_TOKEN_APPROX
+            return float(event.size_chars)
     if first_turn is not None and first_turn.human_prompt_chars is not None:
-        return first_turn.human_prompt_chars / _CHARS_PER_TOKEN_APPROX
+        return float(first_turn.human_prompt_chars)
     return 0.0
 
 
-def _skills_listing_est_tokens(events_before: list[Event]) -> float:
+def _human_prompt_est_tokens(
+    first_turn: Turn | None, events_before: list[Event], calibration: Calibration | None = None
+) -> float:
+    """:func:`_human_prompt_chars` as tokens on the first turn's model."""
+    cal = calibration or Calibration()
+    return cal.text_tokens(_human_prompt_chars(first_turn, events_before), first_turn.model if first_turn else None)
+
+
+def _skills_listing_est_tokens(
+    events_before: list[Event], calibration: Calibration | None = None, model: str | None = None
+) -> float:
     total_chars = sum(
         event.size_chars or 0
         for event in events_before
         if event.kind == EventKind.CONTEXT_INJECT and event.subkind == "skill_listing"
     )
-    return total_chars / _CHARS_PER_TOKEN_APPROX
+    return (calibration or Calibration()).text_tokens(total_chars, model)
 
 
-def _memory_files_est_tokens(snapshot: Snapshot | None) -> float | None:
-    """CLAUDE.md family bytes + rules bytes, divided by four (bytes
-    treated the same as chars for this approximation -- see the module
-    docstring). ``None`` when there is no snapshot, or the snapshot
-    predates schema 2's ``content_layers`` field."""
+def _memory_files_est_tokens(snapshot: Snapshot | None, calibration: Calibration | None = None) -> float | None:
+    """CLAUDE.md family bytes + rules bytes, as tokens on the corpus's
+    most common model (bytes treated the same as chars for this
+    approximation -- see the module docstring). ``None`` when there is no
+    snapshot, or the snapshot predates schema 2's ``content_layers``
+    field."""
     if snapshot is None:
         return None
     content = snapshot.data.get("content_layers")
@@ -262,7 +293,7 @@ def _memory_files_est_tokens(snapshot: Snapshot | None) -> float | None:
     rules = content.get("rules") or {}
     rules_bytes = rules.get("bytes")
     total_bytes = claude_md_bytes + (rules_bytes if isinstance(rules_bytes, (int, float)) else 0)
-    return total_bytes / _CHARS_PER_TOKEN_APPROX
+    return (calibration or Calibration()).text_tokens(total_bytes)
 
 
 def _custom_agents_est_tokens(snapshot: Snapshot | None) -> float | None:
@@ -283,17 +314,78 @@ def _custom_agents_est_tokens(snapshot: Snapshot | None) -> float | None:
     return count * _AGENT_LISTING_TOKENS_PER_AGENT
 
 
+def _mcp_tools_tokens(top: TranscriptResult, first: Turn | None, calibration: Calibration) -> float | None:
+    """Tokens of the MCP servers' tool definitions sent in full, the
+    deferred-tool names listed for them and their instructions in
+    ``top``'s first call, summed over its servers. ``None`` when no MCP
+    server shows up in it at all."""
+    if first is None:
+        return None
+    model = first.model
+    servers = (
+        set(top.upfront_definition_chars_by_server)
+        | set(first.deferred_list_chars_by_server)
+        | set(first.mcp_instruction_chars_by_server)
+    ) - {BUILT_IN_TOOLS}
+    if not servers:
+        return None
+    return sum(
+        calibration.tool_tokens(top.upfront_definition_chars_by_server.get(server, 0), model)
+        + calibration.text_tokens(first.deferred_list_chars_by_server.get(server, 0), model)
+        + calibration.text_tokens(first.mcp_instruction_chars_by_server.get(server, 0), model)
+        for server in servers
+    )
+
+
 def _mcp_tools_flag(snapshot: Snapshot | None) -> str | None:
     """``"present, size unknown"`` when the snapshot names at least one
-    MCP server, else ``None`` -- this module has no way to measure an MCP
-    server's own tool-schema size, only whether one is configured at
-    all (mirrors ``snapshots.build_config_layers_table``'s own
-    ``mcp_servers.names`` reading)."""
+    MCP server, else ``None``. A config snapshot says only whether a server
+    is configured, never what its tools weigh (mirrors
+    ``snapshots.build_config_layers_table``'s own ``mcp_servers.names``
+    reading); the size the first call carried is the separate
+    ``mcp_tools_tokens`` column."""
     if snapshot is None:
         return None
     mcp_servers = snapshot.data.get("mcp_servers")
     names = (mcp_servers or {}).get("names") if isinstance(mcp_servers, dict) else None
     return "present, size unknown" if names else None
+
+
+def _mcp_servers_summary(
+    servers: Sequence[tool_search.McpServerRow] | None, project: str | None
+) -> tuple[str | None, float | None]:
+    """The MCP servers ``project``'s sessions were offered (``None``: every
+    project), as the section on tool search prices them: a count by what
+    can be done about them, and what keeping them cost. Counts and kinds
+    only, never a name. ``(None, None)`` when none was offered, so the
+    caller falls back to what the config snapshot says."""
+    removable = built_in = other = 0
+    usd = 0.0
+    for row in servers or ():
+        if project is None:
+            cost = sum(row.usd_by_project.values())
+            offered = bool(row.usd_by_project)
+        else:
+            cost = row.usd_by_project.get(project, 0.0)
+            offered = project in row.usd_by_project
+        if not offered:
+            continue
+        usd += cost
+        if row.kind == tool_search.KIND_DESKTOP_BUILTIN:
+            built_in += 1
+        elif tool_search.is_removable_kind(row.kind):
+            removable += 1
+        else:
+            other += 1
+    total = removable + built_in + other
+    if not total:
+        return None, None
+    parts = [
+        f"{count} {label}"
+        for count, label in ((removable, "you can turn off"), (built_in, "built into the desktop app"), (other, "other"))
+        if count
+    ]
+    return f"{total} offered: {', '.join(parts)}", usd
 
 
 # -- accumulator -----------------------------------------------------------
@@ -303,9 +395,18 @@ def _mcp_tools_flag(snapshot: Snapshot | None) -> str | None:
 class _ProjectAcc:
     project: str = ""
     sessions: int = 0
+    #: The first call's cache write (what the session wrote itself) and,
+    #: beside it, the shared prefix it read from cache, the first prompt
+    #: that went in uncached and their sum, P0.
     baseline_writes: list[int] = field(default_factory=list)
+    shared_prefix_tokens: list[int] = field(default_factory=list)
+    first_prompt_tokens: list[int] = field(default_factory=list)
+    first_call_tokens: list[int] = field(default_factory=list)
     human_prompt_est_tokens: list[float] = field(default_factory=list)
     skills_listing_est_tokens: list[float] = field(default_factory=list)
+    #: Tokens of the MCP servers' tool definitions, instructions and
+    #: deferred-tool names the first call carried, per session.
+    mcp_tools_tokens: list[float] = field(default_factory=list)
     compaction_records: list[compaction.CompactionRecord] = field(default_factory=list)
     session_ids: list[str] = field(default_factory=list)
     #: The keys this project's config snapshots can be stored under (see
@@ -314,8 +415,9 @@ class _ProjectAcc:
 
 
 #: Parts of a subagent's startup context, in display order. Each is
-#: measured in tokens (chars / 4) from what the transcript records before
-#: the subagent's first priced turn; see :func:`_startup_parts`.
+#: measured in tokens (characters over the calibrated characters per
+#: token, :mod:`calibration`) from what the transcript records for the
+#: first call; see :func:`_startup_events` and :func:`_startup_chars`.
 STARTUP_PARTS = (
     "task_prompt",
     "claude_md",
@@ -331,6 +433,11 @@ STARTUP_PARTS = (
 #: spawn: the deferred-tool list, MCP server instructions, and the
 #: sibling-agent roster.
 _TOOL_LIST_SUBKINDS = frozenset({"deferred_tools_delta", "mcp_instructions_delta", "agent_listing_delta"})
+
+#: The ones of those a subagent's transcript writes after its first call
+#: (539 of 539 agent rosters and 1,334 of 1,334 MCP instructions in the
+#: author's), so they count as startup when seen before the second.
+_LATE_STARTUP_SUBKINDS = frozenset({"mcp_instructions_delta", "agent_listing_delta"})
 
 #: Tools that only search or read. A subagent that used nothing else
 #: counts towards :class:`_AgentStartupAcc`'s ``read_only_spawns``.
@@ -350,19 +457,63 @@ _FORK_MIN_PARENT_CTX = 40_000
 #: within this fraction of the largest.
 _SHARED_TOLERANCE = 0.15
 
+#: A tool an agent type is offered counts as removable from its ``tools:``
+#: list when at most this share of the spawns offered it called it.
+REMOVABLE_USE_SHARE = 0.10
+
+#: The tools Claude Code adds to an agent whatever its ``tools:`` says
+#: (a workflow agent's answer and a handback), so no allowlist removes
+#: them.
+_ALWAYS_OFFERED = frozenset(AGENT_ANSWER_TOOLS)
+
+#: Rows of ``agent_startup_tools`` kept per agent type, largest first.
+_TOOL_ROWS_PER_AGENT = 12
+
+
+def mcp_tool_key(server: str) -> str:
+    """The name an MCP server's tools go under in a tools list or an
+    allowlist (``mcp__<server>__*``)."""
+    return f"mcp__{server}__*"
+
+
+@dataclass(slots=True)
+class _ToolOffer:
+    """One tool, or one MCP server's tools, offered to an agent type on one
+    model: spawns offered it, spawns that called it, and the characters of
+    its definitions across the spawns offered it."""
+
+    offered: int = 0
+    used: int = 0
+    chars: int = 0
+
 
 @dataclass(slots=True)
 class _AgentStartupAcc:
-    """Per-agent-type running totals for the subagent startup breakdown."""
+    """Per-agent-type running totals for the subagent startup breakdown.
+
+    ``startup_tokens``, ``parts``, ``claude_md_by_source`` and the other
+    lists beside them have one entry per measured spawn, in the same order,
+    so a table can keep the spawns on one model. ``models`` names each
+    spawn's model family; an accumulator built by hand without it is read
+    as one model."""
 
     agent_type: str = ""
     spawns: int = 0
     fork_spawns: int = 0
+    #: The first call's whole input (P0: uncached input, cache write and
+    #: cache read), per measured spawn.
     startup_tokens: list[int] = field(default_factory=list)
+    #: ... and the three tokens it is made of: the shared prefix it read
+    #: from cache, what the spawn wrote itself and the first prompt that
+    #: went in uncached.
+    shared_prefix_tokens: list[int] = field(default_factory=list)
+    written_tokens: list[int] = field(default_factory=list)
+    prompt_tokens: list[int] = field(default_factory=list)
+    #: Each measured spawn's model family (:func:`calibration.model_family`).
+    models: list[str] = field(default_factory=list)
     parts: dict[str, list[float]] = field(default_factory=dict)
-    #: Spawns whose transcript recorded a system-prompt snapshot, so the
-    #: system prompt and tool definitions were measured rather than left
-    #: in "not recorded".
+    #: Spawns whose transcript recorded a snapshot that lists tools, so the
+    #: tool definitions were measured rather than left in "not recorded".
     snapshot_spawns: int = 0
     claude_md_by_source: dict[str, list[float]] = field(default_factory=dict)
     skills_listed_spawns: int = 0
@@ -372,25 +523,118 @@ class _AgentStartupAcc:
     claude_md_spawns: int = 0
     read_only_spawns: int = 0
     #: The first turn's model's 5-minute cache-write list price (USD per
-    #: million tokens), per measured spawn whose model is on the rate card.
+    #: million tokens), per measured spawn whose model is on the rate card,
+    #: with the model family it came from beside it.
     write_prices: list[float] = field(default_factory=list)
+    write_price_models: list[str] = field(default_factory=list)
+    #: Model family -> spawns that recorded their tools, and -> each
+    #: tool's offers (a built-in tool by name, an MCP server as
+    #: :func:`mcp_tool_key`).
+    tool_spawns: dict[str, int] = field(default_factory=dict)
+    tools: dict[str, dict[str, _ToolOffer]] = field(default_factory=dict)
+
+    def fixed_model(self) -> tuple[str, list[int]]:
+        """The model family most of this agent type's measured spawns ran
+        on, and the positions of the spawns on it. ``("", all)`` for an
+        accumulator that doesn't name models. Everything compared across
+        agent types is taken from these, so a mix of models is never
+        averaged into one startup size."""
+        count = len(self.startup_tokens)
+        if len(self.models) != count or not any(self.models):
+            return "", list(range(count))
+        tally: dict[str, int] = {}
+        for family in self.models:
+            tally[family] = tally.get(family, 0) + 1
+        family = max(sorted(tally), key=lambda name: tally[name])
+        return family, [index for index, name in enumerate(self.models) if name == family]
+
+    def removable_chars(self, family: str) -> tuple[float, list[tuple[str, int, int, float]]]:
+        """Characters per spawn of the tools and MCP servers offered on
+        ``family`` that at most :data:`REMOVABLE_USE_SHARE` of the spawns
+        offered them called (never the tools Claude Code adds whatever the
+        list says), and each such tool as ``(key, offered, used, chars per
+        spawn offered)``, largest first."""
+        spawns = self.tool_spawns.get(family, 0)
+        if not spawns:
+            return 0.0, []
+        rows = [
+            (key, offer.offered, offer.used, offer.chars / offer.offered)
+            for key, offer in self.tools.get(family, {}).items()
+            if offer.offered and key not in _ALWAYS_OFFERED and offer.used <= REMOVABLE_USE_SHARE * offer.offered
+        ]
+        rows.sort(key=lambda row: (-row[3], row[0]))
+        total = sum(self.tools[family][key].chars for key, _o, _u, _c in rows) / spawns
+        return total, rows
 
 
-def _startup_parts(events_before: list[Event], first: Turn | None) -> tuple[dict[str, float], dict[str, float], bool]:
-    """Tokens per startup part (:data:`STARTUP_PARTS`), CLAUDE.md tokens
-    per source (``User``/``Project``/``Local``/``AutoMem``/``Managed``/
-    ``Nested``/``Other``), and whether a system-prompt snapshot was seen.
-    """
-    chars: dict[str, float] = {part: 0.0 for part in STARTUP_PARTS}
-    claude_md_by_source: dict[str, float] = {}
-    saw_snapshot = False
-    chars["task_prompt"] = _human_prompt_est_tokens(first, events_before) * _CHARS_PER_TOKEN_APPROX
-    for event in events_before:
+@dataclass(slots=True)
+class _Startup:
+    """What one spawn's transcript records for its first call (see
+    :func:`_startup_chars`): characters per part, never text."""
+
+    chars: dict[str, float]
+    claude_md_by_source: dict[str, float]
+    #: A snapshot that lists tools was recorded (so tool definitions are
+    #: measured, not left unrecorded).
+    saw_tools: bool = False
+    #: Each built-in tool's definition size by name, and each MCP server's
+    #: total, from that snapshot.
+    tool_chars: dict[str, int] = field(default_factory=dict)
+    server_chars: dict[str, int] = field(default_factory=dict)
+
+
+def _startup_events(sub: TranscriptResult, first: Turn, second: Turn | None) -> list[Event]:
+    """The events that make up ``sub``'s first call. A subagent writes its
+    tools snapshot, agent roster and MCP instructions after that call, so
+    besides everything before it (:func:`_events_before_first_turn`) this
+    takes the roster and MCP instructions that arrive before the second
+    call, and the first snapshot that lists tools wherever it sits. Later
+    snapshots that list tools are not startup, and a header-only snapshot
+    adds nothing."""
+    events = _events_before_first_turn(sub, first)
+    taken = {id(event) for event in events}
+    have_tools = any(
+        event.kind == EventKind.CONTEXT_INJECT and event.subkind == "prompt_snapshot" and event.detail.get("tools_chars")
+        for event in events
+    )
+    stop = _parse_ts(second.ts) if second is not None else None
+    for event in sub.events:
+        if id(event) in taken:
+            continue
+        if event.kind == EventKind.CONTEXT_INJECT and event.subkind == "prompt_snapshot":
+            if event.detail.get("tools_chars") and not have_tools:
+                events.append(event)
+                have_tools = True
+        elif event.kind == EventKind.CACHE_SIGNAL and event.subkind in _LATE_STARTUP_SUBKINDS:
+            when = _parse_ts(event.ts)
+            if stop is None or (when is not None and when < stop):
+                events.append(event)
+    return events
+
+
+def _startup_chars(events: list[Event], first: Turn | None) -> _Startup:
+    """Characters per startup part (:data:`STARTUP_PARTS`) and CLAUDE.md
+    characters per source (``User``/``Project``/``Local``/``AutoMem``/
+    ``Managed``/``Nested``/``Other``) in ``events``, which
+    :func:`_startup_events` picked. The system prompt is the snapshots'
+    own, counted once (every snapshot repeats it); the tool definitions
+    are those of the first snapshot that lists tools."""
+    found = _Startup(chars={part: 0.0 for part in STARTUP_PARTS}, claude_md_by_source={})
+    chars = found.chars
+    claude_md_by_source = found.claude_md_by_source
+    saw_system = False
+    chars["task_prompt"] = _human_prompt_chars(first, events)
+    for event in events:
         size = event.size_chars or 0
         if event.kind == EventKind.CONTEXT_INJECT and event.subkind == "prompt_snapshot":
-            saw_snapshot = True
-            chars["system_prompt"] += event.detail.get("system_chars") or 0
-            chars["tool_definitions"] += event.detail.get("tools_chars") or 0
+            if not saw_system and event.detail.get("system_chars"):
+                saw_system = True
+                chars["system_prompt"] += event.detail["system_chars"]
+            if event.detail.get("tools_chars") and not found.saw_tools:
+                found.saw_tools = True
+                chars["tool_definitions"] += event.detail["tools_chars"]
+                found.tool_chars = dict(event.detail.get("tool_chars") or {})
+                found.server_chars = dict(event.detail.get("server_chars") or {})
         elif event.kind == EventKind.CONTEXT_INJECT and event.subkind == "instructions":
             chars["claude_md"] += size
             for source, source_chars in (event.detail.get("chars_by_type") or {}).items():
@@ -406,9 +650,44 @@ def _startup_parts(events_before: list[Event], first: Turn | None) -> tuple[dict
             chars["hook_context"] += size
         elif event.kind in (EventKind.CONTEXT_INJECT, EventKind.REMINDER, EventKind.CACHE_SIGNAL, EventKind.ATTACHMENT):
             chars["other_attachments"] += size
-    tokens = {part: value / _CHARS_PER_TOKEN_APPROX for part, value in chars.items()}
-    by_source = {source: value / _CHARS_PER_TOKEN_APPROX for source, value in claude_md_by_source.items()}
-    return tokens, by_source, saw_snapshot
+    return found
+
+
+def _startup_tokens(
+    startup: _Startup, calibration: Calibration, model: str | None
+) -> tuple[dict[str, float], dict[str, float]]:
+    """:func:`_startup_chars` as tokens on ``model``: the tool definitions
+    at the model's tool-definition rate, everything else at its text rate.
+    Returns the tokens per part and the CLAUDE.md tokens per source."""
+    tokens = {
+        part: (
+            calibration.tool_tokens(value, model)
+            if part == "tool_definitions"
+            else calibration.text_tokens(value, model)
+        )
+        for part, value in startup.chars.items()
+    }
+    by_source = {source: calibration.text_tokens(value, model) for source, value in startup.claude_md_by_source.items()}
+    return tokens, by_source
+
+
+def first_call(sub: TranscriptResult) -> FirstCall | None:
+    """``sub``'s first call as the numbers :mod:`calibration` needs:
+    its model, the characters of its tool definitions and of every other
+    recorded startup part, and its cache-read and other input tokens.
+    ``None`` for a fork (its cache read is the parent's conversation, not
+    a tool prefix) and for a transcript with no priced call."""
+    first = _first_priced_turn(sub)
+    if first is None or sub.meta.agent_type == "fork":
+        return None
+    startup = _startup_chars(_startup_events(sub, first, _second_priced_turn(sub)), first)
+    return FirstCall(
+        model=first.model or "",
+        tool_chars=int(startup.chars["tool_definitions"]),
+        text_chars=int(sum(value for part, value in startup.chars.items() if part != "tool_definitions")),
+        shared_prefix_tokens=first.cache_read_tokens,
+        own_tokens=first.input_tokens + first.cache_creation_tokens,
+    )
 
 
 @dataclass(slots=True)
@@ -419,6 +698,9 @@ class ContextBudgetStats:
 
     projects: dict[str, _ProjectAcc] = field(default_factory=dict)
     agents: dict[str, _AgentStartupAcc] = field(default_factory=dict)
+    #: Characters per token by model family, measured on the corpus's own
+    #: first calls (``report.py`` sets it before any session is added).
+    calibration: Calibration = field(default_factory=Calibration)
     #: Where each main session ran (its transcript's ``entrypoint``, ``""``
     #: when none was recorded) -> sessions, for :attr:`desktop_only`.
     entrypoints: dict[str, int] = field(default_factory=dict)
@@ -435,11 +717,13 @@ class ContextBudgetStats:
         self, sub: TranscriptResult, parent_ctx_at_spawn: int | None = None, pricing: "Pricing | None" = None
     ) -> None:
         """Fold one subagent transcript into its agent type's startup
-        breakdown: what the transcript records before the first priced
-        turn (task prompt, CLAUDE.md, skills listing, tool lists, hook
-        output, other attachments and -- when a system-prompt snapshot was
-        recorded -- the system prompt and tool definitions), next to the
-        first turn's full input size.
+        breakdown: what the transcript records for the first priced call
+        (task prompt, CLAUDE.md, skills listing, tool lists, hook output,
+        other attachments, the system prompt and the tool definitions --
+        see :func:`_startup_events` for why some of those sit after the
+        call), next to the call's full input size (P0) and the three
+        parts of it: the shared prefix it read from cache, what the spawn
+        wrote itself and the first prompt that went in uncached.
 
         ``parent_ctx_at_spawn`` is the parent's context size on the turn
         that spawned this subagent (``None`` when it can't be joined). A
@@ -466,27 +750,51 @@ class ContextBudgetStats:
             acc.fork_spawns += 1
             return
 
-        events_before = _events_before_first_turn(sub, first)
-        parts, claude_md_by_source, saw_snapshot = _startup_parts(events_before, first)
+        events = _startup_events(sub, first, _second_priced_turn(sub))
+        startup = _startup_chars(events, first)
+        family = model_family(first.model)
+        parts, claude_md_by_source = _startup_tokens(startup, self.calibration, first.model)
+        measured = len(acc.startup_tokens)
         acc.startup_tokens.append(first.input_tokens + first.cache_creation_tokens + first.cache_read_tokens)
+        acc.shared_prefix_tokens.append(first.cache_read_tokens)
+        acc.written_tokens.append(first.cache_creation_tokens)
+        acc.prompt_tokens.append(first.input_tokens)
+        acc.models.append(family)
         for part, tokens in parts.items():
             acc.parts.setdefault(part, []).append(tokens)
-        for source, tokens in claude_md_by_source.items():
-            acc.claude_md_by_source.setdefault(source, []).append(tokens)
-        if saw_snapshot:
+        # One entry per spawn for every source seen so far, so the lists
+        # line up with ``startup_tokens`` (a spawn without a source is 0).
+        for source in set(acc.claude_md_by_source) | set(claude_md_by_source):
+            values = acc.claude_md_by_source.setdefault(source, [0.0] * measured)
+            values.append(claude_md_by_source.get(source, 0.0))
+        if startup.saw_tools:
             acc.snapshot_spawns += 1
         resolved = pricing.resolve_model(first.model) if pricing is not None else None
         if resolved is not None:
             acc.write_prices.append(resolved.rates.cache_write_5m)
+            acc.write_price_models.append(family)
 
         tool_names = {name for turn in sub.turns for name in turn.tool_names}
+        if startup.saw_tools:
+            acc.tool_spawns[family] = acc.tool_spawns.get(family, 0) + 1
+            offers = acc.tools.setdefault(family, {})
+            for name, chars in startup.tool_chars.items():
+                offer = offers.setdefault(name, _ToolOffer())
+                offer.offered += 1
+                offer.chars += chars
+                offer.used += name in tool_names
+            for server, chars in startup.server_chars.items():
+                offer = offers.setdefault(mcp_tool_key(server), _ToolOffer())
+                offer.offered += 1
+                offer.chars += chars
+                offer.used += any(tool_server(name) == server for name in tool_names)
         if parts["skills_listing"] > 0:
             acc.skills_listed_spawns += 1
             if "Skill" in tool_names:
                 acc.skills_used_spawns += 1
         mcp_offered = any(
             event.detail.get("mcp_added")
-            for event in events_before
+            for event in events
             if event.kind == EventKind.CACHE_SIGNAL and event.subkind == "deferred_tools_delta"
         )
         if mcp_offered:
@@ -520,10 +828,17 @@ class ContextBudgetStats:
         first = _first_priced_turn(top)
         if first is not None:
             acc.baseline_writes.append(first.cache_creation_tokens)
+            acc.shared_prefix_tokens.append(first.cache_read_tokens)
+            acc.first_prompt_tokens.append(first.input_tokens)
+            acc.first_call_tokens.append(first.input_tokens + first.cache_creation_tokens + first.cache_read_tokens)
 
         events_before = _events_before_first_turn(top, first)
-        acc.human_prompt_est_tokens.append(_human_prompt_est_tokens(first, events_before))
-        acc.skills_listing_est_tokens.append(_skills_listing_est_tokens(events_before))
+        model = first.model if first is not None else None
+        acc.human_prompt_est_tokens.append(_human_prompt_est_tokens(first, events_before, self.calibration))
+        acc.skills_listing_est_tokens.append(_skills_listing_est_tokens(events_before, self.calibration, model))
+        mcp_tokens = _mcp_tools_tokens(top, first, self.calibration)
+        if mcp_tokens is not None:
+            acc.mcp_tools_tokens.append(mcp_tokens)
 
         # rates=None: only trigger/pre_tokens/dropped_tokens are read by
         # this module (all come straight from the COMPACT_BOUNDARY event,
@@ -640,29 +955,40 @@ def _latest_statusline_window_by_project(
 
 def _baseline_row(
     project: str,
-    sessions: int,
-    baseline_writes: list[int],
-    human_list: list[float],
-    skills_list: list[float],
+    acc: _ProjectAcc,
     snapshot: Snapshot | None,
+    calibration: Calibration,
+    servers: Sequence[tool_search.McpServerRow] | None = None,
 ) -> list:
-    mean_baseline = _mean(baseline_writes)
-    median_baseline = _median(baseline_writes)
-    human_est = _mean(human_list) or 0.0
-    skills_est = _mean(skills_list) or 0.0
-    memory_est = _memory_files_est_tokens(snapshot)
+    mean_baseline = _mean(acc.first_call_tokens)
+    median_baseline = _median(acc.first_call_tokens)
+    human_est = _mean(acc.human_prompt_est_tokens) or 0.0
+    skills_est = _mean(acc.skills_listing_est_tokens) or 0.0
+    memory_est = _memory_files_est_tokens(snapshot, calibration)
     agents_est = _custom_agents_est_tokens(snapshot)
-    mcp_flag = _mcp_tools_flag(snapshot)
+    # The servers the sessions were offered, priced as tool search prices
+    # them; with none known, whether the config snapshot names any.
+    mcp_flag, mcp_usd = _mcp_servers_summary(servers, None if project == "all" else project)
+    if mcp_flag is None:
+        mcp_flag = _mcp_tools_flag(snapshot)
+    mcp_tokens = _mean(acc.mcp_tools_tokens)
 
     known_total = human_est + skills_est
     if isinstance(memory_est, (int, float)):
         known_total += memory_est
     if isinstance(agents_est, (int, float)):
         known_total += agents_est
+    if mcp_tokens is not None:
+        known_total += mcp_tokens
+
+    # What you can change: the skills list, the memory files and the MCP
+    # tools. The rest of the first call is Claude Code's own tool JSON and
+    # system prompt, which no setting removes.
+    controllable = skills_est + (memory_est or 0.0) + (mcp_tokens or 0.0) if acc.first_call_tokens else None
 
     # Floored at 0, but the floor is not silently absorbed: when the
-    # chars/4 estimates alone already exceed the measured baseline, that
-    # is itself informative (the estimates over-shot), so this reports
+    # estimates alone already exceed the measured first call, that is
+    # itself informative (the estimates over-shot), so this reports
     # None rather than a misleading 0.0 -- see fix #24 and the table note
     # below.
     if not isinstance(mean_baseline, (int, float)):
@@ -674,14 +1000,20 @@ def _baseline_row(
 
     return [
         project,
-        sessions,
+        acc.sessions,
         mean_baseline,
         median_baseline,
+        _mean(acc.shared_prefix_tokens),
+        _mean(acc.baseline_writes),
+        _mean(acc.first_prompt_tokens),
         human_est,
         skills_est,
         memory_est,
         agents_est,
         mcp_flag,
+        mcp_tokens,
+        mcp_usd,
+        controllable,
         residual,
     ]
 
@@ -694,40 +1026,53 @@ def _snapshot_for_project(latest_snapshots: dict[str, Snapshot], acc: _ProjectAc
     return found if found is not None else latest_snapshots.get(acc.project)
 
 
-def _build_baseline_table(stats: ContextBudgetStats, latest_snapshots: dict[str, Snapshot]) -> Table:
+def _build_baseline_table(
+    stats: ContextBudgetStats,
+    latest_snapshots: dict[str, Snapshot],
+    calibration: Calibration | None = None,
+    servers: Sequence[tool_search.McpServerRow] | None = None,
+) -> Table:
+    calibration = calibration or stats.calibration
     columns = [
         Column(key="project", label="Project", kind="str"),
         Column(key="sessions", label="Sessions", kind="int"),
-        Column(key="mean_baseline", label="Mean baseline (measured)", kind="tokens"),
-        Column(key="median_baseline", label="Median baseline (measured)", kind="tokens"),
+        Column(key="mean_baseline", label="Mean first call (measured)", kind="tokens"),
+        Column(key="median_baseline", label="Median first call (measured)", kind="tokens"),
+        Column(key="shared_prefix", label="Shared prefix (measured)", kind="tokens"),
+        Column(key="session_written", label="Written by the session (measured)", kind="tokens"),
+        Column(key="first_prompt", label="First prompt (measured)", kind="tokens"),
         Column(key="human_prompt_est", label="Human prompt (est)", kind="tokens"),
         Column(key="skills_listing_est", label="Skills listing (est)", kind="tokens"),
         Column(key="memory_files_est", label="Memory files (est)", kind="tokens"),
         Column(key="custom_agents_est", label="Custom agents (est)", kind="tokens"),
         Column(key="mcp_tools_est", label="MCP tools (est)", kind="str"),
+        Column(key="mcp_tools_tokens", label="MCP tools in the first call (est)", kind="tokens"),
+        Column(key="mcp_servers_usd", label="Cost of keeping the MCP servers offered (est)", kind="money"),
+        Column(key="controllable_est", label="What you can change (est)", kind="tokens"),
         Column(key="system_prompt_and_tools_est", label="System prompt and tools (est)", kind="tokens"),
     ]
 
-    all_baseline: list[int] = []
-    all_human: list[float] = []
-    all_skills: list[float] = []
-    all_sessions = 0
+    everything = _ProjectAcc(project="all")
 
     rows: list[list] = []
     for project in sorted(stats.projects):
         acc = stats.projects[project]
-        all_baseline.extend(acc.baseline_writes)
-        all_human.extend(acc.human_prompt_est_tokens)
-        all_skills.extend(acc.skills_listing_est_tokens)
-        all_sessions += acc.sessions
+        everything.sessions += acc.sessions
+        for name in (
+            "baseline_writes",
+            "shared_prefix_tokens",
+            "first_prompt_tokens",
+            "first_call_tokens",
+            "human_prompt_est_tokens",
+            "skills_listing_est_tokens",
+            "mcp_tools_tokens",
+        ):
+            getattr(everything, name).extend(getattr(acc, name))
 
         snapshot = _snapshot_for_project(latest_snapshots, acc)
-        rows.append(
-            _baseline_row(project, acc.sessions, acc.baseline_writes, acc.human_prompt_est_tokens,
-                          acc.skills_listing_est_tokens, snapshot)
-        )
+        rows.append(_baseline_row(project, acc, snapshot, calibration, servers))
 
-    rows.insert(0, _baseline_row("all", all_sessions, all_baseline, all_human, all_skills, None))
+    rows.insert(0, _baseline_row("all", everything, None, calibration, servers))
 
     return Table(
         name="context_budget_baseline",
@@ -735,27 +1080,36 @@ def _build_baseline_table(stats: ContextBudgetStats, latest_snapshots: dict[str,
         columns=columns,
         rows=rows,
         notes=[
-            "Human prompt, skills listing and memory files (est) count "
-            f"characters (or bytes) divided by {_CHARS_PER_TOKEN_APPROX} as "
-            "tokens: no tokenizer reads your transcripts. Custom agents (est) "
-            f"is the number of agents times {_AGENT_LISTING_TOKENS_PER_AGENT} "
-            "tokens. MCP tools (est) says only whether MCP tools are there "
-            "(\"present, size unknown\"), not their size. This tool can't "
-            "measure an MCP server's own tool definitions. Claude Code's own "
+            "The first call is everything the first reply read: new input, cache writes and cache reads. "
+            "It splits into the shared prefix read from cache (mostly Claude Code's own tool definitions), "
+            "what the session wrote itself, and the first prompt that went in uncached. "
+            "The same tools measure differently on each model, so compare projects that ran on one model.",
+            "Human prompt, skills listing, memory files and MCP tools (est) count characters (or bytes) "
+            f"divided by characters per token, {calibration.basis()}: no tokenizer reads your transcripts. "
+            f"Custom agents (est) is the number of agents times {_AGENT_LISTING_TOKENS_PER_AGENT} "
+            "tokens. \"MCP tools\" counts the MCP servers the sessions were offered, by what can be done "
+            "about them, with what keeping them cost, from the same per-server prices as the tool search "
+            "section. A server built into the desktop app is shown with its cost and has nothing to remove. "
+            "With none offered it says only whether MCP servers are configured. "
+            "\"MCP tools in the first call\" sizes the definitions, "
+            "deferred-tool names and instructions that call carried. Claude Code's own "
             "/context view is the authoritative breakdown of the context "
             "window. Treat every (est) figure here as a rough guide, never as "
             "exact.",
             "The \"all\" row sums every project's own sessions into one "
-            "mean and median baseline. Its memory files, custom agents and "
-            "MCP tools are left blank. Those figures come from each project's "
+            "mean and median. Its memory files and custom agents "
+            "are left blank. Those figures come from each project's "
             "own config snapshot, which can't be combined across projects.",
+            "\"What you can change\" adds the skills listing, memory files and MCP tools. "
+            "The rest is mostly Claude Code's own tool definitions and system prompt, "
+            "which no setting removes.",
             "\"System prompt and tools (est)\" is what is left over: the "
-            "mean baseline minus every other known (est) part, and never "
+            "mean first call minus every other known (est) part, and never "
             "below 0. It also takes in any part that couldn't be estimated "
             "at all (for example, no config snapshot for that project). So a "
             "large figure here does not always mean a large system prompt. "
             "It is left empty rather than 0 when the (est) parts alone "
-            "already exceed the measured baseline. That means the estimates "
+            "already exceed the measured first call. That means the estimates "
             "overshot, not that the system prompt is free.",
         ],
     )
@@ -940,6 +1294,7 @@ def build_section(
     snapshots: list[Snapshot] | None = None,
     usage_log_rows: list[dict] | None = None,
     pricing: Pricing | None = None,
+    mcp_servers: Sequence[tool_search.McpServerRow] | None = None,
 ) -> Section:
     """Build the "Context budget" report section (key
     ``"context_budget"``). See the module docstring for the three tables.
@@ -971,6 +1326,12 @@ def build_section(
     top-level transcript at all -- the same "still return a Section,
     never omit it" convention every other section in this codebase
     follows for its own precondition-not-met case.
+
+    ``mcp_servers`` is ``tool_search``'s per-server rows
+    (``ToolSearchStats.mcp_servers``): the baseline table's MCP column
+    reuses their cost and kinds rather than judging servers from config
+    names, which the desktop app's own and connector servers never appear
+    in.
     """
     if not stats.projects:
         return Section(
@@ -986,12 +1347,31 @@ def build_section(
     latest_snapshots = snapshots_mod.latest_snapshot_per_project(snapshots) if snapshots else {}
 
     tables = [
-        _build_baseline_table(stats, latest_snapshots),
+        _build_baseline_table(stats, latest_snapshots, servers=mcp_servers),
         _build_autocompact_table(stats, latest_snapshots, usage_log_rows, pricing),
         _build_statusline_table(usage_log_rows, stats.desktop_only),
+        _build_calibration_table(stats.calibration),
     ]
 
     return Section(key="context_budget", title="Context budget", tables=tables, notes=[])
+
+
+def _build_calibration_table(calibration: Calibration) -> Table:
+    columns = [
+        Column(key="model", label="Model", kind="str"),
+        Column(key="tool_chars_per_token", label="Tool definitions (characters per token)", kind="float"),
+        Column(key="text_chars_per_token", label="Other text (characters per token)", kind="float"),
+    ]
+    return Table(
+        name="context_budget_calibration",
+        title="Characters per token",
+        columns=columns,
+        rows=calibration.rows(),
+        notes=[
+            f"Every token figure built from characters in this report is {calibration.basis()}. "
+            "A model gets its own figure once it has ten first calls to measure; until then 4.0 stands in.",
+        ],
+    )
 
 
 # -- subagent startup section ------------------------------------------------
@@ -1001,11 +1381,25 @@ def _mean_or_zero(values: list[float] | None) -> float:
     return fmean(values) if values else 0.0
 
 
+def _picked(values: list, positions: list[int], count: int) -> list:
+    """``values``' entries at ``positions``, when it has one per measured
+    spawn (``count``); a list built some other way is used whole."""
+    return [values[i] for i in positions] if len(values) == count else values
+
+
+def _fixed_write_prices(acc: _AgentStartupAcc, family: str) -> list[float]:
+    if family and len(acc.write_price_models) == len(acc.write_prices):
+        return [price for price, model in zip(acc.write_prices, acc.write_price_models) if model == family]
+    return acc.write_prices
+
+
 def _build_startup_table(stats: ContextBudgetStats) -> Table:
     columns = [
         Column(key="agent_type", label="Agent type", kind="str"),
         Column(key="spawns", label="Spawns", kind="int"),
         Column(key="fork_spawns", label="Forks (left out)", kind="int"),
+        Column(key="model", label="Model measured", kind="str"),
+        Column(key="other_model_spawns", label="Other models (left out)", kind="int"),
         Column(key="startup_tokens", label="Startup size", kind="tokens"),
         Column(key="task_prompt", label="Task prompt", kind="tokens"),
         Column(key="claude_md", label="CLAUDE.md and memory", kind="tokens"),
@@ -1028,22 +1422,28 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             label="...of which, Managed policy CLAUDE.md (still loads either way)",
             kind="tokens",
         ),
+        Column(key="removable_tools", label="Tools never used (can be left out)", kind="tokens"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
         acc = stats.agents[agent_type]
         if not acc.startup_tokens:
             continue
-        startup = fmean(acc.startup_tokens)
-        parts = {part: _mean_or_zero(acc.parts.get(part)) for part in STARTUP_PARTS}
+        count = len(acc.startup_tokens)
+        family, positions = acc.fixed_model()
+        startup = fmean(_picked(acc.startup_tokens, positions, count))
+        parts = {part: _mean_or_zero(_picked(acc.parts.get(part, []), positions, count)) for part in STARTUP_PARTS}
         known = sum(parts.values())
         not_recorded = max(0.0, startup - known)
         measured_pct = min(100.0, known / startup * 100) if startup else None
-        managed_claude_md = _mean_or_zero(acc.claude_md_by_source.get("Managed"))
+        managed_claude_md = _mean_or_zero(_picked(acc.claude_md_by_source.get("Managed", []), positions, count))
+        prices = _fixed_write_prices(acc, family)
+        removable_chars, _tools = acc.removable_chars(family)
+        removable = stats.calibration.tool_tokens(removable_chars, family or None) if _tools else None
         rows.append(
-            [agent_type, acc.spawns, acc.fork_spawns, startup]
+            [agent_type, acc.spawns, acc.fork_spawns, family or None, count - len(positions), startup]
             + [parts[part] for part in STARTUP_PARTS]
-            + [not_recorded, measured_pct, fmean(acc.write_prices) if acc.write_prices else None, managed_claude_md]
+            + [not_recorded, measured_pct, fmean(prices) if prices else None, managed_claude_md, removable]
         )
     return Table(
         name="agent_startup_breakdown",
@@ -1052,15 +1452,60 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
         rows=rows,
         notes=[
             "Startup size is the first turn's whole input (new, cache-write and cache-read tokens). "
-            "Every other column is the average per spawn, in tokens, estimated as characters / "
-            f"{_CHARS_PER_TOKEN_APPROX} from what the transcript records before that first turn.",
-            "The system prompt and tool definitions are only measured when Claude Code recorded a "
-            "system-prompt snapshot for the spawn; otherwise they sit in \"Not recorded\".",
+            "Every other column is the average per spawn, in tokens, estimated from what the transcript "
+            f"records for that first turn, at characters per token {stats.calibration.basis()}.",
+            "Each row averages the spawns on one model, the one most of that agent type's spawns ran on. "
+            "The same tools measure differently on each model, as each one counts tokens its own way. "
+            "Spawns on any other model are counted apart and left out, so a mix of models never "
+            "decides which agent type looks big.",
+            "Claude Code writes a subagent's tool definitions after its first call, so they come from the "
+            "snapshot recorded just after it. A spawn with no such snapshot leaves its tool definitions in "
+            "\"Not recorded\".",
             "Forks inherit the parent's conversation and prompt cache, so they are counted but kept "
             "out of the averages.",
             "\"CLAUDE.md and memory\" includes a managed policy CLAUDE.md (also shown on its own in "
             "the last column). An agent's setting that skips CLAUDE.md files skips only the project's "
             "own ones: a policy CLAUDE.md still loads.",
+            "\"Tools never used\" is the size of the tool definitions and MCP servers this agent type was "
+            f"offered and called in at most {int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them. "
+            "A tools list on the agent would leave them out. Tools Claude Code adds whatever the list says "
+            "are not counted.",
+        ],
+    )
+
+
+def _build_tools_table(stats: ContextBudgetStats) -> Table:
+    columns = [
+        Column(key="agent_type", label="Agent type", kind="str"),
+        Column(key="model", label="Model measured", kind="str"),
+        Column(key="tool", label="Tool", kind="str"),
+        Column(key="offered_spawns", label="Spawns offered it", kind="int"),
+        Column(key="used_spawns", label="Spawns that used it", kind="int"),
+        Column(key="definition_tokens", label="Definition size", kind="tokens"),
+    ]
+    rows: list[list] = []
+    for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
+        acc = stats.agents[agent_type]
+        if not acc.startup_tokens:
+            continue
+        family, _positions = acc.fixed_model()
+        _total, tools = acc.removable_chars(family)
+        for key, offered, used, chars in tools[:_TOOL_ROWS_PER_AGENT]:
+            rows.append(
+                [agent_type, family or None, key, offered, used, stats.calibration.tool_tokens(chars, family or None)]
+            )
+    return Table(
+        name="agent_startup_tools",
+        title="Tools offered to a subagent and rarely used",
+        columns=columns,
+        rows=rows,
+        notes=[
+            "One row per tool or MCP server an agent type was offered and called in at most "
+            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered it, largest first, "
+            f"up to {_TOOL_ROWS_PER_AGENT} per agent type. An MCP server's tools are one row, "
+            "named as an allowlist names them.",
+            "Sizes are tool definitions only, read from the first snapshot that lists tools, "
+            f"at characters per token {stats.calibration.basis()}. No description is kept.",
         ],
     )
 
@@ -1140,6 +1585,19 @@ def _is_shared(means: list[float], measured_types: int) -> bool:
     return top > 0 and all(abs(top - value) <= _SHARED_TOLERANCE * top for value in means)
 
 
+def _reference_family(stats: ContextBudgetStats) -> str:
+    """The model most measured spawns ran on, which every agent type is
+    compared on in the shared table (``""`` when the accumulators don't
+    name models)."""
+    tally: dict[str, int] = {}
+    for acc in stats.agents.values():
+        if len(acc.models) == len(acc.startup_tokens):
+            for family in acc.models:
+                if family:
+                    tally[family] = tally.get(family, 0) + 1
+    return max(sorted(tally), key=lambda name: tally[name]) if tally else ""
+
+
 def _build_shared_table(stats: ContextBudgetStats) -> Table:
     columns = [
         Column(key="part", label="What", kind="str"),
@@ -1148,15 +1606,39 @@ def _build_shared_table(stats: ContextBudgetStats) -> Table:
         Column(key="mean_tokens", label="Size per spawn", kind="tokens"),
         Column(key="total_tokens", label="Total across spawns", kind="tokens"),
     ]
-    measured = [acc for acc in stats.agents.values() if acc.startup_tokens]
+    # Agent types are compared on one model: the same tool set is a
+    # different size on each, which would otherwise decide what looks shared.
+    reference = _reference_family(stats)
+    measured: list[tuple[_AgentStartupAcc, list[int]]] = []
+    for acc in stats.agents.values():
+        if not acc.startup_tokens:
+            continue
+        count = len(acc.startup_tokens)
+        positions = (
+            [i for i, family in enumerate(acc.models) if family == reference]
+            if reference and len(acc.models) == count
+            else list(range(count))
+        )
+        if positions:
+            measured.append((acc, positions))
     rows: list[list] = []
     if len(measured) >= 2:
+        sources = sorted({source for acc, _ in measured for source in acc.claude_md_by_source})
         candidates: list[tuple[str, str, list[list[float]]]] = [
-            (f"claude_md:{source}", CLAUDE_MD_SOURCES.get(source, source), [acc.claude_md_by_source.get(source, []) for acc in measured])
-            for source in sorted({source for acc in measured for source in acc.claude_md_by_source})
+            (
+                f"claude_md:{source}",
+                CLAUDE_MD_SOURCES.get(source, source),
+                [_picked(acc.claude_md_by_source.get(source, []), positions, len(acc.startup_tokens)) for acc, positions in measured],
+            )
+            for source in sources
         ]
         candidates += [
-            (part, source, [acc.parts.get(part, []) for acc in measured]) for part, source in _PART_SOURCES.items()
+            (
+                part,
+                source,
+                [_picked(acc.parts.get(part, []), positions, len(acc.startup_tokens)) for acc, positions in measured],
+            )
+            for part, source in _PART_SOURCES.items()
         ]
         for key, source, per_agent in candidates:
             receiving = [values for values in per_agent if values and fmean(values) > 0]
@@ -1175,6 +1657,9 @@ def _build_shared_table(stats: ContextBudgetStats) -> Table:
             "A part is listed when at least half of the agent types receive it at about the same "
             f"size (within {int(_SHARED_TOLERANCE * 100)}%). That usually means one shared source. "
             "Trimming that source shrinks every one of those spawns.",
+            "Only spawns on "
+            + (reference or "one model")
+            + " are compared, so the model never decides which parts look shared.",
         ],
     )
 
@@ -1194,7 +1679,12 @@ def build_startup_section(stats: ContextBudgetStats) -> Section:
     return Section(
         key="agent_startup",
         title="Subagent startup",
-        tables=[_build_startup_table(stats), _build_unused_table(stats), _build_shared_table(stats)],
+        tables=[
+            _build_startup_table(stats),
+            _build_unused_table(stats),
+            _build_shared_table(stats),
+            _build_tools_table(stats),
+        ],
         notes=[],
     )
 
@@ -1202,8 +1692,11 @@ def build_startup_section(stats: ContextBudgetStats) -> Section:
 __all__ = [
     "CLAUDE_MD_SOURCES",
     "ContextBudgetStats",
+    "REMOVABLE_USE_SHARE",
     "STARTUP_PARTS",
     "build_section",
     "build_startup_section",
+    "first_call",
     "load_context_window_rows",
+    "mcp_tool_key",
 ]

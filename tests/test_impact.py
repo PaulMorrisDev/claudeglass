@@ -858,6 +858,83 @@ def test_ratio_test_needs_enough_sessions_per_row_not_just_overall():
     assert row["p"] is None
 
 
+# -- Phase 8a: the context at the start is compared on one model ---------------
+
+
+def _on(days: float, model: str, startup: int, *, agent_startup: int | None = None) -> SessionFacts:
+    """A session whose main transcript (and Explore spawn) ran on ``model``."""
+    facts = _session(days, 1.0)
+    facts.main.model = model
+    facts.main.startup_tokens = startup
+    if agent_startup is not None:
+        facts.spawns = [("Explore", _Transcript(cost=0.2, turns=3, startup_tokens=agent_startup, model=model))]
+    return facts
+
+
+_STARTUP = Measure("startup_tokens", "Context at the start of a session", "tokens")
+
+
+def test_a_start_of_context_before_and_after_on_different_models_gives_no_figure():
+    """The same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5: a
+    switch of model would read as the change cutting or adding context."""
+    before = [_on(-d, "claude-haiku-4-5", 51_500) for d in (1, 2, 3, 4)]
+    after = [_on(d, "claude-sonnet-5", 69_400) for d in (1, 2, 3, 4)]
+    row = impact._measure_row(_STARTUP, before, after, UNITS)
+    assert row["model"] is None
+    assert row["before_value"] is None and row["after_value"] is None
+    assert row["change_pct"] is None
+    assert row["label_key"] == "too_little_data"
+
+
+def test_a_start_of_context_is_read_on_the_model_both_sides_share():
+    before = [_on(-d, "claude-haiku-4-5", 51_500) for d in (1, 2, 3)] + [
+        _on(-d, "claude-sonnet-5", 70_000) for d in (4, 5, 6, 7, 8)
+    ]
+    after = [_on(d, "claude-sonnet-5", 60_000) for d in (1, 2, 3, 4)] + [_on(5, "claude-opus-5", 90_000)]
+    row = impact._measure_row(_STARTUP, before, after, UNITS)
+    assert row["model"] == "claude-sonnet-5"
+    assert row["before_value"] == pytest.approx(70_000)
+    assert row["after_value"] == pytest.approx(60_000)
+    assert (row["before_n"], row["after_n"]) == (5, 4)
+    assert row["change_pct"] == pytest.approx(-14.3)
+
+
+def test_a_transcript_names_the_model_family_of_its_first_reply_without_the_date():
+    def transcript(model: str) -> _Transcript:
+        turn = Turn(message_id="m1", turn_index=1, model=model, cache_creation_tokens=2_000, cache_read_tokens=50_000)
+        return impact._transcript(TranscriptResult(turns=[turn]), load_pricing())
+
+    dated = transcript("claude-haiku-4-5-20251001")
+    assert dated.model == "claude-haiku-4-5" == transcript("claude-haiku-4-5").model
+    assert dated.startup_tokens == 52_000
+    assert transcript("claude-sonnet-5[1m]").model == "claude-sonnet-5"
+
+
+def test_an_agents_start_of_context_is_held_to_one_model_too():
+    measure = Measure("agent_startup", "Explore: context at the start of each spawn", "tokens", "Explore")
+    before = [_on(-d, "claude-haiku-4-5", 1, agent_startup=51_500) for d in (1, 2, 3)]
+    after = [_on(d, "claude-haiku-4-5", 1, agent_startup=45_000) for d in (1, 2, 3)] + [
+        _on(4, "claude-sonnet-5", 1, agent_startup=69_400)
+    ]
+    row = impact._measure_row(measure, before, after, UNITS)
+    assert row["model"] == "claude-haiku-4-5"
+    assert row["before_value"] == pytest.approx(51_500)
+    assert row["after_value"] == pytest.approx(45_000)
+    assert row["after_n"] == 3
+
+    swapped = [_on(d, "claude-sonnet-5", 1, agent_startup=69_400) for d in (1, 2, 3)]
+    gone = impact._measure_row(measure, before, swapped, UNITS)
+    assert gone["model"] is None and gone["after_value"] is None
+
+
+def test_a_measure_that_does_not_depend_on_the_model_has_no_model_on_its_row():
+    before = [_on(-d, "claude-haiku-4-5", 51_500) for d in (1, 2, 3)]
+    after = [_on(d, "claude-sonnet-5", 69_400) for d in (1, 2, 3)]
+    row = impact._measure_row(Measure("cost_per_session", "Cost per session", "money"), before, after, UNITS)
+    assert "model" not in row
+    assert row["before_value"] == pytest.approx(1.0) and row["after_value"] == pytest.approx(1.0)
+
+
 # -- Phase 5: the lead measure, the mix of sessions and cost per request --------
 
 

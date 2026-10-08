@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import context_files, parse
+from claudeglass import calibration, context_files, parse
 from claudeglass.model import TranscriptMeta, TranscriptResult, Turn
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import effective_rates, load_pricing
@@ -101,6 +101,29 @@ def test_carrying_costs_nothing_without_pricing(tmp_path):
     assert data["files"][0]["sends"] == 1
 
 
+def test_a_files_tokens_and_cost_use_the_calibrated_characters_per_token(tmp_path):
+    """A file is 400 characters: 100 tokens at the default 4.0, 200 at a
+    measured 2.0 for the model that read it (cost scales with the tokens)."""
+    pricing = load_pricing()
+    measured = calibration.Calibration(text={"claude-sonnet-5": 2.0}, default_family="claude-sonnet-5")
+    result = _transcript(tmp_path, "main")
+
+    plain = context_files.ContextFileStats()
+    plain.add(result, pricing, is_main=True)
+    found = context_files.ContextFileStats(calibration=measured)
+    found.add(result, pricing, is_main=True)
+
+    a = plain.to_dict()["files"][0]
+    b = found.to_dict()["files"][0]
+    assert a["tokens"] == 100 and b["tokens"] == 200
+    assert a["cost_usd"] > 0
+    assert b["cost_usd"] == pytest.approx(a["cost_usd"] * 2)
+    skills_a = {row["name"]: row for row in plain.to_dict()["skills"]}
+    skills_b = {row["name"]: row for row in found.to_dict()["skills"]}
+    assert skills_b["pdf"]["listing_tokens"] == round(len("- pdf: Read PDFs.") / 2.0)
+    assert skills_a["pdf"]["listing_tokens"] == round(len("- pdf: Read PDFs.") / 4.0)
+
+
 # -- ROB-P2: index_at (bisect) / cost (prefix sums) match the old O(k*T)
 # algorithm exactly ----------------------------------------------------------
 #
@@ -132,7 +155,7 @@ def _reference_index_at(carry: context_files._Carry, ts: str | None) -> int:
 def _reference_cost(carry: context_files._Carry, chars: int, start: int, end: int) -> float:
     if chars <= 0 or start >= end:
         return 0.0
-    tokens_m = chars / context_files._CHARS_PER_TOKEN_APPROX / 1_000_000
+    tokens_m = chars / calibration.FALLBACK / 1_000_000
     total = 0.0
     for offset, turn in enumerate(carry.turns[start:end]):
         rates = _reference_rates(carry, turn)

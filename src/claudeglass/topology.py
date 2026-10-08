@@ -28,6 +28,15 @@ Two things this module reads only lengths/counts/ids of, never content:
   (direct spawns) and then ``parent_agent_id`` (further agents those
   spawns themselves started) — so a custom skill that fans out is costed
   as a whole, per the plan.
+
+Phase 8a: the spawn-write and session-baseline tables read the whole first
+call (P0 = uncached input + cache write + cache read), shown as the shared
+prefix the call read from cache, what the session wrote itself and the
+first prompt. A cache write alone left out the tool definitions a warm
+cache served. The spawn-write table compares agent types on one model
+each, since the same tools measure 51.5k tokens on Haiku 4.5 and 69.4k on
+Sonnet 5; spawns on any other model are counted in ``other_model_spawns``
+and left out of the means.
 """
 
 from __future__ import annotations
@@ -38,14 +47,15 @@ from pathlib import Path
 from typing import Sequence
 
 from . import jsonl
+from .calibration import Calibration, model_family
 from .model import Column, EventKind, Section, Table, TranscriptResult, Turn
 from .pricing import Pricing, price_turn
 
-#: No tokenizer is run over transcript content (privacy rule); tool-result
-#: and attachment sizes are only ever known in characters, so this is the
-#: approximate chars-per-token ratio used to render them as a token
-#: estimate — every table built from it says "approximate" explicitly.
-_CHARS_PER_TOKEN_APPROX = 4
+# No tokenizer is run over transcript content (privacy rule); tool-result
+# and attachment sizes are only ever known in characters, so they are
+# rendered as a token estimate at the characters per token measured on the
+# corpus's own first calls (:mod:`calibration`, 4.0 until a model has ten)
+# -- every table built from it says "approximate" explicitly.
 
 #: How many turns after a compact_boundary count as "rediscovery" if they
 #: re-Read a file (Feature expansion item 2).
@@ -118,11 +128,14 @@ def _report_index(top: TranscriptResult, subs: Sequence[TranscriptResult]) -> _R
     return index
 
 
-def _report_tokens(result: TranscriptResult, index: _ReportIndex | None = None) -> int:
+def _report_tokens(
+    result: TranscriptResult, index: _ReportIndex | None = None, calibration: Calibration | None = None
+) -> int:
     """The size of the report one agent handed back to whatever started
     it, in approximate tokens: the parent-side tool_result (or, for a
     background agent, its task notification) when ``index`` has it,
-    measured in characters over :data:`_CHARS_PER_TOKEN_APPROX`. Falls
+    measured in characters over the calibrated characters per token of
+    the agent's model (``chars / 4`` without a ``calibration``). Falls
     back to the agent's own last priced turn's output tokens -- a proxy,
     since that turn can also carry tool calls or thinking -- when the
     parent side wasn't found (a digest parsed before ``PARSER_VERSION``
@@ -134,7 +147,8 @@ def _report_tokens(result: TranscriptResult, index: _ReportIndex | None = None) 
         if chars is None and result.meta.agent_id:
             chars = index.by_agent_id.get(agent_key(result.meta.agent_id))
         if chars is not None:
-            return round(chars / _CHARS_PER_TOKEN_APPROX)
+            first = _first_priced_turn(result)
+            return round((calibration or Calibration()).text_tokens(chars, first.model if first else None))
     priced = _priced_turns(result)
     return priced[-1].output_tokens if priced else 0
 
@@ -234,6 +248,17 @@ def _transitive_closure(
 
 
 @dataclass(slots=True)
+class _StartingCall:
+    """One spawn's first call: its model family and the parts of its P0."""
+
+    family: str
+    first_call: int
+    shared_prefix: int
+    written: int
+    prompt: int
+
+
+@dataclass(slots=True)
 class _SkillAccumulator:
     invocations: int = 0
     direct_cost: float = 0.0
@@ -255,9 +280,22 @@ class TopologyStats:
 
     sessions_seen: int = 0
 
-    # (a) downward: spawn write per agent type, session baseline
+    #: Characters per token by model family, measured on the corpus's own
+    #: first calls (``report.py`` sets it before any session is added).
+    calibration: Calibration = field(default_factory=Calibration)
+
+    # (a) downward: spawn write per agent type, session baseline. The
+    # write is the first call's cache write (what the session or spawn
+    # wrote itself); its P0 is that plus the shared prefix it read and the
+    # first prompt that went in uncached.
     spawn_write_by_agent_type: dict[str, list[int]] = field(default_factory=dict)
     session_baseline_writes: list[int] = field(default_factory=list)
+    session_first_calls: list[int] = field(default_factory=list)
+    session_shared_prefix: list[int] = field(default_factory=list)
+    session_first_prompts: list[int] = field(default_factory=list)
+    #: Agent type -> each spawn's first call, with its model family, so
+    #: the table can compare agent types on one model.
+    spawn_first_calls: dict[str, list[_StartingCall]] = field(default_factory=dict)
     #: Capture-improvements addition (A7): the spawning top-level turn's
     #: ``agent_brief_chars`` for each direct spawn (joined via
     #: ``sub.meta.tool_use_id`` -> ``_tool_use_index_from_turns``, same
@@ -362,6 +400,11 @@ class TopologyStats:
         baseline_turn = _first_priced_turn(top)
         if baseline_turn is not None:
             self.session_baseline_writes.append(baseline_turn.cache_creation_tokens)
+            self.session_shared_prefix.append(baseline_turn.cache_read_tokens)
+            self.session_first_prompts.append(baseline_turn.input_tokens)
+            self.session_first_calls.append(
+                baseline_turn.input_tokens + baseline_turn.cache_creation_tokens + baseline_turn.cache_read_tokens
+            )
         # A7: join each sub back to its spawning top-level turn (same
         # tool_use_id join the skill roll-up uses) to read that turn's
         # own agent_brief_chars.
@@ -373,6 +416,15 @@ class TopologyStats:
                 continue
             label = _agent_type_label(sub)
             self.spawn_write_by_agent_type.setdefault(label, []).append(first.cache_creation_tokens)
+            self.spawn_first_calls.setdefault(label, []).append(
+                _StartingCall(
+                    family=model_family(first.model),
+                    first_call=first.input_tokens + first.cache_creation_tokens + first.cache_read_tokens,
+                    shared_prefix=first.cache_read_tokens,
+                    written=first.cache_creation_tokens,
+                    prompt=first.input_tokens,
+                )
+            )
             brief_chars = self._spawn_brief_chars(sub, tool_use_index, turns_by_message_id)
             if brief_chars is not None:
                 self.spawn_brief_chars_by_agent_type.setdefault(label, []).append(brief_chars)
@@ -405,7 +457,9 @@ class TopologyStats:
         index = _report_index(top, subs)
         for sub in subs:
             label = _agent_type_label(sub)
-            self.report_proxy_by_agent_type.setdefault(label, []).append(_report_tokens(sub, index))
+            self.report_proxy_by_agent_type.setdefault(label, []).append(
+                _report_tokens(sub, index, self.calibration)
+            )
 
     # -- (c) skill roll-up -------------------------------------------------
 
@@ -462,7 +516,9 @@ class TopologyStats:
 
             closure = _transitive_closure(direct_subs, children_by_parent)
             acc.spawned_cost += sum(_transcript_cost(sub, rates_lookup) for sub in closure)
-            acc.report_proxy_values.extend(_report_tokens(sub, report_index) for sub in closure)
+            acc.report_proxy_values.extend(
+                _report_tokens(sub, report_index, self.calibration) for sub in closure
+            )
 
     # -- (d) chains --------------------------------------------------------
 
@@ -552,9 +608,10 @@ class TopologyStats:
             self.composition_baseline.setdefault(kind, []).append(
                 first.cache_creation_tokens if first is not None else 0
             )
+            model = first.model if first is not None else None
             tool_result_chars_total = sum(result.tool_result_chars.values())
             self.composition_tool_result_tokens.setdefault(kind, []).append(
-                tool_result_chars_total / _CHARS_PER_TOKEN_APPROX
+                self.calibration.text_tokens(tool_result_chars_total, model)
             )
             output_total = sum(t.output_tokens for t in _priced_turns(result))
             self.composition_output_tokens.setdefault(kind, []).append(output_total)
@@ -564,7 +621,7 @@ class TopologyStats:
                 if e.kind in (EventKind.CACHE_SIGNAL, EventKind.REMINDER, EventKind.CONTEXT_INJECT)
             )
             self.composition_attachment_tokens.setdefault(kind, []).append(
-                attachment_chars / _CHARS_PER_TOKEN_APPROX
+                self.calibration.text_tokens(attachment_chars, model)
             )
             compaction_count = sum(1 for e in result.events if e.kind == EventKind.COMPACT_SUMMARY)
             self.composition_compactions.setdefault(kind, []).append(compaction_count)
@@ -648,33 +705,73 @@ class TopologyStats:
 # -- Section/Table assembly --------------------------------------------------
 
 
+def _fixed_starting_calls(calls: list[_StartingCall]) -> tuple[str, list[_StartingCall]]:
+    """The model family most of ``calls`` ran on, and the calls on it. A
+    first call's size depends on the model that tokenized it, so agent
+    types are compared on one model each, never on a mix. ``""`` and all
+    the calls when none names a model."""
+    tally: dict[str, int] = {}
+    for call in calls:
+        if call.family:
+            tally[call.family] = tally.get(call.family, 0) + 1
+    if not tally:
+        return "", calls
+    family = max(sorted(tally), key=lambda name: tally[name])
+    return family, [call for call in calls if call.family == family]
+
+
 def _build_spawn_write_table(stats: TopologyStats) -> Table:
     columns = [
         Column(key="agent_type", label="Agent type", kind="str"),
         Column(key="spawns", label="Spawns", kind="int"),
+        Column(key="model", label="Model measured", kind="str"),
+        Column(key="other_model_spawns", label="Other models (left out)", kind="int"),
+        Column(key="mean_first_call", label="Mean first call", kind="tokens"),
+        Column(key="mean_shared_prefix", label="Mean shared prefix", kind="tokens"),
         Column(key="mean_write", label="Mean spawn write", kind="tokens"),
         Column(key="median_write", label="Median spawn write", kind="tokens"),
+        Column(key="mean_first_prompt", label="Mean first prompt", kind="tokens"),
         Column(key="mean_briefing_chars", label="Mean briefing chars", kind="int"),
     ]
-    rows = [
-        [
-            agent_type,
-            len(values),
-            _mean(values),
-            _median(values),
-            _mean(stats.spawn_brief_chars_by_agent_type.get(agent_type, [])),
-        ]
-        for agent_type, values in sorted(stats.spawn_write_by_agent_type.items())
-    ]
+    rows = []
+    for agent_type, values in sorted(stats.spawn_write_by_agent_type.items()):
+        calls = stats.spawn_first_calls.get(agent_type, [])
+        if len(calls) == len(values):
+            family, kept = _fixed_starting_calls(calls)
+            writes = [call.written for call in kept]
+            rows.append(
+                [
+                    agent_type,
+                    len(values),
+                    family or None,
+                    len(values) - len(kept),
+                    _mean([call.first_call for call in kept]),
+                    _mean([call.shared_prefix for call in kept]),
+                    _mean(writes),
+                    _median(writes),
+                    _mean([call.prompt for call in kept]),
+                    _mean(stats.spawn_brief_chars_by_agent_type.get(agent_type, [])),
+                ]
+            )
+        else:
+            rows.append(
+                [agent_type, len(values), None, 0, None, None, _mean(values), _median(values), None,
+                 _mean(stats.spawn_brief_chars_by_agent_type.get(agent_type, []))]
+            )
     return Table(
         name="topology_spawn_write",
-        title="Downward: mean/median first-turn cache_creation per agent type (spawn write)",
+        title="Downward: first call per agent type, and what each spawn writes itself",
         columns=columns,
         rows=rows,
         notes=[
-            "The startup write is the cache write on each subagent's first"
-            " reply. It holds the task prompt, system prompt and any preloaded"
-            " skills you pay to write into that agent's cache.",
+            "The first call is everything a subagent's first reply read: new input, cache writes and cache reads."
+            " Most of it is usually the shared prefix, which is mainly Claude Code's own tool definitions"
+            " read from cache.",
+            "The spawn write is the cache write on that first reply. It holds the task prompt, system prompt"
+            " and any preloaded skills you pay to write into that agent's cache.",
+            "Each row averages the spawns on one model, the one most of that agent type's spawns ran on."
+            " The same tools measure differently on each model, so spawns on any other model are counted apart"
+            " and left out.",
             "Your MCP servers and plugins aren't matched against this table:"
             " nothing yet links a subagent's startup write to the settings in"
             " effect when it ran.",
@@ -686,7 +783,7 @@ def _build_spawn_write_table(stats: TopologyStats) -> Table:
 
 
 def _build_session_baseline_table(stats: TopologyStats) -> Table:
-    values = stats.session_baseline_writes
+    values = stats.session_first_calls
     columns = [
         # v0.2.0 fix A2: leading string row-key column -- see
         # recache.py's module docstring for the same fix and rationale;
@@ -696,17 +793,33 @@ def _build_session_baseline_table(stats: TopologyStats) -> Table:
         Column(key="sessions", label="Sessions", kind="int"),
         Column(key="mean_baseline", label="Mean session baseline", kind="tokens"),
         Column(key="median_baseline", label="Median session baseline", kind="tokens"),
+        Column(key="mean_shared_prefix", label="Mean shared prefix", kind="tokens"),
+        Column(key="mean_write", label="Mean written by the session", kind="tokens"),
+        Column(key="mean_first_prompt", label="Mean first prompt", kind="tokens"),
     ]
-    rows = [["all", len(values), _mean(values), _median(values)]]
+    rows = [
+        [
+            "all",
+            len(values),
+            _mean(values),
+            _median(values),
+            _mean(stats.session_shared_prefix),
+            _mean(stats.session_baseline_writes),
+            _mean(stats.session_first_prompts),
+        ]
+    ]
     return Table(
         name="topology_session_baseline",
-        title="Session baseline: top-level first-turn cache_creation",
+        title="Session baseline: top-level first call",
         columns=columns,
         rows=rows,
         notes=[
-            "The main session's own first reply: system prompt, CLAUDE.md and"
-            " the tool definitions loaded up front. Your MCP servers and"
-            " plugins aren't matched against it: nothing yet links the two.",
+            "The main session's own first reply, everything it read: the shared prefix read from cache"
+            " (mostly the tool definitions Claude Code loads up front), what the session wrote itself"
+            " (system prompt and CLAUDE.md), and the first prompt that went in uncached."
+            " Your MCP servers and plugins aren't matched against it: nothing yet links the two.",
+            "The same tools measure differently on each model, so compare this between periods only when the"
+            " sessions ran on one model.",
         ],
     )
 
@@ -756,7 +869,7 @@ def _build_report_proxy_table(stats: TopologyStats) -> Table:
         rows=rows,
         notes=[
             "Report size is the report each subagent handed back, in"
-            f" characters divided by {_CHARS_PER_TOKEN_APPROX}. It is measured"
+            f" characters divided by characters per token, {stats.calibration.basis()}. It is measured"
             " where the report arrived: the Agent tool's result in the parent,"
             " or a background agent's task notification. When the parent side wasn't found,"
             " it falls back to the output tokens of the subagent's own last"
@@ -1018,7 +1131,7 @@ def _build_composition_table(stats: TopologyStats) -> Table:
         rows=rows,
         notes=[
             "Tool result and Claude Code note token counts are approximate:"
-            f" characters divided by {_CHARS_PER_TOKEN_APPROX}. No tokenizer"
+            f" characters divided by characters per token, {stats.calibration.basis()}. No tokenizer"
             " reads your transcripts, to keep them private.",
         ],
     )

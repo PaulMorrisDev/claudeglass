@@ -9,6 +9,7 @@ through both ``events.classify_line`` directly and a full
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -337,6 +338,43 @@ def test_prompt_snapshot_sizes_go_to_detail_not_size_chars():
     assert event.detail["system_chars"] == 1500
     assert event.detail["tool_count"] == 2
     assert event.detail["tools_chars"] > 50
+
+
+def test_prompt_snapshot_records_each_built_in_tools_size_and_each_servers_total():
+    read = {"name": "Read", "description": "Private description of the tool.", "input_schema": {"type": "object"}}
+    bash = {"name": "Bash", "description": "b" * 80}
+    first = {"name": "mcp__figma__get", "description": "f" * 40}
+    second = {"name": "mcp__figma__put", "description": "g" * 60}
+    other = {"name": "mcp__other__run", "description": "o" * 20}
+    line = attachment_line("prompt_snapshot", tools=[read, bash, first, second, other])
+    detail = events.classify_line(line).detail
+
+    def size(tool):
+        return len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False))
+
+    assert detail["tool_chars"] == {"Read": size(read), "Bash": size(bash)}
+    assert detail["server_chars"] == {"figma": size(first) + size(second), "other": size(other)}
+    assert detail["tools_chars"] == sum(size(t) for t in (read, bash, first, second, other))
+    assert detail["tool_count"] == 5
+    # Sizes and names only: no description, schema or other tool name.
+    assert "Private" not in repr(detail)
+    assert "mcp__figma__get" not in repr(detail)
+
+
+def test_prompt_snapshot_leaves_out_a_tool_name_that_is_not_a_plain_identifier():
+    odd = {"name": "C:\\Users\\someone\\secret notes", "description": "x"}
+    line = attachment_line("prompt_snapshot", tools=[odd, {"name": "Read"}, "not a tool", {"description": "no name"}])
+    detail = events.classify_line(line).detail
+    assert detail["tool_chars"] == {"Read": len(json.dumps({"name": "Read"}, separators=(",", ":")))}
+    assert "server_chars" not in detail
+    assert "secret" not in repr(detail)
+    assert detail["tool_count"] == 4
+
+
+def test_a_header_only_prompt_snapshot_records_no_tool_sizes():
+    line = attachment_line("prompt_snapshot", systemPrompt=["x" * 10], toolChangeHeader="tools changed")
+    detail = events.classify_line(line).detail
+    assert detail == {"system_chars": 10}
 
 
 def test_context_inject_invoked_skills_counts_names():

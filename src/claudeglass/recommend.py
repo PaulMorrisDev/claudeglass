@@ -275,8 +275,10 @@ class RecommendThresholds:
     # cache-read-dominance: "cache_read > 50% of cost".
     cache_read_dominance_pct: float = 50.0
 
-    # baseline-bloat: "top-level first-turn cache_creation > 30k tokens
-    # and snapshot shows >= 5 MCP servers or prefix-loaded tools".
+    # baseline-bloat: "the part of a session's first call a setting can
+    # change (skills list, memory files, MCP tools) >= 30k tokens and
+    # snapshot shows >= 5 MCP servers or prefix-loaded tools". Not the whole
+    # first call: about 43k tokens of it are Claude Code's own tool JSON.
     baseline_bloat_tokens: float = 30_000.0
     baseline_bloat_min_mcp_or_plugins: int = 5
 
@@ -284,8 +286,13 @@ class RecommendThresholds:
     # agent type".
     agent_report_size_tokens: float = 8_000.0
 
-    # spawn-cost: "mean first-turn write per agent type > 40k tokens".
+    # spawn-cost: "mean first call per agent type > 40k tokens, and at least
+    # 5k tokens of its tool definitions it never or rarely uses". The first
+    # call alone says little: Claude Code's own tool definitions are 51.5k
+    # tokens of it on Haiku 4.5 and 69.4k on Sonnet 5, so what can be left
+    # out (a tools list on the agent) is what the card is about.
     spawn_cost_tokens: float = 40_000.0
+    spawn_cost_removable_tokens: float = 5_000.0
     # spawn-claude-md / spawn-unused-* / spawn-task-prompt (the
     # agent_startup section, part by part): measured spawns before any of
     # them fires, the per-spawn size a CLAUDE.md or shared part must reach,
@@ -971,18 +978,41 @@ def _rule_cache_read_dominance(report: ReportModel, th: RecommendThresholds) -> 
     ]
 
 
+def _controllable_baseline(report: ReportModel) -> tuple[object, float] | None:
+    """The ``context_budget_baseline`` row with the most at the start of a
+    session that a setting can change (its skills list, memory files and
+    MCP tools), as ``(row key, tokens)``. A project's own row, as the
+    "all" row has no memory files of its own: the "all" row only when
+    there is no project row. ``None`` when the table or column is missing
+    or no row sizes it."""
+    table = _table(report, "context_budget", "context_budget_baseline")
+    if table is None:
+        return None
+    index = _col_index(table, "controllable_est")
+    if index is None:
+        return None
+    rows = [row for row in table.rows if row and row[0] != "all"] or [row for row in table.rows if row]
+    best: tuple[object, float] | None = None
+    for row in rows:
+        value = row[index] if index < len(row) else None
+        if isinstance(value, (int, float)) and (best is None or value > best[1]):
+            best = (row[0], float(value))
+    return best
+
+
 def _rule_baseline_bloat(
     report: ReportModel, th: RecommendThresholds, snapshot: Snapshot | None, archetype: str | None
 ) -> list[Recommendation]:
     if archetype in _NO_SUBAGENT_ARCHETYPES:
         return []
-    baseline_table = _table(report, "agents", "topology_session_baseline")
-    if baseline_table is None or not baseline_table.rows:
+    # Gated on the part a setting can change, never on the whole first
+    # call: about 43k tokens of every first call are Claude Code's own
+    # tool definitions and system prompt, which no setting removes, so
+    # the raw size says nothing about the user's own configuration.
+    controllable = _controllable_baseline(report)
+    if controllable is None or controllable[1] < th.baseline_bloat_tokens:
         return []
-    row_key = baseline_table.rows[0][0]
-    mean_baseline = _cell(report, "agents", "topology_session_baseline", row_key, "mean_baseline")
-    if not isinstance(mean_baseline, (int, float)) or mean_baseline <= th.baseline_bloat_tokens:
-        return []
+    cb_row_key = controllable[0]
     if snapshot is None:
         return []
     # COV-03 (P7a): prefer the deep-merged, per-layer-precedence
@@ -999,72 +1029,62 @@ def _rule_baseline_bloat(
     if prefix_count < th.baseline_bloat_min_mcp_or_plugins:
         return []
 
-    # Prefer the sized context-budget buckets over the plain
-    # cache-creation count when that section is present -- it names
-    # *where* the baseline goes rather than just how big it is.
+    # The controllable part first, then the sized buckets that make it up:
+    # the card names *where* the baseline goes, not just how big it is.
     evidence = [
-        _evidence("Mean session baseline (cache-creation)", mean_baseline, "agents", "topology_session_baseline", row_key),
+        _evidence(
+            "What you can change at the start of a session (est)",
+            controllable[1],
+            "context_budget",
+            "context_budget_baseline",
+            cb_row_key,
+        )
     ]
     biggest_bucket_label: str | None = None
-    cb_table = _table(report, "context_budget", "context_budget_baseline")
-    if cb_table is not None:
-        # Fix #21: the "all" row is built with snapshot=None
-        # (context_budget._build_baseline_table), so its memory-files and
-        # custom-agents buckets are structurally null -- when the report
-        # covers exactly one project, cite that project's own row instead,
-        # which carries every bucket.
-        project_row_keys = [row[0] for row in cb_table.rows if row[0] != "all"]
-        cb_row_key = (
-            project_row_keys[0]
-            if len(project_row_keys) == 1
-            else next((row[0] for row in cb_table.rows if row[0] == "all"), None)
+    # The residual ("system prompt and tools") is a remainder -- mean first
+    # call minus every other known bucket -- not a sized bucket in its own
+    # right, so it is excluded from the "biggest bucket" contest entirely.
+    # It is still shown as evidence, as is the measured first call.
+    bucket_columns = (
+        ("human_prompt_est", "human prompt"),
+        ("skills_listing_est", "skills listing"),
+        ("memory_files_est", "memory files"),
+        ("custom_agents_est", "custom agents"),
+        ("mcp_tools_tokens", "MCP tools"),
+    )
+    best_value: float | None = None
+    for column_key, label in bucket_columns:
+        value = _cell(report, "context_budget", "context_budget_baseline", cb_row_key, column_key)
+        if not isinstance(value, (int, float)):
+            continue
+        evidence.append(
+            _evidence(f"Estimated {label} (est)", value, "context_budget", "context_budget_baseline", cb_row_key)
         )
-        if cb_row_key is not None:
-            # The residual ("system prompt and tools") is a remainder --
-            # mean baseline minus every other known bucket -- not a sized
-            # bucket in its own right, so it is excluded from the "biggest
-            # bucket" contest entirely (it would otherwise win by default
-            # whenever a bucket the table can't size, e.g. MCP tools, ate
-            # into the true total). It is still shown as evidence.
-            bucket_columns = (
-                ("human_prompt_est", "human prompt"),
-                ("skills_listing_est", "skills listing"),
-                ("memory_files_est", "memory files"),
-                ("custom_agents_est", "custom agents"),
+        # Only what a setting can change competes for "largest".
+        if column_key != "human_prompt_est" and (best_value is None or value > best_value):
+            best_value, biggest_bucket_label = value, label
+    first_call = _cell(report, "context_budget", "context_budget_baseline", cb_row_key, "mean_baseline")
+    if isinstance(first_call, (int, float)):
+        evidence.append(
+            _evidence(
+                "Mean first call (measured)", first_call, "context_budget", "context_budget_baseline", cb_row_key
             )
-            residual_column = ("system_prompt_and_tools_est", "system prompt and tools")
-            sized_evidence = []
-            best_label = None
-            best_value = None
-            for column_key, label in bucket_columns:
-                value = _cell(report, "context_budget", "context_budget_baseline", cb_row_key, column_key)
-                if not isinstance(value, (int, float)):
-                    continue
-                sized_evidence.append(
-                    _evidence(f"Estimated {label} (est)", value, "context_budget", "context_budget_baseline", cb_row_key)
-                )
-                if best_value is None or value > best_value:
-                    best_value, best_label = value, label
-            residual_value = _cell(
-                report, "context_budget", "context_budget_baseline", cb_row_key, residual_column[0]
+        )
+    residual = _cell(report, "context_budget", "context_budget_baseline", cb_row_key, "system_prompt_and_tools_est")
+    if isinstance(residual, (int, float)):
+        evidence.append(
+            _evidence(
+                "Estimated system prompt and tools (est)",
+                residual,
+                "context_budget",
+                "context_budget_baseline",
+                cb_row_key,
             )
-            if isinstance(residual_value, (int, float)):
-                sized_evidence.append(
-                    _evidence(
-                        f"Estimated {residual_column[1]} (est)",
-                        residual_value,
-                        "context_budget",
-                        "context_budget_baseline",
-                        cb_row_key,
-                    )
-                )
-            if sized_evidence:
-                evidence = sized_evidence
-                biggest_bucket_label = best_label
+        )
 
     action = (
         "Review which MCP servers and tool schemas load by default -- disabling unused "
-        "ones shrinks every session's first-turn cache write."
+        "ones shrinks every session's first call."
     )
     if biggest_bucket_label:
         action += f" The largest estimated share of that baseline is {biggest_bucket_label}."
@@ -1870,8 +1890,16 @@ def _rule_spawn_cost(
         agent_type = row[0]
         if covered and agent_type in covered:
             continue
-        mean_write = _cell(report, "agents", "topology_spawn_write", agent_type, "mean_write")
-        if not isinstance(mean_write, (int, float)) or mean_write <= th.spawn_cost_tokens:
+        # Gated on the whole first call and on the part of it a tools list
+        # on the agent would take out (what its snapshot offered and it
+        # rarely or never used), not on the cache write: that write is the
+        # briefing and CLAUDE.md, which the spawn-claude-md and
+        # spawn-task-prompt rules read part by part.
+        mean_first_call = _cell(report, "agents", "topology_spawn_write", agent_type, "mean_first_call")
+        if not isinstance(mean_first_call, (int, float)) or mean_first_call <= th.spawn_cost_tokens:
+            continue
+        removable = _cell(report, "agent_startup", "agent_startup_breakdown", agent_type, "removable_tools")
+        if not isinstance(removable, (int, float)) or removable < th.spawn_cost_removable_tokens:
             continue
         # Fix R3: topology_spawn_write has no priced_turns column of its
         # own; cross-reference ttl_by_agent_type's for the same agent
@@ -1881,7 +1909,14 @@ def _rule_spawn_cost(
         if not _row_meets_min_sample(th, spawns, priced_turns):
             continue
         evidence = [
-            _evidence("Mean first-turn write", mean_write, "agents", "topology_spawn_write", agent_type),
+            _evidence("Mean first call", mean_first_call, "agents", "topology_spawn_write", agent_type),
+            _evidence(
+                "Tool definitions it rarely or never uses",
+                removable,
+                "agent_startup",
+                "agent_startup_breakdown",
+                agent_type,
+            ),
         ]
         # Fix A1: only a genuine frontmatter-backed agent type has an
         # omitClaudeMd lever this rule can point at -- Claude Code's own

@@ -27,6 +27,16 @@ is split), for each interval in ``intervals``:
   corpus's real summaries). When the parent transcript can't be found, its
   part is left out.
 
+**Current settings only.** The auto-compact window now in force caps how
+long a run's context can grow: a run that peaked above it ran under an
+older, larger setting (or none), and its length says nothing about what a
+run costs now. Such runs are left out of every figure here (their count
+and cost are reported apart), so a limit the setting has since removed
+never earns a tip. A run's peak context is the largest context of any of
+its replies; the window comes from the latest config snapshot of the
+run's project (``build_report`` passes it). With no window known, every
+run counts.
+
 Each agent type's **best interval** is the one that saves most, among
 those with at least ``min_runs`` runs long enough to split. Short
 intervals split often and pay the add-backs often; long ones split only
@@ -45,7 +55,7 @@ from __future__ import annotations
 import statistics
 from bisect import bisect_right
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Callable, Union
 
 from .carry import boundary_turn_indices, carry_end_index, carry_rate_prefix
 from .compaction_sim import _shrunk_cost
@@ -61,6 +71,8 @@ ASSUMPTIONS: tuple[str, ...] = (
     "keeping both, one cache write of the fresh start and one file re-read allowance",
     "the run-split saving overlaps with the auto-compact saving: both come from carrying less context in "
     "later replies",
+    "a run whose context peaked above the auto-compact window now in force for its project ran under an "
+    "older setting and is left out, so only runs the current setting allows are counted",
 )
 
 #: The split intervals tried, in replies.
@@ -179,6 +191,12 @@ class RunSplitStats:
     rediscovery_allowance_usd: float = 0.0
     #: Runs long enough to split whose parent transcript wasn't found.
     no_parent_runs: int = 0
+    #: Runs left out because their peak context was above the window now in
+    #: force (they ran under an older setting), their cost, and the windows
+    #: that decided it.
+    older_runs: int = 0
+    older_usd: float = 0.0
+    windows: set[int] = field(default_factory=set)
 
     def agent(self, agent_type: str) -> AgentRunSplit:
         found = self.agents.get(agent_type)
@@ -291,13 +309,21 @@ def _run(
     allowance: float,
     th: RunSplitThresholds,
     stats: RunSplitStats,
+    window: int | None = None,
 ) -> None:
     priced = [t for t in tr.turns if t.turn_index > 0]
     if not priced:
         return
-    row = stats.agent(tr.meta.agent_type or "unknown")
     costs = [price_turn(t, lookup(t.model)).total for t in priced]
     run_usd = sum(costs)
+    if window is not None and max(t.ctx for t in priced) > window:
+        # Longer than the setting now in force lets a context grow: it ran
+        # under an older one.
+        stats.older_runs += 1
+        stats.older_usd += run_usd
+        stats.windows.add(window)
+        return
+    row = stats.agent(tr.meta.agent_type or "unknown")
     n = len(priced)
     row.runs += 1
     row.agent_usd += run_usd
@@ -333,18 +359,27 @@ def _run(
         stats.no_parent_runs += 1
 
 
+#: The auto-compact window now in force, as a number for every run or a
+#: function from a run to its own (``None``: not known, so it all counts).
+CurrentWindow = Union[int, None, Callable[[TranscriptResult], "int | None"]]
+
+
 def compute_run_split(
     results: list[TranscriptResult],
     pricing: Pricing,
     thresholds: RunSplitThresholds | None = None,
     rediscovery_allowance_usd: float = 0.0,
+    current_window: CurrentWindow = None,
 ) -> RunSplitStats:
     """The run-split figures over ``results`` (every transcript in the
     window; only subagent runs are split, the rest are read for the parent
     that started each one). ``rediscovery_allowance_usd``: the cost of
     re-reading files after a fresh start, per split; ``build_report``
     passes the one compaction_sim measured from this corpus's real
-    summaries."""
+    summaries. ``current_window``: the auto-compact window now in force
+    (for all runs, or per run); a run that peaked above it ran under an
+    older setting and is left out of every figure (see the module
+    docstring)."""
     th = thresholds or _DEFAULT_THRESHOLDS
     lookup = pricing.resolve_model
     stats = RunSplitStats(
@@ -366,7 +401,8 @@ def compute_run_split(
             if key not in views:
                 views[key] = _parent_view(parent_tr, lookup)
             parent = views[key]
-        _run(tr, lookup, parent, rediscovery_allowance_usd, th, stats)
+        window = current_window(tr) if callable(current_window) else current_window
+        _run(tr, lookup, parent, rediscovery_allowance_usd, th, stats, window)
     return stats
 
 
@@ -402,6 +438,8 @@ def build_section(stats: RunSplitStats, thresholds: RunSplitThresholds | None = 
             Column(key="saving_usd", label="Most you could save", kind="money"),
             Column(key="saving_pct", label="Share of subagent cost", kind="pct"),
             Column(key="agent_usd", label="Subagent cost", kind="money"),
+            Column(key="older_runs", label="Runs left out (older setting)", kind="int"),
+            Column(key="older_usd", label="Cost of those runs", kind="money"),
         ],
         rows=[
             [
@@ -415,6 +453,8 @@ def build_section(stats: RunSplitStats, thresholds: RunSplitThresholds | None = 
                 saving,
                 _share(saving, total_usd),
                 total_usd,
+                stats.older_runs,
+                stats.older_usd,
             ]
         ],
     )
@@ -488,6 +528,15 @@ def build_section(stats: RunSplitStats, thresholds: RunSplitThresholds | None = 
         notes.append(
             f"{stats.no_parent_runs} runs long enough to split have no parent transcript in view, so the "
             "parent's part of each split's cost is left out for them."
+        )
+    if stats.older_runs:
+        low, high = min(stats.windows), max(stats.windows)
+        window = f"{low:,}" if low == high else f"{low:,} to {high:,}"
+        many = stats.older_runs != 1
+        notes.append(
+            f"{stats.older_runs} run{'s' if many else ''} (${stats.older_usd:,.2f}) grew past the auto-compact "
+            f"window now in force ({window} tokens), so {'they' if many else 'it'} ran under an older setting. "
+            f"{'They are' if many else 'It is'} left out of every figure here."
         )
     if len(ranked) > th.top_n:
         notes.append(f"{len(ranked) - th.top_n} more agent types aren't listed.")

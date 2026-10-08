@@ -667,8 +667,12 @@ def _build_every_rule_fixture() -> "report.ReportModel":
             Table(
                 name="topology_spawn_write",
                 title="Spawn write",
-                columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                rows=[["claude-implementer", 50_000]],
+                columns=[
+                    Column(key="agent_type", label="Agent type"),
+                    Column(key="mean_first_call", label="Mean first call"),
+                    Column(key="mean_write", label="Mean write"),
+                ],
+                rows=[["claude-implementer", 110_000, 50_000]],
             ),
             Table(
                 name="topology_effort_tokens",
@@ -676,6 +680,44 @@ def _build_every_rule_fixture() -> "report.ReportModel":
                 columns=[Column(key="effort", label="Effort"), Column(key="thinking_share", label="Thinking share")],
                 rows=[["high", 50.0]],
             ),
+        ],
+    )
+
+    # baseline-bloat reads what a setting can change at the start of a
+    # session; spawn-cost reads the first call and the tool definitions an
+    # agent type is offered and rarely uses.
+    context_budget_section = Section(
+        key="context_budget",
+        title="Context budget",
+        tables=[
+            Table(
+                name="context_budget_baseline",
+                title="Baseline",
+                columns=[
+                    Column(key="project", label="Project"),
+                    Column(key="mean_baseline", label="Mean first call"),
+                    Column(key="skills_listing_est", label="Skills listing"),
+                    Column(key="memory_files_est", label="Memory files"),
+                    Column(key="mcp_tools_tokens", label="MCP tools"),
+                    Column(key="controllable_est", label="What you can change"),
+                ],
+                rows=[["proj", 95_000, 7_000, 7_000, 21_000, 35_000]],
+            )
+        ],
+    )
+    agent_startup_section = Section(
+        key="agent_startup",
+        title="Agent startup",
+        tables=[
+            Table(
+                name="agent_startup_breakdown",
+                title="Startup",
+                columns=[
+                    Column(key="agent_type", label="Agent type"),
+                    Column(key="removable_tools", label="Tools never used"),
+                ],
+                rows=[["claude-implementer", 8_000]],
+            )
         ],
     )
 
@@ -737,6 +779,8 @@ def _build_every_rule_fixture() -> "report.ReportModel":
             compactions_section,
             scorecard_section,
             agents_section,
+            context_budget_section,
+            agent_startup_section,
             sessions_section,
             phases_section,
             limits_section,

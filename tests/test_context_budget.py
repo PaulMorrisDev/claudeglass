@@ -9,11 +9,12 @@ fixture at ``tests/fixtures/real/session-a``.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
-from claudeglass import context_budget, statusline
+from claudeglass import calibration, context_budget, helptext, statusline, tool_search
 from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
@@ -25,6 +26,7 @@ from helpers import (
     assert_privacy,
     attachment_line,
     system_line,
+    tool_use_block,
     turn_line,
     user_str_line,
     write_jsonl,
@@ -126,19 +128,28 @@ def test_baseline_table_human_prompt_and_skills_listing_estimates(tmp_path):
     assert "proj-a" in row_by_project
 
     proj_row = row_by_project["proj-a"]
-    assert proj_row[col["mean_baseline"]] == pytest.approx(40_000)
-    assert proj_row[col["median_baseline"]] == pytest.approx(40_000)
+    # The first call is everything it read: 100 uncached input tokens and a
+    # 40,000-token cache write, split into the three parts it is made of.
+    assert proj_row[col["mean_baseline"]] == pytest.approx(40_100)
+    assert proj_row[col["median_baseline"]] == pytest.approx(40_100)
+    assert proj_row[col["shared_prefix"]] == pytest.approx(0)
+    assert proj_row[col["session_written"]] == pytest.approx(40_000)
+    assert proj_row[col["first_prompt"]] == pytest.approx(100)
     assert proj_row[col["human_prompt_est"]] == pytest.approx(10.0)
     assert proj_row[col["skills_listing_est"]] == pytest.approx(100.0)
     # No snapshot: memory/agents/mcp all null.
     assert proj_row[col["memory_files_est"]] is None
     assert proj_row[col["custom_agents_est"]] is None
     assert proj_row[col["mcp_tools_est"]] is None
-    # Residual = 40000 - (10 + 100) = 39890.
-    assert proj_row[col["system_prompt_and_tools_est"]] == pytest.approx(39_890.0)
+    # Residual = 40100 - (10 + 100) = 39990.
+    assert proj_row[col["system_prompt_and_tools_est"]] == pytest.approx(39_990.0)
+    # No snapshot and no MCP server: nothing to change, apart from the skills list.
+    assert proj_row[col["mcp_tools_tokens"]] is None
+    assert proj_row[col["controllable_est"]] == pytest.approx(100.0)
 
     every_column_label_ends_est = all(
-        c.label.endswith("(est)") or c.key in ("project", "sessions", "mean_baseline", "median_baseline")
+        c.label.endswith("(est)") or c.key
+        in ("project", "sessions", "mean_baseline", "median_baseline", "shared_prefix", "session_written", "first_prompt")
         for c in table.columns
     )
     assert every_column_label_ends_est
@@ -188,7 +199,7 @@ def test_baseline_table_residual_is_the_gap_when_baseline_exceeds_est(tmp_path):
     proj_row = next(row for row in table.rows if row[col["project"]] == "proj-a")
     human_est = proj_row[col["human_prompt_est"]]
     skills_est = proj_row[col["skills_listing_est"]]
-    assert proj_row[col["system_prompt_and_tools_est"]] == pytest.approx(50_000 - human_est - skills_est)
+    assert proj_row[col["system_prompt_and_tools_est"]] == pytest.approx(50_100 - human_est - skills_est)
 
 
 def test_baseline_table_uses_snapshot_for_memory_agents_mcp(tmp_path):
@@ -240,10 +251,79 @@ def test_baseline_table_all_row_aggregates_every_project(tmp_path):
     col = {c.key: i for i, c in enumerate(table.columns)}
     all_row = next(row for row in table.rows if row[col["project"]] == "all")
     assert all_row[col["sessions"]] == 2
-    assert all_row[col["mean_baseline"]] == pytest.approx(20_000.0)
+    assert all_row[col["mean_baseline"]] == pytest.approx(20_100.0)
     # The "all" row never carries per-project config-snapshot buckets.
     assert all_row[col["memory_files_est"]] is None
     assert all_row[col["custom_agents_est"]] is None
+
+
+def _mcp_row(kind, usd_by_project, server="srv"):
+    return tool_search.McpServerRow(server=server, kind=kind, usd_by_project=dict(usd_by_project))
+
+
+def _baseline_rows(stats, **kwargs):
+    section = context_budget.build_section(stats, **kwargs)
+    table = next(t for t in section.tables if t.name == "context_budget_baseline")
+    col = {c.key: i for i, c in enumerate(table.columns)}
+    return section, col, {row[col["project"]]: row for row in table.rows}
+
+
+def test_baseline_mcp_column_reuses_the_tool_search_prices(tmp_path):
+    top_a = _build_session(tmp_path, "a", session_id="sess_a")
+    top_b = _build_session(tmp_path, "b", session_id="sess_b")
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top_a)
+    stats.add_session("proj-b", top_b)
+    servers = [
+        _mcp_row(tool_search.KIND_DESKTOP_CONNECTOR, {"proj-a": 4.0, "proj-b": 1.0}),
+        _mcp_row(tool_search.KIND_DESKTOP_BUILTIN, {"proj-a": 2.5}),
+        _mcp_row(tool_search.KIND_USER, {"proj-b": 0.5}),
+    ]
+    section, col, rows = _baseline_rows(stats, mcp_servers=servers)
+
+    assert rows["proj-a"][col["mcp_tools_est"]] == "2 offered: 1 you can turn off, 1 built into the desktop app"
+    assert rows["proj-a"][col["mcp_servers_usd"]] == pytest.approx(6.5)
+    assert rows["proj-b"][col["mcp_tools_est"]] == "2 offered: 2 you can turn off"
+    assert rows["proj-b"][col["mcp_servers_usd"]] == pytest.approx(1.5)
+    assert rows["all"][col["mcp_tools_est"]] == "3 offered: 2 you can turn off, 1 built into the desktop app"
+    assert rows["all"][col["mcp_servers_usd"]] == pytest.approx(8.0)
+    assert_privacy(section)
+
+
+def test_baseline_mcp_column_never_calls_a_built_in_server_removable(tmp_path):
+    top = _build_session(tmp_path, "a", session_id="sess_a")
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    servers = [_mcp_row(tool_search.KIND_DESKTOP_BUILTIN, {"proj-a": 3.0})]
+    _, col, rows = _baseline_rows(stats, mcp_servers=servers)
+
+    text = rows["proj-a"][col["mcp_tools_est"]]
+    assert text == "1 offered: 1 built into the desktop app"
+    assert "turn off" not in text
+    # Its cost is still shown: the section sizes it, it just offers no fix.
+    assert rows["proj-a"][col["mcp_servers_usd"]] == pytest.approx(3.0)
+
+
+def test_baseline_mcp_column_counts_only_servers_the_project_was_offered(tmp_path):
+    top = _build_session(tmp_path, "a", session_id="sess_a")
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    servers = [_mcp_row(tool_search.KIND_CONNECTOR, {"proj-elsewhere": 9.0})]
+    _, col, rows = _baseline_rows(stats, mcp_servers=servers)
+
+    assert rows["proj-a"][col["mcp_tools_est"]] is None
+    assert rows["proj-a"][col["mcp_servers_usd"]] is None
+
+
+def test_baseline_mcp_column_falls_back_to_the_config_when_no_server_was_offered(tmp_path):
+    top = _build_session(tmp_path, "a", session_id="sess_a")
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    snapshot = _snapshot("proj-a", mcp_servers={"names": ["playwright"]})
+    _, col, rows = _baseline_rows(stats, snapshots=[snapshot], mcp_servers=[])
+
+    assert rows["proj-a"][col["mcp_tools_est"]] == "present, size unknown"
+    assert rows["proj-a"][col["mcp_servers_usd"]] is None
 
 
 # -- autocompact table ----------------------------------------------------
@@ -528,7 +608,7 @@ def test_real_fixture_renders_without_error():
     section = context_budget.build_section(stats)
 
     assert section.key == "context_budget"
-    assert len(section.tables) == 3
+    assert len(section.tables) == 4
     assert_privacy(section)
 
 
@@ -672,3 +752,281 @@ def test_the_desktop_variant_reaches_the_json_output(tmp_path):
     table = _statusline_table(_stats_for(tmp_path, ["claude-desktop"]))
     assert to_jsonable(table)["empty_variant"] == "desktop"
     assert to_jsonable(_statusline_table(_stats_for(tmp_path, ["cli"])))["empty_variant"] == ""
+
+
+# -- subagent startup: the tools snapshot arrives after the first call -----------------------------------------------
+
+def _stamp(line: dict, ts: str) -> dict:
+    line["timestamp"] = ts
+    return line
+
+
+def _tool(name: str, size: int = 300) -> dict:
+    return {"name": name, "description": "d" * size, "input_schema": {"type": "object"}}
+
+
+def _tool_chars(tool: dict) -> int:
+    return len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False))
+
+
+TOOLS = [_tool("Read"), _tool("Grep"), _tool("Bash", 900), _tool("mcp__figma__a"), _tool("mcp__figma__b", 500)]
+
+
+def _sub_lines(
+    *,
+    model: str = "claude-sonnet-5",
+    shared_prefix: int = 60_000,
+    written: int = 3_000,
+    uncached: int = 100,
+    tools: list | None = None,
+    header_after_second: bool = False,
+    later_snapshot: list | None = None,
+    used: str = "Read",
+) -> list[dict]:
+    """A subagent transcript the way Claude Code writes one: the system
+    prompt before the first call, then the tools snapshot, the agent
+    roster and the MCP instructions after it."""
+    tools = TOOLS if tools is None else tools
+    lines = [
+        _stamp(user_str_line("investigate the parser " * 4), "2026-09-18T12:00:00.000Z"),
+        _stamp(attachment_line("prompt_snapshot", systemPrompt=["s" * 2_000]), "2026-09-18T12:00:01.000Z"),
+        _stamp(
+            turn_line(
+                message_id="sub_1",
+                model=model,
+                input_tokens=uncached,
+                cache_creation_input_tokens=written,
+                cache_read_input_tokens=shared_prefix,
+            ),
+            "2026-09-18T12:00:02.000Z",
+        ),
+    ]
+    if tools:
+        lines.append(
+            _stamp(attachment_line("prompt_snapshot", systemPrompt=["s" * 2_000], tools=tools), "2026-09-18T12:00:03.000Z")
+        )
+    lines += [
+        _stamp(attachment_line("agent_listing_delta", rendered="a" * 400), "2026-09-18T12:00:03.500Z"),
+        _stamp(attachment_line("mcp_instructions_delta", rendered="m" * 200), "2026-09-18T12:00:03.600Z"),
+        _stamp(
+            turn_line(
+                message_id="sub_2",
+                model=model,
+                cache_read_input_tokens=shared_prefix + written,
+                content=[tool_use_block(used, "tu_sub_1", {"file_path": "x"})],
+            ),
+            "2026-09-18T12:00:10.000Z",
+        ),
+        # Both of these come after the second call: not part of the startup.
+        _stamp(attachment_line("agent_listing_delta", rendered="z" * 4_000), "2026-09-18T12:00:11.000Z"),
+    ]
+    if header_after_second:
+        lines.append(
+            _stamp(
+                attachment_line("prompt_snapshot", systemPrompt=["s" * 2_000], toolChangeHeader="tools changed"),
+                "2026-09-18T12:00:12.000Z",
+            )
+        )
+    if later_snapshot is not None:
+        lines.append(
+            _stamp(
+                attachment_line("prompt_snapshot", systemPrompt=["s" * 2_000], tools=later_snapshot),
+                "2026-09-18T12:00:13.000Z",
+            )
+        )
+    lines.append(_stamp(turn_line(message_id="sub_3", model=model), "2026-09-18T12:00:20.000Z"))
+    return lines
+
+
+def _sub(tmp_path: Path, name: str, lines: list[dict], agent_type: str = "Explore"):
+    path = tmp_path / f"{name}.jsonl"
+    write_jsonl(path, lines)
+    meta = TranscriptMeta(path=str(path), kind="subagent", agent_type=agent_type, agent_id=name, session_id="sess_sub")
+    return parse_transcript(path, meta)
+
+
+def _startup_tables(stats):
+    section = context_budget.build_startup_section(stats)
+    return {t.name: t for t in section.tables}
+
+
+def _row(table, key_column, key):
+    col = {c.key: i for i, c in enumerate(table.columns)}
+    row = next(r for r in table.rows if r[col[key_column]] == key)
+    return {name: row[i] for name, i in col.items()}
+
+
+def test_tool_definitions_written_after_the_first_call_are_a_startup_part(tmp_path):
+    """A subagent writes its tools snapshot, agent roster and MCP
+    instructions after the first call: they still belong to its startup."""
+    sub = _sub(tmp_path, "agent-1", _sub_lines())
+    stats = context_budget.ContextBudgetStats()
+    stats.add_subagent(sub)
+    tables = _startup_tables(stats)
+    row = _row(tables["agent_startup_breakdown"], "agent_type", "Explore")
+
+    tools_chars = sum(_tool_chars(t) for t in TOOLS)
+    assert row["tool_definitions"] == pytest.approx(tools_chars / 4.0)
+    assert row["tool_definitions"] > 0
+    # The system prompt is counted once, whatever number of snapshots repeat it.
+    assert row["system_prompt"] == pytest.approx(2_000 / 4.0)
+    # The roster and instructions before the second call count; the roster after it does not.
+    assert row["tool_lists"] == pytest.approx((400 + 200) / 4.0)
+    assert row["startup_tokens"] == 60_000 + 3_000 + 100
+    # The note says why the snapshot is read from after the first call.
+    notes = " ".join(tables["agent_startup_breakdown"].notes)
+    assert "after its first call" in notes and "Not recorded" in notes
+
+
+def test_each_built_in_tool_and_mcp_server_has_its_own_size_and_use(tmp_path):
+    sub = _sub(tmp_path, "agent-1", _sub_lines(used="Read"))
+    stats = context_budget.ContextBudgetStats()
+    stats.add_subagent(sub)
+    table = _startup_tables(stats)["agent_startup_tools"]
+    rows = {r[2]: dict(zip([c.key for c in table.columns], r)) for r in table.rows}
+
+    # Read is called; the others, and the MCP server as one row, are not.
+    assert "Read" not in rows
+    assert rows["Bash"]["definition_tokens"] == pytest.approx(_tool_chars(TOOLS[2]) / 4.0)
+    assert rows["Bash"]["offered_spawns"] == 1 and rows["Bash"]["used_spawns"] == 0
+    assert rows["mcp__figma__*"]["definition_tokens"] == pytest.approx(
+        (_tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0
+    )
+    # Largest first.
+    sizes = [r[5] for r in table.rows]
+    assert sizes == sorted(sizes, reverse=True)
+    # No description reaches the table.
+    assert "ddd" not in repr(table)
+    assert_privacy(table)
+
+
+def test_the_removable_size_counts_tools_offered_and_hardly_used(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    for n in range(10):
+        stats.add_subagent(_sub(tmp_path, f"agent-{n}", _sub_lines(used="Read" if n else "Bash")))
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    # Read is used by 9 of 10, Bash by 1 of 10 (at the line), Grep and the MCP server by none.
+    removable = (_tool_chars(TOOLS[1]) + _tool_chars(TOOLS[2]) + _tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0
+    assert row["removable_tools"] == pytest.approx(removable)
+
+
+def test_a_later_header_only_snapshot_does_not_reset_the_tool_definitions(tmp_path):
+    first_only = _sub(tmp_path, "agent-1", _sub_lines())
+    with_header = _sub(tmp_path, "agent-2", _sub_lines(header_after_second=True))
+    with_smaller_later = _sub(tmp_path, "agent-3", _sub_lines(header_after_second=True, later_snapshot=[_tool("Read")]))
+    rows = []
+    for sub in (first_only, with_header, with_smaller_later):
+        stats = context_budget.ContextBudgetStats()
+        stats.add_subagent(sub)
+        rows.append(_row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore"))
+    assert rows[0]["tool_definitions"] > 0
+    assert rows[1]["tool_definitions"] == rows[0]["tool_definitions"]
+    # A later snapshot that lists tools is not startup either.
+    assert rows[2]["tool_definitions"] == rows[0]["tool_definitions"]
+    assert rows[2]["system_prompt"] == rows[0]["system_prompt"]
+
+
+def test_a_spawn_with_no_tools_snapshot_leaves_its_tool_definitions_not_recorded(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_subagent(_sub(tmp_path, "agent-1", _sub_lines(tools=[])))
+    tables = _startup_tables(stats)
+    row = _row(tables["agent_startup_breakdown"], "agent_type", "Explore")
+    assert row["tool_definitions"] == 0
+    assert row["not_recorded"] > 50_000
+    assert row["removable_tools"] is None
+    assert tables["agent_startup_tools"].rows == []
+
+
+def test_the_first_call_comparison_never_mixes_models(tmp_path):
+    """The same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5:
+    one agent type on both is averaged on its own main model only."""
+    stats = context_budget.ContextBudgetStats()
+    for n in range(3):
+        stats.add_subagent(_sub(tmp_path, f"haiku-{n}", _sub_lines(model="claude-haiku-4-5", shared_prefix=51_500)))
+    stats.add_subagent(_sub(tmp_path, "sonnet-0", _sub_lines(model="claude-sonnet-5", shared_prefix=69_400)))
+    for n in range(2):
+        stats.add_subagent(
+            _sub(tmp_path, f"plan-{n}", _sub_lines(model="claude-haiku-4-5", shared_prefix=51_500), agent_type="Plan")
+        )
+    stats.add_subagent(
+        _sub(tmp_path, "plan-sonnet", _sub_lines(model="claude-sonnet-5", shared_prefix=69_400), agent_type="Plan")
+    )
+    tables = _startup_tables(stats)
+    table = tables["agent_startup_breakdown"]
+    explore = _row(table, "agent_type", "Explore")
+    assert explore["model"] == "claude-haiku-4-5"
+    assert explore["spawns"] == 4 and explore["other_model_spawns"] == 1
+    assert explore["startup_tokens"] == pytest.approx(51_500 + 3_000 + 100)
+    plan = _row(table, "agent_type", "Plan")
+    assert plan["model"] == "claude-haiku-4-5" and plan["other_model_spawns"] == 1
+    assert plan["startup_tokens"] == pytest.approx(51_500 + 3_000 + 100)
+    assert any("claude-haiku-4-5" in note for note in tables["agent_startup_shared"].notes)
+
+
+def test_a_model_is_calibrated_from_its_own_subagent_first_calls(tmp_path):
+    subs = [
+        _sub(tmp_path, f"agent-{n}", _sub_lines(model="claude-haiku-4-5", shared_prefix=1_000))
+        for n in range(calibration.MIN_CALLS)
+    ]
+    calls = [context_budget.first_call(sub) for sub in subs]
+    assert all(call is not None for call in calls)
+    found = calibration.Calibration.from_calls(calls)
+    tools_chars = sum(_tool_chars(t) for t in TOOLS)
+    assert found.tool_chars_per_token("claude-haiku-4-5") == pytest.approx(tools_chars / 1_000)
+    assert found.text_chars_per_token("claude-haiku-4-5") > 0
+    assert found.basis() == calibration.BASIS
+
+    stats = context_budget.ContextBudgetStats(calibration=found)
+    stats.add_subagent(subs[0])
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    # The tool definitions read from cache are exactly the shared prefix: 1,000 tokens.
+    assert row["tool_definitions"] == pytest.approx(1_000)
+
+
+def test_a_fork_is_not_a_first_call_to_calibrate_on(tmp_path):
+    fork = _sub(tmp_path, "agent-fork", _sub_lines(), agent_type="fork")
+    assert context_budget.first_call(fork) is None
+
+
+def test_the_startup_tables_carry_help_for_every_kept_column(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_subagent(_sub(tmp_path, "agent-1", _sub_lines()))
+    section = context_budget.build_startup_section(stats)
+    helptext.annotate_section(section, "api")
+    for table in section.tables:
+        assert table.dashboard == helptext.placement_for(table.name)
+        if table.dashboard == "report":
+            continue
+        assert table.help is not None and table.help.shows, table.name
+        assert [c.key for c in table.columns if not c.help] == [], table.name
+
+
+def test_the_baseline_and_calibration_tables_carry_help_and_placement(tmp_path):
+    top = _build_session(tmp_path, "s1", session_id="sess_1")
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    section = context_budget.build_section(stats)
+    helptext.annotate_section(section, "api")
+    names = {t.name for t in section.tables}
+    assert "context_budget_calibration" in names
+    for table in section.tables:
+        assert table.dashboard == helptext.placement_for(table.name)
+        if table.dashboard == "report":
+            continue
+        assert table.help is not None and table.help.shows, table.name
+        assert [c.key for c in table.columns if not c.help] == [], table.name
+
+
+def test_the_controllable_part_of_the_first_call_is_not_the_whole_of_it(tmp_path):
+    """The first call is mostly Claude Code's own tool JSON: the controllable
+    part is the skills list, the memory files and the MCP tools."""
+    top = _build_session(
+        tmp_path, "s1", session_id="sess_1", with_skill_listing=True, skill_listing_chars=4_000,
+        baseline_cache_creation=90_000,
+    )
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    table = next(t for t in context_budget.build_section(stats).tables if t.name == "context_budget_baseline")
+    row = _row(table, "project", "proj-a")
+    assert row["mean_baseline"] == pytest.approx(90_100)
+    assert row["controllable_est"] == pytest.approx(1_000)

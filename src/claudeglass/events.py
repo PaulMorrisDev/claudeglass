@@ -76,6 +76,13 @@ typed message. ``DENIAL_BUCKETS`` names what each denied call was, set by
 a reply, for quality, prompting and waste. ``PLAN_FEEDBACK`` is emitted by
 ``parse.py``, never classified from a line, and ranks just below
 ``HUMAN_TEXT``.
+
+Startup-measures batch (``PARSER_VERSION`` 41): a ``prompt_snapshot``'s
+detail also carries each built-in tool's definition size by name
+(``tool_chars``) and each MCP server's total (``server_chars``), no
+descriptions and no other name. ``BUILT_IN_TOOLS``, ``TOOL_NAME_RE`` and
+:func:`tool_server`, the rule that splits them, live here and ``parse.py``
+re-exports them.
 """
 
 from __future__ import annotations
@@ -782,18 +789,59 @@ def _invoked_skills_detail(attachment: dict) -> dict:
     return detail
 
 
+#: A tool name kept as a key: the API's own tool-name alphabet, so never a
+#: path or free text.
+TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+
+#: The server of a tool that isn't an MCP tool.
+BUILT_IN_TOOLS = "built-in"
+
+
+def tool_server(name: str) -> str:
+    """The MCP server a tool comes from (``mcp__<server>__<tool>``), or
+    :data:`BUILT_IN_TOOLS` for one of Claude Code's own."""
+    parts = name.split("__")
+    if len(parts) >= 3 and parts[0] == "mcp" and parts[1]:
+        return parts[1][:64]
+    return BUILT_IN_TOOLS
+
+
 def _prompt_snapshot_detail(attachment: dict) -> dict:
     """Sizes of the system prompt and tool definitions a ``prompt_snapshot``
     records. The snapshot is not itself sent as a message, so these sit in
     ``Event.detail`` rather than ``Event.size_chars`` (which feeds the
-    injected-attachment totals)."""
+    injected-attachment totals).
+
+    Startup-parts addition (PARSER_VERSION 41): ``tool_chars`` is each
+    built-in tool's definition size by name, and ``server_chars`` each MCP
+    server's tools' total by server name. Only lengths and tool or server
+    names are kept: never a description or a schema, and no other name.
+    """
     detail: dict = {"system_chars": _text_chars(attachment.get("systemPrompt"))}
     tools = attachment.get("tools")
     if isinstance(tools, list) and tools:
         detail["tool_count"] = len(tools)
-        detail["tools_chars"] = sum(
-            len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False)) for tool in tools if isinstance(tool, dict)
-        )
+        total = 0
+        by_tool: dict[str, int] = {}
+        by_server: dict[str, int] = {}
+        for tool in tools:
+            if not isinstance(tool, dict):
+                continue
+            chars = len(json.dumps(tool, separators=(",", ":"), ensure_ascii=False))
+            total += chars
+            name = tool.get("name")
+            if not isinstance(name, str) or not TOOL_NAME_RE.match(name):
+                continue
+            server = tool_server(name)
+            if server == BUILT_IN_TOOLS:
+                by_tool[name] = by_tool.get(name, 0) + chars
+            else:
+                by_server[server] = by_server.get(server, 0) + chars
+        detail["tools_chars"] = total
+        if by_tool:
+            detail["tool_chars"] = by_tool
+        if by_server:
+            detail["server_chars"] = by_server
     return detail
 
 
@@ -1988,6 +2036,9 @@ def primary_kind(events: Iterable[Event] | Sequence[Event]) -> EventKind:
 
 
 __all__ = [
+    "BUILT_IN_TOOLS",
+    "TOOL_NAME_RE",
+    "tool_server",
     "classify_line",
     "PRECEDENCE",
     "primary_kind",

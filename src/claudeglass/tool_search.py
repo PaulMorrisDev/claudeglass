@@ -39,10 +39,14 @@ removing it takes, comes from generic evidence only.
   attributed to it (``attributionMcpServer``), or a known saver's hook
   pointed Claude at its tools (``Turn.saver_redirects``).
 - **Kind**, from positive evidence only: a claude.ai connector (by name,
-  and in the desktop app by an ID matched to that name), a plugin's server
-  (``plugin_...``), or a server in a config snapshot's local
+  and in the desktop app by an ID matched to that name, or an ID-named
+  server that only ever appears in desktop-app transcripts), a plugin's
+  server (``plugin_...``), a server in a config snapshot's local
   (``~/.claude.json``, per project), project (``.mcp.json``), managed or
-  user list. Anything else is of unknown kind and never gets a card.
+  user list, or one of the servers the desktop app brings itself (a
+  closed list, ``desktop_servers``). A built-in desktop server is shown
+  with its cost and never told to be removed. Anything else is of
+  unknown kind and never gets a card.
 - **Priced** per reply at the front-of-prompt rate (:func:`_front_rate`):
   its share of the name list, its instructions and its tools sent in full.
   A lower bound: a reply that rebuilt the cache paid the write rate.
@@ -62,16 +66,13 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Callable
 
-from . import known_savers
+from . import desktop_servers, known_savers
 from . import snapshots as snapshots_mod
+from .calibration import Calibration
 from .discovery import redact_slug
 from .model import Column, Recommendation, ReportModel, Section, Table, TranscriptResult, Turn
 from .parse import BUILT_IN_TOOLS, mcp_name, tool_server
 from .pricing import Pricing, price_turn
-
-#: Characters per token, the approximation used throughout this report
-#: (duplicated per module by convention, see ``carry.py``).
-_CHARS_PER_TOKEN_APPROX = 4
 
 #: The tool Claude calls to load deferred definitions.
 SEARCH_TOOL = "ToolSearch"
@@ -83,6 +84,9 @@ ASSUMPTIONS: tuple[str, ...] = (
     "server, or from every server when none of its own were loaded",
     "a reply that only searched for tools wouldn't have happened without tool search, so its whole cost is "
     "taken off the saving",
+    "characters become tokens at the figure measured on your own first calls for the model that read them "
+    "(the \"Characters per token\" table): one for tool definitions, one for names and instructions, "
+    "and 4.0 for a model with fewer than ten first calls",
 )
 
 
@@ -205,6 +209,9 @@ class ToolSearchStats:
 #: What an MCP server is (:func:`_kind`). Removing one of the first four
 #: changes every project, so a one-project view can't judge it.
 KIND_DESKTOP_CONNECTOR = "claude.ai connector (desktop app)"
+#: A server the desktop app brings itself. Nothing in it is yours to
+#: remove, so it is never in ``_REMOVABLE``.
+KIND_DESKTOP_BUILTIN = "built into the desktop app"
 KIND_CONNECTOR = "claude.ai connector"
 KIND_PLUGIN = "plugin"
 KIND_USER = "user (every project)"
@@ -222,6 +229,7 @@ STATUS_UNUSED = "unused"
 STATUS_ALL_PROJECTS = "all-projects view only"
 STATUS_UNKNOWN = "kind unknown"
 STATUS_MANAGED = "managed"
+STATUS_BUILT_IN = "built in"
 STATUS_SUBAGENTS = "subagents only"
 STATUS_USED = "used"
 STATUS_NOT_SEEN = "configured, not seen"
@@ -231,6 +239,7 @@ _STATUS_ORDER = (
     STATUS_ALL_PROJECTS,
     STATUS_UNKNOWN,
     STATUS_MANAGED,
+    STATUS_BUILT_IN,
     STATUS_SUBAGENTS,
     STATUS_USED,
     "needs sign-in",
@@ -245,6 +254,9 @@ _CONNECTOR_PREFIX = "claude_ai_"
 _PLUGIN_PREFIX = "plugin_"
 #: How the desktop app names a server it hosts: an ID, not a name.
 _ID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+#: The ``entrypoint`` Claude Code records for the desktop app (duplicated
+#: per module by convention, see ``carry.py``).
+_DESKTOP_ENTRYPOINT = "claude-desktop"
 #: Tools shown per server.
 _SAMPLES = 3
 
@@ -272,6 +284,10 @@ class McpServerRow:
     #: user kind), and the projects that config belongs to (local, project).
     config_name: str = ""
     projects: tuple[str, ...] = ()
+    #: What keeping it cost in each project's sessions (``removable_usd``
+    #: split by the project that was offered it), under the project's name
+    #: as reports give it. The context budget's MCP column sums these.
+    usd_by_project: dict[str, float] = field(default_factory=dict)
 
     @property
     def removable_usd(self) -> float:
@@ -292,6 +308,11 @@ class _Seen:
     definitions_usd: float = 0.0
     tools: set = field(default_factory=set)
     connection: str = ""
+    #: Whether a desktop-app transcript named it, and whether one with any
+    #: other (or no) entrypoint did.
+    in_desktop: bool = False
+    in_other: bool = False
+    usd_by_project: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -367,9 +388,13 @@ def _read_config(snapshots, slugs: dict[str, str], canonical: dict[str, str], kn
     return config
 
 
-def _kind(names: list[str], config: _Config) -> tuple[str, str, tuple[str, ...]]:
+def _kind(
+    names: list[str], config: _Config, *, in_desktop: bool = False, in_other: bool = False
+) -> tuple[str, str, tuple[str, ...]]:
     """What the server under ``names`` is, from positive evidence only:
-    its kind, its config name and the projects that config belongs to."""
+    its kind, its config name and the projects that config belongs to.
+    ``in_desktop`` and ``in_other`` say whether desktop-app transcripts,
+    and transcripts of anything else, named it."""
     if any(name.startswith(_CONNECTOR_PREFIX) for name in names):
         desktop = any(_ID_RE.match(name) for name in names)
         return (KIND_DESKTOP_CONNECTOR if desktop else KIND_CONNECTOR), "", ()
@@ -388,6 +413,12 @@ def _kind(names: list[str], config: _Config) -> tuple[str, str, tuple[str, ...]]
             # The merged list also carries managedMcpServers: with that
             # set, a server no other list has may be the organisation's.
             return (KIND_MANAGED if config.managed_list else KIND_USER), config.user[name], ()
+    if in_desktop and any(desktop_servers.is_built_in(name) for name in names):
+        return KIND_DESKTOP_BUILTIN, "", ()
+    # An ID is how the desktop app names a connector; one that only the
+    # desktop app ever named is that, without its claude.ai name.
+    if in_desktop and not in_other and any(_ID_RE.match(name) for name in names):
+        return KIND_DESKTOP_CONNECTOR, "", ()
     return KIND_UNKNOWN, "", ()
 
 
@@ -432,25 +463,37 @@ def _used_in(turn: Turn, savers: dict[str, str]) -> dict[str, int]:
 
 
 def _mcp_servers(
-    results: list[TranscriptResult], lookup, snapshots, all_projects: bool, th: "ToolSearchThresholds"
+    results: list[TranscriptResult],
+    lookup,
+    snapshots,
+    all_projects: bool,
+    th: "ToolSearchThresholds",
+    calibration: Calibration | None = None,
 ) -> list[McpServerRow]:
     """Every MCP server the window names (see the module docstring)."""
+    calibration = calibration or Calibration()
     seen: dict[str, _Seen] = {}
     savers = _saver_servers()
     slugs: dict[str, str] = {}
     canonical: dict[str, str] = {}
     end: datetime | None = None
 
-    def get(server: str) -> _Seen:
+    def get(server: str, desktop: bool | None = None) -> _Seen:
         entry = seen.get(server)
         if entry is None:
             entry = seen[server] = _Seen()
+        if desktop is True:
+            entry.in_desktop = True
+        elif desktop is False:
+            entry.in_other = True
         return entry
 
     for tr in results:
+        desktop = tr.meta.entrypoint == _DESKTOP_ENTRYPOINT
         main = tr.meta.kind == "top-level"
         run = tr.meta.session_id if main else tr.meta.path
         slug = tr.meta.project_slug or ""
+        project = redact_slug(slug) if slug else ""
         if slug:
             keys = snapshots_mod.snapshot_project_keys(slug)
             for key in keys:
@@ -460,12 +503,12 @@ def _mcp_servers(
             s: c for s, c in (tr.upfront_definition_chars_by_server or {}).items() if isinstance(c, int) and c > 0
         }
         for server, names in (tr.mcp_tool_suffixes_by_server or {}).items():
-            get(server).tools.update(names)
+            get(server, desktop).tools.update(names)
         for server, word in (tr.mcp_connection_status or {}).items():
-            get(server).connection = str(word)
+            get(server, desktop).connection = str(word)
         for turn in tr.turns:
             for server, n in _used_in(turn, savers).items():
-                get(server).uses += n
+                get(server, desktop).uses += n
             if turn.turn_index <= 0 or turn.is_synthetic:
                 continue
             at = _parse_ts(turn.ts)
@@ -482,12 +525,16 @@ def _mcp_servers(
                         offered.setdefault(server, [0, 0, 0])[slot] += chars
             if not offered:
                 continue
-            rate = _front_rate(turn, lookup(turn.model)) / _CHARS_PER_TOKEN_APPROX
+            rate = _front_rate(turn, lookup(turn.model))
+            text_rate = rate / calibration.text_chars_per_token(turn.model)
+            tool_rate = rate / calibration.tool_chars_per_token(turn.model)
             for server, (list_chars, instruction_chars, definition_chars) in offered.items():
-                entry = get(server)
-                entry.list_usd += list_chars * rate
-                entry.instructions_usd += instruction_chars * rate
-                entry.definitions_usd += definition_chars * rate
+                entry = get(server, desktop)
+                cost = (list_chars + instruction_chars) * text_rate + definition_chars * tool_rate
+                entry.list_usd += list_chars * text_rate
+                entry.instructions_usd += instruction_chars * text_rate
+                entry.definitions_usd += definition_chars * tool_rate
+                entry.usd_by_project[project] = entry.usd_by_project.get(project, 0.0) + cost
                 (entry.main if main else entry.runs).add(run)
                 if at is not None:
                     entry.first = at if entry.first is None or at < entry.first else entry.first
@@ -519,7 +566,12 @@ def _mcp_servers(
         entries = [seen[n] for n in names]
         firsts = [e.first for e in entries if e.first is not None]
         lasts = [e.last for e in entries if e.last is not None]
-        kind, config_name, projects = _kind(names, config)
+        kind, config_name, projects = _kind(
+            names,
+            config,
+            in_desktop=any(e.in_desktop for e in entries),
+            in_other=any(e.in_other for e in entries),
+        )
         tools = sorted(set().union(*(e.tools for e in entries)))
         row = McpServerRow(
             server=names[0],
@@ -536,12 +588,21 @@ def _mcp_servers(
             definitions_usd=sum(e.definitions_usd for e in entries),
             config_name=config_name,
             projects=projects,
+            usd_by_project=_sum_by_project(entries),
         )
         row.status = _status(row, next((e.connection for e in entries if e.connection), ""), all_projects, th)
         rows.append(row)
     order = {status: i for i, status in enumerate(_STATUS_ORDER)}
     rows.sort(key=lambda r: (order.get(r.status, len(order)), -r.removable_usd, r.server))
     return rows
+
+
+def _sum_by_project(entries: list[_Seen]) -> dict[str, float]:
+    total: dict[str, float] = {}
+    for entry in entries:
+        for project, usd in entry.usd_by_project.items():
+            total[project] = total.get(project, 0.0) + usd
+    return total
 
 
 def _status(row: McpServerRow, connection: str, all_projects: bool, th: "ToolSearchThresholds") -> str:
@@ -553,6 +614,8 @@ def _status(row: McpServerRow, connection: str, all_projects: bool, th: "ToolSea
         return STATUS_SUBAGENTS
     if row.kind == KIND_MANAGED:
         return STATUS_MANAGED
+    if row.kind == KIND_DESKTOP_BUILTIN:
+        return STATUS_BUILT_IN
     # The desktop app names its connectors by ID; the claude.ai name that
     # tells one apart may only turn up in another project's sessions.
     if row.kind == KIND_UNKNOWN and not all_projects and _ID_RE.match(row.server):
@@ -603,22 +666,27 @@ def compute_tool_search(
     *,
     snapshots=None,
     all_projects: bool = False,
+    calibration: Calibration | None = None,
 ) -> ToolSearchStats:
     """The tool search figures over ``results`` (every transcript in the
     window: main sessions and agents each get their own deferred list).
     ``snapshots`` (config snapshots: what kind each MCP server is) and
     ``all_projects`` (the window covers every project, so a server every
-    project loads can be judged) feed ``tool_search_servers``."""
+    project loads can be judged) feed ``tool_search_servers``.
+    ``calibration`` (:mod:`calibration`) turns characters into tokens: a
+    definition at the tool ratio of the model that read it, a name list or
+    instructions at the text ratio; without one every ratio is 4.0."""
     th = thresholds or _DEFAULT_THRESHOLDS
+    calibration = calibration or Calibration()
     stats = ToolSearchStats()
-    stats.mcp_servers = _mcp_servers(results, pricing.resolve_model, snapshots, all_projects, th)
+    stats.mcp_servers = _mcp_servers(results, pricing.resolve_model, snapshots, all_projects, th, calibration)
     sizes = _definition_sizes(results)
     by_server: dict[str, list[int]] = {}
     for name, chars in sizes.items():
         by_server.setdefault(tool_server(name), []).append(chars)
     stats.definitions_measured = len(sizes)
     if sizes:
-        stats.mean_definition_tokens = sum(sizes.values()) / len(sizes) / _CHARS_PER_TOKEN_APPROX
+        stats.mean_definition_tokens = calibration.tool_tokens(sum(sizes.values()) / len(sizes))
 
     def server_row(server: str) -> ServerRow:
         row = stats.servers.get(server)
@@ -628,7 +696,7 @@ def compute_tool_search(
                 server=server,
                 measured=len(own or ()),
                 definition_tokens=(
-                    sum(own) / len(own) / _CHARS_PER_TOKEN_APPROX if own else stats.mean_definition_tokens
+                    calibration.tool_tokens(sum(own) / len(own)) if own else stats.mean_definition_tokens
                 ),
                 own_sizes=bool(own),
             )
@@ -653,7 +721,7 @@ def compute_tool_search(
                 stats.most_deferred_mcp, sum(n for s, n in deferred.items() if s != BUILT_IN_TOOLS)
             )
             rate = _front_rate(turn, lookup(turn.model))
-            list_tokens = turn.deferred_list_chars / _CHARS_PER_TOKEN_APPROX
+            list_tokens = calibration.text_tokens(turn.deferred_list_chars, turn.model)
             stats.list_tokens += list_tokens
             stats.list_usd += list_tokens * rate
             for server, count in deferred.items():
@@ -758,8 +826,11 @@ SERVER_ASSUMPTIONS: tuple[str, ...] = (
     "an MCP server's tool names, instructions and tools sent in full are priced at each reply's cache read "
     "rate, so what keeping it cost is a lower bound: a reply that rebuilt the cache paid its write rate",
     "a server's kind comes from its name (a claude.ai connector, a plugin's server) or from the config "
-    "snapshots (local, project, managed or user); a server named only by an ID in the desktop app is of "
-    "unknown kind until it also appears under its claude.ai name",
+    "snapshots (local, project, managed or user); a server named by an ID counts as a desktop-app "
+    "connector when it appears under its claude.ai name too, or when only desktop-app sessions ever "
+    "named it, and is of unknown kind otherwise",
+    "the servers the desktop app brings itself come from a fixed list of names, so they are shown with "
+    "what they cost and never marked for removal",
 )
 
 
@@ -786,6 +857,7 @@ def _servers_table(stats: ToolSearchStats) -> Table:
             Column(key="instructions_usd", label="Its instructions", kind="money"),
             Column(key="definitions_usd", label="Its tools sent in full", kind="money"),
             Column(key="removable_usd", label="Cost of keeping it", kind="money"),
+            Column(key="how_to_turn_off", label="How to turn it off", kind="str"),
         ],
         rows=[
             [
@@ -805,6 +877,14 @@ def _servers_table(stats: ToolSearchStats) -> Table:
                 r.instructions_usd,
                 r.definitions_usd,
                 r.removable_usd,
+                server_fix(
+                    {
+                        "kind": r.kind,
+                        "server": r.server,
+                        "config_name": r.config_name,
+                        "projects": ", ".join(r.projects),
+                    }
+                ),
             ]
             for r in stats.mcp_servers
         ],
@@ -833,11 +913,21 @@ def _evidence(label: str, value, section_key: str, table_name: str, row_key) -> 
     return (label, value, f"{section_key}.{table_name}", row_key)
 
 
+def is_removable_kind(kind: str) -> bool:
+    """Whether a server of this ``kind`` is one you can turn off (a
+    connector, a plugin's server, or one in your own config), as opposed to
+    a built-in desktop server, a managed one or one of unknown kind."""
+    return kind in _REMOVABLE
+
+
 def server_label(server: str) -> str:
     """A server's name for a sentence: a claude.ai connector's own name
-    ("Team Notes" for ``claude_ai_Team_Notes``), else its key."""
+    ("Team Notes" for ``claude_ai_Team_Notes``), the start of the ID the
+    desktop app names a connector by ("Connector 0a1b2c3d"), else its key."""
     if server.startswith(_CONNECTOR_PREFIX) and len(server) > len(_CONNECTOR_PREFIX):
         return server[len(_CONNECTOR_PREFIX):].replace("_", " ")
+    if _ID_RE.match(server):
+        return f"Connector {server[:8]}"
     return server
 
 
@@ -868,6 +958,9 @@ def server_fix(row: dict, many: bool = False) -> str:
             f"in the desktop app, switch {'each' if many else 'it'} off under + > Connectors (new sessions then "
             f"start without {it}), or{disconnect} to remove {it} from claude.ai chat too"
         )
+    if kind == KIND_DESKTOP_BUILTIN:
+        # Only where the switch is known, and not verified at that.
+        return desktop_servers.switch(str(row.get("server") or ""))
     if kind == KIND_CONNECTOR:
         return (
             f"run /mcp and disable {it} (that turns {it} off in the current project only), or{disconnect} "
@@ -990,6 +1083,7 @@ __all__ = [
     "ToolSearchThresholds",
     "build_section",
     "compute_tool_search",
+    "is_removable_kind",
     "server_fix",
     "server_label",
 ]

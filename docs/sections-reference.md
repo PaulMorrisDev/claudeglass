@@ -268,8 +268,11 @@ Definitions: [Concepts section 3](concepts.md#3-cache-rebuild-definitions-and-si
   share, cache-creation tokens (re-cache vs. all), avoidable cost, and
   `unavoidable_limit_expiry_cost_usd` (re-cache turns right after a
   usage-limit pause, kept out of avoidable cost).
-- `recache_signature_split` — `full-expiry`, `prefix-invalidated` and
-  `limit-expiry` (the gap spanned a usage-limit pause): turns,
+- `recache_signature_split` — `limit-expiry` (the gap spanned a
+  usage-limit pause), `full-expiry` (the wait reached the cache lifetime,
+  or the turn read only the start every session shares) and
+  `prefix-invalidated` (part of the session was read), classified in that
+  order: turns,
   cache-creation tokens, avoidable cost, median ctx, median gap. Every
   cause table below leaves `limit-expiry` turns out.
 - `recache_gap_buckets` — re-cache turns and their control-group share
@@ -766,13 +769,24 @@ immediate-post-compaction cost).
 Answers "how do tokens, cost and information flow between a session and
 the agents/skills/workflows it spawns" with numbers only:
 
-- `topology_spawn_write` — downward: mean/median first-turn
-  `cache_creation` per agent type (the briefing + system prompt + preloaded
-  skills a new spawn pays for), plus the mean `agent_brief_chars` (mean
-  briefing chars) the spawning turn handed that agent type.
-- `topology_session_baseline` — the top-level session's own first-turn
-  `cache_creation` (system prompt + `CLAUDE.md` + prefix-loaded tool
-  schemas) across sessions, for baseline-bloat comparison.
+- `topology_spawn_write` — downward: what a new spawn of each agent type
+  starts with, read off its first call. `mean_first_call` is the whole
+  first call (P0: uncached input + cache write + cache read), split into
+  `mean_shared_prefix` (read from cache: for a subagent, mostly Claude
+  Code's own tool definitions), `mean_write` (what the spawn wrote itself:
+  the briefing, `CLAUDE.md`, skills list) and `mean_first_prompt` (uncached
+  input). `median_write` and the mean `agent_brief_chars` the spawning turn
+  handed that agent type stay. Each row averages the spawns on one model
+  (`model`, the one most of that agent type's spawns ran on), because the
+  same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5; the
+  spawns on any other model are in `other_model_spawns` and left out. A
+  cache write alone left the shared prefix out, so a warm cache made a big
+  agent look small.
+- `topology_session_baseline` — the top-level session's own first call
+  across sessions, split the same way (`mean_baseline` and
+  `median_baseline` are P0; `mean_shared_prefix`, `mean_write`,
+  `mean_first_prompt`). The same tools measure differently on each
+  model, so a note says to compare it between periods only on one model.
 - `topology_upward_tool_result` — upward: `Agent`/`Workflow` tool_result
   sizes, the report that lands back in the parent's context, by agent
   type.
@@ -816,14 +830,18 @@ the agents/skills/workflows it spawns" with numbers only:
 ## `run_split` (`run_split.py`)
 
 Full write-up: [`docs/run-split.md`](run-split.md). Subagent runs only;
-workflow agents are left out. Every saving is net of what each split
+workflow agents are left out, and so is a run that grew past the
+auto-compact window now in force. Every saving is net of what each split
 adds back, at list price.
 
 - `run_split_summary` — one row (`subagent runs`): subagent runs, agent
   types where splitting pays, the runs it would split and their splits
   at each such type's best interval, the median context each split
   drops, those runs' cost, the saving and its share of subagent cost, and
-  subagent cost.
+  subagent cost. The last two columns count the runs left out because
+  their peak context was above the auto-compact window now in force (they
+  ran under an older setting) and what they cost; those runs are in no
+  other figure.
 - `run_split_by_agent` — one row per agent type, largest saving first
   (top `run_split_top_n`, default 20): runs, longest run, the best split
   interval (`every_n`, `null` when none pays), the runs it would split,
@@ -1687,24 +1705,49 @@ appear in `claudeglass report`'s output — call it directly:
 
 What each subagent type is given before its first turn. Built from each
 subagent transcript's events before its first priced turn
-(`ContextBudgetStats.add_subagent`); sizes are characters / 4. A fork
-(its first turn reads most of the parent's context from cache, or its
+(`ContextBudgetStats.add_subagent`); sizes are characters divided by the
+characters per token measured on your own first calls (the
+`context_budget_calibration` table below; 4.0 until a model has ten). A
+fork (its first turn reads most of the parent's context from cache, or its
 agent type is `fork`) is counted in `fork_spawns` and kept out of every
 average. No tables and one note when nothing was measured.
 
+A subagent transcript writes its tools snapshot (`prompt_snapshot` with
+tools), `agent_listing_delta` and `mcp_instructions_delta` after its first
+call, not before it. The breakdown takes the first snapshot that lists
+tools wherever it sits (a later header-only snapshot does not reset it),
+and counts both deltas as startup parts when they arrive before the second
+call. The snapshot's per-tool sizes are kept for built-in tools by name
+and for MCP tools as a total per server (never a description, a schema or
+any other name).
+
+Every comparison across agent types reads the first call on one model: the
+same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5. A row
+averages the spawns on the model most of its spawns ran on (`model`),
+counts the others in `other_model_spawns` and leaves them out.
+
 - `agent_startup_breakdown` — per agent type: `spawns`, `fork_spawns`,
-  `startup_tokens` (the first turn's whole input), the mean per spawn of
-  `task_prompt`, `claude_md`, `skills_listing`, `tool_lists`,
-  `hook_context`, `other_attachments`, `system_prompt` and
-  `tool_definitions` (the last two only when a system-prompt snapshot
-  was recorded), `not_recorded` (the rest), `measured_pct`,
+  `model`, `other_model_spawns`, `startup_tokens` (the first turn's whole
+  input), the mean per spawn of `task_prompt`, `claude_md`,
+  `skills_listing`, `tool_lists`, `hook_context`, `other_attachments`,
+  `system_prompt` and `tool_definitions` (the last two only when a
+  snapshot was recorded), `not_recorded` (the rest; a spawn with no
+  snapshot leaves its tool definitions here, since Claude Code writes the
+  snapshot after the first call), `measured_pct`,
   `write_price` (the first turn's model's 5-minute cache-write list
   price per million tokens, used to price each part), and
   `claude_md_managed` (PROF-11/F13 — the share of `claude_md` that is
   Managed policy CLAUDE.md, which still loads regardless of
   `omitClaudeMd`; `goals._omit_claude_md`, `whatif._omit_claude_md` and
   recommend.py's `spawn-claude-md` rule all subtract it out before
-  pricing what `omitClaudeMd` would save).
+  pricing what `omitClaudeMd` would save) and `removable_tools` (the size
+  of the tool definitions and MCP servers the agent type was offered and
+  called in at most a tenth of the spawns offered them: what a tools list
+  on the agent would leave out. Tools Claude Code adds whatever the list
+  says are not counted).
+- `agent_startup_tools` — per agent type, one row per tool (built-in) or
+  MCP server it was offered and rarely used: spawns offered, spawns that
+  used it and the definition size, largest first.
 - `agent_startup_unused` — per agent type: spawns measured, the skills
   list size, spawns given it and spawns that called the Skill tool,
   spawns offered MCP tools and spawns that called one, the CLAUDE.md
@@ -1718,32 +1761,53 @@ average. No tables and one note when nothing was measured.
 Answers the owner question "do we track preloaded skills, the system
 prompt, and the autocompact buffer?" A transcript never carries those
 sizes directly, so every column ending `(est)` is a clearly labelled
-*estimate* built from what is captured (first-turn `cache_creation`, a
+*estimate* built from what is captured (the first call's size, a
 HUMAN_TEXT/`skill_listing` attachment's own `size_chars`, a schema-2
-config snapshot's `content_layers`) — Claude Code's own `/context` view
+config snapshot's `content_layers`), converted from characters to tokens
+at the characters per token measured on your own first calls
+(`context_budget_calibration`) — Claude Code's own `/context` view
 remains the authoritative breakdown; treat every `(est)` figure here as a
 rough proxy, never as ground truth. Skipped cleanly (no tables, one note)
 when the corpus has no top-level transcripts at all.
 
 - `context_budget_baseline` — per project, plus one `all` row summing
-  every project: the measured mean/median top-level first-turn
-  `cache_creation` (the same metric `agents`' `topology_session_baseline`
-  reports, computed independently here rather than read back off that
-  table), next to estimated buckets in tokens for `human_prompt` (the
-  first HUMAN_TEXT event's `size_chars`, or the first turn's own
-  `human_prompt_chars`, divided by 4), `skills_listing` (every
-  `skill_listing` attachment's `size_chars` preceding the first turn,
-  divided by 4), `memory_files` (the joined schema-2 snapshot's
-  `content_layers` CLAUDE.md family + rules bytes, divided by 4; `null`
-  without a snapshot), `custom_agents` (the snapshot's agent count times
-  a labelled 60-tokens-per-agent-listing constant; `null` without a
-  snapshot), `mcp_tools` (`"present, size unknown"` when the snapshot
-  names at least one MCP server, else `null` — this module has no way to
-  measure an MCP server's own tool-schema size), and
-  `system_prompt_and_tools` — the residual: mean baseline minus every
+  every project: the measured mean/median top-level first call (P0:
+  uncached input + cache write + cache read; the same metric `agents`'
+  `topology_session_baseline` reports, computed independently here rather
+  than read back off that table), split into `shared_prefix` (read from
+  cache), `session_written` (what the session wrote itself) and
+  `first_prompt` (uncached input). Next to them, estimated buckets in
+  tokens for `human_prompt` (the first HUMAN_TEXT event's `size_chars`, or
+  the first turn's own `human_prompt_chars`, over the calibrated
+  characters per token), `skills_listing` (every `skill_listing`
+  attachment's `size_chars` preceding the first turn), `memory_files` (the
+  joined schema-2 snapshot's `content_layers` CLAUDE.md family + rules
+  bytes; `null` without a snapshot), `custom_agents` (the snapshot's agent
+  count times a labelled 60-tokens-per-agent-listing constant; `null`
+  without a snapshot), `mcp_tools` (the MCP servers the project's sessions
+  were offered, counted by what can be done about them, e.g. `"2 offered:
+  1 you can turn off, 1 built into the desktop app"`, from the rows
+  `tool_search` builds; with none offered, `"present, size unknown"` when
+  the snapshot names at least one MCP server, else `null`: a config
+  snapshot never carries a tool's size) with `mcp_servers_usd` (what
+  offering those servers cost, from the same per-server prices as
+  `tool_search`; a built-in desktop server is counted but never
+  removable) and `mcp_tools_tokens` beside them (the
+  definitions, deferred-tool names and instructions the first call
+  carried, when it recorded them), `controllable_est` (skills list +
+  memory files + MCP tools: the part a setting can change; most of P0 is
+  Claude Code's own tool JSON, which none can) and
+  `system_prompt_and_tools` — the residual: mean first call minus every
   other known `(est)` bucket, floored at 0. The `all` row's
   snapshot-derived buckets are always `null` (they can't be meaningfully
   combined across different projects' own snapshots).
+- `context_budget_calibration` — one row per model: the characters per
+  token measured for tool definitions (tool characters over the shared
+  prefix the first call read) and for other text (text characters over
+  what the first call wrote and took in uncached). A model needs ten first
+  calls with a shared prefix to get its own figures (the median of its
+  calls); until then 4.0 stands in and the row is left out. Only those two
+  numbers per model are kept.
 - `context_budget_autocompact` — per project: the configured
   `autoCompactWindow` from the latest schema-2 snapshot's effective
   settings (`null` if absent), the model's context window size (from a
@@ -1781,10 +1845,11 @@ when the corpus has no top-level transcripts at all.
   ground-truth rows logged long before or after the reported period.
 
 `recommend.py`'s `baseline-bloat` rule (see
-[Recommendations](#recommendations-recommendpy) below) cites this
-section's sized buckets as its evidence, and names the largest one in
-its action text, whenever `context_budget` is present in the report —
-falling back to its older single-mean-baseline evidence otherwise.
+[Recommendations](#recommendations-recommendpy) below) fires on the
+`controllable_est` column (30k tokens or more), never on the whole first
+call, and cites that and this section's sized buckets as its evidence,
+naming the largest one in its action text. Without a `context_budget`
+section it does not fire.
 
 ## `tool_search` (`tool_search.py`)
 
@@ -2043,7 +2108,9 @@ own `_rule_*` functions: `ttl-switch`, `long-tool-waits`,
 `notification-invalidation`, `batch-instructions`, `subagent-volume`,
 `compaction-churn`, `long-context-share`, `cache-read-dominance`,
 `baseline-bloat`, `agent-report-size`, `spawn-cost` (for agent types
-without `agent_startup` data; otherwise the per-part `spawn-claude-md`,
+without `agent_startup` data, and only when the mean first call is over
+40k tokens and at least 5k tokens of its tool definitions are rarely or
+never used; otherwise the per-part `spawn-claude-md`,
 `spawn-unused-skills`, `spawn-unused-mcp`, `spawn-read-only-tools`,
 `spawn-task-prompt` and `spawn-shared-claude-md`), `effort-mismatch`,
 `discovery-share` (when the `phases` section is present), `pricing-coverage`,

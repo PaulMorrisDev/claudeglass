@@ -978,6 +978,43 @@ def test_privacy_mcp_server_fields_hold_only_identifiers_and_numbers(tmp_path: P
     assert_privacy(result)
 
 
+def test_privacy_prompt_snapshot_keeps_tool_sizes_by_identifier_only(tmp_path: Path):
+    """A snapshot's per-tool sizes are keyed by built-in tool name and MCP
+    server name, valued by a length: never a description, a schema, or a name
+    that is not a plain identifier."""
+    hostile = "C:\\Users\\someone\\secret notes " + "x" * 200
+    lines = [
+        attachment_line(
+            "prompt_snapshot",
+            systemPrompt=["Private system prompt for someone@example.com"],
+            tools=[
+                {"name": "Read", "description": "Reads /home/someone/private.txt", "input_schema": {"x": hostile}},
+                {"name": "mcp__figma__get", "description": "https://example.com/private"},
+                {"name": hostile, "description": "Private."},
+                {"name": "t" * 200, "description": "Private."},
+            ],
+        ),
+        turn_line(message_id="msg_1"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="subagent", session_id="s"))
+    ident = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+    snapshots = [e for e in result.events if e.subkind == "prompt_snapshot"]
+    assert snapshots
+    for event in snapshots:
+        for field in ("tool_chars", "server_chars"):
+            for name, size in (event.detail.get(field) or {}).items():
+                assert ident.match(name), name
+                assert isinstance(size, int) and size > 0
+    detail = snapshots[0].detail
+    assert set(detail["tool_chars"]) == {"Read"}
+    assert set(detail["server_chars"]) == {"figma"}
+    text = repr(result)
+    assert "Private" not in text and "secret notes" not in text and "someone" not in text
+    assert_privacy(result)
+
+
 def test_privacy_meta_phase_and_description_leave_only_the_role_word(tmp_path: Path):
     """A workflow agent's phase and description are free text. The meta keeps
     one canonical role word and nothing they said: no sentence, no path, no

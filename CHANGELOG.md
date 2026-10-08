@@ -413,6 +413,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Take your figures to another machine.** Setup › Capture ends with the
   `tuning export` and `tuning summary` commands to copy. They are commands,
   not a button.
+- **Subagent tool definitions are sized.** A subagent's transcript writes
+  its tools snapshot, agent roster and MCP instructions after its first
+  call, so the startup breakdown used to record its tool definitions as 0.
+  It now takes the first snapshot that lists tools wherever it sits, and
+  counts the roster and the MCP instructions that arrive before the second
+  call. Each built-in tool's size is kept by name and each MCP server's as a
+  total, never a description. A new table lists the tools an agent type was
+  offered and used in at most a tenth of its spawns, with their sizes, and
+  "Tools never used (can be left out)" totals them. The parser is at
+  version 41, so the first report after the update re-reads your
+  transcripts.
+- **Characters per token, measured.** Token figures built from characters
+  (the context budget, the startup breakdown, context carried by CLAUDE.md
+  and skills, tool search, the session's tool results) no longer assume 4
+  characters per token. Each model gets its own two figures, one for tool
+  definitions (from the shared prefix of its first calls) and one for other
+  text, the median over ten or more first calls; until then 4.0 stands in. A
+  new "Characters per token" table shows them, and the notes say "calibrated
+  on your sessions". No tokenizer reads your transcripts.
+- **Desktop app servers are told apart.** An MCP server named by an ID
+  that only desktop-app sessions (and their subagents) ever offered is
+  a connector, and gets the same advice and thresholds as one the app
+  named. The servers the desktop app brings itself (computer use, the
+  visualiser, the built-in browser and preview, its session and window
+  servers, the scheduler, the terminal and the connector registry) show
+  with their cost and the status "built in", and are never marked
+  "remove": there is nothing to disconnect. Where a switch is known,
+  the new "How to turn it off" column gives it (the computer use
+  setting, marked as not verified).
 
 ### Changed
 
@@ -917,6 +946,49 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ran, the median time each and the time summed, from your own sessions, then
   what capture and coaching notes cost over the same stretch. It replaces the
   Deep-only figure, and `capture status` prints the same line.
+- **Start-of-context figures read the whole first call, on one model.** The
+  session baseline and each agent type's spawn figure were the first call's
+  cache write, which leaves out the tool definitions a warm cache served. They
+  now show the whole first call, split into the shared prefix, what the
+  session wrote and the first prompt. The same tools are 51.5k tokens on
+  Haiku 4.5 and 69.4k on Sonnet 5, so every comparison across agent types, and
+  every before and after of a change, is held to one model: a row names the
+  model it measured and counts the spawns on any other apart. A before and
+  after with no model in common gives no figure instead of reading a switch
+  of model as a saving. A stored baseline still compares on what the session
+  wrote.
+- **Baseline-bloat looks at what you can change.** The card fires when the
+  skills list, memory files and MCP tools together reach 30,000 tokens, not
+  when the whole first call does: about 43,000 tokens of every first call are
+  Claude Code's own tool definitions, which no setting removes. The spawn-cost
+  card needs a first call over 40,000 tokens and at least 5,000 tokens of
+  tool definitions the agent never or rarely uses, since a large first call
+  alone only shows the model's tool set.
+- **A cache rebuild is labelled by the first test it meets.** A rebuild
+  is now classed in this order: a usage limit that ended the gap; a gap
+  at or past the cache lifetime the previous reply wrote at (an hour
+  when it wrote more at one hour than at five minutes, else five
+  minutes); a read no larger than the session's own shared start plus
+  3,000 tokens (the session part expired); and only then a changed
+  prefix. Before, only a read under 2,000 tokens counted as an expiry, so
+  a rebuild that still read the shared start was labelled a changed prefix
+  whatever the gap, and a return that read the shared start plus a little
+  more was not flagged at all. The cold-return table, the context-files
+  figures and the rebuild breakdown share the corrected labels. The
+  parser version already moved to 41 for this release, so the stored rows
+  refresh with it.
+- **MCP cost in the context budget matches the tool search section.**
+  The baseline table's MCP column counts the servers the sessions were
+  offered, by what you can do about them, with what keeping them cost,
+  from the same per-server prices. Without any it still says whether
+  servers are configured. A server built into the desktop app is shown
+  with its cost and nothing to remove.
+- **Delegation figures count only runs the current setting allows.** The
+  auto-compact window now in force (300,000 tokens since about
+  18 September 2026) caps how long a run's context can grow. A run that
+  peaked above it ran under an older setting, so the run-split section
+  and its card leave it out, and say how many runs and how much cost that
+  was. The card goes quiet where only such runs justified it.
 
 ### Fixed
 

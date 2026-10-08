@@ -575,9 +575,27 @@ def test_spawn_cost_suppressed_for_low_sample_via_ttl_cross_reference():
                     columns=[
                         Column(key="agent_type", label="Agent type"),
                         Column(key="spawns", label="Spawns"),
-                        Column(key="mean_write", label="Mean write"),
+                        Column(key="mean_first_call", label="Mean first call"),
                     ],
-                    rows=[["claude-planner", 1, 50_000]],
+                    rows=[["claude-planner", 1, 110_000]],
+                )
+            ],
+        ),
+    )
+    r = _add_section(
+        r,
+        Section(
+            key="agent_startup",
+            title="Agent startup",
+            tables=[
+                Table(
+                    name="agent_startup_breakdown",
+                    title="Startup",
+                    columns=[
+                        Column(key="agent_type", label="Agent type"),
+                        Column(key="removable_tools", label="Tools never used"),
+                    ],
+                    rows=[["claude-planner", 8_000]],
                 )
             ],
         ),
@@ -972,27 +990,41 @@ def test_long_context_share_does_not_fire_below_both():
 # -- baseline-bloat ---------------------------------------------------------
 
 
-def test_baseline_bloat_fires_with_snapshot_evidence():
-    r = _base_report()
-    r = _add_section(
+def _baseline_report(r, *, controllable=35_000, first_call=95_000, project="proj"):
+    """``r`` with the context-budget baseline rows baseline-bloat reads: a
+    project row (and the "all" row built with no config snapshot, so no
+    memory files) sizing the part of the first call a setting can change
+    next to the whole first call, which is mostly Claude Code's own tools."""
+    columns = [
+        Column(key="project", label="Project"),
+        Column(key="sessions", label="Sessions"),
+        Column(key="mean_baseline", label="Mean first call"),
+        Column(key="human_prompt_est", label="Human prompt"),
+        Column(key="skills_listing_est", label="Skills listing"),
+        Column(key="memory_files_est", label="Memory files"),
+        Column(key="mcp_tools_tokens", label="MCP tools"),
+        Column(key="controllable_est", label="What you can change"),
+        Column(key="system_prompt_and_tools_est", label="System prompt and tools"),
+    ]
+    split = controllable / 5
+    rows = [
+        ["all", 10, first_call, 300, split, None, split, split * 2, first_call - controllable],
+        [project, 10, first_call, 300, split, split, split * 2, controllable, first_call - controllable - 300],
+    ]
+    return _add_section(
         r,
         Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
+            key="context_budget",
+            title="Context budget",
+            tables=[Table(name="context_budget_baseline", title="Baseline", columns=columns, rows=rows)],
         ),
     )
+
+
+
+def test_baseline_bloat_fires_with_snapshot_evidence():
+    r = _base_report()
+    r = _baseline_report(r)
     # Fix #20: mcp_servers is the fixed three-key dict the hook actually
     # emits (hooks/snapshot-config.py) -- server names live under
     # "names", not as top-level dict keys -- and enabled_plugins is a
@@ -1010,57 +1042,31 @@ def test_baseline_bloat_fires_with_snapshot_evidence():
     # No lever: MCP servers aren't a settings key, so --patch-set has
     # nothing to write for it, and no one settings file for a scope chip.
     assert rec.lever is None and rec.scope == ""
+    table = "context_budget.context_budget_baseline"
     assert rec.evidence == [
-        ("Mean session baseline (cache-creation)", 50_000, "agents.topology_session_baseline", "all"),
+        ("What you can change at the start of a session (est)", 35_000, table, "proj"),
+        ("Estimated human prompt (est)", 300, table, "proj"),
+        ("Estimated skills listing (est)", 7_000, table, "proj"),
+        ("Estimated memory files (est)", 7_000, table, "proj"),
+        ("Estimated MCP tools (est)", 14_000, table, "proj"),
+        ("Mean first call (measured)", 95_000, table, "proj"),
+        ("Estimated system prompt and tools (est)", 59_700, table, "proj"),
     ]
+    # Only what a setting can change competes for "largest".
+    raw = recommend._rule_baseline_bloat(r, RecommendThresholds(), snapshot, None)[0]
+    assert "largest estimated share of that baseline is MCP tools" in raw.action
 
 
 def test_baseline_bloat_does_not_fire_without_snapshot():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _baseline_report(r)
     recs = recommend_fn(r, config=_config(), archetype=None, snapshot=None)
     assert not any(rec.id == "baseline-bloat" for rec in recs)
 
 
 def test_baseline_bloat_does_not_fire_with_too_few_mcp_servers():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _baseline_report(r)
     snapshot = Snapshot(
         path=Path("s.json"), ts="20260918T000000Z", data={"mcp_servers": {"names": ["a"]}}
     )
@@ -1070,25 +1076,7 @@ def test_baseline_bloat_does_not_fire_with_too_few_mcp_servers():
 
 def test_baseline_bloat_suppressed_for_chat_only():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _baseline_report(r)
     snapshot = Snapshot(
         path=Path("s.json"),
         ts="20260918T000000Z",
@@ -1314,25 +1302,7 @@ def test_attribution_deprecated_does_not_fire_when_neither_set():
 
 def test_baseline_bloat_prefers_effective_enabled_plugins_when_present():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _baseline_report(r)
     # baseline_bloat_min_mcp_or_plugins defaults to 5. Schema-1
     # enabled_plugins names only one plugin (1 MCP + 1 plugin = 2, below
     # the threshold); effective_enabled_plugins (schema 2, deep-merged)
@@ -1349,6 +1319,44 @@ def test_baseline_bloat_prefers_effective_enabled_plugins_when_present():
     )
     recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
     assert any(rec.id == "baseline-bloat" for rec in recs)
+
+
+
+
+def test_baseline_bloat_does_not_fire_on_the_harness_floor_alone():
+    """A 95k first call with 5k of it a setting can change is Claude Code's
+    own tool JSON: the raw size used to fire this card, and says nothing
+    about the user's configuration."""
+    r = _baseline_report(_base_report(), controllable=5_000, first_call=95_000)
+    snapshot = Snapshot(
+        path=Path("s.json"),
+        ts="20260918T000000Z",
+        data={"mcp_servers": {"names": ["a", "b", "c", "d", "e"]}},
+    )
+    recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
+    assert not any(rec.id == "baseline-bloat" for rec in recs)
+
+
+def test_baseline_bloat_fires_on_the_controllable_part_whatever_the_first_call():
+    r = _baseline_report(_base_report(), controllable=30_000, first_call=40_000)
+    snapshot = Snapshot(
+        path=Path("s.json"),
+        ts="20260918T000000Z",
+        data={"mcp_servers": {"names": ["a", "b", "c", "d", "e"]}},
+    )
+    recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
+    assert any(rec.id == "baseline-bloat" for rec in recs)
+
+
+def test_baseline_bloat_does_not_fire_without_the_context_budget_table():
+    r = _base_report()
+    snapshot = Snapshot(
+        path=Path("s.json"),
+        ts="20260918T000000Z",
+        data={"mcp_servers": {"names": ["a", "b", "c", "d", "e"]}},
+    )
+    recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
+    assert not any(rec.id == "baseline-bloat" for rec in recs)
 
 
 # -- agent-report-size ------------------------------------------------------
@@ -1403,8 +1411,9 @@ def test_agent_report_size_suppressed_for_chat_only():
 # -- spawn-cost --------------------------------------------------------------
 
 
-def test_spawn_cost_fires_per_agent_type():
-    r = _base_report()
+def _spawn_cost_report(r, *rows):
+    """``r`` with a first call and an unused-tools size per ``(agent type,
+    mean first call, tools never used)`` row: what spawn-cost reads."""
     r = _add_section(
         r,
         Section(
@@ -1414,17 +1423,49 @@ def test_spawn_cost_fires_per_agent_type():
                 Table(
                     name="topology_spawn_write",
                     title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 50_000]],
+                    columns=[
+                        Column(key="agent_type", label="Agent type"),
+                        Column(key="mean_first_call", label="Mean first call"),
+                    ],
+                    rows=[[agent, first_call] for agent, first_call, _removable in rows],
                 )
             ],
         ),
     )
+    return _add_section(
+        r,
+        Section(
+            key="agent_startup",
+            title="Agent startup",
+            tables=[
+                Table(
+                    name="agent_startup_breakdown",
+                    title="Startup",
+                    columns=[
+                        Column(key="agent_type", label="Agent type"),
+                        Column(key="removable_tools", label="Tools never used"),
+                    ],
+                    rows=[[agent, removable] for agent, _first_call, removable in rows],
+                )
+            ],
+        ),
+    )
+
+
+def test_spawn_cost_fires_per_agent_type():
+    r = _base_report()
+    r = _spawn_cost_report(r, ("claude-implementer", 110_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype=None)
     rec = next(rec for rec in recs if rec.id == "spawn-cost")
     assert rec.lever == "omitClaudeMd"
     assert rec.evidence == [
-        ("Mean first-turn write", 50_000, "agents.topology_spawn_write", "claude-implementer"),
+        ("Mean first call", 110_000, "agents.topology_spawn_write", "claude-implementer"),
+        (
+            "Tool definitions it rarely or never uses",
+            8_000,
+            "agent_startup.agent_startup_breakdown",
+            "claude-implementer",
+        ),
     ]
 
 
@@ -1433,42 +1474,14 @@ def test_spawn_cost_not_suppressed_for_overseer_fanout():
     subagent-volume's ('stop spawning so much') -- an overseer-fanout
     session should still be told to trim an expensive spawn briefing."""
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("claude-implementer", 110_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype="overseer-fanout")
     assert any(rec.id == "spawn-cost" for rec in recs)
 
 
 def test_spawn_cost_suppressed_for_chat_only():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("claude-implementer", 110_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype="chat-only")
     assert not any(rec.id == "spawn-cost" for rec in recs)
 
@@ -1479,21 +1492,7 @@ def test_spawn_cost_emits_workflow_advice_with_no_lever_for_builtin_agent_type()
     # for omitClaudeMd to patch, so without a snapshot to say otherwise
     # this must fall back to workflow advice with no lever.
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["general-purpose", 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("general-purpose", 110_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype=None)
     rec = next(rec for rec in recs if rec.id == "spawn-cost")
     assert rec.lever is None
@@ -1509,21 +1508,7 @@ def test_spawn_cost_snapshot_agents_map_overrides_builtin_fallback():
     # agent type not on the built-in list, absence from that map means
     # no lever; presence means a lever, regardless of the built-in guess.
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 50_000], ["general-purpose", 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("claude-implementer", 110_000, 8_000), ("general-purpose", 110_000, 8_000))
     snapshot = Snapshot(
         path=Path("s.json"),
         ts="20260918T000000Z",
@@ -1539,23 +1524,33 @@ def test_spawn_cost_snapshot_agents_map_overrides_builtin_fallback():
 
 def test_spawn_cost_does_not_fire_below_threshold():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 10_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("claude-implementer", 30_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype=None)
     assert not any(rec.id == "spawn-cost" for rec in recs)
+
+
+def test_spawn_cost_does_not_fire_when_the_first_call_is_mostly_claude_codes_own_tools():
+    """A first call of 110k with nothing a tools list could take out is the
+    harness floor: no setting of the user's changes it, so no card."""
+    r = _spawn_cost_report(_base_report(), ("claude-implementer", 110_000, 500))
+    recs = recommend_fn(r, config=_config(), archetype=None)
+    assert not any(rec.id == "spawn-cost" for rec in recs)
+
+
+def test_spawn_cost_does_not_fire_without_the_startup_breakdown():
+    r = _spawn_cost_report(_base_report(), ("claude-implementer", 110_000, 8_000))
+    r = dataclasses.replace(r, sections=[sec for sec in r.sections if sec.key != "agent_startup"])
+    recs = recommend_fn(r, config=_config(), archetype=None)
+    assert not any(rec.id == "spawn-cost" for rec in recs)
+
+
+def test_spawn_cost_ignores_the_cache_write_it_used_to_gate_on():
+    """A big cache write (a long briefing) on a small first call is the
+    spawn-task-prompt rule's, not spawn-cost's."""
+    r = _spawn_cost_report(_base_report(), ("claude-implementer", 30_000, 8_000))
+    recs = recommend_fn(r, config=_config(), archetype=None)
+    assert not any(rec.id == "spawn-cost" for rec in recs)
+
 
 
 # -- effort-mismatch ---------------------------------------------------------

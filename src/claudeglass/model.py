@@ -803,6 +803,24 @@ messages' ``human_correction``/``human_adjust`` add up to (``Cycle.facts``),
 and ``Cycle.settled`` is the cycle's tag with ``capture_tags.settle``
 applied. The tag fields stay as written.
 
+Startup-sizes addition (``PARSER_VERSION`` 41). What a ``prompt_snapshot``
+says each tool costs, for the startup breakdown's tool definitions and
+the list of tools an agent type is offered and never uses. No new model
+field: ``Event.detail`` of the ``prompt_snapshot`` event gains three keys,
+all lengths keyed by a plain identifier and never a description or schema:
+
+- ``tools_chars: int`` -- characters of every tool definition in the
+  snapshot together.
+- ``tool_chars: dict`` -- a built-in tool's name (one ``events.tool_server``
+  puts in the built-in bucket) -> the characters of its definition.
+- ``server_chars: dict`` -- an MCP server's name -> the characters of all
+  its tools' definitions together.
+
+A subagent's transcript writes this snapshot after its first call, so
+``context_budget`` takes the first snapshot that lists tools wherever it
+sits. A header-only snapshot later on has no ``tools_chars`` and changes
+nothing.
+
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
 count, a closed word (with an "other" fallback) or a raw number off a

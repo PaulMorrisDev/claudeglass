@@ -247,11 +247,20 @@ def test_ttl_mix_by_agent_type_metric_includes_top_level():
     assert ttl_mix_by_agent_type_metric([]) == {}
 
 
-def test_session_baseline_size_metric_reads_mean_baseline():
+def test_session_baseline_size_metric_reads_what_the_session_wrote():
+    """The stored baseline is the session's own first-turn cache write. The
+    table's mean first call also counts the tool definitions read from
+    cache, which differ by model, so it isn't what a stored baseline
+    holds."""
     table = Table(
         name="topology_session_baseline",
-        columns=[Column(key="metric"), Column(key="sessions", kind="int"), Column(key="mean_baseline", kind="tokens")],
-        rows=[["all", 6, 4321.0]],
+        columns=[
+            Column(key="metric"),
+            Column(key="sessions", kind="int"),
+            Column(key="mean_baseline", kind="tokens"),
+            Column(key="mean_write", kind="tokens"),
+        ],
+        rows=[["all", 6, 90_000.0, 4321.0]],
     )
     sections = [Section(key="agents", title="Agents and information flow", tables=[table])]
     assert session_baseline_size_metric(sections) == pytest.approx(4321.0)

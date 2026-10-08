@@ -8,6 +8,8 @@ Hand-built turns use the packaged Sonnet 5 rates (output 10, cache write
 
 from __future__ import annotations
 
+import re
+
 import pytest
 
 from claudeglass import model
@@ -205,3 +207,79 @@ def test_thresholds_come_from_config():
     assert th.intervals == (40, 200) and th.note_tokens == 500 and th.min_runs == 5
     assert RunSplitThresholds.from_config({"run_split_intervals": []}).intervals == RunSplitThresholds().intervals
     assert any("every 40, 200 replies" in line for line in th.describe())
+
+
+# -- current settings only -----------------------------------------------------
+
+#: The auto-compact window in force; a run whose context grew past it ran
+#: under an older, larger setting.
+WINDOW = 300_000
+
+
+def test_a_run_that_peaked_above_the_current_window_is_left_out():
+    older = _run(replies=40, growth=10_000, agent_id="older")  # peaks at 480,000
+    stats = compute_run_split([older, _run(replies=40, agent_id="now")], PRICING, TEN, current_window=WINDOW)
+    row = stats.agents["claude-implementer"]
+    assert row.runs == 1 and row.longest_run == 40
+    assert row.by_interval[10].long_runs == 1 and row.by_interval[10].replies == [40]
+    assert (stats.older_runs, stats.windows) == (1, {WINDOW})
+    kept = compute_run_split([_run(replies=40, agent_id="now")], PRICING, TEN, current_window=WINDOW)
+    assert row.agent_usd == pytest.approx(kept.agents["claude-implementer"].agent_usd)
+    alone = compute_run_split([older], PRICING, TEN)
+    assert stats.older_usd == pytest.approx(alone.agents["claude-implementer"].agent_usd)
+
+
+def test_a_run_that_peaked_at_the_window_still_counts():
+    at_the_window = _run(replies=40, ctx=WINDOW, agent_id="edge")
+    stats = compute_run_split([at_the_window], PRICING, TEN, current_window=WINDOW)
+    assert stats.older_runs == 0 and stats.agents["claude-implementer"].runs == 1
+    over = _run(replies=40, ctx=WINDOW + 1, agent_id="over")
+    stats = compute_run_split([over], PRICING, TEN, current_window=WINDOW)
+    assert stats.older_runs == 1 and stats.agents == {}
+
+
+def test_with_no_window_known_every_run_counts():
+    runs = [_run(replies=40, growth=10_000, agent_id=f"agent-{n}") for n in range(3)]
+    for unknown in (None, lambda tr: None):
+        stats = compute_run_split(runs, PRICING, TEN, current_window=unknown)
+        assert stats.older_runs == 0 and stats.agents["claude-implementer"].runs == 3
+
+
+def test_the_window_can_differ_from_one_run_to_the_next():
+    small = _run(replies=40, ctx=150_000, agent_id="small-window")
+    large = _run(replies=40, ctx=150_000, agent_id="large-window")
+    stats = compute_run_split(
+        [small, large], PRICING, TEN,
+        current_window=lambda tr: 100_000 if tr.meta.agent_id == "small-window" else 400_000,
+    )
+    assert stats.older_runs == 1 and stats.windows == {100_000}
+    assert stats.agents["claude-implementer"].runs == 1
+
+
+def test_the_card_goes_quiet_when_every_long_run_predates_the_window_and_returns_for_one_under_it():
+    th = RunSplitThresholds(intervals=(10,))
+    old_runs = [_run(replies=40, growth=10_000, agent_id=f"old-{n}") for n in range(3)]
+    # Before: they earn the card.
+    assert len(RULES[0](_report(compute_run_split(old_runs, PRICING, th), th), th)) == 1
+    # Under the window now in force they were never possible, so it goes quiet.
+    stats = compute_run_split(old_runs, PRICING, th, current_window=WINDOW)
+    assert stats.agents == {} and stats.older_runs == 3
+    assert RULES[0](_report(stats, th), th) == []
+    # Three long runs that fit the window still earn it.
+    now_runs = [_run(replies=40, agent_id=f"now-{n}") for n in range(3)]
+    stats = compute_run_split(old_runs + now_runs, PRICING, th, current_window=WINDOW)
+    [rec] = RULES[0](_report(stats, th), th)
+    assert rec.agent_type == "claude-implementer"
+    assert rec.saving_usd == pytest.approx(compute_run_split(now_runs, PRICING, th).agents["claude-implementer"].by_interval[10].saving_usd)
+
+
+def test_the_section_says_how_many_runs_ran_under_an_older_setting():
+    runs = [_run(replies=40, growth=10_000, agent_id="older"), _run(replies=40, agent_id="now")]
+    stats = compute_run_split(runs, PRICING, TEN, current_window=WINDOW)
+    section = build_section(stats, TEN)
+    summary = next(t for t in section.tables if t.name == "run_split_summary")
+    row = {c.key: v for c, v in zip(summary.columns, summary.rows[0])}
+    assert row["runs"] == 1 and row["older_runs"] == 1 and row["older_usd"] == pytest.approx(stats.older_usd)
+    assert any(n.startswith("1 run (") and "300,000" in n and "older setting" in n for n in section.notes)
+    clean = build_section(compute_run_split(runs, PRICING, TEN), TEN)
+    assert not any(re.match(r"\d+ runs? \(", n) for n in clean.notes)
