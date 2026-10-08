@@ -361,6 +361,48 @@ def test_limits_section_and_scorecard_receive_the_limit_hit(tmp_path):
     _all_sections_row_keys_are_valid(report.sections)
 
 
+def test_limits_summary_leads_with_the_stops(tmp_path):
+    corpus = _corpus_with_one_limit_hit(tmp_path)
+    report = build_report(corpus, PRICING, Config(), projects=("proj-limit",), window="w")
+
+    table = next(s for s in report.sections if s.key == "limits").tables[0]
+    row = {c.key: v for c, v in zip(table.columns, table.rows[0])}
+    assert [c.key for c in table.columns[:3]] == ["metric", "five_hour_stops", "weekly_stops"]
+    assert (row["five_hour_stops"], row["weekly_stops"], row["limit_hits"], row["window_days"]) == (1, 0, 1, 1)
+
+
+def test_usage_log_cross_check_reads_the_log_file_and_is_left_out_without_rate_limit_rows(tmp_path):
+    corpus = _corpus_with_one_limit_hit(tmp_path)
+    session_id = corpus.sessions[0].session_id
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    log = config_dir / "usage-log.csv"
+
+    def limit_tables(*rows):
+        if rows:
+            lines = ["logged_at,session_id,window,used_percentage,resets_at,source"]
+            lines += [
+                f"2026-09-18T12:00:00Z,{sid},{window},{used},2026-09-18T15:00:00Z,statusline"
+                for sid, window, used in rows
+            ]
+            log.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        report = build_report(corpus, PRICING, Config(), projects=("proj-limit",), window="w", config_dir=config_dir)
+        return [t.name for t in next(s for s in report.sections if s.key == "limits").tables]
+
+    # No log file at all: nothing to compare stops with.
+    assert "limits_csv_cross_check" not in limit_tables()
+    # The desktop app writes context-window rows only: still nothing.
+    assert "limits_csv_cross_check" not in limit_tables((session_id, "context_window", 40.0))
+    # A five-hour row for a session in the report: the cross-check appears.
+    assert "limits_csv_cross_check" in limit_tables((session_id, "five_hour", 100.0))
+    # A five-hour row for a session outside the report does not count.
+    assert "limits_csv_cross_check" not in limit_tables(("some-other-session", "five_hour", 100.0))
+    # Without a config directory there is no log to read.
+    report = build_report(corpus, PRICING, Config(), projects=("proj-limit",), window="w")
+    limits_tables = next(s for s in report.sections if s.key == "limits").tables
+    assert "limits_csv_cross_check" not in [t.name for t in limits_tables]
+
+
 def _limit_events_session(project_dir: Path, session_id: str, terminated: int) -> None:
     """One session-limit hit, one automatic resume, then ``terminated``
     agent-terminated-early notifications."""
@@ -1122,6 +1164,24 @@ def test_baseline_comparison_by_mode_suppresses_below_min_sample(tmp_path):
     assert row[sample_ok_index] == "no"
 
 
+def test_baseline_comparison_by_mode_warns_when_the_baseline_used_older_mode_rules(tmp_path):
+    """A baseline saved before the overnight and one-shot rules changed has
+    no ``mode_rules``; its comparison by mode says so, and one saved under
+    the current rules does not."""
+    corpus = _two_session_corpus(tmp_path)
+    by_mode = {"mixed": {"sessions": 6, "cost_per_session": 1.0}}
+
+    def by_mode_notes(record: dict) -> list[str]:
+        report = build_report(corpus, PRICING, Config(), projects=("proj-two",), window="w", baseline_record=record)
+        section = next(s for s in report.sections if s.key == "baseline_comparison")
+        return next(t for t in section.tables if t.name == "baseline_comparison_by_mode").notes
+
+    older = _minimal_baseline_record(mode_mix={"mixed": 6}, by_mode=by_mode)
+    assert any("older rules" in note for note in by_mode_notes(older))
+    current = _minimal_baseline_record(mode_mix={"mixed": 6}, by_mode=by_mode, mode_rules=2)
+    assert not any("older rules" in note for note in by_mode_notes(current))
+
+
 def test_no_baseline_record_omits_section_and_no_note_by_default(tmp_path):
     corpus = _two_session_corpus(tmp_path)
     report = build_report(corpus, PRICING, Config(), projects=("proj-two",), window="w")
@@ -1371,11 +1431,93 @@ def test_session_records_carry_the_profile_active_at_their_start(tmp_path, monke
     )
     seen: list = []
     real = report_mod.workstyle.build_section
-    monkeypatch.setattr(report_mod.workstyle, "build_section", lambda records: seen.extend(records) or real(records))
+    monkeypatch.setattr(
+        report_mod.workstyle,
+        "build_section",
+        lambda records, costs=None: seen.extend(records) or real(records, costs),
+    )
 
     build_report(load_corpus([project_dir]), PRICING, Config(), projects=("proj",), window="w", config_dir=config_dir)
 
     assert [r.profile_id for r in seen] == ["lean"]
+
+
+def test_direct_spawn_count_leaves_out_workflow_agents_and_agents_started_by_agents():
+    from claudeglass.model import TranscriptMeta, TranscriptResult
+    from claudeglass.report import _direct_spawn_count, _extract_workstyle_features
+
+    def sub(**meta) -> TranscriptResult:
+        return TranscriptResult(meta=TranscriptMeta(**meta))
+
+    subs = [
+        sub(kind="subagent", spawn_depth=1),
+        sub(kind="subagent"),  # no depth recorded: a first-level agent
+        sub(kind="subagent", spawn_depth=2, parent_agent_id="a1"),  # started by an agent
+        sub(kind="subagent", parent_agent_id="a1"),  # same, with no depth recorded
+        sub(kind="workflow-agent", spawn_depth=1),  # a workflow's own agent
+        sub(kind="workflow-agent"),
+    ]
+    assert _direct_spawn_count(subs) == 2
+    assert _direct_spawn_count([]) == 0
+    assert _direct_spawn_count(subs[4:]) == 0
+
+    features = _extract_workstyle_features(TranscriptResult(), subs, [])
+    assert features.spawn_count == 2
+
+
+def test_a_workflow_run_does_not_make_a_session_an_overseer():
+    """Eight agents of a workflow, and no Agent-tool spawn by the session
+    itself, is not the three-or-more spawns an overseer makes."""
+    from claudeglass.model import TranscriptMeta, TranscriptResult
+    from claudeglass.report import _extract_workstyle_features
+    from claudeglass.workstyle import detect_archetype
+
+    subs = [TranscriptResult(meta=TranscriptMeta(kind="workflow-agent", spawn_depth=1)) for _ in range(8)]
+    features = _extract_workstyle_features(TranscriptResult(), subs, [])
+    assert features.spawn_count == 0
+    assert detect_archetype(features)[0] != "overseer-fanout"
+
+
+def test_the_workstyle_table_runs_by_spend_and_its_first_row_is_the_reports_archetype(tmp_path):
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    # Two cheap conversations, then one session that edits a lot and costs far more.
+    for name in ("chat1", "chat2"):
+        write_jsonl(
+            project_dir / f"{name}.jsonl",
+            [turn_line(message_id=f"{name}-1", timestamp="2026-09-18T12:00:00.000Z", input_tokens=10, output_tokens=5)],
+        )
+    write_jsonl(
+        project_dir / "build.jsonl",
+        [
+            turn_line(
+                message_id="build-1",
+                timestamp="2026-09-18T13:00:00.000Z",
+                input_tokens=2_000_000,
+                output_tokens=200_000,
+                content=[{"type": "tool_use", "id": "tu1", "name": "Edit", "input": {}}],
+            )
+        ],
+    )
+    model = build_report(load_corpus([project_dir]), PRICING, Config(), projects=("proj",), window="w")
+
+    section = next(s for s in model.sections if s.key == "workstyle")
+    table = section.tables[0]
+    keys = [c.key for c in table.columns]
+    assert keys == ["archetype", "sessions", "pct", "spend", "description"]
+    by_name = {row[0]: row for row in table.rows}
+    assert by_name["chat-only"][1] == 2
+    assert by_name["single-model"][1] == 1
+    # The one expensive session outweighs the two chats.
+    assert by_name["single-model"][3] > by_name["chat-only"][3] > 0
+    assert table.rows[0][0] == "single-model"
+    spends = [row[3] for row in table.rows]
+    assert spends == sorted(spends, reverse=True)
+
+    # What baseline reads is the archetype recommend() was given.
+    from claudeglass import baseline
+
+    assert baseline._corpus_archetype(model) == "single-model"
 
 
 def test_the_prompting_section_gets_your_dashboard_ratings_and_card_answers(tmp_path, monkeypatch):

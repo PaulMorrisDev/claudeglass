@@ -40,7 +40,7 @@ from datetime import datetime
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
-from . import coaching, pieces as pieces_mod, prompting
+from . import coaching, limits, pieces as pieces_mod, prompting
 from .model import EventKind
 
 #: The most unrated sessions the banner names.
@@ -311,7 +311,9 @@ def unrated_pieces(bundle, threshold: int) -> list[dict]:
     if not cycles:
         tokens = coaching.session_tokens(bundle.top)
         return [{"tokens": tokens, "end_ts": "", "part": 1, "label": ""}] if tokens >= threshold else []
-    found = pieces_mod.pieces_of(cycles, session_id=bundle.session_id)
+    found = pieces_mod.pieces_of(
+        cycles, session_id=bundle.session_id, pauses=limits.limit_pause_intervals(bundle.top)
+    )
     return [
         {
             "tokens": piece.tokens,

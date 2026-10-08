@@ -371,7 +371,17 @@ __version__ = "0.14.0"
 #: FEEDBACK_FACTS_MARKER``) is a ``coaching_note`` event of kind
 #: ``feedback_facts``, ClaudeGlass's own hook context, and the plan check's
 #: question is no clarifying round (``Turn.ask_rounds``).
-PARSER_VERSION = 39
+#:
+#: In 40, a usage-limit line's reset time (``LIMIT_HIT``'s ``reset_ts``)
+#: is read from its "resets 3pm (Europe/London)" text, as it was meant to
+#: be, when the line has no ``quotaLimits.resetsAt``. A zone that can't be
+#: resolved, which is every named zone on a Windows install with no
+#: ``tzdata``, now gives the machine's own zone (``discovery.from_local``)
+#: instead of no reset at all, and the weekly form's date ("resets Oct 3,
+#: 9am") sets the reset's day. A usage-limit pause ends at the reset when
+#: you came back later (``limits.limit_pause_intervals``). A pre-40 digest
+#: has no reset for those lines, so its pauses run to your return.
+PARSER_VERSION = 40
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

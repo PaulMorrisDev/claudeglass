@@ -223,14 +223,51 @@ def test_corpus_archetype_majority_vote():
 
 
 def test_corpus_archetype_ties_break_alphabetically():
-    # corpus_archetype breaks ties via max((count, name)) -- the
-    # lexicographically *largest* name wins a tie, deterministically.
+    # A tie in spend and in count goes to the first name, the same order
+    # the workstyle table lists its rows in (see test_the_table_...).
     records = [
         SessionRecord(session_id="s1", archetype="single-model"),
         SessionRecord(session_id="s2", archetype="chat-only"),
     ]
     archetype, _ = corpus_archetype(records)
-    assert archetype == "single-model"  # "single-model" > "chat-only"
+    assert archetype == "chat-only"  # "chat-only" < "single-model"
+
+
+def test_corpus_archetype_is_the_one_that_cost_the_most():
+    records = [
+        SessionRecord(session_id="c1", archetype="chat-only"),
+        SessionRecord(session_id="c2", archetype="chat-only"),
+        SessionRecord(session_id="c3", archetype="chat-only"),
+        SessionRecord(session_id="f1", archetype="overseer-fanout"),
+    ]
+    costs = {"c1": 0.5, "c2": 0.5, "c3": 0.5, "f1": 40.0}
+    archetype, evidence = corpus_archetype(records, costs)
+    assert archetype == "overseer-fanout"
+    assert evidence["counts"] == {"chat-only": 3, "overseer-fanout": 1}
+    assert evidence["spend"] == {"chat-only": pytest.approx(1.5), "overseer-fanout": pytest.approx(40.0)}
+    # By count alone, the three chats win.
+    assert corpus_archetype(records)[0] == "chat-only"
+
+
+def test_corpus_archetype_equal_spend_goes_to_the_larger_count_then_the_name():
+    records = [
+        SessionRecord(session_id="a1", archetype="single-model"),
+        SessionRecord(session_id="a2", archetype="single-model"),
+        SessionRecord(session_id="b1", archetype="chat-only"),
+    ]
+    costs = {"a1": 1.0, "a2": 1.0, "b1": 2.0}
+    assert corpus_archetype(records, costs)[0] == "single-model"
+    assert corpus_archetype(records, {"a1": 1.0, "a2": 1.0, "b1": 3.0})[0] == "chat-only"
+
+
+def test_corpus_archetype_session_with_no_cost_entry_costs_nothing():
+    records = [
+        SessionRecord(session_id="s1", archetype="chat-only"),
+        SessionRecord(session_id="s2", archetype="mixed"),
+    ]
+    archetype, evidence = corpus_archetype(records, {"s2": 5.0})
+    assert archetype == "mixed"
+    assert evidence["spend"]["chat-only"] == 0.0
 
 
 def test_corpus_archetype_unclassified_records_counted_but_not_voted():
@@ -287,13 +324,15 @@ def test_build_section_counts_and_shares_from_records():
     assert len(section.tables) == 1
     table = section.tables[0]
     assert table.name == "workstyle_archetypes"
-    assert [col.key for col in table.columns] == ["archetype", "sessions", "pct", "description"]
+    assert [col.key for col in table.columns] == ["archetype", "sessions", "pct", "spend", "description"]
 
     by_archetype = {row[0]: row for row in table.rows}
     assert by_archetype["workflow-heavy"][1] == 2
     assert by_archetype["workflow-heavy"][2] == pytest.approx(200.0 / 3.0)
     assert by_archetype["chat-only"][1] == 1
-    assert isinstance(by_archetype["workflow-heavy"][3], str) and by_archetype["workflow-heavy"][3]
+    assert isinstance(by_archetype["workflow-heavy"][4], str) and by_archetype["workflow-heavy"][4]
+    # No costs were given, so what each cost is not known (not 0).
+    assert by_archetype["workflow-heavy"][3] is None
 
     assert_privacy(section)
 
@@ -339,3 +378,62 @@ def test_build_section_row_keys_are_all_strings():
     for table in section.tables:
         for row in table.rows:
             assert isinstance(row[0], str) and row[0]
+
+
+def test_the_table_lists_the_archetype_that_cost_the_most_first():
+    records = [
+        SessionRecord(session_id="c1", archetype="chat-only"),
+        SessionRecord(session_id="c2", archetype="chat-only"),
+        SessionRecord(session_id="c3", archetype="chat-only"),
+        SessionRecord(session_id="f1", archetype="overseer-fanout"),
+        SessionRecord(session_id="f2", archetype="overseer-fanout"),
+        SessionRecord(session_id="m1", archetype="mixed"),
+    ]
+    costs = {"c1": 0.5, "c2": 0.5, "c3": 0.5, "f1": 30.0, "f2": 12.0, "m1": 3.0}
+    table = build_section(records, costs).tables[0]
+
+    assert [row[0] for row in table.rows] == ["overseer-fanout", "mixed", "chat-only"]
+    spend = {row[0]: row[3] for row in table.rows}
+    assert spend == {
+        "overseer-fanout": pytest.approx(42.0),
+        "mixed": pytest.approx(3.0),
+        "chat-only": pytest.approx(1.5),
+    }
+    # The share is still the share of sessions.
+    assert {row[0]: row[1] for row in table.rows}["chat-only"] == 3
+    assert_privacy(build_section(records, costs))
+
+
+def test_the_tables_first_row_is_the_corpus_archetype():
+    """baseline reads row 0 and the recommendations are given
+    ``corpus_archetype``'s answer: they must be the same one."""
+    scenarios = [
+        # (archetype, cost) per session
+        [("chat-only", 1.0), ("chat-only", 1.0), ("mixed", 5.0)],
+        [("chat-only", 2.0), ("mixed", 2.0)],  # a tie in spend and in count
+        [("single-model", 0.0), ("chat-only", 0.0)],  # all free
+        [("mixed", 3.0), ("mixed", 3.0), ("workflow-heavy", 6.0)],  # a tie in spend, not in count
+        [("overseer-fanout", 9.0)],
+    ]
+    for scenario in scenarios:
+        records = [SessionRecord(session_id=f"s{i}", archetype=a) for i, (a, _) in enumerate(scenario)]
+        costs = {f"s{i}": cost for i, (_, cost) in enumerate(scenario)}
+        assert build_section(records, costs).tables[0].rows[0][0] == corpus_archetype(records, costs)[0], scenario
+        # And with no costs at all, by count.
+        assert build_section(records).tables[0].rows[0][0] == corpus_archetype(records)[0], scenario
+
+
+def test_build_section_spend_is_zero_for_raw_features_when_costs_are_given():
+    features = [SessionFeatures(top_level_models=("claude-sonnet-5",), spawn_count=0)]
+    table = build_section(features, {}).tables[0]
+    assert table.rows[0][3] == 0.0
+
+
+def test_build_section_with_costs_for_only_some_sessions():
+    records = [
+        SessionRecord(session_id="s1", archetype="chat-only"),
+        SessionRecord(session_id="s2", archetype="mixed"),
+    ]
+    table = build_section(records, {"s1": 4.0}).tables[0]
+    assert [row[0] for row in table.rows] == ["chat-only", "mixed"]
+    assert table.rows[1][3] == 0.0

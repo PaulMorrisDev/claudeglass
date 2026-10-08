@@ -15,10 +15,11 @@ Deviation from the plan, reported rather than made silently (see
 ``model.py``'s module docstring for this project's convention): the
 plan's `suggest(archetype, purposes)` signature (Milestone v0.3 bullet)
 takes no session *mode* (``classify.classify_mode``'s
-overnight/long-agentic/interactive/mixed), only archetype and purpose --
-but the ``overnight-batch`` catalogue entry is justified entirely by
-*mode* evidence (``classify.classify_mode``'s overnight rule: span > 4h
-and max human gap > 60 min), which has no archetype or purpose signal of
+overnight/long-agentic/interactive/one-shot/mixed), only archetype and
+purpose -- but the ``overnight-batch`` catalogue entry is justified
+entirely by *mode* evidence (``classify.classify_mode``'s overnight rule:
+Claude worked two hours or more at night while you were away), which has
+no archetype or purpose signal of
 its own (an overnight session can be any archetype). With the signature
 fixed as given, ``suggest`` cannot deterministically reach
 ``"overnight-batch"`` -- it is reachable only via direct

@@ -282,9 +282,11 @@ def _plan_build(model: ReportModel) -> dict | None:
 
 
 def _corpus_archetype(model: ReportModel) -> str | None:
-    """The corpus's majority workstyle archetype -- "workstyle" section's
-    "workstyle_archetypes" table is sorted count-descending, so row 0 is
-    the majority (or there are no rows at all)."""
+    """The corpus's workstyle archetype: the one that cost the most. The
+    "workstyle" section's "workstyle_archetypes" table is sorted by spend,
+    descending (by session count when no spend is known), so row 0 is the
+    archetype ``workstyle.corpus_archetype`` gives ``recommend()`` -- the two
+    order with the same function -- or there are no rows at all."""
     table = _table(model, "workstyle", "workstyle_archetypes")
     if table is None or not table.rows:
         return None
@@ -335,7 +337,10 @@ def _suggested_profile(
     """The catalogue profile id to suggest, and a one-line reason citing
     the evidence -- see module docstring's first deviation note for why
     the overnight override has to live here rather than inside
-    ``catalogue.suggest()``. ``plan_build`` (:func:`_plan_build`) makes
+    ``catalogue.suggest()``. ``overnight`` is the mode where Claude worked
+    on its own for two hours or more at night while you were away
+    (``classify.classify_mode``), so the override is for a corpus of
+    unattended night runs, not of long days. ``plan_build`` (:func:`_plan_build`) makes
     the corpus ``plan-then-build`` when at least
     ``_PLAN_BUILD_SHARE`` of its main sessions planned and built in one
     session."""
@@ -344,7 +349,8 @@ def _suggested_profile(
     if total_sessions > 0 and overnight_count / total_sessions >= _OVERNIGHT_OVERRIDE_SHARE:
         return (
             "overnight-batch",
-            f"{overnight_count}/{total_sessions} sessions classified as mode=overnight "
+            f"{overnight_count}/{total_sessions} sessions were overnight runs, where Claude worked on "
+            "its own for two hours or more at night while you were away "
             f"(>= {_OVERNIGHT_OVERRIDE_SHARE:.0%}) -- catalogue.suggest() can never reach "
             "'overnight-batch' by design (see profiles/catalogue.py's "
             "UNREACHABLE_BY_SUGGEST), so this override is applied directly from the "
@@ -451,6 +457,7 @@ def build_baseline(
             "provisional": True,
             "sessions_analysed": 0,
             "mode_mix": {},
+            "mode_rules": classify.MODE_RULES,
             "dominant_purposes": [],
             "archetype": None,
             "scorecard_overall": None,
@@ -516,6 +523,7 @@ def build_baseline(
         "provisional": provisional,
         "sessions_analysed": sessions_analysed,
         "mode_mix": mode_mix,
+        "mode_rules": classify.MODE_RULES,
         "dominant_purposes": purposes,
         "archetype": archetype,
         "scorecard_overall": scorecard[0] if scorecard else None,

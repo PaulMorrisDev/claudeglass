@@ -24,7 +24,7 @@ from claudeglass.model import CaptureTag, Feedback, PlanCheck, PlanStats, Turn
 from claudeglass.pieces import PieceSession, WorkPiece, pieces_in, pieces_of
 from claudeglass.pricing import load_pricing
 
-from helpers import tool_result_block, tool_use_block, user_block_line
+from helpers import tool_result_block, tool_use_block, turn_line, user_block_line, user_str_line
 from test_capture import (
     TAG_IDS,
     _agent_that_reports,
@@ -203,9 +203,14 @@ def test_a_clear_then_a_message_naming_a_path_after_an_approved_plan_is_a_handof
     assert [p.cycles for p in pieces_of([_build(10), named])] == [1, 1]
 
 
-def _gap_pieces(gap_minutes=3 * HOUR, *, last=("a", "b"), now=("c", "d"), reads=(), tag=None, **kw):
+def _gap_pieces(gap_minutes=3 * HOUR, *, last=("a", "b"), now=("c", "d"), reads=(), tag=None, pauses=(), **kw):
     cycles = [_msg(0, files=last), _msg(gap_minutes, files=now, reads=reads, tag=tag, **kw)]
-    return pieces_of(cycles)
+    return pieces_of(cycles, pauses=pauses)
+
+
+def _paused(start_minutes: float, end_minutes: float) -> list:
+    """A usage-limit pause, as ``limits.limit_pause_intervals`` gives one."""
+    return [(BASE + timedelta(minutes=start_minutes), BASE + timedelta(minutes=end_minutes))]
 
 
 def test_with_no_tag_a_long_gap_and_different_files_and_a_message_that_asks_start_a_low_confidence_piece():
@@ -250,6 +255,88 @@ def test_a_gap_is_the_transcripts_own_reading_when_it_has_one():
     assert [p.cycles for p in pieces_of(cycles)] == [1, 1]
     cycles = [_msg(0, files=("a", "b")), _msg(600, files=("c", "d"), gap_s=60.0)]
     assert [p.cycles for p in pieces_of(cycles)] == [2]
+
+
+def test_a_usage_limit_pause_is_left_out_of_the_gap_of_a_tag_free_start():
+    # Three hours since the last reply, all of it the limit's: you came back as it reset.
+    assert [p.cycles for p in _gap_pieces(3 * HOUR, pauses=_paused(0, 3 * HOUR))] == [2]
+    # The reset came an hour in, and the message 2.5 hours after it.
+    assert [p.cycles for p in _gap_pieces(3.5 * HOUR, pauses=_paused(0, HOUR))] == [2]
+    # With no pause known, the same 3.5 hours start a piece.
+    assert [p.cycles for p in _gap_pieces(3.5 * HOUR)] == [1, 1]
+
+
+def test_a_message_three_and_a_half_hours_after_the_reset_still_starts_a_piece():
+    first, second = _gap_pieces(4.5 * HOUR, pauses=_paused(0, HOUR))
+    assert (first.cycles, second.cycles) == (1, 1)
+    assert second.confidence == "low"
+    # Exactly three hours of silence outside the pause is still long enough.
+    assert [p.cycles for p in _gap_pieces(4 * HOUR, pauses=_paused(0, HOUR))] == [1, 1]
+    assert [p.cycles for p in _gap_pieces(4 * HOUR - 1, pauses=_paused(0, HOUR))] == [2]
+
+
+def test_a_pause_is_taken_from_the_transcripts_own_gap_too():
+    # The reply before the message was at minute 10, as gap_s says: 4 hours back.
+    kw = {"files": ("c", "d"), "gap_s": 4 * 3600.0}
+    last = _msg(0, files=("a", "b"))
+    assert [p.cycles for p in pieces_of([last, _msg(4 * HOUR + 10, **kw)], pauses=_paused(10, 3 * HOUR + 10))] == [2]
+    assert [p.cycles for p in pieces_of([last, _msg(4 * HOUR + 10, **kw)], pauses=_paused(10, HOUR + 10))] == [1, 1]
+
+
+def test_a_pause_in_another_part_of_the_session_takes_nothing_from_the_gap():
+    assert [p.cycles for p in _gap_pieces(3 * HOUR, pauses=_paused(-2 * HOUR, 0))] == [1, 1]
+    assert [p.cycles for p in _gap_pieces(3 * HOUR, pauses=_paused(3 * HOUR, 4 * HOUR))] == [1, 1]
+
+
+def limited_session_lines(*, limit: bool = True) -> list[dict]:
+    """Two messages 3h29m50s apart that edit different files, the first reply
+    followed by a usage-limit line that resets an hour later (``limit``). Read
+    with the limit, the silence is 2.5 hours and the second message carries
+    on the work; read without it, it starts a piece."""
+
+    def day(hour: int, minute: int, second: int = 0) -> str:
+        return f"2026-09-18T{hour:02d}:{minute:02d}:{second:02d}.000Z"
+
+    def edits(at: str, *names: str) -> dict:
+        blocks = [tool_use_block("Edit", f"toolu_{at}_{name}", {"file_path": name}) for name in names]
+        return turn_line(content=blocks, model=MODEL, timestamp=at)
+
+    human = {"origin": {"kind": "human"}}
+    lines = [
+        user_str_line("please build the first module for me", timestamp=day(9, 0, 0), **human),
+        edits(day(9, 0, 10), "a.py", "b.py"),
+    ]
+    if limit:
+        reset = datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc)
+        lines.append(
+            turn_line(
+                model="<synthetic>",
+                isApiErrorMessage=True,
+                input_tokens=0,
+                output_tokens=0,
+                content=[{"type": "text", "text": "You've hit your session limit"}],
+                timestamp=day(9, 0, 20),
+                quotaLimits={"resetsAt": reset.timestamp()},
+            )
+        )
+    return lines + [
+        user_str_line("now please build the other module for me", timestamp=day(12, 30, 0), **human),
+        edits(day(12, 30, 10), "c.py", "d.py"),
+    ]
+
+
+def test_the_pauses_of_a_session_are_the_ones_its_own_transcript_gives(tmp_path):
+    top = _top(tmp_path, limited_session_lines())
+    session = NS(top=top, subs=[], session_id="s1", project_dir="/work/app", slug="app", workflows=())
+
+    # An hour of the 3h29m50s since the first reply was the limit's: 2.5 hours is one piece.
+    assert [p.cycles for p in pieces.corpus_pieces(NS(sessions=[session]))] == [2]
+    # Read with no pauses, the same silence starts a second piece.
+    assert [p.cycles for p in pieces_of(capture.prompt_cycles(top))] == [1, 1]
+    # The same two messages with no limit between them are two pieces.
+    plain = _top(tmp_path, limited_session_lines(limit=False))
+    other = NS(top=plain, subs=[], session_id="s2", project_dir="/work/app", slug="app", workflows=())
+    assert [p.cycles for p in pieces.corpus_pieces(NS(sessions=[other]))] == [1, 1]
 
 
 def test_a_feedback_run_is_no_pieces_work_and_never_starts_one():

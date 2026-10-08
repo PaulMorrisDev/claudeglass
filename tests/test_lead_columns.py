@@ -38,6 +38,7 @@ ONE_ROW_TABLES = {
     "recache_summary",
     "recache_huge_context",
     "limits_summary",
+    "limits_stops_rollup",
     "limits_pauses",
     "model_swap_summary",
     "plan_handoff_summary",

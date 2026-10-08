@@ -15,7 +15,10 @@ transcript said is kept.
 - with no ``shift`` word at all: a gap of :data:`GAP_S` or more, and the
   files the message touches share less than :data:`JACCARD_BELOW` of their
   names with the last ones touched (at least :data:`MIN_FILES` files on
-  each side), and a substantive message (low confidence).
+  each side), and a substantive message (low confidence). The gap is the
+  silence before the message less any usage-limit pause in it
+  (``limits.limit_pause_intervals``): a limit holds the work up until it
+  resets, so a resume at the reset is no long silence.
 
 Never at a queued message or an AskUserQuestion answer, which open no
 cycle, nor at a plan reply, which asks for nothing, nor at an aside (below).
@@ -115,11 +118,13 @@ from typing import Iterable, Sequence
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
+from . import limits
 from .model import Feedback, Turn
 
 #: How long a silence is, with different files after it, before a message
-#: with no ``shift`` word starts a piece. A gap alone was right 38% of the
-#: time on a set of 285 hand-labelled messages.
+#: with no ``shift`` word starts a piece, a usage-limit pause not counted. A
+#: gap alone was right 38% of the time on a set of 285 hand-labelled
+#: messages.
 GAP_S = 3 * 3600
 
 #: The share of file names two messages have in common (Jaccard) below
@@ -269,6 +274,9 @@ class PieceSession:
     #: list of ``capture.FeedbackSpan``, or one ``Feedback`` that rates
     #: every cycle (the dashboard's rating of the session).
     feedback: object = None
+    #: The session's usage-limit pauses, ``(start, end)`` pairs from
+    #: ``limits.limit_pause_intervals``, left out of a silence's length.
+    pauses: list = field(default_factory=list)
 
 
 # -- facts of one cycle ----------------------------------------------------------
@@ -450,16 +458,23 @@ class _Segment:
         return None
 
 
-def _gap_s(unit: _Unit, before: _Unit | None) -> float | None:
+def _gap_s(unit: _Unit, before: _Unit | None, pauses: Sequence = ()) -> float | None:
     """Seconds of silence before ``unit``'s message: the transcript's own
-    reading, else from the two times."""
-    if unit.opening.gap_s is not None:
-        return unit.opening.gap_s
-    if before is None:
-        return None
+    reading, else from the two times, less the part of it spent in a
+    usage-limit pause (``pauses``): the limit held the work up until its
+    reset, so a message sent then follows no silence."""
     now = capture_mod._moment(unit.opening.ts)
-    last = capture_mod._moment(before.cycle.turns[-1].ts)
-    return (now - last).total_seconds() if now is not None and last is not None else None
+    if unit.opening.gap_s is not None:
+        gap = unit.opening.gap_s
+        last = now - timedelta(seconds=gap) if now is not None else None
+    else:
+        last = capture_mod._moment(before.cycle.turns[-1].ts) if before is not None else None
+        if now is None or last is None:
+            return None
+        gap = (now - last).total_seconds()
+    if now is None or last is None:
+        return gap
+    return max(0.0, gap - limits.pause_overlap_s(last, now, pauses))
 
 
 def _is_beside(unit: _Unit, members: set[int]) -> bool:
@@ -476,10 +491,13 @@ def _is_aside(unit: _Unit) -> bool:
     return unit.substantive and not unit.changed and unit.beside
 
 
-def _start_of(unit: _Unit, before: _Unit | None, last_files: frozenset, previous: _Segment) -> str | None:
+def _start_of(
+    unit: _Unit, before: _Unit | None, last_files: frozenset, previous: _Segment, pauses: Sequence = ()
+) -> str | None:
     """The word in :data:`STARTS` for the piece ``unit`` starts, or
     ``None`` when it carries on ``previous``, the one before. An aside starts
-    nothing, but a /clear is a fresh start whatever is running."""
+    nothing, but a /clear is a fresh start whatever is running. ``pauses``
+    are the session's usage-limit pauses, which :func:`_gap_s` leaves out."""
     if "clear" in unit.opening.commands_run:
         return None if _is_handoff(unit, previous) else "clear"
     if unit.aside:
@@ -488,7 +506,7 @@ def _start_of(unit: _Unit, before: _Unit | None, last_files: frozenset, previous
     if shift == "new" and unit.substantive:
         return "new"
     if shift is None and unit.substantive:
-        gap = _gap_s(unit, before)
+        gap = _gap_s(unit, before, pauses)
         if (
             gap is not None
             and gap >= GAP_S
@@ -521,7 +539,7 @@ def _segments(session: PieceSession, pricing) -> list[_Segment]:
             continue
         unit.beside = _is_beside(unit, members)
         unit.aside = _is_aside(unit)
-        start = "start" if not segments else _start_of(unit, before, last_files, segments[-1])
+        start = "start" if not segments else _start_of(unit, before, last_files, segments[-1], session.pauses)
         if start is not None:
             segments.append(_Segment(units=held, sessions=[session.session_id], project=session.project, start=start))
             held = []
@@ -790,18 +808,20 @@ def _pricing(rates):
 
 
 def pieces_of(
-    cycles: Sequence, rates=None, feedback=None, *, session_id: str = "", project: str = ""
+    cycles: Sequence, rates=None, feedback=None, *, session_id: str = "", project: str = "", pauses: Sequence = ()
 ) -> list[WorkPiece]:
     """The pieces of work in one session's ``cycles`` (``capture.prompt_cycles``),
     oldest first, with no feedback needed. ``rates`` prices them (a ``Pricing``
     or ``habits``' ``_Rates``; none gives costs of ``0.0``). ``feedback`` says
     what you rated: ``None`` reads each /cg-feedback answer from the cycles, a
     list of ``capture.FeedbackSpan`` gives them, and one ``Feedback`` rates
-    every cycle. A session that opened with a handoff does not join an earlier
-    session here: that is :func:`pieces_in`."""
+    every cycle. ``pauses`` are the session's usage-limit pauses
+    (``limits.limit_pause_intervals``), left out of the silence a tag-free
+    start measures. A session that opened with a handoff does not join an
+    earlier session here: that is :func:`pieces_in`."""
     pricing = _pricing(rates)
     by_cycle, covered = _feedback_of(cycles, feedback)
-    segments = _segments(PieceSession(session_id, list(cycles), project), pricing)
+    segments = _segments(PieceSession(session_id, list(cycles), project, pauses=list(pauses)), pricing)
     return [piece for piece in (_build(s, by_cycle, covered) for s in segments) if piece is not None]
 
 
@@ -869,7 +889,9 @@ def corpus_pieces(corpus, rates=None) -> list[WorkPiece]:
         cycles = capture_mod.prompt_cycles(bundle.top, bundle.subs, getattr(bundle, "workflows", ()))
         # A corpus rebuilt from the store has no project folder, only its slug.
         project = getattr(bundle, "project_dir", "") or getattr(bundle, "slug", "") or ""
-        sessions.append(PieceSession(bundle.session_id, cycles, project))
+        sessions.append(
+            PieceSession(bundle.session_id, cycles, project, pauses=limits.limit_pause_intervals(bundle.top))
+        )
     return pieces_in(sessions, rates)
 
 

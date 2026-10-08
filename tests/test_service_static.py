@@ -3702,3 +3702,196 @@ def test_the_banner_lists_unrated_sessions_by_tokens_and_can_be_dismissed_for_a_
     assert "info.unrated && info.unrated.pieces && info.unrated.pieces.length" in banner
     assert "unratedBlock(unrated, data)" in banner
     assert "!unratedVisible" in banner
+
+
+def test_every_page_the_limit_copy_names_is_the_page_the_limits_section_maps_to() -> None:
+    """The limits section lands on one dashboard page (links.js
+    SECTION_PAGE_MAP), so every {{page:...}} link in the limit copy, in the
+    section and table help and in the limit-pressure card, names that page
+    and never the old Spend usage page."""
+    from claudeglass import advice
+    from claudeglass.model import Recommendation
+    from test_advice import _model_swap_report
+
+    page = _js_string_map(_app_js(), "SECTION_PAGE_MAP")["limits"]
+    assert page == "cache/rebuilds"
+
+    strings: list[tuple[str, str]] = []
+    section = helptext.SECTION_COPY["limits"]
+    strings += [("limits section intro", section.intro)]
+    strings += [(f"limits section {part}", getattr(section.help, part)) for part in ("shows", "read", "act")]
+    limit_tables = [name for name in helptext.TABLE_COPY if name.startswith("limits_")]
+    assert {"limits_summary", "limits_stops_rollup", "limits_stops"} <= set(limit_tables)
+    for name in [*limit_tables, "five_hour_blocks", "waste_summary"]:
+        copy = helptext.TABLE_COPY[name]
+        strings += [(f"{name} title", copy.title)]
+        strings += [(f"{name} {part}", getattr(copy.help, part)) for part in ("shows", "read", "act")] if copy.help else []
+        for key, (label, help_text) in copy.columns.items():
+            # waste_summary is not a limits table: only its limit column is limit copy.
+            if name == "waste_summary" and key != "limit_pause_excluded_turns":
+                continue
+            strings += [(f"{name}.{key} label", label), (f"{name}.{key} help", help_text)]
+
+    # The card, for each biggest cost centre and for none.
+    source = "limits.limits_summary"
+    for shares in ((60.0, 25.0, 15.0), (20.0, 70.0, 10.0), (10.0, 20.0, 70.0), None):
+        evidence = [("5-hour limit stops", 4, source, "all"), ("Days covered", 30, source, "all")]
+        if shares is not None:
+            rollup = "limits.limits_stops_rollup"
+            evidence += [
+                ("Main session share of spend", shares[0], rollup, "all"),
+                ("Direct agents share of spend", shares[1], rollup, "all"),
+                ("Workflow agents share of spend", shares[2], rollup, "all"),
+            ]
+        rec = Recommendation(id="limit-pressure", severity="advice", category="workflow", lever=None, evidence=evidence)
+        (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+        strings += [(f"limit-pressure card {shares}", out.why), (f"limit-pressure card {shares} action", out.action)]
+
+    linked = [(where, token) for where, text in strings for token in re.findall(r"\{\{page:([^}]*)\}\}", text or "")]
+    assert linked, "no limit copy links to a page any more"
+    assert any(where.startswith("limit-pressure card") for where, _ in linked)
+    for where, token in linked:
+        assert token == page, f"{where} links to {token}, but the limits section maps to {page}"
+    for where, text in strings:
+        assert "spend/usage" not in (text or ""), where
+
+
+# -- the one map of session words: mode, purpose and app ------------------------
+
+
+def _session_words() -> dict[str, list[dict]]:
+    """charts-types.js's SESSION_WORDS: how a session ran, what it was for
+    and where it started, each as ``{key, label, note?}``."""
+    source = _declaration_source(_app_js(), "SESSION_WORDS").split("=", 1)[1]
+    return _js_literal_to_json(source)
+
+
+def _mode_palette() -> dict[str, str]:
+    source = _declaration_source(_app_js(), "ENTITY_COLOURS").split("=", 1)[1]
+    return _js_literal_to_json(re.sub(r"^\s*//.*$", "", source, flags=re.MULTILINE))["mode"]
+
+
+def _tuple_words(function: str) -> set[str]:
+    """The words ``classify.<function>`` gives: the string that opens each
+    ``("word", {evidence})`` pair it returns or assigns."""
+    tree = ast.parse((SRC_DIR / "classify.py").read_text(encoding="utf-8"))
+    (node,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function]
+    return {
+        item.elts[0].value
+        for item in ast.walk(node)
+        if isinstance(item, ast.Tuple)
+        and len(item.elts) == 2
+        and isinstance(item.elts[0], ast.Constant)
+        and isinstance(item.elts[0].value, str)
+        and isinstance(item.elts[1], ast.Dict)
+    }
+
+
+def test_the_session_words_are_the_report_tables_words() -> None:
+    """The dashboard names a mode, a purpose and an app as the report's
+    tables do, so the Sessions list and the Sessions by how you worked
+    table never disagree, and one-shot reads the same everywhere."""
+    words = _session_words()
+    tables = {"mode": "sessions_by_mode", "purpose": "sessions_by_purpose", "entrypoint": "by_entrypoint"}
+    assert set(words) == set(tables)
+    for kind, table in tables.items():
+        labels = helptext.TABLE_COPY[table].value_labels
+        assert {word["key"]: word["label"] for word in words[kind]} == labels, kind
+    # The baseline comparison names modes the same way.
+    compared = helptext.TABLE_COPY["baseline_comparison_by_mode"].value_labels
+    assert {word["key"]: word["label"] for word in words["mode"]}.items() <= compared.items()
+    # The sentences are the table's own, so the help and the page say one thing.
+    shows = helptext.TABLE_COPY["sessions_by_mode"].help.shows
+    for word in words["mode"]:
+        assert word["note"] in shows, word["key"]
+
+
+def test_the_session_words_name_the_overnight_and_one_shot_modes_as_the_plan_words_them() -> None:
+    by_key = {word["key"]: word for word in _session_words()["mode"]}
+    assert by_key["overnight"]["label"] == "Overnight (unattended)"
+    assert by_key["overnight"]["note"] == "Overnight: Claude worked on its own for two hours or more at night while you were away."
+    assert by_key["one-shot"]["label"] == "One-shot"
+    assert by_key["one-shot"]["note"] == "One-shot: one request (yours or a scheduled task's), then Claude worked with no more messages from you."
+    assert "an hour or more" not in by_key["overnight"]["note"]
+
+
+def test_the_session_words_cover_every_mode_and_purpose_the_classifier_gives() -> None:
+    """A word the map lacks would show raw ("docs-or-light-edit") in the
+    list, and a menu could not set it."""
+    words = _session_words()
+    modes = {word["key"] for word in words["mode"]}
+    purposes = {word["key"] for word in words["purpose"]}
+    given_modes = _tuple_words("classify_mode")
+    given_purposes = _tuple_words("classify_purpose")
+    assert {"overnight", "long-agentic", "interactive", "one-shot", "mixed"} <= given_modes
+    assert {"docs-or-light-edit", "general-dev", "agent-fanout", "workflow-run"} <= given_purposes
+    assert given_modes <= modes and given_purposes <= purposes
+    assert {"unknown"} <= modes and {"unknown"} <= purposes
+
+
+def test_the_palette_colours_the_modes_the_map_names() -> None:
+    """A mode keeps its colour wherever it shows: the palette's keys are the
+    map's, each mode that has a colour has its own, and what has none is Other."""
+    palette = _mode_palette()
+    keys = {word["key"] for word in _session_words()["mode"]}
+    assert set(palette) - {"other"} <= keys
+    assert {"interactive", "long-agentic", "overnight", "one-shot"} <= set(palette)
+    assert palette["other"] == "var(--chart-other)"
+    coloured = [colour for key, colour in palette.items() if key != "other"]
+    assert len(set(coloured)) == len(coloured), "two modes share a colour"
+    # The ones that were colours before keep them: a new mode takes a new slot.
+    assert [palette[key] for key in ("interactive", "long-agentic", "overnight")] == [
+        "var(--chart-1)",
+        "var(--chart-2)",
+        "var(--chart-3)",
+    ]
+
+
+def test_the_session_list_the_chart_and_the_override_menus_read_one_map() -> None:
+    """Spend > Sessions: the list's Mode, Purpose and Started from columns,
+    the override menus and the session chart's legend and tooltips all read
+    SESSION_WORDS, and none keeps a list of its own."""
+    spend = _static_text("page-spend.js")
+    columns = _declaration_source(spend, "SESSION_COLUMNS")
+    for key in ("mode", "purpose", "entrypoint"):
+        assert re.search(r'key: "' + key + r'", label: "[^"]+", kind: "str", render: wordCell\("' + key + r'"\)', columns), key
+        assert re.search(r'render: wordCell\("' + key + r'"\), sortValue: wordSort\("' + key + r'"\)', columns), key
+    assert "sessionWord(kind, row[kind])" in _function_source(spend, "wordSort")
+    cell = _function_source(spend, "wordCell")
+    assert "sessionWord(kind, value)" in cell and "sessionWordNote(kind, value)" in cell
+    detail = _function_source(spend, "buildSessionDetail")
+    assert 'buildTagSelect("mode", ' in detail and 'buildTagSelect("purpose", ' in detail
+    assert 'sessionWordNote("mode", modeSelect.value)' in detail
+    menu = _function_source(spend, "buildTagSelect")
+    assert "sessionWordChoices(kind)" in menu and "word.label" in menu and "word.key" in menu
+    # No word spelled out in the page: the map is the only list.
+    for key in ("long-agentic", "overnight", "one-shot", "docs-or-light-edit", "local-llm-pipeline"):
+        assert f'"{key}"' not in spend, key
+    assert 'import { dailyChanges, modeColour, renderChart, savingsLevers, sessionContextChart, sessionWord,' in spend
+
+    types = _static_text("charts-types.js")
+    series = types[types.index("var MODE_SERIES") : types.index("function modeKey")]
+    assert "SESSION_WORDS.mode" in series and "hasColour(word.key)" in series
+    assert "ENTITY_COLOURS.mode" in _function_source(types, "hasColour")
+    assert types.count("modeText(d.row)") >= 2
+    # What a tooltip and the chart's table say is the session's own word.
+    assert 'sessionWord("mode", row.mode)' in _function_source(types, "modeText")
+    for gone in ("Long agent runs", "modeLabel(", '"Overnight"'):
+        assert gone not in _app_js(), gone
+
+
+def test_search_finds_a_session_by_the_words_the_list_shows() -> None:
+    palette = _static_text("palette.js")
+    entries = _function_source(palette, "sessionEntries")
+    for kind in ("mode", "purpose", "entrypoint"):
+        assert f'sessionWord("{kind}", row.{kind})' in entries, kind
+    assert 'import { sessionWord } from "./charts-types.js";' in palette
+
+
+def test_the_override_menu_offers_every_word_but_not_classified() -> None:
+    """The choices come from the map, and "unknown" is where a rule gave
+    up, not a choice. (The old purpose menu offered "docs", which the
+    classifier never gives: it says "docs-or-light-edit".)"""
+    choices = _function_source(_static_text("charts-types.js"), "sessionWordChoices")
+    assert 'word.key !== "unknown"' in choices
+    assert '"docs"' not in _static_text("page-spend.js")

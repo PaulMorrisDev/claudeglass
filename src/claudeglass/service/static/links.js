@@ -288,8 +288,9 @@ export var SECTION_PAGE_MAP = {
   sessions: "spend/sessions",
   // Cache. recache_by_group arrives today as a table inside recache;
   // mapped too, so a report that promotes it to its own section still
-  // lands here. Usage-limit pauses force the same full re-write the
-  // rebuild sections count, so they sit beside them.
+  // lands here. A reply after a usage-limit stop that outlasts the
+  // cache's hour rewrites the cache, as the rebuilds do, so the limits
+  // section sits beside them.
   recache: "cache/rebuilds",
   recache_by_group: "cache/rebuilds",
   limits: "cache/rebuilds",

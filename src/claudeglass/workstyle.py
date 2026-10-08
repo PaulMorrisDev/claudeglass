@@ -18,7 +18,7 @@ like ``sonnet``) and get the same answer ``detect_archetype`` would.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Sequence, Union
+from typing import Mapping, Sequence, Union
 
 from .model import Column, Section, SessionRecord, Table
 
@@ -68,7 +68,9 @@ class SessionFeatures:
     #: (Turn.model, TranscriptMeta.agent_model_alias) pairs, one per
     #: spawned subagent transcript — either element may be ``None``.
     subagent_models: tuple[tuple[str | None, str | None], ...] = ()
-    #: Direct subagent spawns in the session (``len(subs)``).
+    #: Subagents the main session started itself with the Agent tool: not
+    #: a workflow's own agents (``meta.kind == "workflow-agent"``), and not
+    #: one an agent started in turn (``report._direct_spawn_count``).
     spawn_count: int = 0
     #: Whether the session ran at least one Workflow (ultracode) run.
     has_workflow: bool = False
@@ -179,27 +181,56 @@ def detect_archetype(features: SessionFeatures) -> tuple[str, dict]:
     return "mixed", evidence
 
 
-def corpus_archetype(records: Sequence[SessionRecord]) -> tuple[str | None, dict]:
-    """The majority archetype across a corpus of already-classified
-    ``SessionRecord``s (``record.archetype``, set per session by a
-    caller via :func:`detect_archetype`), with the vote counts as
-    evidence.
+def _tally(
+    records: Sequence[SessionRecord], costs: Mapping[str, float] | None
+) -> tuple[dict[str, int], dict[str, float]]:
+    """Sessions and spend per archetype over ``records``. ``costs`` maps a
+    session id to what the session cost; a record with no entry costs 0.
+    A record with no archetype is in neither."""
+    counts: dict[str, int] = {}
+    spend: dict[str, float] = {}
+    for record in records:
+        if not record.archetype:
+            continue
+        counts[record.archetype] = counts.get(record.archetype, 0) + 1
+        spend[record.archetype] = spend.get(record.archetype, 0.0) + (costs or {}).get(record.session_id, 0.0)
+    return counts, spend
+
+
+def _by_spend(counts: Mapping[str, int], spend: Mapping[str, float]) -> list[str]:
+    """The archetypes in ``counts``, the one that cost the most first. A tie
+    goes to the one with more sessions, then to the first by name. The
+    workstyle table and :func:`corpus_archetype` both order with this, so
+    the table's first row is always the corpus's archetype."""
+    return sorted(counts, key=lambda archetype: (-spend.get(archetype, 0.0), -counts[archetype], archetype))
+
+
+def corpus_archetype(
+    records: Sequence[SessionRecord], costs: Mapping[str, float] | None = None
+) -> tuple[str | None, dict]:
+    """The archetype that accounts for the most spend across a corpus of
+    already-classified ``SessionRecord``s (``record.archetype``, set per
+    session by a caller via :func:`detect_archetype`), with the vote counts
+    and spend as evidence.
+
+    ``costs`` maps a session id to what that session cost, subagents
+    included. Spend decides, not the count of sessions: a corpus of twenty
+    short chats and three large fan-out runs that cost most of the money is
+    a fan-out corpus, whatever its session count says. Without ``costs``
+    (or with every session free), the count decides, as before. A tie in
+    spend goes to the archetype with more sessions, then to the first by
+    name (:func:`_by_spend`).
 
     Records with no archetype set (``None``) are counted in ``sessions``
     but not in the vote. Returns ``(None, evidence)`` when nothing has an
     archetype yet, rather than raising, since a partially-classified
     corpus is a normal intermediate state.
     """
-    counts: dict[str, int] = {}
-    for record in records:
-        if record.archetype:
-            counts[record.archetype] = counts.get(record.archetype, 0) + 1
-    evidence = {"sessions": len(records), "counts": counts}
+    counts, spend = _tally(records, costs)
+    evidence = {"sessions": len(records), "counts": counts, "spend": spend}
     if not counts:
         return None, evidence
-    # Ties break alphabetically so the result is deterministic.
-    majority = max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
-    return majority, evidence
+    return _by_spend(counts, spend)[0], evidence
 
 
 _ARCHETYPE_DESCRIPTIONS: dict[str, str] = {
@@ -243,9 +274,18 @@ def describe_archetype(archetype: str) -> str:
 
 def build_section(
     records_or_features: Sequence[Union[SessionRecord, SessionFeatures]],
+    costs: Mapping[str, float] | None = None,
 ) -> Section:
     """Build the "Workstyle" report section (fix item 10): one row per
-    archetype, with its session count, corpus share, and description.
+    archetype, with its session count, corpus share, spend and description,
+    the archetype that cost the most first (:func:`_by_spend`).
+
+    ``costs`` maps a session id to what the session cost, as for
+    :func:`corpus_archetype`. Given, each row's ``spend`` is the cost of
+    its sessions and the rows run by spend; left out, ``spend`` is ``None``
+    (not known, not zero) and they run by session count. Spend is only
+    known for a ``SessionRecord``: raw ``SessionFeatures`` carry no id to
+    look a cost up by.
 
     Accepts either already-classified ``SessionRecord``s (archetype read
     straight from ``record.archetype``) or raw ``SessionFeatures``
@@ -260,12 +300,17 @@ def build_section(
     already takes.
     """
     archetypes: list[str | None] = []
+    spend: dict[str, float] = {}
     for item in records_or_features:
         if isinstance(item, SessionFeatures):
             archetype, _ = detect_archetype(item)
+            cost = 0.0
         else:
             archetype = item.archetype
+            cost = (costs or {}).get(item.session_id, 0.0)
         archetypes.append(archetype)
+        if archetype is not None:
+            spend[archetype] = spend.get(archetype, 0.0) + cost
 
     counts: dict[str, int] = {}
     unclassified = 0
@@ -277,8 +322,14 @@ def build_section(
 
     total = len(archetypes)
     rows = [
-        [archetype, count, 100.0 * count / total if total else None, describe_archetype(archetype)]
-        for archetype, count in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+        [
+            archetype,
+            counts[archetype],
+            100.0 * counts[archetype] / total if total else None,
+            spend[archetype] if costs is not None else None,
+            describe_archetype(archetype),
+        ]
+        for archetype in _by_spend(counts, spend if costs is not None else {})
     ]
 
     notes: list[str] = []
@@ -298,6 +349,7 @@ def build_section(
             Column(key="archetype", label="Archetype", kind="str"),
             Column(key="sessions", label="Sessions", kind="int"),
             Column(key="pct", label="Share", kind="pct"),
+            Column(key="spend", label="Spend", kind="money"),
             Column(key="description", label="Description", kind="str"),
         ],
         rows=rows,

@@ -212,3 +212,14 @@ def test_a_reported_task_beats_a_guessed_purpose_but_not_a_structural_one():
     # A task no profile covers (not even in the task vocabulary) falls
     # through to the next task, then the purposes.
     assert suggest("chat-only", [], ["not-a-real-task", "chat"]) == "interactive-chat"
+
+
+def test_overnight_batch_notes_describe_the_unattended_night_mode_not_the_old_span_rule():
+    """The profile is justified by the "overnight" mode, which now means
+    Claude worked on its own at night while you were away. The old rule
+    (a long span with a gap over an hour) is gone from its notes."""
+    notes = get("overnight-batch").notes
+    assert "two hours or more at night while you were away" in notes
+    assert "30% of its working time was at night" in notes
+    for old in ("span > 4 hours", "maximum human gap", "60 minutes"):
+        assert old not in notes, old

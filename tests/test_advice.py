@@ -685,3 +685,124 @@ def test_long_context_share_without_tokensave_still_mentions_a_subagent():
     assert out.variant == ""
     (fix,) = fixes.build_fixes(out)
     assert "subagent" in fix["prompt"].lower()
+
+
+def _limit_pressure_rec(
+    five_hour=0, weekly=0, weekly_stopped=None, cut_off=0, days=30, shares=None, counted=5, burst=None, overall=None
+) -> Recommendation:
+    """``shares`` is the (main, direct, workflow) share of spend before the
+    stops, as the roll-up table gives them; ``burst`` and ``overall`` are the
+    share that ran with 3 or more agents at once in those stops and in all
+    the work."""
+    source = "limits.limits_summary"
+    evidence = [
+        ("5-hour limit stops", five_hour, source, "all"),
+        ("Weekly limit stops", weekly, source, "all"),
+        ("Weekly stops that stopped work", weekly if weekly_stopped is None else weekly_stopped, source, "all"),
+        ("Agents cut off by a limit", cut_off, source, "all"),
+        ("Days covered", days, source, "all"),
+    ]
+    rollup = "limits.limits_stops_rollup"
+    if shares is not None:
+        evidence += [
+            ("Stops counted in the roll-up", counted, rollup, "all"),
+            ("Main session share of spend", shares[0], rollup, "all"),
+            ("Direct agents share of spend", shares[1], rollup, "all"),
+            ("Workflow agents share of spend", shares[2], rollup, "all"),
+        ]
+    if burst is not None:
+        evidence += [
+            ("Spend with 3+ agents at once, in these stops", burst, rollup, "all"),
+            ("Spend with 3+ agents at once, across all your work", overall, rollup, "all"),
+        ]
+    return Recommendation(id="limit-pressure", severity="advice", category="workflow", lever=None, evidence=evidence)
+
+
+def test_limit_pressure_why_counts_stops_over_the_days_covered():
+    (out,) = advice.finish([_limit_pressure_rec(five_hour=4, weekly=1)], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 4 times and your weekly limit 1 time in 30 days."
+
+    (out,) = advice.finish([_limit_pressure_rec(five_hour=1)], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 1 time in 30 days."
+
+    (out,) = advice.finish([_limit_pressure_rec(weekly=2, days=1)], _model_swap_report([]), None, Units())
+    assert out.why == "Your weekly limit stopped you 2 times."
+
+
+def test_limit_pressure_why_keeps_the_cut_off_clause():
+    (out,) = advice.finish([_limit_pressure_rec(five_hour=3, cut_off=2)], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 3 times in 30 days. 2 subagents were cut off by a usage limit."
+
+    (out,) = advice.finish([_limit_pressure_rec(cut_off=1)], _model_swap_report([]), None, Units())
+    assert out.why == "1 subagent was cut off by a usage limit."
+    assert "fewer agents at once" in out.action
+
+
+def test_limit_pressure_why_leaves_out_a_weekly_stop_you_worked_through():
+    rec = _limit_pressure_rec(five_hour=4, weekly=2, weekly_stopped=1)
+    (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 4 times and your weekly limit 1 time in 30 days."
+    rec = _limit_pressure_rec(weekly=1, weekly_stopped=0, cut_off=1)
+    (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert out.why == "1 subagent was cut off by a usage limit."
+
+
+def test_limit_pressure_burst_clause_names_a_single_stop():
+    rec = _limit_pressure_rec(five_hour=1, shares=(20.0, 70.0, 10.0), counted=1, burst=60.0, overall=30.0)
+    (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert "In 1 recent stop, 60% of the spend" in out.why
+    assert "1 stops" not in out.why
+
+
+def test_limit_pressure_card_follows_the_biggest_cost_centre_and_links_to_the_rebuilds_page():
+    link = "{{page:cache/rebuilds}} shows each stop, its reset time and what it cost."
+    cases = {
+        (60.0, 25.0, 15.0): ("main session", "Plan the work before you start, and run /clear when the task changes"),
+        (20.0, 70.0, 10.0): ("direct agents", "Run fewer agents at once when a limit is close."),
+        (10.0, 20.0, 70.0): ("workflow agents", "Lower the concurrency in the workflow script"),
+    }
+    for shares, (name, action) in cases.items():
+        (out,) = advice.finish(
+            [_limit_pressure_rec(five_hour=4, weekly=1, shares=shares)], _model_swap_report([]), None, Units()
+        )
+        assert out.why == (
+            "Your 5-hour limit stopped you 4 times and your weekly limit 1 time in 30 days. "
+            f"Before your stops, your {name} spent the most: {max(shares):.0f}% of list-price spend. "
+            "The limit may weigh models differently."
+        )
+        assert out.action.startswith(action), name
+        assert out.action.endswith(link), name
+        assert "spend/usage" not in out.action
+    # Only the main session's card adds the fewer-agents advice, and only when agents were cut off.
+    (main_cut,) = advice.finish(
+        [_limit_pressure_rec(five_hour=4, cut_off=2, shares=(60.0, 25.0, 15.0))], _model_swap_report([]), None, Units()
+    )
+    assert "/clear" in main_cut.action and "Run fewer agents at once when a limit is close." in main_cut.action
+    (main_alone,) = advice.finish(
+        [_limit_pressure_rec(five_hour=4, shares=(60.0, 25.0, 15.0))], _model_swap_report([]), None, Units()
+    )
+    assert "fewer agents" not in main_alone.action
+
+
+def test_limit_pressure_card_without_a_roll_up_keeps_the_stops_sentence_and_the_fewer_agents_action():
+    (out,) = advice.finish([_limit_pressure_rec(five_hour=3)], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 3 times in 30 days."
+    assert out.action == (
+        "Run fewer agents at once when a limit is close. "
+        "{{page:cache/rebuilds}} shows each stop, its reset time and what it cost."
+    )
+
+
+def test_limit_pressure_card_names_the_burst_only_when_it_stands_out_by_ten_points():
+    clause = "In 5 recent stops, {x}% of the spend ran while 3 or more agents worked at once ({y}% across all your work)."
+
+    def why(burst: float, overall: float) -> str:
+        rec = _limit_pressure_rec(five_hour=4, shares=(20.0, 70.0, 10.0), burst=burst, overall=overall)
+        (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+        return out.why
+
+    assert why(40.0, 30.0).endswith(clause.format(x=40, y=30))
+    assert why(80.0, 30.0).endswith(clause.format(x=80, y=30))
+    assert "agents worked at once" not in why(39.9, 30.0)
+    assert "agents worked at once" not in why(30.0, 30.0)
+    assert "agents worked at once" not in why(10.0, 60.0)

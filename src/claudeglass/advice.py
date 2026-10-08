@@ -48,6 +48,7 @@ from typing import Callable
 
 from . import known_savers, model_gate, model_swap, whatif
 from .fixes import already_set
+from .limits import BURST_AGENTS, SPEND_SOURCES, burst_stands_out
 from .model import Recommendation, ReportModel, SettingChange
 from .pricing import model_names_in, newer_version_of
 from .snapshots import (
@@ -803,19 +804,88 @@ def _explain_agent_report_size(rec: Recommendation, ctx: _Context) -> None:
     rec.action = f"Ask {agent} for a short report: the findings and file paths, not the working."
 
 
+#: The limit-pressure card's evidence label for each ``limits.SPEND_SOURCES``
+#: entry's share, the name the card gives it, and the change it points to
+#: when that source spent the most before your stops.
+_LIMIT_CENTRES: dict[str, tuple[str, str, str]] = {
+    "main": (
+        "Main session share",
+        "main session",
+        "Plan the work before you start, and run /clear when the task changes, so each reply carries less.",
+    ),
+    "direct": ("Direct agents share", "direct agents", "Run fewer agents at once when a limit is close."),
+    "workflow": (
+        "Workflow agents share",
+        "workflow agents",
+        "Lower the concurrency in the workflow script, so fewer agents run at once when a limit is close.",
+    ),
+}
+_FEWER_AGENTS = "Run fewer agents at once when a limit is close."
+
+
+def _limit_centre(rec: Recommendation) -> tuple[str, float] | None:
+    """The ``limits.SPEND_SOURCES`` entry with the biggest share of the
+    spend before your stops (the earlier one on a tie), and that share;
+    ``None`` when the roll-up gave no shares."""
+    shares = {
+        source: value
+        for source in SPEND_SOURCES
+        for value in [_evidence_value(rec, _LIMIT_CENTRES[source][0])]
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    if not shares:
+        return None
+    best = max(SPEND_SOURCES, key=lambda source: shares.get(source, -1.0))
+    return best, shares[best]
+
+
 def _explain_limit_pressure(rec: Recommendation, ctx: _Context) -> None:
-    hits = _evidence_value(rec, "Usage-cap hits")
-    killed = _evidence_value(rec, "terminated")
+    five_hour = _evidence_value(rec, "5-hour limit stops")
+    weekly = _evidence_value(rec, "Weekly stops that stopped work")
+    days = _evidence_value(rec, "Days covered")
+    cut_off = _evidence_value(rec, "cut off")
+    counted = _evidence_value(rec, "Stops counted")
+    burst = _evidence_value(rec, "in these stops")
+    overall = _evidence_value(rec, "across all your work")
     rec.title = "You keep hitting your usage limit"
-    parts = []
-    if isinstance(hits, (int, float)) and hits:
-        parts.append(f"Sessions stopped at a usage limit {hits:,.0f} times")
-    if isinstance(killed, (int, float)) and killed:
-        parts.append(f"{killed:,.0f} subagents were cut off by it")
-    rec.why = (" and ".join(parts) + ".") if parts else "Sessions keep stopping at a usage limit."
-    rec.action = (
-        "Run fewer agents at once when a limit is close, and check {{page:spend/usage}} for when yours resets."
-    )
+
+    def times(count) -> str:
+        return "1 time" if count == 1 else f"{count:,.0f} times"
+
+    span = f" in {days:,.0f} days" if isinstance(days, (int, float)) and days > 1 else ""
+    stops = []
+    if isinstance(five_hour, (int, float)) and five_hour:
+        stops.append(("Your 5-hour limit stopped you ", times(five_hour)))
+    if isinstance(weekly, (int, float)) and weekly:
+        stops.append(("your weekly limit ", times(weekly)) if stops else ("Your weekly limit stopped you ", times(weekly)))
+    sentences = []
+    if stops:
+        sentences.append(" and ".join(lead + count for lead, count in stops) + span + ".")
+    if isinstance(cut_off, (int, float)) and cut_off:
+        sentences.append(f"{cut_off:,.0f} {'subagent was' if cut_off == 1 else 'subagents were'} cut off by a usage limit.")
+    centre = _limit_centre(rec)
+    if centre is not None:
+        source, share = centre
+        sentences.append(
+            f"Before your stops, your {_LIMIT_CENTRES[source][1]} spent the most: {share:.0f}% of list-price spend. "
+            "The limit may weigh models differently."
+        )
+    if (
+        isinstance(counted, (int, float))
+        and isinstance(burst, (int, float))
+        and isinstance(overall, (int, float))
+        and burst_stands_out(burst, overall)
+    ):
+        sentences.append(
+            ("In 1 recent stop, " if counted == 1 else f"In {counted:,.0f} recent stops, ")
+            + f"{burst:.0f}% of the spend ran while {BURST_AGENTS} or more agents "
+            f"worked at once ({overall:.0f}% across all your work)."
+        )
+    rec.why = " ".join(sentences) if sentences else "Your usage limit keeps stopping your work."
+    action = _FEWER_AGENTS if centre is None else _LIMIT_CENTRES[centre[0]][2]
+    if centre is not None and centre[0] == "main" and isinstance(cut_off, (int, float)) and cut_off:
+        action += " " + _FEWER_AGENTS
+    rec.action = action + " {{page:cache/rebuilds}} shows each stop, its reset time and what it cost."
 
 
 def _explain_cache_read_dominance(rec: Recommendation, ctx: _Context) -> None:

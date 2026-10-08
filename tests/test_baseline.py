@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import baseline
+from claudeglass import baseline, classify
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import Column, ReportModel, Section, Table
@@ -128,6 +128,27 @@ def test_corpus_archetype_reads_top_row_of_workstyle_table():
     )
     model = _model_with_sections(Section(key="workstyle", tables=[table]))
     assert baseline._corpus_archetype(model) == "chat-only"
+
+
+def test_corpus_archetype_is_the_one_recommend_is_given():
+    """The table is sorted by spend, so its first row is the archetype that
+    cost the most, the same one workstyle.corpus_archetype returns."""
+    from claudeglass import workstyle
+    from claudeglass.model import SessionRecord
+
+    records = [
+        SessionRecord(session_id="c1", archetype="chat-only"),
+        SessionRecord(session_id="c2", archetype="chat-only"),
+        SessionRecord(session_id="c3", archetype="chat-only"),
+        SessionRecord(session_id="f1", archetype="overseer-fanout"),
+    ]
+    costs = {"c1": 1.0, "c2": 1.0, "c3": 1.0, "f1": 25.0}
+    model = _model_with_sections(workstyle.build_section(records, costs))
+
+    assert baseline._corpus_archetype(model) == "overseer-fanout"
+    assert baseline._corpus_archetype(model) == workstyle.corpus_archetype(records, costs)[0]
+    # By sessions alone it would be chat-only.
+    assert baseline._corpus_archetype(_model_with_sections(workstyle.build_section(records))) == "chat-only"
 
 
 def test_corpus_archetype_none_when_no_rows():
@@ -370,6 +391,7 @@ def test_build_baseline_with_no_sessions_is_a_minimal_provisional_record(tmp_pat
     assert record["mean_spawn_write_by_agent_type"] == {}
     assert record["scorecard_dimensions"] == {}
     assert record["by_mode"] == {}
+    assert record["mode_rules"] == classify.MODE_RULES
 
 
 def test_build_baseline_with_sessions_extracts_from_the_real_report(tmp_path):
@@ -413,6 +435,7 @@ def test_build_baseline_by_mode_has_one_bucket_per_distinct_mode(tmp_path):
     )
     assert model is not None
     assert set(record["by_mode"]) == set(record["mode_mix"])
+    assert record["mode_rules"] == classify.MODE_RULES
     for mode, count in record["mode_mix"].items():
         assert record["by_mode"][mode]["sessions"] == count
 
@@ -690,3 +713,24 @@ def test_the_suggested_profile_follows_the_reported_task_and_says_so():
     assert reason.endswith("tasks=['research'])")
     _, without = baseline._suggested_profile({"mixed": 5}, "single-model", ["general-dev"])
     assert without.endswith("purposes=['general-dev'])")
+
+
+def test_the_overnight_override_says_what_overnight_means():
+    """The reason is read by the person it is shown to: it counts the
+    overnight runs and says they are Claude working on its own at night
+    while you were away, in words, not as a mode setting."""
+    _profile_id, reason = baseline._suggested_profile(
+        {"overnight": 6, "mixed": 4}, archetype="chat-only", purposes=["general-dev"]
+    )
+    assert "6/10 sessions were overnight runs" in reason
+    assert "Claude worked on its own for two hours or more at night while you were away" in reason
+    assert "mode=overnight" not in reason
+    assert "50%" in reason and "sessions_by_mode" in reason
+
+
+def test_a_corpus_of_one_shot_sessions_is_not_an_overnight_corpus():
+    """One-shot is a mode of its own, so a corpus of single-message
+    sessions never reads as overnight, however many it holds."""
+    profile_id, reason = baseline._suggested_profile({"one-shot": 9, "overnight": 1}, archetype="chat-only", purposes=[])
+    assert profile_id != "overnight-batch"
+    assert "overnight runs" not in reason

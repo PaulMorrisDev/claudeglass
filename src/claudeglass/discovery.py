@@ -323,6 +323,19 @@ def to_local(dt: datetime, tz: str | tzinfo | None = None) -> datetime:
     return dt.astimezone(zone) if zone is not None else dt.astimezone()
 
 
+def from_local(wall: datetime, tz: str | tzinfo | None = None) -> datetime:
+    """The UTC instant a wall-clock time names in ``tz``, the inverse of
+    :func:`to_local`. ``wall`` is naive (any ``tzinfo`` is dropped); ``tz``
+    that is empty or can't be resolved (see :func:`_zone`) gives the
+    machine's own zone, whose rules (a clock change between now and
+    ``wall``) apply, which a fixed offset taken from
+    ``datetime.astimezone()`` would not."""
+    wall = wall.replace(tzinfo=None)
+    zone = _zone(tz)
+    local = wall.replace(tzinfo=zone) if zone is not None else wall.astimezone()
+    return local.astimezone(timezone.utc)
+
+
 def local_day(value: str | datetime, tz: str | tzinfo | None = None) -> str:
     """The calendar day, ``YYYY-MM-DD``, that ``value`` falls on in ``tz``
     (the machine's own zone when ``tz`` is empty or can't be resolved).
@@ -808,6 +821,7 @@ __all__ = [
     "find_sessions",
     "ts_in_window",
     "to_local",
+    "from_local",
     "local_day",
     "zone_name",
     "local_midnight",

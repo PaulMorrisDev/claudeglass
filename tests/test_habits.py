@@ -26,6 +26,7 @@ from claudeglass.pricing import load_pricing, price_turn
 
 from test_capture_feedback import Q as FEEDBACK_Q, T as FEEDBACK_T, _run as feedback_run
 from test_pieces import _aside as _piece_aside, _cycle as _piece_cycle, _msg as _piece_msg, _turn as _piece_turn
+from test_pieces import limited_session_lines
 
 from helpers import (
     old_agent_note_text,
@@ -1579,6 +1580,22 @@ def test_fixes_after_a_plan_count_the_rework_the_piece_found_after_it(tmp_path, 
     h = habits.collect(NS(sessions=plain), pricing)
     assert [(p.typed, p.queued) for p in h.plan_fixes] == [(0, 0)] * habits.MIN_GROUP
     assert habits.fixes_after_plan(h).fixed == 0
+
+
+def test_a_usage_limit_pause_is_no_silence_to_the_pieces_of_work(tmp_path, pricing):
+    limited = _work_session(tmp_path, "limited", limited_session_lines())
+    plain = _work_session(tmp_path, "plain", limited_session_lines(limit=False))
+    # The limit held the work up for an hour of the 3h29m50s: one piece. With none, two.
+    assert len(habits.collect(NS(sessions=[limited]), pricing).work_pieces) == 1
+    assert len(habits.collect(NS(sessions=[plain]), pricing).work_pieces) == 2
+
+
+def test_the_pauses_of_a_session_are_kept_with_its_cycles_for_drawing_pieces_across_sessions(pricing):
+    out = Habits()
+    pause = (datetime(2026, 9, 18, 9, 0, tzinfo=timezone.utc), datetime(2026, 9, 18, 10, 0, tzinfo=timezone.utc))
+    habits._pieces_of_session("s1", [_piece_msg(0)], habits._Rates(pricing), out, [], None, {}, "no_plan", "p", (pause,))
+    [session] = out.piece_sessions
+    assert session.pauses == [pause]
 
 
 def test_a_message_sent_while_background_work_ran_is_no_fix_after_a_plan(pricing):

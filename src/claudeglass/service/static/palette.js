@@ -21,6 +21,7 @@ import { evidenceView, openEvidence } from "./evidence.js";
 import { button, copyToClipboard, SEVERITY_LABELS, statusLabel, toast } from "./ui.js";
 import { moneyText, projectName, shortTs } from "./format.js";
 import { openSessionDrawer } from "./page-spend.js";
+import { sessionWord } from "./charts-types.js";
 
 // What app.js lends the palette: setWindow(value) and setTheme(value),
 // which live with the controls they drive.
@@ -327,7 +328,13 @@ function sessionEntries(rows) {
       function () {
         openSessionDrawer(id);
       },
-      { words: [id, row.slug, row.mode, row.purpose].filter(Boolean).join(" "), icon: "clock", typed: true }
+      {
+        words: [id, row.slug, row.mode, sessionWord("mode", row.mode), row.purpose, sessionWord("purpose", row.purpose), sessionWord("entrypoint", row.entrypoint)]
+          .filter(Boolean)
+          .join(" "),
+        icon: "clock",
+        typed: true,
+      }
     );
   });
 }

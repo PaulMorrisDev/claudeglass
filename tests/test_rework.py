@@ -194,8 +194,8 @@ def test_sessions_we_could_not_cut_into_pieces_are_counted_by_their_requests(pri
         f"delivered. That rework cost {amount}."
     )
     # Beside segmented pieces they say nothing when they needed no changes.
-    quiet = pieces.pieces_in([NS(session_id="a", cycles=[_build(0), _msg(10, tag=_tag(shift="new"))], project="p", feedback=None),
-                              NS(session_id="b", cycles=[_build(0), _msg(10)], project="p", feedback=None)])
+    quiet = pieces.pieces_in([NS(session_id="a", cycles=[_build(0), _msg(10, tag=_tag(shift="new"))], project="p", feedback=None, pauses=[]),
+                              NS(session_id="b", cycles=[_build(0), _msg(10)], project="p", feedback=None, pauses=[])])
     assert {p.unsegmented for p in quiet} == {False, True}
     assert [r["item"] for r in _rows(_table(rework.build_section(_h(*quiet)), "rework_headline"))] == ["pieces"]
 

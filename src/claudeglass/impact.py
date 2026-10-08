@@ -699,6 +699,7 @@ _MIX_SUBJECT = {
     "interactive": "Interactive sessions",
     "long-agentic": "Long autonomous runs",
     "overnight": "Overnight sessions",
+    "one-shot": "One-shot sessions",
     "mixed": "Mixed sessions",
 }
 

@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from .capture_catalogue import TASK_LABELS
 from .capture_catalogue import THEMES as CAPTURE_THEMES
 from .habits import ITEMS as HABIT_ITEMS
+from .limits import busy_reset_hour
 from .model import Column, Diagnostics, Help, ReportModel, Section, Table
 
 # -- the table audit ------------------------------------------------------
@@ -82,10 +83,13 @@ PLACEMENT: dict[str, str] = {
     "ttl_cache_economy": "keep",
     # usage limits
     "limits_summary": "keep",
+    "limits_stops_rollup": "keep",
+    "limits_stops": "keep",
     "limits_hits_by_kind": "advanced",
     "limits_agent_terminated": "advanced",
     "limits_pauses": "keep",
     "limits_reset_hour_histogram": "advanced",
+    "limits_wake_gaps": "advanced",
     "limits_by_agent_type": "advanced",
     "limits_csv_cross_check": "advanced",
     "limits_signals_cross_check": "advanced",
@@ -286,6 +290,18 @@ class SectionCopy:
 
 
 _MAIN_OR_SUB = {"top-level": "Main session", "subagent": "Subagents", "workflow-agent": "Workflow agents"}
+#: What each session mode is called wherever a table shows it. The dashboard's
+#: own map (``SESSION_WORDS.mode`` in ``service/static/charts-types.js``) uses the
+#: same words for the Sessions list, its override menu and the session chart;
+#: ``tests/test_service_static.py`` holds the two together.
+_MODE_LABELS = {
+    "interactive": "Interactive",
+    "long-agentic": "Long autonomous run",
+    "overnight": "Overnight (unattended)",
+    "one-shot": "One-shot",
+    "mixed": "Mixed",
+    "unknown": "Not classified",
+}
 _SETTINGS_FILES = {
     "(unknown project)": "Unknown project (older snapshot)",
     "managed": "Managed policy",
@@ -518,12 +534,14 @@ SECTION_COPY: dict[str, SectionCopy] = {
     ),
     "limits": SectionCopy(
         title="Usage limits",
-        intro="How often you hit a usage limit, how long you waited, and what restarting the cache cost afterwards.",
+        intro="How often you hit a usage limit, what you spent before each stop, how long you waited, and what the "
+        "cache writes after it cost.",
         help=Help(
-            shows="Usage-limit stops, pauses, subagents stopped early, and the cache writes on the first reply after "
-            "each pause.",
-            read="After a pause the cache has expired, so the next reply writes its whole context again. That "
-            "cost is unavoidable, so {{page:cache/rebuilds}} and {{page:cache/lifetime}} leave it out of their advice.",
+            shows="Usage-limit stops, who spent what before each one, the subagents they cut off, pauses, and the "
+            "cache writes on the first reply after each pause.",
+            read="If a stop outlasts the cache's hour, the first reply after it writes the conversation to the cache "
+            "again. A reply within the hour reads the cache as usual. That rewrite is the price of carrying on, not a "
+            "caching habit to fix, so the cache rebuild and cache lifetime advice leave it out.",
             act="If limits stop you often at the same hour, move heavy work, such as large subagent fan-outs, "
             "away from that time.",
         ),
@@ -2085,13 +2103,15 @@ TABLE_COPY: dict[str, TableCopy] = {
     "workstyle_archetypes": TableCopy(
         title="Your working patterns",
         help=Help(
-            shows="Each working pattern, how many sessions match it, and what it means.",
-            read="The biggest share is how you usually work.",
+            shows="Each working pattern, how many sessions match it, what those sessions cost, and what it means.",
+            read="The pattern at the top is where most of the money went, so it is how you usually work. "
+            "Patterns are listed by cost, not by how many sessions match.",
             act="",
         ),
         columns={
             "archetype": ("Pattern", "The working pattern."),
             "pct": ("Share", "Share of sessions."),
+            "spend": ("Cost", "What the sessions with this pattern cost at list prices, subagents included."),
             "description": ("What it means", "How the pattern is recognised."),
         },
         # One per workstyle._ARCHETYPE_DESCRIPTIONS key (tested).
@@ -2320,7 +2340,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             read="Your real usage limit window starts with your first message, not on this grid. Treat each "
             "block as an approximation. Each reply counts in the block its own time falls in.",
             act="Blocks with much higher cost than usual are the ones most likely to hit a usage limit. "
-            "{{page:spend/usage}} shows the stops that actually happened.",
+            "{{page:cache/rebuilds}} shows each stop, its reset time and what it cost.",
         ),
         columns={
             "block_start": ("Block start", "When the block starts, in your local time."),
@@ -2469,7 +2489,9 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Your sessions grouped by working mode. Interactive: you replied within a few minutes. "
             "Long autonomous run: Claude worked through many steps or subagents with few prompts from you. "
-            "Overnight: the session ran into the night with a long gap. Mixed: none of these.",
+            "Overnight: Claude worked on its own for two hours or more at night while you were away. "
+            "One-shot: one request (yours or a scheduled task's), then Claude worked with no more messages from "
+            "you. Mixed: none of these.",
             read="Replies and subagents are totals for the group. Typical length and typical prompts come from "
             "the middle session in the group.",
             act="",
@@ -2485,13 +2507,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "human_prompts_median": ("Typical prompts from you", "Messages you typed in the middle session."),
         },
-        value_labels={
-            "interactive": "Interactive",
-            "long-agentic": "Long autonomous run",
-            "overnight": "Overnight",
-            "mixed": "Mixed",
-            "unknown": "Not classified",
-        },
+        value_labels=dict(_MODE_LABELS),
     ),
     "sessions_by_purpose": TableCopy(
         title="Sessions by what they were for",
@@ -2680,15 +2696,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "note": ("Note", "Why a row shows no numbers: too few sessions in one of the windows."),
         },
-        value_labels={
-            "interactive": "Interactive",
-            "long-agentic": "Long autonomous run",
-            "overnight": "Overnight",
-            "mixed": "Mixed",
-            "unknown": "Not classified",
-            "yes": "Yes",
-            "no": "No",
-        },
+        value_labels={**_MODE_LABELS, "yes": "Yes", "no": "No"},
         lead_columns=[
             "mode", "sessions_baseline", "sessions_current", "cost_per_session_baseline", "cost_per_session_current",
             "cost_per_session_delta_pct", "recache_share_delta_pct",
@@ -2775,8 +2783,8 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Totals for the window: how many replies rebuilt the cache, and what that cost.",
             read="Avoidable cost is what the rebuilds cost above reading the same tokens from the cache. "
-            "Rebuilds after a usage-limit pause are counted, but their cost is shown on its own, because "
-            "you can't avoid them.",
+            "Rebuilds after a usage-limit pause are counted, but their cost is shown on its own. That rewrite "
+            "is the price of carrying on, not a caching habit to fix.",
             act="If avoidable cost is a large part of your spend, use the tables below to find the cause.",
         ),
         columns={
@@ -2798,7 +2806,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "unavoidable_limit_expiry_cost_usd": (
                 "Cost after usage-limit pauses",
-                "The same extra cost for rebuilds after a usage-limit pause. You can't avoid these.",
+                "The same extra cost for rebuilds after a usage-limit pause. That rewrite is the price of carrying on.",
             ),
         },
         value_labels={"all": "All replies"},
@@ -2821,7 +2829,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "cost_delta_usd": (
                 "Cost above a cache read",
                 "What these rebuilds cost above reading the same tokens from the cache. "
-                "Unavoidable for the usage-limit row.",
+                "For the usage-limit row, the price of carrying on.",
             ),
             "median_ctx": ("Typical context size", "The middle context size of these replies, in tokens."),
             "median_gap_s": ("Typical wait before", "The middle wait since the previous reply."),
@@ -3227,7 +3235,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "unavoidable_limit_expiry_cost_usd": (
                 "Cost after usage-limit pauses",
-                "The same extra cost for rebuilds after a usage-limit pause. You can't avoid these.",
+                "The same extra cost for rebuilds after a usage-limit pause. That rewrite is the price of carrying on.",
             ),
         },
         value_labels={"all": "All", "top-level": "Main session", "unknown": "Not known"},
@@ -3553,22 +3561,54 @@ TABLE_COPY: dict[str, TableCopy] = {
     "limits_summary": TableCopy(
         title="Usage limits at a glance",
         help=Help(
-            shows="Totals for the window: limit stops, automatic resumes, subagents stopped early, pauses, and "
-            "the cache writes after each pause.",
-            read="One pause can show several limit messages, so stops can be higher than pauses. The cost after "
-            "a pause is a full cache write that you can't avoid.",
-            act="If pauses are frequent, spread heavy work over the day or across the week.",
+            shows="How often a usage limit stopped you, how many subagents it cut off, the pauses, and the cache "
+            "writes after each pause.",
+            read="One stop can write dozens of limit messages, one for each retry and each agent cut off, so "
+            "messages run far above stops. A weekly stop you worked through does not count as stopping work. "
+            "If a stop outlasts the cache's hour, the first reply after it writes the conversation to the cache "
+            "again. A reply within the hour reads the cache as usual. That rewrite is the price of carrying on, "
+            "not a caching habit to fix.",
+            act="If stops are frequent, run fewer agents at once when a limit is close, or spread heavy work "
+            "over the week.",
         ),
         columns={
             "metric": ("", "This row covers the whole window."),
-            "transcripts": ("Conversation logs", "One per main session and one per subagent run."),
+            "five_hour_stops": (
+                "5-hour limit stops",
+                "Times the rolling 5-hour limit stopped you. Limit messages that name the same reset count once.",
+            ),
+            "weekly_stops": (
+                "Weekly limit stops",
+                "Times you reached the weekly limit, including any you worked through. Limit messages that name the "
+                "same reset count once.",
+            ),
+            "weekly_stops_stopped_work": (
+                "Weekly stops that stopped work",
+                "Weekly stops with no reply in your main session more than 10 minutes after the first message "
+                "and before the reset.",
+            ),
+            "window_days": ("Days covered", "Days from the first to the last record in the window."),
             "sessions_affected": (
                 "Sessions affected",
-                "Sessions with a limit stop, a resume after one, or a subagent stopped early.",
+                "Main sessions with a limit message in them, counting the messages agents they ran received.",
             ),
-            "limit_hits": ("Limit stops", "Times Claude Code showed a usage-limit message."),
-            "session_limit_hits": ("5-hour limit stops", "Stops at the rolling 5-hour session limit."),
-            "weekly_limit_hits": ("Weekly limit stops", "Stops at the weekly limit."),
+            "agents_cut_off": (
+                "Agents cut off",
+                "Subagents that replied at least once and then got a limit message after their last reply.",
+            ),
+            "agents_cut_off_direct": ("Direct agents cut off", "Of those, agents started straight from a session."),
+            "agents_cut_off_workflow": ("Workflow agents cut off", "Of those, agents started by a workflow script."),
+            "cut_off_direct_cost_usd": (
+                "Spend of direct agents cut off",
+                "What those agents spent before a limit cut them off. Counts runs from 18 Sep 2026 on.",
+            ),
+            "cut_off_workflow_cost_usd": (
+                "Spend of workflow agents cut off",
+                "What those agents spent before a limit cut them off. Counts runs from 18 Sep 2026 on.",
+            ),
+            "limit_hits": ("Limit messages", "Usage-limit messages across main sessions and agents."),
+            "session_limit_hits": ("5-hour limit messages", "Messages from the rolling 5-hour session limit."),
+            "weekly_limit_hits": ("Weekly limit messages", "Messages from the weekly limit."),
             "limit_resumes": ("Automatic resumes", "Times the desktop app carried on by itself after a limit reset."),
             "agents_terminated": (
                 "Subagents stopped early",
@@ -3579,30 +3619,147 @@ TABLE_COPY: dict[str, TableCopy] = {
             "pause_total_s": ("Total pause time", "All those pauses added together."),
             "limit_turn_cc_tokens": (
                 "Cache writes after a pause",
-                "Tokens written to the cache on the first reply after each pause.",
+                "Tokens written to the cache on the first reply after each pause. This counts the whole window; "
+                "the cost beside it counts runs from 18 Sep 2026 on.",
             ),
             "limit_turn_write_cost_usd": (
                 "Cost of cache writes after a pause",
-                "What those cache writes cost in full. {{page:cache/rebuilds}} shows a smaller figure: large "
-                "contexts only, and only the cost above a cache read.",
+                "What those cache writes cost in full, for runs from 18 Sep 2026 on. {{page:cache/rebuilds}} counts "
+                "large contexts only, and only the cost above a cache read.",
             ),
+            "transcripts": ("Conversation logs", "One per main session and one per subagent run."),
         },
         value_labels={"all": "All"},
         # Total pause time leads "How long usage-limit pauses lasted", the
         # table beside this one, so it isn't a tile here too.
-        lead_columns=["limit_hits", "sessions_affected", "limit_turn_write_cost_usd"],
+        lead_columns=["five_hour_stops", "weekly_stops", "sessions_affected", "agents_cut_off"],
+    ),
+    "limits_stops_rollup": TableCopy(
+        title="Your limit stops, rolled up",
+        help=Help(
+            shows="Who spent the money before the limit stops since 18 Sep 2026: your main session, agents you "
+            "started, or agents a workflow started.",
+            read="Each share is a share of list-price spend; the limit may weigh models differently. The share "
+            "that ran while 3 or more agents were active is set beside the same share across all your work.",
+            act="Start with the biggest spender: plan and clear the main session, run fewer agents at once, or "
+            "lower the concurrency in a workflow script.",
+        ),
+        columns={
+            "metric": ("", "This row covers every stop counted."),
+            "stops": (
+                "Stops counted",
+                "5-hour stops since 18 Sep 2026 that stopped work and named a reset (weekly stops only when there "
+                "are none).",
+            ),
+            "spend_usd": (
+                "List-price spend before them",
+                "What you spent in the window before each stop counted: 5 hours, or 7 days for weekly stops. "
+                "A quarter hour inside two windows counts once.",
+            ),
+            "main_share_pct": (
+                "Main session",
+                "The main session's share of list-price spend; the limit may weigh models differently.",
+            ),
+            "direct_share_pct": (
+                "Direct agents",
+                "Direct agents' share of list-price spend; the limit may weigh models differently. These are "
+                "agents started straight from a session.",
+            ),
+            "workflow_share_pct": (
+                "Workflow agents",
+                "Workflow agents' share of list-price spend; the limit may weigh models differently. These are "
+                "agents started by a workflow script.",
+            ),
+            "largest_centre": (
+                "Biggest spender",
+                "Whether your main session, direct agents or workflow agents spent the most.",
+            ),
+            "largest_share_pct": (
+                "Biggest spender's share",
+                "Its share of list-price spend; the limit may weigh models differently.",
+            ),
+            "burst_share_pct": (
+                "Spend with 3+ agents at once",
+                "Spend that ran while 3 or more agents were active, as a share of list-price spend; the limit may "
+                "weigh models differently. An agent is active from its first to its last reply.",
+            ),
+            "all_burst_share_pct": (
+                "Same, across all your work",
+                "The same spend across all your work since 18 Sep 2026, as a share of list-price spend; the limit may "
+                "weigh models differently. Compare it with the figure beside it.",
+            ),
+            "since": ("Stops counted since", "The first day a stop could be counted."),
+        },
+        value_labels={"all": "All", "main": "Main session", "direct": "Direct agents", "workflow": "Workflow agents"},
+        lead_columns=["stops", "largest_centre", "burst_share_pct", "all_burst_share_pct"],
+    ),
+    "limits_stops": TableCopy(
+        title="Your recent limit stops",
+        help=Help(
+            shows="Each recent time a usage limit stopped you. It gives the reset time, how long before the reset the "
+            "stop began, and who spent the list-price spend before it.",
+            read="Spend runs from the start of the limit's window to the stop. That is 5 hours before the earliest "
+            "reset its messages named for the 5-hour limit, and 7 days for the weekly limit. Each share is a share "
+            "of list-price spend; the limit may weigh models differently.",
+            act="Look for the largest of the three shares, and for stops that ran with many agents at once. Run "
+            "fewer agents at once when a limit is close.",
+        ),
+        columns={
+            "reset": ("Reset time", "When the limit said it would reset, in your time zone."),
+            "kind": ("Limit", "The 5-hour limit or the weekly limit."),
+            "minutes_before_reset": (
+                "Minutes before the reset",
+                "Minutes from the stop's first limit message to the reset.",
+            ),
+            "spend_usd": (
+                "List-price spend in the window",
+                "What you spent from the start of the limit's window to the stop.",
+            ),
+            "main_share_pct": (
+                "Main session",
+                "The main session's share of list-price spend; the limit may weigh models differently.",
+            ),
+            "direct_share_pct": (
+                "Direct agents",
+                "Direct agents' share of list-price spend; the limit may weigh models differently.",
+            ),
+            "workflow_share_pct": (
+                "Workflow agents",
+                "Workflow agents' share of list-price spend; the limit may weigh models differently.",
+            ),
+            "burst_share_pct": (
+                "Spend with 3+ agents at once",
+                "Spend that ran while 3 or more agents were active, as a share of list-price spend; the limit may "
+                "weigh models differently.",
+            ),
+            "top_spender": (
+                "Biggest spender",
+                "The agent type and model family that spent the most in the window, with its share.",
+            ),
+            "second_spender": ("Second biggest", "The next agent type and model family, with its share."),
+            "stopped_work": (
+                "Stopped work",
+                "No for a weekly stop you worked through. Every 5-hour stop counts as stopping work.",
+            ),
+            "agents_cut_off": ("Agents cut off", "Subagents this stop cut off after they had replied at least once."),
+        },
+        lead_columns=[
+            "reset", "kind", "spend_usd", "main_share_pct", "direct_share_pct", "workflow_share_pct",
+            "burst_share_pct",
+        ],
     ),
     "limits_hits_by_kind": TableCopy(
-        title="Which limit you hit",
+        title="Which limit sent the messages",
         help=Help(
-            shows="Limit stops split between the 5-hour session limit and the weekly limit.",
-            read="Session-limit stops reset within hours. Weekly-limit stops can block you for days.",
+            shows="Limit messages split between the 5-hour session limit and the weekly limit.",
+            read="Session-limit messages reset within hours. Weekly-limit messages can block you for days. "
+            "A single stop writes many messages, so these are higher than the stop counts above.",
             act="",
         ),
         columns={
-            "kind": ("Limit", "Which usage limit stopped you."),
-            "hits": ("Stops", "Times this limit stopped a reply."),
-            "share_pct": ("Share", "Share of all limit stops."),
+            "kind": ("Limit", "Which usage limit sent the message."),
+            "hits": ("Messages", "Limit messages from this limit."),
+            "share_pct": ("Share", "Share of all limit messages."),
         },
         value_labels={"session_limit": "5-hour session limit", "weekly_limit": "Weekly limit"},
     ),
@@ -3624,7 +3781,8 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="How long usage-limit pauses lasted",
         help=Help(
             shows="How many times you waited for a usage limit to reset, and for how long.",
-            read="Each pause is the wait from the reply before the limit to the first reply after it.",
+            read="Each pause runs from the reply before the limit to the first reply after it, "
+            "or to the reset if that came first.",
             act="",
         ),
         columns={
@@ -3640,7 +3798,8 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="When your limits reset",
         help=Help(
             shows="Limit stops grouped by the local hour the limit said it would reset.",
-            read="A peak at one hour shows when you usually run out. Stops with no reset time are left out.",
+            read="Each stop counts once, however many limit messages it wrote. A peak at one hour shows when you "
+            "usually run out. Stops with no reset time are left out.",
             act="If limits often reset at a busy hour, start heavy work soon after a reset.",
         ),
         columns={
@@ -3650,18 +3809,41 @@ TABLE_COPY: dict[str, TableCopy] = {
         },
         value_labels={f"{hour:02d}": f"{hour:02d}:00" for hour in range(24)},
     ),
-    "limits_by_agent_type": TableCopy(
-        title="Usage limits by agent type",
+    "limits_wake_gaps": TableCopy(
+        title="What woke the session between limit messages",
         help=Help(
-            shows="Limit stops, pauses and the cache writes after them, for the main session and each agent type.",
-            read="Most stops show up in the main session. A subagent type with many stops is often running "
-            "when you reach the limit.",
+            shows="What happened between one limit message and the next in your main sessions.",
+            read="A retry or a background agent's notice can wake a session so it hits the limit again. Gaps "
+            "holding only lines Claude Code wrote itself are counted on their own.",
+            act="",
+        ),
+        columns={
+            "wake": ("What woke it", "What the gap between two limit messages in a row held."),
+            "gaps": ("Gaps", "Pairs of limit messages in a row with this in between."),
+            "share_pct": ("Share", "Share of all gaps."),
+        },
+        value_labels={
+            "typed": "Something you typed",
+            "resume": "The app resumed by itself",
+            "scheduled": "A scheduled task",
+            "agent_notice": "A background agent reported",
+            "meta_only": "Only lines Claude Code wrote itself",
+            "other": "Something else, or nothing",
+        },
+    ),
+    "limits_by_agent_type": TableCopy(
+        title="Who got the limit message",
+        help=Help(
+            shows="Limit messages, pauses and the cache writes after them, for the main session and each agent "
+            "type.",
+            read="The main session relays a message for each agent a limit cut off, so it receives the most. A "
+            "subagent type with many messages is often running when you reach the limit.",
             act="",
         ),
         columns={
             "agent_type": ("", "The subagent type, or the main session."),
             "transcripts": ("Conversation logs", "Main sessions or subagent runs of this type."),
-            "limit_hits": ("Limit stops", "Times this type showed a usage-limit message."),
+            "limit_hits": ("Limit messages received", "Usage-limit messages this type received."),
             "limit_resumes": ("Automatic resumes", "Times this type carried on by itself after a limit reset."),
             "agents_terminated": ("Subagents stopped early", "Notices of a subagent stopped early, seen by this type."),
             "pause_count": ("Pauses", "Waits between replies that spanned a usage limit."),
@@ -3674,7 +3856,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "limit_turn_write_cost_usd": (
                 "Cost of cache writes after a pause",
-                "What those cache writes cost in full.",
+                "What those cache writes cost in full, for runs from 18 Sep 2026 on.",
             ),
         },
         value_labels={"top-level": "Main session", "unknown": "Subagent (type not recorded)"},
@@ -3689,13 +3871,17 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="How often your usage log recorded a limit as fully used, next to the limit stops found in "
             "your conversation logs.",
             read="The two are recorded separately and won't match exactly. The usage log samples all the time; "
-            "a conversation log only records a stop when a reply was blocked.",
+            "a conversation log only records a stop when a reply was blocked. This table only shows when your "
+            "usage log has entries for the 5-hour or weekly limit.",
             act="A large, lasting gap may mean one of the two logs is missing data.",
         ),
         columns={
             "window": ("Window", "Which usage limit this row compares."),
             "csv_exhaustion_rows": ("Usage log at the limit", "Usage log entries that showed this limit fully used."),
-            "transcript_hits": ("Stops in conversation logs", "Limit stops found in your conversation logs."),
+            "transcript_stops": (
+                "Stops in conversation logs",
+                "Limit stops found in your conversation logs, each counted once.",
+            ),
             "delta": ("Difference", "Conversation-log stops minus usage-log entries."),
         },
         value_labels={"five_hour": "5-hour session limit", "seven_day": "Weekly limit"},
@@ -4614,7 +4800,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "limit_pause_excluded_turns": (
                 "Left out: after a usage limit",
-                "Replies right after a usage-limit pause. {{page:spend/usage}} covers these.",
+                "Replies right after a usage-limit pause. {{page:cache/rebuilds}} covers these.",
             ),
             "api_error_retry_turns": (
                 "After an API error",
@@ -5033,7 +5219,7 @@ DIAGNOSTIC_LABELS: dict[str, tuple[str, str]] = {
     "modes": ("Permission modes seen", "Permission modes recorded in the logs, with counts."),
     "attachment_catch_all": ("Unrecognised note types", "Kinds of Claude Code note this tool does not recognise yet, with counts. Worth reporting if large."),
     "pre_split_turns": ("Replies from older Claude Code", "Replies logged before Claude Code split cache writes by lifetime."),
-    "limit_hits": ("Usage-limit stops", "Times a session stopped at a usage limit."),
+    "limit_hits": ("Usage-limit messages", "Limit messages found in your logs. One stop writes many of them."),
     "limit_resumes": ("Resumes after a limit", "Times a session carried on after a usage-limit stop."),
     "agents_terminated": ("Subagents stopped early", "Subagents Claude Code ended before they finished, for any reason."),
     "pricing_closest_match_turns": ("Replies priced by closest match", "Replies costed at another, similar model's rate because this one has no price list entry of its own. See Usage's \"Priced by closest match\" table."),
@@ -5175,6 +5361,29 @@ def annotate_section(section: Section, billing_mode: str = "api") -> None:
             section.help = copy.help
     for table in section.tables:
         _apply_table_copy(table, _table_copy_for(table.name), billing_mode)
+    if section.key == "limits":
+        _gate_busy_hour_advice(section)
+
+
+def _gate_busy_hour_advice(section: Section) -> None:
+    """Drop the same-hour advice from the limits section and its reset-hour
+    table unless one hour holds enough of the stops to earn it
+    (:func:`limits.busy_reset_hour`). A ``Help`` is shared by every report
+    that uses its copy, so the change goes on a copy of it."""
+    histogram = next((table for table in section.tables if table.name == "limits_reset_hour_histogram"), None)
+    counts: dict[int, int] = {}
+    if histogram is not None:
+        keys = [column.key for column in histogram.columns]
+        if "local_hour" in keys and "resets" in keys:
+            hour_at, stops_at = keys.index("local_hour"), keys.index("resets")
+            for row in histogram.rows:
+                if str(row[hour_at]).isdigit() and isinstance(row[stops_at], int):
+                    counts[int(row[hour_at])] = row[stops_at]
+    if busy_reset_hour(counts) is not None:
+        return
+    for owner in (section, histogram):
+        if owner is not None and owner.help is not None and owner.help.act:
+            owner.help = dataclasses.replace(owner.help, act="")
 
 
 def annotate(model: ReportModel) -> ReportModel:

@@ -196,9 +196,11 @@ is detected and used):
   like ``America/Argentina/Buenos_Aires`` is deliberately left as
   ``None`` rather than guessed at), and ``reset_ts`` (``str | None``, UTC
   ISO -- from the line's own ``quotaLimits.resetsAt`` epoch when present,
-  else reconstructed from the parsed local time + zone via
-  ``zoneinfo.ZoneInfo`` when that resolves, else ``None`` when neither
-  source is usable, e.g. missing tzdata on a bare Windows install).
+  else reconstructed from the parsed local time (and, for the weekly form,
+  its "Oct 3," date) in that zone, which falls back to the machine's own
+  zone when the name can't be resolved, e.g. missing tzdata on a bare
+  Windows install; ``None`` when the line has neither source, or names no
+  single-slash zone).
 - ``Event.detail`` additions for ``API_ERROR``: ``source`` (``str |
   None``, the ``system.subtype=api_error`` line's own ``request_retry``/
   ``connection_retry`` value) alongside the existing ``status``/

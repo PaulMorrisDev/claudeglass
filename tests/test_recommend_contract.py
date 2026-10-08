@@ -714,11 +714,14 @@ def _build_every_rule_fixture() -> "report.ReportModel":
                 title="Usage-limits summary",
                 columns=[
                     Column(key="metric", label="Metric"),
-                    Column(key="limit_hits", label="Limit hits"),
-                    Column(key="agents_terminated_rate_limit", label="Agents terminated by rate limit"),
+                    Column(key="five_hour_stops", label="5-hour limit stops"),
+                    Column(key="weekly_stops", label="Weekly limit stops"),
+                    Column(key="weekly_stops_stopped_work", label="Weekly stops that stopped work"),
+                    Column(key="window_days", label="Days covered"),
                     Column(key="sessions_affected", label="Sessions affected"),
+                    Column(key="agents_cut_off", label="Agents cut off"),
                 ],
-                rows=[["all", 5, 1, 3]],
+                rows=[["all", 5, 1, 1, 30, 3, 1]],
             )
         ],
     )

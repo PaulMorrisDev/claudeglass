@@ -10,7 +10,7 @@ import { button, chip, drawer, errorNotice, loadingNode, prose, tile, tileRow, t
 import { dataGrid, renderMappedSections, renderReportBackedSection } from "./grid.js";
 import { replaceParams, viewIntro } from "./links.js";
 import { chartError, dayLabel, holdChart } from "./charts.js";
-import { dailyChanges, modeColour, renderChart, savingsLevers, sessionContextChart, windowSpan } from "./charts-types.js";
+import { dailyChanges, modeColour, renderChart, savingsLevers, sessionContextChart, sessionWord, sessionWordChoices, sessionWordNote, windowSpan } from "./charts-types.js";
 
 // ======================================================================
 // Spend, Sessions: which sessions stand out (chart 4), over the list. A
@@ -180,6 +180,25 @@ function timeCell(row, value) {
   return el("span", { class: "nowrap", text: shortTs(value) });
 }
 
+// A session's mode, purpose or app in words (charts-types.js SESSION_WORDS,
+// the map the chart and the override menus read too). A mode shows what it
+// means on hover; the others show the key they stand for.
+function wordCell(kind) {
+  return function (row, value) {
+    if (value === null || value === undefined || value === "") return "-";
+    var note = sessionWordNote(kind, value);
+    return el("span", { class: "value-label", title: note || String(value), "data-raw": String(value), text: sessionWord(kind, value) });
+  };
+}
+
+// A word column sorts by the word it shows ("Code review" before
+// "Subagent fan-out"), not by the key behind it.
+function wordSort(kind) {
+  return function (row) {
+    return sessionWord(kind, row[kind]);
+  };
+}
+
 var SESSION_COLUMNS = [
   {
     key: "id",
@@ -197,9 +216,9 @@ var SESSION_COLUMNS = [
   { key: "first_ts", label: "Started", kind: "str", render: timeCell },
   { key: "last_ts", label: "Last reply", kind: "str", render: timeCell },
   { key: "span_s", label: "Span", kind: "secs" },
-  { key: "mode", label: "Mode", kind: "str" },
-  { key: "purpose", label: "Purpose", kind: "str" },
-  { key: "entrypoint", label: "Started from", kind: "str" },
+  { key: "mode", label: "Mode", kind: "str", render: wordCell("mode"), sortValue: wordSort("mode") },
+  { key: "purpose", label: "Purpose", kind: "str", render: wordCell("purpose"), sortValue: wordSort("purpose") },
+  { key: "entrypoint", label: "Started from", kind: "str", render: wordCell("entrypoint"), sortValue: wordSort("entrypoint") },
   { key: "total_cost", label: "Cost", kind: "money" },
   { key: "total_tokens", label: "Tokens", kind: "tokens" },
 ];
@@ -504,14 +523,20 @@ function buildSessionDetail(container, session) {
   }
   var tagControls = el("div", { class: "tag-controls" });
   var modeLabel = el("label", { text: "Mode override" });
-  var modeSelect = buildTagSelect(["", "interactive", "long-agentic", "overnight", "mixed"], (session.tags && session.tags.mode) || session.mode);
+  var modeSelect = buildTagSelect("mode", (session.tags && session.tags.mode) || session.mode);
   modeLabel.appendChild(modeSelect);
+  // What the picked mode means, under the menu.
+  var modeNote = el("p", { class: "notes", "aria-live": "polite" });
+  function showModeNote() {
+    var note = sessionWordNote("mode", modeSelect.value);
+    modeNote.textContent = note;
+    modeNote.hidden = !note;
+  }
+  modeSelect.addEventListener("change", showModeNote);
+  showModeNote();
 
   var purposeLabel = el("label", { text: "Purpose override" });
-  var purposeSelect = buildTagSelect(
-    ["", "local-llm-pipeline", "agent-fanout", "workflow-run", "review", "test-triage", "planning", "docs", "refactor", "general-dev"],
-    (session.tags && session.tags.purpose) || session.purpose
-  );
+  var purposeSelect = buildTagSelect("purpose", (session.tags && session.tags.purpose) || session.purpose);
   purposeLabel.appendChild(purposeSelect);
 
   var saveTagsBtn = button("Save tags");
@@ -521,6 +546,7 @@ function buildSessionDetail(container, session) {
   tagControls.appendChild(saveTagsBtn);
   tagControls.appendChild(tagStatus);
   wrap.appendChild(tagControls);
+  wrap.appendChild(modeNote);
 
   saveTagsBtn.addEventListener("click", function () {
     saveTagsBtn.disabled = true;
@@ -638,12 +664,17 @@ function renderSessionExplain(data, container) {
   container.appendChild(el("p", { class: "notes", text: "Shares are worked out at list price for each model's token counts." }));
 }
 
-function buildTagSelect(options, current) {
+// A menu of one kind of word (SESSION_WORDS: "mode" or "purpose"): each
+// choice shows its name and keeps its key as the value that is saved.
+function buildTagSelect(kind, current) {
   var select = el("select");
-  options.forEach(function (opt) {
-    select.appendChild(el("option", { value: opt, text: opt || "(no override)" }));
+  select.appendChild(el("option", { value: "", text: "(no override)" }));
+  var keys = [];
+  sessionWordChoices(kind).forEach(function (word) {
+    keys.push(word.key);
+    select.appendChild(el("option", { value: word.key, text: word.label }));
   });
-  if (current && options.indexOf(current) !== -1) select.value = current;
+  if (current && keys.indexOf(current) !== -1) select.value = current;
   return select;
 }
 

@@ -91,7 +91,7 @@ and are unchanged.
 the tool already classifies every session into (`review`,
 `test-triage`, `planning`, `docs-or-light-edit`, `refactor`,
 `agent-fanout`, `workflow-run`, `local-llm-pipeline`, `general-dev` for
-purpose; `overnight`, `long-agentic`, `interactive`, `mixed` for mode).
+purpose; `overnight`, `long-agentic`, `interactive`, `one-shot`, `mixed` for mode).
 Pass `--stratify purpose`, `--stratify mode`, or `--stratify ""` (no
 split — one "all" row) to narrow it.
 

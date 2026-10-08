@@ -383,8 +383,9 @@ only cite the report's own tables" convention `recommend.py`'s
 | Field | Source |
 |---|---|
 | `mode_mix` | `sessions` section's `sessions_by_mode` table |
+| `mode_rules` | `classify.MODE_RULES` when it was saved: which mode rules sorted its sessions (2: unattended overnight, and one-shot) |
 | `dominant_purposes` | `sessions` section's `sessions_by_purpose` table (top 3) |
-| `archetype` | `workstyle` section's `workstyle_archetypes` table (top row) |
+| `archetype` | `workstyle` section's `workstyle_archetypes` table (top row: the archetype that cost the most) |
 | `scorecard_overall` / `scorecard_label` | `scorecard` section's `overall` table |
 | `projected_saving_usd` | sum of the `ttl` section's `ttl_by_agent_type` table's `saving_usd` column |
 | `suggested_profile` / `suggested_profile_reason` | see below |
@@ -428,10 +429,11 @@ writable surface.
 `UNREACHABLE_BY_SUGGEST`). Since a majority-overnight corpus is exactly
 the case that profile exists for, `baseline._suggested_profile` applies
 the override itself, directly from the corpus's own `sessions_by_mode`
-table: when at least half of the corpus's sessions are classified
-`mode=overnight`, the suggestion is `"overnight-batch"` regardless of
-what `suggest()` would otherwise say, with the reason string citing the
-exact count. Below that share, `catalogue.suggest()` is called
+table: when at least half of the corpus's sessions are overnight runs
+(`mode=overnight`: Claude worked on its own for two hours or more at
+night while you were away), the suggestion is `"overnight-batch"`
+regardless of what `suggest()` would otherwise say, with the reason
+string citing the exact count. Below that share, `catalogue.suggest()` is called
 normally, with `shape="plan-then-build"` when at least half the main
 sessions approved a plan and built it in the same session
 (`habits.habits_by_shape`); the reason then cites those sessions and

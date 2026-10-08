@@ -668,17 +668,28 @@ def _synthetic_text(content: object) -> str | None:
 
 
 def _limit_reset_ts(
-    d: dict, ts_dt: datetime | None, minutes_of_day: int | None, reset_tz: str | None
+    d: dict,
+    ts_dt: datetime | None,
+    minutes_of_day: int | None,
+    reset_tz: str | None,
+    reset_date: tuple[int, int] | None = None,
 ) -> str | None:
     """UTC ISO timestamp of a limit-hit's reset. Prefers the line's own
     ``quotaLimits.resetsAt`` (a precise Unix epoch, UTC) -- present on
     only around three-quarters of limit-hit lines in the sampled corpus
     -- over reconstructing one from the parsed local-time-of-day clause
-    plus ``reset_tz``, which needs ``zoneinfo`` to resolve the zone (may
-    be unavailable, e.g. missing tzdata on a bare Windows install) and a
-    reference date (this line's own timestamp, in that zone) to anchor
-    "today" vs. "tomorrow". Returns ``None`` when neither source is
-    usable.
+    plus ``reset_tz``. The zone is resolved the way every other local
+    time here is (``discovery.to_local``): a name ``zoneinfo`` can't
+    resolve (no ``tzdata`` on a bare Windows install, which is every name
+    there) gives the machine's own zone, a guess that holds when the
+    machine is where the account's clock is. The reference date is this
+    line's own timestamp in that zone: a time of day alone resolves to the
+    next time it is that time (today or tomorrow), and the weekly form's
+    ``reset_date`` (month, day; ``events.parse_limit_reset_date``) to that
+    day this year, or to next year's when this year's is more than a week
+    behind (December to January), or to last year's when this year's is more
+    than a week ahead (January to December). Returns ``None`` when neither
+    source is usable.
     """
     quota_limits = d.get("quotaLimits")
     if isinstance(quota_limits, dict):
@@ -695,22 +706,32 @@ def _limit_reset_ts(
 
     if minutes_of_day is None or reset_tz is None or ts_dt is None:
         return None
-    try:
-        from zoneinfo import ZoneInfo
+    # Not at the top: discovery imports this module (detect_provider).
+    from . import discovery
 
-        zone = ZoneInfo(reset_tz)
-    except Exception:
-        # Missing tzdata, or a name zoneinfo doesn't recognise -- never
-        # let this fall through to an exception escaping the parser.
-        return None
     try:
-        local_ts = ts_dt.astimezone(zone)
         reset_hour, reset_minute = divmod(minutes_of_day, 60)
-        candidate = local_ts.replace(hour=reset_hour, minute=reset_minute, second=0, microsecond=0)
-        if candidate <= local_ts:
-            candidate = candidate + timedelta(days=1)
-        return candidate.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+        now = discovery.to_local(ts_dt, reset_tz).replace(tzinfo=None)
+        if reset_date is None:
+            wall = now.replace(hour=reset_hour, minute=reset_minute, second=0, microsecond=0)
+        else:
+            wall = datetime(now.year, reset_date[0], reset_date[1], reset_hour, reset_minute)
+        reset = discovery.from_local(wall, reset_tz)
+        if reset <= ts_dt and reset_date is None:
+            # Wall-clock arithmetic, so a clock change in between is kept.
+            reset = discovery.from_local(wall + timedelta(days=1), reset_tz)
+        elif reset <= ts_dt and ts_dt - reset > timedelta(days=7):
+            # A weekly reset is at most a week ahead: a date that has gone by
+            # is next year's only when it is that far behind (December to January).
+            reset = discovery.from_local(wall.replace(year=wall.year + 1), reset_tz)
+        elif reset_date is not None and reset - ts_dt > timedelta(days=8):
+            # Nor more than a week ahead: a date that far ahead is last year's
+            # (a line logged just after New Year naming 31 December).
+            reset = discovery.from_local(wall.replace(year=wall.year - 1), reset_tz)
+        return reset.isoformat().replace("+00:00", "Z")
     except Exception:
+        # A day that doesn't exist (Feb 30), or any zone oddity -- never
+        # let this fall through to an exception escaping the parser.
         return None
 
 
@@ -1341,7 +1362,9 @@ def _new_pending(
             minutes_of_day, reset_tz = events_mod.parse_limit_reset_clause(text)
             pending.reset_minutes_of_day = minutes_of_day
             pending.reset_tz = reset_tz
-            pending.reset_ts = _limit_reset_ts(d, _parse_ts(pending.ts_raw), minutes_of_day, reset_tz)
+            pending.reset_ts = _limit_reset_ts(
+                d, _parse_ts(pending.ts_raw), minutes_of_day, reset_tz, events_mod.parse_limit_reset_date(text)
+            )
     effort = d.get("effort")
     pending.effort = effort if isinstance(effort, str) else None
     per_turn_effort = d.get("perTurnEffort")

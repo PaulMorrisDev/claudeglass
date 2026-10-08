@@ -128,8 +128,15 @@ export var ENTITY_COLOURS = {
   agent: { main: "var(--chart-1)", subagent: "var(--chart-3)" },
   // Chart 1, split by model: a model takes its tier's colour.
   tier: { opus: "var(--chart-1)", sonnet: "var(--chart-2)", haiku: "var(--chart-3)", other: "var(--chart-other)" },
-  // Chart 4: how the session ran. Mixed and unclassified are Other.
-  mode: { interactive: "var(--chart-1)", "long-agentic": "var(--chart-2)", overnight: "var(--chart-3)", other: "var(--chart-other)" },
+  // Chart 4: how the session ran, and the Sessions list's swatch. Its keys
+  // are SESSION_WORDS.mode's (charts-types.js); mixed and unclassified are Other.
+  mode: {
+    interactive: "var(--chart-1)",
+    "long-agentic": "var(--chart-2)",
+    overnight: "var(--chart-3)",
+    "one-shot": "var(--chart-4)",
+    other: "var(--chart-other)",
+  },
   // Chart 8: what an agent's startup context is made of.
   startup: {
     system_prompt: "var(--chart-1)",

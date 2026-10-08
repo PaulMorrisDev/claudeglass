@@ -687,6 +687,105 @@ def test_subagent_volume_suppressed_for_overseer_fanout():
     assert not any(rec.id == "subagent-volume" for rec in recs)
 
 
+def _workstyle_section(rows: list[list]) -> Section:
+    """The workstyle section, with each row ``[archetype, sessions, spend]``."""
+    return Section(
+        key="workstyle",
+        title="Workstyle",
+        tables=[
+            Table(
+                name="workstyle_archetypes",
+                title="Workstyle archetypes",
+                columns=[
+                    Column(key="archetype", label="Archetype"),
+                    Column(key="sessions", label="Sessions", kind="int"),
+                    Column(key="pct", label="Share", kind="pct"),
+                    Column(key="spend", label="Spend", kind="money"),
+                    Column(key="description", label="Description"),
+                ],
+                rows=[[name, sessions, None, spend, ""] for name, sessions, spend in rows],
+            )
+        ],
+    )
+
+
+def _volume_report(workstyle_rows: list[list] | None) -> ReportModel:
+    """A report in which claude-implementer is 60% of the spend, so
+    subagent-volume fires unless the fan-out gate holds it back, with a
+    workstyle section made of ``workstyle_rows`` (none when ``None``)."""
+    r = _add_section(
+        _base_report(),
+        Section(
+            key="ttl",
+            title="TTL",
+            tables=[
+                _ttl_by_agent_type_table(
+                    [
+                        ["top-level", 40.0, 0.0, "no material difference", "promptCacheTtl"],
+                        ["claude-implementer", 60.0, 0.0, "no material difference", "promptCacheTtl"],
+                    ]
+                )
+            ],
+        ),
+    )
+    if workstyle_rows is not None:
+        _add_section(r, _workstyle_section(workstyle_rows))
+    return r
+
+
+def _fires(r: ReportModel, archetype: str | None = None, config: Config | None = None) -> bool:
+    recs = recommend_fn(r, config=config or _config(), archetype=archetype)
+    return any(rec.id == "subagent-volume" for rec in recs)
+
+
+def test_subagent_volume_is_held_back_when_fanout_sessions_are_30_percent_of_the_spend():
+    # 30 of 100 dollars, in 1 session of 11: not the corpus's biggest
+    # archetype by sessions or even by spend, but a third of its money.
+    rows = [["single-model", 6, 50.0], ["overseer-fanout", 1, 30.0], ["chat-only", 4, 20.0]]
+    assert not _fires(_volume_report(rows))
+    assert not _fires(_volume_report(rows), archetype="single-model")
+
+
+def test_subagent_volume_fires_when_fanout_sessions_are_under_30_percent_of_the_spend():
+    rows = [["single-model", 6, 70.1], ["overseer-fanout", 4, 29.9]]
+    assert _fires(_volume_report(rows))
+
+
+def test_the_spend_share_beats_the_corpus_archetype_when_there_is_a_workstyle_table():
+    rows = [["single-model", 6, 90.0], ["overseer-fanout", 4, 10.0]]
+    # The caller says fan-out; the money says otherwise.
+    assert _fires(_volume_report(rows), archetype="overseer-fanout")
+
+
+def test_subagent_volume_falls_back_to_the_archetype_without_a_workstyle_table():
+    assert not _fires(_volume_report(None), archetype="overseer-fanout")
+    assert _fires(_volume_report(None), archetype="single-model")
+    assert _fires(_volume_report(None), archetype=None)
+
+
+def test_subagent_volume_falls_back_to_the_archetype_when_the_workstyle_table_has_no_spend():
+    rows = [["single-model", 6, None], ["overseer-fanout", 4, None]]
+    assert not _fires(_volume_report(rows), archetype="overseer-fanout")
+    assert _fires(_volume_report(rows), archetype="single-model")
+    free = [["single-model", 6, 0.0], ["overseer-fanout", 4, 0.0]]
+    assert not _fires(_volume_report(free), archetype="overseer-fanout")
+
+
+def test_the_fanout_share_threshold_is_30_by_default_and_configurable():
+    assert RecommendThresholds().fanout_spend_share_pct == 30.0
+    rows = [["single-model", 6, 60.0], ["overseer-fanout", 4, 40.0]]
+    assert not _fires(_volume_report(rows))
+    config = Config(thresholds={"recommend": {"fanout_spend_share_pct": 50}})
+    assert _fires(_volume_report(rows), config=config)
+
+
+def test_fanout_spend_share_pct_reads_the_spend_column():
+    rows = [["single-model", 6, 75.0], ["overseer-fanout", 4, 25.0]]
+    assert recommend._fanout_spend_share_pct(_volume_report(rows)) == pytest.approx(25.0)
+    assert recommend._fanout_spend_share_pct(_volume_report([])) is None
+    assert recommend._fanout_spend_share_pct(_volume_report(None)) is None
+
+
 # -- compaction-churn ------------------------------------------------------
 
 
@@ -1981,49 +2080,75 @@ def test_data_quality_does_not_fire_when_all_clean():
 # -- limit-pressure (v3-limits addition) ------------------------------------
 
 
-def _limits_summary_table(hits: int, terminated_rate_limit: int, sessions_affected: int = 1) -> Table:
+def _limits_summary_table(
+    five_hour: int = 0,
+    weekly: int = 0,
+    weekly_stopped_work: int = 0,
+    cut_off: int = 0,
+    days: int = 30,
+    sessions_affected: int = 1,
+) -> Table:
     return Table(
         name="limits_summary",
         title="Usage-limits summary",
         columns=[
             Column(key="metric", label="Metric"),
-            Column(key="limit_hits", label="Limit hits"),
-            Column(key="agents_terminated_rate_limit", label="Agents terminated by rate limit"),
+            Column(key="five_hour_stops", label="5-hour limit stops"),
+            Column(key="weekly_stops", label="Weekly limit stops"),
+            Column(key="weekly_stops_stopped_work", label="Weekly stops that stopped work"),
+            Column(key="window_days", label="Days covered"),
             Column(key="sessions_affected", label="Sessions affected"),
+            Column(key="agents_cut_off", label="Agents cut off"),
         ],
-        rows=[["all", hits, terminated_rate_limit, sessions_affected]],
+        rows=[["all", five_hour, weekly, weekly_stopped_work, days, sessions_affected, cut_off]],
     )
 
 
-def test_limit_pressure_fires_on_hit_count():
-    r = _base_report()
+def _limit_pressure_recs(**counts):
     r = _add_section(
-        r,
-        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(hits=3, terminated_rate_limit=0)]),
+        _base_report(),
+        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(**counts)]),
     )
-    recs = recommend_fn(r, config=_config(), archetype=None)
-    rec = next(rec for rec in recs if rec.id == "limit-pressure")
-    assert ("Usage-cap hits", 3, "limits.limits_summary", "all") in rec.evidence
+    return [rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "limit-pressure"]
 
 
-def test_limit_pressure_fires_on_a_single_rate_limit_termination():
-    r = _base_report()
-    r = _add_section(
-        r,
-        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(hits=0, terminated_rate_limit=1)]),
-    )
-    recs = recommend_fn(r, config=_config(), archetype=None)
-    assert any(rec.id == "limit-pressure" for rec in recs)
+def test_limit_pressure_fires_on_two_five_hour_stops_a_week():
+    # 9 stops in 30 days is 2.1 a week.
+    (rec,) = _limit_pressure_recs(five_hour=9, days=30)
+    assert ("5-hour limit stops", 9, "limits.limits_summary", "all") in rec.evidence
+    assert ("Days covered", 30, "limits.limits_summary", "all") in rec.evidence
+    assert ("Sessions affected", 1, "limits.limits_summary", "all") in rec.evidence
 
 
-def test_limit_pressure_does_not_fire_below_both_thresholds():
-    r = _base_report()
-    r = _add_section(
-        r,
-        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(hits=2, terminated_rate_limit=0)]),
-    )
-    recs = recommend_fn(r, config=_config(), archetype=None)
-    assert not any(rec.id == "limit-pressure" for rec in recs)
+def test_limit_pressure_counts_a_rate_not_a_total():
+    # 8 stops in 30 days is 1.9 a week: below the threshold however long the window.
+    assert not _limit_pressure_recs(five_hour=8, days=30)
+    assert _limit_pressure_recs(five_hour=2, days=7)
+
+
+def test_limit_pressure_reads_a_short_window_as_a_week():
+    # The window floors at 7 days: two stops in a day read as two a week,
+    # and a single stop never does.
+    assert _limit_pressure_recs(five_hour=2, days=1)
+    assert not _limit_pressure_recs(five_hour=1, days=1)
+
+
+def test_limit_pressure_fires_on_a_weekly_stop_that_stopped_work():
+    (rec,) = _limit_pressure_recs(weekly=1, weekly_stopped_work=1)
+    assert ("Weekly stops that stopped work", 1, "limits.limits_summary", "all") in rec.evidence
+
+
+def test_limit_pressure_ignores_a_weekly_stop_you_worked_through():
+    assert not _limit_pressure_recs(weekly=1, weekly_stopped_work=0)
+
+
+def test_limit_pressure_fires_on_a_single_cut_off_agent():
+    (rec,) = _limit_pressure_recs(cut_off=1)
+    assert ("Agents cut off by a limit", 1, "limits.limits_summary", "all") in rec.evidence
+
+
+def test_limit_pressure_does_not_fire_on_one_five_hour_stop():
+    assert not _limit_pressure_recs(five_hour=1, days=30)
 
 
 def test_limit_pressure_absent_without_limits_section():
@@ -2033,10 +2158,9 @@ def test_limit_pressure_absent_without_limits_section():
 
 
 def test_limit_pressure_threshold_is_overridable():
-    r = _base_report()
     r = _add_section(
-        r,
-        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(hits=1, terminated_rate_limit=0)]),
+        _base_report(),
+        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(five_hour=1, days=7)]),
     )
     recs = recommend_fn(r, config=_config(), archetype=None)
     assert not any(rec.id == "limit-pressure" for rec in recs)
@@ -2045,9 +2169,15 @@ def test_limit_pressure_threshold_is_overridable():
         r,
         config=_config(),
         archetype=None,
-        thresholds=RecommendThresholds(limit_pressure_min_hits=1),
+        thresholds=RecommendThresholds(limit_pressure_min_episodes=1),
     )
     assert any(rec.id == "limit-pressure" for rec in recs)
+
+
+def test_limit_pressure_old_message_threshold_is_read_but_ignored():
+    thresholds = RecommendThresholds.from_config({"limit_pressure_min_hits": 1, "limit_pressure_min_episodes": 4})
+    assert thresholds.limit_pressure_min_episodes == 4
+    assert not hasattr(thresholds, "limit_pressure_min_hits")
 
 
 # -- long-tool-waits / notification-invalidation / batch-instructions -------

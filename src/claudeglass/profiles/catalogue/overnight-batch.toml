@@ -3,8 +3,9 @@ name = "Overnight batch"
 for = ["overnight-run", "unattended-batch"]
 archetype = "overseer-fanout"
 notes = """
-For classify.classify_mode's "overnight" mode (span > 4 hours and the \
-maximum human gap > 60 minutes -- an unattended run, not a session mode \
+For classify.classify_mode's "overnight" mode (Claude worked on its own \
+for two hours or more at night while you were away, and at least 30% of \
+its working time was at night -- an unattended run, not a session mode \
 this package's suggest() can currently detect on its own; see \
 catalogue.py's module docstring for why suggest() cannot reach this \
 entry deterministically yet). An unattended run's own gaps are exactly \

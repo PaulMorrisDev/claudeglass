@@ -65,6 +65,7 @@ from . import capture_catalogue as catalogue
 from . import classify
 from . import events as events_mod
 from . import known_savers
+from . import limits
 from . import model_gate
 from . import pieces as pieces_mod
 from . import quality
@@ -1044,6 +1045,7 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
         rated,
         shape,
         getattr(bundle, "project_dir", "") or getattr(bundle, "slug", "") or "",
+        limits.limit_pause_intervals(top),
     )
 
     index_of = {id(t): i for i, t in enumerate(turns)}
@@ -1135,6 +1137,7 @@ def _pieces_of_session(
     rated: dict,
     shape: str,
     project: str = "",
+    pauses: tuple | list = (),
 ) -> tuple[set[int], set[int], set[int]]:
     """Draw the session's pieces of work (``pieces.pieces_of``) and record
     what they say: a :class:`Piece` for each one that no kept answer or
@@ -1143,12 +1146,16 @@ def _pieces_of_session(
     a plan you approved by typing, up to the end of their piece, ids of the
     asides, the messages sent while background work ran)``. The
     session's cycles are kept on ``Habits.piece_sessions``: :func:`collect`
-    draws ``Habits.work_pieces`` from them across sessions, handoffs joined."""
+    draws ``Habits.work_pieces`` from them across sessions, handoffs joined.
+    ``pauses`` are the session's usage-limit pauses
+    (``limits.limit_pause_intervals``), left out of a silence between
+    messages."""
     feedback = session_rating if session_rating is not None and not spans else spans
-    found = pieces_mod.pieces_of(cycles, rates, feedback, session_id=session_id, project=project)
+    pauses = list(pauses)
+    found = pieces_mod.pieces_of(cycles, rates, feedback, session_id=session_id, project=project, pauses=pauses)
     # collect() draws them again across every session, handoffs joined:
     # those are Habits.work_pieces.
-    out.piece_sessions.append(pieces_mod.PieceSession(session_id, cycles, project, feedback))
+    out.piece_sessions.append(pieces_mod.PieceSession(session_id, cycles, project, feedback, pauses))
     rework: set[int] = set()
     planned_after: set[int] = set()
     aside_ids: set[int] = set()

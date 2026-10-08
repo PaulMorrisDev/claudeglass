@@ -29,8 +29,9 @@ would otherwise fall into --
   never events (see this function's docstring). ``parse.py`` classifies
   that text via :func:`classify_synthetic_text` and synthesises the
   ``LIMIT_HIT`` event itself once it knows the turn is synthetic.
-  :func:`classify_synthetic_text` and :func:`parse_limit_reset_clause`
-  live here anyway, alongside every other piece of text-shape knowledge.
+  :func:`classify_synthetic_text`, :func:`parse_limit_reset_clause` and
+  :func:`parse_limit_reset_date` live here anyway, alongside every other
+  piece of text-shape knowledge.
 
 Both new precedence entries (``LIMIT_HIT``, ``LIMIT_RESUME``) rank above
 ``INTERRUPT`` in ``PRECEDENCE`` per the v3-limits brief: a usage-cap
@@ -1330,9 +1331,16 @@ def classify_synthetic_text(text: str | None) -> str:
     return "other_api_error"
 
 
-#: Usage-limits addition (see module docstring): the "resets H[:MM]am|pm
-#: (IANA tz)" clause trailing a session/weekly-limit synthetic text.
-_LIMIT_RESET_RE = re.compile(r"resets\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)", re.IGNORECASE)
+#: Usage-limits addition (see module docstring): the "resets [Mon D, ]H[:MM]am|pm
+#: (IANA tz)" clause trailing a session/weekly-limit synthetic text. The
+#: weekly form names the day ("resets Oct 3, 9am (Europe/London)"); the
+#: five-hour form doesn't.
+_LIMIT_RESET_RE = re.compile(
+    r"resets\s+(?:(?P<month>jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s+(?P<day>\d{1,2}),?\s*)?"
+    r"(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<meridiem>am|pm)\s*\((?P<tz>[^)]+)\)",
+    re.IGNORECASE,
+)
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 #: Single-slash IANA zone names only (e.g. ``Europe/London``) -- a
 #: multi-part name like ``America/Argentina/Buenos_Aires`` is deliberately
 #: excluded rather than guessed at (see model.py's module docstring).
@@ -1351,7 +1359,7 @@ def parse_limit_reset_clause(text: str | None) -> tuple[int | None, str | None]:
     match = _LIMIT_RESET_RE.search(text)
     if not match:
         return None, None
-    hour_raw, minute_raw, meridiem, tz_raw = match.groups()
+    hour_raw, minute_raw, meridiem, tz_raw = match.group("hour", "minute", "meridiem", "tz")
     try:
         hour = int(hour_raw)
         minute = int(minute_raw) if minute_raw else 0
@@ -1365,6 +1373,24 @@ def parse_limit_reset_clause(text: str | None) -> tuple[int | None, str | None]:
     minutes_of_day = hour24 * 60 + minute
     tz = tz_raw if _IANA_TZ_RE.match(tz_raw) else None
     return minutes_of_day, tz
+
+
+def parse_limit_reset_date(text: str | None) -> tuple[int, int] | None:
+    """The ``(month, day)`` a synthetic limit-hit line's "resets ..." clause
+    names ("resets Oct 3, 9am (Europe/London)" gives ``(10, 3)``), or
+    ``None`` for the five-hour form, which names a time of day alone, and
+    for a text with no matching clause. The day is checked against 1-31
+    only: whether it exists that month is for the caller that dates it.
+    """
+    if not isinstance(text, str):
+        return None
+    match = _LIMIT_RESET_RE.search(text)
+    if not match or not match.group("month"):
+        return None
+    day = int(match.group("day"))
+    if not 1 <= day <= 31:
+        return None
+    return _MONTHS.index(match.group("month").lower()) + 1, day
 
 
 #: Usage-limits addition (see module docstring): a subagent killed
@@ -1967,6 +1993,7 @@ __all__ = [
     "primary_kind",
     "classify_synthetic_text",
     "parse_limit_reset_clause",
+    "parse_limit_reset_date",
     "image_token_estimate",
     "content_block_size",
     "sanitize_line_type",

@@ -603,3 +603,80 @@ def test_the_copy_the_changes_page_adds_keeps_to_the_help_rules(tmp_path):
     assert len(strings) > 100
     for where, string in strings:
         _plain(string, where)
+
+
+def test_the_copy_the_limit_stops_build_keeps_to_the_help_rules_and_never_says_percent_of_your_window(tmp_path):
+    """The roll-up sentence, every note, the stop rows' spender text and the
+    help on every share column: the same rules as the help text, and each
+    share says it is a share of list-price spend, not a share of the window."""
+    from claudeglass import limits
+    from test_limits import _limit_line, _spend_reply, _stats_priced, _transcript, _when
+
+    reset = _when(18, 14)
+    main = _transcript(
+        tmp_path, "main", [_spend_reply("m1", _when(18, 10, 30)), _limit_line("l1", _when(18, 12), reset)]
+    )
+    agents = [
+        _transcript(
+            tmp_path,
+            f"a{i}",
+            [_spend_reply(f"a{i}", _when(18, 10, 0)), _spend_reply(f"b{i}", _when(18, 11, 0))],
+            kind="subagent" if i % 2 else "workflow-agent",
+            agent_type="reviewer",
+            session_id=f"s{i}",
+        )
+        for i in range(3)
+    ]
+    (tmp_path / "quiet").mkdir()
+    quiet = _transcript(
+        tmp_path / "quiet", "q", [_spend_reply("q1", _when(19, 11)), _limit_line("ql", _when(19, 12), _when(19, 14))]
+    )
+    strings: list[tuple[str, str]] = []
+    for name, results in (("busy", (main, *agents)), ("quiet", (quiet,))):
+        section = limits.build_section(_stats_priced(*results))
+        helptext.annotate_section(section)
+        for table in section.tables:
+            if table.name not in ("limits_stops_rollup", "limits_stops", "limits_summary"):
+                continue
+            strings += [(f"{name} {table.name} note", note) for note in table.notes]
+            if table.name == "limits_summary":
+                continue
+            keys = [column.key for column in table.columns]
+            for row in table.rows:
+                cells = dict(zip(keys, row))
+                strings += [(f"{name} {table.name}.{k}", cells[k]) for k in ("top_spender", "second_spender") if cells.get(k)]
+            for column in table.columns:
+                if column.key.endswith("share_pct"):
+                    assert "share of list-price spend; the limit may weigh models differently" in column.help, (
+                        table.name,
+                        column.key,
+                    )
+    assert any(where.endswith("limits_stops_rollup note") for where, _ in strings)
+    assert any("3 or more agents worked at once" in text for _, text in strings)
+    for where, text in strings:
+        _plain(text, where)
+    for where, text in _copy_strings():
+        assert "% of your window" not in text, where
+
+
+def test_the_mode_tables_name_overnight_and_one_shot_as_the_plan_words_them():
+    """The overnight value reads "Overnight (unattended)" and a session with a
+    single message "One-shot", in both tables that show a mode, and the
+    sessions table's help says what each means."""
+    by_mode = helptext.TABLE_COPY["sessions_by_mode"]
+    compared = helptext.TABLE_COPY["baseline_comparison_by_mode"]
+    for table in (by_mode, compared):
+        assert table.value_labels["overnight"] == "Overnight (unattended)"
+        assert table.value_labels["one-shot"] == "One-shot"
+        assert table.value_labels["mixed"] == "Mixed"
+    assert "One request" not in {*by_mode.value_labels.values(), *compared.value_labels.values()}
+    shows = by_mode.help.shows
+    assert "Overnight: Claude worked on its own for two hours or more at night while you were away." in shows
+    assert "One-shot: one request (yours or a scheduled task's), then Claude worked with no more messages from you." in shows
+    assert "ran into the night" not in shows
+
+
+def test_the_mix_sentence_calls_a_one_message_session_one_shot():
+    from claudeglass import impact
+
+    assert impact._MIX_SUBJECT["one-shot"] == "One-shot sessions"

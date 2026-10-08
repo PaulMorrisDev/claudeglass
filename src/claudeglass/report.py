@@ -760,9 +760,15 @@ def _build_baseline_comparison_section(
     tables = [overview_table]
     baseline_mode_mix = baseline_record.get("mode_mix") or {}
     if baseline_mode_mix:
-        tables.append(
-            _build_baseline_by_mode_table(baseline_mode_mix, baseline_record.get("by_mode") or {}, current_by_mode)
+        by_mode_table = _build_baseline_by_mode_table(
+            baseline_mode_mix, baseline_record.get("by_mode") or {}, current_by_mode
         )
+        if baseline_record.get("mode_rules", 1) < classify.MODE_RULES:
+            by_mode_table.notes.append(
+                "This baseline sorted its sessions into modes by older rules: overnight then meant a long "
+                "span with a gap, and one-shot did not exist. A mode's change here can come from the new rules."
+            )
+        tables.append(by_mode_table)
 
     return Section(
         key="baseline_comparison",
@@ -882,6 +888,24 @@ def _merge_parser_notes(acc: dict[str, dict[str, int]], notes: dict[str, dict[st
 # TranscriptResult ... directly") -------------------------------------
 
 
+def _direct_spawn_count(subs: list[TranscriptResult]) -> int:
+    """The agents the main session started itself with the Agent tool.
+
+    ``subs`` also holds a workflow's own agents (``meta.kind ==
+    "workflow-agent"``, started by the workflow rather than by anything the
+    session did) and the agents other agents started (``spawn_depth`` of 2
+    or more, or a ``parent_agent_id``). The workstyle archetypes ask how
+    often the session itself delegates, so those are not counted.
+    """
+    return sum(
+        1
+        for sub in subs
+        if sub.meta.kind != "workflow-agent"
+        and (sub.meta.spawn_depth or 1) <= 1
+        and not sub.meta.parent_agent_id
+    )
+
+
 def _extract_workstyle_features(
     top: TranscriptResult, subs: list[TranscriptResult], workflow_runs: list[WorkflowRun]
 ) -> workstyle.SessionFeatures:
@@ -939,7 +963,7 @@ def _extract_workstyle_features(
     return workstyle.SessionFeatures(
         top_level_models=top_level_models,
         subagent_models=tuple(subagent_models),
-        spawn_count=len(subs),
+        spawn_count=_direct_spawn_count(subs),
         has_workflow=bool(workflow_runs),
         effort_turn_counts=effort_turn_counts,
         plan_mode_seen=plan_mode_seen,
@@ -1370,7 +1394,12 @@ def build_report(
     billing, the usage log behind :func:`_report_units`. Without it,
     ``profile_id`` comes from the hook captures in ``snapshots``. The
     ``habits`` section also reads the free signals metrics capture logged
-    there (``signals.load``), only when its salt already exists.
+    there (``signals.load``), only when its salt already exists. The
+    ``limits`` section's usage-log cross-check reads the five-hour and
+    weekly rows of ``<config_dir>/usage-log.csv`` for the report's sessions
+    (``limits.read_usage_log_rows``); ``usage_log_rows`` cannot supply them,
+    for it holds context-window rows only. Without ``config_dir`` the
+    cross-check is left out.
 
     ``all_projects`` says the corpus covers every project (the CLI's
     ``--all-projects``, the dashboard with no project picked), so a
@@ -1828,12 +1857,25 @@ def build_report(
     if _want("limits"):
         limits_section = limits.build_section(ls, pricing, limits_th)
         extra_tables = []
-        if usage_log_rows:
+        # The rows come from the log file itself: the status-line reader
+        # behind ``usage_log_rows`` keeps only context-window rows, which carry
+        # no five-hour or weekly window, so they could never show a limit stop.
+        session_ids = {b.session_id for b in corpus.sessions}
+        rate_rows = (
+            [
+                row
+                for row in limits.read_usage_log_rows(Path(config_dir) / "usage-log.csv")
+                if row.get("session_id") in session_ids
+            ]
+            if config_dir is not None
+            else []
+        )
+        if limits.has_rate_limit_rows(rate_rows):
             # Same dataclasses.replace-a-table-on pattern the "usage"
-            # section above uses for cache_ground_truth: csv_cross_check
-            # needs the already-loaded usage-log rows, which this
-            # module doesn't otherwise keep.
-            extra_tables.append(limits.csv_cross_check(usage_log_rows, ls, limits_th))
+            # section above uses for cache_ground_truth. A log with no
+            # five-hour or weekly row (the desktop app runs no status line)
+            # has nothing to compare stops with, so the table is left out.
+            extra_tables.append(limits.csv_cross_check(rate_rows, ls, limits_th))
         if capture_signals:
             # SIG-2: the free "waits"/"turn_signals" signals cross-check
             # the same transcript-derived hit count, independent of the
@@ -1883,7 +1925,7 @@ def build_report(
         sections.append(quality.build_section(quality.corpus_runs(corpus, pricing), units=units))
 
     if _want("workstyle"):
-        sections.append(workstyle.build_section(session_records))
+        sections.append(workstyle.build_section(session_records, session_cost))
 
     # Perf (S5/ROB-P3): collect() walks the whole corpus, so build it once
     # here and pass it to both the "habits" and "capture" sections below
@@ -2119,15 +2161,16 @@ def build_report(
     # WP10b: recommendations are computed from the already-assembled
     # report (see recommend.py's module docstring for why it works from
     # rendered tables rather than the raw accumulators above), using the
-    # corpus's majority archetype and the latest config snapshot (if any)
-    # as of "now" -- a per-session snapshot join is not attempted here,
+    # corpus's archetype (the one whose sessions cost the most,
+    # ``workstyle.corpus_archetype``) and the latest config snapshot (if
+    # any) as of "now" -- a per-session snapshot join is not attempted here,
     # matching how ``_build_config_section``/``_build_scorecard_section``
     # already treat the snapshots as a single input. It is the picked
     # project's (``_settings_snapshots``), so advice never reads another
     # project's settings as in force. Its agents are widened to every
     # project in that set, since the newest snapshot records only the
     # agents of the project it was taken in.
-    corpus_archetype, _archetype_evidence = workstyle.corpus_archetype(session_records)
+    corpus_archetype, _archetype_evidence = workstyle.corpus_archetype(session_records, session_cost)
     report_model.units = units
     report_model.recommendations = recommend(
         report_model,

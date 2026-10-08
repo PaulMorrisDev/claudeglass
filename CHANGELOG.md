@@ -348,6 +348,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Feedback changes have names.** Turning the `/cg-feedback` prompts on
   or off, or changing which ones run, is a change of its own on the
   Changes page, not "Changed metrics capture".
+- **One-request sessions.** A session where you typed one message at most,
+  Claude replied at least once, and no other mode claimed it, is now
+  `one-shot` ("One-shot: one request (yours or a scheduled task's), then
+  Claude worked with no more messages from you") instead of `mixed`. A
+  session Claude never replied to stays `mixed`. On the author's machine,
+  60 of the 102 sessions the rules called mixed are now one-shot.
+- **Usage limits count stops, not messages.** One stop writes a storm of
+  limit messages, a retry and a notice for each agent it cut off. The
+  Usage limits table now leads with 5-hour limit stops and weekly limit
+  stops, and keeps the messages as "Limit messages". Messages that name the
+  same reset count as one stop, resets within two hours of each other merge,
+  and a message with no reset joins the stop whose reset follows it (within
+  5 hours, or 7 days for the weekly limit). Sessions affected counts the
+  main sessions with a limit message in any stop.
+- **A weekly stop you worked through.** A weekly stop is marked as not
+  stopping work when your main session got a reply more than 10 minutes
+  after its first message and before its reset. The table counts the
+  weekly stops that did stop work.
+- **Agents a limit cut off.** A subagent that replied at least once, and
+  whose last limit message came after its last reply, is counted as cut
+  off, split into direct agents and workflow agents, with what each group
+  had spent. An agent that never replied is not counted.
+- **What woke the session.** A new table files each pair of limit messages
+  in a row by what lay between them: something you typed, the app's
+  resume, a scheduled task, a background agent's notice, only lines
+  Claude Code wrote itself, or something else. Only the kind of line is
+  read.
+- **Your recent limit stops.** A new table on the limits page lists each
+  stop, newest first: whether it was the 5-hour or the weekly limit, its
+  reset time, how many minutes before the reset it began, and what you
+  spent before it, at list prices. The spend runs from 5 hours before the
+  reset (7 days for the weekly limit) to the stop. It is split into your
+  main session, agents you started and agents a workflow started, with the
+  two biggest agent type and model pairs and the share that ran while 3 or
+  more agents worked at once. Each share is a share of list-price spend;
+  the limit may weigh models differently. No new data is stored.
+- **A limit roll-up above it.** One line covers the 5-hour stops since 18
+  Sep 2026 and names the biggest cost centre. A weekly window holds your
+  whole week, so weekly stops are added up only when no 5-hour stop
+  counts. The `limit-pressure` tip follows
+  it: your main session gets plan and `/clear` advice, direct agents get
+  "run fewer agents at once", and workflow agents get the workflow
+  script's concurrency. The tip adds how much of the spend ran with 3 or
+  more agents at once only when that is 10 points or more above your
+  share across all your work.
 
 ### Changed
 
@@ -745,9 +790,88 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   plan, those you typed as a message and those you typed while Claude
   worked, and the plans fixed three times or more. It needs no feedback and
   stays blank below 5 plans. Counts only.
+- **Overnight means Claude worked while you were away.** A session is
+  overnight when Claude, the main session and its subagents together,
+  worked for two hours or more between 22:00 and 07:00 local time while
+  you were away, and at least 30% of its working time was at night. Away
+  is the time between two of your messages more than an hour apart, with
+  usage-limit pauses taken out, and the time after your last one; messages
+  you typed while Claude was working count as messages. Before, a long
+  span, a gap over an hour and a little night activity were enough: on the
+  author's machine 53 of 221 sessions were called overnight, and now 7 are.
+  The new settings are `overnight_active_s`, `overnight_night_share`,
+  `activity_idle_s`, `away_gap_s` and `dormant_gap_s`; the old
+  `overnight_span_s`, `overnight_gap_s` and `overnight_night_turn_share`
+  are still read and no longer do anything.
+- **Overnight reads as what it is.** The mode is named "Overnight
+  (unattended)" in the tables and the dashboard, and its help says "Claude
+  worked on its own for two hours or more at night while you were away".
+  The stored word is still `overnight`. The onboarding report's reason for
+  suggesting the overnight-batch profile, that profile's notes, and the
+  usage-limit and profile docs say the same, in place of the old span and
+  gap rule. A baseline saved before this says so under its comparison by
+  mode.
+- **One map of session words.** The Sessions list's Mode, Purpose and
+  Started from columns, the override menus and the session chart's legend
+  and tooltips all read one map of names, whose words are the report
+  tables' own. The list now says "Long autonomous run" and "Claude desktop
+  app" where it showed `long-agentic` and `claude-desktop`. A mode takes
+  its colour from the palette: one-shot has its own, and mixed or not
+  classified stay grey. The chart's tooltip and table say a session's own
+  mode, "Mixed", where its legend groups the grey ones.
+- **Coming back another day is not a long gap.** A silence of four hours or
+  more with no work in it is left out of the longest gap between your
+  messages and out of the multi-day flag, and a session that has one says
+  so (`resumed_gaps`). The longest gap now names the pair of messages it
+  really is once usage-limit pauses are taken out.
+- **Your working pattern follows the money.** The pattern at the top of the
+  workstyle table, the one profiles and recommendations are tuned to, is the
+  one whose sessions cost the most, not the one with the most sessions. The
+  table gains a Cost column and runs by it. "Stop spawning so much" is held
+  back when sessions that hand work out to cheaper models are 30% or more of
+  the spend (`fanout_spend_share_pct`). The spawn count that picks the
+  pattern counts only agents the session started itself: a workflow's own
+  agents, and agents other agents started, no longer do.
+- **`limit-pressure` counts stops.** It fires on two or more 5-hour limit
+  stops a week, on any weekly stop that stopped work, or on any agent cut
+  off by a limit, so one six-message storm no longer fires it. The setting
+  is `limit_pressure_min_episodes` (default 2); the old
+  `limit_pressure_min_hits` counted messages and is still read and no
+  longer does anything. The tip names the stops and the agents cut off.
+- **The reset-hour table counts one per stop.** A stop that wrote many
+  messages used to add one for each to its hour. Its advice to start heavy work after a
+  reset now shows only when one hour holds 3 or more stops and 30% or more
+  of them.
+- **Who got the limit message.** "Usage limits by agent type" is renamed,
+  and its count reads "Limit messages received", since the main session
+  receives one for each agent a limit cut off.
+- **The usage-log check compares stops.** It reads zero against a real
+  count when the usage log has no 5-hour or weekly entries, so it now stays
+  out of the report in that case.
+- **A stop's cache write is the price of carrying on.** The report said
+  the first reply after a usage-limit pause always rewrites the cache. It
+  does that only if the stop outlasts the cache's hour; a reply within the
+  hour reads the cache as usual. The limits copy and docs now say so, and
+  call the rewrite the price of carrying on, not a caching habit to fix.
+- **Cut-off and post-stop dollars count current settings only.** The spend
+  of agents a limit cut off and the cost of cache writes after a pause
+  count runs from 18 Sep 2026 on (`current_since` under `[thresholds]`;
+  empty counts every run). Counts and tokens stay all-time.
+- **The limits links go to Cache, Rebuilds.** The tip and the help for
+  five-hour blocks and for replies after a pause pointed at Spend, Usage;
+  they now point at the page that shows each stop, its reset time and
+  what it cost. A test keeps every link in the limit copy on that page.
+- **Limit messages are named as messages.** The diagnostics label for the
+  count of limit lines reads "Usage-limit messages", since one stop writes
+  many of them.
 
 ### Fixed
 
+- **The purpose menu offered a word nothing else uses.** The override menu
+  on a session offered "docs", but the classifier and every table say
+  `docs-or-light-edit`, so a session set to it landed in a group no rule or
+  table names. The menus now list the classifier's own words, and the new
+  mode, one-shot, can be picked.
 - **"Needs a hook entry" names the fix.** On Setup › Capture, a metric
   whose hook entry is missing now shows `claudeglass capture connect`
   with a Copy button, except under a settings policy that stops hooks
@@ -758,6 +882,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gets one that Claude's reply already carries.
 - **Output style.** The output style Claude Code repeats on every
   request no longer counts as a cache change; only a change of style does.
+- **Limit reset times on Windows.** A usage-limit message with no exact
+  reset time now gets one from its "resets 3pm (Europe/London)" text. A
+  zone name that can't be resolved, which was every name on Windows
+  without `tzdata`, falls back to your machine's own zone, where these
+  lines had no reset at all before. The weekly form ("resets Oct 3, 9am")
+  now sets the day too.
+- **Limit pauses end at the reset.** Coming back three hours after a
+  limit reset no longer counts those three hours as the limit's pause. A
+  resume at the reset no longer reads as a long silence, so it no longer
+  starts a new piece of work on its own.
 
 Parsed sessions are re-read once to pick this up.
 

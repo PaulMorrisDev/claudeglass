@@ -46,7 +46,7 @@ and it's still useful when you want one section by itself.
 | `overview` | Overview | `report.py` | corpus-wide totals (sessions, transcripts, turns, the four raw token counts, cost, cache-read cost share, cache ROI) plus a per-model breakdown |
 | `usage` | Usage | `usage.py` | day/week/month/project/entrypoint cost and token breakdowns, plus five-hour usage blocks (subscription billing only — see [`reference.md`](reference.md#what-it-reads-and-what-it-cant)) |
 | `elasticity` | Elasticity | `elasticity.py` | how many percentage points of a subscription's 5-hour/7-day/spend-limit window one million tokens (or one list-price dollar) is actually worth, measured from this machine's own usage-log samples — subscription billing only, and only when a usage log exists (see [`elasticity.md`](elasticity.md)) |
-| `sessions` | Sessions | `classify.py` | mode (interactive/long-agentic/overnight/mixed) and purpose (docs/refactor/test-triage/...) per session, with the evidence that produced each classification |
+| `sessions` | Sessions | `classify.py` | mode (interactive/long-agentic/overnight/one-shot/mixed) and purpose (docs/refactor/test-triage/...) per session, with the evidence that produced each classification |
 | `recache` | Re-cache events | `recache.py` | which turns paid to re-write a prefix that should have been a cache hit, why, and what it cost — see [`concepts.md`](concepts.md#3-cache-rebuild-definitions-and-signatures) |
 | `ttl` | Cache TTL break-even | `ttl.py` | per agent type: observed cost vs. simulated 5m-only/1h-only cost, plus the utilisation metrics below |
 | `limits` | Usage limits | `limits.py` | usage-cap pauses (5-hour/weekly), harness-forced subagent terminations, and the desktop app's resume pings, as first-class attributable facts instead of behavioural noise — see [`limits.md`](limits.md) |
@@ -61,7 +61,7 @@ and it's still useful when you want one section by itself.
 | `run_split` | Splitting long subagent runs | `run_split.py` | what long subagent runs would have cost as several shorter runs, each starting fresh from a short note, at several split intervals, and the interval that saves most per agent type — see [`run-split.md`](run-split.md) |
 | `hooks` | Your hooks | `hook_costs.py` | whether each hook you set up works (failed runs and why, relative script paths), what the context it adds costs to keep, what the calls it blocks cost and how often Claude sent them again unchanged, and time waited — see [`hooks.md`](hooks.md) |
 | `quality` | Quality signals | `quality.py` | whether the work went well: agent runs that didn't finish or likely ran out of turns, failed tool calls and shell commands, denials, corrections, edits redone, per agent type and per model and effort, with a significance test — see [`concepts.md`](concepts.md#7-quality-signals) |
-| `workstyle` | Workstyle | `workstyle.py` | one archetype per session/corpus: `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
+| `workstyle` | Workstyle | `workstyle.py` | one archetype per session, and the corpus's archetype (the one whose sessions cost the most): `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
 | `habits` | Work habits | `habits.py` | the "Weekly pace" digest (titled with the window you picked), habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/cg-feedback`) cost per piece of work that met its goal |
 | `rework` | Rework after delivery | `rework.py` | how often Claude had to change work it had already delivered, what that cost and why (your feedback, Claude's tag, Haiku's tag, or inferred from the transcript), the mistakes Claude admitted and who caught them, and the rework by week and by how hard the work was — pieces of work are drawn from the transcripts alone (`pieces.py`) |
 | `prompting` | How you prompt | `prompting.py` | how often each prompting habit happened, whether or not coaching notes were on (small requests sent one at a time, the same request again, asking how it's going, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
@@ -200,12 +200,42 @@ not real invoice lines.
 
 - `sessions_by_mode` — sessions, turns, subagents, median span and
   median human prompts per `mode`. First match wins, in this order:
-  `overnight` (span over 4h once usage-limit pauses are discounted, a
-  human gap over 60min, and real activity in the local 22:00-07:00
-  window), `long-agentic` (a self-chained run, or subagents or at least
-  30 turns with at most 10 human prompts), `interactive` (median human
-  gap under 5min with at most 2 subagents), else `mixed`. A section note
-  states the overnight window in use.
+  `overnight` (Claude worked for two hours or more inside the local
+  22:00-07:00 window while you were away, and at least 30% of its working
+  time was at night), `long-agentic` (a self-chained run, or subagents or
+  at least 30 turns with at most 10 human prompts), `interactive` (median
+  gap between your messages under 5min with at most 2 subagents),
+  `one-shot` (you typed at most one message and Claude replied), else
+  `mixed`. A section note states the overnight window and the work it
+  asks for.
+
+  The stored word stays as it is; the tables and the dashboard show a
+  name: "Interactive", "Long autonomous run", "Overnight (unattended)",
+  "One-shot", "Mixed" and "Not classified". The help reads: "Overnight:
+  Claude worked on its own for two hours or more at night while you were
+  away." and "One-shot: one request (yours or a scheduled task's), then
+  Claude worked with no more messages from you." The dashboard's
+  Sessions list, its override menus and its session chart use the same
+  words (`SESSION_WORDS` in `service/static/charts-types.js`, held to
+  `helptext.py` by `tests/test_service_static.py`).
+
+  *Working time* is the main session's and every subagent's replies, a
+  reply joined to the one before it when they are 10min apart or less
+  (`activity_idle_s`); a lone reply adds none. *Away* is the time between
+  two of your messages more than an hour apart (`away_gap_s`), once any
+  usage-limit pause in the gap is taken out, plus the time after your last
+  message. The messages that count are the ones you typed: lines, answers
+  to a plan, and messages you typed while Claude was working. A silence of
+  4h or more (`dormant_gap_s`) with no work in it is a session you came
+  back to another day: it is left out of the longest gap between your
+  messages and of the `multi_day` flag, and counted in `resumed_gaps`.
+  The thresholds are `overnight_active_s` (7200), `overnight_night_share`
+  (0.3), `activity_idle_s` (600), `away_gap_s` (3600), `dormant_gap_s`
+  (14400), `overnight_night_start_hour` (22), `overnight_night_end_hour`
+  (7) and `multi_day_span_s` (86400), set under `[thresholds.classify.mode]`
+  in `config.toml`. The older `overnight_span_s`, `overnight_gap_s` and
+  `overnight_night_turn_share` are read and ignored. The night is the
+  local one, and a clock change inside it is followed.
 - `sessions_by_purpose` — the same columns by `purpose`. First match
   wins, in this order: `local-llm-pipeline`, `workflow-run`, `review`,
   `test-triage`, `planning`, `docs-or-light-edit`, `refactor`,
@@ -348,27 +378,52 @@ behavioural noise (see `docs/limits.md`'s module-docstring summary for
 why an unattributed pause otherwise misreads as an ordinary long idle
 gap in `recache`/`ttl`/`sessions`).
 
-- `limits_summary` — one "all" row: transcripts, sessions affected,
-  limit hits (session + weekly split), resumes, agents terminated (and
-  by rate limit specifically), pause count/total time, and the
-  cache-creation tokens/write cost paid by the turn immediately
-  following each pause.
-- `limits_hits_by_kind` — `session_limit`/`weekly_limit` hit counts and
-  share.
+The section counts **stops**, not lines: one stop writes a storm of limit
+lines, so lines are kept as "limit messages" (see "Limit stops" in
+`docs/limits.md` for the key that groups them).
+
+- `limits_summary` — one "all" row, leading with 5-hour and weekly
+  stops (and how many weekly stops stopped work), days covered,
+  sessions affected, and agents cut off (direct and workflow, with their
+  spend), then limit messages (session + weekly split), resumes, agents
+  terminated (and by rate limit specifically), pause count/total time,
+  and the cache-creation tokens/write cost paid by the turn immediately
+  following each pause. The dollar figures count runs since
+  `current_since` (18 Sep 2026 by default).
+- `limits_stops_rollup` — one "all" row for the 5-hour stops since
+  `current_since` (weekly stops only when no 5-hour stop counts): the
+  list-price spend in their windows, the main, direct-agent and
+  workflow-agent shares, the largest cost centre, and the share of spend
+  that ran while 3 or more agents were active beside the same share
+  across all work.
+- `limits_stops` — "Your recent limit stops", newest first: kind, reset
+  time, minutes before the reset, list-price spend in the limit's window,
+  the three shares, the burst share, the top two agent type and model
+  family pairs, whether the stop stopped work and the agents it cut off
+  (see "Spend before a stop" in `docs/limits.md`).
+- `limits_hits_by_kind` — `session_limit`/`weekly_limit` message counts
+  and share.
 - `limits_agent_terminated` — `rate_limit`/`other` termination counts
   and share.
 - `limits_pauses` — corpus-wide pause count/total/mean duration.
-- `limits_reset_hour_histogram` — count and share of `LIMIT_HIT` resets
-  by local hour of day (0-23).
-- `limits_by_agent_type` — per-agent-type roll-up: hits, resumes,
-  terminations, pause count/total/median/max, and the post-pause
-  cache-creation tokens/cost.
-- `limits_csv_cross_check` — transcript-derived hit counts vs.
+- `limits_reset_hour_histogram` — count and share of limit stops by
+  local hour of day (0-23), one per stop. Its advice shows only when one
+  hour holds 3 or more stops and 30% or more of them.
+- `limits_wake_gaps` — what lay between consecutive limit lines in main
+  sessions: typed, resume, scheduled, agent notice, only `isMeta` lines,
+  other.
+- `limits_by_agent_type` — "Who got the limit message": per-agent-type
+  roll-up of limit messages received, resumes, terminations, pause
+  count/total/median/max, and the post-pause cache-creation tokens/cost.
+- `limits_csv_cross_check` — transcript-derived stop counts vs.
   `usage-log.csv`'s own exhaustion-row counts for `five_hour`/
   `seven_day`, appended as an extra table on this section only when
-  `report.build_report` is given `usage_log_rows` (same "extra table
-  bolted on" convention `cache_ground_truth` uses for the `usage`
-  section above).
+  `<config_dir>/usage-log.csv` holds at least one `five_hour`/`seven_day`
+  row for a session in the report (same "extra table bolted on"
+  convention `cache_ground_truth` uses for the `usage` section above).
+  `build_report` reads those rows from the log file itself
+  (`limits.read_usage_log_rows`), because the status-line reader behind
+  `usage_log_rows` keeps only context-window rows.
 
 `scorecard.py`'s `cache_efficiency` dimension excludes the portion of
 re-cache share already known to be pause-forced
@@ -382,7 +437,10 @@ rather than their own model's rate
 section's `pricing_closest_match` table above). Neither note changes
 the `pricing_coverage_pct` metric or level itself, which already counts
 a closest-match turn as priced. `recommend.py`'s `limit-pressure` rule
-fires off this section's own `limits_summary` counts.
+fires off this section's own `limits_summary` counts: five-hour stops per
+week (`limit_pressure_min_episodes`, default 2), a weekly stop that
+stopped work, or an agent cut off by a limit. Its card names the largest
+cost centre from `limits_stops_rollup`.
 
 ## `carry` (`carry.py`)
 
@@ -1307,13 +1365,20 @@ Money cells hold list-price USD, and the dashboard phrases them with
 - `workstyle_archetypes` — one row per detected archetype
   (`overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`,
   `effort-varied`, `chat-only`, `single-model`, else `mixed`): sessions,
-  share and a one-sentence description. Each session gets the first
-  archetype whose evidence (model by role, effort spread, spawn counts,
-  plan-mode-then-lower-model-implementer sequences) it matches, in that
-  order. `recommend.py` conditions
-  on this archetype so an overseer session is never told to "stop
-  spawning agents" and a chat-only session is never told about subagent
-  TTLs — see [Recommendations](#recommendations-recommendpy) below.
+  share of sessions, spend (what those sessions cost, subagents
+  included) and a one-sentence description. Rows run by spend, so the
+  first row is the archetype that cost the most; a tie goes to the one
+  with more sessions, then to the first by name. Each session gets the
+  first archetype whose evidence (model by role, effort spread, spawn
+  counts, plan-mode-then-lower-model-implementer sequences) it matches,
+  in that order. The spawn count is the agents the session started with
+  the Agent tool: a workflow's own agents, and agents other agents
+  started, are not counted. `recommend.py` conditions
+  on the first row's archetype so a chat-only session is never told about
+  subagent TTLs, and holds back "stop spawning agents" (`subagent-volume`)
+  when overseer-fanout sessions account for 30% or more of the spend
+  (`fanout_spend_share_pct`) — see
+  [Recommendations](#recommendations-recommendpy) below.
 
 ## `prompting` (`prompting.py`)
 
@@ -1902,7 +1967,10 @@ baseline.
 - `baseline_comparison_by_mode` — per mode: sessions in each window, a
   `sample_ok` flag, and baseline, current and delta-% for cost per
   session, re-cache share and compactions per session. A mode with fewer
-  than 5 sessions on either side shows its session counts only.
+  than 5 sessions on either side shows its session counts only. A baseline
+  saved under older mode rules (no `mode_rules`, or one below
+  `classify.MODE_RULES`) gets a note that a mode's change can come from
+  the new rules.
 
 ## `scorecard` (`scorecard.py`)
 

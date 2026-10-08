@@ -172,8 +172,8 @@ _NO_SUBAGENT_ARCHETYPES = frozenset({"chat-only"})
 
 #: Archetypes for which "stop spawning so much" advice is inappropriate:
 #: an overseer-fanout session's whole point is fanning work out to
-#: subagents, so ``subagent-volume`` (and ``spawn-cost``, which is really
-#: the same "delegation is not free" concern) should not tell it to stop.
+#: subagents, so ``subagent-volume`` should not tell a corpus that spends
+#: much of its money that way to stop (see ``_fanout_spend_share_pct``).
 _FANOUT_ARCHETYPES = frozenset({"overseer-fanout"})
 
 #: Every archetype ``workstyle.detect_archetype``/``corpus_archetype`` can
@@ -255,6 +255,11 @@ class RecommendThresholds:
 
     # subagent-volume: "one agent type > 40% of corpus cost".
     subagent_volume_cost_share_pct: float = 40.0
+    # subagent-volume is not given to a corpus where sessions with the
+    # overseer-fanout workstyle account for this much of the spend or more:
+    # fanning work out is how it works. Weighted by spend, not by session
+    # count, since a few large fan-out runs can cost more than many chats.
+    fanout_spend_share_pct: float = 30.0
 
     # compaction-churn: ">= 2 compactions per session in any mode, or
     # dropped tokens > 30% of new tokens".
@@ -304,9 +309,13 @@ class RecommendThresholds:
     data_quality_fidelity_pct: float = 10.0
 
     # limit-pressure (v3-limits addition, not part of plan Appendix A5):
-    # ">= 3 usage-cap hits, or >= 1 subagent terminated by the rate
-    # limit specifically (not any other termination reason)".
-    limit_pressure_min_hits: int = 3
+    # ">= 2 five-hour limit stops per 7 days, any weekly stop that
+    # stopped work, or >= 1 subagent cut off by a limit". A stop is one
+    # limit being reached, however many limit messages it wrote
+    # (``limits.LimitStats.episodes``). The older
+    # ``limit_pressure_min_hits`` key counted messages: it is read but
+    # ignored.
+    limit_pressure_min_episodes: int = 2
     limit_pressure_min_terminated_rate_limit: int = 1
 
     #: Minimum sample before ANY rule fires: 5 sessions OR 200 priced
@@ -776,10 +785,40 @@ def _rule_batch_instructions(report: ReportModel, th: RecommendThresholds) -> li
     ]
 
 
+def _fanout_spend_share_pct(report: ReportModel) -> float | None:
+    """The percent of the corpus's spend made in sessions with a fan-out
+    workstyle (``_FANOUT_ARCHETYPES``), from the Spend column of the
+    workstyle table. ``None`` when that table is missing, has no spend
+    column or no money in it (a corpus where nothing was priced, or the
+    section was left out), which leaves the caller to the corpus's
+    ``archetype``."""
+    table = _table(report, "workstyle", "workstyle_archetypes")
+    if table is None:
+        return None
+    archetype_idx = _col_index(table, "archetype")
+    spend_idx = _col_index(table, "spend")
+    if archetype_idx is None or spend_idx is None:
+        return None
+    spend = [
+        (row[archetype_idx], row[spend_idx])
+        for row in table.rows
+        if spend_idx < len(row) and isinstance(row[spend_idx], (int, float))
+    ]
+    total = sum(amount for _, amount in spend)
+    if total <= 0:
+        return None
+    return 100.0 * sum(amount for name, amount in spend if name in _FANOUT_ARCHETYPES) / total
+
+
 def _rule_subagent_volume(report: ReportModel, th: RecommendThresholds, archetype: str | None) -> list[Recommendation]:
-    if archetype in _FANOUT_ARCHETYPES:
-        # An overseer-fanout session's whole point is fanning work out;
-        # "stop spawning so much" is not appropriate advice for it.
+    fanout_share = _fanout_spend_share_pct(report)
+    if fanout_share is None:
+        fanout = archetype in _FANOUT_ARCHETYPES
+    else:
+        fanout = fanout_share >= th.fanout_spend_share_pct
+    if fanout:
+        # Fanning work out is how this corpus works: "stop spawning so
+        # much" is not appropriate advice for it.
         return []
     table = _table(report, "ttl", "ttl_by_agent_type")
     if table is None:
@@ -2190,35 +2229,85 @@ def _rule_data_quality(report: ReportModel, th: RecommendThresholds) -> list[Rec
     ]
 
 
+def _limit_rollup_evidence(report: ReportModel) -> list[tuple]:
+    """What the limits section's stops roll-up adds to the limit-pressure
+    card: the stops it counted, each cost centre's share of the list-price
+    spend before them, and how much of that spend ran while 3 or more agents
+    worked at once, in those stops and across all your work. Empty when the
+    roll-up is missing or counted no stops; a cell it lacks is left out, so
+    every value cited is a cell of that table."""
+
+    def cell(column: str):
+        value = _cell(report, "limits", "limits_stops_rollup", "all", column)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    stops = cell("stops")
+    if not stops:
+        return []
+    evidence = [_evidence("Stops counted in the roll-up", stops, "limits", "limits_stops_rollup", "all")]
+    for label, column in (
+        ("Main session share of spend", "main_share_pct"),
+        ("Direct agents share of spend", "direct_share_pct"),
+        ("Workflow agents share of spend", "workflow_share_pct"),
+        ("Spend with 3+ agents at once, in these stops", "burst_share_pct"),
+        ("Spend with 3+ agents at once, across all your work", "all_burst_share_pct"),
+    ):
+        value = cell(column)
+        if value is not None:
+            evidence.append(_evidence(label, value, "limits", "limits_stops_rollup", "all"))
+    return evidence
+
+
 def _rule_limit_pressure(report: ReportModel, th: RecommendThresholds) -> list[Recommendation]:
     """v3-limits addition (not part of plan Appendix A5, see this
     module's module docstring convention for a documented deviation):
-    repeated usage-cap hits, or even one subagent the harness killed
-    specifically for hitting the rate limit, are worth surfacing on
+    repeated usage-cap stops, a weekly stop that held up your work, or even
+    one subagent a limit cut off mid-task, are worth surfacing on
     their own account -- not because there's a single setting to
     change, but because several of this report's other findings
-    (recache's limit-expiry rows, ttl's limit_gaps column, a session
-    that would otherwise misclassify as "overnight") are all downstream
+    (recache's limit-expiry rows, ttl's limit_gaps column, the pauses
+    classify takes out of a session's away time) are all downstream
     symptoms of the same root cause. Reads the ``limits`` section built
     by ``limits.build_section`` -- returns ``[]`` when that section
     isn't present (e.g. an older cached report, or a report assembled
     before this batch's ``report.py`` wiring landed).
-    """
-    hits = _cell(report, "limits", "limits_summary", "all", "limit_hits")
-    terminated_rate_limit = _cell(report, "limits", "limits_summary", "all", "agents_terminated_rate_limit")
-    hits_n = hits if isinstance(hits, (int, float)) else 0
-    terminated_n = terminated_rate_limit if isinstance(terminated_rate_limit, (int, float)) else 0
 
-    if hits_n < th.limit_pressure_min_hits and terminated_n < th.limit_pressure_min_terminated_rate_limit:
+    It counts stops, not limit messages: a single stop writes a storm of
+    them. Five-hour stops are read as a rate per seven days, against at
+    least a week even when the window is shorter, so one stop in a short
+    window is never a rate; each weekly stop that stopped work, and each
+    agent cut off, fires it on its own.
+    """
+
+    def count(column: str) -> float:
+        value = _cell(report, "limits", "limits_summary", "all", column)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+    five_hour = count("five_hour_stops")
+    weekly = count("weekly_stops")
+    weekly_stopped_work = count("weekly_stops_stopped_work")
+    cut_off = count("agents_cut_off")
+    days = count("window_days")
+
+    per_week = five_hour * 7 / max(days, 7)
+    if (
+        per_week < th.limit_pressure_min_episodes
+        and weekly_stopped_work < 1
+        and cut_off < th.limit_pressure_min_terminated_rate_limit
+    ):
         return []
 
     evidence = [
-        _evidence("Usage-cap hits", hits_n, "limits", "limits_summary", "all"),
-        _evidence("Agents terminated by rate limit", terminated_n, "limits", "limits_summary", "all"),
+        _evidence("5-hour limit stops", five_hour, "limits", "limits_summary", "all"),
+        _evidence("Weekly limit stops", weekly, "limits", "limits_summary", "all"),
+        _evidence("Weekly stops that stopped work", weekly_stopped_work, "limits", "limits_summary", "all"),
+        _evidence("Agents cut off by a limit", cut_off, "limits", "limits_summary", "all"),
+        _evidence("Days covered", days, "limits", "limits_summary", "all"),
     ]
     sessions_affected = _cell(report, "limits", "limits_summary", "all", "sessions_affected")
     if sessions_affected is not None:
         evidence.append(_evidence("Sessions affected", sessions_affected, "limits", "limits_summary", "all"))
+    evidence.extend(_limit_rollup_evidence(report))
 
     return [
         Recommendation(
@@ -2229,7 +2318,7 @@ def _rule_limit_pressure(report: ReportModel, th: RecommendThresholds) -> list[R
             title="Usage-cap pauses are a recurring interruption",
             action=(
                 "This corpus hit its session/weekly usage cap repeatedly (or had a subagent "
-                "killed by it) -- consider pacing concurrent agents to the usage window, or "
+                "cut off by it) -- consider pacing concurrent agents to the usage window, or "
                 "reviewing the weekly cap against actual usage, rather than treating the "
                 "resulting pauses as ordinary idle time."
             ),

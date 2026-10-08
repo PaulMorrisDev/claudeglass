@@ -904,6 +904,29 @@ def test_resolve_window_rolls_back_from_now_not_from_midnight(monkeypatch):
     assert until_dt is None
 
 
+def test_from_local_is_the_inverse_of_to_local():
+    wall = datetime(2026, 9, 18, 15, 0)
+    assert discovery.from_local(wall, _IST) == _utc(2026, 9, 18, 9, 30)
+    assert discovery.from_local(wall, "UTC") == _utc(2026, 9, 18, 15, 0)
+    assert discovery.to_local(discovery.from_local(wall, _IST), _IST).replace(tzinfo=None) == wall
+    # Whatever offset the wall time carries is dropped: it is read in the zone asked for.
+    assert discovery.from_local(wall.replace(tzinfo=timezone.utc), _IST) == _utc(2026, 9, 18, 9, 30)
+
+
+def test_from_local_follows_the_clocks_of_the_day_it_names():
+    # Summer time on 18 September, winter time again on 3 November.
+    assert discovery.from_local(datetime(2026, 9, 18, 15, 0), _LONDON) == _utc(2026, 9, 18, 14, 0)
+    assert discovery.from_local(datetime(2026, 11, 3, 9, 0), _LONDON) == _utc(2026, 11, 3, 9, 0)
+
+
+def test_from_local_in_a_zone_that_cannot_be_resolved_is_the_machine_zone():
+    wall = datetime(2026, 9, 18, 15, 0)
+    machine = wall.astimezone(timezone.utc)
+    assert discovery.from_local(wall, None) == machine
+    assert discovery.from_local(wall, "") == machine
+    assert discovery.from_local(wall, "Mars/Olympus") == machine
+
+
 def test_resolve_window_lets_since_win_over_days():
     since_dt, until_dt = discovery._resolve_window(7, "2026-09-01T06:30:00Z", "2026-09-02")
     assert since_dt == _utc(2026, 9, 1, 6, 30)
@@ -912,5 +935,6 @@ def test_resolve_window_lets_since_win_over_days():
 
 
 def test_the_zone_helpers_are_exported():
-    for name in ("to_local", "local_day", "zone_name", "local_midnight", "window_start", "window_start_iso"):
+    names = ("to_local", "from_local", "local_day", "zone_name", "local_midnight", "window_start", "window_start_iso")
+    for name in names:
         assert name in discovery.__all__

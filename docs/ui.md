@@ -853,10 +853,25 @@ is the day of the chart's column. A line above the list says what it is
 narrowed to, with **Show all sessions**. A row and its dot light up
 together. The report's `sessions` section follows.
 
+The list, the override menus and the chart name a mode, a purpose and an
+app in words ("Overnight (unattended)", "One-shot", "Docs or light
+edits", "Terminal") from one map, `SESSION_WORDS` in `charts-types.js`.
+Its words are the report tables' own (`helptext.py`'s value labels for
+`sessions_by_mode`, `sessions_by_purpose` and `by_entrypoint`), and a
+test holds the two together. On the list a mode shows what it means on
+hover (the Mode column) and the others show their key. Each of the three
+columns sorts by the word it shows, not its key. The palette's mode keys
+are the map's: a mode takes its colour from `ENTITY_COLOURS.mode`, and
+mixed or not classified are grey. The chart's tooltip and table give a
+session's own word ("Mixed"), where its legend groups the grey ones as
+"Mixed or not known".
+
 **Detail:** a row, Enter or a dot opens the session drawer
 (`openSessionDrawer`, from `/api/session/<id>`): a summary; **Why was
 this session expensive?** (`/explain`); "Mode override" and "Purpose
-override" with **Save tags**; **Rate this session** while the dashboard
+override" with **Save tags** (each menu lists the map's words by name,
+saves the key, and leaves out "Not classified"; under the menus a line
+says what the picked mode means); **Rate this session** while the dashboard
 rating is on; chart 5; and **Transcripts**, with no path.
 
 A session whose mode or purpose is the catch-all a rule fell back to
@@ -1289,7 +1304,7 @@ their table view with it), so `app.js` hands it `sectionChart` through
 | Work habits | a playbook habit, a prompting habit or the rework section, at its card on Work habits (`?item=`) |
 | Sections and tables | a section at its first table; a table where it is shown, or in the table drawer |
 | Glossary | terms (`?term=`) and How costs work cards (`?card=`) |
-| Recent sessions | the window's 20 newest, each in its drawer |
+| Recent sessions | the window's 20 newest, found by id, project, or their mode, purpose and app in words; each opens in its drawer |
 | Projects | each project, shown on its own |
 
 With nothing typed it lists the pages, then the commands. Each typed
@@ -1408,7 +1423,7 @@ repaints what stays on screen:
 |---|---|
 | Agent | main session `--chart-1`, subagents `--chart-3` |
 | Model tier | Opus (and Fable) `--chart-1`, Sonnet `--chart-2`, Haiku `--chart-3` |
-| Work mode | interactive `--chart-1`, long agentic `--chart-2`, overnight `--chart-3` |
+| Work mode | interactive `--chart-1`, long autonomous run `--chart-2`, overnight `--chart-3`, one-shot `--chart-4`; mixed and not classified are Other |
 | Startup part | system prompt, tool definitions, CLAUDE.md, skills listing, tool lists, task prompt and hook context take `--chart-1` to `--chart-7` |
 
 Anything else is `--chart-other`. A chart never picks colours by rank.
@@ -1657,7 +1672,7 @@ hand with Playwright against a dev service.
 | `grid.js` | `dataGrid`, `pulseRow`, `pulseNode`, `renderTable`, `renderPlacedTables`, `renderMappedSections`, `renderReportBackedSection`, `simpleTable`, `setSectionChart`, `cardRating`, `NEWEST_LAST`, `formatEvidenceValue` |
 | `evidence.js` | `openEvidence`, `evidenceList`, `revealEvidence`, `tableDrawer` |
 | `charts.js` | `CHART_SPECS`, `fillSummary`, `ENTITY_COLOURS`, axes, tooltip, keyboard reading, the table view, resize, `drawChart`, `holdChart`, `chartError` |
-| `charts-types.js` | the eight forms, `renderChart`, `sectionChart`, `sessionContextChart`, `savingsLevers`, `dailyChanges`, `windowSpan`, `changeDay`, `sparkline`, `meter`, `habitSparkline` |
+| `charts-types.js` | the eight forms, `renderChart`, `sectionChart`, `sessionContextChart`, `savingsLevers`, `dailyChanges`, `windowSpan`, `changeDay`, `sparkline`, `meter`, `habitSparkline`, `modeColour`, and the map of session words (`SESSION_WORDS`, `sessionWord`, `sessionWordNote`, `sessionWordChoices`) |
 | `costs.js` | pricing helpers for Actions, Cache, the Glossary and the Overview's cache tile: `modelIdFor`, `rateFor`, `pricingFacts`, `priced`, `modelSentence`, `avoidableRebuilds`, `cardRuleText` |
 | `shell.js` | on every view: the health banner, the status line, the capture banner (with its list of sessions to rate), `RETRY_SECONDS`, `renderHealth`, the setup checklist (`renderSetupCard`, `renderSetupList`) |
 | `icons.js` | `icon(name, opts)` and `ICON_NAMES` |

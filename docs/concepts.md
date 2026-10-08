@@ -582,9 +582,10 @@ next. It starts only at the session start, at a /clear (unless the message
 after it is a handoff), at a settled `shift=new` on a message that asks for
 something, or, with no `shift` word at all, after a silence of 3 hours or
 more with different files (under 10% of the file names in common, at least
-two on each side) on a message that asks for something. That last start is
-the only low-confidence one. A queued message and an answer to a question
-Claude asked open no cycle, and a reply to a plan Claude had just put up
+two on each side) on a message that asks for something. A usage-limit pause
+in the silence does not count towards the 3 hours, up to the limit's reset.
+That last start is the only low-confidence one. A queued message and an
+answer to a question Claude asked open no cycle, and a reply to a plan Claude had just put up
 asks for nothing, so none of them starts a piece. A session with no start
 inside it is one *unsegmented* piece, and counts its messages that asked for
 something, not itself, in a per-piece rate. A session that opens with a

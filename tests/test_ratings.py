@@ -17,6 +17,7 @@ from claudeglass.model import TranscriptMeta
 from claudeglass.parse import parse_transcript
 
 from test_capture_feedback import _run as feedback_run
+from test_pieces import limited_session_lines
 
 from helpers import (
     attachment_line,
@@ -304,6 +305,15 @@ def test_a_piece_is_listed_once_it_reaches_the_threshold(tmp_path):
     [piece] = ratings.unrated_pieces(bundle, tokens)
     assert (piece["tokens"], piece["part"]) == (tokens, 1)
     assert ratings.unrated_pieces(bundle, tokens + 1) == []
+
+
+def test_a_usage_limit_pause_is_no_silence_between_pieces(tmp_path):
+    # An hour of the 3h29m50s between the messages was a limit that held the work up: one piece.
+    [only] = ratings.unrated_pieces(_bundle(tmp_path, limited_session_lines()), 1)
+    assert only["part"] == 1
+    # With no limit between them the same two messages are two pieces.
+    first, second = ratings.unrated_pieces(_bundle(tmp_path, limited_session_lines(limit=False)), 1)
+    assert (first["part"], second["part"]) == (1, 2)
 
 
 def test_a_piece_is_named_by_its_place_its_task_and_its_messages(tmp_path):

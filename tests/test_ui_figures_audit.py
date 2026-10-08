@@ -1076,3 +1076,98 @@ def test_the_mix_note_shows_the_servers_sentence_only_when_the_mix_moved() -> No
     assert text_node["attrs"] == {"class": "change-mix-text", "text": said}
     for item in ({}, {"mix": None}, {"mix": {"flagged": False, "text": ""}}):
         assert _mix_note(item) is None, item
+
+
+# -- how a session ran, in words (charts-types.js SESSION_WORDS) ---------------
+
+
+def _session_words(expression: str) -> object:
+    """``expression`` run in Node over the session words: the map, the
+    palette's modes and the functions that read them."""
+    palette = _declaration_source(_static_text("charts.js"), "ENTITY_COLOURS").removeprefix("export ")
+    words = _declaration_source(_static_text("charts-types.js"), "SESSION_WORDS").removeprefix("export ")
+    names = ("sessionWordEntry", "sessionWord", "sessionWordNote", "sessionWordChoices", "hasColour", "modeKey", "modeText")
+    return _node([("charts-types.js", name) for name in names], expression, preamble=palette + ";\n" + words + ";\n")
+
+
+def test_a_mode_a_purpose_and_an_app_are_shown_by_their_names() -> None:
+    shown = _session_words(
+        """[
+        sessionWord("mode", "one-shot"),
+        sessionWord("mode", "overnight"),
+        sessionWord("mode", "long-agentic"),
+        sessionWord("mode", "mixed"),
+        sessionWord("purpose", "docs-or-light-edit"),
+        sessionWord("entrypoint", "claude-desktop"),
+        sessionWord("mode", "a-mode-added-later"),
+        sessionWord("mode", null),
+        sessionWord("mode", ""),
+        sessionWord("nothing", "cli")
+    ]"""
+    )
+    assert shown == [
+        "One-shot",
+        "Overnight (unattended)",
+        "Long autonomous run",
+        "Mixed",
+        "Docs or light edits",
+        "Claude desktop app",
+        "a-mode-added-later",
+        "",
+        "",
+        "cli",
+    ]
+
+
+def test_a_mode_says_what_it_means_and_a_purpose_or_unknown_mode_says_nothing() -> None:
+    notes = _session_words(
+        """[
+        sessionWordNote("mode", "overnight"),
+        sessionWordNote("mode", "one-shot"),
+        sessionWordNote("mode", "unknown"),
+        sessionWordNote("mode", "a-mode-added-later"),
+        sessionWordNote("purpose", "review")
+    ]"""
+    )
+    assert notes == [
+        "Overnight: Claude worked on its own for two hours or more at night while you were away.",
+        "One-shot: one request (yours or a scheduled task's), then Claude worked with no more messages from you.",
+        "",
+        "",
+        "",
+    ]
+
+
+def test_the_override_menus_offer_each_word_that_can_be_set_by_key() -> None:
+    menus = _session_words(
+        """{
+        mode: sessionWordChoices("mode").map(function (word) { return word.key; }),
+        purpose: sessionWordChoices("purpose").map(function (word) { return word.key; }),
+        labels: sessionWordChoices("mode").map(function (word) { return word.label; })
+    }"""
+    )
+    assert menus["mode"] == ["interactive", "long-agentic", "overnight", "one-shot", "mixed"]
+    assert menus["labels"][2] == "Overnight (unattended)"
+    # The key the classifier gives, not the "docs" the old menu saved.
+    assert "docs-or-light-edit" in menus["purpose"] and "docs" not in menus["purpose"]
+    assert "unknown" not in menus["purpose"]
+    assert len(menus["purpose"]) == len(set(menus["purpose"]))
+
+
+def test_a_session_chart_dot_has_a_colour_only_for_a_mode_the_palette_colours() -> None:
+    keys = _session_words(
+        """[
+        modeKey("one-shot"),
+        modeKey("overnight"),
+        modeKey("mixed"),
+        modeKey("unknown"),
+        modeKey("other"),
+        modeKey(undefined),
+        modeKey("toString"),
+        modeKey("__proto__")
+    ]"""
+    )
+    assert keys == ["one-shot", "overnight", "other", "other", "other", "other", "other", "other"]
+    # The tooltip and the chart's table say the session's own word.
+    said = _session_words('[modeText({ mode: "mixed" }), modeText({ mode: "one-shot" }), modeText({})]')
+    assert said == ["Mixed", "One-shot", "Not classified"]
