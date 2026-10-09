@@ -4,7 +4,8 @@ import type { CacheState } from './lib/cache.js'
 import { runway } from './lib/context.js'
 import { ratesFor, sendCost } from './lib/pricing.js'
 import type { ModelRates } from './lib/pricing.js'
-import { fallbackSettings } from './settings'
+import { fallbackSettings, soundSettings } from './settings'
+import { soundSnap } from './live'
 
 // What the surfaces draw from: the snapshot and the settings, with the few
 // figures worked out from them (the cache countdown, the runway, the parts of
@@ -115,7 +116,7 @@ export function buildView(snap: GlassSnap, settings: GlassSettings, detailed: bo
  * read(\$, detailedAtom), \$.clock.now()); settings not read yet draw as the fallback.
  */
 export function drawView(snap: GlassSnap, settings: GlassSettings | null, detailed: boolean, now: number, working: boolean): View {
-  return buildView(snap, settings ?? fallbackSettings(), detailed, now, working)
+  return buildView(soundSnap(snap), soundSettings(settings), detailed, now, working)
 }
 
 /** True when there is nothing to show yet: no figures from Claude Code. */

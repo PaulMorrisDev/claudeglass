@@ -4,6 +4,7 @@ import { RATES } from './generated/rates.js'
 import { parseTtl } from './lib/cache.js'
 import { projectApplies } from './lib/coach.js'
 import { REBUILD_DEFAULTS } from './lib/rebuild.js'
+import { fillMissing } from './lib/shape.js'
 import type { Io } from './io'
 
 // The settings file ClaudeGlass writes (src/claudeglass/mod_settings.py) and
@@ -36,6 +37,14 @@ function numbers(value: unknown): Record<string, number> {
     if (number !== null) out[key] = number
   }
   return out
+}
+
+/** Settings mirrored to $.state by an older version of the mod, with the fields added since; the fallback when none. */
+export function soundSettings(settings: GlassSettings | null | undefined): GlassSettings {
+  if (settings === null || settings === undefined) return fallbackSettings()
+  const filled = fillMissing(settings, fallbackSettings())
+  // The prices are the file's: a model it leaves out stays unpriced rather than taking the bundled price.
+  return settings.models === undefined || filled.models === settings.models ? filled : { ...filled, models: settings.models }
 }
 
 /** What the mod uses when the settings file is missing, unreadable or of another schema. */
@@ -198,7 +207,10 @@ export function reloadSettings(io: Io): Promise<GlassSettings> {
  * the file the first time and again once they are older than ten minutes.
  */
 export async function getSettings(io: Io): Promise<GlassSettings> {
-  if (cached === null) cached = await io.getSettings()
+  if (cached === null) {
+    const mirrored = await io.getSettings()
+    cached = mirrored === null ? null : soundSettings(mirrored)
+  }
   if (cached === null) return reloadSettings(io)
   const now = await io.now()
   if (now - cached.loadedAt > SETTINGS_REFRESH_MS) return reloadSettings(io)

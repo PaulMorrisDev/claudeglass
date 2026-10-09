@@ -289,3 +289,29 @@ test('with no summarising point in the figures, the point is the window less the
   expect(texts[0]).toBe('○ 40% full · Claude summarises at 267k')
   expect(faults(world)).toEqual([])
 })
+
+test('a snapshot an older version left in state (the mod reloaded mid-session) still draws', async ($, on) => {
+  const world = prepare(on)
+  // $.state outlives a reload: what an older mod kept has no agents or piece, and a shorter turn.
+  let aged = false
+  on('state.get', async (_$, e, next) => {
+    const got = await next(e)
+    const held = got.value as { value?: Record<string, unknown>; version: number } | undefined
+    if (!aged || e.plugin !== 'claudeglass' || e.key !== 'snap' || held?.value === undefined) return got
+    const old = { ...held.value, turn: { rebuilds: [], big: null } }
+    delete old.agents
+    delete old.piece
+    return { value: { ...held, value: old } } as never
+  })
+  await started($, world)
+  aged = true
+
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const mounted = await band($, surface)
+    const texts = await segments(mounted)
+    expect(texts[0]).toMatch(/60% full/)
+    expect(await mounted.find({ type: 'Button', key: 'open' })).toBeDefined()
+    await mounted.unmount()
+  }
+  expect(faults(world)).toEqual([])
+})

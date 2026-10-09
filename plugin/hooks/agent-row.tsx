@@ -3,7 +3,7 @@ import type { Register } from 'claude-code'
 
 import { ICONS, modelColor, rowLine } from './agent-view'
 import { COPY } from './generated/copy.js'
-import { emptySnap } from './live'
+import { emptySnap, soundSnap } from './live'
 import { drawView } from './view'
 
 // Claude Code reads a state reference only where its literal is written, so each file that
@@ -33,7 +33,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
     const base = await next(e)
     if (!isAgentTool(e.props.tool)) return base
-    const snap = await read($, snapAtom)
+    const snap = soundSnap(await read($, snapAtom))
     const id = agentIdOf(e.props.output)
     const agent = snap.agents.find(one => (id !== null ? one.id === id : one.toolUseId === e.props.tool_use_id))
     if (agent === undefined) return base

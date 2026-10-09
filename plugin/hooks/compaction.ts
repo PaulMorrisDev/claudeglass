@@ -10,8 +10,8 @@ import { holdAfterReply, holdStep, saidTotal } from './lib/coverage.js'
 import { buildKeepList, squash } from './lib/keeplist.js'
 import { priceUsage, ratesFor } from './lib/pricing.js'
 import { fill } from './lib/text.js'
-import { emptySnap } from './live'
-import { fallbackSettings } from './settings'
+import { emptySnap, soundSnap } from './live'
+import { soundSettings } from './settings'
 import { onTurnEnd } from './track'
 
 // Compaction review, the event side. Before a summary: the keep list follows the
@@ -158,8 +158,8 @@ export const register: Register = on => {
       // The Detailed view says how the context changed and what the summary cost, when Claude Code reported its usage.
       let detail: BoundaryDetail | null = null
       if ((await read($, detailedAtom)) === true) {
-        const snap = await read($, snapAtom)
-        const settings = (await read($, settingsAtom)) ?? fallbackSettings()
+        const snap = soundSnap(await read($, snapAtom))
+        const settings = soundSettings(await read($, settingsAtom))
         const rates = result.usage === undefined ? null : ratesFor(settings.models, snap.model)
         const usd = result.usage === undefined || rates === null ? null : priceUsage(rates, result.usage, settings.ttl)
         detail = { before: result.tokensBefore ?? null, after: result.tokensAfter ?? null, amount: usd === null ? null : amountOfAfterAbout(usd, snap, settings) }

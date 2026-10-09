@@ -1,5 +1,6 @@
 import type { GlassSnap } from '../types'
 import type { Io } from './io'
+import { fillMissing } from './lib/shape.js'
 
 // What the mod has seen this session, kept in $.state so a hot reload keeps it
 // and the render hooks (which may not write) can read it. The event hooks work
@@ -54,6 +55,14 @@ export function emptySnap(): GlassSnap {
   }
 }
 
+/**
+ * The snapshot as this version reads it. $.state outlives a reload of the mod, so one an older
+ * version wrote can lack fields added since: those come from an empty snapshot.
+ */
+export function soundSnap(snap: GlassSnap | null | undefined): GlassSnap {
+  return fillMissing(snap, emptySnap())
+}
+
 export function emptyTurn(): GlassSnap['turn'] {
   return { rebuilds: [], big: null, switched: false, compactedCold: null, compacted: false, switchUsd: 0 }
 }
@@ -65,7 +74,7 @@ let scheduled = false
 /** The snapshot to work on: the copy in memory, or the one in $.state after a reload. */
 export async function live(io: Io): Promise<GlassSnap> {
   // What $.state returns is read-only; the event hooks change theirs, so they work on a copy (the snapshot is plain JSON).
-  if (work === null) work = JSON.parse(JSON.stringify(await io.getSnap())) as GlassSnap
+  if (work === null) work = JSON.parse(JSON.stringify(soundSnap(await io.getSnap()))) as GlassSnap
   return work
 }
 

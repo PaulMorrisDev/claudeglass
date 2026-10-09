@@ -1,7 +1,7 @@
 import { atom, read } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { emptySnap } from './live'
+import { emptySnap, soundSnap } from './live'
 import { addAttachment, follow, mcpServer, newLedger, receivedClaudeMd, record } from './lib/instructions.js'
 import type { Ledger } from './lib/instructions.js'
 
@@ -57,7 +57,7 @@ function changed($: EngineInterface): void {
 async function reply($: EngineInterface): Promise<number> {
   const id = await $.session.id()
   follow(ledger, id)
-  const snap = await read($, snapAtom)
+  const snap = soundSnap(await read($, snapAtom))
   return snap.sessionId === id ? snap.replies + 1 : 1
 }
 

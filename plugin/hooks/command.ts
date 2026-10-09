@@ -6,7 +6,7 @@ import { runBudget } from './budget'
 import { MAX_PINS, newPin } from './compaction-memory'
 import { rememberedDraft } from './draft'
 import { COPY } from './generated/copy.js'
-import { emptySnap } from './live'
+import { emptySnap, soundSnap } from './live'
 import { fallbackSettings } from './settings'
 import { fill } from './lib/text.js'
 import { OPEN_ARGS } from './pane'
@@ -83,7 +83,7 @@ export const register: Register = on => {
           set: async budget => {
             await update($, budgetAtom, () => budget)
           },
-          snap: () => read($, snapAtom),
+          snap: async () => soundSnap(await read($, snapAtom)),
           settings: async () => (await read($, settingsAtom)) ?? fallbackSettings(),
         })
         return { text }
