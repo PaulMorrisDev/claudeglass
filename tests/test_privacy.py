@@ -1262,7 +1262,8 @@ def test_privacy_reply_text_and_shell_reads_leave_yes_no_answers_and_sizes_never
 
     encoded = json.dumps(cache.encode_result(result))
     blob = encoded + repr(result.events) + repr(result.turns) + repr(result.diagnostics) + repr(result.meta)
-    for word in secrets[:3] + secrets[4:] + ["/tmp/", "C:/work", "Preview", "misread", "false positive"]:
+    # The persisted output's own path, not "/tmp/": on Linux the transcript itself sits under /tmp.
+    for word in secrets[:3] + secrets[4:] + [f"/tmp/{secrets[5]}", "C:/work", "Preview", "misread", "false positive"]:
         assert word not in blob, word
     # Of the commands, only the first one's first words (the existing prefix) are kept.
     assert result.turns[0].cmd_prefix == "git status"

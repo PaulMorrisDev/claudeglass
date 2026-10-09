@@ -874,7 +874,8 @@ def test_the_subagent_stop_hook_hands_the_run_to_a_worker(tmp_path):
             break
         time.sleep(0.1)
     line = json.loads(next(tags.iterdir()).read_text(encoding="utf-8"))
-    assert line["reply"] == "msg_a2" and line["agent"] == "brief=clear missing=none result=done"
+    # The words keep the order the answer gave them.
+    assert line["reply"] == "msg_a2" and line["agent"] == "result=done brief=clear missing=none"
 
 
 # -- the excerpt -----------------------------------------------------------------
