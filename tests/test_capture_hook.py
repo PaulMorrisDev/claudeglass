@@ -397,10 +397,29 @@ def test_no_key_names_are_logged_where_capture_adds_nothing(tmp_path):
         config_dir = _config(tmp_path / name, body)
         _note(config_dir, payload)
         assert not (config_dir / HOOK.PAYLOAD_KEYS_FILE).exists(), name
-    # Only a SessionStart is logged.
+    # Only a SessionStart and a SubagentStop are logged.
     config_dir = _config(tmp_path / "other", '[capture]\nlevel = "essentials"\n')
     _note(config_dir, _subagent())
     assert not (config_dir / HOOK.PAYLOAD_KEYS_FILE).exists()
+
+
+def test_a_subagent_stops_key_names_are_logged_once_under_their_own_label(tmp_path):
+    config_dir = _config(tmp_path / "cg", '[capture]\nlevel = "essentials"\n')
+    log = config_dir / HOOK.PAYLOAD_KEYS_FILE
+    stop = {"session_id": "s1", "hook_event_name": "SubagentStop", "cwd": "/work/app", "agent_id": "a1",
+            "agent_type": "secret-agent-type", "stop_hook_active": False}
+    _run(config_dir, stop)
+    assert json.loads(log.read_text(encoding="utf-8")) == {
+        "subagent_stop": ["agent_id", "agent_type", "cwd", "hook_event_name", "session_id", "stop_hook_active"]
+    }
+    text = log.read_text(encoding="utf-8")
+    assert "secret-agent-type" not in text and "/work/app" not in text
+    _run(config_dir, {**stop, "extra_key": 1})
+    assert log.read_text(encoding="utf-8") == text
+    # Past capture's end, nothing is logged.
+    ended = _config(tmp_path / "ended", '[capture]\nlevel = "essentials"\nuntil = "2020-01-01T00:00:00Z"\n')
+    _run(ended, stop)
+    assert not (ended / HOOK.PAYLOAD_KEYS_FILE).exists()
 
 
 def test_a_hook_that_can_return_output_is_never_a_background_signal():

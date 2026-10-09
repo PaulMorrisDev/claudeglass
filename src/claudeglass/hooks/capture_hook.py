@@ -32,7 +32,8 @@ connect``):
   note itself says a subagent should ignore it, for a compaction that
   check misses. The key names of each kind of SessionStart payload (names
   only, never a value) are written once to ``payload-keys.json``, to see
-  whether Claude Code ever sends an agent field there. A subagent is
+  whether Claude Code ever sends an agent field there; a SubagentStop's
+  are written there once too (``subagent_stop``). A subagent is
   never asked for anything (``SubagentStart``, which older settings may
   still run this on, adds nothing either).
 - ``SubagentStop``, for the agent metrics: the finished run's brief,
@@ -593,12 +594,15 @@ def log_payload_keys(config_dir: Path, payload: dict, scope: str) -> None:
     """Write the key names of this SessionStart payload to
     ``payload-keys.json``, once for each source and scope (``startup``,
     ``compact``, ``compact:subagent`` ...), to see whether Claude Code
-    ever sends an agent field there. Names only, in a closed shape: never
-    a value, and a name that isn't plain letters, digits and underscores is
-    left out."""
+    ever sends an agent field there; a SubagentStop's go under
+    ``subagent_stop``, once. Names only, in a closed shape: never a value,
+    and a name that isn't plain letters, digits and underscores is left
+    out."""
     source = payload.get("source")
     label = source if source in _SESSION_SOURCES else "other"
-    if scope != "main":
+    if payload.get("hook_event_name") == "SubagentStop":
+        label = "subagent_stop"
+    elif scope != "main":
         label = f"{label}:{scope}"
     path = config_dir / PAYLOAD_KEYS_FILE
     seen = _read_json(path)
@@ -4602,6 +4606,11 @@ def _run(argv: list[str]) -> None:
     if unattended:
         return
     if payload.get("hook_event_name") == "SubagentStop":
+        if _capture_for(payload, config, datetime.now(timezone.utc)) is not None:
+            try:
+                log_payload_keys(config_dir, payload, "main")
+            except Exception:  # noqa: BLE001 - a log fault must not cost the agent's own verdict
+                pass
         if coach:
             try:
                 keep_run(payload, config, catalogue, config_dir)
