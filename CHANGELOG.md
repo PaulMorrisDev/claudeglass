@@ -20,14 +20,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   about 30 days with a weekly sparkline, who reads it, in what share of
   their runs and with what mean read size, and its cost a month. Names are
   worked out from your project folders when the page opens, with the same salt as the transcripts, and
-  are never stored; a file this machine cannot find has no name. A new
+  are never stored; a file this machine cannot find has no name. The walk
+  skips virtualenv, cache and build folders (`.venv`, `__pycache__`,
+  `.pytest_cache`, `dist`, `build`, `coverage` and the like) as well as
+  `.git` and `node_modules`, takes documents before other files in a
+  folder, ends as soon as every file has a name, and stops only at a bound
+  of 150,000 files or 100,000 folders. A new
   `project-files` check (`GET /api/project-files` for the table) fires when
-  a file read by agents is 5,000 tokens or more and read by 3 or more agent
+  a text file (`.md` or `.txt`: a context.md, a spec, a plan, any document)
+  read by agents is 5,000 tokens or more and read by 3 or more agent
   types, or grew 25% or more in 30 days, and gives four prompts to copy:
   trim what is stale, split the file by who needs it, move rule-like parts
   into path-scoped `.claude/rules`, and move reference material into a
   skill. For a file agents read it adds a fifth: put the essential lines in
-  the agent definition and drop the read. The tuning export
+  the agent definition and drop the read. Code and data files stay in the
+  table, after the text files, but never fire the check or count toward
+  it, and the page intro and the check say so. The tuning export
   has a `project_files` block of extension classes, sources, size buckets,
   weekly size buckets and shares of runs, with no name. An `@import`ed
   file is assumed to appear as its own entry among the instructions Claude
@@ -64,18 +72,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a `tools:` line for an agent type, built from the tools and MCP servers
   that at least a tenth of its spawns called, and names the rest as rarely
   used. It fires at 5,000 tokens or more a start to leave out, and leaves
-  `Explore`, `Plan` and `claude-code-guide` alone. It says Claude Code adds
-  `StructuredOutput` and `SubagentHandback` whatever the list says, and asks
-  for one run before and one after on the same model, because Claude Code's
-  docs do not say whether the skills list and the agent list go with the
-  Skill and Agent tools. A built-in type or an agent with no file gets a
-  prompt to create a same-named file; `general-purpose` is warned that a
-  list limits every spawn that names no type; a workflow agent gets a
-  workflow-script variant that passes `agentType`. It replaces
-  `spawn-read-only-tools`. Two new report tables, `agent_startup_diet` and
-  `agent_startup_servers`, hold what each agent type would shed and what
-  each rarely used MCP server costs per spawn (definitions, deferred names
-  and instructions). The tuning export gains an optional
+  `Explore`, `Plan` and `claude-code-guide` alone. It reads each agent type
+  on the busiest model with 5 or more spawns that recorded their tools,
+  because older transcripts have none and the busiest model can have no
+  tool data at all. It says Claude Code adds `StructuredOutput` and `SubagentHandback`
+  whatever the list says, and asks for one run before and one after on the
+  same model, because Claude Code's docs do not say whether the skills list
+  and the agent list go with the Skill and Agent tools. A built-in type or
+  an agent with no file gets a prompt to create a same-named file;
+  `general-purpose` is warned that a list limits every spawn that names no
+  type; a workflow agent gets a workflow-script variant that passes
+  `agentType`. It replaces `spawn-read-only-tools`. Two new report tables,
+  `agent_startup_diet` and `agent_startup_servers`, hold what each agent
+  type would shed and what each rarely used MCP server costs per spawn
+  (definitions, deferred names and instructions). The tuning export gains an optional
   `agents.startup_diet_usd`, list-price amounts by built-in type with
   `custom` for the rest.
 
@@ -499,9 +509,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and skills, tool search, the session's tool results) no longer assume 4
   characters per token. Each model gets its own two figures, one for tool
   definitions (from the shared prefix of its first calls) and one for other
-  text, the median over ten or more first calls; until then 4.0 stands in. A
-  new "Characters per token" table shows them, and the notes say "calibrated
-  on your sessions". No tokenizer reads your transcripts.
+  text, the median over ten or more first calls; until then 4.0 stands in.
+  The text figure comes only from first calls that recorded their tool
+  definitions, since a call without them counts the tokens it wrote for
+  them as text, and a call outside 1.5 to 8 characters per token is left
+  out before the median. A new "Characters per token" table shows them, and
+  the notes say "calibrated on your sessions". No tokenizer reads your
+  transcripts.
 - **Desktop app servers are told apart.** An MCP server named by an ID
   that only desktop-app sessions (and their subagents) ever offered is
   a connector, and gets the same advice and thresholds as one the app
@@ -538,7 +552,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   part of the allowlist saving (never added on top of the tools list card),
   and marks `mcpServers` as not verified. A server's instructions stay under
   a `tools:` list, so they are left out of that saving. A built-in agent
-  type's `spawn-cost` card no longer says to shorten the task prompt.
+  type's `spawn-cost` card no longer says to shorten the task prompt, and
+  `Explore`, `Plan` and `claude-code-guide`, which the tools list card
+  leaves alone, get none unless an agent file of yours defines them.
 - **The brief card compares like for like.** Partial and vague asks are
   now set against the median clear ask of the same kind of task and level
   (the whole kind of task when fewer than 3 clear asks share the level),
@@ -1049,7 +1065,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every before and after of a change, is held to one model: a row names the
   model it measured and counts the spawns on any other apart. A before and
   after with no model in common gives no figure instead of reading a switch
-  of model as a saving. A stored baseline still compares on what the session
+  of model as a saving. A CLAUDE.md that several agent types receive is sized
+  over the spawns that loaded it, so a type that often skips it doesn't read
+  as a different size. A stored baseline still compares on what the session
   wrote.
 - **Baseline-bloat looks at what you can change.** The card fires when the
   skills list, memory files and the MCP tools of servers you can turn off

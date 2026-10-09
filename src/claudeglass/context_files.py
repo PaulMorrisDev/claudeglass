@@ -28,7 +28,9 @@ conversation summary). A *standing read* is one an agent type does again and
 again (:func:`is_standing`). Sizes are kept per week too (Monday, UTC), so a
 file that grows shows. Only salted path hashes, counts and sizes are kept;
 ``claude_md_review.local_names`` puts a relative name to a hash on the
-dashboard, from disk, when it is asked for.
+dashboard, from disk, when it is asked for. The table lists every such file,
+text files first; the Overview check (:func:`check_rows`) covers the text
+files only.
 """
 
 from __future__ import annotations
@@ -81,7 +83,9 @@ MIN_WINDOW_DAYS = 7
 #: The sources of a project file, in the words the dashboard uses.
 SOURCES = ("auto", "import", "read")
 #: The extension classes (``claude_md_review.ext_class``) listed first:
-#: prose is what a file can be split, trimmed or moved out of.
+#: prose is what a file can be split, trimmed or moved out of. They are also
+#: the only classes the Overview check covers (:func:`check_rows`); code and
+#: data files stay in the table, after them.
 TEXT_EXTS = ("md", "txt")
 
 
@@ -781,13 +785,25 @@ def check_rows(rows: list[dict], *, maybe_imports: bool = False) -> list[dict]:
     flagged: the CLAUDE.md files Claude Code loads by itself are the
     CLAUDE.md check's.
 
-    Which loaded file is an import is known only from disk
-    (:func:`project_files` ``local``). With ``maybe_imports`` a loaded file
-    counts as one that could be, so a caller can tell cheaply, without
+    Only text files are flagged: the check is about the documents sessions
+    and agents take in (CLAUDE.md, a context.md, specs, plans, any ``.md``),
+    which a split, a trim or a move into a skill helps. A code or data file
+    stays in the Agents page's table, after the text files, but never fires
+    the check or counts toward it, and neither does a file this machine could
+    not name, because its class is not known. A row's class is its ``ext``
+    (:data:`TEXT_EXTS`).
+
+    Which loaded file is an import, and what class a file is, are known
+    only from disk (:func:`project_files` ``local``). With ``maybe_imports``
+    a loaded file counts as one that could be an import and a file of unknown
+    class as one that could be text, so a caller can tell cheaply, without
     reading disk, that nothing at all could be flagged."""
     flagged: list[dict] = []
     for row in rows:
         if row["source"] == "auto" and not maybe_imports:
+            continue
+        ext = row.get("ext") or ""
+        if ext not in TEXT_EXTS and not (maybe_imports and not ext):
             continue
         reasons = []
         if row["tokens"] >= CHECK_MIN_TOKENS and row["types"] >= CHECK_MIN_TYPES:

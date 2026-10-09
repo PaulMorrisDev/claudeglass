@@ -957,7 +957,7 @@ never used. `run_split` ([run splits](run-split.md)) gives each agent type's
 best split interval and what splitting its long runs there would save.
 
 Last comes **Project files your agents read** (`/api/project-files`): one
-row per file with how it arrives (loaded by Claude Code, imported by a
+row per file, text files first, with how it arrives (loaded by Claude Code, imported by a
 CLAUDE.md, or read by agents), its size now, its change over about 30 days
 with a weekly sparkline, who reads it and in what share of their runs, and
 what it costs a month. A row opens a drawer with the shares for every
@@ -968,8 +968,12 @@ reference material into a skill, and, for a file agents read, put the
 essential lines in the agent definition and drop the read. Names are
 worked out from your project folders when the page opens and are never
 stored; a file this machine cannot find shows as not found and has no
-prompts. The section carries the table name `project_files`, so the
-Overview check's link (`projectFilesLink`) scrolls to it and highlights it.
+prompts. The Overview check covers text files only (`.md` and `.txt`: the
+documents sessions and agents take in), and the section intro says so. A
+code or data file is listed after the text files and is never flagged, so
+its drawer offers no prompts. The section carries the table name
+`project_files`, so the Overview check's link (`projectFilesLink`) scrolls
+to it and highlights it.
 
 ### Agents & context › Quality
 

@@ -700,6 +700,16 @@ def _project_file_readers(row: dict) -> str:
     return f"{_capital(subject)} {'read' if plural else 'reads'} it {when}"
 
 
+def _project_files_quiet(ctx: Context) -> dict:
+    """Nothing is flagged. The check covers text files only (the documents
+    sessions and agents take in), and the answer says so."""
+    return _result(
+        "ok",
+        f"No text file is both large and read by many agent types, and none is growing fast {ctx.period}. "
+        "This check covers .md and .txt files. {{page:agents/subagents}} lists every project file, code and data too.",
+    )
+
+
 def _project_files(ctx: Context) -> dict:
     from . import claude_md_review, context_files
 
@@ -711,21 +721,16 @@ def _project_files(ctx: Context) -> dict:
             f"No project file stood out {ctx.period}, so what agents read and how big it is isn't known.",
         )
     # Disk is read only when something could be flagged: the names come
-    # from the project folders (cached for a few minutes).
+    # from the project folders (cached for a few minutes), and with them the
+    # class of each file, which only text files are flagged by.
     if not context_files.check_rows(candidates, maybe_imports=True):
-        return _result(
-            "ok",
-            f"No project file is both large and read by many agent types, and none is growing fast {ctx.period}.",
-        )
+        return _project_files_quiet(ctx)
     rows, _local = claude_md_review.project_file_rows(
         ctx.config_dir, data, projects=None if ctx.only is None else list(ctx.only)
     )
     flagged = context_files.check_rows(rows)
     if not flagged:
-        return _result(
-            "ok",
-            f"No project file is both large and read by many agent types, and none is growing fast {ctx.period}.",
-        )
+        return _project_files_quiet(ctx)
     table = _table(
         [
             ("file", "File"),
@@ -736,7 +741,7 @@ def _project_files(ctx: Context) -> dict:
         ],
         [
             [
-                row["name"] or "A file not found on this machine",
+                row["name"],
                 f"{row['tokens']:,}",
                 f"{row['change_pct']:+.0f}%" if row["change_pct"] is not None else "none",
                 _capital("{0}, {2}".format(*_readers_parts(row))),
@@ -745,7 +750,7 @@ def _project_files(ctx: Context) -> dict:
             for row in flagged[:10]
         ],
     )
-    lead = next((row for row in flagged if row["name"]), flagged[0])
+    lead = flagged[0]
     grew = (
         f", up {lead['change_pct']:.0f}% in 30 days"
         if lead["change_pct"] is not None and lead["change_pct"] >= 10
@@ -754,13 +759,6 @@ def _project_files(ctx: Context) -> dict:
     cost = claude_md_review._amount(ctx.units, lead["cost_month_usd"], "a month", prefix="about")
     sentence = f"{_project_file_readers(lead)}: {cost}."
     more = f" {len(flagged) - 1} more file{'s' if len(flagged) > 2 else ''} {'are' if len(flagged) > 2 else 'is'} flagged." if len(flagged) > 1 else ""
-    if not lead["name"]:
-        return _result(
-            "ok",
-            f"A file is flagged: about {_tokens_text(lead['tokens'])} tokens{grew}. It is not in any project folder "
-            f"on this machine, so there is nothing to change. {sentence}{more}",
-            table=table,
-        )
     return _result(
         "act",
         f"{lead['name']} is now about {_tokens_text(lead['tokens'])} tokens{grew}. {sentence}{more} "
@@ -2000,7 +1998,9 @@ CHECKS: tuple[Check, ...] = (
           ("spawn-claude-md", "spawn-shared-claude-md")),
     Check("project-files", "Are project files that agents read big or growing?",
           "An agent that reads a file keeps it in context and pays to read it again on every later reply. "
-          "A big or fast-growing file that many agent types read costs on every run.", _project_files),
+          "A big or fast-growing file that many agent types read costs on every run. "
+          "This check covers text files (.md and .txt). Code and data files are listed on the Agents page but not checked.",
+          _project_files),
     Check("tool-output", "Do tool results fill your context?",
           "A tool's output stays in the conversation and is re-read on every later reply.", _tool_output,
           ("tool-output-carry",)),

@@ -1030,6 +1030,44 @@ def test_the_first_call_comparison_never_mixes_models(tmp_path):
     assert any("claude-haiku-4-5" in note for note in tables["agent_startup_shared"].notes)
 
 
+def test_tool_data_is_read_on_the_model_that_recorded_it_when_the_busiest_model_did_not(tmp_path):
+    """Older transcripts have no tools snapshot: if most of an agent type's
+    spawns are from before they were written, the model they ran on has no
+    tool data, and tools are measured on the model that has some."""
+    stats = context_budget.ContextBudgetStats()
+    for n in range(3):
+        stats.add_subagent(
+            _sub(tmp_path, f"old-{n}", _sub_lines(model="claude-haiku-4-5", shared_prefix=51_500, tools=[])),
+            pricing=PRICING,
+        )
+    for n in range(2):
+        stats.add_subagent(_sub(tmp_path, f"new-{n}", _sub_lines(model="claude-sonnet-5", used="Read")), pricing=PRICING)
+    tables = _startup_tables(stats)
+    breakdown = _row(tables["agent_startup_breakdown"], "agent_type", "Explore")
+    # The sizes are measured on the model most spawns ran on; the tool figure on the other.
+    assert breakdown["model"] == "claude-haiku-4-5" and breakdown["other_model_spawns"] == 2
+    assert breakdown["tool_definitions"] == 0
+    removable = (_tool_chars(TOOLS[1]) + _tool_chars(TOOLS[2]) + _tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0
+    assert breakdown["removable_tools"] == pytest.approx(removable)
+    diet = _row(tables["agent_startup_diet"], "agent_type", "Explore")
+    assert diet["model"] == "claude-sonnet-5" and diet["spawns"] == 2
+    assert diet["rare_tools"] == "Bash, Grep, mcp__figma__*" and diet["keep_tools"] == "Read"
+    assert diet["dropped_definitions"] == pytest.approx(breakdown["removable_tools"])
+    assert {row[1] for row in tables["agent_startup_tools"].rows} == {"claude-sonnet-5"}
+    assert_privacy(tables["agent_startup_diet"])
+
+
+def test_tools_are_measured_on_the_fixed_model_when_no_spawn_recorded_them(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    for n in range(3):
+        stats.add_subagent(_sub(tmp_path, f"a-{n}", _sub_lines(model="claude-haiku-4-5", tools=[])), pricing=PRICING)
+    stats.add_subagent(_sub(tmp_path, "b-0", _sub_lines(model="claude-sonnet-5", tools=[])), pricing=PRICING)
+    tables = _startup_tables(stats)
+    breakdown = _row(tables["agent_startup_breakdown"], "agent_type", "Explore")
+    assert breakdown["model"] == "claude-haiku-4-5" and breakdown["removable_tools"] is None
+    assert tables["agent_startup_diet"].rows == [] and tables["agent_startup_tools"].rows == []
+
+
 def test_a_model_is_calibrated_from_its_own_subagent_first_calls(tmp_path):
     subs = [
         _sub(tmp_path, f"agent-{n}", _sub_lines(model="claude-haiku-4-5", shared_prefix=1_000))

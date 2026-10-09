@@ -2700,6 +2700,18 @@ def test_the_project_files_copy_keeps_to_the_dashboards_copy_rules() -> None:
             assert len(sentence.split()) <= 25, sentence
 
 
+def test_the_agents_page_checks_the_classes_the_overview_check_covers() -> None:
+    """page-agents.js's CHECKED_CLASSES mirrors context_files.TEXT_EXTS, so the
+    drawer's code-or-data note shows for exactly the files the check never flags."""
+    from claudeglass import context_files
+
+    agents = _static_text("page-agents.js")
+    match = re.search(r"var CHECKED_CLASSES = \[(.*?)\];", agents)
+    assert match
+    assert re.findall(r'"([a-z]+)"', match.group(1)) == list(context_files.TEXT_EXTS)
+    assert "CHECKED_CLASSES.indexOf(row.ext) < 0" in _function_source(agents, "openProjectFile")
+
+
 def test_the_compactions_list_says_it_covers_whole_sessions() -> None:
     """The list is the compactions of the sessions the window counts, as the
     section above it counts them, so a session that began before the window

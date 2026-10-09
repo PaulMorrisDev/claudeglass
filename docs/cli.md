@@ -92,8 +92,8 @@ python -m claudeglass check models
 
 Leave the ID out for every check's one-line answer. Give one to see it
 in full: `models`, `effort`, `compaction`, `cache`, `tools`, `skills`,
-`claude-md`, `project-files` (project files that agents read and that are
-big, read by many agent types or growing), `tool-output`, `hooks`, `tool-search`,
+`claude-md`, `project-files` (text files, such as specs and plans, that
+agents read and that are big, read by many agent types or growing), `tool-output`, `hooks`, `tool-search`,
 `habits`, `failed-calls` (replies lost
 to a failed or blocked tool call), `quality`, `cost-centres` (where the
 spend sits, by cost centre) or `cost-record`

@@ -5961,16 +5961,21 @@ _PF_SALT = b"p" * 32
 _PF_TYPES = ("Explore", "Plan", "Review")
 
 
-def _start_project_files_server(tmp_path, monkeypatch):
+def _start_project_files_server(tmp_path, monkeypatch, *, code: bool = False):
     """A server whose corpus has a main session and three runs of each of
     three agent types reading ``docs/context.md`` in a project folder on
     disk (the folder is named by the ``cwd`` in the transcripts), 25,000
     characters in an early week and 40,000 in the newest, and the three
-    Explore runs also reading a file that is no longer on disk."""
+    Explore runs also reading a file that is no longer on disk. With
+    ``code``, every agent run also reads ``src/app.py`` (40,000 characters)."""
     folder = tmp_path / "work" / "repo"
     (folder / "docs").mkdir(parents=True)
     (folder / "docs" / "context.md").write_text("Notes for the agents.\n", encoding="utf-8")
     context = str(folder / "docs" / "context.md")
+    source = str(folder / "src" / "app.py")
+    if code:
+        (folder / "src").mkdir()
+        (folder / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")
     gone = str(tmp_path / "work" / "gone" / "old-plan.md")
     monkeypatch.setattr(parse, "load_or_create_salt", lambda config_dir: _PF_SALT)
 
@@ -6001,7 +6006,7 @@ def _start_project_files_server(tmp_path, monkeypatch):
     for agent_type in _PF_TYPES:
         for number in range(3):
             agent = f"agent-{agent_type.lower()}{number}"
-            reads = [(context, 40_000)] + ([(gone, 8_000)] if agent_type == "Explore" else [])
+            reads = [(context, 40_000)] + ([(gone, 8_000)] if agent_type == "Explore" else []) + ([(source, 40_000)] if code else [])
             run(agents / f"{agent}.jsonl", agent, "2026-09-28", reads)
             (agents / f"{agent}.meta.json").write_text(json.dumps({"agentType": agent_type}), encoding="utf-8")
 
@@ -6016,6 +6021,20 @@ def project_files_server(tmp_path, monkeypatch):
     claude_md_review._NAMES.clear()
     handle, folder = _start_project_files_server(tmp_path, monkeypatch)
     handle.folder = folder
+    try:
+        yield handle
+    finally:
+        handle.close()
+        handle.store.close()
+        claude_md_review._NAMES.clear()
+
+
+@pytest.fixture
+def project_files_code_server(tmp_path, monkeypatch):
+    from claudeglass import claude_md_review
+
+    claude_md_review._NAMES.clear()
+    handle, folder = _start_project_files_server(tmp_path, monkeypatch, code=True)
     try:
         yield handle
     finally:
@@ -6051,6 +6070,32 @@ def test_project_files_route_names_the_files_agents_read_and_flags_the_big_growi
     # The file that is gone has no name, no reasons and nothing to copy.
     assert (gone["name"], gone["ext"], gone["reasons"], gone["fixes"]) == ("", "", [], [])
     assert gone["tokens"] == 2000 and gone["types"] == 1
+
+
+def test_project_files_route_lists_a_code_file_after_the_text_files_but_never_flags_it(project_files_code_server):
+    resp, payload = project_files_code_server.get_json("/api/project-files")
+    assert resp.status == 200
+    data = payload["data"]
+    assert (data["total"], data["named"]) == (3, 2)
+
+    context, code, gone = data["files"]
+    assert (context["name"], context["ext"]) == ("docs/context.md", "md")
+    # The code file is as big and as widely read as the document, and dearer than the lost file.
+    assert (code["name"], code["ext"], code["tokens"], code["types"]) == ("src/app.py", "code", 10_000, 3)
+    assert code["cost_month_usd"] > gone["cost_month_usd"]
+    assert code["reasons"] == [] and code["fixes"] == []
+    assert context["reasons"] == ["wide", "grew"] and len(context["fixes"]) == 5
+    assert gone["ext"] == "" and gone["reasons"] == []
+
+
+def test_the_project_files_check_leaves_a_code_file_out_of_what_it_names_and_counts(project_files_code_server):
+    resp, payload = project_files_code_server.get_json("/api/quick-actions/project-files")
+    assert resp.status == 200
+    check = payload["data"]
+    assert check["status"] == "act"
+    assert check["summary"].startswith("docs/context.md is now about 10k tokens, up 60% in 30 days. ")
+    assert "more file" not in check["summary"] and "app.py" not in check["summary"]
+    assert [row[0] for row in check["table"]["rows"]] == ["docs/context.md"]
 
 
 def test_project_files_route_keeps_names_out_of_everything_stored_and_out_of_the_report(project_files_server, tmp_path):

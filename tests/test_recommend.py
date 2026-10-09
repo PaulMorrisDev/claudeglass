@@ -1590,6 +1590,29 @@ def test_spawn_cost_emits_workflow_advice_with_no_lever_for_builtin_agent_type()
     assert text == ""
 
 
+def test_spawn_cost_is_not_given_to_the_read_only_helpers():
+    """Explore, Plan and claude-code-guide start with a small tool set of
+    their own, which the tools-list card leaves alone: a built-in one has
+    no file of the user's to put a tools list in, so spawn-cost has no
+    lever for it (it used to fire for Plan, with tools-list advice and no
+    amount)."""
+    for agent in ("Explore", "Plan", "claude-code-guide"):
+        r = _spawn_cost_report(_base_report(), (agent, 110_000, 8_000))
+        recs = recommend_fn(r, config=_config(), archetype=None)
+        assert not any(rec.id == "spawn-cost" for rec in recs), agent
+
+
+def test_spawn_cost_still_names_a_read_only_helper_the_user_gave_a_file():
+    # A Plan.md of the user's is a file omitClaudeMd and a tools list can go in.
+    r = _spawn_cost_report(_base_report(), ("Plan", 110_000, 8_000), ("general-purpose", 110_000, 8_000))
+    snapshot = Snapshot(path=Path("s.json"), ts="20260918T000000Z", data={"agents": {"Plan": {"model": "sonnet"}}})
+    recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
+    spawn_recs = {rec.agent_type: rec for rec in recs if rec.id == "spawn-cost"}
+    assert spawn_recs["Plan"].lever == "omitClaudeMd"
+    # The built-in general-purpose still gets its card beside it.
+    assert spawn_recs["general-purpose"].lever is None
+
+
 def test_spawn_cost_snapshot_agents_map_overrides_builtin_fallback():
     # Fix A1: when a snapshot is available, its own "agents" map (real
     # frontmatter files found on disk) is authoritative -- even for an

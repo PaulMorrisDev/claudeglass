@@ -2181,6 +2181,13 @@ def _rule_spawn_cost(
         agent_type = row[0]
         if covered and agent_type in covered:
             continue
+        # Explore, Plan and claude-code-guide are Claude Code's own read-only
+        # helpers, started with a small tool set of their own: the tools-list
+        # card leaves them alone, so a built-in one with no file of the
+        # user's has no lever here either.
+        has_file = _agent_has_frontmatter(agent_type, snapshot)
+        if not has_file and agent_type in DIET_EXCLUDED:
+            continue
         # Gated on the whole first call and on the part of it a tools list
         # on the agent would take out (what its snapshot offered and it
         # rarely or never used), not on the cache write: that write is the
@@ -2213,13 +2220,14 @@ def _rule_spawn_cost(
         # Fix A1: only a genuine frontmatter-backed agent type has an
         # omitClaudeMd lever this rule can point at -- Claude Code's own
         # bundled agent types (see _BUILTIN_AGENT_TYPES) have no
-        # ``.claude/agents/<type>.md`` file to patch. For those, most of
-        # the first call is Claude Code's own system prompt and tool
-        # definitions, which a shorter task prompt does not touch: this is
-        # workflow advice that points at a same-named agent file with a
-        # tools list (the spawn-tools-list card builds the list), with no
-        # lever and therefore no render_patch_set stanza.
-        if _agent_has_frontmatter(agent_type, snapshot):
+        # ``.claude/agents/<type>.md`` file to patch. For those (the
+        # read-only helpers skipped above apart), most of the first call
+        # is Claude Code's own system prompt and tool definitions, which a
+        # shorter task prompt does not touch: this is workflow advice that
+        # points at a same-named agent file with a tools list (the
+        # spawn-tools-list card builds the list), with no lever and
+        # therefore no render_patch_set stanza.
+        if has_file:
             category = "settings"
             action = (
                 f"Trim what {agent_type} is sent at startup -- a tools list, omitClaudeMd or a narrower "

@@ -17,14 +17,22 @@ Two numbers per model family, and nothing else is kept:
 - **text**: the characters of everything else the transcript records
   before that call (task prompt, CLAUDE.md, skills list, environment
   notes, system prompt, tool lists), over its cache-write plus uncached
-  input tokens. Only calls that read a tool prefix count, so the tool
-  definitions are not in those tokens.
+  input tokens. Only calls that read a tool prefix *and* recorded their
+  tool definitions count. A call with no tools snapshot (every older
+  transcript) may have written those definitions itself, so their tokens
+  would be counted as text: on one real corpus that put the text figure at
+  0.9 characters per token.
 
-A family's number is the median over its calls, and only once it has
-:data:`MIN_CALLS` of them. With fewer it stays out and :data:`FALLBACK`
-(4.0) stands in, so a thin history never invents a precise-looking
-figure. A model family is the model id with its date suffix and
-``[1m]`` removed (:func:`model_family`); it is not
+A call whose ratio falls outside :data:`MIN_RATIO` to :data:`MAX_RATIO`
+characters per token is left out before the median: its characters and
+tokens are not describing the same text (a prefix written by the call, a
+snapshot cut short), whatever the tokenizer.
+
+A family's number is the median over the calls that remain, and only once
+it has :data:`MIN_CALLS` of them. With fewer it stays out and
+:data:`FALLBACK` (4.0) stands in, so a thin history never invents a
+precise-looking figure. A model family is the model id with its date
+suffix and ``[1m]`` removed (:func:`model_family`); it is not
 ``habits.family``'s three-way split, because Sonnet 5 and Sonnet 5.5 do
 not tokenize alike.
 
@@ -53,6 +61,13 @@ FALLBACK = 4.0
 #: First calls a family needs before its own ratio replaces :data:`FALLBACK`.
 MIN_CALLS = 10
 
+#: The characters per token a single call may show and still count. The band
+#: is wide enough for every model measured (tool definitions run about 4 to
+#: 6); a ratio outside it comes from characters and tokens that don't
+#: describe the same text.
+MIN_RATIO = 1.5
+MAX_RATIO = 8.0
+
 #: What a table's note says about its character-to-token figures.
 BASIS = "calibrated on your sessions"
 FALLBACK_BASIS = f"assumed at {FALLBACK:g} characters per token, as too few first calls to calibrate on"
@@ -80,7 +95,8 @@ class FirstCall:
 
     model: str
     #: Characters of the tool definitions in the first snapshot that lists
-    #: tools (0 when none was recorded).
+    #: tools (0 when none was recorded, and then the call counts toward
+    #: neither ratio).
     tool_chars: int = 0
     #: Characters of all the other text recorded for the call's start.
     text_chars: int = 0
@@ -90,14 +106,22 @@ class FirstCall:
     own_tokens: int = 0
 
 
+def _plausible(ratio: float) -> bool:
+    return MIN_RATIO <= ratio <= MAX_RATIO
+
+
 def _ratios(values: list[float]) -> float | None:
-    return median(values) if len(values) >= MIN_CALLS else None
+    """The median of the plausible ratios, once there are
+    :data:`MIN_CALLS` of them."""
+    kept = [value for value in values if _plausible(value)]
+    return median(kept) if len(kept) >= MIN_CALLS else None
 
 
 @dataclass(slots=True)
 class Calibration:
-    """Characters per token by model family: the median of the first
-    calls it was taken from, for families that had :data:`MIN_CALLS`."""
+    """Characters per token by model family: the median of the plausible
+    ratios of the first calls it was taken from, for families that had
+    :data:`MIN_CALLS` of them."""
 
     #: Family -> characters per token of tool definitions.
     tool: dict[str, float] = field(default_factory=dict)
@@ -121,8 +145,11 @@ class Calibration:
                 # A cold start wrote the tool prefix too, so neither
                 # ratio can be told apart in its tokens.
                 continue
-            if call.tool_chars > 0:
-                tool.setdefault(family, []).append(call.tool_chars / call.shared_prefix_tokens)
+            if call.tool_chars <= 0:
+                # No tools snapshot: the tool part is unknown, and tokens
+                # the call wrote for it would count as text.
+                continue
+            tool.setdefault(family, []).append(call.tool_chars / call.shared_prefix_tokens)
             if call.text_chars > 0 and call.own_tokens > 0:
                 text.setdefault(family, []).append(call.text_chars / call.own_tokens)
         found = cls()
@@ -200,7 +227,9 @@ __all__ = [
     "DEFAULT",
     "FALLBACK",
     "FALLBACK_BASIS",
+    "MAX_RATIO",
     "MIN_CALLS",
+    "MIN_RATIO",
     "Calibration",
     "FirstCall",
     "model_family",

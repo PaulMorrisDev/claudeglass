@@ -386,15 +386,14 @@ def test_spawn_cost_is_dropped_for_agents_no_file_can_change():
     assert [r.agent_type for r in out] == ["reviewer"]
 
 
-def test_spawn_cost_promises_a_tools_list_card_only_where_one_can_come():
+def test_a_built_in_agents_spawn_cost_points_at_the_tools_list_card():
+    # The rule gives no spawn-cost card to Explore, Plan or claude-code-guide
+    # (test_spawn_cost_is_not_given_to_the_read_only_helpers), so every
+    # built-in one that reaches this wording is one the tools list card can cover.
     report = _model_swap_report([])
-    recs = [
-        Recommendation(id="spawn-cost", severity="advice", agent_type="Plan"),
-        Recommendation(id="spawn-cost", severity="advice", agent_type="general-purpose"),
-    ]
-    out = {r.agent_type: r for r in advice.finish(recs, report, None, None)}
-    assert "tools list card" not in out["Plan"].action and out["Plan"].action.endswith("never calls.")
-    assert "tools list card" in out["general-purpose"].action
+    recs = [Recommendation(id="spawn-cost", severity="advice", agent_type="general-purpose")]
+    (out,) = advice.finish(recs, report, None, None)
+    assert "tools list card" in out.action and "shorter task prompt does not change" in out.action
 
 
 def test_severity_orders_before_saving():

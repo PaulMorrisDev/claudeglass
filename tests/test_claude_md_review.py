@@ -5,6 +5,7 @@ references and fix prompts (``claude_md_review``)."""
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -296,7 +297,7 @@ def test_local_names_skips_git_node_modules_and_build_folders(tmp_path, fresh_na
     assert not [item for item in found.names.values() if item["name"].endswith("inside.md")]
     for skipped in (".git", "node_modules/pkg", "dist", "build", "__pycache__"):
         assert _hash(project / skipped / "inside.md") not in found.names
-    assert cmr._WALK_SKIP >= {".git", "node_modules", "dist", "build"}
+    assert cmr._NAMES_SKIP >= {".git", "node_modules", "dist", "build"}
 
 
 def test_local_names_stops_at_the_cap_and_says_so(tmp_path, fresh_names):
@@ -342,6 +343,201 @@ def test_the_walk_is_bounded_in_depth_and_in_folders(tmp_path, monkeypatch):
         (tmp_path / name).mkdir()
     _files, cut = cmr._walk_files(tmp_path, 100)
     assert cut is True
+
+
+#: The folders the walk that names files must never enter.
+SKIPPED_FOLDERS = (
+    ".git", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".tox", "dist", "build",
+    "target", ".next", "coverage",
+)
+
+
+@pytest.fixture
+def scanned(monkeypatch):
+    """The folders ``os.scandir`` is asked for, as normalised path strings."""
+    seen: list[str] = []
+    real = os.scandir
+
+    def spy(path="."):
+        seen.append(os.path.normcase(str(path)))
+        return real(path)
+
+    monkeypatch.setattr(os, "scandir", spy)
+    return seen
+
+
+@pytest.fixture
+def walked(monkeypatch):
+    """Each walk of the names (``_walk_files``) as a dict: its ``root``, the
+    ``folders`` it scanned, the ``files`` it took and whether it was ``cut``."""
+    calls: list[dict] = []
+    state: dict = {"call": None}
+    real_walk, real_scandir = cmr._walk_files, os.scandir
+
+    def walk(root, limit, visit=None):
+        call = {"root": root, "limit": limit, "folders": [], "files": 0, "cut": False}
+        calls.append(call)
+        state["call"] = call
+        try:
+            files, cut = real_walk(root, limit, visit)
+        finally:
+            state["call"] = None
+        call["files"], call["cut"] = len(files), cut
+        return files, cut
+
+    def scandir(path="."):
+        if state["call"] is not None:
+            state["call"]["folders"].append(Path(path))
+        return real_scandir(path)
+
+    monkeypatch.setattr(cmr, "_walk_files", walk)
+    monkeypatch.setattr(os, "scandir", scandir)
+    return calls
+
+
+def test_the_walk_never_enters_virtualenv_cache_and_build_folders(tmp_path, scanned):
+    for name in SKIPPED_FOLDERS:
+        (tmp_path / name / "inner").mkdir(parents=True)
+        (tmp_path / name / "inner" / "notes.md").write_text("x", encoding="utf-8")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "context.md").write_text("x", encoding="utf-8")
+
+    files, cut = cmr._walk_files(tmp_path, 1000)
+    assert [path.relative_to(tmp_path).as_posix() for path in files] == ["docs/context.md"] and cut is False
+    root = os.path.normcase(str(tmp_path))
+    entered = {Path(path).relative_to(root).parts[0] for path in scanned if path != root}
+    assert entered == {"docs"}
+    assert set(SKIPPED_FOLDERS) <= cmr._NAMES_SKIP
+
+
+def test_the_skipped_folders_hold_no_names_even_when_asked_for(tmp_path, fresh_names):
+    config_dir, project = _setup(tmp_path)
+    (project / "docs").mkdir()
+    (project / "docs" / "context.md").write_text("x", encoding="utf-8")
+    inside = []
+    for name in SKIPPED_FOLDERS:
+        (project / name).mkdir(parents=True, exist_ok=True)
+        (project / name / "inside.md").write_text("x", encoding="utf-8")
+        inside.append(_hash(project / name / "inside.md"))
+    context = _hash(project / "docs" / "context.md")
+    found = cmr.local_names(config_dir, projects=[project], salt=SALT, wanted=[*inside, context])
+    assert list(found.names) == [context]
+
+
+def test_the_walk_takes_documents_before_other_files_in_a_folder(tmp_path):
+    for name in ("a.py", "b.md", "c.json", "d.txt", "e.mdx", "f"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "g.md").write_text("x", encoding="utf-8")
+    (tmp_path / "sub" / "a.py").write_text("x", encoding="utf-8")
+
+    files, cut = cmr._walk_files(tmp_path, 100)
+    assert [path.relative_to(tmp_path).as_posix() for path in files] == [
+        "b.md", "d.txt", "e.mdx", "a.py", "c.json", "f", "sub/g.md", "sub/a.py",
+    ]
+    assert cut is False
+    # A cap in the middle of a folder keeps its documents.
+    capped, cut = cmr._walk_files(tmp_path, 3)
+    assert [path.name for path in capped] == ["b.md", "d.txt", "e.mdx"] and cut is True
+
+
+def test_a_cap_in_a_crowded_folder_still_names_its_documents(tmp_path, fresh_names):
+    config_dir, project = _setup(tmp_path)
+    crowd = project / "gen"
+    crowd.mkdir()
+    for index in range(30):
+        (crowd / f"a{index:02d}.json").write_text("x", encoding="utf-8")
+    (crowd / "zz-notes.md").write_text("x", encoding="utf-8")
+    found = cmr.local_names(config_dir, projects=[project], salt=SALT, max_files=10)
+    assert found.truncated is True
+    assert _hash(crowd / "zz-notes.md") in found.names
+
+
+def test_the_walk_ends_as_soon_as_its_visitor_has_what_it_came_for(tmp_path, scanned):
+    for name in ("a.md", "b.md"):
+        (tmp_path / name).write_text("x", encoding="utf-8")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "c.md").write_text("x", encoding="utf-8")
+
+    seen: list[str] = []
+
+    def visit(path: Path) -> bool:
+        seen.append(path.name)
+        return path.name == "b.md"
+
+    files, cut = cmr._walk_files(tmp_path, 100, visit)
+    assert [path.name for path in files] == ["a.md", "b.md"] and seen == ["a.md", "b.md"]
+    # Finishing early is not a cut, and the folder below was never scanned.
+    assert cut is False
+    assert scanned == [os.path.normcase(str(tmp_path))]
+
+
+def test_local_names_stops_walking_once_every_wanted_hash_is_named(tmp_path, fresh_names, walked):
+    config_dir, project = _project(tmp_path)
+    wanted = [_hash(project / "CLAUDE.md"), _hash(project / "package.json")]
+    found = cmr.local_names(config_dir, projects=[project], salt=SALT, wanted=wanted)
+
+    assert sorted(found.names) == sorted(wanted)
+    assert found.truncated is False
+    [call] = [call for call in walked if call["root"] == project]
+    # Both files are in the project's own folder: nothing below it was scanned.
+    assert call["folders"] == [project] and call["cut"] is False
+
+
+def test_local_names_does_not_walk_the_next_project_once_the_first_names_everything(tmp_path, fresh_names, walked):
+    config_dir, project = _project(tmp_path)
+    first = tmp_path / "aaa"
+    first.mkdir()
+    (first / "NOTES.md").write_text("x", encoding="utf-8")
+    found = cmr.local_names(config_dir, projects=[first, project], salt=SALT, wanted=[_hash(first / "NOTES.md")])
+    assert list(found.names) == [_hash(first / "NOTES.md")]
+    assert [call["root"] for call in walked] == [first]
+
+
+def test_local_names_does_not_walk_a_project_for_files_that_are_not_in_one(tmp_path, fresh_names, walked):
+    config_dir, project = _project(tmp_path)
+    plan = config_dir.parent / "plans" / "big-plan.md"
+    plan.parent.mkdir()
+    plan.write_text("A plan.\n", encoding="utf-8")
+    found = cmr.local_names(config_dir, projects=[project], salt=SALT, wanted=[_hash(plan)])
+    assert found.names[_hash(plan)]["project"] == ""
+    assert not [call for call in walked if call["root"] == project]
+
+
+def test_a_wanted_hash_that_is_not_on_disk_keeps_the_walk_going_to_the_end(tmp_path, fresh_names, walked):
+    config_dir, project = _project(tmp_path)
+    wanted = [_hash(project / "CLAUDE.md"), _hash(project / "deleted" / "gone.md")]
+    found = cmr.local_names(config_dir, projects=[project], salt=SALT, wanted=wanted)
+
+    assert list(found.names) == [wanted[0]]
+    [call] = [call for call in walked if call["root"] == project]
+    scanned_below = {path.relative_to(project).as_posix() for path in call["folders"] if path != project}
+    assert {"docs", "src", ".claude", ".claude/agents"} <= scanned_below
+    assert not scanned_below & set(SKIPPED_FOLDERS)
+    # It reached the end of the project, which is not a cut.
+    assert call["cut"] is False and found.truncated is False
+
+
+def test_the_file_cap_still_holds_when_a_wanted_hash_can_never_be_found(tmp_path, fresh_names, walked):
+    config_dir, project = _project(tmp_path)
+    wanted = [_hash(project / "deleted" / "gone.md")]
+    found = cmr.local_names(config_dir, projects=[project], salt=SALT, wanted=wanted, max_files=4)
+    [call] = [call for call in walked if call["root"] == project]
+    assert call["files"] == 4 and call["cut"] is True
+    assert found.truncated is True and found.names == {}
+
+
+def test_the_folder_cap_still_holds_when_a_wanted_hash_can_never_be_found(tmp_path, fresh_names, walked, monkeypatch):
+    config_dir, project = _project(tmp_path)
+    monkeypatch.setattr(cmr, "_NAMES_MAX_DIRS", 3)
+    found = cmr.local_names(config_dir, projects=[project], salt=SALT, wanted=[_hash(project / "deleted" / "gone.md")])
+    [call] = [call for call in walked if call["root"] == project]
+    assert len(call["folders"]) == 3 and call["cut"] is True and found.truncated is True
+
+
+def test_the_caps_are_safety_bounds_above_a_big_repository():
+    assert cmr.NAMES_MAX_FILES >= 20000
+    assert cmr._NAMES_MAX_DIRS >= 20000
 
 
 def test_a_worktrees_copy_of_a_file_gets_the_same_name_as_the_main_projects(tmp_path, fresh_names):

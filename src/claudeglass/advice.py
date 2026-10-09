@@ -47,7 +47,6 @@ from datetime import date
 from typing import Callable
 
 from . import cost_centres, known_savers, model_gate, model_swap, whatif
-from .context_budget import DIET_EXCLUDED
 from .fixes import already_set
 from .limits import BURST_AGENTS, SPEND_SOURCES, burst_stands_out
 from .model import Recommendation, ReportModel, SettingChange
@@ -806,16 +805,14 @@ def _explain_spawn_cost(rec: Recommendation, ctx: _Context) -> None:
     if rec.lever is None:
         # A built-in agent type has no file of its own: most of its start is
         # Claude Code's system prompt and tool definitions, so a shorter task
-        # prompt does not change it. A same-named agent file with a tools list does.
+        # prompt does not change it. A same-named agent file with a tools list
+        # does. (The rule gives no card for Explore, Plan or claude-code-guide,
+        # which the tools list card leaves alone, so every one that gets here
+        # can be promised that list.)
         rec.action = (
             f"Most of what {agent} reads at startup is Claude Code's own system prompt and tool definitions, "
             "which a shorter task prompt does not change. A same-named agent file with a tools list leaves out "
-            "the tools it never calls"
-            + (
-                "."
-                if rec.agent_type in DIET_EXCLUDED
-                else "; the tools list card gives that list once enough of its spawns show it."
-            )
+            "the tools it never calls; the tools list card gives that list once enough of its spawns show it."
         )
     else:
         rec.action = (

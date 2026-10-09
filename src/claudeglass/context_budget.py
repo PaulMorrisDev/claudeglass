@@ -499,6 +499,11 @@ _SHARED_TOLERANCE = 0.15
 #: fewer of them is removable.
 REMOVABLE_USE_SHARE = 0.10
 
+#: A model family needs this many spawns that recorded their tools before
+#: a tools list is measured on it in preference to a family with more
+#: snapshots but fewer spawns (the tools-list card's own minimum).
+TOOLS_MODEL_MIN_SPAWNS = 5
+
 #: The tools Claude Code adds to an agent whatever its ``tools:`` says
 #: (a workflow agent's answer and a handback), so no allowlist removes
 #: them.
@@ -592,6 +597,8 @@ class _AgentStartupAcc:
     #: Spawns whose transcript recorded a snapshot that lists tools, so the
     #: tool definitions were measured rather than left in "not recorded".
     snapshot_spawns: int = 0
+    #: Per CLAUDE.md source, the tokens each measured spawn took in (0 for a spawn
+    #: that loaded none): the size of the file is the mean of the non-zero entries.
     claude_md_by_source: dict[str, list[float]] = field(default_factory=dict)
     skills_listed_spawns: int = 0
     skills_used_spawns: int = 0
@@ -640,6 +647,30 @@ class _AgentStartupAcc:
         for family in self.models:
             tally[family] = tally.get(family, 0) + 1
         family = max(sorted(tally), key=lambda name: tally[name])
+        return family, [index for index, name in enumerate(self.models) if name == family]
+
+    def tools_model(self) -> tuple[str, list[int]]:
+        """Like :meth:`fixed_model`, for what needs a tools snapshot: of the
+        model families with at least :data:`TOOLS_MODEL_MIN_SPAWNS` spawns
+        that recorded one, the family this agent type ran most spawns on
+        (failing that, the family with the most snapshots), and the
+        positions of its spawns on it. A snapshot arrives after the first
+        call and older transcripts have none, so the family with the most
+        spawns overall can have no tool data at all. Falls back to
+        :meth:`fixed_model` when no spawn recorded tools or the accumulator
+        doesn't name models."""
+        count = len(self.startup_tokens)
+        if len(self.models) != count or not any(self.models):
+            return self.fixed_model()
+        named = {family: spawns for family, spawns in self.tool_spawns.items() if spawns}
+        if not named:
+            return self.fixed_model()
+        enough = [family for family, spawns in named.items() if spawns >= TOOLS_MODEL_MIN_SPAWNS]
+        if enough:
+            runs = {family: self.models.count(family) for family in enough}
+            family = max(sorted(enough), key=lambda name: (runs[name], named[name]))
+        else:
+            family = max(sorted(named), key=lambda name: named[name])
         return family, [index for index, name in enumerate(self.models) if name == family]
 
     def removable_chars(self, family: str) -> tuple[float, list[tuple[str, int, int, float]]]:
@@ -1695,6 +1726,14 @@ def _picked(values: list, positions: list[int], count: int) -> list:
     return [values[i] for i in positions] if len(values) == count else values
 
 
+def _loaded(sizes: list[float]) -> list[float]:
+    """The sizes of the spawns that took a CLAUDE.md source in at all. A
+    spawn without it is a 0 in :attr:`_AgentStartupAcc.claude_md_by_source`
+    (so the lists line up with the spawns), and it says nothing about how
+    big the file is."""
+    return [size for size in sizes if size > 0]
+
+
 def _fixed_write_prices(acc: _AgentStartupAcc, family: str) -> list[float]:
     if family and len(acc.write_price_models) == len(acc.write_prices):
         return [price for price, model in zip(acc.write_prices, acc.write_price_models) if model == family]
@@ -1806,8 +1845,9 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
         measured_pct = min(100.0, known / startup * 100) if startup else None
         managed_claude_md = _mean_or_zero(_picked(acc.claude_md_by_source.get("Managed", []), positions, count))
         prices = _fixed_write_prices(acc, family)
-        removable_chars, _tools = acc.removable_chars(family)
-        removable = stats.calibration.tool_tokens(removable_chars, family or None) if _tools else None
+        tools_family, _tool_positions = acc.tools_model()
+        removable_chars, _tools = acc.removable_chars(tools_family)
+        removable = stats.calibration.tool_tokens(removable_chars, tools_family or None) if _tools else None
         rows.append(
             [agent_type, acc.spawns, acc.fork_spawns, family or None, count - len(positions), startup]
             + [parts[part] for part in STARTUP_PARTS]
@@ -1838,7 +1878,9 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             "\"Tools never used\" is the size of the tool definitions and MCP servers this agent type was "
             f"offered and called in fewer than {int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them. "
             "A tools list on the agent would leave them out. Tools Claude Code adds whatever the list says "
-            "are not counted.",
+            "are not counted. \"Tools never used\" is measured on the busiest model with "
+            f"{TOOLS_MODEL_MIN_SPAWNS} or more spawns that recorded their tools. "
+            "Older transcripts recorded none, so that model can differ from \"Model measured\".",
             "A part left out of the start is also not read back on the calls after the first, so the last two "
             "columns give what a saving needs: the cache-read price and the average number of those calls.",
         ],
@@ -1859,7 +1901,7 @@ def _build_tools_table(stats: ContextBudgetStats) -> Table:
         acc = stats.agents[agent_type]
         if not acc.startup_tokens:
             continue
-        family, _positions = acc.fixed_model()
+        family, _positions = acc.tools_model()
         _total, tools = acc.removable_chars(family)
         for key, offered, used, chars in tools[:_TOOL_ROWS_PER_AGENT]:
             rows.append(
@@ -1873,8 +1915,8 @@ def _build_tools_table(stats: ContextBudgetStats) -> Table:
         notes=[
             "One row per tool or MCP server an agent type was offered and called in fewer than "
             f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered it, largest first, "
-            f"up to {_TOOL_ROWS_PER_AGENT} per agent type. An MCP server's tools are one row, "
-            "named as an allowlist names them.",
+            f"up to {_TOOL_ROWS_PER_AGENT} per agent type, on the busiest model with {TOOLS_MODEL_MIN_SPAWNS} "
+            "or more spawns that recorded their tools. An MCP server's tools are one row, named as an allowlist names them.",
             "Sizes are tool definitions only, read from the first snapshot that lists tools, "
             f"at characters per token {stats.calibration.basis()}. No description is kept.",
         ],
@@ -1905,7 +1947,7 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         acc = stats.agents[agent_type]
         if not acc.startup_tokens:
             continue
-        family, positions = acc.fixed_model()
+        family, positions = acc.tools_model()
         snapped = acc.tool_spawns.get(family, 0)
         if not snapped:
             continue
@@ -1967,7 +2009,8 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         rows=rows,
         notes=[
             "One row per agent type that was offered tools or MCP servers it called in fewer than "
-            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them, on the model most of its spawns ran on. "
+            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them, on the model with the most spawns "
+            "that recorded their tools. "
             "\"Tools to keep\" are the ones called in at least that share of them, including tools loaded when "
             "asked for. Tools Claude Code adds whatever the list says are in neither.",
             "Sizes are per spawn. The skills list goes with the Skill tool and the agent list with the Agent "
@@ -1999,7 +2042,7 @@ def _build_servers_table(stats: ContextBudgetStats) -> Table:
         acc = stats.agents[agent_type]
         if not acc.startup_tokens:
             continue
-        family, positions = acc.fixed_model()
+        family, positions = acc.tools_model()
         write, read, later, written_share = _price_inputs(acc, family, positions)
         for server, offer in acc.rare_servers(family)[:_SERVER_ROWS_PER_AGENT]:
             usd = diet_usd(
@@ -2033,7 +2076,8 @@ def _build_servers_table(stats: ContextBudgetStats) -> Table:
         notes=[
             "One row per MCP server an agent type was offered and called in fewer than "
             f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered it, largest first, "
-            f"up to {_SERVER_ROWS_PER_AGENT} per agent type.",
+            f"up to {_SERVER_ROWS_PER_AGENT} per agent type, on the model with the most spawns that "
+            "recorded their tools.",
             "Sizes are per spawn offered it: the tool definitions sent in full, the names of its deferred "
             "tools, and its instructions. The cost prices the first two as the tools list table does: a tools "
             "list leaves out those two only. The instructions stay under it and are not in the cost.",
@@ -2160,7 +2204,10 @@ def _build_shared_table(stats: ContextBudgetStats) -> Table:
             (
                 f"claude_md:{source}",
                 CLAUDE_MD_SOURCES.get(source, source),
-                [_picked(acc.claude_md_by_source.get(source, []), positions, len(acc.startup_tokens)) for acc, positions in measured],
+                [
+                    _loaded(_picked(acc.claude_md_by_source.get(source, []), positions, len(acc.startup_tokens)))
+                    for acc, positions in measured
+                ],
             )
             for source in sources
         ]
@@ -2188,7 +2235,8 @@ def _build_shared_table(stats: ContextBudgetStats) -> Table:
         notes=[
             "A part is listed when at least half of the agent types receive it at about the same "
             f"size (within {int(_SHARED_TOLERANCE * 100)}%). That usually means one shared source. "
-            "Trimming that source shrinks every one of those spawns.",
+            "Trimming that source shrinks every one of those spawns. A CLAUDE.md file's size is the "
+            "average over the spawns that loaded it.",
             "Only spawns on "
             + (reference or "one model")
             + " are compared, so the model never decides which parts look shared.",

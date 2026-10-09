@@ -2854,7 +2854,9 @@ def make_handler(
         files Claude Code loads, the files they import, and the files agents
         read by habit, each with its size now, its change over about 30
         days, who reads it and what it costs a month. Names are worked
-        out now from the project folders on disk and are never stored."""
+        out now from the project folders on disk and are never stored.
+        Text files come first; only they can be flagged (``reasons``), as
+        the Overview check covers the documents agents take in."""
         from .. import claude_md_review, context_files
 
         window, err = _window_query(query)

@@ -1062,10 +1062,13 @@ been captured. `capture_status.summary` is the same one-line status
 One answer per way of saving tokens (`quick_actions.CHECKS`): models,
 effort, compaction, cache, tools, skills, claude-md, project-files, tool-output,
 hooks, tool-search, known-savers, habits, failed-calls, quality, cost-centres and cost-record. Each check always answers, including "nothing to
-do". project-files flags a file that agents read when it is 5,000 tokens
+do". project-files flags a text file (`.md` or `.txt`: a context.md, a
+spec, a plan, any document) that agents read when it is 5,000 tokens
 or more and 3 or more agent types read it, or when it grew 25% or more in
 about 30 days (and is 2,000 tokens or more now). It names the dearest one
-and offers four prompts to copy, and a fifth for a file agents read. The CLAUDE.md files Claude Code loads by
+and offers four prompts to copy, and a fifth for a file agents read. Code
+and data files, and files this machine cannot find, are never flagged and
+do not count toward its numbers; they stay in the project-files table. The CLAUDE.md files Claude Code loads by
 itself are the claude-md check's, not this one's. cost-centres says where the spend sits (the main session, direct agents,
 workflow agents and session starts) and which check covers the largest cell;
 it is information, so it is never "worth a look". The last, cost-record,
@@ -1155,11 +1158,16 @@ CLAUDE.md is left out, because it cannot be changed. A file counts as a
 standing read for a reach (the main session, or one agent type) when it is
 read in 3 or more of that reach's runs, or in 20% or more of them. Names
 are worked out from disk when the request arrives and never stored: the
-route hashes the files under your project folders (skipping `.git`,
-`node_modules` and build folders, up to a cap, and counting a git
-worktree's copy as the same file) with the salt the transcripts were
-hashed with. A file that is not in any project folder on this machine has
-no name.
+route hashes the files under your project folders with the salt the
+transcripts were hashed with, and counts a git worktree's copy as the same
+file. The walk skips `.git`, `node_modules`, virtualenv, cache and build
+folders (`.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.mypy_cache`,
+`.ruff_cache`, `.tox`, `dist`, `build`, `target`, `.next`, `coverage`), takes
+the shallow folders first and, within a folder, the documents before other
+files, and ends as soon as every file the report holds has a name. It goes
+10 levels down and stops at a bound, 150,000 files in all or 100,000 folders
+in one project, which is what `truncated` reports. A file that is not in
+any project folder on this machine has no name.
 
 Query: the windowing params above, and `project` (only that project's
 folders are searched).
@@ -1167,7 +1175,7 @@ folders are searched).
 `data`: `{"period", "window_days", "transcripts", "total", "named", "truncated", "files": [...]}`.
 `transcripts` is the runs per reach (`main`, or an agent type) the shares
 are of. `total` counts every file, `named` those given a name, and
-`truncated` is `true` when the folders held more files than the cap. `files`
+`truncated` is `true` when the walk stopped at a bound before it had named everything it was asked for. `files`
 holds the 100 that cost most a month (text files, `.md` and `.txt`, first).
 Each is `{"hash", "source", "type", "scoped", "tokens", "then",
 "change_pct", "series", "cost_usd", "cost_month_usd", "reach", "types",
@@ -1184,7 +1192,10 @@ and `types` the agent types that read it by habit. `name` is the path from the p
 `ext` its class (`md`, `txt`, `json`, `config`, `code` or `other`) and
 `project` the folder's name. `reasons` is `wide`, `grew`, both or none (the
 Overview check's thresholds) and `fixes` holds the prompts to copy for a
-file with reasons and a name, `[]` for the rest.
+file with reasons and a name, `[]` for the rest. Only text files (`md` and
+`txt`) get reasons: the check covers the documents sessions and agents
+take in, so a code, data or unnamed file is listed, after the text files,
+with `reasons` and `fixes` empty.
 
 An `@import`ed file is assumed to appear as its own entry among the
 instructions Claude Code attached, so it has its own size and cost. If it

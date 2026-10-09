@@ -60,45 +60,50 @@ def _with_tools(
     prefix_written=None,
     later_calls=10,
     roster=0.0,
+    family="",
+    snapshots=None,
 ):
     """Record on ``acc`` what its spawns were offered and called, as the
     parser leaves it: ``uses`` is tool -> spawns that called it, ``chars``
-    tool -> characters of its definition per spawn (every spawn is offered
-    every tool in ``chars``), ``servers`` server -> (spawns that used it,
-    definition tokens, deferred tokens, instruction tokens, all per spawn).
-    Everything is under the unnamed model family the helper's other
-    fields use."""
+    tool -> characters of its definition per spawn (every spawn with a
+    tools snapshot is offered every tool in ``chars``), ``servers`` server
+    -> (spawns that used it, definition tokens, deferred tokens,
+    instruction tokens, all per spawn). Everything is under the unnamed
+    model family the helper's other fields use, unless ``family`` names
+    one; ``snapshots`` is how many of the spawns recorded a tools
+    snapshot (all of them by default)."""
     spawns = acc.spawns
+    snapped = spawns if snapshots is None else snapshots
     uses = dict(uses or {})
     chars = dict(chars or {})
     servers = dict(servers or {})
     acc.read_prices = [READ_PRICE] * spawns
     acc.later_calls = [later_calls] * spawns
     acc.roster_tokens = [roster] * spawns
-    acc.tool_spawns = {"": spawns}
+    acc.tool_spawns = {family: snapped}
     acc.tools = {
-        "": {
-            name: context_budget._ToolOffer(offered=spawns, used=uses.get(name, 0), chars=int(size * spawns))
+        family: {
+            name: context_budget._ToolOffer(offered=snapped, used=uses.get(name, 0), chars=int(size * snapped))
             for name, size in chars.items()
         }
     }
-    acc.tool_uses = {"": {name: n for name, n in uses.items() if n}}
+    acc.tool_uses = {family: {name: n for name, n in uses.items() if n}}
     acc.servers = {}
     for server, (used, definitions, deferred, instructions) in servers.items():
         key = context_budget.mcp_tool_key(server)
-        acc.tools[""][key] = context_budget._ToolOffer(
-            offered=spawns, used=used, chars=int(definitions * spawns * 4)
+        acc.tools[family][key] = context_budget._ToolOffer(
+            offered=snapped, used=used, chars=int(definitions * snapped * 4)
         )
-        acc.servers.setdefault("", {})[server] = context_budget._ServerOffer(
-            offered=spawns,
+        acc.servers.setdefault(family, {})[server] = context_budget._ServerOffer(
+            offered=snapped,
             used=used,
-            definitions=definitions * spawns,
-            deferred=deferred * spawns,
-            instructions=instructions * spawns,
+            definitions=definitions * snapped,
+            deferred=deferred * snapped,
+            instructions=instructions * snapped,
         )
         if used:
-            acc.tool_uses[""][key] = used
-    acc.prefix_written = {"": spawns if prefix_written is None else prefix_written}
+            acc.tool_uses[family][key] = used
+    acc.prefix_written = {family: snapped if prefix_written is None else prefix_written}
     return acc
 
 
@@ -323,6 +328,74 @@ def test_agents_the_diet_leaves_alone_get_no_tools_list():
         assert not any(r.id == "spawn-tools-list" for r in recs), name
 
 
+def _diet_row(report, agent_type):
+    table = next(t for s in report.sections if s.key == "agent_startup" for t in s.tables if t.name == "agent_startup_diet")
+    return next(dict(zip([c.key for c in table.columns], row)) for row in table.rows if row[0] == agent_type)
+
+
+def test_the_tools_list_card_is_priced_on_the_model_that_recorded_tools_not_the_busiest_one():
+    # 30 workflow spawns: 20 on opus-5, none with a tools snapshot (an older
+    # transcript has none), and 10 on sonnet-5, all with one. The model most
+    # spawns ran on has no tool data, so the card is built on the other.
+    opus, sonnet = "claude-opus-5", "claude-sonnet-5"
+    uses = {"Read": 10, "Grep": 10, "Bash": 1}
+    mixed = _diet_acc("workflow-subagent", spawns=30, uses=uses, family=sonnet, snapshots=10)
+    mixed.models = [opus] * 20 + [sonnet] * 10
+    report = _report(mixed)
+    row = _diet_row(report, "workflow-subagent")
+    assert row["model"] == sonnet and row["spawns"] == 10
+    assert row["keep_tools"] == "Bash, Grep, Read"
+    assert set(row["rare_tools"].split(", ")) == {"NotebookEdit", "WebFetch", "Skill"}
+    # The size a tools list takes out is the one the breakdown gates spawn-cost on.
+    breakdown = next(t for s in report.sections if s.key == "agent_startup" for t in s.tables if t.name == "agent_startup_breakdown")
+    breakdown_row = dict(zip([c.key for c in breakdown.columns], breakdown.rows[0]))
+    assert breakdown_row["model"] == opus
+    assert breakdown_row["removable_tools"] == pytest.approx(row["dropped_definitions"])
+    # Priced as the ten spawns with tools: the same as an agent type that only had those.
+    alone = _diet_acc("workflow-subagent", spawns=10, uses=uses)
+    assert row["saving_usd"] == pytest.approx(_diet_row(_report(alone), "workflow-subagent")["saving_usd"])
+
+    rec = _tools_rec(_recs(report, units=Units()), "workflow-subagent")
+    assert rec is not None and rec.variant == "workflow-script"
+    assert "tools: Bash, Grep, Read" in rec.action
+    assert f"on the same model ({sonnet})" in rec.action
+    assert any(label == "Spawns with tools recorded" and value == 10 for label, value, *_ in rec.evidence)
+    assert rec.saving_usd == pytest.approx(row["saving_usd"])
+
+
+def test_the_model_with_the_most_tool_snapshots_is_the_one_a_tools_list_is_measured_on():
+    haiku, sonnet = "claude-haiku-4-5", "claude-sonnet-5"
+    acc = _diet_acc("searcher", spawns=40, uses={"Read": 8, "Grep": 8}, family=sonnet, snapshots=8)
+    # Haiku ran 30 spawns, 2 of them with a snapshot.
+    acc.tool_spawns[haiku] = 2
+    acc.tools[haiku] = {"Read": context_budget._ToolOffer(offered=2, used=2, chars=3000)}
+    acc.models = [haiku] * 30 + [sonnet] * 10
+    assert acc.fixed_model()[0] == haiku
+    family, positions = acc.tools_model()
+    assert family == sonnet and positions == list(range(30, 40))
+    # With no snapshot on any model, or no models named, it is the fixed model.
+    bare = _acc("bare", spawns=4)
+    bare.models = [haiku, haiku, sonnet, haiku]
+    assert bare.tools_model() == bare.fixed_model() == (haiku, [0, 1, 3])
+    unnamed = _diet_acc("unnamed", spawns=5)
+    assert unnamed.tools_model() == unnamed.fixed_model() == ("", [0, 1, 2, 3, 4])
+
+
+def test_a_tools_list_is_measured_on_the_busiest_model_once_it_has_enough_snapshots():
+    # 37 spawns: 22 on sonnet-5 (12 with a tools snapshot) and 15 on haiku
+    # (all 15 with one). Sonnet has enough snapshots and ran more spawns, so
+    # the card is measured there, not on the model with the most snapshots.
+    haiku, sonnet = "claude-haiku-4-5", "claude-sonnet-5"
+    acc = _diet_acc("searcher", spawns=37, uses={"Read": 12, "Grep": 12}, family=sonnet, snapshots=12)
+    acc.tool_spawns[haiku] = 15
+    acc.tools[haiku] = {"Read": context_budget._ToolOffer(offered=15, used=15, chars=3000)}
+    acc.models = [sonnet] * 22 + [haiku] * 15
+    assert acc.tools_model() == (sonnet, list(range(22)))
+    # Below the minimum, the model with the most snapshots still wins.
+    acc.tool_spawns[sonnet] = context_budget.TOOLS_MODEL_MIN_SPAWNS - 1
+    assert acc.tools_model()[0] == haiku
+
+
 def test_no_tools_list_without_a_tool_called_or_below_the_size_worth_a_change():
     # Nothing called: there is nothing to put on the line.
     silent = _diet_acc("searcher", uses={})
@@ -491,6 +564,55 @@ def test_shared_claude_md_comes_with_a_prompt():
     rec = next(r for r in recs if r.id == "spawn-shared-claude-md")
     assert rec.fixes and rec.fixes[0]["command"] is None
     assert "move" in rec.fixes[0]["prompt"]
+
+
+def _shared_rec(recs):
+    return next((r for r in recs if r.id == "spawn-shared-claude-md"), None)
+
+
+def test_a_claude_md_is_sized_over_the_spawns_that_loaded_it():
+    # Two agent types both load the 3,000-token project CLAUDE.md, but part of
+    # their spawns loaded none (a spawn that skips it is a 0). Averaged over
+    # every spawn they would read 2,100 and 1,200, too far apart to be one
+    # shared file; over the spawns that loaded it they both read 3,000.
+    one, two = _acc("a", claude_md=0.0), _acc("b", claude_md=0.0)
+    one.claude_md_by_source = {"Project": [3000.0] * 7 + [0.0] * 3}
+    two.claude_md_by_source = {"Project": [0.0] * 6 + [3000.0] * 4}
+    report = _report(one, two)
+    shared = next(t for s in report.sections if s.key == "agent_startup" for t in s.tables if t.name == "agent_startup_shared")
+    (row,) = [r for r in shared.rows if r[0] == "claude_md:Project"]
+    assert row[2] == "2 of 2" and row[3] == pytest.approx(3000.0)
+    # The total is what the spawns that loaded it took in: 11 of them.
+    assert row[4] == pytest.approx(11 * 3000.0)
+    rec = _shared_rec(_recs(report))
+    assert rec is not None
+    assert any(label == "Size per spawn" and value == pytest.approx(3000.0) for label, value, *_ in rec.evidence)
+    assert any(label == "Agent types given it" and value == "2 of 2" for label, value, *_ in rec.evidence)
+    assert "About 3,000 tokens" in rec.why
+
+
+def test_a_type_that_loaded_no_claude_md_is_not_counted_as_given_it():
+    one, two, three = _acc("a", claude_md=0.0), _acc("b", claude_md=0.0), _acc("c", claude_md=0.0)
+    one.claude_md_by_source = {"Project": [3000.0] * 10}
+    two.claude_md_by_source = {"Project": [3000.0] * 5 + [0.0] * 5}
+    three.claude_md_by_source = {"Project": [0.0] * 10}
+    rec = _shared_rec(_recs(_report(one, two, three)))
+    assert rec is not None
+    assert any(label == "Agent types given it" and value == "2 of 3" for label, value, *_ in rec.evidence)
+
+
+def test_the_shared_claude_md_is_compared_on_one_model_over_the_spawns_that_loaded_it():
+    sonnet, haiku = "claude-sonnet-5", "claude-haiku-4-5"
+    one, two = _acc("a", claude_md=0.0), _acc("b", claude_md=0.0)
+    # Eight spawns on sonnet (two without the file) and two on haiku, where the
+    # same file reads larger: only sonnet's loaded spawns are compared.
+    one.models = [sonnet] * 8 + [haiku] * 2
+    one.claude_md_by_source = {"Project": [3000.0, 3000.0, 0.0, 3000.0, 3000.0, 0.0, 3000.0, 3000.0, 9000.0, 9000.0]}
+    two.models = [sonnet] * 10
+    two.claude_md_by_source = {"Project": [3000.0] * 10}
+    rec = _shared_rec(_recs(_report(one, two)))
+    assert rec is not None
+    assert any(label == "Size per spawn" and value == pytest.approx(3000.0) for label, value, *_ in rec.evidence)
 
 
 # -- recommendation key --------------------------------------------------

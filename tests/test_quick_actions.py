@@ -1711,17 +1711,16 @@ def test_a_file_claude_code_loads_by_itself_is_the_claude_md_checks_unless_a_cla
     assert result["status"] == "act" and result["summary"].startswith("docs/context.md is now about 9k tokens.")
 
 
-def test_a_flagged_file_not_in_any_project_folder_is_ok_with_nothing_to_change(tmp_path, pf_names):
+def test_a_big_file_not_in_any_project_folder_has_no_class_so_it_is_not_flagged(tmp_path, pf_names):
     ctx, _project, _salt = _pf_setup(tmp_path)
     result = _pf_run(ctx, _pf_data(_pf_read("0123456789abcdef")))
-    assert result["status"] == "ok" and result["fixes"] == []
-    assert "not in any project folder on this machine" in result["summary"]
-    assert "up 60% in 30 days" in result["summary"]
-    assert result["table"]["rows"][0][0] == "A file not found on this machine"
+    assert result["status"] == "ok" and result["fixes"] == [] and result["table"] is None
+    assert result["summary"].startswith("No text file is both large and read by many agent types")
 
 
-def test_the_check_names_the_dearest_found_file_and_counts_the_others(tmp_path, pf_names):
+def test_the_check_names_the_dearest_text_file_and_counts_the_others(tmp_path, pf_names):
     ctx, project, salt = _pf_setup(tmp_path)
+    # The dearest file is not on disk and has no class: it is neither named nor counted.
     reads = [_pf_read("0123456789abcdef", cost=50.0)]
     for index, cost in enumerate((9.0, 4.0)):
         path = project / "docs" / f"extra{index}.md"
@@ -1729,13 +1728,59 @@ def test_the_check_names_the_dearest_found_file_and_counts_the_others(tmp_path, 
         reads.append(_pf_read(_pf_hash(path, salt), cost=cost))
 
     result = _pf_run(ctx, _pf_data(*reads))
-    # The dearest file is not on disk: the dearest one that is leads, and is the one with prompts.
     assert result["status"] == "act" and result["summary"].startswith("docs/extra0.md is now about 9k tokens")
-    assert result["summary"].count("2 more files are flagged.") == 1
-    assert len(result["table"]["rows"]) == 3
-    assert result["table"]["rows"][0][0] == "A file not found on this machine"
+    assert result["summary"].count("1 more file is flagged.") == 1
+    assert [row[0] for row in result["table"]["rows"]] == ["docs/extra0.md", "docs/extra1.md"]
+    assert len(result["fixes"]) == 5
     one = _pf_run(ctx, _pf_data(*reads[:2]))
-    assert "1 more file is flagged." in one["summary"]
+    assert "more file" not in one["summary"]
+    three = _pf_run(ctx, _pf_data(*reads, _pf_read(_pf_hash(project / "docs" / "context.md", salt), cost=1.0)))
+    assert "2 more files are flagged." in three["summary"]
+
+
+def _pf_one_big_file(tmp_path, ext: str):
+    """The same large file, read by 5 agent types and growing, as code
+    (``src/app.py``) or as text (``docs/spec.<ext>``)."""
+    ctx, project, salt = _pf_setup(tmp_path)
+    (project / "src").mkdir()
+    path = project / "src" / "app.py" if ext == "py" else project / "docs" / f"spec.{ext}"
+    path.write_text("x\n", encoding="utf-8")
+    return ctx, _pf_data(_pf_read(_pf_hash(path, salt)))
+
+
+def test_a_large_code_file_five_agent_types_read_does_not_fire_the_check_but_the_same_as_markdown_does(tmp_path, pf_names):
+    ctx, data = _pf_one_big_file(tmp_path / "code", "py")
+    result = _pf_run(ctx, data)
+    assert result["status"] == "ok" and result["fixes"] == [] and result["table"] is None
+    assert "This check covers .md and .txt files." in result["summary"]
+    assert "app.py" not in result["summary"]
+
+    for ext in ("md", "txt"):
+        ctx, data = _pf_one_big_file(tmp_path / ext, ext)
+        result = _pf_run(ctx, data)
+        assert result["status"] == "act" and result["summary"].startswith(f"docs/spec.{ext} is now about 9k tokens")
+        assert len(result["fixes"]) == 5
+
+
+def test_a_dearer_code_file_neither_leads_nor_counts_toward_the_check(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    (project / "src").mkdir()
+    code = project / "src" / "app.py"
+    code.write_text("x\n", encoding="utf-8")
+    text = project / "docs" / "context.md"
+    result = _pf_run(ctx, _pf_data(_pf_read(_pf_hash(code, salt), cost=90.0), _pf_read(_pf_hash(text, salt), cost=9.0)))
+    assert result["status"] == "act" and result["summary"].startswith("docs/context.md is now about 9k tokens")
+    assert "more file" not in result["summary"]
+    assert [row[0] for row in result["table"]["rows"]] == ["docs/context.md"]
+
+
+def test_the_check_says_what_it_covers_when_it_is_quiet_and_in_its_explanation(tmp_path, pf_names):
+    ctx, _project, _salt = _pf_setup(tmp_path)
+    small = _pf_run(ctx, _pf_data(_pf_read("0123456789abcdef", tokens=900, weekly={"2026-09-28": 900})))
+    assert small["status"] == "ok" and "This check covers .md and .txt files." in small["summary"]
+    assert "{{page:agents/subagents}} lists every project file, code and data too." in small["summary"]
+    check = next(c for c in qa.CHECKS if c.id == "project-files")
+    assert "covers text files (.md and .txt)" in check.why and "Code and data files" in check.why
 
 
 def test_the_check_of_one_project_searches_only_its_folders(tmp_path, pf_names):

@@ -749,9 +749,14 @@ def test_the_copy_the_project_files_check_and_the_agent_stack_add_keeps_to_the_h
     wide = _pf_run(ctx, _pf_data(_pf_read(_pf_hash(context, salt), weekly={"2026-09-28": 9000})))
     gone = _pf_run(ctx, _pf_data(_pf_read("0123456789abcdef")))
     quiet = _pf_run(ctx, _pf_data(_pf_read("0123456789abcdef", tokens=900, weekly={"2026-09-28": 900})))
+    (project / "src").mkdir()
+    (project / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")
+    code = _pf_run(ctx, _pf_data(_pf_read(_pf_hash(project / "src" / "app.py", salt))))
     none = _pf_run(ctx, {})
-    assert (found["status"], gone["status"], quiet["status"], none["status"]) == ("act", "ok", "ok", "no_data")
-    for name, result in (("found", found), ("grown", grown), ("wide", wide), ("gone", gone), ("quiet", quiet), ("none", none)):
+    assert (found["status"], gone["status"], quiet["status"], code["status"], none["status"]) == ("act", "ok", "ok", "ok", "no_data")
+    for name, result in (
+        ("found", found), ("grown", grown), ("wide", wide), ("gone", gone), ("quiet", quiet), ("code", code), ("none", none)
+    ):
         strings.append((f"{name} summary", result["summary"]))
         if result["table"]:
             strings += [(f"{name} column", column["label"]) for column in result["table"]["columns"]]
@@ -782,6 +787,15 @@ def test_the_copy_the_project_files_check_and_the_agent_stack_add_keeps_to_the_h
     strings += [(f"stack column {column.key}", column.help) for column in table.columns if column.help]
 
     strings += [("tuning summary", line) for line in tuning.summary_text(_sample()).splitlines() if "roject file" in line or line.startswith("Of those")]
+    # What the Agents page's section says the check covers (page-agents.js).
+    page = (SRC / "service" / "static" / "page-agents.js").read_text(encoding="utf-8")
+    for said in (
+        "The Overview check looks at text files only (.md and .txt), which you can split or trim.",
+        "Code and data files are listed after them and never flagged.",
+        "No changes to suggest: the Overview check covers text files (.md and .txt), and this file is code or data.",
+    ):
+        assert said in page, said
+        strings.append(("page-agents", said))
     assert row[0] == "docs/context.md" and len(strings) > 60
     for where, text in strings:
         _plain(text, where)

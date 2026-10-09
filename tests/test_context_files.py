@@ -752,6 +752,7 @@ def _row(**over) -> dict:
     return {
         "hash": "aaaa",
         "source": "read",
+        "ext": "md",
         "tokens": 6000,
         "types": 3,
         "change_pct": None,
@@ -789,6 +790,41 @@ def test_files_claude_code_loads_itself_are_the_claude_md_checks_not_this_ones()
     # Unless the caller cannot yet tell an import from a loaded file.
     assert len(context_files.check_rows([big], maybe_imports=True)) == 1
     assert len(context_files.check_rows([{**big, "source": "import"}])) == 1
+
+
+def test_a_large_code_file_many_agent_types_read_does_not_fire_the_check_but_the_same_as_markdown_does():
+    code = _row(ext="code", tokens=20000, types=5, change_pct=80.0)
+    assert context_files.check_rows([code]) == []
+    assert [r["reasons"] for r in context_files.check_rows([{**code, "ext": "md"}])] == [["wide", "grew"]]
+    assert [r["reasons"] for r in context_files.check_rows([{**code, "ext": "txt"}])] == [["wide", "grew"]]
+
+
+@pytest.mark.parametrize("ext", ["json", "config", "code", "other"])
+def test_only_text_files_are_flagged_whatever_their_size_or_growth(ext):
+    assert context_files.check_rows([_row(ext=ext, tokens=30000, types=9, change_pct=500.0)]) == []
+    assert context_files.check_rows([_row(ext=ext, tokens=30000, types=9, change_pct=500.0)], maybe_imports=True) == []
+
+
+def test_a_file_this_machine_could_not_name_has_no_class_and_is_not_flagged_unless_names_are_still_unknown():
+    unnamed = _row(ext="", tokens=20000, types=5)
+    assert context_files.check_rows([unnamed]) == []
+    assert context_files.check_rows([{k: v for k, v in unnamed.items() if k != "ext"}]) == []
+    # Before any name is looked up, a file of unknown class could still be text.
+    assert len(context_files.check_rows([unnamed], maybe_imports=True)) == 1
+
+
+def test_code_and_data_files_stay_in_the_table_after_the_text_files_and_are_counted_as_files():
+    data = _data(
+        reads=[
+            _read("code", tokens=20000, reach={"Explore": 10, "Plan": 10, "Review": 10}, cost_usd=50.0),
+            _read("text", tokens=6000, reach={"Explore": 10, "Plan": 10, "Review": 10}, cost_usd=1.0),
+        ]
+    )
+    local = {"names": {"code": {"name": "src/app.py", "ext": "code", "project": "p"}, "text": {"name": "notes.md", "ext": "md", "project": "p"}}}
+    rows = context_files.project_files(data, local)
+    # The dearer code file is listed, after the text file.
+    assert [row["hash"] for row in rows] == ["text", "code"]
+    assert [row["hash"] for row in context_files.check_rows(rows)] == ["text"]
 
 
 # -- the starting-context stack ------------------------------------------------------------------

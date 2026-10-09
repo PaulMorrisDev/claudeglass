@@ -1797,7 +1797,15 @@ call. The window is the span of the first calls, and at least 7 days, so
 Every comparison across agent types reads the first call on one model: the
 same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5. A row
 averages the spawns on the model most of its spawns ran on (`model`),
-counts the others in `other_model_spawns` and leaves them out.
+counts the others in `other_model_spawns` and leaves them out. What needs a
+tools snapshot (`removable_tools`, `agent_startup_tools`,
+`agent_startup_diet` and `agent_startup_servers`) is read instead on the
+busiest model with 5 or more spawns that recorded one (failing that, the
+model with the most such spawns), since older transcripts have none and
+the busiest model can have no tool data at all. The tools, diet
+and servers tables name that model in their own `model` column;
+`removable_tools` sits in the breakdown, whose `model` stays the busiest
+one.
 
 - `agent_startup_breakdown` — per agent type: `spawns`, `fork_spawns`,
   `model`, `other_model_spawns`, `startup_tokens` (the first turn's whole
@@ -1825,8 +1833,8 @@ counts the others in `other_model_spawns` and leaves them out.
   of the spawns offered it): spawns offered, spawns that used it and the
   definition size, largest first.
 - `agent_startup_diet` — per agent type (report only): what a tools list
-  would take out of a start, on the model most of its spawns ran on.
-  `keep_tools` are the tools and MCP servers (as `mcp__server__*`) called
+  would take out of a start, on the model with the most spawns that
+  recorded their tools. `keep_tools` are the tools and MCP servers (as `mcp__server__*`) called
   in at least a tenth of the spawns offered them, whether sent in full or
   loaded when asked for. `rare_tools` are the rest. `dropped_definitions`,
   `dropped_deferred` (the deferred tool names of the MCP servers left out),
@@ -1863,7 +1871,9 @@ counts the others in `other_model_spawns` and leaves them out.
   size and spawns that only used search and read tools.
 - `agent_startup_shared` — parts (CLAUDE.md by source, and the other
   parts) that at least half the agent types receive at about the same
-  size, with where they come from and the total across spawns.
+  size, with where they come from and the total across spawns. A
+  CLAUDE.md source is averaged over the spawns that loaded it, so spawns
+  that took none in don't pull its size down.
 
 ## `context_budget` (`context_budget.py`)
 
@@ -1917,10 +1927,13 @@ when the corpus has no top-level transcripts at all.
 - `context_budget_calibration` — one row per model: the characters per
   token measured for tool definitions (tool characters over the shared
   prefix the first call read) and for other text (text characters over
-  what the first call wrote and took in uncached). A model needs ten first
-  calls with a shared prefix to get its own figures (the median of its
-  calls); until then 4.0 stands in and the row is left out. Only those two
-  numbers per model are kept.
+  what the first call wrote and took in uncached). Only first calls with a
+  shared prefix and a recorded tools snapshot count, and a call whose ratio
+  falls outside 1.5 to 8 characters per token is left out of that figure.
+  A model needs ten such calls to get its own figure (the median of those
+  calls); until then 4.0 stands in and the figure is left empty, and a
+  model with neither figure has no row. Only those two numbers per model
+  are kept.
 - `context_budget_autocompact` — per project: the configured
   `autoCompactWindow` from the latest schema-2 snapshot's effective
   settings (`null` if absent), the model's context window size (from a
@@ -2289,9 +2302,11 @@ none writes a file.
   `mcpServers`, so the card says to look in the file first.
 - A built-in agent type's `spawn-cost` card no longer says to shorten the
   task prompt: its start is Claude Code's own system prompt and tool
-  definitions, which a tools list trims. The baseline card suggests
-  shortening an agent's `description:` only when your own agents add 1,000
-  tokens or more to every session.
+  definitions, which a tools list trims. `Explore`, `Plan` and
+  `claude-code-guide`, which the tools list card leaves alone, get no
+  `spawn-cost` card unless an agent file of yours defines them. The
+  baseline card suggests shortening an agent's `description:` only when
+  your own agents add 1,000 tokens or more to every session.
 - `spawn-claude-md`, `spawn-unused-skills` and `spawn-task-prompt` are
   priced as each spawn writing the part and every later call reading it
   (`spawn-claude-md` the way the What-if table prices `omitClaudeMd`: the

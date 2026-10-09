@@ -42,8 +42,10 @@ Phase 8a adds the other files your agents consume (``context_files``):
 :func:`local_names` hashes the files under the project folders with the
 same salt transcripts used, so a hash from a transcript gets the path from
 its project folder on the dashboard (never stored, never exported), and
-finds the files a CLAUDE.md imports with ``@path``. :func:`project_file_fixes`
-drafts the prompts for a big, wide or growing file.
+finds the files a CLAUDE.md imports with ``@path``. The walk skips build,
+cache and virtualenv folders, takes documents before other files in a
+folder, and ends as soon as every hash the caller asked for has a name.
+:func:`project_file_fixes` drafts the prompts for a big, wide or growing file.
 """
 
 from __future__ import annotations
@@ -57,10 +59,11 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 
 from . import pages
 from . import parse as parse_mod
+from .context_files import TEXT_EXTS
 from .fixes import PROMPT_RESTART
 from .footprint import home_label
 from .units import Units
@@ -1071,10 +1074,17 @@ def ext_class(name: str) -> str:
 
 
 #: Bounds on the walk that names files, so a large repository stays quick:
-#: how deep, how many folders per project, and how many files in all.
+#: how deep, how many folders per project, and how many files in all. The
+#: walk runs when Overview's checks load, so it stays at about 3 s: on one
+#: machine, lifting both bounds above a 79,000-folder scratch project named
+#: 3 more of 271 files (none the check flags) and took 7 s.
 _NAMES_MAX_DEPTH = 10
 _NAMES_MAX_DIRS = 20000
 NAMES_MAX_FILES = 60000
+#: Folders the walk that names files never enters: the ones above, and the
+#: test, coverage and lint caches. Nothing in them is a file an agent reads
+#: on purpose, and a large one would use up the bounds before the documents.
+_NAMES_SKIP = _WALK_SKIP | frozenset({".pytest_cache", ".ruff_cache", "coverage"})
 
 
 @dataclass(slots=True)
@@ -1099,11 +1109,15 @@ class LocalNames:
         return {"names": self.names, "imports": sorted(self.imports), "inlined": self.inlined}
 
 
-def _walk_files(root: Path, limit: int) -> tuple[list[Path], bool]:
-    """Files under ``root``, shallow ones first, skipping :data:`_WALK_SKIP`
-    folders (``.git``, ``node_modules``, build output) and git worktrees.
-    Stops at ``limit`` files, :data:`_NAMES_MAX_DIRS` folders and
-    :data:`_NAMES_MAX_DEPTH` levels; the flag says it stopped early."""
+def _walk_files(root: Path, limit: int, visit: Callable[[Path], bool] | None = None) -> tuple[list[Path], bool]:
+    """Files under ``root``, shallow ones first and, within a folder,
+    documents (:data:`context_files.TEXT_EXTS`) before the rest, skipping
+    :data:`_NAMES_SKIP` folders (``.git``, ``node_modules``, virtualenvs,
+    caches, build output) and git worktrees. ``visit`` is called with each
+    file as it is found; when it returns true the walk ends there, as the
+    caller has all it came for, and that is not a cut. Stops at ``limit``
+    files, :data:`_NAMES_MAX_DIRS` folders and :data:`_NAMES_MAX_DEPTH`
+    levels; the flag says it stopped early at one of those."""
     found: list[Path] = []
     dirs = 0
     queue: deque[tuple[Path, int]] = deque([(root, 0)])
@@ -1116,18 +1130,24 @@ def _walk_files(root: Path, limit: int) -> tuple[list[Path], bool]:
             entries = sorted(os.scandir(folder), key=lambda entry: entry.name)
         except OSError:
             continue
+        documents: list[str] = []
+        others: list[str] = []
         for entry in entries:
             try:
                 if entry.is_dir(follow_symlinks=False):
-                    skipped = entry.name in _WALK_SKIP or (entry.name == "worktrees" and folder.name == ".claude")
+                    skipped = entry.name in _NAMES_SKIP or (entry.name == "worktrees" and folder.name == ".claude")
                     if depth < _NAMES_MAX_DEPTH and not skipped:
                         queue.append((Path(entry.path), depth + 1))
                 elif entry.is_file(follow_symlinks=False):
-                    if len(found) >= limit:
-                        return found, True
-                    found.append(Path(entry.path))
+                    (documents if ext_class(entry.name) in TEXT_EXTS else others).append(entry.path)
             except OSError:
                 continue
+        for path in documents + others:
+            if len(found) >= limit:
+                return found, True
+            found.append(Path(path))
+            if visit is not None and visit(found[-1]):
+                return found, False
     return found, False
 
 
@@ -1153,13 +1173,15 @@ def local_names(
     page asks for it several times.
 
     This is read from disk when the dashboard asks and stays there. The
-    walk skips ``.git``, ``node_modules`` and build folders, and stops at
-    ``max_files`` files (:attr:`LocalNames.truncated` says so).
+    walk skips ``.git``, ``node_modules``, virtualenv, cache and build
+    folders (:data:`_NAMES_SKIP`), and stops at ``max_files`` files
+    (:attr:`LocalNames.truncated` says so).
 
     ``projects``: the folders a report limited to one project saw, or
     ``None`` for every project Claude Code ran in. ``wanted``: the hashes
     the caller has a use for; only those are kept, so a large repository
-    does not fill memory with names nobody asked for."""
+    does not fill memory with names nobody asked for, and the walk ends as
+    soon as every one of them has a name."""
     config_dir = Path(config_dir)
     wanted = None if wanted is None else frozenset(wanted)
     salt = salt if salt is not None else parse_mod.load_or_create_salt(config_dir)
@@ -1195,31 +1217,23 @@ def _find_names(
 ) -> LocalNames:
     found = LocalNames()
     left = max_files
+    #: The wanted hashes with no name yet. The walk ends when it is empty.
+    pending = None if wanted is None else set(wanted)
 
     def note(path: Path, name: str, project: str, *, force: bool = False) -> None:
         file_hash = parse_mod.path_hash(str(path), salt)
         if force or wanted is None or file_hash in wanted:
             found.names.setdefault(file_hash, {"name": name, "ext": ext_class(path.name), "project": project})
+            if pending is not None:
+                pending.discard(file_hash)
 
+    # Your own files sit outside every project and there are few of them, so
+    # they are named first, on top of the cap, and the walk below can stop
+    # once it has found what is left.
     for folder in folders:
-        files, cut = _walk_files(folder, max(left, 0))
-        left -= len(files)
-        found.truncated = found.truncated or cut
-        copies = worktrees.get(os.path.normcase(str(folder)), ())
-        for path in files:
-            try:
-                relative = path.relative_to(folder)
-            except ValueError:
-                continue
-            name = relative.as_posix()
-            note(path, name, folder.name)
-            for copy in copies:
-                note(copy / relative, name, folder.name)
         memory = _memory_file(claude_root, folder).parent
         for path in sorted(memory.glob("*.md")) if memory.is_dir() else ():
             note(path, home_label(path), "")
-    # Your own plans and rules sit outside every project, so they are named
-    # on top of the cap: there are few of them.
     for extra in (claude_root / "plans", claude_root / "rules"):
         if extra.is_dir():
             files, _cut = _walk_files(extra, 2000)
@@ -1228,6 +1242,32 @@ def _find_names(
     user_file = claude_root / "CLAUDE.md"
     if user_file.is_file():
         note(user_file, home_label(user_file), "")
+
+    def walk(folder: Path) -> None:
+        nonlocal left
+        copies = worktrees.get(os.path.normcase(str(folder)), ())
+
+        def name_file(path: Path) -> bool:
+            """Name one file (and its copy in each git worktree); true once
+            nothing wanted is left."""
+            try:
+                relative = path.relative_to(folder)
+            except ValueError:
+                return False
+            name = relative.as_posix()
+            note(path, name, folder.name)
+            for copy in copies:
+                note(copy / relative, name, folder.name)
+            return pending is not None and not pending
+
+        files, cut = _walk_files(folder, max(left, 0), name_file)
+        left -= len(files)
+        found.truncated = found.truncated or cut
+
+    for folder in folders:
+        if pending is not None and not pending:
+            break
+        walk(folder)
 
     for candidate in discover(config_dir, projects=folders):
         if candidate.level == "Import":

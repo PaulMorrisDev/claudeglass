@@ -59,6 +59,7 @@ function projectFilesSection(panel) {
       class: "section-intro",
       text:
         "These files go into your agents' runs. Claude Code loads some and CLAUDE.md files import some. Agents read the rest in 3 or more runs, or in a fifth of their runs. " +
+        "The Overview check looks at text files only (.md and .txt), which you can split or trim. Code and data files are listed after them and never flagged. " +
         "Names are read from your project folders when you open this page and never stored.",
     })
   );
@@ -67,6 +68,9 @@ function projectFilesSection(panel) {
   panel.appendChild(section);
   return body;
 }
+
+// The extension classes the Overview check covers (context_files.TEXT_EXTS).
+var CHECKED_CLASSES = ["md", "txt"];
 
 var FILE_SOURCES = {
   auto: "Loaded by Claude Code",
@@ -237,6 +241,10 @@ function openProjectFile(row) {
       } else if (!row.name) {
         body.appendChild(
           emptyState("No changes to suggest: this file is not in any project folder on this machine, so there is nothing to point a prompt at.")
+        );
+      } else if (CHECKED_CLASSES.indexOf(row.ext) < 0) {
+        body.appendChild(
+          emptyState("No changes to suggest: the Overview check covers text files (.md and .txt), and this file is code or data.")
         );
       }
     },
