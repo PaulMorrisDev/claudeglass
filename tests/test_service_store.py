@@ -1472,6 +1472,50 @@ def test_turns_for_session_downsamples_above_the_point_cap(store: Store) -> None
     assert marker_turn_index in kept_turn_indices
 
 
+# -- median_end_context --------------------------------------------------
+
+
+def _store_session_ending_at(store: Store, session_id: str, last_ts: str, ctxs: list[int], *, kind: str = "top-level") -> None:
+    """A session whose priced turns end at the last of ``ctxs`` (plus a
+    synthetic turn 0 that never counts)."""
+    from claudeglass.cache import encode_result
+    from claudeglass.model import Turn, TranscriptMeta, TranscriptResult
+
+    turns = [Turn(turn_index=0, ctx=999_999)] + [Turn(turn_index=i, ctx=c) for i, c in enumerate(ctxs, start=1)]
+    result = TranscriptResult(meta=TranscriptMeta(path=_FAKE_PATH, kind=kind, session_id=session_id), turns=turns)
+    store.upsert_session(session_id=session_id, project_slug="proj-a", slug="proj-a", last_ts=last_ts)
+    store.upsert_transcript(
+        session_id=session_id,
+        path=f"{_FAKE_PATH}.{session_id}",
+        kind=kind,
+        digest_json=json.dumps(encode_result(result)),
+    )
+
+
+def test_median_end_context_is_none_without_a_stored_transcript(store: Store) -> None:
+    assert store.median_end_context() is None
+    store.upsert_session(session_id="ghost", project_slug="proj-a", slug="proj-a", last_ts="2026-09-18T10:00:00Z")
+    _store_session_ending_at(store, "sub-only", "2026-09-18T11:00:00Z", [5000], kind="subagent")
+    assert store.median_end_context() is None
+
+
+def test_median_end_context_takes_each_sessions_last_priced_turn(store: Store) -> None:
+    _store_session_ending_at(store, "s1", "2026-09-18T10:00:00Z", [1000, 90_000])
+    _store_session_ending_at(store, "s2", "2026-09-18T11:00:00Z", [2000, 50_000, 120_000])
+    _store_session_ending_at(store, "s3", "2026-09-18T12:00:00Z", [3000, 10_000])
+    assert store.median_end_context() == 90_000
+    _store_session_ending_at(store, "s4", "2026-09-18T13:00:00Z", [400_000])
+    assert store.median_end_context() == 105_000  # the mean of the middle two
+
+
+def test_median_end_context_looks_only_at_the_most_recent_sessions(store: Store) -> None:
+    _store_session_ending_at(store, "old", "2026-09-01T10:00:00Z", [900_000])
+    _store_session_ending_at(store, "new-a", "2026-09-18T10:00:00Z", [10_000])
+    _store_session_ending_at(store, "new-b", "2026-09-18T11:00:00Z", [20_000])
+    assert store.median_end_context(limit=2) == 15_000
+    assert store.median_end_context() == 20_000
+
+
 # -- privacy guard ---------------------------------------------------------
 
 

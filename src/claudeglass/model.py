@@ -1937,6 +1937,11 @@ class ReportMeta:
     #: observed id's entry in ``rates``. Empty on a report built without
     #: a rate card's view of the window (``cli.py``'s wrapped sections).
     model_ids: dict = field(default_factory=dict)
+    #: Additive: characters per token measured on this window's sessions
+    #: (``calibration.Calibration.to_dict``: ``tool`` and ``text`` ratios
+    #: per model family, and the ``default_family``). Two floats per
+    #: family and nothing else; the mod's settings file keeps it.
+    calibration: dict = field(default_factory=dict)
 
 
 @dataclass(slots=True)

@@ -95,7 +95,7 @@ from .. import PARSER_VERSION
 from ..cache import result_from_jsonable
 from ..discovery import _resolve_window, _zone, local_day, redact_slug, source_label, ts_in_window, utc_stamp
 from ..limits import limit_markers as _limit_markers
-from ..model import EventKind
+from ..model import EventKind, TranscriptResult
 
 #: ``meta`` key recording the schema version the store's tables were
 #: created under. Compared against ``schema.SCHEMA_VERSION`` by callers
@@ -459,6 +459,25 @@ class Store:
         if conn is not None:
             conn.close()
             self._local.conn = None
+
+    @classmethod
+    def open_read_only(cls, path: str | Path) -> "Store | None":
+        """A store over the file at ``path`` that only reads, for the CLI's
+        own use beside a running dashboard: nothing is created, migrated or
+        written, so it never waits on the dashboard's writes. ``None``
+        when there is no store file or it can't be opened. Only the read
+        methods work on it."""
+        path = Path(path)
+        if not path.is_file():
+            return None
+        try:
+            conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+        except sqlite3.Error:
+            return None
+        conn.row_factory = sqlite3.Row
+        store = cls(path)
+        store._local.conn = conn
+        return store
 
     def _connection(self) -> sqlite3.Connection:
         conn = getattr(self._local, "conn", None)
@@ -1425,6 +1444,45 @@ class Store:
         mid = len(costs) // 2
         return costs[mid] if len(costs) % 2 else (costs[mid - 1] + costs[mid]) / 2
 
+    @staticmethod
+    def _decode_digest(row) -> TranscriptResult | None:
+        """The ``TranscriptResult`` in a ``transcripts`` row's
+        ``digest_blob`` (the lossless ``cache.result_from_jsonable``
+        decode ``service/rebuild.py`` uses), or ``None`` for no row or a
+        blob that does not decode."""
+        if row is None:
+            return None
+        try:
+            return result_from_jsonable(json.loads(decode_digest_blob(row["digest_blob"])))
+        except (KeyError, TypeError, ValueError, zlib.error):
+            return None
+
+    def median_end_context(self, limit: int = 200) -> int | None:
+        """The median, over the ``limit`` most recent sessions (by
+        ``last_ts``) that have a stored top-level transcript, of the
+        context (``ctx``) of each one's last priced turn
+        (``turn_index > 0``), decoded as :meth:`turns_for_session` does.
+        ``None`` when no session qualifies."""
+        rows = self._connection().execute(
+            "SELECT t.digest_blob FROM sessions s JOIN transcripts t "
+            "ON t.session_id = s.id AND t.kind = 'top-level' "
+            "ORDER BY s.last_ts DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+        ends: list[int] = []
+        for row in rows:
+            result = self._decode_digest(row)
+            if result is None:
+                continue
+            last = [turn.ctx for turn in result.turns if turn.turn_index > 0]
+            if last:
+                ends.append(last[-1])
+        if not ends:
+            return None
+        ends.sort()
+        mid = len(ends) // 2
+        return ends[mid] if len(ends) % 2 else round((ends[mid - 1] + ends[mid]) / 2)
+
     def turns_for_session(self, session_id: str) -> dict | None:
         """Per-turn ``ctx``/cache/marker series for one session's
         top-level transcript, decoded from its stored ``digest_blob``
@@ -1467,11 +1525,8 @@ class Store:
             "SELECT digest_blob FROM transcripts WHERE session_id = ? AND kind = 'top-level'",
             (session_id,),
         ).fetchone()
-        if row is None:
-            return None
-        try:
-            result = result_from_jsonable(json.loads(decode_digest_blob(row["digest_blob"])))
-        except (KeyError, TypeError, ValueError, zlib.error):
+        result = self._decode_digest(row)
+        if result is None:
             return None
 
         turn_series: list[list] = []

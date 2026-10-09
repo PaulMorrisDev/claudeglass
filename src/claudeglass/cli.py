@@ -36,6 +36,7 @@ from zoneinfo import available_timezones
 
 from . import __version__, baseline as baseline_mod, capture_catalogue, capture_view, classify, discovery, installer as installer_mod
 from . import invocation, onboarding, setup_flow
+from . import mod_settings as mod_settings_mod
 from . import pages
 from . import haiku_tags, helptext, hook_health, probe as probe_mod, recache, signals as signals_mod, snapshots
 from . import statusline as statusline_mod
@@ -3246,6 +3247,28 @@ def _update_finish_args(args: argparse.Namespace) -> list[str]:
     return out
 
 
+def _write_mod_settings(config_dir: Path, dashboard_url: str | None) -> None:
+    """Write the mod's settings file (``mod_settings``) so it exists
+    without the dashboard running. "Your usual" comes from the dashboard's
+    store when there is one, read without writing to it; the measured
+    figures wait for the dashboard's next report. A config or rate card
+    that can't be read leaves the file as it was: ``update`` reports those
+    elsewhere."""
+    from .service.serve import STORE_FILENAME
+    from .service.store import Store
+
+    store = Store.open_read_only(config_dir / STORE_FILENAME)
+    try:
+        mod_settings_mod.write(
+            config_dir, mod_settings_mod.build(config_dir, store=store, dashboard_url=dashboard_url)
+        )
+    except (ConfigError, PricingError, OSError):
+        pass
+    finally:
+        if store is not None:
+            store.close()
+
+
 def _cmd_update_finish(
     args: argparse.Namespace,
     *,
@@ -3325,6 +3348,7 @@ def _cmd_update_finish(
             refreshed = []
         if refreshed:
             stdout.write(f"Refreshed {len(refreshed)} hook file{'s' if len(refreshed) != 1 else ''} this version changed.\n")
+        _write_mod_settings(config_dir, mod_settings_mod.dashboard_url(args.bind, args.port))
 
     # -- the dashboard ---------------------------------------------------
     status = 0

@@ -148,6 +148,22 @@ export var ENTITY_COLOURS = {
     hook_context: "var(--chart-7)",
     other: "var(--chart-other)",
   },
+  // What the context is made of, on the mod's "What's filling it" bar and
+  // the dashboard's links to it. It shows beside the agent kind (chart-1,
+  // chart-3), so it takes neither of those. Startup context is the one part
+  // with a breakdown of its own (the startup kind above, chart-1 to
+  // chart-7), so it takes chart-8, which no startup piece uses: the slice
+  // never matches one of its own pieces. Conversation and tool output take
+  // chart-2 and chart-4, which stay apart from each other and from the
+  // startup slice. Room left is drawn as an empty track, so it shares the
+  // grey that Other has.
+  part: {
+    conversation: "var(--chart-2)",
+    output: "var(--chart-4)",
+    startup: "var(--chart-8)",
+    free: "var(--chart-other)",
+    other: "var(--chart-other)",
+  },
 };
 
 export function entityColour(kind, key) {

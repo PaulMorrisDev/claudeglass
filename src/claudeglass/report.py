@@ -2228,6 +2228,7 @@ def build_report(
         # by_model is keyed by the observed turn.model, so every id the
         # by_model table shows can be looked up in `rates`.
         model_ids=pricing.model_ids_meta(overview.by_model.keys()),
+        calibration=calibration.to_dict(),
     )
 
     # Fixes 2/3: these two counters are pricing-time totals (every turn

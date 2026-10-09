@@ -130,6 +130,20 @@ def test_inventory_lists_every_part_with_an_undo(tmp_path):
         assert item.token_cost and item.what_it_does and item.undo
 
 
+def test_the_mods_settings_folder_is_listed_once_it_exists_and_goes_with_the_data_folder(tmp_path):
+    config_dir = _claude(tmp_path)
+    assert "mod_settings" not in {item.key for item in footprint.inventory(config_dir, service_registered=None)}
+    (config_dir / "mod").mkdir()
+    (config_dir / "mod" / "settings.json").write_text("{}", encoding="utf-8")
+    items = {item.key: item for item in footprint.inventory(config_dir, service_registered=None)}
+    item = items["mod_settings"]
+    assert item.status == "installed"
+    assert item.where.endswith("mod")
+    assert item.token_cost and item.what_it_does and item.undo
+    assert footprint.delete_data(config_dir) == []
+    assert not (config_dir / "mod").exists()
+
+
 def test_list_backups_reads_the_reverted_marker(tmp_path):
     config_dir = _claude(tmp_path)
     _fake_backup(config_dir, "20260921T000000Z", reverted=True)

@@ -515,6 +515,24 @@ def inventory(
             )
         )
 
+    mod_dir = config_dir / "mod"
+    if mod_dir.is_dir():
+        items.append(
+            FootprintItem(
+                key="mod_settings",
+                title="Settings file for the ClaudeGlass mod",
+                status="installed",
+                where=home_label(mod_dir),
+                what_it_does=(
+                    "Holds the prices, billing mode, coaching limits and your usual figures that the ClaudeGlass "
+                    "mod reads inside Claude Code, because the mod can't ask this tool for them. Counts and "
+                    "settings only, never a prompt or a path. The mod itself is a separate plugin that you add."
+                ),
+                token_cost="None. The mod shows it to you; Claude never reads it.",
+                undo="Deleted with this tool's data folder.",
+            )
+        )
+
     data_size = _folder_size(config_dir) if config_dir.is_dir() else 0
     items.append(
         FootprintItem(

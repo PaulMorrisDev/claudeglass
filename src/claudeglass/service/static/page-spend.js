@@ -8,7 +8,7 @@ import { compactNumber, formatDuration, fullValue, moneyParts, projectName, shor
 import { fetchJson, loadInto, loadReport, postJson, withWindow } from "./api.js";
 import { button, chip, drawer, errorNotice, loadingNode, prose, tile, tileRow, toast } from "./ui.js";
 import { dataGrid, renderMappedSections, renderReportBackedSection } from "./grid.js";
-import { replaceParams, viewIntro } from "./links.js";
+import { replaceParams, sessionId, viewIntro } from "./links.js";
 import { chartError, dayLabel, holdChart } from "./charts.js";
 import { dailyChanges, modeColour, renderChart, savingsLevers, sessionContextChart, sessionWord, sessionWordChoices, sessionWordNote, windowSpan } from "./charts-types.js";
 
@@ -23,7 +23,20 @@ import { dailyChanges, modeColour, renderChart, savingsLevers, sessionContextCha
 var SESSIONS_LIMIT = 2000;
 
 // run: the draw on screen, so an older draw's late answer is dropped.
-var sessionsView = { run: 0, rows: [], range: null, day: null };
+// opened: the session ?session=<id> last opened, so a redraw doesn't open it again.
+var sessionsView = { run: 0, rows: [], range: null, day: null, opened: null };
+
+// ?session=<id>: that session's drawer, once the list has loaded. An id the
+// list doesn't hold leaves the page as it is.
+function openLinkedSession(id) {
+  if (!id || id === sessionsView.opened) return;
+  var known = sessionsView.rows.some(function (row) {
+    return row.id === id;
+  });
+  if (!known) return;
+  sessionsView.opened = id;
+  openSessionDrawer(id);
+}
 
 function validDay(value) {
   return /^\d{4}-\d\d-\d\d$/.test(String(value || "")) && !isNaN(Date.parse(value + "T00:00:00Z")) ? value : null;
@@ -65,6 +78,7 @@ export function renderSessions(panel) {
   sessionsView.rows = [];
   sessionsView.range = null;
   sessionsView.day = validDay(state.params.day);
+  sessionsView.opened = null;
 
   var chartHost = el("div", { class: "sessions-chart" });
   var filterHost = el("div", { class: "sessions-filter", "aria-live": "polite" });
@@ -144,6 +158,7 @@ export function renderSessions(panel) {
 
   // A day picked on a daily spend chart while this view is open.
   onParams("spend/sessions", function (params) {
+    if (current()) openLinkedSession(sessionId(params));
     var day = validDay(params.day);
     if (day === sessionsView.day || !current()) return;
     sessionsView.day = day;
@@ -163,6 +178,7 @@ export function renderSessions(panel) {
       sessionsView.rows = rows || [];
       drawList();
       drawScatter(false);
+      openLinkedSession(sessionId(state.params));
     },
     { skeleton: "rows" }
   ).then(function (rows) {

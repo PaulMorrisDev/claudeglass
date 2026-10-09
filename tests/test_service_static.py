@@ -3152,6 +3152,51 @@ def test_chart_colours_follow_the_entity_not_the_window() -> None:
             assert re.fullmatch(r"var\(--chart-(?:[1-8]|other)\)", value), (kind, value)
 
 
+def test_the_context_part_colours_keep_clear_of_the_agent_and_startup_colours() -> None:
+    """The mod's "What's filling it" bar shows beside the agent kind and the
+    startup context's own pieces, so none of the parts shares a colour with an
+    agent, and the startup slice shares none with a piece of itself."""
+    source = _declaration_source(_app_js(), "ENTITY_COLOURS").split("=", 1)[1]
+    colours = _js_literal_to_json(re.sub(r"^\s*//.*$", "", source, flags=re.MULTILINE))
+    part = colours["part"]
+    assert list(part) == ["conversation", "output", "startup", "free", "other"]
+    filled = [part["conversation"], part["output"], part["startup"]]
+    assert len(set(filled)) == 3, "the filled parts are told apart"
+    assert not set(filled) & set(colours["agent"].values())
+    assert part["startup"] not in colours["startup"].values()
+    assert part["free"] == part["other"] == "var(--chart-other)"
+
+
+def test_a_session_link_opens_the_sessions_drawer_once_the_list_has_loaded() -> None:
+    """``#/spend/sessions?session=<id>``: links.js is the one place that knows
+    the parameter, and the page opens the drawer after its rows arrive, for an
+    id the list holds, once per draw."""
+    links = _static_text("links.js")
+    for name in ("sessionParams", "sessionId", "sessionLink"):
+        assert "export function " + name + "(" in links, name
+    assert "return { session: id };" in _function_source(links, "sessionParams")
+    assert 'return pageLink("spend/sessions", text, sessionParams(id));' in _function_source(links, "sessionLink")
+    # The address already parses: the segment is a known one and the id is a parameter.
+    assert 'new URLSearchParams(match[3] || "")' in _function_source(links, "parseHash")
+    page = _static_text("page-spend.js")
+    assert "sessionId" in page[: page.index("export function renderSessions(")]
+    open_it = _function_source(page, "openLinkedSession")
+    assert "sessionsView.rows.some(" in open_it and "if (!known) return;" in open_it
+    assert "sessionsView.opened = id;" in open_it and "openSessionDrawer(id);" in open_it
+    assert open_it.index("if (!known) return;") < open_it.index("openSessionDrawer(id);")
+    draw = _function_source(page, "renderSessions")
+    assert "sessionsView.opened = null;" in draw
+    # Once the rows are in, and again if the address changes while the page is open.
+    loaded = draw[draw.index("sessionsView.rows = rows || [];") :]
+    assert loaded.index("drawList();") < loaded.index("openLinkedSession(sessionId(state.params));")
+    assert "openLinkedSession(sessionId(params));" in draw[draw.index('onParams("spend/sessions"') :]
+    for path in _js_modules():
+        if path.name in ("links.js", "page-spend.js"):
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r'(?:pageLink|goTo|formatHash)\(\s*"spend/sessions"[^;]*session', text), path.name
+
+
 # -- Actions: areas, evidence links and deep links ---------------------------
 
 SRC_DIR = REPO_ROOT / "src" / "claudeglass"

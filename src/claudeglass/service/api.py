@@ -113,7 +113,7 @@ from typing import TYPE_CHECKING, Callable
 
 from .. import __version__ as _TOOL_VERSION
 from .. import baseline as baseline_mod
-from .. import capture_catalogue, classify, coaching, discovery, helptext, hook_health, ignores, invocation
+from .. import capture_catalogue, classify, coaching, discovery, helptext, hook_health, ignores, invocation, mod_settings
 from .. import ratings as ratings_mod
 from .. import snapshots as snapshots_mod
 from ..config import (
@@ -181,6 +181,10 @@ _STUCK_SCAN_S = 3600.0
 
 #: How many built reports (one per window) the service keeps.
 _REPORT_CACHE_SIZE = 8
+
+#: The mod's settings file (``mod_settings``) is rewritten from a finished
+#: report at most this often per process.
+_MOD_SETTINGS_EVERY_S = 3600.0
 
 #: A kept report older than this is rebuilt before it is served, rather
 #: than served while a rebuild runs (a tab reopened after a long idle
@@ -1336,6 +1340,43 @@ def make_handler(
         elif refreshing:
             request_ctx.as_of = (current[0], True)
 
+    #: When the mod's settings file was last written, on the monotonic
+    #: clock (``None`` before the first write).
+    mod_settings_state: dict = {"at": None}
+    mod_settings_lock = threading.Lock()
+
+    def _write_mod_settings(cache_key, model) -> None:
+        """Write the mod's settings file from a finished default report (the
+        default window, every project) at most once an hour. It runs on its
+        own thread, since "your usual" reads many stored transcripts, and
+        never raises: a report is not held up by it."""
+        window_days, _since, until, _window_by, project = cache_key
+        # ``since`` is not tested: a ``window_days`` always carries the start it resolves to.
+        if project or until or window_days != _DEFAULT_WINDOW_DAYS:
+            return
+        with mod_settings_lock:
+            now = time.monotonic()
+            last = mod_settings_state["at"]
+            if last is not None and now - last < _MOD_SETTINGS_EVERY_S:
+                return
+            mod_settings_state["at"] = now
+
+        def run():
+            try:
+                data = mod_settings.build(
+                    options.config_dir,
+                    report=model,
+                    store=store,
+                    dashboard_url=mod_settings.dashboard_url(options.bind, options.port),
+                )
+                mod_settings.write(options.config_dir, data)
+            except Exception as exc:  # noqa: BLE001 -- the mod's file is a courtesy; the next hour retries
+                print(f"claudeglass serve: the mod's settings were not written: {exc}", file=sys.stderr, flush=True)
+            finally:
+                store.close()  # this thread's own connection
+
+        threading.Thread(target=run, name="claudeglass-mod-settings", daemon=True).start()
+
     def _build_and_keep(cache_key, building: Future):
         token = _cache_token()
         started = time.monotonic()
@@ -1351,6 +1392,7 @@ def make_handler(
             report_building.pop(cache_key, None)
             _keep_report(cache_key, token, model, started, as_of)
         building.set_result(model)
+        _write_mod_settings(cache_key, model)
         return model, as_of
 
     def _rebuild_in_background(cache_key, building: Future) -> None:

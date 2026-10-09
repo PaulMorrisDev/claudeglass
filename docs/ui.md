@@ -897,6 +897,13 @@ is the day of the chart's column. A line above the list says what it is
 narrowed to, with **Show all sessions**. A row and its dot light up
 together. The report's `sessions` section follows.
 
+`#/spend/sessions?session=<id>` opens that session's drawer once the list
+has loaded (`openLinkedSession`). It is how the ClaudeGlass mod's **Open in
+dashboard** reaches a session. An id the list does not hold, such as a
+session outside the window, leaves the page as it is. `links.js` is the one
+place that knows the parameter (`sessionParams`, `sessionId`,
+`sessionLink`).
+
 The list, the override menus and the chart name a mode, a purpose and an
 app in words ("Overnight (unattended)", "One-shot", "Docs or light
 edits", "Terminal") from one map, `SESSION_WORDS` in `charts-types.js`.
@@ -1537,6 +1544,7 @@ repaints what stays on screen:
 | Model tier | Opus (and Fable) `--chart-1`, Sonnet `--chart-2`, Haiku `--chart-3` |
 | Work mode | interactive `--chart-1`, long autonomous run `--chart-2`, overnight `--chart-3`, one-shot `--chart-4`; mixed and not classified are Other |
 | Startup part | system prompt, tool definitions, CLAUDE.md, skills listing, tool lists, task prompt and hook context take `--chart-1` to `--chart-7` |
+| Context part | conversation `--chart-2`, tool output kept in context `--chart-4`, startup context `--chart-8`, room left and other `--chart-other`. Startup context takes the one slot no startup part uses, and none takes the agent colours |
 
 Anything else is `--chart-other`. A chart never picks colours by rank.
 Chart 7 shows a sign, not an entity: an agent type that saves with a
