@@ -740,3 +740,20 @@ def test_finish_dry_run_writes_no_settings_file(tmp_path):
     _write_config(tmp_path, 'billing = "api"\n')
     _Finish(tmp_path).run("--dry-run")
     assert not mod_settings.settings_path(tmp_path / "cfg").exists()
+
+
+def test_finish_says_how_to_add_the_mod_when_it_has_not_run(tmp_path):
+    rc, out = _Finish(tmp_path).run()
+    assert rc == 0
+    assert cli.MOD_INSTALL in out
+    assert "claude plugin update" not in out
+
+
+def test_finish_says_how_to_update_a_mod_that_ran_lately(tmp_path):
+    present = tmp_path / "cfg" / "mod" / "present"
+    present.mkdir(parents=True)
+    (present / "abc-123.json").write_text('{"schema": 1, "session_id": "abc-123", "seen": 0}', encoding="utf-8")
+    rc, out = _Finish(tmp_path).run()
+    assert rc == 0
+    assert "claude plugin update claudeglass" in out
+    assert cli.MOD_INSTALL not in out

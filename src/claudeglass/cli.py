@@ -3118,6 +3118,27 @@ OLD_DASHBOARD_HELP = (
 
 #: Where a ``.pyz`` user downloads the newest copy.
 _RELEASES_URL = "https://github.com/PaulMorrisDev/claudeglass/releases/latest"
+MOD_HELP = "https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/mod.md"
+#: How the Claude Code mod is added: typed once at a Claude Code terminal prompt.
+MOD_INSTALL = "/plugin install claudeglass --marketplace PaulMorrisDev/claudeglass"
+
+
+def _mod_seen(config_dir: Path, now: float, within_s: int = 86_400) -> bool:
+    """Whether the Claude Code mod ran in the last day: a heartbeat file
+    under ``mod/present/`` it refreshed recently (``seen: 0`` is the
+    tombstone it leaves at a session's end, which still counts as run)."""
+    folder = config_dir / capture_catalogue.MOD_DIR / capture_catalogue.MOD_PRESENT_DIR
+    try:
+        files = list(folder.glob("*.json"))
+    except OSError:
+        return False
+    for path in files:
+        try:
+            if now - path.stat().st_mtime <= within_s:
+                return True
+        except OSError:
+            continue
+    return False
 
 
 def _cmd_update(args: argparse.Namespace, *, runner=None) -> int:
@@ -3474,6 +3495,19 @@ def _cmd_update_finish(
             )
     if not changed_any:
         stdout.write("Up to date: the hooks, statusline and skills this tool added run as they should.\n")
+
+    # -- the Claude Code mod -------------------------------------------------------
+    # update never installs the mod: it says how, or that the one in use
+    # updates through Claude Code.
+    stdout.write("\nThe Claude Code mod:\n")
+    if _mod_seen(config_dir, (now or datetime.now(timezone.utc)).timestamp()):
+        stdout.write("It ran in the last day. Bring it to this version with 'claude plugin update claudeglass'.\n")
+    else:
+        stdout.write(
+            "It shows how full the context is and what each reply costs, inside Claude Code. "
+            f"To add it, type this once at a Claude Code terminal prompt:\n   {MOD_INSTALL}\n"
+            f"More: {MOD_HELP}\n"
+        )
 
     # -- copies for other Pythons ----------------------------------------------
     copies = copies_fn([ran_from])

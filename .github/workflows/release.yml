@@ -45,6 +45,23 @@ jobs:
           files: dist/claudeglass.pyz
           generate_release_notes: true
 
+  # The Claude Code mod, for people who add it from a folder rather than the
+  # marketplace (CLAUDE_CODE_PLUGIN_DIRS or --plugin-dir).
+  mod:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Zip the mod
+        run: |
+          mkdir -p dist
+          cd plugin && zip -r ../dist/claudeglass-mod.zip . -x 'tests/*'
+
+      - name: Attach to the GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: dist/claudeglass-mod.zip
+
   pypi:
     runs-on: ubuntu-latest
     # PyPI's trusted publisher for claudeglass names this workflow and
