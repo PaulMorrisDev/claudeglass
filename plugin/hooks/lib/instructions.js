@@ -345,9 +345,11 @@ export function startupChars(entries) {
  * @param {number} cpt
  * @param {{mcp?: number, file?: number}} [limits]
  * @param {Object<string, number>} [sizes]  Tokens by row key where Claude Code's count has sized the row (see fitToCategories).
+ * @param {(server: string) => boolean} [own]  Whether a server comes with the app (default: isDesktopServer).
  * @returns {{kind: "mcp"|"file", name: string, tokens: number}|null}
  */
-export function adviceFor(entries, cpt, limits, sizes) {
+export function adviceFor(entries, cpt, limits, sizes, own) {
+  var ours = typeof own === "function" ? own : isDesktopServer;
   var fitted = sizes || {};
   var mcpAt = limits && typeof limits.mcp === "number" ? limits.mcp : MCP_TOKENS;
   var fileAt = limits && typeof limits.file === "number" ? limits.file : FILE_TOKENS;
@@ -359,7 +361,7 @@ export function adviceFor(entries, cpt, limits, sizes) {
     var found = null;
     if (one.kind === "mcp") {
       // The Desktop app's own servers are not the person's to turn off.
-      if (isDesktopServer(one.server || "")) continue;
+      if (ours(one.server || "")) continue;
       var live = typeof fitted[one.key] === "number" ? /** @type {number} */ (fitted[one.key]) : tokensOf(one.startupChars, cpt);
       if (live >= mcpAt) found = { kind: "mcp", name: one.server || "", tokens: live };
     } else if (one.kind === "instructions") {
@@ -369,6 +371,45 @@ export function adviceFor(entries, cpt, limits, sizes) {
     if (found !== null && (best === null || found.tokens > best.tokens)) best = found;
   }
   return best;
+}
+
+/** Main-session replies before a built-in tool can be advised against: fewer, and Claude has not yet had the chance to use it. */
+export var TOOL_ADVICE_REPLIES = 3;
+
+/**
+ * The built-in tool in the prompt that Claude has not called this session and that is big enough to be worth dropping:
+ * the largest one at `limit` tokens or more. The rows' own sizes are used, so the advice agrees with the list.
+ * @param {StartupRow[]} rows  The "You control" rows of startupGroups.
+ * @param {string[]} used  The tool names Claude has called this session.
+ * @param {number} [limit]
+ * @returns {{kind: "tool", name: string, tokens: number}|null}
+ */
+export function unusedTool(rows, used, limit) {
+  var at = typeof limit === "number" ? limit : MCP_TOKENS;
+  /** @type {{kind: "tool", name: string, tokens: number}|null} */
+  var best = null;
+  for (var i = 0; i < rows.length; i++) {
+    var row = /** @type {StartupRow} */ (rows[i]);
+    if (row.id !== "tools") continue;
+    for (var j = 0; j < row.items.length; j++) {
+      var item = /** @type {StartupItem} */ (row.items[j]);
+      if (item.deferred || item.tokens < at || used.indexOf(item.label) >= 0) continue;
+      if (best === null || item.tokens > best.tokens) best = { kind: "tool", name: item.label, tokens: item.tokens };
+    }
+  }
+  return best;
+}
+
+/**
+ * The single largest of the fixable things found, or null.
+ * @param {{kind: "mcp"|"file"|"tool", name: string, tokens: number}|null} first
+ * @param {{kind: "mcp"|"file"|"tool", name: string, tokens: number}|null} second
+ * @returns {{kind: "mcp"|"file"|"tool", name: string, tokens: number}|null}
+ */
+export function bestAdvice(first, second) {
+  if (first === null) return second;
+  if (second === null) return first;
+  return second.tokens > first.tokens ? second : first;
 }
 
 /**
@@ -499,7 +540,8 @@ export function serverLabel(wire, names, toolNames) {
   var listed = names && typeof names[wire] === "string" ? names[wire] : "";
   var plugged = PLUGIN_SERVER.exec(listed);
   if (plugged !== null) return asWords(/** @type {string} */ (plugged[1]), listed);
-  if (listed !== "" && !UUID_LIKE.test(listed)) return listed;
+  // A name that only echoes the wire name with underscores ("Claude_Browser") is no better than the words.
+  if (listed !== "" && !UUID_LIKE.test(listed)) return listed === wire && listed.indexOf("_") >= 0 ? asWords(listed, listed) : listed;
   if (UUID_LIKE.test(wire) || listed !== "") {
     var tools = Array.isArray(toolNames) ? toolNames : [];
     var prefix = "mcp__" + wire + "__";
@@ -660,7 +702,7 @@ export function mcpShares(members, serverTokens, counted) {
 /**
  * @typedef {Object} StartupGroups
  * @property {{tokens: number, rows: StartupRow[]}} control  What the person can change.
- * @property {{tokens: number}} builtin  Claude Code's own: the rest of the startup context.
+ * @property {{tokens: number, items: StartupItem[]}} builtin  Claude Code's own: the rest of the startup context; with the servers the app brings listed (largest first) when the page says which they are.
  * @property {{tokens: number, rows: StartupRow[]}} later    What is not in the startup context.
  * @property {number} total  The startup total the first two groups add up to.
  * @property {boolean} fits  Whether that total is the `total` given: false when none was given or it is less than "You control".
@@ -686,9 +728,14 @@ export function mcpShares(members, serverTokens, counted) {
  * @param {Object<string, string>|null|undefined} names  /mcp's name for each server (see serverLabel).
  * @param {number} [total]
  * @param {McpTool[]|null} [counted]  Claude Code's own count of each MCP tool, to share a server's tokens out by (see mcpShares).
+ * @param {(server: string) => boolean} [own]  Whether a server comes with the app. Given (the page is drawn on the desktop), those servers are counted in "Claude Code's own" and listed under it; left out, only the Desktop app's `ccd_` servers are counted there, unlisted.
  * @returns {StartupGroups}
  */
-export function startupGroups(entries, sizeOf, names, total, counted) {
+export function startupGroups(entries, sizeOf, names, total, counted, own) {
+  var listOwn = typeof own === "function";
+  var ours = typeof own === "function" ? own : isDesktopServer;
+  /** @type {StartupItem[]} */
+  var ownItems = [];
   var ids = ["mcp", "tools", "files", "skills", "plugin", "files-later", "skills-used", "reminders", "attached"];
   /** @type {Object<string, StartupRow>} */
   var rows = {};
@@ -714,7 +761,7 @@ export function startupGroups(entries, sizeOf, names, total, counted) {
     if (one.startupChars <= 0) {
       if (one.deferred) {
         // Behind tool search: a server is listed under its row without a size, so the detailed list is whole.
-        if (one.kind === "mcp" && !isDesktopServer(one.server || "")) {
+        if (one.kind === "mcp" && !ours(one.server || "")) {
           var waiting = /** @type {StartupRow} */ (rows.mcp);
           waiting.count += 1;
           waiting.items.push({ label: serverLabel(one.server || "", names, one.tools), tokens: 0, deferred: true });
@@ -732,12 +779,13 @@ export function startupGroups(entries, sizeOf, names, total, counted) {
     var id = "";
     // What the servers told Claude at the start is part of the MCP servers' share, not Claude Code's own.
     var told = one.kind === "attachment" && one.name === "mcp_instructions_delta";
-    if (told || (one.kind === "mcp" && !isDesktopServer(one.server || ""))) id = "mcp";
+    if (told || (one.kind === "mcp" && !ours(one.server || ""))) id = "mcp";
     else if (one.kind === "instructions") id = "files";
     else if (one.kind === "skills") id = "skills";
     else if ((one.kind === "tools" || one.kind === "deferred") && one.from === "plugin") id = "plugin";
     if (id === "") {
       builtin += size;
+      if (listOwn && one.kind === "mcp") ownItems.push({ label: serverLabel(one.server || "", names, one.tools), tokens: size, deferred: false });
       continue;
     }
     var row = /** @type {StartupRow} */ (rows[id]);
@@ -787,12 +835,15 @@ export function startupGroups(entries, sizeOf, names, total, counted) {
   var added = present(["files-later", "skills-used", "reminders", "attached"]);
   var yours = sum(control);
   var fits = typeof total === "number" && total >= yours;
-  var own = fits ? /** @type {number} */ (total) - yours : builtin;
+  var rest = fits ? /** @type {number} */ (total) - yours : builtin;
+  ownItems.sort(function (a, b) {
+    return b.tokens - a.tokens;
+  });
   return {
     control: { tokens: yours, rows: control },
-    builtin: { tokens: own },
+    builtin: { tokens: rest, items: ownItems },
     later: { tokens: sum(added), rows: added },
-    total: yours + own,
+    total: yours + rest,
     fits: fits,
   };
 }

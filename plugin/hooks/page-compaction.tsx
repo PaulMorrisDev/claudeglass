@@ -1,7 +1,6 @@
 import type { Register, RenderElement } from 'claude-code'
 
 import type { GlassKeepItem, GlassMark, GlassReviewUi, GlassSettings } from '../types'
-import { linkTarget } from './agent-view'
 import { listWithPins, memory } from './compaction-memory'
 import { amount, formatTokens, localTime } from './fmt'
 import { COPY } from './generated/copy.js'
@@ -14,8 +13,8 @@ import type { PageContext } from './pane'
 import { figureRow, heading, ROW_CELLS } from './rows'
 
 // The Compaction page. After a summary it says what the summary may have dropped and offers one note that puts it
-// back; the summary, the full list and the earlier messages sit behind quiet buttons, and the history and options
-// behind "More detail". Before a summary it offers what the summary should keep as a handful of ticks and fills
+// back; the summary, the full list and the earlier messages sit behind quiet buttons (one open at a time), and the
+// history behind "More detail". The options are on the pane's Settings view and the dashboard link is the footer's. Before a summary it offers what the summary should keep as a handful of ticks and fills
 // the prompt box with a /compact command. Nothing is ever sent.
 
 /**
@@ -76,6 +75,8 @@ function render(context: PageContext): RenderElement {
   const after = review.after
   const showAfter = after !== null && ui.view === 'after'
   const children: RenderElement[] = []
+  /** The sections after the first, each its own Box; the page's column leaves a blank line between them. */
+  const sections: RenderElement[] = []
 
   /** Changes what the page remembers; reads the state as it is when pressed. */
   const patch = (change: Partial<GlassReviewUi>) => kit.updateReview(was => ({ ...was, seen: true, ui: { ...was.ui, ...change } }))
@@ -90,24 +91,6 @@ function render(context: PageContext): RenderElement {
 
   /** A quiet control: no hotkey, drawn dim. */
   const quiet = (id: string, label: string, onPress: () => Promise<void>): RenderElement => <Button key={id} label={label} dimColor onPress={() => void onPress()} />
-
-  /** The two opt-ins, as quiet toggles each with its detail line. */
-  const options = (): RenderElement => (
-    <Box key="options" flexDirection="column">
-      {heading(table, 'options-title', COPY['compaction.options'])}
-      {[
-        { id: 'hold', label: COPY['compaction.opt.hold'], detail: COPY['compaction.opt.hold.detail'], on: context.options.hold },
-        { id: 'readd', label: COPY['compaction.opt.readd'], detail: COPY['compaction.opt.readd.detail'], on: context.options.readd },
-      ].map(one => (
-        <Box key={one.id} flexDirection="column">
-          <Button key={`opt:${one.id}`} label={`${one.label}: ${one.on ? COPY['compaction.on'] : COPY['compaction.off']}`} dimColor onPress={() => void kit.setOption(one.id, !one.on)} />
-          <Box paddingLeft={4}>
-            <Text dimColor>{one.detail}</Text>
-          </Box>
-        </Box>
-      )) as never}
-    </Box>
-  )
 
   if (showAfter && after !== null) {
     // Only what the user said counts here; files, values, tasks and errors are checked too, and the full list shows them.
@@ -141,53 +124,55 @@ function render(context: PageContext): RenderElement {
     }
     if (ui.note !== null) children.push(<Text key="note">{ui.note}</Text>)
 
-    children.push(
+    // The three views open one at a time: opening one closes the others, so the page stays short.
+    const views: RenderElement[] = []
+    views.push(
       <Box key="actions" flexDirection="row" gap={2}>
-        {quiet('summary', ui.summary ? COPY['compaction.summary.hide'] : COPY['compaction.summary'], () => patch({ summary: !ui.summary }))}
-        {quiet('list', ui.list ? COPY['compaction.list.hide'] : COPY['compaction.list'], () => patch({ list: !ui.list }))}
-        {quiet('earlier', ui.earlier ? COPY['compaction.earlier.hide'] : COPY['compaction.earlier'], () => patch({ earlier: !ui.earlier }))}
+        {quiet('summary', ui.summary ? COPY['compaction.summary.hide'] : COPY['compaction.summary'], () => patch({ summary: !ui.summary, list: false, earlier: false }))}
+        {quiet('list', ui.list ? COPY['compaction.list.hide'] : COPY['compaction.list'], () => patch({ list: !ui.list, summary: false, earlier: false }))}
+        {quiet('earlier', ui.earlier ? COPY['compaction.earlier.hide'] : COPY['compaction.earlier'], () => patch({ earlier: !ui.earlier, summary: false, list: false }))}
       </Box>,
     )
 
     if (ui.summary) {
       const { Markdown } = table
-      children.push(after.summary === '' ? <Text key="summary-none" dimColor>{COPY['compaction.summary.none']}</Text> : <Markdown key="summary" text={after.summary} />)
+      views.push(after.summary === '' ? <Text key="summary-none" dimColor>{COPY['compaction.summary.none']}</Text> : <Markdown key="summary" text={after.summary} />)
     }
 
     if (ui.list) {
-      children.push(heading(table, 'list-title', COPY['compaction.list']))
+      views.push(heading(table, 'list-title', COPY['compaction.list']))
       if (!after.judged) {
-        children.push(
+        views.push(
           <Text key="quick" dimColor>
             {COPY['compaction.quick']}
           </Text>,
         )
       }
-      if (after.items.length === 0) children.push(<Text key="list-none">{COPY['compaction.none']}</Text>)
+      if (after.items.length === 0) views.push(<Text key="list-none">{COPY['compaction.none']}</Text>)
       // The mark's word comes first, so a long item can never push it into a column that wraps.
       for (const item of after.items.filter(one => !one.safe)) {
         const mark = after.marks[item.id] ?? 'found'
-        children.push(
+        views.push(
           <Text key={`item:${item.id}`} dimColor={mark === 'found'}>
             {`${MARK_SYMBOL[mark]} ${markWord(mark)} · ${trim(item.text, LABEL_CHARS)}`}
           </Text>,
         )
       }
       const safe = after.items.filter(one => one.safe).length
-      if (safe > 0) children.push(<Text key="list-safe" dimColor>{fill(COPY['compaction.safe.anyway'], { count: safe })}</Text>)
+      if (safe > 0) views.push(<Text key="list-safe" dimColor>{fill(COPY['compaction.safe.anyway'], { count: safe })}</Text>)
     }
 
     if (ui.earlier) {
-      children.push(
+      views.push(
         heading(table, 'earlier-title', COPY['compaction.earlier']),
         <Text key="earlier-headline" dimColor>
           {after.earlier.length === 0 ? COPY['compaction.earlier.none'] : COPY['compaction.earlier.headline']}
         </Text>,
       )
       for (const one of after.earlier.slice(0, EARLIER_SHOWN)) {
-        children.push(
+        views.push(
           <Box key={`earlier-row:${one.id}`} flexDirection="row" justifyContent="space-between" gap={2} width={ROW_CELLS}>
-            <Box flexShrink={1}>
+            <Box flexShrink={1} minWidth={0}>
               <Text dimColor wrap="truncate">
                 {trim(one.text, LABEL_CHARS)}
               </Text>
@@ -197,6 +182,8 @@ function render(context: PageContext): RenderElement {
         )
       }
     }
+
+    sections.push(<Box key="views" flexDirection="column">{views as never}</Box>)
 
     if (view.detailed) {
       const judgeable = after.items.filter(item => !item.safe)
@@ -223,36 +210,31 @@ function render(context: PageContext): RenderElement {
             ui: { ...was.ui, busy: false, note },
           }))
         }
-        children.push(
+        sections.push(
           <Box key="haiku" flexDirection="column">
             {quiet('haiku-check', COPY['compaction.haiku'], ask)}
-            <Box paddingLeft={4}>
-              <Text dimColor>{fill(COPY['compaction.haiku.detail'], { tokens: formatTokens(Math.ceil(prompt.length / CHARS_PER_TOKEN)) })}</Text>
-            </Box>
+            <Text dimColor>{fill(COPY['compaction.haiku.detail'], { tokens: formatTokens(Math.ceil(prompt.length / CHARS_PER_TOKEN)) })}</Text>
           </Box>,
         )
       }
 
-      children.push(heading(table, 'history-title', COPY['compaction.history']))
+      const history: RenderElement[] = [heading(table, 'history-title', COPY['compaction.history'])]
       for (const row of [...review.history].reverse()) {
         const checked = row.kept + row.missing > 0 ? fill(COPY['compaction.history.checked'], { kept: row.kept, missing: row.missing }) : ''
         const size = (tokens: number | null) => (tokens === null ? COPY['compaction.history.unknown'] : formatTokens(tokens))
         const figure = fill(COPY['compaction.history.figure'], { before: size(row.before), after: size(row.after) })
-        children.push(figureRow(table, `history:${row.ts}`, joinParts([localTime(row.ts), trigger(row), checked]), figure))
+        history.push(figureRow(table, `history:${row.ts}`, joinParts([localTime(row.ts), trigger(row), checked]), figure))
       }
-      const link = dashboardAddress(view.settings.dashboardUrl)
-      if (link !== null) {
-        const { Link } = table
-        children.push(
-          <Box key="dashboard" flexDirection="row" gap={2}>
-            <Link key="dashboard-link" href={linkTarget(link)} label={COPY['compaction.dashboard']} />
-            <Button key="dashboard-copy" label={context.state.copied === 'compactions-link' ? COPY['pane.copied'] : COPY['compaction.dashboard.link']} dimColor onPress={press => context.copy(link, press.surface, 'compactions-link')} />
-          </Box>,
-        )
-      }
-      children.push(options(), <Box key="to-before">{quiet('to-before', COPY['compaction.before'], () => patch({ view: 'before', note: null }))}</Box>)
+      sections.push(<Box key="history" flexDirection="column">{history as never}</Box>, <Box key="to-before">{quiet('to-before', COPY['compaction.before'], () => patch({ view: 'before', note: null }))}</Box>)
     }
-    return <Box flexDirection="column">{children as never}</Box>
+    return (
+      <Box flexDirection="column" gap={1}>
+        <Box key="answer" flexDirection="column">
+          {children as never}
+        </Box>
+        {sections as never}
+      </Box>
+    )
   }
 
   // Before a summary: what it should keep, as ticks.
@@ -283,12 +265,12 @@ function render(context: PageContext): RenderElement {
       </Box>
     )
   }
-  for (const item of suggested) children.push(tick(item, true))
-  if (ui.list) for (const item of more) children.push(tick(item, false))
+  const ticks: RenderElement[] = [...suggested.map(item => tick(item, true)), ...(ui.list ? more.map(item => tick(item, false)) : [])]
+  if (ticks.length > 0) sections.push(<Box key="ticks" flexDirection="column">{ticks as never}</Box>)
 
   if (!nothing) {
     const command = compactKeep(chosen, COPY['compaction.keep'], KEEP_MAX, LABELS)
-    children.push(
+    sections.push(
       <Box key="action" flexDirection="row">
         <Button
           key="use"
@@ -301,22 +283,28 @@ function render(context: PageContext): RenderElement {
       </Box>,
     )
   }
-  if (ui.note !== null) children.push(<Text key="note">{ui.note}</Text>)
+  if (ui.note !== null) sections.push(<Text key="note">{ui.note}</Text>)
 
   const row: RenderElement[] = []
   if (more.length > 0) row.push(quiet('more', ui.list ? COPY['compaction.fewer'] : fill(COPY['compaction.list.more'], { count: more.length }), () => patch({ list: !ui.list })))
   if (after !== null) row.push(quiet('to-after', COPY['compaction.back'], () => patch({ view: 'after', note: null })))
   if (row.length > 0) {
-    children.push(
+    sections.push(
       <Box key="actions" flexDirection="row" gap={2}>
         {row as never}
       </Box>,
     )
   }
-  if (view.detailed) children.push(options())
-  return <Box flexDirection="column">{children as never}</Box>
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Box key="answer" flexDirection="column">
+        {children as never}
+      </Box>
+      {sections as never}
+    </Box>
+  )
 }
 
 export const register: Register = () => {
-  addPage({ id: 'compaction', hotkey: 'k', labelKey: 'pane.compaction', render: context => render(context) })
+  addPage({ id: 'compaction', hotkey: 'k', labelKey: 'pane.compaction', render: context => render(context), dashboard: view => dashboardAddress(view.settings.dashboardUrl) })
 }

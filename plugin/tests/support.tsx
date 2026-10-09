@@ -22,6 +22,8 @@ export type Step = {
   output: number
   model?: string
   tools?: string[]
+  /** What each named tool was called with (an empty input when left out). */
+  inputs?: Record<string, Record<string, unknown>>
 }
 
 /** One MCP tool of Claude Code's breakdown: its tokens and whether it is in the prompt are 100 and true when a test leaves them out. */
@@ -60,6 +62,8 @@ export type World = {
   stale: number | null
   /** False: session.usage reports no breakdown. */
   breakdown: boolean
+  /** The surfaces session.surfaces reports; the session's own surface is the first (terminal when a test leaves it out). */
+  surfaces: string[]
 }
 
 /** The coaching block of a settings file written for a user who turned coaching and the rating reminder on. */
@@ -120,13 +124,13 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
   mock.env(on, { CLAUDE_CONFIG_DIR: '/cfg' })
   const files = new Map<string, string>()
   if (options.settings !== null) files.set(`${CONFIG}/claudeglass/mod/settings.json`, options.settings ?? settingsFile())
-  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {}, root: '/work/project', session: options.session ?? SESSION, listed: 0, stale: null, breakdown: true }
+  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {}, root: '/work/project', session: options.session ?? SESSION, listed: 0, stale: null, breakdown: true, surfaces: ['terminal'] }
   let current = usageFor(0, 0)
   world.figures = (tokens, usd) => {
     current = usageFor(tokens, usd, world.shape)
   }
   on('session.id', () => ({ value: world.session }) as never)
-  on('session.surfaces', () => ({ value: ['terminal'] }) as never)
+  on('session.surfaces', () => ({ value: world.surfaces }) as never)
   on('session.messages', () => ({ value: world.transcript }) as never)
   on('session.usage', () => {
     const context = { ...current.context, ...(world.stale === null ? {} : { tokens: world.stale }) }
@@ -183,7 +187,7 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
       turnId: e.turnId,
       index: e.index,
       answer: '',
-      toolUses: tools.map(name => ({ id: name, name, input: {} })),
+      toolUses: tools.map(name => ({ id: name, name, input: usage.inputs?.[name] ?? {} })),
       stopReason: 'end_turn',
       usage: { model: usage.model ?? 'claude-sonnet-4-6', input_tokens: usage.input ?? 0, output_tokens: usage.output, cache_read_input_tokens: usage.cacheRead, cache_creation_input_tokens: usage.cacheWrite },
     } as never

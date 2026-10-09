@@ -38,6 +38,28 @@ export function nameOf(agent: GlassAgent): string {
   return agentLabel(agent.type, agent.desc)
 }
 
+/** What the Agents page calls a row: the task it was given ("Implement the export"), or its type when it has no description. */
+export function taskName(agent: GlassAgent): string {
+  const task = agent.desc.trim()
+  return task !== '' ? task : nameOf(agent)
+}
+
+/**
+ * The tools an agent called, most called first and at most `max`, as `name ×count`; an MCP tool's own name says nothing,
+ * so every one of them is counted together as "MCP tool". Ends with "…" when more were left out.
+ */
+export function toolsLine(agent: GlassAgent, max: number): string {
+  const counts = new Map<string, number>()
+  for (const [name, count] of Object.entries(agent.tools)) {
+    const shown = name.startsWith('mcp__') ? COPY['tool.mcp'] : name
+    counts.set(shown, (counts.get(shown) ?? 0) + count)
+  }
+  const sorted = [...counts.entries()].sort((a, b) => b[1] - a[1])
+  const parts = sorted.slice(0, max).map(([name, count]) => fill(COPY['agents.tool'], { name, count }))
+  if (sorted.length > max) parts.push('…')
+  return parts.join(' · ')
+}
+
 export function modelName(agent: GlassAgent): string {
   return shortModel(agent.model)
 }
@@ -67,11 +89,6 @@ export function rowLine(agent: GlassAgent, settings: GlassSettings, detailed: bo
 export function cacheShare(agent: GlassAgent): number | null {
   const total = agent.input + agent.cacheRead + agent.cacheWrite
   return total > 0 ? Math.round((agent.cacheRead / total) * 100) : null
-}
-
-/** The desktop opens http links only for localhost, so the dashboard's loopback address is written that way for the Link. */
-export function linkTarget(link: string): string {
-  return link.replace(/^http:\/\/127\.0\.0\.1(?=[:/])/, 'http://localhost')
 }
 
 /** Where the dashboard lists subagent runs, or null when its address isn't known. */

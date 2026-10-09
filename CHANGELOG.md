@@ -61,7 +61,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Agents tab and agent rows.** Each agent shows its model, what it is
   doing in plain words and its cost, running first. The line also sits under
   the Agent call in the conversation, with the report re-read and run too big
-  notes. A row's Details button shows its task prompt, tools and biggest results.
+  notes. A row's second line in Detailed shows its type, figures and tools.
 - **A compaction review.** The mod keeps a list of what you said, decided and
   changed, plus pins from `/glass pin`. It checks the list against each
   conversation summary. The Compaction tab says when Claude summarised and
@@ -80,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The settings file the mod reads, `mod/settings.json`, is written by
   `update --finish` and kept fresh by the dashboard's service.
 - **The mod's Startup tab breaks the tools down.** Built-in tools are a row under You control. Detailed lists each one and each MCP server's largest tools with their sizes, and says how to drop a built-in tool you never use.
+- **The `/glass` pages are easier to read.** Rows keep their figures in line, sections have a gap, and the Settings button gathers the three switches in one place. The footer's dashboard link follows the page. Now shows a colour key, spend as shares that add up to 100 and what the heaviest calls did. The session total is a share of the 5-hour limit only if the session began in the current window and the share is under 100%. Agents rows are named by task. Compaction opens one view at a time. Startup collapses tools that load only when asked for and lists the ten largest tools. On the Desktop it counts the app's own servers under Claude Code's own. It advises on a built-in tool Claude hasn't used.
 - **The dashboard lists every tool a session starts with.** Agents & context → Context has a table of each built-in tool and MCP server, its size at the start and how often sessions used it. On Subagents, the chart's tool definitions name their three largest.
 
 ### Fixed

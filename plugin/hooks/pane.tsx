@@ -5,6 +5,7 @@ import type { GlassPin, GlassReview } from '../types'
 import { emptyReview, sound } from './compaction-memory'
 import { COPY, GLOSSARY } from './generated/copy.js'
 import { emptySnap } from './live'
+import { heading } from './rows'
 import { drawView } from './view'
 import type { View } from './view'
 
@@ -13,6 +14,9 @@ import type { View } from './view'
 // whichever is selected. The selected page and the detailed view persist in $.store.
 // Hotkeys go on the page bar and on each page's one main action; every other
 // control is a quiet Button the focus ring still reaches, and rows are text.
+// The footer's dashboard link is the page's own (its `dashboard`), and Detailed's
+// Settings button opens the three on/off options under whichever page is open:
+// no page holds an option of its own.
 
 // Claude Code reads a state reference only where its literal is written, so each file that
 // reads one declares it (the contract is types/index.d.ts).
@@ -31,6 +35,7 @@ export const PANE_ID = 'glass'
 export type PaneInput = RenderInput<'Pane'>
 
 export type PageState = {
+  /** What the pane has open under the page: "settings" while the Settings view is shown. */
   explain: string | null
   help: boolean
   /** The key of the copy button pressed a moment ago, so only that one says it copied. */
@@ -39,7 +44,8 @@ export type PageState = {
 
 /**
  * What a page can do beyond drawing, spelled out here because Claude Code follows
- * `$` only within the file that holds it. The compaction page uses these.
+ * `$` only within the file that holds it. The compaction page uses these; the pane's
+ * Settings view uses `setOption`.
  */
 export type PageKit = {
   /** Puts `text` in the prompt box as the person's draft; false when the box can't take it. */
@@ -72,15 +78,11 @@ export type PageContext = {
   table: Elements[keyof Elements]
   view: View
   state: PageState
-  /** Opens or closes the explanation under a row. */
-  explain: (key: string) => void
   /** Copies `text` to the surface the press came from. */
   copy: (text: string, surface: PaneInput['surface'], key: string) => void
   /** The pins, and the compaction review as the page was drawn. */
   pins: GlassPin[]
   review: GlassReview
-  /** The opt-ins: the compaction review's two, and the guard before a costly send (draft.ts). */
-  options: { hold: boolean; readd: boolean; guard: boolean }
   kit: PageKit
 }
 
@@ -95,6 +97,11 @@ export type GlassPage = {
   labelKey: CopyKey
   /** The page's body; the pane adds the page bar and the footer around it. */
   render: (context: PageContext) => RenderElement | Promise<RenderElement>
+  /**
+   * Where the dashboard shows what this page is about (the footer's "Open in dashboard" and "Copy link" go
+   * there), or null when its address isn't known. A page that leaves it out gets the session.
+   */
+  dashboard?: (view: View) => string | null
 }
 
 const pages: GlassPage[] = []
@@ -117,6 +124,8 @@ export const OPEN_ARGS: PaneOpenArgs = { id: PANE_ID, title: COPY['pane.title'],
 async function toggleDetailed($: EngineInterface): Promise<boolean> {
   const next = !(await read($, detailedAtom))
   await update($, detailedAtom, () => next)
+  // The Settings view belongs to Detailed: leaving Detailed puts it away, so it doesn't come back unasked.
+  if (!next) await update($, explainAtom, () => null)
   try {
     await $.store.set('detailed', next)
   } catch {
@@ -127,13 +136,26 @@ async function toggleDetailed($: EngineInterface): Promise<boolean> {
 
 async function selectPage($: EngineInterface, id: string): Promise<void> {
   await update($, pageAtom, () => id)
-  await update($, explainAtom, () => null)
   await update($, helpAtom, () => false)
   try {
     await $.store.set('page', id)
   } catch {
     // The page still holds for this session.
   }
+}
+
+/** Opens the Settings view under the page, or closes it; opening it puts the meanings away. */
+async function toggleSettings($: EngineInterface): Promise<void> {
+  const open = (await read($, explainAtom)) === 'settings'
+  await update($, explainAtom, () => (open ? null : 'settings'))
+  if (!open) await update($, helpAtom, () => false)
+}
+
+/** Opens the meanings, or puts them away; opening them puts the Settings view away, so it isn't waiting when they close. */
+async function toggleHelp($: EngineInterface): Promise<void> {
+  const open = await read($, helpAtom)
+  await update($, helpAtom, () => !open)
+  if (!open) await update($, explainAtom, () => null)
 }
 
 /** Marks the copy button `key` as copied for a few seconds after a copy. */
@@ -235,17 +257,23 @@ export const register: Register = on => {
     const context: PageContext = {
       pins: await read($, pinsAtom),
       review: sound(await read($, reviewAtom)),
-      options: { hold: (await $.store.get('hold')) === true, readd: (await $.store.get('readd')) === true, guard: (await $.store.get('guard')) === true },
       kit,
       e,
       table,
       view,
       state,
-      explain: key => void update($, explainAtom, was => (was === key ? null : key)),
       copy: (text, surface, key) => void copyText($, text, surface, key),
     }
     const body = page === undefined ? null : state.help ? null : await page.render(context)
-    const link = dashboardLink(view)
+    const link = (page?.dashboard ?? dashboardLink)(view)
+    // The three on/off options, in one place: each a toggle with its one-line detail directly under it.
+    const settingsOpen = view.detailed && !state.help && state.explain === 'settings'
+    const stored = { guard: (await $.store.get('guard')) === true, hold: (await $.store.get('hold')) === true, readd: (await $.store.get('readd')) === true }
+    const options = [
+      { id: 'guard', label: COPY['guard.opt'], detail: COPY['guard.opt.detail'], on: stored.guard, words: [COPY['guard.opt.on'], COPY['guard.opt.off']] },
+      { id: 'hold', label: COPY['compaction.opt.hold'], detail: COPY['compaction.opt.hold.detail'], on: stored.hold, words: [COPY['compaction.on'], COPY['compaction.off']] },
+      { id: 'readd', label: COPY['compaction.opt.readd'], detail: COPY['compaction.opt.readd.detail'], on: stored.readd, words: [COPY['compaction.on'], COPY['compaction.off']] },
+    ]
 
     return (
       <Box flexDirection="column" gap={1}>
@@ -273,6 +301,17 @@ export const register: Register = on => {
         ) : (
           body
         )}
+        {settingsOpen ? (
+          <Box key="settings" flexDirection="column">
+            {heading(table, 'settings-title', COPY['pane.settings'])}
+            {options.map(one => (
+              <Box key={one.id} flexDirection="column">
+                <Button key={`opt:${one.id}`} label={`${one.label}: ${one.on ? one.words[0] : one.words[1]}`} dimColor onPress={() => void kit.setOption(one.id, !one.on)} />
+                <Text dimColor>{one.detail}</Text>
+              </Box>
+            ))}
+          </Box>
+        ) : null}
         {/* Quiet controls every page shares: no hotkeys, which belong to the pages and each page's one main action. */}
         <Box flexDirection="row" gap={2} alignItems="center">
           <Button key="more" label={view.detailed ? COPY['pane.less'] : COPY['pane.more']} dimColor onPress={() => void toggleDetailed($)} />
@@ -280,7 +319,8 @@ export const register: Register = on => {
           {link !== null ? (
             <Button key="link" label={state.copied === 'link' ? COPY['pane.copied'] : COPY['pane.link']} dimColor onPress={press => void copyText($, link, press.surface, 'link')} />
           ) : null}
-          <Button key="help" label={state.help ? COPY['pane.help.hide'] : COPY['pane.help']} dimColor onPress={() => void update($, helpAtom, shown => !shown)} />
+          {view.detailed ? <Button key="settings" label={settingsOpen ? COPY['pane.settings.hide'] : COPY['pane.settings']} dimColor onPress={() => void toggleSettings($)} /> : null}
+          <Button key="help" label={state.help ? COPY['pane.help.hide'] : COPY['pane.help']} dimColor onPress={() => void toggleHelp($)} />
         </Box>
       </Box>
     )

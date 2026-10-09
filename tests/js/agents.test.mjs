@@ -22,8 +22,6 @@ const {
   agentLabel,
   sortAgents,
   agentShare,
-  promptHead,
-  addBiggest,
   kText,
   reportReread,
   splitCounts,
@@ -110,24 +108,6 @@ test("agentShare is a whole percent, 0 while the session's cost is unknown, neve
   assert.equal(agentShare(1, null), 0);
   assert.equal(agentShare(1, Number.NaN), 0);
   assert.equal(agentShare(-1, 1), 0);
-});
-
-test("promptHead keeps the first lines, with line endings made plain and trailing space dropped", () => {
-  const text = Array.from({ length: 20 }, (_, i) => `line ${i + 1}`).join("\r\n");
-  const head = promptHead(text);
-  assert.equal(head.split("\n").length, 12);
-  assert.ok(head.startsWith("line 1\nline 2"));
-  assert.ok(!head.includes("\r"));
-  assert.equal(promptHead("a\nb\nc", 2), "a\nb");
-  assert.equal(promptHead("trailing  \n\n"), "trailing");
-  assert.equal(promptHead(null), "");
-});
-
-test("addBiggest keeps the largest, biggest first", () => {
-  let list = [];
-  for (const [name, tokens] of [["a", 5], ["b", 50], ["c", 20], ["d", 70], ["e", 1], ["f", 30]]) list = addBiggest(list, { name, tokens }, 3);
-  assert.deepEqual(list.map((item) => item.name), ["d", "b", "f"]);
-  assert.equal(addBiggest([], { name: "x", tokens: 1 }).length, 1);
 });
 
 test("kText rounds half to even, as Python's round() does, and groups thousands", () => {

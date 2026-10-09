@@ -24,6 +24,8 @@
  * ever held in memory by the caller.
  */
 
+import { commandLabel } from "./command.js";
+
 /**
  * @typedef {Object} ToolUseLike
  * @property {string} [tool]
@@ -431,6 +433,18 @@ function failureLine(text) {
 }
 
 /**
+ * What to call a failed shell command: the call's own description when it has one ("Validate the plugin"), else the
+ * command without the setup it starts with (leading `VAR=value` assignments and `cd dir &&` steps, see lib/command.js),
+ * else the tool's name.
+ * @param {ToolUseLike} use
+ * @returns {string}
+ */
+function commandName(use) {
+  var label = commandLabel(use.input);
+  return label !== "" ? label : String(use.tool);
+}
+
+/**
  * The last shell command that failed and was not later run again with success. Only a shell command's failure
  * counts, whatever its output looks like: another tool's error, or a call the user or a permission rule refused,
  * is not something the user ran.
@@ -448,9 +462,9 @@ function lastError(messages) {
       if (use.isError === true) {
         if (SHELL_TOOLS.indexOf(String(use.tool)) < 0 || isRefusal(use.text || "")) continue;
         if (later.has(key)) continue;
-        var command = use.input && typeof use.input.command === "string" ? squash(use.input.command) : String(use.tool);
+        var command = commandName(use);
         var detail = failureLine(use.text || "");
-        var text = detail !== "" ? trimText(command, 50) + " — " + detail : command;
+        var text = detail !== "" ? trimText(command, 50) + " failed: " + detail : command + " failed";
         var item = make("error", text, i, exactTokens(detail));
         if (item.exact.length === 0 && /\w+::\w+/.test(detail)) item.exact = [(detail.match(/[\w/.-]+::\w+/) || [detail])[0]];
         return item;

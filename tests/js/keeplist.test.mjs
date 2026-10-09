@@ -262,3 +262,17 @@ test("files in temp or scratch places and plan files are left out; a project fil
   const long = "/" + "deep/".repeat(30) + "a/b/c.ts";
   assert.equal(names([long], "/work/proj")[0], "…/a/b/c.ts");
 });
+
+test("a failed shell command is named by its description, else by the command without its set-up, then ` failed: ` and the failing line", () => {
+  const call = (input, text = "Exit code 2") => ({ role: "assistant", text: "", toolUses: [{ tool: "Bash", input, isError: true, text }] });
+  const errors = (messages) => kinds(buildKeepList(messages), "error");
+  // The description names it.
+  assert.equal(errors([call({ description: "Validate the plugin", command: "T=/c/x ; cd /y && validate" })])[0].text, "Validate the plugin failed: Exit code 2");
+  // Without one: leading assignments and `cd dir &&` steps are dropped.
+  assert.equal(errors([call({ command: "T=/c/Dev/claude-token-lens/plugin/.claude-plugin ; CC=/c/cc/claude.exe \ncd /c/Dev/app && npm test" })])[0].text, "npm test failed: Exit code 2");
+  assert.equal(errors([call({ command: "NODE_ENV=test npm run build" })])[0].text, "npm run build failed: Exit code 2");
+  // A command that is only set-up keeps itself; no failing line says just that it failed.
+  assert.equal(errors([call({ command: "cd /w && " }, "")])[0].text.endsWith(" failed"), true);
+  // The exact token still comes from the failing line.
+  assert.deepEqual(errors([call({ command: "pytest" }, "FAILED tests/a.py::test_x - AssertionError")])[0].exact, ["tests/a.py"]);
+});

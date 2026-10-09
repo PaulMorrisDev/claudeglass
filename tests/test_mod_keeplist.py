@@ -46,4 +46,4 @@ def test_the_libs_import_only_each_other() -> None:
             if not line.lstrip().startswith(("*", "/*", "//")):
                 assert "import(" not in line, line
             if line.startswith("import "):
-                assert line.rstrip(";").endswith('"./keeplist.js"') or line.rstrip(";").endswith('"./coverage.js"'), line
+                assert line.rstrip(";").endswith(('"./keeplist.js"', '"./coverage.js"', '"./command.js"')), line

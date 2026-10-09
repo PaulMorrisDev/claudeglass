@@ -5,9 +5,8 @@ import type { GlassAgent, GlassSettings, GlassSnap } from '../types'
 import { COPY } from './generated/copy.js'
 import { HOW, SKIP_AGENT_TYPES, SPLIT_WHY, THRESHOLDS, TIPS } from './generated/coaching.js'
 import type { Io } from './io'
-import { activityOf, addBiggest, addSplit, newSplit, promptHead, reportReread, splitCounts, splitRun } from './lib/agents.js'
+import { activityOf, addSplit, newSplit, reportReread, splitCounts, splitRun } from './lib/agents.js'
 import type { Decision, Split } from './lib/agents.js'
-import { toolGrowth } from './lib/context.js'
 import { priceUsage, ratesFor } from './lib/pricing.js'
 import { mayShow, noteAllowed, recordShown } from './lib/rest.js'
 import type { RestThresholds } from './lib/rest.js'
@@ -52,13 +51,9 @@ const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, f
 // on one event.
 //
 // The writes go through live.ts's touch(), which puts the snapshot in $.state
-// at most four times a second whatever the number of agents. The task prompt
-// is kept here in memory, never in $.state.
+// at most four times a second whatever the number of agents.
 
 const MAX_ROWS = 40
-const MAX_BIGGEST = 5
-/** The lines of a task prompt kept for the details view. */
-const PROMPT_LINES = 12
 
 /** How often the engine's list of agents is asked while one is running. */
 const POLL_MS = 10000
@@ -73,7 +68,6 @@ const WORKFLOW_IDLE_MS = 30 * 60 * 1000
 /** How long the events of an agentId no spawn has named are held before they are dropped. */
 const UNCLAIMED_MS = 5000
 
-const prompts = new Map<string, string>()
 /** Rows of agentIds that have raised events but no spawn (yet); not in the snapshot. */
 const unclaimed = new Map<string, GlassAgent>()
 let pendingSplit: Split = newSplit()
@@ -84,15 +78,9 @@ function stopPolling(): void {
   polling = null
 }
 
-/** The first lines of an agent's task prompt, if this module still holds them (a reload empties it). */
-export function promptOf(id: string): string | null {
-  return prompts.get(id) ?? null
-}
-
-/** Forgets the prompts and the runs waiting to be told (a new session, or a test). */
+/** Forgets the runs waiting to be told (a new session, or a test). */
 export function forgetAgents(): void {
   stopPolling()
-  prompts.clear()
   unclaimed.clear()
   pendingSplit = newSplit()
 }
@@ -161,10 +149,6 @@ function blank(id: string, now: number): GlassAgent {
     calls: 0,
     tools: {},
     activity: 'working',
-    lastCtx: 0,
-    lastOutput: 0,
-    lastTools: [],
-    heaviest: [],
     briefChars: 0,
     compactions: 0,
     notes: [],
@@ -207,7 +191,6 @@ function claim(snap: GlassSnap, id: string, now: number): GlassAgent {
     if (snap.agents.length > MAX_ROWS) {
       const old = snap.agents.findIndex(one => one.status !== 'running')
       if (old >= 0) {
-        prompts.delete(snap.agents[old]?.id ?? '')
         snap.agents.splice(old, 1)
       }
     }
@@ -349,7 +332,7 @@ function startPolling($: EngineInterface): void {
 }
 
 export const register: Register = on => {
-  // A /clear: the prompts, the runs waiting to be told and the held events are the cleared conversation's.
+  // A /clear: the runs waiting to be told and the held events are the cleared conversation's.
   onClear(forgetAgents)
 
   // The spawn: what started the run, and the agentId its events will carry.
@@ -374,7 +357,6 @@ export const register: Register = on => {
       row.briefChars = e.prompt.length
       if (e.workflow !== undefined) row.workflow = { runId: e.workflow.runId, call: e.tool_use_id }
       row.seenAt = now
-      prompts.set(row.id, promptHead(e.prompt, PROMPT_LINES))
       // Told on the row of the launch: an agent the main session started in the background, while it holds a lot.
       if (e.workflow === undefined && e.parentAgentId === undefined && e.isTeammate === undefined) {
         const text = tell(snap, settings, reportReread({ background: e.background, ctx: mainContext(snap), th: thresholds(settings) }), 'agent', now)
@@ -439,10 +421,7 @@ export const register: Register = on => {
         if (row.type === '') row.type = input.subagent_type ?? record.description ?? ''
         if (row.desc === '') row.desc = input.description ?? record.description ?? ''
         if (row.model === '' && typeof record.resolvedModel === 'string') row.model = record.resolvedModel
-        if (!prompts.has(id) && typeof input.prompt === 'string') {
-          prompts.set(id, promptHead(input.prompt, PROMPT_LINES))
-          row.briefChars = Math.max(row.briefChars, input.prompt.length)
-        }
+        if (typeof input.prompt === 'string') row.briefChars = Math.max(row.briefChars, input.prompt.length)
         if (record.status === 'async_launched') row.background = true
         if (record.status === 'completed') {
           // The call's `usage` is the run's last request alone, not its total: the row's cost stays the sum of the
@@ -474,23 +453,14 @@ export const register: Register = on => {
         const output = count(usage.output_tokens)
         const cacheRead = count(usage.cache_read_input_tokens)
         const cacheWrite = count(usage.cache_creation_input_tokens)
-        const ctx = input + cacheRead + cacheWrite
         const model = usage.model || e.model
         const tools = result.toolUses.map(use => use.name)
-        if (row.requests > 0 && row.lastTools.length > 0) {
-          const growth = toolGrowth(row.lastCtx, row.lastOutput, ctx)
-          const name = row.lastTools[0] ?? ''
-          if (growth > 0 && name !== '') row.heaviest = addBiggest(row.heaviest, { name, tokens: growth }, MAX_BIGGEST)
-        }
         row.requests += 1
         row.input += input
         row.output += output
         row.cacheRead += cacheRead
         row.cacheWrite += cacheWrite
         row.usd += priceUsage(ratesFor(settings.models, model), { input_tokens: input, output_tokens: output, cache_read_input_tokens: cacheRead, cache_creation_input_tokens: cacheWrite }, settings.ttl)
-        row.lastCtx = ctx
-        row.lastOutput = output
-        row.lastTools = tools
         if (model !== '') row.model = model
         if (tools.length > 0) row.activity = activityOf(tools[tools.length - 1] ?? null)
         if (row.status !== 'running') {

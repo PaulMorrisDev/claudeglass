@@ -93,6 +93,9 @@ async function turnOn($: Dollar, key: 'hold' | 'readd'): Promise<void> {
     await mounted.press({ key: 'page:compaction' } as never)
   }
   expect(showsPage(await mounted.drawn(), 'Compaction')).toBe(true)
+  // The options are on the pane's Settings view, not on this page.
+  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/Hold auto-compact|Re-add pins/)
+  await mounted.press({ key: 'settings' } as never)
   await mounted.press({ key: `opt:${key}` } as never)
   expect(lines(await mounted.drawn()).join('\n')).toMatch(key === 'hold' ? /Hold auto-compact for review: On/ : /Re-add pins after compaction: On/)
   await mounted.unmount()
@@ -279,7 +282,9 @@ test('the summary, the full list with marks, the earlier messages and the histor
   const md = await mounted.find({ type: 'Markdown' })
   expect(String(md?.props.text)).toMatch(/option B/)
 
+  // Opening the list closes the summary: one view at a time.
   await mounted.press({ key: 'list' } as never)
+  expect(await mounted.find({ type: 'Markdown' })).toBeUndefined()
   const text = lines(await mounted.drawn()).join('\n')
   expect(text).toMatch(/Quick check \(est\.\)/)
   // The mark's word comes first on one line, so it can never wrap into a column of its own.
@@ -294,6 +299,11 @@ test('the summary, the full list with marks, the earlier messages and the histor
   expect(open.find(one => one.key === 'list')?.label).toBe('Hide the list')
 
   await mounted.press({ key: 'earlier' } as never)
+  // ... and opening the earlier messages closes the list.
+  const afterEarlier = buttons(await mounted.drawn())
+  expect(afterEarlier.find(one => one.key === 'list')?.label).toBe('Everything checked')
+  expect(afterEarlier.find(one => one.key === 'earlier')?.label).toBe('Hide earlier messages')
+  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/✗ not in the summary/)
   const earlier = buttons(await mounted.drawn()).filter(one => one.key.startsWith('earlier:'))
   expect(earlier.length).toBe(2)
   expect(earlier.every(one => one.label === 'Use this' && one.hotkey === undefined)).toBe(true)
@@ -305,18 +315,19 @@ test('the summary, the full list with marks, the earlier messages and the histor
   expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/Hold auto-compact/)
   await mounted.unmount()
 
-  // Detailed adds the history, the dashboard link with a copy button, and the options.
+  // Detailed adds the history. The options and the dashboard link are not on the page: the footer has the link and Settings the options.
   await $.command.run({ command: 'glass', args: 'detail' } as never)
   const detailed = await pane($)
   const more = lines(await detailed.drawn()).join('\n')
   expect(more).toMatch(/you ran \/compact|on its own/)
   expect(more).toMatch(/150k to 30k/)
-  expect(more).toMatch(/Hold auto-compact for review: Off/)
-  expect(more).toMatch(/Re-add pins after compaction: Off/)
+  expect(more).not.toMatch(/Hold auto-compact|Re-add pins/)
   expect(more).toMatch(/Choose what to keep next time/)
-  const link = await detailed.find({ type: 'Link' })
-  expect(String(link?.props.href)).toBe('http://localhost:8792/#/spend/usage?t=compactions.compactions_summary')
-  await detailed.press({ key: 'dashboard-copy' } as never)
+  const links = elements(await detailed.drawn()).filter(one => one.type === 'Link')
+  expect(links).toHaveLength(1)
+  expect(String(links[0]?.props.href)).toBe('http://localhost:8792/#/spend/usage?t=compactions.compactions_summary')
+  expect(buttons(await detailed.drawn()).some(one => one.key === 'dashboard-copy')).toBe(false)
+  await detailed.press({ key: 'link' } as never)
   expect(world.copied.at(-1)).toBe('http://127.0.0.1:8792/#/spend/usage?t=compactions.compactions_summary')
   // Nothing on this page but the page bar and the one main action has a hotkey, and no two are alike.
   const drawn = buttons(await detailed.drawn())

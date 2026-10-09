@@ -10,7 +10,7 @@ import { beat, keepBeating, leave } from './heartbeat'
 import type { Io } from './io'
 import { emptySnap, emptyTurn, flags, flushNow, forget, live, restart, touch } from './live'
 import { cacheState } from './lib/cache.js'
-import { readContext, toolGrowth } from './lib/context.js'
+import { readContext, toolGrowth, toolWhat } from './lib/context.js'
 import { priceUsage, ratesFor } from './lib/pricing.js'
 import { detectRebuild } from './lib/rebuild.js'
 import { addEvent, announcePresent, isSurface, seconds, settleAfterReply, settleAtEnd, writeSensor } from './sensor'
@@ -33,6 +33,8 @@ const MAX_REPLIES = 100
 const MAX_REPLY_COSTS = 40
 const MAX_COMPACTIONS = 20
 const MAX_HEAVIEST = 5
+/** The most tool names kept as called this session (a session calls a few dozen at most). */
+const MAX_TOOLS_USED = 200
 /** A wait this long after a request that hit the usage limit counts as the limit's pause. */
 const LIMIT_PAUSE_MS = 60 * 1000
 /** A tool result this big is worth a note, for the tools whose output Claude isn't already coached on. */
@@ -266,7 +268,7 @@ async function recordRequest(
   settings: GlassSettings,
   step: { index: number; messageCount: number; model: string },
   usage: TurnUsage,
-  tools: string[],
+  uses: readonly { name: string; input: unknown }[],
   now: number,
 ): Promise<void> {
   const input = count(usage.input_tokens)
@@ -274,6 +276,9 @@ async function recordRequest(
   const cacheRead = count(usage.cache_read_input_tokens)
   const cacheWrite = count(usage.cache_creation_input_tokens)
   const ctx = input + cacheRead + cacheWrite
+  const tools = uses.map(use => use.name)
+  // A few words on what each call did, for the heaviest items: kept in this live snapshot only, never written to disk.
+  const whats = uses.map(use => toolWhat(use.name, use.input))
   const prev = snap.reqs[snap.reqs.length - 1] ?? null
   const model = usage.model || step.model
   const first = step.index === 0 && step.messageCount <= 1 && snap.reqs.length === 0 && snap.replies === 0
@@ -281,10 +286,15 @@ async function recordRequest(
   const afterLimitWait = snap.limitHit && prev !== null && now - prev.ts >= LIMIT_PAUSE_MS
   const growth = prev !== null && step.index > 0 && !afterCompaction ? toolGrowth(prev.ctx, prev.output, ctx) : 0
 
-  const request: GlassRequest = { ts: now, ctx, input, output, cacheRead, cacheWrite, model, tools, afterCompaction, afterLimitWait, first, growth }
+  const request: GlassRequest = { ts: now, ctx, input, output, cacheRead, cacheWrite, model, tools, whats, afterCompaction, afterLimitWait, first, growth }
   if (first) {
     snap.firstCr = cacheRead
     snap.startupFirst = ctx
+    // Only a session seen from its first request has a start: a resumed one may have spent in earlier 5-hour windows.
+    snap.startedAt = snap.turnAt ?? now
+  }
+  for (const name of tools) {
+    if (!snap.toolsUsed.includes(name) && snap.toolsUsed.length < MAX_TOOLS_USED) snap.toolsUsed.push(name)
   }
 
   const rates = ratesFor(settings.models, model)
@@ -310,7 +320,8 @@ async function recordRequest(
     const noted = prev.tools.find(noteTool)
     const name = toolLabel(noted ?? prev.tools[0] ?? '')
     if (name !== '') {
-      snap.heaviest.push({ name, tokens: growth })
+      const what = prev.whats?.[prev.tools.indexOf(name)] ?? ''
+      snap.heaviest.push(what === '' ? { name, tokens: growth } : { name, tokens: growth, what })
       snap.heaviest.sort((a, b) => b.tokens - a.tokens)
       snap.heaviest.splice(MAX_HEAVIEST)
     }
@@ -465,7 +476,7 @@ export const register: Register = on => {
         const snap = await ensure($)
         const settings = await getSettings(io)
         const now = await $.clock.now()
-        await recordRequest(snap, settings, e, result.usage, result.toolUses.map(use => use.name), now)
+        await recordRequest(snap, settings, e, result.usage, result.toolUses, now)
         await touch(io)
       } catch (error) {
         $.ui.log(`claudeglass: turn.step ${String(error)}`, { to: 'debug' })

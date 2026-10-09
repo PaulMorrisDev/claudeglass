@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 
 const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks", "lib");
 const mod = await import(pathToFileURL(join(lib, "instructions.js")).href);
-const { newLedger, follow, record, addAttachment, isAttached, compacted, tokensOf, mcpServer, shortPath, entriesOf, startupChars, adviceFor, receivedClaudeMd, agentTypesOf, fitToCategories, categoryOf, serverLabel, startupGroups, isDesktopServer, toolShares, mcpShares, mcpToolLabel } = mod;
+const { newLedger, follow, record, addAttachment, isAttached, compacted, tokensOf, mcpServer, shortPath, entriesOf, startupChars, adviceFor, receivedClaudeMd, agentTypesOf, fitToCategories, categoryOf, serverLabel, startupGroups, isDesktopServer, unusedTool, bestAdvice, toolShares, mcpShares, mcpToolLabel } = mod;
 
 function item(id, kind, chars, extra = {}) {
   return { id, kind, name: id, chars, reply: 1, from: "engine", startup: true, ...extra };
@@ -277,6 +277,9 @@ test("a server is named as /mcp lists it, else from its wire name, else as a con
   const ID = "5f3a2c1e-9b4d-4e8a-8c3d-1a2b3c4d5e6f";
   assert.equal(serverLabel("github", { github: "GitHub" }, []), "GitHub");
   assert.equal(serverLabel("Claude_Browser", {}, []), "Claude Browser");
+  // /mcp echoing the wire name with underscores is no better than the words; a name /mcp really chose stays as it is.
+  assert.equal(serverLabel("Claude_Browser", { Claude_Browser: "Claude_Browser" }, []), "Claude Browser");
+  assert.equal(serverLabel("claude-in-chrome", { "claude-in-chrome": "claude-in-chrome" }, []), "claude-in-chrome");
   assert.equal(serverLabel("claude-in-chrome", undefined, undefined), "claude in chrome");
   assert.equal(serverLabel("plugin_playwright_playwright", null, []), "playwright");
   assert.equal(serverLabel("plugin_my-plugin_docs_search", {}, []), "docs search");
@@ -388,7 +391,7 @@ test("files and notes added to a message are their own row in the third group, a
 
 test("rows of no tokens are left out, and nothing loaded gives empty groups", () => {
   const empty = startupGroups([], () => 0, {});
-  assert.deepEqual(empty, { control: { tokens: 0, rows: [] }, builtin: { tokens: 0 }, later: { tokens: 0, rows: [] }, total: 0, fits: false });
+  assert.deepEqual(empty, { control: { tokens: 0, rows: [] }, builtin: { tokens: 0, items: [] }, later: { tokens: 0, rows: [] }, total: 0, fits: false });
   const only = startupGroups(entriesOf([item("a", "instructions", 4000, { path: "/w/CLAUDE.md" })]), (one) => tokensOf(one.startupChars, 4), {});
   assert.deepEqual(only.control.rows.map((row) => row.id), ["files"]);
   assert.deepEqual(only.later.rows, []);
@@ -472,4 +475,49 @@ test("nothing is matched before Claude Code counts a startup, or when no categor
   assert.equal(categoryOf({ kind: "attachment", name: "agent_listing_delta" }), "agents");
   assert.equal(categoryOf({ kind: "attachment", name: "mcp_instructions_delta" }), "mcp");
   assert.equal(categoryOf({ kind: "attachment", name: "reminder" }), "");
+});
+
+test("with a predicate for the app's servers, they count in Claude Code's own and are listed there, largest first; behind tool search they are dropped", () => {
+  const entries = entriesOf([
+    item("m1", "mcp", 40000, { server: "Claude_Browser", name: "mcp__Claude_Browser__go" }),
+    item("m2", "mcp", 8000, { server: "visualize", name: "mcp__visualize__show" }),
+    item("m3", "mcp", 20000, { server: "docs", name: "mcp__docs__q" }),
+    item("m4", "mcp", 4000, { server: "terminal", name: "mcp__terminal__run", deferred: true }),
+  ]);
+  const own = (server) => server === "Claude_Browser" || server === "visualize" || server === "terminal";
+  const sizeOf = (one) => tokensOf(one.startupChars, 4);
+  const names = {};
+  const desktop = startupGroups(entries, sizeOf, names, undefined, null, own);
+  assert.deepEqual(desktop.builtin.items.map((one) => [one.label, one.tokens]), [["Claude Browser", 10000], ["visualize", 2000]]);
+  assert.equal(desktop.builtin.tokens, 12000);
+  const mcp = desktop.control.rows.find((row) => row.id === "mcp");
+  assert.deepEqual(mcp.items.map((one) => one.label), ["docs"]);
+  assert.equal(mcp.count, 1, "the app's server behind tool search is not counted among yours");
+  // Without the predicate they stay in You control and nothing is listed under Claude Code's own.
+  const terminal = startupGroups(entries, sizeOf, names, undefined, null);
+  assert.deepEqual(terminal.builtin.items, []);
+  assert.equal(terminal.control.rows.find((row) => row.id === "mcp").count, 4);
+});
+
+test("adviceFor skips the servers the predicate says come with the app", () => {
+  const entries = entriesOf([item("m1", "mcp", 80000, { server: "Claude_Browser" })]);
+  assert.equal(adviceFor(entries, 4).name, "Claude_Browser");
+  assert.equal(adviceFor(entries, 4, undefined, undefined, (server) => server === "Claude_Browser"), null);
+});
+
+test("unusedTool is the largest built-in tool in the prompt over the limit that Claude has not called; bestAdvice takes the larger", () => {
+  const rows = [{ id: "tools", tokens: 30000, count: 4, items: [
+    { label: "Monitor", tokens: 12000, deferred: false },
+    { label: "Bash", tokens: 15000, deferred: false },
+    { label: "Skill", tokens: 3000, deferred: false },
+    { label: "Later", tokens: 0, deferred: true },
+  ] }];
+  assert.deepEqual(unusedTool(rows, []), { kind: "tool", name: "Bash", tokens: 15000 });
+  assert.deepEqual(unusedTool(rows, ["Bash"]), { kind: "tool", name: "Monitor", tokens: 12000 });
+  assert.equal(unusedTool(rows, ["Bash", "Monitor"]), null);
+  assert.equal(unusedTool(rows, [], 16000), null);
+  const server = { kind: "mcp", name: "g", tokens: 13000 };
+  assert.equal(bestAdvice(server, unusedTool(rows, [])).kind, "tool");
+  assert.equal(bestAdvice(server, unusedTool(rows, ["Bash"])).kind, "mcp");
+  assert.equal(bestAdvice(null, null), null);
 });

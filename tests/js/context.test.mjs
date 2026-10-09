@@ -14,7 +14,7 @@ const staticDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src
 const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks", "lib");
 const load = (name) => import(pathToFileURL(join(lib, name)).href);
 
-const { readContext, runway, toolGrowth } = await load("context.js");
+const { readContext, runway, toolGrowth, toolWhat } = await load("context.js");
 const { fill, joinParts } = await load("text.js");
 const { formatTokens, formatAmount, formatAmountCell, amountText, moneySymbol } = await load("units.js");
 const { noteAllowed, mayShow, stamp } = await load("rest.js");
@@ -303,4 +303,25 @@ test("pricing resolves a settings-file rate card", () => {
   const cost = priceUsage(models["claude-sonnet-5-5"], { input_tokens: 1000000, cache_creation_input_tokens: 1000000 }, 3600);
   assert.equal(cost, 9);
   assert.equal(priceUsage(null, { input_tokens: 5 }, 300), 0);
+});
+
+test("toolWhat is a few words on what a call did, and nothing for a tool it does not know", () => {
+  // A shell call: its description, else the command without leading assignments, cut at 40 characters.
+  assert.equal(toolWhat("Bash", { description: "Run the plugin tests", command: "npm test" }), "Run the plugin tests");
+  assert.equal(toolWhat("Bash", { command: "T=/c/x CC=\"a b\" npm test" }), "npm test");
+  assert.equal(toolWhat("PowerShell", { command: "Get-ChildItem -Recurse -Force C:\\Users\\someone\\a-very-long-path" }).length, 40);
+  assert.equal(toolWhat("Bash", { description: "d".repeat(100) }).length, 80);
+  // A file tool: the file's base name, from either kind of path.
+  assert.equal(toolWhat("Read", { file_path: "/work/src/instructions.js" }), "instructions.js");
+  assert.equal(toolWhat("Edit", { file_path: "C:\\Dev\\app\\a.ts" }), "a.ts");
+  assert.equal(toolWhat("NotebookEdit", { notebook_path: "/w/n.ipynb" }), "n.ipynb");
+  // A search: the pattern, cut at 30.
+  assert.equal(toolWhat("Grep", { pattern: "needle" }), "needle");
+  assert.equal(toolWhat("Glob", { pattern: "g".repeat(50) }).length, 30);
+  // A fetch: the host.
+  assert.equal(toolWhat("WebFetch", { url: "https://example.com/a/b?c=d" }), "example.com");
+  // Anything else, or an input that is not an object: nothing.
+  assert.equal(toolWhat("Agent", { description: "x" }), "");
+  assert.equal(toolWhat("Bash", null), "");
+  assert.equal(toolWhat("Read", {}), "");
 });

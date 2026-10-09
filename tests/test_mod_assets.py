@@ -22,7 +22,7 @@ _spec = importlib.util.spec_from_file_location("export_mod_assets", SCRIPT)
 export_mod_assets = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(export_mod_assets)
 
-EXPECTED_FILES = {f"plugin/hooks/generated/{name}.js" for name in ("copy", "coaching", "palette", "rates", "version")}
+EXPECTED_FILES = {f"plugin/hooks/generated/{name}.js" for name in ("copy", "coaching", "palette", "rates", "desktop", "version")}
 
 
 def _exported_json(text: str) -> dict:
@@ -39,7 +39,7 @@ def exported() -> dict[str, str]:
     return export_mod_assets.export()
 
 
-def test_the_script_makes_the_five_asset_files(exported):
+def test_the_script_makes_the_six_asset_files(exported):
     assert set(exported) == EXPECTED_FILES
 
 
@@ -91,6 +91,14 @@ def test_the_version_is_the_packages(exported):
     from claudeglass import __version__
 
     assert _exported_json(exported["plugin/hooks/generated/version.js"]) == {"VERSION": __version__}
+
+
+def test_the_desktop_servers_are_the_python_modules_list(exported):
+    from claudeglass import desktop_servers
+
+    values = _exported_json(exported["plugin/hooks/generated/desktop.js"])
+    assert values == {"BUILT_IN": sorted(desktop_servers.BUILT_IN), "BUILT_IN_PREFIX": desktop_servers.BUILT_IN_PREFIX}
+    assert "Claude_Browser" in values["BUILT_IN"] and values["BUILT_IN_PREFIX"] == "ccd_"
 
 
 def test_the_words_are_the_python_modules(exported):

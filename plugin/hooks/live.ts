@@ -25,6 +25,8 @@ export function emptySnap(): GlassSnap {
     calBase: null,
     parallel: false,
     reqs: [],
+    startedAt: null,
+    toolsUsed: [],
     firstCr: null,
     startupFirst: null,
     model: null,

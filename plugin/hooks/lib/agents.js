@@ -140,39 +140,6 @@ export function agentShare(agentUsd, sessionUsd) {
 }
 
 /**
- * The first `lines` lines of a task prompt, for the details view; the rest
- * is left behind. Nothing here is kept on disk.
- * @param {string|null|undefined} text
- * @param {number} [lines]
- * @returns {string}
- */
-export function promptHead(text, lines) {
-  var count = typeof lines === "number" && lines > 0 ? lines : 12;
-  return String(text || "")
-    .replace(/\r\n?/g, "\n")
-    .split("\n")
-    .slice(0, count)
-    .join("\n")
-    .replace(/\s+$/, "");
-}
-
-/**
- * Adds an item to the biggest tool results, keeping the `max` largest.
- * @param {{name: string, tokens: number}[]} list
- * @param {{name: string, tokens: number}} item
- * @param {number} [max]
- * @returns {{name: string, tokens: number}[]}
- */
-export function addBiggest(list, item, max) {
-  var keep = typeof max === "number" && max > 0 ? max : 5;
-  var next = list.concat([item]);
-  next.sort(function (a, b) {
-    return b.tokens - a.tokens;
-  });
-  return next.slice(0, keep);
-}
-
-/**
  * capture_hook._k: tokens as "150k", thousands grouped, rounded half to
  * even as Python's round() does.
  * @param {number} tokens

@@ -3,7 +3,7 @@ import { COPY } from './generated/copy.js'
 import { formatClock } from './lib/cache.js'
 import { fill } from './lib/text.js'
 import { formatAmount, formatTokens } from './lib/units.js'
-import { limitShare } from './limit'
+import { limitShare, sessionShare } from './limit'
 
 // Amounts and times in the words the user's billing mode calls for. API
 // billing reads in dollars ("$0.38"), a subscription as a share of its limit,
@@ -48,6 +48,20 @@ function shareText(share: number): string {
 export function amountOf(usd: number, snap: GlassSnap, settings: GlassSettings): string {
   if (settings.billing.mode === 'subscription') {
     const share = limitShare(snap, usd)
+    if (share !== null) return fill(COPY['amount.share.limit'], { share: shareText(share) })
+  }
+  return amount(usd, settings)
+}
+
+/**
+ * An amount for the whole session. As `amountOf`, except the 5-hour share is used only when the session
+ * began inside the window now running and the share is 100% or less (limit.ts `sessionShare`): a session
+ * that spans several windows is not priced at one window's rate. Otherwise `amount`: the weekly share,
+ * else the list price.
+ */
+export function sessionAmount(usd: number, snap: GlassSnap, settings: GlassSettings): string {
+  if (settings.billing.mode === 'subscription') {
+    const share = sessionShare(snap, usd)
     if (share !== null) return fill(COPY['amount.share.limit'], { share: shareText(share) })
   }
   return amount(usd, settings)

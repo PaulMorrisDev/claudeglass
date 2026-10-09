@@ -8,6 +8,8 @@
  * raw window. No Python twin; the rules are in the plan (sections 1-3).
  */
 
+import { commandLabel } from "./command.js";
+
 /**
  * @typedef {Object} ContextCategory
  * @property {string} name   "System prompt", "Messages", "Free space", ...
@@ -204,4 +206,45 @@ export function runway(history, point) {
  */
 export function toolGrowth(prevCtx, prevOutput, ctx) {
   return Math.max(0, ctx - prevCtx - prevOutput);
+}
+
+/** The longest a command is kept as "what" a tool call did, and a description (the row cuts it to fit). */
+var WHAT_COMMAND = 40;
+var WHAT_DESCRIPTION = 80;
+/** The longest a search pattern is kept. */
+var WHAT_PATTERN = 30;
+
+/**
+ * A few words on what a tool call did, so the heaviest results can say more than a tool's name: a shell
+ * call's description, else its command (without leading variable assignments and `cd` hops, first 40 characters); a file's
+ * base name for Read, Edit, Write and NotebookEdit; the pattern of Grep and Glob (30 characters); the host
+ * of a WebFetch. Anything else, or an input that has none of these, gives "". Kept in live state only.
+ * @param {string} name   The tool's name.
+ * @param {unknown} input The arguments the model gave it.
+ * @returns {string}
+ */
+export function toolWhat(name, input) {
+  if (input === null || typeof input !== "object") return "";
+  var args = /** @type {Object<string, unknown>} */ (input);
+  /** @param {unknown} value */
+  var text = function (value) {
+    return typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+  };
+  if (name === "Bash" || name === "PowerShell") {
+    return commandLabel(args, WHAT_COMMAND, WHAT_DESCRIPTION);
+  }
+  if (name === "Read" || name === "Edit" || name === "Write" || name === "NotebookEdit") {
+    var path = text(args.file_path) || text(args.notebook_path);
+    var parts = path.split(/[\\/]/).filter(function (part) {
+      return part !== "";
+    });
+    return parts.length === 0 ? "" : /** @type {string} */ (parts[parts.length - 1]);
+  }
+  if (name === "Grep" || name === "Glob") return text(args.pattern).slice(0, WHAT_PATTERN).trim();
+  if (name === "WebFetch") {
+    var url = text(args.url);
+    var host = /^[a-z][a-z0-9+.-]*:\/\/(?:[^/?#@]*@)?([^/?#:]+)/i.exec(url);
+    return host === null ? "" : /** @type {string} */ (host[1]);
+  }
+  return "";
 }

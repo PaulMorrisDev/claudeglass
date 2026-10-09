@@ -465,10 +465,9 @@ test('a spawn that answers after its first events claims them: the figures so fa
 
   const mounted = await agentsPage($)
   await mounted.press({ key: 'more' })
-  await mounted.press({ key: 'agent:agent-1' })
   const shown = lines(await mounted.drawn())
   // Two requests of 5k read and written each, 3k output... the row holds both.
-  expect(shown.some(text => /^[\d.]+k in · /.test(text))).toBe(true)
+  expect(shown.some(text => /^(\w+ · )?[\d.]+k in · /.test(text))).toBe(true)
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
@@ -547,7 +546,6 @@ test('an Agent call\'s own usage is not taken for the run\'s cost: the row keeps
 
   const mounted = await agentsPage($)
   await mounted.press({ key: 'more' })
-  await mounted.press({ key: `agent:${id}` })
   const shown = lines(await mounted.drawn())
   expect(shown.some(text => /9[,.]?0*M|9000k/.test(text))).toBe(false)
   await mounted.unmount()

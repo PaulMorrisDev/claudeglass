@@ -19,6 +19,9 @@ written here as ES modules, one per topic:
 - ``rates.js``: the packaged ``pricing.toml`` as the mod's fallback prices,
   in the shape of the ``pricing`` block of the mod's settings file
   (``claudeglass.mod_settings``);
+- ``desktop.js``: the MCP servers the Claude desktop app brings itself
+  (``claudeglass.desktop_servers``), so the Startup page counts them as
+  Claude Code's own when it is drawn on the desktop;
 - ``version.js``: ``claudeglass.__version__``.
 
 Usage::
@@ -56,7 +59,7 @@ OUTPUT_DIR = REPO_ROOT / "plugin" / "hooks" / "generated"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
 
-from claudeglass import __version__, capture_catalogue, mod_copy, mod_settings  # noqa: E402
+from claudeglass import __version__, capture_catalogue, desktop_servers, mod_copy, mod_settings  # noqa: E402
 from claudeglass.pricing import load_pricing  # noqa: E402
 
 #: The custom properties a chart, a status or a surface in the mod needs.
@@ -274,6 +277,10 @@ def export() -> dict[str, str]:
         ),
         "rates.js": _module(
             ("src/claudeglass/pricing.toml", "src/claudeglass/mod_settings.py"), {"RATES": pricing}
+        ),
+        "desktop.js": _module(
+            ("src/claudeglass/desktop_servers.py",),
+            {"BUILT_IN": sorted(desktop_servers.BUILT_IN), "BUILT_IN_PREFIX": desktop_servers.BUILT_IN_PREFIX},
         ),
         "version.js": _module(("src/claudeglass/__init__.py",), {"VERSION": __version__}),
     }

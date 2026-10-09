@@ -268,10 +268,18 @@ them with the focus keys, or click them:
 
 - **More detail** switches to the Detailed view, and back. It is the same
   switch as `/glass detail`, and Glass remembers it.
-- **Open in dashboard** is a link to this session in the dashboard. **Copy
-  link** copies it, for when your app doesn't open links.
+- **Open in dashboard** is a link to the part of the dashboard that matches
+  the page you are on: this session on Now, subagent runs on Agents,
+  compactions on Compaction and your CLAUDE.md files on Startup. **Copy
+  link** copies it, for when your app doesn't open links. No page repeats
+  the pair.
+- **Settings** (Detailed view only) opens the three switches in one place,
+  below the page. See [Settings](#settings).
 - **What these mean** explains each figure: what it is, why it is that size
   and what to do.
+
+Each page keeps its sections apart with a blank line. A long name is cut with
+an ellipsis rather than pushing its figure off the row.
 
 ### Now
 
@@ -282,47 +290,70 @@ The first screen fits without scrolling:
   soon, `[c]` copies `/compact` for you.
 - A bar of the context with a mark where Claude summarises.
 - **What's filling it**, in three rows: Startup context, Conversation so
-  far, and Tool output kept in context. The last is an estimate, from how
-  much each tool call added, and a note under the rows says so. The Detailed
-  view adds one sentence under each row on what it is and what to do.
-- The session so far: the amount and the number of replies.
+  far, and Tool output kept in context (est.). The last is an estimate, from
+  how much each tool call added, and its name says so. Each row starts with a
+  mark in the colour of its part of the bar: a coloured square on the
+  Desktop, the bar's own shade in a terminal. "What these mean" explains
+  each row.
+- The session so far: the amount and the number of replies. A subscription
+  amount shows as a share of the 5-hour limit only when the whole session
+  began inside the current window and the share is 100% or less. Otherwise
+  it falls back to the weekly share, then to the list price.
 
 The Detailed view adds more:
 
-- The cost and context of each recent reply.
-- Where the spend goes: re-reading the context, writing it to the cache, new
-  input and Claude's output.
-- The heaviest single items.
-- The 5-hour limit, with a "now" cursor.
-- Your usual, and the summaries so far.
-- The switch for the guard ([Prompt help](#prompt-help)).
+- The cost and context of each recent reply, with a line under the chart
+  saying what the bars and the line show.
+- Where the spend goes: each part's share of the session, largest first
+  (re-reading the context, writing it to the cache, new input and Claude's
+  output), as whole percents that add up to 100. The session line above gives
+  the total.
+- The heaviest single items, each with a few words on what the call did, such
+  as "Read · instructions.js" or "Bash · Run the plugin tests". A shell call is
+  named by its description, or else by its command without the variables and
+  `cd` steps it starts with; the compaction review names a failed command the
+  same way. The mod keeps those words in memory only and never writes them to
+  disk.
+- The 5-hour limit, with a "now" cursor, and a line such as "64% used, 98% of
+  the 5 hours gone, resets at 10:22 pm".
+- Your usual, and the summaries so far as one line. The Compaction page lists
+  each.
 
 ### Agents
 
 A sentence says how many agents are working and what share of the session's
-cost they are. Then comes one row for each agent, running first. A row shows
-the agent's name, its model and its cost. It also says what the agent is
-doing in plain words: searching, reading files, editing files, running
-commands or reading the web.
+cost they are. Then comes one row for each agent, running first. A row is
+named by the agent's task, such as "Implement mod per-tool breakdown", and
+falls back to the agent's type when it has none. It shows the model and the
+cost, and says what the agent is doing in plain words: searching, reading
+files, editing files, running commands or reading the web.
 
-At most six rows show; the Detailed view lists every agent. Press
-**Details** at the end of a row to see its task prompt, the tools it used
-and its biggest results. The prompt shows its first 12 lines, and the mod doesn't keep it
-after a reload. A link
-opens subagent runs in the dashboard. The Detailed view adds the tokens, the
-calls and the share re-read from the cache, and a row for the main session.
+At most six rows show; the Detailed view lists every agent. Rows are text and
+have no buttons. The Detailed view adds a line under each row that starts with
+the agent's type, then the tokens, the calls and the share re-read from the
+cache, and a dim line of the tools it used, such as "Bash ×64 · Read ×10 ·
+Edit ×5", with a "…" after the first five. It also adds a row for the main
+session. The footer's link opens subagent runs in the dashboard.
 
 ### Compaction
 
-See [The compaction review](#the-compaction-review).
+See [The compaction review](#the-compaction-review). The three views the page
+can open, the summary, the checked list and earlier messages, open one at a
+time: opening one closes the others, so the page stays short. The footer's
+link opens compactions in the dashboard.
 
 ### Startup
 
-This tab answers what is in every request before you type, and what you can
+This page answers what is in every request before you type, and what you can
 do about it. It opens with one sentence, such as "Every request starts with
 69k tokens of setup." When one MCP server or one instructions file stands
 out, a line under it says which and what to do: turn the server off in
-`/mcp`, or trim the file.
+`/mcp`, or trim the file. The line also covers a built-in tool that adds 10k
+tokens or more to every request and that neither Claude nor a subagent has
+called this session: add its name to `permissions.deny` if you never use it.
+That tool advice waits until Claude has made three replies, so a fresh or
+resumed session isn't told to drop a tool Claude hasn't had a chance to use. It
+names the largest single item.
 
 Three groups follow:
 
@@ -336,7 +367,13 @@ Three groups follow:
   `permissions.deny` in your settings (for example `"deny": ["WebSearch"]`);
   Claude Code then leaves it out of the context, from your next session.
 - **Claude Code's own**: its built-in instructions, as one total. You can't
-  change these, so the tab doesn't list them.
+  change these. In the Desktop app the group also counts the servers that
+  come with the app, such as Claude Browser, visualize and terminal, and the
+  Detailed view lists what is in it: first Claude Code's instructions and
+  system prompt with the rest of the group's tokens, then each server by
+  name and size, largest first, so the rows add up to the group. Without
+  such a server the group lists nothing. In a terminal, VS Code or the
+  mobile app the servers stay under You control.
 - **Added as you work**: files that loaded when Claude reached matching
   paths, skills Claude used, Claude Code's reminders, and files and hook
   notes added to your messages. `/clear` and `/compact` empty these, so
@@ -345,18 +382,33 @@ Three groups follow:
 
 The Detailed view lists each server and each CLAUDE.md file under its row,
 and which agent types received your CLAUDE.md. Under the built-in tools it
-lists each tool with its size, largest first, then the tools that wait behind
-tool search, and says how to drop one. Under each server it lists the server's
+lists the ten largest tools with their sizes, then one row for the rest. The
+tools that wait behind tool search cost nothing at the start, so one dim line
+names them instead of a row each. It shows as many whole names as the row
+holds and ends with ", …" when some don't fit. The same goes for servers that
+wait behind tool search. The page says how to drop a tool. Under each server it lists the server's
 five largest tools with their sizes and counts the rest. Tool sizes are shares
 of the row's figure by the length of each tool's text, or, for a server's
 tools, by Claude Code's own count of them when it gives one. The Detailed view
-also links to your CLAUDE.md files in the dashboard.
+also makes the footer's link open your CLAUDE.md files in the dashboard.
 
 The total is Claude Code's own count when it can give one. Row sizes are
 shares of that count, worked out from the length of each item's text, and
 a note on the tab says they are estimates. Before Claude Code has counted,
 the sizes come from text alone and leave out the input schemas of tools,
 which are most of a tool's size, so the lead says "(est.)".
+
+### Settings
+
+The three on/off options sit in one place. In the Detailed view, press
+**Settings** in the footer and the page shows them below its content, each
+with its one-line detail directly under it: **Ask before a costly send** (the
+[guard](#the-guard)), **Hold auto-compact for review** and **Re-add pins after
+compaction** (see [The two options](#the-two-options)). Press **Hide
+settings** to close them. They also close when you leave the Detailed view
+or open What these mean, and don't come back until you press Settings again.
+No page holds a switch of its own, and the Simple view has no Settings
+button; `/glass guard` still works there.
 
 ## The compaction review
 
@@ -447,10 +499,12 @@ The Detailed view adds three more things:
 - **History** lists each summary in the session. A row has the time, whether
   it ran on its own or you ran `/compact`, tokens before and after, and items
   kept and missing. A link opens compactions on the dashboard.
-- **Options** holds two switches, both off until you turn them on, and
-  **Choose what to keep next time** opens the before view.
+- **Choose what to keep next time** opens the before view. The two
+  switches that go with the review are under [Settings](#settings).
 
 ### The two options
+
+Both are off until you turn them on, in [Settings](#settings).
 
 - **Hold auto-compact for review**. When Claude is about to
   summarise on its own, the mod waits once, so you can review and compact at
@@ -508,7 +562,7 @@ context.
 
 It never asks for a slash command, a queued message, a message with pasted
 images or a message you didn't type. Turn it on and off with `/glass guard`,
-or with the switch at the end of the Detailed Now tab.
+or with the switch in [Settings](#settings).
 
 ### The budget
 
@@ -586,7 +640,7 @@ the mod.
 ## What it never does
 
 - It never changes a setting of Claude Code or ClaudeGlass for you. The
-  switches in the pane (the guard, hold and re-add) change only the mod's
+  switches in Settings (the guard, hold and re-add) change only the mod's
   own behaviour, and only when you press them.
 - It never sends a message for you. Every draft it makes, an Add back note, a
   `/compact` command, a shorter prompt, goes into the prompt box for you to

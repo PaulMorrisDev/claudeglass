@@ -16,6 +16,7 @@ import type { TightenKit } from './tighten'
 // Claude Code reads a state reference only where its literal is written, so each file that
 // reads one declares it (the contract is types/index.d.ts).
 const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, false)
+const explainAtom = atom({ plugin: 'claudeglass', key: 'explain' } as const, null)
 const pinsAtom = atom({ plugin: 'claudeglass', key: 'pins' } as const, [] as GlassPin[])
 const snapAtom = atom({ plugin: 'claudeglass', key: 'snap' } as const, emptySnap())
 const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, null)
@@ -60,6 +61,8 @@ export const register: Register = on => {
       if (e.args.trim() === 'detail') {
         const next = !(await read($, detailedAtom))
         await update($, detailedAtom, () => next)
+        // The Settings view belongs to Detailed: leaving Detailed puts it away, so it doesn't come back unasked.
+        if (!next) await update($, explainAtom, () => null)
         await $.store.set('detailed', next)
         return { text: next ? COPY['pane.detail.on'] : COPY['pane.detail.off'] }
       }

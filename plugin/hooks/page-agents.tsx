@@ -1,7 +1,6 @@
 import type { Register, RenderElement } from 'claude-code'
 
-import { activityWords, agentsLink, agentsUsd, cacheShare, costText, ICONS, linkTarget, modelColor, modelName, nameOf, ordered, runningCount, sharePercent } from './agent-view'
-import { promptOf } from './agents'
+import { activityWords, agentsLink, agentsUsd, cacheShare, costText, ICONS, modelColor, modelName, nameOf, ordered, runningCount, sharePercent, taskName, toolsLine } from './agent-view'
 import { shortAmount } from './fmt'
 import { COPY } from './generated/copy.js'
 import { fill } from './lib/text.js'
@@ -10,15 +9,16 @@ import { addPage } from './pane'
 import type { PageContext } from './pane'
 
 // The Agents page: who is working, on what, and what it costs. The first
-// screen is one sentence and a text row per agent, running first; Detailed adds
-// the tokens, calls and cache per row and the main session's row. A row's quiet
-// Details button shows its task prompt, the tools it used and its biggest results.
-// No hotkeys: the page bar has the keys.
+// screen is one sentence and a text row per agent, running first, each named by
+// the task it was given; Detailed adds, per row, a line of its type, tokens, calls
+// and cache and a dim line of the tools it called, and the main session's row.
+// No buttons and no hotkeys: the page bar has the keys.
 
 const FIRST_SCREEN_ROWS = 6
-const NAME_CELLS = 24
+const NAME_CELLS = 36
 const MODEL_CELLS = 8
-const ACTIVITY_CELLS = 24
+const ACTIVITY_CELLS = 22
+const TOOLS_SHOWN = 5
 
 function headline(context: PageContext): string {
   const { snap } = context.view
@@ -28,10 +28,13 @@ function headline(context: PageContext): string {
   return running === 1 ? fill(COPY['agents.headline.one'], { pct }) : fill(COPY['agents.headline'], { count: running, pct })
 }
 
-function figures(context: PageContext, agent: ReturnType<typeof ordered>[number]): string {
+function figures(agent: ReturnType<typeof ordered>[number]): string {
   const input = agent.input + agent.cacheRead + agent.cacheWrite
   const cache = cacheShare(agent)
+  // The type leads the line, unless the row is already named by it.
+  const type = nameOf(agent)
   const parts = [
+    ...(agent.type.trim() !== '' && taskName(agent) !== type ? [type] : []),
     fill(COPY['agents.tokens'], { input: formatTokens(input), output: formatTokens(agent.output) }),
     agent.calls === 1 ? COPY['agents.calls.one'] : fill(COPY['agents.calls'], { count: agent.calls }),
   ]
@@ -39,82 +42,25 @@ function figures(context: PageContext, agent: ReturnType<typeof ordered>[number]
   return parts.join(' · ')
 }
 
-function details(context: PageContext, agent: ReturnType<typeof ordered>[number]): RenderElement {
-  const { Box, Text, Button, Link } = context.table
-  const settings = context.view.settings
-  const prompt = promptOf(agent.id)
-  const tools = Object.entries(agent.tools).sort((a, b) => b[1] - a[1])
-  const link = agentsLink(settings)
-  const where = [nameOf(agent), modelName(agent), agent.background ? COPY['agents.background'] : ''].filter(one => one !== '').join(' · ')
-
-  const children: RenderElement[] = [
-    <Text key="where" bold>
-      {where}
-    </Text>,
-    <Text key="task-title" bold>
-      {COPY['agents.task']}
-    </Text>,
-  ]
-  if (prompt === null) children.push(<Text key="task-gone">{COPY['agents.prompt.gone']}</Text>)
-  else prompt.split('\n').forEach((line, index) => children.push(<Text key={`task:${index}`} dimColor>{line === '' ? ' ' : line}</Text>))
-
-  if (tools.length > 0) {
-    children.push(
-      <Text key="tools-title" bold>
-        {COPY['agents.tools']}
-      </Text>,
-      <Text key="tools">{tools.map(([name, count]) => fill(COPY['agents.tool'], { name: name.startsWith('mcp__') ? COPY['tool.mcp'] : name, count })).join(' · ')}</Text>,
-    )
-  }
-  if (agent.heaviest.length > 0) {
-    children.push(
-      <Text key="biggest-title" bold>
-        {COPY['now.heaviest']}
-      </Text>,
-      ...agent.heaviest.slice(0, 3).map(item => (
-        <Text key={`biggest:${item.name}:${item.tokens}`}>{fill(COPY['now.largest'], { name: item.name.startsWith('mcp__') ? COPY['tool.mcp'] : item.name, tokens: formatTokens(item.tokens) })}</Text>
-      )),
-    )
-  }
-  if (link !== null) {
-    children.push(
-      <Box key="dashboard" flexDirection="row" gap={1}>
-        <Link key="dashboard-link" href={linkTarget(link)} label={COPY['agents.dashboard']} />
-        <Button key="dashboard-copy" label={context.state.copied === 'agents-link' ? COPY['pane.copied'] : COPY['agents.dashboard.link']} dimColor onPress={press => context.copy(link, press.surface, 'agents-link')} />
-      </Box>,
-    )
-  }
-  return (
-    <Box key={`details:${agent.id}`} flexDirection="column" paddingLeft={4}>
-      <Text bold>{COPY['agents.details']}</Text>
-      {children as never}
-    </Box>
-  )
-}
-
 async function render(context: PageContext): Promise<RenderElement> {
-  const { table, view, state } = context
-  const { Box, Text, Button } = table
+  const { table, view } = context
+  const { Box, Text } = table
   const { snap, settings } = view
   const list = ordered(snap)
 
   if (list.length === 0) return <Text>{COPY['agents.none']}</Text>
 
   const shown = view.detailed ? list : list.slice(0, FIRST_SCREEN_ROWS)
-  const children: RenderElement[] = [
-    <Text key="headline" bold>
-      {headline(context)}
-    </Text>,
-  ]
+  // The rows, the "more" line and the main session's row are one section under the headline.
+  const children: RenderElement[] = []
 
   for (const agent of shown) {
-    const key = `agent:${agent.id}`
-    const open = state.explain === key
+    const tools = view.detailed ? toolsLine(agent, TOOLS_SHOWN) : ''
     children.push(
       <Box key={`row:${agent.id}`} flexDirection="column">
         <Box flexDirection="row" gap={1}>
           <Box width={NAME_CELLS}>
-            <Text wrap="truncate">{`${ICONS[agent.status]} ${nameOf(agent)}`}</Text>
+            <Text wrap="truncate">{`${ICONS[agent.status]} ${taskName(agent)}`}</Text>
           </Box>
           <Box width={MODEL_CELLS}>
             <Text color={modelColor(agent)}>{modelName(agent)}</Text>
@@ -124,14 +70,13 @@ async function render(context: PageContext): Promise<RenderElement> {
           </Box>
           {/* The last column is not boxed: an amount on a subscription ("12.34 USD") is wider than any width worth fixing, and a box would wrap it. */}
           <Text>{costText(agent, settings)}</Text>
-          <Button key={key} label={open ? COPY['agents.hide'] : COPY['agents.show']} dimColor onPress={() => context.explain(key)} />
         </Box>
         {view.detailed ? (
-          <Box paddingLeft={4}>
-            <Text dimColor>{figures(context, agent)}</Text>
+          <Box paddingLeft={2} flexDirection="column">
+            <Text dimColor>{figures(agent)}</Text>
+            {tools !== '' ? <Text dimColor>{tools}</Text> : null}
           </Box>
         ) : null}
-        {open ? details(context, agent) : null}
       </Box>,
     )
   }
@@ -158,9 +103,16 @@ async function render(context: PageContext): Promise<RenderElement> {
     )
   }
 
-  return <Box flexDirection="column">{children as never}</Box>
+  return (
+    <Box flexDirection="column" gap={1}>
+      <Text bold>{headline(context)}</Text>
+      <Box key="rows" flexDirection="column">
+        {children as never}
+      </Box>
+    </Box>
+  )
 }
 
 export const register: Register = () => {
-  addPage({ id: 'agents', hotkey: 'a', labelKey: 'pane.agents', render })
+  addPage({ id: 'agents', hotkey: 'a', labelKey: 'pane.agents', render, dashboard: view => agentsLink(view.settings) })
 }

@@ -67,6 +67,8 @@ export type GlassRequest = {
   cacheWrite: number
   model: string
   tools: string[]
+  /** A few words on what each tool call did (`toolWhat`), in step with `tools`; "" for a tool that has none. Live state only. */
+  whats?: string[]
   afterCompaction: boolean
   afterLimitWait: boolean
   first: boolean
@@ -82,7 +84,8 @@ export type GlassCompaction = {
   wasCold: boolean
 }
 
-export type GlassItem = { name: string; tokens: number }
+/** A tool result's size, with a few words on what the call did when it can say (`toolWhat`). Live state only. */
+export type GlassItem = { name: string; tokens: number; what?: string }
 
 /** One agent run of this session. The task prompt is never kept here (agents.ts holds it in memory). */
 export type GlassAgent = {
@@ -112,12 +115,6 @@ export type GlassAgent = {
   tools: Record<string, number>
   /** What its latest tool call was doing: a COPY key's last word (`agent.<activity>`). */
   activity: 'searching' | 'reading' | 'editing' | 'running' | 'fetching' | 'working'
-  /** Context and output of its latest request, and the tools it asked for, to work out what they added. */
-  lastCtx: number
-  lastOutput: number
-  lastTools: string[]
-  /** The biggest tool results, by what they added to its context. */
-  heaviest: GlassItem[]
   /** Characters of the task prompt, and times it summarised its own context. */
   briefChars: number
   compactions: number
@@ -190,6 +187,10 @@ export type GlassSnap = {
    */
   parallel: boolean
   reqs: GlassRequest[]
+  /** When the session's first reply began (ms); null until a request has been seen. */
+  startedAt: number | null
+  /** The names of the tools the main session has called, once each. */
+  toolsUsed: string[]
   firstCr: number | null
   startupFirst: number | null
   model: string | null
