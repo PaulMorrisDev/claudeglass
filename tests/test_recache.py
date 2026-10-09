@@ -307,6 +307,82 @@ def test_a_context_that_shrank_is_a_compaction_not_an_expiry():
     assert _signature([first, second, compacted], "m3") is None
 
 
+def _compaction_call(**overrides) -> Turn:
+    """The estimated request that wrote a compaction's summary (parse.py)."""
+    fields = dict(
+        message_id="compaction-x", turn_index=3, is_synthetic=True, estimated="compaction",
+        ctx=CR0 + CC0 + 90_000, cache_read_tokens=CR0 + CC0 + 90_000, output_tokens=8_000,
+    )
+    fields.update(overrides)
+    return _turn(**fields)
+
+
+def test_the_first_reply_after_a_summary_is_post_compaction_not_an_expiry_of_the_session_part():
+    """A summary that is smaller than the last real reply's context normally
+    shrinks the context, so nothing is flagged. When the reply after it is
+    larger than the last real reply (a small session, or files read straight
+    back in) it reads only the shared start, which used to be called an expiry."""
+    first, second = _warm_session()
+    summary = _compaction_call(turn_index=3)
+    after = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=90.0)
+    assert after.ctx > second.ctx
+    # Without the summary in the list, the same reply is what it always was.
+    assert _signature([first, second, after], "m4") == "full-expiry"
+    # With it, it is the compaction's write.
+    assert _signature([first, second, summary, after], "m4") == "post-compaction"
+    # Still a rebuild: the count that sizes the run-split re-read allowance is as before.
+    flagged = recache.detect([first, second, summary, after], recache.RecacheThresholds())
+    assert [t.message_id for t in flagged] == ["m4"] and flagged[0].is_recache
+    plain = recache.detect([first, second, after], recache.RecacheThresholds())
+    assert [t.message_id for t in plain] == [t.message_id for t in flagged]
+
+
+def test_a_compact_boundary_marks_the_first_reply_after_it_even_with_no_estimated_call():
+    first, second = _warm_session()
+    after = _next(3, read=CR0 + 11_000, write=second.ctx + 30_000, gap_s=30.0,
+                  preceding_event_kinds=(EventKind.COMPACT_BOUNDARY,))
+    assert _signature([first, second, after], "m3") == "post-compaction"
+
+
+def test_the_post_compaction_label_outranks_the_clock_but_not_a_usage_limit_pause():
+    first, second = _warm_session()
+    summary = _compaction_call(turn_index=3)
+    # The wait since the last real reply includes the whole compaction, past the cache lifetime.
+    long_wait = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=7_200.0)
+    assert _signature([first, second, summary, long_wait], "m4") == "post-compaction"
+    paused = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=7_200.0, gap_cause="limit")
+    assert _signature([first, second, summary, paused], "m4") == "limit-expiry"
+
+
+def test_only_the_first_reply_after_a_summary_gets_the_post_compaction_label():
+    first, second = _warm_session()
+    summary = _compaction_call(turn_index=3)
+    after = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=90.0)
+    # A later reply that really did expire is labelled as before.
+    later = _next(5, read=CR0, write=after.ctx, gap_s=4_000.0)
+    found = {t.message_id: t.recache_signature for t in
+             recache.detect([first, second, summary, after, later], recache.RecacheThresholds())}
+    assert found == {"m4": "post-compaction", "m5": "full-expiry"}
+
+
+def test_a_shrunk_reply_after_a_summary_is_still_no_rebuild():
+    first, second = _warm_session(extra_ctx=200_000)
+    summary = _compaction_call(turn_index=3)
+    compacted = _next(4, read=CR0, write=15_000)
+    assert recache.detect([first, second, summary, compacted], recache.RecacheThresholds()) == []
+
+
+def test_the_signature_table_has_a_post_compaction_row_that_the_other_rows_do_not_count():
+    first, second = _warm_session()
+    summary = _compaction_call(turn_index=3)
+    after = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=90.0)
+    section = recache.build_section(_stats_for([first, second, summary, after]), PRICING, recache.RecacheThresholds())
+    split = _table(section, "recache_signature_split")
+    rows = {row[0]: row for row in split.rows}
+    assert rows["post-compaction"][1] == 1 and rows["full-expiry"][1] == 0
+    assert "post-compaction" in recache.SIGNATURES
+
+
 def test_a_small_session_part_reading_the_shared_start_is_not_a_rebuild():
     """With 1k written beyond the shared start, a warm read of the start
     plus that 1k looks the same as an expired one, so nothing is flagged."""

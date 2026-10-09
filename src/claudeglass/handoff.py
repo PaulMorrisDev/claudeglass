@@ -32,6 +32,18 @@ Each approved plan's build (the replies after it, up to the next
 "plan on Opus, build on Sonnet" estimate (``whatif``), which reads report
 tables, never transcripts.
 
+Each approved plan is also compared by how its build began
+(:class:`PlanApproval`, ``plan_handoff_approvals``): in the same session, with
+the planning context carried on (``kept``); after a /clear within
+:data:`FRESH_CLEAR_S` seconds of the approval, in this session or in the next
+one you opened (``cleared``); or in a session whose first message is the plan
+itself (``handoff``, ``Turn.human_plan_handoff``). A fresh build carries none
+of the planning, so its replies read less. Approvals count whether you clicked
+them in the dialog or typed a go-ahead; a plan you declined and then told
+Claude to carry out is an approval too. :func:`plan_groups` finds them, and
+the plans sent back before each one: ``habits`` builds the plan-rounds table
+from the same groups.
+
 Same shape as ``carry.py``: :class:`HandoffThresholds`,
 :func:`compute_handoff`, :func:`build_section` and :data:`RULES` (folded
 into ``recommend.recommend``). Never imports ``habits``: ``habits``
@@ -42,12 +54,15 @@ from __future__ import annotations
 
 import statistics
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Callable
 
+from . import capture as capture_mod
 from .compaction_sim import _shrunk_cost
 from .model import (
     Column,
     EventKind,
+    PlanStats,
     Recommendation,
     ReportModel,
     Section,
@@ -62,6 +77,28 @@ from .pricing import ModelRates, Pricing, ResolvedRates, price_turn
 #: (duplicated per module by convention, see ``carry.py``).
 _CHARS_PER_TOKEN_APPROX = 4
 
+#: A /clear this many seconds after you approved a plan, or fewer, starts
+#: its build fresh.
+FRESH_CLEAR_S = 60.0
+
+#: A session whose first message is the plan itself is the build of the
+#: latest plan approved before it in the same project, when it began no more
+#: than this many seconds after the approval.
+HANDOFF_LINK_S = 3600.0
+
+#: More replies than this editing files between two plans, and the second
+#: plan is a new ask: a build began without an approval. Claude edits the
+#: plan file between rounds, and that counts as an edit to the parser.
+PLAN_BUILD_REPLIES = 8
+
+#: How a build began, in the order ``plan_handoff_approvals`` lists them.
+START_WORDS = ("kept", "cleared", "handoff")
+START_LABELS = {
+    "kept": "Carried on in the same session",
+    "cleared": "Cleared right after the approval",
+    "handoff": "Started from the plan",
+}
+
 ASSUMPTIONS: tuple[str, ...] = (
     "a build started fresh from an approved plan carries the session's starting context plus the plan "
     "itself, and nothing else the planning read",
@@ -69,6 +106,9 @@ ASSUMPTIONS: tuple[str, ...] = (
     "the next approved plan, and takes off the first reply's cache write and one file re-read allowance",
     "the plan-handoff saving overlaps with the auto-compact saving: both come from carrying less context "
     "in later replies",
+    "a build started fresh when a /clear came within a minute of the approval, or when a session in the same "
+    "project began with the plan itself within an hour of it; an approval from before the parser recorded "
+    "its time can't be told from one that carried on",
 )
 
 RatesArg = ModelRates | ResolvedRates | None
@@ -176,6 +216,101 @@ def plan_shape(priced: list[Turn]) -> str:
     return "plan_build" if any(t.edit_kind == "real" for t in priced[at + 1 :]) else "plan_only"
 
 
+@dataclass(slots=True)
+class PlanGroup:
+    """The plans Claude put up for one ask in a main session, from the
+    first to the one you approved (or the last, when none was). A decline
+    you answered with a go-ahead is an approval of that plan, not a plan
+    sent back, and a plan Claude puts up again unchanged after you approved
+    it by typing is the same plan."""
+
+    #: Indices into the session's priced replies of every ``ExitPlanMode``
+    #: call, the repeat of an approved plan among them.
+    calls: tuple[int, ...]
+    #: Different plans put up, the first and the approved one among them.
+    versions: int
+    #: Plans you sent back in the dialog (a decline followed by a go-ahead
+    #: is no such plan).
+    sent_back: int
+    #: The reply with the approved plan; ``None`` when you approved none.
+    approval: int | None
+    #: You approved it by typing a go-ahead or leaving plan mode, not in the
+    #: dialog.
+    typed: bool
+    #: Steps and files named in the last plan (``PlanStats``).
+    steps: int
+    files: int
+    #: How the feedback on each plan you sent back reads, in order
+    #: (``PlanStats.feedback_class``).
+    feedback: tuple[str, ...]
+
+    @property
+    def end(self) -> int:
+        """The reply with the approved plan, else the last plan put up."""
+        return self.approval if self.approval is not None else self.calls[-1]
+
+    @property
+    def between(self) -> range:
+        """The replies after the first plan, through the approval: what the
+        plan rounds cost. Empty when the first plan was the one."""
+        return range(self.calls[0] + 1, self.end + 1)
+
+
+def _same_plan(a: PlanStats, b: PlanStats) -> bool:
+    return (a.chars, a.steps, a.files) == (b.chars, b.steps, b.files)
+
+
+def _sent_back(plan: PlanStats) -> bool:
+    """The dialog declined it and a typed go-ahead did not follow."""
+    return plan.rejected and plan.outcome != "approved_by_message"
+
+
+def _group(priced: list[Turn], plans: list[int], repeats: list[int]) -> PlanGroup:
+    stats = [priced[i].plan_stats for i in plans]
+    last = stats[-1]
+    approved = _approved(priced[plans[-1]])
+    return PlanGroup(
+        calls=tuple(sorted([*plans, *repeats])),
+        versions=len(plans),
+        sent_back=sum(1 for plan in stats if _sent_back(plan)),
+        approval=plans[-1] if approved else None,
+        typed=approved and last.outcome == "approved_by_message",
+        steps=last.steps,
+        files=last.files,
+        feedback=tuple(plan.feedback_class for plan in stats if _sent_back(plan) and plan.feedback_class),
+    )
+
+
+def plan_groups(priced: list[Turn]) -> list[PlanGroup]:
+    """The plans of a main session's replies (``priced``), grouped by ask:
+    a group closes when you approve a plan, or when more than
+    :data:`PLAN_BUILD_REPLIES` replies edited files since its last plan
+    (the build began without an approval; Claude's edits to the plan file
+    between rounds are a few). Shared with ``habits``."""
+    groups: list[PlanGroup] = []
+    plans: list[int] = []
+    repeats: list[int] = []
+    for i, turn in enumerate(priced):
+        plan = turn.plan_stats
+        if plan is None:
+            continue
+        if plans:
+            head = priced[plans[-1]]
+            if _approved(head):
+                if head.plan_stats.outcome == "approved_by_message" and _same_plan(head.plan_stats, plan):
+                    repeats.append(i)
+                    continue
+                groups.append(_group(priced, plans, repeats))
+                plans, repeats = [], []
+            elif sum(1 for t in priced[plans[-1] + 1 : i] if t.edit_kind == "real") > PLAN_BUILD_REPLIES:
+                groups.append(_group(priced, plans, repeats))
+                plans, repeats = [], []
+        plans.append(i)
+    if plans:
+        groups.append(_group(priced, plans, repeats))
+    return groups
+
+
 def _fresh_start_cost(turn: Turn, rates: RatesArg, fresh: int) -> float:
     """What the first reply after ``/clear`` adds: it writes the fresh
     context to the cache (5-minute) where the real reply read it."""
@@ -217,27 +352,88 @@ class SessionHandoff:
 
 
 @dataclass(slots=True)
+class PlanApproval:
+    """One approved plan and how its build began: counts and costs only."""
+
+    session_id: str
+    turn_index: int
+    #: You approved it by typing a go-ahead or leaving plan mode, not in the
+    #: dialog.
+    typed: bool
+    #: A word of :data:`START_WORDS`.
+    start: str = "kept"
+    #: The planning context the build carried: what a fresh start would have
+    #: dropped (0 once it started fresh).
+    tokens_carried: int = 0
+    #: The replies of the build, what they cost, and the context they read
+    #: in all.
+    build_turns: int = 0
+    build_usd: float = 0.0
+    build_context: int = 0
+
+
+@dataclass(slots=True)
 class HandoffStats:
     main_sessions: int = 0
     main_session_usd: float = 0.0
     sessions: list[SessionHandoff] = field(default_factory=list)
     plans: list[PlanHandoff] = field(default_factory=list)
+    approvals: list[PlanApproval] = field(default_factory=list)
     rediscovery_allowance_usd: float = 0.0
     sonnet_available: bool = False
 
 
+@dataclass(slots=True)
+class _Run:
+    """A main session read once: its priced replies and what each cost."""
+
+    tr: TranscriptResult
+    priced: list[Turn]
+    costs: list[float]
+
+    @property
+    def project(self) -> str:
+        return self.tr.meta.project_slug
+
+    @property
+    def began(self) -> datetime:
+        return capture_mod._moment(self.priced[0].ts) or capture_mod._FLOOR
+
+    def clears(self) -> list[datetime]:
+        """When you ran /clear in it."""
+        found = (
+            capture_mod._moment(event.ts)
+            for event in self.tr.events
+            if event.kind == EventKind.SLASH_COMMAND and event.detail.get("command") == "clear"
+        )
+        return sorted(at for at in found if at is not None)
+
+    def openings(self) -> list[tuple[str, datetime]]:
+        """How the session begins when that starts a build fresh, with when:
+        a /clear before its first reply, and a first message that is the
+        plan itself."""
+        out: list[tuple[str, datetime]] = []
+        clears = self.clears()
+        if clears and clears[0] <= self.began:
+            out.append(("cleared", clears[0]))
+        if self.priced[0].human_plan_handoff and self.began > capture_mod._FLOOR:
+            out.append(("handoff", self.began))
+        return out
+
+
 def _session(
     tr: TranscriptResult, lookup, sonnet: RatesArg, allowance: float, th: HandoffThresholds, stats: HandoffStats
-) -> None:
+) -> _Run | None:
     priced = [t for t in tr.turns if t.turn_index > 0]
     if not priced:
-        return
+        return None
     stats.main_sessions += 1
     costs = [price_turn(t, lookup(t.model)).total for t in priced]
     stats.main_session_usd += sum(costs)
+    run = _Run(tr, priced, costs)
     approved = [i for i, t in enumerate(priced) if _approved(t)]
     if not approved:
-        return
+        return run
 
     start = starting_context(priced)
     plan_calls = [i for i, t in enumerate(priced) if t.plan_stats is not None]
@@ -280,6 +476,75 @@ def _session(
             row.qualifying_plans += 1
             row.saving_usd += saving
     stats.sessions.append(row)
+    return run
+
+
+def _build_of(record: PlanApproval, run: _Run, window: range) -> None:
+    """Sets ``record``'s build to the replies of ``run`` in ``window``."""
+    record.build_turns = len(window)
+    record.build_usd = sum(run.costs[j] for j in window)
+    record.build_context = sum(run.priced[j].ctx for j in window)
+
+
+def _approvals(runs: list[_Run]) -> list[PlanApproval]:
+    """Every approved plan in ``runs`` and how its build began. It stays in
+    the session (``kept``) unless a /clear came within :data:`FRESH_CLEAR_S`
+    seconds of the approval (``cleared``: in the same session, or opening a
+    session of the same project), or a session of the same project, begun
+    within :data:`HANDOFF_LINK_S` seconds of it, opens with the plan itself
+    (``handoff``). A fresh build is the replies of that next session, up to
+    its own first plan; each session starts at most one, and each approval
+    is claimed once. The time of the approval is the line that approved it
+    (``PlanStats.approved_ts``), so a plan without one stays ``kept``."""
+    found: list[tuple[PlanApproval, datetime | None, _Run]] = []
+    for run in runs:
+        priced = run.priced
+        start = starting_context(priced)
+        plan_calls = [i for i, t in enumerate(priced) if t.plan_stats is not None]
+        for group in plan_groups(priced):
+            if group.approval is None:
+                continue
+            turn = priced[group.approval]
+            record = PlanApproval(
+                session_id=run.tr.meta.session_id,
+                turn_index=turn.turn_index,
+                typed=group.typed,
+                tokens_carried=max(0, turn.ctx - _fresh(start, turn)),
+            )
+            end = next((k for k in plan_calls if k > group.calls[-1]), len(priced))
+            _build_of(record, run, range(group.approval + 1, end))
+            found.append((record, capture_mod._moment(turn.plan_stats.approved_ts), run))
+
+    for record, at, run in found:
+        if at is not None and any(0 <= (clear - at).total_seconds() <= FRESH_CLEAR_S for clear in run.clears()):
+            record.start, record.tokens_carried = "cleared", 0
+
+    claimed: set[int] = set()
+    for run in sorted(runs, key=lambda r: r.began):
+        if not run.project:
+            continue
+        for word, opened in run.openings():
+            window = FRESH_CLEAR_S if word == "cleared" else HANDOFF_LINK_S
+            near = [
+                (at, n)
+                for n, (record, at, other) in enumerate(found)
+                if other is not run
+                and other.project == run.project
+                and n not in claimed
+                and record.start == "kept"
+                and at is not None
+                and 0 <= (opened - at).total_seconds() <= window
+            ]
+            if not near:
+                continue
+            n = max(near)[1]
+            claimed.add(n)
+            record = found[n][0]
+            record.start, record.tokens_carried = word, 0
+            first_plan = next((j for j, t in enumerate(run.priced) if t.plan_stats is not None), len(run.priced))
+            _build_of(record, run, range(first_plan))
+            break
+    return [record for record, _, _ in found]
 
 
 def compute_handoff(
@@ -298,15 +563,34 @@ def compute_handoff(
     sonnet_id = pricing.aliases.get("sonnet")
     sonnet = pricing.resolve_model(sonnet_id) if sonnet_id else None
     stats = HandoffStats(rediscovery_allowance_usd=rediscovery_allowance_usd, sonnet_available=sonnet is not None)
+    runs: list[_Run] = []
     for tr in results:
         if tr.meta.kind != "top-level" or scheduled_main_session(tr):
             continue
-        _session(tr, lookup, sonnet, rediscovery_allowance_usd, th, stats)
+        run = _session(tr, lookup, sonnet, rediscovery_allowance_usd, th, stats)
+        if run is not None:
+            runs.append(run)
+    stats.approvals = _approvals(runs)
     stats.sessions.sort(key=lambda s: (-s.saving_usd, -s.tokens_carried, s.session_id))
     return stats
 
 
 # -- report section -----------------------------------------------------------
+
+
+def _approval_row(word: str, rows: list[PlanApproval]) -> list:
+    replies = sum(a.build_turns for a in rows)
+    usd = sum(a.build_usd for a in rows)
+    return [
+        word,
+        len(rows),
+        sum(1 for a in rows if a.typed),
+        int(sum(a.tokens_carried for a in rows) / len(rows)),
+        replies,
+        int(sum(a.build_context for a in rows) / replies) if replies else None,
+        usd / replies if replies else None,
+        usd,
+    ]
 
 
 def build_section(stats: HandoffStats, thresholds: HandoffThresholds | None = None) -> Section:
@@ -373,13 +657,32 @@ def build_section(stats: HandoffStats, thresholds: HandoffThresholds | None = No
             for s in stats.sessions[: th.top_n]
         ],
     )
+    approvals = Table(
+        name="plan_handoff_approvals",
+        title="How the build began after each approved plan",
+        columns=[
+            Column(key="start", label="How the build began", kind="str"),
+            Column(key="approvals", label="Approved plans", kind="int"),
+            Column(key="typed", label="Approved by typing", kind="int"),
+            Column(key="tokens_carried", label="Planning context carried", kind="tokens"),
+            Column(key="build_turns", label="Build replies", kind="int"),
+            Column(key="avg_context", label="Context read per build reply", kind="tokens"),
+            Column(key="usd_per_reply", label="Cost per build reply", kind="money"),
+            Column(key="build_usd", label="Build cost", kind="money"),
+        ],
+        rows=[
+            _approval_row(word, [a for a in stats.approvals if a.start == word])
+            for word in START_WORDS
+            if any(a.start == word for a in stats.approvals)
+        ],
+    )
     notes = list(ASSUMPTIONS) + [
         f"File re-read allowance per fresh start: ${stats.rediscovery_allowance_usd:.4f} at list price.",
         f"Thresholds: {' '.join(th.describe())}",
     ]
     if len(stats.sessions) > th.top_n:
         notes.append(f"{len(stats.sessions) - th.top_n} more sessions with an approved plan aren't listed.")
-    return Section(key="plan_handoff", title="Building in a fresh session after a big plan", tables=[summary, by_session], notes=notes)
+    return Section(key="plan_handoff", title="Building in a fresh session after a big plan", tables=[summary, by_session, approvals], notes=notes)
 
 
 # -- recommendation rule -------------------------------------------------
@@ -574,10 +877,18 @@ __all__ = [
     "HandoffThresholds",
     "HandoffStats",
     "PlanHandoff",
+    "PlanApproval",
+    "PlanGroup",
     "SessionHandoff",
     "starting_context",
     "plan_carried",
     "plan_shape",
+    "plan_groups",
+    "FRESH_CLEAR_S",
+    "HANDOFF_LINK_S",
+    "PLAN_BUILD_REPLIES",
+    "START_WORDS",
+    "START_LABELS",
     "compute_handoff",
     "build_section",
     "RULES",

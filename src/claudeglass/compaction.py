@@ -63,6 +63,18 @@ is the standalone function that produces exactly the "per transcript list
 of compaction records" the brief also asks for, and
 ``CompactionStats.add_transcript`` is built on top of it.
 
+Whose compactions: a subagent's or a workflow agent's own transcript
+compacts too, and carries its parent's session id. Every record says whose
+it is (``CompactionRecord.kind``), the per-session figures count the main
+conversation only, and the compactions inside agent runs are counted apart
+(``CompactionStats.agent_compactions``). :func:`compactions_in` is the one
+count of a single transcript, which the agent run receipts reuse.
+
+Compaction cost: :meth:`CompactionStats.heavy_session_cost_share` is the
+share of main-session cost spent in sessions that compacted
+``HEAVY_COMPACTIONS`` times or more. It reads the cost the report already
+priced per session, so nothing is priced twice.
+
 Privacy: nothing here retains message text, tool_result content, or a
 full path — only counts, token totals (already present on ``Turn``/
 ``Event``), and the small set of tool names in ``_REDISCOVERY_TOOLS``.
@@ -88,6 +100,15 @@ _REDISCOVERY_WINDOW = 10
 
 #: Rows shown in the per-session table :func:`build_section` emits.
 _PER_SESSION_TABLE_LIMIT = 20
+
+#: A main session that compacted this many times or more is a heavy one,
+#: for the share of main-session cost spent in such sessions.
+HEAVY_COMPACTIONS = 3
+
+#: ``TranscriptMeta.kind`` of the main conversation, and of the two kinds
+#: of agent run whose compactions are counted apart from it.
+_MAIN_KIND = "top-level"
+AGENT_KINDS = ("subagent", "workflow-agent")
 
 #: A ``CompactionRecord`` whose ``join_delta_s`` exceeds this many seconds
 #: (15 minutes) is excluded from every aggregate built from its
@@ -228,6 +249,14 @@ def _correlate_compactions_to_turn_index(
     return results
 
 
+def compactions_in(tr: TranscriptResult) -> tuple[int, int]:
+    """``(compactions, automatic ones)`` in one transcript: its
+    ``COMPACT_BOUNDARY`` events. The same count whether the transcript is
+    the main conversation, a subagent's or a workflow agent's."""
+    events = _compaction_events(tr)
+    return len(events), sum(1 for event in events if event.trigger == "auto")
+
+
 @dataclass(slots=True)
 class CompactionRecord:
     """One ``COMPACT_BOUNDARY`` event, plus what its transcript's very
@@ -235,6 +264,9 @@ class CompactionRecord:
     """
 
     session_id: str = ""
+    #: Whose compaction: ``"top-level"`` (the main conversation),
+    #: ``"subagent"`` or ``"workflow-agent"`` (``TranscriptMeta.kind``).
+    kind: str = _MAIN_KIND
     ts: str | None = None
     trigger: str | None = None
     pre_tokens: int | None = None
@@ -309,6 +341,7 @@ def compaction_records_for_transcript(
     applied = recache.apply(tr, th)
     priced_turns = _priced_turns(applied)
     session_id = tr.meta.session_id
+    kind = tr.meta.kind or _MAIN_KIND
     records: list[CompactionRecord] = []
     prev_cumulative_dropped = 0
     for event, turn_idx in _correlate_compactions_to_turn_index(applied, priced_turns):
@@ -341,6 +374,7 @@ def compaction_records_for_transcript(
         records.append(
             CompactionRecord(
                 session_id=session_id,
+                kind=kind,
                 ts=event.ts,
                 trigger=event.trigger,
                 pre_tokens=event.pre_tokens,
@@ -369,6 +403,11 @@ class CompactionStats:
     _sessions_seen: set[str] = field(default_factory=set, repr=False)
     _sessions_with_compaction: set[str] = field(default_factory=set, repr=False)
     _compactions_per_session: dict[str, int] = field(default_factory=dict, repr=False)
+    #: Main sessions folded in (a scheduled one is left out), the
+    #: denominator of the share of main-session cost in heavy sessions.
+    _main_sessions: set[str] = field(default_factory=set, repr=False)
+    #: Compactions inside agent runs, by ``TranscriptMeta.kind``.
+    agent_compactions: dict[str, int] = field(default_factory=dict)
     #: Sum of ``cache_creation_tokens`` across every priced turn in every
     #: transcript folded in so far (not just turns following a
     #: compaction) — the denominator for "dropped tokens' share of total
@@ -418,7 +457,10 @@ class CompactionStats:
             self.scheduled_sessions += 1
             return []
         session_id = tr.meta.session_id
+        is_main = (tr.meta.kind or _MAIN_KIND) == _MAIN_KIND
         self._sessions_seen.add(session_id)
+        if is_main:
+            self._main_sessions.add(session_id)
         priced = _priced_turns(tr)
         self.total_cache_creation += sum(t.cache_creation_tokens for t in priced)
         self.total_new_tokens += sum(new_tokens(t) for t in priced)
@@ -428,11 +470,16 @@ class CompactionStats:
                 self.summary_request_cost += price_turn(turn, rates).total
 
         records = compaction_records_for_transcript(tr, rates, thresholds)
-        if records:
+        if records and is_main:
             self._sessions_with_compaction.add(session_id)
             self._compactions_per_session[session_id] = (
                 self._compactions_per_session.get(session_id, 0) + len(records)
             )
+        elif records:
+            # An agent run's own compactions: counted, but not as the
+            # session's, which carries the parent's id.
+            kind = tr.meta.kind
+            self.agent_compactions[kind] = self.agent_compactions.get(kind, 0) + len(records)
         self.records.extend(records)
         return records
 
@@ -571,11 +618,34 @@ class CompactionStats:
             if r.next_turn_write_cost is not None and _join_is_tight(r)
         )
 
+    def main_cost_total(self, main_cost: dict[str, float]) -> float:
+        """The cost of every main session folded in (a scheduled one is
+        left out), from ``main_cost``: the base of the share of main-session
+        cost in heavy sessions."""
+        return sum(main_cost.get(sid, 0.0) for sid in self._main_sessions)
+
+    def heavy_session_cost_share(
+        self, main_cost: dict[str, float], minimum: int = HEAVY_COMPACTIONS
+    ) -> tuple[int, float, float] | None:
+        """``(heavy sessions, their main-session cost, the share of all
+        main-session cost)`` for main sessions that compacted ``minimum``
+        times or more. ``main_cost`` maps a session id to the cost of its
+        main conversation alone (its agents' cost is not in it). ``None``
+        when no main session has any cost to take a share of. The share is
+        a percentage."""
+        total = self.main_cost_total(main_cost)
+        if total <= 0:
+            return None
+        heavy = [sid for sid, count in self._compactions_per_session.items() if count >= minimum]
+        cost = sum(main_cost.get(sid, 0.0) for sid in heavy)
+        return len(heavy), cost, 100.0 * cost / total
+
     def per_session_summary(self) -> list[tuple[str, int, int, float]]:
         """``(session_id, compaction_count, dropped_tokens, post-compaction
-        write cost)`` for every session with >=1 compaction, sorted by
-        dropped tokens descending (the ordering :func:`build_section`'s
-        per-session table uses).
+        write cost)`` for every session with >=1 compaction in its main
+        conversation (an agent run's own compactions are counted by
+        ``agent_compactions``), sorted by dropped tokens descending (the
+        ordering :func:`build_section`'s per-session table uses).
 
         ``compaction_count`` and ``dropped_tokens`` count every record
         regardless of join tightness (they don't depend on the next-turn
@@ -584,6 +654,8 @@ class CompactionStats:
         """
         by_session: dict[str, tuple[int, int, float]] = {}
         for record in self.records:
+            if record.kind != _MAIN_KIND:
+                continue
             count, dropped, cost = by_session.get(record.session_id, (0, 0, 0.0))
             count += 1
             dropped += record.dropped_tokens or 0
@@ -601,11 +673,13 @@ class CompactionStats:
 # -- report section ---------------------------------------------------------
 
 
-def build_section(stats: CompactionStats) -> Section:
+def build_section(stats: CompactionStats, main_cost: dict[str, float] | None = None) -> Section:
     """The "Compactions" report section (key ``compactions``): a summary
     table, a trigger-mix table, and a per-session table (top 20 by
-    dropped tokens).
+    dropped tokens). ``main_cost`` (session id to the cost of its main
+    conversation) adds the compaction-cost rows to the summary table.
     """
+    heavy = stats.heavy_session_cost_share(main_cost) if main_cost is not None else None
     summary_table = Table(
         name="compactions_summary",
         title="Compaction summary",
@@ -631,6 +705,17 @@ def build_section(stats: CompactionStats) -> Section:
                 "Total post-compaction RE-CACHE-flagged write cost (USD)",
                 stats.total_post_compaction_recache_cost,
             ],
+            ["Compactions inside subagent runs", stats.agent_compactions.get("subagent", 0)],
+            ["Compactions inside workflow agent runs", stats.agent_compactions.get("workflow-agent", 0)],
+            *(
+                [
+                    [f"Sessions with {HEAVY_COMPACTIONS}+ compactions", heavy[0]],
+                    [f"Main-session cost in sessions with {HEAVY_COMPACTIONS}+ compactions (USD)", heavy[1]],
+                    [f"Share of main-session cost in sessions with {HEAVY_COMPACTIONS}+ compactions", heavy[2]],
+                ]
+                if heavy is not None
+                else []
+            ),
         ],
     )
 
@@ -698,6 +783,12 @@ def build_section(stats: CompactionStats) -> Section:
             f"{stats.scheduled_sessions} main session{'s' if stats.scheduled_sessions != 1 else ''} a scheduled "
             "task started, with no message of yours, are left out. Counting checks that never summarise would "
             "lower the summaries per session."
+        )
+    if heavy is not None:
+        notes.append(
+            "The cost rows count a session's main conversation only: what its subagents and workflow agents "
+            f"cost is not in them. A session counts as heavy at {HEAVY_COMPACTIONS} summaries or more in its "
+            "main conversation. Summaries inside agent runs are counted in their own rows."
         )
     if not stats.records:
         notes.insert(0, "No conversation summaries found in this window.")
@@ -769,6 +860,8 @@ __all__ = [
     "is_recache_turn",
     "new_tokens",
     "CompactionRecord",
+    "HEAVY_COMPACTIONS",
+    "compactions_in",
     "compaction_records_for_transcript",
     "CompactionStats",
     "effective_autocompact_threshold",

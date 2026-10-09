@@ -100,7 +100,14 @@ Claude Code waits for a hook each time it runs one. This one is
 registered on UserPromptSubmit and on PostToolUse for `Read`, `Grep`,
 `Glob`, `WebFetch`, `WebSearch` and an approved plan, and never for the
 shell or MCP tools: they were about two thirds of the calls, and a size
-note after them was wrong too often to pay for the wait. A call takes
+note after them was wrong too often to pay for the wait. With coaching
+notes on, it is also registered for the `Agent` and `Workflow` tools, so
+it can tell you what each report from background work will cost to
+answer when you start it in a long session. It reads no size from their
+results and never says a large result is large. It is also registered
+for SubagentStop, where it prints nothing: it only notes that an agent
+run ended too big for one task, so the main session's next hook can say
+so. A call takes
 about 44 milliseconds on the author's Windows machine, python's own
 start being about 12, and returns before anything else when a result is
 under the size a note could apply to. A `settings.json` written before

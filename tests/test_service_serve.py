@@ -449,7 +449,7 @@ def test_once_writes_the_typical_piece_of_work_for_a_survey_that_answers_your_me
     data = json.loads(coaching.path(config_dir).read_text(encoding="utf-8"))
     assert data["typical_piece_tokens"] == 900
     assert set(data) == {
-        "version", "built_at", "days", "split_run", "plan_fresh", "thresholds", "typical_piece_tokens", "muted", "once",
+        "version", "built_at", "days", "plan_fresh", "thresholds", "typical_piece_tokens", "muted", "once",
     }
     # No tip answers yet: no hint is muted or shown once.
     assert data["muted"] == [] and data["once"] == []

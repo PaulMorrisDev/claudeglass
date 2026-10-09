@@ -39,6 +39,7 @@ _LEAD_ADVICE = {
 _REBUILD_LABELS = {
     "full-expiry": "the cache had expired after a pause",
     "prefix-invalidated": "something changed early in the conversation",
+    "post-compaction": "the conversation had just been summarised",
     "limit-expiry": "the cache expired during a usage-limit pause",
 }
 

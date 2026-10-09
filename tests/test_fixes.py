@@ -432,3 +432,42 @@ def test_the_asked_and_decide_apply_explainers():
     assert "have it report the exact changes instead of making them" in split["prompt"]
     assert "Keep the deciding agent on Opus." in split["prompt"]
     assert "started with model set to opus or fable" in asked["prompt"]
+
+
+def test_agent_batch_probes_prompt_carries_the_agent_and_the_line_and_the_explainer_has_its_three_headings():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id="agent-batch-probes", severity="advice", category="workflow", title="Explore looks things up one call at a time",
+        agent_type="Explore", lever=None,
+    )
+    (fix,) = fixes_mod.build_fixes(rec)
+    assert [pair[0] for pair in fix["explainer"]] == ["Where and who it affects", "Trade-off", "How to undo it"]
+    assert "Explore's agent file (~/.claude/agents/Explore.md or .claude/agents/Explore.md)" in fix["prompt"]
+    assert fixes_mod.BATCH_PROBES_LINE in fix["prompt"]
+    assert "{" not in fix["prompt"]
+    # It proposes an edit to a prompt that a restart picks up: the default note, not "none" or the scope one.
+    assert fix.get("note") not in ("none", "scope")
+    assert fixes_mod.fix_note(fix) == fixes_mod.RESTART_NOTE
+
+
+def test_plan_rounds_prompt_asks_for_a_critique_before_a_plan_and_names_the_places_to_put_it():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id="plan-rounds", severity="advice", category="workflow", title="Plans keep being sent back", lever=None,
+    )
+    (fix,) = fixes_mod.build_fixes(rec)
+    assert fixes_mod.CRITIQUE_PLAN_LINE == "Before you show me a plan, critique it for gaps and doubts, then fix them"
+    assert fix["prompt"].count(fixes_mod.CRITIQUE_PLAN_LINE[1:]) == 1
+    assert "From now on, before you show me a plan, critique it" in fix["prompt"]
+    assert "{" not in fix["prompt"]
+    assert [pair[0] for pair in fix["explainer"]] == ["Where and who it affects", "Trade-off", "How to undo it"]
+    rows = dict(fix["explainer"])
+    assert rows["Where and who it affects"].startswith(fixes_mod._SCOPE_WHERE_TEXT)
+    assert "plan skill" in rows["Where and who it affects"]
+    assert rows["How to undo it"] == fixes_mod._SCOPE_UNDO_TEXT
+    # It adds a standing instruction at a scope you pick: the scope note.
+    assert fixes_mod.fix_note(fix) == fixes_mod.SCOPE_NOTE

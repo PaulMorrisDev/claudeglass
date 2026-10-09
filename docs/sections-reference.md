@@ -52,7 +52,7 @@ and it's still useful when you want one section by itself.
 | `limits` | Usage limits | `limits.py` | usage-cap pauses (5-hour/weekly), harness-forced subagent terminations, and the desktop app's resume pings, as first-class attributable facts instead of behavioural noise — see [`limits.md`](limits.md) |
 | `carry` | Context carry cost per tool | `carry.py` | cost of a tool result riding along in the cached prefix on every turn after the one it entered on, by tool and by agent type, plus the saving a truncation cap would have made — see [`carry.md`](carry.md) |
 | `compaction_sim` | Compaction-window sweep | `compaction_sim.py` | modelled cost under other `autoCompactWindow` settings, a fidelity check against each session's actually-configured window, and a conservative "at least W" recommendation — see [`compaction-sim.md`](compaction-sim.md) |
-| `plan_handoff` | Building fresh after a plan | `handoff.py` | what the replies after each approved plan would have cost in a fresh session started from the plan alone, and the same build at Sonnet's prices — see [`plan-handoff.md`](plan-handoff.md) |
+| `plan_handoff` | Building fresh after a plan | `handoff.py` | what the replies after each approved plan would have cost in a fresh session started from the plan alone, the same build at Sonnet's prices, and how each approved plan's build began — see [`plan-handoff.md`](plan-handoff.md) |
 | `model_swap` | Model-swap counterfactual | `model_swap.py` | ceiling saving from repricing every already-observed turn one model tier down, per agent type and corpus-wide, and the agents that ran on a larger model than their work needed — see [`model-swap.md`](model-swap.md) |
 | `waste` | Wasted-turn spend | `waste.py` | spend on turns whose output was never used (tool error, interrupt, tool denial, harness-killed subagent), by cause, agent type and top session — see [`waste.md`](waste.md) |
 | `compactions` | Compactions | `compaction.py` | compaction count, trigger mix, pre/post/dropped tokens, and the re-cache cost of the turn right after each compaction |
@@ -269,8 +269,9 @@ Definitions: [Concepts section 3](concepts.md#3-cache-rebuild-definitions-and-si
   `unavoidable_limit_expiry_cost_usd` (re-cache turns right after a
   usage-limit pause, kept out of avoidable cost).
 - `recache_signature_split` — `limit-expiry` (the gap spanned a
-  usage-limit pause), `full-expiry` (the wait reached the cache lifetime,
-  or the turn read only the start every session shares) and
+  usage-limit pause), `post-compaction` (the first reply after a
+  conversation summary), `full-expiry` (the wait reached the cache
+  lifetime, or the turn read only the start every session shares) and
   `prefix-invalidated` (part of the session was read), classified in that
   order: turns,
   cache-creation tokens, avoidable cost, median ctx, median gap. Every
@@ -563,6 +564,21 @@ only; scheduled ones are left out.
   plans, the most context any of them would have dropped, replies after
   them, whether any counts, the saving, and its build replies and cost
   at both prices.
+- `plan_handoff_approvals` — one row for each way a build began
+  (`kept`, `cleared`, `handoff`; a row is left out with no approvals):
+  the plans you approved, in the dialog or by typing (a decline you
+  answered with a go-ahead counts), how many by typing, the planning
+  context the builds carried, their replies, the context a typical reply
+  read, the cost per reply and the cost in all. A build is `cleared`
+  when a `/clear` came within 60 seconds of the approval and `handoff`
+  when a new session of the same project, begun within an hour, opens
+  with the plan; any other build is `kept`. Counts and amounts only; the
+  opening message is read in memory and only a flag is kept. The
+  Builds after a plan check reads it. See
+  [`plan-handoff.md`](plan-handoff.md#how-each-build-began). The tuning
+  export's `prompting.plans.builds` holds the same counts and list-price
+  amounts for each way, and the Overview's **More detail** links here
+  as "How the build began".
 
 `recommend.recommend()` runs the `plan-handoff` rule (`handoff.RULES`,
 category `workflow`, no lever, no setting change). It fires when at
@@ -747,11 +763,27 @@ dominant cause and its lever.
   `cache_creation` and of `new_tokens` (`input_tokens +
   cache_creation_tokens`), mean compaction duration, total
   post-compaction write cost, and the part of it on turns flagged as a
-  re-cache.
+  re-cache. Summaries inside agent runs have their own rows
+  (`CompactionStats.agent_compactions`): the transcripts of subagents
+  and workflow agents are searched for `compact_boundary` records like a
+  main session's, and each run's summaries are always automatic. The cost
+  of compaction is three rows: the sessions that summarised
+  `HEAVY_COMPACTIONS` (3) times or more in their main conversation, the
+  cost of those main conversations, and its share of the main-session cost
+  of every session in the window. It counts a main conversation's own cost
+  only; what its agents cost stays in the agent rows. There is no live
+  receipt for it; the compaction check on Actions quotes the sessions and
+  their share.
 - `compactions_trigger_mix` — trigger value (`auto`/`manual`/`unknown`)
   counts and share.
 - `compactions_per_session` — top 20 sessions by dropped tokens:
   session, compaction count, dropped tokens, post-compaction write cost.
+
+The tuning export's `compactions` block holds the summary table's counts and
+list-price amounts, the triggers as `auto`, `manual` or `other`, and the
+cost of the sessions that summarised 3 times or more as an amount beside
+the main-session total (the share is worked out when a summary is read).
+The Overview's **More detail** links to the summary table.
 
 A compaction belongs to the window of its session, not to the moment it
 happened: a session counts, in full, when it was last active in the
@@ -810,7 +842,9 @@ the agents/skills/workflows it spawns" with numbers only:
   its transcript kind alone, never by the agent type: its own meta always
   says foreground. Columns: `runs`, `total_cost`, the mean and median
   cost, and the mean `tool_wait_s` (mean tool wait) across those runs'
-  priced turns.
+  priced turns. The tuning export's `agents.launches` holds the agents,
+  replies and cost for each launch, so a cost per run is a division, and the
+  Overview's **More detail** links to this table.
 - `topology_chains_summary` — `stoppedByUser`/`maxTurns` truncation
   signals.
 - `topology_reminder_hook_pressure` — attachment/hook-output counts per
@@ -881,7 +915,10 @@ other.
 - `cost_centres_models` — information only, no card: agent type by model
   tier by who chose the model (named in the call, named in the agent file
   or inherited), direct and workflow apart, with runs, cost and a Sonnet
-  ceiling (the most a move to Sonnet could save at the same tokens).
+  ceiling (the most a move to Sonnet could save at the same tokens). The
+  tuning export's `agents.model_choice` keeps the 60 dearest rows as words
+  and list-price amounts: a custom agent type is `custom` and a model is
+  its family. The Models check's row on the Overview links to this table.
 
 The `subagent-volume` card names the largest cost centre and cites its row.
 The `cost-centres` check (`claudeglass check cost-centres`) is information
@@ -1197,7 +1234,8 @@ columns of a table still divide by that table's own messages.
   asked for a short report, finished, retried and retried for the
   model, what the runs did (the share of calls that were a single
   read-only look: one Read, Grep, Glob or file-reading command in a
-  message and nothing else; and the typical number of calls before
+  message and nothing else, and how many of those were a shell command
+  (`probe_shell_pct`); and the typical number of calls before
   the first edit, among runs that made one), what the runs said about
   CLAUDE.md (used, didn't use), the shares of work reported easy and
   hard, files read again that the parent had read, and runs started by
@@ -1296,6 +1334,69 @@ columns of a table still divide by that table's own messages.
   context it reads again, so the model it runs on matters more than how
   many files it opens. A workflow's agents are left out
   (`AgentFact.direct` is false for them).
+- `habits_probes` — per agent type (`top-level` is the main session):
+  replies, the single read-only calls among them (a reply that made one
+  Read, Grep or Glob, or one shell command that reads files, such as
+  `cat`, `head`, `grep` or `git log`, and nothing else; counted by the
+  message the call came in, so calls already sent together count once), how many of
+  those were a shell command, the runs of two or more such replies in a
+  row, and `batch_cost`: what the replies after the first of each run
+  cost at list price. That is an upper bound, since it takes the lookups
+  of a run to be independent. Rows with no single lookups are left out,
+  costliest first. It feeds `research_split`, `explore_research` and
+  `name_files`, "lookups before the first edit", and the
+  `agent-batch-probes` card. The Overview's **More detail** links to it.
+- `habits_agent_runs` — what agent runs did, by how they were started
+  (`background`, `foreground`, `workflow`; a row is left out with no
+  replies). Runs are counted per run (a workflow's agents are all one run,
+  and a resumed workflow shares one run folder, so its agents are placed
+  by their own timestamps); agents, replies, the share of replies that were
+  a single read-only call (`probe_pct`), `start_reads` (what each agent
+  started with times its replies: an upper bound on what the starting
+  context cost over the run, in tokens), `compactions` and
+  `compacted_agents` (summaries made inside the runs, and the agents that
+  made one), and `shared_reads`, `shared_tokens` and `shared_cost`: reads
+  of the one file that several agents of a group read, the plan or spec
+  they were all handed. That file is the most-shared one of the group, so
+  these are upper bounds. They are on this table only, never in a card.
+  The run-split card and its sweep (`run_split`) count only runs under
+  the auto-compact window now in force. The same groups are in the tuning
+  export's `agents.launches`: runs, agents, replies, single read-only
+  calls, `start_reads`, summaries made, the files siblings had already
+  read, and the cost, by launch.
+- `habits_report_turns` — the main session's replies to a background
+  agent's or a workflow's report, by what each did: `acknowledged` (it
+  made no call), `acted` (it made a call of its own) or `respawned` (it
+  started more agents). A reply starts at a task notification and runs
+  through the calls it made, as the capture module finds a reply.
+  Columns: replies, share, cost (all its calls), the typical context its
+  first call read, and the replies that came an hour or more
+  (`WAKE_GAP_S`) after the main-session reply before (`woke`), with the
+  cache-write tokens of those first calls (`woke_tokens`): the context
+  written again because the cache had expired. A workflow agent's report
+  goes back to its script, so it isn't here; the workflow's own report
+  is. A background command finishing isn't a report. A kind with no
+  replies is left out. The
+  Replies to agent reports check reads it, and `agents.report_turns` in
+  the tuning export holds the three counts.
+- `habits_plan_rounds` — the asks where Claude put up a plan
+  (`handoff.plan_groups`; one ask is every plan from the first to the one
+  you approved), as `kind` rows: `all` (every approved plan), `none`
+  (no plan sent back), `once`, `twice`, `more` (three times or
+  more) and `dropped` (asks whose plan you never approved). A row with
+  no plans is left out. Columns: plans, how many approved by typing (a
+  go-ahead or leaving plan mode, and a decline answered with a
+  go-ahead), plans sent back in the dialog (`rounds`), how many of them
+  read as a question, a critique or a doubt (`asked`, from
+  `PlanStats.feedback_class`), the plans put up per ask, the steps and
+  files of the last plan, and the tokens and cost of the replies after
+  the first plan through the approval, which is nothing for an ask with
+  one plan. More than 8 replies that change files between two
+  plans start another ask. The Plans sent back check and the
+  `plan-rounds` card read it, and `prompting.plans` in the tuning export
+  keeps the counts (`rounds`, and `asks` for the same kinds with their
+  plans, rounds, questions, tokens and cost). The cycle's `plan_cost` now
+  runs to the last plan.
 
 ## `rework` (`rework.py`)
 
@@ -1470,7 +1571,11 @@ reply ends on a question to you: a question mark must close one of its
 last two sentences or a list item that ends it, after code, links, a
 ClaudeGlass tip and the tag are cut. `human_go` and `human_status` mark a
 message that only tells Claude to carry on or only asks how it is going;
-neither is a repeat or a vague correction. Habits with a live hint use that
+neither is a repeat or a vague correction. `human_plan_handoff` marks a
+message that opens with Claude Code's own plan hand-off ("Implement the
+following plan"): only the flag is kept, and it links a build that started
+fresh to the plan approved before it (see
+[`plan-handoff.md`](plan-handoff.md#how-each-build-began)). Habits with a live hint use that
 hint's own rule and default threshold
 (`capture_catalogue.COACHING_THRESHOLDS`), so they count whether or not
 coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
@@ -2235,7 +2340,7 @@ Rules implemented today, in the order they run. From `recommend.py`'s
 own `_rule_*` functions: `ttl-switch`, `long-tool-waits`,
 `notification-invalidation`, `batch-instructions`, `subagent-volume`,
 `compaction-churn`, `long-context-share`, `cache-read-dominance`,
-`baseline-bloat`, `agent-report-size`, `spawn-cost` (for agent types
+`baseline-bloat`, `agent-report-size`, `agent-batch-probes`, `plan-rounds`, `spawn-cost` (for agent types
 without `agent_startup` data, and only when the mean first call is over
 40k tokens and at least 5k tokens of its tool definitions are rarely or
 never used; otherwise the per-part `spawn-tools-list`,
@@ -2272,6 +2377,24 @@ cites the cell it used:
 - `spawn-claude-md` is held back when more of an agent type's runs said
   they used CLAUDE.md than said they didn't, and cites the ones that
   didn't.
+- `agent-batch-probes` is a card per agent type (not the main session)
+  from `habits_probes`, when the type made 100 replies or more, a
+  quarter or more of them a single read-only call, and half of
+  `batch_cost` is $1 or more (`agent_batch_probes_min_replies`,
+  `_share_pct`, `_min_saving_usd` and `_saving_factor`). The halving is
+  because some lookups of a run depend on one another. It cites the four
+  cells it used and offers one line to add to the agent's definition or
+  the workflow prompt that starts it: "Batch independent Read/Grep/Glob
+  calls into a single message".
+- `plan-rounds` is one card, from `habits_plan_rounds`, when at least 5
+  plans were approved, 30% or more of them were sent back first, 30% or
+  more of the rounds read as a question, a critique or a doubt, and the
+  saving is $1 or more (`plan_rounds_min_plans`, `_min_share_pct`,
+  `_min_asked_pct`, `_min_saving_usd`). The saving is `plan_rounds_saving_factor`
+  (default a quarter) of the `all` row's cost, scaled to the `asked` share
+  of the rounds. It cites the five cells it used and offers one line for
+  your first planning message, CLAUDE.md or a plan skill: "Before you show
+  me a plan, critique it for gaps and doubts, then fix them".
 
 The subagent start rules read `agent_startup` and give copyable text only;
 none writes a file.
@@ -2389,6 +2512,7 @@ and nothing here is the original session's real identifier.
 |---|---|---|---|---|---|
 | full-expiry | 7 | 1,003,923 | 5.80 USD | 130,555 | 10m 21s |
 | prefix-invalidated | 0 | 0 | 0.00 USD | - | - |
+| post-compaction | 0 | 0 | 0.00 USD | - | - |
 | limit-expiry | 0 | 0 | 0.00 USD | - | - |
 
 Every re-cache turn in this session was a genuine TTL expiry

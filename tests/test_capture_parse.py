@@ -333,6 +333,30 @@ def test_note_chars_land_on_the_next_turn_and_the_meta_counts_notes(tmp_path):
     ("1. read it\n2. fix it", ("steps",)),
     ("report back in under 200 words", ("short",)),
     ("please tidy things up a bit", ()),
+    # More ways of asking for a short report (parser 43).
+    ("write up to about 1,000 characters of notes", ("short",)),
+    ("a summary of 100 words or fewer", ("short",)),
+    ("end with a 50-word summary", ("short",)),
+    ("answer in <=150 words", ("short",)),
+    ("answer in \u2264 150 words", ("short",)),
+    ("no more than ~200 words", ("short",)),
+    ("within 2-3 sentences", ("short",)),
+    ("Give me a short report", ("short",)),
+    ("reply briefly", ("short",)),
+    ("report back concisely", ("short",)),
+    ("be concise", ("short",)),
+    ("keep it short", ("short",)),
+    ("keep the report tight", ("short",)),
+    # Numbers and words that ask for no length limit.
+    ("a file with 300 words in it", ()),
+    ("read 200 words of the file", ()),
+    ("keep it simple", ()),
+    ("we are short on time", ()),
+    ("answer within the hour", ()),
+    # A length rule for each sentence or each item is not a report limit.
+    ("Help copy: sentences of 25 words or fewer, no snake_case", ()),
+    ("keep functions ≤50 lines per function", ()),
+    ("titles of 8 words or fewer each", ()),
 ])
 def test_prompt_flags(text, flags):
     assert events.prompt_flags([text]) == flags
@@ -358,7 +382,8 @@ def test_a_plan_is_counted_and_its_answer_recorded(tmp_path, is_error, outcome):
         _reply("next"),
     ])
     assert result.turns[0].plan_stats == PlanStats(
-        steps=3, files=3, chars=len(plan), outcome=outcome, rejected=is_error
+        steps=3, files=3, chars=len(plan), outcome=outcome, rejected=is_error,
+        approved_ts="" if is_error else "2026-09-18T12:00:00.000Z",
     )
 
 
@@ -1050,6 +1075,52 @@ def test_a_plan_approved_in_the_dialog_stays_approved_when_you_later_say_go(tmp_
         _asked(), _plan_call(), user_block_line([tool_result_block("tu_p", "ok")]), _asked("continue"), _reply("ok"),
     ])
     assert result.turns[0].plan_stats.outcome == "approved"
+
+
+def test_the_time_of_an_approval_is_the_time_of_the_line_that_approved_it(tmp_path):
+    by_dialog = _parse(tmp_path, [
+        _asked(timestamp="2026-09-18T10:00:00.000Z"), _plan_call(),
+        user_block_line([tool_result_block("tu_p", "ok")], timestamp="2026-09-18T10:07:00.000Z"), _reply("ok"),
+    ])
+    assert by_dialog.turns[0].plan_stats.approved_ts == "2026-09-18T10:07:00.000Z"
+    # A plan you declined and then told Claude to carry out: the time of that message.
+    by_message = _parse(tmp_path, [
+        _asked(timestamp="2026-09-18T10:00:00.000Z"), _plan_call(),
+        _plan_back("add a step", timestamp="2026-09-18T10:05:00.000Z"),
+        _asked("implement the plan", timestamp="2026-09-18T10:06:00.000Z"), _reply("building"),
+    ])
+    plan = by_message.turns[0].plan_stats
+    assert (plan.outcome, plan.rejected, plan.approved_ts) == ("approved_by_message", True, "2026-09-18T10:06:00.000Z")
+    # Nothing approved, no time.
+    never = _parse(tmp_path, [
+        _asked(), _plan_call(), _plan_back("add a step", timestamp="2026-09-18T10:05:00.000Z"), _reply("replanning"),
+    ])
+    assert never.turns[0].plan_stats.approved_ts == ""
+    assert_privacy(by_message)
+
+
+def test_a_message_that_opens_with_the_plan_is_a_plan_handoff_and_one_that_only_mentions_it_is_not(tmp_path):
+    handoff_text = "Implement the following plan:\n\n# Plan\n\n1. Edit src/a.py\n2. Run tests/test_a.py\n"
+    result = _parse(tmp_path, [
+        _asked(handoff_text), _reply("building"),
+        _asked("please implement the following plan: add a retry"), _reply("ok"),
+        _asked("implement the plan"), _reply("ok"),
+    ])
+    assert [turn.human_plan_handoff for turn in result.turns] == [True, False, False]
+    # The text is read in memory and dropped: only the flag is kept.
+    assert_privacy(result)
+    assert "src/a.py" not in json.dumps(cache.encode_result(result))
+    decoded = cache.result_from_jsonable(json.loads(json.dumps(cache.encode_result(result))))
+    assert [turn.human_plan_handoff for turn in decoded.turns] == [True, False, False]
+
+
+def test_the_approval_time_survives_the_digest_cache(tmp_path):
+    result = _parse(tmp_path, [
+        _asked(), _plan_call(), user_block_line([tool_result_block("tu_p", "ok")], timestamp="2026-09-18T10:07:00.000Z"),
+        _reply("ok"),
+    ])
+    decoded = cache.result_from_jsonable(json.loads(json.dumps(cache.encode_result(result))))
+    assert decoded.turns[0].plan_stats.approved_ts == "2026-09-18T10:07:00.000Z"
 
 
 def test_an_answered_question_is_a_round_and_a_declined_one_is_not(tmp_path):

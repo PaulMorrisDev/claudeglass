@@ -409,7 +409,9 @@ def inventory(
                     "Claude Code runs "
                     "a small launcher, which runs the hook's code and its word list, all three in this tool's data "
                     "folder; removing that folder takes them all out. Claude Code waits for the hook after a read, "
-                    "search or web result and each message you send, and never after a shell command."
+                    "search or web result and each message you send, and never after a shell command. With coaching "
+                    "notes on, it also waits after an approved plan and an agent or workflow call. It waits after a "
+                    "finished subagent while coaching notes are on or Claude Haiku judges agent runs."
                 ),
                 token_cost=_hooks_token_cost(capture, level),
                 undo="claudeglass capture off, then claudeglass capture remove",

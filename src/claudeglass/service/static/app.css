@@ -1940,7 +1940,8 @@ details.disclosure[open] > summary {
   color: var(--ink-2);
 }
 
-.overview-cost-centres-levers {
+.overview-cost-centres-levers,
+.overview-detail-links {
   margin: var(--space-2) 0 0;
   padding-left: var(--space-5);
 }

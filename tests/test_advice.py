@@ -828,3 +828,81 @@ def test_limit_pressure_card_names_the_burst_only_when_it_stands_out_by_ten_poin
     assert "agents worked at once" not in why(39.9, 30.0)
     assert "agents worked at once" not in why(30.0, 30.0)
     assert "agents worked at once" not in why(10.0, 60.0)
+
+
+def _batch_probes(agent_type: str = "Explore", **kw) -> Recommendation:
+    return Recommendation(
+        id="agent-batch-probes",
+        severity="advice",
+        category="workflow",
+        title="placeholder",
+        lever=None,
+        agent_type=agent_type,
+        saving_usd=kw.pop("saving_usd", 6.0),
+        evidence=[
+            ("Replies it made", 400, "habits.habits_probes", agent_type),
+            ("Single read-only calls", 190, "habits.habits_probes", agent_type),
+            ("Of them by shell command", kw.pop("shell", 30), "habits.habits_probes", agent_type),
+            ("Replies a batch would spare", 12.0, "habits.habits_probes", agent_type),
+        ],
+        **kw,
+    )
+
+
+def test_agent_batch_probes_names_the_counts_and_the_line_to_add_and_quotes_an_upper_bound():
+    (card,) = advice.finish([_batch_probes()], _model_swap_report([]), None, Units(billing_mode="api", currency="USD"))
+    assert card.title == "Explore looks things up one call at a time"
+    assert "one read-only call and nothing else in 190 of its 400 replies" in card.why
+    assert "30 of the calls were shell commands such as cat or grep." in card.why
+    # The line to paste is the one the Work habits table's help names, word for word.
+    assert f'Add "{fixes.BATCH_PROBES_LINE}" to its agent definition or the prompt that starts it.' in card.action
+    assert card.estimated_saving.startswith("At most ")
+    assert "halved" in card.saving_basis
+
+
+def test_agent_batch_probes_leaves_the_shell_sentence_out_when_no_lookup_was_a_shell_command():
+    (card,) = advice.finish([_batch_probes(shell=0)], _model_swap_report([]), None, Units())
+    assert "shell commands" not in card.why
+
+
+def test_agent_batch_probes_for_workflow_agents_points_at_the_scripts_prompts():
+    (card,) = advice.finish([_batch_probes("workflow-subagent")], _model_swap_report([]), None, Units())
+    assert "the prompt in each workflow script that starts it" in card.action
+
+
+def _plan_rounds(**kw) -> Recommendation:
+    return Recommendation(
+        id="plan-rounds",
+        severity="advice",
+        category="workflow",
+        title="placeholder",
+        lever=None,
+        saving_usd=kw.pop("saving_usd", 5.0),
+        evidence=[
+            ("Plans you approved", kw.pop("plans", 10), "habits.habits_plan_rounds", "all"),
+            ("Never sent back", 4, "habits.habits_plan_rounds", "none"),
+            ("Times plans were sent back", kw.pop("rounds", 12), "habits.habits_plan_rounds", "all"),
+            ("Sent back with a question or critique", kw.pop("asked", 6), "habits.habits_plan_rounds", "all"),
+            ("Replies between the first plan and approval", 40.0, "habits.habits_plan_rounds", "all"),
+        ],
+        **kw,
+    )
+
+
+def test_plan_rounds_counts_the_rounds_and_quotes_the_line_to_ask_for_a_critique():
+    (card,) = advice.finish([_plan_rounds()], _model_swap_report([]), None, Units(billing_mode="api", currency="USD"))
+    assert card.title == "Plans keep being sent back"
+    assert "You sent plans back 12 times before approving 10." in card.why
+    assert "6 of those rounds were a question, a critique or a doubt." in card.why
+    # The line to paste is the one the Work habits fix carries, word for word.
+    assert f'Put one standing request in your first planning message, in CLAUDE.md or in a plan skill. It reads "{fixes.CRITIQUE_PLAN_LINE}."' in card.action
+    assert card.estimated_saving.startswith("At most ")
+    assert "at a quarter of their cost" in card.saving_basis
+
+
+def test_plan_rounds_without_numbers_says_it_without_counts():
+    rec = _plan_rounds()
+    rec.evidence[0] = ("Plans you approved", "n/a", "habits.habits_plan_rounds", "all")
+    (card,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert card.why.startswith("You often send a plan back before you approve it")
+    assert fixes.CRITIQUE_PLAN_LINE in card.action

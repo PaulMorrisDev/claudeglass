@@ -24,8 +24,12 @@ The spec tree is the single list of what may appear. A block is a function
 that takes the shared :class:`_Ctx` and returns a dict, registered with
 :func:`_block` beside the spec node that describes it; adding one means
 adding one registration with ``required=False``, so documents made before
-it still validate. The ``cost_centres`` and ``project_files`` blocks
-(Phase 8a) are such blocks.
+it still validate. The ``cost_centres``, ``project_files`` and
+``compactions`` blocks (Phase 8) are such blocks, and the keys Phase 8 added
+inside older blocks (``agents.probes``, ``agents.report_turns``,
+``agents.launches``, ``agents.model_choice``,
+``prompting.plans.builds`` and ``prompting.plans.asks``) are optional the
+same way.
 Money keys end in ``_usd`` and hold list-price amounts.
 
 Window: the corpus the caller passes is the window (the callers load it with
@@ -56,6 +60,7 @@ from . import PARSER_VERSION, __version__
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
 from . import claude_md_review, classify
+from . import compaction as compaction_mod
 from . import context_budget as context_budget_mod
 from . import context_files as context_files_mod
 from . import cost_centres as cost_centres_mod
@@ -63,15 +68,20 @@ from . import discovery
 from . import coaching as coaching_mod
 from . import events as events_mod
 from . import habits as habits_mod
+from . import handoff as handoff_mod
 from . import haiku_tags, helptext, hook_health, limits
 from . import pieces as pieces_mod
 from . import prompting as prompting_mod
 from . import ratings as ratings_mod
 from . import recache, recommend
 from . import rework as rework_mod
+from . import snapshots as snapshots_mod
 from .calibration import Calibration
 from .capture_tags import CHANGE_PATTERN, GROUNDED_KEYS
 from .model import EventKind
+from .pricing import price_turn
+from .report import _agent_file_models, _dominant_transcript_model
+from .topology import LAUNCH_WORDS
 
 KIND = "claudeglass-tuning"
 FORMAT = 1
@@ -138,6 +148,19 @@ _FILE_SIZE_BOUNDS = (1000, 2000, 5000, 10000, 20000)
 FILE_REACHES = ("main", *AGENT_TYPES)
 #: The most files the export keeps.
 FILES_KEPT = 40
+#: The model-choice rows: who started the run, the model tiers the table
+#: names, and who chose the model (a word each, ``not recorded`` with an
+#: underscore). The export keeps the dearest ``MODEL_ROWS_KEPT``.
+MODEL_STARTERS = ("direct", "workflow")
+MODEL_TIERS = tuple(cost_centres_mod.TIER_LABELS)
+MODEL_CHOSEN = tuple(word.replace(" ", "_") for word in cost_centres_mod.CHOSEN_LABELS)
+MODEL_ROWS_KEPT = 60
+#: How a build began after an approved plan, and the groups of plans put up
+#: for an ask: the words of the Plan handoff and Work habits tables.
+BUILD_STARTS = handoff_mod.START_WORDS
+PLAN_ASKS = habits_mod.PLAN_ROUND_KINDS
+#: The triggers of a summary; every other word counts as ``other``.
+COMPACTION_TRIGGERS = ("auto", "manual", "other")
 #: The events ClaudeGlass's own hooks run on.
 HOOK_EVENTS = tuple(
     sorted(
@@ -162,8 +185,9 @@ _GAP_BOUNDS = (60, 300, 1200)
 HOUR_BUCKETS = ("to_1h", "to_2h", "to_4h", "to_8h", "over_8h")
 _HOUR_BOUNDS = (1, 2, 4, 8)
 #: A reply that starts at a background task's notice this long after the
-#: reply before it is a wake-up.
-WAKE_GAP_S = 3600
+#: reply before it is a wake-up (``habits.is_wake_up``, which the Work
+#: habits report-turns table counts the same way).
+WAKE_GAP_S = habits_mod.WAKE_GAP_S
 #: The replies before a message whose cache writes say how long the cache
 #: lasts, and the two lifetimes (the capture hook's rule).
 _TTL_REPLIES = 5
@@ -624,6 +648,48 @@ class _Ctx:
         return stats.to_dict()
 
     @cached_property
+    def agent_files(self) -> dict[str, str | None]:
+        """Each agent file's ``model`` line by agent type, from the newest
+        settings snapshot with every project's agents, as the report reads
+        them for the model-choice table; empty without a config folder or a
+        snapshot. Read to tell who chose a model, never exported."""
+        snapshots = snapshots_mod.load_snapshots(self.config_dir) if self.config_dir else []
+        if not snapshots:
+            return {}
+        canonical = snapshots_mod.canonical_project_keys({b.slug for b in self.corpus.sessions if b.slug})
+        return _agent_file_models(snapshots_mod.with_every_project_agents(snapshots, canonical))
+
+    @cached_property
+    def compactions(self) -> tuple[compaction_mod.CompactionStats, dict[str, float]]:
+        """The summaries of every transcript, folded as the report folds
+        them, and each main session's own cost (its agents cost is not in
+        it) at list prices: what the Compactions section reads for the cost
+        of summaries. The cost is empty without a rate card."""
+        stats = compaction_mod.CompactionStats()
+        thresholds = recache.RecacheThresholds.from_config(self.config.thresholds)
+        main_cost: dict[str, float] = {}
+        for s in self.sessions:
+            for tr in (s.top, *s.subs):
+                model = _dominant_transcript_model(tr)
+                rates = self.pricing.resolve_model(model) if self.pricing is not None and model else None
+                stats.add_transcript(tr, rates, thresholds)
+            if self.pricing is not None:
+                main_cost[s.top.meta.session_id] = sum(
+                    price_turn(turn, self.pricing.resolve_model(turn.model)).total
+                    for turn in s.top.turns
+                    if turn.turn_index > 0
+                )
+        return stats, main_cost
+
+    @cached_property
+    def approvals(self) -> list[handoff_mod.PlanApproval]:
+        """Every approved plan and how its build began
+        (:func:`handoff.compute_handoff`); empty without a rate card."""
+        if self.pricing is None:
+            return []
+        return handoff_mod.compute_handoff(self.transcripts, self.pricing).approvals
+
+    @cached_property
     def habits(self) -> habits_mod.Habits:
         return habits_mod.collect(
             self.corpus,
@@ -791,6 +857,23 @@ def _capture(ctx: _Ctx) -> dict:
 # -- prompting ---------------------------------------------------------------------------------
 
 _TOTALS = ("typed", "queued", "go_aheads", "status_checks", "corrections", "adjustments", "reminders")
+#: How a build began after an approved plan, and a group of plans put up
+#: for an ask (``plans.builds``, ``plans.asks``).
+_BUILD_SIDE = Obj(
+    {
+        "approvals": Count(),
+        "typed": Count(),
+        "carried_tokens": Count(),
+        "replies": Count(),
+        "context_tokens": Count(),
+        "cost_usd": Num(),
+    },
+    required=("approvals", "replies", "cost_usd"),
+)
+_ASK_SIDE = Obj(
+    {"plans": Count(), "typed": Count(), "sent_back": Count(), "asked": Count(), "tokens": Count(), "cost_usd": Num()},
+    required=("plans", "sent_back", "asked", "cost_usd"),
+)
 
 
 @_block(
@@ -812,6 +895,8 @@ _TOTALS = ("typed", "queued", "go_aheads", "status_checks", "corrections", "adju
                     "rounds": _count_map(COUNT_BUCKETS),
                     "rejected_rounds": Count(),
                     "feedback_rounds": _count_map(catalogue.PLAN_FEEDBACK_CLASSES),
+                    "builds": Map(BUILD_STARTS, _BUILD_SIDE),
+                    "asks": Map(PLAN_ASKS, _ASK_SIDE),
                 },
                 required=("approved", "rounds", "rejected_rounds", "feedback_rounds"),
             ),
@@ -827,8 +912,15 @@ def _prompting(ctx: _Ctx) -> dict:
     ``TREND_MIN_MESSAGES`` has none). ``totals`` count the messages you
     typed, those you typed while Claude worked, and how they read.
     ``plans`` counts the pieces of work with an approved plan, the plan
-    rounds each took, the plans you sent back and how your feedback to
-    them read. ``denials`` are the tool calls that were turned away."""
+    rounds each took, the rounds declined in the dialog
+    (``rejected_rounds``, a decline answered with a go-ahead included) and
+    how your feedback to them read; ``builds`` counts the approved plans
+    by how the build began (``handoff.START_WORDS``: in the same session,
+    after a /clear, or in a session that opens with the plan), with the
+    replies of the build and what they cost; ``asks`` the plans put up for
+    each ask, in the groups of the Plans sent back table
+    (``habits.PLAN_ROUND_KINDS``).
+    ``denials`` are the tool calls that were turned away."""
     tz = ctx.config.tz
     weeks: dict[str, dict] = {}
 
@@ -887,15 +979,43 @@ def _prompting(ctx: _Ctx) -> dict:
                 habit: round(100.0 * row["habits"][habit] / row["messages"], 1) for habit in HABITS if row["habits"][habit]
             }
         out_weeks[week] = entry
+    plans = {
+        "approved": approved,
+        "rounds": _tally(rounds, COUNT_BUCKETS),
+        "rejected_rounds": rejected,
+        "feedback_rounds": _tally(feedback_classes, catalogue.PLAN_FEEDBACK_CLASSES),
+    }
+    builds = {
+        word: {
+            "approvals": len(rows),
+            "typed": sum(1 for a in rows if a.typed),
+            "carried_tokens": sum(a.tokens_carried for a in rows),
+            "replies": sum(a.build_turns for a in rows),
+            "context_tokens": sum(a.build_context for a in rows),
+            "cost_usd": _num(sum(a.build_usd for a in rows)),
+        }
+        for word in BUILD_STARTS
+        if (rows := [a for a in ctx.approvals if a.start == word])
+    }
+    if builds:
+        plans["builds"] = builds
+    asks = {
+        kind: {
+            "plans": len(group),
+            "typed": sum(1 for p in group if p.typed),
+            "sent_back": sum(p.sent_back for p in group),
+            "asked": sum(p.asked for p in group),
+            "tokens": sum(p.tokens for p in group),
+            "cost_usd": _num(sum(p.cost for p in group)),
+        }
+        for kind, group in habits_mod.plan_round_groups(ctx.habits).items()
+    }
+    if asks:
+        plans["asks"] = asks
     return {
         "totals": {key: int(totals[key]) for key in _TOTALS},
         "weeks": out_weeks,
-        "plans": {
-            "approved": approved,
-            "rounds": _tally(rounds, COUNT_BUCKETS),
-            "rejected_rounds": rejected,
-            "feedback_rounds": _tally(feedback_classes, catalogue.PLAN_FEEDBACK_CLASSES),
-        },
+        "plans": plans,
         "denials": _tally(denials, events_mod.DENIAL_BUCKETS),
     }
 
@@ -1115,7 +1235,7 @@ def _breaks(ctx: _Ctx) -> tuple[list[int], list[int]]:
                 ):
                     cold[0] += 1
                     cold[1] += turn.cache_creation_tokens
-                elif turn.preceding_primary == EventKind.TASK_NOTIFICATION and gap >= WAKE_GAP_S:
+                elif habits_mod.is_wake_up(turn, gap):
                     wake[0] += 1
                     wake[1] += turn.cache_creation_tokens
             before.append(turn)
@@ -1223,6 +1343,36 @@ _JUDGE_SIDE = Obj(
     required=("calls", "tagged", "cost_usd", "errors"),
 )
 _RUNS_SIDE = Obj({"runs": Count(), "cost_usd": Num()}, required=("runs", "cost_usd"))
+#: What the runs started one way did (the Work habits run-receipts table).
+_LAUNCH_SIDE = Obj(
+    {
+        "runs": Count(),
+        "agents": Count(),
+        "replies": Count(),
+        "single": Count(),
+        "start_reads": Count(),
+        "compactions": Count(),
+        "compacted": Count(),
+        "shared_reads": Count(),
+        "shared_usd": Num(),
+        "cost_usd": Num(),
+    },
+    required=("runs", "agents", "replies", "cost_usd"),
+)
+#: One row of the model-choice table: runs of one agent type on one model
+#: tier, whose model was chosen the same way.
+_MODEL_CHOICE = Obj(
+    {
+        "started_by": Word(MODEL_STARTERS),
+        "agent_type": Word(AGENT_TYPES),
+        "model": Word(MODEL_TIERS),
+        "chosen": Word(MODEL_CHOSEN),
+        "runs": Count(),
+        "cost_usd": Num(),
+        "ceiling_usd": Num(),
+    },
+    required=("started_by", "agent_type", "model", "chosen", "runs", "cost_usd"),
+)
 
 
 @_block(
@@ -1236,6 +1386,10 @@ _RUNS_SIDE = Obj({"runs": Count(), "cost_usd": Num()}, required=("runs", "cost_u
             "types": _count_map(AGENT_TYPES),
             "models": Map(MODELS, _RUNS_SIDE),
             "startup_diet_usd": Map(AGENT_TYPES, Num()),
+            "probes": Obj({"calls": Count(), "single": Count(), "by_shell": Count(), "runs": Count()}),
+            "report_turns": _count_map(habits_mod.REPORT_KINDS),
+            "launches": Map(LAUNCH_WORDS, _LAUNCH_SIDE),
+            "model_choice": Arr(_MODEL_CHOICE, limit=MODEL_ROWS_KEPT),
         },
         required=("verdicts", "raced", "judge", "runs", "types", "models"),
     ),
@@ -1250,7 +1404,20 @@ def _agents(ctx: _Ctx) -> dict:
     count them by built-in type (everything else is ``custom``); ``models``
     by family. ``startup_diet_usd``, when any agent type would be given a
     tools list, is what that saves over the window at list prices, by the
-    same types (:func:`_startup_diet_usd`)."""
+    same types (:func:`_startup_diet_usd`). ``probes`` counts the
+    agents' replies, those that made one read-only call and nothing else,
+    those by shell command, and the runs of two or more in a row.
+    ``report_turns`` counts the main session's replies to a background
+    agent's or a workflow's report by what they did
+    (``habits.REPORT_KINDS``). ``launches`` count the runs by how they were
+    started (``topology.LAUNCH_WORDS``): the agents and
+    replies, the single read-only calls, the starting context
+    times the replies, the summaries made inside the runs, the files a
+    sibling had already read, and the cost, so a cost per spawn is a
+    division. ``model_choice`` is the Agents page's model-choice table, a row
+    per who started the run, agent type (custom ones as ``custom``), model
+    tier and who chose the model, with the runs, their cost and the most that
+    Sonnet could save, the dearest ``MODEL_ROWS_KEPT`` of them."""
     shapes: dict[str, Counter] = {shape: Counter() for shape in ANSWER_SHAPES}
     for s in ctx.sessions:
         if not s.replies:
@@ -1298,7 +1465,70 @@ def _agents(ctx: _Ctx) -> dict:
     diet = _startup_diet_usd(ctx.startup)
     if diet:
         block["startup_diet_usd"] = diet
+    agents = ctx.habits.agents
+    if any(fact.probe_calls for fact in agents):
+        block["probes"] = {
+            "calls": sum(fact.calls for fact in agents),
+            "single": sum(fact.probe_calls for fact in agents),
+            "by_shell": sum(fact.probe_shell_calls for fact in agents),
+            "runs": sum(fact.probe_runs for fact in agents),
+        }
+    if ctx.habits.report_turns:
+        block["report_turns"] = _tally(Counter(r.kind for r in ctx.habits.report_turns), habits_mod.REPORT_KINDS)
+    launches = {
+        word: {
+            "runs": len({a.run or id(a) for a in group}),
+            "agents": len(group),
+            "replies": sum(a.calls for a in group),
+            "single": sum(a.probe_calls for a in group),
+            "start_reads": sum(a.start_tokens * a.calls for a in group),
+            "compactions": sum(a.compactions for a in group),
+            "compacted": sum(1 for a in group if a.compactions),
+            "shared_reads": sum(a.shared_reads for a in group),
+            "shared_usd": _num(sum(a.shared_cost for a in group)),
+            "cost_usd": _num(sum(a.cost for a in group)),
+        }
+        for word, group in habits_mod.agent_run_groups(ctx.habits).items()
+    }
+    if launches:
+        block["launches"] = launches
+    choices = _model_choice(ctx)
+    if choices:
+        block["model_choice"] = choices
     return block
+
+
+def _model_choice(ctx: _Ctx) -> list[dict]:
+    """The model-choice table's rows (:func:`cost_centres.model_choice`)
+    as words and amounts: a custom agent type is ``custom``, a run's model
+    a tier, who chose it a word. Rows that fall on the same words add up.
+    Without a rate card nothing can be priced, so there are none."""
+    if ctx.pricing is None:
+        return []
+    found = cost_centres_mod.model_choice([(s.top, s.subs) for s in ctx.sessions], ctx.pricing, ctx.agent_files)
+    merged: dict[tuple[str, str, str, str], list] = {}
+    for (centre, agent_type, tier, chosen), row in found.items():
+        key = (
+            centre,
+            agent_type if agent_type in AGENT_TYPES else "custom",
+            tier if tier in MODEL_TIERS else "unknown",
+            chosen.replace(" ", "_"),
+        )
+        item = merged.setdefault(key, [0, 0.0, 0.0])
+        item[0] += row.runs
+        item[1] += row.cost
+        if row.cost_on_sonnet > 0:
+            item[2] += max(row.cost - row.cost_on_sonnet, 0.0)
+    rows = []
+    for (centre, agent_type, tier, chosen), (runs, cost, ceiling) in sorted(
+        merged.items(), key=lambda item: (-item[1][1], item[0])
+    )[:MODEL_ROWS_KEPT]:
+        row = {"started_by": centre, "agent_type": agent_type, "model": tier, "chosen": chosen, "runs": runs}
+        row["cost_usd"] = _num(cost)
+        if ceiling > 0:
+            row["ceiling_usd"] = _num(ceiling)
+        rows.append(row)
+    return rows
 
 
 def _startup_diet_usd(stats) -> dict[str, float]:
@@ -1511,6 +1741,65 @@ def _project_files(ctx: _Ctx) -> dict:
     return {"total": len(rows), "files": files}
 
 
+# -- compactions -------------------------------------------------------------------------------
+
+
+@_block(
+    "compactions",
+    Obj(
+        {
+            "sessions": Count(),
+            "compacted": Count(),
+            "summaries": Count(),
+            "triggers": _count_map(COMPACTION_TRIGGERS),
+            "in_agents": Obj({"subagent": Count(), "workflow": Count()}),
+            "dropped_tokens": Count(),
+            "write_usd": Num(),
+            "summary_usd": Num(),
+            "heavy": Obj({"sessions": Count(), "cost_usd": Num(), "main_usd": Num()}, required=("sessions", "cost_usd", "main_usd")),
+        },
+        required=("sessions", "compacted", "summaries"),
+    ),
+    required=False,
+)
+def _compactions(ctx: _Ctx) -> dict:
+    """The conversation summaries Claude Code made (the Compactions
+    section): the main sessions and how many of them summarised at all,
+    the summaries in their conversations and how they were triggered (any
+    word but ``auto`` and ``manual`` is ``other``), those made inside
+    agent runs, the tokens all of them dropped, and, with a rate card, what they
+    cost at list prices: the cache write on the reply after each summary,
+    the estimated request that wrote it, and, for the sessions that
+    summarised ``compaction.HEAVY_COMPACTIONS`` times or more, their
+    sessions, the cost of their main conversations (``cost_usd``) and the
+    cost of every main conversation (``main_usd``), so the share is a
+    division. Counts and amounts: no session, no summary text."""
+    stats, main_cost = ctx.compactions
+    in_agents = {
+        "subagent": stats.agent_compactions.get("subagent", 0),
+        "workflow": stats.agent_compactions.get("workflow-agent", 0),
+    }
+    triggers: Counter = Counter()
+    for record in stats.records:
+        if record.kind not in compaction_mod.AGENT_KINDS:
+            triggers[record.trigger if record.trigger in COMPACTION_TRIGGERS else "other"] += 1
+    block: dict = {
+        "sessions": stats.total_sessions,
+        "compacted": stats.sessions_with_compaction,
+        "summaries": len(stats.records) - sum(stats.agent_compactions.values()),
+        "triggers": _tally(triggers, COMPACTION_TRIGGERS),
+        "in_agents": in_agents,
+        "dropped_tokens": stats.dropped_total,
+    }
+    if ctx.pricing is not None:
+        block["write_usd"] = _num(stats.total_post_compaction_write_cost)
+        block["summary_usd"] = _num(stats.summary_request_cost)
+        heavy = stats.heavy_session_cost_share(main_cost)
+        if heavy is not None and heavy[0]:
+            block["heavy"] = {"sessions": heavy[0], "cost_usd": _num(heavy[1]), "main_usd": _num(stats.main_cost_total(main_cost))}
+    return block
+
+
 # -- the plain-words summary -------------------------------------------------------------------
 
 _VERDICT_LABELS = {"none": "no word"}
@@ -1573,6 +1862,7 @@ def summary_text(doc) -> str:
         (_overhead_lines, "overhead"),
         (_cost_centres_lines, "cost_centres"),
         (_project_files_lines, "project_files"),
+        (_compactions_lines, "compactions"),
     ):
         if doc.get(name):
             lines += lines_of(doc[name])
@@ -1609,7 +1899,14 @@ def _prompting_lines(block: dict) -> list[str]:
     )
     plans = block["plans"]
     if plans["approved"] or plans["rejected_rounds"]:
-        lines.append(f"Plans: {plans['approved']:,} approved, {_n(plans['rejected_rounds'], 'round')} sent back.")
+        lines.append(f"Plans: {plans['approved']:,} approved, {_n(plans['rejected_rounds'], 'round')} declined in the dialog.")
+    builds = plans.get("builds")
+    if builds:
+        total = sum(row["approvals"] for row in builds.values())
+        lines.append(
+            f"Builds after an approved plan: {_top({word: row['approvals'] for word, row in builds.items()})}, "
+            f"{_n(total, 'plan')} in all."
+        )
     denials = block["denials"]
     if denials:
         lines.append(f"Turned away: {_n(_total(denials), 'tool call')} ({_top(denials, 4)}).")
@@ -1717,6 +2014,35 @@ def _agents_lines(block: dict) -> list[str]:
             f"A tools list on your agents would save about {_usd(sum(diet.values()))} over the window at list prices. "
             f"By type: {_list([f'{_label(word)} {_usd(usd)}' for word, usd in ranked])}."
         )
+    probes = block.get("probes")
+    if probes:
+        lines.append(
+            f"Of {_n(probes['calls'], 'agent reply', 'agent replies')}, {probes['single']:,} made one read-only call "
+            f"and nothing else, {probes['by_shell']:,} of them by shell command. "
+            f"They came in {_n(probes['runs'], 'stretch', 'stretches')} of two or more in a row."
+        )
+    reports = block.get("report_turns")
+    if reports:
+        lines.append(f"Replies to an agent's report: {_top(reports)}.")
+    launches = block.get("launches")
+    if launches:
+        parts = [
+            f"{_label(word)} {_n(row['agents'], 'agent')} at {_usd(row['cost_usd'] / row['agents'])} each"
+            for word, row in launches.items()
+            if row["agents"]
+        ]
+        lines.append(f"Agents by how they were started: {_list(parts)}.")
+    choices = block.get("model_choice")
+    if choices:
+        above = sum(row["runs"] for row in choices if row["model"] in ("opus", "fable"))
+        ceiling = sum(row.get("ceiling_usd", 0.0) for row in choices)
+        chosen = Counter()
+        for row in choices:
+            chosen[row["chosen"]] += row["runs"]
+        lines.append(
+            f"Model choice: {_n(above, 'agent run')} on Opus or above; chosen by {_top(dict(chosen), 4)}. "
+            f"Sonnet could save up to {_usd(ceiling)} at list prices."
+        )
     return lines
 
 
@@ -1766,6 +2092,33 @@ def _cost_centres_lines(block: dict) -> list[str]:
         for centre, amount in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
     ]
     return [f"Spend by cost centre, at list prices: {_list(parts)}."]
+
+
+def _compactions_lines(block: dict) -> list[str]:
+    if not block.get("summaries") and not any((block.get("in_agents") or {}).values()):
+        return []
+    lines = [
+        f"Summaries: {_n(block['summaries'], 'summary', 'summaries')} in {_n(block['compacted'], 'session')} "
+        f"of {block['sessions']:,}"
+        + (f" ({_top(block['triggers'], 3)})" if block.get("triggers") else "")
+        + "."
+    ]
+    inside = block.get("in_agents") or {}
+    if any(inside.values()):
+        lines.append(f"Inside agent runs: {_n(sum(inside.values()), 'summary', 'summaries')}.")
+    if "write_usd" in block:
+        lines.append(
+            f"They cost {_usd(block['write_usd'])} in cache written on the next reply and about "
+            f"{_usd(block.get('summary_usd', 0.0))} to write, at list prices."
+        )
+    heavy = block.get("heavy")
+    if heavy:
+        share = f", {100.0 * heavy['cost_usd'] / heavy['main_usd']:.0f}% of the total" if heavy["main_usd"] else ""
+        lines.append(
+            f"{_n(heavy['sessions'], 'session')} summarised {compaction_mod.HEAVY_COMPACTIONS} times or more: "
+            f"{_usd(heavy['cost_usd'])} of main-session cost{share}."
+        )
+    return lines
 
 
 def _project_files_lines(block: dict) -> list[str]:

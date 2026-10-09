@@ -1011,7 +1011,8 @@ def test_the_tips_are_relayed_or_judged_by_whether_the_note_leaves_it_to_claude(
 
 def test_every_tip_hint_asks_for_the_highlighted_block():
     assert set(prompting.TIP_HINTS) == {
-        "plan_fresh", "plan_fresh_early", "drip_feed", "big_paste", "status_poll", "cold_return"}
+        "plan_fresh", "plan_fresh_early", "drip_feed", "big_paste", "status_poll", "cold_return", "report_reread",
+        "split_run"}
     # Report-only habits have no note, so they have no tip to count.
     assert set(prompting.HABITS) & set(cat.COACHING_HINTS) == set(prompting.COACHED_HABITS)
 

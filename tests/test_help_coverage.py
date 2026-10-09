@@ -332,7 +332,8 @@ def _plain(text: str, where: str) -> None:
     assert not BANNED.search(text), f"{where}: banned term in {text!r}"
     assert not FILLER.search(text), f"{where}: filler word in {text!r}"
     assert " -- " not in text, f"{where}: dash aside in {text!r}"
-    for sentence in re.split(r"(?<=[.?!])\s+", text):
+    # A closing quote or bracket after the full stop belongs to the sentence it ends.
+    for sentence in re.split(r"(?<=[.?!])[\"')]*\s+", text):
         assert len(sentence.split()) <= MAX_SENTENCE_WORDS, f"{where}: sentence over 25 words: {sentence!r}"
 
 
@@ -535,6 +536,54 @@ def test_the_copy_the_failed_calls_check_and_the_work_habits_row_add_keeps_to_th
     if habits_result["saving"]:
         strings.append(("habits saving", habits_result["saving"]))
     assert len(strings) >= 12
+    for where, text in strings:
+        _plain(text, where)
+
+
+def test_the_copy_the_agent_reports_check_and_the_batch_probes_card_keep_to_the_help_rules(tmp_path):
+    """The "Replies to agent reports" check: its question and why, its two
+    tips, and what it says when it finds something, when it finds little,
+    when no report came back and when there is no data; and the card that
+    tells you to batch an agent's lookups: its title, why, action, saving
+    basis, the prompt to copy and the explainer."""
+    from types import SimpleNamespace as NS
+
+    from claudeglass import advice, fixes
+    from claudeglass import quick_actions as qa
+    from claudeglass.model import Recommendation
+    from claudeglass.units import Units
+    from test_advice import _batch_probes, _model_swap_report
+    from test_quick_actions import _ctx, _report_turn_rows, _reports_model
+
+    check = next(c for c in qa.CHECKS if c.id == "agent-reports")
+    strings = [("question", check.question), ("why", check.why)]
+    strings += [(f"tip {key} {tip['title']}", tip[key]) for tip in (qa._REPORT_ACK_TIP, qa._REPORT_WAKE_TIP) for key in tip]
+    models = {
+        "found": _reports_model(_report_turn_rows(ack=(30, 5.0, 3, 300_000))),
+        "one wake-up": _reports_model(_report_turn_rows(ack=(4, 1.0, 1, 100_000), acted=(0, 0.0, 0, 0), respawned=(0, 0.0, 0, 0))),
+        "quiet": _reports_model(_report_turn_rows(ack=(2, 0.2, 0, 0), acted=(8, 1.0, 0, 0), respawned=(1, 0.1, 0, 0))),
+        "none": _reports_model([]),
+    }
+    for name, model in models.items():
+        result = qa.run("agent-reports", _ctx(tmp_path, model=model))
+        strings.append((f"{name} summary", re.sub(r"\{\{page:[a-z/-]+\}\}", "the Work habits page", result["summary"])))
+    nothing = qa.run("agent-reports", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))
+    strings.append(("no data summary", nothing["summary"]))
+
+    for agent in ("Explore", "workflow-subagent"):
+        (card,) = advice.finish([_batch_probes(agent)], _model_swap_report([]), None, Units(billing_mode="api", currency="USD"))
+        strings += [(f"{agent} card {key}", getattr(card, key)) for key in ("title", "why", "action", "estimated_saving", "saving_basis")]
+        rec = Recommendation(
+            id="agent-batch-probes", severity="advice", category="workflow", title=card.title, action=card.action,
+            agent_type=agent, lever=None,
+        )
+        (fix,) = fixes.build_fixes(rec)
+        strings += [(f"{agent} explainer {heading}", text) for heading, text in fix["explainer"]]
+        # The opening line every finding's prompt shares is not this card's copy.
+        opening = fixes._FINDING_OPEN.format(title=card.title) + " "
+        assert fix["prompt"].startswith(opening)
+        strings.append((f"{agent} fix prompt", fix["prompt"].removeprefix(opening).removesuffix(" " + fixes.PROMPT_RESTART)))
+    assert len(strings) >= 20
     for where, text in strings:
         _plain(text, where)
 
@@ -800,3 +849,84 @@ def test_the_copy_the_project_files_check_and_the_agent_stack_add_keeps_to_the_h
     for where, text in strings:
         _plain(text, where)
     claude_md_review._NAMES.clear()
+
+
+def test_the_copy_the_plan_checks_and_the_plan_rounds_card_keep_to_the_help_rules(tmp_path):
+    """The "Plans sent back" and "Builds after a plan" checks: their question,
+    why and what each says in every case; and the card that asks for a
+    critique before a plan: its title, why, action, saving basis, the prompt
+    to copy, its explainer and the sentence the approvals table adds."""
+    from types import SimpleNamespace as NS
+
+    from claudeglass import advice, fixes, handoff, habits
+    from claudeglass import quick_actions as qa
+    from claudeglass.model import Recommendation
+    from claudeglass.units import Units
+    from test_advice import _model_swap_report, _plan_rounds
+    from test_quick_actions import (
+        _PLAN_ROUNDS_REC, _approval_row, _ctx, _plan_approval_model, _plan_rounds_model, _round_row, _rounds_rows,
+    )
+
+    def _own_words(prompt: str, shared: str) -> str:
+        """The prompt without the scope questions every "from now on" prompt
+        ends with: those belong to no one card."""
+        assert prompt.endswith(" " + shared)
+        return prompt.removesuffix(" " + shared)
+
+    nothing = NS(sections=[], context_files={}, recommendations=[])
+    strings = []
+    for check_id in ("plan-rounds", "plan-approval"):
+        check = next(c for c in qa.CHECKS if c.id == check_id)
+        strings += [(f"{check_id} question", check.question), (f"{check_id} why", check.why)]
+    models = {
+        "plan-rounds": {
+            "found": _plan_rounds_model(_rounds_rows(), [_PLAN_ROUNDS_REC]),
+            "quiet": _plan_rounds_model(_rounds_rows()),
+            "none sent back": _plan_rounds_model([_round_row("all", 6), _round_row("none", 6)]),
+            "singular": _plan_rounds_model(
+                [_round_row("all", 1, rounds=1, asked=1, cost=2.0), _round_row("once", 1, 1, 1, 2.0)]
+            ),
+            "no plan": _plan_rounds_model([]),
+            "no data": nothing,
+        },
+        "plan-approval": {
+            "carried on": _plan_approval_model([_approval_row("kept", 8, 120, 150_000, 0.12, typed=3)]),
+            "fresh too": _plan_approval_model([
+                _approval_row("kept", 6, 100, 150_000, 0.12), _approval_row("cleared", 2, 30, 50_000, 0.04),
+            ]),
+            "fresh only": _plan_approval_model([_approval_row("handoff", 1, 10, 30_000, 0.02)]),
+            "none": _plan_approval_model([]),
+            "no data": nothing,
+        },
+    }
+    for check_id, variants in models.items():
+        for name, model in variants.items():
+            result = qa.run(check_id, _ctx(tmp_path, model=model))
+            strings.append((f"{check_id} {name} summary", re.sub(r"\{\{page:[a-z/-]+\}\}", "the Work habits page", result["summary"])))
+            if result["saving"]:
+                strings.append((f"{check_id} {name} saving", result["saving"]))
+            for fix in result["fixes"]:
+                strings.append((f"{check_id} {name} fix prompt", _own_words(fix["prompt"], fixes.PROMPT_SCOPE)))
+
+    for units in (Units(billing_mode="api", currency="USD"), Units(billing_mode="subscription", currency="USD")):
+        (card,) = advice.finish([_plan_rounds()], _model_swap_report([]), None, units)
+        strings += [(f"card {key}", getattr(card, key)) for key in ("title", "why", "action", "estimated_saving", "saving_basis")]
+    rec = Recommendation(
+        id="plan-rounds", severity="advice", category="workflow", title=card.title, action=card.action, lever=None,
+    )
+    (fix,) = fixes.build_fixes(rec)
+    # The where and undo text every "from now on" card shares is no one card's copy.
+    shared = (fixes._SCOPE_WHERE_TEXT, fixes._SCOPE_UNDO_TEXT)
+    strings += [
+        (f"explainer {heading}", text.removeprefix(fixes._SCOPE_WHERE_TEXT).strip())
+        for heading, text in fix["explainer"] if text not in shared
+    ]
+    assert dict(fix["explainer"])["Where and who it affects"].startswith(fixes._SCOPE_WHERE_TEXT)
+    opening = fixes._FINDING_OPEN.format(title=card.title) + " "
+    assert fix["prompt"].startswith(opening)
+    strings.append(("fix prompt", _own_words(fix["prompt"], fixes.PROMPT_SCOPE).removeprefix(opening)))
+    strings += [(f"start label {key}", text) for key, text in handoff.START_LABELS.items()]
+    strings += [(f"round label {key}", text) for key, text in habits.PLAN_ROUND_LABELS.items()]
+    assert len(strings) >= 35
+    for where, text in strings:
+        _plain(text, where)

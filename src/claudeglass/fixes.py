@@ -60,6 +60,15 @@ SCOPE_NOTE = (
     "lasts; new sessions read it when they start."
 )
 
+#: The line ``agent-batch-probes`` tells you to add to an agent definition or
+#: a workflow prompt, word for word (the Work habits table's help says it too).
+BATCH_PROBES_LINE = "Batch independent Read/Grep/Glob calls into a single message"
+
+#: The standing request ``plan-rounds`` tells you to put in your first
+#: planning message, in CLAUDE.md or in a plan skill, word for word (the Work
+#: habits table's help asks for the same in its own words).
+CRITIQUE_PLAN_LINE = "Before you show me a plan, critique it for gaps and doubts, then fix them"
+
 #: Appended to every "from now on" workflow prompt (one that asks Claude
 #: to work differently going forward, rather than to edit a specific
 #: setting): a pasted "from now on" rule isn't picked up by a restart --
@@ -357,6 +366,14 @@ _WORKFLOW_PROMPTS = {
         "can add to the task prompts I send it instead. Show me the diff before saving. Claude Code will ask "
         "my permission before editing files under .claude."
     ),
+    "agent-batch-probes": (
+        "{agent} often makes one read-only call per reply, and each reply reads its whole context again. Please "
+        "read {agent}'s agent file (~/.claude/agents/{agent}.md or .claude/agents/{agent}.md). Then propose "
+        "adding this line to its prompt: \"" + BATCH_PROBES_LINE + ".\" Some agents have no agent file, because "
+        "they are built into Claude Code or a workflow script starts them. If {agent} is one, propose a sentence "
+        "I can add to the task prompts or the workflow script instead. Show me the diff before saving. "
+        "Claude Code will ask my permission before editing files under .claude."
+    ),
     # UX-8: the rest of the workflow-rule ids below (every one that used
     # to fall through build_fixes with no template at all, per this
     # module's own docstring) so every card gets a prompt, not just the
@@ -380,6 +397,9 @@ _WORKFLOW_PROMPTS = {
     "batch-instructions": (
         "From now on, if I send you a few small separate asks in a row, ask whether I'd like them batched "
         "into one message before you start on the first. " + PROMPT_SCOPE
+    ),
+    "plan-rounds": (
+        "From now on, " + CRITIQUE_PLAN_LINE[0].lower() + CRITIQUE_PLAN_LINE[1:] + ". " + PROMPT_SCOPE
     ),
     "subagent-volume": (
         "Please look at why {agent} is spawned so often, or so expensively, in my recent sessions, and "
@@ -592,6 +612,12 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "to Claude's answer to the first before sending the rest.",
         _SCOPE_UNDO_TEXT,
     ),
+    "plan-rounds": (
+        _SCOPE_WHERE_TEXT + " A plan skill is a file under ~/.claude/skills or .claude/skills that you write once.",
+        "Claude spends a reply critiquing each plan before it shows you, and a plan can still miss what only you "
+        "know. Your own questions may still be needed.",
+        _SCOPE_UNDO_TEXT,
+    ),
     "subagent-volume": (
         "Nowhere in Claude Code's config directly -- the fix is fewer spawns, a cheaper model for this "
         "agent type, or a tighter brief; a model change is set in settings.json or the agent's frontmatter.",
@@ -695,6 +721,13 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "hard to summarise briefly.",
         "Remove the added report-length instruction (Claude Code shows the change before saving it if "
         "it's in an agent file).",
+    ),
+    "agent-batch-probes": (
+        "The agent's own file (~/.claude/agents/<type>.md or .claude/agents/<type>.md) if it has one, or the "
+        "Agent prompt or workflow script that starts it.",
+        "Calls that depend on each other can't share a message. Where one search names the next file to read, "
+        "the agent still looks things up one at a time.",
+        "Remove the added line (Claude Code shows the change before saving it if it's in an agent file).",
     ),
     "spawn-task-prompt": (
         _SCOPE_WHERE_TEXT,
@@ -1179,6 +1212,7 @@ _NOTE_OVERRIDES: dict[str, str] = {
     "long-tool-waits": "scope",
     "notification-invalidation": "scope",
     "batch-instructions": "scope",
+    "plan-rounds": "scope",
     "long-context-share": "scope",
     "spawn-task-prompt": "scope",
     "tool-output-carry": "scope",

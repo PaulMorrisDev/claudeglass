@@ -265,7 +265,7 @@ def _run_locked(options: ServeOptions, store_path: Path, lock: StoreLock, *, onc
 
         monthly_job = MonthlyReportJob(options)
 
-    # Coaching notes' split points (service/coaching_job.py), from a
+    # Coaching notes' own numbers (service/coaching_job.py), from a
     # 30-day report of every project built from the store.
     from .coaching_job import CoachingJob
 

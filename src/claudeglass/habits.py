@@ -62,6 +62,7 @@ from typing import TYPE_CHECKING
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
+from . import compaction as compaction_mod
 from . import classify
 from . import events as events_mod
 from . import known_savers
@@ -72,16 +73,18 @@ from . import quality
 from .capture_tags import with_older_why
 from .context_files import _parse_ts
 from .discovery import local_day, to_local
-from .handoff import MIN_FEEDBACK_ANSWERS, plan_carried, plan_shape, starting_context
+from .handoff import MIN_FEEDBACK_ANSWERS, plan_carried, plan_groups, plan_shape, starting_context
 from .model import PROMPT_FLAGS, Column, EventKind, Feedback, Recommendation, Section, Table, Turn
 from .pricing import Pricing, effective_rates, price_turn
-from .topology import agent_key
+from .topology import LAUNCH_WORDS, _report_index, agent_key, launch_of, launches_by_tool_use
 
 if TYPE_CHECKING:
     from .model import ReportModel
 
 _READ_TOOLS = ("Read", "Grep", "Glob")
 _SHELL_TOOLS = ("Bash", "PowerShell")
+#: Calls that start an agent or a workflow.
+_SPAWN_TOOLS = ("Agent", "Task", "Workflow")
 #: Agent reports are counted as reports (``short_reports``), not output.
 _REPORT_TOOLS = ("Agent", "Task")
 #: A tool call stopped before it ran, by denial bucket
@@ -124,6 +127,13 @@ BIG_OUTPUT_TOKENS = catalogue.BIG_OUTPUT_TOKENS
 STALE_TOKENS = 20_000
 #: A break this long lets the cache go cold (the 1-hour TTL at most).
 LONG_BREAK_S = 3_600
+#: A reply that starts at a background task's notice this long after the
+#: reply before it is a wake-up: the cache had gone cold, so the reply
+#: wrote the whole context again (the tuning export counts the same).
+WAKE_GAP_S = 3_600
+#: How many replies after a notification's time the reply that read it is
+#: looked for (``_arrival``).
+_ARRIVAL_SCAN = 4
 #: Without a size tag, a message this many replies long was a large ask.
 LARGE_TURNS = 60
 #: A skill Claude reached for after this many replies came late.
@@ -520,6 +530,13 @@ def _compacted(turn: Turn) -> bool:
     return EventKind.COMPACT_BOUNDARY in turn.preceding_event_kinds
 
 
+def is_wake_up(turn: Turn, gap_s: float) -> bool:
+    """Whether ``turn`` is a wake-up: a reply that starts at a background
+    task's notice ``WAKE_GAP_S`` or more after the reply before it
+    (``gap_s`` is the time between the two)."""
+    return turn.preceding_primary == EventKind.TASK_NOTIFICATION and gap_s >= WAKE_GAP_S
+
+
 class _CarryCost:
     """What keeping tokens in one transcript's context costs from a reply
     on: a cache write by the next reply, then a cache read by each reply
@@ -542,8 +559,13 @@ class _CarryCost:
     def cost(self, i: int, tokens: float) -> float:
         """Carrying ``tokens`` that came back to reply ``i`` (a tool
         result or an agent report)."""
-        j = i + 1
-        if tokens <= 0 or j >= len(self.turns) or _compacted(self.turns[j]):
+        return self.cost_from(i + 1, tokens)
+
+    def cost_from(self, j: int, tokens: float) -> float:
+        """Carrying ``tokens`` that first reached reply ``j`` (a background
+        agent's report, which arrives as a task notification before the
+        reply that reads it, not as the result of a call)."""
+        if tokens <= 0 or j < 0 or j >= len(self.turns) or _compacted(self.turns[j]):
             return 0.0
         later = self._read_on[j + 1] if j + 1 < len(self.turns) and not _compacted(self.turns[j + 1]) else 0.0
         return tokens * (self.writes[j] + later)
@@ -590,6 +612,19 @@ class CycleFact:
     reads: int = 0
     read_tokens: int = 0
     read_carry: float = 0.0
+    #: The message's own replies (one per message id), and how many of
+    #: them were a single read-only probe (:func:`_is_probe`), how many of
+    #: those a shell command, how many runs of two or more such replies in
+    #: a row came, and what the replies after the first of each run cost
+    #: (:func:`_probe_counts`).
+    calls: int = 0
+    probe_calls: int = 0
+    probe_shell_calls: int = 0
+    probe_runs: int = 0
+    probe_batch_cost: float = 0.0
+    #: How many of its replies came before the first one that changed your
+    #: files (:func:`_calls_before_edit`); ``None`` when none did.
+    calls_before_edit: int | None = None
     explore_agents: int = 0
     planned: bool = False
     plan_cost: float = 0.0
@@ -693,6 +728,12 @@ class AgentFact:
     #: them were a single read-only probe (:func:`_is_probe`).
     calls: int = 0
     probe_calls: int = 0
+    #: How many of those were a shell command, the runs of two or more in a
+    #: row, and what the replies after the first of each run cost
+    #: (:func:`_probe_counts`).
+    probe_shell_calls: int = 0
+    probe_runs: int = 0
+    probe_batch_cost: float = 0.0
     #: How many calls came before the first one that changed your files
     #: (:func:`_calls_before_edit`); ``None`` when the run changed none.
     calls_before_edit: int | None = None
@@ -708,6 +749,100 @@ class AgentFact:
     #: The context size at every reply of the run, added up: what the run
     #: read in all, before any cache discount.
     context_tokens: int = 0
+    #: Run receipts. The context of the run's first call, and the summaries
+    #: Claude Code made inside it (all, and the automatic ones).
+    start_tokens: int = 0
+    compactions: int = 0
+    auto_compactions: int = 0
+    #: How it was started (``topology.LAUNCH_WORDS``), the run it belongs to
+    #: and the agents it ran beside. A direct agent is a run of its own; a
+    #: workflow's agents share the run a ``Workflow`` call started or
+    #: resumed (``capture.WorkflowLaunches`` splits a resumed run by each
+    #: agent's own start). ``group`` is empty when nothing can be compared
+    #: with it. Opaque keys, never shown.
+    launch: str = "foreground"
+    run: str = ""
+    group: str = ""
+    #: When it read a file that a sibling of its group read before it: the
+    #: files (at most one for each group, the one most siblings read), their
+    #: size and what carrying them cost. An upper bound: the file may be
+    #: the plan or spec each agent was told to read, or may not.
+    shared_reads: int = 0
+    shared_tokens: int = 0
+    shared_cost: float = 0.0
+
+
+#: What a main-session reply to a background task's notification did, in
+#: the order the report-turns table lists them.
+REPORT_KINDS = ("acknowledged", "acted", "respawned")
+REPORT_KIND_LABELS = {
+    "acknowledged": "Only acknowledged it",
+    "acted": "Acted on it",
+    "respawned": "Started more agents",
+}
+
+
+@dataclass(slots=True)
+class ReportFact:
+    """One reply of the main session that started at a background task's
+    notification (an agent's report), through the last call it made:
+    ``kind`` is a word of :data:`REPORT_KINDS`."""
+
+    session_id: str
+    week: str
+    kind: str
+    #: What the reply cost, all its calls together, and the context its
+    #: first call read again.
+    cost: float
+    context_tokens: int = 0
+    #: It started an hour or more after the reply before it
+    #: (:func:`is_wake_up`), and the cache-write tokens of its first call.
+    woke: bool = False
+    rewritten: int = 0
+
+
+#: The groups of plans the plan-rounds table lists, in order: every plan you
+#: approved, those by how many times plans were sent back first, then the
+#: asks whose plan you never approved.
+PLAN_ROUND_KINDS = ("all", "none", "once", "twice", "more", "dropped")
+PLAN_ROUND_LABELS = {
+    "all": "Every approved plan",
+    "none": "Never sent back",
+    "once": "Sent back once",
+    "twice": "Sent back twice",
+    "more": "Sent back three times or more",
+    "dropped": "Never approved",
+}
+#: The feedback on a plan sent back that a standing request to critique the
+#: plan would have covered (``capture_catalogue.PLAN_FEEDBACK_CLASSES``): a
+#: question, a critique, or a doubt. "other" is something else.
+PLAN_ASKED_CLASSES = ("question", "critique", "unsure")
+
+
+@dataclass(slots=True)
+class PlanFact:
+    """The plans Claude put up for one ask in a main session
+    (``handoff.plan_groups``), from the first to the one you approved."""
+
+    session_id: str
+    week: str
+    #: Different plans put up, the plans you sent back among them, and
+    #: whether you approved one (by typing a go-ahead or leaving plan mode, or
+    #: in the dialog).
+    versions: int
+    sent_back: int
+    approved: bool
+    typed: bool = False
+    #: Steps and files named in the last plan (``PlanStats``).
+    steps: int = 0
+    files: int = 0
+    #: The replies after the first plan, through the approval (the last plan,
+    #: when none was approved): their tokens and what they cost.
+    tokens: int = 0
+    cost: float = 0.0
+    #: Plans you sent back with a question, a critique or a doubt
+    #: (:data:`PLAN_ASKED_CLASSES`).
+    asked: int = 0
 
 
 @dataclass(slots=True)
@@ -823,6 +958,10 @@ class Habits:
 
     cycles: list[CycleFact] = field(default_factory=list)
     agents: list[AgentFact] = field(default_factory=list)
+    #: The main session's replies to agent reports (:class:`ReportFact`).
+    report_turns: list[ReportFact] = field(default_factory=list)
+    #: The plans put up for each ask in a main session (:class:`PlanFact`).
+    plan_rounds: list[PlanFact] = field(default_factory=list)
     pieces: list[Piece] = field(default_factory=list)
     #: Every piece of work drawn from the transcripts, rated or not
     #: (``pieces.WorkPiece``), a session that opens with a handoff joined to
@@ -1113,6 +1252,92 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
             out.small_sessions.append((bundle.session_id, day, bundle.slug, premium, tag is not None))
 
     _agents(bundle, cycles, turns, carry, first_read, rates, out, workflows)
+    _report_turns(bundle, turns, carry, out)
+    _plan_rounds(bundle.session_id, turns, carry, out)
+
+
+def _plan_rounds(session_id: str, turns: list[Turn], carry: _CarryCost, out: Habits) -> None:
+    """One :class:`PlanFact` for each ask the session's plans answer
+    (``handoff.plan_groups``). What the rounds cost is the replies after the
+    first plan through the approval, so an ask with one plan costs
+    nothing here."""
+    for group in plan_groups(turns):
+        between = group.between
+        out.plan_rounds.append(
+            PlanFact(
+                session_id=session_id,
+                week=_week(_moment(turns[group.calls[0]].ts), out.tz),
+                versions=group.versions,
+                sent_back=group.sent_back,
+                approved=group.approval is not None,
+                typed=group.typed,
+                steps=group.steps,
+                files=group.files,
+                tokens=sum(capture_mod._turn_tokens(turns[j]) for j in between),
+                cost=sum(carry.costs[j] for j in between),
+                asked=sum(1 for word in group.feedback if word in PLAN_ASKED_CLASSES),
+            )
+        )
+
+
+def _report_turns(bundle, turns: list[Turn], carry: _CarryCost, out: Habits) -> None:
+    """The main session's replies to a background agent's or a workflow's
+    report: each starts at a reply that follows the report's task
+    notification and runs through the calls it made (as
+    ``capture._hand_off_replies`` finds a reply). One that made no call
+    only acknowledged the report; one that started an agent or a workflow
+    again is ``respawned``; any other call, and it was ``acted`` on. A
+    notice from any other background task (a command finishing) is not a
+    report, so the reply to it isn't counted."""
+    reporters = {
+        agent_key(sub.meta.agent_id)
+        for sub in bundle.subs
+        if sub.meta.agent_id and sub.meta.kind != "workflow-agent"
+    }
+    for turn in turns:
+        reporters.update(task_id for _run_id, task_id in turn.workflow_runs.values() if task_id)
+    stamps = capture_mod._timeline(turns)
+    answers: set[int] = set()
+    for event in bundle.top.events:
+        if event.kind != EventKind.TASK_NOTIFICATION:
+            continue
+        task_id = event.detail.get("task_id")
+        if isinstance(task_id, str) and (task_id in reporters or agent_key(task_id) in reporters):
+            j = _arrival(turns, stamps, event.ts)
+            if j is not None:
+                answers.add(j)
+    previous = None
+    for j, turn in enumerate(turns):
+        if turn.estimated:
+            continue
+        if turn.preceding_primary == EventKind.TASK_NOTIFICATION and j in answers:
+            end = j + 1
+            while end < len(turns) and turns[end].preceding_primary in capture_mod._REPLY_CONTINUES:
+                end += 1
+            calls: Counter = Counter()
+            for reply in turns[j:end]:
+                calls.update(reply.tool_calls_by_tool)
+            kind = "acknowledged"
+            if any(calls.get(tool) for tool in _SPAWN_TOOLS):
+                kind = "respawned"
+            elif sum(calls.values()):
+                kind = "acted"
+            at = _moment(turn.ts)
+            last_at = _moment(previous.ts) if previous is not None else None
+            gap = (at - last_at).total_seconds() if at is not None and last_at is not None else 0.0
+            woke = is_wake_up(turn, gap)
+            out.report_turns.append(
+                ReportFact(
+                    session_id=bundle.session_id,
+                    week=_week(at, out.tz),
+                    kind=kind,
+                    cost=sum(carry.costs[j:end]),
+                    context_tokens=turn.ctx,
+                    woke=woke,
+                    rewritten=turn.cache_creation_tokens if woke else 0,
+                )
+            )
+        previous = turn
 
 
 def _carries_out_plan(cycle) -> bool:
@@ -1396,7 +1621,9 @@ def _cycle_fact(
             big = chars // capture_mod.CHARS_PER_TOKEN
             if big >= BIG_OUTPUT_TOKENS and tool not in _REPORT_TOOLS:
                 fact.big_outputs.append((tool, big, carry.cost(i, big)))
-        if (turn.plan_stats is not None or turn.tool_calls_by_tool.get("ExitPlanMode")) and not fact.planned:
+        if turn.plan_stats is not None or turn.tool_calls_by_tool.get("ExitPlanMode"):
+            # The last plan: the cost of the ask up to the plan you approved,
+            # not up to a first one you sent back.
             fact.planned = True
             fact.plan_cost = sum(carry.costs[j] for j in idx[: n + 1])
         if turn.tests_run or (
@@ -1422,24 +1649,54 @@ def _cycle_fact(
         fact.thinking_cost += turn.thinking_tokens * output
     if fact.tag is not None and fact.tag.plan in ("made", "following", "deviated"):
         fact.planned = True
+    fact.calls = len(cycle.turns)
+    fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost = _probe_counts(
+        cycle.turns, [carry.costs[i] for i in idx]
+    )
+    fact.calls_before_edit = _calls_before_edit(cycle.turns)
     return fact
+
+
+def _arrival(turns: list[Turn], stamps: list[datetime], ts: str | None) -> int | None:
+    """The index of the first reply of ``turns`` (with ``stamps``, their
+    times as ``capture._timeline`` gives them) at or after ``ts`` whose
+    preceding events include a task notification or a queued one: the reply
+    that first read the report that arrived at ``ts``. ``None`` when ``ts``
+    is missing or no such reply is near."""
+    moment = _moment(ts)
+    if moment is None:
+        return None
+    start = bisect.bisect_left(stamps, moment)
+    for j in range(start, min(start + _ARRIVAL_SCAN, len(turns))):
+        kinds = turns[j].preceding_event_kinds
+        if EventKind.TASK_NOTIFICATION in kinds or EventKind.QUEUE_OPERATION in kinds:
+            return j
+    return None
 
 
 def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates, out: Habits, workflows=()) -> None:
     carries = {id(bundle.top): carry}
-    reports: dict[str, tuple[_CarryCost, int, int]] = {}
+    #: Where a synchronous agent's report came back: Agent tool_use id ->
+    #: (the carry of the transcript that made the call, the reply that made it).
+    reports: dict[str, tuple[_CarryCost, int]] = {}
     for i, turn in enumerate(turns):
-        for use_id, chars in turn.agent_result_chars.items():
-            reports[use_id] = (carry, i, chars)
+        for use_id in turn.agent_result_chars:
+            reports[use_id] = (carry, i)
+    priced_of = {id(bundle.top): turns}
     sub_turns = {}
     for sub in bundle.subs:
         priced = capture_mod._priced(sub)
         sub_turns[id(sub)] = priced
+        priced_of[id(sub)] = priced
         sub_carry = _CarryCost(priced, rates)
         carries[id(sub)] = sub_carry
         for i, turn in enumerate(priced):
-            for use_id, chars in turn.agent_result_chars.items():
-                reports[use_id] = (sub_carry, i, chars)
+            for use_id in turn.agent_result_chars:
+                reports[use_id] = (sub_carry, i)
+    #: The report sizes, shared with the topology tables, and the times of
+    #: each transcript's replies (for a background agent's notification).
+    index = _report_index(bundle.top, bundle.subs)
+    stamps: dict[int, list[datetime]] = {}
     main_spawn = {}
     for i, turn in enumerate(turns):
         for use_id in turn.tool_use_ids:
@@ -1447,6 +1704,11 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
     by_agent = {agent_key(sub.meta.agent_id): sub for sub in bundle.subs if sub.meta.agent_id}
     cycle_of = {id(sub): cycle for cycle in cycles for sub in cycle.subs}
     launches = capture_mod.WorkflowLaunches(bundle.top, workflows)
+    launch_words = launches_by_tool_use([bundle.top, *bundle.subs])
+    #: group -> file hash -> [(when, the agent, its reply, size in chars,
+    #: its carry)] of every agent that read it, for the files siblings read
+    #: again.
+    group_reads: dict[str, dict[str, list]] = {}
 
     for sub in bundle.subs:
         priced = sub_turns[id(sub)]
@@ -1464,6 +1726,8 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
             model=_dominant(t.model for t in priced) or "",
             direct=sub.meta.kind != "workflow-agent",
             context_tokens=sum(t.ctx for t in priced),
+            start_tokens=first.ctx,
+            launch=launch_of(sub, launch_words),
             capped="short" in first.prompt_flags,
             retry=first.retry_marker,
             spawn=first.spawn_marker,
@@ -1479,13 +1743,33 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
                 fact.brief = fact.brief or cap.brief
                 fact.missing = fact.missing or tuple(cap.missing)
         fact.calls = len(priced)
-        fact.probe_calls = sum(1 for turn in priced if _is_probe(turn))
+        (fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost) = _probe_counts(
+            priced, sub_carry.costs
+        )
         fact.calls_before_edit = _calls_before_edit(priced)
-        found = reports.get(sub.meta.tool_use_id or "")
-        if found is not None:
-            parent_carry, i, chars = found
+        fact.compactions, fact.auto_compactions = compaction_mod.compactions_in(sub)
+        _place_in_run(fact, sub, launches, main_spawn)
+        if fact.group:
+            _note_reads(group_reads.setdefault(fact.group, {}), fact, priced, sub_carry)
+        chars = index.chars_for(sub)
+        if chars is not None:
             fact.report_tokens = chars // capture_mod.CHARS_PER_TOKEN
-            fact.report_carry = parent_carry.cost(i, fact.report_tokens)
+            found = reports.get(sub.meta.tool_use_id or "")
+            if found is not None:
+                parent_carry, i = found
+                fact.report_carry = parent_carry.cost(i, fact.report_tokens)
+            else:
+                # A background agent's report arrives as a task notification
+                # (queued when it came mid-reply): it is carried from the reply
+                # that first read it.
+                holder, ts = index.notified.get(agent_key(sub.meta.agent_id), (None, None))
+                held = priced_of.get(id(holder))
+                if held is not None:
+                    if id(holder) not in stamps:
+                        stamps[id(holder)] = capture_mod._timeline(held)
+                    j = _arrival(held, stamps[id(holder)], ts)
+                    if j is not None:
+                        fact.report_carry = carries[id(holder)].cost_from(j, fact.report_tokens)
         spawn_at = _spawn_index(sub, main_spawn, by_agent, launches)
         if spawn_at is not None:
             for i, turn in enumerate(priced):
@@ -1497,6 +1781,65 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
                 fact.overlap_reads += again
                 fact.overlap_cost += sub_carry.cost(i, again * per_read / capture_mod.CHARS_PER_TOKEN)
         out.agents.append(fact)
+    for reads in group_reads.values():
+        _share_reads(reads)
+
+
+def _place_in_run(fact: AgentFact, sub, launches, main_spawn: dict) -> None:
+    """Say which run ``sub`` belongs to and which agents ran beside it. A
+    workflow's agents belong to the ``Workflow`` call that started or
+    resumed their run, found by when each agent began
+    (``WorkflowLaunches.call_for``): a resumed run keeps its directory, so
+    the directory alone would put two launches together. A direct agent is
+    a run of its own; its siblings are the agents started by the same
+    reply."""
+    if sub.meta.kind == "workflow-agent":
+        run_id = sub.meta.workflow_run_id or ""
+        if not run_id:
+            return
+        call = launches.call_for(sub)
+        fact.run = fact.group = f"{run_id}|{call[1] if call else ''}"
+        return
+    fact.run = agent_key(sub.meta.agent_id) or sub.meta.tool_use_id or ""
+    at = main_spawn.get(sub.meta.tool_use_id or "")
+    if at is not None:
+        fact.group = f"reply:{at}"
+
+
+def _note_reads(reads: dict, fact: AgentFact, priced: list, carry) -> None:
+    """Add the files one agent read to its group's ``reads``: each file
+    once, at the reply that first read it, with its size."""
+    seen: set[str] = set()
+    for i, turn in enumerate(priced):
+        for n, hashed in enumerate(turn.read_target_hashes):
+            if hashed in seen:
+                continue
+            seen.add(hashed)
+            chars = turn.read_target_chars[n] if n < len(turn.read_target_chars) else 0
+            if chars > 0:
+                reads.setdefault(hashed, []).append((_moment(turn.ts), fact, i, chars, carry))
+
+
+def _share_reads(reads: dict) -> None:
+    """The file most of a group's agents read, if two or more did: every
+    agent after the first to read it has read again what a sibling already
+    had. Each is charged the file's size, carried from the reply that read
+    it. The first reader is found by time, ties by order. One file for each
+    group, so a plan or spec every sibling reads is what shows."""
+    best = max(
+        (hashed for hashed, readers in reads.items() if len(readers) > 1),
+        key=lambda hashed: (len(reads[hashed]), max(r[3] for r in reads[hashed])),
+        default=None,
+    )
+    if best is None:
+        return
+    never = datetime.max.replace(tzinfo=timezone.utc)
+    readers = sorted(reads[best], key=lambda r: r[0] or never)
+    for _when, fact, i, chars, carry in readers[1:]:
+        tokens = chars // capture_mod.CHARS_PER_TOKEN
+        fact.shared_reads += 1
+        fact.shared_tokens += tokens
+        fact.shared_cost += carry.cost(i, tokens)
 
 
 def _is_probe(turn) -> bool:
@@ -1515,6 +1858,37 @@ def _is_probe(turn) -> bool:
         and turn.shell_read_count > 0
         and not (turn.shell_write_count or turn.shell_change_count)
     )
+
+
+def _is_shell_probe(turn) -> bool:
+    """Whether a probe (:func:`_is_probe`) was a shell command, not a Read,
+    Grep or Glob call."""
+    return _is_probe(turn) and not any(turn.tool_calls_by_tool.get(tool) for tool in _READ_TOOLS)
+
+
+def _probe_counts(turns, costs) -> tuple[int, int, int, float]:
+    """``(probes, probes by shell command, runs, cost)`` over ``turns``
+    (one per message id, ``costs`` their cost each): how many replies were
+    a single read-only probe, how many of those were a shell command, how
+    many runs of two or more probes in a row came, and what the replies
+    after the first of each run cost. Those are the replies one message
+    holding the calls side by side would not have needed, as far as the
+    calls didn't depend on each other."""
+    probes = shell = runs = 0
+    cost = 0.0
+    run = 0
+    for turn, usd in zip(turns, costs):
+        if not _is_probe(turn):
+            run = 0
+            continue
+        probes += 1
+        shell += _is_shell_probe(turn)
+        run += 1
+        if run == 2:
+            runs += 1
+        if run >= 2:
+            cost += usd
+    return probes, shell, runs, cost
 
 
 def _calls_before_edit(turns) -> int | None:
@@ -2008,10 +2382,19 @@ def _item_name_files(h: Habits) -> Item | None:
     reads_unnamed = _mean(c.reads for c in unnamed)
     if saving <= 0 or reads_unnamed <= reads_named:
         return None
-    return Item(
-        "name_files", saving, len(unnamed), ("inferred",),
+    evidence = (
         f"Asks that named a file ran {reads_named:.1f} reads and searches on average; the {len(unnamed)} that "
-        f"didn't ran {reads_unnamed:.1f}.",
+        f"didn't ran {reads_unnamed:.1f}."
+    )
+    lone_named = _pct(sum(c.probe_calls for c in named), sum(c.calls for c in named))
+    lone_unnamed = _pct(sum(c.probe_calls for c in unnamed), sum(c.calls for c in unnamed))
+    if lone_named is not None and lone_unnamed is not None and lone_unnamed > lone_named:
+        evidence += (
+            f" {lone_unnamed:.0f}% of the replies to those that didn't made one lookup and nothing else, "
+            f"against {lone_named:.0f}%."
+        )
+    return Item(
+        "name_files", saving, len(unnamed), ("inferred",), evidence,
         waste=_by_week((c.week, usd) for c, usd in gaps),
         reported_share=0.0,
     )
@@ -2060,6 +2443,9 @@ def _item_explore_research(h: Habits) -> Item | None:
     not_found = sum(1 for c in heavy if c.tag is not None and c.tag.found == "no")
     if not_found:
         parts.append(f"Claude said it didn't find what it looked for {not_found} times")
+    lone = sum(c.probe_calls for c in heavy)
+    if lone:
+        parts.append(f"{lone} of their {sum(c.calls for c in heavy)} replies made one lookup and nothing else")
     return Item(
         "explore_research", saving, len(heavy), _sources(confirmed > 0, confirmed < saving), _clauses(parts),
         example=EXPLORE_RESEARCH_TOKENSAVE_EXAMPLE if tokensave else "",
@@ -3267,8 +3653,14 @@ def _agents_table(h: Habits) -> Table:
     levels = [c for c in h.cycles if c.tag is not None and c.tag.level]
     if levels:
         cost = sum(c.cost for c in h.cycles)
+        calls = sum(c.calls for c in h.cycles)
+        edited = [c.calls_before_edit for c in h.cycles if c.calls_before_edit is not None]
         rows.append([
-            "top-level", len(h.cycles), cost, None, None, None, None, None, None, None, None, None,
+            "top-level", len(h.cycles), cost, None, None, None, None, None,
+            _pct(sum(c.probe_calls for c in h.cycles), calls),
+            _pct(sum(c.probe_shell_calls for c in h.cycles), calls),
+            statistics.median(edited) if edited else None,
+            None, None,
             _pct(sum(c.tag.level == "easy" for c in levels), len(levels)),
             _pct(sum(c.tag.level == "hard" for c in levels), len(levels)),
             None, None,
@@ -3292,6 +3684,7 @@ def _agents_table(h: Habits) -> Table:
             sum(1 for a in runs if a.retry),
             sum(1 for a in runs if a.retry == "model"),
             _pct(sum(a.probe_calls for a in runs), sum(a.calls for a in runs)),
+            _pct(sum(a.probe_shell_calls for a in runs), sum(a.calls for a in runs)),
             statistics.median(edited) if edited else None,
             rules.get("used", 0),
             rules.get("unused", 0),
@@ -3313,6 +3706,7 @@ def _agents_table(h: Habits) -> Table:
             Column(key="retried", label="Retried", kind="int"),
             Column(key="retried_model", label="Retried for the model", kind="int"),
             Column(key="probe_pct", label="Single read-only calls", kind="pct"),
+            Column(key="probe_shell_pct", label="Of them by shell command", kind="pct"),
             Column(key="before_edit", label="Calls before the first edit", kind="float"),
             Column(key="rules_used", label="Used CLAUDE.md", kind="int"),
             Column(key="rules_unused", label="Didn't use CLAUDE.md", kind="int"),
@@ -3356,6 +3750,203 @@ def _explore_by_model_table(h: Habits) -> Table:
             Column(key="avg_cost", label="Per run", kind="money"),
             Column(key="avg_context", label="Context read per run", kind="tokens"),
             Column(key="share_pct", label="Share of Explore cost", kind="pct"),
+        ],
+        rows=rows,
+    )
+
+
+def _probes_table(h: Habits) -> Table:
+    """Replies that made one read-only call and nothing else, by where they
+    ran (the main session or an agent type, as ``habits_agents`` names
+    them). Each such reply re-reads the whole context to look at one
+    thing, so a run of them is the cost batching the calls into one message
+    would take out, as far as they didn't depend on each other. A workflow
+    agent counts under its own type, as in ``habits_agents``."""
+    groups: dict[str, list[AgentFact]] = {}
+    for a in h.agents:
+        groups.setdefault(a.agent_type, []).append(a)
+    rows = []
+    if h.cycles:
+        rows.append([
+            "top-level",
+            sum(c.calls for c in h.cycles),
+            sum(c.probe_calls for c in h.cycles),
+            sum(c.probe_shell_calls for c in h.cycles),
+            sum(c.probe_runs for c in h.cycles),
+            sum(c.probe_batch_cost for c in h.cycles),
+        ])
+    for agent_type, runs in groups.items():
+        rows.append([
+            agent_type,
+            sum(a.calls for a in runs),
+            sum(a.probe_calls for a in runs),
+            sum(a.probe_shell_calls for a in runs),
+            sum(a.probe_runs for a in runs),
+            sum(a.probe_batch_cost for a in runs),
+        ])
+    rows = [row for row in rows if row[1] and row[2]]
+    rows.sort(key=lambda row: -row[5])
+    return Table(
+        name="habits_probes",
+        title="Single lookups, one call per reply",
+        columns=[
+            Column(key="agent_type", label="Where", kind="str"),
+            Column(key="calls", label="Replies", kind="int"),
+            Column(key="probes", label="Single read-only calls", kind="int"),
+            Column(key="shell", label="Of them by shell command", kind="int"),
+            Column(key="runs", label="Runs of two or more", kind="int"),
+            Column(key="batch_cost", label="Replies a batch would spare", kind="money"),
+        ],
+        rows=rows,
+    )
+
+
+def agent_run_groups(h: Habits) -> dict[str, list[AgentFact]]:
+    """The agents that made a reply, by how they were started
+    (``topology.LAUNCH_WORDS`` order), leaving out a way nothing used: what
+    the run-receipts table counts, and what the tuning export counts."""
+    found = {word: [a for a in h.agents if a.launch == word and a.calls] for word in LAUNCH_WORDS}
+    return {word: agents for word, agents in found.items() if agents}
+
+
+def _run_receipts_table(h: Habits) -> Table:
+    """What the agent runs did, by how they were started: background and
+    foreground agents (each one a run) and workflow runs (all the agents one
+    ``Workflow`` call started or resumed). Replies, the share that were a
+    single read-only call, the starting context carried across the replies,
+    the summaries made inside the runs, and the one file several agents of a
+    group read. The starting context times the replies and the shared file
+    are upper bounds."""
+    rows = []
+    for word, agents in agent_run_groups(h).items():
+        runs = {a.run or id(a) for a in agents}
+        calls = sum(a.calls for a in agents)
+        rows.append([
+            word,
+            len(runs),
+            len(agents),
+            calls,
+            _pct(sum(a.probe_calls for a in agents), calls),
+            sum(a.start_tokens * a.calls for a in agents),
+            sum(a.compactions for a in agents),
+            sum(1 for a in agents if a.compactions),
+            sum(a.shared_reads for a in agents),
+            sum(a.shared_tokens for a in agents),
+            sum(a.shared_cost for a in agents),
+            sum(a.cost for a in agents),
+        ])
+    return Table(
+        name="habits_agent_runs",
+        title="What agent runs did",
+        columns=[
+            Column(key="launch", label="Started as", kind="str"),
+            Column(key="runs", label="Runs", kind="int"),
+            Column(key="agents", label="Agents", kind="int"),
+            Column(key="calls", label="Replies", kind="int"),
+            Column(key="probe_pct", label="Single read-only calls", kind="pct"),
+            Column(key="start_reads", label="Starting context times replies", kind="tokens"),
+            Column(key="compactions", label="Summaries inside runs", kind="int"),
+            Column(key="compacted_agents", label="Agents that summarised", kind="int"),
+            Column(key="shared_reads", label="Same file read by a sibling", kind="int"),
+            Column(key="shared_tokens", label="Size of those reads", kind="tokens"),
+            Column(key="shared_cost", label="Cost of those reads", kind="money"),
+            Column(key="cost", label="Cost", kind="money"),
+        ],
+        rows=rows,
+    )
+
+
+def _report_turns_table(h: Habits) -> Table:
+    """The main session's replies to a background agent's or a workflow's
+    report, by what the reply did, with the ones that woke the session an
+    hour or more after the reply before it (:func:`is_wake_up`) counted in
+    the last two columns. A workflow agent's report goes back to its
+    script, so only the agents and workflows the session started are here.
+    A background command's notice is not a report."""
+    total = len(h.report_turns)
+    rows = []
+    for kind in REPORT_KINDS:
+        replies = [r for r in h.report_turns if r.kind == kind]
+        if not replies:
+            continue
+        woke = [r for r in replies if r.woke]
+        rows.append([
+            kind,
+            len(replies),
+            _pct(len(replies), total),
+            sum(r.cost for r in replies),
+            _mean(r.context_tokens for r in replies),
+            len(woke),
+            sum(r.rewritten for r in woke),
+        ])
+    return Table(
+        name="habits_report_turns",
+        title="Replies to agent reports",
+        columns=[
+            Column(key="kind", label="The reply", kind="str"),
+            Column(key="replies", label="Replies", kind="int"),
+            Column(key="share_pct", label="Share", kind="pct"),
+            Column(key="cost", label="Cost", kind="money"),
+            Column(key="avg_context", label="Context read per reply", kind="tokens"),
+            Column(key="woke", label="Woke the session after an hour or more", kind="int"),
+            Column(key="woke_tokens", label="Written to the cache again", kind="tokens"),
+        ],
+        rows=rows,
+    )
+
+
+def plan_round_groups(h: Habits) -> dict[str, list[PlanFact]]:
+    """The plans put up for each ask, in the groups of the plans-sent-back
+    table (:data:`PLAN_ROUND_KINDS` order) and leaving out an empty one:
+    every plan you approved, the same split by how many times plans were
+    sent back first, and the asks whose plan you never approved. The
+    tuning export counts the same groups."""
+    approved = [p for p in h.plan_rounds if p.approved]
+    groups = {
+        "all": approved,
+        "none": [p for p in approved if p.sent_back == 0],
+        "once": [p for p in approved if p.sent_back == 1],
+        "twice": [p for p in approved if p.sent_back == 2],
+        "more": [p for p in approved if p.sent_back >= 3],
+        "dropped": [p for p in h.plan_rounds if not p.approved],
+    }
+    return {kind: groups[kind] for kind in PLAN_ROUND_KINDS if groups[kind]}
+
+
+def _plan_rounds_table(h: Habits) -> Table:
+    """The plans put up for each ask: every plan you approved and the same
+    split by how many times plans were sent back first, then the asks whose
+    plan you never approved. A plan you declined and then told Claude to
+    carry out is an approval, not one sent back. The tokens and cost are of
+    the replies after the first plan, through the approval."""
+    rows = []
+    for kind, plans in plan_round_groups(h).items():
+        rows.append([
+            kind,
+            len(plans),
+            sum(1 for p in plans if p.typed),
+            sum(p.sent_back for p in plans),
+            sum(p.asked for p in plans),
+            _mean(p.versions for p in plans),
+            _mean(p.steps for p in plans),
+            _mean(p.files for p in plans),
+            _mean(p.tokens for p in plans),
+            sum(p.cost for p in plans),
+        ])
+    return Table(
+        name="habits_plan_rounds",
+        title="Plans sent back",
+        columns=[
+            Column(key="kind", label="Which plans", kind="str"),
+            Column(key="plans", label="Plans", kind="int"),
+            Column(key="typed", label="Approved by typing", kind="int"),
+            Column(key="rounds", label="Plans sent back", kind="int"),
+            Column(key="asked", label="Sent back with a question or critique", kind="int"),
+            Column(key="versions", label="Plans put up", kind="float"),
+            Column(key="steps", label="Steps in the last plan", kind="float"),
+            Column(key="files", label="Files in the last plan", kind="float"),
+            Column(key="tokens", label="Tokens between the first plan and approval", kind="tokens"),
+            Column(key="cost", label="Cost between the first plan and approval", kind="money"),
         ],
         rows=rows,
     )
@@ -3422,6 +4013,7 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
                 _mean(a.cost for a in runs),
                 _pct(sum(a.result == "done" for a in results), len(results)),
                 _pct(sum(a.probe_calls for a in runs), sum(a.calls for a in runs)),
+                _pct(sum(a.probe_shell_calls for a in runs), sum(a.calls for a in runs)),
                 statistics.median(edited) if edited else None,
                 alt[0] if alt else None,
                 alt[1] if alt else None,
@@ -3436,6 +4028,7 @@ def _agents_by_task_table(h: Habits, model_swap=None) -> Table:
             Column(key="avg_cost", label="Per run", kind="money"),
             Column(key="done_pct", label="Finished", kind="pct"),
             Column(key="probe_pct", label="Single read-only calls", kind="pct"),
+            Column(key="probe_shell_pct", label="Of them by shell command", kind="pct"),
             Column(key="before_edit", label="Calls before the first edit", kind="float"),
             Column(key="cheaper_model", label="Cheaper model", kind="str"),
             Column(key="cheaper_saving_pct", label="Cheaper by", kind="pct"),
@@ -3918,6 +4511,10 @@ def section_from(h: Habits, *, model_swap=None) -> Section:
             _briefs_table(h),
             _templates_table(h, brief_card_shown(h, items)),
             _agents_table(h),
+            _probes_table(h),
+            _run_receipts_table(h),
+            _report_turns_table(h),
+            _plan_rounds_table(h),
             _explore_by_model_table(h),
             _effort_table(h),
             _setups_table(h),
@@ -4334,6 +4931,7 @@ __all__ = [
     "Item",
     "MISSING_LINES",
     "Piece",
+    "agent_run_groups",
     "build_section",
     "capture_dependent_value",
     "capture_section",
@@ -4342,6 +4940,7 @@ __all__ = [
     "digest_table",
     "family",
     "item_title",
+    "plan_round_groups",
     "playbook",
     "playbook_table",
     "section_from",

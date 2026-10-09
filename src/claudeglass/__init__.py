@@ -396,7 +396,22 @@ __version__ = "0.14.0"
 #: ``run_in_background`` or an async launch result). A pre-42 digest has
 #: none, and its agent runs count as foreground in the cost-per-spawn
 #: split.
-PARSER_VERSION = 42
+#:
+#: In 43, the "short" flag on a brief also catches more ways of asking for
+#: a short report ("up to about 1,000 characters", "<=150 words", "100
+#: words or fewer", "a 50-word summary", "be concise", "keep it short").
+#: A length rule for each sentence or each item ("sentences of 25 words or
+#: fewer", "50 lines per function") is a style rule and isn't flagged.
+#: A pre-43 digest flags only the narrower phrasings, so its share of
+#: briefs that ask for a short report is lower. A ``report_reread`` coaching
+#: note keeps its own hint, as the parser's list of hint words is the
+#: capture catalogue's (``events._KNOWN_HINTS``); a pre-43 digest has such a
+#: note as ``other``. Also in 43, a plan records the time you approved it
+#: (``PlanStats.approved_ts``) and a message that opens with the plan itself,
+#: the wording Claude Code writes when you approve and clear the context, is
+#: flagged (``Turn.human_plan_handoff``). A pre-43 digest has neither, so
+#: its approvals can't be told from builds that started fresh.
+PARSER_VERSION = 43
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

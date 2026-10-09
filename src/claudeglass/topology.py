@@ -142,13 +142,30 @@ def launch_of(sub: TranscriptResult, launches: dict[str, str]) -> str:
 
 @dataclass(slots=True)
 class _ReportIndex:
-    """Where each agent's report was measured, for :func:`_report_tokens`:
-    characters by the ``Agent`` tool_use id it answered (a synchronous
-    agent's tool_result, ``Turn.agent_result_chars``) and by agent id (a
-    background agent's task notification, which carries its report)."""
+    """Where each agent's report was measured, for :func:`_report_tokens`
+    and ``habits``' pricing of its carry: characters by the ``Agent``
+    tool_use id it answered (a synchronous agent's tool_result,
+    ``Turn.agent_result_chars``) and by agent id (a background agent's
+    task notification, which carries its report, or the queued command that
+    carried it when the report came mid-reply). ``notified`` says where
+    each notification was written -- the transcript it was handed to and
+    its time -- so the report can be priced from the reply that first read
+    it."""
 
     by_tool_use: dict[str, int] = field(default_factory=dict)
     by_agent_id: dict[str, int] = field(default_factory=dict)
+    notified: dict[str, tuple[TranscriptResult, str | None]] = field(default_factory=dict)
+
+    def chars_for(self, result: TranscriptResult) -> int | None:
+        """The characters of the report ``result`` handed back, or ``None``
+        when none was measured. A workflow agent has none: its report
+        goes back to the workflow script, not to a session."""
+        if result.meta.kind == "workflow-agent":
+            return None
+        chars = self.by_tool_use.get(result.meta.tool_use_id) if result.meta.tool_use_id else None
+        if chars is None and result.meta.agent_id:
+            chars = self.by_agent_id.get(agent_key(result.meta.agent_id))
+        return chars
 
 
 def _report_index(top: TranscriptResult, subs: Sequence[TranscriptResult]) -> _ReportIndex:
@@ -160,10 +177,13 @@ def _report_index(top: TranscriptResult, subs: Sequence[TranscriptResult]) -> _R
         for turn in result.turns:
             index.by_tool_use.update(turn.agent_result_chars)
         for event in result.events:
-            if event.kind == EventKind.TASK_NOTIFICATION and event.size_chars:
+            queued = event.kind == EventKind.QUEUE_OPERATION and event.subkind == "queued_command"
+            if (event.kind == EventKind.TASK_NOTIFICATION or queued) and event.size_chars:
                 task_id = event.detail.get("task_id")
                 if isinstance(task_id, str) and task_id:
-                    index.by_agent_id[agent_key(task_id)] = event.size_chars
+                    key = agent_key(task_id)
+                    index.by_agent_id[key] = event.size_chars
+                    index.notified[key] = (result, event.ts)
     return index
 
 
@@ -172,7 +192,8 @@ def _report_tokens(
 ) -> int:
     """The size of the report one agent handed back to whatever started
     it, in approximate tokens: the parent-side tool_result (or, for a
-    background agent, its task notification) when ``index`` has it,
+    background agent, its task notification or the queued command that
+    carried it mid-reply) when ``index`` has it,
     measured in characters over the calibrated characters per token of
     the agent's model (``chars / 4`` without a ``calibration``). Falls
     back to the agent's own last priced turn's output tokens -- a proxy,
@@ -180,11 +201,7 @@ def _report_tokens(
     parent side wasn't found (a digest parsed before ``PARSER_VERSION``
     15, or a parent transcript that is missing)."""
     if index is not None:
-        chars = None
-        if result.meta.tool_use_id:
-            chars = index.by_tool_use.get(result.meta.tool_use_id)
-        if chars is None and result.meta.agent_id:
-            chars = index.by_agent_id.get(agent_key(result.meta.agent_id))
+        chars = index.chars_for(result)
         if chars is not None:
             first = _first_priced_turn(result)
             return round((calibration or Calibration()).text_tokens(chars, first.model if first else None))

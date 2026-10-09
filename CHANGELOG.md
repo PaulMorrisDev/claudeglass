@@ -9,6 +9,112 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Where agent and context tokens go, from the Overview and in the
+  tuning export.** Each of the new figures for agents, plans and
+  conversation summaries (spend by cost centre, model choice, cost per run by
+  how it was started, the tools list, project files, single lookups, what
+  agent runs did, replies to agent reports, plans sent back, how the build
+  began and what summaries cost) is one click from the Overview and has a
+  place in the tuning export. Under **By cost centre**, **More detail** links
+  to eight of the tables with a line on what each shows, drawn only when the
+  report built the table with rows. A link opens the page that shows the
+  table, unfolds what hides it and highlights it, or opens the table in a
+  panel when its page leaves it to the full report. The Models, Conversation
+  summaries, Replies to agent reports and Plans sent back rows also carry
+  **See the figures** while they are worth a look. The
+  tuning export gains a ninth block, `compactions` (summaries by what
+  triggered them, those inside subagent and workflow runs, the tokens
+  dropped and, at list prices, what they cost and the share of main-session
+  cost in sessions that summarised 3 times or more), and optional keys:
+  `prompting.plans.builds` and `asks`, and `agents.launches` and
+  `model_choice`. Agent types are built-in names or `custom`, models are a
+  family, and no name, path, hash or text of yours is in any of it. A file
+  made before reads as before, and a real one is about 35 KB.
+- **What agent runs did.** A new Work habits table, **What agent runs
+  did**, shows background agents, foreground agents and workflow runs side
+  by side: runs, agents, replies, the share of replies that were a single
+  read-only call, the starting context times the replies (an upper bound),
+  the summaries made inside the runs, and the one file several agents of a
+  group each read (the plan or spec they were all handed), with its size
+  and cost. A workflow's agents are found in `subagents/workflows/`, and a
+  workflow resumed into the same run folder is told apart by each agent's
+  own timestamps. The shared-file figures are an upper bound and stay on
+  this table.
+- **What compaction cost.** The Compactions summary gains three rows: the
+  sessions that summarised their conversation three times or more, the
+  cost of their main conversations, and the share of all main-session cost
+  that is. Summaries inside subagent and workflow agent runs are counted
+  in rows of their own. There is no live note for it; the compaction check
+  on Actions quotes the sessions and their share.
+- **Lookups sent one call at a time.** A reply that made one Read, Grep, Glob
+  or file-reading shell command and nothing else reads the whole context
+  again to look at one thing. A new table on Work habits, **Single lookups,
+  one call per reply**, counts them for the main session and each agent type,
+  by message so calls already sent together count once, with how many were a
+  shell command, the stretches of two or more in a row and the cost of the
+  replies a batch would have spared. Agents gains the share by shell command,
+  and the same counts feed Where research happens and the lookups before
+  the first edit. A new `agent-batch-probes` card, one per agent type with
+  100 replies or more, a quarter of them single lookups and $1 or more to
+  spare once halved (some lookups wait on the one before), offers one line
+  for the agent definition or the workflow prompt: "Batch independent
+  Read/Grep/Glob calls into a single message". The tuning export's `agents`
+  block gains optional `probes` counts.
+- **Replies to agent reports.** The main session's replies that start at a
+  background agent's or a workflow's report (a task notification) are split
+  into only acknowledged, acted on and started more agents, with the cost, the
+  context each read and the replies that woke a session idle for an hour or
+  more, with the context they wrote to the cache again. A new Work habits
+  table, **Replies to agent reports**, and a new `agent-reports` check show
+  them. A workflow agent's report goes back to its script, so it is left out,
+  and a background command finishing is not a report. A report's carry is now
+  priced from the first main-session reply at or after its notification, not
+  from the call that started the agent, and sized from the notification (or
+  the queued message that carried it mid-reply) when the agent ran in the
+  background. The tuning export's `agents` block gains optional `report_turns`
+  counts. Parser 43; the report-size words widen to the briefs that ask for a
+  short report in more ways (335 of 1,793 real briefs from the last 30 days
+  match, 138 before).
+- **Plans sent back before you approved one.** A new Work habits table,
+  **Plans sent back**, groups the asks where Claude put up a plan by how many
+  times you sent a plan back before you approved one (none, once, twice, three
+  times or more), then the asks whose plan you never approved. Each group shows
+  the plans put up per ask, the steps and files in the last plan, how many of
+  the rounds were a question, a critique or a doubt, and the tokens and cost of
+  the replies between the first plan and the approval. A plan you declined and
+  then told Claude to carry out ("implement the plan") counts as an approval by
+  typing, not as a plan sent back, and a plan Claude puts up again unchanged
+  after that is the same plan. A new `plan-rounds` card and a `plan-rounds`
+  check fire at 5 approved plans or more, 30% or more of them sent back, 30% or
+  more of the rounds a question, a critique or a doubt, and $1 or more to
+  spare (a quarter of the rounds' cost, scaled to that share). The fix is one
+  standing line for your first planning message, CLAUDE.md or a plan skill:
+  "Before you show me a plan, critique it for gaps and doubts, then fix them".
+  Thresholds are `plan_rounds_min_plans`, `_min_share_pct`, `_min_asked_pct`,
+  `_min_saving_usd` and `_saving_factor`.
+- **How the build began after each approved plan.** A new table on Spend,
+  Savings, **How the build began after each approved plan**, and a new
+  `plan-approval` check set the builds that carried on in the planning session
+  beside those that started fresh, by the context each build reply read and
+  what it cost. A build counts as fresh when you ran /clear within a minute of
+  the approval, or opened a new session of the same project within an hour
+  whose first message is Claude Code's "Implement the following plan". Plans
+  you approved in the dialog and by typing both count. The live `plan_fresh`
+  hint is unchanged. Parser 43: a plan keeps the time you approved it, and a
+  message keeps a flag for opening with that hand-off, so transcripts are read
+  again once; earlier digests have neither, so their builds read as carried
+  on.
+- **A tip when background work starts in a long session.** A new
+  `report_reread` coaching hint speaks when the main session starts an agent
+  or a workflow in the background and its newest reply read 150,000 tokens
+  or more: each report that comes back is answered by a reply that reads all
+  of it again, so fewer, larger pieces of background work mean fewer re-reads. It rests 30
+  minutes and backs off like the other hints, and is set with
+  `coaching_report_reread_tokens`. With coaching notes on, `update --finish`
+  adds `Agent` and `Workflow` to the PostToolUse matcher; the large-output
+  and quiet-output notes skip a result from either, which is a report or a
+  launch message and not a file. A matcher written before this keeps working
+  until `update --finish` or `capture connect` rewrites it.
 - **Project files your agents read, and their growth.** Files agents read
   with the Read tool now count beside the CLAUDE.md files Claude Code loads
   for them. A read is priced like a loaded file: written once, then read on
@@ -529,6 +635,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The cost of planning is counted up to the last plan.** When you sent a
+  plan back, the cost of planning a message used to stop at the first plan, so
+  the "Skip plan mode for easy changes" habit undercounted what the rounds cost.
+  It now runs to the plan Claude put up last in the message (the one you
+  approved, or the last one put up). A message with one plan costs what it did.
+- **The first reply after a summary is named for it.** In the cache
+  tables, the first reply after a conversation summary is now labelled
+  "Rewritten after a summary", in every table that shares those labels,
+  and no longer "Cache expired (session part)", whatever the wait before
+  it. It still counts as a rewrite wherever rewrites are counted, and the
+  allowance for files read again is unchanged.
 - **Subagent start savings are priced the way the cache charges.** The
   tool definitions are the front of a prefix that sibling spawns share, so
   only the spawns that wrote it pay the write price for it; the skills list,
@@ -1108,6 +1225,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The tip about runs that grow too big now reaches you.** A subagent's
+  notice is never shown, so `split_run` could not tell anyone anything. The
+  hook now notes, when a run stops, that it summarised its own context or
+  began from a brief of 6,000 characters or more (`coaching_split_brief_chars`),
+  and Claude says so as a tip at the next agent call or background-task
+  message in the main session, with the runs told once. Numbered-line counts
+  are not used. It needs the `SubagentStop` entry, which `update --finish`
+  and `capture connect` now add with coaching notes on. The per-agent-type
+  split points the daily run wrote to `coaching.json` are gone, and an older
+  file's `split_run` entry is ignored. `coach-state.json` keeps only two
+  counts per session in place of a reply count per run. The coaching refresh
+  talks of coaching numbers, not split points.
 - **The purpose menu offered a word nothing else uses.** The override menu
   on a session offered "docs", but the classifier and every table say
   `docs-or-light-edit`, so a session set to it landed in a group no rule or

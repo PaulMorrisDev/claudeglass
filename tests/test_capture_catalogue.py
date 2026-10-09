@@ -70,8 +70,9 @@ def test_metrics_claude_writes_have_a_tag_and_a_note_and_the_rest_have_neither()
             assert m.out_chars == 0, m.id
         if m.id == "coaching_notes":
             # The one coaching toggle that runs through the capture hook; Stop only keeps the
-            # newest reply's time for the cold-return receipt and prints nothing.
-            assert m.hooks == ("UserPromptSubmit", "PostToolUse", "Stop")
+            # newest reply's time for the cold-return receipt and prints nothing, and SubagentStop
+            # only records that an agent run ended too big (split_run).
+            assert m.hooks == ("UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop")
         elif m.group in ("derived", "coaching") or m.id in ("feedback_note", "dashboard_rating"):
             assert not m.hooks, m.id
 
@@ -220,7 +221,8 @@ def test_the_post_tool_use_matcher_leaves_out_the_shell_and_mcp_tools():
     the hook's spawns. Whatever metrics are on, the matcher names only
     tools whose results the hook can use."""
     assert cat.BIG_OUTPUT_TOOLS == ("Read", "Grep", "Glob", "WebFetch", "WebSearch")
-    assert cat.COACHING_TOOLS == (*cat.BIG_OUTPUT_TOOLS, "ExitPlanMode")
+    assert cat.SPAWN_TOOLS == ("Agent", "Workflow")
+    assert cat.COACHING_TOOLS == (*cat.BIG_OUTPUT_TOOLS, "ExitPlanMode", "Agent", "Workflow")
     for ids in (cat.level_metrics("deep"), ["coaching_notes"], [*cat.level_metrics("deep"), "coaching_notes"]):
         matchers = [spec[2] for spec in cat.hook_specs(ids) if spec[1] == "PostToolUse"]
         assert len(matchers) == 1
@@ -228,6 +230,22 @@ def test_the_post_tool_use_matcher_leaves_out_the_shell_and_mcp_tools():
         assert not {"Bash", "PowerShell"} & set(names) and not any("mcp__" in name or "*" in name for name in names)
     exported = cat.export_json()
     assert exported["result_tools"] == list(cat.COACHING_TOOLS)
+    assert exported["spawn_tools"] == list(cat.SPAWN_TOOLS)
+
+
+def test_the_agent_and_workflow_tools_join_the_matcher_only_for_coaching_notes():
+    """The large-output note never follows an agent's report, so the
+    capture level alone leaves them out: they are watched for the coaching
+    hint on a background start, and an install without coaching notes
+    keeps its matcher (and its waits) as before."""
+    assert not set(cat.SPAWN_TOOLS) & set(cat.BIG_OUTPUT_TOOLS)
+
+    def matcher(ids):
+        return next(spec[2] for spec in cat.hook_specs(ids) if spec[1] == "PostToolUse")
+
+    assert matcher(cat.level_metrics("deep")) == "Read|Grep|Glob|WebFetch|WebSearch"
+    assert matcher(["coaching_notes"]) == "Read|Grep|Glob|WebFetch|WebSearch|ExitPlanMode|Agent|Workflow"
+    assert matcher([*cat.level_metrics("deep"), "coaching_notes"]) == matcher(["coaching_notes"])
 
 
 def test_the_size_measure_constants_are_exported_for_the_hook():

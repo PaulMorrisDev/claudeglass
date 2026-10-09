@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from . import capture_catalogue, carry, cost_centres, discovery, habits, known_savers, model_gate, model_swap, pages, quality, waste, whatif
+from . import capture_catalogue, carry, compaction, cost_centres, discovery, habits, handoff, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
 from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, build_fix, build_fixes, fix_note
 from .model import Recommendation, SettingChange
@@ -410,11 +410,30 @@ _LARGER_WINDOW = (
 )
 
 
+def _heavy_compactions(tables) -> str:
+    """A sentence on the main sessions that summarised
+    ``compaction.HEAVY_COMPACTIONS`` times or more and their share of the
+    main-session cost, from the Compactions summary table's compaction-cost
+    rows, with a leading space; ``""`` when there were none."""
+    heavy = compaction.HEAVY_COMPACTIONS
+    values = {row.get("metric"): row.get("value") for row in tables.rows("compactions", "compactions_summary")}
+    sessions = whatif._num(values.get(f"Sessions with {heavy}+ compactions"))
+    share = whatif._num(values.get(f"Share of main-session cost in sessions with {heavy}+ compactions"))
+    if not sessions or share is None:
+        return ""
+    count = int(sessions)
+    return (
+        f" {count:,} {'session' if count == 1 else 'sessions'} summarised {heavy} times or more, "
+        f"with {share:.0f}% of the main-session cost."
+    )
+
+
 def _compaction(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     rows = tables.rows("compaction_sim", "compaction_sim_by_window")
     if not rows:
         return _result("no_data", "No sessions long enough to replay in this window.")
+    heavy = _heavy_compactions(tables)
     table = _table(
         [("window", "Summarise at (tokens)"), ("summaries", "Summaries per session"), ("cost", "Cost"),
          ("change", "Against your sessions as they ran")],
@@ -435,7 +454,7 @@ def _compaction(ctx: Context) -> dict:
             "ok",
             f"Your sessions summarised about {whatif._num(observed.get('compactions_per_session')) or 0:.1f} times "
             f"each as they ran, more than the {limit:g} a session a suggested point may reach, so no smaller window "
-            f"is suggested. {_LARGER_WINDOW}",
+            f"is suggested. {_LARGER_WINDOW}{heavy}",
             table=table,
         )
     if not fixes:
@@ -447,19 +466,19 @@ def _compaction(ctx: Context) -> dict:
                 "ok",
                 f"You already summarise at {int(current):,} tokens, within a few percent of the cheapest point "
                 f"replayed that summarises at most {limit:g} times a session. The last column compares each point "
-                f"with your sessions as they ran, not with that setting. {_LARGER_WINDOW}",
+                f"with your sessions as they ran, not with that setting. {_LARGER_WINDOW}{heavy}",
                 table=table,
             )
         return _result(
             "ok",
-            f"Your current summary point is within a few percent of the cheapest one replayed. {_LARGER_WINDOW}",
+            f"Your current summary point is within a few percent of the cheapest one replayed. {_LARGER_WINDOW}{heavy}",
             table=table,
         )
     [candidate] = draft["candidates"]
     return _result(
         "act",
         f"Summarising at {candidate['value']:,} tokens {candidate['estimate']['effect_text'][:1].lower()}"
-        f"{candidate['estimate']['effect_text'][1:]}. Earlier summaries make each reply cheaper but drop detail.",
+        f"{candidate['estimate']['effect_text'][1:]}. Earlier summaries make each reply cheaper but drop detail.{heavy}",
         table=table,
         fixes=fixes,
     )
@@ -1327,8 +1346,9 @@ def _cost_record(ctx: Context) -> dict:
 
 
 _HABIT_RECS = {
-    "batch-instructions", "long-tool-waits", "notification-invalidation", "agent-report-size", "spawn-task-prompt",
-    "cache-read-dominance", "limit-pressure", "long-context-share", "subagent-volume", "discovery-share",
+    "batch-instructions", "long-tool-waits", "notification-invalidation", "agent-report-size", "agent-batch-probes",
+    "spawn-task-prompt", "cache-read-dominance", "limit-pressure", "long-context-share", "subagent-volume",
+    "discovery-share",
 }
 
 #: The finding the "failed-calls" check claims: replies that cost money and
@@ -1592,6 +1612,199 @@ def _failed_calls(ctx: Context) -> dict:
         table=table,
         fixes=_merge_fixes([_failed_calls_fix()], _rec_fixes(recs)),
     )
+
+
+#: The agent-reports check says "worth a look" when at least this many
+#: replies to a report only acknowledged it and they are this share (percent)
+#: of all the replies to reports, or when at least this many reports woke a
+#: session that had sat idle for an hour or more.
+REPORT_ACK_MIN = 10
+REPORT_ACK_SHARE_PCT = 50
+REPORT_WAKE_MIN = 3
+
+_REPORT_ACK_TIP = {
+    "title": "Fewer, larger agents",
+    "text": "Where most replies only acknowledge a report, give an agent a bigger piece of the work and ask for a "
+    "short report in its brief.",
+}
+_REPORT_WAKE_TIP = {
+    "title": "Reports that wake an idle session",
+    "text": "A report that arrives once the cache has expired makes the next reply write the whole context again. "
+    "Start long background work when you will be there for its reports, or ask for a single report at the end.",
+}
+
+
+def _agent_reports(ctx: Context) -> dict:
+    """What the main session does when a background agent's or a workflow's
+    report comes back (``habits_report_turns``): a reply that only
+    acknowledged it, one that acted on it, one that started more agents. Each
+    costs a reply that reads the whole session again, and a report that wakes
+    a session idle for an hour or more also writes that context to the cache
+    again. A workflow agent's report goes back to its script, so it isn't
+    here."""
+    tables = whatif._Tables(ctx.model)
+    if not tables.has("habits", "habits_report_turns"):
+        return _result("no_data", "Not enough sessions in this window.")
+    rows = tables.rows("habits", "habits_report_turns")
+    if not rows:
+        return _result("ok", f"No background agent's or workflow's report came back to your main session {ctx.period}.")
+    by_kind = {row.get("kind"): row for row in rows}
+
+    def number(row, key) -> float:
+        return whatif._num((row or {}).get(key)) or 0.0
+
+    total = int(sum(number(row, "replies") for row in rows))
+    acked = int(number(by_kind.get("acknowledged"), "replies"))
+    acked_cost = number(by_kind.get("acknowledged"), "cost")
+    woke = int(sum(number(row, "woke") for row in rows))
+    woke_tokens = int(sum(number(row, "woke_tokens") for row in rows))
+    cost = sum(number(row, "cost") for row in rows)
+    table = _table(
+        [("reply", "The reply"), ("replies", "Replies"), ("cost", "Cost"), ("woke", "Woke the session")],
+        [
+            [habits.REPORT_KIND_LABELS.get(row.get("kind"), row.get("kind")), row.get("replies"),
+             _cell(ctx, row.get("cost")), row.get("woke")]
+            for row in rows
+        ],
+    )
+    summary = (
+        f"{total:,} {'reply' if total == 1 else 'replies'} to agent reports cost {_money(ctx, cost, prefix='about ')} "
+        f"{ctx.period}. {acked:,} only acknowledged the report"
+        + (f", for {_money(ctx, acked_cost, prefix='about ')}" if acked_cost else "")
+        + "."
+    )
+    if woke:
+        summary += (
+            f" {woke:,} {'woke a session' if woke == 1 else 'woke sessions'} idle for an hour or more, "
+            f"writing {woke_tokens:,} tokens to the cache again."
+        )
+    tips = []
+    if acked >= REPORT_ACK_MIN and acked * 100 >= total * REPORT_ACK_SHARE_PCT:
+        tips.append(dict(_REPORT_ACK_TIP))
+    if woke >= REPORT_WAKE_MIN:
+        tips.append(dict(_REPORT_WAKE_TIP))
+    if not tips:
+        return _result("ok", summary, table=table)
+    return _result("act", summary + " {{page:habits}} has the table.", table=table, tips=tips)
+
+
+def _counted(number: float, noun: str, plural: str = "") -> str:
+    """``1 plan`` / ``3 plans``: ``number`` with ``noun`` pluralised."""
+    whole = int(number)
+    return f"{whole:,} {noun if whole == 1 else (plural or noun + 's')}"
+
+
+def _plan_rounds(ctx: Context) -> dict:
+    """The plans put up for each ask (``habits_plan_rounds``): how many of the
+    plans you approved were sent back first, how often, and what the replies
+    between the first plan and the approval cost. A plan you declined and
+    then told Claude to carry out is an approval, not one sent back. The
+    ``plan-rounds`` card offers one standing request to critique the plan."""
+    tables = whatif._Tables(ctx.model)
+    if not tables.has("habits", "habits_plan_rounds"):
+        return _result("no_data", "Not enough sessions in this window.")
+    rows = tables.rows("habits", "habits_plan_rounds")
+    if not rows:
+        return _result("ok", f"Claude put up no plan for you to approve {ctx.period}.")
+    by_kind = {row.get("kind"): row for row in rows}
+
+    def number(kind, key) -> float:
+        return whatif._num((by_kind.get(kind) or {}).get(key)) or 0.0
+
+    plans = number("all", "plans")
+    sent_back = plans - number("none", "plans")
+    rounds = number("all", "rounds")
+    asked = number("all", "asked")
+    cost = number("all", "cost")
+    never = number("dropped", "plans")
+    table = _table(
+        [("which", "Which plans"), ("plans", "Plans"), ("rounds", "Sent back"), ("cost", "Cost between the first plan and approval")],
+        [
+            [habits.PLAN_ROUND_LABELS.get(row.get("kind"), row.get("kind")), row.get("plans"), row.get("rounds"),
+             _cell(ctx, row.get("cost"))]
+            for row in rows
+        ],
+    )
+    if not plans:
+        summary = f"You approved no plan {ctx.period}."
+    elif not sent_back:
+        summary = f"You approved {_counted(plans, 'plan')} {ctx.period}, and none had a plan sent back first."
+    else:
+        summary = (
+            f"You approved {_counted(plans, 'plan')} {ctx.period}. {sent_back:,.0f} had a plan sent back first, "
+            f"{_counted(rounds, 'time')} in all. The replies between the first plan and the approval cost "
+            f"{_money(ctx, cost, prefix='about ')}."
+        )
+        if asked and rounds == 1:
+            summary += " That round was a question, a critique or a doubt."
+        elif asked:
+            summary += f" {asked:,.0f} of the {rounds:,.0f} rounds were a question, a critique or a doubt."
+    if never:
+        summary += f" {_counted(never, 'ask')} never got a plan approved."
+    recs = _recommendations(ctx, {"plan-rounds"})
+    if not recs:
+        return _result("ok", summary, table=table)
+    saving_usd = _recs_saving_usd(ctx, recs)
+    phrase = _money(ctx, saving_usd, period=True, prefix="About ") if saving_usd > 0 else ""
+    return _result(
+        "act",
+        summary + " {{page:habits}} has the table.",
+        table=table,
+        fixes=_rec_fixes(recs),
+        tips=[{"title": rec.title, "text": rec.action or rec.why} for rec in recs if rec.id not in _recs_with_prompt_fix(recs)],
+        saving_usd=saving_usd if saving_usd > 0 else None,
+        saving=f"{phrase[:1].upper()}{phrase[1:]} with a standing request to critique the plan." if phrase else "",
+    )
+
+
+def _plan_approval(ctx: Context) -> dict:
+    """How the build began after each plan you approved
+    (``plan_handoff_approvals``), by click or by typing: carried on in the
+    same session, started after a /clear within a minute of the approval, or
+    started from the plan alone in a new session. It shows the comparison and
+    leaves the saving to the ``plan-handoff`` card, which the "compaction"
+    check owns."""
+    tables = whatif._Tables(ctx.model)
+    if not tables.has("plan_handoff", "plan_handoff_approvals"):
+        return _result("no_data", "Not enough sessions in this window.")
+    rows = tables.rows("plan_handoff", "plan_handoff_approvals")
+    if not rows:
+        return _result("ok", f"You approved no plan {ctx.period}.")
+    by_start = {row.get("start"): row for row in rows}
+
+    def number(row, key) -> float:
+        return whatif._num((row or {}).get(key)) or 0.0
+
+    approvals = sum(number(row, "approvals") for row in rows)
+    typed = sum(number(row, "typed") for row in rows)
+    kept = by_start.get("kept")
+    fresh = [row for row in rows if row.get("start") != "kept"]
+    fresh_count = sum(number(row, "approvals") for row in fresh)
+    table = _table(
+        [("start", "How the build began"), ("plans", "Plans"), ("typed", "Approved by typing"),
+         ("context", "Context read per build reply"), ("cost", "Cost per build reply")],
+        [
+            [handoff.START_LABELS.get(row.get("start"), row.get("start")), row.get("approvals"), row.get("typed"),
+             f"{number(row, 'avg_context'):,.0f}" if row.get("avg_context") is not None else "",
+             _cell(ctx, row.get("usd_per_reply")) if row.get("usd_per_reply") is not None else ""]
+            for row in rows
+        ],
+    )
+    summary = f"You approved {_counted(approvals, 'plan')} {ctx.period}, {typed:,.0f} of them by typing."
+    if not fresh_count:
+        summary += " Every build carried on in the planning session."
+        if kept and kept.get("avg_context") is not None:
+            summary += f" A build reply read about {number(kept, 'avg_context'):,.0f} tokens of context."
+    else:
+        summary += f" {_counted(fresh_count, 'build')} started fresh."
+        replies = sum(number(row, "build_turns") for row in fresh)
+        fresh_context = sum(number(row, "build_turns") * number(row, "avg_context") for row in fresh)
+        if replies and kept and number(kept, "build_turns") and kept.get("avg_context") is not None:
+            summary += (
+                f" Their replies read about {fresh_context / replies:,.0f} tokens each, against "
+                f"{number(kept, 'avg_context'):,.0f} for the builds that carried on."
+            )
+    return _result("ok", summary + " {{page:spend/savings}} has the saving, if there is one.", table=table)
 
 
 #: Habits from the Work habits playbook shown as tips.
@@ -2018,6 +2231,15 @@ CHECKS: tuple[Check, ...] = (
     Check("failed-calls", "Are failed or blocked tool calls costing you replies?",
           "A call that fails or is blocked still costs a whole reply, and Claude has to make it again.",
           _failed_calls, tuple(sorted(_FAILED_CALL_RECS))),
+    Check("agent-reports", "Do agent reports cost replies that do nothing?",
+          "Every report an agent sends back is answered by a reply that reads the whole session again, "
+          "even when that reply has nothing to do.", _agent_reports),
+    Check("plan-rounds", "Do you send plans back before approving one?",
+          "Each time a plan goes back, the next reply reads the whole planning conversation again.", _plan_rounds,
+          ("plan-rounds",)),
+    Check("plan-approval", "Do your builds start fresh once a plan is approved?",
+          "A build that carries on in the planning session reads everything the planning read, on every reply.",
+          _plan_approval),
     Check("quality", "Is any agent struggling?",
           "A cheaper model or a lower effort only saves money if the work still gets done.", _quality),
     Check("cost-centres", "Where does the spend go?",

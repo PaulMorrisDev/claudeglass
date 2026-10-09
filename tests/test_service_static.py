@@ -4135,3 +4135,134 @@ def test_the_cost_centre_tables_are_in_the_built_report_and_open_on_the_agents_p
     assert f"{cost_centres.SECTION}.{cost_centres.CENTRES_TABLE}" in {
         f"{s.key}.{t.name}" for s in report.sections for t in s.tables
     }
+
+
+def test_the_plan_rounds_card_and_the_two_plan_checks_are_placed_on_the_overview_and_actions() -> None:
+    """The plan-rounds card sits under Habits and says its change spares
+    context carried; the two checks have names on the Overview, one after
+    the other, right after the agent-reports check; and the tables they
+    cite open the Work habits page and Spend, Savings."""
+    app_js = _app_js()
+    assert _js_hyphen_map(app_js, "RULE_AREA")["plan-rounds"] == "habits"
+    assert _js_hyphen_map(app_js, "RULE_MECHANISM")["plan-rounds"] == "carried"
+    source = _declaration_source(_static_text("page-overview.js"), "CHECK_NAMES")
+    names = dict(re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*"([^"]*)"', source, re.MULTILINE))
+    assert names["plan-rounds"] == "Plans sent back" and names["plan-approval"] == "Builds after a plan"
+    order = list(names)
+    assert order.index("plan-rounds") == order.index("agent-reports") + 1
+    assert order.index("plan-approval") == order.index("plan-rounds") + 1
+    sections = _js_string_map(app_js, "SECTION_PAGE_MAP")
+    assert sections["habits"] == "habits" and sections["plan_handoff"] == "spend/savings"
+    # The checks' sentences point at pages that exist.
+    links = _static_text("links.js")
+    assert 'id: "habits"' in links and 'savings: "spend/savings"' in links
+    assert "{{page:spend/savings}}" in (SRC_DIR / "quick_actions.py").read_text(encoding="utf-8")
+
+
+# -- the Phase 8 tables: one click from the Overview ---------------------------------------------------
+
+
+_DETAIL_KEYS = (
+    "model_choice",
+    "cost_per_spawn",
+    "agent_runs",
+    "single_lookups",
+    "report_turns",
+    "plan_rounds",
+    "plan_approvals",
+    "compaction_cost",
+)
+
+
+def _detail_tables() -> dict[str, str]:
+    return _js_string_map(_static_text("links.js"), "DETAIL_TABLES")
+
+
+def test_a_table_link_opens_the_view_that_shows_the_table_scrolled_to_it() -> None:
+    """tableLink is the one place a "section.table" name becomes an address:
+    the view is the one viewForTable names, and the table travels as the t
+    parameter evidence.js revealEvidence scrolls to."""
+    links = _static_text("links.js")
+    source = _function_source(links, "tableLink")
+    assert "viewForTable(name.slice(0, dot), name.slice(dot + 1))" in source
+    assert "{ t: name }" in source and "pageLink(" in source
+    assert "export function tableLink(" in links
+    # The two named targets from Phase 8a stay as they were.
+    assert 'pageLink("agents/subagents", text || "See every cost centre", { t: COST_CENTRES_TABLE })' in links
+    assert 'pageLink("agents/subagents", text || "See every project file", { t: PROJECT_FILES_TABLE })' in links
+
+
+def test_every_phase_8_detail_target_names_a_table_the_report_builds_on_the_page_that_shows_it(tmp_path) -> None:
+    """The eight targets are tables of a built report (rows and all), none
+    left to the full report, and the view each lands on is the one the
+    section map gives: the table is on that page or opens in the drawer."""
+    from claudeglass.config import Config
+    from test_privacy import _phase_8_world
+
+    targets = _detail_tables()
+    assert tuple(targets) == _DETAIL_KEYS
+    links = _static_text("links.js")
+    sections = _js_string_map(links, "SECTION_PAGE_MAP")
+    tables = _js_string_map(links, "TABLE_PAGE_MAP")
+    project = _phase_8_world(tmp_path, [f"word{n}" for n in range(17)])
+    report = build_report(load_corpus([project]), load_pricing(), Config(tz="UTC"), projects=(), window="all time")
+    built = {(section.key, table.name): table for section in report.sections for table in section.tables}
+    for key, source in targets.items():
+        section, table = source.split(".", 1)
+        assert (section, table) in built, (key, source)
+        assert built[(section, table)].rows, (key, source)
+        assert helptext.PLACEMENT[table] in ("keep", "advanced"), (key, source)
+        assert table in helptext.TABLE_COPY, (key, source)
+        assert tables.get(source) or sections.get(section) not in (None, "data"), (key, source)
+    assert {targets[key].split(".")[0] for key in targets} == {"agents", "habits", "plan_handoff", "compactions"}
+
+
+def test_the_overview_lists_the_phase_8_tables_under_more_detail_and_in_the_rows_of_their_checks() -> None:
+    """"More detail" holds one link per table, each with what it shows, only
+    for a table the report built with rows; the five checks that have a table
+    behind them link to it from their row."""
+    overview = _static_text("page-overview.js")
+    imports = re.search(r'import \{([^}]*)\} from "./links.js";', overview)
+    assert imports and {"DETAIL_TABLES", "tableLink"} <= {name.strip() for name in imports.group(1).split(",")}
+    more = _declaration_source(overview, "MORE_DETAIL")
+    used = re.findall(r"DETAIL_TABLES\.([a-z_]+)", more)
+    assert tuple(used) == _DETAIL_KEYS
+    part = _function_source(overview, "detailPart")
+    assert "table.rows.length" in part and 'el("h3", { text: "More detail" })' in part
+    assert "tableLink(item[0], item[1])" in part
+    assert "detailPart(report)" in _function_source(overview, "renderBreakdown")
+    # A check's row links to its table only while it has something to look at.
+    tables = dict(re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*DETAIL_TABLES\.([a-z_]+)', _declaration_source(overview, "CHECK_TABLES"), re.MULTILINE))
+    assert tables == {
+        "models": "model_choice",
+        "compaction": "compaction_cost",
+        "agent-reports": "report_turns",
+        "plan-rounds": "plan_rounds",
+    }
+    assert set(tables) <= set(quick_actions.CHECK_IDS)
+    assert set(tables.values()) <= set(_DETAIL_KEYS)
+    row = _function_source(overview, "checklistRow")
+    assert 'tableLink(CHECK_TABLES[check.id], "See the figures")' in row
+    guard = row[row.index("CHECK_TABLES[check.id]") :].split("{", 1)[0]
+    assert 'row.state === "look" || row.state === "fix"' in guard
+    css = _static_text("app.css")
+    assert ".overview-detail-links" in css
+
+
+def test_the_more_detail_copy_keeps_to_the_dashboards_copy_rules() -> None:
+    """Each link reads "<table title> shows <what it shows>": a sentence of
+    25 words or fewer, with no internal name, no filler and no dash aside,
+    and the title is the table's own."""
+    overview = _static_text("page-overview.js")
+    more = _declaration_source(overview, "MORE_DETAIL")
+    rows = re.findall(r'\[DETAIL_TABLES\.([a-z_]+), "([^"]+)", "([^"]+)"\]', more)
+    assert [key for key, _, _ in rows] == list(_DETAIL_KEYS)
+    targets = _detail_tables()
+    for key, label, text in rows:
+        sentence = f"{label} shows {text}"
+        assert not re.search(r"\b(just|simply)\b", sentence, re.I), sentence
+        assert " -- " not in sentence and not re.search(r"\b[a-z]+_[a-z0-9_]+\b", sentence), sentence
+        assert len(sentence.split()) <= 25, sentence
+        assert sentence.endswith("."), sentence
+        title = helptext.TABLE_COPY[targets[key].split(".", 1)[1]].title
+        assert label.lower() in title.lower() or title.lower() in label.lower(), (label, title)

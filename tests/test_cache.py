@@ -181,7 +181,8 @@ def test_fingerprint_is_pinned():
     cache entry (nothing else does -- unlike PARSER_VERSION, nobody has
     to remember to bump this by hand), not to silently ship it.
     """
-    assert FINGERPRINT == "02a51b46e64100f9a0f618841a82119de2c44524c52b34cf741764a20619a999"
+    # Re-pinned for the ``report_reread`` and ``split_run`` tip titles (parser 43 already starts a new cache generation).
+    assert FINGERPRINT == "1b51edd3cea4b3c2a19d137e9d9a76024e6c9050d133fe108fd40278df393080"
 
 
 # -- salt fingerprint (SEC-P8) ----------------------------------------------

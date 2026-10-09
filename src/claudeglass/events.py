@@ -1101,11 +1101,28 @@ _DONE_RE = re.compile(
     re.IGNORECASE,
 )
 _STEP_LINE_RE = re.compile(r"^\s*(?:\d{1,2}[.)]|step \d{1,2}[:.)]?)\s+\S", re.IGNORECASE | re.MULTILINE)
+#: A brief that asks the agent for a short report: a length limit ("under
+#: 200 words", "up to about 1,000 characters", "<=150 words", "100 words or
+#: fewer", "a 50-word summary"), a short kind of report, "report briefly",
+#: "be concise" or "keep it short". Only the yes/no is kept.
+_REPORT_COUNT = r"(?:\d{1,3}(?:,\d{3})+|\d{1,4})"
+_REPORT_UNIT = r"(?:words|lines|sentences|bullets|bullet points|tokens|characters|chars)"
+_REPORT_KIND = r"(?:report|summary|answer|reply|response)"
+#: A length rule for each sentence ("sentences of 25 words or fewer") or
+#: each item ("50 lines per function", "8 words or fewer each") is a
+#: style rule, not a limit on the report.
+_NOT_SENTENCE = r"(?<!sentences of )(?<!sentence of )(?<!sentences at )(?<!sentences under )"
+_NOT_PER_ITEM = r"(?!\s+(?:per|each)\b)"
 _SHORT_REPORT_RE = re.compile(
-    r"\b(?:(?:under|fewer than|less than|at most|no more than|max(?:imum)?(?: of)?|within)\s+\d{1,4}\s+"
-    r"(?:words|lines|sentences|bullets|bullet points|tokens|characters|chars)"
-    r"|(?:brief|short|concise|one-line|terse)\s+(?:report|summary|answer|reply|response)"
-    r"|(?:report|reply|respond|answer)\s+(?:back\s+)?(?:briefly|concisely|tersely))\b",
+    r"\b(?:(?:under|fewer than|less than|at most|no more than|max(?:imum)?(?: of)?|within|up to|below)\s+"
+    rf"(?:(?:about|around|roughly|approx(?:imately)?\.?)\s+|~\s*)?{_REPORT_COUNT}(?:\s*-\s*{_REPORT_COUNT})?\s+{_REPORT_UNIT}{_NOT_PER_ITEM}"
+    rf"|{_NOT_SENTENCE}{_REPORT_COUNT}(?:\s*-\s*{_REPORT_COUNT})?\s+{_REPORT_UNIT}\s+or\s+(?:fewer|less){_NOT_PER_ITEM}"
+    rf"|{_REPORT_COUNT}-(?:word|line|sentence)\s+{_REPORT_KIND}"
+    rf"|(?:brief|short|concise|one-line|terse)\s+{_REPORT_KIND}"
+    r"|(?:report|reply|respond|answer)\s+(?:back\s+)?(?:briefly|concisely|tersely)"
+    r"|(?:be|stay)\s+(?:brief|concise|terse)"
+    rf"|keep\s+(?:it|this|that|(?:the|your)\s+{_REPORT_KIND})\s+(?:short|brief|concise|tight|terse|compact))\b"
+    rf"|(?:<=?|\u2264)\s*~?\s*{_REPORT_COUNT}\s+{_REPORT_UNIT}\b{_NOT_PER_ITEM}",
     re.IGNORECASE,
 )
 
@@ -1252,8 +1269,10 @@ def _message_flags(texts: Sequence[str], *, has_image: bool = False, skill_comma
 
 def _human_text_detail(d: dict, str_content: str | None) -> tuple[int, dict]:
     """Size and the detail flags for a HUMAN_TEXT line: ``has_paste``,
-    ``correction``, ``unsized_blocks`` (SURV-7, only when non-empty) and
-    the rest of :func:`_message_flags`. Flags only -- never the text."""
+    ``correction``, ``unsized_blocks`` (SURV-7, only when non-empty),
+    ``plan_handoff`` (a message that opens with the plan itself, only when
+    true) and the rest of :func:`_message_flags`. Flags only -- never the
+    text."""
     human_chars, has_paste, unsized_counts = _human_text_metrics(d, str_content)
     texts = human_texts(d)
     detail: dict = {"has_paste": has_paste, "correction": False}
@@ -1276,6 +1295,9 @@ def _human_text_detail(d: dict, str_content: str | None) -> tuple[int, dict]:
         command = _COMMAND_NAME_RE.search(str_content)
         if command:
             detail["command"] = command.group(1)
+    elif prompt_shape.is_plan_handoff(next((t for t in texts if t), "")):
+        # A fresh session opening with the plan itself (``Turn.human_plan_handoff``).
+        detail["plan_handoff"] = True
     if d.get("permissionMode") == "plan":
         detail["plan_mode"] = True
     return human_chars, detail

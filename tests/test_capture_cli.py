@@ -1710,6 +1710,8 @@ def _coaching_hooked(config_dir) -> list[tuple[str, str, bool]]:
 
 
 COACHING_HOOKS = [
+    # split_run's record of a run that ended too big is kept as the run stops, so Claude can say it at the next call.
+    ("SubagentStop", "", False),
     ("UserPromptSubmit", "", False),
     ("PostToolUse", "|".join(cat.COACHING_TOOLS), False),
     # cold_return's state is kept by the Stop entry: the one entry that runs in the background.

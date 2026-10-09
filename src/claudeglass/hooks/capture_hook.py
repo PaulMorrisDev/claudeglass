@@ -44,7 +44,8 @@ connect``):
   for the agent's transcript to be written to its end (a call of an
   answer tool, or no growth for a few seconds), and then reads it
   (:func:`prepare_agent_job`). The agent's report is left exactly as it
-  was.
+  was. With coaching notes on, the entry also records, with no output,
+  whether the run ended too big (:func:`keep_run`).
 - ``PostToolUse``: a one-line note after a large read, search or web
   result, for the Deep level, in the main session while Claude writes
   the tags. How large is measured on what Claude reads of the result
@@ -58,10 +59,18 @@ connect``):
   matched only to tools whose results can be large, and returns at once
   for any other: the shell and MCP tools are no longer matched, but a
   settings.json written before that still runs the hook after them until
-  ``claudeglass capture connect``.
+  ``claudeglass capture connect``. With coaching notes on the matcher
+  also names the tools that start an agent or a workflow
+  (``spawn_tools``); a report or a launch message is no large file or
+  search, so neither this note nor ``quiet_output`` is ever added after
+  one.
 - ``UserPromptSubmit`` and ``PostToolUse`` (also matched to
-  ``ExitPlanMode``) for coaching notes (``[capture] coaching`` has
-  ``coaching_notes``): a short ``cg-coach`` note when a hint applies --
+  ``ExitPlanMode``, ``Agent`` and ``Workflow``) for coaching notes
+  (``[capture] coaching`` has ``coaching_notes``): a short ``cg-coach``
+  note when a hint applies -- an agent or a workflow started in the
+  background by a session holding 150k tokens or more, where the reply
+  to each report it sends back reads all of that again
+  (``report_reread``, resting 30 minutes),
   a message sent after a break that outlasted the prompt cache (a receipt
   for the rewrite, ``cold_return``), a message asking how background work
   is going while it still runs (``status_poll``), small change requests
@@ -83,10 +92,15 @@ connect``):
   tip also appears at once as a one-line notice (``systemMessage``,
   never sent to Claude); the desktop app's Code tab doesn't show one
   (it folds it into a collapsed row of the run summary), so there
-  (:func:`delivery`) the note alone carries the tip. A subagent run past
-  the length its type's runs are best split at (``coaching.json``, from
-  your own sessions) shows you a notice, once, and tells the subagent
-  nothing; the desktop app never shows a subagent's notices. Every
+  (:func:`delivery`) the note alone carries the tip. An agent run that
+  ended too big (``split_run``: Claude Code summarised its context
+  part-way through, or it began from a brief of ``split_brief_chars``
+  characters or more) is never told to the subagent, whose notice never
+  shows: ``SubagentStop`` records it, as counts under the session
+  (:func:`keep_run`), and the main session is told once, at the next
+  ``PostToolUse`` after an agent or workflow call (a foreground run has
+  ended by then) or the next message that reports a finished background
+  task. Every
   entry that can return output (``SessionStart``, ``SubagentStart``,
   ``UserPromptSubmit``, ``PostToolUse``) runs in the foreground, as an
   async hook's output only arrives on the next turn. Each hint rests for
@@ -698,6 +712,10 @@ def note_for(
     event = payload.get("hook_event_name")
     big = False
     if event == "PostToolUse":
+        # An agent's report or a launch message is no large file or search
+        # (the matcher names these tools for the coaching hint alone).
+        if payload.get("tool_name") in catalogue["spawn_tools"]:
+            return ""
         # The size first: under the threshold nothing below applies, so
         # the sampling hash and the project check aren't worth running.
         if result_len is None:
@@ -2067,10 +2085,53 @@ def _quiet_hint(payload: dict, result_len: int, quiet_how: dict, th: dict) -> tu
     return kind, tokens, {"tokens": _k(tokens), "how": quiet_how.get(tool, quiet_how[""])}
 
 
+def _background_start(payload: dict, coaching: dict) -> bool:
+    """Whether a call to an agent or workflow tool sent the work to the
+    background, so its report comes back later as a message of its own:
+    the call asked for it (``run_in_background``), or the result says it
+    launched that way (``isAsync``, a status of ``async_launched``, a
+    workflow's ``taskType``, or the wording ``background_launch_pattern``
+    matches, as the ``status_poll`` hint reads a launch). Nothing of the
+    result is kept."""
+    tool_input = payload.get("tool_input")
+    if isinstance(tool_input, dict) and tool_input.get("run_in_background") is True:
+        return True
+    response = payload.get("tool_response")
+    limit = coaching["background_scan_chars"]
+    if isinstance(response, dict):
+        if response.get("isAsync") is True or response.get("status") == "async_launched":
+            return True
+        if response.get("taskType") == "local_workflow":
+            return True
+        head = _result_head(response, limit)
+    elif isinstance(response, str):
+        head = response[:limit]
+    elif isinstance(response, list):
+        head = _result_head({"content": response}, limit)
+    else:
+        return False
+    return re.search(coaching["background_launch_pattern"], head) is not None
+
+
+def _report_hint(payload: dict, state: dict, session: str, coaching: dict, th: dict) -> tuple[str, float, dict] | None:
+    """``report_reread``: an agent or workflow started in the background
+    while the main session holds ``report_reread_tokens`` or more. Each
+    report it sends back is answered by a reply that reads the whole
+    session again, so the note says what one such read is. The context is
+    the newest reply's, kept by :func:`remember_reply` just before; with
+    none kept, nothing is said."""
+    if not _background_start(payload, coaching):
+        return None
+    kept = _stored_reply(state, session)
+    if kept is None or kept["ctx"] < th["report_reread_tokens"]:
+        return None
+    return "report_reread", kept["ctx"], {"ctx": _k(kept["ctx"])}
+
+
 def _agent_transcript(payload: dict) -> Path | None:
     """The subagent's own transcript, under its session's ``subagents``
-    folder. A workflow agent's sits a level deeper, so it isn't found:
-    its script decides how its work is split."""
+    folder, or, for a workflow agent, a level deeper in the folder of its
+    run (``subagents/workflows/<run>/``)."""
     agent_id = str(payload.get("agent_id") or "")
     path = payload.get("transcript_path")
     if not agent_id or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", agent_id) or not isinstance(path, str) or not path:
@@ -2078,59 +2139,89 @@ def _agent_transcript(payload: dict) -> Path | None:
     given = Path(path)
     if given.name == f"agent-{agent_id}.jsonl":
         return given
-    own = given.with_suffix("") / "subagents" / f"agent-{agent_id}.jsonl"
-    return own if own.is_file() else None
-
-
-def _count_replies(path: Path, row: dict) -> int:
-    """The run's replies since its start or its last summary, reading
-    only what was added since the last call (``row`` keeps the place)."""
-    offset = int(_number(row.get("offset")) or 0)
+    folder = given.with_suffix("") / "subagents"
+    own = folder / f"agent-{agent_id}.jsonl"
+    if own.is_file():
+        return own
     try:
-        with open(path, "rb") as handle:
-            handle.seek(offset)
-            data = handle.read()
+        return next(folder.glob(f"workflows/*/agent-{agent_id}.jsonl"), None)
     except OSError:
-        return int(_number(row.get("replies")) or 0)
-    end = data.rfind(b"\n") + 1
-    replies = int(_number(row.get("replies")) or 0)
-    last_id = row.get("last_id")
-    for record in _records(data[:end]):
-        if record.get("type") == "system" and record.get("subtype") == "compact_boundary":
-            replies, last_id = 0, None
-        elif record.get("type") == "assistant":
-            message = record.get("message")
-            message_id = message.get("id") if isinstance(message, dict) else None
-            if message_id != last_id or message_id is None:
-                replies += 1
-                last_id = message_id
-    row.update(offset=offset + end, replies=replies, last_id=last_id)
-    return replies
-
-
-def _split_hint(payload: dict, personal: dict, state: dict, now_ts: float) -> tuple[str, float, dict] | None:
-    """``split_run``: a subagent whose type's long runs cost you less split
-    (``coaching.json``'s ``split_run``, from the run-split tip), past
-    that many replies, once a run. It shows you a notice and tells the
-    subagent nothing."""
-    splits = personal.get("split_run")
-    agent_type = str(payload.get("agent_type") or "")
-    every_n = _number(splits.get(agent_type)) if isinstance(splits, dict) else None
-    if not every_n or every_n < 1:
         return None
-    path = _agent_transcript(payload)
+
+
+def _stopped_run(payload: dict) -> Path | None:
+    """The transcript of the run a ``SubagentStop`` call is about: the path
+    the call names, else the one :func:`_agent_transcript` finds."""
+    given = payload.get("agent_transcript_path")
+    if isinstance(given, str) and given and os.path.isfile(given):
+        return Path(given)
+    return _agent_transcript(payload)
+
+
+def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now: datetime | None = None) -> bool:
+    """What ``SubagentStop`` does for coaching: records in the coach state
+    that an agent run ended too big for one task (``split_run``), with no
+    output. A subagent's own notice never shows and a note to it would
+    steer work already under way, so it is told in the main session at the
+    next ``PostToolUse`` after an agent or workflow call, or the next
+    background task's finishing message (:func:`_split_hint`). A run counts
+    when Claude Code summarised its context part-way through, or when it
+    began from a brief of ``split_brief_chars`` characters or more. Only
+    counts by those two words are kept, under the session: nothing of the
+    run's type, brief or words. Returns whether the state changed."""
+    if not _coaching_applies(payload, config):
+        return False
+    session_id = payload.get("session_id")
+    if not isinstance(session_id, str) or not session_id:
+        return False
+    if str(payload.get("agent_type") or "") in catalogue["skip_agent_types"]:
+        return False
+    coaching = catalogue["coaching"]
+    personal = _read_json(config_dir / coaching["file"])
+    if "split_run" in _hint_names(personal.get("muted")):
+        return False
+    path = _stopped_run(payload)
     if path is None:
+        return False
+    th = coaching_thresholds(coaching, config, personal)
+    found = {
+        "compaction": _compactions(str(path)) > 0,
+        "brief": len(_agent_brief(_head(str(path), _AGENT_HEAD_BYTES))[0]) >= th["split_brief_chars"],
+    }
+    if not any(found.values()):
+        return False
+    now = now or datetime.now(timezone.utc)
+    state_path = config_dir / coaching["state_file"]
+    state = _read_json(state_path)
+    state.pop("agents", None)
+    row = _session_row(state, _session_key(session_id, config_dir), now.timestamp())
+    splits = row.get("splits") if isinstance(row.get("splits"), dict) else {}
+    for word, hit in found.items():
+        if hit:
+            splits[word] = int(_number(splits.get(word)) or 0) + 1
+    row["splits"] = splits
+    _write_json(state_path, state)
+    return True
+
+
+def _split_hint(state: dict, session: str, coaching: dict, th: dict) -> tuple[str, float, dict] | None:
+    """``split_run``: the agent runs :func:`keep_run` recorded for this
+    session since it was last told, as ``(kind, stake, fields)``. The stake
+    is how many there are. It is told in the main session, where Claude
+    writes the tip: at the next agent or workflow call, or with a background
+    task's finishing message (``coaching_for`` clears the record once told)."""
+    sessions = state.get("sessions")
+    row = sessions.get(session) if isinstance(sessions, dict) else None
+    splits = row.get("splits") if isinstance(row, dict) else None
+    if not isinstance(splits, dict):
         return None
-    agents = state.setdefault("agents", {})
-    if not isinstance(agents, dict):
-        agents = state["agents"] = {}
-    _prune(agents, now_ts)
-    row = agents.setdefault(str(payload["agent_id"]), {})
-    row["touched_at"] = now_ts
-    replies = _count_replies(path, row)
-    if replies < every_n or row.get("told"):
+    compaction = int(_number(splits.get("compaction")) or 0)
+    brief = int(_number(splits.get("brief")) or 0)
+    if compaction <= 0 and brief <= 0:
         return None
-    return f"split_run:{payload['agent_id']}", replies, {"replies": replies, "agent": agent_type, "every_n": int(every_n)}
+    why = "both" if compaction > 0 and brief > 0 else "compaction" if compaction > 0 else "brief"
+    fields = {"why": coaching["split_why"][why].format(brief_chars=f"{int(th['split_brief_chars']):,}")}
+    return "split_run", float(compaction + brief), fields
 
 
 def keep_reply(
@@ -2183,9 +2274,8 @@ def coaching_for(
     every hint that carries a tip has one), each ``""`` when there's none. At
     most one hint, the first that applies and isn't resting (see
     :func:`_gate`). Reads ``coaching.json`` and the transcript; writes
-    ``coach-state.json`` when a hint shows, a subagent's run was counted or
-    the newest reply's time and size changed (``PostToolUse`` keeps those,
-    printing nothing). A message sent while Claude was still working
+    ``coach-state.json`` when a hint shows or the newest reply's time and
+    size changed (``PostToolUse`` keeps those, printing nothing). A message sent while Claude was still working
     (queued) gets no hint: it nudges work under way, and a reply to it
     isn't one that ends the turn. ``result_len`` is :func:`result_chars`
     of a PostToolUse call when the caller already measured it. ``tail`` is
@@ -2212,14 +2302,19 @@ def coaching_for(
     state_path = config_dir / coaching["state_file"]
     state = _read_json(state_path)
     session = _session_key(session_id, config_dir)
-    dirty = False
+    # A run's counts used to be kept by agent id here; they are by session now.
+    dirty = state.pop("agents", None) is not None
     candidates: list = []
     tool = str(payload.get("tool_name") or "")
     if event == "UserPromptSubmit":
         path = payload.get("transcript_path")
         prompt = payload.get("prompt")
         typed = not (isinstance(prompt, str) and prompt.lstrip().startswith(_not_typed_prefixes()))
-        if not in_agent and typed and isinstance(path, str) and path:
+        if not in_agent and isinstance(prompt, str) and prompt.lstrip().startswith(coaching["task_notification_prefix"]):
+            # A background task finished: the next main-session hook after an
+            # agent or workflow run that ended too big (``keep_run``).
+            candidates = [_split_hint(state, session, coaching, th)]
+        elif not in_agent and typed and isinstance(path, str) and path:
             records, replayed = (tail if tail is not None and tail.path == path else _TailReader(path)).get()
             if not _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
                 fresh = personal.get("plan_fresh", True) is not False
@@ -2235,18 +2330,25 @@ def coaching_for(
                 ]
     elif tool == "ExitPlanMode":
         if not in_agent:
-            dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts)
+            dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts) or dirty
             if personal.get("plan_fresh", True) is not False:
                 candidates = [_plan_hint(payload, th)]
     else:
-        if in_agent:
-            candidates.append(_split_hint(payload, personal, state, now_ts))
-            dirty = str(payload.get("agent_id")) in (state.get("agents") or {})
+        if not in_agent:
+            dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts) or dirty
+        if tool in catalogue["spawn_tools"]:
+            # No size hint on a report or a launch message. An agent or a
+            # workflow the main session started in the background gets
+            # the cost of reading its report instead; one that ended too
+            # big is told here (``split_run``) when the main session
+            # called it in the foreground, as it has ended by now.
+            if not in_agent:
+                candidates.append(_report_hint(payload, state, session, coaching, th))
+                candidates.append(_split_hint(state, session, coaching, th))
         else:
-            dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts)
-        if result_len is None:
-            result_len = result_chars(payload, catalogue)
-        candidates.append(_quiet_hint(payload, result_len, coaching["quiet_how"], th))
+            if result_len is None:
+                result_len = result_chars(payload, catalogue)
+            candidates.append(_quiet_hint(payload, result_len, coaching["quiet_how"], th))
     # How to do what a tip says depends on the app: a few words each tip fills in.
     how = {key: variants["desktop" if desktop() else "terminal"] for key, variants in coaching["how"].items()}
     for found in candidates:
@@ -2262,8 +2364,8 @@ def coaching_for(
         else:
             _stamp(state, session, kind, stake, now_ts, th, once=hint in once)
         if hint == "split_run":
-            # One notice a run: it's for you, and saying it again adds nothing.
-            state["agents"][str(payload["agent_id"])]["told"] = True
+            # Told: the runs it was about are not told again, only later ones.
+            _session_row(state, session, now_ts).pop("splits", None)
         if hint in _FRESH_START_HINTS:
             # Resting the others for the cooldown, however much grows.
             for other in _FRESH_START_HINTS:
@@ -4422,6 +4524,11 @@ def _run(argv: list[str]) -> None:
     if unattended:
         return
     if payload.get("hook_event_name") == "SubagentStop":
+        if coach:
+            try:
+                keep_run(payload, config, catalogue, config_dir)
+            except Exception:  # noqa: BLE001 - a coaching fault must not cost the agent's own verdict
+                pass
         job = agent_judge_job(payload, config, catalogue)
         if job:
             spawn_judge(config_dir, job)

@@ -1499,6 +1499,9 @@ def build_report(
 
     session_records: list[SessionRecord] = []
     session_cost: dict[str, float] = {}
+    #: What each session's main conversation cost, without its agents: the
+    #: base of the compaction-cost share (``compaction.build_section``).
+    session_main_cost: dict[str, float] = {}
     #: Additive (project-filter work): each *redacted* project slug's
     #: total cost across every session in this corpus, accumulated
     #: alongside ``session_cost`` below from the same per-session totals
@@ -1602,6 +1605,7 @@ def build_report(
         overview.workflow_runs += len(bundle.workflows)
 
         session_cost_total = 0.0
+        session_main_cost_total = 0.0
         session_cc_total_tokens = 0
         session_recache_cc_tokens = 0
 
@@ -1657,6 +1661,8 @@ def build_report(
                 cell.cost += breakdown.total
 
                 session_cost_total += breakdown.total
+                if tr is top:
+                    session_main_cost_total += breakdown.total
                 session_cc_total_tokens += turn.cache_creation_tokens
 
         tp.add_session(record.session_id, top, list(subs), pricing)
@@ -1673,6 +1679,7 @@ def build_report(
             )
 
         session_cost[record.session_id] = session_cost_total
+        session_main_cost[record.session_id] = session_main_cost_total
         project_cost[slug] = project_cost.get(slug, 0.0) + session_cost_total
         session_cc_total[record.session_id] = session_cc_total_tokens
         session_recache_cc[record.session_id] = session_recache_cc_tokens
@@ -1959,7 +1966,7 @@ def build_report(
         sections.append(waste.build_section(ws, waste_th))
 
     if _want("compactions"):
-        sections.append(compaction.build_section(cs))
+        sections.append(compaction.build_section(cs, session_main_cost))
 
     # Phase 8a: the files agents read by habit, once, for the Agents page's
     # starting-context stack below and for the report model's own

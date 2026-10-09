@@ -387,11 +387,33 @@ def test_finish_adds_the_background_stop_entry_and_the_plan_matcher_coaching_nee
     assert sorted(_capture_hooks(tmp_path)) == sorted([
         ("UserPromptSubmit", "", False),
         ("PostToolUse", "|".join(capture_catalogue.COACHING_TOOLS), False),
+        ("SubagentStop", "", False),
         ("Stop", "", True),
     ])
     assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in _capture_hooks(tmp_path))["PostToolUse"]
     assert json.loads(settings.read_text(encoding="utf-8"))["model"] == "opus"
     # Updated, the next run has nothing left to change.
+    rc, out = _Finish(tmp_path).run()
+    assert "Up to date: the hooks, statusline and skills" in out
+
+
+def test_finish_adds_the_agent_and_workflow_tools_to_a_matcher_written_before_them(tmp_path):
+    _coaching_config(tmp_path)
+    (tmp_path / "claude").mkdir(exist_ok=True)
+    settings = tmp_path / "claude" / "settings.json"
+    command = cli._capture_hook_commands(tmp_path / "cfg")[capture_catalogue.HOOK_SCRIPT]
+    before = "Read|Grep|Glob|WebFetch|WebSearch|ExitPlanMode"
+    old = {"hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": command, "timeout": 5}]}],
+        "PostToolUse": [{"matcher": before, "hooks": [{"type": "command", "command": command, "timeout": 5}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": command, "timeout": 5, "async": True}]}],
+    }}
+    settings.write_text(json.dumps(old), encoding="utf-8")
+    rc, out = _Finish(tmp_path).run("--yes")
+    assert rc == 0 and "Up to date" not in out
+    post = [matcher for event, matcher, _ in _capture_hooks(tmp_path) if event == "PostToolUse"]
+    # One entry, with the new matcher: the old one is replaced, not left to run beside it.
+    assert post == [before + "|Agent|Workflow"]
     rc, out = _Finish(tmp_path).run()
     assert "Up to date: the hooks, statusline and skills" in out
 

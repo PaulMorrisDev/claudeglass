@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import recommend, report
+from claudeglass import fixes as fixes_mod, recommend, report
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import (
@@ -1490,6 +1490,218 @@ def test_agent_report_size_suppressed_for_chat_only():
     )
     recs = recommend_fn(r, config=_config(), archetype="chat-only")
     assert not any(rec.id == "agent-report-size" for rec in recs)
+
+
+# -- agent-batch-probes ------------------------------------------------------
+
+
+def _probes_section(*rows) -> Section:
+    """The Work habits section's ``habits_probes`` table, each row
+    ``(where, replies, single read-only calls, of them by shell, runs, cost of the replies after the first)``."""
+    return Section(
+        key="habits",
+        title="Work habits",
+        tables=[
+            Table(
+                name="habits_probes",
+                title="Single lookups, one call per reply",
+                columns=[
+                    Column(key="agent_type", label="Where"),
+                    Column(key="calls", label="Replies"),
+                    Column(key="probes", label="Single read-only calls"),
+                    Column(key="shell", label="Of them by shell command"),
+                    Column(key="runs", label="Runs of two or more"),
+                    Column(key="batch_cost", label="Replies a batch would spare", kind="money"),
+                ],
+                rows=[list(row) for row in rows],
+            )
+        ],
+    )
+
+
+def _batch_probe_recs(*rows, archetype=None):
+    r = _add_section(_base_report(), _probes_section(*rows))
+    return [rec for rec in recommend_fn(r, config=_config(), archetype=archetype) if rec.id == "agent-batch-probes"]
+
+
+def test_agent_batch_probes_fires_per_agent_type_with_half_the_tables_upper_bound():
+    fired = _batch_probe_recs(
+        ["top-level", 900, 500, 50, 120, 90.0],
+        ["Explore", 400, 190, 30, 55, 12.0],
+        ["claude-implementer", 300, 100, 0, 20, 4.0],
+        ["haiku-sweeper", 400, 20, 0, 3, 40.0],
+    )
+    # The main session's row is yours to prompt; a type with few lookups is left alone.
+    assert [(rec.agent_type, rec.severity, rec.category, rec.lever) for rec in fired] == [
+        ("Explore", "advice", "workflow", None),
+        ("claude-implementer", "advice", "workflow", None),
+    ]
+    explore = fired[0]
+    assert explore.saving_usd == pytest.approx(6.0)
+    assert explore.evidence == [
+        ("Replies it made", 400, "habits.habits_probes", "Explore"),
+        ("Single read-only calls", 190, "habits.habits_probes", "Explore"),
+        ("Of them by shell command", 30, "habits.habits_probes", "Explore"),
+        ("Replies a batch would spare", 12.0, "habits.habits_probes", "Explore"),
+    ]
+    # The action is the line to paste, word for word.
+    assert "Batch independent Read/Grep/Glob calls into a single message" in explore.action
+    assert fired[1].saving_usd == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    "row, why",
+    [
+        (["Explore", 99, 90, 0, 20, 50.0], "under 100 replies"),
+        (["Explore", 400, 99, 0, 20, 50.0], "under a quarter of the replies"),
+        (["Explore", 400, 200, 0, 20, 1.9], "under $1 once halved"),
+        (["Explore", 400, 200, 0, 20, "n/a"], "no figure for the cost"),
+        (["Explore", None, 200, 0, 20, 50.0], "no count of replies"),
+    ],
+)
+def test_agent_batch_probes_stays_quiet_below_its_thresholds_or_without_numbers(row, why):
+    assert _batch_probe_recs(row) == [], why
+
+
+def test_agent_batch_probes_fires_at_exactly_its_thresholds():
+    assert len(_batch_probe_recs(["Explore", 100, 25, 0, 4, 2.0])) == 1
+
+
+def test_agent_batch_probes_needs_the_probes_table_and_its_columns():
+    r = _base_report()
+    assert not any(rec.id == "agent-batch-probes" for rec in recommend_fn(r, config=_config(), archetype=None))
+    section = _probes_section(["Explore", 400, 200, 0, 20, 50.0])
+    del section.tables[0].columns[-1]
+    r = _add_section(_base_report(), section)
+    assert not any(rec.id == "agent-batch-probes" for rec in recommend_fn(r, config=_config(), archetype=None))
+
+
+def test_agent_batch_probes_is_suppressed_for_chat_only():
+    assert _batch_probe_recs(["Explore", 400, 200, 0, 20, 50.0], archetype="chat-only") == []
+
+
+def test_agent_batch_probes_thresholds_come_from_the_config():
+    th = RecommendThresholds.from_config(
+        {"agent_batch_probes_min_replies": 20, "agent_batch_probes_share_pct": 10, "agent_batch_probes_saving_factor": 1}
+    )
+    assert (th.agent_batch_probes_min_replies, th.agent_batch_probes_share_pct) == (20, 10.0)
+    r = _add_section(_base_report(), _probes_section(["Explore", 30, 5, 0, 1, 1.5]))
+    config = Config(thresholds={"recommend": {"agent_batch_probes_min_replies": 20, "agent_batch_probes_share_pct": 10,
+                                              "agent_batch_probes_saving_factor": 1}})
+    recs = recommend_fn(r, config=config, archetype=None)
+    (rec,) = [rec for rec in recs if rec.id == "agent-batch-probes"]
+    assert rec.saving_usd == pytest.approx(1.5)
+
+
+# -- plan-rounds -------------------------------------------------------------
+
+
+def _rounds_section(*rows) -> Section:
+    """The Work habits section's ``habits_plan_rounds`` table, each row
+    ``(kind, plans, typed, rounds, asked, cost)``."""
+    return Section(
+        key="habits",
+        title="Work habits",
+        tables=[
+            Table(
+                name="habits_plan_rounds",
+                title="Plans sent back",
+                columns=[
+                    Column(key="kind", label="Which plans"),
+                    Column(key="plans", label="Plans"),
+                    Column(key="typed", label="Approved by typing"),
+                    Column(key="rounds", label="Plans sent back"),
+                    Column(key="asked", label="Sent back with a question or critique"),
+                    Column(key="cost", label="Cost between the first plan and approval", kind="money"),
+                ],
+                rows=[list(row) for row in rows],
+            )
+        ],
+    )
+
+
+def _plan_round_recs(*rows, config=None):
+    r = _add_section(_base_report(), _rounds_section(*rows))
+    return [rec for rec in recommend_fn(r, config=config or _config(), archetype=None) if rec.id == "plan-rounds"]
+
+
+#: Ten approved plans, six sent back at least once (twelve rounds, six a
+#: question or critique), 40.00 spent on the rounds.
+_ROUNDS_ALL = ["all", 10, 3, 12, 6, 40.0]
+_ROUNDS_NONE = ["none", 4, 1, 0, 0, 0.0]
+
+
+def test_plan_rounds_fires_with_a_quarter_of_the_rounds_cost_scaled_to_the_questions_and_critiques():
+    (rec,) = _plan_round_recs(_ROUNDS_ALL, _ROUNDS_NONE)
+    assert (rec.severity, rec.category, rec.lever, rec.agent_type) == ("advice", "workflow", None, None)
+    assert rec.title == "Plans keep being sent back"
+    # 40.00 of rounds, half of them a question or a critique, a quarter of that.
+    assert rec.saving_usd == pytest.approx(5.0)
+    assert rec.evidence == [
+        ("Plans you approved", 10, "habits.habits_plan_rounds", "all"),
+        ("Never sent back", 4, "habits.habits_plan_rounds", "none"),
+        ("Times plans were sent back", 12, "habits.habits_plan_rounds", "all"),
+        ("Sent back with a question or critique", 6, "habits.habits_plan_rounds", "all"),
+        ("Replies between the first plan and approval", 40.0, "habits.habits_plan_rounds", "all"),
+    ]
+    # The action is the line to paste, word for word.
+    assert fixes_mod.CRITIQUE_PLAN_LINE in rec.action
+
+
+def test_plan_rounds_counts_every_plan_as_sent_back_when_none_was_approved_at_once():
+    (rec,) = _plan_round_recs(_ROUNDS_ALL)
+    assert rec.evidence[1] == ("Never sent back", 0, "habits.habits_plan_rounds", "none")
+
+
+@pytest.mark.parametrize(
+    "all_row, none_row, why",
+    [
+        (["all", 4, 1, 12, 6, 40.0], ["none", 1, 0, 0, 0, 0.0], "under five approved plans"),
+        (["all", 10, 3, 12, 6, 40.0], ["none", 8, 2, 0, 0, 0.0], "under 30% of the plans were sent back"),
+        (["all", 10, 3, 12, 3, 40.0], ["none", 4, 1, 0, 0, 0.0], "under 30% of the rounds were a question or critique"),
+        (["all", 10, 3, 12, 6, 3.0], ["none", 4, 1, 0, 0, 0.0], "under $1 once scaled and cut"),
+        (["all", 10, 3, 0, 0, 40.0], ["none", 10, 3, 0, 0, 0.0], "no plan was sent back"),
+        (["all", 10, 3, 12, 6, "n/a"], ["none", 4, 1, 0, 0, 0.0], "no figure for the cost"),
+        (["all", None, 3, 12, 6, 40.0], ["none", 4, 1, 0, 0, 0.0], "no count of plans"),
+    ],
+)
+def test_plan_rounds_stays_quiet_below_its_thresholds_or_without_numbers(all_row, none_row, why):
+    assert _plan_round_recs(all_row, none_row) == [], why
+
+
+def test_plan_rounds_fires_at_exactly_its_thresholds():
+    # Ten plans with seven approved at once is exactly 30% sent back; five plans is the fewest that count.
+    assert len(_plan_round_recs(["all", 10, 0, 10, 3, 14.0], ["none", 7, 0, 0, 0, 0.0])) == 1
+    assert len(_plan_round_recs(["all", 5, 0, 10, 4, 25.0], ["none", 3, 0, 0, 0, 0.0])) == 1
+
+
+def test_plan_rounds_needs_the_table_its_all_row_and_its_columns():
+    r = _base_report()
+    assert not any(rec.id == "plan-rounds" for rec in recommend_fn(r, config=_config(), archetype=None))
+    # No approved plan at all: no "all" row.
+    assert _plan_round_recs(["dropped", 3, 0, 4, 2, 9.0]) == []
+    section = _rounds_section(_ROUNDS_ALL, _ROUNDS_NONE)
+    del section.tables[0].columns[-1]
+    r = _add_section(_base_report(), section)
+    assert not any(rec.id == "plan-rounds" for rec in recommend_fn(r, config=_config(), archetype=None))
+    # A row shorter than its columns is skipped, not a crash.
+    assert _plan_round_recs(["all", 10]) == []
+
+
+def test_plan_rounds_thresholds_come_from_the_config():
+    th = RecommendThresholds.from_config(
+        {"plan_rounds_min_plans": 2, "plan_rounds_min_share_pct": 10, "plan_rounds_min_asked_pct": 10,
+         "plan_rounds_min_saving_usd": 0.1, "plan_rounds_saving_factor": 1}
+    )
+    assert (th.plan_rounds_min_plans, th.plan_rounds_min_share_pct, th.plan_rounds_saving_factor) == (2, 10.0, 1.0)
+    config = Config(thresholds={"recommend": {
+        "plan_rounds_min_plans": 2, "plan_rounds_min_share_pct": 10, "plan_rounds_min_asked_pct": 10,
+        "plan_rounds_min_saving_usd": 0.1, "plan_rounds_saving_factor": 1,
+    }})
+    (rec,) = _plan_round_recs(["all", 3, 0, 2, 1, 4.0], ["none", 2, 0, 0, 0, 0.0], config=config)
+    assert rec.saving_usd == pytest.approx(2.0)
+    # The defaults would have left it alone.
+    assert _plan_round_recs(["all", 3, 0, 2, 1, 4.0], ["none", 2, 0, 0, 0, 0.0]) == []
 
 
 # -- spawn-cost --------------------------------------------------------------

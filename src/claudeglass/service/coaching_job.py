@@ -1,5 +1,5 @@
-"""While the service runs, keep ``coaching.json`` (your own split points,
-plan habit and typical piece of work, for the capture hook's coaching notes
+"""While the service runs, keep ``coaching.json`` (your own plan habit, tip
+thresholds and typical piece of work, for the capture hook's coaching notes
 and feedback items) up to date.
 
 :class:`CoachingJob` checks once the watcher's first scan is done (so
@@ -33,7 +33,7 @@ CHECK_INTERVAL_S = 3600.0
 #: How often (seconds) it looks whether the first scan is done.
 READY_POLL_S = 30.0
 
-_LOG_PREFIX = "claudeglass serve: coaching split points"
+_LOG_PREFIX = "claudeglass serve: coaching numbers"
 
 
 class CoachingJob:

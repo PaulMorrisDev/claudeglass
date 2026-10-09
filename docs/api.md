@@ -567,7 +567,7 @@ asked. `404` if `<id>` is unknown.
 
 Corpus-wide RE-CACHE breakdown — `Store.recache`.
 
-`data`: `{"by_signature": {"full-expiry": {"turns", "cache_creation_tokens"}, "prefix-invalidated": {...}, "limit-expiry": {...}}}`.
+`data`: `{"by_signature": {"full-expiry": {"turns", "cache_creation_tokens"}, "prefix-invalidated": {...}, "post-compaction": {...}, "limit-expiry": {...}}}`.
 A signature with no rebuilds is absent, not zero. Always all history:
 this route takes no window. The dashboard doesn't fetch it: Cache ›
 Rebuilds draws the window's breakdown from `report.json`'s
@@ -1061,8 +1061,14 @@ been captured. `capture_status.summary` is the same one-line status
 
 One answer per way of saving tokens (`quick_actions.CHECKS`): models,
 effort, compaction, cache, tools, skills, claude-md, project-files, tool-output,
-hooks, tool-search, known-savers, habits, failed-calls, quality, cost-centres and cost-record. Each check always answers, including "nothing to
-do". project-files flags a text file (`.md` or `.txt`: a context.md, a
+hooks, tool-search, known-savers, habits, failed-calls, agent-reports, plan-rounds, plan-approval, quality, cost-centres and cost-record. Each check always answers, including "nothing to
+do". agent-reports counts the main session's replies to a background agent's or a workflow's report by what each did
+(only acknowledged it, acted on it, started more agents) and the reports that woke a session idle for an hour or
+more; it is worth a look at 10 replies that only acknowledged (half or more of them) or 3 wake-ups. plan-rounds counts the plans you sent back before you approved one (a decline you answered
+with a go-ahead is an approval, not a plan sent back); it is worth a look at 5 approved plans or more, 30% or more of them sent
+back and 30% or more of the rounds a question, a critique or a doubt, and it offers one line that asks Claude to critique its
+plan first. plan-approval sets the builds that carried on in the planning session beside those that started fresh (a
+/clear within a minute of the approval, or a new session that opens with the plan) and is never worth a look. project-files flags a text file (`.md` or `.txt`: a context.md, a
 spec, a plan, any document) that agents read when it is 5,000 tokens
 or more and 3 or more agent types read it, or when it grew 25% or more in
 about 30 days (and is 2,000 tokens or more now). It names the dearest one

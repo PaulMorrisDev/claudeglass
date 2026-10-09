@@ -47,7 +47,7 @@ from datetime import date
 from typing import Callable
 
 from . import cost_centres, known_savers, model_gate, model_swap, whatif
-from .fixes import already_set
+from .fixes import BATCH_PROBES_LINE, CRITIQUE_PLAN_LINE, already_set
 from .limits import BURST_AGENTS, SPEND_SOURCES, burst_stands_out
 from .model import Recommendation, ReportModel, SettingChange
 from .pricing import model_names_in, newer_version_of
@@ -843,6 +843,55 @@ def _explain_agent_report_size(rec: Recommendation, ctx: _Context) -> None:
     rec.action = f"Ask {agent} for a short report: the findings and file paths, not the working."
 
 
+def _explain_agent_batch_probes(rec: Recommendation, ctx: _Context) -> None:
+    calls = _evidence_value(rec, "Replies it made")
+    probes = _evidence_value(rec, "Single read-only calls")
+    shell = _evidence_value(rec, "by shell command")
+    agent = rec.agent_type or "this agent"
+    workflow = agent == "workflow-subagent"
+    rec.title = f"{agent} looks things up one call at a time"
+    if isinstance(calls, (int, float)) and isinstance(probes, (int, float)):
+        rec.why = (
+            f"{agent} made one read-only call and nothing else in {_tokens(probes)} of its {_tokens(calls)} replies. "
+            "Each of those replies read its whole context again."
+        )
+        if isinstance(shell, (int, float)) and shell >= 1:
+            rec.why += f" {_tokens(shell)} of the calls were shell commands such as cat or grep."
+    else:
+        rec.why = f"{agent} often makes one read-only call per reply, and each reply reads its whole context again."
+    where = "the prompt in each workflow script that starts it" if workflow else "its agent definition or the prompt that starts it"
+    rec.action = f"Add \"{BATCH_PROBES_LINE}\" to {where}. Lookups that don't depend on each other then share one reply."
+    rec.estimated_saving = ctx.money(rec.saving_usd, prefix="At most ")
+    rec.saving_basis = ctx.basis(
+        "The replies after the first of each run of single lookups, at list price, halved because some lookups "
+        "need the answer to the one before."
+    )
+
+
+def _explain_plan_rounds(rec: Recommendation, ctx: _Context) -> None:
+    plans = _evidence_value(rec, "Plans you approved")
+    rounds = _evidence_value(rec, "Times plans were sent back")
+    asked = _evidence_value(rec, "with a question or critique")
+    rec.title = "Plans keep being sent back"
+    if all(isinstance(v, (int, float)) for v in (plans, rounds, asked)):
+        rec.why = (
+            f"You sent plans back {_tokens(rounds)} times before approving {_tokens(plans)}. "
+            f"{_tokens(asked)} of those rounds were a question, a critique or a doubt. "
+            "Each round reads the whole planning conversation again."
+        )
+    else:
+        rec.why = "You often send a plan back before you approve it, and each round reads the whole planning conversation again."
+    rec.action = (
+        "Put one standing request in your first planning message, in CLAUDE.md or in a plan skill. "
+        f"It reads \"{CRITIQUE_PLAN_LINE}.\" Claude then raises those points itself, and you answer them once."
+    )
+    rec.estimated_saving = ctx.money(rec.saving_usd, prefix="At most ")
+    rec.saving_basis = ctx.basis(
+        "The replies between the first plan and the approval, at list price. Only rounds that were a question, "
+        "a critique or a doubt count, at a quarter of their cost. A critique won't spare every round."
+    )
+
+
 #: The limit-pressure card's evidence label for each ``limits.SPEND_SOURCES``
 #: entry's share, the name the card gives it, and the change it points to
 #: when that source spent the most before your stops.
@@ -1312,6 +1361,8 @@ _EXPLAIN: dict[str, Callable[[Recommendation, _Context], None]] = {
     "mcp-unused-server": _explain_mcp_unused_server,
     "spawn-cost": _explain_spawn_cost,
     "agent-report-size": _explain_agent_report_size,
+    "agent-batch-probes": _explain_agent_batch_probes,
+    "plan-rounds": _explain_plan_rounds,
     "limit-pressure": _explain_limit_pressure,
     "cache-read-dominance": _explain_cache_read_dominance,
     "data-quality": _explain_data_quality,

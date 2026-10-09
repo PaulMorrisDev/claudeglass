@@ -468,6 +468,8 @@ _ALL_RULE_IDS = frozenset(
         "cache-read-dominance",
         "baseline-bloat",
         "agent-report-size",
+        "agent-batch-probes",
+        "plan-rounds",
         "spawn-cost",
         "effort-mismatch",
         "discovery-share",
@@ -770,6 +772,46 @@ def _build_every_rule_fixture() -> "report.ReportModel":
 
     model_swap_section = Section(key="model_swap", title="Model swap", tables=[_agent_models_table()])
 
+    habits_section = Section(
+        key="habits",
+        title="Work habits",
+        tables=[
+            Table(
+                name="habits_probes",
+                title="Single lookups, one call per reply",
+                columns=[
+                    Column(key="agent_type", label="Where"),
+                    Column(key="calls", label="Replies"),
+                    Column(key="probes", label="Single read-only calls"),
+                    Column(key="shell", label="Of them by shell command"),
+                    Column(key="runs", label="Runs of two or more"),
+                    Column(key="batch_cost", label="Replies a batch would spare"),
+                ],
+                rows=[["claude-implementer", 400, 200, 20, 30, 40.0]],
+            ),
+            Table(
+                name="habits_plan_rounds",
+                title="Plans sent back",
+                columns=[
+                    Column(key="kind", label="Which plans"),
+                    Column(key="plans", label="Plans"),
+                    Column(key="typed", label="Approved by typing"),
+                    Column(key="rounds", label="Plans sent back"),
+                    Column(key="asked", label="Sent back with a question or critique"),
+                    Column(key="versions", label="Plans put up"),
+                    Column(key="steps", label="Steps in the last plan"),
+                    Column(key="files", label="Files in the last plan"),
+                    Column(key="tokens", label="Tokens between the first plan and approval"),
+                    Column(key="cost", label="Cost between the first plan and approval"),
+                ],
+                rows=[
+                    ["all", 10, 3, 12, 6, 2.2, 5.0, 3.0, 90_000, 40.0],
+                    ["none", 4, 1, 0, 0, 1.0, 4.0, 2.0, 0, 0.0],
+                ],
+            ),
+        ],
+    )
+
     return ReportModel(
         meta=ReportMeta(pricing=PricingMeta(coverage_pct=90.0)),
         sections=[
@@ -785,6 +827,7 @@ def _build_every_rule_fixture() -> "report.ReportModel":
             phases_section,
             limits_section,
             model_swap_section,
+            habits_section,
         ],
         recommendations=[],
         diagnostics=Diagnostics(lines=1000, unparsable_lines=0, ttl_sum_mismatch=1),

@@ -106,14 +106,21 @@ class HookSpec:
 
     def describe(self) -> str:
         tools = set(self.matcher.split("|"))
+        # The tools the entry watches, in words: results to read, a plan,
+        # and the calls that start an agent or a workflow.
+        reads = tools - {"ExitPlanMode", *capture_catalogue.SPAWN_TOOLS}
+        seen = ["web results" if reads <= set(capture_catalogue.WEB_TOOLS) else "read, search and web results"]
+        if "ExitPlanMode" in tools:
+            seen.append("an approved plan")
+        if tools & set(capture_catalogue.SPAWN_TOOLS):
+            seen.append("an agent or workflow start")
+        after = ", ".join(seen[:-1]) + " and " + seen[-1] if len(seen) > 1 else seen[0]
         when = {
             "SessionStart": "when a session starts, is cleared or compacts",
             "SubagentStart": "when a subagent starts",
             "SubagentStop": "when a subagent finishes",
             "UserPromptSubmit": "when you send a message",
-            "PostToolUse": "after "
-            + ("web results" if tools - {"ExitPlanMode"} <= set(capture_catalogue.WEB_TOOLS) else "read, search and web results")
-            + (" and an approved plan" if "ExitPlanMode" in tools else ""),
+            "PostToolUse": "after " + after,
             "SessionEnd": "when a session ends",
             "Notification": "when Claude waits for you, in the background",
             "PermissionRequest": "when Claude asks for permission, in the background",

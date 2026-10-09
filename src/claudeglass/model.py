@@ -761,6 +761,22 @@ script), so it is never read for this:
   ``TranscriptMeta.tool_use_id``; one with no such call is counted as
   foreground, the way a call with no flag runs.
 
+Plan-approval addition (``PARSER_VERSION`` 43). When a plan was approved,
+and whether a message opened with the plan itself, so a build that started
+fresh can be told from one that carried the planning on. A time and a
+yes/no only; the message is read in memory and dropped:
+
+- ``PlanStats.approved_ts: str = ""`` -- the time of the line that approved
+  the plan: the dialog's answer, the go-ahead message you typed, or the
+  line that left plan mode. ``""`` for a plan nobody approved, and for a
+  digest from before 43.
+- ``Turn.human_plan_handoff: bool = False`` -- the preceding message you
+  typed opened with the wording Claude Code writes when you approve a plan
+  and clear the context ("Implement the following plan:", then the plan):
+  ``prompt_shape.is_plan_handoff``, a pattern in ``capture_catalogue``. Any
+  of the messages you typed before the reply, unlike ``human_go``. It
+  reads the opening only; the plan after it is never kept.
+
 Workflow-agents addition (``PARSER_VERSION`` 37). A workflow agent's
 ``.meta.json`` has no ``toolUseId`` or ``parentAgentId`` (none of 682 did),
 so nothing tied it to the message that started its run. Ids only:
@@ -1092,6 +1108,10 @@ class PlanStats:
     #: Parser-signals addition: how that feedback reads, a word from
     #: ``capture_catalogue.PLAN_FEEDBACK_CLASSES``; None when none given.
     feedback_class: str | None = None
+    #: Plan-approval addition (``PARSER_VERSION`` 43): when the plan was
+    #: approved, the time of the line that approved it (see the module
+    #: docstring); "" when it wasn't.
+    approved_ts: str = ""
 
 
 @dataclass(slots=True)
@@ -1146,7 +1166,8 @@ class Turn:
     preceding_primary: EventKind = EventKind.UNKNOWN
 
     is_recache: bool = False
-    #: "full-expiry" | "prefix-invalidated" | None
+    #: "full-expiry" | "prefix-invalidated" | "post-compaction" |
+    #: "limit-expiry" | None
     recache_signature: str | None = None
 
     #: WP1 addition (plan deviation, see module docstring): from
@@ -1323,6 +1344,9 @@ class Turn:
     human_go: bool = False
     human_status: bool = False
     human_remind: bool = False
+    #: Plan-approval addition (``PARSER_VERSION`` 43): the preceding message
+    #: opened with the wording of a plan handed to a fresh session.
+    human_plan_handoff: bool = False
     #: Live-coaching addition (see module docstring): the preceding message
     #: only asked something, and whether it asked for a change.
     human_question: bool = False

@@ -300,13 +300,22 @@ WEB_TOOLS = ("WebFetch", "WebSearch")
 #: Tools whose results can be large enough for a ``big_output`` note
 #: (Deep), as the PostToolUse matcher. Claude Code only reads a hook's
 #: note when it waits for the hook, so this entry runs in the
-#: foreground; matching only these tools keeps edits and agent calls
-#: from waiting on it. The shell and MCP tools are left out: a replay of
+#: foreground; matching only these tools keeps edits from waiting on it
+#: (and agent calls too, unless coaching notes are on: see
+#: :data:`SPAWN_TOOLS`). The shell and MCP tools are left out: a replay of
 #: 30 days of sessions found the shell's note failed both the precision
 #: test and the tokens-against-time test, and the MCP note right a third
 #: of the time (half was needed). Together they were about two thirds of
 #: the spawns this entry caused.
 BIG_OUTPUT_TOOLS = ("Read", "Grep", "Glob", *WEB_TOOLS)
+
+#: Tools that start an agent or a workflow, which the coaching entry also
+#: watches (:data:`COACHING_TOOLS`) for ``report_reread``. Their results are
+#: a report or a launch message, not a file or a search: neither the
+#: ``big_output`` note nor ``quiet_output`` applies to them, and the hook
+#: skips both for these names. (``AGENT_TOOLS``, further down, is the
+#: parser's list: it also has the older ``Task``.)
+SPAWN_TOOLS = ("Agent", "Workflow")
 
 #: The most tokens an image counts for in a tool result, and the side in
 #: pixels of the square Claude counts one token per (``ceil(width / 28) *
@@ -575,27 +584,37 @@ COACH_MARKER = "cg-coach v"
 OLD_COACH_MARKER = "tl-coach v"
 COACH_VERSION = 1
 
-#: Your own split points and plan habit, worked out from your recent
-#: sessions by the dashboard's service (``coaching.py``) for the hook to
-#: read, in the data folder.
+#: Your own plan habit and what your tip answers changed, worked out from
+#: your recent sessions by the dashboard's service (``coaching.py``) for
+#: the hook to read, in the data folder.
 COACHING_FILE = "coaching.json"
 
 #: What the hook keeps between calls, per session: which hint showed
 #: when and how many times, the time, size and cache lifetime of the
 #: newest reply (written by ``Stop`` and ``PostToolUse``, never any
-#: words), and how far each subagent run had got. In the data folder.
+#: words), and how many agent runs ended too big and haven't been
+#: mentioned yet (``SubagentStop``). In the data folder.
 COACH_STATE_FILE = "coach-state.json"
 
 #: Tools whose results a coaching note may follow: every tool the
-#: large-output note watches, and ``ExitPlanMode`` for an approved plan.
-#: A settings.json written before the shell and MCP tools were dropped
-#: still runs the hook after them until ``capture connect``; the hook
-#: returns at once for any tool not named here.
-COACHING_TOOLS = (*BIG_OUTPUT_TOOLS, "ExitPlanMode")
+#: large-output note watches, ``ExitPlanMode`` for an approved plan, and
+#: the tools that start an agent or a workflow (:data:`SPAWN_TOOLS`) for
+#: ``report_reread`` and ``split_run``. The matcher is these names joined by ``|``;
+#: ``footprint.py`` rewrites it on ``update --finish``. A settings.json
+#: written before the shell and MCP tools were dropped still runs the hook
+#: after them until ``capture connect``; the hook returns at once for any
+#: tool not named here.
+COACHING_TOOLS = (*BIG_OUTPUT_TOOLS, "ExitPlanMode", *SPAWN_TOOLS)
 
-#: The live hints: after a tool result (the first three) and when you
-#: send a message (the rest), most useful first when more than one
-#: applies. ``drip_feed`` and ``big_paste`` are about how you prompt.
+#: The live hints: after a tool result (the first three, and
+#: ``report_reread``, after an agent or a workflow was started in the
+#: background) and when you send a message (the rest), most useful first
+#: when more than one applies. ``split_run`` is the exception that comes
+#: from two places: after an agent or workflow call, and with a background
+#: task's finishing message, because what it reports (an agent run that
+#: summarised its own context, or began from a very long brief) is
+#: recorded when the run stops and told in the main session at the next of
+#: those. ``drip_feed`` and ``big_paste`` are about how you prompt.
 #: ``plan_fresh`` also applies when you send a go-ahead after a plan you
 #: hadn't approved in the dialog, or leave plan mode. ``plan_fresh_early``
 #: is the same advice at an earlier moment: a message sent in plan mode,
@@ -610,6 +629,7 @@ COACHING_HINTS = (
     "plan_fresh_early",
     "split_run",
     "quiet_output",
+    "report_reread",
     "drip_feed",
     "big_paste",
     "status_poll",
@@ -855,6 +875,14 @@ PLAN_CRITIQUE_PATTERN = (
     r"\b(?:no|not|don'?t|do not|doesn'?t|shouldn'?t|never|wrong|instead|rather|too|remove|drop|skip|without"
     r"|avoid|but|change|only|also|needs? to|must|should)\b"
 )
+
+#: How a message that hands a plan to a fresh session opens: Claude Code
+#: writes "Implement the following plan:" and then the plan when you approve
+#: one and clear the context. Matched on the start of the message only,
+#: read in memory by ``prompt_shape.is_plan_handoff``; the parser keeps just
+#: the yes/no (``Turn.human_plan_handoff``). The hook never needs it, so it
+#: stays out of the exported catalogue.
+PLAN_HANDOFF_PATTERN = r"\s*implement the following plan\b"
 
 #: How a reply's closing question is found (``prompt_shape.ends_on_question``,
 #: which the capture hook and the status line repeat step for step). The
@@ -1276,6 +1304,19 @@ COACHING_THRESHOLDS = {
     "warm_prefix_tokens": 42_000,
     #: A tool result this many tokens long gets the narrower-output hint.
     "quiet_output_tokens": 8_000,
+    #: An agent or a workflow started in the background while the main
+    #: session holds this many tokens gets the report-reread hint: each
+    #: report that comes back is answered by a reply that reads all of it.
+    #: Below it, a report's reply costs cents.
+    "report_reread_tokens": 150_000,
+    #: An agent run that began from a brief this many characters long, or
+    #: longer, is noted when it stops, and the main session is told at its
+    #: next agent or workflow call or background task message. In the
+    #: replay that chose it, briefs past it were oversized 59% of the time,
+    #: and the later spawns of a type that had summarised its own context
+    #: 53% of the time, against a base rate of 25%. The other reason a run
+    #: is noted, a summary of its own context, has no number.
+    "split_brief_chars": 6_000,
     #: Planning context, in tokens, kept after an approved plan before the
     #: fresh-session hint applies (``plan_handoff_min_dropped_tokens``'s
     #: default).
@@ -1364,6 +1405,27 @@ COACHING_TIP = {
         "Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that "
         "matters, or saving the rest to a file and giving the path, costs less."
     ),
+    "report_reread": (
+        "This session holds about {ctx} tokens, and the reply to each report the background work sends back reads "
+        "all of it again. Fewer, larger pieces of background work mean fewer reports, so fewer of those re-reads."
+    ),
+    "split_run": (
+        "In this session {why}. Each reply of a run reads everything the run holds again, so runs that big cost "
+        "more than the work needs. Giving the next agent a smaller piece of the work keeps each run short."
+    ),
+}
+
+#: ``split_run``'s ``{why}``, by what was noted since the last time it was
+#: told: ``compaction`` (an agent run summarised its own context part-way
+#: through, which Claude Code does on its own), ``brief`` (a run began from
+#: a brief of ``{brief_chars}`` characters or more, :data:`COACHING_THRESHOLDS`'
+#: ``split_brief_chars``) or ``both``. Counts and these words are all the
+#: hook keeps about a run: never its type, its brief or its words.
+COACHING_SPLIT_WHY = {
+    "compaction": "an agent run had to summarise its own context part-way through",
+    "brief": "an agent run began from a brief of {brief_chars} characters or more",
+    "both": "agent runs had to summarise their own context part-way through or began from a brief of "
+    "{brief_chars} characters or more",
 }
 
 
@@ -1447,6 +1509,11 @@ COACHING_TEXT = {
         then="Otherwise don't mention this note.",
     ),
     "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
+    "report_reread": _tip_note(
+        "report_reread",
+        then="The user's session just started background work. Carry on exactly as you would have without this "
+        "note: it changes nothing about the work.",
+    ),
     "plan_fresh": _tip_note(
         "plan_fresh", where=_BEFORE_BUILD, then="Then carry on unless the user stops you."
     ),
@@ -1455,31 +1522,32 @@ COACHING_TEXT = {
         where=_ENDING_THE_PLAN,
         then="If this reply doesn't end in a plan, add it to the plan you submit later. " + _AS_USUAL,
     ),
-    # Nothing reaches the subagent: told mid-run to stop and hand back,
-    # it either ignored the note (and reported it as a stray hook message)
-    # or would have handed back half-done work. You get the notice instead.
-    "split_run": "",
+    # Told in the main session, never to the subagent: a subagent told
+    # mid-run to stop and hand back either ignored the note (and reported
+    # it as a stray hook message) or would have handed back half-done work,
+    # and a subagent's own notice never shows.
+    "split_run": _tip_note(
+        "split_run",
+        then="An agent run in this session ended showing signs of being too big for one task. Carry on exactly as "
+        "you would have without this note: it changes nothing about the work.",
+    ),
 }
 
 #: The hints that also show the tip as a notice where Claude Code shows
 #: hook messages: every hint with a tip.
-NOTICE_HINTS = ("plan_fresh", "plan_fresh_early", "drip_feed", "big_paste", "status_poll", "cold_return")
+NOTICE_HINTS = (
+    "plan_fresh", "plan_fresh_early", "drip_feed", "big_paste", "status_poll", "cold_return", "report_reread",
+    "split_run",
+)
 
 #: What the hook shows you itself, never sent to Claude, so it costs no
 #: tokens: Claude Code's hook ``systemMessage``. The desktop app shows it
-#: as a collapsed row that folds into the run summary, and never for a
-#: subagent, so there the tip reaches you through Claude alone and the
-#: hook sends no notice (``capture_hook.py``'s ``delivery``). Elsewhere it
-#: shows at once, with the same words as the tip. ``split_run`` shows it
-#: once, when a subagent run passes its split point, and tells the
-#: subagent nothing: with no note to Claude, the notice is all it has.
-#: Same ``{placeholders}`` as :data:`COACHING_TEXT`.
-COACHING_NOTICE = {
-    **{hint: NOTICE_LABEL + COACHING_TIP[hint] for hint in NOTICE_HINTS},
-    "split_run": NOTICE_LABEL + "this {agent} run has made about {replies} replies, and each one reads the whole "
-    "run again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next "
-    "time, give each agent a smaller piece of the work.",
-}
+#: as a collapsed row that folds into the run summary, so there the tip
+#: reaches you through Claude alone and the hook sends no notice
+#: (``capture_hook.py``'s ``delivery``). Elsewhere it shows at once, with
+#: the same words as the tip. Same ``{placeholders}`` as
+#: :data:`COACHING_TEXT`.
+COACHING_NOTICE = {hint: NOTICE_LABEL + COACHING_TIP[hint] for hint in NOTICE_HINTS}
 
 def _plan_check_note() -> str:
     """The note that has Claude ask the plan check: one AskUserQuestion
@@ -1993,8 +2061,9 @@ METRICS: tuple[Metric, ...] = (
         group="derived",
         section="derived",
         title="Where research happens",
-        what="Search and read tokens in the main session against those in Explore agents.",
-        why="When to hand research to an agent.",
+        what="Search and read tokens in the main session against those in Explore agents. Also how many calls were a "
+        "single lookup in a reply of its own.",
+        why="When to hand research to an agent, and when to ask for lookups to be batched.",
         powers=("research", "delegation"),
     ),
     # -- Live coaching ----------------------------------------------------
@@ -2015,20 +2084,22 @@ METRICS: tuple[Metric, ...] = (
         title="Coaching notes from Claude",
         what="Live hints for where the status line doesn't show, such as the desktop app. When one applies, a "
         "hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large "
-        "read, search or web result, a subagent run past the point where your own history says splitting pays, a plan approved "
+        "read, search or web result, an agent run that ended too big for one task (it had to summarise its own "
+        "context, or began from a very long brief), a plan approved "
         "on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, "
-        "or asking how background work is going while it still runs. It also flags how you prompt: small "
+        "asking how background work is going while it still runs, or starting background agents when the session "
+        "already holds a lot of context, since each report they send back re-reads it. It also flags how you prompt: small "
         "requests sent one at a time, or a huge paste. Vague corrections, the same request again and stopping "
         "Claude again and again are counted after the fact on Work habits, with no live note. So is a big "
         "task without a plan.",
         why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
         "140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each "
-        "read, search or web result and each message you send. Setup > Capture and 'claudeglass capture status' show "
+        "read, search or web result, each agent or workflow it starts, and each message you send. Setup > Capture and 'claudeglass capture status' show "
         "how many runs, the median time each and the time summed, from your own sessions. A hook after each reply "
         "runs in the background and keeps only the time and size of Claude's newest reply, so the cache check is "
-        "right after a resume.",
+        "right after a resume. A hook when an agent run ends keeps only whether it ended too big, as counts.",
         powers=("context", "tool_output", "delegation", "planning"),
-        hooks=("UserPromptSubmit", "PostToolUse", "Stop"),
+        hooks=("UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop"),
     ),
     Metric(
         id="brief_templates",
@@ -2195,6 +2266,8 @@ TIP_HINT_TITLES: dict[str, str] = {
     "big_paste": "pasting a lot of text",
     "status_poll": "asking how background work is going",
     "cold_return": "coming back after a break",
+    "report_reread": "starting background agents in a long session",
+    "split_run": "giving agents smaller pieces of work",
 }
 
 
@@ -2524,11 +2597,14 @@ TIP_KNOWN_MIN = 2
 #: The hints with a number of their own that decides when they speak: the
 #: key in :data:`COACHING_THRESHOLDS` the daily run raises. The two plan
 #: hints share one number, so the others' answers would move both; they are
-#: muted instead, like the hint with no number at all (``status_poll``).
+#: muted instead, like the hints with no number at all (``status_poll``)
+#: or with one that is only part of why they speak (``split_run``: its
+#: brief length is one of two triggers, and the other has no number).
 TIP_THRESHOLD_KEYS: dict[str, str] = {
     "drip_feed": "drip_count",
     "big_paste": "big_paste_tokens",
     "cold_return": "cold_min_tokens",
+    "report_reread": "report_reread_tokens",
 }
 
 
@@ -3014,7 +3090,9 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     about, so these stay synchronous; the tool note's matcher keeps
     that wait to the tools whose results can be large. Coaching notes
     (``coaching_notes``) add the message you send and approved plans to
-    that, in one PostToolUse entry shared with the tool note. The feedback
+    that, in one PostToolUse entry shared with the tool note, and a
+    ``SubagentStop`` entry that records an agent run that ended too big
+    (``split_run``). The feedback
     items that answer a message you send (:data:`FEEDBACK_MESSAGE_IDS`) add
     that entry on their own. SessionEnd runs as the session closes, when
     nothing waits on it; the other signals run in the background. While Haiku writes the tags
@@ -3036,10 +3114,12 @@ def hook_specs(ids) -> tuple[tuple[str, str, str, bool], ...]:
     specs: list[tuple[str, str, str, bool]] = []
     if main:
         specs.append((HOOK_SCRIPT, "SessionStart", SESSION_START_MATCHER, False))
-    if agents:
+    if agents or coach:
         # In the foreground, as Stop is for Haiku: it only hands the run to
         # a worker and returns, and claude -p exits without waiting for a
-        # background hook.
+        # background hook. Coaching notes need it too, to record that a run
+        # ended too big (``split_run``) before the foreground agent call
+        # that started it returns.
         specs.append((HOOK_SCRIPT, "SubagentStop", "", False))
     if coach or asks_on_message:
         specs.append((HOOK_SCRIPT, "UserPromptSubmit", "", False))
@@ -3096,6 +3176,7 @@ def export_json() -> dict:
         "no_rules_agent_types": list(NO_RULES_AGENT_TYPES),
         "big_output_tokens": BIG_OUTPUT_TOKENS,
         "result_tools": list(COACHING_TOOLS),
+        "spawn_tools": list(SPAWN_TOOLS),
         "result_image_max_tokens": RESULT_IMAGE_MAX_TOKENS,
         "result_image_patch_px": RESULT_IMAGE_PATCH_PX,
         "result_persist_chars": dict(RESULT_PERSIST_CHARS),
@@ -3137,6 +3218,7 @@ def export_json() -> dict:
             "state_file": COACH_STATE_FILE,
             "thresholds": dict(COACHING_THRESHOLDS),
             "text": dict(COACHING_TEXT),
+            "split_why": dict(COACHING_SPLIT_WHY),
             "quiet_how": dict(COACHING_QUIET_HOW),
             "notice": dict(COACHING_NOTICE),
             "interrupt_prefix": INTERRUPT_PREFIX,

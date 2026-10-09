@@ -1424,3 +1424,201 @@ def test_privacy_naming_a_file_changes_a_copy_of_the_rows_never_the_stats(tmp_pa
     assert all("name" not in item for item in data["reads"])
     assert local.names and not any(isinstance(value, Path) for item in local.names.values() for value in item.values())
     claude_md_review._NAMES.clear()
+
+
+
+# -- Phase 8: single lookups, agent runs, report turns, plan rounds and approvals, summaries, model choice ---------
+
+
+def _phase_8_world(root: Path, secrets: list[str]) -> Path:
+    """One project whose transcripts are full of words and paths. The main
+    session reads a file, starts a background agent of a type with a private
+    name, is told its report, sends a plan back with feedback, approves one,
+    builds and summarises. The agent reads files of its own. A second session
+    opens with the approved plan's own text. Returns the project folder."""
+    from test_tuning import SENT_BACK, _agent_turn, _at, _edit, _human, _ok, _say, _write_agent
+
+    project = root / "projects" / f"proj-{secrets[0]}"
+    project.mkdir(parents=True)
+
+    def plan(second: int, use_id: str, text: str) -> dict:
+        return turn_line(content=[tool_use_block("ExitPlanMode", use_id, {"plan": text})], timestamp=_at(second))
+
+    feedback = f"what about {secrets[10]}? mail {secrets[11]}@example.com"
+    launch = {
+        "description": secrets[5],
+        "prompt": f"look in C:/work/{secrets[6]}",
+        "subagent_type": f"{secrets[7]}-reviewer",
+        "run_in_background": True,
+    }
+    main = [
+        _human(0, f"plan the {secrets[1]} change in C:/Users/someone/{secrets[2]}/app.py", entrypoint="cli"),
+        turn_line(
+            content=[tool_use_block("Read", "tu_r", {"file_path": f"C:/Users/someone/{secrets[3]}/notes.txt"})],
+            timestamp=_at(2),
+            message_id="m_read",
+        ),
+        user_block_line([tool_result_block("tu_r", f"{secrets[4]} contents")], timestamp=_at(3)),
+        _say(4, "Read it."),
+        turn_line(content=[tool_use_block("Agent", "tu_bg", launch)], timestamp=_at(10)),
+        user_block_line(
+            [tool_result_block("tu_bg", "Async agent launched successfully.")],
+            toolUseResult={"isAsync": True, "status": "async_launched", "agentId": "bg1"},
+            timestamp=_at(11),
+        ),
+        _say(12, "Waiting."),
+        _human(30, "meanwhile"),
+        _say(31, "Ok."),
+        user_str_line(
+            "<task-notification><task-id>bg1</task-id><status>completed</status>"
+            f"<result>{secrets[8]} found</result></task-notification>",
+            origin={"kind": "task-notification"},
+            timestamp=_at(60),
+        ),
+        _say(61, "Thanks."),
+        plan(70, "tu_p1", f"# Plan\n1. edit {secrets[9]}.py"),
+        user_block_line(
+            [tool_result_block("tu_p1", SENT_BACK + feedback, is_error=True)],
+            toolDenialKind="user-rejected",
+            timestamp=_at(74),
+        ),
+        plan(80, "tu_p2", f"# Plan\n1. edit {secrets[9]}.py\n2. test {secrets[12]}"),
+        user_block_line([tool_result_block("tu_p2", "User has approved your plan.")], timestamp=_at(85)),
+        _edit(90, 5, f"src/{secrets[13]}.py"),
+        _ok(91, 5),
+        _say(92, "Built it."),
+        system_line(
+            "compact_boundary",
+            timestamp=_at(100),
+            compactMetadata={"trigger": "auto", "preTokens": 100_000, "postTokens": 20_000},
+        ),
+        user_str_line(
+            f"This session is being continued from a conversation about {secrets[14]}.",
+            isCompactSummary=True,
+            timestamp=_at(101),
+        ),
+        _say(110, "Continuing.", cache_creation_input_tokens=25_000, ephemeral_1h_input_tokens=25_000),
+    ]
+    write_jsonl(project / "s1.jsonl", main)
+    opus = "claude-opus-4-1"
+    reads = [
+        _agent_turn(
+            20 + 2 * n,
+            f"a_{n}",
+            tool_use_block("Read", f"tu_a{n}", {"file_path": f"C:/work/{secrets[15]}/{n}.py"}),
+            model=opus,
+        )
+        for n in range(3)
+    ]
+    ending = _agent_turn(30, "a_end", {"type": "text", "text": f"Done with {secrets[16]}."}, model=opus)
+    _write_agent(
+        project / "s1" / "subagents",
+        "agent-bg1",
+        {"agentType": f"{secrets[7]}-reviewer", "description": secrets[5]},
+        [*reads, ending],
+    )
+    opening = f"Implement the following plan:\n\n# Plan\n1. edit {secrets[9]}.py\n2. test {secrets[12]}"
+    write_jsonl(project / "s2.jsonl", [_human(200, opening), _say(205, "On it.")])
+    return project
+
+
+def test_privacy_phase_8_tables_the_store_and_the_export_hold_counts_and_words_never_the_names(tmp_path: Path):
+    # The Phase 8 tables (single lookups, what agent runs did, replies to
+    # reports, plans sent back, how builds began, model choice, summaries),
+    # the parsed transcripts as the cache stores them, and the tuning
+    # export's new blocks are built from files full of names, paths and
+    # text. None of it, nor the private agent type, reaches any of them.
+    from claudeglass import parse, tuning
+    from claudeglass.config import Config
+    from claudeglass.corpus import load_corpus
+    from claudeglass.pricing import load_pricing
+    from claudeglass.report import build_report
+    from test_tuning import DAYS, TODAY
+
+    parse.set_salt(b"p" * 32)
+    secrets = [
+        "okapi", "dugong", "gecko", "manatee", "pika", "marmoset", "tapir", "lemur", "numbat", "quoll",
+        "tarsier", "kakapo", "echidna", "bonobo", "wombat", "ocelot", "capybara",
+    ]  # fmt: skip
+    project = _phase_8_world(tmp_path, secrets)
+    corpus = load_corpus([project])
+    pricing = load_pricing()
+    report = build_report(corpus, pricing, Config(tz="UTC"), projects=(), window="all time")
+
+    # The world holds what it was made to: each table has a row to check.
+    sections = {section.key: section for section in report.sections}
+    wanted = {
+        "habits": ("habits_probes", "habits_agent_runs", "habits_report_turns", "habits_plan_rounds"),
+        "plan_handoff": ("plan_handoff_approvals",),
+        "agents": ("cost_centres_models",),
+        "compactions": ("compactions_summary",),
+    }
+    for key, names in wanted.items():
+        tables = {table.name: table for table in sections[key].tables}
+        for name in names:
+            assert tables[name].rows, (key, name)
+        assert_privacy(sections[key])
+
+    # The parsed transcripts, as the cache stores them.
+    stored = []
+    for session in corpus.sessions:
+        for result in (session.top, *session.subs):
+            stored.append(json.dumps(cache.encode_result(result)))
+            _assert_no_violations(result)
+    turns = [turn for session in corpus.sessions for turn in session.top.turns]
+    assert any(turn.human_plan_handoff for turn in turns)
+    assert any(turn.plan_stats and turn.plan_stats.approved_ts for turn in turns)
+
+    document = tuning.build(
+        corpus,
+        Config(tz="UTC"),
+        pricing,
+        config_dir=tmp_path / "claudeglass",
+        days=DAYS,
+        today=TODAY,
+        claude_root=tmp_path / "claude",
+    )
+    assert tuning.validate(document) == []
+    assert_privacy_deep(document)
+    assert document["prompting"]["plans"]["builds"] and document["prompting"]["plans"]["asks"]
+    assert document["agents"]["launches"] and document["agents"]["model_choice"]
+    assert {row["agent_type"] for row in document["agents"]["model_choice"]} == {"custom"}
+    assert document["compactions"]["summaries"] == 1
+
+    blobs = {
+        "report": json.dumps(dataclasses.asdict(report), default=str),
+        "store": "\n".join(stored),
+        "export": tuning.dumps(document),
+    }
+    # What the transcripts hold is kept as it is by the store and the report, which list an agent by its type and a
+    # session by its project and file: those names are theirs. The export holds no name at all.
+    own = {secrets[0], secrets[7], f"{secrets[7]}-reviewer", str(tmp_path)}
+    forbidden = [*secrets[1:], f"{secrets[7]}-reviewer", "C:/Users", "C:/work", "example.com", "someone", str(tmp_path)]
+    for name, blob in blobs.items():
+        for word in [secrets[0], *forbidden]:
+            if name != "export" and word in own:
+                continue
+            assert word not in blob, (name, word)
+
+
+def test_privacy_a_split_run_count_is_a_number_under_a_session_never_the_run(tmp_path: Path):
+    # An agent run that began from a long brief, summarised its context,
+    # and has a private type, a path and words in everything it said: the
+    # coach state keeps a count of each reason under the session's key.
+    from test_coaching import CATALOGUE, _SUMMARISED, _agent_run, _agent_stop, _keep_run, _pending, _prompt, _reply, cat
+
+    line = cat.COACHING_THRESHOLDS["split_brief_chars"]
+    secrets = ["narwhal", "axolotl", "pangolin", "mongoose"]
+    brief = f"look in C:/Users/someone/{secrets[0]} for {secrets[1]} " + "x" * line
+    session, path = _agent_run(
+        tmp_path,
+        [_prompt(brief), _reply(1_000), _SUMMARISED, _reply(2_000, message_id="m2")],
+        agent_id=secrets[2],
+    )
+    payload = _agent_stop(session, secrets[2], agent_type=f"{secrets[3]}-reviewer")
+    assert CATALOGUE["coaching"]["thresholds"]["split_brief_chars"] == line
+    assert _keep_run(tmp_path, payload) is True
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1, "brief": 1}]
+    kept = (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8")
+    for word in [*secrets, "C:/Users", "someone", f"{secrets[3]}-reviewer", path.name, "reviewer", brief[:20]]:
+        assert word not in kept, word

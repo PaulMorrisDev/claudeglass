@@ -357,21 +357,25 @@ written, or figures that failed the checks below.
 ### What the file holds
 
 A header (`kind`, `format`, `tool_version`, `parser_version`,
-`generated_on` and `window_days`) and eight blocks. A map lists only the words
+`generated_on` and `window_days`) and nine blocks. A map lists only the words
 that were counted, so a missing word reads as zero. A file made before the
 `cost_centres` block was added has six, one made before `project_files` has
-seven, and both are still valid.
+seven, one made before `compactions` has eight, and all are still valid. So is
+a file without the keys that `prompting` and `agents` gained with `compactions`
+(`builds`, `asks`, `probes`, `report_turns`, `launches` and `model_choice`): each is left out when
+there is nothing to count, and a file from before them never had them.
 
 | Block | Holds |
 | --- | --- |
 | `capture` | The setup: capture level, who writes the tags, the share of sessions, which metrics and coaching notes are on and the thresholds in force. For each tip: the notes that asked for it, the replies that showed it, the ones Claude called a misfire, and your useful, known and wrong answers |
-| `prompting` | Messages you typed, ones you typed while Claude worked, go-aheads, status checks, corrections, adjustments and reminders. Per week: messages and the times each habit showed. Plans approved, rounds sent back and how your feedback to them read. Tool calls that were turned away, by reason |
+| `prompting` | Messages you typed, ones you typed while Claude worked, go-aheads, status checks, corrections, adjustments and reminders. Per week: messages and the times each habit showed. Plans approved, plans declined in the dialog (a decline you then answered with a go-ahead included) and how your feedback to them read. The approved plans by how the build began (in the same session, after a `/clear`, or in a session that opens with the plan): how many you approved by typing, the context carried, and the replies of the build with their context and list-price cost. The plans put up for each ask, grouped by how many times you sent one back: how many, how many you typed, the rounds and questions, and what they cost. Tool calls that were turned away, by reason |
 | `tags` | Each tag word as written, by who wrote it (Claude, Haiku, or Haiku filling a reply Claude left bare). Words put right by the hook and by the transcript. The shift Claude wrote against corrections, adjustments and rework. Mistakes Claude admitted, by kind and who caught them. Your `/cg-feedback` answers as counts |
 | `pieces` | Pieces of work, how many requests each took, rework by cause, level and week. Sessions by mode, and the unattended night time of those with some. Runs of small requests sent one at a time. Returns after a break and wake-ups by a background task, with the cache tokens they wrote again |
-| `agents` | The result word agents left, by how their last reply answered. Haiku's judge calls, cost and errors. Direct and workflow runs and their cost, by built-in type (everything else counts as `custom`) and model family. When a tools list would help some agent types, the list-price saving over the window, by the same types |
+| `agents` | The result word agents left, by how their last reply answered. Haiku's judge calls, cost and errors. Direct and workflow runs and their cost, by built-in type (everything else counts as `custom`) and model family. When a tools list would help some agent types, the list-price saving over the window, by the same types. How many agent replies were one read-only call and nothing else, how many of those were a shell command, and in how many stretches of two or more in a row. The main session's replies to an agent's report: acknowledged, acted on and started more agents. The runs by how they were started (background, foreground or workflow): the agents, their replies and single read-only calls, the starting context times the replies, the summaries made inside the runs, the files sibling agents had already read, and the list-price cost, so a cost per run is a division. The model choice table: for each of the 60 dearest rows, who started the run (direct or workflow), the built-in agent type (a custom one is `custom`), the model family, who chose the model (the call, the agent file, the session, or not recorded), the runs, their list-price cost and the most that Sonnet could save. No agent name, file or model id |
 | `overhead` | How sessions were started. How often each ClaudeGlass hook ran, for the events the transcripts can count, and the median time Claude Code recorded. What capture and coaching notes cost. Hook runs and both costs count from when capture was turned on, if that was inside the window. Usage-limit stops by kind |
 | `cost_centres` | Where the window's spend went: for the main session, direct agents, workflow agents and each session's first call, the list-price amount in each of base read, above-base read, growth write, rewrite, post-compaction and output. A row or cell with no spend is left out. Amounts only: the parts of the base read are not in it |
 | `project_files` | The files that go into agents' runs: the CLAUDE.md files Claude Code loads, the files they import and the files agents read by habit. For each of the 40 that cost most: its extension class (`md`, `txt`, `json`, `config`, `code`, `other`, or `unknown` for a file this machine could not find), how it arrives (`auto`, `import` or `read`), its size now and each recent week's as a bucket (up to 1k, 2k, 5k, 10k and 20k tokens, or over), and, for the main session and each agent type, the share of its runs that had the file. A custom agent's runs count as `custom`. No name, path, hash or cost; `total` counts every file |
+| `compactions` | The conversation summaries Claude Code made. The main sessions, how many of them summarised and the summaries in them, by what triggered each (`auto`, `manual` or `other`); those made inside subagent and workflow runs; the tokens they dropped. With a rate card, at list prices: the cache write on the reply after each summary, the estimated cost of writing them, and, for the sessions that summarised 3 times or more, how many there were, what their main conversations cost and what that was in all main-session cost. Counts and amounts: no session, no summary text |
 
 Your session ratings and tip-card answers on the dashboard count as they do
 there. They are read from its database without writing to it, and only their
@@ -399,7 +403,7 @@ and the check fails closed:
   and the others would go unchecked;
 - a second scan of the whole text refuses a drive path, `home/`, `Users\`,
   a Git Bash `/c/` path, an `@`, `://` or `www.`;
-- the file must be 256 KB or less. A real one is about 10 KB.
+- the file must be 256 KB or less. A real one is about 35 KB.
 
 `tuning export` runs the checks before it writes anything. If they fail it
 prints the problems to stderr and exits `2`, with no file and no JSON on
@@ -431,14 +435,19 @@ Tuning figures made on 2026-09-19 for the last 30 days, by ClaudeGlass 0.14.0.
 Capture: level standard, tags written by claude, 100% of sessions, 4 metrics on.
 Tips: 4 notes asked for one, 3 shown, 1 called a misfire.
 Prompting: 120 messages typed, plus 9 typed while Claude worked.
-Plans: 8 approved, 4 rounds sent back.
+Plans: 8 approved, 4 rounds declined in the dialog.
+Builds after an approved plan: kept 5, cleared 2 and handoff 1, 8 plans in all.
 Pieces of work: 67.
 Of the 55 delivered pieces with a clear start, 10 needed changes after delivery.
 Rework: 14 follow-ups after delivery, $31.25 at list prices, most often left out.
 Cold returns: 6, rewriting 900,000 cache tokens. Wake-ups: 2, rewriting 260,000.
 Agent runs: 21 direct costing $14.50, 9 from workflows costing $6.25.
+Agents by how they were started: background 12 agents at $0.96 each, foreground 9 agents at $0.33 each and workflow 9 agents at $0.69 each.
+Model choice: 4 agent runs on Opus or above; chosen by file 10, not recorded 9 and inherited 4. Sonnet could save up to $3.10 at list prices.
 Hooks: SessionStart ran 54 times, median 140 ms; Stop ran 800 times, no time recorded.
 Limits: 3 five-hour stops and 1 weekly stop.
+Summaries: 220 summaries in 40 sessions of 61 (auto 200, manual 15 and other 5).
+26 sessions summarised 3 times or more: $159.50 of main-session cost, 86% of the total.
 ```
 
 ## Statusline payload key recording (`statusline-keys.json`)

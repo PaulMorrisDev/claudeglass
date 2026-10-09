@@ -387,6 +387,33 @@ def test_no_hook_entry_waits_on_a_shell_or_mcp_tool(tmp_path, name):
         assert not [tool for tool in tools if tool in ("Bash", "PowerShell") or tool.startswith("mcp__")], tools
 
 
+def test_coaching_notes_write_the_matcher_with_the_agent_and_workflow_tools_the_other_sets_leave_out(tmp_path):
+    config_dir = tmp_path / "claude" / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    def written(ids) -> str:
+        plan = hook_health.plan_capture(hook_health.capture_specs(ids), cli._capture_hook_commands(config_dir))
+        (group,) = json.loads(plan.new_text)["hooks"]["PostToolUse"]
+        return group["matcher"]
+
+    assert written(("coaching_notes",)) == "Read|Grep|Glob|WebFetch|WebSearch|ExitPlanMode|Agent|Workflow"
+    assert written((*cat.level_metrics("deep"), "coaching_notes")) == written(("coaching_notes",))
+    # Without coaching notes nothing waits on an agent's report or a launch message.
+    assert written(cat.level_metrics("deep")) == "Read|Grep|Glob|WebFetch|WebSearch"
+
+
+def test_the_capture_hooks_item_says_the_agent_and_workflow_calls_wait_for_coaching_notes_only(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=False)}["capture_hooks"]
+    assert "With coaching notes on, it also waits after an approved plan and an agent or workflow call." in item.what_it_does
+    assert (
+        "It waits after a finished subagent while coaching notes are on or Claude Haiku judges agent runs."
+        in item.what_it_does
+    )
+    assert "never after a shell command" in item.what_it_does
+
+
 def test_the_launcher_its_module_and_the_word_list_are_all_one_part_of_the_footprint(tmp_path):
     config_dir = _claude(tmp_path, {})
     hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])

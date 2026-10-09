@@ -344,8 +344,8 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Where research happens (`research_split`)
 
 - **Level:** Always measured, no hook
-- **Captures:** Search and read tokens in the main session against those in Explore agents.
-- **Why:** When to hand research to an agent.
+- **Captures:** Search and read tokens in the main session against those in Explore agents. Also how many calls were a single lookup in a reply of its own.
+- **Why:** When to hand research to an agent, and when to ask for lookups to be batched.
 - **Tag:** No tag. Read from the transcript Claude Code already writes; Claude is never asked, and it costs no tokens.
 - **Powers:** Researching, Delegating to agents
 
@@ -362,10 +362,10 @@ Every metric here has to earn its keep. Something has to read it and turn it int
 ### Coaching notes from Claude (`coaching_notes`)
 
 - **Level:** Live coaching, any level
-- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large read, search or web result, a subagent run past the point where your own history says splitting pays, a plan approved on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, or asking how background work is going while it still runs. It also flags how you prompt: small requests sent one at a time, or a huge paste. Vague corrections, the same request again and stopping Claude again and again are counted after the fact on Work habits, with no live note. So is a big task without a plan.
-- **Why:** Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to 140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each read, search or web result and each message you send. Setup > Capture and 'claudeglass capture status' show how many runs, the median time each and the time summed, from your own sessions. A hook after each reply runs in the background and keeps only the time and size of Claude's newest reply, so the cache check is right after a resume.
+- **Captures:** Live hints for where the status line doesn't show, such as the desktop app. When one applies, a hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large read, search or web result, an agent run that ended too big for one task (it had to summarise its own context, or began from a very long brief), a plan approved on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, asking how background work is going while it still runs, or starting background agents when the session already holds a lot of context, since each report they send back re-reads it. It also flags how you prompt: small requests sent one at a time, or a huge paste. Vague corrections, the same request again and stopping Claude again and again are counted after the fact on Work habits, with no live note. So is a big task without a plan.
+- **Why:** Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to 140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each read, search or web result, each agent or workflow it starts, and each message you send. Setup > Capture and 'claudeglass capture status' show how many runs, the median time each and the time summed, from your own sessions. A hook after each reply runs in the background and keeps only the time and size of Claude's newest reply, so the cache check is right after a resume. A hook when an agent run ends keeps only whether it ended too big, as counts.
 - **Tag:** No tag. A hook adds a note only when a hint applies, and Claude acts on it or tells you in a highlighted tip: the note's first sentence says to write it and its last line is the tip, word for word, so every app shows it. Each hint and when it applies: [coaching.md](coaching.md).
-- **Hook:** UserPromptSubmit, PostToolUse, Stop
+- **Hook:** UserPromptSubmit, PostToolUse, SubagentStop, Stop
 - **Powers:** Clearing context, Tool output, Delegating to agents, Planning
 
 ### Brief templates (`brief_templates`)

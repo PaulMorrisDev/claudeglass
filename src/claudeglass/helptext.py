@@ -26,8 +26,11 @@ from dataclasses import dataclass, field
 from .capture_catalogue import TASK_LABELS
 from .capture_catalogue import THEMES as CAPTURE_THEMES
 from .habits import ITEMS as HABIT_ITEMS
+from .habits import PLAN_ROUND_LABELS, REPORT_KIND_LABELS
+from .handoff import START_LABELS
 from .limits import busy_reset_hour
 from .model import Column, Diagnostics, Help, ReportModel, Section, Table
+from .topology import LAUNCH_LABELS
 
 # -- the table audit ------------------------------------------------------
 
@@ -105,6 +108,7 @@ PLACEMENT: dict[str, str] = {
     "compaction_sim_fidelity": "advanced",
     "plan_handoff_summary": "keep",
     "plan_handoff_by_session": "keep",
+    "plan_handoff_approvals": "keep",
     "model_swap_by_agent_type": "keep",
     "model_swap_summary": "keep",
     "model_swap_agent_file_runs": "report",
@@ -179,6 +183,10 @@ PLACEMENT: dict[str, str] = {
     "habits_briefs": "advanced",
     "habits_brief_templates": "keep",
     "habits_agents": "advanced",
+    "habits_probes": "advanced",
+    "habits_agent_runs": "advanced",
+    "habits_report_turns": "advanced",
+    "habits_plan_rounds": "keep",
     "habits_explore_by_model": "advanced",
     "habits_effort_fit": "advanced",
     "habits_setups": "keep",
@@ -610,9 +618,10 @@ SECTION_COPY: dict[str, SectionCopy] = {
         ),
         help=Help(
             shows="Each main session where you approved a plan, and how much planning context the build kept. "
-            "Also what the replies after it would have cost without it.",
+            "Also what the replies after it would have cost without it, and how each approved plan's build began.",
             read="An upper bound: a fresh session may need more than the plan. The cache write of the plan and an "
-            "allowance for re-reading files are taken off. Replies after a conversation summary aren't counted.",
+            "allowance for re-reading files are taken off. Replies after a conversation summary aren't counted. "
+            "The last table compares builds that carried on with those that started fresh.",
             act="When a big plan is approved, run /clear and ask Claude to carry out the plan file. Forking copies "
             "the whole conversation, so it saves nothing.",
         ),
@@ -992,6 +1001,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "big_paste": "Huge paste",
             "status_poll": "Asking how it's going",
             "cold_return": "Back after a break",
+            "report_reread": "Background agents in a long session",
+            "split_run": "Agent runs that ended too big",
         },
     ),
     "habits_playbook": TableCopy(
@@ -1284,6 +1295,11 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Single read-only calls",
                 "Calls that made one Read, Grep, Glob or file-reading command and nothing else, out of all its calls.",
             ),
+            "probe_shell_pct": (
+                "Of them by shell command",
+                "Calls that were a single read-only shell command, such as cat, grep or ls, out of all its calls. "
+                "They count in the column before.",
+            ),
             "before_edit": (
                 "Calls before the first edit",
                 "A typical run's calls before its first change to your files, among the runs that made one.",
@@ -1297,6 +1313,160 @@ TABLE_COPY: dict[str, TableCopy] = {
         },
         value_labels={"top-level": "Main session"},
         lead_columns=["agent_type", "runs", "cost", "done_pct", "retried", "probe_pct", "report_tokens"],
+    ),
+    "habits_probes": TableCopy(
+        title="Single lookups, one call per reply",
+        help=Help(
+            shows="Where the main session and each subagent type made one read-only call in a reply and nothing "
+            "else. That means a Read, a Grep, a Glob or a file-reading shell command. Stretches of two or more in a "
+            "row are counted, with what the replies after the first cost.",
+            read="Every reply re-reads the whole context. Ten lookups sent one at a time cost ten re-reads, where "
+            "one message holding them all would cost one. Replies are counted by message, so calls already sent "
+            "together count once. The last column is an upper bound. It takes the lookups to be independent, and "
+            "some aren't, such as a read that needs the name a search found first.",
+            act="Ask for independent lookups in one message. Add \"Batch independent Read/Grep/Glob calls into a "
+            "single message\" to the agent definitions or workflow prompts at the top of the list.",
+        ),
+        columns={
+            "agent_type": ("Where", "The main session, or the subagent type."),
+            "calls": ("Replies", "Its replies, one for each message."),
+            "probes": (
+                "Single read-only calls",
+                "Replies that made one Read, Grep, Glob or file-reading command and nothing else.",
+            ),
+            "shell": (
+                "Of them by shell command",
+                "Those that ran as a shell command, such as cat, grep or ls, not as a Read, Grep or Glob call.",
+            ),
+            "runs": ("Runs of two or more", "Stretches of two or more single read-only calls in a row."),
+            "batch_cost": (
+                "Replies a batch would spare",
+                "What the replies after the first of each run cost. These are the re-reads one message holding "
+                "the calls would have saved, if they didn't depend on each other.",
+            ),
+        },
+        value_labels={"top-level": "Main session"},
+        lead_columns=["agent_type", "calls", "probes", "runs", "batch_cost"],
+    ),
+    "habits_agent_runs": TableCopy(
+        title="What agent runs did",
+        help=Help(
+            shows="Agent runs grouped by how they were started. A background or foreground agent is one run. A "
+            "workflow run is every agent that one Workflow call started or resumed. Each row gives the replies, "
+            "the starting context they carried, the summaries made inside the runs, and a file several agents of "
+            "one group read.",
+            read="Every reply re-reads the whole context, starting context included. \"Starting context times "
+            "replies\" is that read added up, so it is an upper bound: the cache makes each read cheaper than a "
+            "fresh one. The shared-file columns count the one file most siblings read, which is often the plan or "
+            "spec each was told to read. They are an upper bound too, since the agents may each have needed it.",
+            act="Agents that summarise are running past what one context holds: give each a smaller piece of the "
+            "work. Where siblings keep reading the same file, put the part they need in the brief.",
+        ),
+        columns={
+            "launch": ("Started as", "How the run was started."),
+            "runs": ("Runs", "Runs of this kind. A resumed workflow run counts once for each time it was resumed."),
+            "agents": ("Agents", "Agent transcripts in those runs."),
+            "calls": ("Replies", "The agents' replies, one for each message."),
+            "probe_pct": (
+                "Single read-only calls",
+                "Share of replies that made one Read, Grep, Glob or file-reading command and nothing else.",
+            ),
+            "start_reads": (
+                "Starting context times replies",
+                "Each agent's first context size times its replies. An upper bound on what the starting prompt cost "
+                "to carry.",
+            ),
+            "compactions": ("Summaries inside runs", "Times Claude Code summarised an agent's context mid-run."),
+            "compacted_agents": ("Agents that summarised", "Agents that were summarised at least once."),
+            "shared_reads": (
+                "Same file read by a sibling",
+                "Reads of the one file most of a group's agents read, after the first agent to read it.",
+            ),
+            "shared_tokens": ("Size of those reads", "Tokens those repeat reads put into the agents' contexts."),
+            "shared_cost": (
+                "Cost of those reads",
+                "What carrying those repeat reads cost at list price. An upper bound.",
+            ),
+            "cost": ("Cost", "What the runs cost at list price."),
+        },
+        value_labels=dict(LAUNCH_LABELS),
+        lead_columns=["launch", "runs", "calls", "compactions", "shared_cost"],
+    ),
+    "habits_report_turns": TableCopy(
+        title="Replies to agent reports",
+        help=Help(
+            shows="The main session's replies to a background agent's or a workflow's report, by what each did. "
+            "It either only acknowledged the report, acted on it with a call of its own, or started more agents. "
+            "The agents a workflow started report to the workflow, so only the workflow's own report counts. A "
+            "background command finishing isn't a report, so it isn't counted.",
+            read="Each report that arrives is answered by a reply that reads the whole session again. A report "
+            "that was only acknowledged still cost a full re-read. The last two columns count replies that woke a "
+            "session idle for an hour or more. They also give the context those replies wrote to the cache "
+            "again, because it had expired.",
+            act="Fewer, larger agents mean fewer reports. Where most replies only acknowledge, give the agent a "
+            "bigger piece of the work, and ask for a short report in its brief.",
+        ),
+        columns={
+            "kind": ("The reply", "What the reply did with the report."),
+            "replies": ("Replies", "Replies of this kind. A reply and the calls it went on to make count once."),
+            "share_pct": ("Share", "Their share of all the replies to reports."),
+            "cost": ("Cost", "What those replies cost at list price, with the calls they went on to make."),
+            "avg_context": ("Context read per reply", "A typical reply's context size when the report arrived."),
+            "woke": (
+                "Woke the session after an hour or more",
+                "Replies that came an hour or more after the one before: the report woke a session that had "
+                "sat idle.",
+            ),
+            "woke_tokens": (
+                "Written to the cache again",
+                "The context those wake-up replies wrote to the cache again, because it expired while the "
+                "session waited.",
+            ),
+        },
+        value_labels=dict(REPORT_KIND_LABELS),
+        lead_columns=["kind", "replies", "share_pct", "cost", "woke"],
+    ),
+    "habits_plan_rounds": TableCopy(
+        title="Plans sent back",
+        help=Help(
+            shows="Each ask where Claude put up a plan, grouped by how many times you sent a plan back before you "
+            "approved one. The last row is the asks whose plan you never approved.",
+            read="Declining a plan and then telling Claude to carry it out counts as an approval, not as a plan "
+            "sent back. The last two columns cover the replies after the first plan, up to the approval, so an "
+            "ask with one plan costs nothing there. Sent back with a question or critique counts the rounds "
+            "a standing request to critique the plan might have covered.",
+            act="Put one standing request in your first planning message, in CLAUDE.md or in a plan skill. Ask "
+            "Claude to critique its own plan before it shows you.",
+        ),
+        columns={
+            "kind": ("Which plans", "Every approved plan, then the same grouped by how many plans were sent back first."),
+            "plans": ("Plans", "Asks in this group. One ask is every plan Claude put up until you approved one."),
+            "typed": (
+                "Approved by typing",
+                "Plans you approved by typing a go-ahead or leaving plan mode, not in the dialog.",
+            ),
+            "rounds": (
+                "Plans sent back",
+                "Plans you declined in the dialog. A decline you then answered with a go-ahead isn't counted.",
+            ),
+            "asked": (
+                "Sent back with a question or critique",
+                "Plans you sent back by asking a question, finding fault or doubting it, by how your feedback reads.",
+            ),
+            "versions": ("Plans put up", "Different plans Claude showed you for one ask, on average."),
+            "steps": ("Steps in the last plan", "Steps the last plan lists, on average."),
+            "files": ("Files in the last plan", "Files the last plan names, on average."),
+            "tokens": (
+                "Tokens between the first plan and approval",
+                "Tokens of the replies after the first plan, through the approval, on average.",
+            ),
+            "cost": (
+                "Cost between the first plan and approval",
+                "What those replies cost at list price, in all.",
+            ),
+        },
+        value_labels=dict(PLAN_ROUND_LABELS),
+        lead_columns=["kind", "plans", "rounds", "asked", "tokens", "cost"],
     ),
     "habits_effort_fit": TableCopy(
         title="Effort against how hard the work was",
@@ -1412,6 +1582,11 @@ TABLE_COPY: dict[str, TableCopy] = {
             "probe_pct": (
                 "Single read-only calls",
                 "Calls that made one Read, Grep, Glob or file-reading command and nothing else, out of all its calls.",
+            ),
+            "probe_shell_pct": (
+                "Of them by shell command",
+                "Calls that were a single read-only shell command, such as cat, grep or ls, out of all its calls. "
+                "They count in the column before.",
             ),
             "before_edit": (
                 "Calls before the first edit",
@@ -2990,7 +3165,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="Cache rebuilds split by what had happened to the cache.",
             read="\"Cache expired\" means the wait reached the cache lifetime, or the reply read only the start "
             "every session shares and none of its own part. \"Cache broken by a change\" means part of its own "
-            "was read, but something early in the context changed. \"Expired during a usage-limit pause\" "
+            "was read, but something early in the context changed. \"Rewritten after a summary\" is the first "
+            "reply after Claude Code summarised the conversation. \"Expired during a usage-limit pause\" "
             "means you were waiting for a limit to reset.",
             act="Expired caches respond to a longer cache lifetime. Broken ones don't: check what came right before "
             "them in the causes table.",
@@ -3010,6 +3186,7 @@ TABLE_COPY: dict[str, TableCopy] = {
         value_labels={
             "full-expiry": "Cache expired",
             "prefix-invalidated": "Cache broken by a change",
+            "post-compaction": "Rewritten after a summary",
             "limit-expiry": "Expired during a usage-limit pause",
         },
     ),
@@ -4066,8 +4243,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="How many sessions were summarised, and how large the context was before and after. Also what "
             "writing each summary cost, and the cache write on the reply after it.",
             read="Costs only count replies within 15 minutes of the summary. \"Rebuilt most of the cache\" is the "
-            "part where the next reply read under a fifth of its context from the cache.",
-            act="If summaries are frequent and large, split long tasks into separate sessions.",
+            "part where the next reply read under a fifth of its context from the cache. Session counts and the "
+            "cost share are for the main conversation. Summaries inside agent runs have their own rows.",
+            act="If summaries are frequent and large, split long tasks into separate sessions. A high cost share "
+            "in sessions with 3 or more summaries says long sessions are where the money goes.",
         ),
         columns={
             "metric": ("", "What is measured."),
@@ -4092,6 +4271,15 @@ TABLE_COPY: dict[str, TableCopy] = {
             "Total post-compaction RE-CACHE-flagged write cost (USD)": (
                 "Of that, replies that rebuilt most of the cache"
             ),
+            "Compactions inside subagent runs": "Summaries inside subagent runs",
+            "Compactions inside workflow agent runs": "Summaries inside workflow agent runs",
+            "Sessions with 3+ compactions": "Sessions with 3 or more summaries",
+            "Main-session cost in sessions with 3+ compactions (USD)": (
+                "Main-conversation cost in sessions with 3 or more summaries"
+            ),
+            "Share of main-session cost in sessions with 3+ compactions": (
+                "Share of main-conversation cost in sessions with 3 or more summaries"
+            ),
         },
         row_kinds={
             "Sessions with >=1 compaction": "int",
@@ -4108,6 +4296,11 @@ TABLE_COPY: dict[str, TableCopy] = {
             "Summary requests (estimated, USD)": "money",
             "Total post-compaction write cost (USD)": "money",
             "Total post-compaction RE-CACHE-flagged write cost (USD)": "money",
+            "Compactions inside subagent runs": "int",
+            "Compactions inside workflow agent runs": "int",
+            "Sessions with 3+ compactions": "int",
+            "Main-session cost in sessions with 3+ compactions (USD)": "money",
+            "Share of main-session cost in sessions with 3+ compactions": "pct",
         },
     ),
     "compactions_trigger_mix": TableCopy(
@@ -4137,7 +4330,7 @@ TABLE_COPY: dict[str, TableCopy] = {
         ),
         columns={
             "session": ("", "The session id."),
-            "count": ("Summaries", "Summaries in this session, including its subagents."),
+            "count": ("Summaries", "Summaries in this session's own conversation. Summaries inside its agent runs are not counted here."),
             "dropped_tokens": ("Tokens removed", "Tokens the summaries removed from the context."),
             "write_cost": (
                 "Cache write cost after summaries",
@@ -4623,6 +4816,35 @@ TABLE_COPY: dict[str, TableCopy] = {
         },
         value_labels={"yes": "Yes", "no": "No"},
         lead_columns=["session", "tokens_carried", "later_turns", "qualifies", "saving_usd", "build_usd"],
+    ),
+    "plan_handoff_approvals": TableCopy(
+        title="How the build began after each approved plan",
+        help=Help(
+            shows="Every plan you approved, by how its build began. A build either carried on in the same session "
+            "or started fresh. Fresh means a /clear within a minute of the approval, or a new session that "
+            "opened with the plan.",
+            read="A build that carries on reads the whole planning conversation on every reply. A fresh one reads "
+            "only the plan. Typed approvals count with dialog ones, and so does a plan you declined and then told "
+            "Claude to carry out. A fresh build is found by timing, so one begun in a different project folder is "
+            "missed.",
+            act="Compare the context read per build reply across the rows. Where the carried-on builds read far "
+            "more, run /clear right after you approve a big plan and ask Claude to carry out the plan file.",
+        ),
+        columns={
+            "start": ("How the build began", "Whether the build stayed in the planning session or started fresh."),
+            "approvals": ("Approved plans", "Plans you approved, in the dialog or by typing."),
+            "typed": ("Approved by typing", "Plans you approved by typing a go-ahead or leaving plan mode."),
+            "tokens_carried": (
+                "Planning context carried",
+                "Context the build read that a fresh start from the plan would have left behind, on average.",
+            ),
+            "build_turns": ("Build replies", "Replies after the approval, up to the next plan."),
+            "avg_context": ("Context read per build reply", "The context a typical build reply read."),
+            "usd_per_reply": ("Cost per build reply", "What a typical build reply cost at list price."),
+            "build_usd": ("Build cost", "What the build replies cost at list price, in all."),
+        },
+        value_labels=dict(START_LABELS),
+        lead_columns=["start", "approvals", "typed", "avg_context", "usd_per_reply"],
     ),
     # -- splitting long subagent runs ------------------------------------------------
     "run_split_summary": TableCopy(

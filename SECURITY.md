@@ -95,7 +95,7 @@ Claude Haiku writes the tags or fills in a missing one, `tags/YYYY-MM.jsonl`
 (see "Claude Haiku as the tagger" and "Claude Haiku as the fallback" under
 "Metrics capture"), and, once
 coaching notes or a survey item that answers your messages have been turned
-on, `coaching.json` (agent-type names, split points, the names of hints
+on, `coaching.json` (the names of hints
 your answers muted or limited, and your typical piece of work) and `coach-state.json` (see "Coaching notes" and "The survey's
 notes" under "Metrics capture"), and, while capture is on, `payload-keys.json` (the
 key names of each kind of SessionStart payload, once each: names only,
@@ -374,17 +374,23 @@ subagent transcript changed in the last five seconds, for the type and
 time of its records only, to tell a subagent's compaction from the main
 session's. The note for a tip ends on the tip itself, a fixed sentence
 built from the same counts, so Claude can write it for you. The split
-hint only shows you a notice; the subagent is never told anything. A
+hint is never said to a subagent: when a subagent run stops, the hook
+reads the head and the compaction records of that run's own transcript in
+memory, keeps only a count under the session for each of two words
+(`compaction`, `brief`) and prints nothing, and the main session's next
+agent call or background-task message says it. No text of the run, its
+brief or its type is kept. A
 background `Stop` entry prints nothing: when a turn ends it only keeps
 the time, context size and cache lifetime of Claude's newest reply, as
 numbers, so the cold-return receipt is timed from a real reply. A
 usage-limit line is never taken for one. `coach-state.json` holds, per
 session, when each hint last showed, how many times and how long it
 rests, and those three numbers, keyed by the same salted session hash
-as the signals, and per subagent run a byte offset and reply count;
-entries older than a day are dropped. A hint you said you already knew also
+as the signals, and, for the agent runs that ended too big and have not
+been told yet, the count of each of two words; entries older than a day
+are dropped. A hint you said you already knew also
 carries a flag, `once`, that is true or absent. `coaching.json` holds
-agent-type names, hint ids from the fixed list in the catalogue, and numbers. Neither ever leaves `<config-dir>`. See
+hint ids from the fixed list in the catalogue, and numbers. Neither ever leaves `<config-dir>`. See
 [docs/coaching.md](docs/coaching.md).
 
 **The survey's notes.** `capture feedback on` (and Deep) also lets the
@@ -932,8 +938,8 @@ ones the code enforces, not promises about intent:
   also covers the file's own text, and a key repeated in one object is
   refused, so nothing can hide in a value the parser would drop.
 - **A size limit.** The document is 256 KB or less. The fullest one the
-  description allows is about 165 KB, so a valid document always fits, and
-  a real one is about 10 KB.
+  description allows is about 225 KB, so a valid document always fits, and
+  a real one is about 35 KB.
 - **Fail closed, at write and at read.** `tuning.build` validates what it
   built and `tuning.dumps` validates again before it returns text, so a
   document that fails produces no file and no JSON on stdout: `tuning

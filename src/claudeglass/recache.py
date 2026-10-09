@@ -42,19 +42,25 @@ about ``cr0``. A rebuild is therefore judged on what lies beyond ``cr0``
   than letting it expire); or
 - it read under ``cr_ratio`` of the part beyond ``cr0``.
 
-Every re-cache turn gets one of three **signatures**, tested in this
+Every re-cache turn gets one of four **signatures**, tested in this
 order, the first that applies winning:
 
 1. ``limit-expiry`` -- the gap spanned a usage-cap pause (below).
-2. ``full-expiry`` -- the gap was at or past the time the previous call's
+2. ``post-compaction`` -- the turn is the first reply after a compaction
+   (a ``compact_boundary`` before it, or the estimated compaction call
+   right before it). The summary replaced the session part, so the
+   write is the compaction's, whatever the wait or the read looked like.
+   It is still a rebuild (``is_recache``), so everything that counts
+   rebuilds counts it as before; only the label differs.
+3. ``full-expiry`` -- the gap was at or past the time the previous call's
    cache lasted: 1 hour when its 1-hour write exceeded its 5-minute
    write, else 5 minutes (carried forward from the last call that wrote
    when it wrote nothing). The cache entry timed out.
-3. ``full-expiry`` -- the turn read no more than ``cr0`` +
+4. ``full-expiry`` -- the turn read no more than ``cr0`` +
    ``SESSION_READ_MARGIN`` (or under ``full_expiry_cr`` outright): the
    session part had gone even though the gap was shorter than the
    lifetime, so for this purpose it expired.
-4. ``prefix-invalidated`` -- only then: part of the session was read, so
+5. ``prefix-invalidated`` -- only then: part of the session was read, so
    it had not expired, but something upstream of the cached prefix
    changed (a notification, an attachment, a model switch, ...) and broke
    it anyway.
@@ -134,8 +140,8 @@ GAP_BUCKETS: tuple[str, ...] = ("<1m", "1-5m", "5-15m", "15-60m", ">60m", "unkno
 
 #: The re-cache signatures, in report order. "limit-expiry" (usage-limits
 #: addition, see module docstring) is checked first in detect() and takes
-#: priority over the other two.
-SIGNATURES: tuple[str, ...] = ("full-expiry", "prefix-invalidated", "limit-expiry")
+#: priority over the others; "post-compaction" comes next.
+SIGNATURES: tuple[str, ...] = ("full-expiry", "prefix-invalidated", "post-compaction", "limit-expiry")
 
 #: How far past the shared start (the first call's cache read, ``cr0``) a
 #: read may go and still be an expiry of the session part. A warm call
@@ -245,7 +251,8 @@ class RecacheThresholds:
             "A rebuild is \"Cache expired\" when the wait since the previous reply reached the time its cache "
             f"lasts (5 minutes, or 1 hour for an hour-long write), or when it read no more than "
             f"{SESSION_READ_MARGIN:,} tokens beyond the shared start (or under {self.full_expiry_cr:,} tokens "
-            "in all). Any other rebuild is \"Cache broken by a change\".",
+            "in all). Any other rebuild is \"Cache broken by a change\". The first reply after a "
+            "conversation summary is \"Rewritten after a summary\" instead, whatever the wait.",
             f"A context counts as very large at {self.huge_ctx:,} tokens when its model's own context "
             "window isn't known.",
         ]
@@ -300,6 +307,7 @@ def detect(turns: Sequence[Turn], th: RecacheThresholds) -> list[Turn]:
     :func:`_is_rebuild` finds that it did not read its own part of the
     context (see the module docstring). Its signature is the first that
     applies of: ``limit-expiry`` (the gap spanned a usage-cap pause);
+    ``post-compaction`` (the first reply after a compaction);
     ``full-expiry`` when the gap reached the TTL the previous call wrote
     at; ``full-expiry`` when it read no more than ``cr0`` +
     :data:`SESSION_READ_MARGIN` (or under ``th.full_expiry_cr``);
@@ -315,9 +323,16 @@ def detect(turns: Sequence[Turn], th: RecacheThresholds) -> list[Turn]:
     cr0 = next((t.cache_read_tokens for t in turns if t.turn_index == 1 and not t.is_synthetic), None)
     prev: Turn | None = None
     ttl_s: float | None = None
+    summarised = False
     for turn in turns:
         if turn.is_synthetic:
+            # The estimated request that wrote a compaction's summary: the
+            # next reply is the first one after it.
+            summarised = summarised or turn.estimated == "compaction"
             continue
+        # The first real reply after a compaction, from either mark of it.
+        after_summary = summarised or EventKind.COMPACT_BOUNDARY in turn.preceding_event_kinds
+        summarised = False
         # The previous call and the TTL it wrote at are updated after this
         # turn is judged, whichever way it falls.
         before, before_ttl = prev, ttl_s
@@ -334,6 +349,11 @@ def detect(turns: Sequence[Turn], th: RecacheThresholds) -> list[Turn]:
             # nothing left to hit because a usage-cap pause intervened,
             # not because of ordinary TTL expiry or an invalidation.
             signature = "limit-expiry"
+        elif after_summary:
+            # The summary replaced the session part: the wait since the last
+            # real reply and the small read are the compaction's doing, not an
+            # expiry of the session part.
+            signature = "post-compaction"
         elif turn.gap_s is not None and before_ttl is not None and turn.gap_s >= before_ttl:
             signature = "full-expiry"
         elif turn.cache_read_tokens < th.full_expiry_cr or (
@@ -652,8 +672,10 @@ def _signature_table(recache_turns: list[Turn], recache_records: list[_Record]) 
             "Cache expired: the wait reached the time the cache lasts, or the reply read only the start "
             "every session shares and none of its own part. Cache broken by a change: it read part of "
             "its own part, so the cache hadn't expired, but something earlier in the context "
-            "changed. Expired during a usage-limit pause: the wait before the reply spanned a pause "
-            "for a usage limit. That last row is shown here but left out of every other table's causes.",
+            "changed. Rewritten after a summary: the first reply after a conversation summary, which "
+            "replaced what the cache held. Expired during a usage-limit pause: the wait before the reply "
+            "spanned a pause for a usage limit. That last row is shown here but left out of every other "
+            "table's causes.",
         ],
     )
 

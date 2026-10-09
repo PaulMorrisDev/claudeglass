@@ -32,30 +32,33 @@ out.
 
 Each note starts `cg-coach v1 <hint>`, so ClaudeGlass can find it in your
 transcripts again and measure what it cost. A note never carries a path,
-a command or your words: only token counts, an idle time, a count and an
-agent type's name.
+a command or your words: only token counts, an idle time and a count.
 
 | Hint | When | What the note asks of Claude |
 |---|---|---|
 | `plan_fresh` | You approve a plan, and building it in a fresh session would drop at least 40,000 tokens of planning context. You approve it in the dialog, by typing a go-ahead after the dialog sent it back, or by leaving plan mode. | Tell you in a tip that building it in a fresh session would carry that much less on every reply of the build: next time, pick the approval option that clears the context first (the desktop), or run `/clear`, then ask Claude to carry out the plan in its file. Then carry on. |
 | `plan_fresh_early` | You send a message in plan mode, which Claude Code reports with the message, with at least 40,000 tokens of planning chat in the session since it started: the plan isn't written yet. Not for a message sent while Claude is working, for a session that was compacted since it started, or when the session's start can't be told. It shares its rest with `plan_fresh`, so one plan gets one of the two. | Nothing about the work. End the plan Claude submits for approval with a tip to approve it with a clear context: on the desktop, the approval option that clears the context first (or `/clear`, then asking Claude to carry out the plan in its file, if the dialog has none); in the terminal, `/clear` first, then the same. If the reply doesn't end in a plan, the tip goes on the plan submitted later. |
-| `split_run` | A subagent run passes the number of replies your own history says its type's runs are best split at (see [below](#your-own-split-points)). | Nothing: the subagent is never told. You get a one-line notice, once a run, that runs of that type cost you less when split, so next time you can give each agent a smaller piece of the work. |
-| `quiet_output` | A read, search or web result is about 8,000 tokens or more, [as measured below](#how-a-results-size-is-measured). A read already given a line limit is left alone. Never after a shell command or an MCP tool. | Next time, ask for less: read only the lines needed, narrow a search or a query. |
+| `split_run` | A subagent run ended showing signs of being too big for one task: Claude Code summarised its context part-way through, or it began from a brief of 6,000 characters or more (`coaching_split_brief_chars`). A workflow agent's brief is the task its script computed, not the prompt that relays it. The hook notes this when the run stops and says it at the next call in the main session: after the agent or workflow call returns, for a run that was in the foreground, or with the message that reports a background run. It comes after `report_reread` at an agent call. It never counts numbered lines or replies. | Nothing about the work. End the reply with a tip that an agent run in this session had to summarise its context or began from a long brief, that each reply of a run reads everything the run holds again, and that giving the next agent a smaller piece of the work keeps each run short. |
+| `quiet_output` | A read, search or web result is about 8,000 tokens or more, [as measured below](#how-a-results-size-is-measured). A read already given a line limit is left alone. Never after a shell command, an MCP tool, or an agent or workflow call, whose result is a report or a launch message. | Next time, ask for less: read only the lines needed, narrow a search or a query. |
+| `report_reread` | The main session starts an agent or a workflow in the background while its newest reply read 150,000 tokens of context or more. The call asked for the background (`run_in_background`), or its result says the work went there, in the same wording `status_poll` reads. A foreground call, a smaller session and a call made from inside a subagent get nothing. It rests 30 minutes like the others, longer on repeats. | Nothing about the work. End the reply with a tip that the session holds about that many tokens and the reply to each report the background work sends back reads all of it again, so fewer, larger pieces of background work mean fewer re-reads. |
 | `drip_feed` | You send your third small change request in a row: short messages, each asking for a change (a change verb opens one of its sentences) and sent within 20 minutes of your message before it, the earlier ones each answered with a change to a file of yours in the reply they started ("make the button bigger", "now move the logo", "and make the footer grey"). A go-ahead, a thank-you, a status check, a question, a statement, an explain request and an answer to Claude's question ask for no change: they neither count nor end the run. A detailed message, a reply that changed nothing, or a longer gap starts the count again. A message sent while Claude is still working gets no hint. | Nothing about the work. End the reply with a tip that working out everything the work still needs and sending it as one message gets it done in one pass. |
 | `big_paste` | You send a message of 10,000 tokens or more, such as a pasted log or file. | If most of it is a log, a file or output, suggest in a tip pasting only the part that matters, or saving it to a file and giving the path. |
 | `status_poll` | You send a message that only asks how the work is going ("how is it going?", "any updates?", "is it done yet?"), while a tool result said work went to the background and no message from that task has arrived since, and the prompt cache is still warm. A message sent while Claude is still working gets no hint. | Nothing about the work. End the reply with a tip that each check makes Claude read the whole session, about that many tokens, to say little that is new, and where to look instead: the task panel on the desktop, `/tasks` in the terminal. It never says a notification will come. |
 | `cold_return` | You send a message after the prompt cache expired (5 minutes idle, or an hour when the session uses the 1-hour cache), and the last reply left 100,000 tokens of context or more. A receipt for the break, whatever the message is. Not after a compaction since that reply, for a message sent while Claude is still working, for one you didn't type, or when a usage limit stopped Claude and you come back within a cache lifetime of its reset (or the reset is unknown). It rests 12 hours. | Nothing about the work. End the reply with a tip saying how long the session sat idle, that the reply wrote about that many tokens of context again (the context less the 42,000 tokens every session starts with, and "in a session already compacted twice" when it was), that the last reply or the task panel already says whether the work is done, and that `/clear` first skips the rewrite for new work. |
 
 One note at most per tool result or message: the first hint in the table
-that applies. `plan_fresh` (a plan approved in the dialog), `split_run` and
-`quiet_output` come after a tool result, the rest when you send a message
-(`plan_fresh` too, for a go-ahead you type). `split_run` comes from inside
-a subagent run but only
-shows you a notice; the rest show only in the main session, except
-`quiet_output`, which shows in both. The prompting hints (`drip_feed` and
-`big_paste`), `status_poll` and `cold_return` are about how you prompt,
-not about the work, so they never change what Claude does: it handles the
-message as it would have and only ends its reply with the tip.
+that applies. `plan_fresh` (a plan approved in the dialog), `split_run`,
+`quiet_output` and `report_reread` come after a tool result (`split_run`
+also with a background task's finishing message), the rest when
+you send a message (`plan_fresh` too, for a go-ahead you type). They show
+only in the main session, except `quiet_output`, which shows in both: a
+subagent's own notice never shows, and a note to one would steer work
+already under way, so `split_run` waits for the main session. The prompting
+hints (`drip_feed` and `big_paste`), `status_poll`, `cold_return`,
+`report_reread` and `split_run` are about how you prompt or what a way of
+working costs, not about the work, so they
+never change what Claude does: it handles the message or the call as it
+would have and only ends its reply with the tip.
 A message you didn't type gets no hint: a background agent's report
 (which Claude Code hands to Claude as the next message), a scheduled
 task, a slash command's output, another session's message, the desktop
@@ -89,8 +92,8 @@ The reply is the one place every app shows, which is why the tip rides
 in it. Two kinds of note differ only in the first sentence:
 
 - **Relayed.** The note tells Claude to write the tip every time:
-  `drip_feed`, `status_poll`, `cold_return`, `plan_fresh` and
-  `plan_fresh_early`. For `plan_fresh` Claude writes it before it starts building; for
+  `drip_feed`, `status_poll`, `cold_return`, `report_reread`, `split_run`,
+  `plan_fresh` and `plan_fresh_early`. For `plan_fresh` Claude writes it before it starts building; for
   `plan_fresh_early`, as the last line of the plan it submits. A plan that
   ends with the tip counts as having relayed it.
 - **Judged.** The note tells Claude to write the tip only if it judges
@@ -108,7 +111,7 @@ UserPromptSubmit says: ⚠️ ClaudeGlass: That's 3 small changes in a row, each
 This is the hook's `systemMessage`: Claude Code shows it to you and never
 sends it to Claude, so it costs no tokens. It has the tip's words behind
 a ⚠️ label. `plan_fresh`, `plan_fresh_early`, `drip_feed`, `big_paste`,
-`status_poll` and `cold_return` have one. The figures in a
+`status_poll`, `cold_return`, `report_reread` and `split_run` have one. The figures in a
 tip, such as the context in tokens, come from the session. The hook never
 works out a dollar amount: that would need prices it doesn't have.
 
@@ -117,9 +120,7 @@ it into a collapsed "Claude Code notice" row of the run summary, and never
 shows one that comes from inside a subagent. So when the hook runs from
 the desktop app (Claude Code sets `CLAUDE_CODE_ENTRYPOINT` to
 `claude-desktop`), it sends no notice for a hint that has a note, and the
-tip reaches you through Claude's reply alone. `split_run` has no note to
-Claude, so it keeps its notice everywhere, though the desktop app doesn't
-show it.
+tip reaches you through Claude's reply alone.
 
 Every hook entry that can return a note or a notice runs in the
 foreground. Claude Code doesn't wait for a hook registered async, and its
@@ -130,6 +131,10 @@ it only keeps the newest reply's time and size (see
 [Cold returns](#cold-returns-and-status-checks)). `claudeglass capture
 connect` adds it; until you run that again, `cold_return` works from the
 end of the transcript alone and Setup › Capture shows a "Needs a hook entry" chip.
+`SubagentStop` also prints nothing but runs in the foreground, since the
+record it makes has to be there when the main session's hook runs right
+after an agent call. Without it, `split_run` never speaks, and Setup ›
+Capture shows the same chip.
 
 The /cg-feedback rating reminder (`feedback_reminder`) has the same look,
 labelled **ClaudeGlass:**. It comes on a message of yours, not at the
@@ -266,6 +271,30 @@ task's message ends the wait in any of the three shapes Claude Code
 writes it. The tip never says a notification will come: a background
 task sends one only when it finishes, and not every kind does. After a
 break that outlasted the cache, `cold_return` speaks instead.
+
+## Starting background work in a long session
+
+`report_reread` speaks when you start background work with a lot of
+context behind it. Each report that work sends back arrives as a message
+of its own, and the main session answers it with a reply that reads the
+whole session again, whether or not the reply has anything to do. At 150,000
+tokens that read costs real money, and a long run can send several reports.
+The note comes with the call that starts the work, so the tip is in time
+to change how the next piece is split.
+
+The size is the newest main-session reply's, kept by the hook that runs
+after each reply (the one `cold_return` reads), so a session whose first
+reply hasn't been kept yet gets nothing. The `Agent` and `Workflow` tools
+are the only ones that can start it, which is why `update --finish` adds
+them to the entry's matcher when coaching notes are on. The note is not
+made from the call's result: only the launch wording is looked at, in its
+first 400 characters, and nothing is kept. A workflow's own agents are
+never counted, as their reports go back to the workflow script and not to
+your session.
+
+What replies to a report cost once they have happened is on Work habits,
+under Replies to agent reports, and in the Replies to agent reports check
+under Actions › Checks.
 
 ## Hints that no longer show live
 
@@ -462,19 +491,23 @@ one you have decided to ignore, so each time it shows again in a session
 its rest doubles: 30 minutes, then 1, 2 and at most 4 hours. `cold_return`
 rests a flat 12 hours and growth never wakes it. `quiet_output` rests, and
 backs off, apart for the main session and for each subagent. `split_run`
-shows once a run.
+grows with the number of runs waiting to be told, and says them all at
+once: the runs it covers are cleared when it shows, so the next note needs
+a later run that ended too big. A run noted while it rests waits for the
+rest to end.
 
-## Your own split points
+## Your own numbers
 
 Some hints depend on how you work. The dashboard's service works them out
 once a day, from a report of your last 30 days across every project, and
 writes them to `coaching.json` in ClaudeGlass's data folder for the hook
-to read:
+to read. (`split_run` used to have a table of split points per agent type
+here. It is gone: the hook can't know which replies a subagent will
+make, and the notice it gave never reached a screen. A `split_run` entry
+in an older `coaching.json` is ignored.) The run-split card on the
+dashboard, which does work out the best interval per agent type from
+runs under the context window now in force, is [its own tip](run-split.md).
 
-- **Split points.** An agent type gets the `split_run` hint only when the
-  [run-split tip](run-split.md) shows its long runs would have cost less
-  split, at the interval it found best. An agent type whose tip you
-  ignored on the dashboard doesn't get it.
 - **The plan hint.** On unless you ignored the
   [plan-handoff tip](plan-handoff.md), or most of your /cg-feedback
   answers say your builds relied on the discussion before the plan. Its
@@ -587,6 +620,8 @@ table, and wins over the file:
 | `coaching_drip_window_minutes` | 20 | The longest wait after your message before it for a message still to count. |
 | `coaching_drip_chars` | 300 | The longest message that counts as a small request. |
 | `coaching_big_paste_tokens` | 10000 | A message's size before `big_paste` applies. |
+| `coaching_report_reread_tokens` | 150000 | The main session's context before starting background agents gets the `report_reread` tip. |
+| `coaching_split_brief_chars` | 6000 | The length of the brief a subagent run begins from, in characters, before `split_run` counts the run as too big. A run Claude Code summarised counts at any length. |
 | `coaching_cold_min_tokens` | 100000 | The smallest context `cold_return` mentions. |
 | `coaching_cold_rest_hours` | 12 | How long `cold_return` rests once shown. |
 | `coaching_warm_prefix_tokens` | 42000 | The tokens every session starts with, left out of `cold_return`'s figure. |
@@ -620,7 +655,8 @@ plus about 25 of output for its line, at most once every three days.
 `capture status` prices both from your own history, as an upper bound.
 
 Claude Code also waits for the hook after each message you send and after
-each read, search or web result and approved plan. Setup > Capture and
+each read, search or web result, approved plan, and agent or workflow call.
+Setup > Capture and
 `claudeglass capture status` show how many runs, the median time each and
 the time summed, from your own sessions. It is never run after a shell
 command or an MCP tool. Those were about two thirds of the calls it waited
@@ -629,8 +665,7 @@ real sessions found a size note after them wrong too often: after a shell
 result it failed the precision and the tokens-against-time checks, and
 after an MCP result it was right 33% of the time (46% counting half
 credit) where 50% was the bar. A subagent that only runs commands
-therefore never reaches `split_run`, which counts its replies when the
-hook runs.
+is judged when it stops instead (`split_run`).
 
 The hook is three files in ClaudeGlass's data folder, under `hooks/`.
 `capture-hook.py` is a small launcher, the file `settings.json` runs;
@@ -659,8 +694,10 @@ own note count or tag coverage.
 
 Coaching notes never change your settings, run `/clear` or start an
 agent: Claude can only follow a hint within the task you gave it, or
-tell you. The hook reads the end of the session's transcript (and a
-subagent's own, for `split_run`; and, at a compaction, the end of any
+tell you. The hook reads the end of the session's transcript (and, when
+a subagent stops, its own transcript for `split_run`: how long its brief
+was and whether Claude Code summarised its context, in memory, with the
+text dropped; and, at a compaction, the end of any
 subagent file that changed in the last five seconds, for its record type
 and time only; and, for the rating reminder, only the time of the
 session's dashboard rating, read from `service.db` without writing to
@@ -668,8 +705,9 @@ it) and keeps a small state file,
 `coach-state.json`, holding when each hint last showed in each session
 (by a salted hash of its id, as the free signals keep it), how many
 times, how long it rests, the time, context and cache lifetime of the
-newest reply (numbers only), and how many replies each subagent run has
-made. Entries older than a day are dropped. For the survey it also keeps,
+newest reply (numbers only), and how many agent runs ended too big and
+have not been told yet, by the two words `compaction` and `brief`. Entries
+older than a day are dropped. For the survey it also keeps,
 for every session together, how many plan checks in a row went unanswered
 and when the check rests until, the time of the last rating reminder, and
 short salted hashes of the plans and pieces of work it has already noted

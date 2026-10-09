@@ -170,6 +170,12 @@ def test_the_sample_document_is_valid_and_holds_every_block():
         ("agents.startup_diet_usd", {"my-private-reviewer": 2.0}, "agents.startup_diet_usd: has a key", "private"),
         ("agents.startup_diet_usd", {"custom": -1.0}, "agents.startup_diet_usd.custom: must be 0 or more", ""),
         ("agents.startup_diet_usd", {"custom": "2 USD"}, "agents.startup_diet_usd.custom: must be a number", ""),
+        ("agents.probes", {"calls": 5, "single": 2, "by_shell": 1, "runs": 1, "files": 3}, "agents.probes: has a key", "files"),
+        ("agents.probes", {"calls": 5, "single": -2}, "agents.probes.single: must be 0 or more", ""),
+        ("agents.probes", {"calls": "5"}, "agents.probes.calls: must be a whole number", ""),
+        ("agents.report_turns", {"acknowledged": 1, "ignored": 2}, "agents.report_turns: has a key", "ignored"),
+        ("agents.report_turns", {"acted": 2.5}, "agents.report_turns.acted: must be a whole number", ""),
+        ("agents.report_turns", ["acted"], "agents.report_turns: must be an object", ""),
         ("overhead.hooks", {"PreToolUse": {"runs": 1, "recorded": 0}}, "overhead.hooks: has a key", "PreToolUse"),
         ("overhead.entrypoints", {"cli": 1, "C": 1}, "overhead.entrypoints: has a key", ""),
         (
@@ -620,7 +626,7 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     assert "Capture cost $4.20 and coaching notes $0.35 at list prices." in lines
     for name in ("Tips:", "Plans:", "Tags:", "Rework:", "Agent answers:", "Hooks:", "Limits:"):
         assert any(line.startswith(name) for line in lines), name
-    assert len(lines) < 40
+    assert len(lines) < 50
 
 
 def test_the_summary_gives_the_tools_list_saving_by_agent_type_when_the_file_has_one():
@@ -1084,7 +1090,7 @@ def test_the_built_document_is_valid_and_has_the_header_and_every_block(doc):
     assert tuning.validate(doc) == []
     assert list(doc) == [
         *tuning._HEADER,
-        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files"),
+        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files", "compactions"),
     ]
     assert doc["kind"] == "claudeglass-tuning" and doc["format"] == 1
     assert doc["tool_version"] == re.match(r"\d+(?:\.\d+)+", __version__).group(0)
@@ -1239,7 +1245,8 @@ def test_prompting_counts_the_messages_plans_and_denials_the_dashboard_counts(do
     assert prompting["totals"]["adjustments"] == 1
     assert sum(week["messages"] for week in prompting["weeks"].values()) == sum(m.asks for s in sessions for m in s.messages)
     assert list(prompting["weeks"]) == ["2026-W38"]
-    assert prompting["plans"] == {
+    plans = {key: prompting["plans"][key] for key in ("approved", "rounds", "rejected_rounds", "feedback_rounds")}
+    assert plans == {
         "approved": 1,
         "rounds": {"two": 1},
         "rejected_rounds": 1,
@@ -1338,6 +1345,50 @@ def test_agent_runs_are_split_by_how_they_answered_and_by_type_and_model(doc, wo
     assert agents["runs"]["direct"]["cost_usd"] == pytest.approx(sum(f.cost for f in facts if f.direct), abs=1e-6)
     assert agents["runs"]["workflow"]["cost_usd"] == pytest.approx(sum(f.cost for f in facts if not f.direct), abs=1e-6)
     assert sum(row["cost_usd"] for row in agents["models"].values()) == pytest.approx(sum(f.cost for f in facts), abs=1e-6)
+
+
+def _agents_block(tmp_path, **found) -> dict:
+    ctx = tuning._Ctx(NS(sessions=[]), Config(tz="UTC"), None, tmp_path, 30, TODAY, None)
+    ctx.habits = habits.Habits(**found)
+    return tuning._agents(ctx)
+
+
+def _probing_agent(**kw) -> habits.AgentFact:
+    return habits.AgentFact("s1", "Explore", "2026-W38", 0.5, **kw)
+
+
+def test_the_agents_block_counts_single_lookups_and_the_replies_to_reports(tmp_path):
+    block = _agents_block(
+        tmp_path,
+        agents=[
+            _probing_agent(calls=20, probe_calls=8, probe_shell_calls=3, probe_runs=2),
+            _probing_agent(calls=10, probe_calls=1, probe_shell_calls=1),
+            _probing_agent(calls=0, direct=False),
+        ],
+        report_turns=[habits.ReportFact("s1", "2026-W38", kind, 0.1) for kind in ("acted", "acknowledged", "acknowledged")],
+    )
+    assert block["probes"] == {"calls": 30, "single": 9, "by_shell": 4, "runs": 2}
+    assert block["report_turns"] == {"acknowledged": 2, "acted": 1}
+    # Counts only: the spec accepts it, and the summary reads it.
+    doc = _sample()
+    doc["agents"] = {**doc["agents"], "probes": block["probes"], "report_turns": block["report_turns"]}
+    assert tuning.validate(doc) == []
+    text = tuning.summary_text(doc)
+    assert "Of 30 agent replies, 9 made one read-only call and nothing else, 4 of them by shell command" in text
+    assert "They came in 2 stretches of two or more in a row." in text
+    assert "Replies to an agent's report: acknowledged 2 and acted 1." in text
+
+
+def test_the_agents_block_leaves_out_lookups_and_report_replies_there_were_none_of(tmp_path):
+    block = _agents_block(tmp_path, agents=[_probing_agent(calls=12)])
+    assert "probes" not in block and "report_turns" not in block
+    doc = _sample()
+    for key in ("probes", "report_turns"):
+        del doc["agents"][key]
+    # A file from before these were added is still valid, and its summary has no line for them.
+    assert tuning.validate(doc) == []
+    text = tuning.summary_text(doc)
+    assert "read-only call" not in text and "agent's report" not in text
 
 
 def test_the_tools_list_saving_is_left_out_when_no_agent_recorded_its_tools(doc):
@@ -1790,3 +1841,389 @@ def test_the_summary_counts_the_project_files_by_size_and_reach():
     lines = tuning.summary_text(quiet).splitlines()
     assert "Project files agents take in: 7 files, 0 of the biggest read by habit." in lines
     assert not any(line.startswith("Of those") for line in lines)
+
+
+# -- Phase 8: how the runs started, who chose the model, what summaries cost, how builds began ------------
+
+
+def _launching_agent(launch: str, run: str, **kw) -> habits.AgentFact:
+    return habits.AgentFact("s1", kw.pop("agent_type", "Explore"), "2026-W38", kw.pop("cost", 0.5), launch=launch, run=run, **kw)
+
+
+def test_the_agents_block_counts_the_runs_by_how_they_started(tmp_path):
+    block = _agents_block(
+        tmp_path,
+        agents=[
+            _launching_agent("background", "r1", calls=20, probe_calls=8, start_tokens=1000, compactions=2),
+            _launching_agent("background", "r2", calls=10, shared_reads=1, shared_tokens=300, shared_cost=0.25, cost=1.0),
+            # A workflow's agents share the run the script started, and an agent with no reply counts nowhere.
+            _launching_agent("workflow", "w1", calls=5, start_tokens=100, direct=False),
+            _launching_agent("workflow", "w1", calls=7, start_tokens=100, direct=False, compactions=1, cost=0.25),
+            _launching_agent("foreground", "f1", calls=0),
+        ],
+    )
+    assert block["launches"] == {
+        "background": {
+            "runs": 2, "agents": 2, "replies": 30, "single": 8, "start_reads": 20_000, "compactions": 2, "compacted": 1,
+            "shared_reads": 1, "shared_usd": 0.25, "cost_usd": 1.5,
+        },
+        "workflow": {
+            "runs": 1, "agents": 2, "replies": 12, "single": 0, "start_reads": 1_200, "compactions": 1, "compacted": 1,
+            "shared_reads": 0, "shared_usd": 0.0, "cost_usd": 0.75,
+        },
+    }  # fmt: skip
+    # Words and counts of the spec's own, in the order the dashboard lists them.
+    assert list(block["launches"]) == ["background", "workflow"]
+    doc = _put(_sample(), "agents.launches", block["launches"])
+    assert tuning.validate(doc) == []
+
+
+def test_the_launches_are_the_run_receipts_tables_own_groups(tmp_path):
+    found = [
+        _launching_agent("background", "r1", calls=20, probe_calls=8, start_tokens=1000, compactions=2, cost=0.4),
+        _launching_agent("foreground", "f1", calls=3, start_tokens=500, shared_reads=2, shared_tokens=90, shared_cost=0.1),
+        _launching_agent("workflow", "w1", calls=5, start_tokens=100, direct=False),
+        _launching_agent("workflow", "w1", calls=7, start_tokens=100, direct=False, compactions=1),
+    ]
+    block = _agents_block(tmp_path, agents=found)["launches"]
+    table = habits._run_receipts_table(habits.Habits(agents=found))
+    keys = [column.key for column in table.columns]
+    assert [row[0] for row in table.rows] == list(block)
+    for row in table.rows:
+        cells = dict(zip(keys, row))
+        mine = block[cells["launch"]]
+        assert mine["runs"] == cells["runs"] and mine["agents"] == cells["agents"] and mine["replies"] == cells["calls"]
+        assert mine["start_reads"] == cells["start_reads"] and mine["compactions"] == cells["compactions"]
+        assert mine["compacted"] == cells["compacted_agents"] and mine["shared_reads"] == cells["shared_reads"]
+        assert mine["cost_usd"] == pytest.approx(cells["cost"], abs=1e-6)
+
+
+def test_the_agents_block_has_no_launches_or_model_choice_when_there_were_no_replies_or_no_rate_card(tmp_path):
+    block = _agents_block(tmp_path, agents=[_launching_agent("background", "r1", calls=0)])
+    assert "launches" not in block and "model_choice" not in block
+    assert tuning.validate(_put(_sample(), "agents", {**_sample()["agents"], **block})) == []
+
+
+def _mini_world(root: Path, file_model: str | None = "opus") -> World:
+    """One main session that summarised three times (an automatic summary, a
+    manual one and one whose trigger the export has no word for), and under it
+    four agent runs on the newer meta shape: a custom type whose agent file
+    names ``file_model``, a built-in one that named Opus in its call, one that
+    named nothing and a workflow's agent. The Explore run summarised once."""
+    alpha = root / "projects" / "proj-mini"
+    alpha.mkdir(parents=True)
+    config_dir = root / "claudeglass"
+    config_dir.mkdir()
+    claude_root = root / "claude"
+    claude_root.mkdir()
+    if file_model is not None:
+        (config_dir / "snapshots").mkdir()
+        snapshot = {"ts": "2026-09-18T08:00:00Z", "agents": {"my-private-reviewer": {"model": file_model}}}
+        (config_dir / "snapshots" / "2026-09-18T08-00-00.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    def boundary(second: int, trigger: str, dropped: int) -> dict:
+        meta = {"trigger": trigger, "preTokens": 100_000, "postTokens": 20_000, "cumulativeDroppedTokens": dropped}
+        return system_line("compact_boundary", timestamp=_at(second), compactMetadata=meta)
+
+    def reply(second: int, message_id: str, **kw) -> dict:
+        return _say(second, "Working.", message_id=message_id, **kw)
+
+    main = [
+        _human(0, "start the work"),
+        reply(5, "m1", input_tokens=1_000, output_tokens=200),
+        boundary(10, "auto", 80_000),
+        reply(20, "m2", cache_creation_input_tokens=25_000, ephemeral_1h_input_tokens=25_000),
+        boundary(30, "manual", 160_000),
+        reply(40, "m3", cache_creation_input_tokens=25_000, ephemeral_1h_input_tokens=25_000),
+        boundary(50, "mystery-trigger", 240_000),
+        reply(60, "m4", cache_creation_input_tokens=25_000, ephemeral_1h_input_tokens=25_000),
+    ]
+    write_jsonl(alpha / "s1.jsonl", main)
+    folder = alpha / "s1" / "subagents"
+    opus = "claude-opus-4-1"
+    for name, meta, model in (
+        ("agent-fi", {"agentType": "my-private-reviewer", "description": "d"}, opus),
+        ("agent-ca", {"agentType": "general-purpose", "description": "d", "model": "opus"}, opus),
+        ("agent-in", {"agentType": "Explore", "description": "d"}, opus),
+    ):
+        lines = [_agent_turn(70, f"{name}_1", {"type": "text", "text": "x"}, model=model, input_tokens=2_000, output_tokens=3_000)]
+        if name == "agent-in":
+            lines.append(boundary(75, "auto", 50_000))
+            lines.append(_agent_turn(80, f"{name}_2", {"type": "text", "text": "y"}, model=model))
+        _write_agent(folder, name, meta, lines)
+    _write_agent(
+        folder / "workflows" / "wf_1",
+        "agent-w1",
+        {"agentType": "workflow-subagent", "description": "d"},
+        [_agent_turn(70, "agent-w1_1", {"type": "text", "text": "z"})],
+    )
+    corpus = load_corpus([alpha])
+    return World(corpus, load_pricing(), Config(tz="UTC"), config_dir, claude_root, root)
+
+
+def _ctx(w: World, pricing=True) -> tuning._Ctx:
+    return tuning._Ctx(w.corpus, w.config, w.pricing if pricing else None, w.config_dir, DAYS, TODAY, w.claude_root)
+
+
+def test_the_model_choice_rows_say_who_chose_each_model_in_words_and_amounts(tmp_path):
+    w = _mini_world(tmp_path)
+    rows = tuning._model_choice(_ctx(w))
+    by_key = {(r["started_by"], r["agent_type"], r["model"], r["chosen"]): r for r in rows}
+    assert set(by_key) == {
+        ("direct", "custom", "opus", "file"),
+        ("direct", "general-purpose", "opus", "call"),
+        ("direct", "Explore", "opus", "inherited"),
+        ("workflow", "workflow-subagent", "sonnet", "inherited"),
+    }
+    assert all(r["runs"] == 1 for r in rows)
+    # An Opus run has a Sonnet ceiling, a Sonnet run none; the rows come dearest first.
+    assert "ceiling_usd" not in by_key[("workflow", "workflow-subagent", "sonnet", "inherited")]
+    assert all(r["ceiling_usd"] > 0 for r in rows if r["model"] == "opus")
+    assert [r["cost_usd"] for r in rows] == sorted((r["cost_usd"] for r in rows), reverse=True)
+    # The same rows the dashboard's table has, to the six places an amount keeps.
+    from claudeglass import cost_centres
+
+    sessions = [(b.top, b.subs) for b in w.corpus.sessions if b.top is not None]
+    found = cost_centres.model_choice(sessions, w.pricing, {"my-private-reviewer": "opus"})
+    assert sum(r["cost_usd"] for r in rows) == pytest.approx(sum(row.cost for row in found.values()), abs=1e-4)
+    assert sum(r["runs"] for r in rows) == sum(row.runs for row in found.values())
+    doc = _put(_sample(), "agents.model_choice", rows)
+    assert tuning.validate(doc) == []
+    assert "my-private-reviewer" not in json.dumps(rows)
+
+
+@pytest.mark.parametrize(
+    "file_model, chosen",
+    [("opus", "file"), ("inherit", "file"), ("sonnet", "inherited"), (None, "inherited")],
+)
+def test_a_choice_is_the_agent_files_only_when_a_settings_snapshot_says_it_names_the_model(tmp_path, file_model, chosen):
+    w = _mini_world(tmp_path, file_model=file_model)
+    rows = tuning._model_choice(_ctx(w))
+    [custom] = [r for r in rows if r["agent_type"] == "custom"]
+    assert custom["chosen"] == chosen
+
+
+def test_there_is_no_model_choice_without_a_rate_card(tmp_path):
+    w = _mini_world(tmp_path)
+    assert tuning._model_choice(_ctx(w, pricing=False)) == []
+
+
+def test_the_model_choice_keeps_the_dearest_rows_and_adds_up_the_rest_on_the_same_words(tmp_path, monkeypatch):
+    from claudeglass import cost_centres
+
+    rows = {
+        ("direct", "my-first-agent", "opus", "call"): cost_centres.ModelRow(runs=2, cost=3.0, cost_on_sonnet=1.0),
+        ("direct", "my-second-agent", "opus", "call"): cost_centres.ModelRow(runs=1, cost=1.0, cost_on_sonnet=0.5),
+        ("direct", "Plan", "haiku", "not recorded"): cost_centres.ModelRow(runs=4, cost=0.5),
+        ("workflow", "workflow-subagent", "unseen-tier", "call"): cost_centres.ModelRow(runs=1, cost=0.25),
+    }
+    monkeypatch.setattr(cost_centres, "model_choice", lambda *a, **k: rows)
+    ctx = tuning._Ctx(NS(sessions=[]), Config(tz="UTC"), object(), tmp_path, 30, TODAY, None)
+    ctx.agent_files = {}
+    block = tuning._model_choice(ctx)
+    # Two custom agents on one tier are one row; a tier the table has no word for is unknown.
+    assert block[0] == {
+        "started_by": "direct", "agent_type": "custom", "model": "opus", "chosen": "call", "runs": 3,
+        "cost_usd": 4.0, "ceiling_usd": 2.5,
+    }  # fmt: skip
+    assert {r["model"] for r in block} == {"opus", "haiku", "unknown"}
+    assert [r["chosen"] for r in block if r["agent_type"] == "Plan"] == ["not_recorded"]
+    monkeypatch.setattr(tuning, "MODEL_ROWS_KEPT", 2)
+    assert len(tuning._model_choice(ctx)) == 2
+
+
+def test_the_compactions_block_counts_the_summaries_and_prices_them_at_list_prices(tmp_path):
+    from claudeglass.pricing import price_turn
+
+    w = _mini_world(tmp_path)
+    block = tuning._compactions(_ctx(w))
+    assert block["sessions"] == 1 and block["compacted"] == 1 and block["summaries"] == 3
+    # The trigger word of a summary is a closed word or ``other``; the agents' own are counted apart.
+    assert block["triggers"] == {"auto": 1, "manual": 1, "other": 1}
+    assert block["in_agents"] == {"subagent": 1, "workflow": 0}
+    assert block["dropped_tokens"] == 80_000 * 3 + 50_000
+    assert block["write_usd"] > 0
+    top = w.corpus.sessions[0].top
+    main = sum(price_turn(t, w.pricing.resolve_model(t.model)).total for t in top.turns if t.turn_index > 0)
+    # The one session summarised three times, so it is the heavy one and all of the main-session cost.
+    assert block["heavy"] == {"sessions": 1, "cost_usd": pytest.approx(main, abs=1e-6), "main_usd": pytest.approx(main, abs=1e-6)}
+    doc = _put(_sample(), "compactions", block)
+    assert tuning.validate(doc) == []
+    text = tuning.summary_text(doc)
+    assert "Summaries: 3 summaries in 1 session of 1 (auto 1, manual 1 and other 1)." in text
+    assert "1 session summarised 3 times or more:" in text and ", 100% of the total." in text
+
+
+def test_the_compactions_block_is_counts_alone_without_a_rate_card(tmp_path):
+    w = _mini_world(tmp_path)
+    block = tuning._compactions(_ctx(w, pricing=False))
+    assert block["summaries"] == 3 and block["compacted"] == 1
+    assert not {"write_usd", "summary_usd", "heavy"} & set(block)
+    assert tuning.validate(_put(_sample(), "compactions", block)) == []
+
+
+def test_the_built_document_has_a_compactions_block_and_the_model_choice_and_nothing_that_names_anything(tmp_path):
+    w = _mini_world(tmp_path)
+    doc = tuning.build(w.corpus, w.config, w.pricing, config_dir=w.config_dir, days=DAYS, today=TODAY, claude_root=w.claude_root)
+    assert list(doc)[-1] == "compactions" and doc["compactions"]["summaries"] == 3
+    assert len(doc["agents"]["model_choice"]) == 4 and doc["agents"]["launches"]["foreground"]["agents"] == 3
+    assert_privacy_deep(doc)
+    text = tuning.dumps(doc)
+    for name in ("my-private-reviewer", "proj-mini", "claude-opus-4-1", "mystery-trigger", "agent-fi", "s1", str(w.root)):
+        assert name not in text, name
+    assert tuning.validate(json.loads(text)) == []
+
+
+def _prompting_block(tmp_path, **found) -> dict:
+    ctx = tuning._Ctx(NS(sessions=[]), Config(tz="UTC"), None, tmp_path, 30, TODAY, None)
+    ctx.prompting = []
+    ctx.habits = habits.Habits(plan_rounds=found.pop("plan_rounds", []))
+    ctx.approvals = found.pop("approvals", [])
+    return tuning._prompting(ctx)
+
+
+def _approval(start: str, **kw) -> "tuning.handoff_mod.PlanApproval":
+    return tuning.handoff_mod.PlanApproval("s1", 3, kw.pop("typed", False), start, **kw)
+
+
+def test_plans_count_how_each_build_began_and_the_plans_put_up_for_each_ask(tmp_path):
+    block = _prompting_block(
+        tmp_path,
+        approvals=[
+            _approval("kept", typed=True, tokens_carried=120_000, build_turns=10, build_usd=1.5, build_context=900_000),
+            _approval("kept", tokens_carried=80_000, build_turns=6, build_usd=0.5, build_context=300_000),
+            _approval("cleared", build_turns=8, build_usd=0.25, build_context=100_000),
+        ],
+        plan_rounds=[
+            habits.PlanFact("s1", "2026-W38", 1, 0, True, typed=True, tokens=0, cost=0.0),
+            habits.PlanFact("s1", "2026-W38", 3, 2, True, tokens=4_000, cost=0.75, asked=1),
+            habits.PlanFact("s2", "2026-W38", 2, 1, False, tokens=900, cost=0.125, asked=1),
+        ],
+    )["plans"]
+    assert block["builds"] == {
+        "kept": {
+            "approvals": 2, "typed": 1, "carried_tokens": 200_000, "replies": 16, "context_tokens": 1_200_000,
+            "cost_usd": 2.0,
+        },
+        "cleared": {
+            "approvals": 1, "typed": 0, "carried_tokens": 0, "replies": 8, "context_tokens": 100_000, "cost_usd": 0.25,
+        },
+    }  # fmt: skip
+    assert block["asks"] == {
+        "all": {"plans": 2, "typed": 1, "sent_back": 2, "asked": 1, "tokens": 4_000, "cost_usd": 0.75},
+        "none": {"plans": 1, "typed": 1, "sent_back": 0, "asked": 0, "tokens": 0, "cost_usd": 0.0},
+        "twice": {"plans": 1, "typed": 0, "sent_back": 2, "asked": 1, "tokens": 4_000, "cost_usd": 0.75},
+        "dropped": {"plans": 1, "typed": 0, "sent_back": 1, "asked": 1, "tokens": 900, "cost_usd": 0.125},
+    }
+    # The groups are the Plans sent back table's own.
+    table = habits._plan_rounds_table(habits.Habits(plan_rounds=[
+        habits.PlanFact("s1", "2026-W38", 1, 0, True, typed=True),
+        habits.PlanFact("s1", "2026-W38", 3, 2, True, tokens=4_000, cost=0.75, asked=1),
+        habits.PlanFact("s2", "2026-W38", 2, 1, False, tokens=900, cost=0.125, asked=1),
+    ]))
+    assert [row[0] for row in table.rows] == list(block["asks"])
+    assert [row[1] for row in table.rows] == [row["plans"] for row in block["asks"].values()]
+    assert tuning.validate(_put(_sample(), "prompting.plans", {**_sample()["prompting"]["plans"], **block})) == []
+
+
+def test_plans_leave_out_builds_and_asks_there_were_none_of(tmp_path):
+    block = _prompting_block(tmp_path)["plans"]
+    assert "builds" not in block and "asks" not in block
+    assert tuning.validate(_put(_sample(), "prompting.plans", block)) == []
+
+
+def test_the_built_plans_hold_the_same_approvals_the_plan_handoff_section_counts(doc, world):
+    approvals = tuning.handoff_mod.compute_handoff([r for s in world.corpus.sessions for r in (s.top, *s.subs)], world.pricing).approvals
+    builds = doc["prompting"]["plans"]["builds"]
+    assert sum(row["approvals"] for row in builds.values()) == len(approvals) == 1
+    assert builds["kept"]["replies"] == sum(a.build_turns for a in approvals)
+    assert builds["kept"]["cost_usd"] == pytest.approx(sum(a.build_usd for a in approvals), abs=1e-6)
+    asks = doc["prompting"]["plans"]["asks"]
+    assert asks["all"]["plans"] == 1 and asks["once"]["plans"] == 1 and asks["all"]["asked"] == 1
+
+
+@pytest.mark.parametrize(
+    "path, value, check",
+    [
+        ("agents.launches", {"my-launch": {"runs": 1, "agents": 1, "replies": 1, "cost_usd": 1.0}}, "agents.launches: has a key"),
+        ("agents.launches.background", {"runs": 1, "agents": 1, "replies": 1}, "agents.launches.background.cost_usd: is missing"),
+        ("agents.launches.background", {"runs": 1, "agents": 1, "replies": 1, "cost_usd": 1.0, "prompt": 1}, "agents.launches.background: has a key"),
+        ("agents.launches.background.cost_usd", -1.0, "agents.launches.background.cost_usd: must be 0 or more"),
+        ("agents.model_choice.0.agent_type", "my-private-reviewer", "agents.model_choice[0].agent_type: must be one of the words"),
+        ("agents.model_choice.0.model", "claude-opus-4-1", "agents.model_choice[0].model: must be one of the words"),
+        ("agents.model_choice.0.chosen", "not recorded", "agents.model_choice[0].chosen: must be one of the words"),
+        ("agents.model_choice.0.started_by", "main", "agents.model_choice[0].started_by: must be one of the words"),
+        ("agents.model_choice.0.runs", "4", "agents.model_choice[0].runs: must be a whole number"),
+        ("agents.model_choice", {}, "agents.model_choice: must be a list"),
+        ("prompting.plans.builds", {"fresh": {"approvals": 1, "replies": 1, "cost_usd": 1.0}}, "prompting.plans.builds: has a key"),
+        ("prompting.plans.builds.kept.cost_usd", "9", "prompting.plans.builds.kept.cost_usd: must be a number"),
+        ("prompting.plans.asks", {"thrice": {"plans": 1, "sent_back": 1, "asked": 1, "cost_usd": 1.0}}, "prompting.plans.asks: has a key"),
+        ("prompting.plans.asks.once.plans", -1, "prompting.plans.asks.once.plans: must be 0 or more"),
+        ("compactions", {"sessions": 1, "compacted": 1}, "compactions.summaries: is missing"),
+        ("compactions.triggers", {"mystery-trigger": 1}, "compactions.triggers: has a key"),
+        ("compactions.in_agents", {"background": 1}, "compactions.in_agents: has a key"),
+        ("compactions.heavy", {"sessions": 1, "cost_usd": 1.0}, "compactions.heavy.main_usd: is missing"),
+        ("compactions.write_usd", -0.5, "compactions.write_usd: must be 0 or more"),
+        ("compactions", [], "compactions: must be an object"),
+    ],
+)
+def test_the_phase_8_keys_reject_a_name_a_bad_word_and_a_wrong_kind(path, value, check):
+    problems = tuning.validate(_put(_sample(), path, value))
+    assert any(check in problem for problem in problems), (path, problems)
+
+
+def test_a_file_from_before_phase_8_still_validates_and_its_summary_has_no_line_for_it():
+    older = _sample()
+    for path in ("agents.launches", "agents.model_choice", "prompting.plans.builds", "prompting.plans.asks"):
+        *parents, last = path.split(".")
+        node = older
+        for key in parents:
+            node = node[key]
+        del node[last]
+    del older["compactions"]
+    assert tuning.validate(older) == []
+    text = tuning.summary_text(older)
+    for phrase in ("by how they were started", "Model choice", "Builds after", "Summaries:", "summarised"):
+        assert phrase not in text, phrase
+    # A smaller document still: no cost centres or project files either.
+    assert tuning.validate({k: v for k, v in older.items() if k not in ("cost_centres", "project_files")}) == []
+
+
+def test_the_summary_reads_the_phase_8_blocks_in_plain_words():
+    lines = tuning.summary_text(_sample()).splitlines()
+    assert "Builds after an approved plan: kept 5, cleared 2 and handoff 1, 8 plans in all." in lines
+    assert (
+        "Agents by how they were started: background 12 agents at $0.96 each, foreground 9 agents at $0.33 each "
+        "and workflow 9 agents at $0.69 each."
+    ) in lines
+    assert (
+        "Model choice: 4 agent runs on Opus or above; chosen by file 10, not recorded 9 and inherited 4. "
+        "Sonnet could save up to $3.10 at list prices."
+    ) in lines
+    assert "Summaries: 220 summaries in 40 sessions of 61 (auto 200, manual 15 and other 5)." in lines
+    assert "Inside agent runs: 48 summaries." in lines
+    assert "They cost $17.90 in cache written on the next reply and about $20.75 to write, at list prices." in lines
+    assert "26 sessions summarised 3 times or more: $159.50 of main-session cost, 86% of the total." in lines
+    for line in lines:
+        _plain(line)
+    # A run of summaries with nothing to count says nothing.
+    quiet = _put(_sample(), "compactions", {"sessions": 5, "compacted": 0, "summaries": 0})
+    assert not any(line.startswith("Summaries:") for line in tuning.summary_text(quiet).splitlines())
+
+
+def test_the_fullest_phase_8_blocks_still_fit_the_size_limit():
+    doc = _sample()
+    doc["agents"]["model_choice"] = [
+        {
+            "started_by": started, "agent_type": agent_type, "model": model, "chosen": chosen, "runs": 10**6,
+            "cost_usd": 10.0**6, "ceiling_usd": 10.0**6,
+        }
+        for started in tuning.MODEL_STARTERS
+        for agent_type in tuning.AGENT_TYPES
+        for model in tuning.MODEL_TIERS
+        for chosen in tuning.MODEL_CHOSEN
+    ][: tuning.MODEL_ROWS_KEPT]
+    assert len(doc["agents"]["model_choice"]) == tuning.MODEL_ROWS_KEPT
+    assert tuning.validate(doc) == []
+    assert len(tuning.dumps(doc).encode("utf-8")) < tuning.MAX_BYTES
+    assert "not_recorded" in tuning.MODEL_CHOSEN

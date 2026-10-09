@@ -423,7 +423,7 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 | A SessionStart hook (`snapshot-config.py`) that records your settings as each session starts. It runs in the background. | `init`, when you connect | None |
 | A status line that logs your usage-limit readings, if you have none. Claude Code runs it only in a terminal, not in the desktop app. | `init`, when you connect | None |
 | The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep. | [Metrics capture](#metrics-capture) | See its levels |
-| The same hook on UserPromptSubmit, and on PostToolUse after read, search and web tools and an approved plan, never after a shell or MCP tool. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
+| The same hook on UserPromptSubmit, and on PostToolUse after read, search and web tools, an approved plan and a call that starts an agent or a workflow, never after a shell or MCP tool; also on SubagentStop, where it only notes a run that ended too big. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
 | The `/cg-feedback` skill, for rating a piece of work when it's done. | `init`'s sharper tips, `capture feedback on`, or the Deep level | Its name and description, listed at each session start |
 | The `/cg-brief` skill, which checks a request against its checklist. | `capture brief on` | Its name and description, listed at each session start |
 

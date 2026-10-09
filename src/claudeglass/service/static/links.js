@@ -433,6 +433,32 @@ export function projectFilesLink(text) {
   return pageLink("agents/subagents", text || "See every project file", { t: PROJECT_FILES_TABLE });
 }
 
+// Any report table, by its "section.table" name: a link to the view that
+// shows it (viewForTable), scrolled to and highlighted as evidence.js
+// revealEvidence does for the two tables above. A table the page leaves to
+// the full report opens in the drawer instead, so the link lands somewhere.
+export function tableLink(source, text) {
+  var name = String(source || "");
+  var dot = name.indexOf(".");
+  return pageLink(viewForTable(name.slice(0, dot), name.slice(dot + 1)), text || "See the table", { t: name });
+}
+
+// The tables behind the Overview's "More detail" part, by what each answers:
+// who chose each agent's model, what one start of an agent costs, what agent
+// runs did, how often one reply made one lookup, how the main session answered
+// an agent's report, how often plans were sent back, how builds began after an
+// approved plan, and what conversation summaries cost.
+export var DETAIL_TABLES = {
+  model_choice: "agents.cost_centres_models",
+  cost_per_spawn: "agents.topology_cost_per_spawn",
+  agent_runs: "habits.habits_agent_runs",
+  single_lookups: "habits.habits_probes",
+  report_turns: "habits.habits_report_turns",
+  plan_rounds: "habits.habits_plan_rounds",
+  plan_approvals: "plan_handoff.plan_handoff_approvals",
+  compaction_cost: "compactions.compactions_summary",
+};
+
 // A check on Actions, by its id (quick_actions.CHECK_IDS): the card a
 // cost-centre part or cell points at.
 export function checkLink(id, text) {

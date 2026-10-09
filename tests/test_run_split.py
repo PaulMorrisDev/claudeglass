@@ -287,3 +287,16 @@ def test_the_section_says_how_many_runs_ran_under_an_older_setting():
     assert not any("$" in n for n in section.notes if "grew past" in n)
     clean = build_section(compute_run_split(runs, PRICING, TEN), TEN)
     assert not any(re.match(r"\d+ runs? grew past", n) for n in clean.notes)
+
+
+def test_the_sweep_counts_only_runs_under_the_window_now_in_force():
+    th = RunSplitThresholds(intervals=(10,))
+    runs = [_run(replies=40, growth=10_000, agent_id=f"old-{n}") for n in range(2)]
+    runs += [_run(replies=40, agent_id=f"now-{n}") for n in range(3)]
+    stats = compute_run_split(runs, PRICING, th, rediscovery_allowance_usd=0.0, current_window=WINDOW)
+    section = build_section(stats, th)
+    sweep = next(t for t in section.tables if t.name == "run_split_sweep")
+    row = {c.key: v for c, v in zip(sweep.columns, sweep.rows[0])}
+    alone = compute_run_split(runs[2:], PRICING, th, rediscovery_allowance_usd=0.0)
+    assert row["long_runs"] == 3 and row["long_runs"] == alone.agents["claude-implementer"].by_interval[10].long_runs
+    assert row["net_usd"] == pytest.approx(alone.agents["claude-implementer"].by_interval[10].saving_usd)

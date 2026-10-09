@@ -353,6 +353,9 @@ var GROUP_TITLES = {
   "agent-report-size": function (n) {
     return "Reports from " + n + " agent types come back large";
   },
+  "agent-batch-probes": function (n) {
+    return n + " agent types look things up one call at a time";
+  },
   "spawn-cost": function (n) {
     return "Spawning " + n + " agent types is expensive before they do any work";
   },

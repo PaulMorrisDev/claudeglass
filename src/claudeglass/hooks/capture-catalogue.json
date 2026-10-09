@@ -332,7 +332,13 @@
   "Glob",
   "WebFetch",
   "WebSearch",
-  "ExitPlanMode"
+  "ExitPlanMode",
+  "Agent",
+  "Workflow"
+ ],
+ "spawn_tools": [
+  "Agent",
+  "Workflow"
  ],
  "result_image_max_tokens": 1600,
  "result_image_patch_px": 28,
@@ -619,6 +625,8 @@
    "cold_rest_hours": 12,
    "warm_prefix_tokens": 42000,
    "quiet_output_tokens": 8000,
+   "report_reread_tokens": 150000,
+   "split_brief_chars": 6000,
    "plan_fresh_tokens": 40000,
    "queued_minutes": 10,
    "drip_count": 3,
@@ -640,9 +648,15 @@
    "drip_feed": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user has sent {count} small change requests in a row, one message each. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** That's {count} small changes in a row, each its own message, and each one re-reads the whole session, about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
    "big_paste": "If most of the user's message is a log, a file or command output, write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. Otherwise don't mention this note.\n> **ClaudeGlass tip:** Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
+   "report_reread": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user's session just started background work. Carry on exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** This session holds about {ctx} tokens, and the reply to each report the background work sends back reads all of it again. Fewer, larger pieces of background work mean fewer reports, so fewer of those re-reads.",
    "plan_fresh": "Write the tip on this note's last line, word for word, before you start building. Then carry on unless the user stops you.\n> **ClaudeGlass tip:** This plan was approved with about {kept} tokens of planning in the session, and every reply of the build reads them again. Building it in a fresh session would carry about {kept} fewer tokens on each reply. {fresh_how}",
    "plan_fresh_early": "Write the tip on this note's last line, word for word, as the last line of the plan you submit for approval. If this reply doesn't end in a plan, add it to the plan you submit later. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** Approve with clear context: this session holds about {kept} tokens of planning chat, and every reply of the build would read it again. {clear_how}",
-   "split_run": ""
+   "split_run": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. An agent run in this session ended showing signs of being too big for one task. Carry on exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** In this session {why}. Each reply of a run reads everything the run holds again, so runs that big cost more than the work needs. Giving the next agent a smaller piece of the work keeps each run short."
+  },
+  "split_why": {
+   "compaction": "an agent run had to summarise its own context part-way through",
+   "brief": "an agent run began from a brief of {brief_chars} characters or more",
+   "both": "agent runs had to summarise their own context part-way through or began from a brief of {brief_chars} characters or more"
   },
   "quiet_how": {
    "Read": "read only the lines you need, with an offset and a limit",
@@ -657,7 +671,8 @@
    "big_paste": "⚠️ ClaudeGlass: Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
    "status_poll": "⚠️ ClaudeGlass: Asking how it's going while work runs in the background makes Claude read the whole session, about {ctx} tokens, to say little that is new. {poll_how}",
    "cold_return": "⚠️ ClaudeGlass: The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, the last reply or the task panel already says. For new work, running /clear first skips the rewrite.",
-   "split_run": "⚠️ ClaudeGlass: this {agent} run has made about {replies} replies, and each one reads the whole run again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next time, give each agent a smaller piece of the work."
+   "report_reread": "⚠️ ClaudeGlass: This session holds about {ctx} tokens, and the reply to each report the background work sends back reads all of it again. Fewer, larger pieces of background work mean fewer reports, so fewer of those re-reads.",
+   "split_run": "⚠️ ClaudeGlass: In this session {why}. Each reply of a run reads everything the run holds again, so runs that big cost more than the work needs. Giving the next agent a smaller piece of the work keeps each run short."
   },
   "interrupt_prefix": "[Request interrupted",
   "not_typed_prefixes": [
@@ -817,7 +832,9 @@
     "drip_feed",
     "big_paste",
     "status_poll",
-    "cold_return"
+    "cold_return",
+    "report_reread",
+    "split_run"
    ],
    "tip_marker": "ClaudeGlass tip:",
    "reminder_line": "Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work.",

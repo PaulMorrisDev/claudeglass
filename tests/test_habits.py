@@ -429,6 +429,10 @@ def test_every_table_is_there_even_with_nothing_to_show():
         "habits_briefs",
         "habits_brief_templates",
         "habits_agents",
+        "habits_probes",
+        "habits_agent_runs",
+        "habits_report_turns",
+        "habits_plan_rounds",
         "habits_explore_by_model",
         "habits_effort_fit",
         "habits_setups",
@@ -1482,6 +1486,154 @@ def test_the_build_after_a_typed_approval_is_planned_until_the_piece_ends(tmp_pa
     assert planned.planned and go.planned and docs.planned
     # A /clear starts another piece: the plan was for the one before it.
     assert not other.planned
+
+
+# -- plans put up for each ask --------------------------------------------------------------
+
+
+_PLAN_LONGER = _PLAN_TEXT + "3. Update docs/app.md\n"
+
+
+def _priced(second: int, content: list[dict], out: int) -> dict:
+    """A reply whose cost is its ``out`` output tokens alone: $2 per million
+    at the test pricing, so 1,000,000 tokens cost 2.00."""
+    return turn_line(content=content, model=MODEL, timestamp=_ts(second), input_tokens=0, output_tokens=out)
+
+
+def _put_up(second: int, n: int, plan: str, out: int = 100_000) -> dict:
+    return _priced(second, [tool_use_block("ExitPlanMode", f"tu_p{n}", {"plan": plan})], out)
+
+
+def _spoke(second: int, out: int) -> dict:
+    return _priced(second, [{"type": "text", "text": "Reworked."}], out)
+
+
+def _turned_down(second: int, n: int, feedback: str) -> dict:
+    return user_block_line(
+        [tool_result_block(f"tu_p{n}", _SENT_BACK + feedback, is_error=True)],
+        toolDenialKind="user-rejected", timestamp=_ts(second),
+    )
+
+
+def _approved_in_dialog(second: int, n: int) -> dict:
+    return user_block_line([tool_result_block(f"tu_p{n}", "User has approved your plan.")], timestamp=_ts(second))
+
+
+def _plan_fact(**kw) -> habits.PlanFact:
+    fields = dict(session_id="s1", week=WEEKS[0], versions=1, sent_back=0, approved=True)
+    fields.update(kw)
+    return habits.PlanFact(**fields)
+
+
+def _rounds_session(tmp_path):
+    """A plan sent back once with a question, a second one approved in the
+    dialog, then a build."""
+    return NS(sessions=[_work_session(tmp_path, "s1", [
+        _said(0, "plan the retry for src/app.py"),
+        _put_up(1, 1, _PLAN_TEXT, out=100_000), _turned_down(2, 1, "why do you need two steps?"),
+        _spoke(3, out=1_000_000),
+        _put_up(4, 2, _PLAN_LONGER, out=500_000), _approved_in_dialog(5, 2),
+        _priced(6, [{"type": "text", "text": "Building."}], out=250_000),
+    ])])
+
+
+def test_the_plan_cost_is_the_cost_up_to_the_last_plan_not_the_first(tmp_path, pricing):
+    [cycle] = habits.collect(_rounds_session(tmp_path), pricing).cycles
+    assert cycle.planned
+    # 0.20 for the first plan, 2.00 for the reply, 1.00 for the plan you approved. The build after is no plan cost.
+    assert cycle.plan_cost == pytest.approx(3.2)
+    assert cycle.cost == pytest.approx(3.7)
+
+
+def test_a_plan_approved_when_first_put_up_costs_what_it_always_did(tmp_path, pricing):
+    lines = [
+        _said(0, "plan the retry for src/app.py"), _put_up(1, 1, _PLAN_TEXT, out=100_000), _approved_in_dialog(2, 1),
+        _priced(3, [{"type": "text", "text": "Building."}], out=250_000),
+    ]
+    h = habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing)
+    assert h.cycles[0].plan_cost == pytest.approx(0.2)
+
+
+def test_each_ask_a_session_planned_is_a_fact_with_its_rounds_and_what_they_cost(tmp_path, pricing):
+    [fact] = habits.collect(_rounds_session(tmp_path), pricing).plan_rounds
+    assert (fact.session_id, fact.week) == ("s1", "2026-09-14")
+    assert (fact.versions, fact.sent_back, fact.approved, fact.typed) == (2, 1, True, False)
+    # The steps and files of the plan you approved, not the first one.
+    assert (fact.steps, fact.files) == (3, 3)
+    assert fact.asked == 1
+    # The replies after the first plan through the approval: 2.00 and 1.00. The first plan and the build are not.
+    assert fact.cost == pytest.approx(3.0)
+    assert fact.tokens >= 1_500_000
+
+
+def test_a_plan_approved_when_first_put_up_costs_nothing_in_rounds(tmp_path, pricing):
+    lines = [
+        _said(0, "plan the retry for src/app.py"), _put_up(1, 1, _PLAN_TEXT), _approved_in_dialog(2, 1),
+        _priced(3, [{"type": "text", "text": "Building."}], out=250_000),
+    ]
+    [fact] = habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing).plan_rounds
+    assert (fact.versions, fact.sent_back, fact.approved, fact.cost, fact.tokens, fact.asked) == (1, 0, True, 0.0, 0, 0)
+
+
+def test_a_decline_you_answered_with_a_go_ahead_is_a_typed_approval_in_the_facts(tmp_path, pricing):
+    lines = [
+        _said(0, "plan the retry for src/app.py"), _put_up(1, 1, _PLAN_TEXT), _turned_down(2, 1, "add a step for the docs"),
+        _said(10, "implement the plan"), *_edit_reply(10, 1),
+    ]
+    [fact] = habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing).plan_rounds
+    assert (fact.versions, fact.sent_back, fact.approved, fact.typed) == (1, 0, True, True)
+
+
+def test_a_plan_you_sent_back_and_never_approved_is_a_fact_that_was_not_approved(tmp_path, pricing):
+    lines = [
+        _said(0, "plan the retry for src/app.py"), _put_up(1, 1, _PLAN_TEXT), _turned_down(2, 1, "that is wrong, start again"),
+        _spoke(3, out=100_000),
+    ]
+    [fact] = habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing).plan_rounds
+    assert (fact.versions, fact.sent_back, fact.approved) == (1, 1, False)
+    assert fact.asked == 1
+
+
+def test_a_session_with_no_plan_has_no_plan_facts(tmp_path, pricing):
+    lines = [_said(0, "add the login form to src/app.py"), *_edit_reply(0, 0)]
+    assert habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing).plan_rounds == []
+
+
+def test_the_plan_rounds_table_splits_approved_plans_by_how_often_they_were_sent_back():
+    h = Habits(plan_rounds=[
+        _plan_fact(steps=4, files=2, tokens=0, cost=0.0),
+        _plan_fact(typed=True, steps=2, files=2),
+        _plan_fact(versions=2, sent_back=1, asked=1, steps=6, files=4, tokens=40_000, cost=2.0),
+        _plan_fact(versions=3, sent_back=2, asked=1, steps=8, files=6, tokens=100_000, cost=4.0),
+        _plan_fact(versions=5, sent_back=4, asked=2, steps=10, files=8, tokens=200_000, cost=6.0),
+        _plan_fact(versions=2, sent_back=2, approved=False, asked=1, tokens=20_000, cost=1.0),
+    ])
+    rows = {row["kind"]: row for row in _rows(_table(habits.section_from(h), "habits_plan_rounds"))}
+    assert list(rows) == ["all", "none", "once", "twice", "more", "dropped"]
+    every = rows["all"]
+    # The plan you never approved stays out of the totals for approved plans.
+    assert (every["plans"], every["typed"], every["rounds"], every["asked"]) == (5, 1, 7, 4)
+    assert every["versions"] == pytest.approx((1 + 1 + 2 + 3 + 5) / 5)
+    assert every["steps"] == pytest.approx((4 + 2 + 6 + 8 + 10) / 5)
+    assert every["files"] == pytest.approx((2 + 2 + 4 + 6 + 8) / 5)
+    assert every["tokens"] == pytest.approx((40_000 + 100_000 + 200_000) / 5)
+    assert every["cost"] == pytest.approx(12.0)
+    assert (rows["none"]["plans"], rows["none"]["typed"], rows["none"]["rounds"]) == (2, 1, 0)
+    assert (rows["once"]["plans"], rows["once"]["rounds"], rows["once"]["cost"]) == (1, 1, 2.0)
+    assert (rows["twice"]["plans"], rows["twice"]["rounds"], rows["twice"]["cost"]) == (1, 2, 4.0)
+    assert (rows["more"]["plans"], rows["more"]["rounds"], rows["more"]["asked"], rows["more"]["cost"]) == (1, 4, 2, 6.0)
+    assert (rows["dropped"]["plans"], rows["dropped"]["rounds"], rows["dropped"]["cost"]) == (1, 2, 1.0)
+
+
+def test_the_plan_rounds_table_leaves_out_a_group_with_no_plans():
+    h = Habits(plan_rounds=[_plan_fact(), _plan_fact(versions=2, sent_back=1, asked=1, cost=1.0, tokens=10_000)])
+    assert [row["kind"] for row in _rows(_table(habits.section_from(h), "habits_plan_rounds"))] == ["all", "none", "once"]
+    assert _rows(_table(habits.section_from(Habits()), "habits_plan_rounds")) == []
+
+
+def test_the_plan_rounds_table_has_one_label_for_each_group():
+    assert set(habits.PLAN_ROUND_LABELS) == set(habits.PLAN_ROUND_KINDS)
+    assert habits.PLAN_ASKED_CLASSES == ("question", "critique", "unsure")
 
 
 def test_plan_hard_stays_quiet_and_says_so_when_most_hard_work_is_already_planned():

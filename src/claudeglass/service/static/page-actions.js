@@ -84,11 +84,13 @@ export var RULE_AREA = {
   "spawn-task-prompt": "agents",
   "subagent-volume": "agents",
   "agent-report-size": "agents",
+  "agent-batch-probes": "agents",
   "run-split": "agents",
   "discovery-share": "habits",
   "limit-pressure": "habits",
   "window-budget": "habits",
   "wasted-turns": "habits",
+  "plan-rounds": "habits",
   "data-quality": "data",
   "pricing-coverage": "data",
   "env-attribution-deprecated": "data",
@@ -157,6 +159,8 @@ var RULE_MECHANISM = {
   "spawn-tools-list": "startup",
   "spawn-task-prompt": "startup",
   "agent-report-size": "report",
+  "agent-batch-probes": "carried",
+  "plan-rounds": "carried",
 };
 
 // One or two short sentences on what the change does to the price, with

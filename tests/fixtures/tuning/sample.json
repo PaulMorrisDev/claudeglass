@@ -51,7 +51,26 @@
       "approved": 8,
       "rounds": {"one": 5, "two": 2, "three": 1},
       "rejected_rounds": 4,
-      "feedback_rounds": {"question": 2, "critique": 1, "other": 1}
+      "feedback_rounds": {"question": 2, "critique": 1, "other": 1},
+      "builds": {
+        "kept": {
+          "approvals": 5,
+          "typed": 2,
+          "carried_tokens": 310000,
+          "replies": 140,
+          "context_tokens": 9800000,
+          "cost_usd": 21.5
+        },
+        "cleared": {"approvals": 2, "typed": 1, "carried_tokens": 0, "replies": 60, "context_tokens": 2100000, "cost_usd": 6.25},
+        "handoff": {"approvals": 1, "replies": 25, "cost_usd": 2.0}
+      },
+      "asks": {
+        "all": {"plans": 8, "typed": 3, "sent_back": 4, "asked": 3, "tokens": 5200000, "cost_usd": 4.75},
+        "none": {"plans": 5, "typed": 2, "sent_back": 0, "asked": 0, "tokens": 0, "cost_usd": 0.0},
+        "once": {"plans": 2, "typed": 1, "sent_back": 2, "asked": 1, "tokens": 1400000, "cost_usd": 1.5},
+        "more": {"plans": 1, "typed": 0, "sent_back": 3, "asked": 2, "tokens": 3800000, "cost_usd": 3.25},
+        "dropped": {"plans": 2, "sent_back": 1, "asked": 1, "cost_usd": 0.5}
+      }
     },
     "denials": {"plan_rejected": 4, "question_declined": 1}
   },
@@ -140,7 +159,30 @@
       "sonnet": {"runs": 15, "cost_usd": 9.4},
       "opus": {"runs": 5, "cost_usd": 10.55}
     },
-    "startup_diet_usd": {"general-purpose": 1.25, "workflow-subagent": 3.5, "custom": 0.75}
+    "startup_diet_usd": {"general-purpose": 1.25, "workflow-subagent": 3.5, "custom": 0.75},
+    "probes": {"calls": 480, "single": 130, "by_shell": 22, "runs": 41},
+    "report_turns": {"acknowledged": 14, "acted": 9, "respawned": 3},
+    "launches": {
+      "background": {
+        "runs": 12,
+        "agents": 12,
+        "replies": 410,
+        "single": 150,
+        "start_reads": 31000000,
+        "compactions": 3,
+        "compacted": 2,
+        "shared_reads": 4,
+        "shared_usd": 0.35,
+        "cost_usd": 11.5
+      },
+      "foreground": {"runs": 9, "agents": 9, "replies": 120, "cost_usd": 3.0},
+      "workflow": {"runs": 2, "agents": 9, "replies": 180, "single": 90, "cost_usd": 6.25}
+    },
+    "model_choice": [
+      {"started_by": "direct", "agent_type": "general-purpose", "model": "opus", "chosen": "inherited", "runs": 4, "cost_usd": 9.5, "ceiling_usd": 3.1},
+      {"started_by": "direct", "agent_type": "custom", "model": "sonnet", "chosen": "file", "runs": 10, "cost_usd": 4.0},
+      {"started_by": "workflow", "agent_type": "workflow-subagent", "model": "haiku", "chosen": "not_recorded", "runs": 9, "cost_usd": 6.25}
+    ]
   },
   "overhead": {
     "entrypoints": {"cli": 40, "claude-desktop": 12, "sdk-cli": 2},
@@ -204,5 +246,16 @@
         "reach": {"main": 0.3, "custom": 0.25}
       }
     ]
+  },
+  "compactions": {
+    "sessions": 61,
+    "compacted": 40,
+    "summaries": 220,
+    "triggers": {"auto": 200, "manual": 15, "other": 5},
+    "in_agents": {"subagent": 30, "workflow": 18},
+    "dropped_tokens": 16800000,
+    "write_usd": 17.9,
+    "summary_usd": 20.75,
+    "heavy": {"sessions": 26, "cost_usd": 159.5, "main_usd": 185.9}
   }
 }

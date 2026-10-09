@@ -483,6 +483,21 @@ def compute(
     return cc
 
 
+def model_choice(
+    sessions: Sequence[tuple[TranscriptResult, Sequence[TranscriptResult]]],
+    pricing: Pricing,
+    agent_files: dict | None = None,
+) -> dict[tuple[str, str, str, str], ModelRow]:
+    """The model-choice rows of ``sessions`` alone, keyed by (started by,
+    agent type, model tier word, who chose it): the rows
+    :func:`compute` makes with a calibration, without the matrix or the
+    parts. The tuning export reads these."""
+    cc = CostCentres(sessions=len(sessions))
+    for _top, subs in sessions:
+        _model_rows(subs, pricing, agent_files or {}, cc)
+    return cc.models
+
+
 def matrix_usd(cc: CostCentres) -> dict[str, dict[str, float]]:
     """The report window's matrix as ``centre -> cell -> list-price USD``,
     rows and cells with spend only: the tuning export's block."""

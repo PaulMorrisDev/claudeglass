@@ -579,7 +579,21 @@ that order, each as a heading with a one-line answer beside it.
    of its own, with its own fix: the replies lost to tool errors and to
    calls a hook or a guard blocked, which used to be counted in Work
    habits. Its fix is a prompt to check a path or name first and to stop
-   and ask when a call is blocked, and its link opens the check.
+   and ask when a call is blocked, and its link opens the check. **Replies to agent reports** is another:
+what the replies to a background agent's or a workflow's report cost, how many only
+acknowledged it and how many woke a session that had sat idle for an hour
+or more. **Plans sent back** counts the plans you sent back before you
+approved one, with what those rounds cost, and offers one line that asks
+Claude to critique its plan first. **Builds after a plan** sets the builds
+that carried on in the planning session beside those that started fresh,
+and points at Spend › Savings.
+
+   A row with a table behind it also links to the figures. While it is Worth
+   a look or Do this, **See the figures** (`tableLink`, from `CHECK_TABLES`
+   in page-overview.js) opens a table of the figures behind that row and highlights it,
+   as an evidence link does: Models to the model-choice table, Conversation
+   summaries to the summary table, Replies to agent reports to the replies
+   table, and Plans sent back to the plans table.
 3. **Did your changes work?** The changes made in the window, from
    `/api/impact` for the window and project picked, judged first
    (`renderChangeCards` with `compact` and `judgedFirst`): the newest 2
@@ -629,6 +643,18 @@ that order, each as a heading with a one-line answer beside it.
    "no setting known" and a cell no check covers says "No advice". The
    Overview's checklist has the matching `cost-centres` row, which is
    information and never "worth a look".
+
+   Last in that part, **More detail** (`detailPart`, links.js
+   `DETAIL_TABLES`) has a link for each table that the checks and cards
+   read, with what it shows: model choice (Agents › Subagents), cost per
+   subagent run (Agents › Subagents), what agent runs did, single lookups,
+   replies to agent reports and plans sent back (Work habits), how the
+   build began after an approved plan (Spend › Savings) and conversation
+   summaries (Spend › Usage). A link is drawn only when the report built
+   that table with rows. Following it opens the page that shows the table,
+   unfolds what hides it and highlights it (`tableLink`, the `t`
+   parameter that `revealEvidence` reads); a table its page leaves to the
+   full report opens in a panel, so the link always lands somewhere.
 5. **Scores, totals, and how amounts are counted** (folded): the billing
    mode and why (`report.meta`), the scorecard's five areas as a table
    (`scorecard.dimensions`, which a recommendation's evidence can point
@@ -844,7 +870,10 @@ sections, each from its own route rather than the full report:
   per agent type and the fidelity check, with chart 3;
 - `/api/plan-handoff`: what building in a fresh session after each big
   approved plan could have saved (no bar in chart 2: it overlaps with
-  the conversation-summary saving);
+  the conversation-summary saving), and how each approved plan's build
+  began: carried on in the planning session, started after a `/clear`
+  within a minute of the approval, or started from the plan in a new
+  session, with the context a build reply read in each;
 - `/api/model-swap`: the most a one-tier-cheaper model could save,
   counting for each subagent only the runs its agent file's model
   decides, and the agents that ran on a larger model than their work
@@ -1034,11 +1063,17 @@ listed here, and a week that can't be measured is a gap in the pace line,
 read out as an en dash); then **Rework after delivery** (the
 `rework` section, `renderRework`), straight after the top habit cards
 and before the brief templates; the brief templates with Copy
-buttons; **Kinds of task**; the other breakdowns under More tables; and
-the notes (More tables includes **Big tool output**, which counts big
-results per tool with what carrying them cost, and **Explore cost by
-model**, which splits what your Explore agents cost across the models they
-ran on). Then the `prompting` section, **How you prompt**
+buttons; **Kinds of task**; **Plans sent back**, which groups the approved
+plans by how many times a plan was sent back first; the other breakdowns
+under More tables; and the notes (More tables includes **Big tool output**,
+which counts big results per tool with what carrying them cost, **Explore
+cost by model**, which splits what your Explore agents cost across the
+models they ran on, **Single lookups, one call per reply**, which counts
+the replies that made one read-only call and nothing else, **Replies to
+agent reports**, which splits the main session's replies to a background
+agent's or a workflow's report into only acknowledged, acted on and started
+more agents, and **What agent runs did**, which sets the agent runs side by
+side by how they were started). Then the `prompting` section, **How you prompt**
 (`renderPromptingSection`): a card per prompting habit seen (small
 requests sent one at a time, the same request again, asking how it's
 going, stopping Claude again and again, big tasks without a plan, vague
@@ -1741,7 +1776,7 @@ hand with Playwright against a dev service.
 | `app.css` | the tokens, the component and page styles, then motion, reduced motion and forced colours |
 | `app.js` | the entry point: the router (`resolveRoute`, `changeView`, `showView`, `VIEW_RENDERERS`), the sidebar, the page header, `menuControl`, the theme toggle and `init()` |
 | `core.js` | `el`, `clear`, the storage helpers, `state`, `WINDOW_OPTIONS`, `renderedViews`, the `goTo` and project hooks, `onParams`, `highlight` and `listenHighlight` |
-| `links.js` | `PAGES`, `viewLabel`, `viewIntro`, `parseHash`, `formatHash`, `scopeParams`, `OLD_TAB_VIEWS`, `SECTION_PAGE_MAP`, `TABLE_PAGE_MAP`, `pageLink`, `GLOSSARY`, `JARGON`, `COST_CARDS`, `termLink`, `cardLink`, the `{{page:}}` pattern |
+| `links.js` | `PAGES`, `viewLabel`, `viewIntro`, `parseHash`, `formatHash`, `scopeParams`, `OLD_TAB_VIEWS`, `SECTION_PAGE_MAP`, `TABLE_PAGE_MAP`, `pageLink`, `tableLink`, `DETAIL_TABLES`, `GLOSSARY`, `JARGON`, `COST_CARDS`, `termLink`, `cardLink`, the `{{page:}}` pattern |
 | `format.js` | `formatCell`, `money`, `moneyText`, `moneyNode`, `moneyParts`, `moneyUnit`, `moneyAxis`, `readableAmounts`, `compactNumber`, `signedPercent`, `fraction`, `shortTs`, `relativeTime`, `windowWhen`, `modelName`, `modelNames`, `projectName`, `setKnownProjects` |
 | `api.js` | `fetchJson`, `loadInto`, `postJson`, `withWindow`, `scopeKey`, `loadReport`, `loadProjects`, `loadRecommendations`, `loadQuickActions`, `prefetchActions`, `actionIndex`, `findSection`, the figures-as-of stamp, the connection state |
 | `ui.js` | the components in the table above, plus `prose`, `countUp`, `enterInTurn` and `motionOK` |

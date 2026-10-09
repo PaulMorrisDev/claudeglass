@@ -2028,6 +2028,9 @@ class _PlanWatch:
     #: The id of the latest plan's ``ExitPlanMode`` call, which a plan
     #: check asked after it is about (``PlanCheck.plan_tool_use_id``).
     latest_id: str = ""
+    #: The time of the line being read, which stamps the plan it approves
+    #: (``PlanStats.approved_ts``).
+    at: str = ""
 
     def see_call(self, pending: _PendingTurn) -> None:
         """A newer ``ExitPlanMode`` call closes the open plan unapproved:
@@ -2045,11 +2048,14 @@ class _PlanWatch:
         """The dialog answered ``plan``: it stays open unless it was
         approved."""
         if plan is not None:
+            if plan.outcome == "approved":
+                plan.approved_ts = self.at
             self.open = None if plan.outcome == "approved" else plan
 
     def approve(self) -> None:
         if self.open is not None:
             self.open.outcome = "approved_by_message"
+            self.open.approved_ts = self.at
             self.open = None
 
     def note_mode(self, mode) -> None:
@@ -2187,6 +2193,7 @@ def _finalize_turn(
     human_adjust = human_remind = human_change = preceding_not_typed = False
     human_gos: list[bool] = []
     human_statuses: list[bool] = []
+    human_handoffs: list[bool] = []
     human_questions: list[bool] = []
     queued_prompts = queued_chars = queued_steps = 0
     queued_correction = queued_adjust = queued_go = queued_status = False
@@ -2252,6 +2259,7 @@ def _finalize_turn(
         human_change = human_change or bool(pending_event.detail.get("change"))
         human_gos.append(bool(pending_event.detail.get("go")))
         human_statuses.append(bool(pending_event.detail.get("status")))
+        human_handoffs.append(bool(pending_event.detail.get("plan_handoff")))
         human_questions.append(bool(pending_event.detail.get("question")))
 
     cap: CaptureTag | None = None
@@ -2369,6 +2377,7 @@ def _finalize_turn(
         human_adjust=human_adjust,
         human_go=bool(human_gos) and all(human_gos),
         human_status=bool(human_statuses) and all(human_statuses),
+        human_plan_handoff=any(human_handoffs),
         human_question=bool(human_questions) and all(human_questions),
         human_change=human_change,
         preceding_not_typed=preceding_not_typed,
@@ -2788,6 +2797,7 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         line_type = d.get("type")
 
         line_ts = d.get("timestamp")
+        plan_watch.at = line_ts if isinstance(line_ts, str) else ""
         if isinstance(line_ts, str) and line_ts:
             line_at = _utc(line_ts)
             if line_at is not None and (latest_at is None or line_at > latest_at):

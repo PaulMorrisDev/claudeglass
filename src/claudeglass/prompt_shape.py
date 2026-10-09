@@ -42,6 +42,7 @@ from .capture_catalogue import (
     PLAN_DOC_CHARS,
     PLAN_DOC_ITEMS,
     PLAN_FEEDBACK_SCAN_CHARS,
+    PLAN_HANDOFF_PATTERN,
     PLAN_HEADING_PATTERN,
     PLAN_ITEM_PATTERN,
     PLAN_LONG_CHARS,
@@ -88,6 +89,7 @@ _ADJUST_RE = re.compile(ADJUST_PATTERN, re.IGNORECASE)
 _REMIND_RE = re.compile(REMIND_PATTERN, re.IGNORECASE)
 _GO_RE = re.compile(GO_PATTERN, re.IGNORECASE)
 _STATUS_RE = re.compile(STATUS_PATTERN, re.IGNORECASE)
+_PLAN_HANDOFF_RE = re.compile(PLAN_HANDOFF_PATTERN, re.IGNORECASE)
 _PLAN_UNSURE_RE = re.compile(PLAN_UNSURE_PATTERN, re.IGNORECASE)
 _PLAN_QUESTION_RE = re.compile(PLAN_QUESTION_PATTERN, re.IGNORECASE)
 _PLAN_CRITIQUE_RE = re.compile(PLAN_CRITIQUE_PATTERN, re.IGNORECASE)
@@ -256,6 +258,13 @@ def is_go(text: str) -> bool:
     ahead", "do it", "implement the plan", "merge it"."""
     text = text.strip()
     return len(text) <= GO_MAX_CHARS and _GO_RE.fullmatch(text) is not None
+
+
+def is_plan_handoff(text: str) -> bool:
+    """Whether ``text`` opens with the wording Claude Code writes when you
+    approve a plan and clear the context: "Implement the following plan:",
+    then the plan. Only the opening is read."""
+    return _PLAN_HANDOFF_RE.match(text) is not None
 
 
 def is_status(text: str) -> bool:

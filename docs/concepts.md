@@ -1,6 +1,6 @@
 # Concepts
 
-How Claude Code's prompt cache works, and the definitions behind the numbers this tool reports: the two token totals, what counts as a cache rebuild, what the cache-lifetime simulation assumes, how CLAUDE.md files and skills are counted, how windows, what-if estimates and before/after comparisons work, and how the quality signals are counted and compared. The [README](../README.md) covers installing and using the tool.
+How Claude Code's prompt cache works, and the definitions behind the numbers this tool reports: the two token totals, what counts as a cache rebuild, what the cache-lifetime simulation assumes, how CLAUDE.md files and skills are counted, how windows, what-if estimates and before/after comparisons work, how the quality signals are counted and compared, and what the figures for agents, plans and conversation summaries mean. The [README](../README.md) covers installing and using the tool.
 
 ## 1. The two token totals
 
@@ -180,20 +180,26 @@ any of these holds:
   rather than letting it expire); or
 - it read less than `cr_ratio` of the part beyond `cr0`.
 
-Every re-cache turn is assigned one of three **signatures**, tested in
+Every re-cache turn is assigned one of four **signatures**, tested in
 this order, the first that applies winning:
 
 1. **`limit-expiry`** — the wait spanned a usage-limit pause (see
    [limits.md](limits.md)).
-2. **`full-expiry`**, by the clock — the wait since the previous call
+2. **`post-compaction`** — the first reply after a compaction (a
+   `compact_boundary` before it, or the estimated compaction call right
+   before it). The summary replaced the session part, so the write is the
+   compaction's whatever the wait or the read looked like. It is still a
+   rebuild, so every count of rebuilds, and the re-read allowance the
+   run-split card takes from them, is unchanged; only the label differs.
+3. **`full-expiry`**, by the clock — the wait since the previous call
    reached the time its cache lasts: one hour when that call wrote more
    at the 1-hour rate than at the 5-minute rate, else five minutes. A
    call that wrote nothing keeps the lifetime of the last call that did.
-3. **`full-expiry`**, by the read — the turn read no more than `cr0` +
+4. **`full-expiry`**, by the read — the turn read no more than `cr0` +
    3,000 tokens (or under `full_expiry_cr`, default 2,000 tokens,
    outright): the session part was gone even though the wait was shorter
    than the lifetime.
-4. **`prefix-invalidated`** — only then: part of the session was read, so
+5. **`prefix-invalidated`** — only then: part of the session was read, so
    the cache had *not* expired, but something upstream of the cached
    prefix changed anyway (a notification, an attachment, a model switch,
    ...) and broke it regardless.
@@ -705,7 +711,17 @@ delivered the work (`redo_cost`), once, even when a cycle is both a redo and
 rework. A message is *planned* when it was written in plan mode, called
 `ExitPlanMode`, or came after a plan you approved by typing, until its piece
 of work ends. When most of your hard asks were planned and none of the others
-was redone, the digest says you are already doing this.
+was redone, the digest says you are already doing this. What planning cost
+(`plan_cost`) runs to the last plan Claude put up in the message, so a plan
+you sent back counts its rounds.
+
+**Plans sent back.** One *ask* is every plan Claude put up until you
+approved one. A plan is *sent back* when the dialog declined it and you
+did not then type a go-ahead: a decline followed by "implement the plan"
+is an approval by typing. Plans Claude puts up again unchanged after an
+approval are the same plan. The Plans sent back table groups the approved
+plans by how often they were sent back first. See
+[`plan-handoff.md`](plan-handoff.md#how-often-a-plan-is-sent-back).
 
 **Coverage.** The share of prompt cycles whose final reply carried a
 `[cg: ...]` tag (`CaptureUsage.coverage`), and separately the share of
@@ -822,3 +838,78 @@ cites how many said they didn't.
 The full table reference — every column of every `habits` and `capture`
 table — is in
 [`docs/sections-reference.md`](sections-reference.md#habits-habitspy).
+
+
+## 10. Where agent and context tokens go
+
+These figures say where tokens go when agents and long conversations are
+involved. Each is worked out from the transcripts alone and priced at list
+prices, whatever you pay. [`sections-reference.md`](sections-reference.md)
+has every column; this is what the words mean.
+
+**Cost centres.** Every priced reply lands in one cell of a matrix. The rows
+say who spent it: the main session, agents the main session started
+(direct), agents a workflow started, and each session's first call. The
+columns say what it paid for: the starting prompt read from the cache (base
+read), the conversation read from the cache (above-base read), new writes
+(growth write), a cache rebuilt (rewrite), the reply after a conversation
+summary (post-compaction) and output. The cells add up to the total spend.
+Only the base read is mostly a setting's doing, so it is split into parts:
+those a setting can remove (MCP servers, CLAUDE.md files, skills, an agent's
+tool list) each name the check that covers them, and those Claude Code
+itself sends say "no setting known". A part is counted once, in the lever
+that removes it, so two levers never claim the same tokens.
+
+**Model choice.** For each agent type and model, the table says who chose
+the model: the call that started the agent, its agent file, or nobody, so
+it took the session's. The Sonnet ceiling is the most that moving the runs
+to Sonnet could save with the same tokens. It is information, not a
+forecast: a cheaper model may need more replies.
+
+**How an agent run was started.** A background agent and a foreground agent
+are told apart by the `run_in_background` of the parent's call, and a
+workflow agent by its transcript kind. An agent's own meta says foreground
+for all three, so it can't be used. A workflow's agents, and every agent of
+a resumed workflow, are one run.
+
+**Single lookups.** A reply is a single lookup when it made one read-only
+call (a Read, a Grep, a Glob or a shell command that reads files) and
+nothing else. Every reply re-reads the whole context, so lookups sent one
+by one cost one re-read each, where one message holding them all would cost
+one. The saving counts the replies after the first of each stretch, and it
+is an upper bound, since some lookups need the answer to the one before.
+
+**Starting context times replies.** What an agent starts with is read again
+on every reply. The product is an upper bound on what the starting context
+cost over the run: the cache makes most of those reads cheaper than a
+fresh one. The same goes for a file several sibling agents read: it counts
+the one most siblings read, often the plan or spec they were all given.
+
+**Replies to an agent's report.** When a background agent or a workflow finishes, its
+report arrives as a message and the main session answers it with a reply
+that reads the whole session again. The reply either only acknowledges the
+report, acts on it or starts more agents. A reply that starts an hour or
+more after the one before it is a wake-up: the cache had expired, so it
+wrote the context again.
+
+**How a build began.** After you approve a plan, the build carries on in the
+planning session (`kept`), starts after a `/clear` within 60 seconds
+(`cleared`), or starts in a new session of the same project that opens with
+the plan (`handoff`). A kept build reads the whole planning conversation on
+every reply; a fresh one reads the plan.
+
+**Plans sent back.** An ask is every plan Claude put up until you approved
+one. The table groups asks by how many times you sent one back, with the
+replies in between and what they cost.
+
+**What conversation summaries cost.** Besides the cache write on the reply
+after a summary, a session that summarised 3 times or more is one where the
+conversation grew and shrank repeatedly. The share of main-session cost in
+those sessions says how much of your spend long conversations account for.
+Only the main conversation's own cost counts; its agents stay in the agent
+rows.
+
+**What the tuning export keeps.** Counts, closed words and list-price
+amounts for each of these, with a custom agent type as `custom`, a model as
+its family and a file as an extension class and a size bucket. See
+[`exports.md`](exports.md#claudeglass-tuning).

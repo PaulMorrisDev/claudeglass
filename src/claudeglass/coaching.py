@@ -7,10 +7,6 @@ so it can't build a report. This module works out, from a report of your
 recent sessions, what depends on your history, and writes it to
 ``<config_dir>/coaching.json`` for the hook to read:
 
-- **split_run**: agent type -> replies. An agent type's long runs would
-  have cost you less split every that many replies: the ``run-split``
-  tip's "Split every (replies)". Only agent types with that tip, and not
-  one you ignored on the dashboard, get the hint.
 - **plan_fresh**: whether the fresh-session hint after an approved plan is
   on. Off when you ignored the ``plan-handoff`` tip, or when most of your
   /cg-feedback answers say the builds after a plan relied on the
@@ -22,11 +18,12 @@ recent sessions, what depends on your history, and writes it to
   your handoff answers say the plan was enough: the hint then speaks at the
   approval sooner.
 - **muted** and **thresholds** (``drip_count``, ``big_paste_tokens``,
-  ``cold_min_tokens``): what your answers to the tip question and Claude's
-  own misfire calls do to a tip (``capture_catalogue.TIP_WRONG_MIN``). A
-  hint called wrong that many times in all has its number raised by
-  ``coaching_rearm_factor``, or, with no number of its own, is muted: the
-  hook skips it.
+  ``cold_min_tokens``, ``report_reread_tokens``): what your answers to the
+  tip question and Claude's own misfire calls do to a tip
+  (``capture_catalogue.TIP_WRONG_MIN``). A hint called wrong that many times
+  in all has its number raised by ``coaching_rearm_factor``, or, with no
+  number of its own (``status_poll``, and ``split_run``, which speaks for
+  two reasons and only one has a number), is muted: the hook skips it.
 - **once**: hints you answered "right but I knew" more often than "useful",
   at least ``capture_catalogue.TIP_KNOWN_MIN`` times: the hook shows each
   once a session.
@@ -41,11 +38,12 @@ recent sessions, what depends on your history, and writes it to
   :data:`MIN_PIECE_REPLIES` replies, and only once there are
   :data:`MIN_PIECES` of them; ``0`` before that.
 
-The file holds agent-type names, hint ids and numbers only: no paths,
-prompts or session ids. The dashboard's service rewrites it once a day
+The file holds hint ids and numbers only: no paths, prompts, agent types or
+session ids. The dashboard's service rewrites it once a day
 (``service/coaching_job.py``); ``claudeglass capture refresh``
 rewrites it now. The hook reads a missing or unreadable file as empty:
-no split hint, the plan hint on.
+the plan hint on, every number its default. (An older file's ``split_run``
+map of agent types is ignored: the split hint no longer depends on the type.)
 """
 
 from __future__ import annotations
@@ -121,10 +119,6 @@ def typical_piece_tokens(corpus) -> int:
     return int(statistics.median(sizes)) if len(sizes) >= MIN_PIECES else 0
 
 
-def _evidence_value(rec, label: str):
-    return next((value for item_label, value, *_ in rec.evidence if item_label == label), None)
-
-
 def _rearm_factor(config_thresholds: dict | None) -> float:
     """``coaching_rearm_factor``: ``config.toml``'s own, else the default
     (at least 1: a factor under it would lower what it raises)."""
@@ -168,14 +162,9 @@ def from_report(report, config_dir: str | Path, config_thresholds: dict | None =
     :func:`typical_piece_tokens` of the corpus the report was built from."""
     recs = list(report.recommendations)
     skip = ignores.skip_keys(config_dir, recs, None)
-    split_run: dict[str, int] = {}
     plan_fresh = True
     for rec in recs:
-        if rec.id == "run-split" and rec.agent_type and rec.key not in skip:
-            every_n = _evidence_value(rec, "Split every (replies)")
-            if isinstance(every_n, int) and every_n > 0:
-                split_run[rec.agent_type] = every_n
-        elif rec.id == "plan-handoff" and rec.key in skip:
+        if rec.id == "plan-handoff" and rec.key in skip:
             plan_fresh = False
     feedback = handoff._feedback_on_plans(report)
     if feedback["answers"] >= handoff.MIN_FEEDBACK_ANSWERS and feedback["no"] * 2 > feedback["answers"]:
@@ -192,7 +181,6 @@ def from_report(report, config_dir: str | Path, config_thresholds: dict | None =
         "version": _VERSION,
         "built_at": (now or datetime.now(timezone.utc)).isoformat(timespec="seconds"),
         "days": DAYS,
-        "split_run": dict(sorted(split_run.items())),
         "plan_fresh": plan_fresh,
         "thresholds": {"plan_fresh_tokens": plan_fresh_tokens, **raised},
         "muted": muted,
@@ -224,15 +212,8 @@ def _raised(data: dict, key: str) -> bool:
 def describe(data: dict) -> list[str]:
     """``coaching.json`` in words, for ``capture status``."""
     if not data:
-        return ["No split points yet: the dashboard's service works them out from your sessions once a day."]
-    splits = data.get("split_run") or {}
+        return ["No coaching numbers yet: the dashboard's service works them out from your sessions once a day."]
     lines = []
-    if splits:
-        lines.append(
-            "Split hint for: " + ", ".join(f"{agent} (every {n} replies)" for agent, n in sorted(splits.items()))
-        )
-    else:
-        lines.append("No agent type's runs cost you more for running long, so no split hint.")
     if data.get("plan_fresh") is False:
         lines.append("The fresh-session hint after a plan is off: you ignored its tip, or said builds need the discussion.")
     muted = [hint for hint in data.get("muted") or () if hint in capture_catalogue.TIP_HINT_TITLES]

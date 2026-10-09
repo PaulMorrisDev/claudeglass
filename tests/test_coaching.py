@@ -1341,57 +1341,6 @@ def test_a_prompt_hint_comes_before_the_cold_return_receipt(tmp_path):
     assert _kind(_send(tmp_path, records, paste, session="s2", now=NOW + timedelta(seconds=30))) == "cold_return"
 
 
-def _agent(tmp_path, records, agent_id="abc", *, nested: bool = False) -> tuple[str, Path]:
-    session = _transcript(tmp_path, [_prompt(), _reply(20_000)], "sess.jsonl")
-    folder = tmp_path / "sess" / "subagents"
-    if nested:
-        folder = folder / "workflows" / "run1"
-    agent_path = Path(_transcript(folder, records, f"agent-{agent_id}.jsonl"))
-    return session, agent_path
-
-
-def test_a_long_subagent_run_gets_the_split_hint_at_your_split_point(tmp_path):
-    config_dir = _config_dir(tmp_path)
-    (config_dir / cat.COACHING_FILE).write_text(json.dumps({"split_run": {"general-purpose": 3}}), encoding="utf-8")
-    # Two records of one reply count once.
-    session, agent_path = _agent(tmp_path, [_prompt(), _reply(1_000, message_id="m1"), _reply(1_000, message_id="m1"),
-                                            _reply(2_000, message_id="m2")])
-    call = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "transcript_path": session, "agent_id": "abc",
-            "agent_type": "general-purpose"}
-    assert _coach(tmp_path, call) == ""
-    with open(agent_path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps(_reply(3_000, message_id="m3")) + "\n")
-    # You get a notice; the subagent gets nothing.
-    note, notice = HOOK.coaching_for({"session_id": "s1", "cwd": "/work/app", **call}, ON, CATALOGUE, config_dir, now=NOW)
-    assert note == "" and notice == cat.COACHING_NOTICE["split_run"].format(agent="general-purpose", replies=3, every_n=3)
-    state = json.loads((config_dir / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
-    assert state["agents"]["abc"]["replies"] == 3
-    # Once a run, however long it goes on.
-    with open(agent_path, "a", encoding="utf-8") as handle:
-        handle.writelines(json.dumps(_reply(3_000 + n, message_id=f"m{n}")) + "\n" for n in range(10, 20))
-    assert HOOK.coaching_for({"session_id": "s1", "cwd": "/work/app", **call}, ON, CATALOGUE, config_dir,
-                             now=NOW + timedelta(hours=2)) == ("", "")
-    # A summary starts the count again.
-    with open(agent_path, "a", encoding="utf-8") as handle:
-        handle.write(json.dumps({"type": "system", "subtype": "compact_boundary"}) + "\n")
-        handle.write(json.dumps(_reply(1_000, message_id="m4")) + "\n")
-    assert _coach(tmp_path, call, now=NOW + timedelta(hours=3)) == ""
-    assert json.loads((config_dir / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))["agents"]["abc"]["replies"] == 1
-
-
-def test_the_split_hint_needs_your_split_point_and_skips_workflow_agents(tmp_path):
-    config_dir = _config_dir(tmp_path)
-    (config_dir / cat.COACHING_FILE).write_text(json.dumps({"split_run": {"general-purpose": 1}}), encoding="utf-8")
-    session, _ = _agent(tmp_path, [_reply(1_000, message_id="m1")])
-    other = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "transcript_path": session, "agent_id": "abc",
-             "agent_type": "Explore"}
-    assert _coach(tmp_path, other) == ""
-    assert not (config_dir / cat.COACH_STATE_FILE).exists()
-    nested_session, _ = _agent(tmp_path, [_reply(1_000, message_id="m1")], "wf1", nested=True)
-    workflow = {**other, "agent_type": "general-purpose", "agent_id": "wf1", "transcript_path": nested_session}
-    assert _coach(tmp_path, workflow) == ""
-
-
 def test_your_thresholds_win_over_the_file_and_the_defaults(tmp_path):
     config_dir = _config_dir(tmp_path)
     (config_dir / cat.COACHING_FILE).write_text(
@@ -1426,6 +1375,11 @@ def test_coaching_notes_add_the_prompt_and_plan_hooks():
     # A background Stop keeps the newest reply for the cold-return receipt: it prints nothing, so nothing waits.
     assert (cat.HOOK_SCRIPT, "Stop", "", True) in specs
     assert sum(1 for spec in deep if spec[1] == "Stop") == 1
+    # A SubagentStop records a run that ended too big, in the foreground like the agent metrics' own.
+    assert [spec for spec in specs if spec[1] == "SubagentStop"] == [(cat.HOOK_SCRIPT, "SubagentStop", "", False)]
+    agents = cat.hook_specs((*cat.agent_metric_ids(cat.level_metrics("standard")), "coaching_notes"))
+    assert sum(1 for spec in agents if spec[1] == "SubagentStop") == 1
+    assert not any(spec[1] == "SubagentStop" for spec in cat.hook_specs(("big_output",)))
 
 
 # -- cold_return: the receipt for a return after the prompt cache expired -------------
@@ -1701,7 +1655,7 @@ def test_a_tool_call_keeps_the_newest_reply_in_the_coach_state_and_says_nothing(
 
 
 def test_a_subagents_tool_call_keeps_nothing_of_the_main_sessions_reply(tmp_path):
-    session, _ = _agent(tmp_path, [_prompt(), _reply(1_000, message_id="m1")])
+    session, _ = _agent_run(tmp_path, [_prompt(), _reply(1_000, message_id="m1")])
     call = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "transcript_path": session, "agent_id": "abc",
             "agent_type": "general-purpose"}
     assert _coach(tmp_path, call, result_len=400) == ""
@@ -2022,6 +1976,7 @@ def test_a_prompting_hint_also_shows_you_a_notice_at_once(tmp_path):
 #: Every placeholder a tip or its note can carry, filled the way the hook does.
 _FIELDS = {
     "idle": "40 minutes", "ctx": "150k", "kept": "90k", "count": 3, "tokens": "12k", "compacted": "",
+    "why": cat.COACHING_SPLIT_WHY["compaction"],
     **{key: variants["terminal"] for key, variants in cat.COACHING_HOW.items()},
 }
 _TIP_HINTS = [hint for hint, text in cat.COACHING_TEXT.items() if cat.TIP_LABEL in text]
@@ -2046,7 +2001,8 @@ def test_the_tip_hints_are_split_into_unconditional_and_conditional():
     assert set(cat.CONDITIONAL_TIP_HINTS) == {"big_paste"}
     assert set(cat.CONDITIONAL_TIP_HINTS) <= set(_TIP_HINTS)
     unconditional = set(_TIP_HINTS) - set(cat.CONDITIONAL_TIP_HINTS)
-    assert unconditional == {"plan_fresh", "plan_fresh_early", "drip_feed", "status_poll", "cold_return"}
+    assert unconditional == {
+        "plan_fresh", "plan_fresh_early", "drip_feed", "status_poll", "cold_return", "report_reread", "split_run"}
     # A conditional note tells Claude when to stay quiet; an unconditional one never does.
     for hint in _TIP_HINTS:
         assert ("don't mention this note" in cat.COACHING_TEXT[hint]) == (hint in cat.CONDITIONAL_TIP_HINTS), hint
@@ -2055,9 +2011,9 @@ def test_the_tip_hints_are_split_into_unconditional_and_conditional():
 def test_a_notice_is_the_tip_behind_the_notice_label():
     for hint in cat.NOTICE_HINTS:
         assert cat.COACHING_NOTICE[hint] == cat.NOTICE_LABEL + cat.COACHING_TIP[hint], hint
-    # Every hint with a tip has a notice, and no other hint but the subagent split does.
+    # Every hint with a tip has a notice, and no other hint does.
     assert set(cat.NOTICE_HINTS) == set(cat.COACHING_TIP)
-    assert set(cat.COACHING_NOTICE) == set(cat.COACHING_TIP) | {"split_run"}
+    assert set(cat.COACHING_NOTICE) == set(cat.COACHING_TIP)
 
 
 @pytest.mark.parametrize("entrypoint, note, notice, shown", [
@@ -2092,25 +2048,28 @@ def test_a_tip_always_reaches_claude_and_a_notice_follows_outside_the_desktop_ap
         assert output["systemMessage"] == cat.NOTICE_LABEL + cat.COACHING_TIP["drip_feed"].format(count=3, ctx="20k")
 
 
-def test_a_subagent_notice_stays_where_the_desktop_app_cannot_show_it(tmp_path, monkeypatch):
+def test_the_split_note_reaches_the_main_session_and_the_desktop_app_shows_no_notice_beside_it(tmp_path, monkeypatch):
+    # A subagent's notice never shows, so the tip goes through the main session's Claude, on the desktop too.
     monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "claude-desktop")
-    config_dir = _config_dir(tmp_path)
-    (config_dir / cat.COACHING_FILE).write_text(json.dumps({"split_run": {"general-purpose": 1}}), encoding="utf-8")
-    session, _ = _agent(tmp_path, [_prompt(), _reply(1_000, message_id="m1")])
-    call = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "transcript_path": session, "agent_id": "abc",
-            "agent_type": "general-purpose", "session_id": "s1", "cwd": "/work/app"}
-    note, notice = HOOK.coaching_for(call, ON, CATALOGUE, config_dir, now=NOW)
-    assert note == "" and HOOK.delivery(note, notice) == notice != ""
+    session, _ = _agent_run(tmp_path, [_prompt(), _SUMMARISED, _reply(1_000, message_id="m1")])
+    assert _keep_run(tmp_path, _agent_stop(session))
+    note, notice = HOOK.coaching_for({"cwd": "/work/app", **_after_the_agent(session)}, ON, CATALOGUE,
+                                     _config_dir(tmp_path), now=NOW)
+    assert _kind(note) == "split_run" and notice != ""
+    assert HOOK.delivery(note, notice) == ""
 
 
 def test_a_tip_for_the_user_is_a_highlighted_block_and_the_notices_are_the_prompting_hints():
-    to_the_user = {"plan_fresh", "plan_fresh_early", "cold_return", "status_poll", "drip_feed", "big_paste"}
+    to_the_user = {
+        "plan_fresh", "plan_fresh_early", "cold_return", "status_poll", "drip_feed", "big_paste", "report_reread",
+        "split_run"}
     for hint, text in cat.COACHING_TEXT.items():
         assert (cat.TIP_LABEL in text) == (hint in to_the_user), hint
     assert set(cat.COACHING_NOTICE) == {
-        "plan_fresh", "plan_fresh_early", "cold_return", "status_poll", "drip_feed", "big_paste", "split_run"}
-    # split_run tells the subagent nothing.
-    assert cat.COACHING_TEXT["split_run"] == ""
+        "plan_fresh", "plan_fresh_early", "cold_return", "status_poll", "drip_feed", "big_paste", "report_reread",
+        "split_run"}
+    # split_run is told in the main session, never to the subagent: it is a note like the others.
+    assert cat.TIP_LABEL in cat.COACHING_TEXT["split_run"]
     assert CATALOGUE["coaching"]["notice"] == cat.COACHING_NOTICE
     assert all(notice.startswith(cat.NOTICE_LABEL) for notice in cat.COACHING_NOTICE.values())
     # The reminder is not in the session start note: it is a note on a message of yours, its last line the one to write.
@@ -2127,7 +2086,7 @@ def test_the_prompting_hints_ask_only_for_a_tip_and_never_steer_the_work():
         r"|ask one short question|set out in a few lines|carry on unless",
         re.IGNORECASE,
     )
-    for hint in ("drip_feed", "cold_return", "status_poll"):
+    for hint in ("drip_feed", "cold_return", "status_poll", "report_reread", "split_run"):
         text = cat.COACHING_TEXT[hint]
         assert not steering.search(text), hint
         assert "changes nothing about the work" in text and cat.TIP_LABEL in text, hint
@@ -2317,11 +2276,13 @@ def _report(*recs) -> NS:
     return NS(recommendations=list(recs), sections=[])
 
 
-def test_the_file_holds_the_split_points_you_have_not_ignored(tmp_path):
+def test_the_file_holds_no_split_point_per_agent_type(tmp_path):
+    # The split note no longer depends on an agent's type or a number of replies: the run-split card's
+    # point is not written, ignored or not.
     ignored = _split_rec("Plan", 50)
     ignores.set_ignored(tmp_path, [ignored], ignored=True, project=None)
     data = coaching.from_report(_report(_split_rec("general-purpose", 150), ignored), tmp_path, now=NOW)
-    assert data["split_run"] == {"general-purpose": 150}
+    assert "split_run" not in data
     assert data["plan_fresh"] is True
     assert data["thresholds"] == {"plan_fresh_tokens": 40_000}
     assert data["built_at"] == NOW.isoformat(timespec="seconds")
@@ -2338,9 +2299,9 @@ def test_an_ignored_plan_tip_turns_the_plan_hint_off(tmp_path):
 def test_the_file_round_trips_and_says_how_old_it_is(tmp_path):
     written = coaching.write(tmp_path, coaching.from_report(_report(_split_rec("Explore", 75)), tmp_path, now=NOW))
     assert written == coaching.path(tmp_path)
-    assert coaching.read(tmp_path)["split_run"] == {"Explore": 75}
+    assert coaching.read(tmp_path)["plan_fresh"] is True and "split_run" not in coaching.read(tmp_path)
     assert coaching.age_hours(tmp_path, NOW + timedelta(hours=3)) == pytest.approx(3)
-    assert "Explore (every 75 replies)" in coaching.describe(coaching.read(tmp_path))[0]
+    assert "Explore" not in " ".join(coaching.describe(coaching.read(tmp_path)))
     assert coaching.read(tmp_path / "missing") == {} and coaching.age_hours(tmp_path / "missing") is None
 
 
@@ -2469,13 +2430,13 @@ def test_the_file_holds_the_typical_piece_and_never_a_negative_one(tmp_path):
 def test_the_summary_says_what_the_typical_piece_is_or_that_it_is_not_known_yet():
     assert "Your typical piece of work is about 420,000 tokens" in coaching.describe({"typical_piece_tokens": 420_000})[-1]
     unknown = "Your typical piece of work isn't known yet: it needs a few more sessions."
-    for data in ({"split_run": {}}, {"typical_piece_tokens": 0}, {"typical_piece_tokens": "many"}, {"typical_piece_tokens": -3}):
+    for data in ({"plan_fresh": True}, {"typical_piece_tokens": 0}, {"typical_piece_tokens": "many"}, {"typical_piece_tokens": -3}):
         assert coaching.describe(data)[-1] == unknown, data
     # No file yet has its own line: nothing was worked out, the typical piece included.
-    assert coaching.describe({}) == ["No split points yet: the dashboard's service works them out from your sessions once a day."]
+    assert coaching.describe({}) == ["No coaching numbers yet: the dashboard's service works them out from your sessions once a day."]
 
 
-def test_the_service_job_writes_the_typical_piece_beside_the_split_points(tmp_path):
+def test_the_service_job_writes_the_typical_piece_beside_the_other_numbers(tmp_path):
     config_dir = _config_dir(tmp_path)
     (config_dir / "config.toml").write_text('[capture]\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
     asked = []
@@ -2581,7 +2542,12 @@ def test_the_footprint_says_coaching_notes_cost_tokens_with_capture_off():
 def test_the_hook_list_says_when_the_coaching_entries_run():
     specs = {spec.event: spec for spec in hook_health.capture_specs(("coaching_notes",))}
     assert specs["UserPromptSubmit"].describe() == "capture-hook.py when you send a message"
-    assert specs["PostToolUse"].describe().endswith("after read, search and web results and an approved plan")
+    assert specs["PostToolUse"].describe().endswith(
+        "after read, search and web results, an approved plan and an agent or workflow start"
+    )
+    # The capture level alone watches results to read, and nothing else.
+    deep = {spec.event: spec for spec in hook_health.capture_specs(cat.level_metrics("deep"))}
+    assert deep["PostToolUse"].describe().endswith("after read, search and web results")
 
 
 def test_setup_capture_shows_what_coaching_notes_cost(tmp_path):
@@ -2595,12 +2561,12 @@ def test_setup_capture_shows_what_coaching_notes_cost(tmp_path):
     assert row["actual_label"] == f"3 notes over the last {capture.HISTORY_DAYS} days"
 
 
-def test_refresh_works_the_split_points_out_now(_claude_folder):
+def test_refresh_works_the_coaching_numbers_out_now(_claude_folder):
     config_dir = _claude_folder
     rc, out = _capture(config_dir, "refresh", "--dry-run")
     assert rc == 0 and not coaching.path(config_dir).exists()
     rc, out = _capture(config_dir, "refresh")
-    assert rc == 0 and coaching.read(config_dir)["split_run"] == {}
+    assert rc == 0 and coaching.read(config_dir)["plan_fresh"] is True and "split_run" not in coaching.read(config_dir)
     assert "coaching_notes" in out
     assert "Your typical piece of work isn't known yet" in out and coaching.read(config_dir)["typical_piece_tokens"] == 0
 
@@ -3022,7 +2988,7 @@ def test_most_builds_that_could_have_started_from_the_plan_make_the_hint_speak_s
 
 def test_the_summary_says_which_tips_are_left_out_wait_for_more_or_show_once():
     data = {
-        "split_run": {}, "plan_fresh": True, "typical_piece_tokens": 0,
+        "plan_fresh": True, "typical_piece_tokens": 0,
         "muted": ["status_poll", "not_a_hint"], "once": ["big_paste"],
         "thresholds": {"drip_count": 5, "big_paste_tokens": cat.COACHING_THRESHOLDS["big_paste_tokens"]},
     }
@@ -3031,7 +2997,7 @@ def test_the_summary_says_which_tips_are_left_out_wait_for_more_or_show_once():
     # A number at its default is not raised.
     assert "Tips that now wait for more because you called them wrong: sending small requests one at a time." in lines
     assert "Tips shown once a session because you already knew them: pasting a lot of text." in lines
-    quiet = coaching.describe({"split_run": {}, "plan_fresh": True, "typical_piece_tokens": 0})
+    quiet = coaching.describe({"plan_fresh": True, "typical_piece_tokens": 0})
     assert not any("called them wrong" in line or "knew" in line for line in quiet)
 
 
@@ -3102,3 +3068,415 @@ def test_the_hook_reads_muted_and_once_only_as_lists_of_names():
     assert HOOK._hint_names(["a", 3, None, "b"]) == frozenset({"a", "b"})
     for odd in (None, "plan_fresh", 5, {"plan_fresh": True}):
         assert HOOK._hint_names(odd) == frozenset()
+
+
+# -- report_reread: starting background agents in a long session ----------------------
+
+
+def _started(tool: str = "Agent", response=None, *, tool_input=None, session: str = "s1", **extra) -> dict:
+    """A PostToolUse call for ``tool``, whose result is ``response``."""
+    return _result(tool, {} if response is None else response, session_id=session,
+                   **({"tool_input": tool_input} if tool_input is not None else {}), **extra)
+
+
+def _long_session(tmp_path, ctx: int = 200_000, name: str = "long.jsonl") -> str:
+    return _transcript(tmp_path, [_prompt(), _reply(ctx, ago_s=30)], name)
+
+
+#: Each way a background launch shows, as the hook reads it.
+_BACKGROUND_STARTS = {
+    "asked for it": dict(tool_input={"run_in_background": True, "prompt": "go"}, response="ok"),
+    "flagged async": dict(response={"isAsync": True, "status": "async_launched"}),
+    "status only": dict(response={"status": "async_launched", "agentId": "a1"}),
+    "workflow task": dict(tool="Workflow", response={"taskType": "local_workflow", "taskId": "wf1"}),
+    "launch text": dict(response="Async agent launched successfully. It works in the background."),
+    "workflow text": dict(tool="Workflow", response="Workflow launched in background. Task ID: wf1a2b"),
+    "text in blocks": dict(response=[{"type": "text", "text": "Async agent launched successfully."}]),
+}
+
+
+def test_big_output_never_fires_on_an_agent_or_workflow_result():
+    huge = cat.BIG_OUTPUT_TOKENS * 4 * 5
+    deep = {"capture": {"level": "deep"}}
+    for tool in ("Agent", "Workflow"):
+        payload = {"hook_event_name": "PostToolUse", "tool_name": tool, "tool_input": {},
+                   "tool_response": {"content": [{"type": "text", "text": "r" * huge}]}}
+        assert HOOK.note_for(payload, deep, CATALOGUE) == "", tool
+        assert HOOK.note_for(payload, deep, CATALOGUE, result_len=huge) == "", tool
+    # The same size from a search is a big output.
+    search = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "tool_input": {"pattern": "x"}}
+    assert HOOK.note_for(search, deep, CATALOGUE, result_len=huge) == cat.tool_note_text("big_output")
+
+
+def test_the_quiet_hint_never_fires_on_an_agent_or_workflow_result(tmp_path):
+    for n, tool in enumerate(("Agent", "Workflow")):
+        payload = _started(tool, {"content": [{"type": "text", "text": "r" * 40_000}]}, session=f"s{n}")
+        assert _coach(tmp_path, payload, result_len=40_000) == "", tool
+        assert _coach(tmp_path, payload) == "", tool
+    # The same result from a tool that isn't one of those is.
+    big = _started("Grep", {"mode": "content", "content": "c" * 40_000}, session="s9")
+    assert _kind(_coach(tmp_path, big, result_len=40_000)) == "quiet_output"
+
+
+def test_agent_and_workflow_are_watched_for_the_coaching_hint_only():
+    assert set(cat.SPAWN_TOOLS) == {"Agent", "Workflow"} and set(cat.SPAWN_TOOLS) <= set(cat.COACHING_TOOLS)
+    assert CATALOGUE["spawn_tools"] == list(cat.SPAWN_TOOLS)
+    post = lambda ids: next(spec[2] for spec in cat.hook_specs(ids) if spec[1] == "PostToolUse")
+    assert post(["coaching_notes"]).endswith("|Agent|Workflow") and "Agent" not in post(cat.level_metrics("deep"))
+
+
+@pytest.mark.parametrize("start", list(_BACKGROUND_STARTS))
+def test_a_background_agent_started_in_a_long_session_gets_the_report_reread_note(tmp_path, start):
+    spec = dict(_BACKGROUND_STARTS[start])
+    tool = spec.pop("tool", "Agent")
+    payload = _started(tool, transcript_path=_long_session(tmp_path), **spec)
+    note = _coach(tmp_path, payload)
+    assert _kind(note) == "report_reread"
+    # What one re-read of the session is, said as a number and nothing of the work.
+    assert "about 200k tokens" in note and "reply to each report" in note
+    # A tip note: Claude passes the last line on.
+    assert note.rstrip().splitlines()[-1].startswith(cat.TIP_LABEL)
+
+
+def test_a_foreground_or_small_or_nested_start_gets_no_report_reread_note(tmp_path):
+    long = _long_session(tmp_path)
+    # It ran in the foreground, so its report came back in this very reply.
+    done = {"status": "completed", "content": [{"type": "text", "text": "done"}]}
+    assert _coach(tmp_path, _started(transcript_path=long, response=done)) == ""
+    # A session under the line.
+    small = _transcript(tmp_path, [_prompt(), _reply(149_000, ago_s=30)], "small.jsonl")
+    assert _coach(tmp_path, _started(transcript_path=small, response={"isAsync": True}, session="s2")) == ""
+    # Nothing known of the session's size.
+    assert _coach(tmp_path, _started(response={"isAsync": True}, session="s3")) == ""
+    # A subagent starting its own helper is not the main session re-reading anything.
+    nested = _started(transcript_path=long, response={"isAsync": True}, session="s4", agent_id="abc",
+                      agent_type="general-purpose")
+    assert _coach(tmp_path, nested) == ""
+    # A background shell command is no agent: its tool is not watched for this hint.
+    shell = {"hook_event_name": "PostToolUse", "tool_name": "Bash", "tool_input": {"run_in_background": True},
+             "tool_response": {"stdout": "ok"}, "transcript_path": long, "session_id": "s5"}
+    assert _coach(tmp_path, shell) == ""
+
+
+def test_the_report_reread_line_is_the_configured_one():
+    assert cat.COACHING_THRESHOLDS["report_reread_tokens"] == 150_000
+    assert CATALOGUE["coaching"]["thresholds"]["report_reread_tokens"] == 150_000
+    assert HOOK.coaching_thresholds(CATALOGUE["coaching"], ON, {})["report_reread_tokens"] == 150_000
+
+
+def test_the_report_reread_note_rests_half_an_hour_then_comes_back(tmp_path):
+    long = _long_session(tmp_path)
+    start = lambda **kw: _started(transcript_path=long, response={"isAsync": True}, **kw)
+    cooldown = cat.COACHING_THRESHOLDS["cooldown_minutes"]
+    assert cooldown == 30 and _kind(_coach(tmp_path, start())) == "report_reread"
+    # Another start soon after is quiet, up to the last minute of the rest.
+    assert _coach(tmp_path, start(), now=NOW + timedelta(minutes=1)) == ""
+    assert _coach(tmp_path, start(), now=NOW + timedelta(minutes=cooldown - 1)) == ""
+    # Past it, the note shows again.
+    assert _kind(_coach(tmp_path, start(), now=NOW + timedelta(minutes=cooldown + 1))) == "report_reread"
+    # Another session has its own rest.
+    assert _kind(_coach(tmp_path, start(session="s2"))) == "report_reread"
+    state = json.loads((tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
+    hints = [row["hints"]["report_reread"] for row in state["sessions"].values()]
+    assert sorted(hint["n"] for hint in hints) == [1, 2]
+    # Numbers only: no word of the work is kept.
+    assert all(set(hint) <= {"ts", "stake", "n", "rest", "once"} for hint in hints)
+
+
+def test_the_report_reread_note_is_a_notice_too_where_the_app_shows_one(tmp_path):
+    long = _long_session(tmp_path)
+    payload = {"session_id": "s1", "cwd": "/w", "hook_event_name": "PostToolUse", "tool_name": "Agent",
+               "tool_input": {}, "tool_response": {"isAsync": True}, "transcript_path": long}
+    note, notice = HOOK.coaching_for(payload, ON, CATALOGUE, _config_dir(tmp_path), now=NOW)
+    assert _kind(note) == "report_reread"
+    # The hint carries a tip, so the note is the way it reaches you, and the notice is its short form.
+    assert "report_reread" in cat.NOTICE_HINTS and "200k" in notice
+
+
+def test_a_report_reread_tip_you_called_wrong_is_not_shown(tmp_path):
+    _as_the_daily_run_writes_it(tmp_path, _tips_report(("report_reread", 0, 0, 2, 0)))
+    long = _long_session(tmp_path)
+    assert _coach(tmp_path, _started(transcript_path=long, response={"isAsync": True})) == ""
+    # Another hint is still shown.
+    cold = _transcript(tmp_path, [_prompt(), _reply(150_000, ago_s=20 * 60)], "cold.jsonl")
+    assert _kind(_coach(tmp_path, {**_prompt_payload(cold), "session_id": "s2"})) == "cold_return"
+
+
+# -- split_run: an agent run that ended too big, recorded when it stops and told in the main session -------------------
+
+
+def _agent_run(tmp_path, records, agent_id="zq7agent", *, workflow: str = "", name: str = "sess",
+               ctx: int = 20_000) -> tuple[str, Path]:
+    """The main session's transcript, and an agent run's own transcript under it: a workflow agent's one level
+    deeper, in the folder of its run."""
+    session = _transcript(tmp_path, [_prompt(), _reply(ctx)], f"{name}.jsonl")
+    folder = tmp_path / name / "subagents"
+    if workflow:
+        folder = folder / "workflows" / workflow
+    return session, Path(_transcript(folder, records, f"agent-{agent_id}.jsonl"))
+
+
+#: Claude Code summarised the run's context part-way through.
+_SUMMARISED = {"type": "system", "subtype": "compact_boundary", "uuid": "c1", "compactMetadata": {"trigger": "auto"}}
+
+
+def _agent_stop(session: str, agent_id: str = "zq7agent", **extra) -> dict:
+    """What ``SubagentStop`` sends when a run ends."""
+    return {"hook_event_name": "SubagentStop", "session_id": "s1", "cwd": "/work/app", "transcript_path": session,
+            "agent_id": agent_id, "agent_type": "general-purpose", **extra}
+
+
+def _keep_run(tmp_path, payload, config=ON, now=NOW) -> bool:
+    return HOOK.keep_run(payload, config, CATALOGUE, _config_dir(tmp_path), now=now)
+
+
+def _pending(tmp_path) -> dict:
+    """The runs that ended too big and have not been told yet, by session."""
+    state = json.loads((tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
+    return {key: row["splits"] for key, row in state["sessions"].items() if "splits" in row}
+
+
+def _after_the_agent(session: str, *, session_id: str = "s1") -> dict:
+    """The call after the main session's foreground agent: the run has ended by now."""
+    return _started("Agent", {"status": "completed", "content": [{"type": "text", "text": "done"}]},
+                    transcript_path=session, session=session_id)
+
+
+def _finished_task(session: str, *, session_id: str = "s1") -> dict:
+    """The message that reports a finished background task."""
+    return {"hook_event_name": "UserPromptSubmit", "transcript_path": session, "session_id": session_id,
+            "prompt": cat.TASK_NOTIFICATION_PREFIX + ">\n<status>completed</status>\n</task-notification>"}
+
+
+def test_a_run_that_summarised_its_context_is_recorded_when_it_stops_as_a_count_and_nothing_else(tmp_path):
+    session, _ = _agent_run(tmp_path, [_prompt("fix the secret widget"), _reply(1_000), _SUMMARISED,
+                                       _reply(2_000, message_id="m2")])
+    assert _keep_run(tmp_path, _agent_stop(session)) is True
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
+    kept = (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8")
+    # No word of the run: not its brief, its type or its id.
+    assert "secret" not in kept and "general-purpose" not in kept and "zq7agent" not in kept
+    # A second run of the session adds to the count.
+    other, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], "second")
+    assert _keep_run(tmp_path, _agent_stop(other, "second"))
+    assert list(_pending(tmp_path).values()) == [{"compaction": 2}]
+
+
+def test_a_run_that_began_from_a_long_brief_is_recorded_at_the_line_and_not_below_it(tmp_path):
+    line = cat.COACHING_THRESHOLDS["split_brief_chars"]
+    assert line == 6_000 and CATALOGUE["coaching"]["thresholds"]["split_brief_chars"] == line
+    short, _ = _agent_run(tmp_path, [_prompt("x" * (line - 1)), _reply(1_000)], name="short")
+    assert _keep_run(tmp_path, _agent_stop(short)) is False
+    assert not (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).exists()
+    long, _ = _agent_run(tmp_path, [_prompt("x" * line), _reply(1_000)], name="long")
+    assert _keep_run(tmp_path, _agent_stop(long)) is True
+    assert list(_pending(tmp_path).values()) == [{"brief": 1}]
+    # Your own line, from config.toml, moves it.
+    config = {**ON, "thresholds": {"coaching_split_brief_chars": 100}}
+    small, _ = _agent_run(tmp_path, [_prompt("y" * 100), _reply(1_000)], name="small")
+    assert _keep_run(tmp_path, _agent_stop(small, session_id="s2"), config) is True
+
+
+def test_a_workflow_agents_brief_is_the_task_its_script_computed(tmp_path):
+    line = cat.COACHING_THRESHOLDS["split_brief_chars"]
+    frame = "[Workflow harness: the task below was computed by the script]\n"
+    relay = _prompt("[Workflow harness: started with]\n" + "r" * (line * 2))
+    short = _prompt(frame + "t" * 100)
+    session, _ = _agent_run(tmp_path, [relay, short, _reply(1_000)], "wf1", workflow="wf_a")
+    # The long line the workflow was started with is context, not this agent's brief.
+    assert _keep_run(tmp_path, _agent_stop(session, "wf1", agent_type="workflow-subagent")) is False
+    long = _prompt(frame + "t" * line)
+    session, _ = _agent_run(tmp_path, [relay, long, _reply(1_000)], "wf2", workflow="wf_b", name="long")
+    assert _keep_run(tmp_path, _agent_stop(session, "wf2", agent_type="workflow-subagent")) is True
+
+
+def test_how_many_replies_a_run_made_decides_nothing(tmp_path):
+    many = [_reply(1_000 + n, message_id=f"m{n}") for n in range(300)]
+    session, _ = _agent_run(tmp_path, [_prompt("go"), *many])
+    assert _keep_run(tmp_path, _agent_stop(session)) is False
+
+
+def test_a_workflow_agent_is_found_in_its_runs_folder_and_recorded_under_its_session(tmp_path):
+    session, path = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], "wf1", workflow="wf_run1")
+    payload = _agent_stop(session, "wf1", agent_type="workflow-subagent")
+    assert HOOK._agent_transcript(payload) == path
+    assert HOOK._agent_transcript({**payload, "agent_id": "missing"}) is None
+    assert _keep_run(tmp_path, payload) is True
+    # Another session's workflow agent has a row of its own; a second agent of the same run adds to the first.
+    other, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], "wf2", workflow="wf_run2", name="other")
+    assert _keep_run(tmp_path, _agent_stop(other, "wf2", session_id="s2", agent_type="workflow-subagent"))
+    sibling, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], "wf3", workflow="wf_run1")
+    assert _keep_run(tmp_path, _agent_stop(session, "wf3", agent_type="workflow-subagent"))
+    assert sorted(counts["compaction"] for counts in _pending(tmp_path).values()) == [1, 2]
+
+
+def test_the_run_is_read_from_the_path_the_stop_names_when_it_names_one(tmp_path):
+    session, path = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], "wf1", workflow="wf_run1")
+    # Not under the session's folder at all: the call's own path is used.
+    elsewhere = tmp_path / "elsewhere" / "agent-q.jsonl"
+    elsewhere.parent.mkdir()
+    elsewhere.write_bytes(path.read_bytes())
+    assert _keep_run(tmp_path, _agent_stop(session, "q", agent_transcript_path=str(elsewhere))) is True
+    assert _keep_run(tmp_path, _agent_stop(session, "unknown")) is False
+
+
+def test_nothing_is_recorded_while_coaching_is_off_for_an_agent_that_sets_up_claude_code_or_a_tip_you_called_wrong(tmp_path):
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)])
+    assert _keep_run(tmp_path, _agent_stop(session), {"capture": {"level": "deep"}}) is False
+    assert _keep_run(tmp_path, _agent_stop(session, agent_type=cat.SKIP_AGENT_TYPES[0])) is False
+    assert _keep_run(tmp_path, _agent_stop(session, session_id="")) is False
+    assert not (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).exists()
+    _as_the_daily_run_writes_it(tmp_path, _tips_report(("split_run", 0, 0, 2, 0)))
+    assert "split_run" in coaching.read(tmp_path / "claudeglass")["muted"]
+    assert _keep_run(tmp_path, _agent_stop(session)) is False
+
+
+def test_a_foreground_run_that_ended_too_big_is_told_once_at_the_agent_call_that_returns(tmp_path):
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)])
+    assert _keep_run(tmp_path, _agent_stop(session))
+    # Not to the subagent, which is still running its own tools, nor after the main session's other tools.
+    inside = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "transcript_path": session,
+              "agent_id": "zq7agent", "agent_type": "general-purpose", "session_id": "s1", "cwd": "/work/app"}
+    assert HOOK.coaching_for(inside, ON, CATALOGUE, _config_dir(tmp_path), now=NOW) == ("", "")
+    nested = _started("Agent", {"isAsync": True}, transcript_path=session, agent_id="zq7agent", agent_type="general-purpose")
+    assert _coach(tmp_path, nested) == ""
+    assert _coach(tmp_path, _started("Grep", {"mode": "content", "content": "c"}, transcript_path=session)) == ""
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
+    note, notice = HOOK.coaching_for({"cwd": "/work/app", **_after_the_agent(session)}, ON, CATALOGUE,
+                                     _config_dir(tmp_path), now=NOW)
+    assert _kind(note) == "split_run"
+    assert cat.COACHING_SPLIT_WHY["compaction"] in note and "Giving the next agent a smaller piece" in note
+    assert note.splitlines()[-1].startswith(cat.TIP_LABEL)
+    assert notice == cat.COACHING_NOTICE["split_run"].format(why=cat.COACHING_SPLIT_WHY["compaction"])
+    # Told: nothing more to say until another run ends too big.
+    assert _pending(tmp_path) == {}
+    assert _coach(tmp_path, _after_the_agent(session), now=NOW + timedelta(hours=3)) == ""
+
+
+def test_a_run_that_ended_in_the_background_is_told_with_the_message_that_reports_it(tmp_path):
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)])
+    assert _keep_run(tmp_path, _agent_stop(session))
+    # Not at a message you typed.
+    assert _coach(tmp_path, _prompt_payload(session)) == ""
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
+    note = _coach(tmp_path, _finished_task(session))
+    assert _kind(note) == "split_run" and cat.COACHING_SPLIT_WHY["compaction"] in note
+    assert _pending(tmp_path) == {}
+    assert _coach(tmp_path, _finished_task(session), now=NOW + timedelta(hours=3)) == ""
+    # A finishing message in a session with nothing recorded says nothing; neither does one inside an agent.
+    assert _coach(tmp_path, {**_finished_task(session, session_id="s2")}) == ""
+    assert _keep_run(tmp_path, _agent_stop(session, session_id="s3"))
+    assert _coach(tmp_path, {**_finished_task(session, session_id="s3"), "agent_id": "x", "agent_type": "Explore"}) == ""
+
+
+def test_the_note_says_why_in_words_for_a_compaction_a_long_brief_or_both(tmp_path):
+    line = f"{int(cat.COACHING_THRESHOLDS['split_brief_chars']):,}"
+    assert line == "6,000"
+    compacted, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="a")
+    long, _ = _agent_run(tmp_path, [_prompt("x" * 6_000), _reply(1_000)], name="b")
+    for session_id, sessions, why in (
+        ("s1", [compacted], "compaction"), ("s2", [long], "brief"), ("s3", [compacted, long], "both"),
+    ):
+        for session in sessions:
+            assert _keep_run(tmp_path, _agent_stop(session, session_id=session_id))
+        note = _coach(tmp_path, _finished_task(session, session_id=session_id))
+        assert _kind(note) == "split_run"
+        assert cat.COACHING_SPLIT_WHY[why].format(brief_chars=line) in note, why
+    assert "{" not in note and "}" not in note
+    assert "6,000 characters" in note
+
+
+def test_one_run_that_both_summarised_and_began_long_counts_under_each_word(tmp_path):
+    session, _ = _agent_run(tmp_path, [_prompt("x" * 6_000), _SUMMARISED, _reply(1_000)])
+    assert _keep_run(tmp_path, _agent_stop(session))
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1, "brief": 1}]
+
+
+def test_a_run_recorded_while_the_note_rests_waits_for_the_rest_and_is_not_lost(tmp_path):
+    cooldown = cat.COACHING_THRESHOLDS["cooldown_minutes"]
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)])
+    assert _keep_run(tmp_path, _agent_stop(session))
+    assert _kind(_coach(tmp_path, _after_the_agent(session))) == "split_run"
+    other, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], "later")
+    assert _keep_run(tmp_path, _agent_stop(other, "later"), now=NOW + timedelta(minutes=1))
+    assert _coach(tmp_path, _after_the_agent(session), now=NOW + timedelta(minutes=cooldown - 1)) == ""
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
+    assert _kind(_coach(tmp_path, _after_the_agent(session), now=NOW + timedelta(minutes=cooldown + 1))) == "split_run"
+    assert _pending(tmp_path) == {}
+    # What the state keeps of the hint is numbers only.
+    state = json.loads((tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8"))
+    (row,) = state["sessions"].values()
+    assert set(row["hints"]["split_run"]) <= {"ts", "stake", "n", "rest", "once"} and row["hints"]["split_run"]["n"] == 2
+
+
+def test_the_report_note_goes_first_and_the_split_note_follows_at_the_next_call(tmp_path):
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], ctx=200_000)
+    assert _keep_run(tmp_path, _agent_stop(session))
+    started = _started("Agent", {"isAsync": True}, transcript_path=session)
+    assert _kind(_coach(tmp_path, started)) == "report_reread"
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
+    assert _kind(_coach(tmp_path, started, now=NOW + timedelta(minutes=1))) == "split_run"
+
+
+def test_a_split_tip_you_called_wrong_is_left_out_of_a_note_already_waiting(tmp_path):
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)])
+    assert _keep_run(tmp_path, _agent_stop(session))
+    _as_the_daily_run_writes_it(tmp_path, _tips_report(("split_run", 0, 0, 2, 0)))
+    assert _coach(tmp_path, _after_the_agent(session)) == ""
+    # Another hint is still shown.
+    cold = _transcript(tmp_path, [_prompt(), _reply(150_000, ago_s=20 * 60)], "cold.jsonl")
+    assert _kind(_coach(tmp_path, {**_prompt_payload(cold), "session_id": "s2"})) == "cold_return"
+
+
+def test_a_split_tip_you_already_knew_is_told_once_a_session(tmp_path):
+    cooldown = cat.COACHING_THRESHOLDS["cooldown_minutes"]
+    _as_the_daily_run_writes_it(tmp_path, _tips_report(("split_run", 0, 2, 0, 0)))
+    assert coaching.read(tmp_path / "claudeglass")["once"] == ["split_run"]
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)])
+    assert _keep_run(tmp_path, _agent_stop(session))
+    assert _kind(_coach(tmp_path, _after_the_agent(session))) == "split_run"
+    other, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], "again")
+    assert _keep_run(tmp_path, _agent_stop(other, "again"), now=NOW + timedelta(minutes=2))
+    assert _coach(tmp_path, _after_the_agent(session), now=NOW + timedelta(minutes=2 + 8 * cooldown)) == ""
+
+
+def test_an_old_state_file_loses_the_counts_it_kept_for_each_agent(tmp_path):
+    config_dir = _config_dir(tmp_path)
+    state_path = config_dir / cat.COACH_STATE_FILE
+    state_path.write_text(json.dumps({"agents": {"abc": {"offset": 5, "replies": 3, "told": True}}, "sessions": {}}),
+                          encoding="utf-8")
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _reply(1_000)])
+    assert _coach(tmp_path, _prompt_payload(session)) == ""
+    assert "agents" not in json.loads(state_path.read_text(encoding="utf-8"))
+
+
+def test_the_catalogue_gives_the_hook_every_word_the_split_note_is_made_from():
+    assert CATALOGUE["coaching"]["split_why"] == cat.COACHING_SPLIT_WHY
+    assert set(cat.COACHING_SPLIT_WHY) == {"compaction", "brief", "both"}
+    for why in cat.COACHING_SPLIT_WHY.values():
+        tip = cat.COACHING_TIP["split_run"].format(why=why.format(brief_chars="6,000"))
+        assert "{" not in tip and "}" not in tip
+    assert "split_run" in cat.COACHING_HINTS and "split_run" in cat.NOTICE_HINTS
+    assert cat.TIP_HINT_TITLES["split_run"] and "split_run" not in cat.TIP_THRESHOLD_KEYS
+
+
+def test_the_hook_records_a_run_when_it_stops_and_tells_the_main_session_at_the_next_agent_call(tmp_path):
+    config_dir = _coaching_config(_config_dir(tmp_path))
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)])
+    # Recording prints nothing: a subagent's own message never shows.
+    rc, out, err = _run(config_dir, _agent_stop(session))
+    assert (rc, out, err) == (0, "", "")
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
+    rc, out, err = _run(config_dir, {"cwd": "/work/app", **_after_the_agent(session)})
+    assert rc == 0 and err == ""
+    output = json.loads(out)
+    assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "split_run"
+    assert output["systemMessage"] == cat.COACHING_NOTICE["split_run"].format(why=cat.COACHING_SPLIT_WHY["compaction"])
+    assert _pending(tmp_path) == {}
+    # The desktop app shows no notice, so the note alone carries the tip.
+    session, _ = _agent_run(tmp_path, [_prompt("go"), _SUMMARISED, _reply(1_000)], name="desk")
+    rc, out, err = _run(config_dir, _agent_stop(session, session_id="s2"), "claude-desktop")
+    assert (rc, out, err) == (0, "", "")
+    rc, out, err = _run(config_dir, {"cwd": "/work/app", **_after_the_agent(session, session_id="s2")}, "claude-desktop")
+    output = json.loads(out)
+    assert _kind(output["hookSpecificOutput"]["additionalContext"]) == "split_run" and "systemMessage" not in output

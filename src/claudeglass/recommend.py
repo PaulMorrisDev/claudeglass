@@ -161,6 +161,7 @@ from . import (
 )
 from .config import Config
 from .context_budget import DIET_EXCLUDED, MIN_WINDOW_DAYS, REMOVABLE_USE_SHARE, SKILLS_TOOL, diet_usd
+from .fixes import BATCH_PROBES_LINE, CRITIQUE_PLAN_LINE
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
 from .snapshots import Snapshot, effective_config, effective_provenance, managed_keys
 from .units import NO_LIMIT_SHARE_HINT, Units
@@ -291,6 +292,30 @@ class RecommendThresholds:
     # agent-report-size: "mean Agent tool_result > 8k tokens for an
     # agent type".
     agent_report_size_tokens: float = 8_000.0
+
+    # agent-batch-probes: "an agent type that made at least 100 replies, a
+    # quarter or more of them one read-only call and nothing else, where
+    # batching the runs of those would have spared at least $1". The
+    # habits_probes figure takes the lookups of a run to be independent, which
+    # some are (a read that needs the name a search just found), so the card
+    # quotes this share of it.
+    agent_batch_probes_min_replies: int = 100
+    agent_batch_probes_share_pct: float = 25.0
+    agent_batch_probes_min_saving_usd: float = 1.0
+    agent_batch_probes_saving_factor: float = 0.5
+
+    # plan-rounds: "at least 5 approved plans, 30% or more of them sent back
+    # before you approved, and 30% or more of those rounds a question, a
+    # critique or a doubt, where the replies between the first plan and the
+    # approval cost at least $1 after scaling". A standing request to critique
+    # the plan can answer the rounds that were a question, a critique or a
+    # doubt, and only some of them, so the card quotes this share of the
+    # table's figure.
+    plan_rounds_min_plans: int = 5
+    plan_rounds_min_share_pct: float = 30.0
+    plan_rounds_min_asked_pct: float = 30.0
+    plan_rounds_min_saving_usd: float = 1.0
+    plan_rounds_saving_factor: float = 0.25
 
     # spawn-cost: "mean first call per agent type > 40k tokens, and at least
     # 5k tokens of its tool definitions it never or rarely uses". The first
@@ -1511,6 +1536,130 @@ def _rule_agent_report_size(report: ReportModel, th: RecommendThresholds, archet
             )
         )
     return out
+
+
+#: The columns of ``habits_probes`` the rule reads, in the order it uses them.
+_PROBE_COLUMNS = ("calls", "probes", "shell", "runs", "batch_cost")
+
+
+def _rule_agent_batch_probes(report: ReportModel, th: RecommendThresholds, archetype: str | None) -> list[Recommendation]:
+    """``agent-batch-probes``: an agent type whose replies are often one
+    read-only call and nothing else (a Read, a Grep, a Glob or a file-reading
+    shell command). Each such reply reads the agent's whole context again to
+    look at one thing, so independent lookups in one message would have cost
+    one read instead of several. Reads the Work habits section's
+    ``habits_probes``, a row for each agent type; the main session's row is
+    left out, since its prompts are yours and the card is for agent
+    definitions and workflow prompts. ``saving_usd`` is
+    :attr:`~RecommendThresholds.agent_batch_probes_saving_factor` of the
+    row's cost: the table's figure is an upper bound."""
+    if archetype in _NO_SUBAGENT_ARCHETYPES:
+        return []
+    table = _table(report, "habits", "habits_probes")
+    if table is None:
+        return []
+    at = {key: _col_index(table, key) for key in _PROBE_COLUMNS}
+    if None in at.values():
+        return []
+    out: list[Recommendation] = []
+    for row in table.rows:
+        agent_type = row[0] if row else None
+        if not isinstance(agent_type, str) or agent_type == "top-level" or len(row) <= max(at.values()):
+            continue
+        calls, probes, shell, runs, cost = (row[at[key]] for key in _PROBE_COLUMNS)
+        if not all(_is_number(value) for value in (calls, probes, shell, runs, cost)):
+            continue
+        if calls < th.agent_batch_probes_min_replies or probes * 100 < calls * th.agent_batch_probes_share_pct:
+            continue
+        saving = cost * th.agent_batch_probes_saving_factor
+        if saving < th.agent_batch_probes_min_saving_usd:
+            continue
+        out.append(
+            Recommendation(
+                id="agent-batch-probes",
+                severity="advice",
+                category="workflow",
+                archetypes=_ALL_ARCHETYPES,
+                title=f"{agent_type} looks things up one call at a time",
+                action=(
+                    f"Add \"{BATCH_PROBES_LINE}\" to {agent_type}'s agent definition, or to the workflow "
+                    "prompt that starts it, so independent lookups share one message."
+                ),
+                lever=None,
+                agent_type=agent_type,
+                evidence=[
+                    _evidence("Replies it made", calls, "habits", "habits_probes", agent_type),
+                    _evidence("Single read-only calls", probes, "habits", "habits_probes", agent_type),
+                    _evidence("Of them by shell command", shell, "habits", "habits_probes", agent_type),
+                    _evidence("Replies a batch would spare", cost, "habits", "habits_probes", agent_type),
+                ],
+                saving_usd=saving,
+            )
+        )
+    return out
+
+
+#: The columns of ``habits_plan_rounds`` the rule reads, in the order it uses them.
+_PLAN_ROUND_COLUMNS = ("plans", "rounds", "asked", "cost")
+
+
+def _rule_plan_rounds(report: ReportModel, th: RecommendThresholds) -> list[Recommendation]:
+    """``plan-rounds``: plans you sent back before you approved one. Each
+    round is a reply that reads the whole planning conversation again, and
+    most were a question, a critique or a doubt that Claude could be asked to
+    raise against its own plan before it shows you. Reads the Work habits
+    section's ``habits_plan_rounds``: the ``all`` row for the totals and the
+    ``none`` row for the plans never sent back. A plan you declined
+    and then told Claude to carry out is an approval, not one sent back.
+    ``saving_usd`` is :attr:`~RecommendThresholds.plan_rounds_saving_factor`
+    of the cost of the replies between the first plan and the approval,
+    scaled to the share of rounds that were a question, a critique or a
+    doubt: the table's figure is an upper bound."""
+    table = _table(report, "habits", "habits_plan_rounds")
+    if table is None:
+        return []
+    at = {key: _col_index(table, key) for key in _PLAN_ROUND_COLUMNS}
+    if None in at.values():
+        return []
+    rows = {row[0]: row for row in table.rows if row and isinstance(row[0], str)}
+    total = rows.get("all")
+    if total is None or len(total) <= max(at.values()):
+        return []
+    plans, rounds, asked, cost = (total[at[key]] for key in _PLAN_ROUND_COLUMNS)
+    if not all(_is_number(value) for value in (plans, rounds, asked, cost)):
+        return []
+    first = rows.get("none")
+    at_once = first[at["plans"]] if first is not None and len(first) > at["plans"] and _is_number(first[at["plans"]]) else 0
+    sent_back = plans - at_once
+    if plans < th.plan_rounds_min_plans or rounds <= 0:
+        return []
+    if sent_back * 100 < plans * th.plan_rounds_min_share_pct or asked * 100 < rounds * th.plan_rounds_min_asked_pct:
+        return []
+    saving = cost * (asked / rounds) * th.plan_rounds_saving_factor
+    if saving < th.plan_rounds_min_saving_usd:
+        return []
+    return [
+        Recommendation(
+            id="plan-rounds",
+            severity="advice",
+            category="workflow",
+            archetypes=_ALL_ARCHETYPES,
+            title="Plans keep being sent back",
+            action=(
+                "Put one standing request in your first planning message, in CLAUDE.md or in a plan skill. "
+                f"It reads \"{CRITIQUE_PLAN_LINE}.\""
+            ),
+            lever=None,
+            evidence=[
+                _evidence("Plans you approved", plans, "habits", "habits_plan_rounds", "all"),
+                _evidence("Never sent back", at_once, "habits", "habits_plan_rounds", "none"),
+                _evidence("Times plans were sent back", rounds, "habits", "habits_plan_rounds", "all"),
+                _evidence("Sent back with a question or critique", asked, "habits", "habits_plan_rounds", "all"),
+                _evidence("Replies between the first plan and approval", cost, "habits", "habits_plan_rounds", "all"),
+            ],
+            saving_usd=saving,
+        )
+    ]
 
 
 # -- subagent startup, part by part -------------------------------------------
@@ -2766,6 +2915,8 @@ def recommend(
     recs.extend(_rule_env_subagent_model(report, snapshot, archetype))
     recs.extend(_rule_attribution_deprecated(report, snapshot))
     recs.extend(_rule_agent_report_size(report, th, archetype))
+    recs.extend(_rule_agent_batch_probes(report, th, archetype))
+    recs.extend(_rule_plan_rounds(report, th))
     part_recs, covered_agents = _rule_spawn_parts(report, th, archetype, snapshot, units)
     recs.extend(part_recs)
     recs.extend(_rule_spawn_cost(report, th, archetype, snapshot, covered_agents))

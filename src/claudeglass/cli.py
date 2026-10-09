@@ -743,7 +743,7 @@ def _add_capture_args(sub: argparse.ArgumentParser) -> None:
         "prune (delete signal files, capture-log.jsonl and habit-log.jsonl records and usage-log.csv rows "
         "older than "
         f"retention_days, or {SIGNAL_RETENTION_DEFAULT_DAYS} days by default); "
-        "refresh (work out the coaching notes' split points from your last 30 days now; the dashboard's "
+        "refresh (work out the coaching notes' own numbers from your last 30 days now; the dashboard's "
         "service does it daily)",
     )
     sub.add_argument(
@@ -3787,7 +3787,7 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
 
     rates = _capture_pricing(args, config, config_dir)
     if rates is None:
-        stdout.write("The rate card can't be read, so the split points can't be worked out.\n")
+        stdout.write("The rate card can't be read, so the coaching numbers can't be worked out.\n")
         return 2
     corpus = _capture_corpus(args, config, config_dir, days=coaching.DAYS)
     _overrides, ratings = _merge_dashboard_marks(config_dir, {})
@@ -4286,7 +4286,7 @@ def _cmd_capture(args: argparse.Namespace, *, stdin=None, stdout=None, now: date
     :data:`~claudeglass.config.SIGNAL_RETENTION_DEFAULT_DAYS` when
     unset) -- the same housekeeping ``serve``'s watcher already does on
     every tick (SEC-P8/G7), offered here for someone not running the
-    service. ``refresh`` works out the coaching notes' split points
+    service. ``refresh`` works out the coaching notes' own numbers
     (``coaching.json``) now, as the service does daily. Coaching notes
     (``coaching_notes``) run through the same hook at any level: ``off``
     leaves them on, ``remove`` turns them off too. ``--dry-run`` changes

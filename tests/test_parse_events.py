@@ -795,6 +795,30 @@ def test_a_typed_request_is_not_a_go_a_status_or_an_adjust(text):
     assert not {"go", "status", "adjust", "remind", "ack"} & detail.keys()
 
 
+@pytest.mark.parametrize("text", [
+    "Implement the following plan:\n\n# Add a login page\n1. a\n2. b",
+    "  implement the following plan: add a login page",
+])
+def test_a_message_that_opens_with_the_plan_handoff_wording_is_flagged(text):
+    from claudeglass import prompt_shape
+    assert prompt_shape.is_plan_handoff(text) is True
+    detail = events.classify_line(user_str_line(text, origin={"kind": "human"})).detail
+    assert detail.get("plan_handoff") is True
+
+
+@pytest.mark.parametrize("text", [
+    "implement the plan",
+    "please implement the following plan: add a login page",
+    "I read the plan. Implement the following plan later.",
+    "fix the parser",
+])
+def test_a_message_that_only_mentions_a_plan_is_not_a_plan_handoff(text):
+    from claudeglass import prompt_shape
+    assert prompt_shape.is_plan_handoff(text) is False
+    detail = events.classify_line(user_str_line(text, origin={"kind": "human"})).detail
+    assert "plan_handoff" not in detail
+
+
 def test_a_typed_message_with_an_image_says_so():
     blocks = [{"type": "text", "text": "this is wrong"}, _image_block()]
     event = events.classify_line(user_block_line(blocks, origin={"kind": "human"}))
