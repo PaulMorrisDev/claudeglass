@@ -1042,9 +1042,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             shows="Your sessions that ran with the ClaudeGlass mod, set beside the ones that did not, on the "
             "same figures. Both groups' values and session counts are shown, so you can judge the gap yourself.",
             read="Each difference is against the sessions without the mod. A row says there are too few sessions "
-            "to compare until each group has 10. Measurable means the gap is larger than chance alone would likely give. Sessions with "
-            "ClaudeGlass may differ in other ways, so a gap does not show the mod caused it. Effects of tools "
-            "like this are usually small.",
+            "to compare until each group has 10. Measurable means the gap is unlikely to be chance alone, checked "
+            "across the five figures together. Most sessions without the mod are from before you added it. "
+            "Sessions with ClaudeGlass may differ in other ways, so a gap does not show the mod caused it. "
+            "Effects of tools like this are usually small.",
             act="",
         ),
         columns={
@@ -1054,7 +1055,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "with_sessions": ("Sessions with", "How many sessions with the mod the figure covers."),
             "without_sessions": ("Sessions without", "How many sessions without the mod the figure covers."),
             "difference": ("Difference", "How the figure with the mod compares with the one without it."),
-            "verdict": ("Measurable?", "Whether the gap is clear of chance, or there is no measurable difference yet."),
+            "verdict": ("Measurable?", "Whether the gap is unlikely to be chance alone, or there is no measurable difference yet."),
         },
     ),
     "habits_playbook": TableCopy(

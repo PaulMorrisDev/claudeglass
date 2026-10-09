@@ -1680,7 +1680,8 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
     context, the figure `Store.median_end_context` takes. A `/clear` starts
     a new session, so this is how full the context was when you cleared or
     closed the session.
-  - `cold_per_100` — cold-cache sends per 100 replies, pooled over the
+  - `cold_per_100` — cold-cache sends per 100 replies to a message of
+    yours (the same replies the sends are counted among), pooled over the
     sessions: a reply to a message of yours that rebuilt a context of
     `cold_min_tokens` (coaching threshold, 100,000) or more after the cache
     lifetime of the reply before had passed (`recache.detect`, signature
@@ -1695,14 +1696,18 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
     those plus the ones the mod showed (`prompting.glass_tips`).
 
   Either group under 10 sessions with the figure gives `difference` as "Too
-  few sessions with Glass yet to compare" (or "without" when that group is
-  the short one) and no `verdict`. Otherwise `difference` is the relative
-  gap in words ("about 12% lower"), and `verdict` is `Measurable` when the
-  95% interval of a seeded bootstrap of the difference (400 resamples of the
-  sessions, a fixed seed per figure, so the same sessions always read the
-  same) leaves zero, else "No measurable difference yet". The table's notes
+  few sessions with ClaudeGlass yet to compare" (or "without" when that
+  group is the short one) and no `verdict`. Otherwise `difference` is the
+  relative gap in words ("about 12% lower"), and `verdict` is `Measurable`
+  when the 99% interval of a seeded bootstrap of the difference (1,000
+  resamples of the sessions, a fixed seed per figure, so the same sessions
+  always read the same) leaves zero, else "No measurable difference yet".
+  The interval is 99% rather than 95% because five figures are read at once
+  (Bonferroni). Non-interactive runs (`entrypoint` `sdk*` or `mcp`) never
+  write `present`, so they are left out of both groups. The table's notes
   say the groups may differ in other ways, so a gap is no proof the mod
-  caused it.
+  caused it, and that most sessions without the mod are from before it was
+  added.
 
   The habit rows above also leave out what you excused: a drip feed, a
   repeat or a vague correction you called Claude's miss (`why=missed`)

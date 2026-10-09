@@ -140,15 +140,18 @@ def test_a_session_is_a_desktop_one_by_its_transcript_or_by_where_the_mod_ran():
 
 def test_the_figures_are_medians_a_pooled_rate_a_share_and_a_mean():
     facts = [
-        SessionFacts("a", cost=1.0, replies=2, end_context=100_000, cold_sends=1, compactions=2, desktop=True, tips=2),
-        SessionFacts("b", cost=6.0, replies=2, end_context=200_000, cold_sends=0, compactions=0, desktop=True, tips=0),
-        SessionFacts("c", cost=9.0, replies=3, end_context=300_000, cold_sends=0, compactions=3, tips=9),
+        SessionFacts("a", cost=1.0, replies=2, answered=2, end_context=100_000, cold_sends=1, compactions=2, desktop=True, tips=2),
+        SessionFacts("b", cost=6.0, replies=2, answered=2, end_context=200_000, cold_sends=0, compactions=0, desktop=True, tips=0),
+        SessionFacts("c", cost=9.0, replies=3, answered=3, end_context=300_000, cold_sends=0, compactions=3, tips=9),
         SessionFacts("d", cost=0.0, replies=0, end_context=None),
     ]
     got = {name: glass_effect.compare(name, facts).without_value for name in glass_effect.FIGURES}
     assert got["cost_per_reply"] == 3.0  # the median of 0.5, 3.0 and 3.0 (the session with no reply has none)
     assert got["end_context"] == 200_000
     assert got["cold_per_100"] == pytest.approx(100 * 1 / 7)  # pooled over the replies, not the mean of the rates
+    # Replies in the middle of the work are not in the base: the sends are counted among replies to you.
+    mid = SessionFacts("e", cost=1.0, replies=10, answered=2, cold_sends=1)
+    assert glass_effect.compare("cold_per_100", [mid]).without_value == 50.0
     assert got["compaction_churn"] == 50.0  # two of four sessions have two or more
     assert got["tips_desktop"] == 1.0  # Desktop sessions only
 
@@ -168,13 +171,13 @@ def test_difference_words_say_how_much_higher_or_lower_in_plain_words():
 def test_too_few_sessions_with_glass_gives_no_difference():
     table = _table(_group("g", 9, glass=True, cost=1.0) + _group("n", 30, glass=False, cost=2.0))
     row = _rows(table)["cost_per_reply"]
-    assert row["difference"] == "Too few sessions with Glass yet to compare" and row["verdict"] is None
+    assert row["difference"] == "Too few sessions with ClaudeGlass yet to compare" and row["verdict"] is None
     # Both groups' values and their session counts are still shown.
     assert (row["with_sessions"], row["without_sessions"]) == (9, 30)
     assert row["with_glass"] == pytest.approx(0.25) and row["without_glass"] == pytest.approx(0.5)
     # The other side being short says so as well.
     other = _rows(_table(_group("g", 12, glass=True) + _group("n", 4, glass=False)))["end_context"]
-    assert other["difference"] == "Too few sessions without Glass yet to compare" and other["verdict"] is None
+    assert other["difference"] == "Too few sessions without ClaudeGlass yet to compare" and other["verdict"] is None
 
 
 def test_a_clear_difference_is_called_measurable_and_stated_in_words():
@@ -231,6 +234,40 @@ def test_the_output_is_deterministic_and_does_not_depend_on_the_order_of_session
     assert _table(list(reversed(specs))).rows == first.rows
 
 
+def test_non_interactive_runs_are_left_out_of_both_groups():
+    sessions, corpus, cost, events = _world(_group("g", 10, glass=True) + _group("n", 10, glass=False))
+    for i, bundle in enumerate(corpus.sessions):
+        if i % 5 == 0:  # four sessions, in both groups
+            bundle.top.meta.entrypoint = ("sdk-cli", "sdk-ts", "sdk-py", "mcp")[i // 5]
+    ids = {f.session_id for f in glass_effect.facts_of(sessions, corpus, cost, TH, events)}
+    assert ids == {b.session_id for i, b in enumerate(corpus.sessions) if i % 5}
+    assert len(ids) == 16
+    for word in ("sdk", "sdk-cli", "sdk-ts", "sdk-py", "SDK-PY", "mcp"):
+        assert glass_effect.is_headless(word)
+    for word in ("cli", "claude-desktop", "claude-vscode", "", None):
+        assert not glass_effect.is_headless(word)
+    table = glass_effect.build_table(sessions, corpus, cost, TH, events)
+    assert max(table.rows[0][3:5]) == 8
+    assert any("before and after" in n for n in table.notes)
+
+
+def test_a_session_is_not_called_measurable_by_chance_across_five_figures():
+    """Five rows at 95% would show a "Measurable" row by chance about 1 report in 4. At 99% each, about 1 in 20 at most."""
+    assert glass_effect.INTERVAL == (0.005, 0.995)
+    # With no real difference, many different samples of sessions seldom give any "Measurable" row.
+    import random
+
+    rng = random.Random(7)
+    hits = 0
+    for _ in range(40):
+        specs = _group("g", 10, glass=True, cost=lambda i: rng.uniform(0.5, 2.0), end_ctx=lambda i: rng.randint(40_000, 90_000)) + _group(
+            "n", 10, glass=False, cost=lambda i: rng.uniform(0.5, 2.0), end_ctx=lambda i: rng.randint(40_000, 90_000)
+        )
+        table = _table(specs)
+        hits += any(row[6] == "Measurable" for row in table.rows)
+    assert hits <= 4
+
+
 def test_the_table_carries_the_caveat_and_what_the_mod_recorded_about_cold_sends():
     specs = _group("g", 10, glass=True, cost=1.0) + _group("n", 10, glass=False, cost=1.0)
     sessions, corpus, cost, events = _world(specs)
@@ -239,6 +276,9 @@ def test_the_table_carries_the_caveat_and_what_the_mod_recorded_about_cold_sends
     table = glass_effect.build_table(sessions, corpus, cost, TH, events)
     notes = " ".join(table.notes)
     assert "does not show that ClaudeGlass caused it" in notes
+    # Most sessions without the mod are from before it was added, and no note sentence is over 25 words.
+    assert "mostly before and after" in notes and "99%" in notes
+    assert all(len(sentence.split()) <= 25 for n in table.notes for sentence in n.replace("? ", ". ").split(". "))
     # Only the mod's own sessions count, and only they can have been warned.
     assert "recorded 3 cold-cache sends" in notes and "warned before 2 of them" in notes
     assert not any("recorded" in n for n in glass_effect.build_table(sessions, corpus, cost, TH, events[:-4]).notes)
@@ -298,7 +338,7 @@ def test_the_report_puts_the_table_beside_the_sessions_with_the_mod_table(corpus
     assert table.title == "Sessions with and without ClaudeGlass" and table.dashboard == "keep"
     assert table.help and table.help.shows and all(c.help for c in table.columns)
     # Three sessions: one with the mod, so every row says there are too few.
-    assert {row[5] for row in table.rows} == {"Too few sessions with Glass yet to compare"}
+    assert {row[5] for row in table.rows} == {"Too few sessions with ClaudeGlass yet to compare"}
     assert_privacy(table)
     # The JSON carries the raw rows and the row kinds the dashboard formats them by.
     data = json.loads(render_json(report))["report"]
@@ -322,6 +362,8 @@ def test_the_table_has_its_words_in_the_help_and_the_placement():
     assert set(copy.columns) == {"figure", "with_glass", "without_glass", "with_sessions", "without_sessions",
                                  "difference", "verdict"}
     assert "10" in copy.help.read and "does not show the mod caused it" in copy.help.read
+    assert "unlikely to be chance alone" in copy.help.read and "five figures together" in copy.help.read
+    assert "larger than chance alone would likely give" not in copy.help.read
 
 
 def test_the_dashboard_draws_every_table_of_the_prompting_section_but_the_habit_cards():

@@ -17,7 +17,8 @@ the rest, on:
    takes. A ``/clear`` starts a new session, so the session before it ends
    with the context as full as it was when you cleared (or closed it); the
    transcript has no better mark of that moment.
-3. ``cold_per_100`` -- cold-cache sends per 100 replies, pooled over the
+3. ``cold_per_100`` -- cold-cache sends per 100 replies to a message of yours
+   (the numerator counts only those, so the denominator does too), pooled over the
    sessions: a main-session reply to a message of yours, sent after the
    cache lifetime of the reply before it had passed (the re-cache
    detection's ``full-expiry`` by the clock, ``recache.detect``), with a
@@ -43,13 +44,22 @@ the rest, on:
 
 Honesty rules: both groups' values and session counts are always shown.
 With fewer than :data:`MIN_SESSIONS` sessions in either group the row says
-so ("Too few sessions with Glass yet to compare") and gives no difference.
-Otherwise the difference is stated in plain words ("about 12% lower"), and
-called measurable only when a seeded bootstrap of the difference (the
-sessions resampled, :data:`RESAMPLES` times) has a 95% interval that leaves
-zero. The seed is fixed per figure, so a report built twice reads the same.
-Sessions with the mod may differ from the others in other ways (who runs
-it, what they work on), so the table makes no causal claim.
+so ("Too few sessions with ClaudeGlass yet to compare") and gives no
+difference. Otherwise the difference is stated in plain words ("about 12%
+lower"), and called measurable only when a seeded bootstrap of the
+difference (the sessions resampled, :data:`RESAMPLES` times) has a 99%
+interval that leaves zero. Five figures are read at once, so each gets a
+99% interval rather than 95%: the Bonferroni split of a 5% chance of a
+false "Measurable" across the table. The seed is fixed per figure, so a
+report built twice reads the same. Sessions with the mod may differ from the
+others in other ways (who runs it, what they work on), so the table makes no
+causal claim.
+
+Non-interactive runs (the Agent SDK, :func:`is_headless`) never write a
+``present`` event, since they have no surface for the mod, so they would
+always land in the "without" group whatever the mod did. They are left out of
+both groups. Most sessions without the mod are from before it was added, so
+the comparison is mostly before and after.
 
 Privacy: only counts and the figures above leave this module; no message
 text, path or session id is kept in the table.
@@ -69,12 +79,18 @@ from .model import Column, EventKind, Table
 #: compares them.
 MIN_SESSIONS = 10
 
-#: The bootstrap's resamples per figure, and the two ends of its interval.
-RESAMPLES = 400
-INTERVAL = (0.025, 0.975)
+#: The bootstrap's resamples per figure, and the two ends of its interval: 99%,
+#: the Bonferroni share of a 5% error across the five figures of the table.
+RESAMPLES = 1000
+INTERVAL = (0.005, 0.995)
 
 #: The Claude desktop app's transcript ``entrypoint``.
 DESKTOP_ENTRYPOINT = "claude-desktop"
+
+#: ``entrypoint`` values with no surface for the mod (``mcp``, and the Agent SDK
+#: ones: ``sdk``, ``sdk-cli``, ``sdk-ts``, ``sdk-py``, ...).
+HEADLESS_ENTRYPOINTS = frozenset({"mcp"})
+HEADLESS_PREFIX = "sdk"
 
 #: Main-conversation compactions that make a session "churning".
 CHURN_COMPACTIONS = 2
@@ -105,11 +121,21 @@ class SessionFacts:
     desktop: bool = False
     cost: float = 0.0
     replies: int = 0
+    #: The replies that answer a message of yours (``replies`` less the ones in
+    #: the middle of the work): the base of the cold-send rate.
+    answered: int = 0
     end_context: int | None = None
     cold_sends: int = 0
     compactions: int = 0
     #: Tips shown in the session: those Claude passed on, plus the mod's.
     tips: int = 0
+
+
+def is_headless(entrypoint: str | None) -> bool:
+    """Whether an ``entrypoint`` is a non-interactive run (the Agent SDK, the
+    MCP server): the mod has no surface there."""
+    word = (entrypoint or "").lower()
+    return word in HEADLESS_ENTRYPOINTS or word.startswith(HEADLESS_PREFIX)
 
 
 def cold_sends(top, th: recache.RecacheThresholds, min_tokens: int) -> int:
@@ -150,7 +176,7 @@ def facts_of(sessions, corpus, session_cost: dict, th: recache.RecacheThresholds
     for bundle in corpus.sessions:
         mine = wanted.get(bundle.session_id)
         top = bundle.top
-        if mine is None or top is None:
+        if mine is None or top is None or is_headless(top.meta.entrypoint):
             continue
         glass = prompting.glass_tips(by_session.get(bundle.session_id), {bundle.session_id})
         priced = [t for t in top.turns if t.turn_index > 0]
@@ -160,6 +186,7 @@ def facts_of(sessions, corpus, session_cost: dict, th: recache.RecacheThresholds
             desktop=top.meta.entrypoint == DESKTOP_ENTRYPOINT or glass.present_surfaces["desktop"] > 0,
             cost=float(session_cost.get(bundle.session_id) or 0.0),
             replies=sum(1 for t in priced if not t.estimated),
+            answered=sum(1 for t in priced if not t.estimated and EventKind.HUMAN_TEXT in t.preceding_event_kinds),
             end_context=priced[-1].ctx if priced else None,
             cold_sends=cold_sends(top, th, min_tokens),
             compactions=compaction.compactions_in(top)[0],
@@ -196,14 +223,14 @@ def _mean(values: list) -> float | None:
 _FIGURES = {
     "cost_per_reply": (lambda f: f.cost / f.replies if f.replies and f.cost > 0 else None, _median),
     "end_context": (lambda f: f.end_context, _median),
-    "cold_per_100": (lambda f: (f.cold_sends, f.replies) if f.replies else None, _rate_per_100),
+    "cold_per_100": (lambda f: (f.cold_sends, f.answered) if f.answered else None, _rate_per_100),
     "compaction_churn": (lambda f: f.compactions >= CHURN_COMPACTIONS, _share_pct),
     "tips_desktop": (lambda f: f.tips if f.desktop else None, _mean),
 }
 
 
 def _interval(figure: str, with_values: list, without_values: list, stat) -> tuple[float, float] | None:
-    """The 95% bootstrap interval of the difference ``stat(with) -
+    """The 99% bootstrap interval of the difference ``stat(with) -
     stat(without)``, the sessions of each group resampled with a generator
     seeded by the figure, so the same sessions always give the same interval."""
     rng = random.Random(_SEED + FIGURES.index(figure))
@@ -254,7 +281,7 @@ def compare(figure: str, facts: list[SessionFacts]) -> Row:
     row = Row(figure, a, b, len(with_values), len(without_values), None, None)
     short = next((word for word, n in (("with", len(with_values)), ("without", len(without_values))) if n < MIN_SESSIONS), None)
     if short:
-        row.difference = f"Too few sessions {short} Glass yet to compare"
+        row.difference = f"Too few sessions {short} ClaudeGlass yet to compare"
         return row
     row.difference = difference_words(a, b)
     interval = _interval(figure, with_values, without_values, stat)
@@ -266,7 +293,7 @@ def compare(figure: str, facts: list[SessionFacts]) -> Row:
 VALUE_LABELS = {
     "cost_per_reply": "Cost per reply",
     "end_context": "Context when the session ended",
-    "cold_per_100": "Cold-cache sends per 100 replies",
+    "cold_per_100": "Cold-cache sends per 100 replies to your messages",
     "compaction_churn": "Sessions with 2 or more conversation summaries",
     "tips_desktop": "Tips shown per Desktop session",
 }
@@ -282,9 +309,12 @@ def build_table(sessions, corpus, session_cost: dict, th: recache.RecacheThresho
     rows = [compare(figure, facts) for figure in FIGURES]
     min_tokens = catalogue.COACHING_THRESHOLDS["cold_min_tokens"]
     notes = [
-        "Sessions with ClaudeGlass may differ from the others in other ways, such as what you worked on, so a "
-        "difference here does not show that ClaudeGlass caused it.",
-        "Measurable means a resampling of the sessions, with a fixed seed, puts the difference clear of zero.",
+        "Sessions with ClaudeGlass may differ from the others in other ways, such as what you worked on. "
+        "A difference here does not show that ClaudeGlass caused it.",
+        "Most sessions without ClaudeGlass are from before you added it, so the comparison is mostly before and "
+        "after. Runs from the Agent SDK are left out of both groups.",
+        "Measurable means the difference stayed clear of zero in a 99% resampling of the sessions, checked across "
+        "the five figures together.",
         "Cost per reply and the context at the end are the middle value across sessions. The context is the last "
         "reply's, when you cleared or closed the session.",
         f"A cold-cache send is a message sent after the cache expired, with {min_tokens:,} tokens or more in "
