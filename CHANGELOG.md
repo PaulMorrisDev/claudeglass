@@ -7,8 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-09
+
 ### Added
 
+- **More to test the judges on.** `scripts/eval-agent-judge.py` has 21
+  known-answer agent runs, up from 8 in 0.14.0. The new ones are a refuted
+  claim, an empty list, three findings, a validator that confirms one
+  claim and refutes another, an implementer that lists concerns, research
+  that lists risks, a workflow agent started with a "Continue" relay, a
+  handback that could not do its work, a handback followed by "Report
+  delivered.", a re-stop after a guard rejection, an answer written after
+  the hook fired, and one brief on a run that finished and on one that was
+  blocked. Each has an answer shape, and the report scores each key and
+  each shape. `--replay FILE` judges the real runs a labels file names,
+  and `--stored CONFIG_DIR` scores the verdicts the hook already stored
+  against the same labels without asking Haiku. The file holds paths,
+  reply ids and closed words, never any text of a run, and the loader
+  refuses anything else, or a file inside the repository.
+  `scripts/eval-tagger.py` gains 14 hand-written sessions
+  (`"source": "hand"`) for what `claude -p` can't record: a message typed
+  while Claude works, plan rounds with feedback, a desktop session's
+  replay block, a screenshot, a workflow, and test commands run by
+  interpreter path or through PowerShell. Two are held out. `record`
+  skips them, the judges are scored on them, and Claude's own figures
+  leave them out. Its trimmer now keeps a queued message's text.
+  [docs/tagger-eval.md](docs/tagger-eval.md) describes both. Its tables
+  were measured before this release, and refreshing them needs a
+  signed-in terminal `claude`. A replay set of 50 real runs puts the
+  stored verdicts' "Finished" share at 60% against 100% right
+  ([docs/tagger-eval.md](docs/tagger-eval.md#replaying-real-runs)).
 - **Where agent and context tokens go, from the Overview and in the
   tuning export.** Each of the new figures for agents, plans and
   conversation summaries (spend by cost centre, model choice, cost per run by
