@@ -1,0 +1,14 @@
+{
+  "name": "claudeglass",
+  "owner": {
+    "name": "PaulMorrisDev"
+  },
+  "plugins": [
+    {
+      "name": "claudeglass",
+      "source": "./plugin",
+      "description": "A live view of context, cost and cache inside Claude Code, from ClaudeGlass."
+    }
+  ],
+  "description": "ClaudeGlass: live context, cost and cache inside Claude Code."
+}
