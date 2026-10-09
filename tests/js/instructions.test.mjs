@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 
 const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks", "lib");
 const mod = await import(pathToFileURL(join(lib, "instructions.js")).href);
-const { newLedger, follow, record, addAttachment, isAttached, compacted, tokensOf, mcpServer, shortPath, entriesOf, startupChars, adviceFor, receivedClaudeMd, agentTypesOf, fitToCategories, categoryOf, serverLabel, startupGroups, isDesktopServer } = mod;
+const { newLedger, follow, record, addAttachment, isAttached, compacted, tokensOf, mcpServer, shortPath, entriesOf, startupChars, adviceFor, receivedClaudeMd, agentTypesOf, fitToCategories, categoryOf, serverLabel, startupGroups, isDesktopServer, toolShares, mcpShares, mcpToolLabel } = mod;
 
 function item(id, kind, chars, extra = {}) {
   return { id, kind, name: id, chars, reply: 1, from: "engine", startup: true, ...extra };
@@ -162,6 +162,117 @@ test("an MCP row keeps its tools' names in load order", () => {
   assert.equal(entries.find((one) => one.key === "tools").tools, undefined);
 });
 
+test("a rolled-up row keeps every tool, in load order, with whether it waits behind tool search", () => {
+  const entries = entriesOf(session().items);
+  assert.deepEqual(entries.find((one) => one.key === "tools").members, [
+    { name: "tool:Bash", chars: 12000, deferred: false },
+    { name: "tool:Read", chars: 8000, deferred: false },
+  ]);
+  assert.deepEqual(entries.find((one) => one.key === "mcp:g").members.map((one) => [one.name, one.chars, one.deferred]), [["tool:mcp__g__a", 30000, false], ["tool:mcp__g__b", 14000, false]]);
+  assert.deepEqual(entries.find((one) => one.key === "mcp:d").members.map((one) => one.deferred), [true]);
+  // Past the three that `biggest` keeps.
+  const many = entriesOf(["a", "b", "c", "d", "e"].map((name, at) => item("tool:" + name, "tools", 100 * (at + 1), { name })));
+  assert.equal(many[0].biggest.length, 3);
+  assert.deepEqual(many[0].members.map((one) => one.name), ["a", "b", "c", "d", "e"]);
+  // A row that is one item has no members.
+  assert.deepEqual(entries.find((one) => one.key === "file:a").members, []);
+  // The deferred built-in tools are a row of their own, apart from the plugins'.
+  const kinds = entriesOf([item("t:A", "tools", 40, { name: "A" }), item("t:B", "deferred", 80, { name: "B", deferred: true }), item("t:C", "deferred", 20, { name: "C", from: "plugin", deferred: true })]);
+  assert.deepEqual(kinds.map((one) => [one.key, one.members.map((member) => member.name)]), [["tools", ["A"]], ["deferred", ["B"]], ["deferred:plugin", ["C"]]]);
+});
+
+/** A tool of a row, in the prompt unless it says otherwise. */
+const member = (name, chars, deferred = false) => ({ name, chars, deferred });
+
+test("a row's tokens are shared out among its tools by size, largest first, and add up to the row", () => {
+  const shares = toolShares([member("small", 1000), member("big", 3000), member("mid", 2000)], 1000);
+  assert.deepEqual(shares, [{ name: "big", tokens: 500, deferred: false }, { name: "mid", tokens: 333, deferred: false }, { name: "small", tokens: 167, deferred: false }]);
+  // What rounding down leaves over goes one token each to the largest fractions, a tie to the larger tool and then the earlier: 33 + 33 + 33 is 99 of 100.
+  const three = [member("a", 100), member("b", 100), member("c", 100)];
+  assert.deepEqual(toolShares(three, 100).map((one) => one.tokens), [34, 33, 33]);
+  // Never a negative share, and the order stays largest first: two of three equal tools get the 2, six equal tools share 3 as 1 1 1 0 0 0.
+  assert.deepEqual(toolShares(three, 2).map((one) => one.tokens), [1, 1, 0]);
+  const six = ["a", "b", "c", "d", "e", "f"].map((name) => member(name, 50));
+  assert.deepEqual(toolShares(six, 3).map((one) => one.tokens), [1, 1, 1, 0, 0, 0]);
+  // The larger fraction wins over the larger tool: 10 over 3, 2 and 1 tools' text is 5, 3.33 and 1.67 before rounding.
+  assert.deepEqual(toolShares([member("a", 3), member("b", 2), member("c", 1)], 10).map((one) => one.tokens), [5, 3, 2]);
+  // Tools that all weigh nothing share the row equally.
+  assert.deepEqual(toolShares([member("a", 0), member("b", 0)], 5).map((one) => one.tokens), [3, 2]);
+  for (const tokens of [0, 1, 2, 3, 7, 999]) {
+    const all = toolShares(six.concat([member("g", 3), member("h", 900)]), tokens);
+    assert.equal(all.reduce((sum, one) => sum + one.tokens, 0), tokens);
+    assert.equal(all.every((one) => one.tokens >= 0), true);
+    assert.deepEqual(all.map((one) => one.name).slice(0, 2), ["h", "a"]);
+  }
+  for (const tokens of [0, 1, 7, 999, 12345]) {
+    const sum = toolShares([member("a", 7), member("b", 13), member("c", 29), member("d", 1)], tokens).reduce((all, one) => all + one.tokens, 0);
+    assert.equal(sum, tokens);
+  }
+  // A single tool is the whole row; no tools is nothing.
+  assert.deepEqual(toolShares([member("only", 5)], 77), [{ name: "only", tokens: 77, deferred: false }]);
+  assert.deepEqual(toolShares([], 77), []);
+});
+
+test("tools behind tool search come after the others, largest first, with no tokens and no part of the row", () => {
+  const shares = toolShares([member("lazy", 9000, true), member("a", 100), member("lazier", 90000, true), member("b", 300)], 400);
+  assert.deepEqual(shares, [
+    { name: "b", tokens: 300, deferred: false },
+    { name: "a", tokens: 100, deferred: false },
+    { name: "lazier", tokens: 0, deferred: true },
+    { name: "lazy", tokens: 0, deferred: true },
+  ]);
+  // Only tools that wait: listed, with nothing to share.
+  assert.deepEqual(toolShares([member("lazy", 9000, true)], 0), [{ name: "lazy", tokens: 0, deferred: true }]);
+  // Sizes given by name stand in for the characters.
+  const weighed = toolShares([member("a", 10), member("b", 10)], 100, { a: 1, b: 3 });
+  assert.deepEqual(weighed.map((one) => [one.name, one.tokens]), [["b", 75], ["a", 25]]);
+});
+
+test("an MCP server's tools share its tokens by Claude Code's count of them, else by characters, never a mix", () => {
+  const members = [member("mcp__s__one", 1000), member("mcp__s__two", 3000), member("mcp__s__lazy", 8000, true)];
+  /** @param {string} name @param {number} tokens @param {boolean} [isLoaded] */
+  const counted = (name, tokens, isLoaded = true) => ({ name, serverName: "s", tokens, isLoaded });
+  const tokensOfShares = (shares) => shares.map((one) => [one.name, one.tokens]);
+  // By characters: 400 shared 1:3.
+  assert.deepEqual(tokensOfShares(mcpShares(members, 400, [])).slice(0, 2), [["mcp__s__two", 300], ["mcp__s__one", 100]]);
+  assert.deepEqual(tokensOfShares(mcpShares(members, 400, null)).slice(0, 2), [["mcp__s__two", 300], ["mcp__s__one", 100]]);
+  // By Claude Code's count when it lists every tool in the prompt (the one waiting needs no entry); the order follows the count.
+  const both = [counted("mcp__s__one", 90), counted("mcp__s__two", 10)];
+  assert.deepEqual(tokensOfShares(mcpShares(members, 400, both)).slice(0, 2), [["mcp__s__one", 360], ["mcp__s__two", 40]]);
+  // A count of nothing for every tool in the prompt says nothing of their sizes: the characters.
+  assert.deepEqual(tokensOfShares(mcpShares(members, 400, [counted("mcp__s__one", 0), counted("mcp__s__two", 0)])).slice(0, 2), [["mcp__s__two", 300], ["mcp__s__one", 100]]);
+  // One missing from its list, or listed as not loaded: the characters, for every tool.
+  assert.deepEqual(tokensOfShares(mcpShares(members, 400, [counted("mcp__s__one", 90)])).slice(0, 2), [["mcp__s__two", 300], ["mcp__s__one", 100]]);
+  assert.deepEqual(tokensOfShares(mcpShares(members, 400, [counted("mcp__s__one", 90), counted("mcp__s__two", 10, false)])).slice(0, 2), [["mcp__s__two", 300], ["mcp__s__one", 100]]);
+  // Either way they add up to the server's figure, and the one waiting has none.
+  const sum = mcpShares(members, 401, both).reduce((all, one) => all + one.tokens, 0);
+  assert.equal(sum, 401);
+  assert.deepEqual(mcpShares(members, 400, both)[2], { name: "mcp__s__lazy", tokens: 0, deferred: true });
+});
+
+test("an MCP tool is named by the part after its server, as words", () => {
+  assert.equal(mcpToolLabel("mcp__github__create_issue", "github"), "create issue");
+  assert.equal(mcpToolLabel("mcp__plugin_playwright_playwright__browser-click", "plugin_playwright_playwright"), "browser click");
+  assert.equal(mcpToolLabel("mcp__other__thing", "github"), "thing");
+  assert.equal(mcpToolLabel("mcp__github__", "github"), "mcp__github__");
+});
+
+test("built-in tools are one row of what the person controls, counting those behind tool search; a session with none in the prompt shows no row", () => {
+  const sizeOf = (one) => tokensOf(one.startupChars > 0 ? one.startupChars : one.chars, 4);
+  const entries = entriesOf([item("sys", "system", 4000), item("t:Bash", "tools", 12000, { name: "Bash" }), item("t:Zed", "deferred", 400, { name: "Zed", deferred: true }), item("t:Read", "tools", 4000, { name: "Read" })]);
+  const groups = startupGroups(entries, sizeOf, {});
+  assert.deepEqual(groups.control.rows.map((row) => [row.id, row.tokens, row.count]), [["tools", 4000, 3]]);
+  assert.deepEqual(groups.control.rows[0].items.map((one) => [one.label, one.tokens, one.deferred]), [["Bash", 3000, false], ["Read", 1000, false], ["Zed", 0, true]]);
+  // Claude Code's own is the rest: the system prompt alone, with or without Claude Code's count.
+  assert.equal(groups.builtin.tokens, 1000);
+  assert.equal(startupGroups(entries, sizeOf, {}, 9000).builtin.tokens, 5000);
+  assert.equal(groups.total, 5000);
+  // All of them behind tool search: counted, but nothing in the prompt, so no row.
+  const lazy = startupGroups(entriesOf([item("sys", "system", 4000), item("t:Zed", "deferred", 400, { name: "Zed", deferred: true })]), sizeOf, {});
+  assert.deepEqual(lazy.control.rows, []);
+  assert.equal(lazy.builtin.tokens, 1000);
+});
+
 test("a server is named as /mcp lists it, else from its wire name, else as a connector of its first tools", () => {
   const ID = "5f3a2c1e-9b4d-4e8a-8c3d-1a2b3c4d5e6f";
   assert.equal(serverLabel("github", { github: "GitHub" }, []), "GitHub");
@@ -190,11 +301,13 @@ test("the three groups: what the person controls, Claude Code's own, and what wa
   record(ledger, item("ctx:date", "context", 40));
   record(ledger, item("file:u", "instructions", 4000, { path: "/home/me/.claude/CLAUDE.md", from: "user" }));
   record(ledger, item("file:p", "instructions", 24000, { path: "/work/CLAUDE.md", from: "project" }));
-  record(ledger, item("tool:Bash", "tools", 12000, { from: "engine" }));
+  record(ledger, item("tool:Bash", "tools", 12000, { name: "Bash", from: "engine" }));
+  record(ledger, item("tool:Read", "tools", 4000, { name: "Read", from: "engine" }));
+  record(ledger, item("tool:Note", "deferred", 6000, { name: "Note", from: "engine", deferred: true }));
   record(ledger, item("tool:Plug", "tools", 4000, { from: "plugin" }));
   record(ledger, item("tool:Lazy", "deferred", 9000, { from: "plugin", deferred: true }));
-  record(ledger, item("tool:mcp__a__x", "mcp", 8000, { server: "a", from: "mcp" }));
-  record(ledger, item("tool:mcp__b__x", "mcp", 20000, { server: "b", from: "mcp" }));
+  record(ledger, item("tool:mcp__a__x", "mcp", 8000, { name: "mcp__a__x", server: "a", from: "mcp" }));
+  record(ledger, item("tool:mcp__b__x", "mcp", 20000, { name: "mcp__b__x", server: "b", from: "mcp" }));
   record(ledger, item("tool:mcp__c__x", "mcp", 40000, { server: "c", from: "mcp", deferred: true }));
   record(ledger, item("tool:mcp__ccd_session__x", "mcp", 16000, { server: "ccd_session", from: "mcp" }));
   record(ledger, item("att:skill_listing", "skills", 6000, { name: "skill listing", from: "skill" }));
@@ -206,21 +319,31 @@ test("the three groups: what the person controls, Claude Code's own, and what wa
   const sizeOf = (one) => tokensOf(one.startupChars > 0 ? one.startupChars : one.chars, 4);
   const groups = startupGroups(entries, sizeOf, { a: "Alpha" });
 
-  // You control: the three servers (two in the prompt, one waiting behind tool search; the Desktop app's is not theirs), both CLAUDE.md files that loaded at the start, the skill list, the plugin's tool.
-  assert.deepEqual(groups.control.rows.map((row) => [row.id, row.tokens, row.count]), [["mcp", 7000, 3], ["files", 7000, 2], ["skills", 1500, 1], ["plugin", 1000, 1]]);
-  assert.equal(groups.control.tokens, 16500);
-  // Servers largest first, by name; the one behind tool search comes last without a size.
-  assert.deepEqual(groups.control.rows[0].items, [{ label: "b", tokens: 5000, deferred: false }, { label: "Alpha", tokens: 2000, deferred: false }, { label: "c", tokens: 0, deferred: true }]);
-  assert.deepEqual(groups.control.rows[1].items.map((one) => one.label), [".claude/CLAUDE.md", "work/CLAUDE.md"]);
-  // Claude Code's own: system prompt 2k, date 10, Bash 3k, the Desktop server 4k, the agent listing 200.
-  assert.equal(groups.builtin.tokens, 2000 + 10 + 3000 + 4000 + 200);
+  // You control: the three servers (two in the prompt, one waiting behind tool search; the Desktop app's is not theirs), the built-in tools (three, one of them behind tool search), both CLAUDE.md files that loaded at the start, the skill list, the plugin's tool.
+  assert.deepEqual(groups.control.rows.map((row) => [row.id, row.tokens, row.count]), [["mcp", 7000, 3], ["tools", 4000, 3], ["files", 7000, 2], ["skills", 1500, 1], ["plugin", 1000, 1]]);
+  assert.equal(groups.control.tokens, 20500);
+  // Servers largest first, by name, each with its tools in the prompt; the one behind tool search comes last without a size or tools.
+  assert.deepEqual(groups.control.rows[0].items, [
+    { label: "b", tokens: 5000, deferred: false, tools: [{ label: "x", tokens: 5000 }] },
+    { label: "Alpha", tokens: 2000, deferred: false, tools: [{ label: "x", tokens: 2000 }] },
+    { label: "c", tokens: 0, deferred: true },
+  ]);
+  // Built-in tools: largest first with their share of the row, the one behind tool search after with none.
+  assert.deepEqual(groups.control.rows[1].items, [
+    { label: "Bash", tokens: 3000, deferred: false },
+    { label: "Read", tokens: 1000, deferred: false },
+    { label: "Note", tokens: 0, deferred: true },
+  ]);
+  assert.deepEqual(groups.control.rows[2].items.map((one) => one.label), [".claude/CLAUDE.md", "work/CLAUDE.md"]);
+  // Claude Code's own: system prompt 2k, date 10, the Desktop server 4k, the agent listing 200. The built-in tools are the person's now.
+  assert.equal(groups.builtin.tokens, 2000 + 10 + 4000 + 200);
   assert.deepEqual(groups.later.rows.map((row) => [row.id, row.tokens]), [["files-later", 2000], ["skills-used", 500], ["reminders", 100]]);
   assert.deepEqual(groups.later.rows[0].items, [{ label: "src/CLAUDE.md", tokens: 2000, deferred: false }]);
   assert.equal(groups.later.tokens, 2600);
   // The first two add up to what the session starts with.
   assert.equal(groups.control.tokens + groups.builtin.tokens, tokensOf(startupChars(entries), 4));
   // Given the total the page shows (Claude Code's count), Claude Code's own is what is left of it.
-  assert.equal(startupGroups(entries, sizeOf, {}, 40000).builtin.tokens, 40000 - 16500);
+  assert.equal(startupGroups(entries, sizeOf, {}, 40000).builtin.tokens, 40000 - 20500);
   // A total smaller than the rows is not used.
   assert.equal(startupGroups(entries, sizeOf, {}, 100).builtin.tokens, groups.builtin.tokens);
 });
@@ -228,7 +351,7 @@ test("the three groups: what the person controls, Claude Code's own, and what wa
 test("the instructions your servers gave Claude at the start are part of the servers' row, not Claude Code's own", () => {
   const ledger = newLedger();
   record(ledger, item("sys:intro", "system", 8000));
-  record(ledger, item("tool:mcp__a__x", "mcp", 8000, { server: "a", from: "mcp" }));
+  record(ledger, item("tool:mcp__a__x", "mcp", 8000, { name: "mcp__a__x", server: "a", from: "mcp" }));
   record(ledger, item("tool:mcp__c__x", "mcp", 40000, { server: "c", from: "mcp", deferred: true }));
   addAttachment(ledger, "mcp_instructions_delta", 4000, 1);
   addAttachment(ledger, "agent_listing_delta", 800, 1);
@@ -238,7 +361,7 @@ test("the instructions your servers gave Claude at the start are part of the ser
   // Two servers are listed (one waits behind tool search); the instructions add their size but are not a server.
   assert.deepEqual(groups.control.rows.map((row) => [row.id, row.tokens, row.count]), [["mcp", 3000, 2]]);
   assert.deepEqual(groups.control.rows[0].items, [
-    { label: "a", tokens: 2000, deferred: false },
+    { label: "a", tokens: 2000, deferred: false, tools: [{ label: "x", tokens: 2000 }] },
     { label: "mcp_instructions_delta", tokens: 1000, deferred: false, instructions: true },
     { label: "c", tokens: 0, deferred: true },
   ]);
@@ -325,6 +448,10 @@ test("nothing is matched before Claude Code counts a startup, or when no categor
   assert.equal(fitToCategories(entries, undefined).matched, false);
   assert.equal(fitToCategories(entries, []).matched, false);
   assert.equal(fitToCategories(entries, [USED("System prompt", 0), USED("Messages", 0)]).matched, false);
+  // Claude Code's rows are said to cover the rows unless the built-in tools are in the prompt and it has no row for them.
+  assert.equal(fitToCategories(entries, [USED("System prompt", 3000), USED("System tools", 9000)]).covered, true);
+  assert.equal(fitToCategories(entries, [USED("System prompt", 3000), USED("MCP tools", 20000), USED("Memory files", 4000)]).covered, false);
+  assert.equal(fitToCategories(entriesOf([item("a", "system", 400)]), [USED("System prompt", 100)]).covered, true);
   // A category with no row of the page's: counted in the total, shared out to nobody.
   const odd = fitToCategories(entries, [USED("Slash commands", 500)]);
   assert.equal(odd.matched, false);

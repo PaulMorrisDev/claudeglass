@@ -146,14 +146,14 @@ test('Simple: the startup total in a sentence, one line of advice, and three gro
     expect(lead(shown)[0]).toBe('Every request starts with about 28k tokens of setup (est.).')
     expect(lead(shown)[1]).toBe("The github tools add 11k to every request. Turn the server off in /mcp when you don't need it.")
 
-    // You control: 11k + 7.5k + 1.5k. Claude Code's own is what is left of the total, in one line.
-    // Two servers are listed: github, and docs behind tool search.
-    expect(run(shown, 'You control', 8)).toEqual(['You control', '20k', 'MCP servers (2)', '11k', 'CLAUDE.md and memory', '7.5k', 'Skills list', '1.5k'])
-    expect(run(shown, "Claude Code's own", 3)).toEqual(["Claude Code's own", '8.01k', "Claude Code's built-in instructions and tools. You can't change these."])
+    // You control: 11k + 5k + 7.5k + 1.5k. Claude Code's own is what is left of the total, in one line.
+    // Two servers are listed: github, and docs behind tool search. Three built-in tools: Bash and Read, and NotebookEdit behind tool search.
+    expect(run(shown, 'You control', 10)).toEqual(['You control', '25k', 'MCP servers (2)', '11k', 'Built-in tools (3)', '5k', 'CLAUDE.md and memory', '7.5k', 'Skills list', '1.5k'])
+    expect(run(shown, "Claude Code's own", 3)).toEqual(["Claude Code's own", '3.01k', "Claude Code's built-in instructions. You can't change these."])
     expect(shown).toContain('Sizes are estimates, shared out by size of text.')
-    // Nothing loaded after the start, so there is no third group; and no section, tool or file is named.
+    // Nothing loaded after the start, so there is no third group; and no section, tool or file is named, nor the advice on dropping a tool.
     expect(shown).not.toContain('Added as you work')
-    expect(shown.join('\n')).not.toMatch(/intro|doing|currentDate|skill_listing|Deferred|docs|Built-in tools|CLAUDE\.md ·|path-scoped/)
+    expect(shown.join('\n')).not.toMatch(/intro|doing|currentDate|skill_listing|Deferred|docs|Bash|Read|NotebookEdit|permissions\.deny|CLAUDE\.md ·|path-scoped/)
     // "(est.)" is said once.
     expect(shown.filter(line => line.includes('(est.)'))).toHaveLength(1)
 
@@ -236,8 +236,32 @@ test('a server is named as /mcp lists it, and one with only an id is a connector
   await mounted.press({ key: 'more' })
   const shown = lines(await mounted.drawn())
   // Largest first, each by its name, never its id.
-  // Four are listed: github, the connector, playwright, and docs behind tool search.
-  expect(run(shown, 'MCP servers (4)', 8)).toEqual(['MCP servers (4)', '13.3k', 'GitHub', '11k', 'Connector (batch, guide, update, …)', '2k', 'playwright', '250'])
+  // Four are listed: github, the connector, playwright, and docs behind tool search. Each server's tools follow it, by their short names.
+  // Claude Code counts the github and playwright tools; the connector's are not in its count, so they share the connector's 2k by text.
+  expect(run(shown, 'MCP servers (4)', 22)).toEqual([
+    'MCP servers (4)',
+    '13.3k',
+    'GitHub',
+    '11k',
+    'create issue',
+    '11k',
+    'Connector (batch, guide, update, …)',
+    '2k',
+    'batch',
+    '500',
+    'guide',
+    '500',
+    'update',
+    '500',
+    'query',
+    '500',
+    'playwright',
+    '250',
+    'click',
+    '250',
+    'docs',
+    'loads when asked for',
+  ])
   expect(shown.join('\n')).not.toContain(ID)
   expect(shown.join('\n')).not.toMatch(/mcp__|plugin[_:]/)
   await mounted.unmount()
@@ -276,12 +300,12 @@ test("Detailed lists each server and file under its row, and none of Claude Code
     const shown = lines(await mounted.drawn())
 
     // Servers largest first, the one that waits behind tool search last and without a size.
-    expect(run(shown, 'MCP servers (2)', 6)).toEqual(['MCP servers (2)', '11k', 'github', '11k', 'docs', 'loads when asked for'])
+    expect(run(shown, 'MCP servers (2)', 8)).toEqual(['MCP servers (2)', '11k', 'github', '11k', 'create issue', '11k', 'docs', 'loads when asked for'])
     // Files in the order they loaded, shortened as the page always has.
     expect(run(shown, 'CLAUDE.md and memory', 8)).toEqual(['CLAUDE.md and memory', '7.5k', '.claude/CLAUDE.md', '1k', 'work/CLAUDE.md', '6k', 'rules/style.md', '500'])
     // The skill that ran loaded after the start: it is in the third group, as one line.
     expect(run(shown, 'Added as you work', 5)).toEqual(['Added as you work', '500', '/clear and /compact empty these.', 'Skills Claude used', '500'])
-    expect(shown.join('\n')).not.toMatch(/intro|doing|currentDate|skill_listing|Deferred|Built-in tools|System prompt/)
+    expect(shown.join('\n')).not.toMatch(/intro|doing|currentDate|skill_listing|Deferred|System prompt|mcp__/)
     await mounted.unmount()
   }
   expect(faults(world)).toEqual([])
@@ -401,9 +425,9 @@ test("with Claude Code's own count the total is its figure, and each row is its 
   // The total is Claude Code's, so the lead carries no estimate mark and no "about"; the rows are shares, said once in the footnote.
   expect(lead(shown)[0]).toBe('Every request starts with 37k tokens of setup.')
   expect(lead(shown)[1]).toBe("The github tools add 15k to every request. Turn the server off in /mcp when you don't need it.")
-  // You control: 15k + 9k + 2k; Claude Code's own is the rest of the 37k.
-  expect(run(shown, 'You control', 8)).toEqual(['You control', '26k', 'MCP servers (2)', '15k', 'CLAUDE.md and memory', '9k', 'Skills list', '2k'])
-  expect(run(shown, "Claude Code's own", 2)).toEqual(["Claude Code's own", '11k'])
+  // You control: 15k + 7k + 9k + 2k; Claude Code's own is the rest of the 37k.
+  expect(run(shown, 'You control', 10)).toEqual(['You control', '33k', 'MCP servers (2)', '15k', 'Built-in tools (3)', '7k', 'CLAUDE.md and memory', '9k', 'Skills list', '2k'])
+  expect(run(shown, "Claude Code's own", 2)).toEqual(["Claude Code's own", '4k'])
   expect(shown).toContain('Sizes are estimates, shared out by size of text.')
   expect(shown.some(line => line.includes('(est.)'))).toBe(false)
   await mounted.unmount()
@@ -483,11 +507,167 @@ test("the instructions your servers gave Claude at the start are part of the MCP
   const mounted = await pane($)
   await mounted.press({ key: 'more' })
   const shown = lines(await mounted.drawn())
-  // github 2k + the servers' instructions 2k; Claude Code's own stays the system prompt and its tools (3k + 10 + 5k).
-  expect(run(shown, 'You control', 4)).toEqual(['You control', '6.5k', 'MCP servers (2)', '4k'])
-  expect(run(shown, "Claude Code's own", 2)).toEqual(["Claude Code's own", '8.01k'])
-  expect(run(shown, 'MCP servers (2)', 8)).toEqual(['MCP servers (2)', '4k', 'github', '2k', 'Instructions the servers gave Claude', '2k', 'docs', 'loads when asked for'])
+  // github 2k + the servers' instructions 2k, the built-in tools 5k; Claude Code's own stays the system prompt (3k + 10).
+  expect(run(shown, 'You control', 4)).toEqual(['You control', '11.5k', 'MCP servers (2)', '4k'])
+  expect(run(shown, 'Built-in tools (3)', 2)).toEqual(['Built-in tools (3)', '5k'])
+  expect(run(shown, "Claude Code's own", 2)).toEqual(["Claude Code's own", '3.01k'])
+  expect(run(shown, 'MCP servers (2)', 10)).toEqual(['MCP servers (2)', '4k', 'github', '2k', 'create issue', '2k', 'Instructions the servers gave Claude', '2k', 'docs', 'loads when asked for'])
   expect(shown.some(line => /mcp_instructions/.test(line))).toBe(false)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('Detailed lists each built-in tool under its row, largest first, those behind tool search after and dim, and says how to drop one', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+
+  const mounted = await pane($)
+  let tree = await mounted.drawn()
+  // Simple: the row alone, with no tool named and no advice.
+  expect(run(lines(tree), 'Built-in tools (3)', 2)).toEqual(['Built-in tools (3)', '5k'])
+  expect(lines(tree).some(line => /Bash|NotebookEdit|permissions\.deny/.test(line))).toBe(false)
+
+  await mounted.press({ key: 'more' })
+  tree = await mounted.drawn()
+  const shown = lines(tree)
+  // Bash is 12000 characters and Read 8000, so they share the row's 5k as 3k and 2k; NotebookEdit waits behind tool search.
+  expect(run(shown, 'Built-in tools (3)', 8)).toEqual(['Built-in tools (3)', '5k', 'Bash', '3k', 'Read', '2k', 'NotebookEdit', 'loads when asked for'])
+  const waiting = elements(tree).find(one => one.type === 'Text' && textOf(one) === 'NotebookEdit')
+  expect(waiting?.props?.dimColor).toBe(true)
+  const live = elements(tree).find(one => one.type === 'Text' && textOf(one) === 'Bash')
+  expect(live?.props?.dimColor).toBeFalsy()
+  // The advice is one dim line under the list, said once.
+  const advice = 'To drop a tool you never use, add its name to permissions.deny in your settings. It takes effect in your next session.'
+  expect(shown.filter(line => line === advice)).toHaveLength(1)
+  expect(shown.indexOf(advice)).toBe(shown.indexOf('NotebookEdit') + 2)
+  expect(elements(tree).find(one => one.type === 'Text' && textOf(one) === advice)?.props?.dimColor).toBe(true)
+  // The tools are text rows, not controls.
+  expect(buttons(tree).some(one => /tool/.test(String(one.props?.key)))).toBe(false)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test("with Claude Code's count each built-in tool is its share of the row, and the shares add up to it", async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  // 701 does not split evenly by 12000 and 8000 characters: 420.6 and 280.4 would come to 420 and 280, so the spare token goes to Bash.
+  world.shape = {
+    startupRows: [
+      { name: 'System prompt', tokens: 4000 },
+      { name: 'System tools', tokens: 701 },
+    ],
+  }
+  await reply($, world, FIRST)
+
+  const mounted = await pane($)
+  await mounted.press({ key: 'more' })
+  const shown = lines(await mounted.drawn())
+  expect(run(shown, 'Built-in tools (3)', 6)).toEqual(['Built-in tools (3)', '701', 'Bash', '421', 'Read', '280'])
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test("a count with no row for the built-in tools does not cover them: the estimate stands and Claude Code's own is not left at nothing", async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($, { github: 8000 })
+  // Claude Code counts 17.5k, which is exactly the rows You control would hold (github 2k, the tools' estimate 5k, files 9k, the skill list 1.5k).
+  // Were the tools' estimate taken out of that total, Claude Code's own would come out as nothing.
+  world.shape = {
+    startupRows: [
+      { name: 'System prompt', tokens: 8500 },
+      { name: 'Memory files', tokens: 9000 },
+    ],
+  }
+  await reply($, world, FIRST)
+
+  const mounted = await pane($)
+  let shown = lines(await mounted.drawn())
+  expect(lead(shown)[0]).toMatch(/^Every request starts with about [\d.]+k tokens of setup \(est\.\)\.$/)
+  expect(run(shown, 'Built-in tools (3)', 2)).toEqual(['Built-in tools (3)', '5k'])
+  expect(run(shown, "Claude Code's own", 2)).toEqual(["Claude Code's own", '8.5k'])
+  await mounted.press({ key: 'more' })
+  shown = lines(await mounted.drawn())
+  expect(shown.some(line => /^Claude Code counts 17\.5k of startup context on the Now page\./.test(line))).toBe(true)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test("Claude Code's own is what is left once the built-in tools are in You control, and they are not named there", async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  // Only built-in tools and the system prompt: the tools are all of You control.
+  await $.prompt.compose(COMPOSE as never)
+  await $.tool.describe({ tool: 'Bash', description: text(12000), provider: ENGINE } as never)
+  const mounted = await pane($)
+  const shown = lines(await mounted.drawn())
+  expect(run(shown, 'You control', 4)).toEqual(['You control', '3k', 'Built-in tools (1)', '3k'])
+  expect(run(shown, "Claude Code's own", 3)).toEqual(["Claude Code's own", '3k', "Claude Code's built-in instructions. You can't change these."])
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test("Detailed lists an MCP server's tools under it by the sizes Claude Code gives, five at most and then a count", async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  for (const tool of ['list_issues', 'get_issue', 'add_comment', 'search_code', 'get_pull_request']) {
+    await $.tool.describe({ tool: `mcp__github__${tool}`, description: text(4000), provider: GITHUB } as never)
+  }
+  // Claude Code counts the github tools at 12k together; the docs server waits behind tool search and has no tool listed.
+  world.shape = {
+    startupRows: [
+      { name: 'System prompt', tokens: 4000 },
+      { name: 'MCP tools', tokens: 12000 },
+    ],
+    mcpTools: [
+      { name: 'mcp__github__create_issue', serverName: 'GitHub', tokens: 6000 },
+      { name: 'mcp__github__list_issues', serverName: 'GitHub', tokens: 3000 },
+      { name: 'mcp__github__get_issue', serverName: 'GitHub', tokens: 1500 },
+      { name: 'mcp__github__add_comment', serverName: 'GitHub', tokens: 900 },
+      { name: 'mcp__github__search_code', serverName: 'GitHub', tokens: 450 },
+      { name: 'mcp__github__get_pull_request', serverName: 'GitHub', tokens: 150 },
+      { name: 'mcp__docs__search', serverName: 'docs', tokens: 777, isLoaded: false },
+    ],
+  }
+  await reply($, world, FIRST)
+
+  const mounted = await pane($)
+  // Simple: servers only.
+  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/create issue|and 1 more/)
+  await mounted.press({ key: 'more' })
+  const tree = await mounted.drawn()
+  const shown = lines(tree)
+  expect(run(shown, 'MCP servers (2)', 16)).toEqual([
+    'MCP servers (2)',
+    '12k',
+    'GitHub',
+    '12k',
+    'create issue',
+    '6k',
+    'list issues',
+    '3k',
+    'get issue',
+    '1.5k',
+    'add comment',
+    '900',
+    'search code',
+    '450',
+    'and 1 more',
+    'docs',
+  ])
+  expect(shown).not.toContain('get pull request')
+  expect(elements(tree).find(one => one.type === 'Text' && textOf(one) === 'and 1 more')?.props?.dimColor).toBe(true)
+  // The server waiting behind tool search shows no tools; nothing shows a wire name.
+  expect(shown[shown.indexOf('docs') + 1]).toBe('loads when asked for')
+  expect(shown.join('\n')).not.toMatch(/mcp__|github__|docs__/)
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })

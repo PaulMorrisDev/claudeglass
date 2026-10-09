@@ -24,6 +24,9 @@ export type Step = {
   tools?: string[]
 }
 
+/** One MCP tool of Claude Code's breakdown: its tokens and whether it is in the prompt are 100 and true when a test leaves them out. */
+export type McpToolRow = { name: string; serverName: string; tokens?: number; isLoaded?: boolean }
+
 export type World = {
   clock: ReturnType<typeof mock.clock>
   files: Map<string, string>
@@ -46,7 +49,7 @@ export type World = {
   /** What session.messages reports: the transcript so far (a test fills it). */
   transcript: unknown[]
   /** The window and summarising point session.usage reports (a 200k window and a 160k point when left out). */
-  shape: { window?: number; point?: number; buffer?: number; startupRows?: { name: string; tokens: number }[]; mcpTools?: { name: string; serverName: string }[] }
+  shape: { window?: number; point?: number; buffer?: number; startupRows?: { name: string; tokens: number }[]; mcpTools?: McpToolRow[] }
   /** The project root session.root reports. */
   root: string
   /** The session id session.id reports (a test changes it, as a /clear does). */
@@ -81,7 +84,7 @@ export function settingsFile(over: Record<string, unknown> = {}): string {
  * (`autoCompactThreshold`) unless `over.buffer` is given: then it names an "Autocompact buffer" category
  * instead and the point is the window less that, as on a machine whose Claude Code leaves the threshold out.
  */
-export function usageFor(tokens: number, usd: number, over: { point?: number; window?: number; startup?: number; buffer?: number; startupRows?: { name: string; tokens: number }[]; mcpTools?: { name: string; serverName: string }[] } = {}) {
+export function usageFor(tokens: number, usd: number, over: { point?: number; window?: number; startup?: number; buffer?: number; startupRows?: { name: string; tokens: number }[]; mcpTools?: McpToolRow[] } = {}) {
   const window = over.window ?? WINDOW
   const point = over.point ?? POINT
   // The startup part is one "System prompt" row, or the rows a test names (Memory files, System tools, ...) when it gives them.
@@ -97,7 +100,7 @@ export function usageFor(tokens: number, usd: number, over: { point?: number; wi
         maxTokens: window,
         percentage: (tokens / window) * 100,
         ...(over.buffer === undefined ? { autoCompactThreshold: point } : {}),
-        ...(over.mcpTools === undefined ? {} : { mcpTools: over.mcpTools.map(tool => ({ ...tool, tokens: 100 })) }),
+        ...(over.mcpTools === undefined ? {} : { mcpTools: over.mcpTools.map(tool => ({ tokens: 100, isLoaded: true, ...tool })) }),
         categories: [
           ...rows.map(row => ({ kind: 'used', name: row.name, tokens: row.tokens })),
           { kind: 'used', name: 'Messages', tokens: tokens - startup },

@@ -5,11 +5,12 @@
  * or rules file, a skill, a tool's description, an attachment), each with its
  * size in characters, kept in the order it loaded; then the rows the page
  * draws (tool descriptions rolled up into one row for the built-in tools, one
- * for the deferred tools and one per MCP server), the startup total, the three
- * groups the page shows it in (what you control, Claude Code's own, what was
- * added as you work), the one line of advice, and which agent runs received
- * CLAUDE.md. Sizes become tokens only here, at the calibrated characters per
- * token the caller passes in.
+ * for the deferred tools and one per MCP server, each keeping its tools), the
+ * startup total, the three groups the page shows it in (what you control,
+ * Claude Code's own, what was added as you work), each tool's share of its
+ * row, the one line of advice, and which agent runs received CLAUDE.md. Sizes
+ * become tokens only here, at the calibrated characters per token the caller
+ * passes in.
  *
  * Plain functions over plain values: no clock, no state, no I/O. Names and
  * paths pass through to the page and nowhere else.
@@ -238,6 +239,15 @@ export function shortPath(path) {
  * @property {string} [parent]
  * @property {string[]} [globs]
  * @property {{name: string, chars: number}[]} biggest  A rolled-up row's largest tools.
+ * @property {Member[]} members  A rolled-up row's every tool, in load order; none for a row that is one item.
+ */
+
+/**
+ * One tool in a rolled-up row.
+ * @typedef {Object} Member
+ * @property {string} name   The tool's name (`mcp__<server>__<tool>` for an MCP tool).
+ * @property {number} chars  Its description, in characters.
+ * @property {boolean} deferred  It waits behind tool search, so it is not in the prompt.
  */
 
 /**
@@ -270,6 +280,7 @@ export function entriesOf(items) {
           deferred: true,
           scoped: false,
           biggest: [],
+          members: [],
         };
         if (item.kind === "mcp") {
           row.server = item.server || "";
@@ -283,6 +294,7 @@ export function entriesOf(items) {
       row.count += 1;
       if (item.deferred !== true) row.deferred = false;
       if (row.tools !== undefined) row.tools.push(item.name);
+      row.members.push({ name: item.name, chars: item.chars, deferred: item.deferred === true });
       row.biggest.push({ name: item.name, chars: item.chars });
       row.biggest.sort(function (a, b) {
         return b.chars - a.chars;
@@ -304,6 +316,7 @@ export function entriesOf(items) {
       deferred: false,
       scoped: item.scoped === true,
       biggest: [],
+      members: [],
     };
     if (item.path !== undefined) one.path = item.path;
     if (item.parent !== undefined) one.parent = item.parent;
@@ -409,10 +422,12 @@ var CATEGORY_NAMES = {
  * and each category's tokens are shared out among the rows that belong to it by their size in characters, so a
  * row's figure is still an estimate but the groups add up to Claude Code's own count. A row whose category the
  * breakdown has no row for gets no size here (the caller keeps its estimate). Without a breakdown, or while it
- * counts no startup tokens (before the first reply), nothing is matched.
+ * counts no startup tokens (before the first reply), nothing is matched. The count does not cover the rows
+ * when the built-in tools are in the prompt but the breakdown has no row for them: their estimate would then
+ * sit inside a total that left them out, and Claude Code's own could come out as nothing.
  * @param {Entry[]} entries
  * @param {Category[]|null|undefined} categories
- * @returns {{ matched: boolean, total: number, sizes: Object<string, number> }}
+ * @returns {{ matched: boolean, covered: boolean, total: number, sizes: Object<string, number> }}
  */
 export function fitToCategories(entries, categories) {
   /** @type {Object<string, number>} */
@@ -430,7 +445,7 @@ export function fitToCategories(entries, categories) {
     var key = CATEGORY_NAMES[name];
     if (key !== undefined) bucket[key] = (bucket[key] || 0) + category.tokens;
   }
-  if (!(total > 0)) return { matched: false, total: 0, sizes: sizes };
+  if (!(total > 0)) return { matched: false, covered: false, total: 0, sizes: sizes };
   /** @type {Object<string, number>} */
   var chars = {};
   for (var j = 0; j < entries.length; j++) {
@@ -447,7 +462,10 @@ export function fitToCategories(entries, categories) {
     sizes[row.key] = Math.round(/** @type {number} */ (bucket[share]) * (row.startupChars / all));
     matched = true;
   }
-  return { matched: matched, total: total, sizes: sizes };
+  var covered = matched && entries.every(function (one) {
+    return categoryOf(one) !== "tools" || one.startupChars <= 0 || sizes[one.key] !== undefined;
+  });
+  return { matched: matched, covered: covered, total: total, sizes: sizes };
 }
 
 /** A server name that is an identifier, not a name (`5f3a2c1e-9b4d-...`). */
@@ -501,20 +519,141 @@ export function serverLabel(wire, names, toolNames) {
 }
 
 /**
+ * A tool's share of the row it is in.
+ * @typedef {Object} ToolShare
+ * @property {string} name
+ * @property {number} tokens  0 for a tool behind tool search.
+ * @property {boolean} deferred
+ */
+
+/**
+ * Shares a row's tokens out among its tools by size: the tools in the prompt
+ * largest first, each its part of `rowTokens` by `weights` (else by characters),
+ * rounded down, with the units left over given one each to the largest
+ * fractions (a tie to the larger tool, then the earlier one) so they add up to
+ * the row and none is negative; then the tools that wait behind tool search,
+ * largest first, with no tokens. Tools that all weigh nothing share it equally.
+ * @param {Member[]} members
+ * @param {number} rowTokens
+ * @param {Object<string, number>} [weights]  A size for each tool by name, in any one unit (Claude Code's tokens, say); every tool in the prompt needs one.
+ * @returns {ToolShare[]}
+ */
+export function toolShares(members, rowTokens, weights) {
+  /** @param {Member} one */
+  var weight = function (one) {
+    return weights !== undefined ? /** @type {number} */ (weights[one.name]) : one.chars;
+  };
+  /** @type {(a: Member, b: Member) => number} */
+  var largest = function (a, b) {
+    return weight(b) - weight(a);
+  };
+  var live = members
+    .filter(function (one) {
+      return !one.deferred;
+    })
+    .sort(largest);
+  var waiting = members
+    .filter(function (one) {
+      return one.deferred;
+    })
+    .sort(function (a, b) {
+      return b.chars - a.chars;
+    });
+  var all = 0;
+  for (var i = 0; i < live.length; i++) all += weight(/** @type {Member} */ (live[i]));
+  var even = !(all > 0);
+  if (even) all = live.length;
+  var row = Math.round(rowTokens);
+  /** @type {ToolShare[]} */
+  var out = [];
+  /** @type {{at: number, fraction: number}[]} */
+  var parts = [];
+  var given = 0;
+  for (var j = 0; j < live.length; j++) {
+    var one = /** @type {Member} */ (live[j]);
+    var exact = (row * (even ? 1 : weight(one))) / all;
+    var whole = Math.floor(exact);
+    out.push({ name: one.name, tokens: whole, deferred: false });
+    parts.push({ at: j, fraction: exact - whole });
+    given += whole;
+  }
+  // The live tools are largest first, so a tie in the fractions goes to the larger and then the earlier by index.
+  parts.sort(function (x, y) {
+    return y.fraction - x.fraction || x.at - y.at;
+  });
+  for (var k = 0; k < row - given && k < parts.length; k++) /** @type {ToolShare} */ (out[/** @type {{at: number}} */ (parts[k]).at]).tokens += 1;
+  return out.concat(
+    waiting.map(function (one) {
+      return { name: one.name, tokens: 0, deferred: true };
+    }),
+  );
+}
+
+/**
+ * An MCP tool's name on the page: the part after `mcp__<server>__`, as words.
+ * @param {string} tool  `mcp__<server>__<tool>`.
+ * @param {string} server
+ */
+export function mcpToolLabel(tool, server) {
+  var prefix = "mcp__" + server + "__";
+  var short = tool.indexOf(prefix) === 0 ? tool.slice(prefix.length) : tool.replace(/^mcp__.+?__/, "");
+  return asWords(short, tool);
+}
+
+/**
+ * One tool of Claude Code's breakdown of the MCP tools (`$.session.usage({ breakdown: "summary" }).context.breakdown.mcpTools`).
+ * @typedef {Object} McpTool
+ * @property {string} name  `mcp__<server>__<tool>`.
+ * @property {string} serverName
+ * @property {number} tokens
+ * @property {boolean} isLoaded  In the prompt, not waiting behind tool search.
+ */
+
+/**
+ * The tools of one MCP server and their share of the server's tokens: by the
+ * tokens Claude Code's breakdown gives them when it lists every one that is in
+ * the prompt, else by description characters (the two are never mixed).
+ * @param {Member[]} members  The server's tools.
+ * @param {number} serverTokens
+ * @param {McpTool[]|null|undefined} counted
+ * @returns {ToolShare[]}
+ */
+export function mcpShares(members, serverTokens, counted) {
+  /** @type {Object<string, number>} */
+  var listed = {};
+  var list = Array.isArray(counted) ? counted : [];
+  for (var i = 0; i < list.length; i++) {
+    var one = list[i];
+    if (one && one.isLoaded !== false && typeof one.tokens === "number" && isFinite(one.tokens) && one.tokens >= 0) listed[one.name] = one.tokens;
+  }
+  var live = members.filter(function (member) {
+    return !member.deferred;
+  });
+  var whole = live.length > 0 && live.every(function (member) {
+    return Object.prototype.hasOwnProperty.call(listed, member.name);
+  });
+  var sum = 0;
+  for (var j = 0; j < live.length; j++) sum += listed[/** @type {Member} */ (live[j]).name] || 0;
+  // A count that is nothing for every tool says nothing about their sizes: the text does.
+  return toolShares(members, serverTokens, whole && sum > 0 ? listed : undefined);
+}
+
+/**
  * One line under a row of the Startup page: a file or a server.
  * @typedef {Object} StartupItem
  * @property {string} label
  * @property {number} tokens
  * @property {boolean} deferred  Waits behind tool search, so costs nothing at startup.
  * @property {boolean} [instructions]  Not a server: the instructions the servers gave Claude, which the label does not name (the page does).
+ * @property {{label: string, tokens: number}[]} [tools]  A server's tools in the prompt, largest first, adding up to its tokens (none for a server behind tool search).
  */
 
 /**
  * One row of a group on the Startup page.
  * @typedef {Object} StartupRow
- * @property {string} id      "mcp", "files", "skills" or "plugin" (you control); "files-later", "skills-used", "reminders" or "attached" (added as you work).
+ * @property {string} id      "mcp", "tools", "files", "skills" or "plugin" (you control); "files-later", "skills-used", "reminders" or "attached" (added as you work).
  * @property {number} tokens
- * @property {number} count   What the row stands for: servers (every one listed, those behind tool search too), files, skills, tools.
+ * @property {number} count   What the row stands for: servers (every one listed, those behind tool search too), files, skills, tools (those behind tool search too).
  * @property {StartupItem[]} items  Largest first for servers; in load order otherwise.
  */
 
@@ -530,12 +669,14 @@ export function serverLabel(wire, names, toolNames) {
 /**
  * The page's three groups. "You control" is the MCP servers (all but the
  * Desktop app's own, with the instructions they gave Claude at the start), the
- * CLAUDE.md and memory files, the skill list and the plugins' tools; "Claude
- * Code's own" is the rest of the startup context, one total; "Added as you
- * work" is what loaded after the start (files Claude reached, skills it ran,
- * Claude Code's reminders, files and notes added to your messages). A tool that
- * waits behind tool search costs nothing: its server is counted and listed
- * without a size, and no other row has it. Rows of no tokens are left out. `total` is
+ * built-in tools (a bare tool name in the deny rules takes one out of the
+ * context), the CLAUDE.md and memory files, the skill list and the plugins'
+ * tools; "Claude Code's own" is the rest of the startup context, one total;
+ * "Added as you work" is what loaded after the start (files Claude reached,
+ * skills it ran, Claude Code's reminders, files and notes added to your
+ * messages). A tool that waits behind tool search costs nothing: its server is
+ * counted and listed without a size, and no other row has it. Rows of no
+ * tokens are left out. `total` is
  * the startup total the page shows: given, the built-in part is what is left
  * of it once "You control" is taken out. A total less than "You control" (a
  * breakdown that left out a part whose rows keep their estimates) can't hold
@@ -544,10 +685,11 @@ export function serverLabel(wire, names, toolNames) {
  * @param {(entry: Entry) => number} sizeOf  Tokens for a row.
  * @param {Object<string, string>|null|undefined} names  /mcp's name for each server (see serverLabel).
  * @param {number} [total]
+ * @param {McpTool[]|null} [counted]  Claude Code's own count of each MCP tool, to share a server's tokens out by (see mcpShares).
  * @returns {StartupGroups}
  */
-export function startupGroups(entries, sizeOf, names, total) {
-  var ids = ["mcp", "files", "skills", "plugin", "files-later", "skills-used", "reminders", "attached"];
+export function startupGroups(entries, sizeOf, names, total, counted) {
+  var ids = ["mcp", "tools", "files", "skills", "plugin", "files-later", "skills-used", "reminders", "attached"];
   /** @type {Object<string, StartupRow>} */
   var rows = {};
   for (var r = 0; r < ids.length; r++) {
@@ -555,10 +697,20 @@ export function startupGroups(entries, sizeOf, names, total) {
     rows[made] = { id: made, tokens: 0, count: 0, items: [] };
   }
   var builtin = 0;
+  /** @type {Member[]} */
+  var builtinTools = [];
   for (var i = 0; i < entries.length; i++) {
     var one = /** @type {Entry} */ (entries[i]);
     var size = sizeOf(one);
     var label = one.path !== undefined ? shortPath(one.path) : one.name;
+    // Every built-in tool, in the prompt or behind tool search, is counted and listed in its own row.
+    if ((one.kind === "tools" || one.kind === "deferred") && one.from !== "plugin") {
+      var tools = /** @type {StartupRow} */ (rows.tools);
+      tools.count += one.count;
+      if (one.startupChars > 0) tools.tokens += size;
+      builtinTools = builtinTools.concat(one.members);
+      continue;
+    }
     if (one.startupChars <= 0) {
       if (one.deferred) {
         // Behind tool search: a server is listed under its row without a size, so the detailed list is whole.
@@ -592,8 +744,26 @@ export function startupGroups(entries, sizeOf, names, total) {
     row.tokens += size;
     row.count += told ? 0 : id === "plugin" ? one.count : 1;
     if (told) row.items.push({ label: label, tokens: size, deferred: false, instructions: true });
-    else row.items.push({ label: id === "mcp" ? serverLabel(one.server || "", names, one.tools) : label, tokens: size, deferred: false });
+    else if (id === "mcp") {
+      var server = one.server || "";
+      var inPrompt = mcpShares(one.members, size, counted).filter(function (share) {
+        return !share.deferred;
+      });
+      row.items.push({
+        label: serverLabel(server, names, one.tools),
+        tokens: size,
+        deferred: false,
+        tools: inPrompt.map(function (share) {
+          return { label: mcpToolLabel(share.name, server), tokens: share.tokens };
+        }),
+      });
+    } else row.items.push({ label: label, tokens: size, deferred: false });
   }
+  // The built-in tools: in the prompt largest first, those behind tool search after, none with a size.
+  var shared = toolShares(builtinTools, /** @type {StartupRow} */ (rows.tools).tokens);
+  /** @type {StartupRow} */ (rows.tools).items = shared.map(function (share) {
+    return { label: share.name, tokens: share.tokens, deferred: share.deferred };
+  });
   /** @type {StartupRow} */ (rows.mcp).items.sort(function (a, b) {
     return b.tokens - a.tokens;
   });
@@ -613,7 +783,7 @@ export function startupGroups(entries, sizeOf, names, total) {
     for (var k = 0; k < list.length; k++) all += /** @type {StartupRow} */ (list[k]).tokens;
     return all;
   };
-  var control = present(["mcp", "files", "skills", "plugin"]);
+  var control = present(["mcp", "tools", "files", "skills", "plugin"]);
   var added = present(["files-later", "skills-used", "reminders", "attached"]);
   var yours = sum(control);
   var fits = typeof total === "number" && total >= yours;

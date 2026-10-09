@@ -59,6 +59,8 @@ export type PageKit = {
    * (`mcp__<server>__tool`); empty when Claude Code can't say.
    */
   mcpNames: () => Promise<Record<string, string>>
+  /** Claude Code's count of each MCP tool as of now (what /context lists); empty when it can't say. */
+  mcpTools: () => Promise<{ name: string; serverName: string; tokens: number; isLoaded: boolean }[]>
 }
 
 /**
@@ -150,6 +152,15 @@ function copiedKey(value: unknown): string | null {
   return typeof value === 'string' ? value : null
 }
 
+/** Claude Code's own breakdown of the context (the summary: local and free); undefined when it can't give one. */
+async function breakdownOf($: EngineInterface) {
+  try {
+    return (await $.session.usage({ breakdown: 'summary' })).context.breakdown
+  } catch {
+    return undefined
+  }
+}
+
 /** Where the dashboard shows this session, or null when the dashboard's address isn't known. */
 export function dashboardLink(view: View): string | null {
   const base = view.settings.dashboardUrl
@@ -172,6 +183,13 @@ export const register: Register = on => {
     const table = $.ui.resolve(e)
     const { Box, Text, Button, Link } = table
 
+    // Claude Code's breakdown of the context, asked for once in a draw however many of the kit's figures a page reads; none when it can't say.
+    let asked: ReturnType<typeof breakdownOf> | undefined
+    const summary = () => {
+      if (asked === undefined) asked = breakdownOf($)
+      return asked
+    }
+
     const kit: PageKit = {
       fill: async text => {
         try {
@@ -191,26 +209,18 @@ export const register: Register = on => {
         await update($, reviewAtom, was => ({ ...sound(was) }))
       },
       categories: async () => {
-        try {
-          const usage = await $.session.usage({ breakdown: 'summary' })
-          return (usage.context.breakdown?.categories ?? []).map(one => ({ name: one.name, tokens: one.tokens, kind: one.kind, isDeferred: one.isDeferred }))
-        } catch {
-          return []
-        }
+        const breakdown = await summary()
+        return (breakdown?.categories ?? []).map(one => ({ name: one.name, tokens: one.tokens, kind: one.kind, isDeferred: one.isDeferred }))
       },
       mcpNames: async () => {
-        try {
-          const usage = await $.session.usage({ breakdown: 'summary' })
-          const names: Record<string, string> = {}
-          for (const tool of usage.context.breakdown?.mcpTools ?? []) {
-            const wire = /^mcp__(.+?)__/.exec(tool.name)?.[1]
-            if (wire !== undefined && tool.serverName !== '') names[wire] = tool.serverName
-          }
-          return names
-        } catch {
-          return {}
+        const names: Record<string, string> = {}
+        for (const tool of (await summary())?.mcpTools ?? []) {
+          const wire = /^mcp__(.+?)__/.exec(tool.name)?.[1]
+          if (wire !== undefined && tool.serverName !== '') names[wire] = tool.serverName
         }
+        return names
       },
+      mcpTools: async () => (await summary())?.mcpTools?.map(one => ({ name: one.name, serverName: one.serverName, tokens: one.tokens, isLoaded: one.isLoaded })) ?? [],
       ask: async (model, prompt, maxTokens) => {
         try {
           const answer = await $.model.complete({ model, prompt, maxTokens, effort: 'low', timeoutMs: 60000 })

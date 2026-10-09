@@ -326,13 +326,17 @@ out, a line under it says which and what to do: turn the server off in
 
 Three groups follow:
 
-- **You control**: your MCP servers, CLAUDE.md and memory files, the skills
-  list, and tools from plugins. Servers are named as `/mcp` lists them, and
-  the count includes any that wait behind tool search. The instructions your
-  servers gave Claude at the start are part of the servers' figure. Turn off a
-  server you don't need, or trim a file, to make every request smaller.
-- **Claude Code's own**: its built-in instructions and tools, as one total.
-  You can't change these, so the tab doesn't list them.
+- **You control**: your MCP servers, Claude Code's built-in tools, CLAUDE.md
+  and memory files, the skills list, and tools from plugins. Servers are named
+  as `/mcp` lists them, and the count includes any that wait behind tool
+  search; so does the built-in tools' count. The instructions your servers
+  gave Claude at the start are part of the servers' figure. Turn off a server
+  you don't need, trim a file, or drop a built-in tool you never use to make
+  every request smaller. To drop a tool, add its bare name to
+  `permissions.deny` in your settings (for example `"deny": ["WebSearch"]`);
+  Claude Code then leaves it out of the context, from your next session.
+- **Claude Code's own**: its built-in instructions, as one total. You can't
+  change these, so the tab doesn't list them.
 - **Added as you work**: files that loaded when Claude reached matching
   paths, skills Claude used, Claude Code's reminders, and files and hook
   notes added to your messages. `/clear` and `/compact` empty these, so
@@ -340,8 +344,13 @@ Three groups follow:
   is left out when nothing has been added.
 
 The Detailed view lists each server and each CLAUDE.md file under its row,
-and which agent types received your CLAUDE.md. It also links to your
-CLAUDE.md files in the dashboard.
+and which agent types received your CLAUDE.md. Under the built-in tools it
+lists each tool with its size, largest first, then the tools that wait behind
+tool search, and says how to drop one. Under each server it lists the server's
+five largest tools with their sizes and counts the rest. Tool sizes are shares
+of the row's figure by the length of each tool's text, or, for a server's
+tools, by Claude Code's own count of them when it gives one. The Detailed view
+also links to your CLAUDE.md files in the dashboard.
 
 The total is Claude Code's own count when it can give one. Row sizes are
 shares of that count, worked out from the length of each item's text, and

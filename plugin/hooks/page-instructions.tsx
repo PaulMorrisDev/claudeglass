@@ -17,21 +17,25 @@ import { figureRow, heading } from './rows'
 // working): what is in every request before the person types, and what they can do
 // about it. It opens with that total in one sentence and, when one thing is big
 // enough to fix, one line of advice. Then three groups: what the person controls
-// (MCP servers, CLAUDE.md and memory, the skills list, plugin tools), Claude Code's
-// own, which is one total because it can't be changed, and what was added as the
+// (MCP servers, built-in tools, CLAUDE.md and memory, the skills list, plugin tools),
+// Claude Code's own, which is one total because it can't be changed, and what was added as the
 // work went on (files Claude reached, skills it ran, reminders). Claude Code's own
 // count of the startup context is the total when it has one, and the rows are shares
 // of it by characters of text; before it has counted, or for a row no row of /context
 // covers, the size is characters over the calibrated characters per token (the ledger
 // is in instructions.ts). Every size is an estimate, said once in a footnote.
-// Detailed lists each server and file under its row, says which agent types received
-// CLAUDE.md, and links to the CLAUDE.md files in the dashboard.
+// Detailed lists each server and file under its row, each built-in tool under its row
+// (a bare tool name in the deny rules drops it from the context) and each MCP server's
+// largest tools under it, says which agent types received CLAUDE.md, and links to the
+// CLAUDE.md files in the dashboard.
 
 /** The words that name a row: a server count is part of its name. */
 function rowName(row: StartupRow): string {
   switch (row.id) {
     case 'mcp':
       return fill(COPY['startup.mcp'], { count: row.count })
+    case 'tools':
+      return fill(COPY['startup.tools'], { count: row.count })
     case 'files':
       return COPY['startup.files']
     case 'skills':
@@ -70,16 +74,31 @@ function adviceLine(entries: Entry[], cpt: number, sizes: Sizes, names: Record<s
   return fill(COPY['startup.advice.mcp'], { server, tokens: formatTokens(found.tokens) })
 }
 
-/** A row's heading line is its figure; in Detailed the servers or files under it follow, indented. */
+/** The most tools listed under one MCP server before "and N more". */
+const SERVER_TOOLS = 5
+
+/** A row's heading line is its figure; in Detailed the servers, tools or files under it follow, indented. */
 function rowLines(context: PageContext, row: StartupRow): RenderElement[] {
   const { table } = context
+  const { Text } = table
   const lines = [figureRow(table, `row:${row.id}`, rowName(row), formatTokens(row.tokens))]
-  if (!context.view.detailed || !['mcp', 'files', 'files-later'].includes(row.id)) return lines
+  if (!context.view.detailed || !['mcp', 'tools', 'files', 'files-later'].includes(row.id)) return lines
   row.items.forEach((item, at) => {
     const name = item.instructions === true ? COPY['startup.mcp.instructions'] : row.id === 'files-later' ? fill(COPY['startup.later.mark'], { name: item.label }) : item.label
     const figure = item.deferred ? COPY['startup.deferred'] : formatTokens(item.tokens)
     lines.push(figureRow(table, `item:${row.id}:${at}`, name, figure, { indent: 2, dim: item.deferred }))
+    // A server's largest tools under it, the rest as a count.
+    const tools = item.tools ?? []
+    tools.slice(0, SERVER_TOOLS).forEach((tool, nth) => lines.push(figureRow(table, `item:${row.id}:${at}:${nth}`, tool.label, formatTokens(tool.tokens), { indent: 4 })))
+    if (tools.length > SERVER_TOOLS) lines.push(figureRow(table, `item:${row.id}:${at}:more`, fill(COPY['startup.more'], { count: tools.length - SERVER_TOOLS }), '', { indent: 4, dim: true }))
   })
+  if (row.id === 'tools' && row.items.length > 0) {
+    lines.push(
+      <Text key="tools-note" dimColor>
+        {COPY['startup.tools.note']}
+      </Text>,
+    )
+  }
   return lines
 }
 
@@ -94,13 +113,14 @@ async function render(context: PageContext): Promise<RenderElement> {
   // Claude Code's own count of the startup context, split among the rows; the estimate alone when it has none yet.
   const fit = fitToCategories(entries, await context.kit.categories())
   const sizes: Sizes = fit.matched ? fit.sizes : {}
-  const total = fit.matched ? fit.total : tokensOf(startupChars(entries), cpt)
+  // A count that leaves out the built-in tools in the prompt can't hold the rows: the estimate stands, with no total to take them from.
+  const total = fit.matched ? (fit.covered ? fit.total : undefined) : tokensOf(startupChars(entries), cpt)
   const names = await context.kit.mcpNames()
-  const groups = startupGroups(entries, one => sizeOf(one, cpt, sizes), names, total)
+  const groups = startupGroups(entries, one => sizeOf(one, cpt, sizes), names, total, await context.kit.mcpTools())
   const advice = adviceLine(entries, cpt, sizes, names)
   // Claude Code's figure is not an estimate; the estimate says so in the lead. A count too small to hold the
   // rows the page lists (a breakdown that left a part out) gives way to the estimate, so the lead is the groups' sum.
-  const counted = fit.matched && groups.fits
+  const counted = fit.matched && fit.covered && groups.fits
   const lead = fill(COPY[counted ? 'startup.lead' : 'startup.lead.est'], { tokens: formatTokens(groups.total) })
 
   const children: RenderElement[] = [
