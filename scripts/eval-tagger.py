@@ -13,13 +13,16 @@ Three steps, each spending no more than it says:
         for its own tags, and keeps a trimmed copy of each transcript in
         scripts/tagger-eval/sessions/. Spends Claude tokens (a few dollars
         with Sonnet). The recorded sessions are committed, so this is only
-        needed to change the scenarios.
+        needed to change the scenarios. A scenario marked "source": "hand"
+        has a session written by hand (queued messages, plan rounds, a
+        desktop replay): it is skipped, and said to be, so it is never
+        overwritten.
 
     python scripts/eval-tagger.py judge [--configs haiku,haiku-think,sonnet] [--repeats 3] [--jobs 6] [--hook PATH]
         Builds the hook's excerpt of each scenario's last turn (with
         Claude's own tag taken out of the reply) and asks each judge
         configuration for the tag, --repeats times, the way the hook does
-        (capture-hook.py's ask_haiku). Each call gets a line of its own,
+        (capture_hook.py's ask_haiku). Each call gets a line of its own,
         so no run reads another's cache and costs are what real use pays.
         Writes the raw answers to scripts/tagger-eval/results/<time>.json.
         Spends a little: about $0.002 a Haiku call, $0.009 a Sonnet one.
@@ -28,8 +31,9 @@ Three steps, each spending no more than it says:
         The report, from the newest results file by default: accuracy per
         key against the known answers (as the hook stores them, and before
         its plan and skill corrections), how often repeat runs agree, cost
-        and time per call, Claude's own tags scored the same way, and how
-        often Haiku agrees with Claude. Spends nothing.
+        and time per call, Claude's own tags scored the same way (but not
+        for a hand-written session, where Claude wrote none), and how often
+        Haiku agrees with Claude. Spends nothing.
 
 It loads the real hook script, so it measures the excerpt, instructions,
 word filter and corrections the hook uses today. Run it after changing
@@ -59,10 +63,12 @@ HERE = ROOT / "scripts" / "tagger-eval"
 PROJECT = HERE / "project"
 SESSIONS = HERE / "sessions"
 RESULTS = HERE / "results"
+#: What Claude Code runs (the launcher), and the module holding the hook's code.
 HOOK_PATH = ROOT / "src" / "claudeglass" / "hooks" / "capture-hook.py"
+MODULE_PATH = HOOK_PATH.with_name("capture_hook.py")
 
 
-def _load_hook(path: Path = HOOK_PATH):
+def _load_hook(path: Path = MODULE_PATH):
     spec = importlib.util.spec_from_file_location("_capture_hook_eval", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -74,13 +80,16 @@ CATALOGUE = HOOK.load_catalogue()
 
 
 def _use_hook(path: Path) -> None:
-    """Judge with another copy of the hook script (and the catalogue
+    """Judge with another copy of the hook module (and the catalogue
     beside it), to compare a change against what it replaces."""
     global HOOK, CATALOGUE
     HOOK = _load_hook(path)
     CATALOGUE = HOOK.load_catalogue(path.with_name(HOOK.CATALOGUE_FILE))
-#: Every key a main-session tag can carry: the Deep level's.
-KEYS = [m["id"] for m in CATALOGUE["metrics"] if m["main_line"]]
+#: Every metric a main-session tag can carry: the Deep level's.
+METRIC_IDS = [m["id"] for m in CATALOGUE["metrics"] if m["main_line"]]
+#: Every key of such a tag: each metric's own, then the keys riding on it
+#: (why and admit on shift).
+KEYS = HOOK.tag_keys(CATALOGUE, METRIC_IDS)
 
 #: Judge configurations: the model ``claude --model`` takes, and the
 #: thinking budget (``MAX_THINKING_TOKENS``; 0 is none).
@@ -122,8 +131,30 @@ def _claude_dir() -> Path:
     return Path(base) if base else Path.home() / ".claude"
 
 
+def _trim_queued(record: dict) -> dict | None:
+    """A message typed while Claude worked (a ``queued_command`` attachment),
+    which the excerpt shows: its text and ``commandMode``, nothing else.
+    ``None`` for any other attachment, and for a queued line that isn't a
+    message of yours (a task notification, another session's message): the
+    hook's own reading of it (``_queued_text``) decides."""
+    if not HOOK._queued_text(record):
+        return None
+    attachment = record["attachment"]
+    prompt = attachment["prompt"]
+    if isinstance(prompt, list):
+        prompt = [
+            {"type": "text", "text": block["text"]}
+            for block in prompt if isinstance(block, dict) and block.get("type") == "text" and isinstance(block.get("text"), str)
+        ]
+    out = {key: record[key] for key in _TOP_KEYS if key in record}
+    out["attachment"] = {"type": "queued_command", "prompt": prompt, "commandMode": attachment["commandMode"]}
+    return out
+
+
 def _trim(record: dict) -> dict | None:
     """What the excerpt and the scoring need from one transcript line."""
+    if record.get("type") == "attachment":
+        return _trim_queued(record)
     if record.get("type") not in ("user", "assistant"):
         return None
     out = {key: record[key] for key in _TOP_KEYS if key in record}
@@ -165,6 +196,8 @@ def _trim(record: dict) -> dict | None:
 
 
 def _record_one(scenario: dict, model: str, python: str) -> str:
+    if scenario.get("source") == "hand":
+        raise ValueError(f"{scenario['id']} is written by hand and never recorded")
     sid = str(uuid.uuid4())
     with tempfile.TemporaryDirectory(prefix="tagger-eval-") as tmp:
         tmp_path = Path(tmp)
@@ -173,7 +206,7 @@ def _record_one(scenario: dict, model: str, python: str) -> str:
         config_dir = tmp_path / "cg"
         config_dir.mkdir()
         (config_dir / "config.toml").write_text(
-            '[capture]\nlevel = "custom"\nmetrics = [' + ", ".join(f'"{k}"' for k in KEYS) + ']\n'
+            '[capture]\nlevel = "custom"\nmetrics = [' + ", ".join(f'"{k}"' for k in METRIC_IDS) + ']\n'
             'tagger = "claude"\n',
             encoding="utf-8",
         )
@@ -219,6 +252,10 @@ def cmd_record(args) -> int:
     plans = _claude_dir() / "plans"
     before = set(plans.glob("*.md")) if plans.is_dir() else set()
     scenarios = _scenarios(args.only)
+    by_hand = [s["id"] for s in scenarios if s.get("source") == "hand"]
+    if by_hand:
+        print(f"skipped {len(by_hand)} written by hand, never recorded: {', '.join(by_hand)}", flush=True)
+    scenarios = [s for s in scenarios if s.get("source") != "hand"]
     with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as pool:
         futures = {pool.submit(_record_one, s, args.model, sys.executable): s["id"] for s in scenarios}
         for future in concurrent.futures.as_completed(futures):
@@ -264,8 +301,14 @@ def _untagged(records: list[dict]) -> list[dict]:
 
 def _job(scenario_id: str) -> tuple[dict, dict]:
     """The hook's job for a scenario's last turn, and what the scoring
-    needs from the session: Claude's own tag and whether a skill ran."""
+    needs from the session: Claude's own tag and whether a skill ran. The
+    transcript is read in order, without the lines the desktop app wrote
+    again when it resumed the session, as the hook reads it; an older hook
+    that doesn't gets it as it is."""
     records = _records(SESSIONS / f"{scenario_id}.jsonl")
+    ordered = getattr(HOOK, "_ordered", None)
+    if ordered is not None:
+        records = ordered(records)[0]
     clean = _untagged(records)
     mode = next((r.get("permissionMode") for r in reversed(records) if r.get("permissionMode")), "default")
     # The recording's project folder, from the paths its tools touched.
@@ -278,7 +321,7 @@ def _job(scenario_id: str) -> tuple[dict, dict]:
                "last_assistant_message": _final_text(clean), "permission_mode": mode}
     facts: dict = {}
     excerpt, reply = HOOK.judge_excerpt(clean, payload, CATALOGUE, True, facts)
-    job = {"ts": "", "reply": reply, "keys": KEYS, "system": HOOK.build_judge_prompt(CATALOGUE, KEYS),
+    job = {"ts": "", "reply": reply, "keys": KEYS, "system": HOOK.build_judge_prompt(CATALOGUE, METRIC_IDS),
            "excerpt": excerpt, "facts": facts}
     last_human = max(i for i, r in enumerate(records) if HOOK._typed(r, CATALOGUE["coaching"]["interrupt_prefix"]))
     skill_ran = any(
@@ -335,6 +378,9 @@ def cmd_judge(args) -> int:
     tasks = []
     for scenario in scenarios:
         job, facts = _job(scenario["id"])
+        if scenario.get("source") == "hand":
+            # Nobody asked Claude for a tag in a hand-written session.
+            facts["claude"] = None
         out["scenarios"][scenario["id"]] = {**facts, "excerpt": job["excerpt"], "facts": job["facts"],
                                             "runs": {c: [None] * args.repeats for c in configs}}
         tasks += [(scenario["id"], job, c, n) for c in configs for n in range(args.repeats)]
@@ -382,6 +428,13 @@ def expected_for(scenario: dict, facts: dict) -> dict:
     return expect
 
 
+def _own(row: dict) -> list[str]:
+    """Claude's own tag for a scenario, as the list to score: none for a
+    hand-written session (``claude`` is ``None``), where Claude wrote no tag
+    to be right or wrong."""
+    return [] if row.get("claude") is None else [row["claude"]]
+
+
 def _pct(n: float, d: float) -> str:
     return f"{100 * n / d:.0f}%" if d else "–"
 
@@ -396,6 +449,10 @@ def score(results: dict, scenarios: dict) -> str:
     lines = [f"# Tagger eval, {results['when']} (hook: {results.get('hook', 'current')})", "",
              f"{len(everything)} scenarios, {results['repeats']} runs each per judge. Accuracy is against the known "
              "answers in scenarios.json, over every scored key of every run.", ""]
+    by_hand = sum(1 for row in everything.values() if row.get("claude") is None)
+    if by_hand:
+        lines[-2] += (f" Sessions written by hand ({by_hand}) hold no tag of Claude's, so they are left out of "
+                      "Claude's own figures.")
     sets = {}
     for sid in everything:
         sets.setdefault(scenarios[sid].get("set", "tuning"), []).append(sid)
@@ -410,7 +467,7 @@ def score(results: dict, scenarios: dict) -> str:
                 right = total = 0
                 for sid in ids:
                     row = everything[sid]
-                    tags = [row["claude"]] if config is None else [
+                    tags = _own(row) if config is None else [
                         r["tag"] for r in row["runs"][config] if r and "error" not in r
                     ]
                     for tag in tags:
@@ -460,7 +517,7 @@ def score(results: dict, scenarios: dict) -> str:
             f"{_pct(sum(raw_right.values()), sum(raw_total.values()))} | {_pct(same, pairs)} | ${usd:.4f} | "
             f"{secs:.1f} | {thinking:.0f} | {len(runs) - len(good)} |"
         )
-    right, total = tally(lambda row: [row["claude"]])
+    right, total = tally(_own)
     per_key["claude (own tags)"] = (right, total)
     table.append(f"| Claude's own tags (the session's model, one run) | {_pct(sum(right.values()), sum(total.values()))} | – | – | – | – | – | – |")
     lines += ["## Overall", "", *table, ""]
@@ -481,7 +538,7 @@ def score(results: dict, scenarios: dict) -> str:
         agree = count = 0
         for row in rows.values():
             tags = [words(r["tag"]) for r in row["runs"][config] if r and "error" not in r]
-            if not tags:
+            if not tags or row.get("claude") is None:
                 continue
             own = words(row["claude"])
             for key in KEYS:
@@ -495,7 +552,7 @@ def score(results: dict, scenarios: dict) -> str:
         misses = []
         for sid, row in rows.items():
             expect = expected_for(scenarios[sid], row)
-            tags = [row["claude"]] if config == "claude" else [r["tag"] for r in row["runs"][config] if r and "error" not in r]
+            tags = _own(row) if config == "claude" else [r["tag"] for r in row["runs"][config] if r and "error" not in r]
             for key, options in expect.items():
                 answers = [words(t).get(key) for t in tags]
                 wrong = [a for a in answers if not accepts(options, a)]
@@ -533,7 +590,7 @@ def main(argv=None) -> int:
     judge.add_argument("--jobs", type=int, default=6)
     judge.add_argument("--only", nargs="*", default=())
     judge.add_argument("--set", choices=("tuning", "holdout"), help="only the scenarios of this set")
-    judge.add_argument("--hook", help="judge with this copy of capture-hook.py (its catalogue beside it)")
+    judge.add_argument("--hook", help="judge with this copy of capture_hook.py (its catalogue beside it)")
     scored = sub.add_parser("score", help="the report (spends nothing)")
     scored.add_argument("results", nargs="?")
     scored.add_argument("--out")

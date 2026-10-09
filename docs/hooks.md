@@ -86,6 +86,36 @@ ClaudeGlass's own capture note is folded into its hook's row, and the
 context is left out of the table, since you can't change it; a note
 gives its total.
 
+## ClaudeGlass's own hook
+
+Its row is labelled `capture-hook.py`, the launcher Claude Code runs.
+The hook is three files under `hooks/` in ClaudeGlass's data folder: the
+launcher, `capture_hook.py` with the code, and `capture-catalogue.json`
+with the word list. Python keeps the compiled form of a module it
+imports and none of a script it is started on, so the code sits in a
+module to skip compiling it on every call. Uninstalling removes all
+three, and the compiled copy, with the data folder.
+
+Claude Code waits for a hook each time it runs one. This one is
+registered on UserPromptSubmit and on PostToolUse for `Read`, `Grep`,
+`Glob`, `WebFetch`, `WebSearch` and an approved plan, and never for the
+shell or MCP tools: they were about two thirds of the calls, and a size
+note after them was wrong too often to pay for the wait. With coaching
+notes on, it is also registered for the `Agent` and `Workflow` tools, so
+it can tell you what each report from background work will cost to
+answer when you start it in a long session. It reads no size from their
+results and never says a large result is large. It is also registered
+for SubagentStop, where it prints nothing: it only notes that an agent
+run ended too big for one task, so the main session's next hook can say
+so. A call takes
+about 44 milliseconds on the author's Windows machine, python's own
+start being about 12, and returns before anything else when a result is
+under the size a note could apply to. A `settings.json` written before
+the shell and MCP tools were dropped keeps starting it after them until
+`claudeglass update --finish` or `capture connect` rewrites the entry;
+it returns at once. The wait and the size measure are on the
+[coaching notes page](coaching.md#what-it-costs).
+
 ## The report section
 
 `hooks`, always emitted, with two tables: `hooks_summary` (one row) and

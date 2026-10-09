@@ -12,11 +12,12 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from claudeglass import cli, helptext, hook_health, setup_flow
-from claudeglass.model import Diagnostics, Event, EventKind, TranscriptResult
+from claudeglass.model import Diagnostics, Event, EventKind, TranscriptMeta, TranscriptResult, Turn
 from claudeglass.render import markdown
 
 NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
@@ -498,7 +499,7 @@ def test_a_hook_that_stopped_failing_leaves_the_tally():
     assert (stat.calls, stat.errors) == (2, 1)
 
 
-# -- CAP-9/F10: measure_deep_wait / DeepWaitStats ----------------------------
+# -- Phase 7: measure_hook_overhead / HookOverhead --------------------------
 
 
 def _call_event(hook_name: str, duration_ms, *, capture: bool = True, subkind: str = "hook_success") -> Event:
@@ -510,48 +511,328 @@ def _call_event(hook_name: str, duration_ms, *, capture: bool = True, subkind: s
     return Event(kind=EventKind.HOOK_OUTPUT, subkind=subkind, detail=detail)
 
 
-def test_measure_deep_wait_computes_median_and_p90():
-    # 8 quick calls at 100ms, 2 slow ones at 900ms.
-    durations = [100] * 8 + [900] * 2
-    results = [_result(*[_call_event("PostToolUse", ms) for ms in durations])]
-    stats = hook_health.measure_deep_wait(results)
-    assert stats.calls == 10
-    assert stats.median_ms == 100.0
-    assert stats.p90_ms == 900.0
-
-
-def test_measure_deep_wait_ignores_a_post_tool_use_call_without_the_capture_flag():
-    # A third-party PostToolUse hook: no "capture" key at all.
-    results = [_result(_call_event("PostToolUse", 500, capture=False))]
-    assert hook_health.measure_deep_wait(results) == hook_health.DeepWaitStats()
-
-
-def test_measure_deep_wait_ignores_own_hook_calls_under_a_different_event():
-    # ClaudeGlass's own SessionStart/SubagentStart calls aren't Deep's wait.
-    results = [_result(_call_event("SessionStart", 140))]
-    assert hook_health.measure_deep_wait(results) == hook_health.DeepWaitStats()
-
-
-def test_measure_deep_wait_counts_a_failed_call_too():
-    # Claude Code waited for the hook to finish whether or not it errored.
-    results = [_result(_call_event("PostToolUse", 300, subkind="hook_non_blocking_error"))]
-    stats = hook_health.measure_deep_wait(results)
-    assert stats.calls == 1
-    assert stats.median_ms == 300.0
-
-
-def test_measure_deep_wait_with_nothing_to_measure_returns_empty_stats():
-    stats = hook_health.measure_deep_wait([_result()])
-    assert stats == hook_health.DeepWaitStats()
-    assert stats.summary() is None
-
-
-def test_deep_wait_summary_wording():
-    stats = hook_health.DeepWaitStats(calls=10, median_ms=100.0, p90_ms=900.0)
-    text = stats.summary()
-    assert text == (
-        "Deep's large-output/web hook waited ≈0.1s (median, p90 ≈0.9s) over 10 calls this week."
+def _turn(tools: dict | None = None, *, errors: dict | None = None, stop: str | None = "tool_use", synthetic: bool = False) -> Turn:
+    return Turn(
+        tool_calls_by_tool=dict(tools or {}),
+        tool_errors_by_tool=dict(errors or {}),
+        stop_reason=stop,
+        is_synthetic=synthetic,
     )
+
+
+def _main(*, turns=(), events=()) -> TranscriptResult:
+    return TranscriptResult(meta=TranscriptMeta(kind="top-level"), turns=list(turns), events=list(events))
+
+
+def _agent(agent_type: str = "Explore", *, turns=(), events=(), kind: str = "subagent") -> TranscriptResult:
+    return TranscriptResult(meta=TranscriptMeta(kind=kind, agent_type=agent_type), turns=list(turns), events=list(events))
+
+
+def _spec(event: str, matcher: str = "") -> hook_health.HookSpec:
+    return hook_health.HookSpec("capture-hook.py", event, matcher)
+
+
+def _row(overhead: hook_health.HookOverhead, event: str) -> hook_health.HookOverheadRow:
+    [row] = [row for row in overhead.rows if row.event == event]
+    return row
+
+
+def test_overhead_counts_runs_from_matched_tool_calls_when_few_durations_are_recorded():
+    # 120 matched calls (main and agent), but Claude Code wrote a time for 3.
+    results = [
+        _main(
+            turns=[_turn({"Read": 60, "Grep": 40})],
+            events=[_call_event("PostToolUse", 40), _call_event("PostToolUse", 50), _call_event("PostToolUse", 60)],
+        ),
+        _agent(turns=[_turn({"Read": 20})]),
+    ]
+    row = _row(hook_health.measure_hook_overhead(results, [_spec("PostToolUse", "Read|Grep")]), "PostToolUse")
+    assert (row.runs, row.recorded, row.median_ms) == (120, 3, 50.0)
+    assert row.counted
+    assert row.summed_s == pytest.approx(6.0)
+
+
+def test_overhead_does_not_count_tools_the_matcher_leaves_out():
+    results = [_main(turns=[_turn({"Read": 5, "Bash": 30, "ReadMcp": 7})])]
+    row = _row(hook_health.measure_hook_overhead(results, [_spec("PostToolUse", "Read|Grep")]), "PostToolUse")
+    # Bash is not in the list, and a plain list names tools exactly, so
+    # ReadMcp is not Read.
+    assert row.runs == 5
+
+
+@pytest.mark.parametrize(
+    ("matcher", "expected"),
+    [("", 7), ("*", 7), ("Read", 1), ("Read|Bash", 4), ("Web.*", 2), ("^mcp__", 1), ("(unclosed", 0)],
+)
+def test_overhead_reads_a_matcher_as_claude_code_does(matcher, expected):
+    # Empty or "*" selects everything; letters, digits, "_" and "|" name
+    # tools exactly; anything else is a regular expression, and one that
+    # doesn't compile selects nothing.
+    results = [_main(turns=[_turn({"Read": 1, "Bash": 3, "WebFetch": 1, "WebSearch": 1, "mcp__x__y": 1})])]
+    row = _row(hook_health.measure_hook_overhead(results, [_spec("PostToolUse", matcher)]), "PostToolUse")
+    assert row.runs == expected
+
+
+def test_overhead_leaves_out_calls_that_failed_because_they_run_a_different_event():
+    results = [_main(turns=[_turn({"Read": 10, "Grep": 4}, errors={"Read": 3, "Grep": 9})])]
+    row = _row(hook_health.measure_hook_overhead(results, [_spec("PostToolUse", "Read|Grep")]), "PostToolUse")
+    # PostToolUseFailure ran for the 3 failed Reads; a count never goes
+    # under zero.
+    assert row.runs == 7
+
+
+def test_overhead_adds_the_runs_of_two_entries_on_one_event():
+    results = [_main(turns=[_turn({"Read": 5, "Grep": 2})])]
+    row = _row(
+        hook_health.measure_hook_overhead(results, [_spec("PostToolUse", "Read"), _spec("PostToolUse", "Grep")]),
+        "PostToolUse",
+    )
+    assert row.runs == 7
+
+
+def test_overhead_median_comes_from_recorded_durations_of_its_own_hook_only():
+    results = [
+        _main(
+            turns=[_turn({"Read": 50})],
+            events=[
+                _call_event("PostToolUse", 10),
+                _call_event("PostToolUse", 20),
+                _call_event("PostToolUse", 600, subkind="hook_non_blocking_error"),  # waited for either way
+                _call_event("PostToolUse", 9000, capture=False),  # someone else's hook
+                _call_event("SessionStart", 9000),  # another event
+                _call_event("PostToolUse", None),  # no duration recorded
+                _call_event("PostToolUse", "slow"),
+                _call_event("PostToolUse", True),
+                Event(kind=EventKind.REMINDER, subkind="hook_success", detail={"hookName": "PostToolUse", "durationMs": 7777, "capture": True}),
+            ],
+        )
+    ]
+    row = _row(hook_health.measure_hook_overhead(results, [_spec("PostToolUse", "Read")]), "PostToolUse")
+    assert (row.runs, row.recorded, row.median_ms) == (50, 3, 20.0)
+
+
+def test_an_event_with_no_recorded_duration_has_unknown_time_not_zero():
+    results = [_main(turns=[_turn(stop="end_turn"), _turn(stop="end_turn")])]
+    overhead = hook_health.measure_hook_overhead(results, [_spec("Stop")])
+    row = _row(overhead, "Stop")
+    assert (row.runs, row.recorded) == (2, 0)
+    assert row.median_ms is None
+    assert row.summed_s is None
+    assert overhead.median_ms is None
+    assert overhead.timed == ()
+    assert overhead.untimed == (row,)
+
+
+def test_overhead_never_counts_fewer_runs_than_were_recorded():
+    results = [_main(events=[_call_event("PostToolUse", 30), _call_event("PostToolUse", 50)])]
+    row = _row(hook_health.measure_hook_overhead(results, [_spec("PostToolUse", "Read")]), "PostToolUse")
+    assert (row.runs, row.recorded, row.median_ms) == (2, 2, 40.0)
+
+
+def test_overhead_counts_user_prompts_in_main_sessions_only():
+    prompts = [
+        Event(kind=EventKind.HUMAN_TEXT),
+        Event(kind=EventKind.SLASH_COMMAND),
+        Event(kind=EventKind.TASK_NOTIFICATION),
+        Event(kind=EventKind.AGENT_TERMINATED),
+        Event(kind=EventKind.SCHEDULED_TASK),
+        Event(kind=EventKind.LIMIT_RESUME),
+        Event(kind=EventKind.PEER_MESSAGE),
+        Event(kind=EventKind.QUEUE_OPERATION, subkind="queued_command"),
+        Event(kind=EventKind.META, subkind="resume"),
+    ]
+    not_prompts = [
+        Event(kind=EventKind.QUEUE_OPERATION, subkind="enqueue"),
+        Event(kind=EventKind.META, subkind="other"),
+        Event(kind=EventKind.REMINDER),
+    ]
+    results = [_main(events=[*prompts, *not_prompts]), _agent(events=[Event(kind=EventKind.HUMAN_TEXT)] * 4)]
+    row = _row(hook_health.measure_hook_overhead(results, [_spec("UserPromptSubmit")]), "UserPromptSubmit")
+    assert row.runs == len(prompts)
+
+
+def test_overhead_counts_the_main_turns_that_ended_for_stop():
+    results = [
+        _main(
+            turns=[
+                _turn(stop="end_turn"),
+                _turn(stop="max_tokens"),
+                _turn(stop="tool_use"),  # carried on to a tool, no stop
+                _turn(stop=None),  # cut off
+                _turn(stop="end_turn", synthetic=True),  # not a model reply
+            ]
+        ),
+        _agent(turns=[_turn(stop="end_turn")]),  # an agent ends with SubagentStop
+    ]
+    row = _row(hook_health.measure_hook_overhead(results, [_spec("Stop")]), "Stop")
+    assert row.runs == 2
+
+
+def test_overhead_counts_starts_and_compactions_for_session_start():
+    compact = Event(kind=EventKind.COMPACT_BOUNDARY)
+    results = [_main(events=[compact, compact]), _main(), _agent(events=[compact])]
+    overhead = lambda matcher: _row(hook_health.measure_hook_overhead(results, [_spec("SessionStart", matcher)]), "SessionStart")
+    assert overhead("").runs == 2 + 3
+    assert overhead("startup|clear|compact").runs == 2 + 3
+    assert overhead("startup|clear").runs == 2
+    assert overhead("compact").runs == 3
+    assert overhead("resume").runs == 0
+
+
+def test_overhead_counts_sessions_for_session_end_and_agent_runs_for_subagent_events():
+    results = [_main(), _main(), _agent("Explore"), _agent("general-purpose", kind="workflow-agent"), _agent("Plan")]
+    overhead = hook_health.measure_hook_overhead(
+        results,
+        [_spec("SessionEnd"), _spec("SubagentStart"), _spec("SubagentStop", "Explore|Plan")],
+    )
+    assert _row(overhead, "SessionEnd").runs == 2
+    assert _row(overhead, "SubagentStart").runs == 3
+    assert _row(overhead, "SubagentStop").runs == 2
+
+
+def test_overhead_keeps_an_event_it_cannot_count_with_its_recorded_runs_only():
+    results = [_main(events=[_call_event("Notification", 80), _call_event("Notification", 120)])]
+    overhead = hook_health.measure_hook_overhead(results, [_spec("Notification")])
+    row = _row(overhead, "Notification")
+    assert (row.counted, row.runs, row.recorded, row.median_ms) == (False, 2, 2, 100.0)
+    # An uncounted event has no honest run total, so the sentence leaves it out.
+    assert overhead.timed == () and overhead.untimed == ()
+    assert overhead.summary() is None
+
+
+def test_overhead_counts_only_the_runs_from_since_on():
+    early = Turn(tool_calls_by_tool={"Bash": 1}, stop_reason="tool_use", ts="2026-09-18T09:00:00Z")
+    late = Turn(tool_calls_by_tool={"Bash": 1}, stop_reason="tool_use", ts="2026-09-18T11:00:00Z")
+    timed = Event(
+        kind=EventKind.HOOK_OUTPUT, subkind="hook_success", ts="2026-09-18T08:00:00Z",
+        detail={"hookName": "PostToolUse", "durationMs": 80, "capture": True},
+    )  # fmt: skip
+    results = [_main(turns=[early, late], events=[timed])]
+    whole = _row(hook_health.measure_hook_overhead(results, [_spec("PostToolUse")]), "PostToolUse")
+    cut = _row(
+        hook_health.measure_hook_overhead(results, [_spec("PostToolUse")], since="2026-09-18T10:00:00+00:00"),
+        "PostToolUse",
+    )
+    assert (whole.runs, whole.recorded) == (2, 1)
+    assert (cut.runs, cut.recorded, cut.median_ms) == (1, 0, None)
+    # A transcript with nothing from then on is left out, so it isn't a start either.
+    later = hook_health.measure_hook_overhead(results, [_spec("SessionStart")], since="2026-09-19T00:00:00Z")
+    assert _row(later, "SessionStart").runs == 0
+
+
+def test_overhead_with_no_specs_or_no_transcripts_is_empty():
+    assert hook_health.measure_hook_overhead([_main(turns=[_turn({"Read": 3})])], []).rows == ()
+    assert hook_health.measure_hook_overhead([], []).summary() is None
+    row = _row(hook_health.measure_hook_overhead([], [_spec("PostToolUse", "Read")]), "PostToolUse")
+    assert (row.runs, row.recorded, row.median_ms) == (0, 0, None)
+    assert hook_health.measure_hook_overhead([], [_spec("PostToolUse", "Read")]).summary() is None
+
+
+def test_overhead_summary_wording():
+    results = [
+        _main(
+            turns=[_turn({"Read": 2000})],
+            events=[_call_event("PostToolUse", 50)] * 5,
+        )
+    ]
+    text = hook_health.measure_hook_overhead(results, [_spec("PostToolUse", "Read")]).summary()
+    # 2,000 runs at 50 ms is 100 s: 1.7 min.
+    assert text == "ClaudeGlass's hooks ran about 2,000 times, about 50 ms each, about 1.7 min summed (calls overlap)."
+
+
+def test_overhead_summary_rounds_large_counts_and_long_spans():
+    rows = (hook_health.HookOverheadRow("PostToolUse", runs=26_602, recorded=484, median_ms=88.4),)
+    # 26,602 x 88.4 ms = 2,352 s = 39 min.
+    assert hook_health.HookOverhead(rows).summary() == (
+        "ClaudeGlass's hooks ran about 26,600 times, about 88 ms each, about 39 min summed (calls overlap)."
+    )
+
+
+def test_overhead_summary_reads_small_amounts_plainly():
+    one = (hook_health.HookOverheadRow("Stop", runs=1, recorded=1, median_ms=0.2),)
+    assert hook_health.HookOverhead(one).summary() == (
+        "ClaudeGlass's hooks ran once, under 1 ms each, under 1 s summed (calls overlap)."
+    )
+    few = (hook_health.HookOverheadRow("Stop", runs=12, recorded=3, median_ms=250.0),)
+    assert hook_health.HookOverhead(few).summary() == (
+        "ClaudeGlass's hooks ran about 12 times, about 250 ms each, about 3 s summed (calls overlap)."
+    )
+
+
+def test_overhead_summary_leaves_out_an_event_with_no_time_and_says_so():
+    rows = (
+        hook_health.HookOverheadRow("PostToolUse", runs=1000, recorded=10, median_ms=60.0),
+        hook_health.HookOverheadRow("Stop", runs=40, recorded=0, median_ms=None),
+        hook_health.HookOverheadRow("UserPromptSubmit", runs=55, recorded=0, median_ms=None),
+        hook_health.HookOverheadRow("Notification", runs=2, recorded=2, median_ms=100.0, counted=False),
+    )
+    text = hook_health.HookOverhead(rows).summary()
+    # Only the timed event is in the figures; the sentence names the rest
+    # that ran without a recorded time (Notification can't be counted at all).
+    assert text == (
+        "ClaudeGlass's hooks ran about 1,000 times, about 60 ms each, about 1 min summed (calls overlap). "
+        "Left out, with no run time recorded: Stop, UserPromptSubmit."
+    )
+
+
+def test_overhead_summary_does_not_mention_left_out_events_when_all_have_a_time():
+    rows = (
+        hook_health.HookOverheadRow("PostToolUse", runs=100, recorded=10, median_ms=60.0),
+        hook_health.HookOverheadRow("Stop", runs=40, recorded=4, median_ms=100.0),
+    )
+    assert "Left out" not in hook_health.HookOverhead(rows).summary()
+
+
+def test_overhead_summary_when_no_event_has_a_time():
+    rows = (hook_health.HookOverheadRow("Stop", runs=40, recorded=0, median_ms=None),)
+    assert hook_health.HookOverhead(rows).summary() == (
+        "ClaudeGlass's hooks ran about 40 times. Claude Code recorded no run time for them."
+    )
+    once = (hook_health.HookOverheadRow("Stop", runs=1, recorded=0, median_ms=None),)
+    assert hook_health.HookOverhead(once).summary() == "ClaudeGlass's hooks ran once. Claude Code recorded no run time for them."
+
+
+def test_overhead_median_is_weighted_by_runs_per_event():
+    def overhead(fast_runs: int, slow_runs: int) -> hook_health.HookOverhead:
+        return hook_health.HookOverhead(
+            (
+                hook_health.HookOverheadRow("PostToolUse", runs=fast_runs, recorded=5, median_ms=40.0),
+                hook_health.HookOverheadRow("UserPromptSubmit", runs=slow_runs, recorded=5, median_ms=900.0),
+            )
+        )
+
+    assert overhead(90, 10).median_ms == 40.0
+    assert overhead(10, 90).median_ms == 900.0
+    assert overhead(90, 10).runs == 100
+    assert overhead(90, 10).summed_s == pytest.approx(90 * 0.04 + 10 * 0.9)
+
+
+def test_installed_specs_reads_the_capture_entries_in_settings(tmp_path):
+    claude = tmp_path / "claude"
+    claude.mkdir()
+    wanted = (
+        hook_health.HookSpec("capture-hook.py", "PostToolUse", "Read|Grep"),
+        hook_health.HookSpec("capture-hook.py", "Stop"),
+    )
+    commands = {"capture-hook.py": '"python" -I -S "C:\\cg\\hooks\\capture-hook.py" --config-dir "C:\\cg"'}
+    settings = {
+        "hooks": {
+            "PreToolUse": [{"hooks": [{"type": "command", "command": "other-tool"}]}],  # not ours
+        }
+    }
+    (claude / "settings.json").write_text(json.dumps(settings), encoding="utf-8")
+    hook_health.connect(hook_health.plan_capture(wanted, commands, claude_root=claude), now=NOW)
+    assert set(hook_health.installed_specs(claude)) == set(wanted)
+
+
+def test_installed_specs_is_empty_without_a_readable_settings_file(tmp_path):
+    claude = tmp_path / "claude"
+    claude.mkdir()
+    assert hook_health.installed_specs(claude) == ()
+    (claude / "settings.json").write_text("{not json", encoding="utf-8")
+    assert hook_health.installed_specs(claude) == ()
+    (claude / "settings.json").write_text("[]", encoding="utf-8")
+    assert hook_health.installed_specs(claude) == ()
 
 
 # -- settings policies that stop the user's own hooks running at all -------
@@ -643,3 +924,36 @@ def test_hooks_block_under_a_policy_offers_no_connect_command(tmp_path):
     assert block["blocked_by"] == hook_health.POLICY_ALL_OFF_MANAGED
     assert block["summary"] == hook_health.POLICY_TEXT[hook_health.POLICY_ALL_OFF_MANAGED]
     assert capture_view.hooks_block(None)["blocked_by"] is None
+
+
+# -- Phase 7: sessions by entrypoint, the corpus flattened ------------------
+
+
+def test_terminal_sessions_counts_terminal_and_all_sessions():
+    entrypoints = {
+        "claude-desktop": {"count": 204, "last_ts": "2026-09-22"},
+        "cli": {"count": 1, "last_ts": "2026-09-20"},
+        "": {"count": 3, "last_ts": "2026-09-21"},
+    }
+    # A session whose entrypoint is unknown counts in the total only.
+    assert hook_health.terminal_sessions(entrypoints) == (1, 208)
+    assert hook_health.terminal_sessions({"claude-desktop": {"count": 5, "last_ts": "x"}}) == (0, 5)
+
+
+def test_terminal_sessions_with_no_readings_is_zero_of_zero():
+    assert hook_health.terminal_sessions({}) == (0, 0)
+    assert hook_health.terminal_sessions(None) == (0, 0)
+
+
+def test_corpus_results_flattens_each_session_and_skips_a_bundle_with_no_top():
+    top, sub = _main(), _agent()
+    other_top = _main()
+    corpus = SimpleNamespace(
+        sessions=[
+            SimpleNamespace(top=top, subs=[sub]),
+            SimpleNamespace(top=None, subs=[_agent()]),
+            SimpleNamespace(top=other_top, subs=[]),
+        ]
+    )
+    assert hook_health.corpus_results(corpus) == [top, sub, other_top]
+    assert hook_health.corpus_results(SimpleNamespace(sessions=[])) == []

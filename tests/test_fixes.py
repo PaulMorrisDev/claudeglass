@@ -155,6 +155,55 @@ def test_scope_ids_get_the_prompt_scope_suffix_and_the_scope_note():
         assert fixes_mod.fix_note(fix) == fixes_mod.SCOPE_NOTE, rec_id
 
 
+def test_tools_list_prompts_for_a_new_agent_file_do_not_say_to_keep_its_tools_the_same():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation, SettingChange
+
+    def prompt(key, value):
+        rec = Recommendation(
+            id="spawn-tools-list" if key == "tools" else "spawn-claude-md",
+            severity="advice",
+            category="settings",
+            title="x",
+            agent_type="statusline-setup",
+            changes=[SettingChange(target="agent", key=key, agent="statusline-setup", value=value, new_agent_file=True)],
+        )
+        (fix,) = fixes_mod.build_fixes(rec)
+        return fix["prompt"]
+
+    tools = prompt("tools", ["Grep", "Read"])
+    assert "same name" in tools and "keep its tools the same" not in tools
+    assert "Claude Code adds StructuredOutput and SubagentHandback" in tools
+    # Any other setting on a new file still carries the original tool list over.
+    assert "keep its tools the same" in prompt("omitClaudeMd", True)
+
+
+def test_the_workflow_script_variant_of_the_tools_list_card_has_its_own_prompt_and_explainer():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id="spawn-tools-list",
+        variant="workflow-script",
+        severity="advice",
+        category="workflow",
+        title="Workflow agents are given tools they rarely call",
+        action="In each workflow script that starts agents, pass agentType. tools: Grep, Read.",
+        agent_type="workflow-subagent",
+    )
+    (fix,) = fixes_mod.build_fixes(rec)
+    assert fix["key"] is None and fix["command"] is None
+    assert "agentType" in fix["prompt"]
+    assert "tools: Grep, Read" in fix["prompt"]
+    assert [heading for heading, _ in fix["explainer"]]
+    assert all(text.strip() for _, text in fix["explainer"])
+    # The plain id has no entry of its own: the variant is what selects one.
+    plain = Recommendation(
+        id="spawn-tools-list", severity="advice", category="workflow", title="x", agent_type="workflow-subagent"
+    )
+    assert fixes_mod.build_fixes(plain) == []
+
+
 def test_none_note_ids_get_no_note():
     """limit-pressure, discovery-share and pricing-coverage have a prompt
     but propose nothing a restart would pick back up, so their fix gets
@@ -383,3 +432,42 @@ def test_the_asked_and_decide_apply_explainers():
     assert "have it report the exact changes instead of making them" in split["prompt"]
     assert "Keep the deciding agent on Opus." in split["prompt"]
     assert "started with model set to opus or fable" in asked["prompt"]
+
+
+def test_agent_batch_probes_prompt_carries_the_agent_and_the_line_and_the_explainer_has_its_three_headings():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id="agent-batch-probes", severity="advice", category="workflow", title="Explore looks things up one call at a time",
+        agent_type="Explore", lever=None,
+    )
+    (fix,) = fixes_mod.build_fixes(rec)
+    assert [pair[0] for pair in fix["explainer"]] == ["Where and who it affects", "Trade-off", "How to undo it"]
+    assert "Explore's agent file (~/.claude/agents/Explore.md or .claude/agents/Explore.md)" in fix["prompt"]
+    assert fixes_mod.BATCH_PROBES_LINE in fix["prompt"]
+    assert "{" not in fix["prompt"]
+    # It proposes an edit to a prompt that a restart picks up: the default note, not "none" or the scope one.
+    assert fix.get("note") not in ("none", "scope")
+    assert fixes_mod.fix_note(fix) == fixes_mod.RESTART_NOTE
+
+
+def test_plan_rounds_prompt_asks_for_a_critique_before_a_plan_and_names_the_places_to_put_it():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id="plan-rounds", severity="advice", category="workflow", title="Plans keep being sent back", lever=None,
+    )
+    (fix,) = fixes_mod.build_fixes(rec)
+    assert fixes_mod.CRITIQUE_PLAN_LINE == "Before you show me a plan, critique it for gaps and doubts, then fix them"
+    assert fix["prompt"].count(fixes_mod.CRITIQUE_PLAN_LINE[1:]) == 1
+    assert "From now on, before you show me a plan, critique it" in fix["prompt"]
+    assert "{" not in fix["prompt"]
+    assert [pair[0] for pair in fix["explainer"]] == ["Where and who it affects", "Trade-off", "How to undo it"]
+    rows = dict(fix["explainer"])
+    assert rows["Where and who it affects"].startswith(fixes_mod._SCOPE_WHERE_TEXT)
+    assert "plan skill" in rows["Where and who it affects"]
+    assert rows["How to undo it"] == fixes_mod._SCOPE_UNDO_TEXT
+    # It adds a standing instruction at a scope you pick: the scope note.
+    assert fixes_mod.fix_note(fix) == fixes_mod.SCOPE_NOTE

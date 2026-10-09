@@ -60,6 +60,15 @@ SCOPE_NOTE = (
     "lasts; new sessions read it when they start."
 )
 
+#: The line ``agent-batch-probes`` tells you to add to an agent definition or
+#: a workflow prompt, word for word (the Work habits table's help says it too).
+BATCH_PROBES_LINE = "Batch independent Read/Grep/Glob calls into a single message"
+
+#: The standing request ``plan-rounds`` tells you to put in your first
+#: planning message, in CLAUDE.md or in a plan skill, word for word (the Work
+#: habits table's help asks for the same in its own words).
+CRITIQUE_PLAN_LINE = "Before you show me a plan, critique it for gaps and doubts, then fix them"
+
 #: Appended to every "from now on" workflow prompt (one that asks Claude
 #: to work differently going forward, rather than to edit a specific
 #: setting): a pasted "from now on" rule isn't picked up by a restart --
@@ -101,7 +110,7 @@ SETTING_TEXT: dict[str, tuple[str, str, str]] = {
     "tools": (
         "The only tools this agent may call. Definitions of other tools are not sent to it.",
         "The agent can't use any tool missing from the list, for example to edit a file.",
-        "",
+        "Claude Code adds StructuredOutput and SubagentHandback to every subagent whatever this list says.",
     ),
     "model": (
         "Which Claude model does the work. Smaller models cost less per token.",
@@ -357,6 +366,14 @@ _WORKFLOW_PROMPTS = {
         "can add to the task prompts I send it instead. Show me the diff before saving. Claude Code will ask "
         "my permission before editing files under .claude."
     ),
+    "agent-batch-probes": (
+        "{agent} often makes one read-only call per reply, and each reply reads its whole context again. Please "
+        "read {agent}'s agent file (~/.claude/agents/{agent}.md or .claude/agents/{agent}.md). Then propose "
+        "adding this line to its prompt: \"" + BATCH_PROBES_LINE + ".\" Some agents have no agent file, because "
+        "they are built into Claude Code or a workflow script starts them. If {agent} is one, propose a sentence "
+        "I can add to the task prompts or the workflow script instead. Show me the diff before saving. "
+        "Claude Code will ask my permission before editing files under .claude."
+    ),
     # UX-8: the rest of the workflow-rule ids below (every one that used
     # to fall through build_fixes with no template at all, per this
     # module's own docstring) so every card gets a prompt, not just the
@@ -380,6 +397,9 @@ _WORKFLOW_PROMPTS = {
     "batch-instructions": (
         "From now on, if I send you a few small separate asks in a row, ask whether I'd like them batched "
         "into one message before you start on the first. " + PROMPT_SCOPE
+    ),
+    "plan-rounds": (
+        "From now on, " + CRITIQUE_PLAN_LINE[0].lower() + CRITIQUE_PLAN_LINE[1:] + ". " + PROMPT_SCOPE
     ),
     "subagent-volume": (
         "Please look at why {agent} is spawned so often, or so expensively, in my recent sessions, and "
@@ -416,6 +436,16 @@ _WORKFLOW_PROMPTS = {
         "session. Show me the diff before saving. Claude Code will ask my permission before editing files "
         "under .claude."
     ),
+    # Your answers say the builds relied on the discussion, or the plan left
+    # out what you then fixed: a thinner plan would lose even more in a fresh
+    # session, so the plan has to carry it first.
+    "plan-handoff:fuller_plans": (
+        "Please add a short instruction to my ~/.claude/CLAUDE.md: before I approve a plan, add the decisions, "
+        "file paths and constraints the build needs, and a done-when line. Then, when I approve a plan that took "
+        "a lot of exploring, remind me to run /clear and start the build from the saved plan file, one phase per "
+        "session. Show me the diff before saving. Claude Code will ask my permission before editing files under "
+        ".claude."
+    ),
     "run-split": (
         "My {agent} runs get long, and every later reply reads again all the run has read. Please add a short "
         "instruction to my ~/.claude/CLAUDE.md: when a task for {agent} "
@@ -449,10 +479,19 @@ _WORKFLOW_PROMPTS = {
         "of pasting their contents, and leave out background it can look up itself. " + PROMPT_SCOPE
     ),
     "spawn-cost": (
-        "Please check whether {agent} has its own agent file; if it does, propose an omitClaudeMd or "
-        "narrower-skills change to trim what it's sent at startup, and if it's a built-in agent type with no "
-        "file, suggest how to shorten the Agent prompt I write when I spawn it. Show me the change before "
-        "making it."
+        "Please check whether {agent} has its own agent file; if it does, propose a tools list, an "
+        "omitClaudeMd or a narrower-skills change to trim what it's sent at startup. If it's a built-in agent "
+        "type with no file, explain what a same-named agent file with a tools list would leave out, and "
+        "which of its tools my recent runs called. Show me the change before making it."
+    ),
+    # {action} is the card's own tools line and the tools it leaves out.
+    "spawn-tools-list:workflow-script": (
+        "Please find the workflow scripts I start agents from (.claude/workflows in this project, and "
+        "~/.claude/workflows). {action} For each agent() call that names no agentType, say what job it does "
+        "and which tools that job needs, and propose an agent file under .claude/agents that lists only "
+        "those tools in its tools: line, then pass its name as agentType in the call's options. Show me each "
+        "new agent file and each changed call before saving anything. Claude Code will ask my permission "
+        "before editing files under .claude."
     ),
     "effort-mismatch": (
         "Please check the current effortLevel in ~/.claude/settings.json (or the relevant agent's "
@@ -573,6 +612,12 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "to Claude's answer to the first before sending the rest.",
         _SCOPE_UNDO_TEXT,
     ),
+    "plan-rounds": (
+        _SCOPE_WHERE_TEXT + " A plan skill is a file under ~/.claude/skills or .claude/skills that you write once.",
+        "Claude spends a reply critiquing each plan before it shows you, and a plan can still miss what only you "
+        "know. Your own questions may still be needed.",
+        _SCOPE_UNDO_TEXT,
+    ),
     "subagent-volume": (
         "Nowhere in Claude Code's config directly -- the fix is fewer spawns, a cheaper model for this "
         "agent type, or a tighter brief; a model change is set in settings.json or the agent's frontmatter.",
@@ -610,6 +655,13 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "A fresh session knows only the plan and what it reads again, so a thin plan can mean re-reading "
         "files or asking again about decisions made while planning.",
         "Remove the reminder from your CLAUDE.md and keep building in the planning session.",
+    ),
+    "plan-handoff:fuller_plans": (
+        "Nowhere in Claude Code's config: how you move from planning to building in the main session. The "
+        "prompt adds a plan checklist and a reminder to your CLAUDE.md.",
+        "A fuller plan takes longer to write and approve, and Claude can still leave out a decision you had "
+        "not thought of yet.",
+        "Remove the instruction from your CLAUDE.md and approve plans as they come.",
     ),
     "run-split": (
         "Nowhere in Claude Code's config: how the main session hands work to this agent. The prompt adds an "
@@ -670,6 +722,13 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "Remove the added report-length instruction (Claude Code shows the change before saving it if "
         "it's in an agent file).",
     ),
+    "agent-batch-probes": (
+        "The agent's own file (~/.claude/agents/<type>.md or .claude/agents/<type>.md) if it has one, or the "
+        "Agent prompt or workflow script that starts it.",
+        "Calls that depend on each other can't share a message. Where one search names the next file to read, "
+        "the agent still looks things up one at a time.",
+        "Remove the added line (Claude Code shows the change before saving it if it's in an agent file).",
+    ),
     "spawn-task-prompt": (
         _SCOPE_WHERE_TEXT,
         "Pointing an agent at files instead of pasting their contents means it spends a turn reading them "
@@ -684,12 +743,21 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "Move the section back into the shared file (Claude Code shows the diff before saving it).",
     ),
     "spawn-cost": (
-        "The agent's own frontmatter file, if it has one (omitClaudeMd there trims what it's sent at "
-        "spawn); for a built-in agent type with no file, nowhere in the config -- the fix is a shorter "
-        "Agent prompt when you spawn it.",
-        "Trimming what an agent receives at spawn can remove context it actually needed, costing you a "
-        "follow-up message instead.",
-        "Undo the frontmatter change, or go back to briefing it as before.",
+        "The agent's own frontmatter file, if it has one (a tools list or omitClaudeMd there trims what it's "
+        "sent at spawn); for a built-in agent type with no file, a new agent file of the same name, which "
+        "replaces the built-in one.",
+        "Trimming what an agent receives at spawn can remove context or a tool it actually needed, costing "
+        "you a follow-up message instead.",
+        "Undo the frontmatter change, or delete the same-named agent file to get the built-in agent back.",
+    ),
+    "spawn-tools-list:workflow-script": (
+        "Your workflow scripts (.claude/workflows in a project, or ~/.claude/workflows) and the agent files "
+        "under .claude/agents that they name as agentType. Workflow agents have no agent file of their own, "
+        "so a script has to name one.",
+        "An agent can't call a tool missing from its list. The list on this card is the mix across all your "
+        "workflow agents, so a job that needs a tool few jobs use must keep it.",
+        "Take agentType out of the call, or put the tool back in the agent file's list (Claude Code shows the "
+        "change before saving it).",
     ),
     "effort-mismatch": (
         "settings.json's effortLevel (or an agent's own effort frontmatter field), at whichever scope "
@@ -811,6 +879,10 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
 #: something the agent needs. The prompt asks Claude to do it first; the
 #: command, which only sets the key, carries it as a warning.
 _PREPARE = {
+    "tools": (
+        "First check that {agent}'s prompt never tells it to use a tool that is not on the list, and add "
+        "any that it does."
+    ),
     "omitClaudeMd": (
         "First read the CLAUDE.md files {agent} receives today (~/.claude/CLAUDE.md, the project's CLAUDE.md "
         "and CLAUDE.local.md, and any files they import). List the rules {agent} needs to do its job, show me "
@@ -819,6 +891,10 @@ _PREPARE = {
     ),
 }
 _COMMAND_WARNINGS = {
+    "tools": (
+        "This replaces the agent's whole tools list. Check that its prompt never relies on a tool left off "
+        "the list."
+    ),
     "omitClaudeMd": (
         "This only sets the flag. Move the rules the agent needs into its agent file first, or use the prompt "
         "above, which does both."
@@ -872,6 +948,17 @@ def already_set(key: str, value, now) -> bool:
         return wanted == current
     if isinstance(value, bool) or isinstance(now, bool):
         return value is now
+    if isinstance(value, (list, tuple)) and key in ("tools", "disallowedTools"):
+        # A tools list is a set: the order it is written in, and whether the
+        # file spells it as a list or as "Read, Grep", change nothing.
+        names = (
+            [part.strip() for part in now.split(",") if part.strip()]
+            if isinstance(now, str)
+            else list(now)
+            if isinstance(now, (list, tuple))
+            else None
+        )
+        return names is not None and sorted(map(str, value)) == sorted(map(str, names))
     return value == now
 
 
@@ -991,11 +1078,12 @@ def prompt_for(rec: Recommendation, change: SettingChange) -> str:
     subject = f"the {change.agent} agent" if change.target == "agent" else "my Claude Code settings"
     prepare = _PREPARE.get(change.key, "").format(agent=change.agent, path=path)
     if change.new_agent_file:
+        # A tools list is the point of the file, so only another key keeps the tools.
+        keep_tools = "" if change.key == "tools" else ", and keep its tools the same"
         ask = (
             f"{change.agent} is a built-in Claude Code agent. Create {path}, a custom agent with the same "
             f"name, that does the same job as the built-in one and sets {change.key}: {_after(change)} in "
-            "its frontmatter. Write its prompt from what you know of the built-in agent, and keep its "
-            "tools the same."
+            f"its frontmatter. Write its prompt from what you know of the built-in agent{keep_tools}."
         )
         if prepare:
             ask += " " + prepare
@@ -1124,6 +1212,7 @@ _NOTE_OVERRIDES: dict[str, str] = {
     "long-tool-waits": "scope",
     "notification-invalidation": "scope",
     "batch-instructions": "scope",
+    "plan-rounds": "scope",
     "long-context-share": "scope",
     "spawn-task-prompt": "scope",
     "tool-output-carry": "scope",

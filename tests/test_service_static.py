@@ -40,7 +40,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import backtest, capture_view, footprint, helptext, quick_actions, setup_status, skills_review
+from claudeglass import backtest, capture_catalogue, capture_view, footprint, helptext, quick_actions, setup_status, skills_review
 from claudeglass.config import CaptureConfig, Config
 from claudeglass.corpus import load_corpus
 from claudeglass.pricing import load_pricing
@@ -550,6 +550,14 @@ def test_capture_group_opens_for_a_metric_that_needs_you() -> None:
     assert "if (row.statusline_note) box.appendChild(" in _function_source(_app_js(), "renderMetricRow")
 
 
+def test_a_metric_row_that_needs_a_hook_entry_names_the_command_unless_a_policy_blocks_it() -> None:
+    row = _function_source(_app_js(), "renderMetricRow")
+    chip = row.index('chip("Needs a hook entry"')
+    assert chip < row.index('codeBlockWithCopy(row.hook_command, "Command")')
+    # A settings policy stops the hooks running: 'capture connect' can't change that, so it isn't offered.
+    assert "row.needs_hook && row.hook_command && !(data.hooks && data.hooks.blocked_by)" in row
+
+
 def test_a_metric_row_says_what_it_costs_before_no_tokens() -> None:
     row = _function_source(_app_js(), "renderMetricRow")
     assert "if (!row.asks_claude) cost = row.cost_note || (" in row
@@ -703,6 +711,12 @@ def test_habits_playbook_caps_featured_cards_and_collapses_the_rest() -> None:
     assert "appendHabitCards" in body
 
 
+def test_the_empty_habits_state_names_every_habit_the_notes_still_warn_about() -> None:
+    """The coaching notes still warn about small requests (drip_feed), huge pastes (big_paste) and
+    checks on a background task (status_poll), so the empty state names all three."""
+    assert "small requests, huge pastes" in _static_text("page-habits.js")
+
+
 def test_habits_digest_money_cards_follow_the_billing_mode() -> None:
     """UX-1 (F1): the Work habits digest's money cards go through
     ``moneyParts()`` (the ``Units.money`` mirror), not a bare "X USD" from
@@ -713,9 +727,196 @@ def test_habits_digest_money_cards_follow_the_billing_mode() -> None:
     app_js = _app_js()
     body = _function_source(app_js, "renderHabitsDigest")
     assert 'kind === "money" ? moneyParts(' in body
-    assert "unit: amount ? amount.unit || null : null" in body and "amount.secondary" in body
+    assert "unit: unit || null" in body and "amount.secondary" in body
     # The habits the playbook shows as cards aren't repeated above them.
     assert "carded" in body and "if (rows.length && !own.length) return;" in body
+
+
+def test_every_money_figure_on_the_habits_page_carries_the_period_it_covers() -> None:
+    """A habit's saving is a week's worth and a prompting habit's cost is a
+    window's total, so each says so (also on a plan, where the period rides
+    with the list-price equivalent, not after "weekly usage limit"). A
+    habit with nothing priced says "Not priced", never a bare zero."""
+    app_js = _app_js()
+    digest = _declaration_source(app_js, "DIGEST_PERIODS")
+    for item in ("top_1", "top_2", "top_3", "adopted"):
+        assert f'{item}: "a week"' in digest
+    assert 'cost_per_met: "per piece of work"' in digest
+    tiles = _function_source(app_js, "renderHabitsDigest")
+    assert "moneyParts(Number(row.value), { period: period })" in tiles
+    assert "!amount.secondary && period" in tiles
+    money = _function_source(app_js, "periodMoney")
+    assert "amount.secondary" in money and 'amount.secondary + " " + period' in money
+    assert "moneyText(usd, { period: period, prefix: prefix })" in money
+    cards = _function_source(app_js, "appendHabitCards")
+    assert 'periodMoney(row.saving, "a week", "About ")' in cards and '"Saving not priced"' in cards
+    assert "savingPeriod" not in cards
+    prompting = _function_source(app_js, "promptingCard")
+    assert 'typeof row.cost === "number" && row.cost > 0' in prompting
+    assert 'periodMoney(row.cost, row.period, "About ")' in prompting and '"Not priced"' in prompting
+
+
+def test_a_week_that_could_not_be_measured_reads_as_an_en_dash_in_the_charts_label() -> None:
+    """The by-week string marks a week before capture, or with too few
+    messages, as "-"; the sparkline draws it as a gap and its label says
+    an en dash, not a hyphen a screen reader skips."""
+    app_js = _app_js()
+    words = _function_source(app_js, "weeksLabel")
+    assert 'part === "-"' in words and "\u2013" in words
+    for card in ("appendHabitCards", "promptingCard"):
+        assert "weeksLabel(row.weeks)" in _function_source(app_js, card)
+
+
+def test_the_brief_templates_show_their_notes_where_the_brief_skill_is_offered() -> None:
+    """The /cg-brief offer is one note under the templates, written only
+    while the brief card shows, so the page renders whatever notes arrive."""
+    body = _function_source(_app_js(), "renderBriefTemplates")
+    assert "table.notes && table.notes.length" in body
+    assert "notesList(table.notes, new Set(), true)" in body
+
+
+_REWORK_RENDERERS = (
+    "renderRework",
+    "renderReworkHeadline",
+    "renderReworkCauses",
+    "reworkCauseCard",
+    "renderReworkAdmitted",
+    "renderReworkWeeks",
+    "renderReworkLevels",
+)
+
+
+def test_rework_renders_after_the_top_habit_cards_and_before_the_brief_templates() -> None:
+    """The rework section is its own report section but sits on the Work
+    habits page: straight after the playbook's cards (the habits the page
+    leads with), before the brief templates. With no habits section it
+    still shows, ahead of How you prompt."""
+    app_js = _app_js()
+    body = _function_source(app_js, "renderHabitsSection")
+    playbook = body.index("renderHabitsPlaybook(")
+    rework = body.index("renderRework(rework, container)")
+    templates = body.index("renderBriefTemplates(")
+    assert playbook < rework < templates
+    page = _function_source(app_js, "renderHabits")
+    assert 'findSection(result.report, "rework")' in page
+    assert "renderHabitsSection(section, container, rework)" in page
+    assert "} else if (rework) {" in page and "renderRework(rework, container);" in page
+    assert page.index("renderRework(rework, container);") < page.index("renderPromptingSection(prompting, container)")
+    # One empty state when nothing was delivered, not five empty blocks.
+    assert "emptyState(" in _function_source(app_js, "renderRework")
+    mapping = _js_string_map(app_js, "SECTION_PAGE_MAP")
+    assert mapping["rework"] == "habits"
+
+
+def test_rework_amounts_follow_the_billing_mode_and_carry_their_period() -> None:
+    """Amounts are formatted here, not written as dollars: a cause card
+    through moneyText with the section's period ("over the last 30 days"),
+    the tile through moneyParts. A cost that is nothing we could price reads
+    "not priced" in rework.py's own words, never a bare zero."""
+    from claudeglass import rework
+    from claudeglass.habits import Habits
+
+    app_js = _app_js()
+    card = _function_source(app_js, "reworkCauseCard")
+    assert 'moneyText(row.cost, { period: period, prefix: "That rework cost " })' in card
+    assert "Number(row.cost) > 0" in card
+    headline = _function_source(app_js, "renderReworkHeadline")
+    assert "moneyParts(Number(lead.cost))" in headline and "caption: lead.period || null" in headline
+    assert "Not priced" in headline
+    for phrase in ("That rework was not priced.", "That rework cost "):
+        assert phrase in card
+    section = rework.build_section(Habits())
+    assert section.tables[0].columns[-1].key == "period"
+    assert _function_source(app_js, "renderRework").count("period") >= 2
+
+
+def test_the_rework_headline_shows_the_background_work_line_as_a_hint_after_its_sentences() -> None:
+    """rework.py's "Not counted as rework" sentence is a row of its own, so
+    the page prints it in its words, last and quieter than the figures."""
+    headline = _function_source(_app_js(), "renderReworkHeadline")
+    assert '["pieces", "requests", "unknown", "asides"]' in headline
+    assert 'item === "unknown" || item === "asides" ? "cell-hint" : null' in headline
+    # The tiles still lead with the pieces or requests row, which the line never replaces.
+    assert "var lead = byItem.pieces || byItem.requests;" in headline
+
+
+def test_the_rework_glossary_entry_calls_asides_messages_you_send_while_background_work_runs() -> None:
+    """The Rework entry (and the README's copy of it) says "message", not
+    "side question": an aside can steer the running work as well as ask about
+    it."""
+    app_js = _app_js()
+    glossary = dict(re.findall(r'\["([^"]+)", "([^"]+)"\]', _declaration_source(app_js, "GLOSSARY")))
+    assert "A message you send that changes no files while background work runs is not rework." in glossary["Rework"]
+    assert "side question" not in glossary["Rework"].lower()
+    assert "side question" not in _function_source(app_js, "renderReworkHeadline").lower()
+    assert "A message you send that changes no files while background work runs is not rework." in README_MD.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_rework_cards_say_each_try_line_once_and_only_offer_something_to_copy() -> None:
+    """A cause that came from several places has one Try line and one line
+    to copy. The page only shows prompts and commands: nothing in the
+    rework renderers sends a request or writes a setting."""
+    app_js = _app_js()
+    card = _function_source(app_js, "reworkCauseCard")
+    assert "row.try && !told.has(row.cause)" in card and "told.add(row.cause)" in card
+    assert "codeBlockWithCopy(row.paste" in card
+    limit = re.search(r"var CAUSE_CARD_LIMIT = (\d+);", app_js)
+    assert limit and int(limit.group(1)) == 5
+    assert "CAUSE_CARD_LIMIT" in _function_source(app_js, "renderReworkCauses")
+    for name in _REWORK_RENDERERS:
+        source = _function_source(app_js, name)
+        assert not re.search(r"fetch\(|apiPost|apiGet|XMLHttpRequest|localStorage", source), name
+
+
+def test_rework_weeks_draw_a_bar_only_where_the_table_gave_a_share() -> None:
+    """A week with fewer than 5 pieces that needed changes has no share,
+    and the page draws a dash for it (habitSparkline's "-"), never a zero
+    bar; the minimum on the page is rework.py's."""
+    from claudeglass import rework
+
+    app_js = _app_js()
+    limit = re.search(r"var WEEK_MIN_REWORKED = (\d+);", app_js)
+    assert limit and int(limit.group(1)) == rework.MIN_WEEK_REWORKED
+    body = _function_source(app_js, "renderReworkWeeks")
+    assert 'row.share === null || row.share === undefined ? "-"' in body
+    assert 'row.caught_per_piece === null || row.caught_per_piece === undefined' in body
+    assert "habitSparkline(shares" in body and "habitSparkline(caught" in body
+    # The numbers behind the bars stay one click away.
+    assert "Week by week" in body and "renderTable(table" in body
+
+
+def test_the_rework_page_reads_only_columns_the_tables_have() -> None:
+    """Each field the renderers read from a row is a column rework.py's
+    tables declare, so a renamed column fails here, not as an empty card."""
+    from claudeglass import rework
+    from claudeglass.habits import Habits
+
+    section = rework.build_section(Habits())
+    columns = {column.key for table in section.tables for column in table.columns}
+    app_js = _app_js()
+    source = "\n".join(_function_source(app_js, name) for name in _REWORK_RENDERERS)
+    read = set(re.findall(r"\b(?:row|lead|said)\.([a-z_]+)", source)) | set(re.findall(r"\]\.(period|week)\b", source))
+    assert read, "the rework renderers read no row fields"
+    assert read <= columns, read - columns
+    # The items it picks sentences by are the ones the headline and admitted tables write.
+    for item in ("pieces", "requests", "unknown", "admitted", "possible"):
+        assert f'"{item}"' in source or f"byItem.{item}" in source, item
+
+
+def test_the_glossary_names_the_rework_words() -> None:
+    """Piece of work, Rework, Status check and Plan round are glossary
+    terms, in both the dashboard and the README; Piece of work and Rework
+    open a popover where prose() meets them."""
+    app_js = _app_js()
+    glossary = dict(re.findall(r'\["([^"]+)", "([^"]+)"\]', _declaration_source(app_js, "GLOSSARY")))
+    jargon = dict(re.findall(r'\["([^"]+)", "([^"]+)"\]', _declaration_source(app_js, "JARGON")))
+    for term in ("Piece of work", "Rework", "Status check", "Plan round"):
+        assert term in glossary and term in _readme_glossary_terms(), term
+    assert re.search(r"\b(?:" + jargon["Piece of work"] + r")\b", "pieces of work")
+    assert re.search(r"\b(?:" + jargon["Rework"] + r")\b", "rework")
+    assert f"All {len(glossary)} terms" in README_MD.read_text(encoding="utf-8")
 
 
 def test_a_profile_estimate_scales_by_its_normalised_tasks() -> None:
@@ -1041,6 +1242,52 @@ def _seed_store() -> Store:
     return store
 
 
+def _canned_project_files(units: Units, period: str) -> dict:
+    """``/api/project-files`` for a file agents read in 4 agent types'
+    runs and one that is not on this machine, made by the code the route
+    calls from the shape ``context_files.to_dict`` has."""
+    from claudeglass import claude_md_review, context_files
+
+    def read(file_hash: str, tokens: int, reach: dict, weekly: dict) -> dict:
+        return {
+            "hash": file_hash, "source": "read", "tokens": tokens, "reach": reach, "reads": dict(reach),
+            "read_tokens": {name: tokens * runs for name, runs in reach.items()}, "cost_usd": 4.5,
+            "cost_by_reach": {}, "weekly": weekly, "last_seen": "2026-09-14T10:00:00+00:00",
+        }
+
+    data = {
+        "transcripts": {"main": 10, "Explore": 10, "Plan": 10, "general-purpose": 10},
+        "files": [],
+        "reads": [
+            read("a" * 16, 9000, {"main": 4, "Explore": 6, "Plan": 5, "general-purpose": 10},
+                 {"2026-08-17": 4000, "2026-08-24": 6000, "2026-09-07": 9000}),
+            read("b" * 16, 1200, {"Explore": 5}, {"2026-09-14": 1200}),
+        ],
+        "standing": {},
+        "window_days": 30,
+        "newest": "2026-09-14",
+    }
+    names = {"a" * 16: {"name": "docs/context.md", "ext": "md", "project": "demo"}}
+    rows = context_files.project_files(data, {"names": names})
+    flagged = {row["hash"]: row["reasons"] for row in context_files.check_rows(rows)}
+    return {
+        "period": period,
+        "window_days": 30,
+        "transcripts": data["transcripts"],
+        "total": len(rows),
+        "named": sum(1 for row in rows if row["name"]),
+        "truncated": False,
+        "files": [
+            {
+                **row,
+                "reasons": flagged.get(row["hash"], []),
+                "fixes": claude_md_review.project_file_fixes(row, units) if row["hash"] in flagged else [],
+            }
+            for row in rows
+        ],
+    }
+
+
 def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
     """Build the canned ``/api/*`` payloads: store-backed routes from a
     seeded ``Store``, report-backed routes from a synthetic JSONL corpus
@@ -1135,6 +1382,7 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
     canned["/api/profile-goals"] = {"goals": goals.goals_list()}
     canned["/api/skills"] = skills_review.review(config_dir, report.context_files or {}, units, period, projects=[])
     canned["/api/claude-md"] = {"period": period, "transcripts": 0, "files": []}
+    canned["/api/project-files"] = _canned_project_files(units, period)
     canned["/api/impact"] = {"changes": [], "caveat": "", "min_sessions": 3, "lookback_days": 30}
     canned["/api/backtest"] = {"predictions": [], "judged_just_now": 0, "verdicts": list(backtest.VERDICTS)}
     canned["/api/setup"] = {
@@ -1143,6 +1391,13 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
         "uninstall_command": footprint.UNINSTALL_COMMAND,
     }
     canned["/api/capture"] = capture_view.view(CaptureConfig(), units=units)
+    canned["/api/tip-feedback"] = {
+        "answers": [],
+        "options": [
+            {"word": word, "label": label, "description": text}
+            for word, label, text in capture_catalogue.TIP_CARD_OPTIONS
+        ],
+    }
     setup_items = setup_status.check_setup(config_dir, is_registered=lambda: False, running=True, url=None)
     canned["/api/setup/status"] = {
         "items": [setup_status.to_jsonable(item) for item in setup_items],
@@ -2309,6 +2564,39 @@ def test_a_change_card_says_what_changed_where_and_each_measures_reading() -> No
     assert "moneyText" not in row
 
 
+def test_a_change_card_leads_with_the_measure_the_server_names() -> None:
+    source = _app_js()
+    lead = _function_source(source, "leadMeasure")
+    # The one /api/impact names (its ratio test's surest), else the first it lists.
+    assert "measure.key === item.lead" in lead and "measures[0]" in lead
+    card = _function_source(source, "changeCard")
+    assert "var lead = leadMeasure(item);" in card
+    assert "var lead = measures[0]" not in card
+    # The compact card on the Overview shows the lead alone.
+    assert "opts.compact ? (lead ? [lead] : [])" in card
+
+
+def test_a_change_card_says_when_the_mix_of_sessions_moved_and_reads_cost_last() -> None:
+    source = _app_js()
+    mix = _function_source(source, "mixNote")
+    # The server says whether and in which words; the page only shows it.
+    assert "item.mix" in mix and "mix.flagged" in mix and "mix.text" in mix
+    # A status colour comes with an icon and words (WCAG 1.4.1).
+    assert 'chip("Session mix changed", { icon: "warning", tone: "warn"' in mix
+    assert "moneyText" not in mix
+    card = _function_source(source, "changeCard")
+    assert "var mixMoved = !!(item.mix && item.mix.flagged);" in card
+    assert "mixNote(item)" in card and "measureRow(measure, mixMoved)" in card
+    # Not on a card still waiting for sessions: the mix is only judged with enough of them.
+    assert card.index("mixNote(item)") > card.index("return card;")
+    row = _function_source(source, "measureRow")
+    assert 'measure.demoted ? " is-demoted" : ""' in row
+    assert "measure.demoted && mixMoved" in row and '"Read last: the mix of sessions changed."' in row
+    css = _static_text("app.css")
+    for selector in (".change-mix", ".change-mix-text", ".change-measure.is-demoted", ".change-demoted"):
+        assert re.search(re.escape(selector) + r"[^{]*\{", css), selector
+
+
 def test_a_change_card_says_what_the_sessions_since_saved() -> None:
     source = _app_js()
     card = _function_source(source, "changeCard")
@@ -2368,6 +2656,60 @@ def test_the_context_page_asks_for_the_pickers_project_on_every_list() -> None:
     assert 'loadInto(files, withWindow("/api/claude-md"), renderClaudeMdList' in context
     assert 'loadInto(skills, withWindow("/api/skills"), renderSkills' in context
     assert 'withWindow("/api/claude-md/" + encodeURIComponent(file.id))' in _function_source(agents, "openClaudeMd")
+
+
+def test_the_agents_page_lists_the_project_files_and_the_overview_check_points_at_them() -> None:
+    """Agents > Subagents ends with the project-files table, loaded for the
+    picked window and project; its section carries the table name the
+    check's link scrolls to, and every amount goes through the money
+    formatters."""
+    agents = _static_text("page-agents.js")
+    page = _function_source(agents, "renderAgents")
+    assert 'loadInto(files, withWindow("/api/project-files"), renderProjectFiles' in page
+    assert 'var PROJECT_FILES_NAME = "project_files";' in agents
+    assert '"data-table-name": PROJECT_FILES_NAME' in _function_source(agents, "projectFilesSection")
+    links = _static_text("links.js")
+    match = re.search(r'export var PROJECT_FILES_TABLE = "([a-z_.]+)";', links)
+    assert match and match.group(1) == "agents.project_files"
+    assert 'pageLink("agents/subagents", text || "See every project file", { t: PROJECT_FILES_TABLE })' in links
+    grid = _function_source(agents, "renderProjectFiles")
+    assert '{ key: "cost_month_usd", label: "Cost a month", kind: "money" }' in grid
+    assert "sparkline(row.series" in grid
+    assert "moneyText(row.cost_month_usd" in _function_source(agents, "openProjectFile")
+    assert "renderFixList(row.fixes, body)" in _function_source(agents, "openProjectFile")
+    names = dict(
+        re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*"([^"]*)"', _declaration_source(_static_text("page-overview.js"), "CHECK_NAMES"), re.MULTILINE)
+    )
+    assert names["project-files"] == "Project files agents read"
+    assert 'projectFilesLink("See the files")' in _function_source(_static_text("page-overview.js"), "checklistRow")
+    assert '["/api/project-files", "Loading your project files"]' in _static_text("api.js")
+
+
+def test_the_project_files_copy_keeps_to_the_dashboards_copy_rules() -> None:
+    """The words the table and its drawer show follow the house rules the
+    help text is held to: no internal names, no filler, short sentences."""
+    agents = _static_text("page-agents.js")
+    section = _function_source(agents, "projectFilesSection")
+    texts = re.findall(r'"((?:[^"\\]|\\.)*)"', section + _function_source(agents, "renderProjectFiles"))
+    sentences = [t for t in texts if " " in t and t[:1].isupper()]
+    assert sentences, "found no copy to check"
+    for text in sentences:
+        assert not re.search(r"\b(just|simply)\b", text, re.I), text
+        assert " -- " not in text, text
+        for sentence in re.split(r"(?<=[.?!])\s+", text):
+            assert len(sentence.split()) <= 25, sentence
+
+
+def test_the_agents_page_checks_the_classes_the_overview_check_covers() -> None:
+    """page-agents.js's CHECKED_CLASSES mirrors context_files.TEXT_EXTS, so the
+    drawer's code-or-data note shows for exactly the files the check never flags."""
+    from claudeglass import context_files
+
+    agents = _static_text("page-agents.js")
+    match = re.search(r"var CHECKED_CLASSES = \[(.*?)\];", agents)
+    assert match
+    assert re.findall(r'"([a-z]+)"', match.group(1)) == list(context_files.TEXT_EXTS)
+    assert "CHECKED_CLASSES.indexOf(row.ext) < 0" in _function_source(agents, "openProjectFile")
 
 
 def test_the_compactions_list_says_it_covers_whole_sessions() -> None:
@@ -2571,10 +2913,16 @@ def test_capture_banner_dismissal_is_a_seven_day_snooze_not_permanent() -> None:
     are gone: the sidebar's status line says the level instead.)"""
     app_js = _app_js()
     assert re.search(r"(?:export\s+)?(?:var|let|const) BANNER_SNOOZE_MS = 7 \* 24 \* 60 \* 60 \* 1000;", app_js)
-    notes_fn = _function_source(app_js, "notesSnoozed")
-    assert "Date.now() - ts < BANNER_SNOOZE_MS" in notes_fn
+    snooze_fn = _function_source(app_js, "snoozed")
+    assert "Date.now() - ts < BANNER_SNOOZE_MS" in snooze_fn
+    assert 'snoozed("tls:captureNotesHidden", notesSignature(notes))' in _function_source(app_js, "notesSnoozed")
     banner_fn = _function_source(app_js, "renderCaptureBanner")
     assert 'storageSet("tls:captureNotesHidden", Date.now() + "|" + notesSignature(notes))' in banner_fn
+    # The list of sessions waiting for a rating snoozes the same way.
+    assert 'snoozed("tls:captureUnratedHidden", unratedSignature(unrated))' in _function_source(app_js, "unratedSnoozed")
+    assert 'storageSet("tls:captureUnratedHidden", Date.now() + "|" + unratedSignature(unrated))' in _function_source(
+        app_js, "unratedBlock"
+    )
     # No permanent "1" write for the dismissal, and no invite left to hide.
     assert '"tls:captureNotesHidden", "1"' not in app_js
     assert "tls:captureInviteHidden" not in app_js
@@ -2981,6 +3329,115 @@ def test_an_overview_row_counts_its_other_findings_as_findings() -> None:
     assert '" more)"' not in overview
 
 
+def test_the_habit_link_scrolls_to_a_card_opens_its_fold_and_highlights_it() -> None:
+    """#/habits?item=<key>: the page reads the item once it is drawn, finds
+    the card by its data-item, opens every <details> it sits in (the playbook's
+    "more habits" fold among them) and pulses it. The playbook's cards, both
+    the featured and the folded, the prompting cards and the rework section
+    all carry the key."""
+    page = _static_text("page-habits.js")
+    imports = page[: page.index("export function renderHabits(")]
+    for name in ("onParams", "pulseNode", "habitItem", "REWORK_ITEM"):
+        assert name in imports, name
+    draw = _function_source(page, "renderHabits")
+    assert "var drawn = loadReport().then(" in draw
+    assert 'onParams("habits", function (params) {' in draw
+    assert "var item = habitItem(params);" in draw
+    # Only once the page's cards exist, so a link that opens the page cold works.
+    assert "drawn.then(function () {" in draw and "showHabitItem(container, item);" in draw
+    show = _function_source(page, "showHabitItem")
+    assert "container.querySelector('[data-item=\"' + CSS.escape(item) + '\"]')" in show
+    assert 'closest("details")' in show and "fold.open = true;" in show
+    assert "while (fold) {" in show, "every fold the card sits in opens, not only the nearest"
+    assert 'pulseNode(node, "block-target");' in show
+    assert show.index("fold.open = true;") < show.index("pulseNode(")
+    # The folded cards are built by the same function as the featured ones.
+    playbook = _function_source(page, "renderHabitsPlaybook")
+    assert "appendHabitCards(table, featured, cards);" in playbook
+    assert "appendHabitCards(table, rest, restCards);" in playbook
+    assert playbook.index("more.appendChild(restCards)") < playbook.index("block.appendChild(more)")
+    assert "more.appendChild(restCards);" in playbook
+    assert '"data-item": row.habit' in _function_source(page, "appendHabitCards")
+    assert '"data-item": row.habit' in _function_source(page, "promptingCard")
+    assert '"data-item": REWORK_ITEM' in _function_source(page, "renderRework")
+    # The card a link names exists whichever way it was drawn: no page-level
+    # lookup by id or by index.
+    assert "getElementById" not in show
+
+
+def test_the_habit_link_lives_in_one_helper_and_every_caller_uses_it() -> None:
+    """links.js is the one place that knows the parameter. The Overview, the
+    quick-action tips and the palette go through it, and no other module
+    builds a Work habits address of its own."""
+    links = _static_text("links.js")
+    for name in ("habitParams", "habitItem", "habitLink", "goToHabit"):
+        assert "export function " + name + "(" in links, name
+    assert 'export var REWORK_ITEM = "rework";' in links
+    assert 'return pageLink("habits", text, habitParams(item));' in _function_source(links, "habitLink")
+    assert 'goTo("habits", { params: habitParams(item) });' in _function_source(links, "goToHabit")
+    assert "return { item: item };" in _function_source(links, "habitParams")
+    overview = _function_source(_static_text("page-overview.js"), "checklistRow")
+    assert "habitLink(check.item," in overview
+    assert 'check.item === REWORK_ITEM ? "See the rework" : "See the habit"' in overview
+    tips = _function_source(_static_text("ui.js"), "renderTips")
+    assert 'habitLink(tip.habit, "See the habit")' in tips
+    palette = _static_text("palette.js")
+    entries = _function_source(palette, "habitEntries")
+    assert "goToHabit(key);" in entries and "goToHabit(REWORK_ITEM);" in entries
+    assert 'cards("habits", "habits_playbook"' in entries and 'cards("prompting", "prompting_habits"' in entries
+    assert "habitEntries(result && result.report)" in _function_source(palette, "loadEntries")
+    assert '{ kind: "habit", label: "Work habits" }' in palette
+    for path in _js_modules():
+        if path.name == "links.js":
+            continue
+        text = path.read_text(encoding="utf-8")
+        assert not re.search(r'(?:pageLink|goTo|formatHash)\(\s*"habits"[^;]*item', text), path.name
+
+
+def test_the_habit_item_keys_agree_between_the_page_and_the_checks() -> None:
+    """The rework section's key is the same string on the page (links.js)
+    and in the check that links to it, and no habit's key is the same as it
+    or as another habit's, so one ``item`` names one card."""
+    from claudeglass import habits, prompting
+
+    match = re.search(r'export var REWORK_ITEM = "([a-z_]+)";', _static_text("links.js"))
+    assert match and match.group(1) == quick_actions.REWORK_ITEM
+    keys = list(habits.ITEMS) + list(prompting.HABITS) + [quick_actions.REWORK_ITEM]
+    assert len(keys) == len(set(keys))
+
+
+def test_every_check_has_a_name_on_the_overview_and_the_new_one_reads_as_its_own_row() -> None:
+    """The Overview names each check; the tool-error and blocked rows moved
+    out of Work habits to a check of their own, "Failed and blocked tool
+    calls"."""
+    source = _declaration_source(_static_text("page-overview.js"), "CHECK_NAMES")
+    names = dict(re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*"([^"]*)"', source, re.MULTILINE))
+    assert set(names) <= set(quick_actions.CHECK_IDS)
+    assert names["failed-calls"] == "Failed and blocked tool calls"
+    assert names["habits"] == "Work habits"
+    order = list(names)
+    assert order.index("failed-calls") == order.index("habits") + 1
+
+
+def test_an_overview_row_leads_with_the_rework_headline_and_its_own_saving() -> None:
+    """The Work habits row: when the check has a headline (the rework
+    headline, once enough pieces were reworked) it is the finding, and the
+    row's saving is the check's own (the playbook's saving counted with the
+    largest recommendation group, never both for one habit); every other
+    check keeps its first group's lead and saving."""
+    app_js = _app_js()
+    row = _function_source(app_js, "checklistRow")
+    assert 'var headline = check && check.headline ? check.headline : "";' in row
+    assert "var lead = headline ? null : row.groups[0];" in row
+    assert "var finding = headline || (" in row
+    assert "(check && check.saving) ||" in row
+    rows = _function_source(app_js, "checklistRows")
+    assert "row.check.saving_usd > 0" in rows
+    assert "row.saving = Math.max(row.saving, row.check.saving_usd)" in rows
+    # The saving is the check's: the page doesn't sum anything it already counted.
+    assert "habits_playbook" not in rows
+
+
 # -- Phase 9: the Spend and Cache pages --------------------------------------
 
 
@@ -3231,3 +3688,581 @@ def test_models_read_by_name_on_screen() -> None:
     assert "var text = modelNames(String(cell));" in table
     assert 'el("span", { title: String(cell), text: text })' in table
     assert "return modelNames(String(value));" in _function_source(_static_text("page-actions.js"), "valueText")
+
+
+# -- the rating redesign on the dashboard (Phase 4, dashboard parity) -----------------------
+
+
+def test_the_session_rating_form_is_served_from_the_catalogue_not_copied_into_the_page() -> None:
+    """The Sessions-tab rating asks what /cg-feedback asks. The questions,
+    their words and when each applies come from the service's
+    ``feedback_questions``; the page holds none of them. A question
+    changed in the catalogue changes here with no edit to the page."""
+    spend = _static_text("page-spend.js")
+    form = _function_source(spend, "buildSessionRating")
+    assert "session.feedback_questions.forEach(function (q)" in form
+    assert 'q.question + (q.multi ? " (tick any)" : "")' in form
+    assert "ratingOptions(" in form and "q.builds" in form
+    # No question's own text, and none of the words a rating can hold, sits in the page.
+    page = "\n".join(_static_text(name) for name in ("page-spend.js", "grid.js", "links.js"))
+    for question in capture_catalogue.RATING_QUESTIONS:
+        for text in (question.question, question.plain, *(description for _word, _label, description in question.options)):
+            assert not text or text not in page, f"question text copied into the page: {text}"
+    for key, words in capture_catalogue.RATING_VOCAB.items():
+        if key == "tip_hint":
+            continue
+        for word in words:
+            assert f'"{word}"' not in form, f"rating word copied into the form: {key}={word}"
+    # The service decides which questions apply; the page only keeps what the form shows.
+    assert "feedback_questions" in spend
+    assert "session.feedback_questions) wrap.appendChild(buildSessionRating(container, session))" in _function_source(
+        spend, "buildSessionDetail"
+    )
+
+
+def test_a_session_with_several_plans_gets_a_rating_row_for_each() -> None:
+    """The plan and handoff questions come with ``builds`` when a session has
+    two or more approved plans. The form asks each build in its own row and
+    sends them as ``builds``, with the top-level answers left to build 1."""
+    form = _function_source(_static_text("page-spend.js"), "buildSessionRating")
+    assert "q.builds.forEach(function (item)" in form
+    assert 'class: "rating-build"' in form and "item.label" in form
+    assert "payload.builds = Object.keys(numbers)" in form
+    assert "payload.plan = null;" in form and "payload.handoff = null;" in form
+    # Saved builds the form doesn't show are sent back unchanged.
+    assert "savedBuilds.forEach(function (b)" in form and "if (asked.length || keepBuilds)" in form
+
+
+def test_a_follow_up_question_shows_only_while_its_answer_is_ticked() -> None:
+    form = _function_source(_static_text("page-spend.js"), "buildSessionRating")
+    gate = _function_source(form, "gate")
+    assert "q.needs" in gate and "groups[q.key].hidden" in gate
+    # A hidden question sends no answer, and a tip answer travels with the tip it was about.
+    assert 'q.needs && groups[q.key].hidden ? [] : tickedWords(inputs[q.key])' in form
+    assert "payload.tip_hint = payload.tip ?" in form
+
+
+def test_the_rating_form_keeps_answers_to_questions_it_does_not_show() -> None:
+    """A rating has more answers than one session shows. Saving from a form
+    that left a question out must not clear what was said to it."""
+    form = _function_source(_static_text("page-spend.js"), "buildSessionRating")
+    assert 'if (key !== "set_at" && key !== "builds") payload[key] = saved[key];' in form
+
+
+def test_saving_a_rating_asks_for_the_banner_again() -> None:
+    form = _function_source(_static_text("page-spend.js"), "buildSessionRating")
+    assert 'document.dispatchEvent(new CustomEvent("cg-rating-saved"))' in form
+    shell = _static_text("shell.js")
+    assert 'document.addEventListener("cg-rating-saved"' in shell and "capturePoll.fetchedAt = 0;" in shell
+
+
+def test_tip_habit_and_recommendation_cards_carry_the_four_ratings() -> None:
+    """Useful, Trying it, Knew it and Wrong here come from the service
+    (``/api/tip-feedback`` options), written back to the same route. The
+    card holds no setting and no apply button: it is a rating."""
+    grid = _static_text("grid.js")
+    assert "export function cardRating(kind, item)" in grid
+    rating = _function_source(grid, "cardRating")
+    assert "/api/tip-feedback" in grid
+    assert "postJson(" in rating or "postJson(" in grid
+    for forbidden in ("config", "apply", "Apply"):
+        assert forbidden not in rating, forbidden
+    habits = _static_text("page-habits.js")
+    actions = _static_text("page-actions.js")
+    assert 'cardRating("tip", String(row.habit))' in habits
+    assert 'cardRating("habit", String(row.habit))' in habits
+    assert 'cardRating("recommendation", String(focus.key || focus.id || group.id))' in actions
+    assert "cardRating" in re.search(r"import \{[^}]*\} from \"./grid.js\";", habits).group(0)
+    assert "cardRating" in re.search(r"import \{[^}]*\} from \"./grid.js\";", actions).group(0)
+
+
+def test_the_card_rating_words_are_not_copied_into_the_page() -> None:
+    grid = _static_text("grid.js")
+    body = _function_source(grid, "cardRating")
+    for _word, label, description in capture_catalogue.TIP_CARD_OPTIONS:
+        assert label not in body and description not in grid, label
+    assert "cardRatings.options" in grid
+
+
+def test_a_low_confidence_label_gets_a_chip_in_the_list_and_the_detail() -> None:
+    spend = _static_text("page-spend.js")
+    assert spend.count('chip("Label unsure"') == 2
+    assert "row.low_confidence" in spend and "session.low_confidence" in spend
+
+
+def test_the_banner_lists_unrated_sessions_by_tokens_and_can_be_dismissed_for_a_week() -> None:
+    shell = _static_text("shell.js")
+    block = _function_source(shell, "unratedBlock")
+    # Tokens only: a count, never an amount of money.
+    assert "compactNumber(piece.tokens)" in block
+    assert "moneyText" not in block and "$" not in block
+    assert 'openSessionDrawer(piece.session_id)' in block
+    assert 'storageSet("tls:captureUnratedHidden", Date.now() + "|" + unratedSignature(unrated));' in block
+    assert 'snoozed("tls:captureUnratedHidden", unratedSignature(unrated))' in _function_source(shell, "unratedSnoozed")
+    banner = _function_source(shell, "renderCaptureBanner")
+    assert "info.unrated && info.unrated.pieces && info.unrated.pieces.length" in banner
+    assert "unratedBlock(unrated, data)" in banner
+    assert "!unratedVisible" in banner
+
+
+def test_every_page_the_limit_copy_names_is_the_page_the_limits_section_maps_to() -> None:
+    """The limits section lands on one dashboard page (links.js
+    SECTION_PAGE_MAP), so every {{page:...}} link in the limit copy, in the
+    section and table help and in the limit-pressure card, names that page
+    and never the old Spend usage page."""
+    from claudeglass import advice
+    from claudeglass.model import Recommendation
+    from test_advice import _model_swap_report
+
+    page = _js_string_map(_app_js(), "SECTION_PAGE_MAP")["limits"]
+    assert page == "cache/rebuilds"
+
+    strings: list[tuple[str, str]] = []
+    section = helptext.SECTION_COPY["limits"]
+    strings += [("limits section intro", section.intro)]
+    strings += [(f"limits section {part}", getattr(section.help, part)) for part in ("shows", "read", "act")]
+    limit_tables = [name for name in helptext.TABLE_COPY if name.startswith("limits_")]
+    assert {"limits_summary", "limits_stops_rollup", "limits_stops"} <= set(limit_tables)
+    for name in [*limit_tables, "five_hour_blocks", "waste_summary"]:
+        copy = helptext.TABLE_COPY[name]
+        strings += [(f"{name} title", copy.title)]
+        strings += [(f"{name} {part}", getattr(copy.help, part)) for part in ("shows", "read", "act")] if copy.help else []
+        for key, (label, help_text) in copy.columns.items():
+            # waste_summary is not a limits table: only its limit column is limit copy.
+            if name == "waste_summary" and key != "limit_pause_excluded_turns":
+                continue
+            strings += [(f"{name}.{key} label", label), (f"{name}.{key} help", help_text)]
+
+    # The card, for each biggest cost centre and for none.
+    source = "limits.limits_summary"
+    for shares in ((60.0, 25.0, 15.0), (20.0, 70.0, 10.0), (10.0, 20.0, 70.0), None):
+        evidence = [("5-hour limit stops", 4, source, "all"), ("Days covered", 30, source, "all")]
+        if shares is not None:
+            rollup = "limits.limits_stops_rollup"
+            evidence += [
+                ("Main session share of spend", shares[0], rollup, "all"),
+                ("Direct agents share of spend", shares[1], rollup, "all"),
+                ("Workflow agents share of spend", shares[2], rollup, "all"),
+            ]
+        rec = Recommendation(id="limit-pressure", severity="advice", category="workflow", lever=None, evidence=evidence)
+        (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+        strings += [(f"limit-pressure card {shares}", out.why), (f"limit-pressure card {shares} action", out.action)]
+
+    linked = [(where, token) for where, text in strings for token in re.findall(r"\{\{page:([^}]*)\}\}", text or "")]
+    assert linked, "no limit copy links to a page any more"
+    assert any(where.startswith("limit-pressure card") for where, _ in linked)
+    for where, token in linked:
+        assert token == page, f"{where} links to {token}, but the limits section maps to {page}"
+    for where, text in strings:
+        assert "spend/usage" not in (text or ""), where
+
+
+# -- the one map of session words: mode, purpose and app ------------------------
+
+
+def _session_words() -> dict[str, list[dict]]:
+    """charts-types.js's SESSION_WORDS: how a session ran, what it was for
+    and where it started, each as ``{key, label, note?}``."""
+    source = _declaration_source(_app_js(), "SESSION_WORDS").split("=", 1)[1]
+    return _js_literal_to_json(source)
+
+
+def _mode_palette() -> dict[str, str]:
+    source = _declaration_source(_app_js(), "ENTITY_COLOURS").split("=", 1)[1]
+    return _js_literal_to_json(re.sub(r"^\s*//.*$", "", source, flags=re.MULTILINE))["mode"]
+
+
+def _tuple_words(function: str) -> set[str]:
+    """The words ``classify.<function>`` gives: the string that opens each
+    ``("word", {evidence})`` pair it returns or assigns."""
+    tree = ast.parse((SRC_DIR / "classify.py").read_text(encoding="utf-8"))
+    (node,) = [n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == function]
+    return {
+        item.elts[0].value
+        for item in ast.walk(node)
+        if isinstance(item, ast.Tuple)
+        and len(item.elts) == 2
+        and isinstance(item.elts[0], ast.Constant)
+        and isinstance(item.elts[0].value, str)
+        and isinstance(item.elts[1], ast.Dict)
+    }
+
+
+def test_the_session_words_are_the_report_tables_words() -> None:
+    """The dashboard names a mode, a purpose and an app as the report's
+    tables do, so the Sessions list and the Sessions by how you worked
+    table never disagree, and one-shot reads the same everywhere."""
+    words = _session_words()
+    tables = {"mode": "sessions_by_mode", "purpose": "sessions_by_purpose", "entrypoint": "by_entrypoint"}
+    assert set(words) == set(tables)
+    for kind, table in tables.items():
+        labels = helptext.TABLE_COPY[table].value_labels
+        assert {word["key"]: word["label"] for word in words[kind]} == labels, kind
+    # The baseline comparison names modes the same way.
+    compared = helptext.TABLE_COPY["baseline_comparison_by_mode"].value_labels
+    assert {word["key"]: word["label"] for word in words["mode"]}.items() <= compared.items()
+    # The sentences are the table's own, so the help and the page say one thing.
+    shows = helptext.TABLE_COPY["sessions_by_mode"].help.shows
+    for word in words["mode"]:
+        assert word["note"] in shows, word["key"]
+
+
+def test_the_session_words_name_the_overnight_and_one_shot_modes_as_the_plan_words_them() -> None:
+    by_key = {word["key"]: word for word in _session_words()["mode"]}
+    assert by_key["overnight"]["label"] == "Overnight (unattended)"
+    assert by_key["overnight"]["note"] == "Overnight: Claude worked on its own for two hours or more at night while you were away."
+    assert by_key["one-shot"]["label"] == "One-shot"
+    assert by_key["one-shot"]["note"] == "One-shot: one request (yours or a scheduled task's), then Claude worked with no more messages from you."
+    assert "an hour or more" not in by_key["overnight"]["note"]
+
+
+def test_the_session_words_cover_every_mode_and_purpose_the_classifier_gives() -> None:
+    """A word the map lacks would show raw ("docs-or-light-edit") in the
+    list, and a menu could not set it."""
+    words = _session_words()
+    modes = {word["key"] for word in words["mode"]}
+    purposes = {word["key"] for word in words["purpose"]}
+    given_modes = _tuple_words("classify_mode")
+    given_purposes = _tuple_words("classify_purpose")
+    assert {"overnight", "long-agentic", "interactive", "one-shot", "mixed"} <= given_modes
+    assert {"docs-or-light-edit", "general-dev", "agent-fanout", "workflow-run"} <= given_purposes
+    assert given_modes <= modes and given_purposes <= purposes
+    assert {"unknown"} <= modes and {"unknown"} <= purposes
+
+
+def test_the_palette_colours_the_modes_the_map_names() -> None:
+    """A mode keeps its colour wherever it shows: the palette's keys are the
+    map's, each mode that has a colour has its own, and what has none is Other."""
+    palette = _mode_palette()
+    keys = {word["key"] for word in _session_words()["mode"]}
+    assert set(palette) - {"other"} <= keys
+    assert {"interactive", "long-agentic", "overnight", "one-shot"} <= set(palette)
+    assert palette["other"] == "var(--chart-other)"
+    coloured = [colour for key, colour in palette.items() if key != "other"]
+    assert len(set(coloured)) == len(coloured), "two modes share a colour"
+    # The ones that were colours before keep them: a new mode takes a new slot.
+    assert [palette[key] for key in ("interactive", "long-agentic", "overnight")] == [
+        "var(--chart-1)",
+        "var(--chart-2)",
+        "var(--chart-3)",
+    ]
+
+
+def test_the_session_list_the_chart_and_the_override_menus_read_one_map() -> None:
+    """Spend > Sessions: the list's Mode, Purpose and Started from columns,
+    the override menus and the session chart's legend and tooltips all read
+    SESSION_WORDS, and none keeps a list of its own."""
+    spend = _static_text("page-spend.js")
+    columns = _declaration_source(spend, "SESSION_COLUMNS")
+    for key in ("mode", "purpose", "entrypoint"):
+        assert re.search(r'key: "' + key + r'", label: "[^"]+", kind: "str", render: wordCell\("' + key + r'"\)', columns), key
+        assert re.search(r'render: wordCell\("' + key + r'"\), sortValue: wordSort\("' + key + r'"\)', columns), key
+    assert "sessionWord(kind, row[kind])" in _function_source(spend, "wordSort")
+    cell = _function_source(spend, "wordCell")
+    assert "sessionWord(kind, value)" in cell and "sessionWordNote(kind, value)" in cell
+    detail = _function_source(spend, "buildSessionDetail")
+    assert 'buildTagSelect("mode", ' in detail and 'buildTagSelect("purpose", ' in detail
+    assert 'sessionWordNote("mode", modeSelect.value)' in detail
+    menu = _function_source(spend, "buildTagSelect")
+    assert "sessionWordChoices(kind)" in menu and "word.label" in menu and "word.key" in menu
+    # No word spelled out in the page: the map is the only list.
+    for key in ("long-agentic", "overnight", "one-shot", "docs-or-light-edit", "local-llm-pipeline"):
+        assert f'"{key}"' not in spend, key
+    assert 'import { dailyChanges, modeColour, renderChart, savingsLevers, sessionContextChart, sessionWord,' in spend
+
+    types = _static_text("charts-types.js")
+    series = types[types.index("var MODE_SERIES") : types.index("function modeKey")]
+    assert "SESSION_WORDS.mode" in series and "hasColour(word.key)" in series
+    assert "ENTITY_COLOURS.mode" in _function_source(types, "hasColour")
+    assert types.count("modeText(d.row)") >= 2
+    # What a tooltip and the chart's table say is the session's own word.
+    assert 'sessionWord("mode", row.mode)' in _function_source(types, "modeText")
+    for gone in ("Long agent runs", "modeLabel(", '"Overnight"'):
+        assert gone not in _app_js(), gone
+
+
+def test_search_finds_a_session_by_the_words_the_list_shows() -> None:
+    palette = _static_text("palette.js")
+    entries = _function_source(palette, "sessionEntries")
+    for kind in ("mode", "purpose", "entrypoint"):
+        assert f'sessionWord("{kind}", row.{kind})' in entries, kind
+    assert 'import { sessionWord } from "./charts-types.js";' in palette
+
+
+def test_the_override_menu_offers_every_word_but_not_classified() -> None:
+    """The choices come from the map, and "unknown" is where a rule gave
+    up, not a choice. (The old purpose menu offered "docs", which the
+    classifier never gives: it says "docs-or-light-edit".)"""
+    choices = _function_source(_static_text("charts-types.js"), "sessionWordChoices")
+    assert 'word.key !== "unknown"' in choices
+    assert '"docs"' not in _static_text("page-spend.js")
+
+
+# -- Phase 7: the Capture segment's overhead line, tuning block and warnings --
+
+
+def test_capture_segment_confirms_with_the_warning_of_the_level_or_row_chosen() -> None:
+    """A level's and a metric's own warning says what that choice does;
+    the page-wide one is the fallback only. The sample confirm, which keeps
+    the level, uses the page's."""
+    app_js = _app_js()
+    assert "level.warning || data.warning" in _function_source(app_js, "renderCaptureLevels")
+    assert "row.warning || data.warning" in _function_source(app_js, "renderMetricRow")
+    assert "data.warning" in _function_source(app_js, "renderCaptureControls")
+
+
+def test_capture_segment_no_longer_claims_a_subagent_is_asked_for_anything() -> None:
+    capture_js = _static_text("page-capture.js")
+    rough = _function_source(capture_js, "roughLine")
+    assert "subagent_note" not in rough and "report_tag" not in rough
+    assert "when a subagent starts" not in capture_js and "per agent report" not in capture_js
+    assert "the agent is asked for nothing" in rough
+    # And the Python side no longer words a warning that way.
+    assert "subagent starts" not in capture_view.WARNING and "when a session or subagent" not in capture_view.WARNING
+
+
+def test_capture_segment_shows_one_overhead_line_whenever_the_server_sends_one() -> None:
+    capture_js = _static_text("page-capture.js")
+    render = _function_source(capture_js, "renderCaptureData")
+    assert 'if (data.overhead) nowBlock.appendChild(el("p", { class: "notes capture-overhead"' in render
+    line = _function_source(capture_js, "overheadLine")
+    assert "overhead.label" in line and "overhead.hooks" in line
+    # Both costs go through the page's money helper, so they follow the billing mode.
+    assert "overheadAmount(overhead.capture)" in line and "overheadAmount(overhead.coaching)" in line
+    assert 'return billed(amount, "", "about ");' in _function_source(capture_js, "overheadAmount")
+    assert "if (overhead.capture && overhead.coaching)" in line
+
+
+def test_capture_overhead_line_is_worded_as_capture_status_words_it() -> None:
+    """``capture status`` prints ``capture_view.overhead_text``; the page
+    composes the same sentences from the same fields."""
+    line = _function_source(_static_text("page-capture.js"), "overheadLine")
+    for piece in (
+        "No run of ClaudeGlass's hooks shows in your sessions.",
+        " Capture cost ",
+        " and coaching notes cost ",
+        " in the same stretch.",
+    ):
+        assert piece in line, piece
+    text = capture_view.overhead_text("L", "", "C", "N")
+    assert text == "L: No run of ClaudeGlass's hooks shows in your sessions. Capture cost C and coaching notes cost N in the same stretch."
+
+
+def test_capture_segment_ends_with_the_tuning_block_of_copyable_commands() -> None:
+    capture_js = _static_text("page-capture.js")
+    render = _function_source(capture_js, "renderCaptureData")
+    assert render.rstrip().endswith("renderCaptureTuning(data, container);\n}")
+    tuning = _function_source(capture_js, "renderCaptureTuning")
+    assert "captureBlock(container, tuning.title)" in tuning
+    assert 'el("p", { class: "notes", text: tuning.text })' in tuning
+    assert "codeBlockWithCopy(tuning.export_command," in tuning
+    assert "codeBlockWithCopy(tuning.summary_command," in tuning
+    # The dashboard only offers the commands: nothing here runs or writes.
+    for forbidden in ("postJson", "postCapture", "fetch(", 'el("button"', "download", "Blob"):
+        assert forbidden not in tuning, forbidden
+
+
+def test_grid_words_an_empty_status_line_table_for_desktop_sessions() -> None:
+    grid_js = _static_text("grid.js")
+    assert (
+        '"context_budget_statusline:desktop": ["No status line readings in this window.", '
+        '"The desktop app doesn\'t run status lines; first-call sizes come from transcripts instead."]'
+    ) in grid_js
+    # The plain key stays for a window that may have run one.
+    assert "context_budget_statusline: [" in grid_js
+    empty = _function_source(grid_js, "emptyText")
+    assert 'EMPTY_TEXT[table.name + ":" + table.empty_variant]' in empty
+    assert empty.index("empty_variant") < empty.index("EMPTY_TEXT[table.name] ||")
+
+
+# -- cost centres (Phase 8a) ------------------------------------------------------------------------
+
+
+def test_the_cost_centre_table_is_reachable_from_the_overview_and_names_a_real_table() -> None:
+    """The Overview's "By cost centre" part links to the cost-centre table on
+    Agents and to the check that covers each controllable part; the link
+    target is the table the report really builds."""
+    from claudeglass import cost_centres
+
+    links = _static_text("links.js")
+    match = re.search(r'export var COST_CENTRES_TABLE = "([a-z_.]+)";', links)
+    assert match and match.group(1) == f"{cost_centres.SECTION}.{cost_centres.CENTRES_TABLE}"
+    assert 'pageLink("agents/subagents", text || "See every cost centre", { t: COST_CENTRES_TABLE })' in links
+    assert 'pageLink("actions/checks", text, { id: id })' in links
+    overview = _static_text("page-overview.js")
+    assert "costCentrePart(report)" in overview and '"By cost centre"' in overview
+    assert "costCentresLink(" in overview and "checkLink(lever.card" in overview
+    names = dict(re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*"([^"]*)"', _declaration_source(overview, "CHECK_NAMES"), re.MULTILINE))
+    assert names["cost-centres"] == "Where the spend goes"
+    order = list(names)
+    assert order.index("cost-centres") == order.index("cost-record") - 1
+
+
+def test_the_columns_that_name_a_check_are_the_report_tables_own() -> None:
+    """grid.js draws these columns as links to a check; each is a column of
+    a table cost_centres builds, and holds check ids."""
+    from claudeglass import cost_centres, quick_actions
+
+    source = _declaration_source(_static_text("grid.js"), "CHECK_LINK_COLUMNS")
+    named = set(re.findall(r'"([a-z_]+\.[a-z_]+)"\s*:\s*true', source))
+    assert named == {"cost_centres_parts.card", "cost_centres_advice.hint"}
+    cc = cost_centres.CostCentres(sessions=1)
+    cc.matrix["window"] = {("main", "rewrite"): 1.0, ("main", "base_read"): 2.0}
+    cc.parts = {("main", "base_read", "claude_md"): 2.0}
+    tables = {table.name: table for table in cost_centres.build_tables(cc)}
+    for ref in named:
+        table_name, column = ref.split(".")
+        keys = [c.key for c in tables[table_name].columns]
+        assert column in keys, ref
+        values = {row[keys.index(column)] for row in tables[table_name].rows} - {"", cost_centres.NO_ADVICE}
+        assert values and values <= set(quick_actions.CHECK_IDS), (ref, values)
+
+
+def test_the_cost_centre_tables_are_in_the_built_report_and_open_on_the_agents_page(tmp_path) -> None:
+    from claudeglass import cost_centres
+
+    project = tmp_path / "projects" / "proj-a"
+    project.mkdir(parents=True)
+    write_jsonl(project / "s1.jsonl", [turn_line(message_id="m1", input_tokens=10, output_tokens=20)])
+    report = build_report(
+        load_corpus([project]), load_pricing(), Config(tz="UTC"), projects=("proj-a",), window="last 7 days"
+    )
+    section = next(s for s in report.sections if s.key == cost_centres.SECTION)
+    names = [t.name for t in section.tables]
+    for name in (cost_centres.CENTRES_TABLE, cost_centres.PARTS_TABLE, cost_centres.ADVICE_TABLE, cost_centres.MODELS_TABLE):
+        assert name in names
+    assert helptext.PLACEMENT[cost_centres.CENTRES_TABLE] == "keep"
+    assert f"{cost_centres.SECTION}.{cost_centres.CENTRES_TABLE}" in {
+        f"{s.key}.{t.name}" for s in report.sections for t in s.tables
+    }
+
+
+def test_the_plan_rounds_card_and_the_two_plan_checks_are_placed_on_the_overview_and_actions() -> None:
+    """The plan-rounds card sits under Habits and says its change spares
+    context carried; the two checks have names on the Overview, one after
+    the other, right after the agent-reports check; and the tables they
+    cite open the Work habits page and Spend, Savings."""
+    app_js = _app_js()
+    assert _js_hyphen_map(app_js, "RULE_AREA")["plan-rounds"] == "habits"
+    assert _js_hyphen_map(app_js, "RULE_MECHANISM")["plan-rounds"] == "carried"
+    source = _declaration_source(_static_text("page-overview.js"), "CHECK_NAMES")
+    names = dict(re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*"([^"]*)"', source, re.MULTILINE))
+    assert names["plan-rounds"] == "Plans sent back" and names["plan-approval"] == "Builds after a plan"
+    order = list(names)
+    assert order.index("plan-rounds") == order.index("agent-reports") + 1
+    assert order.index("plan-approval") == order.index("plan-rounds") + 1
+    sections = _js_string_map(app_js, "SECTION_PAGE_MAP")
+    assert sections["habits"] == "habits" and sections["plan_handoff"] == "spend/savings"
+    # The checks' sentences point at pages that exist.
+    links = _static_text("links.js")
+    assert 'id: "habits"' in links and 'savings: "spend/savings"' in links
+    assert "{{page:spend/savings}}" in (SRC_DIR / "quick_actions.py").read_text(encoding="utf-8")
+
+
+# -- the Phase 8 tables: one click from the Overview ---------------------------------------------------
+
+
+_DETAIL_KEYS = (
+    "model_choice",
+    "cost_per_spawn",
+    "agent_runs",
+    "single_lookups",
+    "report_turns",
+    "plan_rounds",
+    "plan_approvals",
+    "compaction_cost",
+)
+
+
+def _detail_tables() -> dict[str, str]:
+    return _js_string_map(_static_text("links.js"), "DETAIL_TABLES")
+
+
+def test_a_table_link_opens_the_view_that_shows_the_table_scrolled_to_it() -> None:
+    """tableLink is the one place a "section.table" name becomes an address:
+    the view is the one viewForTable names, and the table travels as the t
+    parameter evidence.js revealEvidence scrolls to."""
+    links = _static_text("links.js")
+    source = _function_source(links, "tableLink")
+    assert "viewForTable(name.slice(0, dot), name.slice(dot + 1))" in source
+    assert "{ t: name }" in source and "pageLink(" in source
+    assert "export function tableLink(" in links
+    # The two named targets from Phase 8a stay as they were.
+    assert 'pageLink("agents/subagents", text || "See every cost centre", { t: COST_CENTRES_TABLE })' in links
+    assert 'pageLink("agents/subagents", text || "See every project file", { t: PROJECT_FILES_TABLE })' in links
+
+
+def test_every_phase_8_detail_target_names_a_table_the_report_builds_on_the_page_that_shows_it(tmp_path) -> None:
+    """The eight targets are tables of a built report (rows and all), none
+    left to the full report, and the view each lands on is the one the
+    section map gives: the table is on that page or opens in the drawer."""
+    from claudeglass.config import Config
+    from test_privacy import _phase_8_world
+
+    targets = _detail_tables()
+    assert tuple(targets) == _DETAIL_KEYS
+    links = _static_text("links.js")
+    sections = _js_string_map(links, "SECTION_PAGE_MAP")
+    tables = _js_string_map(links, "TABLE_PAGE_MAP")
+    project = _phase_8_world(tmp_path, [f"word{n}" for n in range(17)])
+    report = build_report(load_corpus([project]), load_pricing(), Config(tz="UTC"), projects=(), window="all time")
+    built = {(section.key, table.name): table for section in report.sections for table in section.tables}
+    for key, source in targets.items():
+        section, table = source.split(".", 1)
+        assert (section, table) in built, (key, source)
+        assert built[(section, table)].rows, (key, source)
+        assert helptext.PLACEMENT[table] in ("keep", "advanced"), (key, source)
+        assert table in helptext.TABLE_COPY, (key, source)
+        assert tables.get(source) or sections.get(section) not in (None, "data"), (key, source)
+    assert {targets[key].split(".")[0] for key in targets} == {"agents", "habits", "plan_handoff", "compactions"}
+
+
+def test_the_overview_lists_the_phase_8_tables_under_more_detail_and_in_the_rows_of_their_checks() -> None:
+    """"More detail" holds one link per table, each with what it shows, only
+    for a table the report built with rows; the five checks that have a table
+    behind them link to it from their row."""
+    overview = _static_text("page-overview.js")
+    imports = re.search(r'import \{([^}]*)\} from "./links.js";', overview)
+    assert imports and {"DETAIL_TABLES", "tableLink"} <= {name.strip() for name in imports.group(1).split(",")}
+    more = _declaration_source(overview, "MORE_DETAIL")
+    used = re.findall(r"DETAIL_TABLES\.([a-z_]+)", more)
+    assert tuple(used) == _DETAIL_KEYS
+    part = _function_source(overview, "detailPart")
+    assert "table.rows.length" in part and 'el("h3", { text: "More detail" })' in part
+    assert "tableLink(item[0], item[1])" in part
+    assert "detailPart(report)" in _function_source(overview, "renderBreakdown")
+    # A check's row links to its table only while it has something to look at.
+    tables = dict(re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*DETAIL_TABLES\.([a-z_]+)', _declaration_source(overview, "CHECK_TABLES"), re.MULTILINE))
+    assert tables == {
+        "models": "model_choice",
+        "compaction": "compaction_cost",
+        "agent-reports": "report_turns",
+        "plan-rounds": "plan_rounds",
+    }
+    assert set(tables) <= set(quick_actions.CHECK_IDS)
+    assert set(tables.values()) <= set(_DETAIL_KEYS)
+    row = _function_source(overview, "checklistRow")
+    assert 'tableLink(CHECK_TABLES[check.id], "See the figures")' in row
+    guard = row[row.index("CHECK_TABLES[check.id]") :].split("{", 1)[0]
+    assert 'row.state === "look" || row.state === "fix"' in guard
+    css = _static_text("app.css")
+    assert ".overview-detail-links" in css
+
+
+def test_the_more_detail_copy_keeps_to_the_dashboards_copy_rules() -> None:
+    """Each link reads "<table title> shows <what it shows>": a sentence of
+    25 words or fewer, with no internal name, no filler and no dash aside,
+    and the title is the table's own."""
+    overview = _static_text("page-overview.js")
+    more = _declaration_source(overview, "MORE_DETAIL")
+    rows = re.findall(r'\[DETAIL_TABLES\.([a-z_]+), "([^"]+)", "([^"]+)"\]', more)
+    assert [key for key, _, _ in rows] == list(_DETAIL_KEYS)
+    targets = _detail_tables()
+    for key, label, text in rows:
+        sentence = f"{label} shows {text}"
+        assert not re.search(r"\b(just|simply)\b", sentence, re.I), sentence
+        assert " -- " not in sentence and not re.search(r"\b[a-z]+_[a-z0-9_]+\b", sentence), sentence
+        assert len(sentence.split()) <= 25, sentence
+        assert sentence.endswith("."), sentence
+        title = helptext.TABLE_COPY[targets[key].split(".", 1)[1]].title
+        assert label.lower() in title.lower() or title.lower() in label.lower(), (label, title)

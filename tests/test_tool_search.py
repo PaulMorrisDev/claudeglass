@@ -17,6 +17,7 @@ from claudeglass import fixes as fixes_mod
 from claudeglass import quick_actions as qa
 from claudeglass import tool_search
 from claudeglass.cache import encode_result, result_from_jsonable
+from claudeglass.calibration import Calibration
 from claudeglass.model import (
     Diagnostics,
     PricingMeta,
@@ -161,6 +162,24 @@ def test_deferred_tools_are_sized_by_their_own_server_or_every_server():
     assert stats.kept_tokens == pytest.approx(15 * 400)
     assert github.saving_usd == pytest.approx(10 * 400 * SONNET.cache_read / 1e6)
     assert stats.most_deferred == 15 and stats.most_deferred_mcp == 15
+
+
+def test_definitions_and_name_lists_use_the_calibrated_characters_per_token():
+    """A definition is sized at the model's tool ratio and the name list at its
+    text ratio; without a calibration both are 4.0."""
+    found = Calibration(tool={"claude-sonnet-5": 5.0}, text={"claude-sonnet-5": 2.0}, default_family="claude-sonnet-5")
+    definitions = {"mcp__github__a": 1200, "mcp__github__b": 2000}
+    turn = _turn(1, {"github": 10}, list_chars=400)
+    stats = tool_search.compute_tool_search([_result(turn, definitions=definitions)], PRICING, calibration=found)
+
+    assert stats.mean_definition_tokens == pytest.approx(1600 / 5.0)
+    assert stats.servers["github"].definition_tokens == pytest.approx(1600 / 5.0)
+    assert stats.list_tokens == pytest.approx(400 / 2.0)
+    assert stats.kept_tokens == pytest.approx(10 * 1600 / 5.0)
+
+    plain = tool_search.compute_tool_search([_result(turn, definitions=definitions)], PRICING)
+    assert plain.mean_definition_tokens == pytest.approx(1600 / 4.0)
+    assert plain.list_tokens == pytest.approx(400 / 4.0)
 
 
 def test_a_reply_that_rebuilt_the_cache_prices_them_as_a_cache_write():
@@ -400,9 +419,11 @@ def _reply(days: float = 0.0, *, lists=None, instructions=None, calls=None, attr
 
 
 def _session(session_id: str, *turns: Turn, kind: str = "top-level", slug: str = "proj", tools=None, upfront=None,
-             status=None) -> TranscriptResult:
+             status=None, entrypoint: str | None = None) -> TranscriptResult:
     return TranscriptResult(
-        meta=TranscriptMeta(path=f"{session_id}.jsonl", kind=kind, session_id=session_id, project_slug=slug),
+        meta=TranscriptMeta(
+            path=f"{session_id}.jsonl", kind=kind, session_id=session_id, project_slug=slug, entrypoint=entrypoint
+        ),
         turns=list(turns),
         mcp_tool_suffixes_by_server=tools or {},
         upfront_definition_chars_by_server=upfront or {},
@@ -598,6 +619,123 @@ def test_a_desktop_id_without_its_claude_ai_name_is_judged_only_across_every_pro
     assert rows[ID].status == tool_search.STATUS_ALL_PROJECTS
     assert rows["other-server"].status == tool_search.STATUS_UNKNOWN
     assert _rows(_unused(ID))[ID].status == tool_search.STATUS_UNKNOWN
+
+
+# -- the desktop app: connectors by ID, and the servers it brings itself ----------
+
+DESKTOP = "claude-desktop"
+
+
+def test_an_id_named_server_only_the_desktop_app_ever_named_is_a_desktop_connector():
+    row = _rows(_unused(ID, entrypoint=DESKTOP))[ID]
+    assert row.kind == tool_search.KIND_DESKTOP_CONNECTOR and row.status == tool_search.STATUS_REMOVE
+    assert row.aliases == ()
+    (card,) = _cards(_unused(ID, entrypoint=DESKTOP))
+    assert "+ > Connectors" in card.action and "claude.ai/customize/connectors" in card.action
+    assert card.title == "Connector 0a1b2c3d is an MCP server you never use"
+    assert card.subject == ID
+
+
+def test_a_desktop_connector_by_id_keeps_the_remove_bars_and_the_all_projects_rule():
+    # The same thresholds as a named connector.
+    assert _rows(_unused(ID, sessions=9, entrypoint=DESKTOP))[ID].status == tool_search.STATUS_UNUSED
+    assert _rows(_unused(ID, first=6.5, entrypoint=DESKTOP))[ID].status == tool_search.STATUS_UNUSED
+    # Removing it changes every project, so one project's view can't judge.
+    assert _rows(_unused(ID, entrypoint=DESKTOP), all_projects=False)[ID].status == tool_search.STATUS_ALL_PROJECTS
+    # A use counts.
+    used = _unused(ID, entrypoint=DESKTOP) + [
+        _session("u", _reply(calls={f"mcp__{ID}__find": 1}), entrypoint=DESKTOP)
+    ]
+    assert _rows(used)[ID].status == tool_search.STATUS_USED
+
+
+def test_an_id_named_server_a_terminal_session_also_named_stays_of_unknown_kind():
+    results = _unused(ID, entrypoint=DESKTOP) + [_session("cli", _reply(instructions={ID: BIG}), entrypoint="cli")]
+    row = _rows(results)[ID]
+    assert row.kind == tool_search.KIND_UNKNOWN and row.status == tool_search.STATUS_UNKNOWN
+    # And one the transcripts never gave an entrypoint for is not taken for the desktop app's.
+    assert _rows(_unused(ID, entrypoint=None))[ID].kind == tool_search.KIND_UNKNOWN
+
+
+def test_a_subagent_run_in_the_desktop_app_counts_as_the_desktop_app():
+    results = _unused(ID, kind="subagent", entrypoint=DESKTOP)
+    row = _rows(results)[ID]
+    assert row.kind == tool_search.KIND_DESKTOP_CONNECTOR and row.status == tool_search.STATUS_SUBAGENTS
+
+
+def test_an_id_named_server_is_a_connector_only_when_nothing_else_names_it():
+    snap = _snapshot(mcp_servers={"names": [ID]})
+    assert _rows(_unused(ID, entrypoint=DESKTOP), snapshots=[snap])[ID].kind == tool_search.KIND_USER
+
+
+BUILT_INS = ["computer-use", "visualize", "Claude_Browser", "Claude_Preview", "ccd_session", "ccd_directory",
+             "terminal", "scheduled-tasks", "mcp-registry"]
+
+
+@pytest.mark.parametrize("server", BUILT_INS)
+def test_a_server_the_desktop_app_brings_itself_is_shown_with_its_cost_and_never_told_to_remove(server):
+    results = _unused(server, entrypoint=DESKTOP)
+    row = _rows(results)[server]
+    assert row.kind == tool_search.KIND_DESKTOP_BUILTIN and row.status == tool_search.STATUS_BUILT_IN
+    assert row.removable_usd == pytest.approx(10 * BIG * PER_CHAR)
+    # Even well past every bar, and with every project in view: no card.
+    assert _cards(results) == []
+    (card,) = _cards(_unused(server, entrypoint=DESKTOP) + _unused("claude_ai_A", entrypoint=DESKTOP))
+    assert server not in card.subject and card.subject == "claude_ai_A"
+
+
+def test_a_built_in_is_used_when_claude_used_it():
+    results = _unused("terminal", entrypoint=DESKTOP) + [
+        _session("u", _reply(calls={"mcp__terminal__run": 1}), entrypoint=DESKTOP)
+    ]
+    assert _rows(results)["terminal"].status == tool_search.STATUS_USED
+
+
+def test_a_name_from_the_built_in_list_is_a_built_in_only_in_the_desktop_app_and_when_not_yours():
+    # Offered only to a terminal session: some server of yours that shares a name.
+    assert _rows(_unused("terminal", entrypoint="cli"))["terminal"].kind == tool_search.KIND_UNKNOWN
+    assert _rows(_unused("terminal"))["terminal"].kind == tool_search.KIND_UNKNOWN
+    # In your config, it is yours, and as removable as any other of yours.
+    snap = _snapshot(mcp_servers={"names": ["terminal"]})
+    row = _rows(_unused("terminal", entrypoint=DESKTOP), snapshots=[snap])["terminal"]
+    assert row.kind == tool_search.KIND_USER and row.status == tool_search.STATUS_REMOVE
+    # A near miss is not on the list.
+    assert _rows(_unused("terminals", entrypoint=DESKTOP))["terminals"].kind == tool_search.KIND_UNKNOWN
+    assert _rows(_unused("ccd", entrypoint=DESKTOP))["ccd"].kind == tool_search.KIND_UNKNOWN
+
+
+def test_the_built_in_names_are_the_servers_this_table_calls_built_in():
+    """What the pages that price the base are given, so that cost centres and
+    the context budget never file a server of yours as the app's: a name on
+    the list that the table calls yours, or saw only outside the desktop app,
+    is not in it."""
+    results = (
+        _unused("terminal", entrypoint=DESKTOP)
+        + _unused("computer-use", entrypoint=DESKTOP)
+        + _unused("visualize", entrypoint="cli")
+        + _unused("github", entrypoint=DESKTOP)
+    )
+    snap = _snapshot(mcp_servers={"names": ["computer-use"]})
+    rows = _stats(results, snapshots=[snap]).mcp_servers
+    assert tool_search.built_in_names(rows) == frozenset({"terminal"})
+    assert tool_search.built_in_names(_stats(results).mcp_servers) == frozenset({"terminal", "computer-use"})
+    assert tool_search.built_in_names([]) == frozenset()
+    # Every name a built-in row goes by counts.
+    row = tool_search.McpServerRow(server="id-1", aliases=("terminal",), kind=tool_search.KIND_DESKTOP_BUILTIN)
+    assert tool_search.built_in_names([row]) == frozenset({"id-1", "terminal"})
+
+
+def test_the_table_says_how_to_turn_a_server_off_only_where_it_is_known():
+    results = [
+        r for server in ("computer-use", "terminal", "claude_ai_Notes", "mystery")
+        for r in _unused(server, entrypoint=DESKTOP)
+    ]
+    table = next(t for t in tool_search.build_section(_stats(results)).tables if t.name == "tool_search_servers")
+    column = [c.key for c in table.columns].index("how_to_turn_off")
+    fix = {row[0]: row[column] for row in table.rows}
+    assert "not verified" in fix["computer-use"]
+    assert fix["terminal"] == "" and fix["mystery"] == ""
+    assert "+ > Connectors" not in fix["claude_ai_Notes"] and "run /mcp" in fix["claude_ai_Notes"]
 
 
 def test_the_desktop_apps_id_for_a_connector_is_the_same_server():

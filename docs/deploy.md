@@ -385,12 +385,13 @@ python dist/claudeglass.pyz serve --projects-root ~/.claude/projects --config-di
 Equivalent, if you'd rather invoke `zipapp` yourself directly, to:
 
 ```bash
-python -m zipapp src -m "claudeglass.__main__:main" -o dist/claudeglass.pyz -p "/usr/bin/env python3"
+python -m zipapp src -m "claudeglass.__main__:main" -o dist/claudeglass.pyz -p "/usr/bin/env python3" -c
 ```
 
 `scripts/build-pyz.py` does the same thing (via the `zipapp` module's
-Python API rather than shelling out), plus: copies `src/claudeglass/`
-into a clean temporary directory first, skipping `__pycache__`, so a
+Python API rather than shelling out; the archive is compressed), plus:
+copies `src/claudeglass/` into a clean temporary directory first,
+skipping `__pycache__`, so a
 stray compiled-bytecode cache from your own dev environment never ends
 up inside the shipped archive; and includes `service/static/*` (the web
 UI) automatically, since it's just an ordinary file tree already living
@@ -415,6 +416,21 @@ exactly the bug `__main__.py`'s own docstring warns about.
 it (`subprocess`, real Python interpreter) to confirm `--version` works
 and a non-zero exit code (a stub subcommand) survives the round trip —
 verified locally as part of S1-integration.
+
+The dashboard's files and the shipped profiles are read with
+`importlib.resources`, never from a path built out of `__file__`, so
+they are found inside the archive. A path like that points into the zip
+and opens nothing.
+
+`python scripts/build-pyz.py --smoke dist/claudeglass.pyz` runs a built
+archive the way a user would. In a subprocess with the archive as the
+only copy of claudeglass, it lists the shipped profiles and asks the
+dashboard's own handler for the page, `app.js` and `app.css`, and for a
+missing file and a path that steps out of the folder. Then it runs
+`--version` and `--help` of every subcommand. It prints each failure and
+exits 1. `tests/test_build_pyz.py` runs the same check on a fresh build.
+The release workflow runs it on Python 3.12 and 3.11, before the file is
+attached to the release.
 
 ## Retention and purge
 
@@ -536,10 +552,14 @@ says what to do.
 ## The store's schema version
 
 `service.db` records the schema version it was written under
-(`meta.schema_version`). Version 8, from 0.13.0, adds `turns_agg.bucket`:
-the UTC quarter hour each group of replies falls in. It lets the
-dashboard cut a window and its daily chart at local midnight in any time
-zone, rather than at UTC's.
+(`meta.schema_version`). Version 9 adds the redesigned rating: the
+`why`, `missed_in`, `tip` and `tip_hint` columns on `session_feedback`,
+and the `session_plan_feedback` and `tip_feedback` tables. Upgrading
+from 8 adds them in place in one transaction, keeps every row and reads
+nothing again. Version 8, from 0.13.0, adds `turns_agg.bucket`: the UTC
+quarter hour each group of replies falls in. It lets the dashboard cut a
+window and its daily chart at local midnight in any time zone, rather
+than at UTC's.
 
 - **Upgrading from 7 keeps every row.** `Store.migrate()` adds the column
   and marks every stored transcript for one re-parse, the same step a
@@ -549,16 +569,17 @@ zone, rather than at UTC's.
   transcript is read again, its rows have no bucket and count on the UTC
   day they were stored under, so a daily chart can place a late-evening
   reply a day off for that short time.
-- **Downgrading rebuilds the store.** An older version pointed at a store
-  a newer one migrated can't be served by an additive step, so `migrate()`
-  copies `service.db` aside as `service.db.bak-<version>-<timestamp>`
-  (and prints where on stderr), drops every table and recreates them. The
-  next watcher tick reads the transcripts still on disk again. Your
-  session tags and ratings are put back. Logged "what if" predictions are
+- **Downgrading rebuilds the store.** An older version pointed at a
+  store a newer one migrated can't be served by an additive step, so
+  `migrate()` copies `service.db` aside as
+  `service.db.bak-<version>-<timestamp>` (and prints where on stderr),
+  drops every table and recreates them. The next watcher tick reads the
+  transcripts still on disk again. Your session tags, session ratings
+  and card ratings are put back. Logged "what if" predictions are
   re-read from `prediction-log.jsonl` and come back unjudged, so their
-  verdicts and seen marks are lost until the dashboard judges them again.
-  Transcripts Claude Code has already removed are not rebuilt; they stay
-  in the backup file.
+  verdicts and seen marks are lost until the dashboard judges them
+  again. Transcripts Claude Code has already removed are not rebuilt;
+  they stay in the backup file.
 
 ## Time zone and `tzdata`
 

@@ -13,7 +13,10 @@ for the billing mode):
   how often Claude tagged what it was asked to (coverage), and how much
   of each metric has been collected. A /cg-feedback run is priced whole
   (every turn of the cycle it ran in), in any session, captured or not:
-  the skill works at every level.
+  the skill works at every level. So are the plan check's and the rating
+  reminder's notes, and what Claude wrote for them (the question it asked,
+  the reminder line it ended a reply with): scope ``feedback``, whatever
+  the capture level (:func:`_add_feedback_hints`).
 - :func:`history` replays your own recent sessions to price one
   character of note or tag in each place capture puts them, so
   :func:`estimate` can price any level or set of metrics before you turn
@@ -21,23 +24,38 @@ for the billing mode):
 
 A *prompt cycle* (:func:`prompt_cycles`) is one message of yours and
 everything Claude did about it: the turn after a human message up to
-the next one, with the subagents those turns started, at any depth.
+the next one, with the subagents those turns started, at any depth. A
+workflow's agents join the cycle of the reply that started (or resumed)
+their run (:class:`WorkflowLaunches`). A tag written in reply to a
+background agent's or a workflow's report counts for the cycle whose call
+launched it, even when you had sent another message by then
+(``Cycle.late_turns``), and so does what that reply cost
+(:func:`cycle_spend`). Hand-offs carry through: an agent or workflow that
+such a reply starts, and the reply to its report, are that cycle's too, so
+a plan that goes on from one workflow to the next stays in the cycle that
+began it. The turns stay where they ran, so the timeline is unchanged;
+only the charge moves. A cycle also says which earlier cycles still had an
+agent or a workflow running when it began (``Cycle.running``), so a message
+sent while background work ran can be told from a new job.
 
 :func:`feedback_spans` ties each /cg-feedback answer to the work it
 rates: the cycles since the previous feedback (answered or declined),
-or since the session started.
+or since the session started. Running it again with no work since the
+previous run replaces that run's answers.
 """
 
 from __future__ import annotations
 
+import bisect
 from dataclasses import dataclass, field, fields, replace
 from datetime import datetime, timezone
 
 from . import capture_catalogue as catalogue
-from .capture_tags import MAIN_TAG_FIELDS, SUB_TAG_FIELDS, merge_feedback
+from .capture_tags import MAIN_TAG_FIELDS, SUB_TAG_FIELDS, merge_feedback, settle_feedback, settle_tag
 from .context_files import _Carry, _parse_ts
-from .model import EventKind, Feedback, TranscriptResult, Turn
+from .model import CaptureTag, EventKind, Feedback, TranscriptResult, Turn
 from .pricing import Pricing, effective_rates, price_turn
+from .testrun import widest
 from .topology import agent_key
 
 CHARS_PER_TOKEN = 4
@@ -80,15 +98,51 @@ def enough_target(metric_id: str) -> int:
 
 @dataclass(slots=True)
 class Cycle:
-    """One message of yours and the work that answered it."""
+    """One message of yours and the work that answered it. A reply to the
+    report of an agent (or workflow) the cycle launched is the cycle's work
+    even when it ran after you sent another message, and hand-offs carry
+    through: what that reply launched in turn, and the reply to its
+    report, are the cycle's too (``_hand_off_replies``)."""
 
     #: Indexes into the transcript's priced turns: ``start`` is the turn
     #: after your message, ``end`` the first turn of the next cycle.
     start: int
     end: int
     turns: list[Turn] = field(default_factory=list)
-    #: Subagent transcripts started in this cycle, at any depth.
+    #: Subagent transcripts started in this cycle, at any depth, and those
+    #: started by a reply handed to it (``late_turns``).
     subs: list[TranscriptResult] = field(default_factory=list)
+    #: Replies in later cycles that answered the report of an agent (or
+    #: workflow) this cycle launched, in order, or the report of one that a
+    #: reply already handed to it launched. Their tags and their cost
+    #: are this cycle's; the turns still belong to the cycle they ran in.
+    #: A reply is every turn from the one that read the report to the last
+    #: of the tool calls it made (``_hand_off_replies``).
+    late_turns: list[Turn] = field(default_factory=list)
+    #: Positions in ``turns`` of replies that answered an earlier cycle's
+    #: report: their tags and their cost are that cycle's, not this one's.
+    handed_off: set[int] = field(default_factory=set)
+    #: Indexes (into ``prompt_cycles``' list, so earlier than this cycle) of
+    #: the cycles that had an agent or a workflow still running when this
+    #: cycle's first turn ran: launched, with no report (or, for a run that
+    #: held the session, no result) yet. A launch a handed-back reply made
+    #: counts for the cycle it was handed to. ``pieces`` reads it to tell a
+    #: message sent while background work ran from one that was not
+    #: (``_running_at_starts``).
+    running: tuple[int, ...] = ()
+    #: What the transcript says about this cycle's work, the facts
+    #: ``capture_tags.settle`` puts right the tag's words with (see its
+    #: docstring for the keys). ``prompt_cycles`` fills it; a cycle built
+    #: without it has none, and ``settled`` is then ``tag``.
+    facts: dict = field(default_factory=dict)
+
+    @property
+    def tag_turns(self) -> list[Turn]:
+        """The turns whose tags, and whose cost, are this cycle's: its
+        own, less the replies to an earlier cycle's agents, then the later
+        replies to its own."""
+        own = [turn for n, turn in enumerate(self.turns) if n not in self.handed_off]
+        return own + self.late_turns
 
     @property
     def tag(self):
@@ -97,12 +151,22 @@ class Cycle:
         when an earlier or a later tag in the same cycle (a retry, a
         correction) left it unset (CAP-10 -- this used to keep only the
         last tag whole, silently losing a key an earlier tag answered
-        and the last one didn't). ``None`` when no turn wrote one."""
-        tags = [t.cap for t in self.turns if t.cap is not None and t.cap.has_tl]
+        and the last one didn't). The exception is ``level`` and ``size``:
+        a cycle's work was as hard and as big as its hardest and biggest
+        reply, so the highest word wins. A tag written in reply to the
+        report of an agent this cycle launched counts here, in whichever
+        cycle the reply ran (``tag_turns``). When Claude tagged any reply
+        of the cycle, a tag Haiku filled in for one it left untagged (a
+        reply before a background command finished, say) gives no words:
+        Claude judged the whole piece of work. ``None`` when no turn wrote
+        one. The words are as written; ``settled`` has the transcript's
+        facts applied."""
+        tags = self._tags()
         if not tags:
             return None
-        merged = tags[0]
-        for tag in tags[1:]:
+        words = [t for t in tags if not t.judged] or tags
+        merged = words[0]
+        for tag in words[1:]:
             changes = {
                 f.name: getattr(tag, f.name)
                 for f in fields(tag)
@@ -114,25 +178,222 @@ class Cycle:
         # what every tag actually cost to write, judge_usd what Haiku's did.
         return replace(
             merged,
+            level=_highest(words, "level"),
+            size=_highest(words, "size"),
             has_tl=True,
             chars=sum(t.chars for t in tags),
             judged=any(t.judged for t in tags),
             judge_usd=sum(t.judge_usd for t in tags),
+            grounded=tuple(dict.fromkeys(item for t in tags for item in t.grounded)),
         )
+
+    def _tags(self) -> list[CaptureTag]:
+        return [t.cap for t in self.tag_turns if t.cap is not None and t.cap.has_tl]
+
+    @property
+    def haiku_only(self) -> bool:
+        """The cycle has a tag and Claude wrote none of them: Haiku
+        wrote every one (``CaptureTag.judged``)."""
+        tags = self._tags()
+        return bool(tags) and all(t.judged for t in tags)
+
+    @property
+    def settled(self) -> CaptureTag | None:
+        """:attr:`tag` with what the transcript settles put right
+        (``capture_tags.settle``): a plan the cycle made, tests it ran, a
+        first message's ``shift``, a ``why`` with no redo behind it. What
+        was changed is in its ``grounded``. Read this, not ``tag``, for
+        anything that counts or compares tags; ``tag`` is for what Claude
+        wrote. Same as ``tag`` when the cycle has no facts."""
+        tag = self.tag
+        if tag is None or not self.facts:
+            return tag
+        facts = dict(self.facts)
+        # ``admit`` needs a candidate in the reply only when Haiku wrote it.
+        facts["judged"] = next((t.judged for t in reversed(self._tags()) if t.admit), False)
+        return settle_tag(tag, facts)
+
+    @property
+    def admit_possible(self) -> bool:
+        """A reply says it got something wrong (``Turn.admit_candidate``)
+        but no ``admit`` stands for it: a pattern match, not a confirmed
+        admission, so it is never added to a total."""
+        if not self.facts.get("admit_candidate"):
+            return False
+        settled = self.settled
+        return settled is None or settled.admit is None
+
+    @property
+    def plan_rounds(self) -> int:
+        """Plans Claude put up in this cycle: its ``ExitPlanMode`` calls."""
+        return sum(1 for turn in self.turns if turn.plan_stats is not None)
+
+    @property
+    def rejected_rounds(self) -> int:
+        """Plans you sent back in the dialog, even one you then approved by
+        typing a go-ahead."""
+        return sum(1 for turn in self.turns if turn.plan_stats is not None and turn.plan_stats.rejected)
+
+    @property
+    def feedback_rounds(self) -> int:
+        """Rejected plans you typed feedback for."""
+        return sum(1 for turn in self.turns if turn.plan_stats is not None and turn.plan_stats.feedback_chars)
+
+    @property
+    def plan_feedback_classes(self) -> tuple[str, ...]:
+        """How each round's feedback read, in order: one word from
+        ``capture_catalogue.PLAN_FEEDBACK_CLASSES`` per round with any."""
+        return tuple(
+            turn.plan_stats.feedback_class
+            for turn in self.turns
+            if turn.plan_stats is not None and turn.plan_stats.feedback_class
+        )
+
+    @property
+    def ask_rounds(self) -> int:
+        """Clarifying questions Claude asked you in this cycle that you
+        answered."""
+        return sum(turn.ask_rounds for turn in self.turns)
 
 
 #: ``CaptureTag`` fields about the tag itself, not what it says.
-_TAG_COST_FIELDS = ("has_tl", "chars", "judged", "judge_usd")
+_TAG_COST_FIELDS = ("has_tl", "chars", "judged", "judge_usd", "grounded")
+
+
+def _highest(tags: list[CaptureTag], key: str) -> str | None:
+    """The highest word any of ``tags`` gives ``key`` (``level``:
+    easy < normal < hard; ``size``: xs < s < m < l < xl), ``None`` when
+    none gives one."""
+    order = catalogue.TAG_VOCAB[key]
+    found = [word for word in (getattr(t, key) for t in tags) if word in order]
+    return max(found, key=order.index) if found else None
 
 
 def _priced(result: TranscriptResult) -> list[Turn]:
     return [turn for turn in result.turns if turn.turn_index > 0]
 
 
-def prompt_cycles(top: TranscriptResult, subs=()) -> list[Cycle]:
+_FLOOR = datetime.min.replace(tzinfo=timezone.utc)
+
+
+def _moment(ts: str | None) -> datetime | None:
+    """``ts`` as an aware time (UTC when it names no zone), or ``None``."""
+    moment = _parse_ts(ts) if ts else None
+    if moment is not None and moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment
+
+
+def _timeline(turns: list[Turn]) -> list[datetime]:
+    """One time per turn that never runs backwards, so it can be searched:
+    a turn with no time (or one stamped before the turn before it) takes
+    the earlier one's."""
+    out = []
+    last = _FLOOR
+    for turn in turns:
+        moment = _moment(turn.ts)
+        if moment is not None and moment > last:
+            last = moment
+        out.append(last)
+    return out
+
+
+def _first_moment(sub: TranscriptResult) -> datetime | None:
+    """When a subagent first spoke: its first priced turn with a time,
+    else its first turn with one."""
+    for turns in (_priced(sub), sub.turns):
+        for turn in turns:
+            moment = _moment(turn.ts)
+            if moment is not None:
+                return moment
+    return None
+
+
+class WorkflowLaunches:
+    """Which main-session reply started each workflow agent.
+
+    A workflow agent's metadata names its run (``workflow_run_id``, the
+    run's directory) but no tool call, so the join is through the
+    ``Workflow`` calls themselves (``Turn.workflow_runs``). A resumed run
+    keeps its ``runId`` and its directory, so one run can have several
+    calls; its agents are split between them by time: each agent goes to
+    the latest call at or before its first priced turn. Failing that (a
+    digest from before the parser recorded the calls, or a call whose
+    result was never logged) the agent goes to the reply before the run
+    file's ``started`` time, and failing that to none.
+
+    Only a ``kind == "workflow-agent"`` transcript is ever joined: a
+    workflow agent's ``agent_type`` is a custom name as often as
+    ``workflow-subagent``, so the kind is what says it is one.
+
+    Every answer is an index into the main session's priced turns, the
+    one :func:`prompt_cycles` and ``habits`` both use for "the reply
+    that started it".
+    """
+
+    def __init__(self, top: TranscriptResult, runs=()):
+        turns = _priced(top)
+        self.stamps = _timeline(turns)
+        #: runId -> [(priced-turn index, tool_use_id)], in turn order.
+        self._calls: dict[str, list[tuple[int, str]]] = {}
+        #: taskId -> the tool_use_id of the call that launched it.
+        self._tasks: dict[str, str] = {}
+        for i, turn in enumerate(turns):
+            for tool_use_id, (run_id, task_id) in turn.workflow_runs.items():
+                self._calls.setdefault(run_id, []).append((i, tool_use_id))
+                if task_id:
+                    self._tasks.setdefault(task_id, tool_use_id)
+        self._started: dict[str, datetime] = {}
+        for run in runs:
+            moment = _moment(run.started)
+            if run.run_id and moment is not None:
+                self._started.setdefault(run.run_id, moment)
+
+    def task_use(self, task_id: str) -> str | None:
+        """The tool_use_id of the ``Workflow`` call that launched
+        ``task_id`` (what the run's task notification names)."""
+        return self._tasks.get(task_id)
+
+    def call_for(self, sub: TranscriptResult) -> tuple[int, str] | None:
+        """``(priced-turn index, tool_use_id)`` of the ``Workflow`` call
+        that started ``sub``, or ``None`` for an agent that isn't a
+        workflow agent or whose run has no call at or before it."""
+        run_id = sub.meta.workflow_run_id
+        if sub.meta.kind != "workflow-agent" or not run_id:
+            return None
+        calls = self._calls.get(run_id)
+        if not calls:
+            return None
+        first = _first_moment(sub)
+        if first is None:
+            return calls[0]
+        found = None
+        for i, tool_use_id in calls:
+            if self.stamps[i] <= first:
+                found = (i, tool_use_id)
+        return found
+
+    def turn_index(self, sub: TranscriptResult) -> int | None:
+        """The priced turn of the main session that started ``sub``, or
+        ``None``."""
+        if sub.meta.kind != "workflow-agent":
+            return None
+        call = self.call_for(sub)
+        if call is not None:
+            return call[0]
+        started = self._started.get(sub.meta.workflow_run_id or "")
+        if started is None:
+            return None
+        i = bisect.bisect_right(self.stamps, started) - 1
+        return i if i >= 0 else None
+
+
+def prompt_cycles(top: TranscriptResult, subs=(), workflows=()) -> list[Cycle]:
     """The prompt cycles of a main-session transcript, each with the
     subagents it started. Turns before your first message (a resumed
-    session's leftovers) make no cycle."""
+    session's leftovers) make no cycle. ``workflows`` (the session's
+    ``WorkflowRun`` files) lets a workflow agent whose run has no logged
+    call still find its cycle by when the run started."""
     turns = _priced(top)
     starts = [i for i, turn in enumerate(turns) if turn.human_prompt_chars is not None]
     cycles = [
@@ -145,20 +406,249 @@ def prompt_cycles(top: TranscriptResult, subs=()) -> list[Cycle]:
         for turn in cycle.turns:
             for tool_use_id in turn.tool_use_ids:
                 cycle_of_use[tool_use_id] = n
+    launches = WorkflowLaunches(top, workflows)
+    # Hand-offs first: a reply handed back to an earlier cycle takes the
+    # agents and workflows it starts with it, so they must be settled before
+    # any agent is placed.
+    handed = _hand_off_replies(top, turns, starts, cycles, cycle_of_use, subs, launches)
+    by_workflow: dict[int, int] = {}
+    for sub in subs:
+        at = launches.turn_index(sub)
+        if at is not None and at >= starts[0]:
+            by_workflow[id(sub)] = handed.get(at, bisect.bisect_right(starts, at) - 1)
     by_agent = {agent_key(sub.meta.agent_id): sub for sub in subs if sub.meta.agent_id}
     for sub in subs:
-        n = _cycle_for(sub, cycle_of_use, by_agent)
+        n = _cycle_for(sub, cycle_of_use, by_agent, by_workflow)
         if n is not None:
             cycles[n].subs.append(sub)
+    _cycle_facts(cycles, 1 if starts[0] else 0)
+    for cycle, running in zip(cycles, _running_at_starts(top, turns, starts, cycle_of_use, subs, by_agent, launches)):
+        cycle.running = running
     return cycles
 
 
-#: Which of a cycle's feedback wins: the answers read from the skill's
-#: question, then its own tag, then a declined question. Answers outrank
-#: the tag (SEC-P1): a `[cg-fb: ...]` line is free text Claude could
-#: write in any reply, but the AskUserQuestion call its answers come from
-#: is not.
-_FEEDBACK_RANK = {"answers": 3, "tag": 2, "skipped": 1}
+def _plan_approved(turn: Turn) -> bool:
+    """Whether this reply's plan was approved, in the dialog or by a
+    go-ahead message (``handoff._approved``; the hook's ``plan_before``)."""
+    return turn.plan_stats is not None and turn.plan_stats.outcome in ("approved", "approved_by_message")
+
+
+def _cycle_facts(cycles: list[Cycle], before: int) -> None:
+    """Fill each cycle's ``facts`` for ``capture_tags.settle``, from what
+    the parser counted: the plan, skills, edits, subagents' and workflow
+    agents' edits, shell commands, tests, errors and admissions of the
+    turns whose tags are the cycle's (``Cycle.tag_turns``), and how the
+    message that opened it reads. ``before`` is how many messages came
+    before the first cycle (1 when the transcript starts mid-session, with
+    replies to a message it doesn't hold)."""
+    approved = False
+    last: frozenset[str] = frozenset()
+    for n, cycle in enumerate(cycles):
+        turns = cycle.tag_turns
+        opening = cycle.turns[0]
+        edits = sum(t.edit_call_count for t in turns)
+        hashes = frozenset(h for t in turns for h in t.edit_target_hashes)
+        agent_files = sum(t.agent_edit_files for t in turns)
+        for sub in cycle.subs:
+            agent_files += sum(t.edit_call_count + t.shell_write_count + t.shell_change_count for t in _priced(sub))
+        cycle.facts = {
+            "plan_now": any(t.plan_stats is not None for t in turns),
+            "plan_before": approved,
+            "skills": sum(len(t.skills_invoked) for t in turns),
+            "files": edits,
+            "agent_files": agent_files,
+            "shell_changes": sum(t.shell_write_count + t.shell_change_count for t in turns),
+            "tests": widest(t.tests_run for t in turns),
+            "docs_only": edits > 0 and sum(t.edit_doc_count for t in turns) == edits,
+            "earlier": before + n,
+            "correction": opening.human_correction,
+            "adjust": opening.human_adjust,
+            "same_files": bool(hashes & last),
+            "tool_errors": sum(t.tool_error_count for t in turns),
+            "admit_candidate": any(t.admit_candidate for t in turns),
+        }
+        approved = approved or any(_plan_approved(t) for t in turns)
+        last = hashes
+
+
+#: What can come right before a turn that carries on a reply: Claude's own
+#: tool results and the harness notes around them, never a message, a
+#: queued message, an interruption or another report. The turn that read
+#: the report and every turn after it that runs for one of these is one
+#: reply.
+_REPLY_CONTINUES = frozenset(
+    {
+        EventKind.TOOL_RESULT,
+        EventKind.ATTACHMENT,
+        EventKind.REMINDER,
+        EventKind.HOOK_OUTPUT,
+        EventKind.TOOL_DENIAL,
+        EventKind.CONTEXT_INJECT,
+        EventKind.META,
+        EventKind.UNKNOWN,
+        EventKind.API_ERROR,
+        EventKind.TASK_STATUS,
+    }
+)
+
+
+def _hand_off_replies(top, turns, starts, cycles, cycle_of_use, subs, launches) -> dict[int, int]:
+    """A reply to an agent's report is about that agent's work, so its tag
+    and its cost belong to the cycle whose call launched the agent, not to
+    the cycle that happened to be open when the report arrived. The report
+    is a task notification (``task_id`` is the background agent's id, or
+    the workflow's task id); the reply starts at the first turn after it,
+    when nothing outranked it as the reason that turn ran
+    (``preceding_primary``): a message of yours between them starts a
+    cycle of its own and hands nothing off. It goes on through the turns
+    that follow its tool calls (:data:`_REPLY_CONTINUES`) to the end of the
+    cycle it ran in, because the answer and its ``[cg: ...]`` line come
+    last. The first report a reply answers decides where it goes.
+
+    Hand-offs carry through. The reports are taken in the order they
+    arrived, and every tool call of a handed reply is moved to the cycle
+    it is handed to (``cycle_of_use`` is updated in place), so an agent or
+    workflow that reply starts is that cycle's too, and so is the reply to
+    its report: a plan that goes on from one workflow's report to the next
+    stays one cycle's work, whatever you typed in between. Returns each
+    handed turn's index (into ``turns``) with the cycle it was handed to,
+    so a workflow that a handed turn started (which has no tool call to
+    follow) is placed with it."""
+    launched = _launched_agents(subs)
+    stamps = launches.stamps
+    handed: dict[int, int] = {}
+    decided: set[int] = set()
+    for event in top.events:
+        if event.kind != EventKind.TASK_NOTIFICATION:
+            continue
+        task_id = event.detail.get("task_id")
+        if not isinstance(task_id, str):
+            continue
+        use_id = launched.get(task_id) or launches.task_use(task_id)
+        origin = cycle_of_use.get(use_id) if use_id else None
+        moment = _moment(event.ts)
+        if origin is None or moment is None:
+            continue
+        i = bisect.bisect_left(stamps, moment)
+        if i >= len(turns) or i in decided or turns[i].preceding_primary != EventKind.TASK_NOTIFICATION:
+            continue
+        decided.add(i)
+        n = bisect.bisect_right(starts, i) - 1
+        if n <= origin:
+            continue
+        end = cycles[n].end
+        j = i
+        while True:
+            handed[j] = origin
+            for tool_use_id in turns[j].tool_use_ids:
+                cycle_of_use[tool_use_id] = origin
+            j += 1
+            if j >= end or turns[j].preceding_primary not in _REPLY_CONTINUES:
+                break
+    for i, origin in sorted(handed.items()):
+        n = bisect.bisect_right(starts, i) - 1
+        cycles[n].handed_off.add(i - cycles[n].start)
+        cycles[origin].late_turns.append(turns[i])
+    return handed
+
+
+def _launched_agents(subs) -> dict[str, str]:
+    """Agent id (``agent_key``) -> the ``tool_use_id`` of the call that
+    started it, for the agents that have a transcript. A workflow's agents
+    have no call to follow (``WorkflowLaunches``)."""
+    return {
+        agent_key(sub.meta.agent_id): sub.meta.tool_use_id
+        for sub in subs
+        if sub.meta.agent_id and sub.meta.tool_use_id and sub.meta.kind != "workflow-agent"
+    }
+
+
+def _last_moment(sub: TranscriptResult) -> datetime | None:
+    """When a subagent last spoke: its last priced turn with a time, else
+    its last turn with one."""
+    for turns in (_priced(sub), sub.turns):
+        for turn in reversed(turns):
+            moment = _moment(turn.ts)
+            if moment is not None:
+                return moment
+    return None
+
+
+def _launch_of(sub, calls, by_agent, launches) -> str | None:
+    """The ``tool_use_id`` (one of ``calls``) of the call that started
+    ``sub``: its own, its workflow's, or its parent agent's for a nested
+    spawn."""
+    seen = set()
+    while sub is not None and id(sub) not in seen:
+        seen.add(id(sub))
+        if sub.meta.tool_use_id in calls:
+            return sub.meta.tool_use_id
+        call = launches.call_for(sub)
+        if call is not None and call[1] in calls:
+            return call[1]
+        sub = by_agent.get(agent_key(sub.meta.parent_agent_id)) if sub.meta.parent_agent_id else None
+    return None
+
+
+def _running_at_starts(top, turns, starts, cycle_of_use, subs, by_agent, launches) -> list[tuple[int, ...]]:
+    """For each cycle, the earlier cycles that had an agent or a workflow
+    still running when its first turn ran (``Cycle.running``): the call came
+    before that turn and the run's end had not arrived by then. A background
+    agent's or a workflow's end is its task notification (or a termination
+    notice); a foreground agent's is its result. Calls are placed with the
+    cycle they belong to after the hand-offs (``cycle_of_use``). A run whose
+    end the transcript never shows counts as running only while one of its
+    agents was still speaking at that turn, so a run that was stopped without
+    a word does not make every later message look like it ran beside one.
+    Times only; no text is read."""
+    agents = _launched_agents(subs)
+    agent_calls = set(agents.values())
+    calls: dict[str, int] = {}
+    for i, turn in enumerate(turns):
+        for tool_use_id in turn.tool_use_ids:
+            if tool_use_id in agent_calls:
+                calls[tool_use_id] = i
+        for tool_use_id, (_run_id, task_id) in turn.workflow_runs.items():
+            if task_id:
+                calls[tool_use_id] = i
+    if not calls:
+        return [() for _ in starts]
+    ended: dict[str, datetime] = {}
+    for event in top.events:
+        if event.kind in (EventKind.TASK_NOTIFICATION, EventKind.AGENT_TERMINATED):
+            keys = [event.detail.get("task_id")]
+        elif event.kind == EventKind.TOOL_RESULT:
+            # A foreground agent's result: ``[agent id, status]`` pairs.
+            keys = [agent_key(str(pair[0])) for pair in event.detail.get("agents") or () if pair]
+        else:
+            continue
+        moment = _moment(event.ts)
+        for key in keys:
+            tool_use_id = (agents.get(key) or launches.task_use(key)) if isinstance(key, str) else None
+            if tool_use_id in calls and moment is not None:
+                ended.setdefault(tool_use_id, moment)
+    spoke: dict[str, datetime] = {}
+    for sub in subs:
+        tool_use_id = _launch_of(sub, calls, by_agent, launches)
+        last = _last_moment(sub) if tool_use_id is not None else None
+        if last is not None and last > spoke.get(tool_use_id, _FLOOR):
+            spoke[tool_use_id] = last
+    out = []
+    for n, start in enumerate(starts):
+        at = launches.stamps[start]
+        found = set()
+        for tool_use_id, i in calls.items():
+            origin = cycle_of_use.get(tool_use_id)
+            if origin is None or origin >= n or i >= start:
+                continue
+            if tool_use_id in ended:
+                running = ended[tool_use_id] > at
+            else:
+                running = tool_use_id in spoke and spoke[tool_use_id] >= at
+            if running:
+                found.add(origin)
+        out.append(tuple(sorted(found)))
+    return out
 
 
 @dataclass(slots=True)
@@ -176,21 +666,20 @@ class FeedbackSpan:
 def cycle_feedback(cycle: Cycle) -> Feedback | None:
     """The feedback given in ``cycle``, or ``None``. A ``[cg-fb: ...]``
     tag counts only in a genuine /cg-feedback run (SEC-P1): elsewhere it
-    could be forged or quoted reply text, so it's dropped. Answers of the
-    best kind are merged: the handoff question's come from a second
-    AskUserQuestion call, on a later turn."""
+    could be forged or quoted reply text, so it's dropped. What each kind
+    gave is merged across the turns (the second AskUserQuestion call's
+    questions come on a later turn), then :func:`settle_feedback` decides:
+    the answers read from the skill's questions outrank its tag, which
+    adds only a word for a key you answered in your own words."""
     genuine = is_feedback_run(cycle)
-    best = None
+    by_source: dict[str, Feedback] = {}
     for turn in cycle.turns:
         fb = turn.feedback
         if fb is None or (fb.source == "tag" and not genuine):
             continue
-        rank = _FEEDBACK_RANK.get(fb.source, 0)
-        if best is None or rank > _FEEDBACK_RANK.get(best.source, 0):
-            best = fb
-        elif rank == _FEEDBACK_RANK.get(best.source, 0):
-            best = merge_feedback(best, fb)
-    return best
+        earlier = by_source.get(fb.source)
+        by_source[fb.source] = fb if earlier is None else merge_feedback(earlier, fb)
+    return settle_feedback(by_source.get("answers"), by_source.get("tag"), by_source.get("skipped"))
 
 
 def is_feedback_run(cycle: Cycle) -> bool:
@@ -217,27 +706,40 @@ def _excluded_from_coverage(cycle: Cycle, all_turns: list[Turn]) -> bool:
 def feedback_spans(cycles: list[Cycle]) -> list[FeedbackSpan]:
     """Each feedback in ``cycles`` (one session's, from
     :func:`prompt_cycles`) with the cycles it rates. A declined question
-    ends a span too, so the next answer rates only what came after it."""
-    spans = []
+    ends a span too, so the next answer rates only what came after it. A
+    run with no work since the previous one is a rerun to change that
+    run's answers: it replaces them, over the same cycles, and a declined
+    rerun leaves them as they were."""
+    spans: list[FeedbackSpan] = []
     begin = 0
     for n, cycle in enumerate(cycles):
         fb = cycle_feedback(cycle)
         if fb is None:
             continue
         rated = [c for c in cycles[begin:n] if not is_feedback_run(c)]
-        spans.append(FeedbackSpan(feedback=fb, run=cycle, cycles=rated))
         begin = n + 1
+        if spans and not rated:
+            if fb.source != "skipped":
+                spans[-1] = FeedbackSpan(feedback=fb, run=cycle, cycles=spans[-1].cycles)
+            continue
+        spans.append(FeedbackSpan(feedback=fb, run=cycle, cycles=rated))
     return spans
 
 
-def _cycle_for(sub, cycle_of_use, by_agent) -> int | None:
+def _cycle_for(sub, cycle_of_use, by_agent, by_workflow=None) -> int | None:
     """The cycle a subagent belongs to: the one whose turn started it,
-    or its parent agent's, for a nested spawn."""
+    or its parent agent's, for a nested spawn. A workflow agent has no
+    tool call to follow: ``by_workflow`` (``id(sub)`` -> cycle) says where
+    its run was started. Both maps already follow the hand-offs
+    (``_hand_off_replies``): a call made in a reply that was handed back
+    to an earlier cycle is that cycle's."""
     seen = set()
     while sub is not None and id(sub) not in seen:
         seen.add(id(sub))
         if sub.meta.tool_use_id in cycle_of_use:
             return cycle_of_use[sub.meta.tool_use_id]
+        if by_workflow and id(sub) in by_workflow:
+            return by_workflow[id(sub)]
         sub = by_agent.get(agent_key(sub.meta.parent_agent_id)) if sub.meta.parent_agent_id else None
     return None
 
@@ -269,8 +771,10 @@ class CaptureUsage:
     notes: int = 0
     #: ``main``, ``subagent``, ``tool`` (notes after tool results),
     #: ``brief`` (the ``[spawn: ...]``/``[retry: ...]`` words a brief
-    #: starts with) and ``haiku`` (Claude Haiku's calls, while it writes
-    #: the tags: their whole cost, as ``tag_cost``).
+    #: starts with), ``haiku`` (Claude Haiku's calls, while it writes
+    #: the tags: their whole cost, as ``tag_cost``) and ``feedback`` (the
+    #: plan check's and the rating reminder's notes and Claude's words
+    #: for them).
     scopes: dict[str, ScopeUse] = field(default_factory=dict)
     #: metric id -> USD, the note and tag cost split by each metric's share.
     by_metric: dict[str, float] = field(default_factory=dict)
@@ -282,10 +786,14 @@ class CaptureUsage:
     spend: float = 0.0
     cycles: int = 0
     tagged_cycles: int = 0
+    #: Tagged cycles whose only tag Claude Haiku wrote (no reply carried
+    #: one): the fallback's fills while Claude writes the tags.
+    filled_cycles: int = 0
     reports: int = 0
     tagged_reports: int = 0
     #: Turns Claude Haiku tagged: the main session's replies while it
-    #: writes the tags (``[capture] tagger = "haiku"``), and every agent
+    #: writes the tags (``[capture] tagger = "haiku"``), the replies it
+    #: filled in when Claude left them without a tag, and every agent
     #: run it judged, whoever writes them.
     judged: int = 0
     #: /cg-feedback runs, what they cost (every turn of each), and how
@@ -293,6 +801,14 @@ class CaptureUsage:
     feedback_runs: int = 0
     feedback_cost: float = 0.0
     feedback_answered: int = 0
+    #: The plan check and the rating reminder (scope ``feedback``): notes
+    #: that asked for either, plan checks Claude asked and how many you
+    #: answered with one of the four words, and replies that ended with
+    #: the reminder line.
+    feedback_notes: int = 0
+    plan_checks: int = 0
+    plan_checks_answered: int = 0
+    reminders: int = 0
     #: SURV-3: notes that land after a compact boundary -- the carried
     #: prefix a compaction would otherwise have discounted is gone, so
     #: these notes carry at the fuller, post-compaction rate. Counted
@@ -449,12 +965,23 @@ class CoachingUsage:
         return 100.0 * self.cost / self.spend if self.spend > 0 else None
 
 
+#: Kinds of a note under the coaching marker that aren't coaching: the
+#: plan check, the rating reminder and the facts line a /cg-feedback run
+#: starts with.
+_FEEDBACK_NOTE_KINDS = frozenset((*catalogue.FEEDBACK_HINTS, "feedback_facts"))
+
+
 def _coaching_notes(result: TranscriptResult):
     """``(ts, chars, kind)`` per coaching note in ``result``, alone or
     sharing an attachment with a capture note."""
     for event in result.events:
         if event.subkind == "coaching_note" and event.size_chars:
-            yield event.ts, event.size_chars, event.detail.get("kind") or "other"
+            kind = event.detail.get("kind") or "other"
+            # The feedback notes are priced with their own metrics
+            # (:func:`_add_feedback_hints`), and the facts line with the
+            # /cg-feedback run it opens.
+            if kind not in _FEEDBACK_NOTE_KINDS:
+                yield event.ts, event.size_chars, kind
         elif event.subkind == "capture_note" and event.detail.get("coach_chars"):
             yield event.ts, event.detail["coach_chars"], event.detail.get("coach") or "other"
 
@@ -561,17 +1088,70 @@ def _spend(result: TranscriptResult, pricing, since) -> float:
     return total
 
 
+@dataclass(frozen=True, slots=True)
+class CycleSpend:
+    """What one cycle's work is charged: its own replies, less the ones
+    that answered an earlier cycle's agents (``Cycle.handed_off``), the
+    replies to its own agents' reports that ran in later cycles
+    (``Cycle.late_turns``), and every turn of the subagents and workflow
+    agents it started. Over a whole session each turn is charged once, so
+    the cycles' charges add up to the session's cost."""
+
+    #: USD at list price; ``0.0`` with no price table.
+    cost: float = 0.0
+    #: Part of ``cost``: later replies to this cycle's agents' reports.
+    moved_in: float = 0.0
+    #: Not in ``cost``: this cycle's own replies to earlier cycles' agents,
+    #: charged to the cycle that started them.
+    moved_out: float = 0.0
+    #: Tokens (input, cache writes, cache reads and output) of the main
+    #: session's replies charged to this cycle, the same replies as
+    #: ``cost`` less the agents.
+    tokens: int = 0
+    #: The tokens of the agents' turns.
+    agent_tokens: int = 0
+    #: How many main-session replies are charged (the turns behind ``tokens``).
+    replies: int = 0
+
+
+def _turn_tokens(turn: Turn) -> int:
+    return turn.input_tokens + turn.cache_creation_tokens + turn.cache_read_tokens + turn.output_tokens
+
+
+def cycle_spend(cycle: Cycle, pricing: Pricing | None) -> CycleSpend:
+    """:class:`CycleSpend` of ``cycle``: the one place a cycle's cost is
+    worked out, so :func:`usage`, ``habits`` and ``pieces`` agree on what
+    a reply to an agent's report cost and whose it was. The reply keeps
+    its place in ``cycle.turns``, the timeline."""
+    agents = [turn for sub in cycle.subs for turn in _priced(sub)]
+    moved_out = [turn for n, turn in enumerate(cycle.turns) if n in cycle.handed_off]
+    own = [turn for n, turn in enumerate(cycle.turns) if n not in cycle.handed_off]
+    charged = own + cycle.late_turns
+
+    def usd(turns) -> float:
+        if pricing is None:
+            return 0.0
+        return sum(price_turn(turn, pricing.resolve_model(turn.model)).total for turn in turns)
+
+    moved_in = usd(cycle.late_turns)
+    return CycleSpend(
+        cost=usd(own) + moved_in + usd(agents),
+        moved_in=moved_in,
+        moved_out=usd(moved_out),
+        tokens=sum(_turn_tokens(t) for t in charged),
+        agent_tokens=sum(_turn_tokens(t) for t in agents),
+        replies=len(charged),
+    )
+
+
 def _cycle_cost(cycle: Cycle, pricing) -> float:
-    if pricing is None:
-        return 0.0
-    turns = list(cycle.turns) + [turn for sub in cycle.subs for turn in _priced(sub)]
-    return sum(price_turn(turn, pricing.resolve_model(turn.model)).total for turn in turns)
+    return cycle_spend(cycle, pricing).cost
 
 
-def _add_feedback_runs(use: CaptureUsage, top: TranscriptResult, subs, pricing, since) -> bool:
+def _add_feedback_runs(use: CaptureUsage, top: TranscriptResult, subs, pricing, since, workflows=()) -> bool:
     """Price this session's /cg-feedback runs; ``True`` when it had any."""
     found = False
-    for cycle in prompt_cycles(top, subs):
+    for cycle in prompt_cycles(top, subs, workflows):
         if not is_feedback_run(cycle):
             continue
         moment = _parse_ts(cycle.turns[0].ts) if cycle.turns else None
@@ -592,6 +1172,79 @@ def _add_feedback_runs(use: CaptureUsage, top: TranscriptResult, subs, pricing, 
     return found
 
 
+def _add_feedback_hints(use: CaptureUsage, result: TranscriptResult, pricing, since) -> bool:
+    """Price the plan check and the rating reminder in one main
+    transcript, whatever the capture level: each note that asked for
+    either, carried until the next summary as a capture note is; the
+    question Claude asked for the plan check, and the reminder line a
+    reply ended with, as output at that turn's rate and then carried on
+    (as a tag is). Each goes to its own metric and to scope ``feedback``.
+    ``True`` when the transcript had any."""
+    notes = [
+        event for event in result.events
+        if event.subkind == "coaching_note"
+        and event.size_chars
+        and event.detail.get("kind") in catalogue.FEEDBACK_NOTE_METRIC
+    ]
+    turns = [turn for turn in _priced(result) if turn.plan_check is not None or turn.coach_reminder]
+    if not notes and not turns:
+        return False
+    carry = _Carry(result, pricing)
+    ends = _segment_ends(result, carry)
+
+    def counted(ts) -> bool:
+        if since is None:
+            return True
+        moment = _parse_ts(ts)
+        return moment is not None and moment >= since
+
+    def carried(ts, chars: int, after: int = 0) -> float:
+        start = carry.index_at(ts) + after
+        return carry.cost(chars, start, next((e for e in ends if e > start), len(carry.turns)))
+
+    found = False
+    for event in notes:
+        if not counted(event.ts):
+            continue
+        found = True
+        cost = carried(event.ts, event.size_chars)
+        metric_id = catalogue.FEEDBACK_NOTE_METRIC[event.detail["kind"]]
+        use.feedback_notes += 1
+        use._add("feedback", note_chars=event.size_chars, note_cost=cost, day=_day(event.ts))
+        use.by_metric[metric_id] = use.by_metric.get(metric_id, 0.0) + cost
+    for turn in turns:
+        if not counted(turn.ts):
+            continue
+        found = True
+        for metric_id, chars, here in (
+            ("plan_check", catalogue.PLAN_CHECK_ASK_CHARS, turn.plan_check is not None),
+            ("feedback_reminder", catalogue.REMINDER_REPLY_CHARS, turn.coach_reminder),
+        ):
+            if not here:
+                continue
+            # Output at this turn's rate; the words then stay in context
+            # from the next turn on, as a tag's do.
+            cost = chars * _output_usd_per_char(turn, pricing) + carried(turn.ts, chars, 1)
+            use._add("feedback", tag_chars=chars, tag_cost=cost, day=_day(turn.ts))
+            use.by_metric[metric_id] = use.by_metric.get(metric_id, 0.0) + cost
+            if metric_id == "plan_check":
+                use.plan_checks += 1
+                if turn.plan_check.word:
+                    use.plan_checks_answered += 1
+                    use._count("plan_check")
+            else:
+                use.reminders += 1
+    return found
+
+
+def is_captured(result) -> bool:
+    """Whether a main transcript or a subagent's carried a capture note, or
+    Claude Haiku tagged one of its turns: what :func:`usage` counts as a
+    captured session, so every figure about "your messages" counts the
+    same ones."""
+    return result.meta.cap_injections > 0 or any(t.cap is not None and t.cap.judged for t in result.turns)
+
+
 def _start(since: str):
     start = _parse_ts(since) if since else None
     if start is not None and start.tzinfo is None:
@@ -600,13 +1253,18 @@ def _start(since: str):
 
 
 def feedback_usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
-    """Only the /cg-feedback runs in ``corpus`` from ``since`` on: what
-    they cost and how many were answered. For the Capture tab, which
-    shows them whatever the capture level."""
+    """Only the /cg-feedback runs in ``corpus`` from ``since`` on, with
+    the plan check and the rating reminder: what they cost and how many
+    were answered. For the Capture tab, which shows them whatever the
+    capture level."""
     use = CaptureUsage(since=since)
     start = _start(since)
     for bundle in corpus.sessions:
-        if bundle.top is not None and _add_feedback_runs(use, bundle.top, bundle.subs, pricing, start):
+        if bundle.top is None:
+            continue
+        rated = _add_feedback_runs(use, bundle.top, bundle.subs, pricing, start, getattr(bundle, "workflows", ()))
+        hinted = _add_feedback_hints(use, bundle.top, pricing, start)
+        if rated or hinted:
             use.spend += _spend(bundle.top, pricing, start)
     return use
 
@@ -614,22 +1272,21 @@ def feedback_usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureU
 def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
     """What capture cost across ``corpus`` from ``since`` (an ISO time)
     on. A session counts once its main transcript carries a capture note;
-    its subagents count with it. /cg-feedback runs count in any session."""
+    its subagents count with it. /cg-feedback runs, plan checks and rating
+    reminders count in any session."""
     use = CaptureUsage(since=since)
     start = _start(since)
     for bundle in corpus.sessions:
         top = bundle.top
         # A session Haiku tagged counts even when its note asked Claude
         # for nothing (no retry or reminder line): there was none.
-        captured_top = top is not None and (
-            top.meta.cap_injections > 0 or any(t.cap is not None and t.cap.judged for t in top.turns)
-        )
-        subs = [
-            sub for sub in bundle.subs
-            if captured_top or sub.meta.cap_injections > 0 or any(t.cap is not None and t.cap.judged for t in sub.turns)
-        ]
-        rated = top is not None and _add_feedback_runs(use, top, bundle.subs, pricing, start)
-        if rated and not captured_top:
+        captured_top = top is not None and is_captured(top)
+        subs = [sub for sub in bundle.subs if captured_top or is_captured(sub)]
+        workflows = getattr(bundle, "workflows", ())
+        rated = top is not None and _add_feedback_runs(use, top, bundle.subs, pricing, start, workflows)
+        # The plan check and the reminder work at every level too.
+        hinted = top is not None and _add_feedback_hints(use, top, pricing, start)
+        if (rated or hinted) and not captured_top:
             # Its spend, so capture's share stays a share of what the
             # sessions it cost anything in spent.
             use.spend += _spend(top, pricing, start)
@@ -647,7 +1304,7 @@ def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
             _add_tags(use, top, carry, pricing, False, start)
             use.spend += _spend(top, pricing, start)
             top_turns = _priced(top)
-            for cycle in prompt_cycles(top):
+            for cycle in prompt_cycles(top, bundle.subs, workflows):
                 moment = _parse_ts(cycle.turns[0].ts) if cycle.turns else None
                 if start is not None and (moment is None or moment < start):
                     continue
@@ -657,6 +1314,8 @@ def usage(corpus, pricing: Pricing | None, since: str = "") -> CaptureUsage:
                 tag = cycle.tag
                 if tag is not None:
                     use.tagged_cycles += 1
+                    if tag.judged and not tag.chars:
+                        use.filled_cycles += 1
         for sub in subs:
             use.subagents += 1
             carry = _Carry(sub, pricing)
@@ -711,6 +1370,9 @@ class History:
     web_results: int = 0
     web_note: float = 0.0
     web_tag: float = 0.0
+    #: Plans approved in the replayed sessions: the most times the plan check
+    #: could ask (once per plan).
+    plans_approved: int = 0
     #: What the replayed sessions cost.
     spend: float = 0.0
 
@@ -741,7 +1403,9 @@ def _segments(result: TranscriptResult, carry: _Carry) -> list[tuple[int, int]]:
 
 def _big_output_calls(turn: Turn) -> int:
     """How many of this turn's tool calls are estimated to have crossed
-    Deep's big-output threshold (CAP-10): Claude Code fires the note
+    Deep's big-output threshold (CAP-10) among the tools the hook is run
+    after (:data:`~claudeglass.capture_catalogue.BIG_OUTPUT_TOOLS`: not
+    the shell or MCP tools): Claude Code fires the note
     once per matching *call*, but ``tool_result_chars_by_tool`` only
     totals a tool's calls for the turn, so a turn with several big
     calls of the same tool is estimated as that total split evenly
@@ -750,7 +1414,7 @@ def _big_output_calls(turn: Turn) -> int:
     threshold = catalogue.BIG_OUTPUT_TOKENS * CHARS_PER_TOKEN
     total = 0
     for name, chars in turn.tool_result_chars_by_tool.items():
-        if chars < threshold:
+        if chars < threshold or name not in catalogue.BIG_OUTPUT_TOOLS:
             continue
         calls = turn.tool_calls_by_tool.get(name, 1)
         total += min(calls, chars // threshold)
@@ -776,6 +1440,7 @@ def history(corpus, pricing: Pricing | None, days: int = 14) -> History:
             for turn in _priced(top):
                 for tool_use_id in turn.tool_use_ids:
                     spawners[tool_use_id] = turn
+            out.plans_approved += sum(1 for turn in _priced(top) if _plan_approved(turn))
             for cycle in prompt_cycles(top):
                 out.cycles += 1
                 tag_turn = cycle.turns[-1]
@@ -891,23 +1556,38 @@ def estimate(past: History, ids, sample: int = 100, tagger: str = catalogue.DEFA
     reply = reply + _TAG_FRAME_CHARS if reply else 0
     report = sum(m.out_chars for m in enabled if m.sub_line)
     report = report + _TAG_FRAME_CHARS if report else 0
-    # A brief's [spawn:]/[retry:] words, per subagent (none now); the
-    # feedback reminder's line, once a session: its share of the per-reply
-    # carry is sessions over messages.
-    brief = sum(m.out_chars for m in enabled if (m.main_extra or m.sub_extra) and m.group != "feedback")
-    reminder = sum(m.out_chars for m in enabled if m.main_extra and m.group == "feedback")
-    once = past.sessions / past.cycles if past.cycles else 0.0
+    # A brief's [spawn:]/[retry:] words, per subagent (none now).
+    brief = sum(m.out_chars for m in enabled if m.main_extra or m.sub_extra)
     cost = (
         main * past.main_note
         + sub * past.sub_note
         + no_rules * past.sub_note_no_rules
         + reply * past.reply_tag
-        + reminder * past.reply_tag * once
         + report * past.report_tag
         + brief * past.brief_tag
     )
     note_tokens = main * past.main_notes + max(sub, no_rules) * past.sub_notes
-    tag_tokens = reply * past.cycles + reminder * past.sessions + report * past.subagents + brief * past.subagents
+    tag_tokens = reply * past.cycles + report * past.subagents + brief * past.subagents
+    # The feedback notes: a note on one of your messages (carried like any
+    # note), and the words Claude writes for it, at the rate of an
+    # average reply. The reminder comes at most once in the rest period
+    # (and once a session); the plan check once per approved plan.
+    # Assumption: an upper bound, since not every plan gets edited nor
+    # every piece reaches the reminder's size.
+    th = catalogue.COACHING_THRESHOLDS
+    per_cycle = past.reply_tag / past.cycles if past.cycles else 0.0
+    per_note = past.main_note / past.main_notes if past.main_notes else 0.0
+    for metric_id, hint, count in (
+        ("feedback_reminder", "rating_reminder", min(past.sessions, past.days / th["rating_rest_days"])),
+        ("plan_check", "plan_check", past.plans_approved),
+    ):
+        if metric_id not in wanted:
+            continue
+        note = len(catalogue.FEEDBACK_NOTE_TEXT[hint]) + catalogue.NOTE_WRAP_CHARS + len("UserPromptSubmit")
+        out_chars = catalogue.METRICS_BY_ID[metric_id].out_chars
+        cost += count * (note * per_note + out_chars * per_cycle)
+        note_tokens += note * count
+        tag_tokens += out_chars * count
     if haiku:
         cost += past.cycles * catalogue.JUDGE_USD_PER_CALL
     if agents:
@@ -916,7 +1596,8 @@ def estimate(past: History, ids, sample: int = 100, tagger: str = catalogue.DEFA
         ("big_output", past.big_outputs, past.big_output_note, past.big_output_tag),
         ("web", past.web_results, past.web_note, past.web_tag),
     ):
-        if metric_id in wanted:
+        # No note after a tool result while Claude Haiku writes the tags.
+        if metric_id in wanted and tagger != "haiku":
             chars = (
                 len(catalogue.tool_note_text(metric_id))
                 + _WRAP["PostToolUse"]

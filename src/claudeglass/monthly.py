@@ -251,7 +251,8 @@ def _habits_digest_table(
         {"effort_share_threshold_pct": _effort_mismatch_share_threshold(config)} if config is not None else {}
     )
     tz = config.tz if config is not None else None
-    digest = habits.digest_table(habits.collect(corpus, pricing, ratings=ratings, tz=tz, **threshold_kwargs))
+    since = config.capture.enabled_at if config is not None else ""
+    digest = habits.digest_table(habits.collect(corpus, pricing, ratings=ratings, tz=tz, since=since, **threshold_kwargs))
     if not digest.rows:
         return None
     copy = TABLE_COPY["habits_digest"]

@@ -256,6 +256,40 @@ def test_corpus_from_store_filters_by_project_slugs(tmp_path: Path):
     assert corpus_windowed.sessions == []
 
 
+def test_corpus_from_store_session_ids_keep_only_those_sessions_whatever_the_window(tmp_path: Path):
+    """``session_ids`` (the session drawer's rating facts, the banner's
+    unrated list) keeps the named sessions only, and a session outside the
+    window is still found: the drawer opens sessions of any age."""
+    root = tmp_path / "projects"
+    proj_a = root / "proj-a"
+    proj_b = root / "proj-b"
+    proj_a.mkdir(parents=True)
+    proj_b.mkdir(parents=True)
+    old_path = proj_a / "sess-old.jsonl"
+    write_jsonl(old_path, [turn_line(timestamp="2020-01-01T00:00:00.000Z")])
+    write_jsonl(proj_a / "sess-new.jsonl", [turn_line(timestamp="2026-09-18T00:00:00.000Z")])
+    write_jsonl(proj_b / "sess-other.jsonl", [turn_line(timestamp="2026-09-18T00:00:00.000Z")])
+
+    options = ServeOptions(projects_root=root, config_dir=tmp_path / "config")
+    store = Store(":memory:")
+    store.open()
+    FileWatcher(store, options).run_once()
+
+    assert {b.session_id for b in corpus_from_store(store, session_ids=["sess-new"]).sessions} == {"sess-new"}
+    both = corpus_from_store(store, session_ids=["sess-new", "sess-other", "no-such-session"])
+    assert {b.session_id for b in both.sessions} == {"sess-new", "sess-other"}
+    # The window leaves the old one out of a report, but not out of a lookup by id.
+    assert {b.session_id for b in corpus_from_store(store, since="2026-01-01T00:00:00Z").sessions} == {
+        "sess-new", "sess-other",
+    }
+    old = corpus_from_store(store, since="2026-01-01T00:00:00Z", session_ids=["sess-old"])
+    assert [b.session_id for b in old.sessions] == ["sess-old"] and old.sessions[0].top is not None
+    # It composes with the project filter, and an empty list is no sessions at all.
+    assert corpus_from_store(store, session_ids=["sess-new"], project_slugs=["proj-b"]).sessions == []
+    assert corpus_from_store(store, session_ids=[]).sessions == []
+    assert len(corpus_from_store(store, session_ids=None).sessions) == 3
+
+
 def test_corpus_from_store_skips_session_with_no_stored_transcripts(tmp_path: Path):
     """A ``sessions`` row with no matching ``transcripts`` rows at all
     (shouldn't normally arise from the watcher, but is cheap to guard) is

@@ -31,7 +31,8 @@ Each :meth:`FileWatcher.run_once` tick:
    prunes old sessions when ``options.retention_days`` is set, and always
    prunes old capture signal files (``signals.prune``) and Claude Haiku's
    tag files (``haiku_tags.prune``), old
-   ``capture-log.jsonl`` records (``config.prune_capture_log``) and old
+   ``capture-log.jsonl`` and ``habit-log.jsonl`` records (``config.prune_capture_log``,
+   ``config.prune_habit_log``) and old
    ``usage-log.csv`` rows (SIG-5: ``log_usage.prune_usage_log``) -- at
    ``options.retention_days`` when set, else
    ``config.SIGNAL_RETENTION_DEFAULT_DAYS`` (SEC-P8/G7: this telemetry
@@ -706,6 +707,7 @@ class FileWatcher:
         signals_mod.prune(self.options.config_dir, signal_retention)
         haiku_tags.prune(self.options.config_dir, signal_retention)
         config_mod.prune_capture_log(self.options.config_dir, signal_retention)
+        config_mod.prune_habit_log(self.options.config_dir, signal_retention)
 
         # SIG-5: usage-log.csv is written unconditionally on every
         # statusline refresh, capture on or off -- same "never left to

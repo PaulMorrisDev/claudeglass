@@ -84,6 +84,10 @@ re-cache share, compactions per session, median session span, mean
 first-turn cache-creation write) were already session-count-independent
 and are unchanged.
 
+Mean first-turn cache-creation write is compared on one model only: the
+model family both arms' first calls ran on most. The same start measures
+differently on each model. With no model in both arms the row shows `-`.
+
 ### Stratification and the minimum-sample gate
 
 `--stratify` (default `purpose,mode`) splits `compare_by_stratum` by
@@ -91,7 +95,7 @@ and are unchanged.
 the tool already classifies every session into (`review`,
 `test-triage`, `planning`, `docs-or-light-edit`, `refactor`,
 `agent-fanout`, `workflow-run`, `local-llm-pipeline`, `general-dev` for
-purpose; `overnight`, `long-agentic`, `interactive`, `mixed` for mode).
+purpose; `overnight`, `long-agentic`, `interactive`, `one-shot`, `mixed` for mode).
 Pass `--stratify purpose`, `--stratify mode`, or `--stratify ""` (no
 split — one "all" row) to narrow it.
 

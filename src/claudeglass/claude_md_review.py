@@ -37,6 +37,15 @@ Actions are fix dicts in :func:`fixes.build_fix`'s shape (``title``,
 ``explainer``, ``prompt``; ``command`` is always ``None`` because the
 change is an edit to your own words, not a setting). The dashboard never
 edits a file itself.
+
+Phase 8a adds the other files your agents consume (``context_files``):
+:func:`local_names` hashes the files under the project folders with the
+same salt transcripts used, so a hash from a transcript gets the path from
+its project folder on the dashboard (never stored, never exported), and
+finds the files a CLAUDE.md imports with ``@path``. The walk skips build,
+cache and virtualenv folders, takes documents before other files in a
+folder, and ends as soon as every hash the caller asked for has a name.
+:func:`project_file_fixes` drafts the prompts for a big, wide or growing file.
 """
 
 from __future__ import annotations
@@ -47,11 +56,14 @@ import os
 import re
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable, Iterable
 
 from . import pages
 from . import parse as parse_mod
+from .context_files import TEXT_EXTS
 from .fixes import PROMPT_RESTART
 from .footprint import home_label
 from .units import Units
@@ -1031,6 +1043,434 @@ def file_detail(review: FileReview, units: Units, period: str) -> dict:
     return detail
 
 
+# -- project files: their names, from disk, and what to do about one ------------
+
+
+#: What a file's extension says about it, in a closed set of words: prose
+#: first (the files a split or a trim helps), then data, configuration and code.
+EXT_CLASSES = ("md", "txt", "json", "config", "code", "other")
+_EXT_SETS = {
+    "md": frozenset({".md", ".markdown", ".mdx"}),
+    "txt": frozenset({".txt", ".text", ".rst", ".adoc"}),
+    "json": frozenset({".json", ".jsonl", ".ndjson", ".json5"}),
+    "config": frozenset(
+        {".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf", ".env", ".xml", ".csv", ".tsv", ".lock", ".properties"}
+    ),
+    "code": frozenset(
+        {
+            ".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".cs", ".java", ".kt", ".go", ".rs", ".rb", ".php",
+            ".c", ".h", ".cpp", ".hpp", ".swift", ".sh", ".ps1", ".bat", ".sql", ".html", ".css", ".scss", ".vue",
+            ".svelte", ".lua", ".dart", ".scala",
+        }
+    ),
+}
+
+
+def ext_class(name: str) -> str:
+    """The class of a file name's extension (:data:`EXT_CLASSES`): ``other``
+    for any it does not know, or for none."""
+    suffix = os.path.splitext(str(name))[1].lower()
+    return next((word for word, suffixes in _EXT_SETS.items() if suffix in suffixes), "other")
+
+
+#: Bounds on the walk that names files, so a large repository stays quick:
+#: how deep, how many folders per project, and how many files in all. The
+#: walk runs when Overview's checks load, so it stays at about 3 s: on one
+#: machine, lifting both bounds above a 79,000-folder scratch project named
+#: 3 more of 271 files (none the check flags) and took 7 s.
+_NAMES_MAX_DEPTH = 10
+_NAMES_MAX_DIRS = 20000
+NAMES_MAX_FILES = 60000
+#: Folders the walk that names files never enters: the ones above, and the
+#: test, coverage and lint caches. Nothing in them is a file an agent reads
+#: on purpose, and a large one would use up the bounds before the documents.
+_NAMES_SKIP = _WALK_SKIP | frozenset({".pytest_cache", ".ruff_cache", "coverage"})
+
+
+@dataclass(slots=True)
+class LocalNames:
+    """What a walk of the project folders found, keyed by the salted hash of
+    each file's path (:func:`parse.path_hash`), the same hash transcripts
+    keep. Lives on the dashboard's machine and is never stored or exported."""
+
+    #: hash -> ``name`` (the path from its project folder, or ``~``-relative
+    #: outside one), ``ext`` (:func:`ext_class`) and ``project`` (the folder's name).
+    names: dict[str, dict] = field(default_factory=dict)
+    #: Files some CLAUDE.md pulls in with ``@path``.
+    imports: set[str] = field(default_factory=set)
+    #: hash of an imported file -> the CLAUDE.md that imports it (``parent``,
+    #: its hash) and the import's size (``tokens``).
+    inlined: dict[str, dict] = field(default_factory=dict)
+    #: The walk stopped at a bound, so some files may have no name.
+    truncated: bool = False
+
+    def as_dict(self) -> dict:
+        """The shape ``context_files.project_files`` takes as ``local``."""
+        return {"names": self.names, "imports": sorted(self.imports), "inlined": self.inlined}
+
+
+def _walk_files(root: Path, limit: int, visit: Callable[[Path], bool] | None = None) -> tuple[list[Path], bool]:
+    """Files under ``root``, shallow ones first and, within a folder,
+    documents (:data:`context_files.TEXT_EXTS`) before the rest, skipping
+    :data:`_NAMES_SKIP` folders (``.git``, ``node_modules``, virtualenvs,
+    caches, build output) and git worktrees. ``visit`` is called with each
+    file as it is found; when it returns true the walk ends there, as the
+    caller has all it came for, and that is not a cut. Stops at ``limit``
+    files, :data:`_NAMES_MAX_DIRS` folders and :data:`_NAMES_MAX_DEPTH`
+    levels; the flag says it stopped early at one of those."""
+    found: list[Path] = []
+    dirs = 0
+    queue: deque[tuple[Path, int]] = deque([(root, 0)])
+    while queue:
+        folder, depth = queue.popleft()
+        if dirs >= _NAMES_MAX_DIRS:
+            return found, True
+        dirs += 1
+        try:
+            entries = sorted(os.scandir(folder), key=lambda entry: entry.name)
+        except OSError:
+            continue
+        documents: list[str] = []
+        others: list[str] = []
+        for entry in entries:
+            try:
+                if entry.is_dir(follow_symlinks=False):
+                    skipped = entry.name in _NAMES_SKIP or (entry.name == "worktrees" and folder.name == ".claude")
+                    if depth < _NAMES_MAX_DEPTH and not skipped:
+                        queue.append((Path(entry.path), depth + 1))
+                elif entry.is_file(follow_symlinks=False):
+                    (documents if ext_class(entry.name) in TEXT_EXTS else others).append(entry.path)
+            except OSError:
+                continue
+        for path in documents + others:
+            if len(found) >= limit:
+                return found, True
+            found.append(Path(path))
+            if visit is not None and visit(found[-1]):
+                return found, False
+    return found, False
+
+
+_NAMES_TTL_S = 600.0
+_NAMES: dict[tuple, tuple[float, LocalNames]] = {}
+_NAMES_LOCK = threading.Lock()
+
+
+def local_names(
+    config_dir: Path,
+    *,
+    projects: list[Path] | None = None,
+    salt: bytes | None = None,
+    max_files: int = NAMES_MAX_FILES,
+    wanted: Iterable[str] | None = None,
+) -> LocalNames:
+    """Name the files transcripts only know by hash: hash the files under
+    each project folder (and its git worktrees, as the same path), your
+    plans, rules, user CLAUDE.md and each project's auto memory, with the
+    salt transcripts were hashed with, and keep the path from the project
+    folder beside each hash. Also finds the files CLAUDE.md files import
+    with ``@path``. The result is kept for :data:`_NAMES_TTL_S` seconds, as a
+    page asks for it several times.
+
+    This is read from disk when the dashboard asks and stays there. The
+    walk skips ``.git``, ``node_modules``, virtualenv, cache and build
+    folders (:data:`_NAMES_SKIP`), and stops at ``max_files`` files
+    (:attr:`LocalNames.truncated` says so).
+
+    ``projects``: the folders a report limited to one project saw, or
+    ``None`` for every project Claude Code ran in. ``wanted``: the hashes
+    the caller has a use for; only those are kept, so a large repository
+    does not fill memory with names nobody asked for, and the walk ends as
+    soon as every one of them has a name."""
+    config_dir = Path(config_dir)
+    wanted = None if wanted is None else frozenset(wanted)
+    salt = salt if salt is not None else parse_mod.load_or_create_salt(config_dir)
+    claude_root = _claude_root(config_dir)
+    folders, worktrees = split_worktrees(projects if projects is not None else project_folders(claude_root))
+    key = (
+        os.path.normcase(str(config_dir)),
+        tuple(os.path.normcase(str(folder)) for folder in folders),
+        hashlib.sha256(salt).hexdigest(),
+        max_files,
+        None if wanted is None else hashlib.sha256("".join(sorted(wanted)).encode()).hexdigest(),
+    )
+    now = time.monotonic()
+    with _NAMES_LOCK:
+        for old_key in [k for k, (at, _) in _NAMES.items() if now - at >= _NAMES_TTL_S]:
+            del _NAMES[old_key]
+        if key in _NAMES:
+            return _NAMES[key][1]
+    found = _find_names(config_dir, claude_root, folders, worktrees, salt, max_files, wanted)
+    with _NAMES_LOCK:
+        _NAMES[key] = (time.monotonic(), found)
+    return found
+
+
+def _find_names(
+    config_dir: Path,
+    claude_root: Path,
+    folders: list[Path],
+    worktrees: dict[str, list[Path]],
+    salt: bytes,
+    max_files: int,
+    wanted: frozenset[str] | None = None,
+) -> LocalNames:
+    found = LocalNames()
+    left = max_files
+    #: The wanted hashes with no name yet. The walk ends when it is empty.
+    pending = None if wanted is None else set(wanted)
+
+    def note(path: Path, name: str, project: str, *, force: bool = False) -> None:
+        file_hash = parse_mod.path_hash(str(path), salt)
+        if force or wanted is None or file_hash in wanted:
+            found.names.setdefault(file_hash, {"name": name, "ext": ext_class(path.name), "project": project})
+            if pending is not None:
+                pending.discard(file_hash)
+
+    # Your own files sit outside every project and there are few of them, so
+    # they are named first, on top of the cap, and the walk below can stop
+    # once it has found what is left.
+    for folder in folders:
+        memory = _memory_file(claude_root, folder).parent
+        for path in sorted(memory.glob("*.md")) if memory.is_dir() else ():
+            note(path, home_label(path), "")
+    for extra in (claude_root / "plans", claude_root / "rules"):
+        if extra.is_dir():
+            files, _cut = _walk_files(extra, 2000)
+            for path in files:
+                note(path, home_label(path), "")
+    user_file = claude_root / "CLAUDE.md"
+    if user_file.is_file():
+        note(user_file, home_label(user_file), "")
+
+    def walk(folder: Path) -> None:
+        nonlocal left
+        copies = worktrees.get(os.path.normcase(str(folder)), ())
+
+        def name_file(path: Path) -> bool:
+            """Name one file (and its copy in each git worktree); true once
+            nothing wanted is left."""
+            try:
+                relative = path.relative_to(folder)
+            except ValueError:
+                return False
+            name = relative.as_posix()
+            note(path, name, folder.name)
+            for copy in copies:
+                note(copy / relative, name, folder.name)
+            return pending is not None and not pending
+
+        files, cut = _walk_files(folder, max(left, 0), name_file)
+        left -= len(files)
+        found.truncated = found.truncated or cut
+
+    for folder in folders:
+        if pending is not None and not pending:
+            break
+        walk(folder)
+
+    for candidate in discover(config_dir, projects=folders):
+        if candidate.level == "Import":
+            continue
+        parent_hash = parse_mod.path_hash(str(candidate.path), salt)
+        for target in _imports(_read(candidate.path) or "", candidate.path):
+            if not target.is_file():
+                continue
+            child_hash = parse_mod.path_hash(str(target), salt)
+            text = _read(target) or ""
+            found.imports.add(child_hash)
+            found.inlined.setdefault(
+                child_hash, {"parent": parent_hash, "tokens": round(len(text) / _CHARS_PER_TOKEN_APPROX)}
+            )
+            if child_hash not in found.names:
+                project = candidate.project_root
+                try:
+                    name = target.relative_to(project).as_posix() if project is not None else home_label(target)
+                except ValueError:
+                    name = home_label(target)
+                note(target, name, project.name if project is not None else "", force=True)
+    return found
+
+
+def project_file_rows(
+    config_dir: Path, data: dict, *, projects: list[Path] | None = None
+) -> tuple[list[dict], LocalNames]:
+    """The project files agents consume (``context_files.project_files``)
+    with the names this machine can give them: the rows of ``data`` (a
+    report's ``context_files``) and the walk that named them. Only the
+    hashes the report has a use for are kept from the walk."""
+    from . import context_files
+
+    rows = context_files.project_files(data)
+    local = local_names(config_dir, projects=projects, wanted={row["hash"] for row in rows})
+    return context_files.project_files(data, local.as_dict()), local
+
+
+def _type_names(row: dict) -> list[str]:
+    """The agent types that read a file by habit, biggest share first."""
+    return [
+        item["reach"]
+        for item in sorted(row.get("reach") or (), key=lambda item: -item.get("share", 0))
+        if item.get("standing") and item.get("reach") != "main"
+    ]
+
+
+def _file_explainer(row: dict, label: str, what: str, now_after: str, effect: str, tradeoff: str) -> list[list[str]]:
+    types = _type_names(row)
+    loaded = ", and loaded for them by Claude Code" if row.get("source") != "read" else ""
+    return [
+        ["What this changes", what],
+        ["Now and after", now_after],
+        ["Where and who it affects", f"{label}: read by {', '.join(types) if types else 'your agents'}{loaded}."],
+        ["Expected effect", effect],
+        ["Trade-off", tradeoff],
+        [
+            "How to undo it",
+            "Claude shows the diff before saving. To go back, restore the file from git or ask Claude to undo the edit.",
+        ],
+    ]
+
+
+def project_file_fixes(row: dict, units: Units) -> list[dict]:
+    """What to do about a project file (a row of
+    ``context_files.project_files``) that is big, read by many agent types
+    or growing: trim what is stale, split it by who needs it, move
+    rule-like parts into path-scoped rules, move reference material into a
+    skill, and, for a file agents read, put the few lines an agent needs in
+    its definition and drop its read. Each is a prompt to copy: the
+    dashboard edits nothing. A file
+    with no name on this machine (``row["name"]`` empty) has no fixes."""
+    name = row.get("name") or ""
+    if not name:
+        return []
+    project = row.get("project") or ""
+    label = f"{name} (in {project})" if project else name
+    tokens = int(row.get("tokens") or 0)
+    types = _type_names(row)
+    cost = float(row.get("cost_month_usd") or 0.0)
+    each_1k = _amount(units, cost * 1000 / tokens, "a month", prefix="about ") if tokens and cost > 0 else ""
+    effect = (
+        f"It costs {_amount(units, cost, 'a month')} now. Every 1,000 tokens cut saves {each_1k}."
+        if each_1k
+        else "A smaller file is written to the cache and read back less each time."
+    )
+    now = f"Now: about {tokens:,} tokens, read by {len(types)} agent type{'s' if len(types) != 1 else ''}."
+    who = ", ".join(types) if types else "your agents"
+    stem, ext = os.path.splitext(os.path.basename(name))
+    grew = row.get("change_pct")
+    pace = f" It grew {grew:.0f}% in about 30 days." if isinstance(grew, (int, float)) and grew >= 1 else ""
+    opening = f"{label} is about {tokens:,} tokens and is read by {who}.{pace}"
+    fixes = [
+        _fix(
+            "Trim what is stale",
+            _file_explainer(
+                row,
+                label,
+                "Finished work, decisions the code already shows, repeated text and notes about files that no "
+                "longer exist are cut.",
+                f"{now} After: smaller, and it stops growing by what is no longer true.",
+                effect,
+                "A note you cut cannot be read later. Git keeps the old text.",
+            ),
+            "\n".join(
+                [
+                    opening,
+                    "Read it and list what is stale. That means finished work, decisions the code already shows, "
+                    "text that repeats, and notes about files or functions that no longer exist. Cut those.",
+                    _PROMPT_TAIL,
+                ]
+            ),
+        ),
+        _fix(
+            "Split it by who needs it",
+            _file_explainer(
+                row,
+                label,
+                "The file is split into a short shared part and a file for each group that needs more.",
+                f"{now} After: each agent type reads the shared part and only its own file.",
+                effect,
+                "More files to keep up to date, and an agent must know which one is its own.",
+            ),
+            "\n".join(
+                [
+                    opening,
+                    "Work out which parts each of those agents uses. Keep a short shared part in the file, and "
+                    f"move what only some of them need into separate files beside it (for example {stem}-<topic>{ext}). "
+                    "Then change each agent's definition (.claude/agents/<name>.md) so it reads only the files it needs.",
+                    _PROMPT_TAIL,
+                ]
+            ),
+        ),
+        _fix(
+            "Move rule-like parts into path-scoped rules",
+            _file_explainer(
+                row,
+                label,
+                "Rules that apply to one part of the code move into their own files under .claude/rules. They load "
+                "only when Claude works on a matching path.",
+                f"{now} After: those parts load only for the paths they name.",
+                effect,
+                "A rule loads only when a matching file is touched, so check the globs name the right paths.",
+            ),
+            "\n".join(
+                [
+                    opening,
+                    "Find the parts that are rules about one folder or file type: a style, naming or safety rule. "
+                    "Move each into its own file under .claude/rules/ with a `paths:` list of globs in its "
+                    "frontmatter. It then loads only when Claude works on a matching file. Leave a one-line pointer "
+                    "behind only if the rule matters elsewhere.",
+                    _PROMPT_TAIL,
+                ]
+            ),
+        ),
+        _fix(
+            "Move reference material into a skill",
+            _file_explainer(
+                row,
+                label,
+                "Reference material (long lists, tables, how-tos) moves into a skill that loads only when a task "
+                "needs it.",
+                f"{now} After: only the skill's one-line description is always present.",
+                effect,
+                "Claude must choose to load the skill, so write its description to say when it applies.",
+            ),
+            "\n".join(
+                [
+                    opening,
+                    "Find the reference material: long lists, tables and step-by-step guides that only some tasks "
+                    "need. Move it into a skill (.claude/skills/<name>/SKILL.md) with a description that says "
+                    "when to use it, and remove it from the file.",
+                    _PROMPT_TAIL,
+                ]
+            ),
+        ),
+    ]
+    if types and row.get("source") == "read":
+        fixes.append(
+            _fix(
+                "Put the essential lines in the agent definition and drop the read",
+                _file_explainer(
+                    row,
+                    label,
+                    "Each agent keeps the few lines it uses in its own definition, and stops reading the file.",
+                    f"{now} After: no agent reads it by habit.",
+                    effect,
+                    "The copied lines can drift from the file, so copy only what rarely changes.",
+                ),
+                "\n".join(
+                    [
+                        opening,
+                        f"For each of these agents ({who}), find the few lines it really uses and copy them into "
+                        "its definition (.claude/agents/<name>.md). Then remove the instruction to read the file "
+                        "from that definition. Keep the file for people.",
+                        _PROMPT_TAIL,
+                    ]
+                ),
+            )
+        )
+    return fixes
+
+
 def render_markdown(review: Review, units: Units, period: str) -> str:
     """The review as Markdown, for ``claudeglass review claude-md``."""
     lines = ["# CLAUDE.md review", ""]
@@ -1064,16 +1504,23 @@ def render_markdown(review: Review, units: Units, period: str) -> str:
 
 __all__ = [
     "Candidate",
+    "EXT_CLASSES",
     "FileReview",
     "LEVELS",
+    "LocalNames",
+    "NAMES_MAX_FILES",
     "Review",
     "Section",
     "agent_names",
     "build_fixes",
     "build_review",
     "discover",
+    "ext_class",
     "file_detail",
     "file_summary",
+    "local_names",
+    "project_file_fixes",
+    "project_file_rows",
     "project_folders",
     "render_markdown",
     "sections",

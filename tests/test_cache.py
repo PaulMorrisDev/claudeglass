@@ -181,7 +181,15 @@ def test_fingerprint_is_pinned():
     cache entry (nothing else does -- unlike PARSER_VERSION, nobody has
     to remember to bump this by hand), not to silently ship it.
     """
-    assert FINGERPRINT == "300ee16b8cfe7eecdf237736b01a6add26a0eb37ec13dd44b121c048f954653a"
+    # Re-pinned for the ``report_reread`` and ``split_run`` tip titles (parser 43 already starts a new cache generation).
+    assert FINGERPRINT == "1b51edd3cea4b3c2a19d137e9d9a76024e6c9050d133fe108fd40278df393080"
+
+
+def test_the_parser_version_has_a_note_saying_what_its_bump_changed():
+    """The fingerprint above covers the vocabularies only: a parser change
+    that alters a digest bumps ``PARSER_VERSION`` by hand, with a note."""
+    source = (Path(__file__).parent.parent / "src" / "claudeglass" / "__init__.py").read_text(encoding="utf-8")
+    assert f"#: Bumped to {PARSER_VERSION}:" in source
 
 
 # -- salt fingerprint (SEC-P8) ----------------------------------------------

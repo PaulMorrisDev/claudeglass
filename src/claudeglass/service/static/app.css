@@ -1608,10 +1608,35 @@ details.disclosure[open] > summary {
   font-size: var(--text-sm);
 }
 
+/* The mix of sessions moved between a change's two sides: a chip and the
+   sentence that says which kind of session and by how much. */
+.change-mix {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin: 0 0 var(--space-5);
+  font-size: var(--text-sm);
+}
+
+.change-mix-text {
+  color: var(--ink-2);
+  max-width: var(--measure);
+}
+
 .change-measures {
   display: grid;
   gap: var(--space-6);
   margin-bottom: var(--space-5);
+}
+
+/* A measure read last (cost per session of a change that isn't about cost). */
+.change-measure.is-demoted .change-measure-label {
+  color: var(--ink-3);
+}
+
+.change-demoted {
+  margin: var(--space-2) 0 0;
 }
 
 .change-measure-label {
@@ -1904,6 +1929,23 @@ details.disclosure[open] > summary {
   margin: 0;
 }
 
+/* The cost-centre table has a column per cell, so it takes the whole row. */
+.overview-breakdown-wide {
+  grid-column: 1 / -1;
+}
+
+.overview-cost-centres-lead,
+.overview-cost-centres-more {
+  margin: var(--space-3) 0 0;
+  color: var(--ink-2);
+}
+
+.overview-cost-centres-levers,
+.overview-detail-links {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
+}
+
 .overview-details {
   margin-top: var(--space-10);
 }
@@ -2033,6 +2075,49 @@ details.disclosure[open] > summary {
   gap: var(--space-2);
   margin: 0 var(--space-6) var(--space-2) 0;
   font-size: var(--text-md);
+}
+
+/* The rating row on a tip, habit or recommendation card. */
+.card-rating {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin-top: var(--space-4);
+}
+
+.card-rating-label {
+  color: var(--ink-2);
+  font-size: var(--text-sm);
+}
+
+.button.card-rating-button[aria-pressed="true"] {
+  border-color: color-mix(in srgb, var(--accent) 30%, var(--border));
+  background: var(--accent-soft);
+  color: var(--accent-ink);
+}
+
+/* One plan build's answers: its name, then the ticks, on one line. */
+.rating-build {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  margin-bottom: var(--space-2);
+}
+
+.rating-build-label {
+  min-width: 7rem;
+  margin-right: var(--space-5);
+  color: var(--ink-2);
+  font-weight: var(--weight-semibold);
+}
+
+.label-guess {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-3);
+  margin: var(--space-4) 0;
 }
 
 .rating-actions {
@@ -2756,6 +2841,19 @@ span.severity-mark {
 
 .capture-hide {
   color: var(--ink-2);
+}
+
+/* The banner's sessions waiting for a rating. */
+.capture-unrated {
+  margin-top: var(--space-3);
+}
+
+.capture-unrated p {
+  margin: 0;
+}
+
+.capture-unrated-list li {
+  margin-top: var(--space-1);
 }
 
 .capture-levels {

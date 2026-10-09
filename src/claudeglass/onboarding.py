@@ -487,7 +487,7 @@ CAPTURE_INTRO = (
     "Metrics capture (optional)\n"
     "ClaudeGlass can have Claude note a few words about each piece of work, such as the kind of task, how clear "
     "the request was and whether an agent finished, so its suggestions fit how you work. This uses your tokens: "
-    "Claude reads a short note when a session or subagent starts, and ends each reply with a one-line tag such as "
+    "Claude reads a short note when a session starts, and ends each reply with a one-line tag such as "
     "[cg: task=bugfix brief=clear], which you will see. The free level only logs a few events to a local file.\n"
 )
 
@@ -622,8 +622,9 @@ def ask_capture_until(
 
 FEEDBACK_INTRO = (
     "Feedback after a piece of work (optional)\n"
-    "ClaudeGlass can add a /cg-feedback skill to Claude Code. Run it when you finish a piece of work and tick four "
-    "quick questions: did it deliver, what slowed it, was it worth the tokens, and what would have helped. Your "
+    "ClaudeGlass can add a /cg-feedback skill to Claude Code. Run it when you finish a piece of work and tick a few "
+    "quick questions: did it deliver, what were your follow-up messages, was it worth the tokens, and what would "
+    "have made it cheaper. Your "
     "answers show which work paid off, so the tips fit how you work. It costs nothing until you run it, then about "
     "two short turns, and a second status line reminds you it's there. It works at any capture level, even off.\n"
 )

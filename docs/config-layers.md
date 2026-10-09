@@ -185,11 +185,9 @@ merged a settings-file `mcpServers` block was merging a key Claude Code
 itself never writes there; COV-03 fixed this dead-code path rather than
 extending it.
 
-`recommend.py`'s `_rule_baseline_bloat` now prefers
-`effective_enabled_plugins` (deep-merged) over the older single-layer
-`enabled_plugins` field when the snapshot has it, so a plugin-count
-bloat recommendation reflects every layer's plugins, not just the
-user layer's.
+`recommend.py`'s `_rule_baseline_bloat` no longer reads the snapshot's MCP
+server or plugin counts. It fires on the measured `controllable_est` alone
+(see [sections-reference](sections-reference.md)).
 
 ## `effective_agents`
 

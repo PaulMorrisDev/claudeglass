@@ -1,5 +1,5 @@
 {
-  "about": "Scripted Claude Code sessions in project/ for scripts/eval-tagger.py. Each scenario's last turn is judged. 'expect' gives the right words for that turn: a list of acceptable values, null meaning the key should be left out; for the 'missing' list key, '~a|b' means not 'none' and naming at least one of a, b. A key not in 'expect' isn't scored. 'skill': 'auto' is worked out from the session: helped or unneeded when a skill ran, else none, would-help or left out. Scenarios with \"set\": \"holdout\" were written after the judge's instructions were tuned on the rest, and never used to tune them: they show how the tuning holds up on work it hasn't seen.",
+  "about": "Scripted Claude Code sessions in project/ for scripts/eval-tagger.py. Each scenario's last turn is judged. 'expect' gives the right words for that turn: a list of acceptable values, null meaning the key should be left out; for the 'missing' list key, '~a|b' means not 'none' and naming at least one of a, b. A key not in 'expect' isn't scored. 'skill': 'auto' is worked out from the session: helped or unneeded when a skill ran, else none, would-help or left out. Scenarios with \"set\": \"holdout\" were written after the judge's instructions were tuned on the rest, and never used to tune them: they show how the tuning holds up on work it hasn't seen. Scenarios with \"source\": \"hand\" have a session written by hand, in the format the recorded ones are trimmed to (plus what the trimmer drops and the excerpt reads: the plan text, the feedback typed into a plan dialog, a tool result's note and a background start's status): 'record' skips them and says so, so they are never overwritten, and no tag of Claude's is scored for them, as none was asked for. \"entrypoint\": \"claude-desktop\" marks a session whose lines carry that entrypoint. A hand-written scenario's own 'about' says what its session covers.",
   "scenarios": [
     {
       "id": "bugfix_clear",
@@ -40,9 +40,6 @@
           "none",
           null
         ],
-        "found": [
-          null
-        ],
         "skill": "auto"
       }
     },
@@ -68,9 +65,6 @@
         ],
         "prior": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -106,9 +100,6 @@
           "manual",
           null
         ],
-        "found": [
-          null
-        ],
         "skill": "auto"
       }
     },
@@ -123,9 +114,6 @@
         ],
         "brief": [
           "clear"
-        ],
-        "found": [
-          "yes"
         ],
         "level": [
           "easy"
@@ -156,9 +144,6 @@
       "expect": {
         "task": [
           "research"
-        ],
-        "found": [
-          "no"
         ],
         "plan": [
           "none",
@@ -204,9 +189,6 @@
         "check": [
           "targeted",
           "full"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -241,9 +223,6 @@
         "check": [
           "targeted",
           "full"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -262,9 +241,6 @@
         ],
         "missing": [
           "~goal|constraints|done|scope"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -288,9 +264,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -313,9 +286,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -341,9 +311,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -366,9 +333,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -401,9 +365,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -441,9 +402,6 @@
           "none",
           null
         ],
-        "found": [
-          null
-        ],
         "size": [
           "xs",
           "s"
@@ -465,9 +423,6 @@
         ],
         "check": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -491,9 +446,6 @@
         "prior": [
           "needed",
           "some"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -513,9 +465,6 @@
         "prior": [
           "needed",
           "some"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -530,10 +479,6 @@
         ],
         "brief": [
           "clear"
-        ],
-        "found": [
-          "yes",
-          null
         ],
         "plan": [
           "none",
@@ -563,9 +508,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -580,9 +522,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -631,9 +570,6 @@
           "none",
           null
         ],
-        "found": [
-          null
-        ],
         "missing": [
           "none",
           null
@@ -658,9 +594,6 @@
         "skill": "auto",
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -693,9 +626,6 @@
           "none",
           "made",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -710,8 +640,399 @@
         ],
         "missing": [
           "~goal|done|scope|files|constraints"
+        ]
+      }
+    },
+    {
+      "id": "plan_build_rename",
+      "source": "hand",
+      "about": "A plan approved in the dialog and built in the same turn, then a short rename of what was built: a fix.",
+      "turns": [
+        "Plan how to add Store.remove_item(name, quantity) to inventory/store.py: lower the quantity, delete the item when it reaches zero, and raise KeyError for an unknown name. Then build it with tests in tests/test_store.py and run them with python -m pytest -q.",
+        "rename remove_item to take_item"
+      ],
+      "expect": {
+        "shift": [
+          "fix"
         ],
-        "found": [
+        "task": [
+          "refactor"
+        ],
+        "prior": [
+          "needed"
+        ],
+        "size": [
+          "xs",
+          "s"
+        ],
+        "level": [
+          "easy"
+        ],
+        "check": [
+          "full"
+        ]
+      }
+    },
+    {
+      "id": "plan_build_three_fixes",
+      "source": "hand",
+      "about": "A plan approved and built, then three short corrections in a row. The last says Claude missed a step the plan names.",
+      "turns": [
+        "Plan how to add CSV export of the report to inventory/report.py, then build it once I approve. I want a header row (name, quantity, price), one row per item sorted by name, names that contain a comma quoted, and a Total row at the end. Keep the text report as it is. Add tests in tests/test_report.py and run them with python -m pytest -q.",
+        "that's wrong, the rows aren't sorted by name",
+        "you forgot the Total row",
+        "still wrong, you missed quoting names that contain a comma. The plan says to."
+      ],
+      "expect": {
+        "shift": [
+          "fix"
+        ],
+        "why": [
+          "missed"
+        ],
+        "task": [
+          "bugfix"
+        ],
+        "prior": [
+          "needed"
+        ],
+        "size": [
+          "xs",
+          "s"
+        ],
+        "check": [
+          "full"
+        ]
+      }
+    },
+    {
+      "id": "drip_three_small",
+      "source": "hand",
+      "about": "Three small edit requests to one file, one after another. The third only makes sense with the first two.",
+      "turns": [
+        "Add a one-line docstring to parse_price in inventory/utils.py.",
+        "Add one to parse_quantity too.",
+        "And one to parse_name."
+      ],
+      "expect": {
+        "task": [
+          "docs",
+          "refactor"
+        ],
+        "shift": [
+          "grew",
+          "build"
+        ],
+        "prior": [
+          "needed"
+        ],
+        "size": [
+          "xs"
+        ],
+        "level": [
+          "easy"
+        ],
+        "check": [
+          "none",
+          "manual"
+        ]
+      }
+    },
+    {
+      "id": "claude_wrong",
+      "source": "hand",
+      "about": "Claude's change breaks what the request said, and the user says so. The reply doesn't own the mistake.",
+      "turns": [
+        "Add Store.remove_item(name, quantity) to inventory/store.py: lower the quantity, and when it reaches zero keep the item with quantity 0 instead of deleting it. Raise KeyError for an unknown name. Add tests in tests/test_store.py and run them with python -m pytest -q.",
+        "That's wrong, you delete the item at zero and I said to keep it with quantity 0. Fix it and change the tests to match."
+      ],
+      "expect": {
+        "shift": [
+          "fix"
+        ],
+        "why": [
+          "missed"
+        ],
+        "task": [
+          "bugfix"
+        ],
+        "prior": [
+          "needed"
+        ],
+        "admit": [
+          null
+        ],
+        "size": [
+          "xs",
+          "s"
+        ],
+        "check": [
+          "full"
+        ]
+      }
+    },
+    {
+      "id": "claude_admits",
+      "source": "hand",
+      "about": "The user reports the earlier fix didn't work, and the reply owns that its earlier change was the wrong one.",
+      "turns": [
+        "total_value() in inventory/store.py ignores the quantity; it should add up price * quantity. Fix it and run the tests with python -m pytest -q.",
+        "That's not right: the report total is still £1.25 and it should be £8.00."
+      ],
+      "expect": {
+        "admit": [
+          "change"
+        ],
+        "shift": [
+          "fix"
+        ],
+        "task": [
+          "bugfix"
+        ],
+        "prior": [
+          "needed"
+        ],
+        "check": [
+          "full"
+        ]
+      }
+    },
+    {
+      "id": "queued_correction",
+      "source": "hand",
+      "about": "A thin request, then a correction typed while Claude worked (a queued message) that gives the details.",
+      "turns": [
+        "Add Store.remove_item(name, quantity) to inventory/store.py: lower the quantity, delete the item when it reaches zero, and raise KeyError for an unknown name. Add tests for it in tests/test_store.py and run them with python -m pytest -q.",
+        "Now add a remove command to the cli."
+      ],
+      "expect": {
+        "task": [
+          "feature"
+        ],
+        "shift": [
+          "build",
+          "grew"
+        ],
+        "prior": [
+          "needed"
+        ],
+        "brief": [
+          "partial",
+          "vague"
+        ],
+        "missing": [
+          "~constraints|done|scope|goal"
+        ],
+        "size": [
+          "xs",
+          "s"
+        ]
+      }
+    },
+    {
+      "id": "desk_plan_rounds",
+      "source": "hand",
+      "entrypoint": "claude-desktop",
+      "about": "Desktop. A plan sent back once with feedback, proposed again, then approved by typing 'implement the plan'. Hand-written sessions keep the plan text and the feedback, which the trimmer would drop.",
+      "turns": [
+        "Plan how to save and load the Store as JSON.",
+        "implement the plan"
+      ],
+      "expect": {
+        "plan": [
+          "following"
+        ],
+        "shift": [
+          "build"
+        ],
+        "task": [
+          "feature"
+        ],
+        "prior": [
+          "needed"
+        ],
+        "size": [
+          "s",
+          "m"
+        ],
+        "check": [
+          "full"
+        ]
+      }
+    },
+    {
+      "id": "desk_interpreter_tests",
+      "source": "hand",
+      "entrypoint": "claude-desktop",
+      "about": "Desktop. The tests run through the interpreter's full path, C:/Python311/python.exe -m pytest, on one file.",
+      "turns": [
+        "Add Store.names_starting_with(prefix) to inventory/store.py: the sorted names that start with prefix. Add a test in tests/test_store.py and run just that file."
+      ],
+      "expect": {
+        "task": [
+          "feature"
+        ],
+        "brief": [
+          "clear"
+        ],
+        "check": [
+          "targeted"
+        ],
+        "size": [
+          "s"
+        ],
+        "level": [
+          "easy"
+        ],
+        "plan": [
+          "none",
+          null
+        ],
+        "shift": [
+          null,
+          "new"
+        ]
+      }
+    },
+    {
+      "id": "desk_powershell_tests",
+      "source": "hand",
+      "entrypoint": "claude-desktop",
+      "about": "Desktop. The whole suite runs through the PowerShell tool, the first run's long output is saved to a file (a persisted output) and read back.",
+      "turns": [
+        "Run the whole test suite and fix whatever fails."
+      ],
+      "expect": {
+        "task": [
+          "bugfix"
+        ],
+        "brief": [
+          "clear",
+          "partial"
+        ],
+        "check": [
+          "full"
+        ],
+        "size": [
+          "xs",
+          "s"
+        ],
+        "plan": [
+          "none",
+          null
+        ],
+        "shift": [
+          null,
+          "new"
+        ]
+      }
+    },
+    {
+      "id": "desk_replay_block",
+      "source": "hand",
+      "entrypoint": "claude-desktop",
+      "about": "Desktop. The app resumed the session and wrote the first turn again after the last line, with its old uuids. The last turn is the typo fix.",
+      "turns": [
+        "Add a Store.clear() method that empties the store, with a test for it. Run the tests with python -m pytest -q.",
+        "Fix the typo in README.md: \"recieve\" should be \"receive\"."
+      ],
+      "expect": {
+        "task": [
+          "docs"
+        ],
+        "shift": [
+          "new"
+        ],
+        "prior": [
+          "none",
+          null
+        ],
+        "size": [
+          "xs"
+        ],
+        "brief": [
+          "clear"
+        ],
+        "level": [
+          "easy"
+        ],
+        "check": [
+          "none",
+          "manual",
+          null
+        ]
+      }
+    },
+    {
+      "id": "desk_screenshot",
+      "source": "hand",
+      "entrypoint": "claude-desktop",
+      "about": "Desktop. The request is a screenshot (an image block with no placeholder text) and one sentence.",
+      "turns": [
+        "[image]\nThis is the stock report as it prints now. The total is wrong, it should be £8.00. Fix it."
+      ],
+      "expect": {
+        "task": [
+          "bugfix"
+        ],
+        "brief": [
+          "clear",
+          "partial"
+        ],
+        "check": [
+          "run"
+        ],
+        "size": [
+          "xs",
+          "s"
+        ],
+        "level": [
+          "easy"
+        ],
+        "shift": [
+          null,
+          "new"
+        ]
+      }
+    },
+    {
+      "id": "desk_opus_workflow",
+      "source": "hand",
+      "entrypoint": "claude-desktop",
+      "about": "Desktop, on an Opus model. One turn starts a Workflow and ends while its agents are still working.",
+      "turns": [
+        "Use a workflow to review each module in inventory/ and fix the bugs it finds, one agent per module."
+      ],
+      "expect": {
+        "task": [
+          "bugfix",
+          "review"
+        ],
+        "brief": [
+          "clear"
+        ],
+        "level": [
+          "normal",
+          "hard"
+        ],
+        "size": [
+          "m",
+          "l",
+          "xl"
+        ],
+        "check": [
+          "none"
+        ],
+        "plan": [
+          "none",
+          null
+        ],
+        "shift": [
+          null,
+          "new"
+        ],
+        "prior": [
+          "none",
           null
         ]
       }
@@ -748,9 +1069,6 @@
           "none",
           null
         ],
-        "found": [
-          null
-        ],
         "check": [
           "run",
           "targeted",
@@ -767,9 +1085,6 @@
       "expect": {
         "task": [
           "research"
-        ],
-        "found": [
-          "yes"
         ],
         "check": [
           "none",
@@ -814,9 +1129,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -842,9 +1154,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -860,9 +1169,6 @@
         ],
         "missing": [
           "~goal|scope|done|constraints|files"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -883,9 +1189,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -914,9 +1217,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -939,9 +1239,6 @@
         ],
         "task": [
           "feature"
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -989,9 +1286,6 @@
         "plan": [
           "none",
           null
-        ],
-        "found": [
-          null
         ]
       }
     },
@@ -1010,9 +1304,6 @@
         ],
         "plan": [
           "none",
-          null
-        ],
-        "found": [
           null
         ]
       }
@@ -1033,8 +1324,74 @@
         ],
         "missing": [
           "~done|goal|constraints|scope"
+        ]
+      }
+    },
+    {
+      "id": "ho_post_plan_tweak",
+      "set": "holdout",
+      "source": "hand",
+      "about": "A plan approved and built, then a short tweak to the output that was built.",
+      "turns": [
+        "Plan a --json flag for the list command in inventory/cli.py, then build it. Keep the text output as the default.",
+        "make the key qty instead of quantity"
+      ],
+      "expect": {
+        "shift": [
+          "fix"
         ],
-        "found": [
+        "why": [
+          "changed",
+          "left_out"
+        ],
+        "prior": [
+          "needed"
+        ],
+        "size": [
+          "xs",
+          "s"
+        ],
+        "level": [
+          "easy"
+        ],
+        "check": [
+          "run"
+        ]
+      }
+    },
+    {
+      "id": "ho_queued_scope",
+      "set": "holdout",
+      "source": "hand",
+      "about": "A one-line request, then a message typed while Claude worked that widens it to a second file and a test.",
+      "turns": [
+        "Add a Store.count() method that returns how many different items there are."
+      ],
+      "expect": {
+        "task": [
+          "feature"
+        ],
+        "size": [
+          "s",
+          "m"
+        ],
+        "level": [
+          "easy",
+          "normal"
+        ],
+        "shift": [
+          null,
+          "new"
+        ],
+        "prior": [
+          "none",
+          null
+        ],
+        "check": [
+          "full"
+        ],
+        "plan": [
+          "none",
           null
         ]
       }

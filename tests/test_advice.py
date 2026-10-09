@@ -251,6 +251,18 @@ def test_already_set_matches_model_aliases_and_maps():
     assert not fixes.already_set("maxTurns", 1, True)
 
 
+def test_already_set_treats_a_tools_list_as_a_set():
+    # Order does not matter, and a file may spell the list as one string.
+    assert fixes.already_set("tools", ["Read", "Grep"], ["Grep", "Read"])
+    assert fixes.already_set("tools", ["Read", "Grep"], "Grep, Read")
+    assert fixes.already_set("disallowedTools", ["Skill"], ["Skill"])
+    # A longer or shorter list is a different list, and nothing set is not set.
+    assert not fixes.already_set("tools", ["Read", "Grep"], ["Read", "Grep", "Bash"])
+    assert not fixes.already_set("tools", ["Read", "Grep"], ["Read"])
+    assert not fixes.already_set("tools", ["Read", "Grep"], None)
+    assert not fixes.already_set("tools", ["Read", "Grep"], 3)
+
+
 def _compaction(id_, **kw) -> Recommendation:
     return Recommendation(id=id_, severity="advice", category="settings", lever="autoCompactWindow", **kw)
 
@@ -372,6 +384,16 @@ def test_spawn_cost_is_dropped_for_agents_no_file_can_change():
     ]
     out = advice.finish(recs, report, None, None)
     assert [r.agent_type for r in out] == ["reviewer"]
+
+
+def test_a_built_in_agents_spawn_cost_points_at_the_tools_list_card():
+    # The rule gives no spawn-cost card to Explore, Plan or claude-code-guide
+    # (test_spawn_cost_is_not_given_to_the_read_only_helpers), so every
+    # built-in one that reaches this wording is one the tools list card can cover.
+    report = _model_swap_report([])
+    recs = [Recommendation(id="spawn-cost", severity="advice", agent_type="general-purpose")]
+    (out,) = advice.finish(recs, report, None, None)
+    assert "tools list card" in out.action and "shorter task prompt does not change" in out.action
 
 
 def test_severity_orders_before_saving():
@@ -510,7 +532,7 @@ def test_model_tier_leaves_out_an_agent_often_retried_on_a_larger_model():
 
 
 
-def test_model_tier_leaves_out_an_agent_whose_runs_said_they_needed_a_larger_model():
+def test_model_tier_leaves_out_an_agent_whose_work_was_mostly_hard():
     from claudeglass import habits
 
     report = _model_swap_report(
@@ -519,14 +541,15 @@ def test_model_tier_leaves_out_an_agent_whose_runs_said_they_needed_a_larger_mod
             ["implementer", "claude-opus-5-5", "claude-sonnet-5", 20.0],
         ]
     )
-    runs = [habits.AgentFact(session_id="s", agent_type="reviewer", week="", cost=1.0, fit=fit)
-            for fit in ("larger", "larger", "larger", "smaller", "smaller")]
+    runs = [habits.AgentFact(session_id="s", agent_type="reviewer", week="", cost=1.0, level=level)
+            for level in ("hard", "hard", "hard", "easy", "easy")]
     report.sections.append(habits.section_from(habits.Habits(agents=runs)))
     snap = Snapshot(path=None, ts="2026-09-20T00:00:00Z", data={"agents": {}})
     (tier,) = [r for r in advice.finish([_tier("reviewer"), _tier("implementer")], report, snap, Units())
                if r.id == "model-tier"]
     assert [c.agent for c in tier.changes] == ["implementer"]
-    assert "Claude said a larger model was needed: reviewer (3 runs)." in tier.why
+    assert "Much of the work reported hard: reviewer (60%)." in tier.why
+    assert "Claude said" not in tier.why
 
 
 def test_model_tier_left_out_note_groups_agents_by_reason_and_names_only_a_few():
@@ -684,3 +707,202 @@ def test_long_context_share_without_tokensave_still_mentions_a_subagent():
     assert out.variant == ""
     (fix,) = fixes.build_fixes(out)
     assert "subagent" in fix["prompt"].lower()
+
+
+def _limit_pressure_rec(
+    five_hour=0, weekly=0, weekly_stopped=None, cut_off=0, days=30, shares=None, counted=5, burst=None, overall=None
+) -> Recommendation:
+    """``shares`` is the (main, direct, workflow) share of spend before the
+    stops, as the roll-up table gives them; ``burst`` and ``overall`` are the
+    share that ran with 3 or more agents at once in those stops and in all
+    the work."""
+    source = "limits.limits_summary"
+    evidence = [
+        ("5-hour limit stops", five_hour, source, "all"),
+        ("Weekly limit stops", weekly, source, "all"),
+        ("Weekly stops that stopped work", weekly if weekly_stopped is None else weekly_stopped, source, "all"),
+        ("Agents cut off by a limit", cut_off, source, "all"),
+        ("Days covered", days, source, "all"),
+    ]
+    rollup = "limits.limits_stops_rollup"
+    if shares is not None:
+        evidence += [
+            ("Stops counted in the roll-up", counted, rollup, "all"),
+            ("Main session share of spend", shares[0], rollup, "all"),
+            ("Direct agents share of spend", shares[1], rollup, "all"),
+            ("Workflow agents share of spend", shares[2], rollup, "all"),
+        ]
+    if burst is not None:
+        evidence += [
+            ("Spend with 3+ agents at once, in these stops", burst, rollup, "all"),
+            ("Spend with 3+ agents at once, across all your work", overall, rollup, "all"),
+        ]
+    return Recommendation(id="limit-pressure", severity="advice", category="workflow", lever=None, evidence=evidence)
+
+
+def test_limit_pressure_why_counts_stops_over_the_days_covered():
+    (out,) = advice.finish([_limit_pressure_rec(five_hour=4, weekly=1)], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 4 times and your weekly limit 1 time in 30 days."
+
+    (out,) = advice.finish([_limit_pressure_rec(five_hour=1)], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 1 time in 30 days."
+
+    (out,) = advice.finish([_limit_pressure_rec(weekly=2, days=1)], _model_swap_report([]), None, Units())
+    assert out.why == "Your weekly limit stopped you 2 times."
+
+
+def test_limit_pressure_why_keeps_the_cut_off_clause():
+    (out,) = advice.finish([_limit_pressure_rec(five_hour=3, cut_off=2)], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 3 times in 30 days. 2 subagents were cut off by a usage limit."
+
+    (out,) = advice.finish([_limit_pressure_rec(cut_off=1)], _model_swap_report([]), None, Units())
+    assert out.why == "1 subagent was cut off by a usage limit."
+    assert "fewer agents at once" in out.action
+
+
+def test_limit_pressure_why_leaves_out_a_weekly_stop_you_worked_through():
+    rec = _limit_pressure_rec(five_hour=4, weekly=2, weekly_stopped=1)
+    (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 4 times and your weekly limit 1 time in 30 days."
+    rec = _limit_pressure_rec(weekly=1, weekly_stopped=0, cut_off=1)
+    (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert out.why == "1 subagent was cut off by a usage limit."
+
+
+def test_limit_pressure_burst_clause_names_a_single_stop():
+    rec = _limit_pressure_rec(five_hour=1, shares=(20.0, 70.0, 10.0), counted=1, burst=60.0, overall=30.0)
+    (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert "In 1 recent stop, 60% of the spend" in out.why
+    assert "1 stops" not in out.why
+
+
+def test_limit_pressure_card_follows_the_biggest_cost_centre_and_links_to_the_rebuilds_page():
+    link = "{{page:cache/rebuilds}} shows each stop, its reset time and what it cost."
+    cases = {
+        (60.0, 25.0, 15.0): ("main session", "Plan the work before you start, and run /clear when the task changes"),
+        (20.0, 70.0, 10.0): ("direct agents", "Run fewer agents at once when a limit is close."),
+        (10.0, 20.0, 70.0): ("workflow agents", "Lower the concurrency in the workflow script"),
+    }
+    for shares, (name, action) in cases.items():
+        (out,) = advice.finish(
+            [_limit_pressure_rec(five_hour=4, weekly=1, shares=shares)], _model_swap_report([]), None, Units()
+        )
+        assert out.why == (
+            "Your 5-hour limit stopped you 4 times and your weekly limit 1 time in 30 days. "
+            f"Before your stops, your {name} spent the most: {max(shares):.0f}% of list-price spend. "
+            "The limit may weigh models differently."
+        )
+        assert out.action.startswith(action), name
+        assert out.action.endswith(link), name
+        assert "spend/usage" not in out.action
+    # Only the main session's card adds the fewer-agents advice, and only when agents were cut off.
+    (main_cut,) = advice.finish(
+        [_limit_pressure_rec(five_hour=4, cut_off=2, shares=(60.0, 25.0, 15.0))], _model_swap_report([]), None, Units()
+    )
+    assert "/clear" in main_cut.action and "Run fewer agents at once when a limit is close." in main_cut.action
+    (main_alone,) = advice.finish(
+        [_limit_pressure_rec(five_hour=4, shares=(60.0, 25.0, 15.0))], _model_swap_report([]), None, Units()
+    )
+    assert "fewer agents" not in main_alone.action
+
+
+def test_limit_pressure_card_without_a_roll_up_keeps_the_stops_sentence_and_the_fewer_agents_action():
+    (out,) = advice.finish([_limit_pressure_rec(five_hour=3)], _model_swap_report([]), None, Units())
+    assert out.why == "Your 5-hour limit stopped you 3 times in 30 days."
+    assert out.action == (
+        "Run fewer agents at once when a limit is close. "
+        "{{page:cache/rebuilds}} shows each stop, its reset time and what it cost."
+    )
+
+
+def test_limit_pressure_card_names_the_burst_only_when_it_stands_out_by_ten_points():
+    clause = "In 5 recent stops, {x}% of the spend ran while 3 or more agents worked at once ({y}% across all your work)."
+
+    def why(burst: float, overall: float) -> str:
+        rec = _limit_pressure_rec(five_hour=4, shares=(20.0, 70.0, 10.0), burst=burst, overall=overall)
+        (out,) = advice.finish([rec], _model_swap_report([]), None, Units())
+        return out.why
+
+    assert why(40.0, 30.0).endswith(clause.format(x=40, y=30))
+    assert why(80.0, 30.0).endswith(clause.format(x=80, y=30))
+    assert "agents worked at once" not in why(39.9, 30.0)
+    assert "agents worked at once" not in why(30.0, 30.0)
+    assert "agents worked at once" not in why(10.0, 60.0)
+
+
+def _batch_probes(agent_type: str = "Explore", **kw) -> Recommendation:
+    return Recommendation(
+        id="agent-batch-probes",
+        severity="advice",
+        category="workflow",
+        title="placeholder",
+        lever=None,
+        agent_type=agent_type,
+        saving_usd=kw.pop("saving_usd", 6.0),
+        evidence=[
+            ("Replies it made", 400, "habits.habits_probes", agent_type),
+            ("Single read-only calls", 190, "habits.habits_probes", agent_type),
+            ("Of them by shell command", kw.pop("shell", 30), "habits.habits_probes", agent_type),
+            ("Re-reads a batch would spare", 12.0, "habits.habits_probes", agent_type),
+        ],
+        **kw,
+    )
+
+
+def test_agent_batch_probes_names_the_counts_and_the_line_to_add_and_quotes_an_upper_bound():
+    (card,) = advice.finish([_batch_probes()], _model_swap_report([]), None, Units(billing_mode="api", currency="USD"))
+    assert card.title == "Explore looks things up one call at a time"
+    assert "one read-only call and nothing else in 190 of its 400 replies" in card.why
+    assert "30 of the calls were shell commands such as cat or grep." in card.why
+    # The line to paste is the one the Work habits table's help names, word for word.
+    assert f'Add "{fixes.BATCH_PROBES_LINE}" to its agent definition or the prompt that starts it.' in card.action
+    assert card.estimated_saving.startswith("At most ")
+    assert "halved" in card.saving_basis
+
+
+def test_agent_batch_probes_leaves_the_shell_sentence_out_when_no_lookup_was_a_shell_command():
+    (card,) = advice.finish([_batch_probes(shell=0)], _model_swap_report([]), None, Units())
+    assert "shell commands" not in card.why
+
+
+def test_agent_batch_probes_for_workflow_agents_points_at_the_scripts_prompts():
+    (card,) = advice.finish([_batch_probes("workflow-subagent")], _model_swap_report([]), None, Units())
+    assert "the prompt in each workflow script that starts it" in card.action
+
+
+def _plan_rounds(**kw) -> Recommendation:
+    return Recommendation(
+        id="plan-rounds",
+        severity="advice",
+        category="workflow",
+        title="placeholder",
+        lever=None,
+        saving_usd=kw.pop("saving_usd", 5.0),
+        evidence=[
+            ("Plans you approved", kw.pop("plans", 10), "habits.habits_plan_rounds", "all"),
+            ("Never sent back", 4, "habits.habits_plan_rounds", "none"),
+            ("Times plans were sent back", kw.pop("rounds", 12), "habits.habits_plan_rounds", "all"),
+            ("Sent back with a question or critique", kw.pop("asked", 6), "habits.habits_plan_rounds", "all"),
+            ("Replies between the first plan and approval", 40.0, "habits.habits_plan_rounds", "all"),
+        ],
+        **kw,
+    )
+
+
+def test_plan_rounds_counts_the_rounds_and_quotes_the_line_to_ask_for_a_critique():
+    (card,) = advice.finish([_plan_rounds()], _model_swap_report([]), None, Units(billing_mode="api", currency="USD"))
+    assert card.title == "Plans keep being sent back"
+    assert "You sent plans back 12 times before approving 10." in card.why
+    assert "6 of those rounds were a question, a critique or a doubt." in card.why
+    # The line to paste is the one the Work habits fix carries, word for word.
+    assert f'Put one standing request in your first planning message, in CLAUDE.md or in a plan skill. It reads "{fixes.CRITIQUE_PLAN_LINE}."' in card.action
+    assert card.estimated_saving.startswith("At most ")
+    assert "at a quarter of their cost" in card.saving_basis
+
+
+def test_plan_rounds_without_numbers_says_it_without_counts():
+    rec = _plan_rounds()
+    rec.evidence[0] = ("Plans you approved", "n/a", "habits.habits_plan_rounds", "all")
+    (card,) = advice.finish([rec], _model_swap_report([]), None, Units())
+    assert card.why.startswith("You often send a plan back before you approve it")
+    assert fixes.CRITIQUE_PLAN_LINE in card.action

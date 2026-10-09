@@ -100,7 +100,9 @@ _VERSION_DIR_RE = re.compile(r"^p(\d+)$")
 def _fingerprint() -> str:
     """SHA-256 (hex) over every closed vocabulary, tag key/label and
     ``PROMPT_FLAGS`` word :mod:`capture_tags`/:mod:`parse` read while
-    parsing a transcript (ROB-P4/P5).
+    parsing a transcript (ROB-P4/P5), and the ``/cg-feedback`` questions'
+    headers and labels and the tip hint titles that
+    :func:`capture_tags.feedback_from_answers` matches an answer against.
 
     ``PARSER_VERSION`` is bumped by hand, which means it's exactly as
     reliable as the person editing ``capture_catalogue.py``/``model.py``
@@ -128,6 +130,16 @@ def _fingerprint() -> str:
         "skill_name_pattern": capture_catalogue.SKILL_NAME_PATTERN,
         "feedback_vocab": {key: list(values) for key, values in capture_catalogue.FEEDBACK_VOCAB.items()},
         "feedback_list_keys": sorted(capture_catalogue.FEEDBACK_LIST_KEYS),
+        "feedback_questions": [
+            [q.header, q.key, [[word, label] for word, label, _ in q.options]]
+            for q in capture_catalogue.ALL_FEEDBACK_QUESTIONS
+        ],
+        "tip_hint_titles": dict(capture_catalogue.TIP_HINT_TITLES),
+        "plan_check": {
+            "header": capture_catalogue.PLAN_CHECK_HEADER,
+            "options": [[word, label] for word, label, _ in capture_catalogue.PLAN_CHECK_OPTIONS],
+        },
+        "reminder_line": capture_catalogue.FEEDBACK_REMINDER_LINE,
     }
     canonical = json.dumps(parts, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -272,11 +284,22 @@ def _decoder_for(tp):
         return _decode_list
 
     if origin is dict or tp is dict:
+        args = typing.get_args(tp)
+        value_type = args[1] if len(args) == 2 else None
+        value_decoder = _decoder_for(value_type) if value_type is not None else _identity
+        if value_decoder is _identity:
 
-        def _decode_dict(value):
-            return None if value is None else dict(value)
+            def _decode_dict(value):
+                return None if value is None else dict(value)
 
-        return _decode_dict
+            return _decode_dict
+
+        # A value that needs decoding (a tuple the JSON turned into a
+        # list: ``Turn.workflow_runs``) is decoded; one that doesn't stays.
+        def _decode_dict_values(value, _d=value_decoder):
+            return None if value is None else {k: _d(v) for k, v in value.items()}
+
+        return _decode_dict_values
 
     if tp is datetime:
 

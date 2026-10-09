@@ -21,8 +21,23 @@ jobs:
       - name: Build the single-file .pyz
         run: python scripts/build-pyz.py
 
+      # --version alone passes with a .pyz that cannot serve the dashboard or
+      # read the shipped profiles. --smoke runs the archive as a user would:
+      # it serves the dashboard's pages, lists the profiles and prints the
+      # help of every subcommand.
       - name: Smoke-test the .pyz
-        run: python dist/claudeglass.pyz --version
+        run: |
+          python dist/claudeglass.pyz --version
+          python scripts/build-pyz.py --smoke dist/claudeglass.pyz
+
+      # The archive reads its files through zipfile, which differs between
+      # Python versions: run it on the oldest one the package supports too.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Smoke-test the .pyz on Python 3.11
+        run: python scripts/build-pyz.py --smoke dist/claudeglass.pyz
 
       - name: Attach to the GitHub release
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2

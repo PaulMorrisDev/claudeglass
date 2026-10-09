@@ -14,11 +14,12 @@ never disagree. The quality check is the one with thresholds of its own
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import re
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from . import capture_catalogue, carry, discovery, habits, known_savers, model_gate, model_swap, pages, quality, waste, whatif
+from . import capture_catalogue, carry, compaction, cost_centres, discovery, habits, handoff, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
 from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, build_fix, build_fixes, fix_note
 from .model import Recommendation, SettingChange
@@ -125,8 +126,20 @@ def _table(columns: list[tuple[str, str]], rows: list[list]) -> dict | None:
     return {"columns": [{"key": k, "label": label} for k, label in columns], "rows": rows}
 
 
-def _result(status: str, summary: str, *, table=None, fixes=None, tips=None) -> dict:
-    return {"status": status, "summary": summary, "table": table, "fixes": fixes or [], "tips": tips or []}
+def _result(
+    status: str, summary: str, *, table=None, fixes=None, tips=None, headline=None, item=None, saving_usd=None,
+    saving: str = "",
+) -> dict:
+    """A check's answer. ``headline``, ``item``, ``saving_usd`` and ``saving``
+    are for the Overview's row for the check, and empty for every check but the
+    one that has them (``habits``): the sentence the row leads with in place
+    of its first finding, the Work habits card it points at (an ``item`` of
+    ``#/habits?item=<key>``), and what the check's changes save over the
+    window, as a number (USD at list price) and as a sentence."""
+    return {
+        "status": status, "summary": summary, "table": table, "fixes": fixes or [], "tips": tips or [],
+        "headline": headline, "item": item, "saving_usd": saving_usd, "saving": saving,
+    }
 
 
 def _recommendations(ctx: Context, ids: set[str]) -> list:
@@ -397,11 +410,30 @@ _LARGER_WINDOW = (
 )
 
 
+def _heavy_compactions(tables) -> str:
+    """A sentence on the main sessions that summarised
+    ``compaction.HEAVY_COMPACTIONS`` times or more and their share of the
+    main-session cost, from the Compactions summary table's compaction-cost
+    rows, with a leading space; ``""`` when there were none."""
+    heavy = compaction.HEAVY_COMPACTIONS
+    values = {row.get("metric"): row.get("value") for row in tables.rows("compactions", "compactions_summary")}
+    sessions = whatif._num(values.get(f"Sessions with {heavy}+ compactions"))
+    share = whatif._num(values.get(f"Share of main-session cost in sessions with {heavy}+ compactions"))
+    if not sessions or share is None:
+        return ""
+    count = int(sessions)
+    return (
+        f" {count:,} {'session' if count == 1 else 'sessions'} summarised {heavy} times or more, "
+        f"with {share:.0f}% of the main-session cost."
+    )
+
+
 def _compaction(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     rows = tables.rows("compaction_sim", "compaction_sim_by_window")
     if not rows:
         return _result("no_data", "No sessions long enough to replay in this window.")
+    heavy = _heavy_compactions(tables)
     table = _table(
         [("window", "Summarise at (tokens)"), ("summaries", "Summaries per session"), ("cost", "Cost"),
          ("change", "Against your sessions as they ran")],
@@ -422,7 +454,7 @@ def _compaction(ctx: Context) -> dict:
             "ok",
             f"Your sessions summarised about {whatif._num(observed.get('compactions_per_session')) or 0:.1f} times "
             f"each as they ran, more than the {limit:g} a session a suggested point may reach, so no smaller window "
-            f"is suggested. {_LARGER_WINDOW}",
+            f"is suggested. {_LARGER_WINDOW}{heavy}",
             table=table,
         )
     if not fixes:
@@ -434,19 +466,19 @@ def _compaction(ctx: Context) -> dict:
                 "ok",
                 f"You already summarise at {int(current):,} tokens, within a few percent of the cheapest point "
                 f"replayed that summarises at most {limit:g} times a session. The last column compares each point "
-                f"with your sessions as they ran, not with that setting. {_LARGER_WINDOW}",
+                f"with your sessions as they ran, not with that setting. {_LARGER_WINDOW}{heavy}",
                 table=table,
             )
         return _result(
             "ok",
-            f"Your current summary point is within a few percent of the cheapest one replayed. {_LARGER_WINDOW}",
+            f"Your current summary point is within a few percent of the cheapest one replayed. {_LARGER_WINDOW}{heavy}",
             table=table,
         )
     [candidate] = draft["candidates"]
     return _result(
         "act",
         f"Summarising at {candidate['value']:,} tokens {candidate['estimate']['effect_text'][:1].lower()}"
-        f"{candidate['estimate']['effect_text'][1:]}. Earlier summaries make each reply cheaper but drop detail.",
+        f"{candidate['estimate']['effect_text'][1:]}. Earlier summaries make each reply cheaper but drop detail.{heavy}",
         table=table,
         fixes=fixes,
     )
@@ -486,7 +518,7 @@ def _cache(ctx: Context) -> dict:
 def _tools(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     rows = tables.rows("agent_startup", "agent_startup_unused")
-    ids = {"spawn-unused-mcp", "spawn-unused-skills", "spawn-read-only-tools", "baseline-bloat"}
+    ids = {"spawn-tools-list", "spawn-unused-mcp", "spawn-unused-skills", "baseline-bloat"}
     # baseline-bloat is about main sessions, so it can fire when no
     # subagent started: look its fix up first.
     fixes = _rec_fixes(_recommendations(ctx, ids))
@@ -495,12 +527,28 @@ def _tools(ctx: Context) -> dict:
             return _result("act", "No subagents started in this window; the fix below is for your main sessions.",
                            fixes=fixes)
         return _result("no_data", "No subagents started in this window.")
+    # What a tools list would leave out of each agent type's start: how many
+    # tools it was offered and rarely calls, and the tokens that comes to.
+    diet = {r.get("agent_type"): r for r in tables.rows("agent_startup", "agent_startup_diet")}
+
+    def rarely_called(agent_type) -> str:
+        row = diet.get(agent_type)
+        if row is None:
+            return "none"
+        count = len([name for name in str(row.get("rare_tools") or "").split(", ") if name])
+        left_out = sum(
+            whatif._num(row.get(key)) or 0.0
+            for key in ("dropped_definitions", "dropped_deferred", "dropped_skills", "dropped_roster")
+        )
+        return f"{count} (about {left_out:,.0f} tokens)" if count else "none"
+
     table = _table(
         [("agent", "Agent"), ("spawns", "Starts"), ("mcp", "Offered MCP / used it"),
-         ("skills", "Listed skills / used one")],
+         ("skills", "Listed skills / used one"), ("tools", "Tools it rarely calls")],
         [[_who(r.get("agent_type")), r.get("spawns"),
           f"{r.get('mcp_offered_spawns') or 0} / {r.get('mcp_used_spawns') or 0}",
-          f"{r.get('skills_listed_spawns') or 0} / {r.get('skills_used_spawns') or 0}"] for r in rows],
+          f"{r.get('skills_listed_spawns') or 0} / {r.get('skills_used_spawns') or 0}",
+          rarely_called(r.get("agent_type"))] for r in rows],
     )
     if not fixes:
         return _result("ok", "Every agent uses the tools, MCP servers and skills it's given, or they cost little.",
@@ -625,6 +673,117 @@ def _claude_md(ctx: Context) -> dict:
         "sections.",
         table=table,
         fixes=fixes,
+    )
+
+
+def _tokens_text(tokens: int) -> str:
+    """9000 as ``9k``, 1500 as ``1.5k``, 800 as ``800``: a size in a sentence."""
+    if tokens >= 10_000:
+        return f"{tokens / 1000:.0f}k"
+    if tokens >= 1_000:
+        return f"{tokens / 1000:.1f}".rstrip("0").rstrip(".") + "k"
+    return f"{tokens:,}"
+
+
+def _readers_parts(row: dict) -> tuple[str, bool, str]:
+    """Who reads a project file by habit, in three parts: the readers
+    ("5 agent types", "your main session and Explore"), whether that is
+    more than one, and how often ("on every run", "in about 40% of their
+    runs")."""
+    readers = [item for item in row.get("reach") or () if item.get("standing")]
+    if not readers:
+        return "your agents", True, "sometimes"
+    types = [item["reach"] for item in readers if item["reach"] != "main"]
+    main = any(item["reach"] == "main" for item in readers)
+    who = [f"{len(types)} agent types"] if len(types) >= 3 else types
+    if main:
+        who.insert(0, "your main session")
+    subject = " and ".join([", ".join(who[:-1]), who[-1]] if len(who) > 2 else who)
+    plural = len(types) + (1 if main else 0) > 1
+    shares = [item["share"] for item in readers]
+    if min(shares) >= 0.95:
+        when = "on every run"
+    else:
+        when = f"in about {round(sum(shares) / len(shares) * 100)}% of {'their' if plural else 'its'} runs"
+    return subject, plural, when
+
+
+def _capital(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def _project_file_readers(row: dict) -> str:
+    """The start of a sentence about a project file's readers: "5 agent
+    types read it on every run"."""
+    subject, plural, when = _readers_parts(row)
+    return f"{_capital(subject)} {'read' if plural else 'reads'} it {when}"
+
+
+def _project_files_quiet(ctx: Context) -> dict:
+    """Nothing is flagged. The check covers text files only (the documents
+    sessions and agents take in), and the answer says so."""
+    return _result(
+        "ok",
+        f"No text file is both large and read by many agent types, and none is growing fast {ctx.period}. "
+        "This check covers .md and .txt files. {{page:agents/subagents}} lists every project file, code and data too.",
+    )
+
+
+def _project_files(ctx: Context) -> dict:
+    from . import claude_md_review, context_files
+
+    data = getattr(ctx.model, "context_files", None) or {}
+    candidates = context_files.project_files(data)
+    if not candidates:
+        return _result(
+            "no_data",
+            f"No project file stood out {ctx.period}, so what agents read and how big it is isn't known.",
+        )
+    # Disk is read only when something could be flagged: the names come
+    # from the project folders (cached for a few minutes), and with them the
+    # class of each file, which only text files are flagged by.
+    if not context_files.check_rows(candidates, maybe_imports=True):
+        return _project_files_quiet(ctx)
+    rows, _local = claude_md_review.project_file_rows(
+        ctx.config_dir, data, projects=None if ctx.only is None else list(ctx.only)
+    )
+    flagged = context_files.check_rows(rows)
+    if not flagged:
+        return _project_files_quiet(ctx)
+    table = _table(
+        [
+            ("file", "File"),
+            ("tokens", "Tokens"),
+            ("change", "Change in 30 days"),
+            ("readers", "Read by"),
+            ("cost", "Cost a month"),
+        ],
+        [
+            [
+                row["name"],
+                f"{row['tokens']:,}",
+                f"{row['change_pct']:+.0f}%" if row["change_pct"] is not None else "none",
+                _capital("{0}, {2}".format(*_readers_parts(row))),
+                ctx.units.money_cell(row["cost_month_usd"]) if row["cost_month_usd"] else "none",
+            ]
+            for row in flagged[:10]
+        ],
+    )
+    lead = flagged[0]
+    grew = (
+        f", up {lead['change_pct']:.0f}% in 30 days"
+        if lead["change_pct"] is not None and lead["change_pct"] >= 10
+        else ""
+    )
+    cost = claude_md_review._amount(ctx.units, lead["cost_month_usd"], "a month", prefix="about")
+    sentence = f"{_project_file_readers(lead)}: {cost}."
+    more = f" {len(flagged) - 1} more file{'s' if len(flagged) > 2 else ''} {'are' if len(flagged) > 2 else 'is'} flagged." if len(flagged) > 1 else ""
+    return _result(
+        "act",
+        f"{lead['name']} is now about {_tokens_text(lead['tokens'])} tokens{grew}. {sentence}{more} "
+        "{{page:agents/subagents}} lists every project file.",
+        table=table,
+        fixes=claude_md_review.project_file_fixes(lead, ctx.units),
     )
 
 
@@ -783,13 +942,15 @@ def _tool_output(ctx: Context) -> dict:
         ))
     fixes = _merge_fixes(fixes, _rec_fixes(carry_recs))
 
-    loops = next((r for r in tables.rows("habits", "habits_tool_output") if r.get("tool") == "loops"), None)
-    if loops and (whatif._num(loops.get("loops")) or 0) >= 1:
+    # The failed-command count lives on the waste summary now, and is a
+    # count only: the retries are never priced, so no amount is quoted.
+    waste_row = next(iter(tables.rows("waste", "waste_summary")), None)
+    loops = int(whatif._num((waste_row or {}).get("failed_command_loops")) or 0)
+    if loops >= 1:
         tips.append({
             "title": "Stop a failing command sooner",
-            "text": f"{int(whatif._num(loops.get('loops')) or 0)} commands failed three or more times within one "
-            f"message, costing {_money(ctx, loops.get('cost'), period=True, prefix='about ')}. Ask Claude to stop after two failed tries "
-            "at the same command and tell you what it saw.",
+            "text": f"{loops} {'command' if loops == 1 else 'commands'} failed three or more times within one "
+            "message. Ask Claude to stop after two failed tries at the same command and tell you what it saw.",
         })
 
     if not fixes:
@@ -1090,6 +1251,61 @@ def _savers(ctx: Context) -> dict:
 _COST_RECORD_LIMIT_PCT = 5.0
 
 
+#: How many controllable parts of the base the cost-centres check names as
+#: tips (the largest by cost, across every cost centre).
+_COST_CENTRE_PARTS_SHOWN = 5
+
+
+def _cost_centres(ctx: Context) -> dict:
+    """Where the window's spend sits, as the cost-centre table has it
+    (information, not a finding): the largest cell and the check that covers
+    it, and the controllable parts of the base read with the check each one
+    links to. Never ``act``: there is nothing to fix here, the checks it
+    names do that."""
+    tables = whatif._Tables(ctx.model)
+    rows = tables.rows(cost_centres.SECTION, cost_centres.CENTRES_TABLE)
+    grand = sum(whatif._num(r.get("total")) or 0.0 for r in rows)
+    if grand <= 0:
+        return _result("no_data", f"No spend {ctx.period} to split into cost centres.")
+    cells = [
+        (whatif._num(r.get(cell)) or 0.0, r["centre"], cell)
+        for r in rows
+        for cell in cost_centres.CELLS
+    ]
+    top_cost, top_centre, top_cell = max(cells)
+    hint = cost_centres.hint_for(top_centre, top_cell)
+    covered = (
+        f"The {cost_centres.CHECK_LABELS[hint]} check covers it."
+        if hint in cost_centres.CHECK_LABELS
+        else "No check advises on it."
+    )
+    summary = (
+        f"The largest cell is {cost_centres.CENTRE_LABELS.get(top_centre, top_centre).lower()}, "
+        f"{cost_centres.CELL_LABELS.get(top_cell, top_cell).lower()}: {_money(ctx, top_cost, period=True)}, "
+        f"{100.0 * top_cost / grand:.0f}% of the spend. {covered}"
+    )
+    table = _table(
+        [("centre", "Cost centre"), *[(cell, cost_centres.CELL_LABELS[cell]) for cell in cost_centres.CELLS],
+         ("total", "Total")],
+        [[cost_centres.CENTRE_LABELS.get(r["centre"], r["centre"]),
+          *[_cell(ctx, r.get(cell)) for cell in cost_centres.CELLS], _cell(ctx, r.get("total"))] for r in rows],
+    )
+    parts = [
+        r for r in tables.rows(cost_centres.SECTION, cost_centres.PARTS_TABLE)
+        if r.get("cell") == "base_read" and r.get("card") and (whatif._num(r.get("cost")) or 0.0) > 0
+    ]
+    parts.sort(key=lambda r: -(whatif._num(r.get("cost")) or 0.0))
+    tips = [
+        {
+            "title": f"{r['part']} ({cost_centres.CENTRE_LABELS.get(r['centre'], r['centre']).lower()})",
+            "text": f"{_money(ctx, r.get('cost'), period=True)} of the base read. "
+                    f"The {cost_centres.CHECK_LABELS.get(r['card'], r['card'])} check covers it.",
+        }
+        for r in parts[:_COST_CENTRE_PARTS_SHOWN]
+    ]
+    return _result("ok", summary, table=table, tips=tips)
+
+
 def _cost_record(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     summary = tables.rows("cost_record", "cost_record_summary")
@@ -1130,10 +1346,16 @@ def _cost_record(ctx: Context) -> dict:
 
 
 _HABIT_RECS = {
-    "batch-instructions", "long-tool-waits", "notification-invalidation", "agent-report-size", "spawn-task-prompt",
-    "cache-read-dominance", "limit-pressure", "long-context-share", "subagent-volume", "discovery-share",
-    "wasted-turns",
+    "batch-instructions", "long-tool-waits", "notification-invalidation", "agent-report-size", "agent-batch-probes",
+    "spawn-task-prompt", "cache-read-dominance", "limit-pressure", "long-context-share", "subagent-volume",
+    "discovery-share",
 }
+
+#: The finding the "failed-calls" check claims: replies that cost money and
+#: produced nothing. Its lever is the dominant cause's, which is nearly
+#: always a failed or a blocked call. It sits under that check alone: a
+#: rule id in two checks' ``rule_ids`` would be one finding listed twice.
+_FAILED_CALL_RECS = {"wasted-turns"}
 
 #: The agent-model cards (``agent_models.RULES``), claimed by the "models"
 #: check: agents that wrote code or decided on a larger model than the work
@@ -1154,17 +1376,19 @@ def _blocked_by_label(row: dict) -> str:
     return f"blocked: {who}, by {blocker}"
 
 
-def _habit_rows(tables) -> list[dict]:
-    """The habits card's own "replies that went nowhere" rows:
-    ``waste_by_cause`` minus its "blocked"/"redirected" rows (a flat
-    total says less than who blocked it), plus one row per
-    ``waste_blocked_by`` breakdown row, each already labelled for
-    display. Kept as plain dicts, cost_usd still a raw number, so the
-    summary can pick out and phrase the costliest one."""
+def _waste_rows(tables) -> list[dict]:
+    """The "replies that went nowhere" rows: ``waste_by_cause`` minus its
+    "blocked"/"redirected" rows (a flat total says less than who blocked
+    it), plus one row per ``waste_blocked_by`` breakdown row, each already
+    labelled for display. Kept as plain dicts, cost_usd still a raw number,
+    so a summary can pick out and phrase the costliest one. ``failed`` marks
+    a failed or blocked tool call (``waste.CALL_FAILURE_CAUSES``): the
+    "failed-calls" check's rows; the rest are the habits check's."""
     rows = [
         {
             "label": r.get("cause"), "turns": r.get("turns"), "cost_usd": r.get("cost_usd"),
             "lever": r.get("lever") or "", "redirect": False, "blocker": None,
+            "failed": r.get("cause") in waste.CALL_FAILURE_CAUSES,
         }
         for r in tables.rows("waste", "waste_by_cause")
         if whatif._num(r.get("turns")) and r.get("cause") not in ("blocked", waste.REDIRECT_CAUSE)
@@ -1173,11 +1397,25 @@ def _habit_rows(tables) -> list[dict]:
         {
             "label": _blocked_by_label(r), "turns": r.get("turns"), "cost_usd": r.get("cost_usd"),
             "lever": r.get("lever") or "", "redirect": r.get("kind") == "saver", "blocker": r.get("blocker"),
+            "failed": True,
         }
         for r in tables.rows("waste", "waste_blocked_by")
         if whatif._num(r.get("turns"))
     ]
     return rows
+
+
+def _habit_rows(tables) -> list[dict]:
+    """The habits card's own rows: replies that went nowhere for a reason
+    other than a failed or blocked tool call (an interrupt, a denied
+    permission, a spent turn budget, an API error retried)."""
+    return [r for r in _waste_rows(tables) if not r["failed"]]
+
+
+def _failed_call_rows(tables) -> list[dict]:
+    """The "failed-calls" check's rows: tool errors, and each blocker's
+    blocked or redirected replies."""
+    return [r for r in _waste_rows(tables) if r["failed"]]
 
 
 def _recs_with_prompt_fix(recs) -> set[str]:
@@ -1186,6 +1424,63 @@ def _recs_with_prompt_fix(recs) -> set[str]:
     finding isn't said twice, once as a plain tip and once as a fix card
     offering to act on it."""
     return {rec.id for rec in recs if any((fix.get("prompt") or "") for fix in _rec_fixes([rec]))}
+
+
+#: The rework headline leads the "habits" check on the Overview when this share
+#: (percent) or more of at least this many pieces of work needed changes after
+#: Claude delivered them (``rework``'s "pieces" headline row).
+REWORK_LEAD_SHARE_PCT = 20
+REWORK_LEAD_MIN_PIECES = 5
+
+#: The Work habits card the rework section answers to (links.js's
+#: ``REWORK_ITEM``): ``#/habits?item=rework``.
+REWORK_ITEM = "rework"
+
+
+def _rework_lead(tables) -> str:
+    """The first sentence of the rework headline ("4 of your 12 pieces of
+    work needed changes after Claude delivered them.") when it leads the
+    habits check: :data:`REWORK_LEAD_SHARE_PCT` percent or more of at least
+    :data:`REWORK_LEAD_MIN_PIECES` pieces. ``""`` otherwise, and for a report
+    with no rework section (an older cached one). Requests in sessions that
+    couldn't be cut into pieces are a rougher count, so they never lead."""
+    row = next((r for r in tables.rows("rework", "rework_headline") if r.get("item") == "pieces"), None)
+    if row is None:
+        return ""
+    total = whatif._num(row.get("total")) or 0
+    count = whatif._num(row.get("count")) or 0
+    if total < REWORK_LEAD_MIN_PIECES or count * 100 < total * REWORK_LEAD_SHARE_PCT:
+        return ""
+    match = re.match(r".+?[.!?](?=\s|$)", str(row.get("text") or ""))
+    return match.group(0) if match else ""
+
+
+def _recs_saving_usd(ctx: Context, recs) -> float:
+    """What the largest of ``recs``' groups saves over the window, as the
+    Overview counts a row's recommendations: one rule is one group (its agent
+    types together, each once), the row takes its largest group, and a card
+    you ignored counts for nothing."""
+    groups: dict = {}
+    for rec in recs:
+        usd = rec.saving_usd
+        if rec.key in ctx.skip_keys or rec.severity not in ("action", "advice") or not usd or usd <= 0:
+            continue
+        slot = (rec.id, rec.severity) if rec.agent_type else (rec.key or rec.id)
+        groups[slot] = groups.get(slot, 0.0) + usd
+    return max(groups.values(), default=0.0)
+
+
+def _playbook_saving_usd(ctx: Context, tables) -> float:
+    """What the Work habits playbook's habits would save over the window: each
+    habit's own total (``saving_total``), never a weekly rate scaled up to the
+    window's length. A habit a recommendation covers has no saving of its own
+    (``habits.apply_covered_by`` drops it and names the rule), so it isn't
+    counted again here."""
+    return sum(
+        whatif._num(row.get("saving_total")) or 0.0
+        for row in tables.rows("habits", "habits_playbook")
+        if not row.get("covered_by")
+    )
 
 
 def _habits(ctx: Context) -> dict:
@@ -1201,25 +1496,16 @@ def _habits(ctx: Context) -> dict:
     playbook = _playbook_tips(ctx, tables)
     tips += playbook
     fixes = _rec_fixes(recs)
+    # The rework headline leads the Overview's row for this check once
+    # enough of your pieces of work needed changes after delivery.
+    rework = _rework_lead(tables)
 
-    if not recs and not rows and not playbook:
+    if not recs and not rows and not playbook and not rework:
         return _result("no_data", "Not enough sessions in this window.")
 
-    problem_rows = [r for r in rows if not r["redirect"]]
-    redirect_rows = [r for r in rows if r["redirect"]]
-
-    if not recs and not playbook:
-        if not problem_rows and redirect_rows:
-            savers = ", ".join(sorted({r["blocker"] for r in redirect_rows if r["blocker"]}))
-            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in redirect_rows)
-            return _result(
-                "ok",
-                f"The only blocked replies {ctx.period} were {_money(ctx, cost, prefix='about ')} of on-purpose "
-                f"redirects from {savers} -- not a problem to fix.",
-                table=table,
-            )
-        if problem_rows:
-            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in problem_rows)
+    if not recs and not playbook and not rework:
+        if rows:
+            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in rows)
             return _result(
                 "ok",
                 f"{_money(ctx, cost, prefix='About ')} went to replies that went nowhere {ctx.period}, but no "
@@ -1228,17 +1514,297 @@ def _habits(ctx: Context) -> dict:
             )
         return _result("ok", "No habit stands out as costing tokens.", table=table)
 
-    ways = len(recs) + len(playbook)
-    top = max(problem_rows, key=lambda r: whatif._num(r["cost_usd"]) or 0, default=None)
+    ways = len(recs) + len(playbook) + (1 if rework else 0)
+    top = max(rows, key=lambda r: whatif._num(r["cost_usd"]) or 0, default=None)
     why = f" The costliest: {top['label']} ({_cell(ctx, top['cost_usd'])})." if top else ""
+    saving_usd = _recs_saving_usd(ctx, recs) + _playbook_saving_usd(ctx, tables)
+    saving = ""
+    if saving_usd > 0:
+        phrase = _money(ctx, saving_usd, period=True, prefix="About ")
+        saving = f"{phrase[:1].upper()}{phrase[1:]} if you change these habits."
     return _result(
         "act",
-        f"{ways} way{'s' if ways != 1 else ''} of working cost tokens {ctx.period}.{why} These are habits, not "
+        (f"{rework} " if rework else "")
+        + f"{ways} way{'s' if ways != 1 else ''} of working cost tokens {ctx.period}.{why} These are habits, not "
         "settings: nothing changes unless you change how you work. {{page:habits}} has the rest.",
         table=table,
         fixes=fixes,
         tips=tips,
+        headline=rework or None,
+        item=REWORK_ITEM if rework else (playbook[0]["habit"] if playbook else None),
+        saving_usd=saving_usd if saving_usd > 0 else None,
+        saving=saving,
     )
+
+
+def _failed_calls_fix() -> dict:
+    """The check's own fix: a "from now on" prompt to check before a call
+    and to stop and say when one is blocked (``waste.CALL_FAILURE_FIX``)."""
+    fix = waste.CALL_FAILURE_FIX
+    return {
+        "key": None,
+        "agent": None,
+        "title": fix["title"],
+        "explainer": [
+            ["Why it's suggested", fix["why"]],
+            ["Where and who it affects", fix["where"]],
+            ["Trade-off", fix["trade_off"]],
+            ["How to undo it", fix["undo"]],
+        ],
+        "command": None,
+        "command_warning": "",
+        "prompt": f"{fix['prompt']} {PROMPT_SCOPE}",
+        "note": "scope",
+    }
+
+
+def _failed_calls(ctx: Context) -> dict:
+    """Replies lost to a tool call that failed or that a hook or a guard
+    blocked: ``waste_by_cause``'s tool errors and ``waste_blocked_by``'s rows,
+    which the habits check used to carry among its own."""
+    tables = whatif._Tables(ctx.model)
+    rows = _failed_call_rows(tables)
+    table = _table(
+        [("cause", "Failed or blocked"), ("turns", "Replies"), ("cost", "Cost"), ("lever", "What helps")],
+        [[r["label"], r["turns"], _cell(ctx, r["cost_usd"]), r["lever"]] for r in rows],
+    )
+    recs = _recommendations(ctx, _FAILED_CALL_RECS)
+    problem_rows = [r for r in rows if not r["redirect"]]
+    redirect_rows = [r for r in rows if r["redirect"]]
+    if not rows and not recs:
+        if not tables.has("waste", "waste_by_cause"):
+            return _result("no_data", "Not enough sessions in this window.")
+        return _result("ok", f"No reply was lost to a failed or blocked tool call {ctx.period}.")
+    if not recs:
+        if not problem_rows:
+            savers = ", ".join(sorted({r["blocker"] for r in redirect_rows if r["blocker"]}))
+            cost = sum(whatif._num(r["cost_usd"]) or 0 for r in redirect_rows)
+            return _result(
+                "ok",
+                f"The only blocked replies {ctx.period} were {_money(ctx, cost, prefix='about ')} of on-purpose "
+                f"redirects from {savers}. That is not a problem to fix.",
+                table=table,
+            )
+        cost = sum(whatif._num(r["cost_usd"]) or 0 for r in problem_rows)
+        return _result(
+            "ok",
+            f"{_money(ctx, cost, prefix='About ')} went to replies lost to failed or blocked tool calls "
+            f"{ctx.period}, but not enough to flag.",
+            table=table,
+        )
+    turns = sum(int(whatif._num(r["turns"]) or 0) for r in problem_rows)
+    cost = sum(whatif._num(r["cost_usd"]) or 0 for r in problem_rows)
+    top = max(problem_rows, key=lambda r: whatif._num(r["cost_usd"]) or 0, default=None)
+    if problem_rows and cost:
+        lost = (
+            f"{turns:,} {'reply' if turns == 1 else 'replies'} went to failed or blocked tool calls {ctx.period}, "
+            f"which cost {_money(ctx, cost, prefix='about ')}."
+        )
+    else:
+        lost = (
+            f"Replies that went nowhere cost a material share of spend {ctx.period}. "
+            "Most of that was not from failed or blocked tool calls."
+        )
+    why = f" The costliest: {top['label']} ({_cell(ctx, top['cost_usd'])})." if top and cost else ""
+    return _result(
+        "act",
+        lost + why + " {{page:spend/savings}} has the wasted-replies lever.",
+        table=table,
+        fixes=_merge_fixes([_failed_calls_fix()], _rec_fixes(recs)),
+    )
+
+
+#: The agent-reports check says "worth a look" when at least this many
+#: replies to a report only acknowledged it and they are this share (percent)
+#: of all the replies to reports, or when at least this many reports woke a
+#: session that had sat idle for an hour or more.
+REPORT_ACK_MIN = 10
+REPORT_ACK_SHARE_PCT = 50
+REPORT_WAKE_MIN = 3
+
+_REPORT_ACK_TIP = {
+    "title": "Fewer, larger agents",
+    "text": "Where most replies only acknowledge a report, give an agent a bigger piece of the work and ask for a "
+    "short report in its brief.",
+}
+_REPORT_WAKE_TIP = {
+    "title": "Reports that wake an idle session",
+    "text": "A report that arrives once the cache has expired makes the next reply write the whole context again. "
+    "Start long background work when you will be there for its reports, or ask for a single report at the end.",
+}
+
+
+def _agent_reports(ctx: Context) -> dict:
+    """What the main session does when a background agent's or a workflow's
+    report comes back (``habits_report_turns``): a reply that only
+    acknowledged it, one that acted on it, one that started more agents. Each
+    costs a reply that reads the whole session again, and a report that wakes
+    a session idle for an hour or more also writes that context to the cache
+    again. A workflow agent's report goes back to its script, so it isn't
+    here."""
+    tables = whatif._Tables(ctx.model)
+    if not tables.has("habits", "habits_report_turns"):
+        return _result("no_data", "Not enough sessions in this window.")
+    rows = tables.rows("habits", "habits_report_turns")
+    if not rows:
+        return _result("ok", f"No background agent's or workflow's report came back to your main session {ctx.period}.")
+    by_kind = {row.get("kind"): row for row in rows}
+
+    def number(row, key) -> float:
+        return whatif._num((row or {}).get(key)) or 0.0
+
+    total = int(sum(number(row, "replies") for row in rows))
+    acked = int(number(by_kind.get("acknowledged"), "replies"))
+    acked_cost = number(by_kind.get("acknowledged"), "cost")
+    woke = int(sum(number(row, "woke") for row in rows))
+    woke_tokens = int(sum(number(row, "woke_tokens") for row in rows))
+    cost = sum(number(row, "cost") for row in rows)
+    table = _table(
+        [("reply", "The reply"), ("replies", "Replies"), ("cost", "Cost"), ("woke", "Woke the session")],
+        [
+            [habits.REPORT_KIND_LABELS.get(row.get("kind"), row.get("kind")), row.get("replies"),
+             _cell(ctx, row.get("cost")), row.get("woke")]
+            for row in rows
+        ],
+    )
+    summary = (
+        f"{total:,} {'reply' if total == 1 else 'replies'} to agent reports cost {_money(ctx, cost, prefix='about ')} "
+        f"{ctx.period}. {acked:,} only acknowledged the report"
+        + (f", for {_money(ctx, acked_cost, prefix='about ')}" if acked_cost else "")
+        + "."
+    )
+    if woke:
+        summary += (
+            f" {woke:,} {'woke a session' if woke == 1 else 'woke sessions'} idle for an hour or more, "
+            f"writing {woke_tokens:,} tokens to the cache again."
+        )
+    tips = []
+    if acked >= REPORT_ACK_MIN and acked * 100 >= total * REPORT_ACK_SHARE_PCT:
+        tips.append(dict(_REPORT_ACK_TIP))
+    if woke >= REPORT_WAKE_MIN:
+        tips.append(dict(_REPORT_WAKE_TIP))
+    if not tips:
+        return _result("ok", summary, table=table)
+    return _result("act", summary + " {{page:habits}} has the table.", table=table, tips=tips)
+
+
+def _counted(number: float, noun: str, plural: str = "") -> str:
+    """``1 plan`` / ``3 plans``: ``number`` with ``noun`` pluralised."""
+    whole = int(number)
+    return f"{whole:,} {noun if whole == 1 else (plural or noun + 's')}"
+
+
+def _plan_rounds(ctx: Context) -> dict:
+    """The plans put up for each ask (``habits_plan_rounds``): how many of the
+    plans you approved were sent back first, how often, and what the replies
+    between the first plan and the approval cost. A plan you declined and
+    then told Claude to carry out is an approval, not one sent back. The
+    ``plan-rounds`` card offers one standing request to critique the plan."""
+    tables = whatif._Tables(ctx.model)
+    if not tables.has("habits", "habits_plan_rounds"):
+        return _result("no_data", "Not enough sessions in this window.")
+    rows = tables.rows("habits", "habits_plan_rounds")
+    if not rows:
+        return _result("ok", f"Claude put up no plan for you to approve {ctx.period}.")
+    by_kind = {row.get("kind"): row for row in rows}
+
+    def number(kind, key) -> float:
+        return whatif._num((by_kind.get(kind) or {}).get(key)) or 0.0
+
+    plans = number("all", "plans")
+    sent_back = plans - number("none", "plans")
+    rounds = number("all", "rounds")
+    asked = number("all", "asked")
+    cost = number("all", "cost")
+    never = number("dropped", "plans")
+    table = _table(
+        [("which", "Which plans"), ("plans", "Plans"), ("rounds", "Sent back"), ("cost", "Cost between the first plan and approval")],
+        [
+            [habits.PLAN_ROUND_LABELS.get(row.get("kind"), row.get("kind")), row.get("plans"), row.get("rounds"),
+             _cell(ctx, row.get("cost"))]
+            for row in rows
+        ],
+    )
+    if not plans:
+        summary = f"You approved no plan {ctx.period}."
+    elif not sent_back:
+        summary = f"You approved {_counted(plans, 'plan')} {ctx.period}, and none had a plan sent back first."
+    else:
+        summary = (
+            f"You approved {_counted(plans, 'plan')} {ctx.period}. {sent_back:,.0f} had a plan sent back first, "
+            f"{_counted(rounds, 'time')} in all. The replies between the first plan and the approval cost "
+            f"{_money(ctx, cost, prefix='about ')}."
+        )
+        if asked and rounds == 1:
+            summary += " That round was a question, a critique or a doubt."
+        elif asked:
+            summary += f" {asked:,.0f} of the {rounds:,.0f} rounds were a question, a critique or a doubt."
+    if never:
+        summary += f" {_counted(never, 'ask')} never got a plan approved."
+    recs = _recommendations(ctx, {"plan-rounds"})
+    if not recs:
+        return _result("ok", summary, table=table)
+    saving_usd = _recs_saving_usd(ctx, recs)
+    phrase = _money(ctx, saving_usd, period=True, prefix="About ") if saving_usd > 0 else ""
+    return _result(
+        "act",
+        summary + " {{page:habits}} has the table.",
+        table=table,
+        fixes=_rec_fixes(recs),
+        tips=[{"title": rec.title, "text": rec.action or rec.why} for rec in recs if rec.id not in _recs_with_prompt_fix(recs)],
+        saving_usd=saving_usd if saving_usd > 0 else None,
+        saving=f"{phrase[:1].upper()}{phrase[1:]} with a standing request to critique the plan." if phrase else "",
+    )
+
+
+def _plan_approval(ctx: Context) -> dict:
+    """How the build began after each plan you approved
+    (``plan_handoff_approvals``), by click or by typing: carried on in the
+    same session, started after a /clear within a minute of the approval, or
+    started from the plan alone in a new session. It shows the comparison and
+    leaves the saving to the ``plan-handoff`` card, which the "compaction"
+    check owns."""
+    tables = whatif._Tables(ctx.model)
+    if not tables.has("plan_handoff", "plan_handoff_approvals"):
+        return _result("no_data", "Not enough sessions in this window.")
+    rows = tables.rows("plan_handoff", "plan_handoff_approvals")
+    if not rows:
+        return _result("ok", f"You approved no plan {ctx.period}.")
+    by_start = {row.get("start"): row for row in rows}
+
+    def number(row, key) -> float:
+        return whatif._num((row or {}).get(key)) or 0.0
+
+    approvals = sum(number(row, "approvals") for row in rows)
+    typed = sum(number(row, "typed") for row in rows)
+    kept = by_start.get("kept")
+    fresh = [row for row in rows if row.get("start") != "kept"]
+    fresh_count = sum(number(row, "approvals") for row in fresh)
+    table = _table(
+        [("start", "How the build began"), ("plans", "Plans"), ("typed", "Approved by typing"),
+         ("context", "Context read per build reply"), ("cost", "Cost per build reply")],
+        [
+            [handoff.START_LABELS.get(row.get("start"), row.get("start")), row.get("approvals"), row.get("typed"),
+             f"{number(row, 'avg_context'):,.0f}" if row.get("avg_context") is not None else "",
+             _cell(ctx, row.get("usd_per_reply")) if row.get("usd_per_reply") is not None else ""]
+            for row in rows
+        ],
+    )
+    summary = f"You approved {_counted(approvals, 'plan')} {ctx.period}, {typed:,.0f} of them by typing."
+    if not fresh_count:
+        summary += " Every build carried on in the planning session."
+        if kept and kept.get("avg_context") is not None:
+            summary += f" A build reply read about {number(kept, 'avg_context'):,.0f} tokens of context."
+    else:
+        summary += f" {_counted(fresh_count, 'build')} started fresh."
+        replies = sum(number(row, "build_turns") for row in fresh)
+        fresh_context = sum(number(row, "build_turns") * number(row, "avg_context") for row in fresh)
+        if replies and kept and number(kept, "build_turns") and kept.get("avg_context") is not None:
+            summary += (
+                f" Their replies read about {fresh_context / replies:,.0f} tokens each, against "
+                f"{number(kept, 'avg_context'):,.0f} for the builds that carried on."
+            )
+    return _result("ok", summary + " {{page:spend/savings}} has the saving, if there is one.", table=table)
 
 
 #: Habits from the Work habits playbook shown as tips.
@@ -1268,18 +1834,18 @@ def _playbook_tips(ctx: Context, tables) -> list[dict]:
         key = row.get("habit")
         title = row.get("title") or habits.ITEMS.get(key, ("", key))[1]
         saving = ""
-        if whatif._num(row.get("saving")):
-            saving = _money(ctx, row.get("saving"), prefix="About ")
-            # habits.playbook_table already normalizes ``saving`` to a
-            # per-week figure; say so explicitly for API billing, where
-            # the phrased amount is just a dollar figure. A subscription's
-            # own phrasing already says "of your weekly usage limit", so
-            # adding "a week" there would read as "weekly usage limit a
-            # week" (the same doubling this prefix already avoids for
-            # "about").
-            if saving and ctx.units.billing_mode != "subscription":
-                saving = f"{saving} a week"
+        amount = ctx.units.money(whatif._num(row.get("saving")) or 0.0)
+        if amount is not None:
+            # A week's saving (habits.playbook_table), said in every billing mode.
+            # Beside a share of the weekly usage limit the period goes on the
+            # list-price equivalent, as page-habits.js's periodMoney does.
+            if amount.secondary:
+                amount = replace(amount, secondary=f"{amount.secondary} a week")
+            else:
+                amount = replace(amount, primary=f"{amount.primary} a week")
+            saving = amount.phrase("About ")
         tips.append({
+            "habit": key,
             "title": title,
             "text": " ".join(part for part in (
                 row.get("evidence") or "",
@@ -1372,15 +1938,17 @@ def _capture_fix(ctx: Context, tables) -> dict | None:
              "start asking Claude to end its reply to each of your messages with a one-line tag (the kind of task, "
              "how clear the ask was, how hard the work was, whether it changed course). A subagent is asked for "
              "nothing: when one finishes, Claude Haiku reads its brief and the end of its report and says whether "
-             "it finished and, for a rerun, why it was run again. This tool keeps only those words, never the text "
-             "around them."],
+             "it finished and, for a rerun, why it was run again. If Claude ends a reply without its tag, Claude "
+             "Haiku reads a short excerpt of that exchange and writes the tag. This tool keeps only those words, "
+             "never the text around them."],
             ["Why", "Without them this check guesses: a retry on a larger model counts against the cheaper one even "
              "when the brief was the problem, and an agent that stopped half-done looks finished. With them, "
              "retries and unfinished runs are counted from what Claude said, and {{page:habits}} can rank "
              "habits by kind of task."],
             ["What it costs", f"A note of about {main} tokens at each session start, read from the prompt cache "
              "after the first reply, about 15 output tokens per message, and a Claude Haiku call of about "
-             f"${capture_catalogue.JUDGE_USD_PER_CALL:.3f} per subagent run. " "{{page:setup/capture}} estimates it "
+             f"${capture_catalogue.JUDGE_USD_PER_CALL:.3f} per subagent run and per reply Claude leaves without its tag. "
+             "{{page:setup/capture}} estimates it "
              "from your own recent sessions before you turn it on, and the banner shows what it has cost while it's "
              "on."],
             ["Where and who it affects", "~/.claude/settings.json gets the hook entries (the command shows the "
@@ -1635,12 +2203,17 @@ CHECKS: tuple[Check, ...] = (
           ("ttl-switch",)),
     Check("tools", "Do agents carry tools, MCP servers or skills they never use?",
           "Everything an agent is offered is sent each time it starts, used or not.", _tools,
-          ("spawn-unused-mcp", "spawn-unused-skills", "spawn-read-only-tools", "baseline-bloat")),
+          ("spawn-tools-list", "spawn-unused-mcp", "spawn-unused-skills", "baseline-bloat")),
     Check("skills", "Which skills are listed to Claude but never used?",
           "Each skill's name and description is sent at every session and subagent start.", _skills),
     Check("claude-md", "Which CLAUDE.md files cost most?",
           "CLAUDE.md files are sent at the start of every session and most subagents.", _claude_md,
           ("spawn-claude-md", "spawn-shared-claude-md")),
+    Check("project-files", "Are project files that agents read big or growing?",
+          "An agent that reads a file keeps it in context and pays to read it again on every later reply. "
+          "A big or fast-growing file that many agent types read costs on every run. "
+          "This check covers text files (.md and .txt). Code and data files are listed on the Agents page but not checked.",
+          _project_files),
     Check("tool-output", "Do tool results fill your context?",
           "A tool's output stays in the conversation and is re-read on every later reply.", _tool_output,
           ("tool-output-carry",)),
@@ -1655,8 +2228,23 @@ CHECKS: tuple[Check, ...] = (
           "a call away and cost a reply. This weighs what it says it saved against what it cost.", _savers),
     Check("habits", "Do any habits cost tokens?",
           "Pauses, retries and long reports cost tokens that no setting can save.", _habits, tuple(sorted(_HABIT_RECS))),
+    Check("failed-calls", "Are failed or blocked tool calls costing you replies?",
+          "A call that fails or is blocked still costs a whole reply, and Claude has to make it again.",
+          _failed_calls, tuple(sorted(_FAILED_CALL_RECS))),
+    Check("agent-reports", "Do agent reports cost replies that do nothing?",
+          "Every report an agent sends back is answered by a reply that reads the whole session again, "
+          "even when that reply has nothing to do.", _agent_reports),
+    Check("plan-rounds", "Do you send plans back before approving one?",
+          "Each time a plan goes back, the next reply reads the whole planning conversation again.", _plan_rounds,
+          ("plan-rounds",)),
+    Check("plan-approval", "Do your builds start fresh once a plan is approved?",
+          "A build that carries on in the planning session reads everything the planning read, on every reply.",
+          _plan_approval),
     Check("quality", "Is any agent struggling?",
           "A cheaper model or a lower effort only saves money if the work still gets done.", _quality),
+    Check("cost-centres", "Where does the spend go?",
+          "Every reply is a cache read of the starting prompt, a read of the conversation, a write, or output. "
+          "Knowing which is largest says which check to open first.", _cost_centres),
     Check("cost-record", "Do ClaudeGlass's figures match Claude Code's own?",
           "Claude Code writes down what it thinks each session cost. Where it does, ClaudeGlass checks its own "
           "figures against it.", _cost_record),
@@ -1685,7 +2273,8 @@ def run_all(ctx: Context) -> list[dict]:
     for check in CHECKS:
         result = run(check.id, ctx)
         out.append({key: result[key] for key in ("id", "question", "why", "status", "summary", "rule_ids")}
-                   | {"fix_count": len(result["fixes"]), "tip_count": len(result["tips"])})
+                   | {"fix_count": len(result["fixes"]), "tip_count": len(result["tips"])}
+                   | {key: result[key] for key in ("headline", "item", "saving_usd", "saving")})
     return out
 
 

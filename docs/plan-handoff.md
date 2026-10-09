@@ -21,8 +21,10 @@ can be asked to carry it out, one phase per session.
 ## What it measures
 
 For every main session (scheduled checks left out) and every
-`ExitPlanMode` call whose result came back without an error
-(`Turn.plan_stats.outcome == "approved"`):
+`ExitPlanMode` call you approved: its result came back without an error
+(`Turn.plan_stats.outcome == "approved"`), or the dialog sent it back and
+you then typed a go-ahead before the next plan, or left plan mode
+(`"approved_by_message"`):
 
 - **Fresh start.** The session's starting context (its first reply's
   context less your first message, characters / 4) plus the plan
@@ -55,13 +57,77 @@ the next `ExitPlanMode` call, as they ran and at Sonnet's list price
 (the rate card's `sonnet` alias). The "plan on Opus, build on Sonnet"
 estimate reads these columns.
 
+## How each build began
+
+The tip above reads the plans that count. `plan_handoff_approvals` looks
+at every plan you approved, in the dialog or by typing a go-ahead, and at
+how its build began. A plan you declined and then told Claude to carry
+out ("implement the plan") counts as an approval by typing, and the plan
+Claude puts up again unchanged after that is the same plan.
+
+A build is one of three kinds (`handoff.START_WORDS`):
+
+- `kept`: it carried on in the planning session. This is the default.
+- `cleared`: you ran `/clear` within 60 seconds of the approval
+  (`FRESH_CLEAR_S`), in the same session or as the first thing in a
+  new session of the same project.
+- `handoff`: a new session of the same project began within an hour of
+  the approval (`HANDOFF_LINK_S`) and its first message is Claude Code's
+  "Implement the following plan:" (`Turn.human_plan_handoff`, a flag; the
+  message is not kept).
+
+The time of the approval is the line that approved it
+(`PlanStats.approved_ts`). A fresh build is the new session's replies up
+to its own first plan. Each approval is claimed by at most one new
+session and each session starts at most one build, the latest approval
+before it winning. A session with no project, or an approval with no
+time (a digest from before parser 43), is never linked, so it reads as
+carried on.
+
+The table has a row for each kind that happened: approvals, how many
+were typed, the planning context a build carried, its replies, the
+context a typical reply read, the cost per reply and the cost in all.
+Compare the context read per reply across the rows. It shows whether a
+fresh start would have paid, before you rely on the saving above. The
+Builds after a plan check on the Overview says the same in a sentence
+and points here. It is information: the saving stays with the card.
+The live `plan_fresh` hint does not read it.
+
+## How often a plan is sent back
+
+The Work habits table `habits_plan_rounds` (`habits.PlanFact`) looks at
+the asks, not the approvals. One ask is every plan Claude put up for it,
+from the first to the one you approved (`handoff.plan_groups`). A plan
+counts as sent back when the dialog sent it back and you did not then
+type a go-ahead. Claude's edits to its plan file between two plans are
+not a build: more than 8 replies that change files between two plans
+(`PLAN_BUILD_REPLIES`) start another ask.
+
+Each row groups the approved plans by how many times plans were sent back
+first (none, once, twice, three times or more), with the asks whose plan
+you never approved in the last row. The tokens and cost are of the
+replies after the first plan, through the approval, so an ask with one
+plan costs nothing there. How your feedback read on each plan sent
+back (`PlanStats.feedback_class`, a closed word) says which rounds a
+standing request to critique the plan might have covered: a question, a
+critique or a doubt. The `plan-rounds` card fires at 5 approved plans or
+more, 30% or more of them sent back, 30% or more of the rounds a
+question, a critique or a doubt, and $1 or more to spare. The saving is a
+quarter of the rounds' cost, scaled to that share
+(`plan_rounds_saving_factor`): a critique will not spare every round.
+Its fix is one line for your first planning message, CLAUDE.md or a plan
+skill. The message-level `plan_cost` (the cost of planning the habit
+"Skip plan mode for easy changes" counts) now runs to the last plan put
+up, not the first.
+
 ## The report section
 
-`plan_handoff`, always emitted, with two tables:
-`plan_handoff_summary` (one row) and `plan_handoff_by_session`. See
+`plan_handoff`, always emitted, with three tables:
+`plan_handoff_summary` (one row), `plan_handoff_by_session` and
+`plan_handoff_approvals`. See
 [`sections-reference.md`](sections-reference.md#plan_handoff-handoffpy)
-for the columns. The dashboard shows both on Spend › Savings
-(`GET /api/plan-handoff`).
+for the columns. The dashboard shows all three on Spend › Savings
+(`GET /api/plan-handoff`). `habits_plan_rounds` is on Work habits.
 
 ## The recommendation
 
@@ -81,7 +147,7 @@ the "split large asks into planned steps" habit the same way.
 
 After a piece of work in which you approved a plan, `/cg-feedback` asks
 a fifth question in a second call: "Could the build have started in a
-fresh session from just the plan?" (`yes`, `partly`, `no`; the tag's
+fresh session from the plan alone?" (`yes`, `partly`, `no`; the tag's
 `handoff` key). `habits.habits_by_shape` counts the answers on sessions
 that planned and built (`plan_build`). Once there are at least three
 (`handoff.MIN_FEEDBACK_ANSWERS`):
@@ -91,9 +157,35 @@ that planned and built (`plan_build`). Once there are at least three
   needed, so it suggests adding the decisions, file paths and
   constraints to the plan first.
 - More than half `yes`: the card cites them ("You said 5 of 6 builds
-  could have started from the plan").
+  could have started from the plan") and tells you to run `/clear` as
+  soon as you approve the plan.
 - More than half of the rated planned builds too costly (`worth=no`):
   the card says so.
+
+The fixes after a plan count too. Two answers sort a fix into three
+groups: the plan check (Claude asks it before the first correction after
+a plan is built, `plan_check`) and the plan question in `/cg-feedback`
+(`plan`: "After you approved the plan, did it cover what you then fixed or
+added?"). They show as `plan_covered`, `plan_gap` and `plan_new` in
+`habits_by_shape`:
+
+- `covered`: the plan said it, and the build missed it. These join the
+  `check_work` habit as misses in the plan, so it reads "Have Claude tick
+  off each plan step before it says done" when most are there.
+- `gap`: the plan left it out. When more than half of at least three of
+  these answers are `gap`, the card becomes "Write fuller plans, then
+  build in a fresh session" too, with its own sentence: "You said 3 of 4
+  fixes after a plan were things it left out". Its fix prompt asks Claude
+  to add the missing decisions before you approve.
+- `new`: you thought of it later. It is no rework: the message it
+  followed is not counted as redone, so it stays out of Redone and the
+  waste figures.
+
+The daily run also writes your handoff answers into `coaching.json`
+(see [coaching.md](coaching.md)). With more than half `yes` the live
+`plan_fresh` hint speaks sooner, after `plan_handoff_min_dropped_tokens`
+divided by `coaching_rearm_factor`. With more than half `no` it is off,
+because a fresh start would have lost what the build needed.
 
 With fewer answers the card is as above.
 

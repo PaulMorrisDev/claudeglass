@@ -152,6 +152,67 @@ def test_a_claude_md_size_change_is_carried_on_every_reply(tmp_path):
     assert "About 5,000 tokens more carried" in result.basis
 
 
+def _write_start(project_dir, name, day, model, start_read):
+    """A session whose first call is ``start_read`` tokens of shared prefix."""
+    start = CHANGE + timedelta(days=day)
+    write_jsonl(
+        project_dir / f"{name}.jsonl",
+        [
+            turn_line(
+                timestamp=(start + timedelta(seconds=120 * i)).strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                model=model,
+                cache_read_input_tokens=start_read + 1_000 * i,
+                cache_creation_input_tokens=5_000,
+                ephemeral_5m_input_tokens=5_000,
+            )
+            for i in range(8)
+        ],
+    )
+
+
+def _start_setup(tmp_path, before, after):
+    """``before`` and ``after`` are lists of (model, tokens read at the start)."""
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    for n, (model, read) in enumerate(before):
+        _write_start(project_dir, f"b{n}", -3 + n * 0.5, model, read)
+    for n, (model, read) in enumerate(after):
+        _write_start(project_dir, f"a{n}", 0.1 + n * 0.1, model, read)
+    corpus = load_corpus([project_dir])
+    facts = impact.session_facts(corpus, PRICING)
+    point = ChangePoint(CHANGE, "apply", "x")
+    sides = impact.sides(point, facts, now=CHANGE + timedelta(days=1))
+    return sides[0], sides[1], {b.session_id: b for b in corpus.sessions}
+
+
+_PLUGINS = ChangePoint(
+    CHANGE, "apply", "x", keys=["enabledPlugins"],
+    changes=[{"key": "enabledPlugins", "agent": None, "old": ["a"], "new": []}],
+)
+
+
+def test_a_change_in_the_start_of_context_is_read_on_the_model_both_sides_ran_on(tmp_path):
+    """Moving from Haiku 4.5 (51.5k of tools) to Sonnet 5 (69.4k) must not
+    read as a change that added 18k tokens to every reply."""
+    mixed = _start_setup(
+        tmp_path,
+        [("claude-sonnet-5", 70_000)] * 3,
+        [("claude-sonnet-5", 60_000)] * 3 + [("claude-haiku-4-5", 20_000)] * 2,
+    )
+    result = counterfactual.without_change(_PLUGINS, *mixed, PRICING)
+    assert result.fidelity == "approximate"
+    # 70k - 60k+5k written = a drop of exactly 10,000 on the one shared model.
+    assert "About 10,000 tokens more carried" in result.basis
+    assert result.saved_usd > 0
+
+
+def test_no_start_of_context_figure_when_the_two_sides_share_no_model(tmp_path):
+    apart = _start_setup(tmp_path, [("claude-haiku-4-5", 46_500)] * 3, [("claude-sonnet-5", 64_400)] * 3)
+    result = counterfactual.without_change(_PLUGINS, *apart, PRICING)
+    # No carried figure to give, so the headline falls back to the sessions before.
+    assert result.per_key == [] and result.fidelity == "before"
+
+
 def test_several_settings_at_once_are_headlined_from_the_sessions_before(tmp_path):
     before, after, bundles = _setup(tmp_path)
     point = ChangePoint(

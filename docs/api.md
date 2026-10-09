@@ -101,13 +101,17 @@ audit for the CLI's own JSON output (`render/json_out.py`) and is
 reused verbatim here.
 
 The context-file routes are the one deliberate exception.
-`/api/claude-md`, `/api/claude-md/<id>` and `/api/skills` return the
-files' paths with your home folder written as `~`, short excerpts of
-CLAUDE.md text (repeated lines) and skill descriptions. That text is
-read from disk (or, for skill descriptions, the newest transcript's
-skill listing) when the request arrives and is never stored. It is the
-content of your own instruction files, never a message or tool
-result.
+`/api/claude-md`, `/api/claude-md/<id>`, `/api/skills` and
+`/api/project-files` return the files' paths with your home folder
+written as `~` (or, for a project file, its path from the project folder
+and that folder's name), short excerpts of CLAUDE.md text (repeated
+lines) and skill descriptions. That text is read from disk (or, for skill
+descriptions, the newest transcript's skill listing) when the request
+arrives and is never stored. It is the content of your own instruction
+files, never a message or tool result. For `/api/project-files` that
+means the names are worked out by hashing the files under your project
+folders with the same salt the transcripts were hashed with and matching
+the hashes the store holds; the store keeps only the hashes.
 
 ## Local only
 
@@ -317,13 +321,17 @@ can still include a session whose transcript file Claude Code's own
 `cleanupPeriodDays` retention has already removed — see "Store rebuild"
 below.
 
-`schema_version` is the store's schema: 8 as of 0.13.0, which added
-`turns_agg.bucket`, the UTC quarter hour each day's figures are split
-into, so `GET /api/daily-usage` can count a day in your own zone. A store
-at 7 gains the column in place and every transcript is read once more to
-fill it in (a transcript whose file is gone keeps its UTC day). An older
-version that opens a store already at 8 rebuilds it from the transcripts,
-after setting a copy aside; your session tags and ratings are put back.
+`schema_version` is the store's schema: 9 since the /cg-feedback
+redesign, which added the rating's `why`, `missed_in`, `tip` and
+`tip_hint` columns and the `session_plan_feedback` and `tip_feedback`
+tables. A store at 8 gains them in place and nothing is read again.
+Version 8, from 0.13.0, added `turns_agg.bucket`, the UTC quarter hour
+each day's figures are split into, so `GET /api/daily-usage` can count a
+day in your own zone. A store at 7 gains the column in place and every
+transcript is read once more to fill it in (a transcript whose file is
+gone keeps its UTC day). An older version that opens a newer store
+rebuilds it from the transcripts, after setting a copy aside; your
+session tags, session ratings and card ratings are put back.
 
 `watcher` (S1-perf) additionally carries a per-tick timing breakdown of
 its own `duration_s`: `discovery_s` (filesystem walk + diffing against
@@ -443,7 +451,18 @@ Query: `limit` (default 50), `offset` (default 0), plus the optional
 sessions a report over that window counts (last reply in the window).
 Without one, every session. Newest first (by `first_ts`).
 
-`data`: `[{"id", "slug", "first_ts", "last_ts", "span_s", "archetype", "mode", "purpose", "entrypoint", "billing_mode", "profile_id", "total_cost", "total_tokens", "source", "first_day", "last_day"}, ...]`.
+`data`: `[{"id", "slug", "first_ts", "last_ts", "span_s", "archetype", "mode", "mode_source", "purpose", "purpose_source", "entrypoint", "billing_mode", "profile_id", "total_cost", "total_tokens", "source", "first_day", "last_day", "low_confidence"}, ...]`.
+
+`mode_source` and `purpose_source` (additive) say what set each label:
+`override` (a label you set), `rule` (ClaudeGlass's rules) or, for the
+purpose only, `reported` (Claude's own tag).
+
+`low_confidence` (additive) is `true` when the session's mode or purpose
+is the catch-all a rule fell back to (`mixed`, `general-dev`) rather than
+a label you set or Claude reported, so the dashboard can show a chip on
+it. A mode or purpose you set on the dashboard counts as yours at once,
+before the next scan writes it to the session. It is a flag only; no text
+comes with it.
 
 `first_day` and `last_day` (additive) are the local calendar days
 (`YYYY-MM-DD`, in `config.toml`'s `tz`, else the machine's zone) of the
@@ -464,13 +483,30 @@ if `<id>` is unknown.
 
 `data`: the session-summary fields above, plus `transcripts` (list of
 `{"id", "kind", "agent_id", "agent_type", "spawn_depth", "parent_agent_id"}`
-— no `path`), `tags` (`{key: value}`) and `feedback`: your rating
-from Spend › Sessions (`{"outcome", "slow", "worth", "helped",
-"set_at"}`, words only; `null` when unrated). While the dashboard
-rating is switched on (`[capture] feedback` holds `dashboard_rating`),
-`data` also carries `feedback_questions`: the `/cg-feedback` questions
-to rate it with, each `{"key", "question", "multi", "options": [{"word",
-"label"}]}`.
+— no `path`), `tags` (`{key: value}`), `low_confidence` (as in
+`GET /api/sessions`) and `feedback`: your rating from Spend › Sessions
+(`{"outcome", "slow", "worth", "helped", "why", "missed_in", "plan",
+"handoff", "tip", "tip_hint", "builds": [{"build", "plan", "handoff"}],
+"set_at"}`, words only; `null` when unrated). `plan` and `handoff` are
+the first plan build's answers. While the dashboard rating is switched on
+(`[capture] feedback` holds `dashboard_rating`), `data` also carries:
+
+- `feedback_facts`: what the session's own transcript says, as counts and
+  words only (`tokens`, `typical`, `followups`, `queued`, `plan`,
+  `plan_followups`, `plan_asked`, `build`, `tips`, `tip`, `admits`: the
+  facts line `/cg-feedback` reads, worked out again here), or `null` when
+  no top-level transcript is stored.
+- `feedback_questions`: the `/cg-feedback` questions to rate it with,
+  from the same catalogue and in the same order, left out when the facts
+  say they don't apply. Each is `{"key", "question", "multi", "options":
+  [{"word", "label", "description"}], "needs", "tip_hint", "builds"}`.
+  `needs` is a word the `why` answer must hold for the question to show
+  (the question about where a missed detail was said waits for
+  `missed`), else `""`. `tip_hint` is the tip the tip question is about.
+  `builds` is empty, except for the plan and handoff questions of a
+  session with two or more approved plans: it then holds `[{"build",
+  "label", "question"}]`, one for each plan build the question applies to,
+  and the answers are kept for each.
 
 If the session has a stored top-level transcript digest, `data` also
 carries `turn_series` and `markers` (S1-integration fix 1.g), sourced
@@ -531,7 +567,7 @@ asked. `404` if `<id>` is unknown.
 
 Corpus-wide RE-CACHE breakdown — `Store.recache`.
 
-`data`: `{"by_signature": {"full-expiry": {"turns", "cache_creation_tokens"}, "prefix-invalidated": {...}, "limit-expiry": {...}}}`.
+`data`: `{"by_signature": {"full-expiry": {"turns", "cache_creation_tokens"}, "prefix-invalidated": {...}, "post-compaction": {...}, "limit-expiry": {...}}}`.
 A signature with no rebuilds is absent, not zero. Always all history:
 this route takes no window. The dashboard doesn't fetch it: Cache ›
 Rebuilds draws the window's breakdown from `report.json`'s
@@ -1024,18 +1060,48 @@ been captured. `capture_status.summary` is the same one-line status
 ### `GET /api/quick-actions`
 
 One answer per way of saving tokens (`quick_actions.CHECKS`): models,
-effort, compaction, cache, tools, skills, claude-md, tool-output,
-hooks, tool-search, known-savers, habits, quality and cost-record. Each check always answers, including "nothing to
-do". The last, cost-record, checks ClaudeGlass's own figures against the
-cost Claude Code records for a session.
+effort, compaction, cache, tools, skills, claude-md, project-files, tool-output,
+hooks, tool-search, known-savers, habits, failed-calls, agent-reports, plan-rounds, plan-approval, quality, cost-centres and cost-record. Each check always answers, including "nothing to
+do". agent-reports counts the main session's replies to a background agent's or a workflow's report by what each did
+(only acknowledged it, acted on it, started more agents) and the reports that woke a session idle for an hour or
+more; it is worth a look at 10 replies that only acknowledged (half or more of them) or 3 wake-ups. plan-rounds counts the plans you sent back before you approved one (a decline you answered
+with a go-ahead is an approval, not a plan sent back); it is worth a look at 5 approved plans or more, 30% or more of them sent
+back and 30% or more of the rounds a question, a critique or a doubt, and it offers one line that asks Claude to critique its
+plan first. plan-approval sets the builds that carried on in the planning session beside those that started fresh (a
+/clear within a minute of the approval, or a new session that opens with the plan) and is never worth a look. project-files flags a text file (`.md` or `.txt`: a context.md, a
+spec, a plan, any document) that agents read when it is 5,000 tokens
+or more and 3 or more agent types read it, or when it grew 25% or more in
+about 30 days (and is 2,000 tokens or more now). It names the dearest one
+and offers four prompts to copy, and a fifth for a file agents read. Code
+and data files, and files this machine cannot find, are never flagged and
+do not count toward its numbers; they stay in the project-files table. The CLAUDE.md files Claude Code loads by
+itself are the claude-md check's, not this one's. cost-centres says where the spend sits (the main session, direct agents,
+workflow agents and session starts) and which check covers the largest cell;
+it is information, so it is never "worth a look". The last, cost-record,
+checks ClaudeGlass's own figures against the cost Claude Code records for a
+session. failed-calls ("Failed and blocked
+tool calls") holds the replies lost to a tool call that failed or that a hook
+or a guard blocked; habits keeps the other replies that went nowhere.
 
 Query: the windowing params above.
 
-`data`: `{"period", "checks": [{"id", "question", "why", "status", "summary", "rule_ids", "fix_count", "tip_count"}, ...]}`.
+`data`: `{"period", "checks": [{"id", "question", "why", "status", "summary", "rule_ids", "fix_count", "tip_count", "headline", "item", "saving_usd", "saving"}, ...]}`.
 `period` is the window as a phrase ("over the last 30 days", "in the
 last hour"). `status` is `act` (worth a look), `ok` (nothing to do) or
 `no_data`. `rule_ids` (additive) lists the `/api/recommendations` rule
 ids this check draws on -- `[]` for a check with no rule behind it.
+`headline`, `item`, `saving_usd` and `saving` (additive) are for the
+Overview's row for the check, and `null`, `null`, `null` and `""` for every
+check but `habits`. `headline` is the sentence the row leads with in place
+of its first finding: the rework headline, once 20% or more of at least 5
+pieces of work needed changes after Claude delivered them. `item` is the Work
+habits card the row points at (`#/habits?item=<item>`): `rework` when the
+headline leads, else the top habit worth trying. `saving_usd` is what its
+changes would save over the window, at list price: the largest
+recommendation it draws on, plus the playbook's habits that no
+recommendation already covers (each one's own total over the window, the
+playbook's `saving_total`). `saving` says that in the billing
+mode.
 
 ### `GET /api/quick-actions/<id>`
 
@@ -1043,14 +1109,17 @@ One check in full. `404` for an unknown id.
 
 Query: the windowing params above.
 
-`data`: `{"id", "question", "why", "period", "rule_ids", "status", "summary", "table": {"columns": [{"key", "label"}, ...], "rows": [[cell, ...], ...]}|null, "fixes": [Fix, ...], "tips": [{"title", "text"}, ...]}`,
+`data`: `{"id", "question", "why", "period", "rule_ids", "status", "summary", "table": {"columns": [{"key", "label"}, ...], "rows": [[cell, ...], ...]}|null, "fixes": [Fix, ...], "tips": [{"title", "text"}, ...], "headline", "item", "saving_usd", "saving"}`,
 where each row is a list of display values in column order, `table` is
 `null` when there is nothing to show, and a `Fix` is the `fixes.py`
 shape `/api/recommendations` uses, plus an optional `title`. Environment-variable fixes (`BASH_MAX_OUTPUT_LENGTH`,
 `MAX_MCP_OUTPUT_TOKENS`) carry a prompt and no command: this tool never
 writes the `env` block. `rule_ids` (additive, same list as
 `/api/quick-actions`'s own) names the recommendation rule ids this
-check relates to; `[]` when none does.
+check relates to; `[]` when none does. `headline`, `item`, `saving_usd` and
+`saving` are the same four fields as in the list. A tip from the `habits`
+check that comes from the Work habits playbook also carries `habit`, its key
+for `#/habits?item=<habit>`.
 
 ### `GET /api/claude-md`
 
@@ -1084,6 +1153,60 @@ the id of another project's file is `404` while this one is picked.
 `agents`), `imports` (paths, `~`-relative), `duplicates` (`line`,
 `excerpt`, `tokens`, `also_in: [{"file", "line"}]`), `stale` (`line`,
 `reference`, `kind`), `cost_by_reach` and `fixes`.
+
+### `GET /api/project-files`
+
+The project files your agents take in: the CLAUDE.md files Claude Code
+loads, the files a CLAUDE.md pulls in with `@path`, and the files agents
+read by habit. Each has its size now, how it changed over about 30 days,
+who has it in a run and what it costs a month. The managed policy
+CLAUDE.md is left out, because it cannot be changed. A file counts as a
+standing read for a reach (the main session, or one agent type) when it is
+read in 3 or more of that reach's runs, or in 20% or more of them. Names
+are worked out from disk when the request arrives and never stored: the
+route hashes the files under your project folders with the salt the
+transcripts were hashed with, and counts a git worktree's copy as the same
+file. The walk skips `.git`, `node_modules`, virtualenv, cache and build
+folders (`.venv`, `venv`, `__pycache__`, `.pytest_cache`, `.mypy_cache`,
+`.ruff_cache`, `.tox`, `dist`, `build`, `target`, `.next`, `coverage`), takes
+the shallow folders first and, within a folder, the documents before other
+files, and ends as soon as every file the report holds has a name. It goes
+10 levels down and stops at a bound, 150,000 files in all or 100,000 folders
+in one project, which is what `truncated` reports. A file that is not in
+any project folder on this machine has no name.
+
+Query: the windowing params above, and `project` (only that project's
+folders are searched).
+
+`data`: `{"period", "window_days", "transcripts", "total", "named", "truncated", "files": [...]}`.
+`transcripts` is the runs per reach (`main`, or an agent type) the shares
+are of. `total` counts every file, `named` those given a name, and
+`truncated` is `true` when the walk stopped at a bound before it had named everything it was asked for. `files`
+holds the 100 that cost most a month (text files, `.md` and `.txt`, first).
+Each is `{"hash", "source", "type", "scoped", "tokens", "then",
+"change_pct", "series", "cost_usd", "cost_month_usd", "reach", "types",
+"last_seen", "name", "ext", "project", "reasons", "fixes"}`. `source` is
+`auto` (Claude Code loads it), `import` (a CLAUDE.md pulls it in) or
+`read` (agents read it). `tokens` is its size now, `then` its largest size
+3 to 6 weeks before the newest week and `change_pct` the change, both
+`null` with no such week or when the file was not seen in the newest 2
+weeks. `series` is the size per week, up to 13 weeks. `cost_month_usd` is
+`cost_usd` over the window scaled to 30 days. `reach` is `[{"reach",
+"runs", "share", "standing", "mean_tokens"}]` (`mean_tokens` is the mean
+size of one read by that reach, `null` when it only had the file loaded)
+and `types` the agent types that read it by habit. `name` is the path from the project folder (`""` when not found),
+`ext` its class (`md`, `txt`, `json`, `config`, `code` or `other`) and
+`project` the folder's name. `reasons` is `wide`, `grew`, both or none (the
+Overview check's thresholds) and `fixes` holds the prompts to copy for a
+file with reasons and a name, `[]` for the rest. Only text files (`md` and
+`txt`) get reasons: the check covers the documents sessions and agents
+take in, so a code, data or unnamed file is listed, after the text files,
+with `reasons` and `fixes` empty.
+
+An `@import`ed file is assumed to appear as its own entry among the
+instructions Claude Code attached, so it has its own size and cost. If it
+does not, its row is worked out from the file on disk and the file that
+imports it.
 
 ### `GET /api/skills`
 
@@ -1196,13 +1319,13 @@ short. Only a change your sessions alone show (`source` `transcript`) can
 fall before it: every other kind is itself a recorded change, and moves
 the base back to it.
 
-`data`: `{"changes": [{"change": {"ts", "source", "label", "keys", "changes", "backup_ts", "reverted", "project", "project_name", "summary", "day"}, "before_sessions", "after_sessions", "enough", "gate", "verdict", "measures": [{"key", "label", "kind", "better", "before", "after", "before_value", "after_value", "before_n", "after_n", "change_pct", "direction", "p", "label_key", "label_text"}, ...], "quality": [{"group", "label", "before_runs", "after_runs", "verdict", "judged", "min_runs", "signals": [{"key", "label", "kind", "worse_when", "unit", "before", "after", "before_text", "after_text", "before_counts", "after_counts", "before_runs", "after_runs", "p", "label_key", "verdict"}, ...]}, ...], "without": {"paid_usd", "without_usd", "saved_usd", "fidelity", "fidelity_text", "basis", "sessions", "text", "since_text", "per_key": [{"key", "agent", "fidelity", "fidelity_text", "saved_usd", "saved_text", "basis"}, ...]} | null}, ...], "caveat", "min_sessions", "lookback_days"}`.
+`data`: `{"changes": [{"change": {"ts", "source", "label", "keys", "changes", "backup_ts", "reverted", "project", "project_name", "summary", "day"}, "before_sessions", "after_sessions", "enough", "gate", "verdict", "lead", "mix": {"flagged", "kind", "before_pct", "after_pct", "shift_pts", "text"} | null, "measures": [{"key", "label", "kind", "better", "before", "after", "before_value", "after_value", "before_n", "after_n", "change_pct", "direction", "p", "label_key", "label_text", "demoted"}, ...], "quality": [{"group", "label", "before_runs", "after_runs", "verdict", "judged", "min_runs", "signals": [{"key", "label", "kind", "worse_when", "unit", "before", "after", "before_text", "after_text", "before_counts", "after_counts", "before_runs", "after_runs", "p", "label_key", "verdict"}, ...]}, ...], "without": {"paid_usd", "without_usd", "saved_usd", "fidelity", "fidelity_text", "basis", "sessions", "text", "since_text", "per_key": [{"key", "agent", "fidelity", "fidelity_text", "saved_usd", "saved_text", "basis"}, ...]} | null}, ...], "caveat", "min_sessions", "lookback_days"}`.
 Newest change first. `change.source` is `apply`, `revert`,
 `config` (a settings change the hook saw), `capture` (a metrics
 capture change from `capture-log.jsonl`, whose keys are `capture.<field>`
 and are measured by capture's own tokens per session and the share of
-messages Claude tagged) or `transcript` (a change only the sessions
-show). `changes` lists `{"key", "agent", "old", "new"}` where the values
+messages Claude tagged), `habit` (a card you marked Trying it, keyed
+`habit.<id>`) or `transcript` (a change only the sessions show). `changes` lists `{"key", "agent", "old", "new"}` where the values
 are known: a `config` change records a setting's values only when both
 are plain values of at most 80 characters. `summary` is those changes
 in one line ("model: opus → sonnet"), then any other changed key by
@@ -1227,6 +1350,38 @@ text in the billing mode's units; `direction` is `lower`, `higher`,
 `same` or `null`. For an `apply` that is not yet undone, `backup_ts` is
 what `claudeglass apply --revert <backup_ts>` takes.
 
+**The lead, the verdict and the mix.** `measures` has the lead measure
+first and the rest in the order below; `lead` is its `key`, `null` until
+`enough` is true. The lead is the measure the ratio test is surest of
+(`impact.lead_row`): a clear difference (`lower`, `higher`) before a
+possible one (`possibly_lower`, `possibly_higher`) before `no_clear_change`,
+then the smaller `p`, then the order below. A measure with too little data
+leads only when nothing else has a reading. A difference under 5%
+(`direction` `same`) has `label_key` `no_clear_change` however sure the
+test is of it (`p` stays as tested), since with enough sessions any wobble
+tests as significant.
+`verdict` is one line about the lead and says no more than its reading
+allows: "fell 40%" or "rose 25%" for a clear difference, "may have fallen"
+or "may have risen" for a possible one, "no clear change", "about the same"
+for a difference under 5%, or "too little data to judge yet". The backtest
+reads a row the same way for an estimate of no real effect
+(`backtest._judge_row`), so a wobble is never a larger effect than estimated.
+Any other estimate is judged on the test's own reading.
+
+`demoted` is true for `cost_per_session` on a change to metrics capture,
+live coaching or the feedback prompts (any change keyed `capture.<field>`,
+`change_points.affects_capture`): such a change adds notes and tags or asks
+for ratings and isn't meant to move cost, so cost per session is read after
+every measure that has a reading, whatever it says. `mix` says whether the
+kind of session shifted between the two sides (`impact.session_mix`), and is
+`null` until `enough`. The sessions are a scheduled run, or else one of the
+modes; `kind` is the one whose share moved most, `before_pct` and
+`after_pct` its share of each side in percent, and `shift_pts` the
+difference in points. `flagged` is true when that is 25 points or more
+(`impact.MIX_SHIFT_PTS`), and `text` then says so in a sentence (it is empty
+otherwise). A flagged mix means the per-session figures compare different
+kinds of work, however the sessions are weighted.
+
 A measure's `key` says what it counts. Each is a ratio of sums over the
 sessions on a side, so a per-reply figure weighs a long session by its
 replies, and `better` is `lower` for every one except `tagged_share`:
@@ -1237,20 +1392,22 @@ replies, and `better` is `lower` for every one except `tagged_share`:
 | `output_per_turn` | `tokens` | Output tokens (thinking included) per main-session reply. |
 | `turns_per_session` | `count` | Main-session replies per session. |
 | `cost_per_turn` | `money` | Cost per main-session reply. |
+| `cost_per_substantive_cycle` | `money` | Cost per request: a session's cost over its prompt cycles that asked for something (see below). A scheduled run has none, so it leaves the figure alone. |
 | `cost_per_session` | `money` | Cost per session, the overall check. |
 | `rebuild_share` | `pct` | Share of cache writes that rebuilt expired context. |
 | `summaries` | `count` | Conversation summaries per session. |
 | `peak_context` | `tokens` | Largest context per session. |
 | `startup_tokens` | `tokens` | Context at the start of a session. |
 | `agent_cost`, `agent_startup` | `money`, `tokens` | One agent's cost, and its starting context, per spawn. |
-| `capture_tokens`, `tagged_share`, `prompting_habits`, `drip_share` | `tokens`, `pct`, `count`, `pct` | Metrics capture's own notes and tags per session, the messages Claude tagged, and the prompting habits and one-at-a-time small requests per message. |
+| `capture_tokens`, `tagged_share`, `prompting_habits`, `drip_share` | `tokens`, `pct`, `count`, `pct` | Metrics capture's own notes and tags per session, the messages Claude tagged, and the prompting habits and one-at-a-time small requests per 100 messages that asked for something (see below). |
 
 Which measures a change gets, in order (`impact.measures_for`), from the
-keys it names; `cost_per_session` is always last:
+keys it names; `cost_per_session` is always last, with `cost_per_substantive_cycle`
+just before it for a model change and a habit you started:
 
 | A change to | Measures |
 |---|---|
-| `model` | `tokens_per_session`, `output_per_turn`, `turns_per_session`, `cost_per_turn` |
+| `model` | `tokens_per_session`, `output_per_turn`, `turns_per_session`, `cost_per_turn`, `cost_per_substantive_cycle` |
 | `effortLevel`, `alwaysThinkingEnabled`, `MAX_THINKING_TOKENS` | `output_per_turn`, `cost_per_turn` |
 | `fastMode` | `cost_per_turn` |
 | `autoCompactWindow` | `summaries`, `peak_context` |
@@ -1258,6 +1415,7 @@ keys it names; `cost_per_session` is always last:
 | skills, plugins or MCP servers | `startup_tokens` |
 | an agent's setting | `agent_cost`, `agent_startup` for that agent |
 | `capture.coaching` | `prompting_habits`, `drip_share`, `capture_tokens` |
+| `habit.<id>` (a card marked Trying it) | `prompting_habits` (and `drip_share` for `drip_feed`) when the prompting report measures the habit, else `tokens_per_session`; both with `cost_per_substantive_cycle` |
 | any other `capture.<field>` | `capture_tokens`, `tagged_share` |
 | anything else (a CLAUDE.md size change) | `startup_tokens` |
 
@@ -1269,6 +1427,15 @@ come before `cost_per_turn`: a settings edit lists its keys
 alphabetically, so `effortLevel` comes before `model`, and its card would
 otherwise lead with money. `fastMode` changes the price and the speed but
 not the tokens, so it is judged on cost per reply alone.
+
+**Messages that asked for something.** The rates `prompting_habits` and
+`drip_share` and the figure `cost_per_substantive_cycle` leave out the
+messages that asked for nothing: a go-ahead, a status check, a thank-you or a
+reply to a plan (`pieces.asks`, the same count the Work habits rates use). A
+message you typed while Claude worked counts. The habit rates divide by those
+messages, and cost per request by the prompt cycles that had at least one, so
+a run of go-aheads or polls can't pass for cheaper work or fewer habits. The
+same count is used on both sides of a comparison.
 
 `without` is what the sessions after the change would have cost
 without it (`counterfactual.py`), or `null` with fewer than
@@ -1415,18 +1582,23 @@ last 14 days replayed as if capture had been on (`capture.estimate`),
 and the notes and tags measured in transcripts since `enabled_at`
 (`capture.usage`). The replay is kept for 30 minutes and the measured
 part until the store changes; an older copy is served while a fresh
-one is built in the background.
+one is built in the background. The overhead line is kept the same way.
 
-`data`: `{"config", "warning", "samples", "levels", "sections", "measured", "history", "hooks", "billing", "roi", "banner", "feedback", "commands"}`:
+`data`: `{"config", "warning", "samples", "levels", "sections", "measured", "history", "hooks", "billing", "roi", "banner", "feedback", "commands", "overhead", "tuning"}`:
 
 - `config`: the same block as `/api/health`'s `capture`, without `hooks_ok`.
-- `warning`: the cost warning the dashboard repeats before any change
-  that uses more tokens.
+- `warning`: what the choice now in force makes Claude read and write
+  (`capture_view.warning_text`), the general one (`capture_view.WARNING`)
+  while capture is off. The dashboard repeats the warning of the level or
+  the metric chosen, from that card's or row's own `warning`, before any
+  change that uses more tokens.
 - `samples`: the allowed sampling percentages, `[100, 50, 25, 10]`.
 - `levels`: one card each for `off`, `free`, `essentials`, `standard`,
   `deep` and `custom`: `title`, `summary`, `adds` (metric titles over
   the level before), `metrics`, `asks_claude`, `current`, `rough`
-  (token sizes from the catalogue) and `estimate` (`tokens_per_week`,
+  (token sizes from the catalogue), `warning` (what that level makes
+  Claude read and write, worked out from `rough` and the tagger, so a
+  level that asks Claude for nothing says so) and `estimate` (`tokens_per_week`,
   `tokens_text`, `usd`, `text`, `share_pct`, `share_text`; `null`
   when it costs nothing or there is no history).
 - `sections`: the metrics grouped as on the page. Each has `id`,
@@ -1434,12 +1606,17 @@ one is built in the background.
   `title`, `what`, `why`, `powers`, `tag` (what Claude writes),
   `hooks`, `requires`, `on`, `toggle` (`false` for metrics that are
   always measured), `asks_claude`, `needs_hook` (on, but its hook
-  entry is missing), `needs_install` with `install_note` and
+  entry is missing) with `hook_command` (the command that adds it,
+  `claudeglass capture connect`), `needs_install` with `install_note` and
   `install_command` (the `/cg-feedback` skill is on but its file is
   missing, out of date or someone else's: the dashboard never writes
-  Claude Code's folder, so it names the CLI command), `statusline_note`
-  (a status-line toggle is on but Claude Code's status line isn't this
-  tool's), `estimate` and `actual` (`{usd, text}` a week, and over
+  Claude Code's folder, so it names the CLI command), `warning` (what
+  switching it on makes Claude read and write, with the metrics it needs;
+  empty for a row that asks Claude for nothing), `statusline_note` (a
+  status-line toggle is on but won't show: no session of yours ran in a
+  terminal, where Claude Code runs a status line and the desktop app does
+  not, or few did, or the status line isn't this tool's; `null` otherwise),
+  `estimate` and `actual` (`{usd, text}` a week, and over
   `actual_label`: since it was turned on, or the last 14 days for the
   skill and, with how many there were, for coaching notes), and `answers`/`target`/`enough` (whether enough has been
   collected for firm suggestions; for the skill and the dashboard
@@ -1447,8 +1624,11 @@ one is built in the background.
 - `measured`: `null` while off; otherwise `since`, `sessions`,
   `subagents`, `notes`, `note_tokens`, `tag_tokens`, the amount and
   share of spend, coverage (`coverage_pct`: the share of messages
-  Claude tagged; `report_coverage_pct` for agent reports), `scopes`
-  (`main`, `subagent`, `tool`, `brief`) and a `daily` series.
+  Claude tagged; `report_coverage_pct` for agent reports; while Claude
+  writes the tags, `own_coverage_text` and `filled_text` split that share
+  into what Claude tagged and what Claude Haiku filled in, both empty
+  until it filled one), `scopes` (`main`, `subagent`, `tool`, `brief`)
+  and a `daily` series.
 - `history`: what the estimates replay (`days`, `sessions`,
   `subagents`, `cycles`), `null` with no history.
 - `hooks`: `ok` (`true` when nothing is missing and no settings policy
@@ -1472,7 +1652,22 @@ one is built in the background.
 - `banner`: `on`, `headline`, `notes` (end time passed, hook entries
   missing, no notes seen, low coverage, enough collected, the skill
   needs installing, what capture costs a week against what depends on
-  it) and `feedback_note`.
+  it), `feedback_note` and `unrated`: the pieces of work big enough for the
+  rating reminder that you haven't rated, or `null` when there are none
+  (or while the reminder and the dashboard rating are both off). It is
+  `{"threshold", "threshold_text", "total", "pieces": [{"session_id",
+  "slug", "last_ts", "tokens", "tokens_text", "part", "label"}], "text"}`:
+  the newest five pieces of the last 30 days' sessions, with the count of
+  them all and the sentence that introduces them. A piece is a stretch of a
+  session that was one job (`pieces.pieces_of`), so one session can hold
+  several: `part` is its place in the session, from 1, `last_ts` is when
+  it last replied, and `label` names it by words and counts only (`piece 2
+  of 3, feature, 4 messages`; empty for a session whose messages are not
+  in the transcript). The threshold is the larger of
+  `rating_min_tokens` and `rating_typical_factor` times your typical
+  piece of work (the same figures the reminder in Claude Code uses);
+  `tokens` counts the main transcript only. A rating on the dashboard
+  takes a session off the list. The banner shows tokens, not money.
 - `feedback`: `skill` (`installed`, `outdated`, `foreign`, `missing`,
   or `null` while the skill is off), `runs` and `answered` (its runs
   over the last `days` days), `ratings` (sessions rated on the
@@ -1481,7 +1676,24 @@ one is built in the background.
   (the `/cg-brief` skill's file, in the same words as `skill`, or
   `null` while brief templates are off).
 - `commands`: the `status`, `connect`, `feedback` and `brief` CLI
-  commands.
+  commands, and the `tuning_export` and `tuning_summary` ones.
+- `overhead`: the overhead line, `null` while no ClaudeGlass hook is in
+  `settings.json` (it is there with capture off too). `{"label", "days",
+  "recent", "hooks", "capture", "coaching", "text"}`: the stretch it
+  covers (`label` is "Over your last 7 days", or "Since capture was
+  turned on" when that was within them, `recent`), `hooks` the sentence
+  `hook_health.measure_hook_overhead` writes from your own transcripts, from
+  the start of that stretch (how many runs, the median time each, the time
+  summed; empty when none shows),
+  `capture` and `coaching` what capture's notes and tags and the coaching
+  notes cost over the same stretch (`{usd, text}`; `null` while the rate
+  card can't be read) and `text`, the line as `claudeglass capture status`
+  prints it.
+- `tuning`: the block "Take your figures to another machine":
+  `{"title", "text", "export_command", "summary_command"}`. The commands
+  are `claudeglass tuning export --out claudeglass-tuning.json` and
+  `claudeglass tuning summary claudeglass-tuning.json`; the dashboard
+  runs and writes nothing.
 
 `409` with the `claudeglass capture status` command in
 `error.commands` when `config.toml` can't be read.
@@ -1629,23 +1841,71 @@ tag set after the write).
 ### `POST /api/sessions/<id>/feedback`
 
 Your rating of a session: the `/cg-feedback` questions as checkboxes,
-kept in this tool's own store (the `session_feedback` table), so it
-costs no tokens. The session drawer on Spend › Sessions shows the form
-while the dashboard rating is switched on; the route itself works either
-way.
+kept in this tool's own store (the `session_feedback` and
+`session_plan_feedback` tables), so it costs no tokens. The session
+drawer on Spend › Sessions shows the form while the dashboard rating is
+switched on, with the questions `GET /api/session/<id>` lists; the route
+itself works either way.
 
 Body: `{"outcome": word|null, "slow": [word], "worth": word|null,
-"helped": [word]}`, any key left out counting as nothing ticked. The
-words are `capture_catalogue.FEEDBACK_VOCAB`'s, never free text:
+"helped": [word], "why": [word], "missed_in": word|null, "plan":
+word|null, "handoff": word|null, "tip": word|null, "tip_hint": word|null,
+"builds": [{"build": n, "plan": word|null, "handoff": word|null}]}`, any
+key left out counting as nothing ticked. The words are
+`capture_catalogue.RATING_VOCAB`'s, never free text:
 `outcome` is `met`, `partly`, `missed` or `stopped`; `slow` any of
 `unclear`, `rework`, `tools`, `none`; `worth` is `yes`, `fair` or
-`no`; `helped` any of `context`, `plan`, `smaller`, `none`. A body
-with nothing ticked clears the rating. `404` if `<id>` is unknown;
-`400` if the body is not a JSON object, has another key, or a word
-isn't one of these (the cross-site checks above run first).
+`no`; `helped` any of `context`, `plan`, `smaller`, `none`; `why` any of
+`left_out`, `missed`, `changed`, `none`; `missed_in` is `message`,
+`plan`, `standing` or `earlier`; `plan` is `covered`, `gap` or `new`;
+`handoff` is `yes`, `partly` or `no`; `tip` is `useful`, `known` or
+`wrong`, and `tip_hint` names the tip it is about (a tip hint of
+`capture_catalogue.TIP_HINT_TITLES`). A tip answer keeps its `tip_hint`
+only with the answer.
+
+`builds` holds the plan and handoff answers for each plan build of a
+session with two or more approved plans (`build` from 1 to 32, each
+once, at most 32). `plan` and `handoff` on their own are build 1's, unless
+`builds` names it. A body with nothing ticked clears the rating, plan
+builds and all. `404` if `<id>` is unknown; `400` if the body is not a
+JSON object, has another key, or a word isn't one of these (the
+cross-site checks above run first).
 
 `data`: `{"session_id": str, "feedback": {...} | null}` (as in
 `GET /api/session/<id>`).
+
+### `GET /api/tip-feedback`
+
+What you have said about tip, habit and recommendation cards on the
+dashboard, and the answers a card can take.
+
+`data`: `{"answers": [{"kind", "item", "answer", "set_at"}], "options":
+[{"word", "label", "description"}]}`. `options` are `useful` (Useful),
+`trying` (Trying it), `known` (Knew it) and `wrong` (Wrong here), from
+`capture_catalogue.TIP_CARD_OPTIONS`.
+
+### `POST /api/tip-feedback`
+
+Rate one card. Body: `{"kind": "tip" | "habit" | "recommendation",
+"item": str, "answer": word|null}`. `item` is the card's id: a tip hint
+or a prompting habit for `tip`, a work-habits playbook item for `habit`,
+a recommendation's key for `recommendation`. `answer` is one of the
+words above, or `null` to take the answer back. `400` for another key, an
+unknown `kind`, an `item` that is not a card of that kind, a word that is
+not one of the four, or more than 500 cards holding an answer (the
+cross-site checks above run first).
+
+It is a rating you give, kept in the `tip_feedback` table: nothing in
+Claude Code's own settings or in `config.toml` changes. `trying` also
+adds a line (`kind`, `item`, the state `trying` and a time, no text) to
+`habit-log.jsonl` in the config folder each time you pick it when it was
+not already your answer, which puts a change point on the Changes page
+from that day so the habit's effect can be measured. Your answer on the
+card of a tip hint also counts in the "Tips Claude showed" table of the
+report (`trying` counts as `useful`).
+
+`data`: `{"kind", "item", "answer", "set_at"}` (`set_at` is `null` when
+the answer was taken back).
 
 ### `POST /api/capture`
 
@@ -1918,7 +2178,11 @@ and `notes`, the fields `helptext.annotate` fills in for the dashboard:
 `help` (`{shows, read, act}`), `value_labels` (raw cell value -> display
 label), `row_groups` and `row_kinds` (for a long "metric / value"
 table), `dashboard` (`keep`, `advanced` or `report`) and, additive,
-`lead_columns`. `lead_columns` lists column keys in the order the
+`lead_columns` and `empty_variant`. `empty_variant` is a word that says
+why a table is empty when the grid has a sentence of its own for it
+(`"desktop"` on `context_budget_statusline` when every session in the
+window ran in the desktop app, which runs no status line; `""`
+otherwise). `lead_columns` lists column keys in the order the
 dashboard shows them first: on a wide table at most 7, the row key
 first, with the rest behind the grid's column chooser; on a one-row
 summary table (such as `waste_summary`) at most 4 headline values, shown
@@ -1928,12 +2192,12 @@ and the CSV export keep the raw values, and the Markdown and HTML
 renderers ignore `lead_columns`.
 
 **`GET /api/session/<id>` returns a superset of the listed fields.**
-`Store.session()`'s dict includes `mode_source`/`purpose_source`
-alongside every field `/api/sessions` lists — a non-breaking addition,
-not a contradiction of the field list above (which describes the
-session-summary fields plus `transcripts`/`tags`, not an exact field
-count), and dropping fields `Store` already computes for no privacy
-reason would only lose information a client might want.
+`Store.session()`'s dict includes `turn_series`, `markers`, `truncated`
+and `limit_markers` alongside every field `/api/sessions` lists — a
+non-breaking addition, not a contradiction of the field list above
+(which describes the session-summary fields plus `transcripts`/`tags`,
+not an exact field count), and dropping fields `Store` already computes
+for no privacy reason would only lose information a client might want.
 
 **`/api/profiles/<id>/diff` and `POST /api/profiles` are real routes as
 of v0.3**, no longer the `501 not_implemented` stubs an earlier version

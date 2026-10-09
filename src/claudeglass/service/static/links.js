@@ -41,7 +41,7 @@ export var PAGES = [
       {
         id: "recommendations",
         label: "Recommendations",
-        intro: "Changes worth making, most important first. Each one comes with a prompt or command you can copy.",
+        intro: "Changes worth making, most important first. Each one comes with a prompt or command you can copy, and a rating you can give.",
       },
       {
         id: "checks",
@@ -64,7 +64,7 @@ export var PAGES = [
         intro:
           "What you could save: shorter tool output, earlier conversation summaries, cheaper models, and replies that did no useful work.",
       },
-      { id: "sessions", label: "Sessions", intro: "Every session, newest first. Pick one to see its replies on a timeline." },
+      { id: "sessions", label: "Sessions", intro: "Every session, newest first. Pick one to see its replies on a timeline, and to rate it." },
     ],
   },
   {
@@ -109,7 +109,7 @@ export var PAGES = [
     icon: "habits",
     group: "details",
     intro:
-      "How the way you work shapes what it costs. The habits that would have saved the most in your own sessions, each with an example to copy.",
+      "How the way you work shapes what it costs. The habits that would have saved the most in your own sessions, each with an example to copy and a rating you can give. A rating changes no setting.",
   },
   {
     id: "setup",
@@ -133,7 +133,7 @@ export var PAGES = [
         label: "Capture",
         window: false,
         intro:
-          "Metrics capture: short tags that tell ClaudeGlass what each piece of work was and how it went, so suggestions fit how you work. Choose how much, and see what it costs.",
+          "Metrics capture: short tags that tell ClaudeGlass what the work on each message was and how it went, so suggestions fit how you work. Choose how much, and see what it costs.",
       },
     ],
   },
@@ -288,8 +288,9 @@ export var SECTION_PAGE_MAP = {
   sessions: "spend/sessions",
   // Cache. recache_by_group arrives today as a table inside recache;
   // mapped too, so a report that promotes it to its own section still
-  // lands here. Usage-limit pauses force the same full re-write the
-  // rebuild sections count, so they sit beside them.
+  // lands here. A reply after a usage-limit stop that outlasts the
+  // cache's hour rewrites the cache, as the rebuilds do, so the limits
+  // section sits beside them.
   recache: "cache/rebuilds",
   recache_by_group: "cache/rebuilds",
   limits: "cache/rebuilds",
@@ -307,6 +308,8 @@ export var SECTION_PAGE_MAP = {
   hooks: "agents/hooks",
   habits: "habits",
   prompting: "habits",
+  // Rework after delivery sits on the Work habits page, after its top habit cards.
+  rework: "habits",
   // Setup. Settings draws the config section's tables once, from
   // /api/config-diff?auto_keys=1, and skips the section itself.
   config: "setup/settings",
@@ -370,6 +373,32 @@ export function pageLink(key, text, params) {
   return link;
 }
 
+// A card on the Work habits page, by key: a habit of the playbook
+// ("brief_clearly"), a habit of How you prompt ("drip_feed") or the rework
+// section (REWORK_ITEM). The address is #/habits?item=<key>. This is the one
+// place that knows the parameter: the Overview, the quick-action tips and the
+// palette build the address here, and the page reads it back with habitItem.
+export var REWORK_ITEM = "rework";
+
+export function habitParams(item) {
+  return { item: item };
+}
+
+export function habitItem(params) {
+  return params && params.item ? String(params.item) : "";
+}
+
+// A link that scrolls to the card, opens it out of "more habits" if it is
+// folded there, and highlights it. Without text it reads "Work habits".
+export function habitLink(item, text) {
+  return pageLink("habits", text, habitParams(item));
+}
+
+// The same, for a control that isn't a link (a palette entry).
+export function goToHabit(item) {
+  goTo("habits", { params: habitParams(item) });
+}
+
 // Say in the address what the view on screen has open (the selected
 // recommendation), without a new history entry: Back leaves the view,
 // not each item looked at.
@@ -385,6 +414,55 @@ export function replaceParams(params) {
 
 export function captureLink(text) {
   return pageLink("setup/capture", text);
+}
+
+// The spend-by-cost-centre table on Agents (Subagents), scrolled to and
+// highlighted as an evidence link's table is (evidence.js revealEvidence).
+// Reachable from the Overview's "By cost centre" part.
+export var COST_CENTRES_TABLE = "agents.cost_centres";
+
+export function costCentresLink(text) {
+  return pageLink("agents/subagents", text || "See every cost centre", { t: COST_CENTRES_TABLE });
+}
+
+// The project-files table on Agents (Subagents): the files agents read,
+// scrolled to and highlighted the same way. The project-files check points here.
+export var PROJECT_FILES_TABLE = "agents.project_files";
+
+export function projectFilesLink(text) {
+  return pageLink("agents/subagents", text || "See every project file", { t: PROJECT_FILES_TABLE });
+}
+
+// Any report table, by its "section.table" name: a link to the view that
+// shows it (viewForTable), scrolled to and highlighted as evidence.js
+// revealEvidence does for the two tables above. A table the page leaves to
+// the full report opens in the drawer instead, so the link lands somewhere.
+export function tableLink(source, text) {
+  var name = String(source || "");
+  var dot = name.indexOf(".");
+  return pageLink(viewForTable(name.slice(0, dot), name.slice(dot + 1)), text || "See the table", { t: name });
+}
+
+// The tables behind the Overview's "More detail" part, by what each answers:
+// who chose each agent's model, what one start of an agent costs, what agent
+// runs did, how often one reply made one lookup, how the main session answered
+// an agent's report, how often plans were sent back, how builds began after an
+// approved plan, and what conversation summaries cost.
+export var DETAIL_TABLES = {
+  model_choice: "agents.cost_centres_models",
+  cost_per_spawn: "agents.topology_cost_per_spawn",
+  agent_runs: "habits.habits_agent_runs",
+  single_lookups: "habits.habits_probes",
+  report_turns: "habits.habits_report_turns",
+  plan_rounds: "habits.habits_plan_rounds",
+  plan_approvals: "plan_handoff.plan_handoff_approvals",
+  compaction_cost: "compactions.compactions_summary",
+};
+
+// A check on Actions, by its id (quick_actions.CHECK_IDS): the card a
+// cost-centre part or cell points at.
+export function checkLink(id, text) {
+  return pageLink("actions/checks", text, { id: id });
 }
 
 // The page and segment a view key names, as the reader sees it:
@@ -427,7 +505,7 @@ export var GLOSSARY = [
   ["Managed setting", "A setting your organisation's policy controls. Only your administrator can change it."],
   ["Snapshot", "A record of your Claude Code settings at one moment, taken so changes can be compared over time."],
   ["Window", "The stretch of time the numbers cover, picked at the top of the dashboard. It can be the last hour, today, the last 24 hours, 7, 30 or 90 days, all time, or since your last change. The 7, 30 and 90 day windows are whole local days, today included, from midnight. A session counts, in full, when it was last active in the window; since your last change, when it started after the change."],
-  ["Change point", "A moment your settings changed: an apply, its undo, or a change the settings snapshot saw. A model, effort or CLAUDE.md size change that held for 3 sessions in a row is one too. The dashboard compares the sessions before it with those after it."],
+  ["Change point", "A moment your settings changed: an apply, its undo, or a change the settings snapshot saw. A model, effort or CLAUDE.md size change that held for 3 sessions in a row is one too. So is a habit you marked as Trying it. The dashboard compares the sessions before it with those after it."],
   ["Quick action", "One question about a way to spend less, answered from your own sessions with the evidence and a fix you can copy. The dashboard lists them on the Actions page, under Checks."],
   ["What-if estimate", "What a change would have saved over the window, worked out from your own sessions. It is an estimate: cheaper settings can change how Claude works, which the estimate can't see."],
   ["CLAUDE.md", "Instruction files Claude reads at the start of every session, and of most subagents: yours, each project's, and rule files. Every line is paid for on every reply that re-reads it."],
@@ -435,10 +513,14 @@ export var GLOSSARY = [
   ["Quality signal", "A sign of whether the work went well, not only what it cost: tool calls that failed, agent runs that didn't finish, your corrections. Compared across models and efforts, and before and after each change you make."],
   ["Metrics capture", "An opt-in feature, off by default: a one-line tag, written by Claude or Claude Haiku, saying what the work was and how it went. It costs tokens while it's on. init's last questions and claudeglass capture turn it on, change what it asks for, or turn it off."],
   ["Capture level", "How much metrics capture asks for: off, free, essentials, standard or deep, each adding more of it. Set at init or with claudeglass capture level."],
-  ["Tag", "The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as [cg: task=bugfix brief=clear]. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is."],
+  ["Tag", "The one-line, closed-vocabulary note metrics capture keeps about the work on one message or one subagent run, such as [cg: task=bugfix brief=clear]. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is."],
   ["Prompt cycle", "One message of yours and everything Claude did to answer it, subagents at any depth included. The unit metrics capture and the Work habits page measure by."],
+  ["Piece of work", "One job, drawn from a session's transcript alone. It runs from a fresh start (the session start, a /clear, or a message about something new) to the next. It needs no feedback and no tag."],
+  ["Rework", "A follow-up that changes work Claude had already delivered: a redo, a fix, a correction you typed, or an adjustment to files it had changed. A message you send that changes no files while background work runs is not rework. Each rework has a cause, and the dashboard says where that cause came from."],
+  ["Status check", "A short message that only asks how the work is going, or whether it is done. It asks for nothing new, so it is never rework."],
+  ["Plan round", "A message you send while a plan is being made: you sent the plan back with changes, or wrote in plan mode. It is feedback on the plan, so it is never rework."],
   ["Work habits", "The page (and report section) that turns prompt cycles into habits worth trying, with a rough saving for each. Each shows where its evidence came from: reported by Claude, inferred from the transcript, or your own feedback."],
-  ["Feedback skill", "/cg-feedback, a skill you can add and run after a piece of work. It asks whether the work delivered, what slowed it, whether it was worth the tokens, and what would have helped. Works at any capture level, even off; picking deep turns it on, with its reminders."],
+  ["Feedback skill", "/cg-feedback, a skill you can add and run after a piece of work. It asks whether the work delivered, what your follow-up messages were, whether it was worth the tokens, and what would have made it cheaper. Works at any capture level, even off; picking deep turns it on, with its reminders."],
   ["Brief templates", "Checklists per kind of task on the Work habits page, built from what your own requests tend to lack. Turned on, it also adds a /cg-brief skill that checks a request against its checklist and asks once for anything missing before Claude starts."],
   ["Sampling", "Running metrics capture in only a share of sessions (100, 50, 25 or 10 percent, [capture] sample) to spend fewer tokens on it. Picked at random, per session."],
   ["Time-box", "The date metrics capture switches itself back off. By default it's 14 days after you turn a level on, whether at init, with capture on or level, or on the Capture page. So turning it on never means it runs unattended forever. --for or --capture-for sets another length, and --no-limit or --capture-no-limit turns the limit off. You can also say so when asked."],
@@ -498,6 +580,8 @@ export var JARGON = [
   ["Capture level", "capture levels?"],
   ["Managed setting", "managed settings?"],
   ["Prompt cycle", "prompt cycles?"],
+  ["Piece of work", "pieces? of work"],
+  ["Rework", "rework"],
   ["Change point", "change points?"],
   ["Effort level", "effort levels?"],
   ["Billing mode", "billing mode"],

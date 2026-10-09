@@ -327,6 +327,77 @@ def test_each_capture_change_is_a_change_point(tmp_path):
     assert change_points.latest(tmp_path).label == "Turned metrics capture off"
 
 
+# -- habits you marked "Trying it" ------------------------------------------------
+
+
+def _tried(tmp_path, kind, item, *, day, state="trying"):
+    from datetime import datetime, timezone
+
+    from claudeglass import config as config_mod
+
+    config_mod.append_habit_log(
+        tmp_path, kind=kind, item=item, state=state, now=datetime(2026, 9, day, 9, tzinfo=timezone.utc)
+    )
+
+
+def test_each_card_you_marked_trying_is_a_change_point_for_every_project(tmp_path):
+    _tried(tmp_path, "habit", "split_large", day=2)
+    _tried(tmp_path, "tip", "drip_feed", day=3)
+    _tried(tmp_path, "recommendation", "model.default", day=4)
+    points = change_points.change_points(tmp_path)
+    assert [p.source for p in points] == ["habit"] * 3
+    assert [p.label for p in points] == [
+        "Started trying: Split large asks into planned steps",
+        "Started trying: Small requests sent one at a time",
+        "Started trying a recommendation",
+    ]
+    assert [p.keys for p in points] == [["habit.split_large"], ["habit.drip_feed"], ["habit.model.default"]]
+    assert points[0].changes == [{"key": "habit.split_large", "agent": None, "old": None, "new": "trying"}]
+    assert [p.ts.day for p in points] == [2, 3, 4]
+    # A habit is yours, not a project's: it applies everywhere.
+    assert all(change_points.applies_to(p, "any-project") for p in points)
+    assert change_points.latest(tmp_path).label == "Started trying a recommendation"
+
+
+def test_a_habit_point_says_where_it_came_from_and_names_no_setting(tmp_path):
+    _tried(tmp_path, "tip", "plan_fresh", day=2)
+    [point] = change_points.change_points(tmp_path)
+    assert change_points.summary(point) == "You marked it as trying on the dashboard"
+    assert point.to_dict()["summary"] == "You marked it as trying on the dashboard"
+    assert point.label.startswith("Started trying: ")
+
+
+def test_a_tip_that_has_no_title_of_its_own_still_gets_a_neutral_label(tmp_path):
+    _tried(tmp_path, "tip", "something-new", day=2)
+    [point] = change_points.change_points(tmp_path)
+    assert point.label == "Started trying a habit" and point.keys == ["habit.something-new"]
+
+
+def test_only_trying_counts_and_a_broken_habit_line_is_skipped(tmp_path):
+    _tried(tmp_path, "habit", "split_large", day=2, state="useful")
+    (tmp_path / "habit-log.jsonl").write_text(
+        "not json\n"
+        + json.dumps({"ts": "never", "kind": "habit", "item": "split_large", "state": "trying"}) + "\n"
+        + json.dumps({"ts": "2026-09-03T09:00:00+00:00", "kind": "idea", "item": "x", "state": "trying"}) + "\n"
+        + json.dumps({"ts": "2026-09-04T09:00:00+00:00", "kind": "habit", "item": "split_large", "state": "trying"}) + "\n",
+        encoding="utf-8",
+    )
+    points = change_points.change_points(tmp_path)
+    assert [(p.source, p.ts.day) for p in points] == [("habit", 4)]
+
+
+def test_habit_points_sit_among_the_others_in_time_order(tmp_path):
+    from datetime import datetime, timezone
+
+    from claudeglass import config as config_mod
+
+    config_mod.set_capture(tmp_path, level="essentials", now=datetime(2026, 9, 1, 9, tzinfo=timezone.utc))
+    _tried(tmp_path, "habit", "split_large", day=5)
+    config_mod.set_capture(tmp_path, sample=50, now=datetime(2026, 9, 9, 9, tzinfo=timezone.utc))
+    points = change_points.change_points(tmp_path)
+    assert [p.source for p in points] == ["capture", "habit", "capture"]
+
+
 def test_turning_coaching_notes_on_and_off_is_named_as_such(tmp_path):
     from datetime import datetime, timezone
 
@@ -340,6 +411,68 @@ def test_turning_coaching_notes_on_and_off_is_named_as_such(tmp_path):
     assert [p.label for p in points] == ["Turned coaching notes on", "Changed live coaching", "Turned coaching notes off"]
     assert points[0].keys == ["capture.coaching"]
     assert points[0].to_dict()["summary"] == "capture.coaching: none → Coaching notes from Claude"
+
+
+def test_turning_the_feedback_prompts_on_and_off_is_named_as_such(tmp_path):
+    from claudeglass import config as config_mod
+
+    config_mod.set_capture(tmp_path, feedback=["feedback_skill"], now=datetime(2026, 9, 1, 9, tzinfo=timezone.utc))
+    config_mod.set_capture(tmp_path, feedback=["feedback_skill", "feedback_note"],
+                           now=datetime(2026, 9, 2, 9, tzinfo=timezone.utc))
+    config_mod.set_capture(tmp_path, feedback=[], now=datetime(2026, 9, 3, 9, tzinfo=timezone.utc))
+    points = change_points.change_points(tmp_path)
+    assert [p.label for p in points] == ["Turned /cg-feedback on", "Changed /cg-feedback", "Turned /cg-feedback off"]
+    assert points[0].keys == ["capture.feedback"]
+    # A change to the feedback prompts alone is not "Changed metrics capture".
+    assert all("metrics capture" not in p.label for p in points)
+
+
+def test_a_feedback_change_made_with_other_capture_changes_keeps_the_label_of_the_other(tmp_path):
+    records = [
+        {
+            "ts": "2026-09-01T09:00:00+00:00",
+            "level": "standard",
+            "changed": {"level": {"from": "off", "to": "standard"}, "feedback": {"from": [], "to": ["feedback_skill"]}},
+        },
+    ]
+    (tmp_path / "capture-log.jsonl").write_text("".join(json.dumps(r) + "\n" for r in records), encoding="utf-8")
+    [point] = change_points.change_points(tmp_path)
+    assert point.label == "Turned metrics capture on: Standard"
+    assert point.keys == ["capture.feedback", "capture.level"]
+
+
+def test_a_change_to_capture_coaching_or_feedback_is_one_that_affects_capture(tmp_path):
+    from claudeglass import config as config_mod
+
+    config_mod.set_capture(tmp_path, level="essentials", now=datetime(2026, 9, 1, 9, tzinfo=timezone.utc))
+    config_mod.set_capture(tmp_path, coaching=["coaching_notes"], now=datetime(2026, 9, 2, 9, tzinfo=timezone.utc))
+    config_mod.set_capture(tmp_path, feedback=["feedback_skill"], now=datetime(2026, 9, 3, 9, tzinfo=timezone.utc))
+    points = change_points.change_points(tmp_path)
+    assert [p.source for p in points] == ["capture"] * 3
+    assert all(change_points.affects_capture(p) for p in points)
+
+
+def test_a_change_of_another_kind_does_not_affect_capture():
+    when = datetime(2026, 9, 1, 9, tzinfo=timezone.utc)
+    for source, keys in (
+        ("apply", ["model"]),
+        ("transcript", ["model"]),
+        ("config", ["user_settings.theme"]),
+        ("habit", ["habit.drip_feed"]),
+        ("revert", ["effortLevel"]),
+    ):
+        point = change_points.ChangePoint(when, source, "x", keys=keys)
+        assert not change_points.affects_capture(point), (source, keys)
+
+
+def test_a_change_keyed_for_capture_affects_capture_whatever_its_source_or_spelling():
+    when = datetime(2026, 9, 1, 9, tzinfo=timezone.utc)
+    config = change_points.ChangePoint(when, "config", "x", keys=["effective.model", "capture.feedback"])
+    assert change_points.affects_capture(config)
+    layered = change_points.ChangePoint(when, "config", "x", keys=["effective.capture.level"])
+    assert change_points.affects_capture(layered)
+    named = change_points.ChangePoint(when, "capture", "x", keys=[])
+    assert change_points.affects_capture(named)
 
 
 def test_a_broken_capture_log_line_is_skipped(tmp_path):

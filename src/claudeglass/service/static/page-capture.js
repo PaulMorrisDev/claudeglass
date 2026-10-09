@@ -154,13 +154,34 @@ function estimateLine(estimate) {
 function roughLine(rough) {
   var parts = [];
   if (rough.session_note) parts.push("about " + rough.session_note + " tokens of note when a session starts, is cleared or compacts");
-  if (rough.subagent_note) parts.push("about " + rough.subagent_note + " when a subagent starts");
   if (rough.reply_tag) parts.push("about " + rough.reply_tag + " tokens of tag per reply");
-  if (rough.reminder) parts.push("about " + rough.reminder + " tokens once a session for the /cg-feedback reminder");
-  if (rough.report_tag) parts.push("about " + rough.report_tag + " per agent report");
+  if (rough.message_note) parts.push("about " + rough.message_note + " tokens of note on a message of yours now and then, when a plan check or the /cg-feedback reminder is due");
+  if (rough.reminder) parts.push("about " + rough.reminder + " tokens for the /cg-feedback reminder, at most once every 3 days");
+  if (rough.plan_check) parts.push("about " + rough.plan_check + " tokens for the plan check's question, once per approved plan");
   if (rough.tool_note) parts.push("about " + rough.tool_note + " after each large or web tool result");
   if (rough.agent_judge) parts.push("a Claude Haiku call after each agent run (the agent is asked for nothing)");
   return parts.length ? "Roughly " + parts.join("; ") + "." : "";
+}
+
+// The overhead line: the stretch it covers, what ClaudeGlass's hooks added
+// up to (the server's own sentence) and what capture's notes and coaching
+// notes cost in it. capture_view.overhead_text writes the same line for
+// 'claudeglass capture status'. The costs are left out while the rate card
+// couldn't be read.
+function overheadLine(overhead) {
+  var hooks = overhead.hooks || "No run of ClaudeGlass's hooks shows in your sessions.";
+  var text = overhead.label + ": " + hooks;
+  if (overhead.capture && overhead.coaching) {
+    text += " Capture cost " + overheadAmount(overhead.capture) + " and coaching notes cost " + overheadAmount(overhead.coaching) + " in the same stretch.";
+  }
+  return text;
+}
+
+// An amount of the overhead line. One too small to show reads as the
+// service writes it ("under $0.01"), not "about <$0.01".
+function overheadAmount(amount) {
+  if (captureBilling === "api" && typeof amount.usd === "number" && amount.usd > 0 && amount.usd < 0.005) return amount.text;
+  return billed(amount, "", "about ");
 }
 
 function renderCaptureData(data, container) {
@@ -184,12 +205,15 @@ function renderCaptureData(data, container) {
       ];
       if (measured.coverage_text) {
         var tagger = config.tagger === "haiku" ? "Claude Haiku" : "Claude";
-        lines.push(tagger + " tagged " + measured.coverage_text + " of your messages" + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs." : "."));
+        var tagged = (config.tagger !== "haiku" && measured.filled_text)
+          ? "Claude tagged " + measured.own_coverage_text + " of your messages, and Claude Haiku filled in " + measured.filled_text
+          : tagger + " tagged " + measured.coverage_text + " of your messages";
+        lines.push(tagged + (measured.report_coverage_pct !== null ? "; Claude Haiku judged " + formatCell(measured.report_coverage_pct, "pct") + " of agent runs." : "."));
       }
       nowBlock.appendChild(el("ul", { class: "notes" }, lines.map(function (line) {
         return el("li", { text: line });
       })));
-      var scopeNames = { main: "Main session", subagent: "Subagents", tool: "After tool results", brief: "Agent briefs", haiku: "Claude Haiku's calls" };
+      var scopeNames = { main: "Main session", subagent: "Subagents", tool: "After tool results", brief: "Agent briefs", haiku: "Claude Haiku's calls", feedback: "Feedback notes" };
       var scopeRows = Object.keys(measured.scopes || {}).map(function (key) {
         var scope = measured.scopes[key];
         return [scopeNames[key] || key, thousands(scope.note_tokens), thousands(scope.tag_tokens), billed(scope)];
@@ -223,6 +247,8 @@ function renderCaptureData(data, container) {
       : "Capture cost " + billed(data.roi.cost, "a week", "about ") + "; nothing measured yet relies on it.";
     nowBlock.appendChild(el("p", { class: "notes", text: roiText }));
   }
+  // Shown whenever a ClaudeGlass hook is installed, capture on or not.
+  if (data.overhead) nowBlock.appendChild(el("p", { class: "notes capture-overhead", text: overheadLine(data.overhead) }));
   if (data.history && data.history.sessions) {
     nowBlock.appendChild(
       el("p", {
@@ -260,6 +286,20 @@ function renderCaptureData(data, container) {
   renderCaptureLevels(data, container);
   renderCaptureControls(data, container);
   renderCaptureMetrics(data, container);
+  renderCaptureTuning(data, container);
+}
+
+// The commands that carry your figures to another machine. The dashboard
+// writes nothing here: the CLI makes the file, from the same figures.
+function renderCaptureTuning(data, container) {
+  var tuning = data.tuning;
+  if (!tuning) return;
+  var block = captureBlock(container, tuning.title);
+  block.appendChild(el("p", { class: "notes", text: tuning.text }));
+  block.appendChild(el("p", { class: "notes", text: "From a terminal on this machine, write the file:" }));
+  block.appendChild(codeBlockWithCopy(tuning.export_command, "Command", "writing the file"));
+  block.appendChild(el("p", { class: "notes", text: "Then read it in plain words, here or on the other machine:" }));
+  block.appendChild(codeBlockWithCopy(tuning.summary_command, "Command", "reading the file"));
 }
 
 function renderCaptureLevels(data, container) {
@@ -292,7 +332,7 @@ function renderCaptureLevels(data, container) {
           return;
         }
         confirmCapture("Use more tokens for metrics capture?", [
-          data.warning,
+          level.warning || data.warning,
           "Switching to " + level.title + " adds " + titlesOf(data, added) + ".",
           level.estimate ? "At the pace of your last two weeks: " + estimateLine(level.estimate) : roughLine(level.rough),
         ], send);
@@ -404,8 +444,8 @@ function renderCaptureControls(data, container) {
 
 // Each group of metrics folds, so the page opens on the levels. A group
 // with a metric that needs something from you (a hook entry, an
-// install) or that won't show (the status line isn't this tool's)
-// starts open.
+// install) or that won't show (the status line isn't this tool's, or
+// your sessions ran where Claude Code runs no status line) starts open.
 function renderCaptureMetrics(data, container) {
   var block = captureBlock(container, "Metrics");
   block.appendChild(el("p", { class: "notes", text: "What each one captures and what it costs. Open one for why it helps and what Claude writes for it. Ticking one here picks your own set (Custom)." }));
@@ -468,6 +508,12 @@ function renderMetricRow(row, data, container) {
     more.appendChild(facts);
     box.appendChild(more);
   }
+  if (row.needs_hook && row.hook_command && !(data.hooks && data.hooks.blocked_by)) {
+    // The chip says an entry is missing; this says how to add it. The
+    // dashboard never writes settings.json: the CLI shows the change first.
+    box.appendChild(el("p", { class: "notes" }, prose("settings.json has no entry for this. The dashboard doesn't change it, so add the entry from a terminal:")));
+    box.appendChild(codeBlockWithCopy(row.hook_command, "Command"));
+  }
   if (row.needs_install) {
     // The dashboard never writes Claude Code's folder: the CLI adds the
     // skill after showing it and asking.
@@ -516,7 +562,7 @@ function renderMetricRow(row, data, container) {
         return (config.metrics || []).indexOf(id) === -1;
       });
       confirmCapture("Use more tokens for metrics capture?", [
-        data.warning,
+        row.warning || data.warning,
         "Switching on " + row.title.toLowerCase() + (needs.length ? " (with " + titlesOf(data, needs) + ", which it needs)" : "") + (row.estimate ? " adds about " + billed(row.estimate, "a week") + "." : "."),
       ], send);
     } else {

@@ -89,6 +89,7 @@ blocked storage still works.
 | `tls:sort:<table>` | a table's sort |
 | `tls:cols:<table>` | the columns chosen for a wide table |
 | `tls:captureNotesHidden` | when the capture banner's notes were dismissed, and which |
+| `tls:captureUnratedHidden` | when the banner's list of pieces to rate was dismissed, and which pieces it held |
 
 Two older keys are read once: `tls:activeTab` (the old tab bar's last
 tab, removed after) and `tls:overviewWindow` when `tls:window` is unset.
@@ -324,7 +325,7 @@ click outside closes it.
 ### Addresses
 
 ```
-#/<page>[/<segment>][?w=<window>&project=<slug>&id=&t=&row=&term=&card=&day=&split=]
+#/<page>[/<segment>][?w=<window>&project=<slug>&id=&item=&t=&row=&term=&card=&day=&split=]
 ```
 
 `formatHash` writes `w` first, then `project` (left out for all
@@ -336,6 +337,7 @@ of lower-case words joined by hyphens.
 | `w` | the window: `1h`, `today`, `24h`, `7`, `30`, `90`, `all` or `change` |
 | `project` | the one project shown; absent for all projects |
 | `id` | the inbox item picked: a recommendation's `key` (its id, plus the agent type for a per-agent rule) or a check id |
+| `item` | on Work habits, the card to show: a habit of the playbook (`brief_clearly`), a prompting habit (`drip_feed`) or `rework`, the rework section. The page scrolls to it, opens the fold it sits in ("more habits") and pulses it. A key this window has no card for leaves the page as it is |
 | `t`, `row` | a report table (`section.table`) and the row to open at |
 | `term`, `card` | a glossary term or a How costs work card |
 | `day` | a local day, as the service counts it: Spend › Sessions lists the sessions active that day, Your changes pulses the card of the change made that day |
@@ -482,6 +484,18 @@ N tokens · <amount> (x% of spend) · tagged on P% of messages") and links
 to Setup › Capture and Work habits. **Dismiss for a week** hides the
 notes until they change.
 
+While the `/cg-feedback` reminder or the dashboard rating is on, the
+banner also lists the pieces of work you haven't rated that used at least
+the reminder's size (`info.unrated`, from `/api/capture`): a sentence, then
+up to five lines, each with the project, when it last replied, its tokens
+(tokens, never money), a short label (`piece 2 of 3, feature, 4 messages`)
+and **Rate it**, which opens the session drawer (`openSessionDrawer`) where
+the questions are; the rating there is of the whole session. A count says
+how many more there are, with a link to Spend › Sessions. A rating, here or
+in `/cg-feedback`, takes the work it covers off the list. Its own **Dismiss for a
+week** hides the list until it changes. The banner asks for a rating and
+changes nothing.
+
 **The Setup card** tops the Overview while a part that matters isn't
 working yet (`/api/setup/status`, `renderSetupCard`): how you pay, the
 connection to Claude Code, the dashboard at logon, and capture when it's
@@ -549,6 +563,37 @@ that order, each as a heading with a one-line answer beside it.
    that is For your information isn't a problem, so it stays off the
    checklist. Its prompt is among the check's fixes, and it is an item
    on Actions › Recommendations like any other card.
+
+   Two rows are worked out from more than the recommendations. **Work
+   habits** leads with the rework sentence ("4 of your 12 pieces of work
+   needed changes after Claude delivered them.") when 20% or more of 5 or
+   more pieces were reworked; below that it keeps its usual lead.
+   Requests in sessions that couldn't be cut into pieces never lead. Its
+   saving is the largest recommendation it carries plus what the habits
+   of the playbook would save over the window (a habit a recommendation
+   already covers isn't counted twice, and each habit adds what it would
+   have saved over the window, never a weekly rate scaled up). Its link
+   goes to the card:
+   **See the rework**, or **See the habit** for the top habit
+   (`#/habits?item=<key>`). **Failed and blocked tool calls** is a check
+   of its own, with its own fix: the replies lost to tool errors and to
+   calls a hook or a guard blocked, which used to be counted in Work
+   habits. Its fix is a prompt to check a path or name first and to stop
+   and ask when a call is blocked, and its link opens the check. **Replies to agent reports** is another:
+what the replies to a background agent's or a workflow's report cost, how many only
+acknowledged it and how many woke a session that had sat idle for an hour
+or more. **Plans sent back** counts the plans you sent back before you
+approved one, with what those rounds cost, and offers one line that asks
+Claude to critique its plan first. **Builds after a plan** sets the builds
+that carried on in the planning session beside those that started fresh,
+and points at Spend › Savings.
+
+   A row with a table behind it also links to the figures. While it is Worth
+   a look or Do this, **See the figures** (`tableLink`, from `CHECK_TABLES`
+   in page-overview.js) opens a table of the figures behind that row and highlights it,
+   as an evidence link does: Models to the model-choice table, Conversation
+   summaries to the summary table, Replies to agent reports to the replies
+   table, and Plans sent back to the plans table.
 3. **Did your changes work?** The changes made in the window, from
    `/api/impact` for the window and project picked, judged first
    (`renderChangeCards` with `compact` and `judgedFirst`): the newest 2
@@ -583,7 +628,34 @@ that order, each as a heading with a one-line answer beside it.
    reading gives that too and says why. A day opens Spend › Sessions and
    a change Your changes. Under it, spend **by project** (the usage
    section's `by_project` table) and **by model** (the daily rows
-   summed), side by side, each left out when it has one row.
+   summed), side by side, each left out when it has one row. Then, across
+   the page's width, **by cost centre** (the agents section's
+   `cost_centres` table, left out when it has no rows): the main session,
+   direct agents, workflow agents and session starts against base read,
+   above-base read, growth write, rewrite, post-compaction and output. Under
+   it, the controllable parts of the base read that cost the most (from
+   `cost_centres_parts`), each with a link to the check that covers it
+   (`checkLink`, to Actions › Checks), and **See every cost centre**
+   (`costCentresLink`: Agents › Subagents, scrolled to the table as an
+   evidence link's table is). In the table on that page, the `card` column
+   of the parts table and the `hint` column of the advice table are links
+   to a check too (`withCheckLinks` in grid.js); a harness-fixed part says
+   "no setting known", a not-measured part says nothing, and a cell no check
+   covers says "No advice". The
+   Overview's checklist has the matching `cost-centres` row, which is
+   information and never "worth a look".
+
+   Last in that part, **More detail** (`detailPart`, links.js
+   `DETAIL_TABLES`) has a link for each table that the checks and cards
+   read, with what it shows: model choice (Agents › Subagents), cost per
+   subagent run (Agents › Subagents), what agent runs did, single lookups,
+   replies to agent reports and plans sent back (Work habits), how the
+   build began after an approved plan (Spend › Savings) and conversation
+   summaries (Spend › Usage). A link is drawn only when the report built
+   that table with rows. Following it opens the page that shows the table,
+   unfolds what hides it and highlights it (`tableLink`, the `t`
+   parameter that `revealEvidence` reads); a table its page leaves to the
+   full report opens in a panel, so the link always lands somewhere.
 5. **Scores, totals, and how amounts are counted** (folded): the billing
    mode and why (`report.meta`), the scorecard's five areas as a table
    (`scorecard.dimensions`, which a recommendation's evidence can point
@@ -627,19 +699,32 @@ alone.
    and the ratio test's reading coloured by the measure's `better`
    (Lower is good news for a cost; the share of messages tagged has no
    better side and reads neutral). Which measures a card shows depends
-   on the change. The first is its lead: its reading is the chip by the
-   title, and it is the only one on the Overview's short card.
+   on the change. The first is its lead (`item.lead`, drawn by
+   `leadMeasure`): the measure the ratio test is surest of, not the first
+   one listed. A clear difference leads before a possible one, and that
+   before no clear change; a difference under 5% reads as no clear
+   change, its badge included, however sure the test is of it. Its reading
+   is the chip by the title, `/api/impact`'s one-line `verdict` is about it
+   (a card shows that line only while it waits for sessions), and it is the
+   only measure on the Overview's short card. The rest follow in the order below.
    - A **model** change is judged on the tokens it spends first: Tokens
      per session (everything read and written, subagents included),
-     Output tokens per reply and Replies per session, then Cost per reply
-     and Cost per session. A new model version can be priced differently
-     per token, so cost alone can't say whether it does the same work
-     with less; the tokens can. They stay ahead of Cost per reply even
-     when the same settings edit changes effort, thinking or fast mode, so
-     a model change made alone or with those leads with Tokens per session.
-     A settings edit lists its keys alphabetically, so another setting
-     changed with the model and listed before it, such as the compaction
-     window, a plugin or an agent, leads with its own measure.
+     Output tokens per reply and Replies per session, then Cost per reply,
+     Cost per request and Cost per session. A new model version can be
+     priced differently per token, so cost alone can't say whether it does
+     the same work with less; the tokens can. They stay ahead of Cost per
+     reply in the list even when the same settings edit changes effort,
+     thinking or fast mode. A model change whose tokens didn't move leads
+     with whichever measure did, often the cost. A settings edit lists its
+     keys alphabetically, so another setting changed with the model and
+     listed before it, such as the compaction window, a plugin or an
+     agent, can lead with its own measure.
+   - **Cost per request** (a model change, or a habit you started) is a
+     session's cost over the prompt cycles that asked for something, not
+     over every message. A go-ahead, a status check, a thank-you or a
+     reply to a plan asks for nothing, so a run of them can't pass for
+     cheaper work. A scheduled run has none and leaves the figure alone.
+     The habit rates below use the same count.
    - An **effort or thinking** change (the effort level, thinking on or
      off, the thinking budget) leads with Output tokens per reply, then
      Cost per reply and Cost per session.
@@ -648,8 +733,20 @@ alone.
      measures: its cost per spawn and its context at the start of each
      spawn.
    - Turning coaching notes on is measured by the prompting habits it
-     warns about, per 100 of your messages, and the share of messages
-     that were small requests sent one at a time.
+     warns about, per 100 of your messages that asked for something, and
+     the share of those that were small requests sent one at a time.
+   - A change to **metrics capture, live coaching or the feedback
+     prompts** isn't meant to move cost, so its Cost per session is read
+     last, in a quieter colour, whatever it says. When the mix of
+     sessions moved too, that row adds "Read last: the mix of sessions
+     changed."
+   - **Session mix changed.** When a kind of session (a scheduled run, or
+     one of the modes) was 25 points more or less of the sessions after
+     a change than before it, the card says so under its title with a
+     warning chip and the server's sentence (`item.mix`, drawn by
+     `mixNote`): the per-session figures then compare different kinds of
+     work, however the sessions are weighted, so read the other measures
+     first. It shows on every kind of change, not only capture ones.
 
    Then **Saved so far** from `without.saved_usd` ("Cost more so far"
    when it's negative) with how it was priced, a row per setting when
@@ -703,8 +800,10 @@ detail scrolls) and the one picked.
   group, picking a row shows that agent's change. Then the fixes as
   command blocks (a `scope: "managed"` card says your organisation's
   policy sets it), **The numbers behind this** as evidence links,
-  **Not for you?** with **Ignore this recommendation**, and **The check
-  this answers**.
+  **Was this useful?** with **Useful**, **Trying it**, **Knew it** and
+  **Wrong here** (a rating only, `POST /api/tip-feedback`), **Not for
+  you?** with **Ignore this recommendation**, and **The check this
+  answers**.
 - **Ignoring** (`ignores.py`, `POST /api/recommendations/ignore`) hides
   an item in the project on screen, or in every project from the
   all-projects view, while the profile `apply` last marked active stays
@@ -772,7 +871,10 @@ sections, each from its own route rather than the full report:
   per agent type and the fidelity check, with chart 3;
 - `/api/plan-handoff`: what building in a fresh session after each big
   approved plan could have saved (no bar in chart 2: it overlaps with
-  the conversation-summary saving);
+  the conversation-summary saving), and how each approved plan's build
+  began: carried on in the planning session, started after a `/clear`
+  within a minute of the approval, or started from the plan in a new
+  session, with the context a build reply read in each;
 - `/api/model-swap`: the most a one-tier-cheaper model could save,
   counting for each subagent only the runs its agent file's model
   decides, and the agents that ran on a larger model than their work
@@ -795,11 +897,42 @@ is the day of the chart's column. A line above the list says what it is
 narrowed to, with **Show all sessions**. A row and its dot light up
 together. The report's `sessions` section follows.
 
+The list, the override menus and the chart name a mode, a purpose and an
+app in words ("Overnight (unattended)", "One-shot", "Docs or light
+edits", "Terminal") from one map, `SESSION_WORDS` in `charts-types.js`.
+Its words are the report tables' own (`helptext.py`'s value labels for
+`sessions_by_mode`, `sessions_by_purpose` and `by_entrypoint`), and a
+test holds the two together. On the list a mode shows what it means on
+hover (the Mode column) and the others show their key. Each of the three
+columns sorts by the word it shows, not its key. The palette's mode keys
+are the map's: a mode takes its colour from `ENTITY_COLOURS.mode`, and
+mixed or not classified are grey. The chart's tooltip and table give a
+session's own word ("Mixed"), where its legend groups the grey ones as
+"Mixed or not known".
+
 **Detail:** a row, Enter or a dot opens the session drawer
 (`openSessionDrawer`, from `/api/session/<id>`): a summary; **Why was
 this session expensive?** (`/explain`); "Mode override" and "Purpose
-override" with **Save tags**; **Rate this session** while the dashboard
-rating is on; chart 5; and **Transcripts**, with no path. Chart 5 draws
+override" with **Save tags** (each menu lists the map's words by name,
+saves the key, and leaves out "Not classified"; under the menus a line
+says what the picked mode means); **Rate this session** while the dashboard
+rating is on; chart 5; and **Transcripts**, with no path.
+
+A session whose mode or purpose is the catch-all a rule fell back to
+(`low_confidence`) shows a **Label unsure** chip beside its id in the
+list. The drawer says so above the tag controls, so you can set the right
+label.
+
+**Rate this session** asks the `/cg-feedback` questions as ticks. The
+service sends them (`feedback_questions`, from the same catalogue as the
+skill, so the words are not copied into the page) and leaves out the
+ones the session's own facts say don't apply: a question about where a
+missed detail was said shows only while "Claude missed something (it was
+in my request or the plan)" is ticked. A session with two or more
+approved plans gets a row for each plan build under the plan and handoff
+questions, saved as `builds`. Answers the page doesn't show for a
+session stay as they were when you save. **Clear** removes the whole
+rating. Chart 5 draws
 context size over turns with a marker shape per event (cache rebuild,
 conversation summary, subagent start, your message). Usage-limit events
 sit in lanes above, placed by time because they fall between turns. It
@@ -846,10 +979,31 @@ as the CLI's `ttl` command shows them.
 **Answers:** "What do my subagents cost, what are they given, and should long runs be split?"
 
 The `agent_startup`, `agents` and `run_split` sections. `agent_startup`
-draws chart 8. Then cost per run, skills and MCP cost, effort, and what
-each agent never used. `run_split` ([run splits](run-split.md)) gives
-each agent type's best split interval and what splitting its long runs
-there would save.
+draws chart 8. Beside it, **What each agent type carries into a run**
+(`agent_startup_stack`) stacks, per agent type, the system prompt and tools,
+the files loaded for it, the files it reads by habit and the brief it is
+given. Then cost per run, skills and MCP cost, effort, and what each agent
+never used. `run_split` ([run splits](run-split.md)) gives each agent type's
+best split interval and what splitting its long runs there would save.
+
+Last comes **Project files your agents read** (`/api/project-files`): one
+row per file, text files first, with how it arrives (loaded by Claude Code, imported by a
+CLAUDE.md, or read by agents), its size now, its change over about 30 days
+with a weekly sparkline, who reads it and in what share of their runs, and
+what it costs a month. A row opens a drawer with the shares for every
+reach, the mean size of one read by each, and, for a file the Overview
+check flags, prompts to copy: trim what is stale, split the file by who
+needs it, move rule-like parts into path-scoped `.claude/rules`, move
+reference material into a skill, and, for a file agents read, put the
+essential lines in the agent definition and drop the read. Names are
+worked out from your project folders when the page opens and are never
+stored; a file this machine cannot find shows as not found and has no
+prompts. The Overview check covers text files only (`.md` and `.txt`: the
+documents sessions and agents take in), and the section intro says so. A
+code or data file is listed after the text files and is never flagged, so
+its drawer offers no prompts. The section carries the table name
+`project_files`, so the Overview check's link (`projectFilesLink`) scrolls
+to it and highlights it.
 
 ### Agents & context › Quality
 
@@ -905,15 +1059,91 @@ an hour, today, 24 hours or since your last change) and whose weeks, here
 and in the by-week lines, start on your local Monday; **Habits worth
 trying** as cards (saving a week, what your sessions show, an example to
 copy, how often it was seen, its source, confidence, a weekly pace line
-and how the saving is worked out); the brief templates with Copy
-buttons; **Kinds of task**; the other breakdowns under More tables; and
-the notes. Then the `prompting` section, **How you prompt**
+and how the saving is worked out; a habit you already picked up isn't
+listed here, and a week that can't be measured is a gap in the pace line,
+read out as an en dash); then **Rework after delivery** (the
+`rework` section, `renderRework`), straight after the top habit cards
+and before the brief templates; the brief templates with Copy
+buttons; **Kinds of task**; **Plans sent back**, which groups the approved
+plans by how many times a plan was sent back first; the other breakdowns
+under More tables; and the notes (More tables includes **Big tool output**,
+which counts big results per tool with what carrying them cost, **Explore
+cost by model**, which splits what your Explore agents cost across the
+models they ran on, **Single lookups, one call per reply**, which counts
+the replies that made one read-only call and nothing else, **Replies to
+agent reports**, which splits the main session's replies to a background
+agent's or a workflow's report into only acknowledged, acted on and started
+more agents, and **What agent runs did**, which sets the agent runs side by
+side by how they were started). Then the `prompting` section, **How you prompt**
 (`renderPromptingSection`): a card per prompting habit seen (small
-requests sent one at a time, the same request again, stopping Claude
-again and again, big tasks without a plan, vague corrections, huge
-pastes) with what it cost, what to try instead, how often it happened
+requests sent one at a time, the same request again, asking how it's
+going, stopping Claude again and again, big tasks without a plan, vague
+corrections, huge pastes, context carried into new pieces) with what it cost over the
+window ("over the last 30 days", or "Not priced" for a vague correction), what to try instead, how often it happened
 per 100 messages and a by-week line; then, once there are coaching
-notes, **Tips Claude showed**. Nothing here changes a setting.
+notes, **Tips Claude showed**, with how often Claude passed each tip on
+("relayed N of M" for a hint Claude is told to show every time, "judged
+relevant N of M" for one it decides on) and how often it called the tip a
+misfire. Nothing here changes a setting.
+
+**Rework after delivery** answers "How often did Claude have to change
+work it had already delivered, and why?" It opens with two tiles (the
+pieces of work that needed changes out of all of them, and what that rework
+cost, in the billing mode and with its period) and `rework.py`'s sentences:
+"N of your M pieces of work needed changes after Claude delivered them. That
+rework cost X. U% came from requests that left something out, C% from
+Claude's mistakes, X% from changes of mind", then "O% came from failed
+tools, plan gaps or a mix of causes." when some rework had one of those
+causes (the shares are left out when no rework had a cause reported), then
+"We couldn't tell why for K%: run /cg-feedback after a piece of
+work to say" when some rework has no cause, and a sentence of its own for
+sessions that couldn't be cut into pieces (counted by messages that asked
+for something), and, when a delivered piece has any, "Not counted as rework:
+N messages you sent while background work ran (X)." in a quieter
+line. Below it:
+
+- **Why work needed changes**: a card per cause and source, your feedback
+  first, then Claude's tag, Haiku's tag and what the transcript shows. Each
+  card has what the rework cost, the counts behind it, a **Try** line and
+  something to copy (a line to say more up front for a request that left
+  something out, `/cg-brief` while Work habits shows its brief card; a
+  re-read, check and test line for Claude's mistakes, or the line for where
+  you said it missed; "Plan this first" for a change of mind; the checks
+  for tool calls that failed). A cause from several sources says its Try
+  line once. **Fixes after a plan you approved** shows once 5 plans were
+  approved and some needed 3 or more fixes. A follow-up with no cause
+  reads "Cause not reported", never "Claude got it wrong". Five cards show;
+  the rest fold under "N more causes".
+- **Mistakes Claude admitted**: how many, who caught each, how many were an
+  instruction it had been given and what the rework after yours cost, with
+  the change to make and a line to copy. A reply that only reads like an
+  admission is "possible", said apart and never in a total.
+- **Rework by week**: a bar for the share of pieces that needed changes
+  (only for a week with 5 or more that did; a dash is too few to say), a bar
+  for mistakes you caught per piece (a week with 5 tagged pieces), and the
+  figures under "Week by week".
+- **Rework by how hard the work was**: the rework per message that asked
+  for something, by the level Claude tagged the work.
+
+Nothing in it writes a setting: each line is something to copy.
+
+**Linking to a card.** Each habit card, each prompting card and the
+rework section carries its key (`data-item`). `#/habits?item=<key>` scrolls
+to that card once the page is drawn, opens the "more habits" fold when the
+card sits under it, and pulses it (`showHabitItem`, the same pulse as a
+change on Your changes). `links.js` is the one place that knows the
+parameter (`habitLink`, `goToHabit`, `habitItem`, `REWORK_ITEM`): the
+Overview's Work habits row, the habit tips on Actions › Checks
+(**See the habit**) and search all use it.
+
+Each habit card and each prompting card ends with **Your rating**:
+**Useful**, **Trying it**, **Knew it** and **Wrong here** (`cardRating`
+in `grid.js`, `POST /api/tip-feedback`). Pressing the answer you gave
+takes it back. **Trying it** also marks the day you started, which
+becomes a change point on Your changes ("Started trying: ..."), so the
+habit's effect is measured from then. A recommendation's detail has the
+same row under **Was this useful?**. These are ratings you give. No
+button here writes a setting or a file in Claude Code's folders.
 
 ### Setup › Settings
 
@@ -969,15 +1199,19 @@ cost?" The same for every window.
 far, how often Claude tagged); its weekly cost against what depends on
 it (`roi`); a warning with `capture connect` when a hook entry is
 missing; the level cards (Off, Free, Essentials, Standard, Deep, Custom)
-with weekly estimates; sampling, who writes the tags, and end time; and
-every metric grouped by where it is captured.
+with weekly estimates; sampling, who writes the tags, and end time;
+every metric grouped by where it is captured; the overhead line
+(`overhead`); and the block "Take your figures to another machine"
+(`tuning`).
 
 "Tags written by" picks Claude (at the end of its replies) or Claude
 Haiku (asked after each turn, `[capture] tagger`; see
 [capture.md](capture.md#who-writes-the-tags)). Picking Haiku asks first,
 saying what the hook sends and what it keeps. While Haiku writes them,
 the tag line says "Claude Haiku tagged" and "Claude Haiku's calls" is a
-row of its own in where the tokens went.
+row of its own in where the tokens went. With Claude picked, Haiku still
+fills in a tag Claude left out, in the background. The tag line then says
+"Claude Haiku filled in", and its calls count in the same row.
 
 The end-time menu's first entry is the end already set ("In 12 days:
 2026-10-07 09:00 UTC", or "Ended: ..."). A choice saves the moment it is
@@ -986,12 +1220,53 @@ While capture is off the menu is hidden and a note says the first switch
 on ends by itself after `timebox_days` (14).
 
 A group folds ("Main session (3 of 12 on)") unless a metric in it needs
-a hook entry or an install. The feedback and brief skill rows show
+a hook entry or an install. A row that **Needs a hook entry** shows
+`claudeglass capture connect`, except under a settings policy that stops hooks
+running, where it isn't offered. The feedback and brief skill rows show
 **Needs installing** with their `capture ... on` command: the dashboard
 never writes Claude Code's folder. A change that asks Claude for more
-repeats the cost warning in a dialog first. Changes go to
+repeats the cost warning in a dialog first. It is the warning of the
+level or the metric chosen: each says only what that choice makes Claude
+read and write. The Free level reads "uses none of your Claude tokens";
+a level where Claude writes the tags names the note at the start of a
+session (and after `/clear` or a compaction), the tag you will see at the
+end of each reply, and, at Deep, the note after a large result. While
+Claude Haiku writes the tags, none of those is asked of Claude: the
+warning says Haiku writes them in the background. No level asks a
+subagent, or an agent a workflow starts, for anything: the agent metrics
+are one Claude Haiku call after each agent run. With capture off, the
+page's own warning is the general one. Changes go to
 `POST /api/capture`; when the file can't be written, the view shows the
 CLI commands instead.
+
+**Overhead line.** Under where capture stands, one line, shown whenever
+any ClaudeGlass hook is in Claude Code's `settings.json`, capture on or
+not: "Over your last 7 days: ClaudeGlass's hooks ran about 2,400 times,
+about 40 ms each, about 1.6 min summed (calls overlap). Capture cost
+about 0.12 USD and coaching notes cost about 0.03 USD in the same
+stretch." It opens "Since capture was turned on" when that was within the
+week. Only the runs from the start of that stretch count, as the costs do.
+The runs and the median time come from your own sessions, so they
+are measured, not a guess at how long Claude waits; the costs use your
+billing mode (a share of your limit on a plan). `claudeglass capture
+status` prints the same line.
+
+**Status-line features.** The rows for the second status line and the
+coaching line follow where your sessions ran, because Claude Code runs a
+status line in a terminal only and the desktop app runs none. With no
+session in a terminal, the row says "All 204 of your sessions ran outside
+a terminal, and the desktop app doesn't run status lines"; with most
+outside one, "Only 1 of your 205 sessions ran in a terminal ..."; and a
+status line that isn't ClaudeGlass's is still named. `capture status`
+says the same.
+
+**Take your figures to another machine.** The last block: a sentence
+saying the file holds counts and words from fixed lists only, never a
+name, a path or any text of yours or Claude's, then two commands with
+Copy, `claudeglass tuning export --out claudeglass-tuning.json` and
+`claudeglass tuning summary claudeglass-tuning.json`. The page runs and
+writes nothing; [exports.md](exports.md#claudeglass-tuning) says what the
+file holds.
 
 ### Data quality
 
@@ -1021,7 +1296,8 @@ CLI commands instead.
 
 **Answers:** "What does this word mean?" The same for every window.
 
-`GLOSSARY` in `links.js`, word for word the README's glossary. **Find a
+`GLOSSARY` in `links.js`, word for word the README's glossary (44 terms,
+among them Piece of work, Rework, Status check and Plan round). **Find a
 term** above the list narrows it as you type: an entry stays when every
 word typed is in its term or definition. A status line counts the
 matches; with none, the page says so and offers **Show every term**.
@@ -1137,9 +1413,10 @@ their table view with it), so `app.js` hands it `sectionChart` through
 | Pages | every page and segment |
 | Commands | Set window: …, Show all projects, the three themes, Show keyboard shortcuts, Copy prompt: … |
 | Recommendations, Checks | the item, selected in its inbox (`?id=`) |
+| Work habits | a playbook habit, a prompting habit or the rework section, at its card on Work habits (`?item=`) |
 | Sections and tables | a section at its first table; a table where it is shown, or in the table drawer |
 | Glossary | terms (`?term=`) and How costs work cards (`?card=`) |
-| Recent sessions | the window's 20 newest, each in its drawer |
+| Recent sessions | the window's 20 newest, found by id, project, or their mode, purpose and app in words; each opens in its drawer |
 | Projects | each project, shown on its own |
 
 With nothing typed it lists the pages, then the commands. Each typed
@@ -1258,7 +1535,7 @@ repaints what stays on screen:
 |---|---|
 | Agent | main session `--chart-1`, subagents `--chart-3` |
 | Model tier | Opus (and Fable) `--chart-1`, Sonnet `--chart-2`, Haiku `--chart-3` |
-| Work mode | interactive `--chart-1`, long agentic `--chart-2`, overnight `--chart-3` |
+| Work mode | interactive `--chart-1`, long autonomous run `--chart-2`, overnight `--chart-3`, one-shot `--chart-4`; mixed and not classified are Other |
 | Startup part | system prompt, tool definitions, CLAUDE.md, skills listing, tool lists, task prompt and hook context take `--chart-1` to `--chart-7` |
 
 Anything else is `--chart-other`. A chart never picks colours by rank.
@@ -1500,16 +1777,16 @@ hand with Playwright against a dev service.
 | `app.css` | the tokens, the component and page styles, then motion, reduced motion and forced colours |
 | `app.js` | the entry point: the router (`resolveRoute`, `changeView`, `showView`, `VIEW_RENDERERS`), the sidebar, the page header, `menuControl`, the theme toggle and `init()` |
 | `core.js` | `el`, `clear`, the storage helpers, `state`, `WINDOW_OPTIONS`, `renderedViews`, the `goTo` and project hooks, `onParams`, `highlight` and `listenHighlight` |
-| `links.js` | `PAGES`, `viewLabel`, `viewIntro`, `parseHash`, `formatHash`, `scopeParams`, `OLD_TAB_VIEWS`, `SECTION_PAGE_MAP`, `TABLE_PAGE_MAP`, `pageLink`, `GLOSSARY`, `JARGON`, `COST_CARDS`, `termLink`, `cardLink`, the `{{page:}}` pattern |
+| `links.js` | `PAGES`, `viewLabel`, `viewIntro`, `parseHash`, `formatHash`, `scopeParams`, `OLD_TAB_VIEWS`, `SECTION_PAGE_MAP`, `TABLE_PAGE_MAP`, `pageLink`, `tableLink`, `DETAIL_TABLES`, `GLOSSARY`, `JARGON`, `COST_CARDS`, `termLink`, `cardLink`, the `{{page:}}` pattern |
 | `format.js` | `formatCell`, `money`, `moneyText`, `moneyNode`, `moneyParts`, `moneyUnit`, `moneyAxis`, `readableAmounts`, `compactNumber`, `signedPercent`, `fraction`, `shortTs`, `relativeTime`, `windowWhen`, `modelName`, `modelNames`, `projectName`, `setKnownProjects` |
 | `api.js` | `fetchJson`, `loadInto`, `postJson`, `withWindow`, `scopeKey`, `loadReport`, `loadProjects`, `loadRecommendations`, `loadQuickActions`, `prefetchActions`, `actionIndex`, `findSection`, the figures-as-of stamp, the connection state |
 | `ui.js` | the components in the table above, plus `prose`, `countUp`, `enterInTurn` and `motionOK` |
-| `grid.js` | `dataGrid`, `pulseRow`, `pulseNode`, `renderTable`, `renderPlacedTables`, `renderMappedSections`, `renderReportBackedSection`, `simpleTable`, `setSectionChart`, `NEWEST_LAST`, `formatEvidenceValue` |
+| `grid.js` | `dataGrid`, `pulseRow`, `pulseNode`, `renderTable`, `renderPlacedTables`, `renderMappedSections`, `renderReportBackedSection`, `simpleTable`, `setSectionChart`, `cardRating`, `NEWEST_LAST`, `formatEvidenceValue` |
 | `evidence.js` | `openEvidence`, `evidenceList`, `revealEvidence`, `tableDrawer` |
 | `charts.js` | `CHART_SPECS`, `fillSummary`, `ENTITY_COLOURS`, axes, tooltip, keyboard reading, the table view, resize, `drawChart`, `holdChart`, `chartError` |
-| `charts-types.js` | the eight forms, `renderChart`, `sectionChart`, `sessionContextChart`, `savingsLevers`, `dailyChanges`, `windowSpan`, `changeDay`, `sparkline`, `meter`, `habitSparkline` |
+| `charts-types.js` | the eight forms, `renderChart`, `sectionChart`, `sessionContextChart`, `savingsLevers`, `dailyChanges`, `windowSpan`, `changeDay`, `sparkline`, `meter`, `habitSparkline`, `modeColour`, and the map of session words (`SESSION_WORDS`, `sessionWord`, `sessionWordNote`, `sessionWordChoices`) |
 | `costs.js` | pricing helpers for Actions, Cache, the Glossary and the Overview's cache tile: `modelIdFor`, `rateFor`, `pricingFacts`, `priced`, `modelSentence`, `avoidableRebuilds`, `cardRuleText` |
-| `shell.js` | on every view: the health banner, the status line, the capture banner, `RETRY_SECONDS`, `renderHealth`, the setup checklist (`renderSetupCard`, `renderSetupList`) |
+| `shell.js` | on every view: the health banner, the status line, the capture banner (with its list of sessions to rate), `RETRY_SECONDS`, `renderHealth`, the setup checklist (`renderSetupCard`, `renderSetupList`) |
 | `icons.js` | `icon(name, opts)` and `ICON_NAMES` |
 | `palette.js` | `openPalette`, `matchScore`, `GO_KEYS`, `showShortcuts`, `initPalette` |
 | `d3.js` | the one door to the vendored d3 |

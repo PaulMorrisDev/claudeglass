@@ -20,7 +20,11 @@ each failed (`blocked`, `denied`, `failed` or `misfire`, read from the
 start of the error text and then dropped). A turn whose only failed
 calls are commands that ran and reported failure (a failing test or
 build) isn't wasted: Claude used that output. It is counted in
-`waste_summary`'s `failed_command_turns` and left out. Everything else is read off
+`waste_summary`'s `failed_command_turns` and left out. The same command
+failing three or more times within one message of yours (in a main
+session) is counted too, as `failed_command_loops`: a count only, neither
+priced nor wasted. It replaces the "stop retrying a failing command" habit
+that Work habits used to price. Everything else is read off
 `EventKind`/`Turn.preceding_primary`/`Turn.gap_cause`/`TranscriptMeta.
 stopped_by_user`, all of which already existed.
 
@@ -66,8 +70,8 @@ fixed priority order (a turn is assigned to exactly one cause, so
 | `max-turns` | The turn's own transcript has `TranscriptMeta.kind != "top-level"` and `TranscriptMeta.stopped_by_user` is true. A **transcript-level override**: every priced turn in a killed subagent transcript is wasted, since that transcript returns no report to its parent regardless of what any one turn did. | Raise the subagent's `maxTurns` budget, or narrow its brief so it finishes — and reports back — inside the turns it's given. |
 | `tool-error` | The turn's own `Turn.tool_error_count > 0` — one of its own tool_use calls came back with a tool_result carrying `is_error: true` — and at least one of those calls couldn't run as written (`misfire` in `Turn.tool_errors_by_kind`: a wrong path, a malformed command, an edit whose text wasn't found). | Give exact paths and names in briefs, and have Claude check a path exists or read a file before it edits or runs against it. |
 | `blocked` | The same, where a hook or a Claude Code guard blocked the call (`blocked`) and nothing misfired, and at least one of those blocked calls was **not** a known token saver's own redirect. | Put the rule the hook enforces into the instructions of the agent that keeps hitting it. |
-| `interrupt` | The *next* priced turn's `preceding_primary == EventKind.INTERRUPT` — the turn under scrutiny is the one the user cut off. | Batch instructions and plan the whole step before running it. |
-| `tool-denial` | The *next* priced turn's `preceding_primary == EventKind.TOOL_DENIAL`. | Add the repeatedly-denied tool/command to the permissions allowlist. |
+| `interrupt` | The *next* priced turn's `preceding_primary == EventKind.INTERRUPT` — the turn under scrutiny is the one the user cut off. Not when the only denials in that window are a plan or question you answered, or a call a hook or auto mode blocked: the line is then only how Claude Code ends the turn (`events.stop_window`). | Batch instructions and plan the whole step before running it. |
+| `tool-denial` | The *next* priced turn's `preceding_primary == EventKind.TOOL_DENIAL` and a call you or a deny rule turned down (bucket `refused`) among its `Turn.preceding_denials`. A plan you sent back or a question you declined is an answer, not a denial, and a plan with feedback is `EventKind.PLAN_FEEDBACK`, never this cause. | Add the repeatedly-denied tool/command to the permissions allowlist. |
 
 `redirected` (`REDIRECT_CAUSE`) sits inside the `blocked` check, not in
 `CAUSES`: a turn takes this cause instead of `blocked` only when *every

@@ -1,6 +1,6 @@
 # Concepts
 
-How Claude Code's prompt cache works, and the definitions behind the numbers this tool reports: the two token totals, what counts as a cache rebuild, what the cache-lifetime simulation assumes, how CLAUDE.md files and skills are counted, how windows, what-if estimates and before/after comparisons work, and how the quality signals are counted and compared. The [README](../README.md) covers installing and using the tool.
+How Claude Code's prompt cache works, and the definitions behind the numbers this tool reports: the two token totals, what counts as a cache rebuild, what the cache-lifetime simulation assumes, how CLAUDE.md files and skills are counted, how windows, what-if estimates and before/after comparisons work, how the quality signals are counted and compared, and what the figures for agents, plans and conversation summaries mean. The [README](../README.md) covers installing and using the tool.
 
 ## 1. The two token totals
 
@@ -160,27 +160,55 @@ Two practical consequences worth designing around:
 ## 3. Cache rebuild definitions and signatures
 
 A turn is a **cache rebuild** (called a *re-cache* in the code and the JSON output; [`recache.py`](../src/claudeglass/recache.py))
-when all of the following hold:
+when it is not the transcript's first priced turn, its context (`ctx`)
+exceeds `ctx_floor` (default 20,000 tokens), and the model had to pay to
+write its own part of that context again instead of reading a warm cache
+entry, for no correctness reason.
 
-- it is not the transcript's first priced turn,
-- its context (`ctx`) exceeds `ctx_floor` (default 20,000 tokens), and
-- the fraction of that context actually served from cache read falls
-  below `cr_ratio` (default 0.2, i.e. less than 20% of context came from
-  a cache hit) —
+Every context starts with a prefix the sessions of one kind share (the
+tool definitions, about 43,000 tokens in the desktop app). It is written
+once and read by every later session, and it survives an expiry. So the
+first priced call's cache read (`cr0`) is the size of that shared start,
+and a rebuild is judged on what lies beyond it. A turn is a rebuild when
+any of these holds:
 
-in other words: the model had to pay to write most of its own context
-again, instead of reading a warm cache entry, for no correctness reason.
-Every re-cache turn is assigned one of two **signatures**:
+- it read less than `cr_ratio` (default 0.2) of its whole context from
+  the cache (the original test);
+- it read no more than `cr0` + 3,000 tokens although the previous call
+  had left more than that cached, and its context did not shrink (a
+  shrink is a compaction or `/clear`, which replaces the session part
+  rather than letting it expire); or
+- it read less than `cr_ratio` of the part beyond `cr0`.
 
-- **`full-expiry`** — `cache_read_tokens` is below `full_expiry_cr`
-  (default 2,000 tokens): the cache entry had essentially nothing left
-  to hit, consistent with its TTL having simply run out since the
-  previous turn.
-- **`prefix-invalidated`** — `cache_read_tokens` sits between
-  `full_expiry_cr` and `cr_ratio × ctx`: there was a partial hit, so the
-  TTL had *not* expired, but something upstream of the cached prefix
-  changed anyway (a notification, an attachment, a model switch, a
-  compaction, ...) and broke it regardless.
+Every re-cache turn is assigned one of four **signatures**, tested in
+this order, the first that applies winning:
+
+1. **`limit-expiry`** — the wait spanned a usage-limit pause (see
+   [limits.md](limits.md)).
+2. **`post-compaction`** — the first reply after a compaction (a
+   `compact_boundary` before it, or the estimated compaction call right
+   before it). The summary replaced the session part, so the write is the
+   compaction's whatever the wait or the read looked like. It is still a
+   rebuild, so every count of rebuilds, and the re-read allowance the
+   run-split card takes from them, is unchanged; only the label differs.
+3. **`full-expiry`**, by the clock — the wait since the previous call
+   reached the time its cache lasts: one hour when that call wrote more
+   at the 1-hour rate than at the 5-minute rate, else five minutes. A
+   call that wrote nothing keeps the lifetime of the last call that did.
+4. **`full-expiry`**, by the read — the turn read no more than `cr0` +
+   3,000 tokens (or under `full_expiry_cr`, default 2,000 tokens,
+   outright): the session part was gone even though the wait was shorter
+   than the lifetime. The clock did not do it, so the TTL simulation
+   (section 4) treats it as something no lifetime could have prevented.
+5. **`prefix-invalidated`** — only then: part of the session was read, so
+   the cache had *not* expired, but something upstream of the cached
+   prefix changed anyway (a notification, an attachment, a model switch,
+   ...) and broke it regardless.
+
+When the first call or the previous call is not known, only the original
+test and the `full_expiry_cr` floor apply. The old rule called a turn
+"broken by a change" whenever the shared start pushed its read above 20%
+of the context, which filed most cold returns under the wrong label.
 
 A re-cache turn's **avoidable cost** is what its own cache-creation
 tokens cost at the write rate they were actually billed at, minus what
@@ -202,6 +230,10 @@ themselves where the model might not hold for their own working style:
 - a hit refreshes TTL so survival depends only on `gap_s`
 - prefix-invalidated turns keep their observed split under every policy
   (no double counting)
+- a turn rebuilt after a summary keeps its observed split under every
+  policy, and a turn that read only the shared start although the wait was
+  shorter than the lifetime the previous call wrote keeps it under any
+  policy at least as long as its wait
 - reads are priced at the flat cache_read rate
 - compaction shrink clamps write at 0
 - gap is measured from the start of one request to the start of the next
@@ -232,6 +264,17 @@ and a `skill_listing` entry with one line per skill (its name and
 description). The parser keeps, per file, a salted hash of its path, its
 type, whether it is path-scoped and its size; per skill, its name and
 size. No text is kept (`context_files.py`).
+
+Files agents read count too. Each Read tool result is a salted hash of the
+path and the size of what came back (nothing when the read failed). A file
+read becomes part of the conversation from the next reply on, so it is
+priced as a loaded file is: written once, then read on every later reply,
+until the conversation is summarised. A **standing read** is a file read in
+3 or more runs of a reach (the main session, or one agent type), or in 20%
+or more of them. The Agents page lists these with the loaded files, with
+each file's size by week, the change over about 30 days and what it costs a
+month (the cost over the window scaled to 30 days). Names come from your
+project folders on disk when the page opens and are never stored.
 
 - **How often it is sent**: once per main session, once per subagent
   run that receives it (Explore and Plan subagents skip CLAUDE.md), and
@@ -314,24 +357,38 @@ size. No text is kept (`context_files.py`).
 - **Before and after** (`impact.py`): for each change point, the
   sessions started in the 14 days before it (or since the previous
   change) are compared with those started after it, on the measures
-  that change should move, most telling first, with cost per session
-  always last as the overall check. A model change is judged on the
-  tokens it spends before what they cost, so a different price per token
+  that change should move, with cost per session always last as the
+  overall check. The card leads with the measure the ratio test is
+  surest of, not the first one listed: a clear difference, then a
+  possible one, then no clear change, the smaller p-value breaking a
+  tie, and a difference under 5% reads as no clear change. Its one-line
+  verdict says no more than that reading allows ("fell 40%", "may have
+  fallen", "no clear change", "about the same"). A model change is judged on
+  the tokens it spends before what they cost, so a different price per token
   can't pass for a different amount of work: tokens per session, output
-  tokens per reply, replies per session, cost per reply, then cost per
-  session. An effort or thinking change is judged on output tokens per
-  reply, cost per reply, then cost per session. A fast mode change
-  changes the price, not the tokens, so it is judged on cost per reply,
-  then cost per session. When one settings edit changes several keys,
-  the measures follow the order the keys are listed in (alphabetically),
-  but the token measures always come before cost per reply, even when an
-  effort, thinking or fast mode key is listed ahead of `model`. Output tokens per
-  reply counts real replies only; a conversation summary's estimated
-  request counts in tokens per session instead. Other changes use cost
-  per spawn for a change to one agent, summaries per session for
-  `autoCompactWindow`, cache rebuild share for a TTL change, and so on.
-  Each project is judged between its own neighbouring changes: a change
-  to every project is compared in each project with the changes that
+  tokens per reply, replies per session, cost per reply, cost per request
+  (a session's cost over its prompt cycles that asked for something,
+  which a run of go-aheads or status checks can't move), then cost per
+  session. A change to metrics capture, live coaching or the feedback
+  prompts isn't meant to move cost, so its cost per session is read last
+  whatever it says. A card also says when the mix of sessions moved:
+  a scheduled run or a mode whose share changed by 25 points or more
+  between the two sides, which makes the per-session figures compare
+  different kinds of work. The prompting-habit and one-at-a-time rates
+  divide by the messages that asked for something, the way the Work
+  habits rates do, with the same count on both sides. An effort or thinking
+  change is judged on output tokens per reply, cost per reply, then cost per
+  session. A fast mode change changes the price, not the tokens, so it is
+  judged on cost per reply, then cost per session. When one settings edit
+  changes several keys, the measures follow the order the keys are listed in
+  (alphabetically), but the token measures always come before cost per
+  reply, even when an effort, thinking or fast mode key is listed ahead of
+  `model`. Output tokens per reply counts real replies only; a conversation
+  summary's estimated request counts in tokens per session instead. Other
+  changes use cost per spawn for a change to one agent, summaries per
+  session for `autoCompactWindow`, cache rebuild share for a TTL change, and
+  so on. Each project is judged between its own neighbouring changes: a
+  change to every project is compared in each project with the changes that
   apply there, so a change made in one project cuts only that project's
   before and after, and the all-projects card is the project readings
   put together. The sessions after it are weighted to the mix of work
@@ -365,14 +422,14 @@ transcript: a main session or one subagent run.
 
 | Signal | Counted as | Out of | For |
 |---|---|---|---|
-| Didn't finish | runs that reported failure, were stopped, were ended early by Claude Code, never replied, were cut off (the last reply asked for a tool and nothing came after it; ending on a `StructuredOutput` call is a workflow agent's answer, so that counts as finished), or ended their last reply with `[result: partial]` or `[result: blocked]` (see markers below) | agent runs | subagents |
+| Didn't finish | runs that reported failure, were stopped, were ended early by Claude Code, never replied, were cut off (the last reply asked for a tool and nothing came after it; ending on a `StructuredOutput` or `SubagentHandback` call is an agent handing its answer back, so that counts as finished), or ended their last reply with `[result: partial]` or `[result: blocked]` (see markers below) | agent runs | subagents |
 | Likely out of turns | cut-off runs that ended right after a tool result came back, without being stopped: how a run ends when its `maxTurns` runs out (Claude Code doesn't record the reason) | agent runs | subagents |
 | Retried on a larger model | runs after which the same agent type, started again on a larger model family in the same session, edited one of the same files within 2 hours, or a larger model was started with a brief saying `[retry: model]` (see below) | agent runs that edited files or were retried | subagents |
 | Reported failure / Stopped | the status in the agent's task notification or result | agent runs with a recorded outcome | subagents |
 | Failed tool calls | tool results marked as an error | tool calls | all |
 | Failed shell commands | Bash and PowerShell results marked as an error | shell commands | all |
-| Denied by you | tool calls you declined | tool calls | all |
-| Stopped by you | replies you interrupted | replies | main session |
+| Denied by you | tool calls you or a deny rule turned down; not a plan you sent back, a question you declined or a call a hook blocked | tool calls | all |
+| Stopped by you | replies you interrupted; not the line Claude Code writes after a plan or question you answered | replies | main session |
 | Corrections | your messages containing a correction phrase ("that's wrong", "still broken", "why did you", "undo that"...) | your messages | main session |
 | Edited again | edits to a file already changed before your latest message | edits | main session |
 | Hit output limit | replies that stopped at the output token limit | replies | all |
@@ -455,11 +512,12 @@ These two markers were first asked for by adding two lines to
 `~/.claude/CLAUDE.md` (commit 30f930b, `quality.MARKER_LINES`, about 115
 tokens, sent with every session and most subagents whether or not any
 agent ran that day). [Metrics capture](#8-metrics-capture) now supersedes
-that: at its Essentials level it asks for the same `[retry: ...]` and
-`[result: ...]` words, plus everything else Essentials and the levels
-above it capture, from a note the hook adds only at each session and
-subagent start — never a permanent CLAUDE.md addition, and nothing at
-all while capture is off. See [`docs/capture.md`](capture.md) for the
+that: at its Essentials level it records the same `[retry: ...]` and
+`[result: ...]` words, from a Claude Haiku call that judges each agent
+run in the background (the agent is asked for nothing), plus everything
+else Essentials and the levels above it capture, from a note the hook
+adds only at each session start — never a permanent CLAUDE.md addition,
+and nothing at all while capture is off. See [`docs/capture.md`](capture.md) for the
 full catalogue. The old CLAUDE.md lines still parse exactly as above if
 you already added them, or if Claude keeps writing the markers on its
 own after capture is off. The check "Is any agent struggling?" on
@@ -513,10 +571,11 @@ floor.
 ## 8. Metrics capture
 
 Metrics capture is an opt-in feature: while it's on, a hook adds a short
-note to each session and subagent start, and Claude ends its replies
-with a one-line tag (`[cg: task=bugfix brief=partial level=normal]`; a
-subagent's report ends `[result: done]` plus whatever extra words its
-level asks for). It costs tokens, and levels trade depth of insight for
+note to each session start, and Claude ends its replies with a one-line
+tag (`[cg: task=bugfix brief=partial level=normal]`; unless Claude Haiku
+writes the tags, then it sends no note and the replies carry no tag). A
+Claude Haiku call judges each agent run in the background, so no
+subagent or workflow agent is asked for anything. It costs tokens, and levels trade depth of insight for
 that cost: Free (local signals only, no Claude tokens), Essentials,
 Standard and Deep, each including the levels below it, plus Custom. The
 full catalogue — every metric's id, level, what it captures, why, its
@@ -542,7 +601,132 @@ you turn a level on.
 **Prompt cycle.** `capture.prompt_cycles` is the unit metrics capture's
 own numbers are counted over: one message of yours, the reply that
 answers it, and every subagent that message started, at any depth, up to
-(not including) the turn that answers your next message.
+(not including) the turn that answers your next message. A workflow's
+agents belong to the cycle of the reply that started their run; a run
+that was resumed keeps its run id, so its agents are split between the
+resuming replies by when they started. A tag Claude writes in reply to a
+background agent's or a workflow's report counts for the cycle that
+launched it, even when you sent another message in between. The whole
+reply goes with it: its tag, and every turn it took, from the one that read
+the report to the last tool call it made. Hand-offs carry through: an agent
+or workflow that such a reply starts belongs to the same cycle, with all its
+agents, and so does the reply to its report. A plan that goes on from one
+workflow's report to the next therefore stays in the cycle that began it,
+whatever you typed in between, while a workflow a message of yours starts
+stays with that message. The reply keeps its place in the cycle's own turns,
+the timeline, but `capture.cycle_spend` charges its cost and tokens to the
+cycle that started the agent, so the cycles' costs still add up to the
+session's. A piece of work's cost labels the amount
+that came this way (`moved_cost`).
+
+**Piece of work.** The stretch of a session that was one job, drawn from the
+transcript alone by `pieces.pieces_of`, so it needs no /cg-feedback answer
+and no tag. Where it differs from a prompt cycle: a cycle is one message and
+its replies, and a piece is the run of cycles from one fresh start to the
+next. It starts only at the session start, at a /clear (unless the message
+after it is a handoff), at a settled `shift=new` on a message that asks for
+something, or, with no `shift` word at all, after a silence of 3 hours or
+more with different files (under 10% of the file names in common, at least
+two on each side) on a message that asks for something. A usage-limit pause
+in the silence does not count towards the 3 hours, up to the limit's reset.
+That last start is the only low-confidence one. A queued message and an
+answer to a question Claude asked open no cycle, and a reply to a plan Claude had just put up
+asks for nothing, so none of them starts a piece. A session with no start
+inside it is one *unsegmented* piece, and counts its messages that asked for
+something, not itself, in a per-piece rate. A session that opens with a
+handoff, within 72 hours of the end of the same project's previous piece,
+joins that piece. A handoff is a first message that carries the previous
+piece on. A long first message (1,500 characters or more) or a paste does so
+only when the first cycle reads or edits a file that piece edited, whatever
+paths it names and whether or not a plan was approved. Any other first
+message does so when it names a file path and either the previous piece's
+plan was approved or the first cycle reads or edits a file that piece
+edited. A long message or a paste for other files, or a short path with
+nothing carried over and no approved plan, is a new piece. An **aside** is a
+message you sent while background work ran: a cycle that asks for something
+(not a go-ahead, a status check or a thank-you) and changes no files,
+at whose first reply an agent or workflow an earlier cycle of the piece
+launched is still running (its report has not come back). Most are side
+questions or remarks, and some steer the running work with a requirement, a
+clarification or a correction. An aside never starts a piece, whatever its
+`shift` says, and is never rework. It is left out of the piece's message
+count and of the rework rates, but its cost stays in the piece
+(`aside_cycles`, `aside_cost`). A cycle that changes a file while the work
+runs is an ordinary one, and so is the same message once the report is in.
+**Rework** is a cycle after the piece's first
+delivery that has a settled `shift` of `redo` or `fix`, a correction you
+typed or queued, or an adjustment that changes files the piece already
+changed. A short message that changes the files the cycle before it did is
+no rework on that alone: a hand-check found it right for 1 message in 12,
+so with no such flag or tag it is not rework. A go-ahead, a thank-you,
+a status check, a round of plan feedback and an aside are never rework. Your
+/cg-feedback answers can rule a cycle out
+(`why=changed`, `plan=new`, a plan check of `new`) and are where the
+**cause** comes from first, then the cycle's settled `why` tag, else "cause
+not reported". Each cause carries where it came from: your feedback,
+Claude's tag, Haiku's tag, or inferred (nothing gave the cause, so the
+follow-up was read from your message or the tag's `shift` alone). Nothing
+says Claude got it wrong unless your answers or a tag did. The typical piece the coaching file holds
+is the median of these pieces' tokens, and the capture banner lists the
+pieces of work no rating covers. `pieces.rework_rate`, `rework_by_level` and
+`rework_by_size` normalise rework per message that asked for something
+(asides left out) and per piece. A `habits.Piece` is the habits tables' own
+row: the work one
+/cg-feedback answer or dashboard rating covers, with its outcome, and one
+row with no outcome for each piece of work no answer covers. Only the rows
+with an outcome feed the tables that need your answer. The `rework` section
+(`rework.py`) reports the rework, its causes and where each came from, by
+piece of work, with one line under its headline for the asides it left out
+(how many, and what they cost).
+
+**Admission.** A reply that owns a mistake of Claude's. It counts only when
+the settled `admit` tag says so (`claim`, `change` or `instruction`: an
+instruction Claude had been given and did not follow); a reply that only
+reads like one (`Cycle.admit_possible`) is a possible admission and is
+never in a total. It is *caught by you* when a message of yours pushed back
+before it (`Turn.admit_caught`, else a correction or adjustment typed or
+queued before it), else *by Claude itself*. The rework after an admission
+you caught is the admitting cycle, when it was rework, and the run of
+rework cycles after it, each counted once.
+
+**Messages that asked for something.** A message asks for something
+(`pieces.asks`, `CycleFact.asks`) unless it is a go-ahead, a status
+check, a thank-you, or your reply to a plan you sent back. Each message
+you typed while Claude worked adds one, less a go-ahead or a status check
+among them, and a /cg-feedback run asks nothing. The habit rates per
+message and the weekly trends divide by these. A habit built from
+Claude's tags divides by the tagged ones, so a week it wasn't tagging is a
+dash, not a week with nothing to fix. A trend is "new" until 3 weeks are
+measured and "Not measured" when every week is zero. The percentage columns
+of a table divide by the messages in that table's own group.
+
+**Partial and vague asks.** The `brief_clearly` card compares them with clear
+asks like for like: within one kind of task and level, leaving out the
+messages that carried out a plan, with at least 5 messages on each side. It
+shows when a partial or vague ask cost more than a clear one in at least 60%
+of the comparisons. The plain averages in "How clear your asks were" mix in
+plan builds and every kind of work, so that table carries a note saying so.
+
+**Redone and planned.** A message is *redone* when a settled `shift`
+of `redo` or `fix` or a correction followed it, or when the piece of work
+reworked it afterwards. A follow-up you called a change of mind, new to the
+plan or not a fix doesn't count. Nor does an aside or a plan-feedback round.
+The whole chain of rework is charged to the message that
+delivered the work (`redo_cost`), once, even when a cycle is both a redo and
+rework. A message is *planned* when it was written in plan mode, called
+`ExitPlanMode`, or came after a plan you approved by typing, until its piece
+of work ends. When most of your hard asks were planned and none of the others
+was redone, the digest says you are already doing this. What planning cost
+(`plan_cost`) runs to the last plan Claude put up in the message, so a plan
+you sent back counts its rounds.
+
+**Plans sent back.** One *ask* is every plan Claude put up until you
+approved one. A plan is *sent back* when the dialog declined it and you
+did not then type a go-ahead: a decline followed by "implement the plan"
+is an approval by typing. Plans Claude puts up again unchanged after an
+approval are the same plan. The Plans sent back table groups the approved
+plans by how often they were sent back first. See
+[`plan-handoff.md`](plan-handoff.md#how-often-a-plan-is-sent-back).
 
 **Coverage.** The share of prompt cycles whose final reply carried a
 `[cg: ...]` tag (`CaptureUsage.coverage`), and separately the share of
@@ -553,7 +737,7 @@ wrong, so a habit built on few tagged cycles is shown with that caveat.
 **Enough data.** Each metric has a target answer count before its
 suggestions are treated as settled rather than early (`capture.ENOUGH`):
 40 tagged cycles for a main-session metric (`task`, `brief`, `level`,
-...), 25 for a subagent metric (`result`, `fit`, `rules`, `agent_brief`),
+...), 25 for a subagent metric (`result`, `agent_brief`),
 20 for a brief-start marker (`retry`, `spawn`), 15 for a tool-note metric
 (`big_output`, `web`), 20 for a free signal, 10 for a feedback answer.
 Setup › Capture uses this to suggest lowering a level once a metric has
@@ -585,23 +769,54 @@ whether you've already picked it up. Every table is always present in a
 report, empty (with a note saying why) when capture is off or nothing's
 been collected yet — a table never disappears out from under you.
 
+**A tag's words are checked against the transcript.** Claude and Haiku
+can write a word the transcript contradicts: `check=none` after testing
+a change, or a `why` with no redo behind it. Before a tag counts, a fixed
+rule set (`capture_tags.settle`) puts such words right from the counts
+the parser took: files changed, tests run, plans and how you answered
+them, skills run. The capture hook applies the same rules, written again
+because it can't import the package, to Haiku's words before they are
+stored, whether it writes every tag or fills in one Claude left out. The
+tag file notes each change in an optional `g` field.
+Claude's tag is kept as it was written, and reports read the settled
+words. A reply that reads like an admission with no `admit` word is only
+a possible admission and is never added to a total. When one message
+gets several tags, `level` and `size` take the highest word. Nothing but
+counts, yes/no answers and closed words comes out of the check.
+
 **Evidence and confidence.** Each habit is labelled by where its
 evidence came from: **reported** (a capture tag), **inferred** (measured
 without asking Claude), or **your feedback**. Confidence is **high**
 from 20 supporting cases, **medium** from 8; inferred evidence alone is
-never high, since it's the weakest of the three. **Trend** is **new**,
-**falling**, **rising** or **steady**, from the habit's rate per message
+never high, since it's the weakest of the three. **Trend** is **new**
+(until 3 weeks are measured), **falling**, **rising**, **steady** or **not
+measured** (every week is zero), from the habit's rate per message
 over the last eight weeks; a fall sustained over at least four known
 weeks counts as **picked up**, and the saving that implies moves into
 the "Weekly pace" digest's `adopted` figure instead of still being
 suggested.
 
+**Your /cg-feedback answers change the advice.** What you say a piece of
+work's follow-ups were (`why`), where Claude's miss was (`missed_in`), what
+would have made it cheaper (`helped`), whether it was worth it (`worth`),
+whether the plan covered a fix (`plan`, `plan_check`), whether a build
+could have started from the plan (`handoff`), and what you thought of a
+tip (`tip`, `tip_hint`) feed the habits and cards that match. The same
+answers on the dashboard's session rating count the same way when no
+/cg-feedback run rated that session. Follow-ups you called a change of
+mind, or new to the plan, are no rework: they are
+left out of `redone` and the waste figures where the cycles are built
+(`CycleFact.excused`), so every table agrees. A tip you called wrong twice
+waits for more or is muted, and one you knew twice shows once a session,
+through `coaching.json`. `docs/sections-reference.md` names the table
+each answer lands in. Every answer is a closed word, kept as a count, and
+the words you type under Other are read once and dropped.
+
 **Cheaper-setup verdicts** (`habits_setups`, shown on Setup › Profiles):
 for a kind of task, the model and effort you used most (`usual`) against
 the cheapest setup that cost less, went at least as well within 5
 points, and has 5 or more messages (`cheaper`). "Went well" is your
-feedback's `met` where you gave it, else not redone by your next
-message. The two are compared level for level, on only the capture
+feedback's `met` where you gave it, else not redone afterwards. The two are compared level for level, on only the capture
 levels both setups ran, weighted by the usual setup's own mix
 (`habits._like_for_like`), and only once those shared levels hold at
 least half the usual setup's messages — comparing a setup that mostly
@@ -614,10 +829,11 @@ evidence instead of a heuristic: `recommend._rule_effort_mismatch` joins
 high effort or above, with no approximation caveat, ahead of its
 structural fallback. `advice._merge_model_tier` reads
 `habits.unfit_agents` (built from `habits_agents`) as a veto over a
-cheaper-model suggestion: an agent whose runs said a larger model would
-suit, whose work was mostly reported hard, or that was retried for the
-model, is left out of the suggestion — never added to one just because
-its runs said "smaller" would do. The `spawn-claude-md` rule adds
+cheaper-model suggestion: an agent whose work was mostly reported hard,
+or that was retried for the model, is left out of the suggestion. What
+the agent's runs did (the share of calls that were a single read-only
+look, and the calls before the first edit) is shown beside it and never
+pushes a suggestion. The `spawn-claude-md` rule adds
 `habits_agents`' reported `rules_used`/`rules_unused` counts on top of
 its structural evidence (whether every measured spawn only searched or
 read files): it holds back suggesting `omitClaudeMd: true` once most of
@@ -627,3 +843,81 @@ cites how many said they didn't.
 The full table reference — every column of every `habits` and `capture`
 table — is in
 [`docs/sections-reference.md`](sections-reference.md#habits-habitspy).
+
+
+## 10. Where agent and context tokens go
+
+These figures say where tokens go when agents and long conversations are
+involved. Each is worked out from the transcripts alone and priced at list
+prices, whatever you pay. [`sections-reference.md`](sections-reference.md)
+has every column; this is what the words mean.
+
+**Cost centres.** Every priced reply lands in one cell of a matrix. The rows
+say who spent it: the main session, agents the main session started
+(direct), agents a workflow started, and each session's first call. The
+columns say what it paid for: the starting prompt read from the cache (base
+read), the conversation read from the cache (above-base read), new writes
+(growth write), a cache rebuilt (rewrite), the reply after a conversation
+summary (post-compaction) and output. The cells add up to the total spend.
+Only the base read is mostly a setting's doing, so it is split into parts:
+those a setting can remove (MCP servers, CLAUDE.md files, skills, the agent
+list, an agent's tool list) each name the check that covers them, and those
+Claude Code itself sends say "no setting known". What nothing measured, such
+as an agent's brief or a session's first prompt, is marked Not measured. A
+part is counted once, in the lever that removes it, so two levers never claim
+the same tokens.
+
+**Model choice.** For each agent type and model, the table says who chose
+the model: the call that started the agent, its agent file, or nobody, so
+it took the session's. The Sonnet ceiling is the most that moving the runs
+to Sonnet could save with the same tokens. It is information, not a
+forecast: a cheaper model may need more replies.
+
+**How an agent run was started.** A background agent and a foreground agent
+are told apart by the `run_in_background` of the parent's call, and a
+workflow agent by its transcript kind. An agent's own meta says foreground
+for all three, so it can't be used. A workflow's agents, and every agent of
+a resumed workflow, are one run.
+
+**Single lookups.** A reply is a single lookup when it made one read-only
+call (a Read, a Grep, a Glob or a shell command that reads files) and
+nothing else. Every reply re-reads the whole context, so lookups sent one
+by one cost one re-read each, where one message holding them all would cost
+one. The saving counts the cache reads of the replies after the first of each
+stretch. A batched message still writes the tool results. It is an upper
+bound, since some lookups need the answer to the one before.
+
+**Starting context times replies.** What an agent starts with is read again
+on every reply. The product is an upper bound on what the starting context
+cost over the run: the cache makes most of those reads cheaper than a
+fresh one. The same goes for a file several sibling agents read: it counts
+the one most siblings read, often the plan or spec they were all given.
+
+**Replies to an agent's report.** When a background agent or a workflow finishes, its
+report arrives as a message and the main session answers it with a reply
+that reads the whole session again. The reply either only acknowledges the
+report, acts on it or starts more agents. A reply that starts an hour or
+more after the one before it is a wake-up: the cache had expired, so it
+wrote the context again.
+
+**How a build began.** After you approve a plan, the build carries on in the
+planning session (`kept`), starts after a `/clear` within 60 seconds
+(`cleared`), or starts in a new session of the same project that opens with
+the plan (`handoff`). A kept build reads the whole planning conversation on
+every reply; a fresh one reads the plan.
+
+**Plans sent back.** An ask is every plan Claude put up until you approved
+one. The table groups asks by how many times you sent one back, with the
+replies in between and what they cost.
+
+**What conversation summaries cost.** Besides the cache write on the reply
+after a summary, a session that summarised 3 times or more is one where the
+conversation grew and shrank repeatedly. The share of main-session cost in
+those sessions says how much of your spend long conversations account for.
+Only the main conversation's own cost counts; its agents stay in the agent
+rows.
+
+**What the tuning export keeps.** Counts, closed words and list-price
+amounts for each of these, with a custom agent type as `custom`, a model as
+its family and a file as an extension class and a size bucket. See
+[`exports.md`](exports.md#claudeglass-tuning).

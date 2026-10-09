@@ -184,7 +184,7 @@ def _models(draft: _Draft, tables, *, subagents_only: bool) -> None:
         if gate.vetoed(agent, _alias(best)):
             # The quality check found this agent did worse on that model,
             # or its runs on it were often retried on a larger one; or
-            # Claude reported its work needed a larger model.
+            # its work was mostly reported hard.
             continue
         who = "the main session" if agent == TOP else agent
         draft.add(
@@ -545,12 +545,12 @@ def _task_agents(draft: _Draft, tables, task: str) -> None:
     answered ``task``'s work (metrics capture's ``habits_agents_by_task``),
     vetoed exactly as ``_models`` vetoes its corpus-wide draft: a setup
     the quality check found worse, one often retried for the model, an
-    agent whose runs said, or were mostly, hard work
+    agent whose runs were mostly hard work or retried for the model
     (``habits.unfit_agents``), or this task's own slice of its runs
-    needing a larger model (``model_gate``, all wired through
+    being mostly hard or retried for the model (``model_gate``, all wired through
     ``habits.habits_agents_by_task``'s ``cheaper_model`` column, which
-    is already ``None`` when that row's own "larger model per task"
-    veto fired -- see ``habits._agents_by_task_table``). F8: ``cheaper_model``/
+    is already ``None`` when that row's own per-task veto fired -- see
+    ``habits._agents_by_task_table``). F8: ``cheaper_model``/
     ``cheaper_saving_pct`` are ``_model_swap_alt``'s corpus-wide verdict for
     the agent type (every task it ran, not just this one) -- only the
     veto and the run count are task-specific -- so the evidence says so,

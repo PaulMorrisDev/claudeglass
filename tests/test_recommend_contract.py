@@ -468,6 +468,8 @@ _ALL_RULE_IDS = frozenset(
         "cache-read-dominance",
         "baseline-bloat",
         "agent-report-size",
+        "agent-batch-probes",
+        "plan-rounds",
         "spawn-cost",
         "effort-mismatch",
         "discovery-share",
@@ -667,8 +669,12 @@ def _build_every_rule_fixture() -> "report.ReportModel":
             Table(
                 name="topology_spawn_write",
                 title="Spawn write",
-                columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                rows=[["claude-implementer", 50_000]],
+                columns=[
+                    Column(key="agent_type", label="Agent type"),
+                    Column(key="mean_first_call", label="Mean first call"),
+                    Column(key="mean_write", label="Mean write"),
+                ],
+                rows=[["claude-implementer", 110_000, 50_000]],
             ),
             Table(
                 name="topology_effort_tokens",
@@ -676,6 +682,44 @@ def _build_every_rule_fixture() -> "report.ReportModel":
                 columns=[Column(key="effort", label="Effort"), Column(key="thinking_share", label="Thinking share")],
                 rows=[["high", 50.0]],
             ),
+        ],
+    )
+
+    # baseline-bloat reads what a setting can change at the start of a
+    # session; spawn-cost reads the first call and the tool definitions an
+    # agent type is offered and rarely uses.
+    context_budget_section = Section(
+        key="context_budget",
+        title="Context budget",
+        tables=[
+            Table(
+                name="context_budget_baseline",
+                title="Baseline",
+                columns=[
+                    Column(key="project", label="Project"),
+                    Column(key="mean_baseline", label="Mean first call"),
+                    Column(key="skills_listing_est", label="Skills listing"),
+                    Column(key="memory_files_est", label="Memory files"),
+                    Column(key="mcp_removable_tokens", label="MCP tools you can turn off"),
+                    Column(key="controllable_est", label="What you can change"),
+                ],
+                rows=[["proj", 95_000, 7_000, 7_000, 21_000, 35_000]],
+            )
+        ],
+    )
+    agent_startup_section = Section(
+        key="agent_startup",
+        title="Agent startup",
+        tables=[
+            Table(
+                name="agent_startup_breakdown",
+                title="Startup",
+                columns=[
+                    Column(key="agent_type", label="Agent type"),
+                    Column(key="removable_tools", label="Tools never used"),
+                ],
+                rows=[["claude-implementer", 8_000]],
+            )
         ],
     )
 
@@ -714,16 +758,59 @@ def _build_every_rule_fixture() -> "report.ReportModel":
                 title="Usage-limits summary",
                 columns=[
                     Column(key="metric", label="Metric"),
-                    Column(key="limit_hits", label="Limit hits"),
-                    Column(key="agents_terminated_rate_limit", label="Agents terminated by rate limit"),
+                    Column(key="five_hour_stops", label="5-hour limit stops"),
+                    Column(key="weekly_stops", label="Weekly limit stops"),
+                    Column(key="weekly_stops_stopped_work", label="Weekly stops that stopped work"),
+                    Column(key="window_days", label="Days covered"),
                     Column(key="sessions_affected", label="Sessions affected"),
+                    Column(key="agents_cut_off", label="Agents cut off"),
                 ],
-                rows=[["all", 5, 1, 3]],
+                rows=[["all", 5, 1, 1, 30, 3, 1]],
             )
         ],
     )
 
     model_swap_section = Section(key="model_swap", title="Model swap", tables=[_agent_models_table()])
+
+    habits_section = Section(
+        key="habits",
+        title="Work habits",
+        tables=[
+            Table(
+                name="habits_probes",
+                title="Single lookups, one call per reply",
+                columns=[
+                    Column(key="agent_type", label="Where"),
+                    Column(key="calls", label="Replies"),
+                    Column(key="probes", label="Single read-only calls"),
+                    Column(key="shell", label="Of them by shell command"),
+                    Column(key="runs", label="Runs of two or more"),
+                    Column(key="batch_cost", label="Re-reads a batch would spare"),
+                ],
+                rows=[["claude-implementer", 400, 200, 20, 30, 40.0]],
+            ),
+            Table(
+                name="habits_plan_rounds",
+                title="Plans sent back",
+                columns=[
+                    Column(key="kind", label="Which plans"),
+                    Column(key="plans", label="Plans"),
+                    Column(key="typed", label="Approved by typing"),
+                    Column(key="rounds", label="Plans sent back"),
+                    Column(key="asked", label="Sent back with a question or critique"),
+                    Column(key="versions", label="Plans put up"),
+                    Column(key="steps", label="Steps in the last plan"),
+                    Column(key="files", label="Files in the last plan"),
+                    Column(key="tokens", label="Tokens between the first plan and approval"),
+                    Column(key="cost", label="Cost between the first plan and approval"),
+                ],
+                rows=[
+                    ["all", 10, 3, 12, 6, 2.2, 5.0, 3.0, 90_000, 40.0],
+                    ["none", 4, 1, 0, 0, 1.0, 4.0, 2.0, 0, 0.0],
+                ],
+            ),
+        ],
+    )
 
     return ReportModel(
         meta=ReportMeta(pricing=PricingMeta(coverage_pct=90.0)),
@@ -734,10 +821,13 @@ def _build_every_rule_fixture() -> "report.ReportModel":
             compactions_section,
             scorecard_section,
             agents_section,
+            context_budget_section,
+            agent_startup_section,
             sessions_section,
             phases_section,
             limits_section,
             model_swap_section,
+            habits_section,
         ],
         recommendations=[],
         diagnostics=Diagnostics(lines=1000, unparsable_lines=0, ttl_sum_mismatch=1),

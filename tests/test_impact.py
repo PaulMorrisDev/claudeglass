@@ -43,6 +43,7 @@ def test_measures_follow_the_changed_keys():
         "output_per_turn",
         "turns_per_session",
         "cost_per_turn",
+        "cost_per_substantive_cycle",
         "cost_per_session",
     ]
     for key in ("effortLevel", "alwaysThinkingEnabled", "MAX_THINKING_TOKENS"):
@@ -68,6 +69,7 @@ def test_measures_follow_the_changed_keys():
             "output_per_turn",
             "turns_per_session",
             "cost_per_turn",
+            "cost_per_substantive_cycle",
             "cost_per_session",
         ], keys
     assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=["fastMode", "effortLevel"]))] == [
@@ -91,6 +93,23 @@ def test_measures_follow_the_changed_keys():
     ttl = impact.measures_for(ChangePoint(CHANGE, "config", "x", keys=["effective.promptCacheTtl"]))
     assert ttl[0].key == "rebuild_share"
     assert impact.measures_for(ChangePoint(CHANGE, "apply", "x"))[0].key == "startup_tokens"
+
+
+def test_a_habit_you_started_is_measured_on_the_habits_it_names():
+    # A prompting habit: how often you do it, and for the small requests
+    # sent one at a time, their share as well.
+    drip = impact.measures_for(ChangePoint(CHANGE, "habit", "x", keys=["habit.drip_feed"]))
+    assert [m.key for m in drip] == ["prompting_habits", "drip_share", "cost_per_substantive_cycle", "cost_per_session"]
+    other = impact.measures_for(ChangePoint(CHANGE, "habit", "x", keys=["habit.plan_first"]))
+    assert [m.key for m in other] == ["prompting_habits", "cost_per_substantive_cycle", "cost_per_session"]
+    # A playbook item or a recommendation has no habit rate: judge it on
+    # the tokens a session uses, then on cost.
+    for key in ("habit.split_large", "habit.model.default"):
+        assert [m.key for m in impact.measures_for(ChangePoint(CHANGE, "habit", "x", keys=[key]))] == [
+            "tokens_per_session",
+            "cost_per_substantive_cycle",
+            "cost_per_session",
+        ], key
 
 
 def test_compare_reports_a_drop_with_counts():
@@ -510,9 +529,12 @@ def test_a_dearer_version_with_the_same_usage_moves_cost_but_not_tokens(tmp_path
     result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
     assert result["enough"]
     by_key = {m["key"]: m for m in result["measures"]}
+    # Every measure is there; the one the test is surest of leads, then the rest as listed.
     assert list(by_key) == [
-        "tokens_per_session", "output_per_turn", "turns_per_session", "cost_per_turn", "cost_per_session",
+        "cost_per_turn", "tokens_per_session", "output_per_turn", "turns_per_session", "cost_per_substantive_cycle",
+        "cost_per_session",
     ]
+    assert result["lead"] == "cost_per_turn"
     # Same tokens, replies and output per reply before and after: nothing to see.
     for key in ("tokens_per_session", "output_per_turn", "turns_per_session"):
         assert by_key[key]["change_pct"] == 0.0 and by_key[key]["direction"] == "same", key
@@ -522,14 +544,13 @@ def test_a_dearer_version_with_the_same_usage_moves_cost_but_not_tokens(tmp_path
         assert by_key[key]["change_pct"] == 100.0 and by_key[key]["direction"] == "higher", key
         assert by_key[key]["label_key"] == "higher", key
     # Read in their own units, and lower is better for each.
-    assert [(by_key[k]["kind"], by_key[k]["before"]) for k in list(by_key)[:3]] == [
+    assert [(by_key[k]["kind"], by_key[k]["before"]) for k in ("tokens_per_session", "output_per_turn", "turns_per_session")] == [
         ("tokens", "130,000 tokens"), ("tokens", "400 tokens"), ("count", "4.0"),
     ]
     assert all(row["better"] == "lower" for row in by_key.values())
-    # The headline is the tokens: usage didn't move, so it says so rather than the price.
-    assert result["verdict"] == (
-        "Tokens per session: about the same (130,000 tokens before, 130,000 tokens after)."
-    )
+    # The headline is the one that moved: usage didn't, so it is the price.
+    assert result["verdict"].startswith("Cost per reply rose 100%, from ")
+    assert result["verdict"].endswith("(3 sessions before, 4 after).")
 
 
 def test_a_version_that_writes_half_as_much_a_reply_reads_lower_though_it_costs_more(tmp_path):
@@ -545,13 +566,13 @@ def test_a_version_that_writes_half_as_much_a_reply_reads_lower_though_it_costs_
     assert (output["before"], output["after"]) == ("400 tokens", "200 tokens")
     assert output["change_pct"] == -50.0 and output["direction"] == "lower"
     assert output["label_key"] == "lower"
-    # Cache reads dwarf the output, so a session's tokens barely fall, and the headline says so.
+    # Cache reads dwarf the output, so a session's tokens barely fall: too little to lead with,
+    # however sure the test is of it, so the output that halved does.
     tokens = by_key["tokens_per_session"]
     assert (tokens["before"], tokens["after"]) == ("130,000 tokens", "129,200 tokens")
     assert tokens["change_pct"] == -0.6 and tokens["direction"] == "same"
-    assert result["verdict"] == (
-        "Tokens per session: about the same (130,000 tokens before, 129,200 tokens after)."
-    )
+    assert result["lead"] == "output_per_turn" and result["measures"][0] is output
+    assert result["verdict"] == "Output tokens per reply fell 50%, from 400 tokens to 200 tokens (3 sessions before, 4 after)."
     assert by_key["turns_per_session"]["direction"] == "same"
     # Twice the price per token still costs more a reply, for all the shorter replies.
     for key in ("cost_per_turn", "cost_per_session"):
@@ -835,3 +856,403 @@ def test_ratio_test_needs_enough_sessions_per_row_not_just_overall():
     assert row["before_n"] == 1 and row["after_n"] == 1
     assert row["label_key"] == "too_little_data"
     assert row["p"] is None
+
+
+# -- Phase 8a: the context at the start is compared on one model ---------------
+
+
+def _on(days: float, model: str, startup: int, *, agent_startup: int | None = None) -> SessionFacts:
+    """A session whose main transcript (and Explore spawn) ran on ``model``."""
+    facts = _session(days, 1.0)
+    facts.main.model = model
+    facts.main.startup_tokens = startup
+    if agent_startup is not None:
+        facts.spawns = [("Explore", _Transcript(cost=0.2, turns=3, startup_tokens=agent_startup, model=model))]
+    return facts
+
+
+_STARTUP = Measure("startup_tokens", "Context at the start of a session", "tokens")
+
+
+def test_a_start_of_context_before_and_after_on_different_models_gives_no_figure():
+    """The same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5: a
+    switch of model would read as the change cutting or adding context."""
+    before = [_on(-d, "claude-haiku-4-5", 51_500) for d in (1, 2, 3, 4)]
+    after = [_on(d, "claude-sonnet-5", 69_400) for d in (1, 2, 3, 4)]
+    row = impact._measure_row(_STARTUP, before, after, UNITS)
+    assert row["model"] is None
+    assert row["before_value"] is None and row["after_value"] is None
+    assert row["change_pct"] is None
+    assert row["label_key"] == "too_little_data"
+
+
+def test_a_start_of_context_is_read_on_the_model_both_sides_share():
+    before = [_on(-d, "claude-haiku-4-5", 51_500) for d in (1, 2, 3)] + [
+        _on(-d, "claude-sonnet-5", 70_000) for d in (4, 5, 6, 7, 8)
+    ]
+    after = [_on(d, "claude-sonnet-5", 60_000) for d in (1, 2, 3, 4)] + [_on(5, "claude-opus-5", 90_000)]
+    row = impact._measure_row(_STARTUP, before, after, UNITS)
+    assert row["model"] == "claude-sonnet-5"
+    assert row["before_value"] == pytest.approx(70_000)
+    assert row["after_value"] == pytest.approx(60_000)
+    assert (row["before_n"], row["after_n"]) == (5, 4)
+    assert row["change_pct"] == pytest.approx(-14.3)
+
+
+def test_a_transcript_names_the_model_family_of_its_first_reply_without_the_date():
+    def transcript(model: str) -> _Transcript:
+        turn = Turn(message_id="m1", turn_index=1, model=model, cache_creation_tokens=2_000, cache_read_tokens=50_000)
+        return impact._transcript(TranscriptResult(turns=[turn]), load_pricing())
+
+    dated = transcript("claude-haiku-4-5-20251001")
+    assert dated.model == "claude-haiku-4-5" == transcript("claude-haiku-4-5").model
+    assert dated.startup_tokens == 52_000
+    assert transcript("claude-sonnet-5[1m]").model == "claude-sonnet-5"
+
+
+def test_an_agents_start_of_context_is_held_to_one_model_too():
+    measure = Measure("agent_startup", "Explore: context at the start of each spawn", "tokens", "Explore")
+    before = [_on(-d, "claude-haiku-4-5", 1, agent_startup=51_500) for d in (1, 2, 3)]
+    after = [_on(d, "claude-haiku-4-5", 1, agent_startup=45_000) for d in (1, 2, 3)] + [
+        _on(4, "claude-sonnet-5", 1, agent_startup=69_400)
+    ]
+    row = impact._measure_row(measure, before, after, UNITS)
+    assert row["model"] == "claude-haiku-4-5"
+    assert row["before_value"] == pytest.approx(51_500)
+    assert row["after_value"] == pytest.approx(45_000)
+    assert row["after_n"] == 3
+
+    swapped = [_on(d, "claude-sonnet-5", 1, agent_startup=69_400) for d in (1, 2, 3)]
+    gone = impact._measure_row(measure, before, swapped, UNITS)
+    assert gone["model"] is None and gone["after_value"] is None
+
+
+def test_a_measure_that_does_not_depend_on_the_model_has_no_model_on_its_row():
+    before = [_on(-d, "claude-haiku-4-5", 51_500) for d in (1, 2, 3)]
+    after = [_on(d, "claude-sonnet-5", 69_400) for d in (1, 2, 3)]
+    row = impact._measure_row(Measure("cost_per_session", "Cost per session", "money"), before, after, UNITS)
+    assert "model" not in row
+    assert row["before_value"] == pytest.approx(1.0) and row["after_value"] == pytest.approx(1.0)
+
+
+# -- Phase 5: the lead measure, the mix of sessions and cost per request --------
+
+
+def _row(
+    key: str, label_key: str, *, p: float | None = 0.01, direction: str | None = "lower",
+    change_pct: float | None = -30.0, demoted: bool = False, label: str | None = None,
+) -> dict:
+    """A comparison row with only what the lead and the verdict read."""
+    return {
+        "key": key, "label": label or key.replace("_", " ").capitalize(), "label_key": label_key,
+        "direction": direction, "p": p, "change_pct": change_pct, "demoted": demoted,
+        "before_value": 1.0, "after_value": 0.7, "before": "1.00 USD", "after": "0.70 USD",
+    }
+
+
+def test_the_lead_is_the_measure_the_test_is_surest_of_not_the_first_one_listed():
+    rows = [
+        _row("a", "no_clear_change", p=0.6, direction="higher"),
+        _row("b", "possibly_lower", p=0.03),
+        _row("c", "lower", p=0.04),
+        _row("d", "too_little_data", p=None),
+    ]
+    # A clear difference before a possible one, whatever their p-values, before no clear change.
+    assert impact.lead_row(rows)["key"] == "c"
+    # Among clear ones the smaller p-value leads, and among ties the earlier row.
+    rows.append(_row("e", "higher", p=0.002, direction="higher"))
+    assert impact.lead_row(rows)["key"] == "e"
+    rows.append(_row("f", "higher", p=0.002, direction="higher"))
+    assert impact.lead_row(rows)["key"] == "e"
+    # Nothing judged: the least doubtful of the rest, not the size of the move.
+    quiet = [_row("a", "too_little_data", p=None), _row("b", "no_clear_change", p=0.9, direction="same")]
+    assert impact.lead_row(quiet)["key"] == "b"
+    assert impact.lead_row([_row("a", "too_little_data", p=None)])["key"] == "a"
+    assert impact.lead_row([]) is None
+
+
+def test_a_significant_move_under_the_noise_floor_does_not_lead():
+    # With enough sessions a 0.6% wobble tests as significant; it is not what the card is about.
+    wobble = _row("tokens_per_session", "lower", p=0.0, direction="same", change_pct=-0.6, label="Tokens per session")
+    move = _row("output_per_turn", "possibly_lower", p=0.04, change_pct=-50.0)
+    assert impact.lead_row([wobble, move])["key"] == "output_per_turn"
+    # Left alone it reads as the same, never as a fall.
+    assert impact._reading(wobble) == "no_clear_change"
+    assert impact._verdict([wobble], 5, 5, True) == (
+        "Tokens per session: about the same (1.00 USD before, 0.70 USD after)."
+    )
+
+
+def test_a_demoted_measure_leads_only_when_nothing_else_has_a_reading():
+    cost = _row("cost_per_session", "lower", p=0.0, demoted=True)
+    other = _row("capture_tokens", "no_clear_change", p=1.0, direction="same", change_pct=0.0)
+    assert impact.lead_row([cost, other])["key"] == "capture_tokens"
+    # Too little data on the others is not a reading: cost still reads before them.
+    thin = _row("tagged_share", "too_little_data", p=None)
+    assert impact.lead_row([cost, thin])["key"] == "cost_per_session"
+    # Not demoted, the same row leads.
+    assert impact.lead_row([dict(cost, demoted=False), other])["key"] == "cost_per_session"
+
+
+@pytest.mark.parametrize(
+    "reading, direction, change, expected",
+    [
+        ("lower", "lower", -40.2, "Cost per session fell 40%, from 1.00 USD to 0.70 USD (3 sessions before, 4 after)."),
+        ("higher", "higher", 25.0, "Cost per session rose 25%, from 1.00 USD to 0.70 USD (3 sessions before, 4 after)."),
+        ("possibly_lower", "lower", -12.0, "Cost per session may have fallen 12%, from 1.00 USD to 0.70 USD (3 sessions before, 4 after)."),
+        ("possibly_higher", "higher", 12.0, "Cost per session may have risen 12%, from 1.00 USD to 0.70 USD (3 sessions before, 4 after)."),
+        ("no_clear_change", "lower", -20.0, "Cost per session: no clear change (1.00 USD before, 0.70 USD after)."),
+        ("no_clear_change", "same", 1.0, "Cost per session: about the same (1.00 USD before, 0.70 USD after)."),
+        ("too_little_data", "lower", -20.0, "Cost per session: too little data to judge yet (1.00 USD before, 0.70 USD after)."),
+    ],
+)
+def test_the_verdict_says_only_what_the_lead_rows_reading_allows(reading, direction, change, expected):
+    row = _row("cost_per_session", reading, direction=direction, change_pct=change, label="Cost per session")
+    assert impact._verdict([row], 3, 4, True) == expected
+
+
+def test_the_verdict_follows_the_lead_not_the_first_row():
+    rows = [
+        _row("tokens_per_session", "no_clear_change", p=0.5, direction="same", change_pct=1.0, label="Tokens per session"),
+        _row("cost_per_turn", "higher", p=0.001, direction="higher", change_pct=100.0, label="Cost per reply"),
+    ]
+    assert impact._verdict(rows, 3, 4, True).startswith("Cost per reply rose 100%")
+
+
+def test_a_verdict_with_no_percentage_or_no_values_still_reads():
+    unknown = _row("cost_per_session", "lower", change_pct=None, label="Cost per session")
+    assert impact._verdict([unknown], 3, 4, True) == (
+        "Cost per session fell, from 1.00 USD to 0.70 USD (3 sessions before, 4 after)."
+    )
+    empty = dict(_row("cost_per_session", "too_little_data", p=None), before_value=None, after_value=None)
+    assert impact._verdict([empty], 3, 4, True) == "No data on the measures this change should move."
+    assert impact._verdict([], 3, 4, True) == "No data on the measures this change should move."
+
+
+def test_the_verdict_for_too_few_sessions_does_not_name_a_measure():
+    assert "Too few sessions since the change" in impact._verdict([_row("a", "lower")], 5, 1, False)
+    assert "Too few sessions before the change" in impact._verdict([_row("a", "lower")], 1, 5, False)
+
+
+def _kinded(days: float, *, mode: str = "interactive", scheduled: bool = False) -> SessionFacts:
+    facts = _session(days, 1.0)
+    facts.mode, facts.scheduled = mode, scheduled
+    return facts
+
+
+def test_the_mix_is_flagged_when_a_kind_of_session_moves_by_25_points():
+    before = [_kinded(-d) for d in (1, 2, 3, 4)]
+    # One scheduled run in four after: 0% to 25%, exactly the bar.
+    after = [_kinded(0.1, scheduled=True)] + [_kinded(d) for d in (0.2, 0.3, 0.4)]
+    mix = impact.session_mix(before, after)
+    assert mix["flagged"] is True
+    assert (mix["kind"], mix["before_pct"], mix["after_pct"], mix["shift_pts"]) == ("scheduled", 0.0, 25.0, 25.0)
+    assert mix["text"] == (
+        "Scheduled runs were 0% of the sessions before this change and 25% after. "
+        "Cost per session compares different kinds of work here, so read the other measures first."
+    )
+
+
+def test_the_mix_is_not_flagged_a_point_short_of_the_bar():
+    before = [_kinded(-0.01 * n) for n in range(25)]
+    after = [_kinded(0.01 * n, scheduled=n < 6) for n in range(25)]
+    mix = impact.session_mix(before, after)
+    assert mix["flagged"] is False and mix["shift_pts"] == 24.0 and mix["text"] == ""
+    after = [_kinded(0.01 * n, scheduled=n < 7) for n in range(25)]
+    assert impact.session_mix(before, after)["flagged"] is True
+
+
+def test_the_mix_follows_the_session_mode_and_a_share_moving_down_counts_too():
+    before = [_kinded(-d, mode="long-agentic") for d in (1, 2, 3, 4)]
+    after = [_kinded(d, mode="interactive") for d in (0.1, 0.2, 0.3, 0.4)]
+    mix = impact.session_mix(before, after)
+    assert mix["flagged"] is True and mix["shift_pts"] == 100.0
+    # Two kinds move the same 100 points: the scheduled one would win a tie, neither is scheduled.
+    assert mix["kind"] in {"interactive", "long-agentic"}
+    assert mix["text"].endswith("Cost per session compares different kinds of work here, so read the other measures first.")
+    back = impact.session_mix(after, before)
+    assert back["flagged"] is True and back["shift_pts"] == 100.0
+
+
+def test_a_scheduled_run_counts_as_scheduled_whatever_its_mode():
+    before = [_kinded(-d) for d in (1, 2, 3, 4)]
+    after = [_kinded(d, mode="long-agentic", scheduled=True) for d in (0.1, 0.2, 0.3, 0.4)]
+    mix = impact.session_mix(before, after)
+    assert mix["kind"] == "scheduled" and mix["shift_pts"] == 100.0
+    assert mix["text"].startswith("Scheduled runs were 0%")
+
+
+def test_the_mix_is_not_judged_without_sessions_on_both_sides_or_without_modes():
+    sessions = [_kinded(d) for d in (0.1, 0.2)]
+    assert impact.session_mix([], sessions) is None and impact.session_mix(sessions, []) is None
+    # Sessions built by hand carry no mode: nothing to compare.
+    bare = [_session(d, 1.0) for d in (0.1, 0.2, 0.3)]
+    mix = impact.session_mix(bare, bare)
+    assert mix == {"flagged": False, "kind": "", "before_pct": 0.0, "after_pct": 0.0, "shift_pts": 0.0, "text": ""}
+
+
+def test_compare_carries_the_mix_the_lead_and_each_rows_demotion():
+    point = ChangePoint(CHANGE, "apply", "Changed a setting", keys=["effortLevel"])
+    before = [_kinded(-d) for d in (1, 2, 3)]
+    after = [_kinded(d, scheduled=True) for d in (0.1, 0.2, 0.3)]
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    assert result["mix"]["flagged"] is True and result["mix"]["kind"] == "scheduled"
+    assert result["lead"] == result["measures"][0]["key"]
+    assert not any(row["demoted"] for row in result["measures"])
+    # Too few sessions after: no lead and no mix to speak of.
+    thin = impact.compare(point, before + after[:1], UNITS, now=CHANGE + timedelta(days=1))
+    assert thin["enough"] is False and thin["lead"] is None and thin["mix"] is None
+
+
+@pytest.mark.parametrize("keys", [["capture.level"], ["capture.coaching"], ["capture.feedback"]])
+def test_a_capture_change_reads_cost_per_session_last_however_far_it_moved(keys):
+    source = "capture" if keys != ["capture.feedback"] else "config"
+    point = ChangePoint(CHANGE, source, "Turned something on", keys=keys)
+    before = [_captured(-d, 0, 4, 0) for d in (1, 2, 3)]
+    after = [_captured(d, 0, 4, 0) for d in (0.1, 0.2, 0.3)]
+    for facts in before:
+        facts.main.cost = 4.0
+    for facts in after:
+        facts.main.cost = 2.0
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    by_key = {m["key"]: m for m in result["measures"]}
+    cost = by_key["cost_per_session"]
+    # Cost fell by half with no spread: the test is sure, and still it is not the headline.
+    assert cost["label_key"] == "lower" and cost["demoted"] is True
+    assert result["lead"] != "cost_per_session" and result["measures"][0]["key"] == result["lead"]
+    assert not result["verdict"].startswith("Cost per session")
+    assert [row["key"] for row in result["measures"] if row["demoted"]] == ["cost_per_session"]
+
+
+def test_a_cost_change_is_not_demoted_when_cost_is_what_it_is_about():
+    point = ChangePoint(CHANGE, "transcript", "Model changed", keys=["model"])
+    before = [_session(-d, 4.0) for d in (1, 2, 3)]
+    after = [_session(d, 2.0) for d in (0.1, 0.2, 0.3)]
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    assert not any(row["demoted"] for row in result["measures"])
+    # Cost is the headline here: cost per reply, per request and per session all halved.
+    assert result["lead"] in {"cost_per_turn", "cost_per_session", "cost_per_substantive_cycle"}
+    assert result["lead"] == result["measures"][0]["key"]
+
+
+def _asked(days: float, cost: float, *, asks: int, cycles: int, messages: int) -> SessionFacts:
+    facts = _session(days, cost)
+    facts.messages, facts.asks, facts.substantive = messages, asks, cycles
+    return facts
+
+
+def test_cost_per_request_divides_by_the_cycles_that_asked_for_something():
+    # Two of ten prompt cycles asked for anything before, five after, for the same cost.
+    before = [_asked(-d, 10.0, asks=2, cycles=2, messages=10) for d in (1, 2, 3)]
+    after = [_asked(d, 10.0, asks=5, cycles=5, messages=10) for d in (0.1, 0.2, 0.3)]
+    assert impact._value(impact._CYCLE, before) == (5.0, 3)
+    assert impact._value(impact._CYCLE, after) == (2.0, 3)
+    # Cost per session can't tell them apart; cost per request can.
+    assert impact._value(impact._COST, before)[0] == impact._value(impact._COST, after)[0]
+    point = ChangePoint(CHANGE, "transcript", "Model changed", keys=["model"])
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    row = next(m for m in result["measures"] if m["key"] == "cost_per_substantive_cycle")
+    assert row["label"] == "Cost per request" and row["change_pct"] == -60.0 and row["label_key"] == "lower"
+    assert (row["kind"], row["better"]) == ("money", "lower")
+    # It is the only measure that moved, so it leads and the verdict is about it.
+    assert result["lead"] == "cost_per_substantive_cycle"
+    assert result["verdict"].startswith("Cost per request fell 60%, from ")
+    # And it sits just before cost per session in the order measures_for gives.
+    keys = [m.key for m in impact.measures_for(point)]
+    assert keys.index("cost_per_substantive_cycle") == keys.index("cost_per_session") - 1
+
+
+def test_a_scheduled_run_has_no_cost_per_request_of_its_own():
+    # No message of yours, so no prompt cycle that asked for anything: it leaves the figure alone.
+    scheduled = _asked(0, 50.0, asks=0, cycles=0, messages=1)
+    scheduled.scheduled = True
+    real = [_asked(-d, 10.0, asks=2, cycles=2, messages=4) for d in (1, 2, 3)]
+    assert impact._value(impact._CYCLE, real + [scheduled]) == impact._value(impact._CYCLE, real) == (5.0, 3)
+
+
+def test_cost_per_request_is_only_for_a_change_of_model_or_a_habit_you_started():
+    def keys(*changed: str) -> list[str]:
+        return [m.key for m in impact.measures_for(ChangePoint(CHANGE, "transcript", "x", keys=list(changed)))]
+
+    assert "cost_per_substantive_cycle" in keys("model")
+    assert "cost_per_substantive_cycle" in keys("habit.drip_feed")
+    assert "cost_per_substantive_cycle" in keys("habit.split_large")
+    for other in (["effortLevel"], ["fastMode"], ["capture.level"], ["capture.coaching"], ["autoCompactWindow"]):
+        assert "cost_per_substantive_cycle" not in keys(*other), other
+    assert keys("model")[-2:] == ["cost_per_substantive_cycle", "cost_per_session"]
+
+
+def test_the_habit_rates_divide_by_the_messages_that_asked_for_something():
+    def session(days, *, messages, asks):
+        facts = _asked(days, 1.0, asks=asks, cycles=asks, messages=messages)
+        facts.habits, facts.drip_messages = 2, 3
+        return facts
+
+    # Ten messages, five of them asks: 2 habits and 3 drip messages in 5 asks.
+    five = [session(d, messages=10, asks=5) for d in (0.1, 0.2, 0.3)]
+    assert impact._value(impact._HABITS, five) == (40.0, 3)
+    assert impact._value(impact._DRIP, five) == (60.0, 3)
+    # Ten more go-ahead messages change neither rate: they asked for nothing.
+    padded = [session(d, messages=20, asks=5) for d in (0.1, 0.2, 0.3)]
+    assert impact._value(impact._HABITS, padded) == impact._value(impact._HABITS, five)
+    assert impact._value(impact._DRIP, padded) == impact._value(impact._DRIP, five)
+    # A session counted by hand (no asks) falls back to its messages.
+    by_hand = _captured(0.1, 0, 10, 0)
+    by_hand.habits, by_hand.drip_messages = 3, 4
+    assert (by_hand.requests, by_hand.substantive_cycles) == (10, 10)
+    assert impact._value(impact._HABITS, [by_hand]) == (30.0, 1)
+
+
+def test_both_sides_of_a_habit_comparison_use_the_same_count_of_asks():
+    point = ChangePoint(CHANGE, "habit", "Started a habit", keys=["habit.drip_feed"])
+    before = [_asked(-d, 1.0, asks=5, cycles=5, messages=20) for d in (1, 2, 3)]
+    after = [_asked(d, 1.0, asks=5, cycles=5, messages=10) for d in (0.1, 0.2, 0.3)]
+    for facts in before + after:
+        facts.habits, facts.drip_messages = 2, 3
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    for key in ("prompting_habits", "drip_share"):
+        row = next(m for m in result["measures"] if m["key"] == key)
+        # Half the messages after, the same asks and the same habits: no change, not a doubling.
+        assert row["before_value"] == row["after_value"], key
+        assert row["direction"] == "same" and row["label_key"] == "no_clear_change", key
+
+
+def test_session_facts_count_what_asked_for_something_the_way_the_habit_rates_do(tmp_path):
+    from claudeglass import prompting
+    from helpers import user_str_line
+
+    lines = []
+    for n, text in enumerate(("fix the parser and add a test for it", "continue", "how is it going?", "also rename the helper")):
+        lines.append(user_str_line(text, origin={"kind": "human"}, timestamp=f"2026-09-18T12:00:{2 * n:02d}.000Z"))
+        lines.append(turn_line(content=[{"type": "text", "text": "Done."}], timestamp=f"2026-09-18T12:00:{2 * n + 1:02d}.000Z"))
+    project_dir = tmp_path / "proj"
+    project_dir.mkdir()
+    write_jsonl(project_dir / "s.jsonl", lines)
+    corpus = load_corpus([project_dir])
+    [facts] = impact.session_facts(corpus, load_pricing())
+    # Four prompt cycles; the go-ahead and the status check asked for nothing.
+    assert facts.messages == 4
+    assert (facts.asks, facts.substantive) == (2, 2)
+    assert (facts.requests, facts.substantive_cycles) == (2, 2)
+    # The same count the Work habits rates divide by.
+    habit_facts = prompting.session_prompting(corpus.sessions[0], prompting._Prices(load_pricing()))
+    assert prompting.habit_rates(habit_facts)[2] == facts.asks
+
+
+def test_a_card_reads_a_sure_move_under_the_noise_floor_as_no_clear_change():
+    def facts(days, cost, tokens):
+        return SessionFacts(
+            start=CHANGE + timedelta(days=days),
+            main=_Transcript(cost=cost, turns=10, output_tokens=4000, total_tokens=tokens),
+        )
+
+    before = [facts(-d, c, 1_000_000) for d, c in zip((1, 2, 3, 4, 5), (10, 30, 50, 20, 40))]
+    after = [facts(d / 10, c, 980_000) for d, c in zip((1, 2, 3, 4, 5), (12, 28, 47, 25, 38))]
+    point = ChangePoint(CHANGE, "transcript", "Model changed", keys=["model"])
+    result = impact.compare(point, before + after, UNITS, now=CHANGE + timedelta(days=1))
+    tokens = next(m for m in result["measures"] if m["key"] == "tokens_per_session")
+    # A 2% fall with no spread: the test is sure of it, the card still says no clear change.
+    assert tokens["direction"] == "same" and tokens["p"] == 0.0
+    assert tokens["label_key"] == "no_clear_change"
+    assert tokens["label_text"] == impact.quality.LABELS["no_clear_change"]
+    assert result["verdict"].startswith("Tokens per session: about the same")

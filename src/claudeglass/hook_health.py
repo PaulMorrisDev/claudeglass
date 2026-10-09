@@ -22,8 +22,9 @@ SessionEnd, Notification and PermissionRequest for the free signals),
 described by :class:`HookSpec`. :func:`check_capture` checks them the same way;
 :func:`plan_capture` works out the change that makes settings.json run
 exactly the entries the chosen metrics need, and :func:`connect` writes
-it. :func:`install_hook_files` copies the hook scripts out of the
-package, which works inside the ``.pyz`` build too.
+it. :func:`install_hook_files` copies the hook files (the launcher
+``capture-hook.py``, the module ``capture_hook.py`` it runs and the
+catalogue) out of the package, which works inside the ``.pyz`` build too.
 
 None of the above needs a transcript. :func:`count_hook_errors` does --
 it tallies each hook event's non-blocking errors (``PreToolUse``,
@@ -34,10 +35,12 @@ of its recorded runs into one plain-English prompt naming where to look for it,
 the latency/noise trade-off, and the undo. It only ever prints; nothing
 here writes to settings.json on that account.
 
-:func:`measure_deep_wait` reads the same transcripts for Deep's own
-big_output/web PostToolUse hook's real ``durationMs`` (CAP-9/F10: it used
-to be dropped, and the catalogue guessed at a figure with no source
-behind it) and turns it into a median/p90 :class:`DeepWaitStats`.
+:func:`measure_hook_overhead` reads the same transcripts for what ClaudeGlass's
+own hooks cost to run: how often each installed hook ran (counted from the
+tool calls, prompts, turn ends and agent runs the transcripts hold, since a
+run that prints nothing leaves no record) against the real ``durationMs``
+Claude Code did record (CAP-9/F10: it used to be dropped, and the catalogue
+guessed at a figure with no source behind it), as a :class:`HookOverhead`.
 """
 
 from __future__ import annotations
@@ -50,9 +53,10 @@ import json
 import os
 import re
 import shutil
+import statistics
 import subprocess
 import sys
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterable
@@ -66,8 +70,17 @@ HOOK_SCRIPT_NAME = "snapshot-config.py"
 #: of them belongs to capture.
 CAPTURE_SCRIPTS = (capture_catalogue.HOOK_SCRIPT,)
 
-#: Files each capture script needs next to it under ``<config-dir>/hooks``.
-CAPTURE_FILES = {capture_catalogue.HOOK_SCRIPT: (capture_catalogue.HOOK_SCRIPT, capture_catalogue.CATALOGUE_FILE)}
+#: Files each capture script needs next to it under ``<config-dir>/hooks``:
+#: the launcher Claude Code runs, the module it imports and the catalogue
+#: the module reads. The launcher comes last, as :func:`install_hook_files`
+#: writes it last: it is the file that starts using the others.
+CAPTURE_FILES = {
+    capture_catalogue.HOOK_SCRIPT: (
+        capture_catalogue.CATALOGUE_FILE,
+        capture_catalogue.HOOK_MODULE,
+        capture_catalogue.HOOK_SCRIPT,
+    )
+}
 
 #: Every file name this tool ever installs under ``<config-dir>/hooks``.
 ALL_HOOK_FILES = frozenset({HOOK_SCRIPT_NAME} | {name for names in CAPTURE_FILES.values() for name in names})
@@ -76,7 +89,7 @@ ALL_HOOK_FILES = frozenset({HOOK_SCRIPT_NAME} | {name for names in CAPTURE_FILES
 CAPTURE_TIMEOUT_S = 5
 
 #: The oldest Python a hook command can safely name: ``tomllib``, which
-#: ``capture-hook.py`` reads config.toml with, is stdlib only from here.
+#: ``capture_hook.py`` reads config.toml with, is stdlib only from here.
 _MIN_PYTHON = (3, 11)
 
 
@@ -93,14 +106,21 @@ class HookSpec:
 
     def describe(self) -> str:
         tools = set(self.matcher.split("|"))
+        # The tools the entry watches, in words: results to read, a plan,
+        # and the calls that start an agent or a workflow.
+        reads = tools - {"ExitPlanMode", *capture_catalogue.SPAWN_TOOLS}
+        seen = ["web results" if reads <= set(capture_catalogue.WEB_TOOLS) else "read, search and web results"]
+        if "ExitPlanMode" in tools:
+            seen.append("an approved plan")
+        if tools & set(capture_catalogue.SPAWN_TOOLS):
+            seen.append("an agent or workflow start")
+        after = ", ".join(seen[:-1]) + " and " + seen[-1] if len(seen) > 1 else seen[0]
         when = {
             "SessionStart": "when a session starts, is cleared or compacts",
             "SubagentStart": "when a subagent starts",
             "SubagentStop": "when a subagent finishes",
             "UserPromptSubmit": "when you send a message",
-            "PostToolUse": "after "
-            + ("web results" if tools - {"ExitPlanMode"} <= set(capture_catalogue.WEB_TOOLS) else "shell, read, search, web and MCP results")
-            + (" and an approved plan" if "ExitPlanMode" in tools else ""),
+            "PostToolUse": "after " + after,
             "SessionEnd": "when a session ends",
             "Notification": "when Claude waits for you, in the background",
             "PermissionRequest": "when Claude asks for permission, in the background",
@@ -630,6 +650,16 @@ def backup_path(settings_path: Path, now: datetime) -> Path:
 TERMINAL_ENTRYPOINTS = frozenset({"cli"})
 
 
+def terminal_sessions(entrypoints: dict[str, dict] | None) -> tuple[int, int]:
+    """``(terminal, total)``: how many of your sessions ran in a terminal
+    and how many ran at all, from ``entrypoints``
+    (``Store.entrypoint_counts()``). A session whose entrypoint is unknown
+    counts in ``total`` only. ``(0, 0)`` with no readings."""
+    counts = entrypoints or {}
+    terminal = sum(v.get("count", 0) for k, v in counts.items() if k in TERMINAL_ENTRYPOINTS)
+    return terminal, sum(v.get("count", 0) for v in counts.values())
+
+
 def statusline_check(
     config_dir: str | Path, entrypoints: dict[str, dict], *, claude_root: str | Path | None = None
 ) -> tuple[bool, str]:
@@ -651,8 +681,7 @@ def statusline_check(
                     last_logged = max(last_logged or "", row["logged_at"])
     except (OSError, csv.Error):
         pass
-    terminal = sum(v.get("count", 0) for k, v in entrypoints.items() if k in TERMINAL_ENTRYPOINTS)
-    total = sum(v.get("count", 0) for v in entrypoints.values())
+    terminal, total = terminal_sessions(entrypoints)
     desktop_note = (
         f" {total - terminal} of your {total} sessions ran outside a terminal (for example in the desktop app), "
         "where Claude Code does not run a statusline, so usage limits are only logged from terminal sessions."
@@ -832,6 +861,17 @@ def _capture_entries(settings: dict) -> list[tuple[HookSpec, dict]]:
     return found
 
 
+def installed_specs(claude_root: str | Path | None = None) -> tuple[HookSpec, ...]:
+    """The capture entries settings.json runs now, one per entry (so two
+    entries on one event count twice, as Claude Code runs both). An
+    unreadable settings file reads as none, as in :func:`check_capture`."""
+    try:
+        settings = json.loads(settings_path(claude_root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    return tuple(spec for spec, _entry in _capture_entries(settings if isinstance(settings, dict) else {}))
+
+
 def _sync_capture_entries(settings: dict, wanted: tuple[HookSpec, ...], commands: dict[str, str]) -> list[str]:
     """Make ``settings`` run exactly the capture entries in ``wanted``,
     each with the command ``commands`` gives its script: entries no
@@ -968,13 +1008,13 @@ def check_capture(
     """Compare settings.json's capture entries with ``wanted``. Never
     raises: an unreadable settings file reads as no entries.
 
-    With ``config_dir``, each entry's script and catalogue (SEC-P7/ROB-P7)
+    With ``config_dir``, each entry's launcher, module and catalogue (SEC-P7/ROB-P7)
     are also hash-stamp checked against the manifest :func:`install_hook_files`
     writes, adding to ``.outdated``/``.modified`` -- cheap (a few files
     hashed, no transcript read), so safe for a hot status path. With
     ``check_python`` too, each distinct interpreter is also asked its own
     version once (:func:`_interpreter_version`, a bounded subprocess
-    call) and flagged when older than 3.11, since ``capture-hook.py``
+    call) and flagged when older than 3.11, since the hook
     needs ``tomllib`` to read config.toml at all -- left off by default
     since spawning a process isn't free."""
     health = CaptureHookHealth(settings_path=settings_path(claude_root), needed=tuple(wanted))
@@ -1006,7 +1046,12 @@ def check_capture(
             for name in CAPTURE_FILES.get(spec.script, (spec.script,)):
                 target = script if name == spec.script else script.with_name(name)
                 state = _file_provenance(target, name, manifest)
-                if state == "missing" and name != spec.script:
+                if state == "missing" and name == capture_catalogue.HOOK_MODULE:
+                    health.problems.append(
+                        f"The module {name} next to {spec.script} is missing, so the hook does nothing. "
+                        "'claudeglass capture connect' puts it back."
+                    )
+                elif state == "missing" and name != spec.script:
                     health.problems.append(
                         f"The catalogue {name} next to {spec.script} is missing, so its notes fall back to "
                         "plain wording."
@@ -1074,14 +1119,19 @@ def install_hook_files(config_dir: str | Path, names) -> list[Path]:
     final rename fails (ROB-P7: a locked file on Windows, say), that one
     file is skipped -- its previous copy is left running rather than the
     whole install failing -- and it keeps its old manifest stamp, so
-    :func:`check_capture` still reports it accurately. Returns the paths
-    actually written."""
+    :func:`check_capture` still reports it accurately. A capture script
+    (the launcher) is written last, and only once the module it imports is
+    there: it is the file that starts using the others, so an install cut
+    short never leaves one pointing at nothing. Returns the paths actually
+    written."""
     dest_dir = Path(config_dir) / "hooks"
     dest_dir.mkdir(parents=True, exist_ok=True)
     written = []
     manifest = _load_manifest(config_dir)
     changed = False
-    for name in names:
+    for name in sorted(names, key=lambda name: name in CAPTURE_SCRIPTS):
+        if name in CAPTURE_SCRIPTS and not (dest_dir / capture_catalogue.HOOK_MODULE).is_file():
+            continue
         data = (importlib.resources.files("claudeglass") / "hooks" / name).read_bytes()
         dest = dest_dir / name
         tmp = dest.with_name(f"{name}.{os.getpid()}.tmp")
@@ -1111,16 +1161,19 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
     starts (ROB-P7), so a newer pip install reaches the hook scripts
     Claude Code actually runs without waiting for the next ``capture
     connect``. A file nothing has installed yet, or one already current,
-    is left alone; returns the paths actually rewritten."""
+    is left alone, except that a capture script that is installed and
+    isn't hand-edited gets back any of its own files that are missing: an
+    install from before the hook moved into a module has none, and the
+    launcher that replaces its script needs one. Returns the paths
+    actually rewritten."""
     dest_dir = Path(config_dir) / "hooks"
     if not dest_dir.is_dir():
         return []
     manifest = _load_manifest(config_dir)
+    states = {name: _file_provenance(dest_dir / name, name, manifest) for name in sorted(ALL_HOOK_FILES)}
     stale = []
     healed = False
-    for name in sorted(ALL_HOOK_FILES):
-        dest = dest_dir / name
-        state = _file_provenance(dest, name, manifest)
+    for name, state in states.items():
         if state == "ok":
             packaged_hash = _sha256(_packaged_bytes(name))
             if manifest.get(name) != packaged_hash:
@@ -1128,6 +1181,10 @@ def refresh_hook_files(config_dir: str | Path) -> list[Path]:
                 healed = True
         elif state == "outdated":
             stale.append(name)
+    for script, names in CAPTURE_FILES.items():
+        if states.get(script) in ("missing", "modified"):
+            continue
+        stale += [name for name in names if states[name] == "missing" and name not in stale]
     if healed and not stale:
         _save_manifest(config_dir, manifest)
     if stale:
@@ -1335,67 +1392,299 @@ def count_hook_errors(results: Iterable[TranscriptResult], stopped: Iterable[str
     return HookErrorHealth(stats=tuple(tally[name] for name in sorted(tally)))
 
 
-# -- CAP-9: Deep's measured wait (F10) ---------------------------------------
+# -- CAP-9 / Phase 7: what ClaudeGlass's own hooks cost to run -----------------
 
 
-@dataclass(slots=True)
-class DeepWaitStats:
-    """How long Deep's big_output/web PostToolUse hook actually took, from
-    real ``durationMs`` values on ClaudeGlass's own calls (F10: this used
-    to be dropped, and the catalogue guessed "a fraction of a second"
-    with no source behind it). Only a median and a p90 are kept -- never
-    the raw per-call durations -- built by :func:`measure_deep_wait`.
-    """
+def corpus_results(corpus) -> list[TranscriptResult]:
+    """Every parsed transcript in ``corpus`` (each session's own and its
+    subagents'), for the scans here that read events, not turns."""
+    results: list[TranscriptResult] = []
+    for bundle in corpus.sessions:
+        if bundle.top is None:
+            continue
+        results.extend([bundle.top, *bundle.subs])
+    return results
 
-    calls: int = 0
-    median_ms: float | None = None
-    p90_ms: float | None = None
+
+@dataclass(frozen=True, slots=True)
+class HookOverheadRow:
+    """One installed hook event: how often it ran and how long a run took.
+
+    ``runs`` is counted from the transcripts, since a run that prints
+    nothing leaves no record; ``recorded`` is how many runs Claude Code did
+    write a ``durationMs`` for, and ``median_ms`` is the median of those
+    (``None`` when none: the time is then unknown, never zero). An event the
+    transcripts can't count is ``counted=False`` and holds the recorded
+    runs only."""
+
+    event: str
+    runs: int
+    recorded: int
+    median_ms: float | None
+    counted: bool = True
+
+    @property
+    def summed_s(self) -> float | None:
+        """Runs times the median, in seconds; ``None`` with no time."""
+        return None if self.median_ms is None else self.runs * self.median_ms / 1000
+
+
+def _count_text(runs: int) -> str:
+    """``runs`` to three figures: 26,602 reads 26,600."""
+    return f"{round(runs, 3 - len(str(runs))) if runs >= 1000 else runs:,}"
+
+
+def _ms_text(ms: float) -> str:
+    return f"about {round(ms):,} ms" if ms >= 0.5 else "under 1 ms"
+
+
+def _span_text(seconds: float) -> str:
+    """A summed time in the unit that reads best: minutes, or seconds
+    under a minute."""
+    if seconds >= 60:
+        minutes = seconds / 60
+        return f"about {round(minutes):,} min" if minutes >= 10 else f"about {round(minutes, 1):g} min"
+    return f"about {round(seconds):,} s" if seconds >= 0.5 else "under 1 s"
+
+
+@dataclass(frozen=True, slots=True)
+class HookOverhead:
+    """What ClaudeGlass's own hooks cost to run over a stretch of
+    transcripts, one :class:`HookOverheadRow` per installed hook event.
+    Built by :func:`measure_hook_overhead`.
+
+    The median is of the runs Claude Code recorded a time for. Those are
+    mostly runs that printed something and so did the most work, while a run
+    that exits early leaves no record, so runs times the median runs high.
+    Calls overlap, so the summed time is not time Claude sat waiting."""
+
+    rows: tuple[HookOverheadRow, ...] = ()
+
+    @property
+    def timed(self) -> tuple[HookOverheadRow, ...]:
+        """The rows with both a run count and a recorded time."""
+        return tuple(row for row in self.rows if row.counted and row.runs and row.median_ms is not None)
+
+    @property
+    def untimed(self) -> tuple[HookOverheadRow, ...]:
+        """The counted rows that ran but have no recorded time."""
+        return tuple(row for row in self.rows if row.counted and row.runs and row.median_ms is None)
+
+    @property
+    def runs(self) -> int:
+        """Runs of the events with a time (the ones the summary counts)."""
+        return sum(row.runs for row in self.timed)
+
+    @property
+    def summed_s(self) -> float:
+        return sum(row.summed_s for row in self.timed)
+
+    @property
+    def median_ms(self) -> float | None:
+        """The median across all runs: each event's median, weighted by its
+        runs. ``None`` when no event has a time."""
+        timed = sorted(self.timed, key=lambda row: row.median_ms)
+        if not timed:
+            return None
+        half = sum(row.runs for row in timed) / 2
+        seen = 0
+        for row in timed:
+            seen += row.runs
+            if seen >= half:
+                return row.median_ms
+        return timed[-1].median_ms  # unreachable: the last row always reaches half
 
     def summary(self) -> str | None:
-        """``"Deep waited ~=N s this week"``, or ``None`` with no calls to
-        measure from (capture off, Deep's tool-note metrics off, or no
-        matching tool result yet)."""
-        if not self.calls or self.median_ms is None or self.p90_ms is None:
-            return None
-        return (
-            f"Deep's large-output/web hook waited ≈{self.median_ms / 1000:.1f}s (median, "
-            f"p90 ≈{self.p90_ms / 1000:.1f}s) over {self.calls} calls this week."
+        """One plain sentence on how often the hooks ran and what that
+        added up to, then, if any ran with no recorded time, which were
+        left out. ``None`` when nothing ran."""
+        untimed = self.untimed
+        if not self.timed:
+            if not untimed:
+                return None
+            total = sum(row.runs for row in untimed)
+            runs = "once" if total == 1 else f"about {_count_text(total)} times"
+            return f"ClaudeGlass's hooks ran {runs}. Claude Code recorded no run time for them."
+        runs = "once" if self.runs == 1 else f"about {_count_text(self.runs)} times"
+        text = (
+            f"ClaudeGlass's hooks ran {runs}, {_ms_text(self.median_ms)} each, "
+            f"{_span_text(self.summed_s)} summed (calls overlap)."
         )
+        if untimed:
+            text += f" Left out, with no run time recorded: {', '.join(row.event for row in untimed)}."
+        return text
 
 
-def _percentile(sorted_values: list[float], fraction: float) -> float:
-    """Nearest-rank percentile; fine for the handful of calls a week
-    of Deep hook activity produces -- no interpolation needed."""
-    index = min(len(sorted_values) - 1, int(fraction * len(sorted_values)))
-    return sorted_values[index]
+#: A matcher of only these characters names tools exactly, ``|`` between
+#: them; anything else is a regular expression (Claude Code's own rule).
+_PLAIN_MATCHER_RE = re.compile(r"[A-Za-z0-9_|]+")
+
+#: Parser events that are a prompt Claude Code submitted in a main session,
+#: so ``UserPromptSubmit`` fired for it: what you typed or ran as a slash
+#: command, a background run's report, a scheduled task, the app's resume
+#: ping and a message from another session.
+_PROMPT_KINDS = frozenset(
+    {
+        EventKind.HUMAN_TEXT,
+        EventKind.SLASH_COMMAND,
+        EventKind.TASK_NOTIFICATION,
+        EventKind.AGENT_TERMINATED,
+        EventKind.SCHEDULED_TASK,
+        EventKind.LIMIT_RESUME,
+        EventKind.PEER_MESSAGE,
+    }
+)
 
 
-def measure_deep_wait(results: Iterable[TranscriptResult]) -> DeepWaitStats:
-    """Median/p90 ``durationMs`` (:func:`_hook_output_detail` <- events.py)
-    across every PostToolUse call ClaudeGlass's own capture hook made in
-    ``results`` (already-parsed transcripts -- same "no I/O here"
-    contract as :func:`count_hook_errors`) -- every outcome counts, not
-    only a successful one, because Claude Code waited for the hook to
-    finish either way.
-    """
-    durations: list[float] = []
+def _matches(matcher: str, name: str) -> bool:
+    """Whether a hook entry's ``matcher`` selects ``name`` (a tool, a
+    session source or an agent type), as Claude Code reads it."""
+    if matcher in ("", "*"):
+        return True
+    if _PLAIN_MATCHER_RE.fullmatch(matcher):
+        return name in matcher.split("|")
+    try:
+        return re.search(matcher, name) is not None
+    except re.error:
+        return False
+
+
+def _tool_runs(matcher: str, results: list[TranscriptResult]) -> int:
+    """Tool calls ``matcher`` selects across ``results``. A call that
+    errored ran PostToolUseFailure instead of PostToolUse, so it isn't one."""
+    chosen: dict[str, bool] = {}
+    total = 0
+    for result in results:
+        for turn in result.turns:
+            for tool, calls in turn.tool_calls_by_tool.items():
+                if chosen.setdefault(tool, _matches(matcher, tool)):
+                    total += max(0, calls - turn.tool_errors_by_tool.get(tool, 0))
+    return total
+
+
+def _prompt_runs(results: list[TranscriptResult]) -> int:
+    return sum(
+        1
+        for result in results
+        for event in result.events
+        if event.kind in _PROMPT_KINDS
+        or (event.kind == EventKind.QUEUE_OPERATION and event.subkind == "queued_command")
+        or (event.kind == EventKind.META and event.subkind == "resume")
+    )
+
+
+def _fires(spec: HookSpec, mains: list[TranscriptResult], agents: list[TranscriptResult]) -> int | None:
+    """How many times ``spec``'s entry ran, counted from the transcripts of
+    the main sessions (``mains``) and the agent runs (``agents``); ``None``
+    for an event the transcripts don't show (a wait for you, a permission
+    prompt, a turn that ended in an API error)."""
+    event = spec.event
+    if event == "PostToolUse":
+        return _tool_runs(spec.matcher, [*mains, *agents])
+    if event == "UserPromptSubmit":
+        return _prompt_runs(mains)
+    if event == "Stop":
+        return sum(
+            1
+            for result in mains
+            for turn in result.turns
+            if turn.stop_reason not in (None, "tool_use") and not turn.is_synthetic
+        )
+    if event == "SessionStart":
+        sources = set(spec.matcher.split("|")) if spec.matcher not in ("", "*") else {"startup", "clear", "compact"}
+        # An agent run has no start of its own but compacts like a session,
+        # and a /clear starts a new session file, so it is counted as a start.
+        compactions = sum(1 for result in [*mains, *agents] for e in result.events if e.kind == EventKind.COMPACT_BOUNDARY)
+        return (len(mains) if sources & {"startup", "clear"} else 0) + (compactions if "compact" in sources else 0)
+    if event == "SessionEnd":
+        return len(mains)
+    if event in ("SubagentStart", "SubagentStop"):
+        return sum(1 for result in agents if _matches(spec.matcher, result.meta.agent_type or ""))
+    return None
+
+
+def _moment(ts) -> datetime | None:
+    """``ts`` (ISO 8601) as an aware time, UTC when it names no zone, or ``None``."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    try:
+        moment = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+
+
+def _from_time(results: list[TranscriptResult], since: str) -> list[TranscriptResult]:
+    """``results`` cut to their turns and events from ``since`` (an ISO
+    time) on; a transcript left with neither is dropped, and so is a turn
+    or event with no readable time. An unreadable ``since`` cuts nothing."""
+    start = _moment(since)
+    if start is None:
+        return list(results)
+    kept = []
+    for result in results:
+        turns = [t for t in result.turns if (at := _moment(t.ts)) is not None and at >= start]
+        events = [e for e in result.events if (at := _moment(e.ts)) is not None and at >= start]
+        if turns or events:
+            kept.append(replace(result, turns=turns, events=events))
+    return kept
+
+
+def measure_hook_overhead(
+    results: Iterable[TranscriptResult], specs: Iterable[HookSpec], since: str = ""
+) -> HookOverhead:
+    """What ``specs`` (the capture entries settings.json runs, see
+    :func:`installed_specs`) cost to run, from ``results`` (already-parsed
+    transcripts, with their agent runs; same "no I/O here" contract as
+    :func:`count_hook_errors`).
+
+    Runs are counted from what fires each event, because a run that prints
+    nothing leaves no record and so hides most of them (one real week: 26,602
+    matched tool calls, 484 with a recorded time). PostToolUse: the tool calls,
+    main and agent, that the entry's matcher selects. UserPromptSubmit: the
+    prompts a main session submitted. Stop: the main-session turns that ended.
+    SessionStart: the main sessions and every compaction, agents' included.
+    SessionEnd: the main sessions.
+    SubagentStart and SubagentStop: the agent runs. Each entry counts, so two
+    entries on one event add. The time is the median ``durationMs`` of the
+    runs of ClaudeGlass's own hook (``detail["capture"]``) that Claude Code did
+    record, whatever their outcome, since it waited either way. With
+    ``since`` (an ISO time), only the turns and events from then on count,
+    so the runs cover the same stretch as a cost measured from it; a session
+    that carries on across it counts as one start."""
+    results = _from_time(results, since) if since else list(results)
+    mains = [result for result in results if result.meta.kind == "top-level"]
+    agents = [result for result in results if result.meta.kind != "top-level"]
+    durations: dict[str, list[float]] = {}
     for result in results:
         for event in result.events:
-            if event.kind != EventKind.HOOK_OUTPUT:
-                continue
-            if event.detail.get("hookName") != "PostToolUse" or not event.detail.get("capture"):
+            if event.kind != EventKind.HOOK_OUTPUT or not event.detail.get("capture"):
                 continue
             duration = event.detail.get("durationMs")
-            if isinstance(duration, (int, float)):
-                durations.append(float(duration))
-    if not durations:
-        return DeepWaitStats()
-    durations.sort()
-    return DeepWaitStats(
-        calls=len(durations),
-        median_ms=_percentile(durations, 0.5),
-        p90_ms=_percentile(durations, 0.9),
-    )
+            name = event.detail.get("hookName")
+            if isinstance(name, str) and isinstance(duration, (int, float)) and not isinstance(duration, bool):
+                durations.setdefault(name, []).append(float(duration))
+    by_event: dict[str, list[HookSpec]] = {}
+    for spec in specs:
+        by_event.setdefault(spec.event, []).append(spec)
+    rows = []
+    for event, entries in by_event.items():
+        fires = [_fires(spec, mains, agents) for spec in entries]
+        recorded = durations.get(event, [])
+        counted = None not in fires
+        runs = sum(fires) if counted else len(recorded)
+        rows.append(
+            HookOverheadRow(
+                event=event,
+                # A run Claude Code recorded certainly ran, so the count
+                # never falls under it.
+                runs=max(runs, len(recorded)),
+                recorded=len(recorded),
+                median_ms=statistics.median(recorded) if recorded else None,
+                counted=counted,
+            )
+        )
+    return HookOverhead(rows=tuple(rows))
 
 
 __all__ = [
@@ -1403,11 +1692,12 @@ __all__ = [
     "CAPTURE_SCRIPTS",
     "CaptureHookHealth",
     "ConnectPlan",
-    "DeepWaitStats",
     "HOOK_SCRIPT_NAME",
     "HookErrorHealth",
     "HookErrorStat",
     "HookHealth",
+    "HookOverhead",
+    "HookOverheadRow",
     "HookSpec",
     "POLICY_ALL_OFF",
     "POLICY_ALL_OFF_MANAGED",
@@ -1418,16 +1708,19 @@ __all__ = [
     "check",
     "check_capture",
     "connect",
+    "corpus_results",
     "count_hook_errors",
     "hook_command",
     "hook_policy",
     "install_hook_files",
+    "installed_specs",
     "managed_settings_dir",
-    "measure_deep_wait",
+    "measure_hook_overhead",
     "plan_capture",
     "plan_connect",
     "refresh_hook_files",
     "remove_capture_entries",
     "repair",
     "settings_path",
+    "terminal_sessions",
 ]

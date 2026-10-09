@@ -32,8 +32,6 @@
    "missing",
    "plan",
    "skill",
-   "found",
-   "fit",
    "agent_brief",
    "session_end",
    "waits",
@@ -51,8 +49,6 @@
    "missing",
    "plan",
    "skill",
-   "found",
-   "fit",
    "agent_brief",
    "prior",
    "check",
@@ -67,6 +63,7 @@
   "feedback_skill",
   "feedback_note",
   "feedback_reminder",
+  "plan_check",
   "dashboard_rating"
  ],
  "metrics": [
@@ -75,6 +72,7 @@
    "group": "essentials",
    "requires": [],
    "main_line": "task: feature|bugfix|refactor|debug|docs|review|test|research|plan|ops|chat (the kind of work asked for)",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -87,6 +85,7 @@
    "group": "essentials",
    "requires": [],
    "main_line": "brief: clear|partial|vague (how complete the request was)",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -98,7 +97,8 @@
    "id": "level",
    "group": "essentials",
    "requires": [],
-   "main_line": "level: easy|normal|hard (how hard the work was)",
+   "main_line": "level: easy|normal|hard (how hard the work was, counting agents or workflows this reply started in the background and your reply to their reports, not work left for a later reply)",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -110,7 +110,11 @@
    "id": "shift",
    "group": "essentials",
    "requires": [],
-   "main_line": "shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the last one; the scope grew; redoing earlier work; fixing a fault in it)",
+   "main_line": "shift: new|build|grew|redo|fix, only if it applies (a new unrelated task; building on the last one; the scope grew; redoing earlier work; changing what you just delivered because it was wrong or not what they wanted, a rename or tweak included = fix; a question or remark about the work or tag mid-work = no shift)\nwhy: left_out|missed|changed|tools, only with shift redo or fix (their earlier request or the plan left it out; you missed something their request or the plan said; they changed their mind; a tool or setup failure)\nadmit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of yours: a wrong statement; a wrong change; an instruction you were given and didn't follow)",
+   "extra_keys": [
+    "why",
+    "admit"
+   ],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -122,7 +126,8 @@
    "id": "size",
    "group": "essentials",
    "requires": [],
-   "main_line": "size: xs|s|m|l|xl (how big the work was)",
+   "main_line": "size: xs|s|m|l|xl (how big the work was, counting agents or workflows this reply started in the background and your reply to their reports, not work left for a later reply)",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -135,10 +140,11 @@
    "group": "essentials",
    "requires": [],
    "main_line": "",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
-   "sub_line": "result: done|partial|blocked (done = the agent finished what its brief asked; partial = some of it; blocked = it could not go on, such as a missing file, tool or permission)",
+   "sub_line": "result: done|partial|blocked (done = the agent did its own work and handed back what its brief asked for, whatever it found: findings, refuted claims and an empty list all count as done; partial = it did some of its work; blocked = it could not do its own work, such as a missing file, tool or permission)",
    "sub_extra": "",
    "tool_note": ""
   },
@@ -149,6 +155,7 @@
     "result"
    ],
    "main_line": "",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -160,7 +167,8 @@
    "id": "missing",
    "group": "standard",
    "requires": [],
-   "main_line": "missing: files,goal,constraints,done,repro,scope or none (what the request lacked that you had to find or guess; a comma list)",
+   "main_line": "missing: files,goal,constraints,done,repro,scope or none (what the request lacked that you had to find or guess; a comma list; files = you had to search for which files; scope = what to change and what to leave alone wasn't said)",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -173,6 +181,7 @@
    "group": "standard",
    "requires": [],
    "main_line": "plan: none|made|following|deviated (no plan; you wrote one; you worked to one; you departed from it)",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -184,37 +193,12 @@
    "id": "skill",
    "group": "standard",
    "requires": [],
-   "main_line": "skill: helped|unneeded|would-help|none (whether a skill you ran helped; would-help:<name> if one of the listed skills would have)",
+   "main_line": "skill: helped|unneeded|would-help|none (if you ran a skill: helped or unneeded; if you ran none: none, or would-help:<name> when one of the listed skills would have helped)",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
    "sub_line": "",
-   "sub_extra": "",
-   "tool_note": ""
-  },
-  {
-   "id": "found",
-   "group": "standard",
-   "requires": [],
-   "main_line": "found: yes|partial|no (for research or search work: whether you found what was asked)",
-   "main_extra": "",
-   "extra_before_tag": false,
-   "main_extra_untagged": "",
-   "sub_line": "",
-   "sub_extra": "",
-   "tool_note": ""
-  },
-  {
-   "id": "fit",
-   "group": "standard",
-   "requires": [
-    "result"
-   ],
-   "main_line": "",
-   "main_extra": "",
-   "extra_before_tag": false,
-   "main_extra_untagged": "",
-   "sub_line": "fit: smaller|right|larger (smaller = a smaller, cheaper model could plainly have done this: simple lookups or mechanical edits; right = it suited the model it ran on; larger = the agent struggled in a way a stronger model would not have)",
    "sub_extra": "",
    "tool_note": ""
   },
@@ -225,6 +209,7 @@
     "result"
    ],
    "main_line": "",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -236,7 +221,8 @@
    "id": "prior",
    "group": "deep",
    "requires": [],
-   "main_line": "prior: needed|some|none (how much of the earlier conversation this work needed)",
+   "main_line": "prior: needed|some|none (how much of the earlier conversation this work needed; always none on the first message)",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -248,7 +234,8 @@
    "id": "check",
    "group": "deep",
    "requires": [],
-   "main_line": "check: targeted|full|build|run|manual|none (how you verified the change)",
+   "main_line": "check: targeted|full|build|run|manual|none (how you verified the change: targeted = ran the tests for the part changed; full = ran the whole test suite, at any point; build = only built or type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check, or you changed nothing)",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -261,6 +248,7 @@
    "group": "deep",
    "requires": [],
    "main_line": "",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -273,6 +261,7 @@
    "group": "free",
    "requires": [],
    "main_line": "",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -285,6 +274,7 @@
    "group": "free",
    "requires": [],
    "main_line": "",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -297,6 +287,7 @@
    "group": "free",
    "requires": [],
    "main_line": "",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
@@ -309,33 +300,22 @@
    "group": "free",
    "requires": [],
    "main_line": "",
+   "extra_keys": [],
    "main_extra": "",
    "extra_before_tag": false,
    "main_extra_untagged": "",
    "sub_line": "",
    "sub_extra": "",
    "tool_note": ""
-  },
-  {
-   "id": "feedback_reminder",
-   "group": "feedback",
-   "requires": [],
-   "main_line": "",
-   "main_extra": "The first time in this session you finish a piece of work the user asked for, add this before your tag, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work.",
-   "extra_before_tag": true,
-   "main_extra_untagged": "The first time in this session you finish a piece of work the user asked for, end your reply with this, after a blank line, and never again after that:\n> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work.",
-   "sub_line": "",
-   "sub_extra": "",
-   "tool_note": ""
   }
  ],
  "text": {
-  "intro": "The user turned on ClaudeGlass metrics capture, to see where their tokens go.",
+  "intro": "The user turned on ClaudeGlass metrics capture, to see where their tokens go. If you are a subagent, ignore this note.",
   "main_tag_intro": "End your final reply to each user message with one line, [cg: key=word ...], using only these keys and words:",
   "sub_tag_intro": "End your final report with one line, {tag}, using only these words:",
   "sub_tag": "[result: done|partial|blocked]",
   "sub_tag_with_keys": "[result: done|partial|blocked key=word ...]",
-  "skip_key_line": "Leave out a key you can't judge."
+  "skip_key_line": "Leave out a key you can't judge. When carrying out a plan, judge the plan, not the go-ahead. Tag your reply to an agent's report for the request that started the agent."
  },
  "skip_agent_types": [
   "statusline-setup",
@@ -346,6 +326,27 @@
   "Plan"
  ],
  "big_output_tokens": 8000,
+ "result_tools": [
+  "Read",
+  "WebFetch",
+  "WebSearch",
+  "ExitPlanMode",
+  "Agent",
+  "Workflow"
+ ],
+ "spawn_tools": [
+  "Agent",
+  "Workflow"
+ ],
+ "result_image_max_tokens": 1600,
+ "result_image_patch_px": 28,
+ "result_persist_chars": {
+  "Grep": 20000,
+  "WebFetch": 50000,
+  "Bash": 30000,
+  "PowerShell": 30000
+ },
+ "result_preview_chars": 2200,
  "signal_events": {
   "SessionEnd": "session_end",
   "Notification": "waits",
@@ -401,18 +402,24 @@
    "reply": 1500,
    "command": 100,
    "commands": 6,
-   "files": 8
+   "files": 8,
+   "queued": 300,
+   "queued_count": 3,
+   "origin": 600,
+   "origin_min": 300,
+   "short": 300
   },
+  "fallback_writer": "haiku-fallback",
   "intro": "You label one exchange between a user and Claude, an AI coding assistant, for the user's own usage analytics. You get an excerpt of it: the user's message, what Claude did, and the end of Claude's final reply. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words. In them, \"you\" means Claude:",
-  "rule": "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (found outside research or a search; shift on a first message) or the excerpt can't tell at all.",
+  "rule": "Judge only from the excerpt: a plan, skill or check it doesn't show wasn't there. Give every key that applies. Leave one out only when it doesn't fit this work (why without a redo or fix; admit without an admission; shift on a first message, or on a question or remark while the work goes on) or the excerpt can't tell at all. When Claude carried out a plan, judge the plan, not the user's go-ahead.",
   "lines": {
    "task": "task: feature|bugfix|refactor|debug|docs|review|test|research|plan|ops|chat (the kind of work asked for: docs = documentation or comments only; ops = CI, build, deploy or configuration; test = tests only; research = finding something out; review = judging existing work; debug = finding a fault's cause; chat = no work asked for)",
    "brief": "brief: clear|partial|vague (how complete the request was: clear = what to change and what done looks like; partial = the goal without the details; vague = neither)",
-   "shift": "shift: new|build|grew|redo|fix, only after an earlier message (new = an unrelated task; build = a next step on top of the last task; grew = more asked of the same task; redo = the same task done another way; fix = fixing a fault in the last work)",
-   "size": "size: xs|s|m|l|xl (how big the work was: xs = a line or two, or only an answer; s = a small change; m = a feature with its tests; l = many files; xl = a large change)",
+   "shift": "shift: new|build|grew|redo|fix, only after an earlier message (new = an unrelated task; build = a next step on top of the last task; grew = more asked of the same task; redo = the same task done another way; fix = changing what Claude just delivered because it was wrong or not what they wanted, a rename or tweak included). A question or remark about the work, or about the tag, while the work goes on gets no shift: shift describes a change to the work.\nwhy: left_out|missed|changed|tools, only with shift redo or fix (left_out = their earlier request or the plan left it out; missed = Claude missed something their request or the plan said; changed = they changed their mind; tools = a tool or setup failure)\nadmit: claim|change|instruction, only if it applies (this reply admits an earlier mistake of Claude's: claim = a wrong statement; change = a wrong change; instruction = an instruction it was given and didn't follow)",
+   "size": "size: xs|s|m|l|xl (how big the work was, counting agents or workflows this reply started in the background and Claude's reply to their reports, not work left for a later reply: xs = a line or two, or only an answer; s = a small change; m = a feature with its tests; l = many files; xl = a large change)",
    "plan": "plan: none|made|following|deviated (none = no plan; made = Claude wrote one this turn, as a plan file or as steps in its reply; following = Claude carried out one written earlier; deviated = Claude departed from one written earlier)",
-   "prior": "prior: needed|some|none (how much the work relied on the earlier conversation: needed = the message only makes sense with it; some = it helped; none = a fresh request)",
-   "check": "check: targeted|full|build|run|manual|none (how Claude verified its change: targeted = ran the tests for the part changed; full = ran the whole test suite; build = only built or type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check, or nothing changed)"
+   "prior": "prior: needed|some|none (how much the work relied on the earlier conversation: needed = the message only makes sense with it; some = it helped; none = a fresh request, and always none on the first message)",
+   "check": "check: targeted|full|build|run|manual|none (how Claude verified its change: targeted = ran the tests for the part changed; full = ran the whole test suite, at any point; build = only built or type-checked; run = ran the program itself to see it work; manual = only read it back; none = no check, or nothing changed)"
   },
   "vocab": {
    "task": [
@@ -444,6 +451,17 @@
     "grew",
     "redo",
     "fix"
+   ],
+   "why": [
+    "left_out",
+    "missed",
+    "changed",
+    "tools"
+   ],
+   "admit": [
+    "claim",
+    "change",
+    "instruction"
    ],
    "size": [
     "xs",
@@ -523,31 +541,32 @@
    "missing"
   ],
   "agent": {
-   "intro": "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt of it: the brief the agent was given, what it did, the end of its report and the session's earlier agent runs. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words:",
-   "rule": "Judge only from the excerpt. Give every key; leave one out only when the excerpt can't tell at all.",
+   "intro": "You label one finished run of an AI coding agent, for the user's own usage analytics. You get an excerpt of it: the brief the agent was given, what it did, the end of its report or the answer it handed back, and the session's earlier agent runs. Answer with one line and nothing else, [cg: key=word ...], using only these keys and words:",
+   "rule": "Judge only from the excerpt. Judge the brief first, from the brief alone, whatever the result. Give every key; leave one out only when the excerpt can't tell at all.",
    "limits": {
     "brief": 2000,
+    "relay": 300,
     "report": 1500,
     "earlier": 4,
     "earlier_brief": 200,
     "earlier_report": 200,
     "command": 100,
     "commands": 6,
-    "files": 8
+    "files": 8,
+    "closing": 300,
+    "answer_field": 300,
+    "answer_fields": 10
    },
    "keys": {
+    "agent_brief": [
+     "brief",
+     "missing"
+    ],
     "result": [
      "result"
     ],
     "retry": [
      "retry"
-    ],
-    "fit": [
-     "fit"
-    ],
-    "agent_brief": [
-     "brief",
-     "missing"
     ]
    },
    "vocab": {
@@ -555,11 +574,6 @@
      "done",
      "partial",
      "blocked"
-    ],
-    "fit": [
-     "smaller",
-     "right",
-     "larger"
     ],
     "brief": [
      "clear",
@@ -581,7 +595,22 @@
      "scope",
      "other"
     ]
-   }
+   },
+   "answer_tools": [
+    "StructuredOutput",
+    "SubagentHandback"
+   ],
+   "wait": {
+    "poll_s": 0.5,
+    "quiet_s": 3.0,
+    "cap_s": 20.0
+   },
+   "model_tiers": [
+    "haiku",
+    "sonnet",
+    "opus",
+    "fable"
+   ]
   }
  },
  "coaching": {
@@ -589,82 +618,236 @@
   "version": 1,
   "file": "coaching.json",
   "state_file": "coach-state.json",
-  "read_tools": [
-   "Read",
-   "Grep",
-   "Glob"
-  ],
   "thresholds": {
-   "clear_context_tokens": 100000,
-   "cold_min_tokens": 20000,
+   "cold_min_tokens": 100000,
+   "cold_rest_hours": 12,
+   "warm_prefix_tokens": 42000,
    "quiet_output_tokens": 8000,
-   "explore_reads": 8,
+   "report_reread_tokens": 150000,
+   "split_brief_chars": 6000,
    "plan_fresh_tokens": 40000,
+   "queued_minutes": 10,
    "drip_count": 3,
    "drip_window_minutes": 20,
    "drip_chars": 300,
-   "vague_fix_chars": 80,
    "big_paste_tokens": 10000,
-   "plan_steps": 4,
-   "plan_min_chars": 150,
-   "repeat_similarity": 0.8,
-   "repeat_window_minutes": 60,
-   "repeat_min_words": 4,
-   "stop_loop_count": 3,
-   "stop_window_minutes": 20,
    "cooldown_minutes": 30,
-   "rearm_factor": 1.5
+   "rearm_factor": 1.5,
+   "max_backoff": 3,
+   "rating_min_tokens": 1000000,
+   "rating_typical_factor": 2,
+   "rating_rest_days": 3,
+   "plan_check_off_days": 14,
+   "plan_check_declines": 2
   },
   "text": {
-   "cache_cold": "The prompt cache expired while this session sat idle for {idle}, so this reply writes the whole context again: about {ctx} tokens at the cache-write price. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying so, and that /clear before a new task after a break avoids it. If it carries on the same work, don't mention it.",
-   "clear_context": "This session's context is about {ctx} tokens, and every reply reads all of it again. If the user's message starts a task unrelated to the work so far, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that /clear before a new task would have saved that. If it carries on the same work, don't mention it.",
-   "drip_feed": "The user has sent {count} small change requests in a row, one message each, and every message re-reads the whole context. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting that working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
-   "repeat_ask": "The user has sent much the same request as one you answered earlier. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting that saying what was wrong with the last attempt gets a better next one than sending the request again.",
-   "plan_first": "The user's message asks for about {steps} separate changes, outside plan mode. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting plan mode (Shift+Tab) for a job this size: it agrees the approach before anything changes.",
-   "stop_loop": "The user has stopped you {count} times in the last {minutes} minutes. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that plan mode (Shift+Tab) agrees the approach before any work starts.",
-   "vague_fix": "The user says something is wrong but not what they saw or expected. Handle the message exactly as you would have without this note: it changes nothing about the work. End your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" saying that naming what they saw and expected, or pasting the error, gets a fix first time.",
-   "big_paste": "The user's message is about {tokens} tokens, and every later reply reads it again. If most of it is a log, a file or command output, end your reply, before any tag, with a blank line and then a quote block starting \"> **ClaudeGlass tip:**\" suggesting they paste only the part that matters, or save it to a file and give the path so only what's needed is read.",
+   "cold_return": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user came back to this session after a break. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, {done_how} For new work, running /clear first skips the rewrite.",
+   "status_poll": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user is asking about work that is still running in the background. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** Asking how it's going while work runs in the background makes Claude read the whole session, about {ctx} tokens, to say little that is new. {poll_how}",
+   "drip_feed": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user has sent {count} small change requests in a row, one message each. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** That's {count} small changes in a row, each its own message, and each one re-reads the whole session, about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
+   "big_paste": "If most of the user's message is a log, a file or command output, write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. Otherwise don't mention this note.\n> **ClaudeGlass tip:** Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
    "quiet_output": "That result was about {tokens} tokens, and every later reply reads it again. Next time, {how}.",
-   "explore_reads": "You've made {reads} reads and searches for this message, about {tokens} tokens that every later reply reads again. {advice}",
-   "plan_fresh": "This plan was approved with about {kept} tokens of planning in context, which every reply of the build reads again. Before you start building, tell the user in a quote block starting \"> **ClaudeGlass tip:**\" that building it in a fresh session (/clear, then ask Claude to carry out the saved plan) would carry about {kept} fewer tokens on each reply. Then carry on unless they stop you.",
-   "split_run": ""
+   "report_reread": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user's session just started background work. Carry on exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** This session holds about {ctx} tokens, and the reply to each report the background work sends back reads all of it again. Fewer, larger pieces of background work mean fewer reports, so fewer of those re-reads.",
+   "plan_fresh": "Write the tip on this note's last line, word for word, before you start building. Then carry on unless the user stops you.\n> **ClaudeGlass tip:** This plan was approved with about {kept} tokens of planning in the session, and every reply of the build reads them again. Building it in a fresh session would carry about {kept} fewer tokens on each reply. {fresh_how}",
+   "plan_fresh_early": "Write the tip on this note's last line, word for word, as the last line of the plan you submit for approval. If this reply doesn't end in a plan, add it to the plan you submit later. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** Approve with clear context: this session holds about {kept} tokens of planning chat, and every reply of the build would read it again. {clear_how}",
+   "split_run": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. An agent run in this session ended showing signs of being too big for one task. Carry on exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** In this session {why}. Each reply of a run reads everything the run holds again, so runs that big cost more than the work needs. Giving the next agent a smaller piece of the work keeps each run short."
+  },
+  "split_why": {
+   "compaction": "an agent run had to summarise its own context part-way through",
+   "brief": "an agent run began from a brief of {brief_chars} characters or more",
+   "both": "agent runs had to summarise their own context part-way through or began from a brief of {brief_chars} characters or more"
   },
   "quiet_how": {
    "Read": "read only the lines you need, with an offset and a limit",
-   "Bash": "cut the command's output down first: a quieter flag, or a filter that keeps every error and failure line",
    "Grep": "narrow the pattern or the path, or ask for file names or counts only",
    "Glob": "narrow the pattern",
    "": "ask for less: a narrower query or a smaller page"
   },
-  "explore_advice": {
-   "explore": "If more searching is needed, hand it to an Explore agent: it searches in its own context and sends back a short summary.",
-   "tokensave": "If more searching is needed, use tokensave's own tools instead: tokensave_context for a concept, tokensave_search for a symbol, tokensave_files for files, then read only the lines you need."
-  },
   "notice": {
-   "drip_feed": "⚠️ ClaudeGlass: {count} small requests in a row, one message each. Work out everything that needs changing and send it as one prompt: it costs less.",
-   "repeat_ask": "⚠️ ClaudeGlass: that's much the same request as before. Saying what was wrong with the last attempt helps more than sending it again.",
-   "plan_first": "⚠️ ClaudeGlass: a {steps}-step request outside plan mode. Plan mode (Shift+Tab) agrees the approach before anything changes.",
-   "stop_loop": "⚠️ ClaudeGlass: you've stopped Claude {count} times in {minutes} minutes. Plan mode (Shift+Tab) agrees the approach before work starts.",
-   "vague_fix": "⚠️ ClaudeGlass: say what you saw and what you expected, or paste the error, to get a fix first time.",
-   "big_paste": "⚠️ ClaudeGlass: this message is about {tokens} tokens, and every later reply reads it again. Paste only the part that matters, or give a file path.",
-   "split_run": "⚠️ ClaudeGlass: this {agent} run has made about {replies} replies, and each one reads the whole run again. In your past sessions {agent} runs cost less when split about every {every_n} replies: next time, give each agent a smaller piece of the work."
+   "plan_fresh": "⚠️ ClaudeGlass: This plan was approved with about {kept} tokens of planning in the session, and every reply of the build reads them again. Building it in a fresh session would carry about {kept} fewer tokens on each reply. {fresh_how}",
+   "plan_fresh_early": "⚠️ ClaudeGlass: Approve with clear context: this session holds about {kept} tokens of planning chat, and every reply of the build would read it again. {clear_how}",
+   "drip_feed": "⚠️ ClaudeGlass: That's {count} small changes in a row, each its own message, and each one re-reads the whole session, about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
+   "big_paste": "⚠️ ClaudeGlass: Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
+   "status_poll": "⚠️ ClaudeGlass: Asking how it's going while work runs in the background makes Claude read the whole session, about {ctx} tokens, to say little that is new. {poll_how}",
+   "cold_return": "⚠️ ClaudeGlass: The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, {done_how} For new work, running /clear first skips the rewrite.",
+   "report_reread": "⚠️ ClaudeGlass: This session holds about {ctx} tokens, and the reply to each report the background work sends back reads all of it again. Fewer, larger pieces of background work mean fewer reports, so fewer of those re-reads.",
+   "split_run": "⚠️ ClaudeGlass: In this session {why}. Each reply of a run reads everything the run holds again, so runs that big cost more than the work needs. Giving the next agent a smaller piece of the work keeps each run short."
   },
-  "correction_pattern": "\\b(?:that'?s (?:wrong|not right|not what|incorrect|broken)|th(?:is|at) (?:is|was) (?:wrong|broken|incorrect|not (?:right|working|what))|it'?s (?:still )?(?:broken|wrong|not working|failing|incorrect)|(?:still|it still) (?:broken|failing|wrong|not working|doesn'?t work|fails)|(?:doesn'?t|does not|didn'?t|did not) work|not what (?:i|we) (?:asked|wanted|meant|said)|you (?:broke|missed|forgot|ignored|didn'?t (?:do|read|follow|check|run|fix))|why (?:did|didn'?t|would|are|is) you|(?:undo|revert|roll back) (?:that|this|it|the|your)|that broke|you'?ve broken|try again|redo (?:it|that|this)|wrong (?:file|approach|answer|place|branch|one))\\b",
-  "correction_scan_chars": 200,
-  "fix_pattern": "\\b(?:fix|fixed|broken|wrong|incorrect|still|again|bug|error|errors|failing|fails|crash(?:es|ed)?)\\b",
-  "question_pattern": "\\s*(?:what|which|who|whom|whose|where|when|how)\\b",
-  "specific_pattern": "[`\\\"/\\\\:#<>(){}\\[\\]=]|\\w\\.\\w|\\d|(?i:\\b(?:should|must|needs? to|supposed to|meant to)\\s+(?:say|show|read|print|return|display|be|use|have|look|go)\\s+(?!(?:working|fixed|right|correct|better|ok|okay|fine|done|good)\\b)\\w+|\\bmake (?:it|this|that|them) (?!(?:work|right|better|correct)\\b)\\w+|\\b(?:change|set|turn|rename)\\b[^.!?]{0,40}\\bto\\b|\\b(?:expected|instead|rather than)\\b)",
   "interrupt_prefix": "[Request interrupted",
+  "not_typed_prefixes": [
+   "<command-",
+   "<local-command-",
+   "<bash-",
+   "<scheduled-task",
+   "<<autonomous-loop",
+   "<task-notification",
+   "[SYSTEM NOTIFICATION",
+   "<agent-message",
+   "<cross-session-message",
+   "Another Claude session sent a message",
+   "I hit my usage limit while you were working, but it has reset now",
+   "The app was quit while you were working"
+  ],
+  "agent_tools": [
+   "Agent",
+   "Task"
+  ],
+  "not_typed_turn_origins": [
+   "task_notification",
+   "peer",
+   "scheduled"
+  ],
+  "resume_prefixes": [
+   "I hit my usage limit while you were working, but it has reset now",
+   "The app was quit while you were working"
+  ],
+  "go_pattern": "(?:please\\s+)?(?:(?:once|when|after) (?:that'?s |it'?s |this is |everything is )?(?:done|complete|completed|finished|ready)[\\s,\\-–—:]+)?(?:(?:yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm|looks good|sounds good)(?:[\\s,.!]+(?:(?:continue|keep going|carry on|proceed|go ahead|go on|go)(?:[\\s,]+(?:and|then))?[\\s,]+(?:(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*)|continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan|(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*|(?:do|go with|pick|take)\\s+(?:option\\s+|number\\s+|step\\s+)?(?:\\d{1,2}|one|two|three|a|b|c)(?:\\s*(?:,|and|&)\\s*(?:\\d{1,2}|one|two|three|a|b|c))*(?:\\s+first)?))?|(?:(?:continue|keep going|carry on|proceed|go ahead|go on|go)(?:[\\s,]+(?:and|then))?[\\s,]+(?:(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*)|continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan|(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*|(?:do|go with|pick|take)\\s+(?:option\\s+|number\\s+|step\\s+)?(?:\\d{1,2}|one|two|three|a|b|c)(?:\\s*(?:,|and|&)\\s*(?:\\d{1,2}|one|two|three|a|b|c))*(?:\\s+first)?))(?:[\\s,.!]+(?:please|now|thanks|thank you))*[\\s!.,]*",
+  "go_max_chars": 60,
+  "limit_line_prefixes": [
+   "You've hit your session limit",
+   "You've hit your weekly limit"
+  ],
+  "status_pattern": "(?:(?:hi|hey|ok|okay|so|and|well)[\\s,.!]+)?(?:how(?:'?s| is| are)(?: it| this| that| everything| things| the [a-z]+(?: [a-z]+)?)? (?:going|progressing|looking|coming(?: along)?|doing)|what(?:'?s| is)(?: the)? (?:status|progress|state|remaining|left|happening|going on)|(?:is|are)(?: it| this| that| everything| they| we)? (?:all )?(?:done|finished|complete|completed|merged|running|ready|working|still (?:running|working|going))|are you (?:still )?(?:working|running|there|done|finished)|any (?:updates?|progress|news|findings|results?)|where are we(?: at| now)?|status|progress|updates?|how (?:long|much) (?:is )?(?:left|remaining|to go))(?:[\\s,.!?]+(?:now|yet|so far|please|there|at the moment|currently))*[\\s!.,?]*",
+  "status_max_chars": 120,
+  "background_launch_pattern": "Command running in background with ID: |was moved to the background \\(ID: |Async agent launched successfully|Workflow launched in background\\. Task ID: ",
+  "background_scan_chars": 400,
+  "task_notification_prefix": "<task-notification",
+  "task_notification_call_pattern": "<tool-use-id>([^<\\s]+)</tool-use-id>",
+  "scheduled_task_prefix": "<scheduled-task",
+  "plan_said_pattern": "the user said:\\s*",
+  "error_blocked_pattern": "^(?:\\w+:\\w+ hook error|<tool_use_error>Blocked:|This agent is isolated in the worktree)|blocked by (?:a |the )?hook",
+  "reply_scan_chars": 1200,
+  "reply_fence_pattern": "(?s)```.*?(?:```|\\Z)",
+  "reply_tip_block_pattern": "(?m)^[ \\t]*>[ \\t]*(?:\\U0001F4A1\\U0000FE0F?[ \\t]*)?[*_]*ClaudeGlass(?: tip)?:.*(?:\\n[ \\t]*>.*)*\\n?",
+  "reply_inline_code_pattern": "`[^`\\n]*`",
+  "reply_url_pattern": "https?://\\S+|www\\.\\S+",
+  "reply_quoted_pattern": "[\\\"\\U0000201C][^\\\"\\U0000201C\\U0000201D\\n]{0,120}[\\\"\\U0000201D]",
+  "reply_reminder_line_pattern": "(?m)^.*Finished\\? Run /(?:cg|tl)-feedback.*\\n?",
+  "reply_tags_pattern": "(?i)(?:\\[(?:cg|tl|result|cg-fb|tl-fb):[^\\[\\]\\n]{0,400}\\][`*_.\\s]*){1,3}\\s*$",
+  "reply_list_start_pattern": "^\\s*(?:[-*+\\U00002022]|\\d{1,3}[.)])\\s+",
+  "reply_unit_pattern": "(?<=[.!?])\\s+|\\n+",
+  "reply_question_trim": "*_`\"')]>~”’",
+  "test_command_split_pattern": "&&|\\|\\||;|\\||\\r?\\n|[)}]",
+  "test_heredoc_pattern": "(?s)(?<!<)<<(?!<)-?[ \\t]*(?P<quote>['\\\"]?)(?P<tag>[A-Za-z_]\\w*)(?P=quote)(?P<rest>[^\\n]*)\\n.*?(?:\\n[ \\t]*(?P=tag)[ \\t]*(?=\\n|\\Z)|\\Z)",
+  "test_quoted_pattern": "(?P<shell>(?<![\\w.-])(?:ba|z|da)?sh(?:\\.exe)?\\s+-[A-Za-z]*c\\s+|(?<![\\w.-])(?:pwsh|powershell)(?:\\.exe)?\\s+(?:-\\w+\\s+)*?-[cC](?:ommand)?\\s+|(?<![\\w.-])cmd(?:\\.exe)?\\s+/[cCkK]\\s+)?(?:'(?P<single>[^']*)'|\"(?P<double>(?:[^\"\\\\]|\\\\[\\s\\S])*)\")",
+  "test_prefix_pattern": "(?:[(&{]\\s*|(?:\\$env:)?\\w+=\\S*\\s+|(?:time|nohup|command|exec|sudo|do|then|else|elif|if|while|until|!)\\s+|timeout(?:\\.exe)?\\s+(?:-\\S+\\s+)*\\d+[smhd]?\\s+|(?:uv|poetry|pipenv|pdm|hatch|rye)\\s+run\\s+(?:--[\\w-]+\\s+)*|(?:npx|bunx)\\s+(?:(?:-y|--yes|--no-install)\\s+)?|(?:pnpm|yarn)\\s+(?:exec|dlx)\\s+|bundle\\s+exec\\s+)",
+  "test_program_pattern": "^(?:\"(?:[^\"\\n]*[/\\\\])?|'(?:[^'\\n]*[/\\\\])?|(?:[^\\s\"']*[/\\\\])?)([\\w.+-]+?)(?:\\.(?:exe|cmd|bat))?[\"']?(?=\\s|$)",
+  "test_runner_pattern": "(?:(?:python3?(?:\\.\\d+)?|py|<path>)(?:\\s+(?:-[uBEsSqIOd]+|-[XW]\\s*\\S+|-\\d(?:\\.\\d+)?))*\\s+-m\\s+(?:pytest|unittest)|pytest|py\\.test|tox|nox|jest|vitest|mocha|rspec|phpunit|ctest|(?:npm|yarn|pnpm|bun)(?:\\s+run)?\\s+test(?::[\\w-]+)?|(?:go|cargo|dotnet|deno|swift|mix|flutter|dart|rake)\\s+test|cargo\\s+nextest\\s+run|mvnw?\\s+test|gradlew?\\s+test|playwright\\s+test|make\\s+test)",
+  "test_no_run_pattern": "(?:^|\\s)(?:--collect-only|--co|--help|-h|--version|--fixtures|--markers|--setup-plan|--listTests|--list-tests|--no-run)(?=\\s|$)",
+  "test_target_pattern": "(?:^|\\s)(?:-k\\b|-t\\b|--testNamePattern|--testPathPattern|-run\\b|--grep\\b|--filter\\b|--tests\\b|-Dtest|\\S*::\\S+|\\S*tests?/\\S*|\\S*test_\\S+|\\S+_test\\.\\w+|\\S+\\.(?:test|spec)\\.\\w+|\\S*spec/\\S*)",
+  "test_bare_target_pattern": "(?:^|\\s)(?!-)[\\w./:-]+",
+  "test_bare_target_runner_pattern": "(?:go|cargo)\\s+test",
+  "test_no_target_pattern": "(?:\\s*&?\\d?>>?&?\\s*\\S*|(?:^|\\s)(?:-n|-p|-c|-j|-o|-W|--cov(?:-report|-config)?|--maxfail|--tb|--timeout|--durations|--rootdir|--junitxml|--workers|--shard|--reporter|--config|--maxWorkers)(?:\\s+|=)\\S+)",
+  "test_whole_suite_pattern": "(?:^|\\s)(?:\\./\\.\\.\\.|(?:\\./)?(?:tests?|specs?|__tests__|src|\\.)/?)(?=\\s|$)",
   "edit_tools": [
    "Edit",
    "Write",
    "MultiEdit",
    "NotebookEdit"
   ],
+  "how": {
+   "fresh_how": {
+    "desktop": "Next time, pick the approval option that clears the context first; if the dialog has none, run /clear, then ask Claude to implement the plan in `<file>`.",
+    "terminal": "Run /clear, then ask Claude to implement the plan in `<file>`."
+   },
+   "clear_how": {
+    "desktop": "Pick the approval option that clears the context first; if the dialog has none, run /clear, then ask Claude to implement the plan in `<file>`.",
+    "terminal": "Run /clear first, then ask Claude to implement the plan in `<file>`."
+   },
+   "poll_how": {
+    "desktop": "The task panel shows what is still running, with no message sent.",
+    "terminal": "Typing /tasks shows what is still running, with no message sent."
+   },
+   "done_how": {
+    "desktop": "the last reply or the task panel already says.",
+    "terminal": "the last reply or /tasks already says."
+   }
+  },
+  "asks_pattern": "\\s*(?:what|which|who|whom|whose|where|when|why|how)\\b",
+  "config_path_pattern": "(?:^|[\\\\/])\\.claude(?:[\\\\/]|$)",
+  "shell_write_pattern": "(?:\\b(?:sed|perl)\\b[^\\n|;&]*?\\s-(?:[A-Za-z]*i[A-Za-z]*(?=[\\s.]|$)|-in-place\\b)|\\b(?:Set|Add)-Content\\b|\\[(?:System\\.)?IO\\.File\\]::(?:WriteAll(?:Text|Lines|Bytes)|AppendAll(?:Text|Lines))|\\b(?:cat|echo|printf)\\b[^\\n|;&]*?(?<![\\d&])>>?(?!&)[ \\t]*(?!/dev/null|nul\\b|\\$null)[^\\s&|;>]|\\b(?:cat|echo|printf)\\b[^\\n]*\\|[ \\t]*tee\\b[ \\t]+(?:-a[ \\t]+)?(?!/dev/null|nul\\b)[^\\s&|;>-]|(?:^|[;\\n(&|])[ \\t]*(?:[\\\"'$@]|(?:echo|write-output|write|get-content|gc|cat|type)\\b)[^\\n;]*\\|[ \\t]*(?:out-file|tee-object)\\b)",
+  "shell_change_pattern": "(?:git(?:\\s+(?:-[Cc]\\s+\\S+|--?[\\w-]+(?:=\\S+)?))*\\s+(?:merge|rebase|cherry-pick|revert|pull|apply|am|restore|reset|stash|mv|rm|clean)|mv|cp|rm|rmdir|mkdir|touch|patch|truncate|ln|(?:remove|move|copy|new|rename)-item|del|erase|rd|md|ren|ri|mi|cpi|ni|rni)(?=\\s|$)",
+  "admit_pattern": "\\b(?:i(?:'m| am| was) (?:wrong|mistaken|incorrect)|i (?:got|had|made) (?:that|this|it|them|those|these)(?: all)? (?:wrong|incorrect)|i made (?:a|an|that|this|the same) (?:mistake|error)|my (?:mistake|bad|error|fault|oversight|misreading|misunderstanding)|that was (?:wrong|incorrect|a mistake|my (?:mistake|error|fault))|i mis(?:read|understood|stated|spoke|counted|named|labell?ed|reported|judged|interpreted|remembered|quoted|described)|i (?:incorrectly|wrongly|mistakenly) \\w+|i(?:'d| had) (?:missed|overlooked|forgotten|misread|misunderstood)|i should(?:n'?t| not)? have (?!(?:a|an|the|some|more|any|no|enough)\\b)|i (?:didn'?t|did not|failed to|forgot to|neglected to) (?:follow|read|check|run|apply|use|verify|test|update|include|do what|honou?r|respect|account)|i (?:hadn'?t|had not) (?:checked|run|read|verified|tested|looked|considered|accounted)|i (?:ignored|overlooked|missed|forgot) (?:that|this|it|your|the|to)|you(?:'re| are) (?:absolutely |completely |totally |quite |entirely )?right|i apologi[sz]e for (?:the |my |that |this )?(?:mistake|error|oversight|mix-?up|confusion)|sorry (?:about that|for the (?:mistake|error|confusion|mix-?up)|,? (?:i|that was|my)))\\b",
+  "admit_scan_chars": 600,
+  "correction_pattern": "\\b(?:that'?s (?:wrong|not right|not what|incorrect|broken)|th(?:is|at) (?:is|was) (?:wrong|broken|incorrect|not (?:right|working|what))|it'?s (?:still )?(?:broken|wrong|not working|failing|incorrect)|(?:still|it still) (?:broken|failing|wrong|not working|doesn'?t work|fails)|(?:doesn'?t|does not|didn'?t|did not) work|not what (?:i|we) (?:asked|wanted|meant|said)|you (?:broke|missed|forgot|ignored|didn'?t (?:do|read|follow|check|run|fix))|why (?:did|didn'?t|would|are|is) you|(?:undo|revert|roll back) (?:that|this|it|the|your)|that broke|you'?ve broken|try again|redo (?:it|that|this)|wrong (?:file|approach|answer|place|branch|one))\\b",
+  "correction_scan_chars": 200,
+  "adjust_pattern": "(?:(?:^|[.!?]\\s+)actually\\b|\\b(?:instead|rather than|not quite|not exactly|(?:change|set|turn|switch|swap|make) (?:it|that|this|them|these|those) (?:to|into)|rename|(?:should|needs? to|supposed to|meant to) (?:say|read|show|display|look)|(?:a (?:bit|little)|slightly) (?:more|less|bigger|smaller|longer|shorter|wider|narrower|larger|taller|higher|lower)|too (?:big|small|long|short|wide|narrow|large|tall|bright|dark|loud|quiet|busy)|move (?:it|that|this|them|these|those))\\b)",
+  "review_pattern": "\\s*(?:please\\s+)?(?:(?:can|could|would) you\\s+(?:please\\s+)?)?(?:review|audit|check|look (?:at|over|through|into)|read|explain|summari[sz]e|analy[sz]e|investigate|inspect|explore|compare|assess|evaluate|critique|list|show|tell me|describe|walk me through|go through|examine|proofread|verify)\\b",
   "ack_pattern": "(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no)(?:[\\s!.,]+(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no))*[\\s!.,]*",
-  "list_item_pattern": "(?m)^[ \\t]*(?:\\d{1,2}[.)]|[-*\\u2022])[ \\t]+\\S",
-  "action_pattern": "(?:^|[.;:!?\\n,]|\\band\\b|\\bthen\\b|\\balso\\b)\\s*(?:please\\s+)?(?:add|create|build|implement|make|move|migrate|refactor|rename|remove|delete|update|change|replace|write|fix|set up|convert|integrate|split|merge|extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support)\\b",
-  "item_separator_pattern": ",\\s*and\\b|,|;|\\band\\b",
-  "sentence_end_pattern": "[.!?]+(?=\\s|$)|\\n+"
+  "change_pattern": "(?:^|[.!?;:,\\n])\\s*(?:(?:so|now|also|and|then|next|ok|okay|yes|yep|yeah|sure|right|great|nice|good|cool|thanks|thank you|perfect|plus|finally|first|lastly)[\\s,.!:;\\-\\u2013\\u2014]+)*(?:(?:(?:can|could|would|will) (?:you|we)(?: please)?|please|let'?s|let us|(?:we|you) (?:should|need to|have to|must|can|could)|(?:i|we) (?:want|need|would like|would love) (?:you |us |it |this |that )?to|i'?d (?:like|love) (?:you |us |it )?to)\\s+)?(?:add|create|build|implement|make|move|migrate|refactor|rename|remove|delete|update|change|replace|write|fix|set|convert|integrate|split|extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support|improve|tweak|adjust|enable|disable|increase|decrease|reduce|hide|use|switch|swap|put|ensure|apply|align|resize|restyle|polish|simplify|shorten|lengthen|expand|center|centre|style|colou?r|highlight|trim|tidy|reorder|sort|group|wrap|turn|bump|revert|undo|install|configure|rebuild|regenerate|reword|rephrase|relocate|tighten|loosen|darken|lighten|enlarge|shrink|widen|narrow|rotate|flip)\\b(?!\\s*:|\\s+(?:[\\w'-]+\\s+)?(?:is|isn'?t|was|wasn'?t|are|were|has|had|failed|fails|broke|breaks|works|worked|looks|seems|still|doesn'?t|didn'?t|won'?t)\\b|\\s+(?:for|of)\\b)",
+  "change_scan_chars": 600,
+  "feedback": {
+   "skill": "cg-feedback",
+   "facts_marker": "cg-fb-facts v1",
+   "fact_keys": [
+    "tokens",
+    "typical",
+    "followups",
+    "queued",
+    "plan",
+    "plan_followups",
+    "plan_asked",
+    "build",
+    "tips",
+    "tip",
+    "admits"
+   ],
+   "hints": [
+    "plan_check",
+    "rating_reminder"
+   ],
+   "text": {
+    "plan_check": "The user approved a plan, Claude changed files since, and this message reads as a fix to that work. Before you act on the message, call AskUserQuestion once with one question: header \"CG plan fix\", question \"Quick one for ClaudeGlass about the plan you approved: is this message (and any you typed while Claude was building it) mostly…\", one answer (multiSelect false), with these options, labels word for word: \"Claude missed the plan\" (The plan already said so); \"The plan missed it\" (The plan left it out); \"Something new\" (I only thought of it later); \"Not a fix\" (Nothing was wrong with the plan or the build). Ask nothing else, and ask it only this once. When the answer is back, or the user declines, handle the message exactly as you would have without this note. Say nothing about the answer, and never copy, quote or save the user's words.",
+    "rating_reminder": "This piece of work has used about {tokens} tokens and hasn't been rated. Once you have finished the work this message asks for, write the line below as the last thing in your final reply, after a blank line and before any tag, word for word. If you are still working, or waiting on the user, leave it out. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass:** Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work."
+   },
+   "headers": [
+    "CG followups",
+    "CG handoff",
+    "CG missed",
+    "CG next time",
+    "CG outcome",
+    "CG plan",
+    "CG tip",
+    "CG worth",
+    "TL handoff",
+    "TL helped",
+    "TL outcome",
+    "TL slowdown",
+    "TL worth"
+   ],
+   "plan_headers": [
+    "CG plan",
+    "CG plan fix"
+   ],
+   "plan_check_header": "CG plan fix",
+   "plan_check_words": [
+    "covered",
+    "gap",
+    "new",
+    "none"
+   ],
+   "plan_check_labels": [
+    "Claude missed the plan",
+    "The plan missed it",
+    "Something new",
+    "Not a fix"
+   ],
+   "tip_hints": [
+    "plan_fresh",
+    "plan_fresh_early",
+    "drip_feed",
+    "big_paste",
+    "status_poll",
+    "cold_return",
+    "report_reread",
+    "split_run"
+   ],
+   "tip_marker": "ClaudeGlass tip:",
+   "reminder_line": "Finished? Run /cg-feedback: a few ticks make your savings tips fit how you work.",
+   "message_ids": [
+    "feedback_skill",
+    "plan_check",
+    "feedback_reminder"
+   ]
+  }
  }
 }

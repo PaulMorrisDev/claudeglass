@@ -79,7 +79,7 @@ def test_plan_capture_adds_the_entries_a_level_needs_and_writes_nothing(tmp_path
     assert [(event, matcher) for event, matcher, _ in entries] == [
         ("SessionStart", "startup|clear|compact"),
         ("SubagentStop", ""),
-        ("PostToolUse", "Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"),
+        ("PostToolUse", "Read|WebFetch|WebSearch"),
         ("SessionEnd", ""),
         ("Notification", ""),
         ("PermissionRequest", ""),
@@ -108,6 +108,22 @@ def test_plan_capture_is_a_no_op_once_connected(tmp_path):
     assert hook_health.check_capture(ESSENTIALS).ok
 
 
+def test_an_entry_with_the_matcher_from_before_the_shell_and_mcp_tools_were_dropped_is_replaced(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    commands = _commands(config_dir)
+    old_matcher = "Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*"
+    old = {"hooks": {"PostToolUse": [{"matcher": old_matcher, "hooks": [
+        {"type": "command", "command": commands[cat.HOOK_SCRIPT], "timeout": 5},
+    ]}]}}
+    (config_dir.parent / "settings.json").write_text(json.dumps(old), encoding="utf-8")
+    plan = hook_health.plan_capture(DEEP, commands)
+    # The old entry still runs, so it is taken out and the entry for the new matcher put in.
+    assert any(line.startswith("Remove the capture hook") for line in plan.changes)
+    assert any(line.startswith("Update the capture hook") and "read, search and web results" in line for line in plan.changes)
+    matchers = [matcher for event, matcher, _ in _entries(json.loads(plan.new_text)) if event == "PostToolUse"]
+    assert matchers == ["Read|WebFetch|WebSearch"]
+
+
 def test_a_changed_command_is_updated_in_place_not_duplicated(tmp_path):
     config_dir = _claude(tmp_path, {})
     old = {cat.HOOK_SCRIPT: '"/old/python" "/old/hooks/capture-hook.py"'}
@@ -122,7 +138,7 @@ def test_lowering_the_level_takes_out_entries_no_metric_needs(tmp_path):
     config_dir = _claude(tmp_path, {})
     hook_health.connect(hook_health.plan_capture(DEEP, _commands(config_dir)), now=NOW)
     plan = hook_health.plan_capture(ESSENTIALS, _commands(config_dir))
-    assert plan.changes == ["Remove the capture hook that runs capture-hook.py after shell, read, search, web and MCP results."]
+    assert plan.changes == ["Remove the capture hook that runs capture-hook.py after read, search and web results."]
     assert "PostToolUse" not in json.loads(plan.new_text)["hooks"]
 
 
@@ -234,6 +250,15 @@ def test_check_capture_reports_a_missing_catalogue(tmp_path):
     assert any("catalogue" in p and "missing" in p for p in health.problems)
 
 
+def test_check_capture_reports_a_missing_module_the_launcher_runs(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    (config_dir / "hooks" / cat.HOOK_MODULE).unlink()
+    health = hook_health.check_capture(ESSENTIALS, config_dir=config_dir)
+    assert not health.ok
+    assert any(cat.HOOK_MODULE in p and "missing" in p and "capture connect" in p for p in health.problems)
+
+
 def test_check_capture_python_version_is_off_by_default_and_bounded_when_asked(tmp_path, monkeypatch):
     config_dir = _claude(tmp_path, {})
     _connect_essentials(config_dir)
@@ -261,8 +286,36 @@ def test_install_hook_files_skips_a_file_whose_replace_fails(tmp_path, monkeypat
 
     monkeypatch.setattr(hook_health.os, "replace", _boom)
     written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
-    assert [p.name for p in written] == [cat.HOOK_SCRIPT]
+    assert [p.name for p in written] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
     assert not (config_dir / "hooks" / cat.CATALOGUE_FILE).exists()
+    assert not list((config_dir / "hooks").glob("*.tmp"))
+
+
+def test_install_hook_files_writes_the_launcher_its_module_and_the_catalogue(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    # The launcher is the file Claude Code runs and the one that starts using the others: last.
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE, cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+    for name in (cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE):
+        assert (config_dir / "hooks" / name).read_bytes() == _packaged(name)
+    manifest = json.loads((config_dir / "hooks" / ".manifest.json").read_text(encoding="utf-8"))
+    assert {cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE} <= set(manifest)
+    assert len(_packaged(cat.HOOK_SCRIPT)) < 2_000  # a launcher, not the hook itself
+
+
+def test_install_hook_files_leaves_the_launcher_out_when_its_module_cannot_be_written(tmp_path, monkeypatch):
+    config_dir = _claude(tmp_path, {})
+    real_replace = os.replace
+
+    def _boom(src, dst):
+        if Path(dst).name == cat.HOOK_MODULE:
+            raise OSError("locked")
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(hook_health.os, "replace", _boom)
+    written = hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    assert [p.name for p in written] == [cat.CATALOGUE_FILE]
+    assert not (config_dir / "hooks" / cat.HOOK_SCRIPT).exists()
     assert not list((config_dir / "hooks").glob("*.tmp"))
 
 
@@ -334,8 +387,42 @@ def test_refresh_hook_files_treats_a_pre_manifest_file_as_outdated_not_modified(
     (hooks_dir / cat.CATALOGUE_FILE).write_bytes(_packaged(cat.CATALOGUE_FILE))
 
     refreshed = hook_health.refresh_hook_files(config_dir)
-    assert [p.name for p in refreshed] == [cat.HOOK_SCRIPT]
+    # The launcher, and the module it needs, which an install from before the split lacks.
+    assert [p.name for p in refreshed] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
     assert (hooks_dir / cat.HOOK_SCRIPT).read_bytes() == _packaged(cat.HOOK_SCRIPT)
+    assert (hooks_dir / cat.HOOK_MODULE).read_bytes() == _packaged(cat.HOOK_MODULE)
+
+
+def test_refresh_hook_files_upgrades_an_install_that_holds_the_whole_hook_in_one_file(tmp_path):
+    import hashlib
+
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / cat.HOOK_MODULE).unlink()
+    old = b"# the whole hook, as 0.14 wrote it\n"
+    (hooks_dir / cat.HOOK_SCRIPT).write_bytes(old)
+    manifest = json.loads((hooks_dir / ".manifest.json").read_text(encoding="utf-8"))
+    manifest[cat.HOOK_SCRIPT] = hashlib.sha256(old).hexdigest()
+    del manifest[cat.HOOK_MODULE]
+    (hooks_dir / ".manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    assert not hook_health.check_capture(ESSENTIALS, config_dir=config_dir).ok
+
+    refreshed = hook_health.refresh_hook_files(config_dir)
+    assert [p.name for p in refreshed] == [cat.HOOK_MODULE, cat.HOOK_SCRIPT]
+    assert hook_health.check_capture(ESSENTIALS, config_dir=config_dir).ok
+    assert hook_health.refresh_hook_files(config_dir) == []
+
+
+def test_refresh_hook_files_leaves_a_hand_edited_script_without_adding_a_module(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _connect_essentials(config_dir)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / cat.HOOK_MODULE).unlink()
+    (hooks_dir / cat.HOOK_SCRIPT).write_text("# someone edited this by hand\n", encoding="utf-8")
+    assert hook_health.refresh_hook_files(config_dir) == []
+    assert not (hooks_dir / cat.HOOK_MODULE).exists()
+    assert (hooks_dir / cat.HOOK_SCRIPT).read_text(encoding="utf-8") == "# someone edited this by hand\n"
 
 
 def test_backups_made_in_the_same_second_never_overwrite_each_other(tmp_path):
@@ -391,6 +478,25 @@ def test_on_dry_run_shows_the_cost_and_the_diff_and_writes_nothing(tmp_path):
     assert not (config_dir / "config.toml").exists() and not (config_dir / "hooks").exists()
 
 
+def test_the_cost_note_names_no_note_or_tag_while_haiku_writes_the_tags(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ntagger = "haiku"\n', encoding="utf-8")
+    rc, out = _capture(config_dir, "on", "--level", "standard", "--dry-run", stdin="y\ny\n")
+    assert rc == 0
+    assert "This makes Claude use more of your tokens. It adds " in out
+    assert "Claude Haiku writes the tags in the background" in out
+    assert "one-line tag such as" not in out and "reads a short note" not in out
+
+
+def test_the_cost_note_for_an_agent_metric_names_the_judge_only(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "free"\n', encoding="utf-8")
+    rc, out = _capture(config_dir, "enable", "result", "--dry-run", stdin="y\ny\n")
+    assert rc == 0
+    assert "It adds result. Claude Haiku judges each agent run in the background" in out
+    assert "reads a short note" not in out and "one-line tag" not in out
+
+
 def test_a_no_to_the_cost_question_changes_nothing(tmp_path):
     config_dir = _claude(tmp_path, {})
     rc, out = _capture(config_dir, "on", stdin="n\n")
@@ -427,7 +533,9 @@ def test_levels_up_and_down_sync_the_entries(tmp_path):
     assert hook_health.check_capture(DEEP).ok
     rc, out = _capture(config_dir, "level", "essentials", "--yes")
     assert "This makes Claude use more" not in out  # lowering asks nothing about cost
-    assert [e for e, _, _ in _entries(_settings(config_dir))] == [spec.event for spec in ESSENTIALS]
+    # The feedback items Deep turned on stay, and so does the entry they need: the hook answers a message of yours.
+    events = [e for e, _, _ in _entries(_settings(config_dir))]
+    assert sorted(events) == sorted([*(spec.event for spec in ESSENTIALS), "UserPromptSubmit"])
 
 
 def test_a_settings_edit_made_while_the_question_waits_is_never_lost(tmp_path):
@@ -476,16 +584,16 @@ def test_disabling_a_metric_takes_what_needs_it_along(tmp_path):
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "level", "standard", "--yes")
     rc, out = _capture(config_dir, "disable", "result", "--yes")
-    assert rc == 0 and "retry, fit, agent_brief need result, so they go too." in out
+    assert rc == 0 and "retry, agent_brief need result, so they go too." in out
     capture = load_config(config_dir=config_dir).capture
-    assert capture.level == "custom" and not {"result", "retry", "fit", "agent_brief"} & set(capture.metrics)
+    assert capture.level == "custom" and not {"result", "retry", "agent_brief"} & set(capture.metrics)
 
 
 def test_enabling_one_metric_brings_what_it_needs(tmp_path):
     config_dir = _claude(tmp_path, {})
-    rc, out = _capture(config_dir, "enable", "fit", "--yes")
+    rc, out = _capture(config_dir, "enable", "agent_brief", "--yes")
     assert rc == 0 and "Off -> Custom" in out
-    assert load_config(config_dir=config_dir).capture.metrics == ["result", "fit"]
+    assert load_config(config_dir=config_dir).capture.metrics == ["result", "agent_brief"]
 
 
 def test_feedback_toggles_are_switched_on_their_own_list(tmp_path):
@@ -575,7 +683,7 @@ def test_off_after_deep_says_what_the_entry_left_after_each_tool_costs(tmp_path)
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "level", "deep", "--yes")
     rc, out = _capture(config_dir, "off")
-    assert rc == 0 and "50 ms after every shell command, read and search" in out and "capture remove" in out
+    assert rc == 0 and "50 ms after every read, search and web result" in out and "capture remove" in out
 
 
 def test_off_keeps_the_entries_and_remove_takes_them_out(tmp_path):
@@ -758,6 +866,22 @@ def test_status_names_claude_as_the_tagger_when_haiku_only_judged_agent_runs():
     assert "  Claude Haiku tagged 100.0% of your messages; Claude Haiku judged 100.0% of agent runs" in lines
 
 
+def test_status_tells_the_replies_haiku_filled_in_from_the_ones_claude_tagged():
+    """While Claude writes the tags, a reply it left bare and Haiku's
+    fallback tagged is Haiku's, not Claude's."""
+    from claudeglass.capture import CaptureUsage
+    from claudeglass.units import Units
+
+    use = CaptureUsage(sessions=1, subagents=1, cycles=4, tagged_cycles=3, filled_cycles=1)
+    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=False)
+    assert any("Claude tagged 50.0% of your messages, and Claude Haiku filled in 25.0%" in line for line in lines)
+    # Nothing filled in: the plain line. The haiku tagger wrote every tag, so it isn't split.
+    plain = CaptureUsage(sessions=1, subagents=1, cycles=4, tagged_cycles=3)
+    assert "  Claude tagged 75.0% of your messages" in cli._capture_usage_lines(plain, Units(billing_mode="api"), haiku=False)
+    lines = cli._capture_usage_lines(use, Units(billing_mode="api"), haiku=True)
+    assert "  Claude Haiku tagged 75.0% of your messages" in lines
+
+
 def test_status_while_on_before_any_captured_session_says_so(tmp_path):
     config_dir = _claude(tmp_path, {})
     _session(config_dir, days_ago=2)
@@ -867,52 +991,98 @@ def test_status_never_prints_a_raw_matcher_or_tool_name(tmp_path):
     assert "PreToolUse" in out
 
 
-# -- CAP-9/F10: Deep's measured wait in capture status -----------------------
+# -- CAP-9/F10, Phase 7: how often the hooks ran, in capture status ----------
 
 
-def test_status_shows_deeps_measured_wait_when_its_tool_note_metrics_are_on(tmp_path):
-    config_dir = _claude(tmp_path, {})
-    from claudeglass.config import set_capture
-    from helpers import attachment_line, turn_line, user_str_line, write_jsonl
+_HOOK_COMMAND = (
+    '"python.exe" -I -S "C:\\Users\\me\\scratch\\tl\\hooks\\capture-hook.py" '
+    '--config-dir "C:\\Users\\me\\scratch\\tl"'
+)
 
-    set_capture(config_dir, level="deep", now=datetime.now(timezone.utc) - timedelta(days=2))
-    start = datetime.now(timezone.utc) - timedelta(days=1)
+
+def _hooked_session(config_dir, *, recorded_ms=(), reads=6, days_ago=1.0):
+    """One recent session with ``reads`` Read calls in a turn, a reply
+    that ended, and a PostToolUse hook call of ClaudeGlass's for each
+    time in ``recorded_ms``."""
+    from helpers import attachment_line, tool_use_block, turn_line, user_str_line, write_jsonl
+
+    start = datetime.now(timezone.utc) - timedelta(days=days_ago)
 
     def ts(second):
         return (start + timedelta(seconds=second)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
-    command = (
-        '"python.exe" -I -S "C:\\Users\\me\\scratch\\tl\\hooks\\capture-hook.py" '
-        '--config-dir "C:\\Users\\me\\scratch\\tl"'
-    )
+    reply = turn_line(content=[{"type": "text", "text": "Fixed."}], timestamp=ts(3), input_tokens=2000, output_tokens=400)
+    reply["message"]["stop_reason"] = "end_turn"
     lines = [
         user_str_line("fix the failing test", origin={"kind": "human"}, timestamp=ts(0)),
-        turn_line(content=[{"type": "text", "text": "Fixed."}], timestamp=ts(1), input_tokens=2000, output_tokens=400),
+        turn_line(
+            content=[tool_use_block("Read", f"r{i}", {"file_path": f"/w/f{i}.py"}) for i in range(reads)],
+            timestamp=ts(1),
+        ),
+        reply,
     ]
-    for i, ms in enumerate([100] * 8 + [900] * 2):
-        line = attachment_line("hook_success", hookName="PostToolUse:Bash", durationMs=ms, command=command)
-        line["timestamp"] = ts(2 + i)
+    for i, ms in enumerate(recorded_ms):
+        line = attachment_line("hook_success", hookName="PostToolUse:Read", durationMs=ms, command=_HOOK_COMMAND)
+        line["timestamp"] = ts(4 + i)
         lines.append(line)
     project = config_dir.parent / "projects" / "C--work-app"
     project.mkdir(parents=True, exist_ok=True)
     write_jsonl(project / "s1.jsonl", lines)
 
+
+def _hooks_on(config_dir, *, days_on: float = 10, level: str = "deep"):
+    """Capture on since ``days_on`` days ago, its hooks in settings.json."""
+    from claudeglass.config import set_capture
+
+    set_capture(config_dir, level=level, now=datetime.now(timezone.utc) - timedelta(days=days_on))
+    specs = hook_health.capture_specs(cat.level_metrics(level))
+    hook_health.connect(hook_health.plan_capture(specs, _commands(config_dir)), now=NOW)
+
+
+def test_status_says_how_often_the_hooks_ran_and_what_that_added_up_to(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir)
+    # 6 Read calls, but Claude Code wrote a time for 3 of the hook's runs.
+    _hooked_session(config_dir, recorded_ms=(100, 120, 140))
     rc, out = _capture(config_dir, "status")
     assert rc == 0
-    assert "Deep's large-output/web hook waited \u22480.1s (median, p90 \u22480.9s) over 10 calls this week." in out
+    # Runs come from the transcript (6 Reads), not the 3 recorded; the
+    # median is of the 3. The events that ran with no time are named.
+    assert (
+        "Over your last 7 days: ClaudeGlass's hooks ran about 6 times, about 120 ms each, about 1 s summed "
+        "(calls overlap). Left out, with no run time recorded: SessionStart, SessionEnd, Stop."
+    ) in out
+    assert "hook waited" not in out
 
 
-def test_status_hides_deep_wait_when_its_tool_note_metrics_are_off(tmp_path):
+def test_status_counts_from_when_capture_was_turned_on_if_that_was_this_week(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir, days_on=2)
+    _hooked_session(config_dir, recorded_ms=(100,))
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "Since capture was turned on: ClaudeGlass's hooks ran about 6 times, about 100 ms each" in out
+    assert "Over your last 7 days" not in out
+
+
+def test_status_shows_no_hook_line_when_no_hook_is_installed(tmp_path):
     config_dir = _claude(tmp_path, {})
     from claudeglass.config import set_capture
 
-    # Standard doesn't turn on big_output/web, so there's nothing to show
-    # even though there's a session in the window.
-    set_capture(config_dir, level="standard", now=datetime.now(timezone.utc) - timedelta(days=2))
-    _session(config_dir)
+    set_capture(config_dir, level="deep", now=datetime.now(timezone.utc) - timedelta(days=10))
+    _hooked_session(config_dir, recorded_ms=(100, 120))
     rc, out = _capture(config_dir, "status")
     assert rc == 0
-    assert "hook waited" not in out
+    assert "ClaudeGlass's hooks ran" not in out
+
+
+def test_status_shows_no_hook_line_when_nothing_ran_in_the_window(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir)
+    _hooked_session(config_dir, recorded_ms=(100,), days_ago=30)  # a month ago: outside the 7 days
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "ClaudeGlass's hooks ran" not in out
 
 
 def _init_args(config_dir, *argv):
@@ -1113,10 +1283,23 @@ def test_feedback_on_shows_the_skill_and_writes_it_after_a_yes(tmp_path):
     assert _skill(config_dir).read_text(encoding="utf-8") == cat.feedback_skill_text()
     capture = load_config(config_dir=config_dir).capture
     assert capture.feedback == ["feedback_skill", "feedback_note"] and capture.level == "off"
-    # settings.json is never touched: the skill needs no hook.
+    # settings.json is never touched by this: the skill works without a hook, and the facts line its run
+    # starts with comes from an entry `connect` adds.
     assert _settings(config_dir) == {}
+    assert "'claudeglass capture connect' adds it." in out
     rc, out = _capture(config_dir, "feedback", "on")
     assert "Feedback is already on." in out and "The /cg-feedback skill is in place" in out
+
+
+def test_feedback_on_asks_for_the_facts_lines_hook_entry_only_while_it_is_missing(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _capture(config_dir, "feedback", "on", "--yes")
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0 and [e for e, _, _ in _entries(_settings(config_dir))] == ["UserPromptSubmit"]
+    # Connected: nothing more to say, and nothing for the dry run or the switch off.
+    for args in (("on", "--yes"), ("on", "--dry-run"), ("off", "--yes")):
+        rc, out = _capture(config_dir, "feedback", *args)
+        assert rc == 0 and "needs an entry in settings.json" not in out, args
 
 
 def test_feedback_on_dry_run_and_a_no_write_no_skill(tmp_path):
@@ -1135,7 +1318,7 @@ def test_an_old_skill_is_shown_as_a_diff_and_someone_elses_is_left_alone(tmp_pat
     config_dir = _claude(tmp_path, {})
     _capture(config_dir, "feedback", "on", "--yes")
     skill = _skill(config_dir)
-    skill.write_text(cat.feedback_skill_text().replace("four quick", "three quick"), encoding="utf-8")
+    skill.write_text(cat.feedback_skill_text().replace("a few quick", "four quick"), encoding="utf-8")
     assert "out of date" in _capture(config_dir, "status")[1]
     rc, out = _capture(config_dir, "feedback", "on", "--yes")
     assert "This updates the /cg-feedback skill" in out and "-description:" in out
@@ -1442,6 +1625,31 @@ def test_prune_removes_old_signal_files_and_capture_log_records(tmp_path):
     assert log[0]["ts"] == (NOW - timedelta(days=5)).isoformat(timespec="seconds")
 
 
+def test_prune_removes_old_habit_log_records_too(tmp_path):
+    from claudeglass.config import append_habit_log, load_habit_log
+
+    config_dir = _claude(tmp_path, {})
+    append_habit_log(config_dir, kind="habit", item="split_large", now=NOW - timedelta(days=200))
+    append_habit_log(config_dir, kind="tip", item="drip_feed", now=NOW - timedelta(days=5))
+
+    rc, out = _capture(config_dir, "prune")
+
+    assert rc == 0
+    assert "1 capture-log or habit-log record(s)" in out
+    assert [record["item"] for record in load_habit_log(config_dir)] == ["drip_feed"]
+
+
+def test_prune_dry_run_leaves_the_habit_log_alone(tmp_path):
+    from claudeglass.config import append_habit_log, load_habit_log
+
+    config_dir = _claude(tmp_path, {})
+    append_habit_log(config_dir, kind="habit", item="split_large", now=NOW - timedelta(days=200))
+
+    rc, _out = _capture(config_dir, "prune", "--dry-run")
+
+    assert rc == 0 and len(load_habit_log(config_dir)) == 1
+
+
 def test_prune_uses_retention_days_from_config_when_set(tmp_path):
     config_dir = _claude(tmp_path, {})
     (config_dir / "config.toml").write_text("retention_days = 30\n", encoding="utf-8")
@@ -1491,3 +1699,172 @@ def test_on_warns_when_a_settings_policy_stops_hooks_running(tmp_path):
     assert hook_health.POLICY_TEXT[hook_health.POLICY_ALL_OFF] in out
     assert "won't run them while that holds" in out
     assert out.index("won't run them") < out.index("This changes")
+
+
+# -- the coaching hook entries: every route that connects adds all of them ------
+
+
+def _coaching_hooked(config_dir) -> list[tuple[str, str, bool]]:
+    """``(event, matcher, async)`` of the capture entries settings.json holds."""
+    return [(event, matcher, bool(entry.get("async"))) for event, matcher, entry in _capture_entries(config_dir)]
+
+
+COACHING_HOOKS = [
+    # split_run's record of a run that ended too big is kept as the run stops, so Claude can say it at the next call.
+    ("SubagentStop", "", False),
+    ("UserPromptSubmit", "", False),
+    ("PostToolUse", "|".join(cat.COACHING_TOOLS), False),
+    # cold_return's state is kept by the Stop entry: the one entry that runs in the background.
+    ("Stop", "", True),
+]
+
+
+def test_capture_connect_adds_the_stop_entry_and_the_plan_matcher_for_coaching_notes(tmp_path):
+    config_dir = _claude(tmp_path, {"model": "opus"})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert _coaching_hooked(config_dir) == COACHING_HOOKS
+    assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in _coaching_hooked(config_dir))["PostToolUse"]
+    assert _settings(config_dir)["model"] == "opus"
+    # Connected, it has nothing more to add.
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0 and "already runs the capture hooks" in out
+    assert _coaching_hooked(config_dir) == COACHING_HOOKS
+
+
+def test_capture_connect_brings_an_older_coaching_connection_up_to_date(tmp_path):
+    # What an earlier version wrote: the prompt hook, and a PostToolUse matcher without the plan tool.
+    config_dir = _claude(tmp_path, {})
+    commands = _commands(config_dir)
+    old = {"hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": commands[cat.HOOK_SCRIPT], "timeout": 5}]}],
+        "PostToolUse": [{"matcher": "Read|Grep|Glob|WebFetch|WebSearch", "hooks": [
+            {"type": "command", "command": commands[cat.HOOK_SCRIPT], "timeout": 5}]}],
+    }}
+    (config_dir.parent / "settings.json").write_text(json.dumps(old), encoding="utf-8")
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    assert not hook_health.check_capture(
+        hook_health.capture_specs(("coaching_notes",)), claude_root=config_dir.parent, config_dir=config_dir
+    ).ok
+    rc, out = _capture(config_dir, "connect", "--yes")
+    assert rc == 0, out
+    assert sorted(_coaching_hooked(config_dir)) == sorted(COACHING_HOOKS)
+
+
+# -- Phase 7: the overhead line's costs, and status-line features by entrypoint --
+
+
+def test_status_overhead_line_adds_what_capture_and_coaching_notes_cost(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir)
+    _hooked_session(config_dir, recorded_ms=(100, 120, 140))
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    (line,) = [text for text in out.splitlines() if text.startswith("Over your last 7 days: ClaudeGlass's hooks ran")]
+    # The hook sentence first, then the two costs over the same stretch.
+    assert "(calls overlap)." in line
+    assert line.index("(calls overlap).") < line.index(" Capture cost ")
+    assert line.index(" Capture cost ") < line.index(" and coaching notes cost ") < line.index(" in the same stretch.")
+    assert line.endswith(" in the same stretch.")
+
+
+def test_status_overhead_line_is_the_one_the_capture_page_shows(tmp_path):
+    """``capture status`` and Setup > Capture print the same line, from
+    ``capture_view.build_overhead`` over ``capture_view.overhead_window``."""
+    from claudeglass import capture_view
+
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir, days_on=2)
+    _hooked_session(config_dir, recorded_ms=(100,))
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    window = capture_view.overhead_window(load_config(config_dir).capture)
+    assert window["label"] == "Since capture was turned on" and window["recent"] is True
+    (line,) = [text for text in out.splitlines() if text.startswith(window["label"] + ": ")]
+    hooks = line[len(window["label"]) + 2 :].split(" Capture cost ")[0]
+    assert hooks.startswith("ClaudeGlass's hooks ran about 6 times") and line.endswith("in the same stretch.")
+
+
+def test_status_says_so_when_no_hook_run_shows_in_the_window(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _hooks_on(config_dir)
+    _hooked_session(config_dir, recorded_ms=(100,), days_ago=30)  # a month ago: outside the 7 days
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "Over your last 7 days: No run of ClaudeGlass's hooks shows in your sessions." in out
+
+
+def test_status_has_no_overhead_line_while_no_hook_is_installed(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    from claudeglass.config import set_capture
+
+    set_capture(config_dir, level="deep", now=datetime.now(timezone.utc) - timedelta(days=10))
+    _hooked_session(config_dir, recorded_ms=(100, 120))
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "in the same stretch" not in out and "No run of ClaudeGlass's hooks" not in out
+
+
+def _sessions_ran_in(config_dir, *entrypoints):
+    """A data-folder store with one session for each of ``entrypoints``."""
+    from claudeglass.service.serve import STORE_FILENAME
+    from claudeglass.service.store import Store
+
+    store = Store(config_dir / STORE_FILENAME)
+    store.open()
+    for i, entrypoint in enumerate(entrypoints):
+        store.upsert_session(
+            session_id=f"s{i}", project_slug="proj", last_ts=f"2026-09-2{i % 10}T10:00:00Z", entrypoint=entrypoint
+        )
+    store.close()
+
+
+def _lines_on(config_dir) -> None:
+    (config_dir / "config.toml").write_text(
+        '[capture]\nlevel = "off"\nfeedback = ["feedback_note"]\ncoaching = ["coaching_line"]\n', encoding="utf-8"
+    )
+
+
+def test_status_says_the_status_line_features_never_show_when_no_session_ran_in_a_terminal(tmp_path):
+    config_dir = _claude(tmp_path, {"statusLine": {"type": "command", "command": "claudeglass statusline"}})
+    _lines_on(config_dir)
+    _sessions_ran_in(config_dir, "claude-desktop", "claude-desktop", "claude-desktop")
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    notes = [text for text in out.splitlines() if text.startswith("All 3 of your sessions ran outside a terminal")]
+    # One for each feature, each in its own words, and the desktop app's reason.
+    assert len(notes) == 2 and len(set(notes)) == 2
+    assert all("doesn't run status lines" in note for note in notes)
+    assert "This second line never shows" in out and "This line never shows" in out
+    # Even a status line that is ClaudeGlass's runs nowhere here.
+    assert "Your status line isn't" not in out
+
+
+def test_status_names_how_few_sessions_ran_in_a_terminal(tmp_path):
+    config_dir = _claude(tmp_path, {"statusLine": {"type": "command", "command": "claudeglass statusline"}})
+    _lines_on(config_dir)
+    _sessions_ran_in(config_dir, "claude-desktop", "claude-desktop", "claude-desktop", "cli")
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "Only 1 of your 4 sessions ran in a terminal, and the desktop app doesn't run status lines" in out
+    assert "ran outside a terminal" not in out
+
+
+def test_status_keeps_saying_the_status_line_is_someone_elses_without_a_store(tmp_path):
+    config_dir = _claude(tmp_path, {"statusLine": {"type": "command", "command": "my-own-line"}})
+    _lines_on(config_dir)
+    rc, out = _capture(config_dir, "status")
+    assert rc == 0
+    assert "Your status line isn't ClaudeGlass's, so this second line won't show there" in out
+    assert "ran outside a terminal" not in out and "Only " not in out.split("Your status line")[-1]
+
+
+def test_status_cost_lines_ask_a_subagent_for_nothing(tmp_path):
+    lines = cli._capture_cost_lines(cat.level_metrics("deep"))
+    text = "\n".join(lines)
+    assert "when a subagent starts" not in text and "each subagent report" not in text
+    assert "about 56 tokens of note after each large or web tool result" in text
+    # While Haiku writes the tags the hook sends no note after a large result either.
+    haiku = "\n".join(cli._capture_cost_lines(cat.level_metrics("deep"), "haiku"))
+    assert "after each large or web tool result" not in haiku

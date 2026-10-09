@@ -18,7 +18,7 @@ import { el, escapeHtml, goTo, highlight, state } from "./core.js";
 import { actionIndex } from "./api.js";
 import { MINUS, compactNumber, formatDuration, moneyAxis, moneyCell, moneyText, projectName, shortTs, signedPercent, thousands } from "./format.js";
 import { BASIS } from "./ui.js";
-import { CHART_SPECS, bandAxis, dayLabel, drawChart, entityColour, modelTier, moneyTicks, roundedBar, tokenTick, valueAxis } from "./charts.js";
+import { CHART_SPECS, ENTITY_COLOURS, bandAxis, dayLabel, drawChart, entityColour, modelTier, moneyTicks, roundedBar, tokenTick, valueAxis } from "./charts.js";
 
 // Fewer points than this and a chart says less than a table would: the
 // page shows tiles instead (docs/ui.md, "Admission rule"). Daily spend
@@ -1305,20 +1305,104 @@ function line(ctx, data) {
 
 // -- 4. session outliers: a scatter with a time brush -----------------------------------------
 
-var MODE_SERIES = [
-  { key: "interactive", label: "Interactive" },
-  { key: "long-agentic", label: "Long agent runs" },
-  { key: "overnight", label: "Overnight" },
-  { key: "other", label: "Mixed or not known" },
-];
+// How a session ran, what it was for and where it started, in words. This
+// is the one map: the Sessions list's Mode, Purpose and Started from
+// columns, the drawer's override menus, this chart's legend and tooltips,
+// and the palette (ENTITY_COLOURS.mode, charts.js) all read it, so a mode
+// has one name wherever it shows. The words are the report tables' own
+// (helptext.py: the value labels of sessions_by_mode, sessions_by_purpose
+// and by_entrypoint); a test holds the two together. `note` is the
+// sentence that says what a mode means. A key the map has not heard of
+// shows as it is.
+export var SESSION_WORDS = {
+  mode: [
+    { key: "interactive", label: "Interactive", note: "Interactive: you replied within a few minutes." },
+    {
+      key: "long-agentic",
+      label: "Long autonomous run",
+      note: "Long autonomous run: Claude worked through many steps or subagents with few prompts from you.",
+    },
+    {
+      key: "overnight",
+      label: "Overnight (unattended)",
+      note: "Overnight: Claude worked on its own for two hours or more at night while you were away.",
+    },
+    { key: "one-shot", label: "One-shot", note: "One-shot: one request (yours or a scheduled task's), then Claude worked with no more messages from you." },
+    { key: "mixed", label: "Mixed", note: "Mixed: none of these." },
+    { key: "unknown", label: "Not classified", note: "" },
+  ],
+  purpose: [
+    { key: "general-dev", label: "General development" },
+    { key: "agent-fanout", label: "Subagent fan-out" },
+    { key: "docs-or-light-edit", label: "Docs or light edits" },
+    { key: "test-triage", label: "Running and fixing tests" },
+    { key: "workflow-run", label: "Workflow runs" },
+    { key: "refactor", label: "Refactoring" },
+    { key: "planning", label: "Planning" },
+    { key: "review", label: "Code review" },
+    { key: "local-llm-pipeline", label: "Calling a local model" },
+    { key: "unknown", label: "Not classified" },
+  ],
+  entrypoint: [
+    { key: "cli", label: "Terminal" },
+    { key: "claude-desktop", label: "Claude desktop app" },
+    { key: "claude-vscode", label: "VS Code extension" },
+    { key: "sdk", label: "Agent SDK" },
+    { key: "sdk-cli", label: "Agent SDK (command line)" },
+    { key: "sdk-ts", label: "Agent SDK (TypeScript)" },
+    { key: "sdk-py", label: "Agent SDK (Python)" },
+    { key: "unknown", label: "Not recorded" },
+  ],
+};
 
-function modeKey(mode) {
-  return mode === "interactive" || mode === "long-agentic" || mode === "overnight" ? mode : "other";
+function sessionWordEntry(kind, key) {
+  var words = SESSION_WORDS[kind] || [];
+  for (var i = 0; i < words.length; i++) if (words[i].key === key) return words[i];
+  return null;
 }
 
-function modeLabel(key) {
-  for (var i = 0; i < MODE_SERIES.length; i++) if (MODE_SERIES[i].key === key) return MODE_SERIES[i].label;
-  return key;
+// A session's mode, purpose or app (kind: "mode", "purpose", "entrypoint")
+// by its name: "One-shot", not "one-shot". Empty when it has none.
+export function sessionWord(kind, key) {
+  if (key === null || key === undefined || key === "") return "";
+  var word = sessionWordEntry(kind, key);
+  return word ? word.label : String(key);
+}
+
+// What a mode means, as a sentence; empty when the map has none.
+export function sessionWordNote(kind, key) {
+  var word = sessionWordEntry(kind, key);
+  return (word && word.note) || "";
+}
+
+// The words a person can pick for a session's override: all but "not
+// classified", which is where a rule gave up.
+export function sessionWordChoices(kind) {
+  return (SESSION_WORDS[kind] || []).filter(function (word) {
+    return word.key !== "unknown";
+  });
+}
+
+function hasColour(key) {
+  return key !== "other" && Object.prototype.hasOwnProperty.call(ENTITY_COLOURS.mode, key);
+}
+
+// The chart's series: each mode the palette colours, then the rest in grey
+// (mixed, not classified, or a mode this page has not heard of).
+var MODE_SERIES = SESSION_WORDS.mode
+  .filter(function (word) {
+    return hasColour(word.key);
+  })
+  .concat([{ key: "other", label: "Mixed or not known" }]);
+
+function modeKey(mode) {
+  return hasColour(mode) ? mode : "other";
+}
+
+// A session's mode as its tooltip and the chart's table say it: its own
+// word, not its colour's ("Mixed", where the legend says "Mixed or not known").
+function modeText(row) {
+  return sessionWord("mode", row.mode) || "Not classified";
 }
 
 // A session's colour on the scatter, for its row's swatch in the grid.
@@ -1421,7 +1505,7 @@ function scatter(ctx, data) {
     d.tip = {
       value: moneyText(d.cost),
       label: projectName(d.row.slug),
-      lines: [shortTs(d.row.first_ts), "Ran for " + formatDuration(d.row.span_s), modeLabel(d.mode)],
+      lines: [shortTs(d.row.first_ts), "Ran for " + formatDuration(d.row.span_s), modeText(d.row)],
     };
     d.open = opener(opts, "open", d.row);
   });
@@ -1558,7 +1642,7 @@ function scatter(ctx, data) {
         { key: "mode", label: "How it ran", kind: "str" },
       ],
       rows: dots.map(function (d) {
-        return { started: shortTs(d.row.first_ts), project: projectName(d.row.slug), cost: d.cost, length: num(d.row.span_s), mode: modeLabel(d.mode) };
+        return { started: shortTs(d.row.first_ts), project: projectName(d.row.slug), cost: d.cost, length: num(d.row.span_s), mode: modeText(d.row) };
       }),
     },
     legend: present.map(function (s) {

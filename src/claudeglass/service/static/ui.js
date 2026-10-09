@@ -8,7 +8,7 @@
 
 import { clear, el, pickProject, state } from "./core.js";
 import { icon } from "./icons.js";
-import { cardLink, glossaryText, JARGON, linkText, plainText, termLink } from "./links.js";
+import { cardLink, glossaryText, habitLink, JARGON, linkText, plainText, termLink } from "./links.js";
 
 // Reduced motion asked for (docs/ui.md, "Motion"): components that
 // animate in JS check this; CSS has its own media query.
@@ -700,7 +700,9 @@ export function renderFixList(fixes, container) {
 }
 
 // level: the heading's tag, for where the tips sit ("h4" by default);
-// seen: the Set of glossary terms already explained on this card.
+// seen: the Set of glossary terms already explained on this card. A tip
+// from the Work habits playbook carries its habit (quick_actions.py): it
+// ends with a link to that habit's card, opened and highlighted there.
 export function renderTips(tips, container, level, seen) {
   if (!tips || !tips.length) return;
   container.appendChild(el(level || "h4", { text: "Habits that help" }));
@@ -709,7 +711,9 @@ export function renderTips(tips, container, level, seen) {
       "ul",
       { class: "notes" },
       tips.map(function (tip) {
-        return el("li", null, [el("strong", { text: tip.title + ". " }), el("span", null, prose(tip.text, seen))]);
+        var parts = [el("strong", { text: tip.title + ". " }), el("span", null, prose(tip.text, seen))];
+        if (tip.habit) parts.push(el("span", { text: " " }), habitLink(tip.habit, "See the habit"));
+        return el("li", null, parts);
       })
     )
   );

@@ -35,7 +35,7 @@ subcommands and the `/api/profiles*`, `/api/profile-schema` and
 or above. It reads the Work habits section's `habits_setups` table: for
 each kind of task Claude reported, the model and effort the main
 session ran on, the cost per message, and how often the work went well
-(your feedback where you gave it, otherwise whether your next message
+(your feedback where you gave it, otherwise whether the messages after it
 redid it). Your usual setup is the one used most. The cheaper setup is
 the cheapest with at least 5 messages that cost less and went well
 within 5 points of your usual one (`habits.SETUP_OK_TOLERANCE`),
@@ -55,7 +55,7 @@ subagent type that most often answered that kind of task, when its
 `habits_agents_by_task` runs support one and nothing vetoes it — the
 same checks the corpus-wide "cheaper models where it's safe" goal uses
 (a worse setup or a retried model from the quality check, or an agent
-whose runs said, or were mostly, hard work). Every candidate's
+whose work was mostly reported hard). Every candidate's
 estimated saving is scaled to that task's own share of the window
 (`habits_by_task`'s per-task cost against the total, or the agent's
 task share against its own for an agent candidate); without a clean
@@ -75,8 +75,10 @@ subagent run says whether it used your CLAUDE.md. "Spend less on
 subagents" ticks `omitClaudeMd` for an agent type when more of its runs
 said they didn't use it than said they did, cites the count, and leaves
 it out when more said they did. Without those reports it is offered
-unticked, as before. What the runs said about the model only ever holds
-a cheaper model back.
+unticked, as before. A cheaper model is held back for an agent whose
+work was mostly reported hard, or that was retried because the model
+wasn't enough; what its runs did, the single read-only calls and the
+calls before the first edit, is shown beside it and never pushes one.
 
 The estimate reads the report's own tables and runs no new simulation:
 
@@ -339,9 +341,9 @@ real report table/column rather than an invented number.
 | `interactive-chat` | chat, quick-question, pairing, docs | `chat-only` | `effortLevel=medium`, `promptCacheTtl=5m` | `ttl.ttl_by_agent_type`'s top-level `gap_p50_s`/`gap_p90_s`/`recommendation`/`lever` row (chat-only turn gaps rarely clear the 1h TTL break-even); `scorecard.dimensions` (no `cache_efficiency`/`context_hygiene`/`agent_efficiency` evidence to justify a higher tier). |
 | `discovery-scrape` | data-exploration, web-research, database-exploration | `single-model` | `effortLevel=low`, `subagentPromptCacheTtl=5m`, `autoCompactWindow=100000`; `agents.Explore.effort=low`, `agents.Explore."experimental.cacheTtl"=5m` | `classify.classify_purpose`'s `local-llm-pipeline` signature and `phases.phases_summary`'s "discovery" row `cost_share_pct`; `recache.recache_huge_context.share_pct` / `scorecard.dimensions`' context-hygiene p90 proxy for the tightened `autoCompactWindow`. |
 | `planning-requirements` | planning, requirements, architecture | `single-model` | `effortLevel=high`, `promptCacheTtl=1h` | `agents.topology_effort_tokens`'s `thinking_share` column (the deliberate opposite case to the effort-mismatch rule: a planning session's high thinking-token share is doing real work); `sessions.sessions_by_purpose`'s "planning" row for the longer per-turn gap justifying 1h. |
-| `implementation-heavy` | implementation, refactor, test-triage, review | `plan-high-implement-low` | `effortLevel=medium`, `subagentPromptCacheTtl=5m`; `agents.claude-implementer.model=sonnet`, `.effort=medium`, `.maxTurns=60`, `.omitClaudeMd=false`, `."experimental.cacheTtl"=5m` | `agents.topology_spawn_write`'s `mean_write` column (recommend.py's spawn-cost rule threshold — `omitClaudeMd` is left `false` deliberately, since the rule only recommends flipping it once a specific corpus clears the threshold); `ttl.ttl_by_agent_type`'s per-agent-type lever text. |
-| `overseer-fanout` | fanout, multi-agent-coordination | `overseer-fanout` | `effortLevel=high`, `subagentPromptCacheTtl=5m`; `agents.claude-implementer.effort=medium`, `.maxTurns=60` | `agents.topology_report_proxy`'s `mean_proxy` column (agent-report-size rule); `agents.topology_spawn_write`'s `mean_write` column (spawn-cost rule) for the top/implementer effort split. |
-| `overnight-batch` | overnight-run, unattended-batch | `overseer-fanout` | `subagentPromptCacheTtl=1h`, `autoCompactWindow=300000`, `cleanupPeriodDays=30`; `agents.verification-runner."experimental.cacheTtl"=1h` | `classify.classify_mode`'s "overnight" mode (span > 4h, max human gap > 60min); `ttl.ttl_by_agent_type`'s `gaps_over_1h`/`gap_p90_s` columns; `compactions.compactions_summary`'s "Compactions per session (mean)" / dropped-token-share rows for the raised `autoCompactWindow`. |
+| `implementation-heavy` | implementation, refactor, test-triage, review | `plan-high-implement-low` | `effortLevel=medium`, `subagentPromptCacheTtl=5m`; `agents.claude-implementer.model=sonnet`, `.effort=medium`, `.maxTurns=60`, `.omitClaudeMd=false`, `."experimental.cacheTtl"=5m` | `agents.topology_spawn_write`'s `mean_first_call` column and `agent_startup.agent_startup_breakdown`'s `removable_tools` column (recommend.py's spawn-cost rule thresholds — `omitClaudeMd` is left `false` deliberately, since the rule only recommends flipping it once a specific corpus clears the thresholds); `ttl.ttl_by_agent_type`'s per-agent-type lever text. |
+| `overseer-fanout` | fanout, multi-agent-coordination | `overseer-fanout` | `effortLevel=high`, `subagentPromptCacheTtl=5m`; `agents.claude-implementer.effort=medium`, `.maxTurns=60` | `agents.topology_report_proxy`'s `mean_proxy` column (agent-report-size rule); `agents.topology_spawn_write`'s `mean_first_call` column (spawn-cost rule) for the top/implementer effort split. |
+| `overnight-batch` | overnight-run, unattended-batch | `overseer-fanout` | `subagentPromptCacheTtl=1h`, `autoCompactWindow=300000`, `cleanupPeriodDays=30`; `agents.verification-runner."experimental.cacheTtl"=1h` | `classify.classify_mode`'s "overnight" mode (Claude worked on its own for two hours or more at night while you were away, and at least 30% of its working time was at night); `ttl.ttl_by_agent_type`'s `gaps_over_1h`/`gap_p90_s` columns; `compactions.compactions_summary`'s "Compactions per session (mean)" / dropped-token-share rows for the raised `autoCompactWindow`. |
 | `plan-then-build` | plan-then-build | `single-model` | `promptCacheTtl=1h`; no model change | `habits.habits_by_shape`'s `plan_build` row (`share` column: main sessions that approve a plan with `ExitPlanMode`, then edit files in the same session); `plan_handoff.plan_handoff_summary`'s `tokens_carried_median`/`saving_usd` for the `/clear`-after-the-plan habit its notes describe. Not `implementation-heavy`, whose archetype hands the build to a cheaper model or agent. |
 | `workflow-ultracode` | workflow-run, scripted-multi-phase, ops | `workflow-heavy` | `subagentPromptCacheTtl=5m`; `agents.claude-implementer.maxTurns=40`, `."experimental.cacheTtl"=5m` | `workflows.workflows_summary`'s "Total workflow runs" row and `workflows.workflows_detail`'s per-run `agent_count`/`phases` columns; `ttl.ttl_by_agent_type`'s per-agent-type lever (short-gap scripted phases). |
 
@@ -433,8 +435,8 @@ back to `interactive-chat`.
 **Known limitation, disclosed rather than papered over:** `suggest()`
 can never return `overnight-batch` (`catalogue.UNREACHABLE_BY_SUGGEST`).
 That profile is justified entirely by session *mode* evidence
-(`classify.classify_mode`'s overnight rule: span > 4 hours and maximum
-human gap > 60 minutes), which `suggest`'s plan-specified signature
+(`classify.classify_mode`'s overnight rule: Claude worked two hours or
+more at night while you were away), which `suggest`'s plan-specified signature
 (archetype and purpose only, no mode) has no way to receive — an
 overnight session can be any archetype. `catalogue.get("overnight-batch")`
 still returns it directly, and `baseline._suggested_profile` suggests

@@ -10,22 +10,24 @@ three-way check: did the quality section find this setup did clearly
 worse on that model (``quality.worse_models``), were its runs on that
 model often retried on a larger one (``quality.retried_models``,
 :data:`quality.RETRIED_SHARE`), and did metrics capture say the
-agent's work needed a larger model or was mostly hard
+agent's work was mostly hard or a run was retried for the model
 (``habits.unfit_agents``). This module is the one copy.
 
 It also closes a fourth gap the corpus-wide ``unfit_agents`` check
-never covered: a *task's own* runs saying a larger model was needed,
-even when the agent isn't flagged unfit overall (:func:`row_unfit_reason`,
-reused per-task by ``habits._agents_by_task_table`` and
-``profiles.goals._task_agents``) -- the "larger model per task" veto.
+never covered: a *task's own* runs being mostly hard or retried for the
+model, even when the agent isn't flagged unfit overall
+(:func:`row_unfit_reason`, reused per-task by
+``habits._agents_by_task_table`` and ``profiles.goals._task_agents``) --
+the per-task veto. Claude's own verdict of whether a larger model was
+needed (``fit``) said "right" every time and is no longer a veto.
 
 Every sample-size floor here comes from a single source,
 ``model_swap.ModelSwapThresholds.min_sessions`` -- the same floor
 ``model_swap.py``'s own rows already clear before a
 ``best_cheaper_alternative_model`` is even offered -- rather than each
-caller inventing its own (the naive ``fit_larger``/``hard_pct``/
-``retried_model`` checks here previously had no floor at all: one
-retried run out of one was enough to blacklist a model forever).
+caller inventing its own (the naive ``hard_pct``/``retried_model``
+checks here previously had no floor at all: one retried run out of
+one was enough to blacklist a model forever).
 """
 
 from __future__ import annotations
@@ -40,24 +42,17 @@ def row_unfit(row: dict, *, min_sessions: int | None = None) -> tuple[str, float
     """``(kind, figure)`` for why a habits agents row -- corpus-wide
     (``habits_agents``) or one kind of task's slice of it
     (``habits_agents_by_task``) -- shouldn't be offered a smaller model:
-    ``"larger"`` (Claude said a larger model was needed at least as often
-    as a smaller one would do; the figure is those runs), ``"hard"``
-    (most of its work was reported hard; the figure is that share) or
-    ``"retried-model"`` (a run was retried because the model wasn't
-    enough; the figure is those retries). ``None`` when nothing vetoes
-    it, including when its sample (``row["runs"]``) is below
+    ``"hard"`` (most of its work was reported hard; the figure is that
+    share) or ``"retried-model"`` (a run was retried because the model
+    wasn't enough; the figure is those retries). ``None`` when nothing
+    vetoes it, including when its sample (``row["runs"]``) is below
     ``min_sessions``. The main session counts by how hard its work was
-    only, since it has no ``fit``/``retried_model`` of its own --
-    matching the long-standing ``habits.unfit_agents`` convention this
-    replaces."""
+    only, since it has no ``retried_model`` of its own -- matching the
+    long-standing ``habits.unfit_agents`` convention this replaces."""
     runs = row.get("runs")
     if min_sessions is not None and isinstance(runs, (int, float)) and runs < min_sessions:
         return None
-    larger = row.get("fit_larger") or 0
-    smaller = row.get("fit_smaller") or 0
     hard = row.get("hard_pct")
-    if larger and larger >= smaller:
-        return "larger", larger
     if isinstance(hard, (int, float)) and hard >= 50:
         return "hard", hard
     if (row.get("retried_model") or 0) >= 1:
@@ -68,8 +63,6 @@ def row_unfit(row: dict, *, min_sessions: int | None = None) -> tuple[str, float
 def unfit_reason(kind: str, figure: float) -> str:
     """The clause for one :func:`row_unfit` result, for "left out
     because ..."."""
-    if kind == "larger":
-        return f"Claude said {figure} of its runs needed a larger model"
     if kind == "hard":
         return f"{figure:.0f}% of its work was reported hard"
     return "a run was retried because the model wasn't enough"

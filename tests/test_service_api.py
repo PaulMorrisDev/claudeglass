@@ -24,12 +24,14 @@ S1-watcher landing first.
 from __future__ import annotations
 
 import http.client
+import itertools
 import json
 import os
 import sys
 import threading
 import time
 import types
+import zipfile
 from datetime import datetime, timedelta, timezone, tzinfo
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -37,6 +39,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
+from claudeglass import capture_catalogue, capture_view, parse
 from claudeglass import corpus as corpus_mod
 from claudeglass import discovery
 from claudeglass.config import ConfigError, load_config, load_session_overrides
@@ -51,7 +54,15 @@ from claudeglass.service.contracts import CodeState, ServeOptions, WatcherState,
 from claudeglass.service.store import Store
 from claudeglass.snapshots import Snapshot
 
-from helpers import assert_privacy, tool_use_block, turn_line, write_jsonl
+from helpers import (
+    assert_privacy,
+    tool_result_block,
+    tool_use_block,
+    turn_line,
+    user_block_line,
+    user_str_line,
+    write_jsonl,
+)
 
 #: Distinctive fake local-only strings -- same convention
 #: ``tests/test_service_store.py`` uses for its own path-leak guard. If
@@ -173,18 +184,25 @@ def _install_fake_rebuild(monkeypatch, corpus: corpus_mod.Corpus) -> None:
 
     fake = types.ModuleType("claudeglass.service.rebuild")
 
-    def corpus_from_store(store, *, days=None, since=None, until=None, window_by="last-reply", project_slugs=None):
-        # project_slugs (additive, project-filter work): the one argument
-        # this fake does *not* ignore -- api.py's own project filter
-        # (_project_query/_build_report_model) is what a test in this
-        # file exercises, and it can only see an effect if this stand-in
-        # actually narrows `corpus` the same way the real
+    def corpus_from_store(
+        store, *, days=None, since=None, until=None, window_by="last-reply", project_slugs=None, session_ids=None
+    ):
+        # project_slugs (additive, project-filter work) and session_ids
+        # (the session drawer's rating facts, the banner's unrated list):
+        # the arguments this fake does *not* ignore -- api.py's own
+        # project filter (_project_query/_build_report_model) is what a
+        # test in this file exercises, and it can only see an effect if
+        # this stand-in actually narrows `corpus` the same way the real
         # service.rebuild.corpus_from_store does.
-        if project_slugs is None:
+        if project_slugs is None and session_ids is None:
             return corpus
-        allowed = set(project_slugs)
+        allowed = set(project_slugs) if project_slugs is not None else None
+        wanted = set(session_ids) if session_ids is not None else None
         return corpus_mod.Corpus(
-            sessions=[b for b in corpus.sessions if b.slug in allowed],
+            sessions=[
+                b for b in corpus.sessions
+                if (allowed is None or b.slug in allowed) and (wanted is None or b.session_id in wanted)
+            ],
             total_files=corpus.total_files,
             total_bytes=corpus.total_bytes,
             cache_hits=corpus.cache_hits,
@@ -382,10 +400,11 @@ class _Clock:
 def _freeze_clock(monkeypatch, now: datetime = _PINNED) -> _Clock:
     """Pin "now" for the window code and return the clock to move it.
 
-    A calendar window is worked out in two modules, each with its own
+    A calendar window is worked out in three modules, each with its own
     ``datetime``: ``discovery.window_start`` (where ``window_days`` and
-    "today" start) and ``service.api`` (the other named windows, a period's
-    bounds), so both are patched. The store's own clock (the legacy rows'
+    "today" start), ``service.api`` (the other named windows, a period's
+    bounds) and ``capture_view.overhead_window`` (the Capture page's last 7
+    days), so all three are patched. The store's own clock (the legacy rows'
     upper bound) and the report cache's monotonic one are not."""
     clock = _Clock(now)
 
@@ -397,6 +416,7 @@ def _freeze_clock(monkeypatch, now: datetime = _PINNED) -> _Clock:
 
     monkeypatch.setattr(discovery, "datetime", _Frozen)
     monkeypatch.setattr(service_api, "datetime", _Frozen)
+    monkeypatch.setattr(capture_view, "datetime", _Frozen)
     return clock
 
 
@@ -2269,6 +2289,121 @@ def test_static_file_is_served_from_a_real_static_dir(tmp_path, monkeypatch):
         store.close()
 
 
+def test_static_files_are_served_from_inside_a_zip(tmp_path, monkeypatch):
+    # The single-file .pyz keeps the dashboard inside a zip, where a path
+    # built from __file__ opens nothing. static_dir takes what
+    # importlib.resources hands back, so a zipfile.Path stands for it here.
+    corpus = _build_corpus(tmp_path)
+    _install_fake_rebuild(monkeypatch, corpus)
+    store = Store(tmp_path / "service.db")
+    store.open()
+
+    archive = tmp_path / "ui.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("static/index.html", b'<html><meta name="cg-command" content="claudeglass">hello</html>')
+        zf.writestr("static/app.js", b"console.log('hi');")
+        zf.writestr("static/fonts/face.woff2", b"wOF2")
+        zf.writestr("static/vendor/lib.js", b"var lib = 1;")
+        zf.writestr("static/.tool-cache/state.json", b"{}")
+        zf.writestr("static/.hidden.js", b"var h = 1;")
+        zf.writestr("outside.txt", b"secret")
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    options = ServeOptions(projects_root=tmp_path / "projects", config_dir=config_dir)
+    handler_cls = service_api.make_handler(store, options, static_dir=zipfile.Path(archive, "static/"))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    handle = _ServerHandle(httpd, thread, corpus=corpus, store=store, options=options)
+    try:
+        resp, raw = handle.request("GET", "/")
+        assert resp.status == 200
+        assert b"hello" in raw
+
+        for path, content_type, cache, body in (
+            ("/static/app.js", "text/javascript", "no-store", b"console.log('hi');"),
+            ("/static/fonts/face.woff2", "font/woff2", "public, max-age=31536000, immutable", b"wOF2"),
+            ("/static/vendor/lib.js", "text/javascript", "public, max-age=31536000, immutable", b"var lib = 1;"),
+        ):
+            resp, raw = handle.request("GET", path)
+            assert resp.status == 200, path
+            assert resp.getheader("Content-Type") == content_type, path
+            assert resp.getheader("Cache-Control") == cache, path
+            assert raw == body, path
+        resp, raw = handle.request("HEAD", "/static/app.js")
+        assert resp.status == 200
+        assert raw == b""
+
+        # A folder, a missing file, a dot-file or dot-folder and a name that
+        # steps out of the folder are all "not found", as in a real folder.
+        for path in (
+            "/static/fonts",
+            "/static/missing.js",
+            "/static/.hidden.js",
+            "/static/.tool-cache/state.json",
+            "/static/..%2foutside.txt",
+            "/static/%2e%2e/outside.txt",
+            "/static/fonts%5c..%5capp.js",
+        ):
+            resp, _raw = handle.request("GET", path)
+            assert resp.status == 404, path
+    finally:
+        handle.close()
+        store.close()
+
+
+def test_the_default_static_dir_is_read_through_importlib_resources():
+    root = service_api._default_static_dir()
+    assert root.joinpath("index.html").is_file()
+    assert root.joinpath("app.js").is_file()
+    found = service_api._static_file(root, "fonts/InterVariable-4.1.woff2")
+    assert found is not None
+    assert found[1] == ("fonts", "InterVariable-4.1.woff2")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        "/",
+        "..",
+        "../x",
+        "a/../../x",
+        ".hidden",
+        "fonts/.x",
+        "fonts\\..\\app.js",
+        "C:evil",
+        "a:b",
+        "nul\x00.js",
+        "fonts",
+        "missing.js",
+    ],
+)
+def test_static_file_refuses_a_name_that_is_not_one_file_of_the_ui(tmp_path, name):
+    static = tmp_path / "static"
+    (static / "fonts").mkdir(parents=True)
+    (static / "app.js").write_text("1", encoding="utf-8")
+    (tmp_path / "x").write_text("outside", encoding="utf-8")
+    assert service_api._static_file(static, name) is None
+
+
+def test_static_file_finds_a_file_and_refuses_a_link_that_leaves_the_folder(tmp_path):
+    static = tmp_path / "static"
+    (static / "fonts").mkdir(parents=True)
+    (static / "fonts" / "face.woff2").write_bytes(b"wOF2")
+    found = service_api._static_file(static, "fonts//face.woff2")
+    assert found is not None
+    assert found[1] == ("fonts", "face.woff2")
+    assert found[0].read_bytes() == b"wOF2"
+    (tmp_path / "secret.txt").write_text("secret", encoding="utf-8")
+    try:
+        (static / "link.txt").symlink_to(tmp_path / "secret.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("links cannot be made here")
+    assert service_api._static_file(static, "link.txt") is None
+
+
 # -- 500 on unexpected exceptions --------------------------------------------
 
 
@@ -2795,7 +2930,8 @@ def test_impact_lists_the_changes_a_window_covers_and_judges_each_on_its_whole_s
 
 def test_impact_judges_a_model_change_on_tokens_before_cost(tmp_path, monkeypatch):
     """Sonnet to Opus, with the same tokens in every session: the price per
-    token doubles, and the card leads with the tokens, which didn't move."""
+    token doubles. The tokens, which didn't move, are measured first; the
+    card leads with the price, which did."""
     now = datetime.now(timezone.utc)
     runs = [(f"s{n}", days, _SONNET) for n, days in enumerate((13, 12, 11), 1)]
     runs += [(f"s{n}", days, _OPUS) for n, days in enumerate((9, 8, 7, 6), 4)]
@@ -2806,10 +2942,15 @@ def test_impact_judges_a_model_change_on_tokens_before_cost(tmp_path, monkeypatc
         [change] = _impact_changes(handle)
         assert change["change"]["source"] == "transcript" and change["enough"]
         by_key = {row["key"]: row for row in change["measures"]}
+        # The lead first (what the ratio test is surest of), the rest as the model change lists them.
+        assert change["lead"] == "cost_per_turn" and list(by_key)[0] == "cost_per_turn"
         assert list(by_key) == [
-            "tokens_per_session", "output_per_turn", "turns_per_session", "cost_per_turn", "cost_per_session",
+            "cost_per_turn", "tokens_per_session", "output_per_turn", "turns_per_session",
+            "cost_per_substantive_cycle", "cost_per_session",
         ]
-        assert [(by_key[k]["kind"], by_key[k]["before"], by_key[k]["after"]) for k in list(by_key)[:3]] == [
+        assert [(by_key[k]["kind"], by_key[k]["before"], by_key[k]["after"]) for k in (
+            "tokens_per_session", "output_per_turn", "turns_per_session",
+        )] == [
             ("tokens", "300 tokens", "300 tokens"),
             ("tokens", "50 tokens", "50 tokens"),
             ("count", "2.0", "2.0"),
@@ -2817,9 +2958,11 @@ def test_impact_judges_a_model_change_on_tokens_before_cost(tmp_path, monkeypatc
         assert [by_key[k]["direction"] for k in ("tokens_per_session", "cost_per_turn", "cost_per_session")] == [
             "same", "higher", "higher",
         ]
-        assert change["verdict"] == (
-            "Tokens per session: about the same (300 tokens before, 300 tokens after)."
-        )
+        # A change that is about cost reads cost like any other measure, and says how the mix stands.
+        assert not any(row["demoted"] for row in change["measures"])
+        assert by_key["cost_per_substantive_cycle"]["kind"] == "money"
+        assert set(change["mix"]) == {"flagged", "kind", "before_pct", "after_pct", "shift_pts", "text"}
+        assert change["verdict"].startswith("Cost per reply rose ")
     finally:
         handle.close()
         handle.store.close()
@@ -2845,6 +2988,23 @@ def test_impact_lists_every_change_a_window_covers_with_no_cap(tmp_path, monkeyp
             stamps = [change["change"]["ts"] for change in changes]
             assert stamps == sorted(stamps, reverse=True)
         assert len(_impact_changes(handle, f"since={_stamp(now - timedelta(days=5))}")) == 5
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_impact_says_no_lead_and_no_mix_until_a_change_has_sessions_on_both_sides(tmp_path, monkeypatch):
+    now = datetime.now(timezone.utc)
+    handle = _start_server(tmp_path, monkeypatch)
+    try:
+        _log_captures(handle, [now - timedelta(days=1.5)])
+        [change] = _impact_changes(handle)
+        assert change["enough"] is False
+        assert change["lead"] is None and change["mix"] is None
+        # A capture change names cost per session as the one read last, whatever the sessions say.
+        by_key = {row["key"]: row for row in change["measures"]}
+        assert by_key["cost_per_session"]["demoted"] is True
+        assert not any(row["demoted"] for key, row in by_key.items() if key != "cost_per_session")
     finally:
         handle.close()
         handle.store.close()
@@ -3633,11 +3793,11 @@ def test_post_capture_explicit_empty_until_means_no_limit(server):
 
 
 def test_post_capture_picks_metrics_sampling_end_and_feedback(server):
-    resp, payload = server.post_json("/api/capture", {"metrics": ["task", "fit"]})
+    resp, payload = server.post_json("/api/capture", {"metrics": ["task", "agent_brief"]})
     assert resp.status == 200
     config = payload["data"]["config"]
-    # fit rides on result, so result comes with it.
-    assert config["level"] == "custom" and config["metrics"] == ["task", "result", "fit"]
+    # agent_brief rides on result, so result comes with it.
+    assert config["level"] == "custom" and config["metrics"] == ["task", "result", "agent_brief"]
     resp, payload = server.post_json(
         "/api/capture", {"sample": 25, "until": "2099-01-01T00:00:00+00:00", "feedback": ["feedback_note"]}
     )
@@ -3786,8 +3946,19 @@ def test_session_detail_offers_the_rating_questions_only_while_it_is_on(server):
     _feedback_on(server, "dashboard_rating")
     resp, payload = server.get_json(f"/api/session/{server.session_id}")
     questions = payload["data"]["feedback_questions"]
-    assert [q["key"] for q in questions] == ["outcome", "slow", "worth", "helped"]
-    assert questions[1]["multi"] is True and {"word": "none", "label": "Nothing"} in questions[1]["options"]
+    # The fixture session has no follow-up, plan or tip, so only the
+    # questions that need none of them are asked.
+    assert [q["key"] for q in questions] == ["outcome", "worth", "helped"]
+    helped = questions[2]
+    assert helped["multi"] is True and "none" in [o["word"] for o in helped["options"]]
+    assert all(o["label"] and o["description"] for q in questions for o in q["options"])
+    assert all(q["needs"] == "" and q["tip_hint"] == "" and q["builds"] == [] for q in questions)
+    assert "{" not in "".join(q["question"] for q in questions)
+    # The facts the questions were left in or out by are counts and words only.
+    facts = payload["data"]["feedback_facts"]
+    assert set(facts) == set(capture_catalogue.FEEDBACK_FACT_KEYS)
+    assert facts["followups"] == 0 and facts["plan"] == "none" and facts["tip"] == "none"
+    assert payload["data"]["low_confidence"] is False
 
 
 def test_rating_a_session_saves_words_and_an_empty_rating_clears_it(server):
@@ -3812,6 +3983,21 @@ def test_rating_a_session_saves_words_and_an_empty_rating_clears_it(server):
         {"slow": "tools"},
         {"slow": ["tools", "my boss"]},
         {"worth": 5},
+        {"why": ["left_out", "because"]},
+        {"why": "missed"},
+        {"missed_in": "somewhere"},
+        {"plan": "great"},
+        {"handoff": ["yes"]},
+        {"tip": "loved it"},
+        {"tip_hint": 7},
+        {"builds": "all"},
+        {"builds": [{"build": 0, "plan": "gap"}]},
+        {"builds": [{"build": True, "plan": "gap"}]},
+        {"builds": [{"build": 1, "plan": "gap"}, {"build": 1, "plan": "covered"}]},
+        {"builds": [{"build": 1, "plan": "terrible"}]},
+        {"builds": [{"build": 1, "note": "text"}]},
+        {"builds": ["one"]},
+        {"builds": [{"build": n} for n in range(1, 34)]},
     ],
 )
 def test_rating_refuses_anything_but_known_words(server, body):
@@ -3834,6 +4020,505 @@ def test_rating_refuses_cross_site_posts(server):
     assert server.store.feedback(server.session_id) is None
 
 
+def test_rating_a_session_keeps_the_redesigned_answers(server):
+    url = f"/api/sessions/{server.session_id}/feedback"
+    body = {
+        "outcome": "partly", "why": ["left_out", "missed", "left_out"], "missed_in": "plan", "worth": "fair",
+        "helped": ["plan"], "plan": "gap", "handoff": "partly", "tip": "useful", "tip_hint": "plan_fresh",
+    }
+    resp, payload = server.post_json(url, body)
+    assert resp.status == 200
+    saved = payload["data"]["feedback"]
+    assert saved["why"] == ["left_out", "missed"] and saved["missed_in"] == "plan"
+    assert saved["tip"] == "useful" and saved["tip_hint"] == "plan_fresh"
+    # A lone plan and handoff answer is the first plan build's.
+    assert saved["plan"] == "gap" and saved["handoff"] == "partly"
+    assert saved["builds"] == [{"build": 1, "plan": "gap", "handoff": "partly"}]
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["feedback"] == saved
+    # The next rating replaces it: what it leaves out is cleared, and a tip
+    # hint without an answer is dropped.
+    resp, payload = server.post_json(url, {"outcome": "met", "tip_hint": "plan_fresh"})
+    cleared = payload["data"]["feedback"]
+    assert cleared["why"] == [] and cleared["plan"] is None and cleared["tip"] is None and cleared["tip_hint"] is None
+    assert cleared["builds"] == []
+
+
+def test_a_rating_with_nothing_ticked_clears_the_plan_builds_too(server):
+    url = f"/api/sessions/{server.session_id}/feedback"
+    server.post_json(url, {"builds": [{"build": 1, "plan": "covered", "handoff": "yes"}]})
+    assert server.store.feedback(server.session_id)["builds"]
+    resp, payload = server.post_json(url, {"builds": [{"build": 1, "plan": None, "handoff": None}]})
+    assert resp.status == 200 and payload["data"]["feedback"] is None
+    assert server.store.feedback(server.session_id) is None
+
+
+def _lines_for_two_plans() -> list[dict]:
+    """A top-level transcript with two approved plans: the first has a
+    follow-up after it, the second does not."""
+
+    def at(second: int) -> str:
+        return f"2026-09-18T12:{second // 60:02d}:{second % 60:02d}.000Z"
+
+    def ask(second: int, text: str) -> dict:
+        return user_str_line(text, origin={"kind": "human"}, timestamp=at(second))
+
+    def reply(second: int, *blocks) -> dict:
+        content = list(blocks) or [{"type": "text", "text": "ok"}]
+        return turn_line(content=content, timestamp=at(second), input_tokens=300, output_tokens=40)
+
+    def done(second: int, *ids: str) -> dict:
+        return user_block_line([tool_result_block(i, "ok") for i in ids], timestamp=at(second))
+
+    def edit(tool_id: str, path: str) -> dict:
+        return tool_use_block("Edit", tool_id, {"file_path": path})
+
+    return [
+        ask(0, "plan the change"),
+        reply(1, tool_use_block("ExitPlanMode", "tu_p1", {"plan": "1. Edit a.py"})), done(2, "tu_p1"),
+        reply(3, edit("e1", "C:/Dev/repo/a.py")), done(4, "e1"), reply(5),
+        ask(10, "the title is wrong"),
+        reply(11, edit("e2", "C:/Dev/repo/a.py")), done(12, "e2"), reply(13),
+        ask(20, "now plan the second part"),
+        reply(21, tool_use_block("ExitPlanMode", "tu_p2", {"plan": "1. Edit b.py"})), done(22, "tu_p2"),
+        reply(23, edit("e3", "C:/Dev/repo/b.py")), done(24, "e3"), reply(25),
+    ]
+
+
+def _two_plan_corpus(tmp_path: Path) -> corpus_mod.Corpus:
+    project_dir = tmp_path / "projects" / "proj-a"
+    project_dir.mkdir(parents=True)
+    write_jsonl(project_dir / "session-a.jsonl", _lines_for_two_plans())
+    return corpus_mod.load_corpus([project_dir])
+
+
+def test_a_session_with_two_plans_is_asked_about_each_build(tmp_path, monkeypatch):
+    handle = _start_server(tmp_path, monkeypatch, corpus=_two_plan_corpus(tmp_path))
+    try:
+        _feedback_on(handle, "dashboard_rating")
+        resp, payload = handle.get_json(f"/api/session/{handle.session_id}")
+        data = payload["data"]
+        assert data["feedback_facts"]["plan"] == "approved" and data["feedback_facts"]["followups"] >= 1
+        rows = {q["key"]: q for q in data["feedback_questions"]}
+        assert {"plan", "handoff", "why"} <= set(rows)
+        # The handoff is asked once for each build; the plan question for the
+        # build that had a follow-up after its approval.
+        assert [b["build"] for b in rows["handoff"]["builds"]] == [1, 2]
+        assert [b["label"] for b in rows["handoff"]["builds"]] == ["Plan 1 of 2", "Plan 2 of 2"]
+        assert [b["build"] for b in rows["plan"]["builds"]] == [1]
+        assert all(b["question"] and "{" not in b["question"] for q in rows.values() for b in q["builds"])
+        assert rows["outcome"]["builds"] == [] and rows["worth"]["builds"] == []
+
+        resp, payload = handle.post_json(
+            f"/api/sessions/{handle.session_id}/feedback",
+            {
+                "outcome": "partly",
+                "builds": [
+                    {"build": 1, "plan": "gap", "handoff": "partly"},
+                    {"build": 2, "plan": None, "handoff": "yes"},
+                ],
+            },
+        )
+        assert resp.status == 200
+        saved = payload["data"]["feedback"]
+        assert saved["builds"] == [
+            {"build": 1, "plan": "gap", "handoff": "partly"},
+            {"build": 2, "plan": None, "handoff": "yes"},
+        ]
+        assert saved["plan"] == "gap" and saved["handoff"] == "partly"
+        assert handle.store.all_feedback()[handle.session_id]["builds"] == saved["builds"]
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_session_with_no_stored_transcript_still_gets_the_questions_that_need_no_facts(server):
+    _feedback_on(server, "dashboard_rating")
+    server.corpus.sessions[0].top = None  # the fake rebuild returns the corpus as it is
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert resp.status == 200
+    data = payload["data"]
+    assert data["feedback_facts"] is None
+    keys = [q["key"] for q in data["feedback_questions"]]
+    assert keys == ["outcome", "why", "missed_in", "worth", "helped"]
+    assert all("{" not in q["question"] for q in data["feedback_questions"])
+
+
+# -- the label chip --------------------------------------------------------------
+
+
+def _set_labels(server, *, mode=None, mode_source=None, purpose=None, purpose_source=None):
+    conn = server.store._connection()
+    conn.execute("DELETE FROM session_tags WHERE session_id = ?", (server.session_id,))  # the fixture tags its purpose
+    conn.execute(
+        "UPDATE sessions SET mode = ?, mode_source = ?, purpose = ?, purpose_source = ? WHERE id = ?",
+        (mode, mode_source, purpose, purpose_source, server.session_id),
+    )
+
+
+def test_a_session_labelled_by_the_catch_all_rule_is_low_confidence(server):
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [False]
+    _set_labels(server, mode="mixed", mode_source="rule", purpose="refactor", purpose_source="intent-signature")
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [True]
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["low_confidence"] is True
+    _set_labels(server, mode="agentic", mode_source="tool-signature", purpose="general-dev", purpose_source="rule")
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [True]
+
+
+@pytest.mark.parametrize("source", ["override", "reported", "tool-signature"])
+def test_a_label_you_set_or_claude_reported_is_not_a_guess(server, source):
+    _set_labels(server, mode="mixed", mode_source=source, purpose="general-dev", purpose_source=source)
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [False]
+
+
+def test_setting_a_tag_takes_the_chip_off_straight_away(server):
+    _set_labels(server, mode="mixed", mode_source="rule", purpose="general-dev", purpose_source="rule")
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["low_confidence"] is True
+    # A tag for one label leaves the other still a guess.
+    server.post_json(f"/api/sessions/{server.session_id}/tags", {"key": "mode", "value": "interactive"})
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["low_confidence"] is True
+    server.post_json(f"/api/sessions/{server.session_id}/tags", {"key": "purpose", "value": "docs"})
+    resp, payload = server.get_json(f"/api/session/{server.session_id}")
+    assert payload["data"]["low_confidence"] is False
+    resp, payload = server.get_json("/api/sessions")
+    assert [row["low_confidence"] for row in payload["data"]] == [False]
+
+
+# -- what you say about a tip, habit or recommendation card ----------------------------
+
+
+def test_tip_feedback_lists_the_answers_a_card_can_take(server):
+    resp, payload = server.get_json("/api/tip-feedback")
+    assert resp.status == 200
+    data = payload["data"]
+    assert data["answers"] == []
+    assert [o["word"] for o in data["options"]] == list(capture_catalogue.TIP_CARD_VOCAB)
+    assert [o["label"] for o in data["options"]] == ["Useful", "Trying it", "Knew it", "Wrong here"]
+    assert all(o["description"] for o in data["options"])
+
+
+def test_rating_a_card_saves_it_and_pressing_the_same_answer_again_takes_it_back(server):
+    resp, payload = server.post_json("/api/tip-feedback", {"kind": "tip", "item": "drip_feed", "answer": "useful"})
+    assert resp.status == 200
+    assert payload["data"]["answer"] == "useful" and payload["data"]["set_at"]
+    resp, payload = server.post_json("/api/tip-feedback", {"kind": "habit", "item": "split_large", "answer": "known"})
+    assert resp.status == 200
+    resp, payload = server.get_json("/api/tip-feedback")
+    rows = payload["data"]["answers"]
+    assert [(r["kind"], r["item"], r["answer"]) for r in rows] == [
+        ("habit", "split_large", "known"), ("tip", "drip_feed", "useful"),
+    ]
+    assert all(r["set_at"] for r in rows)
+    resp, payload = server.post_json("/api/tip-feedback", {"kind": "tip", "item": "drip_feed", "answer": None})
+    assert resp.status == 200 and payload["data"]["answer"] is None and payload["data"]["set_at"] is None
+    assert server.store.tip_feedback_count() == 1
+
+
+def test_a_recommendation_card_is_rated_by_its_key(server):
+    resp, payload = server.post_json(
+        "/api/tip-feedback", {"kind": "recommendation", "item": "model.default:sonnet", "answer": "wrong"}
+    )
+    assert resp.status == 200
+    assert server.store.tip_feedback()[("recommendation", "model.default:sonnet")]["answer"] == "wrong"
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        [],
+        {},
+        {"kind": "tip", "item": "drip_feed", "answer": "great"},
+        {"kind": "tip", "item": "drip_feed", "answer": ["useful"]},
+        {"kind": "idea", "item": "drip_feed", "answer": "useful"},
+        {"kind": "tip", "item": "not-a-tip", "answer": "useful"},
+        {"kind": "tip", "item": "split_large", "answer": "useful"},
+        {"kind": "habit", "item": "drip_feed", "answer": "useful"},
+        {"kind": "habit", "item": 3, "answer": "useful"},
+        {"kind": "recommendation", "item": "Has Spaces", "answer": "useful"},
+        {"kind": "recommendation", "item": "x" * 201, "answer": "useful"},
+        {"kind": "tip", "item": "drip_feed", "answer": "useful", "note": "free text"},
+    ],
+)
+def test_rating_a_card_refuses_anything_but_known_cards_and_words(server, body):
+    resp, payload = server.post_json("/api/tip-feedback", body)
+    assert resp.status == 400 and payload["error"]["code"] == "bad_request"
+    assert server.store.tip_feedback_count() == 0
+    assert not (server.options.config_dir / "habit-log.jsonl").exists()
+
+
+def test_rating_a_card_refuses_cross_site_posts(server):
+    body = {"kind": "tip", "item": "drip_feed", "answer": "trying"}
+    resp, _raw = server.request("POST", "/api/tip-feedback", body=body, headers={"Origin": "https://evil.example"})
+    assert resp.status == 403
+    assert server.store.tip_feedback_count() == 0
+    assert not (server.options.config_dir / "habit-log.jsonl").exists()
+
+
+def test_trying_a_card_logs_the_day_once_and_only_words_go_in_the_log(server):
+    from claudeglass.config import load_habit_log
+
+    body = {"kind": "habit", "item": "split_large", "answer": "trying"}
+    server.post_json("/api/tip-feedback", body)
+    server.post_json("/api/tip-feedback", body)  # pressing it again changes nothing
+    [record] = load_habit_log(server.options.config_dir)
+    assert set(record) == {"ts", "kind", "item", "state"}
+    assert (record["kind"], record["item"], record["state"]) == ("habit", "split_large", "trying")
+    # Other answers log nothing; trying it again after another answer logs a new start.
+    server.post_json("/api/tip-feedback", {**body, "answer": "useful"})
+    assert len(load_habit_log(server.options.config_dir)) == 1
+    server.post_json("/api/tip-feedback", body)
+    assert len(load_habit_log(server.options.config_dir)) == 2
+
+
+def test_a_card_rating_changes_no_setting(server):
+    before = {path.name for path in server.options.config_dir.iterdir()}
+    server.post_json("/api/tip-feedback", {"kind": "tip", "item": "plan_fresh", "answer": "useful"})
+    server.post_json("/api/tip-feedback", {"kind": "habit", "item": "split_large", "answer": "trying"})
+    after = {path.name for path in server.options.config_dir.iterdir()}
+    # Only the habit log is new: no config.toml, and nothing outside the folder.
+    assert after - before == {"habit-log.jsonl"}
+
+
+def test_the_number_of_rated_cards_is_capped(server, monkeypatch):
+    monkeypatch.setattr(service_api, "_MAX_TIP_FEEDBACK", 2)
+    for key in ("one", "two"):
+        resp, _payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": key, "answer": "known"})
+        assert resp.status == 200
+    resp, payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": "three", "answer": "known"})
+    assert resp.status == 400 and "at most 2" in payload["error"]["message"]
+    # A card that already holds an answer can still change it or give it back.
+    resp, _payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": "one", "answer": "wrong"})
+    assert resp.status == 200
+    resp, _payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": "two", "answer": None})
+    assert resp.status == 200
+    resp, _payload = server.post_json("/api/tip-feedback", {"kind": "recommendation", "item": "three", "answer": "known"})
+    assert resp.status == 200
+
+
+def test_a_card_answer_moves_the_change_token(server):
+    before = server.store.change_token()
+    server.post_json("/api/tip-feedback", {"kind": "tip", "item": "drip_feed", "answer": "known"})
+    assert server.store.change_token() != before
+
+
+# -- the banner's list of sessions to rate ----------------------------------------------------
+
+
+#: Windows' clock ticks every 15.6 ms, so two calls in a row could write the
+#: same time and leave the store's change token where it was.
+_TOUCHES = itertools.count(1)
+
+
+def _recent_session(server, days_ago: int = 1) -> None:
+    """The fixture session replied a few days ago, so it is inside the
+    banner's window whenever the suite runs."""
+    now = datetime.now(timezone.utc)
+    stamp = (now - timedelta(days=days_ago)).isoformat(timespec="seconds")
+    conn = server.store._connection()
+    conn.execute("UPDATE sessions SET first_ts = ?, last_ts = ? WHERE id = ?", (stamp, stamp, server.session_id))
+    # A re-parsed transcript is what moves the store's change token.
+    conn.execute(
+        "UPDATE transcripts SET updated_at = ? WHERE session_id = ?",
+        ((now + timedelta(microseconds=next(_TOUCHES))).isoformat(timespec="microseconds"), server.session_id),
+    )
+
+
+def _lower_the_reminder_threshold(server, tokens: int = 100) -> None:
+    from claudeglass import coaching
+
+    coaching.write(server.options.config_dir, {"thresholds": {"rating_min_tokens": tokens}})
+
+
+def _banner(server) -> dict:
+    resp, payload = server.get_json("/api/capture")
+    assert resp.status == 200
+    return payload["data"]["banner"]
+
+
+def test_the_banner_lists_a_piece_of_work_big_enough_for_the_reminder_with_its_tokens(server):
+    _recent_session(server)
+    _feedback_on(server, "feedback_reminder")
+    # The reminder's default floor is a million tokens: this session is far below it.
+    assert _banner(server)["unrated"] is None
+    _lower_the_reminder_threshold(server)
+    unrated = _banner(server)["unrated"]
+    assert unrated["threshold"] == 100 and unrated["threshold_text"] == "100"
+    assert unrated["total"] == 1 and [p["session_id"] for p in unrated["pieces"]] == [server.session_id]
+    piece = unrated["pieces"][0]
+    assert piece["tokens"] > 100 and piece["tokens_text"] == str(piece["tokens"])
+    assert set(piece) == {"session_id", "slug", "last_ts", "tokens", "tokens_text", "part", "label"}
+    # One piece in the session, named by its messages and not by a part of several.
+    assert piece["part"] == 1 and isinstance(piece["label"], str) and "piece 1 of" not in piece["label"]
+    assert unrated["text"].startswith("1 piece of work used at least 100 tokens and has no rating yet.")
+    # Tokens only: no money amount and no path comes with it.
+    assert "$" not in json.dumps(unrated)
+    _assert_no_leak(json.dumps(unrated).encode("utf-8"))
+
+
+def test_rating_a_session_takes_it_off_the_banner(server):
+    _recent_session(server)
+    _lower_the_reminder_threshold(server)
+    _feedback_on(server, "dashboard_rating")
+    assert _banner(server)["unrated"]["total"] == 1
+    server.post_json(f"/api/sessions/{server.session_id}/feedback", {"outcome": "met"})
+    assert _banner(server)["unrated"] is None
+    # Taking the rating back puts it on the list again.
+    server.post_json(f"/api/sessions/{server.session_id}/feedback", {})
+    assert _banner(server)["unrated"]["total"] == 1
+
+
+def test_the_banner_leaves_out_a_session_outside_the_window(server):
+    _lower_the_reminder_threshold(server)
+    _feedback_on(server, "feedback_reminder")
+    _recent_session(server, days_ago=45)
+    assert _banner(server)["unrated"] is None
+    _recent_session(server, days_ago=2)
+    assert _banner(server)["unrated"]["total"] == 1
+
+
+def test_the_banner_reads_again_only_the_sessions_that_changed(server, monkeypatch):
+    from claudeglass.service import rebuild
+
+    _lower_the_reminder_threshold(server)
+    _feedback_on(server, "feedback_reminder")
+    _recent_session(server, days_ago=2)
+    asked = []
+    real = rebuild.corpus_from_store
+
+    def spy(store, **kwargs):
+        if kwargs.get("session_ids") is not None:
+            asked.append(sorted(kwargs["session_ids"]))
+        return real(store, **kwargs)
+
+    monkeypatch.setattr(rebuild, "corpus_from_store", spy)
+    assert _banner(server)["unrated"]["total"] == 1
+    assert asked == [[server.session_id]]
+    # A change elsewhere in the store rebuilds the list without reading the session again.
+    server.store.set_tip_feedback("recommendation", "any-key", "useful")
+    assert _banner(server)["unrated"]["total"] == 1
+    assert asked == [[server.session_id]]
+
+
+def _cleared_corpus(tmp_path: Path, *, more_in_second: int = 0) -> corpus_mod.Corpus:
+    """One session of two pieces of work: a /clear sits between them. The second has ``more_in_second``
+    extra replies, so it is the bigger."""
+
+    def at(second: int) -> str:
+        return f"2026-09-18T12:{second // 60:02d}:{second % 60:02d}.000Z"
+
+    def reply(second: int, *blocks) -> dict:
+        content = list(blocks) or [{"type": "text", "text": "ok"}]
+        return turn_line(content=content, timestamp=at(second), input_tokens=300, output_tokens=40)
+
+    lines = [
+        user_str_line("build the title", origin={"kind": "human"}, timestamp=at(0)),
+        reply(1, tool_use_block("Edit", "e1", {"file_path": "C:/Dev/repo/a.py"})),
+        user_block_line([tool_result_block("e1", "ok")], timestamp=at(2)),
+        reply(3),
+        user_str_line("<command-name>/clear</command-name>\n<command-message>clear</command-message>\n"
+                      "<command-args></command-args>", timestamp=at(10)),
+        user_str_line("now build the footer", origin={"kind": "human"}, timestamp=at(20)),
+        reply(21, tool_use_block("Edit", "e2", {"file_path": "C:/Dev/repo/b.py"})),
+        user_block_line([tool_result_block("e2", "ok")], timestamp=at(22)),
+        reply(23),
+        *[reply(24 + n) for n in range(more_in_second)],
+    ]
+    project_dir = tmp_path / "projects" / "proj-a"
+    project_dir.mkdir(parents=True)
+    write_jsonl(project_dir / "session-a.jsonl", lines)
+    return corpus_mod.load_corpus([project_dir])
+
+
+def test_a_session_with_a_clear_in_it_lists_each_piece_that_is_big_enough(tmp_path, monkeypatch):
+    handle = _start_server(tmp_path, monkeypatch, corpus=_cleared_corpus(tmp_path, more_in_second=1))
+    try:
+        _recent_session(handle)
+        _feedback_on(handle, "feedback_reminder")
+        # The first piece is two replies of 340 tokens, the second three.
+        _lower_the_reminder_threshold(handle, 100)
+        unrated = _banner(handle)["unrated"]
+        assert unrated["total"] == 2
+        rows = unrated["pieces"]
+        assert [p["session_id"] for p in rows] == [handle.session_id] * 2
+        # Newest first: the later piece, then the earlier.
+        assert [(p["part"], p["tokens"], p["label"]) for p in rows] == [
+            (2, 1020, "piece 2 of 2, 1 message"),
+            (1, 680, "piece 1 of 2, 1 message"),
+        ]
+        assert unrated["text"].startswith("2 pieces of work used at least 100 tokens and have no rating yet.")
+        # The stored total only prefilters: the pieces' own tokens decide which are listed.
+        handle.store._connection().execute(
+            "UPDATE sessions SET total_tokens = 5000 WHERE id = ?", (handle.session_id,)
+        )
+        _lower_the_reminder_threshold(handle, 700)
+        assert [p["part"] for p in _banner(handle)["unrated"]["pieces"]] == [2]
+        assert _banner(handle)["unrated"]["total"] == 1
+        assert "$" not in json.dumps(_banner(handle)["unrated"])
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_a_piece_of_a_session_is_named_by_its_messages(tmp_path, monkeypatch):
+    handle = _start_server(tmp_path, monkeypatch, corpus=_two_plan_corpus(tmp_path))
+    try:
+        _recent_session(handle)
+        _lower_the_reminder_threshold(handle)
+        _feedback_on(handle, "feedback_reminder")
+        [piece] = _banner(handle)["unrated"]["pieces"]
+        assert (piece["part"], piece["label"]) == (1, "3 messages")
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_the_banner_leaves_out_a_session_you_rated_with_a_feedback_run(tmp_path, monkeypatch):
+    from claudeglass import capture
+
+    handle = _start_server(tmp_path, monkeypatch, corpus=_two_plan_corpus(tmp_path))
+    try:
+        _recent_session(handle)
+        _lower_the_reminder_threshold(handle)
+        _feedback_on(handle, "feedback_reminder")
+        assert _banner(handle)["unrated"]["total"] == 1
+        # A /cg-feedback run in the session counts as a rating. A new
+        # threshold makes the banner read the sessions again.
+        monkeypatch.setattr(capture, "is_feedback_run", lambda cycle: True)
+        _lower_the_reminder_threshold(handle, 101)
+        assert _banner(handle)["unrated"] is None
+    finally:
+        handle.close()
+        handle.store.close()
+
+
+def test_there_is_no_list_while_the_reminder_and_the_dashboard_rating_are_both_off(server):
+    _recent_session(server)
+    _lower_the_reminder_threshold(server)
+    assert _banner(server)["unrated"] is None
+    _feedback_on(server, "feedback_note")
+    assert _banner(server)["unrated"] is None
+    _feedback_on(server, "dashboard_rating")
+    assert _banner(server)["unrated"]["total"] == 1
+
+
+def test_the_banner_follows_your_own_reminder_threshold(server):
+    _recent_session(server)
+    _feedback_on(server, "feedback_reminder")
+    config_path = server.options.config_dir / "config.toml"
+    held = config_path.read_text(encoding="utf-8")  # the [capture] table _feedback_on wrote
+    config_path.write_text(held + "\n[thresholds]\ncoaching_rating_min_tokens = 100\n", encoding="utf-8")
+    assert _banner(server)["unrated"]["threshold"] == 100
+    config_path.write_text(held + "\n[thresholds]\ncoaching_rating_min_tokens = 1000000\n", encoding="utf-8")
+    assert _banner(server)["unrated"] is None
+
+
 def test_capture_shows_feedback_counts_and_the_skill_install_note(server):
     import os
 
@@ -3843,7 +4528,7 @@ def test_capture_shows_feedback_counts_and_the_skill_install_note(server):
     data = payload["data"]
     rows = {row["id"]: row for section in data["sections"] for row in section["metrics"]}
     assert data["feedback"]["skill"] == "missing" and data["feedback"]["ratings"] == 1
-    assert [q["key"] for q in data["feedback"]["questions"]] == ["outcome", "slow", "worth", "helped"]
+    assert [q["key"] for q in data["feedback"]["questions"]] == [q.key for q in capture_catalogue.RATING_QUESTIONS]
     skill = rows["feedback_skill"]
     assert skill["needs_install"] is True and skill["install_command"] == "claudeglass capture feedback on"
     assert skill["actual_label"] == "Over the last 14 days"
@@ -4309,6 +4994,7 @@ def test_report_cache_does_not_leak_across_project_filters(two_project_server):
         "/api/diagnostics",
         "/api/claude-md",
         "/api/skills",
+        "/api/project-files",
         "/api/profile-goals",
         "/api/quick-actions",
         "/api/report.json",
@@ -5275,3 +5961,303 @@ def test_a_named_zone_counts_a_clock_change_in_the_window(server, monkeypatch):
     assert (period["tz"], period["since"], period["first_day"]) == ("Europe/London", "2026-10-24T23:00:00Z", "2026-10-25")
     period = _summary_data(server, "window_days=2&previous=1")["period"]
     assert (period["since"], period["until"]) == ("2026-10-22T23:00:00Z", "2026-10-24T11:00:00Z")
+
+
+# -- Phase 7: the Capture tab's overhead line, tuning block and warnings -----
+
+
+def _capture_hooks_installed(server, level: str = "essentials") -> None:
+    """settings.json (the fake Claude folder's) runs the capture hooks of
+    ``level``."""
+    from claudeglass import capture_catalogue, cli, hook_health
+
+    specs = hook_health.capture_specs(capture_catalogue.level_metrics(level))
+    plan = hook_health.plan_capture(specs, cli._capture_hook_commands(server.options.config_dir))
+    hook_health.connect(plan, now=datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc))
+
+
+def test_capture_offers_the_commands_that_take_your_figures_to_another_machine(server):
+    resp, payload = server.get_json("/api/capture")
+    data = payload["data"]
+    assert data["tuning"] == {
+        "title": "Take your figures to another machine",
+        "text": "The file holds counts and words from fixed lists only, never a name, a path or any text of yours or Claude's.",
+        "export_command": "claudeglass tuning export --out claudeglass-tuning.json",
+        "summary_command": "claudeglass tuning summary claudeglass-tuning.json",
+    }
+    assert data["commands"]["tuning_export"] == data["tuning"]["export_command"]
+    assert data["commands"]["tuning_summary"] == data["tuning"]["summary_command"]
+
+
+def test_capture_has_no_overhead_line_while_no_claudeglass_hook_is_installed(server):
+    resp, payload = server.get_json("/api/capture")
+    assert payload["data"]["overhead"] is None
+    server.post_json("/api/capture", {"level": "essentials"})
+    # On, but settings.json still runs nothing of ours.
+    resp, payload = server.get_json("/api/capture")
+    assert payload["data"]["overhead"] is None
+
+
+def test_capture_overhead_line_appears_once_a_hook_is_installed_even_with_capture_off(server, monkeypatch):
+    # The seeded turns are stamped 2026-09-18; the last 7 days are counted back from two days after.
+    _freeze_clock(monkeypatch, datetime(2026, 9, 20, tzinfo=timezone.utc))
+    _capture_hooks_installed(server)
+    resp, payload = server.get_json("/api/capture")
+    overhead = payload["data"]["overhead"]
+    assert payload["data"]["config"]["on"] is False
+    assert overhead["label"] == "Over your last 7 days" and overhead["days"] == 7 and overhead["recent"] is False
+    # The hook sentence is the one the CLI prints, counted from the sessions' own tool calls.
+    assert overhead["hooks"].startswith("ClaudeGlass's hooks ran about ")
+    assert overhead["text"].startswith("Over your last 7 days: " + overhead["hooks"])
+    assert "Capture cost " in overhead["text"] and overhead["text"].endswith("in the same stretch.")
+    assert overhead["capture"]["usd"] == 0 and overhead["coaching"]["usd"] == 0
+    assert_privacy(overhead)
+
+
+def test_capture_overhead_line_counts_from_when_capture_was_turned_on(server):
+    _capture_hooks_installed(server)
+    server.post_json("/api/capture", {"level": "essentials"})
+    resp, payload = server.get_json("/api/capture")
+    overhead = payload["data"]["overhead"]
+    assert overhead["label"] == "Since capture was turned on" and overhead["recent"] is True
+    assert overhead["text"].startswith("Since capture was turned on: ")
+
+
+def test_capture_levels_and_rows_carry_the_warning_for_what_they_do(server):
+    resp, payload = server.get_json("/api/capture")
+    data = payload["data"]
+    levels = {level["id"]: level for level in data["levels"]}
+    assert levels["free"]["warning"].startswith("This level uses none of your Claude tokens")
+    assert "after a large read, search or web result" in levels["deep"]["warning"]
+    assert "after a large read" not in levels["essentials"]["warning"]
+    for level in ("essentials", "standard", "deep"):
+        assert "subagents and workflow agents are asked for nothing" in levels[level]["warning"]
+        assert "subagent starts" not in levels[level]["warning"]
+    rows = {row["id"]: row for section in data["sections"] for row in section["metrics"]}
+    assert "tag you will see" in rows["task"]["warning"] and rows["session_end"]["warning"] == ""
+    # Capture off: the page's own is the general one.
+    assert "uses your tokens above the free level" in data["warning"]
+
+
+def test_capture_page_warning_follows_the_level_and_the_tagger_in_force(server):
+    resp, payload = server.post_json("/api/capture", {"level": "essentials"})
+    warning = payload["data"]["warning"]
+    assert "Claude reads a short note at the start of a session" in warning
+    assert "such as [cg: task=bugfix brief=clear]" in warning
+    resp, payload = server.post_json("/api/capture", {"level": "essentials", "tagger": "haiku"})
+    warning = payload["data"]["warning"]
+    assert "Claude Haiku writes the tags in the background" in warning and "Claude reads" not in warning
+    resp, payload = server.post_json("/api/capture", {"level": "free"})
+    assert payload["data"]["warning"].startswith("This level uses none of your Claude tokens")
+
+
+def test_capture_status_line_features_follow_where_the_sessions_ran(server):
+    _feedback_on(server, "feedback_note")
+    assert server.post_json("/api/capture", {"coaching": ["coaching_line"]})[0].status == 200
+    rows = lambda: {  # noqa: E731 - a local reader
+        row["id"]: row
+        for section in server.get_json("/api/capture")[1]["data"]["sections"]
+        for row in section["metrics"]
+    }
+    # The fixture's session ran in a terminal: only the status line being someone else's is to say.
+    assert rows()["feedback_note"]["statusline_note"].startswith("Your status line isn't ClaudeGlass's")
+    server.store._connection().execute(
+        "UPDATE sessions SET entrypoint = 'claude-desktop' WHERE id = ?", (server.session_id,)
+    )
+    after = rows()
+    for metric_id in ("feedback_note", "coaching_line"):
+        note = after[metric_id]["statusline_note"]
+        assert note.startswith("All 1 of your sessions ran outside a terminal"), metric_id
+        assert "doesn't run status lines" in note
+
+
+# -- project files: /api/project-files ----------------------------------------------------------
+
+_PF_SALT = b"p" * 32
+_PF_TYPES = ("Explore", "Plan", "Review")
+
+
+def _start_project_files_server(tmp_path, monkeypatch, *, code: bool = False):
+    """A server whose corpus has a main session and three runs of each of
+    three agent types reading ``docs/context.md`` in a project folder on
+    disk (the folder is named by the ``cwd`` in the transcripts), 25,000
+    characters in an early week and 40,000 in the newest, and the three
+    Explore runs also reading a file that is no longer on disk. With
+    ``code``, every agent run also reads ``src/app.py`` (40,000 characters)."""
+    folder = tmp_path / "work" / "repo"
+    (folder / "docs").mkdir(parents=True)
+    (folder / "docs" / "context.md").write_text("Notes for the agents.\n", encoding="utf-8")
+    context = str(folder / "docs" / "context.md")
+    source = str(folder / "src" / "app.py")
+    if code:
+        (folder / "src").mkdir()
+        (folder / "src" / "app.py").write_text("print(1)\n", encoding="utf-8")
+    gone = str(tmp_path / "work" / "gone" / "old-plan.md")
+    monkeypatch.setattr(parse, "load_or_create_salt", lambda config_dir: _PF_SALT)
+
+    project_dir = tmp_path / "projects" / "proj-a"
+    project_dir.mkdir(parents=True)
+
+    def run(path: Path, name: str, day: str, reads: list[tuple[str, int]]) -> None:
+        lines = []
+        for index, (target, chars) in enumerate(reads + [("", 0)] * 2):
+            content = [{"type": "text", "text": "ok"}]
+            if target:
+                content.append(tool_use_block("Read", f"{name}_{index}", {"file_path": target}))
+            lines.append(
+                turn_line(content=content, timestamp=f"{day}T09:0{index}:00.000Z", cache_read_input_tokens=1000, cwd=str(folder))
+            )
+            if target:
+                lines.append(
+                    user_block_line(
+                        [tool_result_block(f"{name}_{index}", "x" * chars)], timestamp=f"{day}T09:0{index}:30.000Z"
+                    )
+                )
+        write_jsonl(path, lines)
+
+    run(project_dir / "session-0.jsonl", "early", "2026-08-31", [(context, 25_000)])
+    run(project_dir / "session-1.jsonl", "late", "2026-09-28", [(context, 40_000)])
+    agents = project_dir / "session-1" / "subagents"
+    agents.mkdir(parents=True)
+    for agent_type in _PF_TYPES:
+        for number in range(3):
+            agent = f"agent-{agent_type.lower()}{number}"
+            reads = [(context, 40_000)] + ([(gone, 8_000)] if agent_type == "Explore" else []) + ([(source, 40_000)] if code else [])
+            run(agents / f"{agent}.jsonl", agent, "2026-09-28", reads)
+            (agents / f"{agent}.meta.json").write_text(json.dumps({"agentType": agent_type}), encoding="utf-8")
+
+    corpus = corpus_mod.load_corpus([project_dir], salt=_PF_SALT)
+    return _start_server(tmp_path, monkeypatch, corpus=corpus), folder
+
+
+@pytest.fixture
+def project_files_server(tmp_path, monkeypatch):
+    from claudeglass import claude_md_review
+
+    claude_md_review._NAMES.clear()
+    handle, folder = _start_project_files_server(tmp_path, monkeypatch)
+    handle.folder = folder
+    try:
+        yield handle
+    finally:
+        handle.close()
+        handle.store.close()
+        claude_md_review._NAMES.clear()
+
+
+@pytest.fixture
+def project_files_code_server(tmp_path, monkeypatch):
+    from claudeglass import claude_md_review
+
+    claude_md_review._NAMES.clear()
+    handle, folder = _start_project_files_server(tmp_path, monkeypatch, code=True)
+    try:
+        yield handle
+    finally:
+        handle.close()
+        handle.store.close()
+        claude_md_review._NAMES.clear()
+
+
+def test_project_files_route_names_the_files_agents_read_and_flags_the_big_growing_one(project_files_server):
+    resp, payload = project_files_server.get_json("/api/project-files")
+    assert resp.status == 200
+    data = payload["data"]
+    assert data["transcripts"] == {"Explore": 3, "Plan": 3, "Review": 3, "main": 2}
+    assert (data["total"], data["named"], data["truncated"]) == (2, 1, False)
+    assert data["period"] == "over the last 30 days"
+
+    context, gone = data["files"]
+    assert (context["name"], context["ext"], context["project"]) == ("docs/context.md", "md", "repo")
+    assert context["source"] == "read" and context["tokens"] == 10_000
+    assert (context["then"], context["change_pct"]) == (6250, 60.0)
+    assert context["series"][0] == 6250 and context["series"][-1] == 10_000
+    assert context["reasons"] == ["wide", "grew"] and context["types"] == 3
+    assert context["cost_month_usd"] > 0
+    shares = {item["reach"]: (item["runs"], item["share"], item["standing"]) for item in context["reach"]}
+    assert shares == {
+        "main": (2, 1.0, False),
+        "Explore": (3, 1.0, True),
+        "Plan": (3, 1.0, True),
+        "Review": (3, 1.0, True),
+    }
+    assert len(context["fixes"]) == 5 and "docs/context.md (in repo)" in context["fixes"][0]["prompt"]
+
+    # The file that is gone has no name, no reasons and nothing to copy.
+    assert (gone["name"], gone["ext"], gone["reasons"], gone["fixes"]) == ("", "", [], [])
+    assert gone["tokens"] == 2000 and gone["types"] == 1
+
+
+def test_project_files_route_lists_a_code_file_after_the_text_files_but_never_flags_it(project_files_code_server):
+    resp, payload = project_files_code_server.get_json("/api/project-files")
+    assert resp.status == 200
+    data = payload["data"]
+    assert (data["total"], data["named"]) == (3, 2)
+
+    context, code, gone = data["files"]
+    assert (context["name"], context["ext"]) == ("docs/context.md", "md")
+    # The code file is as big and as widely read as the document, and dearer than the lost file.
+    assert (code["name"], code["ext"], code["tokens"], code["types"]) == ("src/app.py", "code", 10_000, 3)
+    assert code["cost_month_usd"] > gone["cost_month_usd"]
+    assert code["reasons"] == [] and code["fixes"] == []
+    assert context["reasons"] == ["wide", "grew"] and len(context["fixes"]) == 5
+    assert gone["ext"] == "" and gone["reasons"] == []
+
+
+def test_the_project_files_check_leaves_a_code_file_out_of_what_it_names_and_counts(project_files_code_server):
+    resp, payload = project_files_code_server.get_json("/api/quick-actions/project-files")
+    assert resp.status == 200
+    check = payload["data"]
+    assert check["status"] == "act"
+    assert check["summary"].startswith("docs/context.md is now about 10k tokens, up 60% in 30 days. ")
+    assert "more file" not in check["summary"] and "app.py" not in check["summary"]
+    assert [row[0] for row in check["table"]["rows"]] == ["docs/context.md"]
+
+
+def test_project_files_route_keeps_names_out_of_everything_stored_and_out_of_the_report(project_files_server, tmp_path):
+    resp, raw = project_files_server.request("GET", "/api/project-files")
+    assert resp.status == 200
+    text = raw.decode("utf-8")
+    # The route shows the path from the project folder, never the whole path.
+    assert "docs/context.md" in text
+    assert str(tmp_path) not in text and tmp_path.name not in text and "old-plan" not in text
+
+    for route in ("/api/report.json", "/api/summary", "/api/recommendations"):
+        _resp, body = project_files_server.request("GET", route)
+        assert b"context.md" not in body and b"old-plan" not in body, route
+    # The check and the route name the file when asked, and keep none of it.
+    project_files_server.request("GET", "/api/quick-actions")
+    project_files_server.store._connection().commit()
+    for stored in tmp_path.glob("service.db*"):
+        content = stored.read_bytes()
+        assert b"context.md" not in content and b"old-plan" not in content, stored.name
+
+
+def test_project_files_route_of_one_project_searches_only_its_folders(project_files_server):
+    resp, payload = project_files_server.get_json("/api/project-files?project=proj-a")
+    assert resp.status == 200
+    assert payload["data"]["named"] == 1
+    resp, _raw = project_files_server.request("GET", "/api/project-files?project=nope")
+    assert resp.status == 400
+
+
+def test_project_files_route_takes_the_named_windows(project_files_server):
+    resp, payload = project_files_server.get_json("/api/project-files?window=24h")
+    assert resp.status == 200 and payload["data"]["period"] == "in the last 24 hours"
+    resp, _raw = project_files_server.request("GET", "/api/project-files?window=fortnight")
+    assert resp.status == 400
+
+
+def test_project_files_check_reaches_the_overview_with_the_same_file(project_files_server):
+    resp, payload = project_files_server.get_json("/api/quick-actions/project-files")
+    assert resp.status == 200
+    check = payload["data"]
+    assert check["status"] == "act"
+    assert check["summary"].startswith("docs/context.md is now about 10k tokens, up 60% in 30 days. ")
+    assert len(check["fixes"]) == 5
+
+
+def test_project_files_route_is_empty_without_any_read_file(server):
+    resp, payload = server.get_json("/api/project-files")
+    assert resp.status == 200
+    assert payload["data"]["files"] == [] and payload["data"]["total"] == 0 and payload["data"]["named"] == 0

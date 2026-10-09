@@ -12,9 +12,10 @@ a short note when a hint applies — this tool still never calls Claude
 directly. The
 one exception is part of the same opt-in: the capture hook runs the
 `claude` command you already use to ask Claude Haiku about each finished
-agent run, and, if you let Haiku write the main session's tags too
-(`capture tagger haiku`), about each turn (see "Claude Haiku as the
-tagger" and "Agent runs" below). This
+agent run, if you let Haiku write the main session's tags too
+(`capture tagger haiku`), about each turn, and, while Claude writes
+them, about a reply it left without a tag (see "Claude Haiku as the
+tagger", "Claude Haiku as the fallback" and "Agent runs" below). This
 document is a sign-off checklist for a corporate security review,
 written to be verifiable against the code rather than taken on trust.
 
@@ -81,19 +82,27 @@ Everything this tool writes by itself lives under `<config-dir>`
 `usage-log.csv`, `statusline-keys.json`, `salt`, `service.db`,
 `hooks/snapshot-config.py`, `profiles/`, `backups/`,
 `active-profile`, and, once metrics capture has been turned on at
-least once: `hooks/capture-hook.py`, `hooks/capture-catalogue.json`
+least once: `hooks/capture-hook.py` (a small launcher),
+`hooks/capture_hook.py` (the hook's code, with the compiled copy Python
+keeps in `hooks/__pycache__/`), `hooks/capture-catalogue.json`
 (a copy of the packaged metric catalogue the hook reads),
 `capture-log.jsonl` (one JSON line per `[capture]` change — the level,
-sample, `until` etc. you set, never anything from a transcript) and
-`signals/YYYY-MM.jsonl` (see "Metrics capture" below), and, while
-Claude Haiku writes the tags, `tags/YYYY-MM.jsonl` (see "Claude Haiku as
-the tagger" under "Metrics capture"), and, once
-coaching notes have been turned on, `coaching.json` (agent-type names
-and split points) and `coach-state.json` (see "Coaching notes" under
-"Metrics capture"). The only other
+sample, `until` etc. you set, never anything from a transcript),
+`habit-log.jsonl` (one JSON line each time you press **Trying it** on a
+dashboard card: the card's kind, its id, the word `trying` and a time,
+nothing else) and `signals/YYYY-MM.jsonl` (see "Metrics capture" below), and, while
+Claude Haiku writes the tags or fills in a missing one, `tags/YYYY-MM.jsonl`
+(see "Claude Haiku as the tagger" and "Claude Haiku as the fallback" under
+"Metrics capture"), and, once
+coaching notes or a survey item that answers your messages have been turned
+on, `coaching.json` (the names of hints
+your answers muted or limited, and your typical piece of work) and `coach-state.json` (see "Coaching notes" and "The survey's
+notes" under "Metrics capture"), and, while capture is on, `payload-keys.json` (the
+key names of each kind of SessionStart payload, once each: names only,
+never a value). The only other
 files it writes are output files you name on the command line: for
-example `--out` (`export`, `monthly-report`, `scrub-fixture`), `report
---html PATH` or `serve --monthly-report DIR`.
+example `--out` (`export`, `monthly-report`, `tuning export`,
+`scrub-fixture`), `report --html PATH` or `serve --monthly-report DIR`.
 
 Five commands change something outside `<config-dir>`. Each prints the
 change before making it:
@@ -349,16 +358,82 @@ same settings.json diff and yes. When a hint applies, the capture hook
 adds a short note to Claude's context, `cg-coach v1 <hint>` and a
 sentence built only from token counts, an idle time and an agent
 type's name — never a path, command or anything you wrote. To decide,
-the hook reads the last 256 KB of the session's transcript (the first
-512 KB for the plan hint's starting size, and a subagent's own
-transcript for the split hint), counting sizes and tool names only;
-nothing it reads is kept. The split hint only shows you a notice; the
-subagent is never told anything. `coach-state.json` holds, per session, when
-each hint last showed, keyed by the same salted session hash as the
-signals, and per subagent run a byte offset and reply count; entries
-older than a day are dropped. `coaching.json` holds agent-type names
-and numbers. Neither ever leaves `<config-dir>`. See
+the hook reads the last 4 MB of the session's transcript when you send a
+message (256 KB when a plan is approved, 64 KB after a tool call or when a
+turn ends; the first 512 KB for the plan hint's starting size, and a
+subagent's own transcript for the split hint), counting sizes, times and tool names
+only; nothing it reads is kept. It also reads your message's words in
+memory, only to tell a change request, a go-ahead, a status check or a
+question from the rest, and a usage-limit line's opening words and reset
+time; it keeps none of them. To count compactions it scans the whole
+transcript a line at a time and keeps only the compaction markers' ids.
+To tell that work went to the background it matches the first 400
+characters of a tool result against four fixed phrases in memory and
+drops the text. At a compaction it also looks at the end of any
+subagent transcript changed in the last five seconds, for the type and
+time of its records only, to tell a subagent's compaction from the main
+session's. The note for a tip ends on the tip itself, a fixed sentence
+built from the same counts, so Claude can write it for you. The split
+hint is never said to a subagent: when a subagent run stops, the hook
+reads the head and the compaction records of that run's own transcript in
+memory, keeps only a count under the session for each of two words
+(`compaction`, `brief`) and prints nothing, and the main session's next
+agent call or background-task message says it. No text of the run, its
+brief or its type is kept. A
+background `Stop` entry prints nothing: when a turn ends it only keeps
+the time, context size and cache lifetime of Claude's newest reply, as
+numbers, so the cold-return receipt is timed from a real reply. A
+usage-limit line is never taken for one. `coach-state.json` holds, per
+session, when each hint last showed, how many times and how long it
+rests, and those three numbers, keyed by the same salted session hash
+as the signals, and, for the agent runs that ended too big and have not
+been told yet, the count of each of two words; entries older than a day
+are dropped. A hint you said you already knew also
+carries a flag, `once`, that is true or absent. `coaching.json` holds
+hint ids from the fixed list in the catalogue, and numbers. Neither ever leaves `<config-dir>`. See
 [docs/coaching.md](docs/coaching.md).
+
+**The survey's notes.** `capture feedback on` (and Deep) also lets the
+capture hook answer a message you send, at any capture level, after the
+same settings.json diff and yes. It reads the same end of the transcript
+as the coaching hints, in memory, and keeps nothing it reads. When you run
+`/cg-feedback` it adds one line, `cg-fb-facts v1`, of numbers and words
+from closed lists: the tokens the piece of work used, your typical piece,
+how many follow-up messages you sent, a plan's state, a tip's hint id
+and similar counts, never a word you wrote. With the plan check on (Deep
+turns it on), a message that reads as a fix to work Claude did after you
+approved a plan gets a note that has Claude ask one `AskUserQuestion` (the
+header "CG plan fix", four fixed options), and with the rating reminder
+on, a piece of work of a million tokens or more that hasn't been rated
+gets a note that has Claude end its reply with a fixed line. To see
+whether you rated that session on the dashboard, the hook opens the
+dashboard's `service.db` read-only and reads only the time of that
+session's rating. To decide, the hook matches your message's words against
+fixed patterns in memory (a correction, an adjustment, a go-ahead, a
+thank-you, a status check) and keeps none of them. The parser keeps the
+one word you ticked
+for the plan check (`PlanCheck.word`: covered, gap, new or none), or none
+when you declined or typed your own, and never the message. For all
+sessions together, `coach-state.json` also holds how many plan checks in
+a row went unanswered and the time the check rests until, the time of the
+last reminder, and short salted hashes of the plans and pieces of work
+already noted (at most 32 of each) and of the plan-check questions already
+counted (the last 16). `coaching.json`
+also holds your typical piece of work, a token count worked out from
+sessions you have had, and what your tip and plan answers change: the hint
+ids to leave out (`muted`) or show once a session (`once`), and the raised
+numbers for the hints that have one. Those lists come from counts of closed
+words (useful, known, wrong) in the report, never a word you wrote, and the
+hook only compares hint names against them. The checks are in
+`tests/test_capture_hook.py`
+(`test_the_facts_line_holds_only_counts_and_words_of_a_closed_list`,
+`test_the_feedback_notes_leave_nothing_of_your_words_in_the_note_or_the_state`),
+`tests/test_coaching.py`
+(`test_a_tip_you_already_knew_shows_once_a_session_however_much_grows`,
+`test_the_hook_reads_muted_and_once_only_as_lists_of_names`)
+and `tests/test_capture_parse.py`
+(`test_a_declined_plan_check_or_an_other_answer_has_no_word_and_keeps_none_of_your_words`).
+See [docs/coaching.md](docs/coaching.md#the-surveys-notes).
 
 **Claude Haiku as the tagger.** Off by default: `capture tagger haiku`
 (or "Tags written by" on Setup › Capture, after a yes) turns it on, and
@@ -366,11 +441,18 @@ and numbers. Neither ever leaves `<config-dir>`. See
 no tag. When a turn of the main session ends, the capture hook's `Stop`
 entry builds a short excerpt of it from the transcript's end: your
 message (up to 2,000 characters) and the one before (300), how many you
-sent before, what Claude did (model calls, output tokens, tool names and
-counts, how many files it changed, the first line of up to six shell
-commands, skill names, subagent and tool-error counts, whether there was
-a plan) and the last 1,500 characters of Claude's final reply. Never a
-tool's output. It hands the excerpt to a worker (the same script with
+sent before and how many minutes after Claude's last reply, how many
+files that reply changed and how many changed again, how many short
+follow-ups you sent in a row, up to three messages you sent while Claude
+worked (300 characters each), what Claude did (model calls, output
+tokens, tool names and counts, how many files it changed, the first line
+of up to six Bash or PowerShell commands, skill names, subagent and
+tool-error counts, whether there was a plan and how often one was
+proposed and sent back), the first 600 characters of the plan you
+approved or, without one, of your latest message longer than 300, and
+the last 1,500 characters of Claude's final reply. Never a tool's
+output. All of it is held in memory and handed to the worker. It hands
+the excerpt to a worker (the same script with
 `--judge`) and returns. The worker runs `claude -p --model haiku --tools ""
 --setting-sources "" --strict-mcp-config --no-session-persistence
 --output-format json`, the excerpt on stdin (never on the command line,
@@ -385,29 +467,84 @@ closed vocabularies (a skill name after `would-help:` is dropped), in
 `<config-dir>/tags/YYYY-MM.jsonl`, with the time, the reply's API message
 id, and the call's cost, token counts and model name. `haiku_tags.load`
 checks every line again before a report uses it. The files are pruned on
-the same retention as the signals. `tests/test_haiku_tags.py`
+the same retention as the signals. Before the words are written, the
+hook settles them against the transcript. It reads your message and
+Claude's last reply for a few phrases (a correction, a tweak, an owned
+mistake) and the shell commands for ones that move or remove files, in
+memory. Only yes/no answers and counts go on to the worker, and none of
+that text is kept. When a word changed, the line holds an optional `g`
+note for each change, `key:from>to`, in closed vocabulary words only, and
+`haiku_tags.load` checks it with the rest of the line.
+`tests/test_haiku_tags.py`
 (`test_the_worker_logs_the_words_and_the_cost_never_the_excerpt`,
 `test_the_loader_checks_every_line_again`,
-`test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude`)
+`test_the_row_notes_each_word_grounding_changed_or_dropped_and_nothing_else`,
+`test_the_grounding_note_is_read_back_checked_and_an_old_row_has_none`,
+`test_the_stop_hook_hands_the_turn_to_a_worker_that_asks_claude`,
+`test_what_the_user_sent_while_claude_worked_goes_to_haiku_and_is_never_kept`)
 covers this.
 
-**Agent runs.** With any agent metric on (`result`, `retry`, `fit`,
+**Claude Haiku as the fallback.** While Claude writes the tags, the
+default, a reply that ends a piece of work without one would leave it
+untagged. From Essentials up the same `Stop` entry then asks Haiku for
+it, with no setting of its own: this is part of the capture opt-in, and
+`capture tagger haiku` still moves every tag to Haiku. It is the same
+excerpt, worker, `claude -p` command, `CLAUDEGLASS_JUDGE` guard, closed
+vocabularies, grounding and tag file as above, and the line holds one
+more field, `w`, set to `haiku-fallback` so a report can tell the two
+writers apart (a line without it, and any other value, reads as the
+tagger's). The hook decides from the end of the transcript and the
+payload, in memory. It asks for none of these: a reply that has a tag,
+a piece of work in which any reply has one, a reply with no text, a turn
+that answers a line you didn't type (a background agent's report, a
+message from another session, a scheduled task, a command's output, a
+prompt Claude Code sent itself), a turn while a background agent is
+still running, a session a scheduled task started (it gets no note
+either, as the parser drops tags there), and any call from a script
+(`claude -p` or the Agent SDK). `tests/test_haiku_tags.py`
+(`test_the_fallback_asks_haiku_for_an_untagged_reply_that_ends_a_piece_of_work`,
+`test_the_fallback_leaves_a_tagged_reply_a_tagged_cycle_and_an_empty_reply_alone`,
+`test_the_fallback_skips_a_turn_that_answers_a_line_the_user_did_not_type`,
+`test_the_fallback_skips_a_session_a_scheduled_task_started`,
+`test_the_stop_hook_hands_a_fallback_to_the_worker_unless_a_script_is_running_it`,
+`test_the_worker_marks_a_fallback_line_with_its_writer`) and
+`tests/test_capture_hook.py` (`test_a_scheduled_task_session_gets_no_note`)
+cover this.
+
+**Agent runs.** With any agent metric on (`result`, `retry`,
 `agent_brief`, from Essentials up), no subagent is asked for anything and
 no brief carries a marker. When a subagent finishes, the capture hook's
-`SubagentStop` entry builds a short excerpt from its transcript and the
-session's: its type and model, its brief (up to 2,000 characters), the
-last 300 characters Claude wrote before starting it, what it did (model
+`SubagentStop` entry returns at once, handing the worker only the paths
+of the agent's transcript and the session's. The worker waits until the
+agent's answer call (`StructuredOutput` or `SubagentHandback`) is in the
+transcript or the file has stopped growing for three seconds, up to a
+cap of 20 seconds, and records `no_answer` without calling Haiku when
+the cap is reached. It then builds a short excerpt from the agent's
+transcript and the session's: its type and model, its brief (up to 2,000
+characters; a workflow agent's computed task, with the line the workflow
+was started with beside it, up to 300 characters, as context), the last
+300 characters Claude wrote before starting it, what it did (model
 calls, output tokens, tool names and counts, the files it changed, the
 first line of up to six shell commands, tool-error count), the last
-1,500 characters of its report, and up to four earlier agent runs (their
-type, the first 200 characters of their brief and the last 200 of their
-report). Never a tool's output. The same worker asks Haiku as above, and
-only the checked words (`result`, `retry`, `fit`, `brief`, `missing`)
-are kept in the same tag files, with the id of the agent's last reply.
-Agents that set up Claude Code itself are skipped. `tests/test_haiku_tags.py`
+1,500 characters of its report or, when it handed an answer back
+through an answer tool, that answer, field by field with each value cut
+at 300 characters, and up to four earlier agent runs read from the
+whole of the session's transcript (their type, model, the first 200
+characters of their brief and the last 200 of their report). Never a
+tool's output. The same worker asks Haiku as above, and only the checked
+words (`result`, `retry`, `brief`, `missing`) are kept in the same tag
+files, with the id of the agent's last reply. A run judged at more than
+one stop has a line for each, and the newest is read. Older lines may
+also hold a `fit` word, from before that verdict was dropped, and it is
+still read. Agents that set up Claude Code itself are skipped.
+`tests/test_haiku_tags.py`
 (`test_the_agent_excerpt_says_what_the_run_did_and_what_came_before`,
 `test_the_worker_logs_an_agent_runs_words_under_their_own_key`,
-`test_the_subagent_stop_hook_hands_the_run_to_a_worker`) covers this.
+`test_the_subagent_stop_hook_hands_the_run_to_a_worker`,
+`test_the_stop_hook_returns_at_once_and_leaves_the_reading_to_the_worker`,
+`test_a_workflow_agents_answer_is_shown_field_by_field_each_value_cut_on_its_own`,
+`test_a_file_that_never_stops_growing_is_given_up_on_at_the_cap_and_no_haiku_call_is_made`)
+covers this.
 
 **Scripts and the Agent SDK.** A run with nobody at the screen
 (`claude -p` or the Agent SDK: Claude Code sets `CLAUDE_CODE_ENTRYPOINT`
@@ -426,12 +563,33 @@ its own words — an unknown key, an unknown word, a value that doesn't
 match — is dropped, never stored. The one exception is
 `skill=would-help:<name>`, and even that survives only when `<name>`
 matches a skill the same transcript already listed or invoked, not
-whatever string Claude wrote. `/cg-feedback` itself has no free-text
-field to scrub in the first place: all four of its questions (outcome,
-what slowed it, worth, what would have helped) are answered by ticking
-from a closed list of options — the same lists `POST
-/api/sessions/<id>/feedback` and the dashboard's own rating checkboxes
-accept (see "What the dashboard can change" below).
+whatever string Claude wrote. `/cg-feedback` has one place to type,
+the Other choice every `AskUserQuestion` offers, and it is handled the
+same way: the text is read once, to pick the closest word, then
+discarded. Claude maps it to a word of that question's own list (or
+leaves the key out when nothing fits), is told never to copy, quote or
+save it, and writes only the word in the tag with the question's key in
+`from_text`. The parser sees the answer in the transcript in memory only
+(`feedback_from_answers`) and keeps just which questions were answered
+that way (`Feedback.other`, keys from the closed list). A word picked
+from your note is accepted only when the `AskUserQuestion` result shows
+a non-label answer for that key, a ticked answer always wins over the
+tag, and a tag with no answers behind it loses its `from_text` words
+(`capture_tags.settle_feedback`). The checks are in
+`tests/test_capture_feedback.py`
+(`test_a_word_picked_from_your_note_counts_when_the_answer_was_not_a_label`,
+`test_a_tag_cannot_override_a_ticked_answer`,
+`test_free_text_answers_are_never_kept_only_which_question_they_answered`)
+and `tests/test_privacy.py`. The dashboard's own rating has no free-text
+field: its questions are checkboxes over the closed lists in
+`RATING_VOCAB`, which `POST /api/sessions/<id>/feedback` accepts, with
+the plan and handoff answers for each plan build. What it shows a session
+comes from counts and words worked out in memory from the stored
+transcript digest (`ratings.session_facts`): no message text is read,
+kept or sent. The Useful, Trying it, Knew it and Wrong here buttons on
+tip, habit and recommendation cards are a closed list too
+(`TIP_CARD_VOCAB`), kept with the card's id in the store's `tip_feedback`
+table (see "What the dashboard can change" below).
 
 **Signals are salted, like everything else here.** The free signals —
 why a session ended, and what kind of thing Claude was waiting on when
@@ -452,14 +610,22 @@ capped at `CAPTURE_TIMEOUT_S` = 5 seconds). An async hook's
 the *next* conversation turn), but that's too late for a note about a
 tool result Claude just saw, so these stay synchronous. At the Deep
 level, the PostToolUse hook that notes an unusually large result or a
-web call (matcher `Bash|Read|Grep|Glob|WebFetch|WebSearch|mcp__.*`) is
-foreground too, for the same reason. Claude Code records each hook
-call's real `durationMs`; `capture status` prints your own median and
-p90 wait for this hook over the last 7 days ("Deep's large-output/web
-hook waited...") whenever big_output or web is on (only
-`WebFetch|WebSearch` matter when a custom set turns on the web metric
-alone); without either metric nothing is registered on PostToolUse at
-all.
+web call (matcher `Read|WebFetch|WebSearch`, never the shell, search or
+MCP tools) is foreground too, for the same reason. A settings.json
+written before they were dropped still runs the hook after them until
+the entry is rewritten; it returns at once, before it reads
+`config.toml`, a transcript or its state file. Claude Code records the
+real `durationMs` of the hook calls that printed something, which is few
+of them. `capture status` therefore counts how often each installed hook
+ran from the transcripts instead (the tool calls its matcher selects, the
+messages you sent, the turns that ended, the sessions and the agent
+runs), takes the median of the times that were recorded, and prints one
+sentence over your last 7 days, or since capture was turned on if that
+was later ("ClaudeGlass's hooks ran about..."). It is counts and
+durations only, and an event with no recorded time is named as left out,
+never shown as zero. Without the big_output and web metrics nothing is
+registered on PostToolUse at all (only `WebFetch|WebSearch` matter when a
+custom set turns on the web metric alone).
 
 **Hook health is bucketed, not named.** `hook_health.count_hook_errors`
 tallies every hook attachment Claude Code writes to a transcript —
@@ -477,8 +643,8 @@ asynchronously (in the background) since nothing needs to read what
 they print.
 
 **Files.** See "What is written, and where" above for
-`hooks/capture-hook.py`, `hooks/capture-catalogue.json`,
-`capture-log.jsonl` and `signals/`, and the `capture` bullet there for
+`hooks/capture-hook.py`, `hooks/capture_hook.py`,
+`hooks/capture-catalogue.json`, `capture-log.jsonl`, `habit-log.jsonl` and `signals/`, and the `capture` bullet there for
 how the settings.json hook entries and the `cg-feedback`/`cg-brief`
 skill files under `~/.claude/skills/` are added (diff or full text,
 asked, backed up) and removed.
@@ -516,9 +682,10 @@ capture or coaching notes, which spend tokens inside your own Claude
 Code session (never a call this tool makes itself) — see "Metrics
 capture" above. From Essentials up, the capture hook starts the `claude`
 command once per finished agent run, and, while Claude Haiku writes the
-tags, once per turn; the call is Claude Code's, with your own login,
+tags, once per turn, or, while Claude writes them, once for a reply that
+ended without one; the call is Claude Code's, with your own login,
 and the hook imports no networking module (see "Claude Haiku as the
-tagger" and "Agent runs" above).
+tagger", "Claude Haiku as the fallback" and "Agent runs" above).
 
 **`update` is the one command that reaches the real internet**, and it
 does so through `pip`, not through this tool's own networking code:
@@ -631,11 +798,14 @@ recommendation or profile gives you a prompt to paste into Claude Code
 (which asks your permission before editing anything under `.claude`)
 and a `claudeglass apply ... --dry-run` command to run yourself.
 The service's few write routes touch only its own files: session tags
-(`mode`/`purpose`) and your `/cg-feedback` rating (`POST
-/api/sessions/<id>/feedback` — the same closed checkbox vocabulary the
-skill itself writes, `capture_catalogue.FEEDBACK_VOCAB`; an unknown
-field or value is `400`, and nothing ticked clears a rating) in the
-store, user profiles under `<config-dir>/profiles/` (`POST
+(`mode`/`purpose`), your `/cg-feedback` rating (`POST
+/api/sessions/<id>/feedback` — the closed checkbox vocabulary of the
+skill's questions, `capture_catalogue.RATING_VOCAB`; an unknown
+field or value is `400`, and nothing ticked clears a rating) and your
+rating of a tip, habit or recommendation card (`POST /api/tip-feedback`
+— `capture_catalogue.TIP_CARD_VOCAB`, with the card's kind and id; an
+unknown value or id is `400`, and **Trying it** also appends a line to
+`habit-log.jsonl`) in the store, user profiles under `<config-dir>/profiles/` (`POST
 /api/profiles`, and `POST /api/profiles/from-current`, which saves the
 allowlisted keys of the latest config snapshot there), and the
 `[capture]` table of ClaudeGlass's own `config.toml` (`POST
@@ -738,6 +908,67 @@ present when `--hash-slugs` is in effect (`tests/helpers.assert_privacy`
 also fails on any slug-shaped `Users-`/`home-`-anchored username segment
 anywhere in a scanned string, not just in export output). Full
 column-by-column detail: [`docs/exports.md`](docs/exports.md).
+
+## Tuning export (`tuning`)
+
+`claudeglass tuning export` (`src/claudeglass/tuning.py`) writes the
+figures that show how you work with Claude, to take to another machine, and
+`claudeglass tuning summary FILE` reads one back. Export works over the same
+in-memory corpus every other subcommand does, and `summary` reads one local
+file and nothing else. Export also reads your dashboard ratings and tip-card
+answers from `<config-dir>/service.db`, read-only, as `report` does; only
+their counts reach the file. Neither makes a network call. Export writes only
+to the terminal or the single file `--out` names. The properties below are the
+ones the code enforces, not promises about intent:
+
+- **Only counts, list-price amounts and words from fixed lists.** The
+  document never holds a name, a path, a hash, a session id, a project name,
+  a skill name, a custom agent name (it counts as `custom`), a model id (it
+  is reduced to a family) or any text of yours or Claude's. Any new pattern
+  that reads a transcript's text runs in memory and the text is dropped.
+- **A closed description of what may appear.** `tuning.spec()` names every
+  key. Every string must be one of the words it lists or match a tight
+  pattern (a version, a date, an ISO week). Every number must be finite, 0
+  or more and no more than a trillion. The keys of every map come from fixed lists
+  built from the packaged catalogues, never from the data, so nothing in a
+  transcript can become a key.
+- **A second scan of the whole text.** Whatever the description says, the
+  serialised document is refused if it holds a drive path, `home/`,
+  `Users\`, a Git Bash `/c/` path, an `@`, `://` or `www.`. At read, the scan
+  also covers the file's own text, and a key repeated in one object is
+  refused, so nothing can hide in a value the parser would drop.
+- **A size limit.** The document is 256 KB or less. The fullest one the
+  description allows is about 225 KB, so a valid document always fits, and
+  a real one is about 35 KB.
+- **Fail closed, at write and at read.** `tuning.build` validates what it
+  built and `tuning.dumps` validates again before it returns text, so a
+  document that fails produces no file and no JSON on stdout: `tuning
+  export` prints the problems to stderr and exits `2`. `tuning summary` validates the file it reads and, when it
+  fails, prints no figure from it and exits `2`. A file is stat-ed first, and
+  one over twice the limit is refused without being read.
+- **Problem lines never repeat what they found.** A line names a key path
+  and the check it failed ("`capture.level`: must be one of the words the
+  spec allows"). It never prints a value or a key from the document, so
+  printing a refusal can't leak what caused it. A refusal prints at most 20
+  lines and counts the rest.
+- **The file is written whole or not at all.** With `--out`, the text is
+  written to a temporary file in the same folder and renamed into place
+  (`cli._write_file_atomic`), so a failure leaves any file already there as it
+  was and leaves no partial file or leftover.
+- **Nothing is imported.** No command copies a tuning file into
+  `<config-dir>`, the dashboard's store or `config.toml`, and the dashboard
+  never reads one. A file you receive from someone else is only ever read by
+  `summary`, which validates it first.
+
+`tests/test_tuning.py` changes the sample document one thing at a time and
+checks that each unknown key, key given twice, free text, path, address, URL
+and oversize file fails and that no value or key is echoed. It also runs
+`build` over a world on disk and scans the result with
+`tests/helpers.assert_privacy_deep` and for every private string it wrote.
+`tests/test_cli_tuning.py` holds the command's side: an invalid build leaves
+no file and prints no JSON, a tampered file prints no figure, and the refusal
+text holds no path. Full detail:
+[`docs/exports.md`](docs/exports.md#claudeglass-tuning).
 
 ## Statusline
 

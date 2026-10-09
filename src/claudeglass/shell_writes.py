@@ -26,12 +26,19 @@ absolute one counts.
 
 The command is read here and dropped: :func:`write_targets` returns the
 paths for the caller to hash and count, then discard.
+:func:`simple_commands` hands the same reading of quotes, heredocs and
+pipelines to ``shell_reads``. :func:`changes_files` answers a looser
+question for ``Turn.shell_change_count``: does any command change files
+without authoring their content (``git merge``, ``mv``, ``rm``)?
 """
 
 from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+
+from . import testrun
+from .capture_catalogue import SHELL_CHANGE_PATTERN
 
 #: Cheap pre-check so most commands skip tokenising altogether.
 _MAYBE_WRITES_RE = re.compile(
@@ -77,6 +84,7 @@ _DRIVE_RELATIVE_RE = re.compile(r"^[A-Za-z]:")
 _FD_RE = re.compile(r"^(?:\d+|\*)$")
 _ASSIGNMENT_RE = re.compile(r"^[A-Za-z_]\w*=")
 _BASH_OPERATOR_CHARS = frozenset(" \t\r\n;|&<>()")
+_CHANGE_RE = re.compile(SHELL_CHANGE_PATTERN, re.IGNORECASE)
 
 
 @dataclass(slots=True)
@@ -87,6 +95,19 @@ class _Command:
     words: list[tuple[str, bool]] = field(default_factory=list)
     writes: list[str] = field(default_factory=list)
     fed: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class SimpleCommand:
+    """One simple command as ``shell_reads`` reads it: the program (lower
+    case, no directory or ``.exe``), its arguments as plain words,
+    whether its standard output goes to a file, and whether a heredoc or
+    here-string feeds it."""
+
+    program: str
+    args: tuple[str, ...]
+    redirected: bool
+    fed: bool
 
 
 def write_targets(command: str, *, powershell: bool, cwd: str | None) -> list[str]:
@@ -116,6 +137,41 @@ def write_targets(command: str, *, powershell: bool, cwd: str | None) -> list[st
                 if resolved is not None:
                     targets.append(resolved)
     return targets
+
+
+def changes_files(command: str, *, powershell: bool) -> bool:
+    """Whether a command in ``command`` changes files without handing them
+    content, which :func:`write_targets` can't see: a ``git`` command that
+    rewrites the working tree, ``mv``, ``cp``, ``rm``, ``mkdir`` and their
+    PowerShell kin (``capture_catalogue.SHELL_CHANGE_PATTERN``). Each
+    simple command is read after quotes, comments and heredoc bodies are
+    set aside and what comes before its program is dropped as
+    ``testrun`` drops it (``timeout 60``, ``uv run``), so a commit message
+    that mentions a merge changes nothing, and ``2>&1`` or ``> /dev/null``
+    on a test run changes nothing either.
+    ``git commit``, ``add`` and ``push`` leave the files as they were.
+    Over-matching is the safe side (``capture_tags.settle`` only holds
+    back ``check=none``)."""
+    for pipeline in _pipelines(command, powershell):
+        for cmd in pipeline:
+            program, args = _program(cmd.words, powershell)
+            if program and _CHANGE_RE.match(testrun.normalize(" ".join([program, *(text for text, _quoted in args)]))):
+                return True
+    return False
+
+
+def simple_commands(command: str, *, powershell: bool) -> list[list[SimpleCommand]]:
+    """The pipelines of ``command``, each a list of its simple commands
+    in order. ``cd X && ...`` is a pipeline of its own, ahead of the
+    rest."""
+    result: list[list[SimpleCommand]] = []
+    for pipeline in _pipelines(command, powershell):
+        simple = []
+        for cmd in pipeline:
+            program, args = _program(cmd.words, powershell)
+            simple.append(SimpleCommand(program, tuple(text for text, _quoted in args), bool(cmd.writes), cmd.fed))
+        result.append(simple)
+    return result
 
 
 # -- reading the command ------------------------------------------------------------

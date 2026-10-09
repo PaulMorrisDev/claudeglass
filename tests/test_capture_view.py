@@ -5,15 +5,21 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace as NS
 
-from claudeglass import capture, capture_catalogue as catalogue, capture_view, habits
+import pytest
+
+from claudeglass import capture, capture_catalogue as catalogue, capture_view, habits, parse
 from claudeglass.config import CaptureConfig
 from claudeglass.hook_health import CaptureHookHealth, HookSpec
+from claudeglass.pricing import load_pricing
 from claudeglass.units import Units
 
 from helpers import assert_privacy, elasticity_with_slope
+from test_capture import _ask, _note, _reply, _top
 
 API = Units(billing_mode="api")
+FIXTURES = Path(__file__).resolve().parent / "fixtures"
 
 
 def _past() -> capture.History:
@@ -40,7 +46,7 @@ def test_off_invites_with_the_essentials_estimate():
     assert levels["essentials"]["estimate"]["usd"] < levels["deep"]["estimate"]["usd"]
     assert "Feedback reminder from Claude" in levels["deep"]["adds"]
     assert "Feedback reminder from Claude" not in levels["standard"]["adds"]
-    assert levels["deep"]["metrics"][-3:] == list(catalogue.DEEP_FEEDBACK_IDS)
+    assert levels["deep"]["metrics"][-4:] == list(catalogue.DEEP_FEEDBACK_IDS)
     assert levels["off"]["current"] is True
     rows = _rows(data)
     assert rows["task"]["on"] is False and rows["task"]["estimate"]["usd"] > 0
@@ -76,6 +82,17 @@ def test_on_headline_shows_level_tokens_amount_and_coverage():
     assert rows["task"]["actual"]["usd"] == 0.012
     assert rows["task"]["answers"] == 0 and rows["task"]["target"] == capture.enough_target("task")
     assert data["measured"]["scopes"]["main"]["note_tokens"] == 1000
+
+
+def test_measured_splits_the_tags_haiku_filled_in_from_claudes_own():
+    data = capture_view.view(_on(), past=_past(), units=API, use=_use(cycles=8, tagged_cycles=6, filled_cycles=2))
+    measured = data["measured"]
+    assert measured["coverage_text"] == "75.0%"
+    assert (measured["own_coverage_text"], measured["filled_text"]) == ("50.0%", "25.0%")
+    # Nothing filled in, or nothing measured: both stay empty.
+    for use in (_use(cycles=8, tagged_cycles=6), _use(cycles=0, tagged_cycles=0, filled_cycles=0)):
+        measured = capture_view.view(_on(), past=_past(), units=API, use=use)["measured"]
+        assert (measured["own_coverage_text"], measured["filled_text"]) == ("", "")
 
 
 def test_on_notes_low_coverage_enough_data_and_expiry():
@@ -268,6 +285,20 @@ def test_missing_hook_marks_the_metrics_that_need_it():
     assert rows["result"]["needs_hook"] is True
     assert rows["task"]["needs_hook"] is False
     assert rows["size"]["needs_hook"] is False  # off
+    # The chip comes with the exact command that adds the entry; a row that needs nothing names none.
+    assert rows["result"]["hook_command"] == capture_view.CONNECT_COMMAND == "claudeglass capture connect"
+    assert rows["task"]["hook_command"] is None and rows["size"]["hook_command"] is None
+
+
+def test_the_background_stop_entry_missing_marks_coaching_notes_and_names_the_command():
+    # An earlier version's connection has no Stop entry: the coaching metric shows the chip and the command.
+    stop = HookSpec(catalogue.HOOK_SCRIPT, "Stop", "", True)
+    health = CaptureHookHealth(settings_path=Path("settings.json"), needed=(stop,), missing=(stop,))
+    config = CaptureConfig(coaching=["coaching_notes"])
+    rows = _rows(capture_view.view(config, units=API, hooks=health))
+    assert rows["coaching_notes"]["needs_hook"] is True
+    assert rows["coaching_notes"]["hook_command"] == "claudeglass capture connect"
+    assert "Run 'claudeglass capture connect' to fix it." in capture_view.hooks_block(health)["summary"]
 
 
 def test_describe_and_config_block():
@@ -283,8 +314,8 @@ def test_change_commands():
     before = _on()
     assert capture_view.change_commands(before, {"level": "off"}) == ["claudeglass capture off"]
     assert capture_view.change_commands(before, {"level": "deep"}) == ["claudeglass capture level deep"]
-    assert capture_view.change_commands(before, {"metrics": ["task", "fit"]}) == [
-        "claudeglass capture enable fit",
+    assert capture_view.change_commands(before, {"metrics": ["task", "agent_brief"]}) == [
+        "claudeglass capture enable agent_brief",
         "claudeglass capture disable brief level shift size retry session_end waits permissions turn_signals",
     ]
     assert capture_view.change_commands(before, {"feedback": ["feedback_note"], "sample": 50}) == [
@@ -375,6 +406,59 @@ def test_feedback_runs_are_priced_over_the_last_days_and_counted_toward_enough()
     assert rows["task"]["actual_label"] == "Since it was turned on"
 
 
+def _unrated(total: int = 2, pieces: int = 2) -> dict:
+    return {
+        "threshold": 1_000_000,
+        "threshold_text": "1M",
+        "total": total,
+        "pieces": [
+            {"session_id": f"s{n}", "slug": "shop", "last_ts": f"2026-09-2{n}T10:00:00Z", "tokens": 1_200_000 + n,
+             "tokens_text": "1.2M", "part": 1, "label": "feature, 3 messages"}
+            for n in range(pieces)
+        ],
+    }
+
+
+def test_the_banner_lists_the_pieces_of_work_waiting_for_a_rating_with_a_sentence_that_introduces_them():
+    unrated = _unrated()
+    for config in (CaptureConfig(feedback=["feedback_reminder"]), CaptureConfig(feedback=["dashboard_rating"])):
+        banner = capture_view.view(config, unrated=unrated)["banner"]
+        block = banner["unrated"]
+        assert block["text"] == (
+            "2 pieces of work used at least 1M tokens and have no rating yet. "
+            "Rating them makes your savings tips fit how you work."
+        )
+        assert [p["session_id"] for p in block["pieces"]] == ["s0", "s1"]
+        # Each piece keeps the words that name it, so a session with two of them reads as two.
+        assert [(p["part"], p["label"]) for p in block["pieces"]] == [(1, "feature, 3 messages")] * 2
+        assert (block["threshold"], block["threshold_text"], block["total"]) == (1_000_000, "1M", 2)
+    # The figures it was given stay as they were, with the sentence added.
+    assert "text" not in unrated
+
+
+def test_the_banner_counts_more_pieces_than_it_lists_and_says_one_in_the_singular():
+    block = capture_view.view(CaptureConfig(), unrated=_unrated(total=7, pieces=5))["banner"]["unrated"]
+    assert block["total"] == 7 and len(block["pieces"]) == 5
+    assert block["text"].startswith("7 pieces of work used at least 1M tokens and have no rating yet.")
+    one = capture_view.view(CaptureConfig(), unrated=_unrated(total=1, pieces=1))["banner"]["unrated"]
+    assert one["text"].startswith("1 piece of work used at least 1M tokens and has no rating yet.")
+
+
+def test_the_banner_has_no_list_without_pieces_to_rate():
+    for unrated in (None, {}, _unrated(total=0, pieces=0)):
+        assert capture_view.view(CaptureConfig(), unrated=unrated)["banner"]["unrated"] is None
+    assert capture_view.view(CaptureConfig())["banner"]["unrated"] is None
+
+
+def test_the_banner_list_is_there_whether_capture_is_on_or_off_and_holds_no_money():
+    on = capture_view.view(CaptureConfig(level="essentials"), units=API, unrated=_unrated())["banner"]
+    off = capture_view.view(CaptureConfig(), units=API, unrated=_unrated())["banner"]
+    assert on["on"] is True and off["on"] is False
+    assert on["unrated"] == off["unrated"] and on["unrated"] is not None
+    assert "$" not in str(on["unrated"]) and "USD" not in str(on["unrated"])
+    assert_privacy(on)
+
+
 def test_status_line_toggles_say_when_the_status_line_is_someone_elses():
     config = CaptureConfig(feedback=["feedback_note"], coaching=["coaching_line"])
     rows = _rows(capture_view.view(config, statusline=False))
@@ -390,5 +474,389 @@ def test_coaching_notes_say_what_a_note_costs_not_no_tokens():
     Capture page said "No tokens." beside what the notes had cost."""
     rows = _rows(capture_view.view(CaptureConfig(coaching=["coaching_notes", "coaching_line"])))
     assert rows["coaching_notes"]["asks_claude"] is False
-    assert rows["coaching_notes"]["cost_note"] == "About 50 to 120 tokens a note, only when a hint applies."
+    assert rows["coaching_notes"]["cost_note"] == "About 50 to 140 tokens a note, only when a hint applies."
     assert rows["coaching_line"]["cost_note"] is None
+
+
+# -- one tagged share ----------------------------------------------------------------
+
+
+def _session(tmp_path, name: str, lines) -> NS:
+    folder = tmp_path / name
+    folder.mkdir()
+    return NS(top=_top(folder, lines), subs=[], session_id=name, project_dir="p", slug="p")
+
+
+def test_the_banners_tagged_share_is_the_one_work_habits_shows(tmp_path):
+    """The Capture banner and the Work habits digest count the same messages:
+    those from when capture was turned on, in sessions it reached. A session
+    with no capture note, and a message before capture was on, count in
+    neither."""
+    parse.set_salt(b"v" * 32)
+    pricing = load_pricing(path=FIXTURES / "pricing_min.toml")
+    tag = "Done.\n[cg: task=bugfix]"
+    reached = _session(tmp_path, "reached", [
+        _note(0, ["task"]),
+        _ask(1), _reply(2, text=tag),
+        _ask(3), _reply(4, text=tag),
+        _ask(5), _reply(6, text="Done."),
+        _ask(7), _reply(8, text=tag),
+    ])
+    missed = _session(tmp_path, "missed", [_ask(10), _reply(11), _ask(12), _reply(13), _ask(14), _reply(15)])
+    corpus = NS(sessions=[reached, missed])
+    since = "2026-09-18T12:00:03Z"
+
+    use = capture.usage(corpus, pricing, since=since)
+    assert (use.cycles, use.tagged_cycles) == (3, 2)
+    h = habits.collect(corpus, pricing, tz="UTC", since=since)
+    (row,) = [r for r in habits.digest_table(h).rows if r[0] == "tagged"]
+    assert row[2] == pytest.approx(use.coverage) == pytest.approx(200 / 3)
+    assert row[3] == "2 of 3 since you turned capture on"
+    # Without a start time the digest counts every message of a session capture reached.
+    (row,) = [r for r in habits.digest_table(habits.collect(corpus, pricing, tz="UTC")).rows if r[0] == "tagged"]
+    assert row[3] == "3 of 4"
+
+
+# -- Phase 7: status-line features follow the entrypoint mix ------------------
+
+_DESKTOP = {"claude-desktop": {"count": 204, "last_ts": "2026-09-22T09:00:00Z"}}
+_MIX = {**_DESKTOP, "cli": {"count": 1, "last_ts": "2026-09-20T09:00:00Z"}}
+
+
+@pytest.mark.parametrize("own", [True, False, None])
+@pytest.mark.parametrize("metric_id", ["feedback_note", "coaching_line"])
+def test_statusline_note_says_so_when_no_session_ran_in_a_terminal(metric_id, own):
+    """The desktop app runs no status line, so with 204 of 204 sessions
+    there, the note says that whoever's line it is: not that it is someone
+    else's."""
+    note = capture_view.statusline_note(metric_id, own, _DESKTOP)
+    assert note == capture_view.DESKTOP_STATUSLINE_NOTES[metric_id].format(total="204")
+    assert note.startswith("All 204 of your sessions ran outside a terminal")
+    assert "doesn't run status lines" in note
+
+
+def test_statusline_note_for_a_mix_names_how_few_ran_in_a_terminal():
+    note = capture_view.statusline_note("coaching_line", True, _MIX)
+    assert note == (
+        "Only 1 of your 205 sessions ran in a terminal, and the desktop app doesn't run status lines, "
+        "so this shows in few of them."
+    )
+    # A status line that isn't ours keeps its own sentence, with the mix after it.
+    theirs = capture_view.statusline_note("coaching_line", False, _MIX)
+    assert theirs.startswith(capture_view.STATUSLINE_NOTES["coaching_line"])
+    assert theirs.endswith("so this shows in few of them.")
+
+
+def test_statusline_note_is_quiet_when_the_line_will_show_or_cannot_be_told():
+    mostly_terminal = {"cli": {"count": 3, "last_ts": "x"}, "claude-desktop": {"count": 2, "last_ts": "x"}}
+    assert capture_view.statusline_note("feedback_note", True, mostly_terminal) is None
+    assert capture_view.statusline_note("feedback_note", None, None) is None
+    assert capture_view.statusline_note("feedback_note", None, {}) is None
+    # A status line that isn't ours is the only thing to say without readings.
+    assert capture_view.statusline_note("feedback_note", False, None) == capture_view.STATUSLINE_NOTES["feedback_note"]
+    # Only the status-line features have a note.
+    assert capture_view.statusline_note("task", False, _DESKTOP) is None
+
+
+def test_the_status_line_rows_follow_the_entrypoints_the_page_is_given():
+    config = CaptureConfig(feedback=["feedback_note"], coaching=["coaching_line"])
+    rows = _rows(capture_view.view(config, statusline=True, entrypoints=_DESKTOP))
+    for metric_id in ("feedback_note", "coaching_line"):
+        assert rows[metric_id]["statusline_note"].startswith("All 204 of your sessions ran outside a terminal")
+    rows = _rows(capture_view.view(config, statusline=True, entrypoints=_MIX))
+    assert rows["coaching_line"]["statusline_note"].startswith("Only 1 of your 205 sessions ran in a terminal")
+    # Off, a feature has nothing to say yet.
+    rows = _rows(capture_view.view(CaptureConfig(), statusline=True, entrypoints=_DESKTOP))
+    assert rows["coaching_line"]["statusline_note"] is None
+    # With no entrypoints given, as before.
+    rows = _rows(capture_view.view(config, statusline=True))
+    assert rows["coaching_line"]["statusline_note"] is None
+
+
+# -- Phase 7: the warning says only what the choice does ----------------------
+
+
+def _warning(level: str, tagger: str = "claude") -> str:
+    return capture_view.warning_text(catalogue.level_metrics(level), tagger)
+
+
+def test_warning_for_no_level_and_the_free_level_asks_for_no_tokens():
+    assert capture_view.warning_text(()) == "Metrics capture is off, so it uses no tokens."
+    free = _warning("free")
+    assert free.startswith("This level uses none of your Claude tokens")
+    assert "reads" not in free and "tag" not in free
+
+
+@pytest.mark.parametrize("level", ["essentials", "standard", "deep"])
+def test_warning_for_a_claude_tagger_level_names_the_note_and_the_tag_and_the_judge(level):
+    text = _warning(level)
+    assert text.startswith("Metrics capture uses your tokens.")
+    assert "Claude reads a short note at the start of a session or after /clear or a compaction" in text
+    assert f"such as {capture_view.TAG_EXAMPLE}" in text
+    assert "judges each agent run in the background" in text
+    assert "subagents and workflow agents are asked for nothing" in text
+    # The old claim: Claude reads a note when a subagent starts.
+    assert "subagent starts" not in text and "or subagent" not in text
+
+
+def test_warning_names_the_tool_note_at_deep_only():
+    assert "after a large read, search or web result" in _warning("deep")
+    assert "after a large read" not in _warning("essentials")
+    assert "after a large read" not in _warning("standard")
+
+
+@pytest.mark.parametrize("level", ["essentials", "standard", "deep"])
+def test_warning_while_claude_haiku_writes_the_tags_has_no_note_and_no_tag(level):
+    """The hook sends a note at the start of a session only when Claude
+    writes the tags, and no note after a large result either: with Haiku
+    tagging, Claude is asked for nothing."""
+    text = _warning(level, "haiku")
+    assert "Claude Haiku writes the tags in the background" in text
+    assert "so Claude's replies carry no tag" in text
+    assert "Claude reads" not in text and "/clear" not in text and "after a large read" not in text
+    assert "one-line tag you will see" not in text
+
+
+def test_warning_for_the_feedback_notes_names_what_makes_them_due():
+    reminder = capture_view.warning_text(("feedback_reminder",))
+    assert ", when the /cg-feedback reminder is due." in reminder
+    plan = capture_view.warning_text(("plan_check",))
+    assert ", when a plan check is due." in plan
+    both = capture_view.warning_text(("feedback_reminder", "plan_check"))
+    assert ", when the /cg-feedback reminder or a plan check is due." in both
+    # No note at the start of a session for these alone.
+    assert "/clear" not in both
+
+
+def test_warning_for_a_metric_that_writes_no_tag_under_haiku_still_says_what_it_does():
+    text = capture_view.warning_text(("session_end",))
+    assert text.startswith("This level uses none of your Claude tokens")
+    assert capture_view.warning_text(("big_output",), "haiku") == (
+        "While Claude Haiku writes the tags, this adds nothing for Claude to read or write."
+    )
+
+
+def test_each_level_and_each_asking_row_carries_its_own_warning():
+    data = capture_view.view(CaptureConfig())
+    levels = {level["id"]: level for level in data["levels"]}
+    assert levels["off"]["warning"] == "Metrics capture is off, so it uses no tokens."
+    assert levels["free"]["warning"].startswith("This level uses none of your Claude tokens")
+    for level in ("essentials", "standard", "deep"):
+        assert levels[level]["warning"] == capture_view.warning_text(levels[level]["metrics"])
+    # Deep turns the feedback reminder and the plan check on, so it alone mentions their note.
+    assert ", when the /cg-feedback reminder or a plan check is due." in levels["deep"]["warning"]
+    assert "a message of yours" not in levels["essentials"]["warning"]
+    assert levels["essentials"]["warning"] == _warning("essentials")
+    rows = _rows(data)
+    assert rows["task"]["warning"] == capture_view.warning_text(catalogue.with_requirements(("task",)))
+    assert "tag you will see" in rows["task"]["warning"]
+    # A row that asks Claude for nothing has no warning to show.
+    assert rows["session_end"]["warning"] == "" and rows["prompt_features"]["warning"] == ""
+    # A feedback row asks on its own, with no level behind it.
+    assert ", when a plan check is due." in rows["plan_check"]["warning"]
+
+
+def test_rows_and_levels_follow_the_tagger():
+    data = capture_view.view(CaptureConfig(level="essentials", tagger="haiku"))
+    levels = {level["id"]: level for level in data["levels"]}
+    assert "Claude Haiku writes the tags" in levels["essentials"]["warning"]
+    # Deep still has Claude read the feedback note on a message, but no note at the start of a session.
+    assert "at the start of a session" not in levels["deep"]["warning"]
+    assert "Claude Haiku writes the tags" in levels["deep"]["warning"]
+    assert "Claude Haiku writes the tags" in _rows(data)["task"]["warning"]
+
+
+def test_the_page_warning_is_the_one_for_what_is_on_now_else_the_generic_one():
+    off = capture_view.view(CaptureConfig())
+    assert off["warning"] == capture_view.WARNING
+    assert "uses your tokens" in off["warning"]
+    # The generic one makes no claim a level may not hold.
+    assert "subagent" not in off["warning"] and "when a session" not in off["warning"]
+    on = capture_view.view(_on(), units=API)
+    assert on["warning"] == _warning("essentials")
+    free = capture_view.view(CaptureConfig(level="free", enabled_at="2026-09-20T10:00:00+00:00"))
+    assert free["warning"].startswith("This level uses none of your Claude tokens")
+
+
+# -- Phase 7: take your figures to another machine ----------------------------
+
+
+def test_the_tuning_block_has_a_title_a_sentence_and_the_two_copyable_commands():
+    data = capture_view.view(CaptureConfig())
+    assert data["tuning"] == {
+        "title": "Take your figures to another machine",
+        "text": "The file holds counts and words from fixed lists only, never a name, a path or any text of yours or Claude's.",
+        "export_command": "claudeglass tuning export --out claudeglass-tuning.json",
+        "summary_command": "claudeglass tuning summary claudeglass-tuning.json",
+    }
+    assert data["commands"]["tuning_export"] == data["tuning"]["export_command"]
+    assert data["commands"]["tuning_summary"] == data["tuning"]["summary_command"]
+    # It is there with capture on, too, and carries no path of yours.
+    on = capture_view.view(_on(), units=API)
+    assert on["tuning"] == data["tuning"]
+    assert_privacy(data)
+
+
+def test_the_tuning_commands_name_real_subcommands():
+    from claudeglass import cli
+
+    parser = cli._make_parser()
+    export = parser.parse_args(capture_view.TUNING_EXPORT_COMMAND.split()[1:])
+    summary = parser.parse_args(capture_view.TUNING_SUMMARY_COMMAND.split()[1:])
+    assert (export.action, export.out) == ("export", capture_view.TUNING_FILE)
+    assert (summary.action, summary.path) == ("summary", capture_view.TUNING_FILE)
+
+
+# -- Phase 7: the overhead line -----------------------------------------------
+
+_NOW = datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc)
+
+
+def test_overhead_window_is_the_last_seven_days_unless_capture_started_within_them():
+    off = capture_view.overhead_window(CaptureConfig(), _NOW)
+    assert off["recent"] is False and off["days"] == 7
+    assert off["label"] == "Over your last 7 days"
+    assert off["corpus"] == {"days": 7}
+    assert off["since"] == "2026-09-15T12:00:00+00:00"
+    old = capture_view.overhead_window(CaptureConfig(level="deep", enabled_at="2026-08-01T10:00:00+00:00"), _NOW)
+    assert old["recent"] is False and old["label"] == "Over your last 7 days"
+    new = capture_view.overhead_window(CaptureConfig(level="deep", enabled_at="2026-09-20T10:00:00+00:00"), _NOW)
+    assert new["recent"] is True and new["label"] == "Since capture was turned on"
+    assert new["since"] == "2026-09-20T10:00:00+00:00" and new["corpus"] == {"since": "2026-09-20T10:00:00+00:00"}
+
+
+def test_overhead_window_takes_a_start_time_without_a_zone_and_ignores_an_unreadable_one():
+    naive = capture_view.overhead_window(CaptureConfig(level="deep", enabled_at="2026-09-21T10:00:00"), _NOW)
+    assert naive["recent"] is True
+    junk = capture_view.overhead_window(CaptureConfig(level="deep", enabled_at="not a time"), _NOW)
+    assert junk["recent"] is False and junk["corpus"] == {"days": 7}
+
+
+def test_overhead_text_puts_the_hooks_first_then_the_two_costs():
+    text = capture_view.overhead_text(
+        "Over your last 7 days", "ClaudeGlass's hooks ran about 6 times.", "about 0.40 USD", "about 0.10 USD"
+    )
+    assert text == (
+        "Over your last 7 days: ClaudeGlass's hooks ran about 6 times. "
+        "Capture cost about 0.40 USD and coaching notes cost about 0.10 USD in the same stretch."
+    )
+    # No run counted: says so rather than leaving a gap; an unpriced cost is left out.
+    assert capture_view.overhead_text("Over your last 7 days", "", None, None) == (
+        "Over your last 7 days: No run of ClaudeGlass's hooks shows in your sessions."
+    )
+
+
+def test_overhead_block_prices_both_costs_in_the_billing_mode():
+    window = capture_view.overhead_window(CaptureConfig(), _NOW)
+    block = capture_view.overhead_block(
+        window, hooks_text="ClaudeGlass's hooks ran about 6 times.", capture_usd=0.4, coaching_usd=0.1, units=API
+    )
+    assert block["capture"]["usd"] == pytest.approx(0.4) and block["coaching"]["usd"] == pytest.approx(0.1)
+    assert block["capture"]["text"].startswith("about ") and "USD" in block["capture"]["text"]
+    assert block["label"] == "Over your last 7 days" and block["days"] == 7 and block["recent"] is False
+    assert block["hooks"] == "ClaudeGlass's hooks ran about 6 times."
+    assert block["text"] == (
+        f"Over your last 7 days: ClaudeGlass's hooks ran about 6 times. Capture cost {block['capture']['text']} "
+        f"and coaching notes cost {block['coaching']['text']} in the same stretch."
+    )
+    # A plan shows share of the limit, never a bare dollar amount.
+    plan = capture_view.overhead_block(
+        window, hooks_text="x", capture_usd=0.4, coaching_usd=0.1, units=Units(billing_mode="plan")
+    )
+    assert "$" not in plan["text"]
+
+
+def test_overhead_block_without_a_rate_card_gives_the_hook_sentence_alone():
+    window = capture_view.overhead_window(CaptureConfig(), _NOW)
+    block = capture_view.overhead_block(
+        window, hooks_text="ClaudeGlass's hooks ran about 6 times.", capture_usd=None, coaching_usd=None, units=API
+    )
+    assert block["capture"] is None and block["coaching"] is None
+    assert block["text"] == "Over your last 7 days: ClaudeGlass's hooks ran about 6 times."
+
+
+def _hooked_corpus(tmp_path, *, reads: int = 4, recorded_ms=(100, 140)):
+    """One session capture reached: a note, a tagged reply after ``reads``
+    Reads, and a recorded run of ClaudeGlass's PostToolUse hook per time."""
+    from helpers import attachment_line, tool_use_block
+
+    command = '"python.exe" -I -S "C:\\tl\\hooks\\capture-hook.py" --config-dir "C:\\tl"'
+    lines = [
+        _note(0, ["task"]),
+        _ask(1),
+        _reply(2, *[tool_use_block("Read", f"r{i}", {"file_path": f"/w/f{i}.py"}) for i in range(reads)]),
+        _reply(3, text="Done.\n[cg: task=bugfix]"),
+    ]
+    for i, ms in enumerate(recorded_ms):
+        line = attachment_line("hook_success", hookName="PostToolUse:Read", durationMs=ms, command=command)
+        line["timestamp"] = f"2026-09-18T12:00:{10 + i:02d}.000Z"
+        lines.append(line)
+    return NS(sessions=[_session(tmp_path, "hooked", lines)])
+
+
+def test_build_overhead_counts_the_hook_runs_and_prices_the_notes_over_the_window(tmp_path):
+    parse.set_salt(b"v" * 32)
+    pricing = load_pricing(path=FIXTURES / "pricing_min.toml")
+    corpus = _hooked_corpus(tmp_path)
+    window = capture_view.overhead_window(
+        CaptureConfig(level="essentials", enabled_at="2026-09-18T12:00:00+00:00"), datetime(2026, 9, 20, tzinfo=timezone.utc)
+    )
+    specs = [HookSpec("capture-hook.py", "PostToolUse", "Read")]
+    block = capture_view.build_overhead(corpus, specs, pricing, API, window)
+    assert block["label"] == "Since capture was turned on"
+    assert block["hooks"].startswith("ClaudeGlass's hooks ran about 4 times, about 120 ms each")
+    assert block["hooks"].endswith("(calls overlap).")
+    expected_capture = capture.usage(corpus, pricing, since=window["since"]).cost
+    assert expected_capture > 0
+    assert block["capture"]["usd"] == pytest.approx(expected_capture, abs=1e-6)
+    assert block["coaching"]["usd"] == pytest.approx(
+        capture.coaching_usage(corpus, pricing, since=window["since"]).cost, abs=1e-6
+    )
+    assert block["text"].startswith("Since capture was turned on: ClaudeGlass's hooks ran about 4 times")
+    # A figure too small to show reads "under 0.01 USD" and none at all "nothing", never a bare zero.
+    assert block["capture"]["text"] == "under 0.01 USD" and block["coaching"]["text"] == "nothing"
+    assert "Capture cost under 0.01 USD and coaching notes cost nothing in the same stretch." in block["text"]
+    assert block["text"].endswith("in the same stretch.")
+
+
+def test_build_overhead_counts_only_the_hook_runs_inside_the_window(tmp_path):
+    parse.set_salt(b"v" * 32)
+    pricing = load_pricing(path=FIXTURES / "pricing_min.toml")
+    specs = [HookSpec("capture-hook.py", "PostToolUse", "Read")]
+    # Turned on after the 4 Reads (12:00:02) and before the 2 recorded runs (12:00:10 and 12:00:11).
+    window = capture_view.overhead_window(
+        CaptureConfig(level="essentials", enabled_at="2026-09-18T12:00:05+00:00"), datetime(2026, 9, 20, tzinfo=timezone.utc)
+    )
+    block = capture_view.build_overhead(_hooked_corpus(tmp_path), specs, pricing, API, window)
+    assert block["hooks"].startswith("ClaudeGlass's hooks ran about 2 times")
+
+
+def test_build_overhead_is_none_while_no_hook_is_installed(tmp_path):
+    pricing = load_pricing(path=FIXTURES / "pricing_min.toml")
+    window = capture_view.overhead_window(CaptureConfig(), _NOW)
+    assert capture_view.build_overhead(_hooked_corpus(tmp_path), [], pricing, API, window) is None
+
+
+def test_build_overhead_with_no_rate_card_still_counts_the_runs(tmp_path):
+    parse.set_salt(b"v" * 32)
+    window = capture_view.overhead_window(CaptureConfig(), _NOW)
+    specs = [HookSpec("capture-hook.py", "PostToolUse", "Read")]
+    block = capture_view.build_overhead(_hooked_corpus(tmp_path), specs, None, API, window)
+    assert block["capture"] is None and block["coaching"] is None
+    assert "ClaudeGlass's hooks ran about 4 times" in block["text"] and "Capture cost" not in block["text"]
+
+
+def test_build_overhead_says_so_when_no_hook_run_shows_in_the_sessions():
+    pricing = load_pricing(path=FIXTURES / "pricing_min.toml")
+    window = capture_view.overhead_window(CaptureConfig(), _NOW)
+    specs = [HookSpec("capture-hook.py", "PostToolUse", "Read")]
+    block = capture_view.build_overhead(NS(sessions=[]), specs, pricing, API, window)
+    assert block["hooks"] == ""
+    assert block["text"].startswith("Over your last 7 days: No run of ClaudeGlass's hooks shows in your sessions.")
+
+
+def test_the_view_carries_the_overhead_it_is_given_and_none_without():
+    window = capture_view.overhead_window(CaptureConfig(), _NOW)
+    block = capture_view.overhead_block(window, hooks_text="x", capture_usd=0.2, coaching_usd=0.0, units=API)
+    assert capture_view.view(CaptureConfig(), overhead=block)["overhead"] == block
+    assert capture_view.view(CaptureConfig())["overhead"] is None

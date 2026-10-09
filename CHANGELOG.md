@@ -7,6 +7,1379 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-10-09
+
+### Added
+
+- **More to test the judges on.** `scripts/eval-agent-judge.py` has 21
+  known-answer agent runs, up from 8 in 0.14.0. The new ones are a refuted
+  claim, an empty list, three findings, a validator that confirms one
+  claim and refutes another, an implementer that lists concerns, research
+  that lists risks, a workflow agent started with a "Continue" relay, a
+  handback that could not do its work, a handback followed by "Report
+  delivered.", a re-stop after a guard rejection, an answer written after
+  the hook fired, and one brief on a run that finished and on one that was
+  blocked. Each has an answer shape, and the report scores each key and
+  each shape. `--replay FILE` judges the real runs a labels file names,
+  and `--stored CONFIG_DIR` scores the verdicts the hook already stored
+  against the same labels without asking Haiku. The file holds paths,
+  reply ids and closed words, never any text of a run, and the loader
+  refuses anything else, or a file inside the repository.
+  `scripts/eval-tagger.py` gains 14 hand-written sessions
+  (`"source": "hand"`) for what `claude -p` can't record: a message typed
+  while Claude works, plan rounds with feedback, a desktop session's
+  replay block, a screenshot, a workflow, and test commands run by
+  interpreter path or through PowerShell. Two are held out. `record`
+  skips them, the judges are scored on them, and Claude's own figures
+  leave them out. Its trimmer now keeps a queued message's text.
+  [docs/tagger-eval.md](docs/tagger-eval.md) describes both, with live
+  figures for this release. The agent judge gets 102 of 105 known
+  answers. On 89 real runs checked one by one, all of them finished, the
+  verdicts stored before this release said `done` for 53%, and this
+  release's judge says it for 96%
+  ([docs/tagger-eval.md](docs/tagger-eval.md#replaying-real-runs)). The
+  main-session judges score Haiku 87%, Haiku with thinking 92% and Sonnet
+  96% on the held-out sessions, level with 0.14.0's hook on the same set.
+- **Where agent and context tokens go, from the Overview and in the
+  tuning export.** Each of the new figures for agents, plans and
+  conversation summaries (spend by cost centre, model choice, cost per run by
+  how it was started, the tools list, project files, single lookups, what
+  agent runs did, replies to agent reports, plans sent back, how the build
+  began and what summaries cost) is one click from the Overview and has a
+  place in the tuning export. Under **By cost centre**, **More detail** links
+  to eight of the tables with a line on what each shows, drawn only when the
+  report built the table with rows. A link opens the page that shows the
+  table, unfolds what hides it and highlights it, or opens the table in a
+  panel when its page leaves it to the full report. The Models, Conversation
+  summaries, Replies to agent reports and Plans sent back rows also carry
+  **See the figures** while they are worth a look. The
+  tuning export gains a ninth block, `compactions` (summaries by what
+  triggered them, those inside subagent and workflow runs, the tokens
+  dropped and, at list prices, what they cost and the share of main-session
+  cost in sessions that summarised 3 times or more), and optional keys:
+  `prompting.plans.builds` and `asks`, and `agents.launches` and
+  `model_choice`. Agent types are built-in names or `custom`, models are a
+  family, and no name, path, hash or text of yours is in any of it. A file
+  made before reads as before, and a real one is about 35 KB.
+- **What agent runs did.** A new Work habits table, **What agent runs
+  did**, shows background agents, foreground agents and workflow runs side
+  by side: runs, agents, replies, the share of replies that were a single
+  read-only call, the starting context times the replies (an upper bound),
+  the summaries made inside the runs, and the one file several agents of a
+  group each read (the plan or spec they were all handed), with its size
+  and cost. A workflow's agents are found in `subagents/workflows/`, and a
+  workflow resumed into the same run folder is told apart by each agent's
+  own timestamps. The shared-file figures are an upper bound and stay on
+  this table.
+- **What compaction cost.** The Compactions summary gains three rows: the
+  sessions that summarised their conversation three times or more, the
+  cost of their main conversations, and the share of all main-session cost
+  that is. Summaries inside subagent and workflow agent runs are counted
+  in rows of their own. There is no live note for it; the compaction check
+  on Actions quotes the sessions and their share.
+- **Lookups sent one call at a time.** A reply that made one Read, Grep, Glob
+  or file-reading shell command and nothing else reads the whole context
+  again to look at one thing. A new table on Work habits, **Single lookups,
+  one call per reply**, counts them for the main session and each agent type,
+  by message so calls already sent together count once, with how many were a
+  shell command, the stretches of two or more in a row and the cost of the
+  replies a batch would have spared. Agents gains the share by shell command,
+  and the same counts feed Where research happens and the lookups before
+  the first edit. A new `agent-batch-probes` card, one per agent type with
+  100 replies or more, a quarter of them single lookups and $1 or more to
+  spare once halved (some lookups wait on the one before), offers one line
+  for the agent definition or the workflow prompt: "Batch independent
+  Read/Grep/Glob calls into a single message". The tuning export's `agents`
+  block gains optional `probes` counts.
+- **Replies to agent reports.** The main session's replies that start at a
+  background agent's or a workflow's report (a task notification) are split
+  into only acknowledged, acted on and started more agents, with the cost, the
+  context each read and the replies that woke a session idle for an hour or
+  more, with the context they wrote to the cache again. A new Work habits
+  table, **Replies to agent reports**, and a new `agent-reports` check show
+  them. A workflow agent's report goes back to its script, so it is left out,
+  and a background command finishing is not a report. A report's carry is now
+  priced from the first main-session reply at or after its notification, not
+  from the call that started the agent, and sized from the notification (or
+  the queued message that carried it mid-reply) when the agent ran in the
+  background. The tuning export's `agents` block gains optional `report_turns`
+  counts. Parser 43; the report-size words widen to the briefs that ask for a
+  short report in more ways (335 of 1,793 real briefs from the last 30 days
+  match, 138 before).
+- **Plans sent back before you approved one.** A new Work habits table,
+  **Plans sent back**, groups the asks where Claude put up a plan by how many
+  times you sent a plan back before you approved one (none, once, twice, three
+  times or more), then the asks whose plan you never approved. Each group shows
+  the plans put up per ask, the steps and files in the last plan, how many of
+  the rounds were a question, a critique or a doubt, and the tokens and cost of
+  the replies between the first plan and the approval. A plan you declined and
+  then told Claude to carry out ("implement the plan") counts as an approval by
+  typing, not as a plan sent back, and a plan Claude puts up again unchanged
+  after that is the same plan. A new `plan-rounds` card and a `plan-rounds`
+  check fire at 5 approved plans or more, 30% or more of them sent back, 30% or
+  more of the rounds a question, a critique or a doubt, and $1 or more to
+  spare (a quarter of the rounds' cost, scaled to that share). The fix is one
+  standing line for your first planning message, CLAUDE.md or a plan skill:
+  "Before you show me a plan, critique it for gaps and doubts, then fix them".
+  Thresholds are `plan_rounds_min_plans`, `_min_share_pct`, `_min_asked_pct`,
+  `_min_saving_usd` and `_saving_factor`.
+- **How the build began after each approved plan.** A new table on Spend,
+  Savings, **How the build began after each approved plan**, and a new
+  `plan-approval` check set the builds that carried on in the planning session
+  beside those that started fresh, by the context each build reply read and
+  what it cost. A build counts as fresh when you ran /clear within a minute of
+  the approval, or opened a new session of the same project within an hour
+  whose first message is Claude Code's "Implement the following plan". Plans
+  you approved in the dialog and by typing both count. The live `plan_fresh`
+  hint is unchanged. Parser 43: a plan keeps the time you approved it, and a
+  message keeps a flag for opening with that hand-off, so transcripts are read
+  again once; earlier digests have neither, so their builds read as carried
+  on.
+- **A tip when background work starts in a long session.** A new
+  `report_reread` coaching hint speaks when the main session starts an agent
+  or a workflow in the background and its newest reply read 150,000 tokens
+  or more: each report that comes back is answered by a reply that reads all
+  of it again, so fewer, larger pieces of background work mean fewer re-reads. It rests 30
+  minutes and backs off like the other hints, and is set with
+  `coaching_report_reread_tokens`. With coaching notes on, `update --finish`
+  adds `Agent` and `Workflow` to the PostToolUse matcher; the large-output
+  and quiet-output notes skip a result from either, which is a report or a
+  launch message and not a file. A matcher written before this keeps working
+  until `update --finish` or `capture connect` rewrites it.
+- **Project files your agents read, and their growth.** Files agents read
+  with the Read tool now count beside the CLAUDE.md files Claude Code loads
+  for them. A read is priced like a loaded file: written once, then read on
+  every later reply until the conversation is summarised. A file read in 3
+  or more runs, or in a fifth of an agent type's runs, is a standing read.
+  Agents gains **What each agent type carries into a run** (system and
+  tools, files loaded for it, files it reads by habit, then its brief) and
+  **Project files your agents read**: each file's size, its change over
+  about 30 days with a weekly sparkline, who reads it, in what share of
+  their runs and with what mean read size, and its cost a month. Names are
+  worked out from your project folders when the page opens, with the same salt as the transcripts, and
+  are never stored; a file this machine cannot find has no name. The walk
+  skips virtualenv, cache and build folders (`.venv`, `__pycache__`,
+  `.pytest_cache`, `dist`, `build`, `coverage` and the like) as well as
+  `.git` and `node_modules`, takes documents before other files in a
+  folder, ends as soon as every file has a name, and stops only at a bound
+  of 150,000 files or 100,000 folders. A new
+  `project-files` check (`GET /api/project-files` for the table) fires when
+  a text file (`.md` or `.txt`: a context.md, a spec, a plan, any document)
+  read by agents is 5,000 tokens or more and read by 3 or more agent
+  types, or grew 25% or more in 30 days, and gives four prompts to copy:
+  trim what is stale, split the file by who needs it, move rule-like parts
+  into path-scoped `.claude/rules`, and move reference material into a
+  skill. For a file agents read it adds a fifth: put the essential lines in
+  the agent definition and drop the read. Code and data files stay in the
+  table, after the text files, but never fire the check or count toward
+  it, and the page intro and the check say so. The tuning export
+  has a `project_files` block of extension classes, sources, size buckets,
+  weekly size buckets and shares of runs, with no name. An `@import`ed
+  file is assumed to appear as its own entry among the instructions Claude
+  Code attached; no CLAUDE.md on the machine this was built on imports
+  anything, so that is unchecked, and the importing file is read from disk
+  to cover the other case.
+- **Spend by cost centre.** A new table on Agents (and a part of the
+  Overview under "Where do your tokens go?") splits every reply into
+  base read, above-base read, growth write, rewrite, post-compaction and
+  output, for the main session, direct agents, workflow agents and each
+  session's first call (the 1-hour write). The rows add up to your total
+  spend. The base read is split into the parts of the starting prompt, each
+  counted once under the setting that removes it: a part you can change links
+  to its check, and one the harness fixes (the Artifact tool, PowerShell, the
+  system prompt) says no setting is known. In the main session, the MCP
+  servers built into the desktop app are one of those. Rewrite and
+  post-compaction cells are split into the starting prompt written again
+  and the conversation.
+  Another table shows the newest 30 and 7 days and names the check that
+  covers each cell, or says there is no advice. A fourth, for information
+  only, lists agent type by model by who chose it (the call, the agent file
+  or inheritance), with runs, cost and a Sonnet ceiling. The
+  "most of your subagent cost" card now names the largest cost centre, a new
+  `cost-centres` check says where the spend sits, and the tuning export has
+  a `cost_centres` block of list-price amounts.
+- **Cost per subagent run, by how it started.** The table gains Runs and
+  Total, and splits each agent type by background agent, foreground agent
+  (from the parent call's `run_in_background`) and workflow agent, told
+  apart by transcript kind alone. The spawns note gives the median among
+  sessions that spawn, and how many sessions spawn none, in place of a mean
+  that those sessions pulled down. Parser 42 records the launch word on each
+  reply.
+- **A tools list for each agent type.** A new `spawn-tools-list` card gives
+  a `tools:` line for an agent type, built from the tools and MCP servers
+  that at least a tenth of its spawns called, and names the rest as rarely
+  used. It fires at 5,000 tokens or more a start to leave out, and leaves
+  `Explore`, `Plan` and `claude-code-guide` alone. It reads each agent type
+  on the busiest model with 5 or more spawns that recorded their tools,
+  because older transcripts have none and the busiest model can have no
+  tool data at all. It says Claude Code adds `StructuredOutput` and `SubagentHandback`
+  whatever the list says, and asks for one run before and one after on the
+  same model, because Claude Code's docs do not say whether the skills list
+  and the agent list go with the Skill and Agent tools. A built-in type or
+  an agent with no file gets a prompt to create a same-named file;
+  `general-purpose` is warned that a list limits every spawn that names no
+  type; a workflow agent gets a workflow-script variant that passes
+  `agentType`. It replaces `spawn-read-only-tools`. Two new report tables,
+  `agent_startup_diet` and `agent_startup_servers`, hold what each agent
+  type would shed and what each rarely used MCP server costs per spawn
+  (definitions, deferred names and instructions). The tuning export gains an optional
+  `agents.startup_diet_usd`, list-price amounts by built-in type with
+  `custom` for the rest.
+
+- **Queued messages counted.** A message you typed while Claude was
+  working now counts toward the turn it reached, and is never mistaken
+  for a new prompt. On the author's machine that added 431 messages
+  that no count saw before.
+- **What your prompts say.** Go-ahead, status check, adjust and
+  reminder prompts are flagged.
+- **Plan answers.** Plan feedback is sized and classed in one word. A
+  plan you approve by typing now counts as approved.
+- **Why a call didn't run.** Each denied call gets one word. Only a
+  call you turned down counts as yours.
+- **Replies.** Ending on a question, admitting a mistake and disowning
+  a tip are noticed.
+- **Shell reads and test runs.** Shell reads are counted, and a test
+  run is recognised however it is spelled: through an interpreter
+  path, behind env or timeout, or in PowerShell. The hook, the parser
+  and the status line share one matcher.
+- **Workflow agents.** A workflow agent joins the cycle that launched
+  it, matched by its run and start time, so a resumed run splits
+  across the cycles that resumed it. Before, no workflow agent landed
+  in a cycle. A tag moves to the cycle whose report it answers.
+- **One list of messages you didn't type.** It is shared by the
+  parser, the hook and the status line.
+- **A tip always reaches you.** The desktop app folds a hook's message
+  into a collapsed row, so a coaching note that carries a tip now opens
+  by telling Claude to write it and ends on the tip itself, word for
+  word. Where Claude Code shows hook messages, the same tip also appears
+  at once; in the desktop app only Claude's reply carries it. A test
+  holds every hook entry that can return output to the foreground.
+- **Relay rate.** Tips Claude showed now reads "relayed N of M" for a
+  hint Claude is told to show every time and "judged relevant N of M"
+  for the one it decides on (paste), and counts the
+  tips Claude called a misfire.
+- **Context carried into new pieces.** A new row in How you prompt
+  counts a message that began a new piece of work with 20,000 tokens or
+  more of earlier work still in context, and what its replies paid to
+  read that work again. The reply's tag says a piece is new (a new
+  task, or no earlier context needed); with no tag saying the work went
+  on, a break of over an hour does.
+- **Explore cost by model.** A new table on Work habits splits what the
+  Explore agents you started cost across the models they ran on, with
+  the context each run read. A workflow's agents are left out.
+- **Commands that keep failing.** The waste summary counts how many
+  times the same command failed three or more times within one message
+  of yours, in a main session. It is a count only: the failures are
+  work, so nothing is priced or counted as waste.
+- **Approve a plan with a clear context.** A new `plan_fresh_early`
+  hint speaks up when you send a message in plan mode with 40,000
+  tokens or more of planning chat in the session: the plan isn't
+  written yet, so its note asks Claude to end the plan it submits with a
+  tip to approve it with a clear context. The desktop wording names the
+  approval option that clears the context first and falls back to
+  `/clear` plus asking Claude to implement the plan in its file. It stays
+  quiet when the first reply is too far into the transcript to read,
+  when the session was compacted since it started, and for a message
+  sent while Claude is working. It shares its rest with `plan_fresh`,
+  and a plan that ends with the tip counts as relayed.
+
+- **A receipt for coming back after a break.** `cold_return` replaces
+  `cache_cold`. When a message arrives after the prompt cache expired
+  and the last reply left 100,000 tokens of context or more, the note
+  asks Claude to say how long the session sat idle and how many tokens
+  the reply wrote again, less the 42,000 every session starts with, with
+  a compaction count as one clause. It says the last reply already
+  answers "is it done?" (or the task panel on the desktop, `/tasks` in
+  the terminal), and that `/clear` first skips the
+  rewrite for new work. It is a receipt, so it no longer depends on what
+  the message is about. It is quiet after a compaction since the last
+  reply, for a message sent while Claude works or one you didn't type,
+  and for 12 hours once shown. It shares one rest with `plan_fresh` and
+  `plan_fresh_early`.
+- **The break is timed from the real last reply.** A usage-limit line, an
+  overload or any other line Claude Code writes in place of a reply is
+  never a reply, so a limit at the end of a turn can't restart the
+  clock or zero the context. The desktop app writes old lines again when
+  it resumes a session, so a line with a repeated `uuid` or a time
+  behind the ones before it is left out, and a new background `Stop`
+  entry (and each read, search or web result) keeps the newest reply's time, context
+  and cache lifetime in `coach-state.json`: three numbers, no text.
+  When nothing was kept and the transcript ends in a replay, the
+  receipt stays silent. Run `claudeglass capture connect` once to add
+  the `Stop` entry; Setup › Capture shows a "Needs a hook entry" chip
+  until you do.
+- **Asking how it's going, while work runs in the background.** A new
+  `status_poll` hint speaks up when a message only asks how the work is
+  going and a tool result said work went to the background with no
+  message from that task since (a message naming another call, such as
+  a subagent's own background command, doesn't count). It matches the
+  result's own wording, not `run_in_background`, which an agent or a
+  workflow goes to the background without. The tip says each check makes Claude read the whole
+  session, about that many tokens, and points to the task panel (the
+  desktop) or `/tasks`. It never promises a notification. After a break
+  that outlasted the cache, `cold_return` speaks instead. After the fact,
+  How you prompt has a new row, "Asking how it's going": each poll is
+  priced from the reply it drew. That is the cost `repeat_ask` used to
+  carry, as every one of its live firings was a poll.
+- **Why work was redone, and mistakes admitted.** With `shift` on, a tag
+  can carry two more words. `why=left_out|missed|changed|tools` goes
+  with a redo or a fix: your request or the plan left it out, Claude
+  missed something they said, you changed your mind, or a tool or setup
+  failed. `admit=claim|change|instruction` says the reply admits an
+  earlier mistake: a wrong statement, a wrong change, or an instruction
+  it was given and didn't follow. They ride on the `shift` switch, so
+  there is nothing new to turn on, and Haiku writes them when it writes
+  your tags. Only the closed words are kept. With them and the clearer
+  wording below, the Essentials note grows from about 196 to about 353
+  tokens, Standard from 314 to 484 and Deep from 422 to 662.
+- **Haiku fills in a tag Claude left out.** While Claude writes the
+  tags, a reply that ends a piece of work without one now gets a Claude
+  Haiku call in the background, about $0.002, through your own login.
+  The tag file's line records `"w":"haiku-fallback"`, so the two
+  writers can be told apart, and `capture status` says how many tags
+  Haiku filled in and what that cost. There is nothing new to turn on:
+  the call rides on the `Stop` entry capture already has, with the same
+  excerpt, checks and closed words as `capture tagger haiku`. It is
+  skipped for a reply that has a tag, a piece of work with a tag on any
+  reply, a turn that answers a background agent, another session, a
+  scheduled task or a prompt Claude Code sent itself, a turn that
+  starts a background agent or workflow or ends while one still runs,
+  a turn whose command went to the background and hasn't reported, and
+  a script run. When Claude tags a later reply of the same piece of
+  work, Claude's words stand and Haiku's fill-in only adds its cost.
+- **Scheduled tasks get no note.** A session a scheduled task started
+  has no message of yours, so the parser drops every tag in it. It no
+  longer gets the capture note, which spent tokens for nothing.
+- **`/cg-feedback` asks what your follow-ups were.** It asks in two
+  calls of at most four questions each, and leaves out any that don't
+  apply. The first call holds the outcome, what your follow-up messages
+  were mostly (things you hadn't said, something Claude missed, a change
+  of mind, or just questions), whether it was worth the tokens, and what
+  would have made it cheaper. The second asks where the missed thing was
+  (only after you ticked missed), whether an approved plan covered what you
+  then fixed, whether the build could have started fresh from the plan, and
+  whether a tip ClaudeGlass showed was right (only when one was). The
+  headers start `CG` and fit 12 characters. The skill reads an optional
+  `cg-fb-facts v1` line of counts and ids when one is there, to fill in its
+  numbers and skip a question that doesn't apply, and works without it. It
+  ends with a fixed "Recorded for ClaudeGlass" line, one "Next time" line
+  picked by priority, and the tag as the last line of the reply. The tag
+  gains `why`, `missed_in`, `plan`, `tip`, `tip_hint` and `from_text`, and
+  its body limit goes from 200 to 300 characters. `PARSER_VERSION` is 39,
+  so transcripts are read again.
+- **A note typed under Other is read once, then dropped.** Claude maps what
+  you typed to the closest word of that question's list (or leaves the key
+  out when nothing fits), never copies, quotes or saves it, and lists the
+  keys in `from_text`. The parser keeps a word picked that way only when
+  the `AskUserQuestion` result shows a non-label answer for that key. A
+  ticked answer always wins over the tag, and a tag with no answers behind
+  it loses its `from_text` words. The parser keeps only which questions
+  were answered that way (`Feedback.other`), never the text.
+- **Running `/cg-feedback` again replaces the answers.** A run with no work
+  since the previous one is a rerun to change that run's answers, so it
+  replaces them over the same work instead of rating nothing. A declined
+  rerun leaves them as they were.
+- **A facts line starts every `/cg-feedback` run.** The capture hook adds
+  one line of counts and ids to the message, `cg-fb-facts v1 tokens=...
+  typical=... followups=... queued=... plan=... plan_followups=...
+  plan_asked=... build=... tips=... tip=... admits=...`, and nothing else
+  that you wrote. Follow-ups leave out go-aheads and status checks. It
+  runs at any capture level, including off, while the survey is on, and
+  reads the same end of the transcript the coaching hints read, so it
+  stays far inside the hook's five seconds. It needs the
+  `UserPromptSubmit` entry that `capture connect` adds, and `capture
+  feedback on` says so while it is missing. Without it the skill works as
+  before.
+- **Your typical piece of work.** The daily service run, and `capture
+  refresh`, write `typical_piece_tokens` to `coaching.json`: the median
+  main-transcript tokens of your last 30 days' sessions, counting those
+  with at least three replies and only once there are five (`0` until
+  then). A session stands in for a piece of work until pieces are told
+  apart in the report. The run now also happens for a survey item on your
+  messages with coaching notes off.
+- **A plan check after you fix an approved plan's build.** Switching to
+  Deep turns it on, and `capture enable plan_check` turns it on at any
+  level. After you approve a plan and Claude changes files, your next
+  typed message that corrects or adjusts the work gets one question
+  from Claude first, asked with `AskUserQuestion` under the header "CG
+  plan fix": did the plan already say it, did it leave it out, is it
+  something new, or not a fix. It isn't asked for a go-ahead, a
+  thank-you, a status check or a message sent while Claude was working,
+  nor when the plan's own feedback rounds already said what was wrong,
+  and at most once a plan. After two declines or answers in your own
+  words in a row it rests for 14 days. Only the one word you ticked is
+  kept (`PlanCheck`), never your message. Setup › Capture shows what the
+  check cost and how many were answered.
+  New thresholds `coaching_plan_check_declines` and
+  `coaching_plan_check_off_days`.
+- **Your `/cg-feedback` answers change the advice.** Each answer now feeds
+  the cards it bears on, and every card says what it used.
+  - *Things you hadn't said.* "Say what you want and what done looks like"
+    and the other habits about briefing Claude cite how many follow-ups were
+    things your request left out, and the first can stand on those answers
+    alone. The `/cg-brief` checklist weighs a message whose follow-ups were
+    things it left out twice.
+  - *Something Claude missed.* A new "Have Claude check its work against
+    what you asked" habit counts the fixes for it, the tokens they used, and
+    the fixes after a plan where the plan check or the plan question said the
+    plan already held it. Its line to paste, and its title, follow where it
+    was missed: your message, the plan, CLAUDE.md or memory, or earlier in the
+    chat.
+  - *A change of mind, or new to the plan.* A message that looked like a redo
+    is left out of Redone, the rework behind "Split large asks into planned
+    steps", "Plan hard work before building it" and "Check each change, and
+    run the full suite once", and the waste figures, when you called your
+    follow-ups a change of mind alone, said the fix was new to the plan, or
+    answered "new" to the plan check. Kinds of task says how many it left
+    out. A mix of reasons rules nothing out.
+  - *How you prompt.* A follow-up you called Claude's miss or a change of
+    mind is no small request, repeat or vague correction. "Big tasks without
+    a plan" is priced at half what the follow-ups cost where you said a plan
+    first would have helped, and shows how it was worked out.
+  - *Worth it, and what would have helped.* Large asks in work you called too
+    costly, or said smaller pieces would have helped, join "Split large asks
+    into planned steps"; ones you called worth it leave it. A plan first
+    would have helped feeds "Plan hard work before building it", and more up
+    front feeds the habits about briefing Claude.
+  - *The plan.* Work after a plan now counts, per kind of session, fixes that
+    the plan covered, left out, or that were new (Planning and building in one
+    session). More than half of three or more saying the plan left it out
+    turns the plan-handoff card into "Write fuller plans" with its own
+    prompt; more than half saying the plan was enough makes it say to run
+    /clear at the approval, and the fresh-session hint speaks after
+    `coaching_rearm_factor` times less planning.
+  - *The tips.* Tips Claude showed gains what you said of each tip (useful,
+    right but I knew, wrong) and a Found useful share. A tip called wrong
+    twice, by you or by Claude disowning it, waits for `coaching_rearm_factor`
+    times more where it has a number (small requests, pastes, coming back),
+    and is left out otherwise. A tip you knew more often than found useful
+    shows once a session. The daily run writes `muted`, `once` and the raised
+    numbers to `coaching.json`; `capture status` lists them.
+- **The dashboard asks what `/cg-feedback` asks.** Rate this session on
+  Spend › Sessions now shows the same questions, served from the same
+  catalogue so the words are never copied into the page, and leaves out
+  the ones the session's own facts say don't apply. The rating gains `why`,
+  `missed_in`, `plan`, `handoff` and `tip` (with `tip_hint`), and a session
+  with two or more approved plans gets a plan and handoff row for each
+  build (`session_plan_feedback`). Tip, habit and recommendation cards end
+  with Useful, Trying it, Knew it and Wrong here (`POST /api/tip-feedback`,
+  the `tip_feedback` table, store version 9). These are ratings you give,
+  never a setting. A tip card's answer joins the Tips Claude showed counts,
+  and Trying it adds a line to `habit-log.jsonl` (kind, id, `trying` and a
+  time) that becomes a change point, so the habit's effect is measured from
+  that day. A session whose mode or purpose is a rule's catch-all gets a
+  Label unsure chip. The banner lists the sessions that used at least the
+  reminder's size and have no rating, with their tokens and a Rate it
+  button, and a rating takes a session off the list. A session rated only
+  on the dashboard feeds the same habits and cards a /cg-feedback run
+  does; beside a run, its plan and handoff answers are left out so a
+  build isn't counted twice. `capture prune` also clears old
+  `habit-log.jsonl` lines. Counts and closed words only: no
+  message text is read, kept or shown.
+- **Pieces of work.** A session's messages are now grouped into the pieces
+  of work you did. A piece starts at the session start, at a /clear (unless
+  the next message is a handoff), at a message Claude tagged `shift=new`
+  that no one contradicted, or, with no tag, after a gap of 3 hours or
+  more on files that share under a tenth of the last piece's. Never at a
+  queued message, a plan reply, the answer to a question or a message you
+  sent while background work ran that changes no files. A session that
+  opens within 72 hours
+  with a handoff that carries something over joins the piece it continues:
+  a short message naming a file path after an approved plan or with a read
+  or edit of a file that piece edited, or a long message or a paste that
+  reads or edits such a file. A long message or a paste that shares no
+  file starts a new piece, whatever paths it names and whether or not a
+  plan was approved, and so does a path with nothing to tie it to the
+  piece. A session with no start inside it is one unsegmented piece. Each
+  piece counts its replies, tokens and cost, how sure the start is, and
+  how many cycles were rework: a cycle after the first delivery that
+  redoes or fixes it (a settled `redo` or `fix`), a correction you typed
+  or queued, or an adjustment that changes the piece's files again. A
+  short message that only changes the files the last reply changed is
+  not rework: a hand-check found that guess right 1 time in 12, so it
+  needs one of those flags or tags. Plan
+  rounds, go-aheads and status checks are never rework, and neither is
+  work you rated as a changed mind or a new plan. The cause comes from
+  your feedback first, then the reply's `why` tag, then it reads "cause
+  not reported"; the source is one of feedback, Claude tag, Haiku tag or
+  inferred. Rework rates are counted per cycle and per piece, split by
+  level and size. Counts and closed words only.
+- **Rework after delivery.** A new section on the Work habits page, after
+  the top habit cards, says how many of your pieces of work needed changes
+  after Claude delivered them, what that rework cost, and how much came
+  from requests that left something out, Claude's mistakes and changes of
+  mind, and from failed tools, plan gaps or a mix of causes when some did.
+  It needs no feedback and no tag, which only say why: where neither
+  does, the cause reads "cause not reported", never "Claude got it wrong".
+  Each cause is a card that names its source (your feedback, Claude's tag,
+  Haiku's tag or inferred) with a Try line and something to copy: a line to
+  say more up front for a request that left something out (`/cg-brief`
+  while the brief card shows), a re-read-and-check line for
+  Claude's mistakes (or the line for where you said it missed), "Plan this
+  first" for a change of mind, and the checks for tool calls that failed.
+  After a plan you approved, fixes show as a card once 5 plans were. Claude's
+  admitted mistakes are counted from the tags, with who caught each, how many
+  were an instruction it had been given, and what the rework after yours
+  cost; a reply that only reads like an admission is said apart and never
+  counted. Weekly bars appear for a week with 5 or more pieces that needed
+  changes, and rework per request is split by how hard the work was. The
+  glossary gains Piece of work, Rework, Status check and Plan round.
+  Counts, closed words and amounts only.
+- **Messages sent during background work are not rework.** A message that
+  asks for something (not a go-ahead, a status check or a thank-you) and
+  changes no files, sent while an agent or workflow an earlier message of
+  the same piece started was still running, is now an aside. Most are side
+  questions or remarks, and some steer the running work with a requirement,
+  a clarification or a correction. It never starts a piece, whatever its
+  `shift` word says, and is never rework. It is left out of the piece's
+  count of requests and of the rework rates, but its cost stays in the
+  piece (`aside_cycles` and `aside_cost` on a piece of work). The same
+  message after the report came back is an ordinary one, and so is one
+  that changes a file while the work runs. Either is rework only when a
+  settled redo or fix, a correction or an adjustment says so, never just
+  because a short one changes the last reply's files. An aside is not a
+  fix after a plan you approved either, and never marks the message
+  before it as redone. When a delivered piece has any,
+  one line under the rework headline says how many messages you sent
+  while background work ran and what they cost. Counts and amounts only.
+- **A link to a habit.** `#/habits?item=<key>` opens Work habits at that
+  card: it scrolls there, opens "more habits" when the card is folded
+  under it, and highlights it. The rework section is an item too
+  (`item=rework`). The Overview, the habit tips on Actions > Checks
+  (**See the habit**) and search (a new Work habits group) all link
+  through the one helper in `links.js`.
+- **Failed and blocked tool calls.** The replies lost to tool errors and
+  to calls a hook or a guard blocked are a check of their own on
+  Overview and Actions > Checks, `failed-calls`, with its own fix: a
+  prompt to check a path or name first and to stop and ask when a call
+  is blocked. They used to be counted inside Work habits.
+- **Session mix on the Changes page.** A change card now says when the
+  mix of sessions moved between its two sides: a warning chip and a
+  sentence when the share of scheduled runs, or of one mode, moved by 25
+  points or more between before and after the change. Cost per session
+  then compares different kinds of work, so the card says to read the
+  other measures first. `GET /api/impact` gains `mix` on each change.
+- **Cost per request.** A change of model, and a habit you started, also
+  show cost per request: a session's cost over its prompt cycles that
+  asked for something. A run of go-aheads or status checks can't move it,
+  and a scheduled run has none. `GET /api/impact` gains the measure
+  `cost_per_substantive_cycle`.
+- **Feedback changes have names.** Turning the `/cg-feedback` prompts on
+  or off, or changing which ones run, is a change of its own on the
+  Changes page, not "Changed metrics capture".
+- **One-request sessions.** A session where you typed one message at most,
+  Claude replied at least once, and no other mode claimed it, is now
+  `one-shot` ("One-shot: one request (yours or a scheduled task's), then
+  Claude worked with no more messages from you") instead of `mixed`. A
+  session Claude never replied to stays `mixed`. On the author's machine,
+  60 of the 102 sessions the rules called mixed are now one-shot.
+- **Usage limits count stops, not messages.** One stop writes a storm of
+  limit messages, a retry and a notice for each agent it cut off. The
+  Usage limits table now leads with 5-hour limit stops and weekly limit
+  stops, and keeps the messages as "Limit messages". Messages that name the
+  same reset count as one stop, resets within two hours of each other merge,
+  and a message with no reset joins the stop whose reset follows it (within
+  5 hours, or 7 days for the weekly limit). Sessions affected counts the
+  main sessions with a limit message in any stop.
+- **A weekly stop you worked through.** A weekly stop is marked as not
+  stopping work when your main session got a reply more than 10 minutes
+  after its first message and before its reset. The table counts the
+  weekly stops that did stop work.
+- **Agents a limit cut off.** A subagent that replied at least once, and
+  whose last limit message came after its last reply, is counted as cut
+  off, split into direct agents and workflow agents, with what each group
+  had spent. An agent that never replied is not counted.
+- **What woke the session.** A new table files each pair of limit messages
+  in a row by what lay between them: something you typed, the app's
+  resume, a scheduled task, a background agent's notice, only lines
+  Claude Code wrote itself, or something else. Only the kind of line is
+  read.
+- **Your recent limit stops.** A new table on the limits page lists each
+  stop, newest first: whether it was the 5-hour or the weekly limit, its
+  reset time, how many minutes before the reset it began, and what you
+  spent before it, at list prices. The spend runs from 5 hours before the
+  reset (7 days for the weekly limit) to the stop. It is split into your
+  main session, agents you started and agents a workflow started, with the
+  two biggest agent type and model pairs and the share that ran while 3 or
+  more agents worked at once. Each share is a share of list-price spend;
+  the limit may weigh models differently. No new data is stored.
+- **A limit roll-up above it.** One line covers the 5-hour stops since 18
+  Sep 2026 and names the biggest cost centre. A weekly window holds your
+  whole week, so weekly stops are added up only when no 5-hour stop
+  counts. The `limit-pressure` tip follows
+  it: your main session gets plan and `/clear` advice, direct agents get
+  "run fewer agents at once", and workflow agents get the workflow
+  script's concurrency. The tip adds how much of the spend ran with 3 or
+  more agents at once only when that is 10 points or more above your
+  share across all your work.
+- **Tuning export.** `claudeglass tuning export` writes the figures that
+  show how you work with Claude (how you prompt, how replies were tagged,
+  how pieces of work went, what agents cost, what ClaudeGlass costs) as a
+  small JSON file of counts and words from fixed lists, to take to another
+  machine. `--days` sets the window (30 by default, 1 to 365), every project
+  is included unless you name some, and `--out` writes the file whole or not
+  at all; without it the JSON is printed. `claudeglass tuning summary FILE`
+  reads one back in plain words. Names, paths, hashes, session ids and text
+  are never in it, custom agents count as `custom` and models as a family.
+  Your dashboard ratings and tip-card answers count as they do on the
+  dashboard, as counts only. The file is checked against a fixed list of
+  what it may hold: an unknown key, a key given twice, free text, a path, an
+  address, a URL or a file over 256 KB is
+  refused. `export` then prints the problems, which name a key and a check
+  and never a value, writes nothing and exits 2, and `summary` prints no
+  figure from a file that fails the same checks. See
+  [docs/exports.md](docs/exports.md#claudeglass-tuning).
+- **Take your figures to another machine.** Setup › Capture ends with the
+  `tuning export` and `tuning summary` commands to copy. They are commands,
+  not a button.
+- **Subagent tool definitions are sized.** A subagent's transcript writes
+  its tools snapshot, agent roster and MCP instructions after its first
+  call, so the startup breakdown used to record its tool definitions as 0.
+  It now takes the first snapshot that lists tools wherever it sits, and
+  counts the roster and the MCP instructions that arrive before the second
+  call. Each built-in tool's size is kept by name and each MCP server's as a
+  total, never a description. A new table lists the tools an agent type was
+  offered and used in at most a tenth of its spawns, with their sizes, and
+  "Tools never used (can be left out)" totals them. The parser is at
+  version 41, so the first report after the update re-reads your
+  transcripts.
+- **Characters per token, measured.** Token figures built from characters
+  (the context budget, the startup breakdown, context carried by CLAUDE.md
+  and skills, tool search, the session's tool results) no longer assume 4
+  characters per token. Each model gets its own two figures, one for tool
+  definitions (from the shared prefix of its first calls) and one for other
+  text, the median over ten or more first calls; until then 4.0 stands in.
+  The text figure comes only from first calls that recorded their tool
+  definitions, since a call without them counts the tokens it wrote for
+  them as text, and a call outside 1.5 to 8 characters per token is left
+  out before the median. A new "Characters per token" table shows them, and
+  the notes say "calibrated on your sessions". No tokenizer reads your
+  transcripts.
+- **Desktop app servers are told apart.** An MCP server named by an ID
+  that only desktop-app sessions (and their subagents) ever offered is
+  a connector, and gets the same advice and thresholds as one the app
+  named. The servers the desktop app brings itself (computer use, the
+  visualiser, the built-in browser and preview, its session and window
+  servers, the scheduler, the terminal and the connector registry) show
+  with their cost and the status "built in", and are never marked
+  "remove": there is nothing to disconnect. Where a switch is known,
+  the new "How to turn it off" column gives it (the computer use
+  setting, marked as not verified).
+
+### Changed
+
+- **The cost of planning is counted up to the last plan.** When you sent a
+  plan back, the cost of planning a message used to stop at the first plan, so
+  the "Skip plan mode for easy changes" habit undercounted what the rounds cost.
+  It now runs to the plan Claude put up last in the message (the one you
+  approved, or the last one put up). A message with one plan costs what it did.
+- **The first reply after a summary is named for it.** In the cache
+  tables, the first reply after a conversation summary is now labelled
+  "Rewritten after a summary", in every table that shares those labels,
+  and no longer "Cache expired (session part)", whatever the wait before
+  it. It still counts as a rewrite wherever rewrites are counted, and the
+  allowance for files read again is unchanged.
+- **Subagent start savings are priced the way the cache charges.** The
+  tool definitions are the front of a prefix that sibling spawns share, so
+  only the spawns that wrote it pay the write price for it; the skills list,
+  the agent list, CLAUDE.md and the task prompt are written by each spawn,
+  and every part is read again on each later call. The subagent start cards
+  (`spawn-tools-list`, `spawn-claude-md`, `spawn-unused-skills`,
+  `spawn-unused-mcp` and `spawn-task-prompt`) use this price in place of one
+  write plus the later reads for every part, and the report window is
+  stretched to 7 days before a saving is scaled to 30. `spawn-claude-md`
+  takes the What-if table's figure for `omitClaudeMd`, which is the cache
+  write at each spawn or what the Context files section prices carrying
+  CLAUDE.md, if that is more. The custom-agents row is sized from the agent
+  list the first calls recorded (split by agent type) rather than a flat
+  60 tokens each, and the baseline card suggests trimming an agent's
+  `description:` only when your own agents add 1,000 tokens or more.
+- **The MCP and skills cards fit under a tools list.** `spawn-unused-skills`
+  offers the tools list first (leave Skill off it) and keeps
+  `disallowedTools: Skill` as the narrow option. `spawn-unused-mcp` is now
+  per server, fires for a server that at most 2% of the spawns offered it
+  called and that costs at least 5 USD over 30 days, shows its amount as a
+  part of the allowlist saving (never added on top of the tools list card),
+  and marks `mcpServers` as not verified. A server's instructions stay under
+  a `tools:` list, so they are left out of that saving. A built-in agent
+  type's `spawn-cost` card no longer says to shorten the task prompt, and
+  `Explore`, `Plan` and `claude-code-guide`, which the tools list card
+  leaves alone, get none unless an agent file of yours defines them.
+- **The brief card compares like for like.** Partial and vague asks are
+  now set against the median clear ask of the same kind of task and level
+  (the whole kind of task when fewer than 3 clear asks share the level),
+  at what their own work cost, and the messages that carried out a plan
+  are left out of both sides. The sum is signed, needs at least 5 messages
+  on each side, and the card shows only when a partial or vague ask cost
+  more in at least 60% of the comparisons. Its evidence quotes the median,
+  for example "the median one cost 3.6x a clear ask of the same kind". The
+  "How clear your asks were" table says what its plain averages mix in
+  and gives the same comparison, so the two agree. The optional /cg-brief
+  skill is offered only while the card shows, in one note under the brief
+  templates and on the rework card for a request that left something out.
+- **Trends say only what they can measure.** A week before capture was
+  turned on reads as a dash, not a zero, for a habit that needs the tags.
+  A habit reads "new" until 3 weeks are measured and "Not measured" when
+  every week is zero. A habit built from tags divides by the tagged
+  messages of a week, so a week Claude wasn't tagging is a dash and not a
+  week with nothing to fix.
+- **One tagged share, and a period on every figure.** The Work habits
+  digest counts the share of messages tagged from the day capture was
+  turned on, in the sessions capture reached, the same as the Capture
+  banner. Its money tiles and cards say what they cover: a saving a week,
+  a cost of a piece of work, and in How you prompt a total over the
+  window, with the period beside the list-price equivalent on a plan. A
+  habit with nothing priced reads "Not priced", never a bare $0.00. Weeks
+  in How you prompt start on your local Monday, not a UTC one.
+- **Stricter cards.** Clearing between tasks no longer counts a thank-you,
+  a status check, a message after a usage-limit pause, or a new task you
+  said needed the earlier work. Lowering effort for easy work needs easy
+  work to think at least 10 points more of its output than hard work does
+  at the same effort, and a saving of at least $1 a week. Skipping plan
+  mode for easy work needs 5 easy asks and $1. A habit you already picked
+  up is no longer also listed as worth trying.
+- **The Work habits row leads with the rework.** When 20% or more of 5 or
+  more pieces of work needed changes after delivery, the Overview's Work
+  habits row opens with that sentence and links to the rework section;
+  otherwise it keeps its lead, now linked to the habit it names. Its
+  saving now includes what the playbook's habits would save over the
+  window, with no habit counted twice (one a recommendation already
+  covers is left out). `GET /api/quick-actions` gains `headline`, `item`,
+  `saving_usd` and `saving` on each check, and a tip gains `habit`.
+  The playbook table gains `saving_total`, each habit's saving over the
+  whole window.
+- **Changes lead with the measure the test is surest of.** A change
+  card opens with the measure whose before-and-after test is surest, not
+  the first one listed: a clear difference before a possible one before no
+  clear change, then the smaller p-value. A move under 5% reads as no
+  clear change, however sure the test is of it. The one-line verdict says
+  only what that reading allows ("fell 40%", "may have fallen", "no clear
+  change", "about the same", "too little data to judge yet"), where it used
+  to say a rise or a fall for any difference. `GET /api/impact` gains `lead`
+  on each change, and the Overview's short card shows it. An estimate of no
+  effect on the Changes page treats a move under 5% as no change.
+- **Capture changes read cost last.** For a change to metrics capture, live
+  coaching or the feedback prompts, cost per session is read after every
+  other measure with a reading, in a quieter colour, whatever it says: such
+  a change isn't meant to move cost, and the sessions around it can differ
+  more than it does. `GET /api/impact` gains `demoted` on each measure.
+- **Habit rates count requests.** For a change to coaching or a habit you
+  started, the habits and one-at-a-time small requests per 100 messages now
+  divide by the messages that asked for something (not a go-ahead, status
+  check, thank-you or plan reply), the count Work habits uses, and the same
+  count stands under both sides of the comparison.
+
+- **A hint that keeps coming back rests longer.** Within a session, each
+  time a hint shows again its rest doubles: 30 minutes, then 1, 2 and at
+  most 4 hours (`coaching_max_backoff`). Growth still ends the rest
+  early, except for `cold_return`, which rests a flat 12 hours
+  (`coaching_cold_rest_hours`).
+- **Hints that read your history look further back.** A message's
+  hints read up to the last 4 MB of the transcript, up from 256 KB, so
+  a long tool result no longer hides the last reply. No hash of your
+  words is kept.
+- **Tips carry the context.** `drip_feed` now says how many tokens each
+  re-read covers. The notes still hold counts, times and token figures
+  only; no dollar amount comes from the hook.
+- **`drip_feed` counts requests, not messages.** A go-ahead, a
+  thank-you, a status check, a question and an answer to Claude's
+  question neither count nor end a run, and a question that closes a
+  reply that changed a file is an offer, not something the next message
+  answers. A change to a file of yours is an edit or a shell write
+  outside a `.claude` folder, or a file a subagent changed; Claude's
+  own memory, plans and scripts don't count. A message you send while
+  Claude is working gets no hint. The window stays 20 minutes.
+- **`drip_feed` follows your messages, not Claude's replies.** A replay
+  of 30 days of real sessions found it right in 2 of 11 firings. The 20
+  minutes now run between your own messages, so Claude answering a
+  background agent's report no longer stretches a run over hours. A
+  message is credited only with the edits of the reply it started, and a
+  subagent's with the message whose reply launched it. Only a message
+  that asks for a change counts: a statement, a report, an explain
+  request and a bug report neither count nor end a run. A go-ahead also
+  covers merge, release, push, commit, "run the tests", "ship it" and
+  "carry on". "Try again" is a vague correction, not a go-ahead.
+- **`plan_first` reads your own prose.** Steps are counted outside
+  fenced blocks, quoted lines and pasted logs, and a job counts from 3
+  steps, down from 4 (in 2,755 messages that added 6). A review-only
+  request and a message that is a plan already (1,500 characters or more
+  with headings, or five numbered items) are left alone.
+- **`plan_first` leaves briefs, pastes and releases alone.** The same
+  replay found it right in none of 7 firings. A message of 2,000
+  characters or more is a plan, and so are five listed items, whether
+  numbered "1." or "1)" or opened with "-" or "*". A message with pasted
+  code or a pasted log, or one that asks to merge, ship or release,
+  has no steps.
+- **`cold_return` waits out a usage limit.** It was right in all 10
+  firings, but 27% followed a usage-limit stop, where the wait was the
+  limit's. It stays quiet when you come back within a cache lifetime of
+  the limit's reset, or when the reset can't be told, and speaks as
+  usual after that.
+- **A message typed after a pause is no longer "queued".** The last tool
+  call or result must be under 10 minutes old (`coaching_queued_minutes`)
+  for a message to count as sent while Claude is working. The replay found 5
+  messages typed 10 minutes to 2 hours later that were read as queued.
+  A call that launched a subagent and has no result yet is the exception:
+  a subagent runs as long as it needs, so a message typed meanwhile is
+  still sent into work under way, whatever the call's age.
+- **A change verb counts where it opens a sentence.** "Build failed",
+  "Update: it works now" and "Support for tabs is missing" use the verb
+  as a noun or as the subject of a report, so they are no change request
+  and no longer count towards `drip_feed`. The merge, ship and release
+  words that keep `plan_first` quiet count the same way: "the merge
+  conflict in step 3" is a mention, "merge it" is a request.
+- **A shell line you ran no longer lends its edits to your last
+  message.** In the report, a reply that began with a line you didn't
+  type (a `!` command, another session's message) is nobody's answer to
+  your message before it, in the report and the live hint alike, so both
+  count the same small-requests run.
+- **Plan-mode wording names both apps.** The `plan_first` and `stop_loop`
+  rows in How you prompt say to start the message with `/plan` or pick Plan
+  in the mode menu next to Send on the desktop, and to press Shift+Tab in
+  the terminal.
+
+- **Seven hints no longer speak up in the session.** `clear_context`
+  fired on almost every long session and produced almost no tips,
+  `cache_cold` is now the `cold_return` receipt above, and
+  `explore_reads` is now the Explore cost table above. `repeat_ask`,
+  `stop_loop` and `vague_fix` fired on polls, go-aheads, refusals and
+  questions far more often than on the habit, so they are counted after
+  the fact only, in How you prompt, with no live note. `plan_first` is
+  counted after the fact only too, for the reason below. Their old notes
+  in earlier transcripts are still recognised, so what they cost is
+  still counted. The `config.toml` keys for them are ignored.
+- **`plan_first` is report-only.** Before its rule was tightened, a
+  replay of 30 days of real sessions found it right in none of 7
+  firings, which is wrong more often than right. Those 7 were detailed
+  briefs for long runs, a pasted install log, a scripted hook test and a
+  merge request mixed with questions. With the tightened rule, 12
+  messages asked for 3 or more changes, and each was rightly left alone:
+  a long brief (5), a message that mentions a plan (5), one already
+  shaped like a plan (1) and a merge request (1). That author writes
+  plans upfront, so the hint had no real chance to help. It still shows
+  in How you prompt, with the same advice, and the help text explains
+  it. The hook no longer speaks up for it, and `coaching_plan_steps` and
+  `coaching_plan_min_chars` are ignored: its rule is fixed, as the other
+  report-only habits' are.
+- **`drip_feed` stays live, with the tighter rule.** It was right in 2 of
+  11 firings before the tightening. With the tightened rule the same
+  replay found 630 messages that reached the check and 43 short requests
+  for a change, but no run got past one request: 23 stopped there, with
+  no earlier request (14), an earlier one with no file change behind it
+  (7) or one that was too long (2). The 8 nearest misses were not runs
+  of small requests. It fired 0 times in the last 30 days, so it now
+  speaks only on a clear run of small change requests. The hook, the
+  status line and Work habits count a run the same way, and
+  `coaching_drip_count`, `coaching_drip_window_minutes` and
+  `coaching_drip_chars` still set it.
+- **Stricter rules for the three counted after the fact.** A repeat is
+  an answer with a file change that missed: a poll, a go-ahead and a
+  thank-you are never one, so what a poll costs is `status_poll`'s.
+  A stop is Esc on a reply: not the tail of a call you turned down, a
+  plan you sent back, a declined question or a hook's block. A vague
+  correction needs a phrase that says something went wrong ("still
+  broken", "that didn't work"), so a bare "fix this" no longer counts;
+  it also skips a question, a go-ahead, a thank-you, a status check, a
+  message with an image and a retry after a reply that failed. It shows
+  "Not priced", as what it caused can't be told apart from the fix.
+- **A result's size is what Claude reads.** The large-output note and
+  the `quiet_output` hint count a result's words, in tokens. A picture
+  counts for its own tokens, worked out from its width and height, at
+  most 1,600, never for its encoding. A result Claude Code saved to a
+  file (a search past about 20,000 characters, a web page past 50,000)
+  counts for the preview that reached Claude. A diff or a patch that is
+  only shown to you is left out. The rest after `quiet_output` is kept
+  apart for the main session and each subagent, since one's big result is
+  no reason to stay quiet to the other. In practice `quiet_output` now
+  follows a large read or web page: a search is saved to a file before it
+  is large enough.
+- **The hook skips shell, MCP and search results.** Claude Code waits for the
+  capture hook after every result it is registered for, and the shell
+  and MCP tools were about two thirds of them. A replay over real
+  sessions found the large-output note after a shell result failed its
+  precision and tokens-against-time checks, and was right 33% of the
+  time after an MCP result (46% with half credit; the bar was 50%). Grep
+  and Glob results can't reach the note's size at all: Claude Code keeps a
+  Grep result whole only up to 20,000 characters, and in 30 days no Glob
+  result passed 18,200, yet Grep was the call the hook delayed most. The
+  PostToolUse entry now matches `Read|WebFetch|WebSearch`, and
+  an approved plan with coaching notes. `update --finish`, `capture
+  connect` and Setup › Capture rewrite an older entry after you say yes;
+  until then it still starts the hook, which returns at once for those
+  tools. A subagent that only runs commands no longer reaches
+  `split_run`, which counts a run's replies when the hook runs.
+- **The hook starts faster.** `capture-hook.py` is now a small
+  launcher, and the code is `capture_hook.py` beside it, so Python keeps
+  its compiled form between calls instead of compiling 130 KB each time.
+  The hook imports `argparse`, `hashlib`, `hmac`, `subprocess` and
+  `tomllib` only where it uses them, and returns before anything else when
+  a result is under the size a note could apply to. On the author's
+  Windows machine a call took about 62 ms and takes about 44 (python
+  alone starts in about 12); a call an older entry still sends for a shell
+  tool takes about 31. `capture connect`, `update --finish` and the
+  dashboard's start copy the launcher, the module and the word list
+  together, the launcher last and only once the module is there. An
+  install from before the split keeps working and is brought up to date
+  by the next of them. Uninstalling takes all three out with the data
+  folder.
+- **Repeated failures left the habits playbook.** "Stop retrying a
+  failing command" is no longer a habit with a saving; the waste summary
+  counts it instead.
+- **Subagent compactions.** The hook counts a compaction as a
+  subagent's only when a subagent file recorded one in the last five
+  seconds, and the session note tells a subagent to ignore it. The key
+  names of each kind of SessionStart payload are logged once, names only.
+- **`found` and Haiku's agent `fit` are no longer asked for.** `found`
+  was answered 14% of the time, and "yes" 9 times in 10. `fit`, Haiku's
+  verdict on whether a smaller model would have done an agent's task,
+  was always "right". Neither is in a note or in Haiku's questions now,
+  and a `config.toml` that lists them still loads. Rows already written
+  are still read, so older sessions keep their words.
+- **The notes say more about what each word means.** `shift` counts a
+  rename or tweak of what Claude just delivered as `fix`. `check` says
+  what each word means, `none` when nothing changed, and `full` when the
+  whole suite ran at any point. `prior` is always `none` on the first
+  message, `skill` states its condition first, and `missing` says what
+  `files` and `scope` mean. A closing line asks Claude to judge a plan,
+  not the go-ahead that carried it out, and to tag its reply to an
+  agent's report for the request that started the agent. Haiku gets the
+  same meanings.
+- **`level` and `size` cover the work a message's cost holds.** Their
+  lines now say they count the reply, the agents or workflows it started
+  in the background and the reply to their report, and not work left for
+  a later reply, so a message that only starts a workflow is sized by the
+  work it sets going. That is the work a prompt cycle charges to the
+  message. Haiku reads the same words. `shift` also says that a question
+  or remark about the work or the tag, made while the work goes on, gets
+  no shift. The Essentials note grows from about 353 to about 435
+  tokens, Standard from 484 to 566 and Deep from 594 to 676.
+- **A tag's words are checked against the transcript.** One set of rules
+  now puts right the words the transcript contradicts, for Claude's tags
+  as they are read back and for Haiku's before they are stored. A `why`
+  needs a redo or a fix, and `tools` a failed tool call. A first message
+  has no `shift` but `new`. `build` or `grew` reads `fix` after a
+  correction, or a tweak to the files just changed. Haiku's `admit` needs
+  a reply that reads like one, and a reply that does but got no word is
+  only a possible admission, never added to a total. `check` is `none`
+  when no edit, subagent, workflow agent or file-moving command changed
+  anything, and otherwise follows the tests that ran. `plan` is `made`
+  whenever a plan went up and `following` once one was approved. Reports
+  read the settled words and the calibration counts keep Claude's own.
+  The parser now counts edit calls, documentation edits and file-moving
+  commands, so every digest is rebuilt once. Haiku's tag file notes each
+  change in an optional `g` field, in closed words only.
+- **The highest level and size win.** When one message gets several
+  tags, its `level` and `size` are the highest of them, not the last
+  one's, so a closing "easy" no longer relabels hard work. Other words
+  still go to the last tag that gave them.
+- **Haiku is told more about the turn.** Its excerpt now opens with the
+  request the work began with (the start of the plan you approved, else
+  your latest long message). It also gives the minutes since Claude's
+  last reply, the files that reply changed and how many changed again,
+  the short follow-ups you sent in a row, up to three messages you sent
+  while Claude worked (read by Haiku only, never kept), how often a plan
+  was proposed and sent back, and the rounds of feedback you gave. Lines
+  a replay wrote again are left out, and an agent's shell commands
+  include PowerShell. The plan line no longer says "not used" when the
+  plan call lies outside the end of a long session that was read.
+- **Agent runs are judged more accurately.** A workflow agent's brief
+  is the task its script computed. The line the workflow was started
+  with comes along as context, cut to 300 characters, and no longer
+  stands in for the brief. A run that hands back its answer through
+  `SubagentHandback` finishes as one that ends on `StructuredOutput`
+  does, and its `message` is read as the report. A structured answer is
+  shown field by field, each long value cut on its own, and a short
+  closing remark after the answer no longer turns it back into a
+  report. The brief and what it lacked are asked about before the
+  result, so that how a run ended doesn't colour how its brief reads,
+  and `done` is taken out of what the brief lacked when the agent was
+  told to hand an answer back. Findings, refuted claims and an
+  empty list count as done, and blocked now means the agent could not
+  do its own work. The judge also runs at a stop that follows a stop
+  hook's request to carry on, and the newest verdict for a run wins.
+- **Haiku waits for an agent's last lines.** The `SubagentStop` hook
+  fires before an agent's transcript is complete, so a workflow agent's
+  answer was often missing and the judge read its last words instead.
+  The hook now returns at once, and the background worker reads the
+  transcript after an answer appears or the file has stopped growing for
+  three seconds. If it is still growing after 20 seconds, the line
+  records `no_answer` and Haiku isn't asked. A run whose brief was
+  rerun on a higher model tier anywhere in the session, not only near
+  its end, is `retry=model`; a workflow's agents are never retries of
+  each other.
+- **Agent tables measure the work, not the model fit.** Claude's own
+  verdict that a smaller model would do was `right` every time, so the
+  `Smaller would do`, `Model was right` and `Needed larger` columns are
+  gone from How agents were used and Agents by kind of task, along with
+  the "larger model" veto on a cheaper-model suggestion. Two measured
+  columns take their place: `Single read-only calls`, the share of an
+  agent's calls that made one Read, Grep, Glob or file-reading command
+  and nothing else, and `Calls before the first edit`. A cheaper model is
+  still held back for an agent whose work was mostly hard or that was
+  retried for the model, and the Models evidence cites the two columns
+  beside the share of work reported easy.
+- **The older slowdown question is still read.** Runs from before the
+  redesign asked what slowed the work. Those `slow` answers stay readable:
+  "my request was unclear" counts as `why` = things you hadn't said (marked
+  as an older answer), "nothing" as `why` = none, and "wrong approach or
+  rework" gives no `why`, because it didn't say who caused it. Tool trouble
+  is dropped. The older `TL` headers still parse. The "CG clear" and "CG
+  notice" questions are gone, and the habits tables count `why` words
+  beside `slow` under "Slowed most by". The dashboard's session rating asks
+  the same questions (see "The dashboard asks what `/cg-feedback` asks"
+  below). The installed skill is flagged out of date and rewritten by
+  `capture feedback on` and `update --finish`. `SECURITY.md` and
+  `docs/capture.md` now say that free text is read once to pick the closest
+  word, then discarded.
+- **The rating reminder comes once a piece of work, not once a session.**
+  It replaces the line the session start note asked for. The Deep note
+  shrinks from about 662 to about 594 tokens. When the message you send
+  finds a piece of work that is unrated and has used at least a million
+  tokens and twice your typical piece, the hook's note asks Claude to end
+  its final reply with the /cg-feedback line, at most once a piece and once
+  every three days. A piece starts with the session, a `/clear`, or a
+  message Claude tagged `shift=new`, and starts again after a /cg-feedback
+  run. A rating on the dashboard since the piece started counts too. Deep
+  turns it on, like the other. New thresholds `coaching_rating_min_tokens`,
+  `coaching_rating_typical_factor` and `coaching_rating_rest_days`.
+  `capture status` counts the reminder and the plan check and prices them
+  from your own history as an upper bound.
+- **Feedback on its own hooks capture.** A setup with capture off and
+  only a survey item that answers your messages on counts as hooked, so
+  `capture connect` adds the entry and `capture off` and Setup's "no" to
+  tips leave it while a survey switch needs it.
+- **A reply to an agent's report costs the message that started the
+  agent.** When an agent or a workflow reports back and Claude answers,
+  that reply, and the rest of its turns, now count toward the cycle that
+  launched the agent, not the cycle it landed in. The reply stays in the
+  timeline where it happened, and a piece's cost says how much moved.
+  The parser, the habits and the pieces share one count, so a turn is
+  charged once.
+- **A hand-off carries through.** When the reply to a report starts the
+  next agent or workflow, that run and the reply to its report now count
+  toward the same message too, however many questions you typed in
+  between. Before, a plan that went from one workflow to the next sent
+  the later runs' agents and replies to whatever message you had typed
+  last. A workflow that a message of yours starts still counts for that
+  message. Costs move between messages, and the total is unchanged.
+- **"Typical" is the median piece of work.** The daily run writes the
+  median tokens of a piece of the last 30 days to `coaching.json`, where
+  it wrote the median session, so one long session of several tasks no
+  longer reads as one big task.
+- **The banner lists pieces, not sessions.** The unrated banner on the
+  dashboard counts the pieces of work that used at least the reminder's
+  size, and a session with two shows two rows, each with the piece's
+  label. A piece you ran /cg-feedback in, or rated on the dashboard, is
+  off the list.
+- **A workflow's agents are told apart by kind.** The agent model
+  table, the model swap verdict and the advice cards now split a
+  workflow's agents from the ones you started by the run's kind, not by
+  the agent's type name, so a custom agent type that a workflow starts
+  is no longer taken for yours.
+- **Rates per message count what you asked.** A go-ahead, a status
+  check, a thank-you and a reply to a plan no longer count as a message
+  in a rate, and each message you typed while Claude worked now does. The
+  habit trends and the prompting rates per 100 messages divide by that, so
+  rates step down now that queued messages count, and a rate in an old
+  report is not comparable with a new one. The percentage columns of a
+  table still divide by that table's own messages.
+- **Redone covers the whole chain of rework.** A message counts as redone
+  when its piece of work reworked it later, not only when the next message
+  did, and its redo cost adds every cycle of the chain once, even a cycle
+  that is both a redo and rework. The Redone columns now read "redone
+  afterwards".
+- **Habits keep every piece of work.** A piece no answer or rating covers
+  is a row with no outcome, built from the transcript alone. The tables
+  that need your answer, such as the outcomes and the cost of a piece that
+  met its goal, still read only the rated ones.
+- **Hard work you already plan.** A message is planned when it was written
+  in plan mode, called `ExitPlanMode`, or came after a plan you approved by
+  typing, until its piece ends. When most hard asks were planned and none
+  of the others was redone, the weekly pace says "Already doing this"
+  instead of a habit to try.
+- **Fixes after a plan, from the transcripts.** The plans by shape table
+  counts the corrections, adjustments and other rework after an approved
+  plan, those you typed as a message and those you typed while Claude
+  worked, and the plans fixed three times or more. It needs no feedback and
+  stays blank below 5 plans. Counts only.
+- **Overnight means Claude worked while you were away.** A session is
+  overnight when Claude, the main session and its subagents together,
+  worked for two hours or more between 22:00 and 07:00 local time while
+  you were away, and at least 30% of its working time was at night. Away
+  is the time between two of your messages more than an hour apart, with
+  usage-limit pauses taken out, and the time after your last one; messages
+  you typed while Claude was working count as messages. Before, a long
+  span, a gap over an hour and a little night activity were enough: on the
+  author's machine 53 of 221 sessions were called overnight, and now 7 are.
+  The new settings are `overnight_active_s`, `overnight_night_share`,
+  `activity_idle_s`, `away_gap_s` and `dormant_gap_s`; the old
+  `overnight_span_s`, `overnight_gap_s` and `overnight_night_turn_share`
+  are still read and no longer do anything.
+- **Overnight reads as what it is.** The mode is named "Overnight
+  (unattended)" in the tables and the dashboard, and its help says "Claude
+  worked on its own for two hours or more at night while you were away".
+  The stored word is still `overnight`. The onboarding report's reason for
+  suggesting the overnight-batch profile, that profile's notes, and the
+  usage-limit and profile docs say the same, in place of the old span and
+  gap rule. A baseline saved before this says so under its comparison by
+  mode.
+- **One map of session words.** The Sessions list's Mode, Purpose and
+  Started from columns, the override menus and the session chart's legend
+  and tooltips all read one map of names, whose words are the report
+  tables' own. The list now says "Long autonomous run" and "Claude desktop
+  app" where it showed `long-agentic` and `claude-desktop`. A mode takes
+  its colour from the palette: one-shot has its own, and mixed or not
+  classified stay grey. The chart's tooltip and table say a session's own
+  mode, "Mixed", where its legend groups the grey ones.
+- **Coming back another day is not a long gap.** A silence of four hours or
+  more with no work in it is left out of the longest gap between your
+  messages and out of the multi-day flag, and a session that has one says
+  so (`resumed_gaps`). The longest gap now names the pair of messages it
+  really is once usage-limit pauses are taken out.
+- **Your working pattern follows the money.** The pattern at the top of the
+  workstyle table, the one profiles and recommendations are tuned to, is the
+  one whose sessions cost the most, not the one with the most sessions. The
+  table gains a Cost column and runs by it. "Stop spawning so much" is held
+  back when sessions that hand work out to cheaper models are 30% or more of
+  the spend (`fanout_spend_share_pct`). The spawn count that picks the
+  pattern counts only agents the session started itself: a workflow's own
+  agents, and agents other agents started, no longer do.
+- **`limit-pressure` counts stops.** It fires on two or more 5-hour limit
+  stops a week, on any weekly stop that stopped work, or on any agent cut
+  off by a limit, so one six-message storm no longer fires it. The setting
+  is `limit_pressure_min_episodes` (default 2); the old
+  `limit_pressure_min_hits` counted messages and is still read and no
+  longer does anything. The tip names the stops and the agents cut off.
+- **The reset-hour table counts one per stop.** A stop that wrote many
+  messages used to add one for each to its hour. Its advice to start heavy work after a
+  reset now shows only when one hour holds 3 or more stops and 30% or more
+  of them.
+- **Who got the limit message.** "Usage limits by agent type" is renamed,
+  and its count reads "Limit messages received", since the main session
+  receives one for each agent a limit cut off.
+- **The usage-log check compares stops.** It reads zero against a real
+  count when the usage log has no 5-hour or weekly entries, so it now stays
+  out of the report in that case.
+- **A stop's cache write is the price of carrying on.** The report said
+  the first reply after a usage-limit pause always rewrites the cache. It
+  does that only if the stop outlasts the cache's hour; a reply within the
+  hour reads the cache as usual. The limits copy and docs now say so, and
+  call the rewrite the price of carrying on, not a caching habit to fix.
+- **Cut-off and post-stop dollars count current settings only.** The spend
+  of agents a limit cut off and the cost of cache writes after a pause
+  count runs from 18 Sep 2026 on (`current_since` under `[thresholds]`;
+  empty counts every run). Counts and tokens stay all-time.
+- **The limits links go to Cache, Rebuilds.** The tip and the help for
+  five-hour blocks and for replies after a pause pointed at Spend, Usage;
+  they now point at the page that shows each stop, its reset time and
+  what it cost. A test keeps every link in the limit copy on that page.
+- **Limit messages are named as messages.** The diagnostics label for the
+  count of limit lines reads "Usage-limit messages", since one stop writes
+  many of them.
+- **Hook time is counted, not guessed.** Claude Code records a hook's time
+  only for the runs that printed something: in one measured week (7.7
+  days), 484 of 26,602 matched tool calls. `capture status` took the median
+  and p90 of those and called it Deep's wait. It now counts how often each
+  installed hook ran from the transcripts (the tool calls its matcher
+  selects, the messages you sent, the turns that ended, the sessions and
+  the agent runs), takes the median of the times that were recorded, and
+  prints "ClaudeGlass's hooks ran about N times, about M ms each, about K
+  min summed (calls overlap)" over your last 7 days, or since capture was
+  turned on if that was later. An event with no recorded time is named as
+  left out, never shown as zero. The coaching docs' "a few tens of
+  milliseconds a call" gives way to this too.
+- **The desktop app doesn't run status lines, and the page says so.**
+  Setup › Capture keys the features that rely on a status line on the mix
+  of entry points, so they no longer show as active when every session is a
+  desktop one. In that case the context budget's status-line table stays
+  empty, and its empty text reads "The desktop app doesn't run status
+  lines; first-call sizes come from transcripts instead."
+- **Sign in to the claude command.** When Haiku can't judge because the
+  `claude` command isn't signed in, the error now reads "the claude command
+  isn't signed in: sign in to the claude command in a terminal (the desktop
+  app keeps its own login)". The stored word is still `no_login`.
+- **A change costs nothing by itself, and the page says why.** An applied
+  change's token cost now reads: "None by itself. Each session writes its
+  own part of the prompt cache, and a change to the tool set rewrites the
+  shared part once." The "A change takes effect in new sessions" note says
+  the same about the prompt cache. Both used to say every session builds its
+  cache from scratch, which isn't so.
+- **The overhead line is on Setup › Capture.** One line, whenever any
+  ClaudeGlass hook is installed, with capture on or off: how often the hooks
+  ran, the median time each and the time summed, from your own sessions, then
+  what capture and coaching notes cost over the same stretch. It replaces the
+  Deep-only figure, and `capture status` prints the same line.
+- **Start-of-context figures read the whole first call, on one model.** The
+  session baseline and each agent type's spawn figure were the first call's
+  cache write, which leaves out the tool definitions a warm cache served. They
+  now show the whole first call, split into the shared prefix, what the
+  session wrote and the first prompt. The same tools are 51.5k tokens on
+  Haiku 4.5 and 69.4k on Sonnet 5, so every comparison across agent types, and
+  every before and after of a change, is held to one model: a row names the
+  model it measured and counts the spawns on any other apart. A before and
+  after with no model in common gives no figure instead of reading a switch
+  of model as a saving. A CLAUDE.md that several agent types receive is sized
+  over the spawns that loaded it, so a type that often skips it doesn't read
+  as a different size. A stored baseline still compares on what the session
+  wrote.
+- **Baseline-bloat looks at what you can change.** The card fires when the
+  skills list, memory files and the MCP tools of servers you can turn off
+  together reach 30,000 tokens, whatever the config's count of servers and
+  plugins, not when the whole first call does: about 43,000 tokens of every
+  first call are Claude Code's own tool definitions, which no setting removes.
+  Servers built into the desktop app are left out of that part. The spawn-cost
+  card needs a first call over 40,000 tokens and at least 5,000 tokens of
+  tool definitions the agent never or rarely uses, since a large first call
+  alone only shows the model's tool set.
+- **A cache rebuild is labelled by the first test it meets.** A rebuild
+  is now classed in this order: a usage limit that ended the gap; a gap
+  at or past the cache lifetime the previous reply wrote at (an hour
+  when it wrote more at one hour than at five minutes, else five
+  minutes); a read no larger than the session's own shared start plus
+  3,000 tokens (the session part expired); and only then a changed
+  prefix. Before, only a read under 2,000 tokens counted as an expiry, so
+  a rebuild that still read the shared start was labelled a changed prefix
+  whatever the gap, and a return that read the shared start plus a little
+  more was not flagged at all. The cold-return table, the context-files
+  figures, the rebuild breakdown and the cache-lifetime section's expired
+  and changed split share the corrected labels. The
+  parser version already moved to 41 for this release, so the stored rows
+  refresh with it. A saved baseline records which rules counted its rebuilds,
+  and the comparison notes when they were older.
+- **MCP cost in the context budget matches the tool search section.**
+  The baseline table's MCP column counts the servers the sessions were
+  offered, by what you can do about them, with what keeping them cost,
+  from the same per-server prices. Without any it still says whether
+  servers are configured. A server built into the desktop app is shown
+  with its cost and nothing to remove.
+- **Delegation figures count only runs the current setting allows.** The
+  auto-compact window now in force (300,000 tokens since about
+  18 September 2026) caps how long a run's context can grow. A run that
+  peaked above it ran under an older setting, so the run-split section
+  and its card leave it out, and say how many runs and how much cost that
+  was. The card goes quiet where only such runs justified it.
+
+### Fixed
+
+- **The tip about runs that grow too big now reaches you.** A subagent's
+  notice is never shown, so `split_run` could not tell anyone anything. The
+  hook now notes, when a run stops, that it summarised its own context or
+  began from a brief of 6,000 characters or more (`coaching_split_brief_chars`),
+  and Claude says so as a tip at the next agent call or background-task
+  message in the main session, with the runs told once. Numbered-line counts
+  are not used. It needs the `SubagentStop` entry, which `update --finish`
+  and `capture connect` now add with coaching notes on. The per-agent-type
+  split points the daily run wrote to `coaching.json` are gone, and an older
+  file's `split_run` entry is ignored. `coach-state.json` keeps only two
+  counts per session in place of a reply count per run. The coaching refresh
+  talks of coaching numbers, not split points.
+- **The purpose menu offered a word nothing else uses.** The override menu
+  on a session offered "docs", but the classifier and every table say
+  `docs-or-light-edit`, so a session set to it landed in a group no rule or
+  table names. The menus now list the classifier's own words, and the new
+  mode, one-shot, can be picked.
+- **"Needs a hook entry" names the fix.** On Setup › Capture, a metric
+  whose hook entry is missing now shows `claudeglass capture connect`
+  with a Copy button, except under a settings policy that stops hooks
+  from running. A test holds `update`, `capture connect` and `init` to
+  adding the background `Stop` entry and the plan tool's matcher.
+- **Coaching notices.** The docs now show how a notice really appears,
+  and the desktop app, which folds it into a collapsed row, no longer
+  gets one that Claude's reply already carries.
+- **Output style.** The output style Claude Code repeats on every
+  request no longer counts as a cache change; only a change of style does.
+- **Limit reset times on Windows.** A usage-limit message with no exact
+  reset time now gets one from its "resets 3pm (Europe/London)" text. A
+  zone name that can't be resolved, which was every name on Windows
+  without `tzdata`, falls back to your machine's own zone, where these
+  lines had no reset at all before. The weekly form ("resets Oct 3, 9am")
+  now sets the day too.
+- **Limit pauses end at the reset.** Coming back three hours after a
+  limit reset no longer counts those three hours as the limit's pause. A
+  resume at the reset no longer reads as a long silence, so it no longer
+  starts a new piece of work on its own.
+- **Old judge errors went to the wrong column.** Haiku's log lines from
+  before the `agent` marker existed (two from 28 Sep) were counted as errors
+  on your replies, though they were on agent runs. A line with no marker and
+  no tag now counts as an agent line when its reply id belongs to an agent's
+  turn; a line that holds a tag, or one whose id a main turn also holds,
+  stays where it was. `capture status` and the tuning export both read the
+  logs this way.
+- **The capture warning said more than a level does.** It told you Claude
+  reads a note "when a session or subagent starts", at every level. No level
+  asks a subagent, or an agent a workflow starts, for anything: the note goes
+  in at the start of a session (and after `/clear` or a compaction) at
+  Essentials, Standard and Deep, and only while Claude writes the tags, and
+  the agent metrics are one Claude Haiku call after each run. Each level and
+  each metric now carries a warning of its own, worked out from the same sizes
+  the page shows, so the Free level says it uses none of your Claude tokens
+  and a level with Haiku tagging says Claude reads and writes nothing for the
+  tags. The Setup page, the footprint notes, the onboarding question and the
+  docs say the same.
+- **The estimate counted a tool note Haiku never sends.** While Claude Haiku
+  writes the tags the hook adds no note after a large read, search or web
+  result, but the rough sizes and the replayed estimate still counted one.
+  They no longer do.
+- **The step-down tip no longer counts a subagent note.** It said stepping
+  down would save "0 per subagent start". It names the session start only.
+- **Compare holds the model fixed for the first-turn write.** `claudeglass
+  compare` reads the mean first-turn cache write on the one model both arms
+  ran on most, since the same start measures differently on each model.
+- **The cache lifetime table overstated what a longer lifetime saves.** A
+  rebuild after a wait shorter than the lifetime the previous call wrote,
+  where the reply read only the shared start, and the first reply after a
+  conversation summary were priced as warm reads under every lifetime. They
+  now keep what they cost, so the saving for a longer lifetime and the
+  expired share of rebuilds are no longer inflated. The rebuild section
+  keeps its labels. The session explanation no longer says every expired
+  cache followed a pause, and the rebuild help says a longer lifetime helps
+  only when the wait reached it.
+- **What Haiku reads about plans matches the dashboard.** A plan file edit
+  or a plan-mode progress note no longer counts as a plan; only a plan sent
+  for your approval does. A plan you send back or close is no longer a
+  failed tool, though a hook blocking it still is. A go-ahead typed while
+  Claude works, or a mode change written as its own line, approves a waiting
+  plan, as it does for the dashboard.
+- **Test runs named inside quotes.** A runner named in a quoted commit
+  message or `echo` (`"fix parser; pytest green"`) no longer counts as a
+  test run, for the parser, the purpose rules and the hook alike. A string
+  handed to a shell's `-c` (`docker run img sh -c "cd /app && pytest"`) is
+  still read as commands.
+- **Admissions after plan feedback.** A critique or a question typed into a
+  plan's dialog now counts as pushing back, so an admission in the next
+  reply is put down to you catching it, not to Claude.
+- **Work habits and the Rework section agree.** A plan you sent back, or a
+  message in plan mode, no longer counts as the earlier ask redone. A
+  follow-up you called "not a fix" in the plan check is left out of Redone
+  too. A dashboard rating still answers for a session where you declined the
+  /cg-feedback questions, so its cause is kept. "Pieces of work" in the
+  planning table counts each piece once, in the shape of the session it
+  began in.
+- **The batching saving counts what a batch spares.** Batching single
+  lookups into one message saves the cache re-reads of the replies after
+  the first, not whole replies, since a batched message still writes the
+  tool results. The column is now "Re-reads a batch would spare", and the
+  card's basis says so. The "Per 100 messages" help says it counts messages
+  that asked for something, so status checks can pass 100.
+- **Cost-centre parts.** The agent list is now a part of its own, linked
+  to the Tools check. What nothing measured, such as an agent's brief, is
+  marked "Not measured" instead of harness-fixed. Servers built into the
+  desktop app count as the app's only in desktop sessions, and cost centres
+  and the context budget take that list from the tool search table, so a
+  server of yours that shares a built-in name stays yours. The notes under
+  the agent startup tables keep to 25-word sentences and read correctly
+  before there are enough first calls to calibrate on.
+- **The tuning summary's Plans line** now counts pieces of work with an
+  approved plan, so it no longer reads as a different number from the
+  Builds line under it.
+- **The single-file `claudeglass.pyz`** now serves the dashboard and reads
+  the shipped profiles from inside the archive; before, it showed an empty
+  page and found no profiles. It is compressed, and the release runs the
+  built file (`build-pyz.py --smoke`: the dashboard pages, the profiles and
+  every subcommand's help, on Python 3.12 and 3.11) before publishing it.
+
+Parsed sessions are re-read once to pick this up (parser 44).
+
 ## [0.14.0] - 2026-10-02
 
 ### Added

@@ -101,15 +101,17 @@ Deviations from the plan/brief, reported rather than made silently (see
   its own docstring). This module uses that p90 figure as the evidence
   for this clause, which is a stricter (harder-to-clear) proxy for the
   same "context bloat" concern than the median the plan names.
-- A5's ``baseline-bloat``/``batch-instructions``/``long-tool-waits`` rules
-  each combine a report-table condition with a second condition that has
-  no dedicated table cell (MCP-server/enabled-plugin counts from a config
-  snapshot; mean queue-operations per session; the joint "gap > 300s
+- A5's ``batch-instructions``/``long-tool-waits`` rules each combine a
+  report-table condition with a second condition that has no dedicated
+  table cell (mean queue-operations per session; the joint "gap > 300s
   *and* preceded by Bash/PowerShell" condition split across two
   independent tables). Each is implemented as documented below, next to
   its rule function, using the closest available signal; the cited
   evidence is always a real table cell even where the full joint
   condition described in the plan can only be approximated.
+  ``baseline-bloat`` once had a second condition too (MCP-server and
+  plugin counts from a config snapshot); it now fires on the measured
+  ``controllable_est`` cell alone.
 - ``long-tool-waits``, specifically: no table anywhere in this codebase
   exposes the *joint* count of turns that are both preceded by
   Bash/PowerShell (``recache_preceding_tool``) and follow a gap > 300s
@@ -129,10 +131,11 @@ to patch. ``_agent_has_frontmatter`` now answers this from the latest
 config snapshot's ``agents`` map when one is available, else from a
 built-in list of Claude Code's own bundled agent types
 (``_BUILTIN_AGENT_TYPES``). A built-in agent type still gets a
-recommendation, just as ``category="workflow"`` advice ("shorten the
-briefing you pass in the Agent prompt") with ``lever=None`` -- which
-``render_patch_set`` already skips, so no patch-set stanza is emitted for
-it either.
+recommendation, just as ``category="workflow"`` advice (a same-named agent
+file with a tools list, since a shorter task prompt does not change the
+system prompt and tool definitions it starts with) with ``lever=None`` --
+which ``render_patch_set`` already skips, so no patch-set stanza is emitted
+for it either.
 """
 
 from __future__ import annotations
@@ -145,6 +148,7 @@ from . import (
     agent_models,
     carry,
     compaction_sim,
+    cost_centres,
     elasticity,
     handoff,
     hook_costs,
@@ -153,9 +157,11 @@ from . import (
     run_split,
     tool_search,
     waste,
+    whatif,
 )
 from .config import Config
-from .context_budget import _READ_ONLY_TOOLS
+from .context_budget import DIET_EXCLUDED, MIN_WINDOW_DAYS, REMOVABLE_USE_SHARE, SKILLS_TOOL, diet_usd
+from .fixes import BATCH_PROBES_LINE, CRITIQUE_PLAN_LINE
 from .model import Recommendation, ReportModel, Section, SettingChange, Table
 from .snapshots import Snapshot, effective_config, effective_provenance, managed_keys
 from .units import NO_LIMIT_SHARE_HINT, Units
@@ -172,8 +178,8 @@ _NO_SUBAGENT_ARCHETYPES = frozenset({"chat-only"})
 
 #: Archetypes for which "stop spawning so much" advice is inappropriate:
 #: an overseer-fanout session's whole point is fanning work out to
-#: subagents, so ``subagent-volume`` (and ``spawn-cost``, which is really
-#: the same "delegation is not free" concern) should not tell it to stop.
+#: subagents, so ``subagent-volume`` should not tell a corpus that spends
+#: much of its money that way to stop (see ``_fanout_spend_share_pct``).
 _FANOUT_ARCHETYPES = frozenset({"overseer-fanout"})
 
 #: Every archetype ``workstyle.detect_archetype``/``corpus_archetype`` can
@@ -255,6 +261,11 @@ class RecommendThresholds:
 
     # subagent-volume: "one agent type > 40% of corpus cost".
     subagent_volume_cost_share_pct: float = 40.0
+    # subagent-volume is not given to a corpus where sessions with the
+    # overseer-fanout workstyle account for this much of the spend or more:
+    # fanning work out is how it works. Weighted by spend, not by session
+    # count, since a few large fan-out runs can cost more than many chats.
+    fanout_spend_share_pct: float = 30.0
 
     # compaction-churn: ">= 2 compactions per session in any mode, or
     # dropped tokens > 30% of new tokens".
@@ -270,17 +281,50 @@ class RecommendThresholds:
     # cache-read-dominance: "cache_read > 50% of cost".
     cache_read_dominance_pct: float = 50.0
 
-    # baseline-bloat: "top-level first-turn cache_creation > 30k tokens
-    # and snapshot shows >= 5 MCP servers or prefix-loaded tools".
+    # baseline-bloat: "the part of a session's first call a setting can
+    # change (skills list, memory files, MCP tools of servers you can turn
+    # off) >= 30k tokens". Not the whole first call (about 43k tokens of it
+    # are Claude Code's own tool JSON), and not a count of configured servers.
     baseline_bloat_tokens: float = 30_000.0
+    # env-tool-search: the snapshot names at least this many MCP servers.
     baseline_bloat_min_mcp_or_plugins: int = 5
 
     # agent-report-size: "mean Agent tool_result > 8k tokens for an
     # agent type".
     agent_report_size_tokens: float = 8_000.0
 
-    # spawn-cost: "mean first-turn write per agent type > 40k tokens".
+    # agent-batch-probes: "an agent type that made at least 100 replies, a
+    # quarter or more of them one read-only call and nothing else, where
+    # batching the runs of those would have spared at least $1". The
+    # habits_probes figure is the cache reads of the replies after the first
+    # of each run, and takes the lookups of a run to be independent, which
+    # some are (a read that needs the name a search just found), so the card
+    # quotes this share of it.
+    agent_batch_probes_min_replies: int = 100
+    agent_batch_probes_share_pct: float = 25.0
+    agent_batch_probes_min_saving_usd: float = 1.0
+    agent_batch_probes_saving_factor: float = 0.5
+
+    # plan-rounds: "at least 5 approved plans, 30% or more of them sent back
+    # before you approved, and 30% or more of those rounds a question, a
+    # critique or a doubt, where the replies between the first plan and the
+    # approval cost at least $1 after scaling". A standing request to critique
+    # the plan can answer the rounds that were a question, a critique or a
+    # doubt, and only some of them, so the card quotes this share of the
+    # table's figure.
+    plan_rounds_min_plans: int = 5
+    plan_rounds_min_share_pct: float = 30.0
+    plan_rounds_min_asked_pct: float = 30.0
+    plan_rounds_min_saving_usd: float = 1.0
+    plan_rounds_saving_factor: float = 0.25
+
+    # spawn-cost: "mean first call per agent type > 40k tokens, and at least
+    # 5k tokens of its tool definitions it never or rarely uses". The first
+    # call alone says little: Claude Code's own tool definitions are 51.5k
+    # tokens of it on Haiku 4.5 and 69.4k on Sonnet 5, so what can be left
+    # out (a tools list on the agent) is what the card is about.
     spawn_cost_tokens: float = 40_000.0
+    spawn_cost_removable_tokens: float = 5_000.0
     # spawn-claude-md / spawn-unused-* / spawn-task-prompt (the
     # agent_startup section, part by part): measured spawns before any of
     # them fires, the per-spawn size a CLAUDE.md or shared part must reach,
@@ -289,6 +333,15 @@ class RecommendThresholds:
     spawn_part_tokens: float = 2_000.0
     spawn_unused_part_tokens: float = 500.0
     spawn_task_prompt_tokens: float = 4_000.0
+    # spawn-tools-list: the tokens a tools list would take out of one spawn's
+    # start (tool definitions, deferred tool names, skills list and agent
+    # list) before the card fires.
+    spawn_tools_list_tokens: float = 5_000.0
+    # spawn-unused-mcp names an MCP server when at most this share of the
+    # spawns offered it called it, and it costs at least this much over 30
+    # days across the spawns that were offered it.
+    spawn_unused_mcp_use_share_pct: float = 2.0
+    spawn_unused_mcp_min_usd_30d: float = 5.0
 
     # effort-mismatch: ">= 30% of output tokens are thinking on sessions
     # whose purpose is docs/general-dev at effort high or above".
@@ -304,9 +357,13 @@ class RecommendThresholds:
     data_quality_fidelity_pct: float = 10.0
 
     # limit-pressure (v3-limits addition, not part of plan Appendix A5):
-    # ">= 3 usage-cap hits, or >= 1 subagent terminated by the rate
-    # limit specifically (not any other termination reason)".
-    limit_pressure_min_hits: int = 3
+    # ">= 2 five-hour limit stops per 7 days, any weekly stop that
+    # stopped work, or >= 1 subagent cut off by a limit". A stop is one
+    # limit being reached, however many limit messages it wrote
+    # (``limits.LimitStats.episodes``). The older
+    # ``limit_pressure_min_hits`` key counted messages: it is read but
+    # ignored.
+    limit_pressure_min_episodes: int = 2
     limit_pressure_min_terminated_rate_limit: int = 1
 
     #: Minimum sample before ANY rule fires: 5 sessions OR 200 priced
@@ -776,10 +833,40 @@ def _rule_batch_instructions(report: ReportModel, th: RecommendThresholds) -> li
     ]
 
 
+def _fanout_spend_share_pct(report: ReportModel) -> float | None:
+    """The percent of the corpus's spend made in sessions with a fan-out
+    workstyle (``_FANOUT_ARCHETYPES``), from the Spend column of the
+    workstyle table. ``None`` when that table is missing, has no spend
+    column or no money in it (a corpus where nothing was priced, or the
+    section was left out), which leaves the caller to the corpus's
+    ``archetype``."""
+    table = _table(report, "workstyle", "workstyle_archetypes")
+    if table is None:
+        return None
+    archetype_idx = _col_index(table, "archetype")
+    spend_idx = _col_index(table, "spend")
+    if archetype_idx is None or spend_idx is None:
+        return None
+    spend = [
+        (row[archetype_idx], row[spend_idx])
+        for row in table.rows
+        if spend_idx < len(row) and isinstance(row[spend_idx], (int, float))
+    ]
+    total = sum(amount for _, amount in spend)
+    if total <= 0:
+        return None
+    return 100.0 * sum(amount for name, amount in spend if name in _FANOUT_ARCHETYPES) / total
+
+
 def _rule_subagent_volume(report: ReportModel, th: RecommendThresholds, archetype: str | None) -> list[Recommendation]:
-    if archetype in _FANOUT_ARCHETYPES:
-        # An overseer-fanout session's whole point is fanning work out;
-        # "stop spawning so much" is not appropriate advice for it.
+    fanout_share = _fanout_spend_share_pct(report)
+    if fanout_share is None:
+        fanout = archetype in _FANOUT_ARCHETYPES
+    else:
+        fanout = fanout_share >= th.fanout_spend_share_pct
+    if fanout:
+        # Fanning work out is how this corpus works: "stop spawning so
+        # much" is not appropriate advice for it.
         return []
     table = _table(report, "ttl", "ttl_by_agent_type")
     if table is None:
@@ -792,6 +879,10 @@ def _rule_subagent_volume(report: ReportModel, th: RecommendThresholds, archetyp
     total_cost = sum(row[cost_idx] for row in table.rows if cost_idx < len(row) and isinstance(row[cost_idx], (int, float)))
     if not total_cost:
         return []
+    # Phase 8a: the card also names the cost centre with the most spend
+    # (advice._explain_subagent_volume words it) and cites that row of the
+    # spend-by-cost-centre table, absent from a hand-built report.
+    centre = cost_centres.largest_centre(report)
     out: list[Recommendation] = []
     for row in table.rows:
         agent_type = row[0]
@@ -828,6 +919,11 @@ def _rule_subagent_volume(report: ReportModel, th: RecommendThresholds, archetyp
                     # table's other rows) and stated in the action text
                     # instead, per the evidence contract (module docstring).
                     _evidence("Cost (observed)", cost, "ttl", "ttl_by_agent_type", agent_type),
+                    *(
+                        [_evidence("Largest cost centre", centre[2], "agents", "cost_centres", centre[0])]
+                        if centre is not None
+                        else []
+                    ),
                 ],
             )
         )
@@ -932,100 +1028,98 @@ def _rule_cache_read_dominance(report: ReportModel, th: RecommendThresholds) -> 
     ]
 
 
+def _controllable_baseline(report: ReportModel) -> tuple[object, float] | None:
+    """The ``context_budget_baseline`` row with the most at the start of a
+    session that a setting can change (its skills list, memory files and
+    the MCP tools of servers you can turn off), as ``(row key, tokens)``.
+    A project's own row, as the "all" row has no memory files of its own:
+    the "all" row only when there is no project row. ``None`` when the table or column is missing
+    or no row sizes it."""
+    table = _table(report, "context_budget", "context_budget_baseline")
+    if table is None:
+        return None
+    index = _col_index(table, "controllable_est")
+    if index is None:
+        return None
+    rows = [row for row in table.rows if row and row[0] != "all"] or [row for row in table.rows if row]
+    best: tuple[object, float] | None = None
+    for row in rows:
+        value = row[index] if index < len(row) else None
+        if isinstance(value, (int, float)) and (best is None or value > best[1]):
+            best = (row[0], float(value))
+    return best
+
+
 def _rule_baseline_bloat(
     report: ReportModel, th: RecommendThresholds, snapshot: Snapshot | None, archetype: str | None
 ) -> list[Recommendation]:
     if archetype in _NO_SUBAGENT_ARCHETYPES:
         return []
-    baseline_table = _table(report, "agents", "topology_session_baseline")
-    if baseline_table is None or not baseline_table.rows:
+    # Gated on the part a setting can change, never on the whole first
+    # call: about 43k tokens of every first call are Claude Code's own
+    # tool definitions and system prompt, which no setting removes, so
+    # the raw size says nothing about the user's own configuration.
+    controllable = _controllable_baseline(report)
+    if controllable is None or controllable[1] < th.baseline_bloat_tokens:
         return []
-    row_key = baseline_table.rows[0][0]
-    mean_baseline = _cell(report, "agents", "topology_session_baseline", row_key, "mean_baseline")
-    if not isinstance(mean_baseline, (int, float)) or mean_baseline <= th.baseline_bloat_tokens:
-        return []
-    if snapshot is None:
-        return []
-    # COV-03 (P7a): prefer the deep-merged, per-layer-precedence
-    # effective_enabled_plugins (schema 2) over the old user-layer-only
-    # enabled_plugins (schema 1) when a snapshot carries it -- this rule
-    # exists to answer "how much baseline bloat comes from plugins", so
-    # it should count what's actually enabled across every settings
-    # layer, not just what the user layer names. Falls back to the old
-    # field for a snapshot captured before this field existed.
-    plugin_names = snapshot.data.get("effective_enabled_plugins")
-    if not isinstance(plugin_names, list):
-        plugin_names = snapshot.data.get("enabled_plugins") or []
-    prefix_count = len((snapshot.data.get("mcp_servers") or {}).get("names") or []) + len(plugin_names)
-    if prefix_count < th.baseline_bloat_min_mcp_or_plugins:
-        return []
+    cb_row_key = controllable[0]
 
-    # Prefer the sized context-budget buckets over the plain
-    # cache-creation count when that section is present -- it names
-    # *where* the baseline goes rather than just how big it is.
+    # The controllable part first, then the sized buckets that make it up:
+    # the card names *where* the baseline goes, not just how big it is.
     evidence = [
-        _evidence("Mean session baseline (cache-creation)", mean_baseline, "agents", "topology_session_baseline", row_key),
+        _evidence(
+            "What you can change at the start of a session (est)",
+            controllable[1],
+            "context_budget",
+            "context_budget_baseline",
+            cb_row_key,
+        )
     ]
     biggest_bucket_label: str | None = None
-    cb_table = _table(report, "context_budget", "context_budget_baseline")
-    if cb_table is not None:
-        # Fix #21: the "all" row is built with snapshot=None
-        # (context_budget._build_baseline_table), so its memory-files and
-        # custom-agents buckets are structurally null -- when the report
-        # covers exactly one project, cite that project's own row instead,
-        # which carries every bucket.
-        project_row_keys = [row[0] for row in cb_table.rows if row[0] != "all"]
-        cb_row_key = (
-            project_row_keys[0]
-            if len(project_row_keys) == 1
-            else next((row[0] for row in cb_table.rows if row[0] == "all"), None)
+    # The residual ("system prompt and tools") is a remainder -- mean first
+    # call minus every other known bucket -- not a sized bucket in its own
+    # right, so it is excluded from the "biggest bucket" contest entirely.
+    # It is still shown as evidence, as is the measured first call.
+    bucket_columns = (
+        ("human_prompt_est", "human prompt"),
+        ("skills_listing_est", "skills listing"),
+        ("memory_files_est", "memory files"),
+        ("custom_agents_est", "custom agents"),
+        ("mcp_removable_tokens", "MCP tools you can turn off"),
+    )
+    best_value: float | None = None
+    for column_key, label in bucket_columns:
+        value = _cell(report, "context_budget", "context_budget_baseline", cb_row_key, column_key)
+        if not isinstance(value, (int, float)):
+            continue
+        evidence.append(
+            _evidence(f"Estimated {label} (est)", value, "context_budget", "context_budget_baseline", cb_row_key)
         )
-        if cb_row_key is not None:
-            # The residual ("system prompt and tools") is a remainder --
-            # mean baseline minus every other known bucket -- not a sized
-            # bucket in its own right, so it is excluded from the "biggest
-            # bucket" contest entirely (it would otherwise win by default
-            # whenever a bucket the table can't size, e.g. MCP tools, ate
-            # into the true total). It is still shown as evidence.
-            bucket_columns = (
-                ("human_prompt_est", "human prompt"),
-                ("skills_listing_est", "skills listing"),
-                ("memory_files_est", "memory files"),
-                ("custom_agents_est", "custom agents"),
+        # Only what a setting can change competes for "largest".
+        if column_key != "human_prompt_est" and (best_value is None or value > best_value):
+            best_value, biggest_bucket_label = value, label
+    first_call = _cell(report, "context_budget", "context_budget_baseline", cb_row_key, "mean_baseline")
+    if isinstance(first_call, (int, float)):
+        evidence.append(
+            _evidence(
+                "Mean first call (measured)", first_call, "context_budget", "context_budget_baseline", cb_row_key
             )
-            residual_column = ("system_prompt_and_tools_est", "system prompt and tools")
-            sized_evidence = []
-            best_label = None
-            best_value = None
-            for column_key, label in bucket_columns:
-                value = _cell(report, "context_budget", "context_budget_baseline", cb_row_key, column_key)
-                if not isinstance(value, (int, float)):
-                    continue
-                sized_evidence.append(
-                    _evidence(f"Estimated {label} (est)", value, "context_budget", "context_budget_baseline", cb_row_key)
-                )
-                if best_value is None or value > best_value:
-                    best_value, best_label = value, label
-            residual_value = _cell(
-                report, "context_budget", "context_budget_baseline", cb_row_key, residual_column[0]
+        )
+    residual = _cell(report, "context_budget", "context_budget_baseline", cb_row_key, "system_prompt_and_tools_est")
+    if isinstance(residual, (int, float)):
+        evidence.append(
+            _evidence(
+                "Estimated system prompt and tools (est)",
+                residual,
+                "context_budget",
+                "context_budget_baseline",
+                cb_row_key,
             )
-            if isinstance(residual_value, (int, float)):
-                sized_evidence.append(
-                    _evidence(
-                        f"Estimated {residual_column[1]} (est)",
-                        residual_value,
-                        "context_budget",
-                        "context_budget_baseline",
-                        cb_row_key,
-                    )
-                )
-            if sized_evidence:
-                evidence = sized_evidence
-                biggest_bucket_label = best_label
+        )
 
     action = (
         "Review which MCP servers and tool schemas load by default -- disabling unused "
-        "ones shrinks every session's first-turn cache write."
+        "ones shrinks every session's first call."
     )
     if biggest_bucket_label:
         action += f" The largest estimated share of that baseline is {biggest_bucket_label}."
@@ -1052,8 +1146,7 @@ def _rule_baseline_bloat(
 # -- COV-09: env-var / deprecated-setting lever rules ---------------------
 #
 # Every rule below reads its gating condition straight from ``snapshot``
-# (the same "current config" snapshot ``_rule_baseline_bloat`` above reads
-# ``mcp_servers``/``enabled_plugins`` from), since none of these five
+# (the latest "current config" snapshot), since none of these five
 # levers has a per-project group-by table of its own -- only presence/
 # value facts. Evidence still cites a real, already-rendered table cell:
 # ``snapshots.build_env_levers_table`` (wired into report.py's "config"
@@ -1196,9 +1289,9 @@ def _rule_env_tool_search(
     is set to ``true``. The snapshot records names only (never the URL
     value), so this can't tell a first-party override from a proxy --
     the action states that caveat rather than assuming a proxy. Gated on
-    the same "meaningful MCP footprint" signal ``baseline-bloat`` uses
-    (mirrors that rule's own snapshot read), since tool search only helps
-    a session that actually loads several MCP servers.
+    the snapshot naming at least ``baseline_bloat_min_mcp_or_plugins``
+    MCP servers, since tool search only helps a session that actually
+    loads several MCP servers.
     """
     if archetype in _NO_SUBAGENT_ARCHETYPES or snapshot is None:
         return []
@@ -1446,6 +1539,132 @@ def _rule_agent_report_size(report: ReportModel, th: RecommendThresholds, archet
     return out
 
 
+#: The columns of ``habits_probes`` the rule reads, in the order it uses them.
+_PROBE_COLUMNS = ("calls", "probes", "shell", "runs", "batch_cost")
+
+
+def _rule_agent_batch_probes(report: ReportModel, th: RecommendThresholds, archetype: str | None) -> list[Recommendation]:
+    """``agent-batch-probes``: an agent type whose replies are often one
+    read-only call and nothing else (a Read, a Grep, a Glob or a file-reading
+    shell command). Each such reply reads the agent's whole context again to
+    look at one thing, so independent lookups in one message would have cost
+    one read instead of several. Reads the Work habits section's
+    ``habits_probes``, a row for each agent type; the main session's row is
+    left out, since its prompts are yours and the card is for agent
+    definitions and workflow prompts. ``saving_usd`` is
+    :attr:`~RecommendThresholds.agent_batch_probes_saving_factor` of the
+    row's ``batch_cost``, the cache reads of the replies after the first of
+    each run: the table's figure is an upper bound, and what a batched
+    message still writes is not in it."""
+    if archetype in _NO_SUBAGENT_ARCHETYPES:
+        return []
+    table = _table(report, "habits", "habits_probes")
+    if table is None:
+        return []
+    at = {key: _col_index(table, key) for key in _PROBE_COLUMNS}
+    if None in at.values():
+        return []
+    out: list[Recommendation] = []
+    for row in table.rows:
+        agent_type = row[0] if row else None
+        if not isinstance(agent_type, str) or agent_type == "top-level" or len(row) <= max(at.values()):
+            continue
+        calls, probes, shell, runs, cost = (row[at[key]] for key in _PROBE_COLUMNS)
+        if not all(_is_number(value) for value in (calls, probes, shell, runs, cost)):
+            continue
+        if calls < th.agent_batch_probes_min_replies or probes * 100 < calls * th.agent_batch_probes_share_pct:
+            continue
+        saving = cost * th.agent_batch_probes_saving_factor
+        if saving < th.agent_batch_probes_min_saving_usd:
+            continue
+        out.append(
+            Recommendation(
+                id="agent-batch-probes",
+                severity="advice",
+                category="workflow",
+                archetypes=_ALL_ARCHETYPES,
+                title=f"{agent_type} looks things up one call at a time",
+                action=(
+                    f"Add \"{BATCH_PROBES_LINE}\" to {agent_type}'s agent definition, or to the workflow "
+                    "prompt that starts it, so independent lookups share one message."
+                ),
+                lever=None,
+                agent_type=agent_type,
+                evidence=[
+                    _evidence("Replies it made", calls, "habits", "habits_probes", agent_type),
+                    _evidence("Single read-only calls", probes, "habits", "habits_probes", agent_type),
+                    _evidence("Of them by shell command", shell, "habits", "habits_probes", agent_type),
+                    _evidence("Re-reads a batch would spare", cost, "habits", "habits_probes", agent_type),
+                ],
+                saving_usd=saving,
+            )
+        )
+    return out
+
+
+#: The columns of ``habits_plan_rounds`` the rule reads, in the order it uses them.
+_PLAN_ROUND_COLUMNS = ("plans", "rounds", "asked", "cost")
+
+
+def _rule_plan_rounds(report: ReportModel, th: RecommendThresholds) -> list[Recommendation]:
+    """``plan-rounds``: plans you sent back before you approved one. Each
+    round is a reply that reads the whole planning conversation again, and
+    most were a question, a critique or a doubt that Claude could be asked to
+    raise against its own plan before it shows you. Reads the Work habits
+    section's ``habits_plan_rounds``: the ``all`` row for the totals and the
+    ``none`` row for the plans never sent back. A plan you declined
+    and then told Claude to carry out is an approval, not one sent back.
+    ``saving_usd`` is :attr:`~RecommendThresholds.plan_rounds_saving_factor`
+    of the cost of the replies between the first plan and the approval,
+    scaled to the share of rounds that were a question, a critique or a
+    doubt: the table's figure is an upper bound."""
+    table = _table(report, "habits", "habits_plan_rounds")
+    if table is None:
+        return []
+    at = {key: _col_index(table, key) for key in _PLAN_ROUND_COLUMNS}
+    if None in at.values():
+        return []
+    rows = {row[0]: row for row in table.rows if row and isinstance(row[0], str)}
+    total = rows.get("all")
+    if total is None or len(total) <= max(at.values()):
+        return []
+    plans, rounds, asked, cost = (total[at[key]] for key in _PLAN_ROUND_COLUMNS)
+    if not all(_is_number(value) for value in (plans, rounds, asked, cost)):
+        return []
+    first = rows.get("none")
+    at_once = first[at["plans"]] if first is not None and len(first) > at["plans"] and _is_number(first[at["plans"]]) else 0
+    sent_back = plans - at_once
+    if plans < th.plan_rounds_min_plans or rounds <= 0:
+        return []
+    if sent_back * 100 < plans * th.plan_rounds_min_share_pct or asked * 100 < rounds * th.plan_rounds_min_asked_pct:
+        return []
+    saving = cost * (asked / rounds) * th.plan_rounds_saving_factor
+    if saving < th.plan_rounds_min_saving_usd:
+        return []
+    return [
+        Recommendation(
+            id="plan-rounds",
+            severity="advice",
+            category="workflow",
+            archetypes=_ALL_ARCHETYPES,
+            title="Plans keep being sent back",
+            action=(
+                "Put one standing request in your first planning message, in CLAUDE.md or in a plan skill. "
+                f"It reads \"{CRITIQUE_PLAN_LINE}.\""
+            ),
+            lever=None,
+            evidence=[
+                _evidence("Plans you approved", plans, "habits", "habits_plan_rounds", "all"),
+                _evidence("Never sent back", at_once, "habits", "habits_plan_rounds", "none"),
+                _evidence("Times plans were sent back", rounds, "habits", "habits_plan_rounds", "all"),
+                _evidence("Sent back with a question or critique", asked, "habits", "habits_plan_rounds", "all"),
+                _evidence("Replies between the first plan and approval", cost, "habits", "habits_plan_rounds", "all"),
+            ],
+            saving_usd=saving,
+        )
+    ]
+
+
 # -- subagent startup, part by part -------------------------------------------
 
 #: Built-in agent types that Claude Code already starts without CLAUDE.md
@@ -1455,6 +1674,11 @@ _SKIPS_CLAUDE_MD = frozenset({"Explore", "Plan"})
 #: Agent types started by Claude Code itself (workflow scripts, forks)
 #: rather than by name, so no agent file can override them.
 _NOT_OVERRIDABLE = frozenset({"workflow-subagent", "fork", "unknown", "(unknown)"})
+
+#: The agent type every workflow script's agents run as, unless the script
+#: names one: no agent file is its own, so its tools-list card is advice
+#: for the script (``agentType`` on its ``agent()`` calls), not a change.
+_WORKFLOW_AGENT = "workflow-subagent"
 
 #: ``SettingChange.current`` when there is no config snapshot to read it from.
 _CURRENT_UNKNOWN = "unknown (no config snapshot yet)"
@@ -1480,28 +1704,250 @@ def _agent_current(agent_type: str, key: str, snapshot: Snapshot | None):
     return entry.get(key) if isinstance(entry, dict) else None
 
 
-def _startup_saving(units: "Units | None", tokens, spawns, price, *, prefix: str = "") -> str:
-    """The list price of writing ``tokens`` into the cache on each of
-    ``spawns`` spawns, phrased for the billing mode, or ``""`` when any
-    input is missing."""
-    if units is None or not all(isinstance(v, (int, float)) and v > 0 for v in (tokens, spawns, price)):
+def _startup_saving(units: "Units | None", usd, *, prefix: str = "") -> str:
+    """``usd``, a list-price amount over the spawns in this report,
+    phrased for the billing mode, or ``""`` when there is none."""
+    if units is None or not isinstance(usd, (int, float)) or not usd > 0:
         return ""
-    amount = units.money(tokens * spawns * price / 1_000_000, period="across the spawns in this report")
+    amount = units.money(usd, period="across the spawns in this report")
     if amount is None:
         return ""
     text = f"{prefix}{amount.text()}."
     return text[:1].upper() + text[1:]
 
 
-def _startup_basis(units: "Units | None") -> str:
-    """How :func:`_startup_saving` worked its amount out."""
+def _startup_basis(units: "Units | None", *, carried: bool = True) -> str:
+    """How an amount from :func:`_startup_saving` was worked out:
+    ``carried`` when it counts the cache reads on the calls after a
+    spawn's first, not only the write at the start."""
     if units is None:
         return ""
-    basis = "Estimated at the list price of writing these tokens into the cache once per spawn."
+    if carried:
+        basis = (
+            "Estimated at list prices: each spawn writes these tokens into the cache, and every later call "
+            "reads them back."
+        )
+    else:
+        basis = "Estimated at the list price of writing these tokens into the cache once per spawn."
     probe = units.money(1.0)
     if probe is not None and probe.basis == NO_LIMIT_SHARE_HINT:
         basis += " " + probe.basis
     return basis
+
+
+def _is_number(value) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
+def _body_usd(tokens, spawns, write, read, later) -> tuple[float | None, bool]:
+    """List-price USD of ``tokens`` that each of ``spawns`` spawns writes
+    into the cache at startup and then reads on every later call (the
+    ``agent_startup_breakdown`` row's write price, read price and calls
+    after the first), and whether the reads were counted. Without a read
+    price or a count of later calls, only the write is."""
+    if not (_is_number(tokens) and _is_number(spawns) and _is_number(write)) or min(tokens, spawns, write) <= 0:
+        return None, False
+    counted = _is_number(read) and read > 0 and _is_number(later) and later > 0
+    usd = diet_usd(
+        spawns,
+        0.0,
+        tokens,
+        write=write,
+        read=read if counted else None,
+        later_calls=later if counted else 0.0,
+        written_share=1.0,
+    )
+    return (usd or None), counted
+
+
+def _row_values(report: ReportModel, section_key: str, table_name: str, row_key) -> dict | None:
+    """The first row of the table whose first cell is ``row_key``, as
+    ``{column key: cell}``; ``None`` when the table or the row is missing."""
+    table = _table(report, section_key, table_name)
+    row = _row(table, row_key) if table is not None else None
+    if row is None:
+        return None
+    return {column.key: row[i] for i, column in enumerate(table.columns) if i < len(row)}
+
+
+def _per_30_days(usd, days) -> float | None:
+    """``usd`` over a window of ``days`` as a 30-day amount. A window
+    shorter than :data:`MIN_WINDOW_DAYS` is stretched to it, so a day or
+    two of data never reads as a rate."""
+    if not _is_number(usd) or not usd > 0:
+        return None
+    span = days if _is_number(days) and days > 0 else 30.0
+    return usd * 30.0 / max(span, float(MIN_WINDOW_DAYS))
+
+
+def _split_names(text) -> list[str]:
+    return [name for name in str(text or "").split(", ") if name]
+
+
+#: Tools a tools-list card names as left out, before "and N more".
+_TOOLS_SHOWN = 6
+
+#: What ``agent_startup_diet`` takes out of a start, as the card words it:
+#: column, then what it is.
+_DIET_PARTS = (
+    ("dropped_definitions", "tool definitions"),
+    ("dropped_deferred", "deferred tool names"),
+    ("dropped_skills", "the skills list"),
+    ("dropped_roster", "the agent list"),
+)
+
+_GENERAL_PURPOSE_WARNING = (
+    "general-purpose is the agent Claude Code starts when a task names no type, so a tools list on it limits "
+    "every one of those spawns, not only the ones measured here. Keep any tool you want them to have."
+)
+
+
+def _name_list(names: list[str], shown: int = _TOOLS_SHOWN) -> str:
+    head = ", ".join(names[:shown])
+    extra = len(names) - shown
+    return f"{head}, and {extra} more" if extra > 0 else head
+
+
+def tools_list_offer(
+    agent_type: str, diet: dict, th: RecommendThresholds | None = None
+) -> tuple[list[str], list[str], float] | None:
+    """The tools to keep, the tools to leave off and the tokens that
+    leaving them off takes from each start, for one ``agent_startup_diet``
+    row (as a dict by column), or ``None`` when no ``spawn-tools-list`` card
+    is worth giving: an agent the diet leaves alone, one with no file to
+    give a list (a fork or an unknown type), too few spawns, no tool called
+    to put on the line, or less than
+    :attr:`RecommendThresholds.spawn_tools_list_tokens` to take off it."""
+    th = th or RecommendThresholds()
+    if agent_type in DIET_EXCLUDED or (agent_type in _NOT_OVERRIDABLE and agent_type != _WORKFLOW_AGENT):
+        return None
+    measured = diet.get("spawns")
+    if not isinstance(measured, int) or measured < th.spawn_parts_min_spawns:
+        return None
+    keep = _split_names(diet.get("keep_tools"))
+    rare = _split_names(diet.get("rare_tools"))
+    dropped = sum(diet[column] for column, _label in _DIET_PARTS if _is_number(diet.get(column)))
+    if not keep or not rare or dropped < th.spawn_tools_list_tokens:
+        return None
+    return keep, rare, dropped
+
+
+def _tools_list_card(
+    report: ReportModel,
+    th: RecommendThresholds,
+    agent_type: str,
+    snapshot: Snapshot | None,
+    units: "Units | None",
+) -> Recommendation | None:
+    """``spawn-tools-list``: a ``tools:`` line for one agent type, built
+    from the tools at least a tenth of its spawns called, with the rest
+    named as rarely used. Needs the ``agent_startup_diet`` row, which
+    carries what leaving them out takes from a start."""
+    diet = _row_values(report, "agent_startup", "agent_startup_diet", agent_type)
+    offer = tools_list_offer(agent_type, diet, th) if diet is not None else None
+    if offer is None:
+        return None
+    keep, rare, dropped = offer
+    measured = diet["spawns"]
+    sizes = [(label, diet.get(column)) for column, label in _DIET_PARTS]
+
+    workflow = agent_type == _WORKFLOW_AGENT
+    has_file = _agent_has_frontmatter(agent_type, snapshot) and not workflow
+    source = _agent_source(agent_type, snapshot)
+    scope = "user" if workflow else ("repo" if source == "project" or (has_file and source is None) else "user")
+    general = agent_type == "general-purpose"
+    pct = int(REMOVABLE_USE_SHARE * 100)
+    line = "tools: " + ", ".join(keep)
+    model = diet.get("model")
+    check = (
+        "Check it with one spawn before and one after on the same model"
+        f"{f' ({model})' if model else ''}, comparing their startup size."
+    )
+    left_out = (
+        f"Rarely used, so left out (each was called in fewer than {pct}% of the spawns offered it): "
+        f"{_name_list(rare)}. Claude Code adds StructuredOutput and SubagentHandback to every subagent "
+        "whatever the list says."
+    )
+    if workflow:
+        title = "Workflow agents are given tools they rarely call"
+        action = (
+            "In each workflow script that starts agents, pass agentType with the name of an agent whose file "
+            f"sets this line: {line}. {left_out} Workflow agents do different jobs, so give each kind of job "
+            f"its own agent file and trim its list to what that job needs. {check}"
+        )
+        category = "workflow"
+    else:
+        title = f"{agent_type} is given tools it rarely calls"
+        action = f"Limit {agent_type}'s tools to the ones it calls: {line}. {left_out} {check}"
+        category = "settings"
+        if general:
+            action += " " + _GENERAL_PURPOSE_WARNING
+
+    why_parts = [f"{value:,.0f} of {label}" for label, value in sizes if _is_number(value) and value >= 1]
+    why = (
+        f"In {measured} spawns, {agent_type} called {len(keep)} of the tools it was offered in at least "
+        f"{pct}% of them. Leaving out the rest takes about {dropped:,.0f} tokens out of each start: "
+        f"{', '.join(why_parts)}."
+    )
+    evidence = [_evidence("Spawns with tools recorded", measured, "agent_startup", "agent_startup_diet", agent_type)]
+    definitions = diet.get("dropped_definitions")
+    if _is_number(definitions):
+        evidence.append(
+            _evidence("Tool definitions left out per spawn", definitions, "agent_startup", "agent_startup_diet", agent_type)
+        )
+    usd = diet.get("saving_usd")
+    usd = float(usd) if _is_number(usd) and usd > 0 else None
+    if usd is not None:
+        evidence.append(
+            _evidence("Saving across these spawns", diet["saving_usd"], "agent_startup", "agent_startup_diet", agent_type)
+        )
+    basis = (
+        _startup_basis(units)
+        + " Tool definitions are shared by spawns of one type, so only the spawns that wrote them pay the "
+        "write price for them."
+    )
+    if any(_is_number(diet.get(column)) and diet[column] >= 1 for column in ("dropped_skills", "dropped_roster")):
+        basis += (
+            " The skills list and the agent list are counted as going with the Skill and Agent tools. Claude "
+            "Code's docs don't say so, so the check above is what confirms it."
+        )
+    kept_instructions = diet.get("kept_instructions")
+    if _is_number(kept_instructions) and kept_instructions >= 1:
+        basis += (
+            f" A tools list leaves MCP server instructions in (about {kept_instructions:,.0f} tokens per spawn). "
+            "Switching the server off drops them. A list of the servers an agent may use might too, but that isn't verified."
+        )
+    changes: list[SettingChange] = []
+    if not workflow:
+        changes.append(
+            SettingChange(
+                target="agent",
+                key="tools",
+                agent=agent_type,
+                value=keep,
+                current=_agent_current(agent_type, "tools", snapshot),
+                new_agent_file=not has_file,
+                note=_GENERAL_PURPOSE_WARNING if general else "An MCP server appears as mcp__server__*, meaning all of its tools.",
+            )
+        )
+    return Recommendation(
+        id="spawn-tools-list",
+        severity="advice",
+        category=category,
+        archetypes=_ALL_ARCHETYPES,
+        title=title,
+        action=action,
+        lever=None,
+        scope=scope,
+        agent_type=agent_type,
+        evidence=evidence,
+        changes=changes,
+        estimated_saving=_startup_saving(units, usd, prefix="about "),
+        saving_basis=basis if usd is not None else "",
+        saving_usd=usd,
+        why=why,
+        variant="workflow-script" if workflow else "",
+    )
 
 
 def _rule_spawn_parts(
@@ -1529,6 +1975,11 @@ def _rule_spawn_parts(
     def used(agent_type, column):
         return _cell(report, "agent_startup", "agent_startup_unused", agent_type, column)
 
+    whatif_tables = whatif._Tables(report)
+    context_files = getattr(report, "context_files", None) or {}
+    servers = _table(report, "agent_startup", "agent_startup_servers")
+    server_keys = [column.key for column in servers.columns] if servers is not None else []
+
     out: list[Recommendation] = []
     covered: set[str] = set()
     for row in breakdown.rows:
@@ -1538,12 +1989,23 @@ def _rule_spawn_parts(
             continue
         overridable = agent_type not in _NOT_OVERRIDABLE
         price = part(agent_type, "write_price")
+        read_price = part(agent_type, "read_price")
+        later_calls = part(agent_type, "later_calls")
         has_file = _agent_has_frontmatter(agent_type, snapshot)
         source = _agent_source(agent_type, snapshot)
         scope = "repo" if source == "project" or (has_file and source is None) else "user"
         spawns_evidence = _evidence("Spawns measured", spawns, "agent_startup", "agent_startup_unused", agent_type)
         read_only = used(agent_type, "read_only_spawns")
         all_read_only = isinstance(read_only, int) and read_only == spawns
+
+        # The tools list comes first: the skills list and MCP cards below
+        # point at it, and the generic spawn-cost card leaves the agent alone
+        # once it is given.
+        tools_card = _tools_list_card(report, th, agent_type, snapshot, units)
+        if tools_card is not None:
+            out.append(tools_card)
+            covered.add(agent_type)
+        diet_rare = _split_names(_cell(report, "agent_startup", "agent_startup_diet", agent_type, "rare_tools"))
 
         claude_md_total = part(agent_type, "claude_md")
         # PROF-11/F13: Managed policy CLAUDE.md still loads regardless of
@@ -1582,6 +2044,13 @@ def _rule_spawn_parts(
                 rules_evidence.append(
                     _evidence("Runs that said they didn't use CLAUDE.md", rules_unused, "habits", "habits_agents", agent_type)
                 )
+            # The same figure the What-if table gives omitClaudeMd: the cache
+            # write at each spawn, or what the Context files section prices
+            # carrying CLAUDE.md across the rest of each spawn, if that is more.
+            omitted = whatif._omit_claude_md(whatif_tables, context_files, agent_type, agent_type)
+            claude_md_usd = omitted.get("saving_usd")
+            carry_usd = whatif._claude_md_carry_usd(context_files, agent_type)
+            carried = _is_number(claude_md_usd) and carry_usd > 0 and abs(claude_md_usd - carry_usd) < 1e-5
             out.append(
                 Recommendation(
                     id="spawn-claude-md",
@@ -1615,8 +2084,13 @@ def _rule_spawn_parts(
                             new_agent_file=not has_file,
                         )
                     ],
-                    estimated_saving=_startup_saving(units, claude_md, spawns, price),
-                    saving_basis=_startup_basis(units),
+                    estimated_saving=_startup_saving(units, claude_md_usd),
+                    saving_basis=(
+                        _startup_basis(units, carried=carried)
+                        + (" It is priced as the Context files section prices carrying it." if carried else "")
+                        if units is not None and _is_number(claude_md_usd)
+                        else ""
+                    ),
                     why=why,
                 )
             )
@@ -1633,6 +2107,14 @@ def _rule_spawn_parts(
             and skills_used == 0
             and overridable
         ):
+            # Whether the tools list above leaves Skill out, which takes the
+            # skills list with it: this card is then a part of that saving.
+            in_tools_list = tools_card is not None and SKILLS_TOOL in diet_rare
+            skills_usd, skills_carried = _body_usd(skills_tokens, listed, price, read_price, later_calls)
+            undocumented = (
+                " Whether that also drops the skills list from its startup isn't documented, so check the "
+                "Skills list column after a few new spawns."
+            )
             out.append(
                 Recommendation(
                     id="spawn-unused-skills",
@@ -1641,10 +2123,13 @@ def _rule_spawn_parts(
                     archetypes=_ALL_ARCHETYPES,
                     title=f"{agent_type} is given the skills list but never used a skill",
                     action=(
-                        f"Add Skill to {agent_type}'s disallowedTools so it can't call skills. Whether this "
-                        "also drops the skills list from its startup isn't documented, so check the Skills "
-                        "list column after a few new spawns."
-                    ),
+                        f"Leave Skill off the tools list for {agent_type}, which stops it being sent the skills "
+                        "list. To change nothing else, add Skill to its disallowedTools instead."
+                        if in_tools_list
+                        else f"Give {agent_type} a tools list that leaves Skill out, or, to change nothing else, "
+                        "add Skill to its disallowedTools."
+                    )
+                    + undocumented,
                     lever=None,
                     scope=scope,
                     agent_type=agent_type,
@@ -1667,95 +2152,112 @@ def _rule_spawn_parts(
                             unconfirmed=True,
                         )
                     ],
-                    estimated_saving=_startup_saving(
-                        units, skills_tokens, listed, price, prefix="if the list is dropped, about "
+                    estimated_saving=_startup_saving(units, skills_usd, prefix="if the list is dropped, about "),
+                    saving_basis=(
+                        _startup_basis(units, carried=skills_carried)
+                        + (" It is part of the tools list saving, not on top of it." if in_tools_list else "")
+                        if units is not None and skills_usd is not None
+                        else ""
                     ),
-                    saving_basis=_startup_basis(units),
                     why=f"In {listed} spawns given the skills list, {agent_type} never called a skill.",
                 )
             )
             covered.add(agent_type)
 
+        # One card per agent type, naming each server it was offered and
+        # hardly ever called. A server is named when at most
+        # ``spawn_unused_mcp_use_share_pct`` of the spawns offered it called
+        # it and it costs ``spawn_unused_mcp_min_usd_30d`` over 30 days.
         offered = used(agent_type, "mcp_offered_spawns")
         mcp_used = used(agent_type, "mcp_used_spawns")
-        tool_lists = part(agent_type, "tool_lists")
-        if isinstance(offered, int) and offered >= th.spawn_parts_min_spawns and mcp_used == 0 and overridable:
+        unused_servers: list[tuple[str, int, int, float, float]] = []
+        first_server_row: dict | None = None
+        for server_row in servers.rows if servers is not None and overridable else []:
+            if not server_row or server_row[0] != agent_type:
+                continue
+            values = dict(zip(server_keys, server_row))
+            if first_server_row is None:
+                first_server_row = values
+            server_offered, server_used = values.get("offered_spawns"), values.get("used_spawns")
+            if not (isinstance(server_offered, int) and isinstance(server_used, int)):
+                continue
+            if server_offered < th.spawn_parts_min_spawns:
+                continue
+            if server_used * 100 > th.spawn_unused_mcp_use_share_pct * server_offered + 1e-9:
+                continue
+            month = _per_30_days(values.get("saving_usd"), values.get("window_days"))
+            if month is None or month < th.spawn_unused_mcp_min_usd_30d:
+                continue
+            unused_servers.append((str(values.get("server")), server_offered, server_used, values["saving_usd"], month))
+        if unused_servers and isinstance(offered, int) and isinstance(mcp_used, int):
+            names = [f"{name} (used in {n_used} of {n_offered} spawns)" for name, n_offered, n_used, _u, _m in unused_servers]
+            total_usd = sum(window_usd for _n, _o, _u, window_usd, _m in unused_servers)
+            costs = ""
+            if units is not None:
+                costs = " Across the spawns in this report they cost " + "; ".join(
+                    f"{units.money_text(window_usd)} ({name})"
+                    for name, _o, _u, window_usd, _m in unused_servers[:_TOOLS_SHOWN]
+                ) + "."
+            mcp_evidence = [
+                _evidence("Spawns offered MCP tools", offered, "agent_startup", "agent_startup_unused", agent_type),
+                _evidence("Spawns that used an MCP tool", mcp_used, "agent_startup", "agent_startup_unused", agent_type),
+            ]
+            if first_server_row is not None and str(first_server_row.get("server")) == unused_servers[0][0]:
+                first = unused_servers[0]
+                mcp_evidence += [
+                    _evidence(f"Spawns offered {first[0]}", first[1], "agent_startup", "agent_startup_servers", agent_type),
+                    _evidence(f"Spawns that used {first[0]}", first[2], "agent_startup", "agent_startup_servers", agent_type),
+                ]
             out.append(
                 Recommendation(
                     id="spawn-unused-mcp",
                     severity="info",
                     category="settings",
                     archetypes=_ALL_ARCHETYPES,
-                    title=f"{agent_type} is offered MCP tools but never used one",
+                    title=f"{agent_type} is offered MCP servers it hardly ever uses",
                     action=(
-                        f"Give {agent_type} an mcpServers list naming only the servers it needs, so the "
-                        "others' tools aren't loaded for it."
+                        f"Give {agent_type} an mcpServers list naming only the servers it needs, so these "
+                        f"aren't loaded for it: {_name_list(names)}."
                     ),
                     lever=None,
                     scope=scope,
                     agent_type=agent_type,
-                    evidence=[
-                        _evidence("Spawns offered MCP tools", offered, "agent_startup", "agent_startup_unused", agent_type),
-                        _evidence("Spawns that used an MCP tool", mcp_used, "agent_startup", "agent_startup_unused", agent_type),
-                    ],
+                    evidence=mcp_evidence,
                     changes=[
                         SettingChange(
                             target="agent",
                             key="mcpServers",
                             agent=agent_type,
-                            suggested="only the servers this agent needs (none were used in these spawns)",
+                            suggested="only the servers this agent needs",
                             current=_agent_current(agent_type, "mcpServers", snapshot),
                             new_agent_file=not has_file,
+                            unconfirmed=True,
+                            note=(
+                                "ClaudeGlass doesn't record which servers an agent's mcpServers lists, so check "
+                                "the agent file for one before you change it."
+                            ),
                         )
                     ],
-                    estimated_saving=_startup_saving(
-                        units, tool_lists, offered, price, prefix="at most "
+                    estimated_saving=_startup_saving(units, total_usd, prefix="about "),
+                    saving_basis=(
+                        _startup_basis(units)
+                        + " Each server counts its tool definitions and deferred tool names. Its instructions stay under "
+                        "a tools list and aren't counted. It is the same saving as the "
+                        "tools list card, taken a server at a time, so it isn't added to it."
+                        if units is not None
+                        else ""
                     ),
-                    saving_basis=_startup_basis(units)
-                    + " The tool lists this is taken from also hold deferred tools and the agent roster, so the "
-                    "real saving is smaller.",
-                    why=f"In {offered} spawns offered MCP tools, {agent_type} never called one.",
-                )
-            )
-            covered.add(agent_type)
-
-        if all_read_only and has_file:
-            out.append(
-                Recommendation(
-                    id="spawn-read-only-tools",
-                    severity="info",
-                    category="settings",
-                    archetypes=_ALL_ARCHETYPES,
-                    title=f"{agent_type} only ever searched and read files",
-                    action=(
-                        f"Limit {agent_type}'s tools to the search and read tools it used, so the "
-                        "definitions of the others aren't sent at startup."
+                    why=(
+                        f"At most {th.spawn_unused_mcp_use_share_pct:g}% of the spawns offered each of these "
+                        f"servers called it.{costs}"
                     ),
-                    lever=None,
-                    scope=scope,
-                    agent_type=agent_type,
-                    evidence=[
-                        _evidence("Spawns that only searched or read", read_only, "agent_startup", "agent_startup_unused", agent_type),
-                        spawns_evidence,
-                    ],
-                    changes=[
-                        SettingChange(
-                            target="agent",
-                            key="tools",
-                            agent=agent_type,
-                            value=sorted(_READ_ONLY_TOOLS),
-                            current=_agent_current(agent_type, "tools", snapshot),
-                            note="Remove any tool from the list that this agent should not use.",
-                        )
-                    ],
-                    estimated_saving="",
-                    why=f"All {spawns} measured spawns used only search and read tools.",
                 )
             )
             covered.add(agent_type)
 
         task_prompt = part(agent_type, "task_prompt")
         if isinstance(task_prompt, (int, float)) and task_prompt >= th.spawn_task_prompt_tokens:
+            prompt_usd, prompt_carried = _body_usd(task_prompt / 2, spawns, price, read_price, later_calls)
             out.append(
                 Recommendation(
                     id="spawn-task-prompt",
@@ -1774,10 +2276,10 @@ def _rule_spawn_parts(
                         _evidence("Task prompt per spawn", task_prompt, "agent_startup", "agent_startup_breakdown", agent_type),
                         spawns_evidence,
                     ],
-                    estimated_saving=_startup_saving(
-                        units, task_prompt / 2, spawns, price, prefix="if they were half as long, about "
+                    estimated_saving=_startup_saving(units, prompt_usd, prefix="if they were half as long, about "),
+                    saving_basis=(
+                        _startup_basis(units, carried=prompt_carried) if units is not None and prompt_usd else ""
                     ),
-                    saving_basis=_startup_basis(units),
                     why=f"Each {agent_type} spawn starts with about {task_prompt:,.0f} tokens of instructions from its parent.",
                 )
             )
@@ -1831,8 +2333,24 @@ def _rule_spawn_cost(
         agent_type = row[0]
         if covered and agent_type in covered:
             continue
-        mean_write = _cell(report, "agents", "topology_spawn_write", agent_type, "mean_write")
-        if not isinstance(mean_write, (int, float)) or mean_write <= th.spawn_cost_tokens:
+        # Explore, Plan and claude-code-guide are Claude Code's own read-only
+        # helpers, started with a small tool set of their own: the tools-list
+        # card leaves them alone, so a built-in one with no file of the
+        # user's has no lever here either.
+        has_file = _agent_has_frontmatter(agent_type, snapshot)
+        if not has_file and agent_type in DIET_EXCLUDED:
+            continue
+        # Gated on the whole first call and on the part of it a tools list
+        # on the agent would take out (what its snapshot offered and it
+        # rarely or never used), not on the cache write: that write is the
+        # task prompt and CLAUDE.md, which the spawn-claude-md and
+        # spawn-task-prompt rules read part by part. An agent type the
+        # spawn-tools-list card covers is left to it.
+        mean_first_call = _cell(report, "agents", "topology_spawn_write", agent_type, "mean_first_call")
+        if not isinstance(mean_first_call, (int, float)) or mean_first_call <= th.spawn_cost_tokens:
+            continue
+        removable = _cell(report, "agent_startup", "agent_startup_breakdown", agent_type, "removable_tools")
+        if not isinstance(removable, (int, float)) or removable < th.spawn_cost_removable_tokens:
             continue
         # Fix R3: topology_spawn_write has no priced_turns column of its
         # own; cross-reference ttl_by_agent_type's for the same agent
@@ -1842,19 +2360,30 @@ def _rule_spawn_cost(
         if not _row_meets_min_sample(th, spawns, priced_turns):
             continue
         evidence = [
-            _evidence("Mean first-turn write", mean_write, "agents", "topology_spawn_write", agent_type),
+            _evidence("Mean first call", mean_first_call, "agents", "topology_spawn_write", agent_type),
+            _evidence(
+                "Tool definitions it rarely or never uses",
+                removable,
+                "agent_startup",
+                "agent_startup_breakdown",
+                agent_type,
+            ),
         ]
         # Fix A1: only a genuine frontmatter-backed agent type has an
         # omitClaudeMd lever this rule can point at -- Claude Code's own
         # bundled agent types (see _BUILTIN_AGENT_TYPES) have no
-        # ``.claude/agents/<type>.md`` file to patch. For those, this is
-        # workflow advice ("shorten the briefing you pass in the Agent
-        # prompt") with no lever and therefore no render_patch_set stanza.
-        if _agent_has_frontmatter(agent_type, snapshot):
+        # ``.claude/agents/<type>.md`` file to patch. For those (the
+        # read-only helpers skipped above apart), most of the first call
+        # is Claude Code's own system prompt and tool definitions, which a
+        # shorter task prompt does not touch: this is workflow advice that
+        # points at a same-named agent file with a tools list (the
+        # spawn-tools-list card builds the list), with no lever and
+        # therefore no render_patch_set stanza.
+        if has_file:
             category = "settings"
             action = (
-                f"Trim {agent_type}'s briefing -- omitClaudeMd or a narrower skills set "
-                "cuts what has to be written into its cache on the very first turn."
+                f"Trim what {agent_type} is sent at startup -- a tools list, omitClaudeMd or a narrower "
+                "skills set cuts what has to be written into its cache on the very first turn."
             )
             lever = "omitClaudeMd"
             # Fix R13: omitClaudeMd is per-agent frontmatter (each
@@ -1867,9 +2396,9 @@ def _rule_spawn_cost(
         else:
             category = "workflow"
             action = (
-                f"Shorten the briefing you pass in the Agent prompt for {agent_type} -- "
-                "there is no agent frontmatter file to trim for a built-in agent type, so "
-                "this cost has to come out of what you ask it to do on spawn."
+                f"{agent_type} is a built-in agent type, so most of what it reads at startup is Claude Code's "
+                "own system prompt and tool definitions, which a shorter task prompt does not change. A "
+                "same-named agent file with a tools list leaves out the tools it never calls."
             )
             lever = None
             scope = "user"
@@ -2190,35 +2719,85 @@ def _rule_data_quality(report: ReportModel, th: RecommendThresholds) -> list[Rec
     ]
 
 
+def _limit_rollup_evidence(report: ReportModel) -> list[tuple]:
+    """What the limits section's stops roll-up adds to the limit-pressure
+    card: the stops it counted, each cost centre's share of the list-price
+    spend before them, and how much of that spend ran while 3 or more agents
+    worked at once, in those stops and across all your work. Empty when the
+    roll-up is missing or counted no stops; a cell it lacks is left out, so
+    every value cited is a cell of that table."""
+
+    def cell(column: str):
+        value = _cell(report, "limits", "limits_stops_rollup", "all", column)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+
+    stops = cell("stops")
+    if not stops:
+        return []
+    evidence = [_evidence("Stops counted in the roll-up", stops, "limits", "limits_stops_rollup", "all")]
+    for label, column in (
+        ("Main session share of spend", "main_share_pct"),
+        ("Direct agents share of spend", "direct_share_pct"),
+        ("Workflow agents share of spend", "workflow_share_pct"),
+        ("Spend with 3+ agents at once, in these stops", "burst_share_pct"),
+        ("Spend with 3+ agents at once, across all your work", "all_burst_share_pct"),
+    ):
+        value = cell(column)
+        if value is not None:
+            evidence.append(_evidence(label, value, "limits", "limits_stops_rollup", "all"))
+    return evidence
+
+
 def _rule_limit_pressure(report: ReportModel, th: RecommendThresholds) -> list[Recommendation]:
     """v3-limits addition (not part of plan Appendix A5, see this
     module's module docstring convention for a documented deviation):
-    repeated usage-cap hits, or even one subagent the harness killed
-    specifically for hitting the rate limit, are worth surfacing on
+    repeated usage-cap stops, a weekly stop that held up your work, or even
+    one subagent a limit cut off mid-task, are worth surfacing on
     their own account -- not because there's a single setting to
     change, but because several of this report's other findings
-    (recache's limit-expiry rows, ttl's limit_gaps column, a session
-    that would otherwise misclassify as "overnight") are all downstream
+    (recache's limit-expiry rows, ttl's limit_gaps column, the pauses
+    classify takes out of a session's away time) are all downstream
     symptoms of the same root cause. Reads the ``limits`` section built
     by ``limits.build_section`` -- returns ``[]`` when that section
     isn't present (e.g. an older cached report, or a report assembled
     before this batch's ``report.py`` wiring landed).
-    """
-    hits = _cell(report, "limits", "limits_summary", "all", "limit_hits")
-    terminated_rate_limit = _cell(report, "limits", "limits_summary", "all", "agents_terminated_rate_limit")
-    hits_n = hits if isinstance(hits, (int, float)) else 0
-    terminated_n = terminated_rate_limit if isinstance(terminated_rate_limit, (int, float)) else 0
 
-    if hits_n < th.limit_pressure_min_hits and terminated_n < th.limit_pressure_min_terminated_rate_limit:
+    It counts stops, not limit messages: a single stop writes a storm of
+    them. Five-hour stops are read as a rate per seven days, against at
+    least a week even when the window is shorter, so one stop in a short
+    window is never a rate; each weekly stop that stopped work, and each
+    agent cut off, fires it on its own.
+    """
+
+    def count(column: str) -> float:
+        value = _cell(report, "limits", "limits_summary", "all", column)
+        return value if isinstance(value, (int, float)) and not isinstance(value, bool) else 0
+
+    five_hour = count("five_hour_stops")
+    weekly = count("weekly_stops")
+    weekly_stopped_work = count("weekly_stops_stopped_work")
+    cut_off = count("agents_cut_off")
+    days = count("window_days")
+
+    per_week = five_hour * 7 / max(days, 7)
+    if (
+        per_week < th.limit_pressure_min_episodes
+        and weekly_stopped_work < 1
+        and cut_off < th.limit_pressure_min_terminated_rate_limit
+    ):
         return []
 
     evidence = [
-        _evidence("Usage-cap hits", hits_n, "limits", "limits_summary", "all"),
-        _evidence("Agents terminated by rate limit", terminated_n, "limits", "limits_summary", "all"),
+        _evidence("5-hour limit stops", five_hour, "limits", "limits_summary", "all"),
+        _evidence("Weekly limit stops", weekly, "limits", "limits_summary", "all"),
+        _evidence("Weekly stops that stopped work", weekly_stopped_work, "limits", "limits_summary", "all"),
+        _evidence("Agents cut off by a limit", cut_off, "limits", "limits_summary", "all"),
+        _evidence("Days covered", days, "limits", "limits_summary", "all"),
     ]
     sessions_affected = _cell(report, "limits", "limits_summary", "all", "sessions_affected")
     if sessions_affected is not None:
         evidence.append(_evidence("Sessions affected", sessions_affected, "limits", "limits_summary", "all"))
+    evidence.extend(_limit_rollup_evidence(report))
 
     return [
         Recommendation(
@@ -2229,7 +2808,7 @@ def _rule_limit_pressure(report: ReportModel, th: RecommendThresholds) -> list[R
             title="Usage-cap pauses are a recurring interruption",
             action=(
                 "This corpus hit its session/weekly usage cap repeatedly (or had a subagent "
-                "killed by it) -- consider pacing concurrent agents to the usage window, or "
+                "cut off by it) -- consider pacing concurrent agents to the usage window, or "
                 "reviewing the weekly cap against actual usage, rather than treating the "
                 "resulting pauses as ordinary idle time."
             ),
@@ -2339,6 +2918,8 @@ def recommend(
     recs.extend(_rule_env_subagent_model(report, snapshot, archetype))
     recs.extend(_rule_attribution_deprecated(report, snapshot))
     recs.extend(_rule_agent_report_size(report, th, archetype))
+    recs.extend(_rule_agent_batch_probes(report, th, archetype))
+    recs.extend(_rule_plan_rounds(report, th))
     part_recs, covered_agents = _rule_spawn_parts(report, th, archetype, snapshot, units)
     recs.extend(part_recs)
     recs.extend(_rule_spawn_cost(report, th, archetype, snapshot, covered_agents))
@@ -2570,4 +3151,5 @@ __all__ = [
     "effective_min_sample",
     "recommend",
     "render_patch_set",
+    "tools_list_offer",
 ]

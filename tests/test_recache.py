@@ -176,6 +176,282 @@ def test_thresholds_describe_mentions_every_value():
 
 
 # --------------------------------------------------------------------
+# detect(): the four-step order (Phase 8 "Cache rebuild labels")
+# --------------------------------------------------------------------
+
+CR0 = 43_000  # the shared start every session's first call reads
+CC0 = 17_000  # what that first call wrote beyond it
+
+
+def _first(**overrides) -> Turn:
+    """A desktop-style first call: reads the shared start, writes the rest
+    at the 1-hour rate."""
+    fields = dict(
+        message_id="m1", turn_index=1, ctx=CR0 + CC0, cache_read_tokens=CR0,
+        cache_creation_tokens=CC0, cc_1h=CC0,
+    )
+    fields.update(overrides)
+    return _turn(**fields)
+
+
+def _next(index: int, *, read: int, write: int = 1_000, gap_s: float = 60.0, **overrides) -> Turn:
+    """A later call in the same conversation: ``read`` served from the
+    cache and ``write`` newly written (1-hour rate unless overridden)."""
+    fields = dict(
+        message_id=f"m{index}", turn_index=index, gap_s=gap_s, ctx=read + write,
+        cache_read_tokens=read, cache_creation_tokens=write, cc_1h=write,
+    )
+    fields.update(overrides)
+    return _turn(**fields)
+
+
+def _warm_session(extra_ctx: int = 90_000) -> list[Turn]:
+    """Two calls of a session that has grown to ``CR0 + CC0 + extra_ctx``."""
+    return [_first(), _next(2, read=CR0 + CC0, write=extra_ctx)]
+
+
+def _signature(turns: list[Turn], message_id: str) -> str | None:
+    found = {t.message_id: t.recache_signature for t in recache.detect(turns, recache.RecacheThresholds())}
+    return found.get(message_id)
+
+
+def test_a_limit_expiry_stays_first_whatever_the_gap_and_the_read_say():
+    turns = _warm_session()
+    third = _next(3, read=CR0, write=turns[-1].ctx, gap_s=7_200.0, gap_cause="limit")
+    assert _signature([*turns, third], "m3") == "limit-expiry"
+
+
+@pytest.mark.parametrize("gap_s,expected", [
+    (299.0, "prefix-invalidated"),
+    (300.0, "full-expiry"),
+    (900.0, "full-expiry"),
+])
+def test_a_gap_at_or_past_the_five_minute_ttl_is_an_expiry(gap_s, expected):
+    # The previous call wrote at the 5-minute rate; the read is a partial
+    # hit of the session (10% of its own part), so only the gap can say expiry.
+    first = _first(cc_1h=0, cc_5m=CC0)
+    second = _next(2, read=CR0 + CC0, write=90_000, cc_1h=0, cc_5m=90_000)
+    third = _next(3, read=CR0 + 11_000, write=110_000, gap_s=gap_s, cc_1h=0, cc_5m=110_000)
+    assert _signature([first, second, third], "m3") == expected
+
+
+@pytest.mark.parametrize("gap_s,expected", [
+    (3_599.0, "prefix-invalidated"),
+    (3_600.0, "full-expiry"),
+])
+def test_a_gap_is_measured_against_the_hour_when_the_previous_call_wrote_at_the_hour_rate(gap_s, expected):
+    first, second = _warm_session()
+    third = _next(3, read=CR0 + 11_000, write=110_000, gap_s=gap_s)
+    assert _signature([first, second, third], "m3") == expected
+
+
+def test_a_call_that_wrote_nothing_carries_the_previous_ttl_forward():
+    first, second = _warm_session()
+    # A pure read: it wrote nothing, so the entry it read keeps the 1-hour TTL.
+    third = _next(3, read=second.ctx, write=0, cc_1h=0)
+    fourth = _next(4, read=CR0 + 11_000, write=110_000, gap_s=1_800.0)
+    assert _signature([first, second, third, fourth], "m4") == "prefix-invalidated"
+    later = _next(4, read=CR0 + 11_000, write=110_000, gap_s=3_600.0)
+    assert _signature([first, second, third, later], "m4") == "full-expiry"
+
+
+def test_an_equal_split_counts_as_the_five_minute_rate():
+    first = _first(cc_1h=CC0 // 2, cc_5m=CC0 // 2)
+    even = _next(2, read=CR0 + CC0, write=90_000, cc_1h=45_000, cc_5m=45_000)
+    third = _next(3, read=CR0 + 11_000, write=110_000, gap_s=400.0)
+    assert _signature([first, even, third], "m3") == "full-expiry"
+    # With a strict 1-hour majority on the previous call, 400 s is within the TTL.
+    hourly = _next(2, read=CR0 + CC0, write=90_000, cc_1h=60_000, cc_5m=30_000)
+    assert _signature([first, hourly, third], "m3") == "prefix-invalidated"
+
+
+def test_a_call_with_no_recorded_ttl_split_counts_as_five_minutes():
+    first = _first(cc_1h=0, cc_5m=0, ttl_split_unknown=True)
+    second = _next(2, read=CR0 + CC0, write=90_000, cc_1h=0, ttl_split_unknown=True)
+    third = _next(3, read=CR0 + 11_000, write=110_000, gap_s=400.0)
+    assert _signature([first, second, third], "m3") == "full-expiry"
+
+
+def test_write_ttl_s_is_how_long_the_entry_a_call_wrote_lasts():
+    assert recache.write_ttl_s(_turn(cc_5m=10)) == 300.0
+    assert recache.write_ttl_s(_turn(cc_1h=10)) == 3_600.0
+    assert recache.write_ttl_s(_turn(cc_1h=10, cc_5m=10)) == 300.0
+    assert recache.write_ttl_s(_turn(cache_creation_tokens=10, ttl_split_unknown=True)) == 300.0
+    assert recache.write_ttl_s(_turn()) is None
+
+
+@pytest.mark.parametrize("gap_s,before_ttl,expected", [
+    (299.0, 300.0, False),
+    (300.0, 300.0, True),
+    (60.0, 3_600.0, False),
+    (3_600.0, 3_600.0, True),
+    (None, 300.0, False),
+    (900.0, None, False),
+])
+def test_expired_by_clock_needs_a_known_wait_and_lifetime_and_reaches_the_lifetime(gap_s, before_ttl, expected):
+    assert recache.expired_by_clock(gap_s, before_ttl) is expected
+
+
+def test_a_read_only_expiry_keeps_its_label_but_is_not_expired_by_the_clock():
+    """Rule 4 still calls a 60 s wait that read only the shared start an
+    expiry (the rebuild section and the cold-return advice rely on it), but
+    the clock test is the one ``ttl.py`` uses to tell it from a timed one."""
+    first, second = _warm_session()
+    read_only = _next(3, read=CR0, write=110_000, gap_s=60.0)
+    assert _signature([first, second, read_only], "m3") == "full-expiry"
+    assert not recache.expired_by_clock(read_only.gap_s, recache.write_ttl_s(second))
+    timed = _next(3, read=CR0, write=110_000, gap_s=3_600.0)
+    assert _signature([first, second, timed], "m3") == "full-expiry"
+    assert recache.expired_by_clock(timed.gap_s, recache.write_ttl_s(second))
+
+
+def test_the_session_explainer_does_not_say_every_expired_cache_followed_a_pause():
+    """A read-only expiry is labelled "full-expiry" with a wait well inside
+    the cache lifetime, so the explainer must not claim a pause."""
+    from claudeglass.service.explain import _REBUILD_LABELS
+
+    assert "pause" not in _REBUILD_LABELS["full-expiry"]
+    assert _REBUILD_LABELS["full-expiry"].startswith("the cache had expired")
+
+
+def test_a_read_at_the_shared_start_plus_3k_is_an_expiry_of_the_session_part():
+    """The shared start survives an expiry, so the cache read is the start
+    plus a little. 46k of a 156k context is over 20% of the whole, which
+    the old test took as a warm hit."""
+    first, second = _warm_session()
+    at_the_margin = _next(3, read=CR0 + 3_000, write=110_000)
+    assert at_the_margin.cache_read_tokens >= 0.2 * at_the_margin.ctx
+    assert _signature([first, second, at_the_margin], "m3") == "full-expiry"
+    # One token more and it read some of the session: a change broke it.
+    past_it = _next(3, read=CR0 + 3_001, write=110_000)
+    assert _signature([first, second, past_it], "m3") == "prefix-invalidated"
+
+
+def test_prefix_invalidation_is_judged_on_the_part_beyond_the_shared_start():
+    first, second = _warm_session()
+    # 36% of the 110k beyond the start was read: a real hit, not a rebuild.
+    assert _signature([first, second, _next(3, read=CR0 + 40_000, write=70_000)], "m3") is None
+    # 11% of it: flagged, and not an expiry because the session was partly read.
+    assert _signature([first, second, _next(3, read=CR0 + 12_000, write=100_000)], "m3") == "prefix-invalidated"
+
+
+def test_a_warm_read_is_never_a_rebuild():
+    first, second = _warm_session()
+    assert _signature([first, second, _next(3, read=second.ctx, write=500)], "m3") is None
+
+
+def test_a_context_that_shrank_is_a_compaction_not_an_expiry():
+    first, second = _warm_session(extra_ctx=200_000)
+    # After a compaction the context restarts from the shared start plus a
+    # summary: it reads only the start, but nothing expired.
+    compacted = _next(3, read=CR0, write=15_000)
+    assert compacted.ctx < second.ctx
+    assert _signature([first, second, compacted], "m3") is None
+
+
+def _compaction_call(**overrides) -> Turn:
+    """The estimated request that wrote a compaction's summary (parse.py)."""
+    fields = dict(
+        message_id="compaction-x", turn_index=3, is_synthetic=True, estimated="compaction",
+        ctx=CR0 + CC0 + 90_000, cache_read_tokens=CR0 + CC0 + 90_000, output_tokens=8_000,
+    )
+    fields.update(overrides)
+    return _turn(**fields)
+
+
+def test_the_first_reply_after_a_summary_is_post_compaction_not_an_expiry_of_the_session_part():
+    """A summary that is smaller than the last real reply's context normally
+    shrinks the context, so nothing is flagged. When the reply after it is
+    larger than the last real reply (a small session, or files read straight
+    back in) it reads only the shared start, which used to be called an expiry."""
+    first, second = _warm_session()
+    summary = _compaction_call(turn_index=3)
+    after = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=90.0)
+    assert after.ctx > second.ctx
+    # Without the summary in the list, the same reply is what it always was.
+    assert _signature([first, second, after], "m4") == "full-expiry"
+    # With it, it is the compaction's write.
+    assert _signature([first, second, summary, after], "m4") == "post-compaction"
+    # Still a rebuild: the count that sizes the run-split re-read allowance is as before.
+    flagged = recache.detect([first, second, summary, after], recache.RecacheThresholds())
+    assert [t.message_id for t in flagged] == ["m4"] and flagged[0].is_recache
+    plain = recache.detect([first, second, after], recache.RecacheThresholds())
+    assert [t.message_id for t in plain] == [t.message_id for t in flagged]
+
+
+def test_a_compact_boundary_marks_the_first_reply_after_it_even_with_no_estimated_call():
+    first, second = _warm_session()
+    after = _next(3, read=CR0 + 11_000, write=second.ctx + 30_000, gap_s=30.0,
+                  preceding_event_kinds=(EventKind.COMPACT_BOUNDARY,))
+    assert _signature([first, second, after], "m3") == "post-compaction"
+
+
+def test_the_post_compaction_label_outranks_the_clock_but_not_a_usage_limit_pause():
+    first, second = _warm_session()
+    summary = _compaction_call(turn_index=3)
+    # The wait since the last real reply includes the whole compaction, past the cache lifetime.
+    long_wait = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=7_200.0)
+    assert _signature([first, second, summary, long_wait], "m4") == "post-compaction"
+    paused = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=7_200.0, gap_cause="limit")
+    assert _signature([first, second, summary, paused], "m4") == "limit-expiry"
+
+
+def test_only_the_first_reply_after_a_summary_gets_the_post_compaction_label():
+    first, second = _warm_session()
+    summary = _compaction_call(turn_index=3)
+    after = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=90.0)
+    # A later reply that really did expire is labelled as before.
+    later = _next(5, read=CR0, write=after.ctx, gap_s=4_000.0)
+    found = {t.message_id: t.recache_signature for t in
+             recache.detect([first, second, summary, after, later], recache.RecacheThresholds())}
+    assert found == {"m4": "post-compaction", "m5": "full-expiry"}
+
+
+def test_a_shrunk_reply_after_a_summary_is_still_no_rebuild():
+    first, second = _warm_session(extra_ctx=200_000)
+    summary = _compaction_call(turn_index=3)
+    compacted = _next(4, read=CR0, write=15_000)
+    assert recache.detect([first, second, summary, compacted], recache.RecacheThresholds()) == []
+
+
+def test_the_signature_table_has_a_post_compaction_row_that_the_other_rows_do_not_count():
+    first, second = _warm_session()
+    summary = _compaction_call(turn_index=3)
+    after = _next(4, read=CR0, write=second.ctx + 20_000, gap_s=90.0)
+    section = recache.build_section(_stats_for([first, second, summary, after]), PRICING, recache.RecacheThresholds())
+    split = _table(section, "recache_signature_split")
+    rows = {row[0]: row for row in split.rows}
+    assert rows["post-compaction"][1] == 1 and rows["full-expiry"][1] == 0
+    assert "post-compaction" in recache.SIGNATURES
+
+
+def test_a_small_session_part_reading_the_shared_start_is_not_a_rebuild():
+    """With 1k written beyond the shared start, a warm read of the start
+    plus that 1k looks the same as an expired one, so nothing is flagged."""
+    first = _first(ctx=CR0 + 1_000, cache_creation_tokens=1_000, cc_1h=1_000)
+    second = _next(2, read=CR0 + 1_000, write=500)
+    third = _next(3, read=CR0, write=1_500, gap_s=4_000.0)
+    assert _signature([first, second, third], "m3") is None
+
+
+def test_without_the_first_call_the_original_rules_apply():
+    # A list that does not start at the transcript's first turn: no cr0, no
+    # previous call. 46k of 150k is 31%, a warm hit as before.
+    warm = _turn(message_id="m3", turn_index=3, gap_s=7_200.0, ctx=150_000, cache_read_tokens=46_000, cache_creation_tokens=104_000)
+    assert recache.detect([warm], recache.RecacheThresholds()) == []
+    # And a low read is full-expiry on the floor alone, whatever the gap.
+    cold = _turn(message_id="m3", turn_index=3, gap_s=10.0, ctx=150_000, cache_read_tokens=500, cache_creation_tokens=149_500)
+    assert _signature([cold], "m3") == "full-expiry"
+
+
+def test_a_synthetic_turn_does_not_become_the_previous_call_or_the_shared_start():
+    first, second = _warm_session()
+    synthetic = _turn(message_id="syn", turn_index=0, is_synthetic=True, ctx=0)
+    third = _next(3, read=CR0, write=110_000, gap_s=4_000.0)
+    assert _signature([first, synthetic, second, third], "m3") == "full-expiry"
+
+
+# --------------------------------------------------------------------
 # gap_bucket(): boundaries
 # --------------------------------------------------------------------
 

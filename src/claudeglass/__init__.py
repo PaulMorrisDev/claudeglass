@@ -4,7 +4,7 @@ Claude Code transcripts.
 
 from __future__ import annotations
 
-__version__ = "0.14.0"
+__version__ = "0.15.0"
 
 #: Bump when transcript-parsing logic changes in a way that could change
 #: results computed from a previously cached file.
@@ -128,7 +128,7 @@ __version__ = "0.14.0"
 #: recorded one (CAP-9/F10: this used to be dropped), and, only when
 #: ``True``, whether the call ran ClaudeGlass's own capture hook script
 #: (``capture``, never the command string itself). ``hook_health.py``'s
-#: new ``count_hook_errors``/``measure_deep_wait`` both read these
+#: new ``count_hook_errors``/``measure_hook_overhead`` both read these
 #: straight off already-parsed events; a pre-18 digest has none of them,
 #: so every transcript is re-parsed once to pick them up.
 #: Bumped to 19 by the parser-signals batch (SURV-4/5/6/7): ``thinking_drop``
@@ -249,7 +249,181 @@ __version__ = "0.14.0"
 #: write target is (a forward-slash or Git Bash path was a real edit
 #: before), so a pre-36 digest counts those scratch writes as real
 #: edits.
-PARSER_VERSION = 36
+#:
+#: Bumped to 37: how each message you typed reads -- a tweak, a repeat of
+#: what you said, a bare go-ahead, a status check (``Turn.human_adjust``,
+#: ``human_remind``, ``human_go``, ``human_status``) -- and the messages
+#: you typed while Claude was working (``Turn.queued_prompts``,
+#: ``queued_chars``, ``queued_steps`` and the flags beside them), which
+#: no counter saw before. A queued message that is a copy of one also
+#: written as a user line is dropped. An image message is no longer a
+#: vague fix. Lines you didn't type are one list now, with the desktop
+#: app's usage-limit and app-quit notes, another session's message and a
+#: ``turnOrigin`` that rules a line out. An ``output_style`` attachment is
+#: a reminder unless the style changed, and a ``permission-mode`` or
+#: system ``informational`` line is ignored. A pre-37 digest has none of
+#: these, counts every ``output_style`` as a cache change, and counts the
+#: app's quit note as something you typed.
+#:
+#: Also in 37, from how each tool call that didn't run was answered
+#: (model.py's Plan-feedback addition). Every denial event carries a
+#: bucket word in ``detail["bucket"]``: a plan you sent back, a question
+#: you declined, a hook's block, an auto mode block (or its being
+#: unavailable), a dialog you closed, or a call you or a deny rule turned
+#: down. Only that last bucket counts as a denial by habits, waste,
+#: quality and prompting. An ``INTERRUPT`` has a subkind
+#: (``tool_refusal`` or ``shutdown``) and, for a refusal, the bucket of
+#: the denial it follows. A plan you sent back with feedback is a
+#: ``PLAN_FEEDBACK`` event holding the feedback's length and one word for
+#: how it reads (never its text), and ``ExitPlanMode`` answers no longer
+#: add to ``Turn.tool_error_count``. ``PlanStats`` gains ``outcome``
+#: ``approved_by_message`` (a go-ahead you typed, or leaving plan mode,
+#: before the next plan), ``rejected`` and the feedback's length and
+#: class; ``Turn`` gains ``ask_rounds`` and ``preceding_denials``. A
+#: pre-37 digest has none of these, so it counts a plan or question you
+#: answered as a denial and a stop, and a plan approved by typing as
+#: never approved.
+#:
+#: Also in 37, from what Claude's replies and tool calls said (model.py's
+#: Assistant-and-tool-signals addition), each kept as a yes/no, a count or
+#: a size, never the words. ``Turn.reply_asked`` now means the reply ends
+#: on a question to you: code, URLs, a ClaudeGlass tip and the tag are cut,
+#: and the question mark must close one of the last two sentences or a
+#: list item that ends it, not sit anywhere in the last 300 characters.
+#: ``admit_candidate`` marks a reply that owns a mistake, with
+#: ``admit_caught`` saying whether you had pushed back first (``user``) or
+#: Claude noticed (``self``), and ``tip_disowned`` marks a reply that calls
+#: a ClaudeGlass tip a misfire. ``read_target_chars`` gives the size of
+#: each Read result beside ``read_target_hashes``. Reads made through
+#: Bash or PowerShell (``grep``, ``sed -n``, ``cat``, ``git log`` and so
+#: on) are counted in ``shell_read_count`` with their results' size in
+#: ``shell_read_chars``. ``tests_run`` says whether the reply ran the
+#: tests, ``targeted`` or ``full``, read from the whole command (an
+#: interpreter path, an env or ``timeout`` prefix, a quoted path or
+#: PowerShell no longer hides one) by the one matcher the parser, the
+#: classifier and the capture hook share (``testrun.py``). A pre-37 digest
+#: has none of these, so it reads a question mark anywhere in the last 300
+#: characters as a question and finds a test run only by its command's
+#: first words.
+#:
+#: And in 37, the join from a workflow's agents to the message that started
+#: them. A ``Workflow`` call's result names the run (``runId``, the run's
+#: directory name) and its task (``taskId``); ``Turn.workflow_runs`` keeps
+#: the two ids under the call's tool_use id, nothing else of the result.
+#: The agents of that run carry the same ``runId`` in their metadata, so
+#: ``capture.prompt_cycles`` and ``habits`` now put each in the cycle of the
+#: reply that launched (or resumed) its run: overlap, the agent list, a
+#: cycle's cost and ``redo_cost`` count them. A resumed run keeps its
+#: ``runId``, so its agents are split between the calls by time. A pre-37
+#: digest has no ``workflow_runs``, so its workflow agents join the cycle of
+#: the reply before the run's ``started`` time, or none. Also, a tag written
+#: in reply to a background agent's (or workflow's) report counts for the
+#: cycle whose call launched it, not the one open when the report arrived.
+#:
+#: And in 37, what counts as a vague correction or a repeated request
+#: (``Turn.human_vague``, ``human_repeat``). A vague correction needs a
+#: correction or bad-outcome phrase ("still failing", "that didn't work"):
+#: a bare "fix this", anything ending in a question mark, a go-ahead and a
+#: thank-you are no longer one. A poll ("how is it going"), a go-ahead and
+#: an acknowledgement are never a repeat. A pre-37 digest from before
+#: this change counts them.
+#:
+#: Also in 37: ``Turn.human_question``, ``config_edit_count`` and
+#: ``agent_edit_files`` for the small-requests check, and
+#: ``Turn.human_change`` (the message asked for a change: a change verb
+#: opens one of its sentences, and it is no go-ahead, question, report or
+#: explain request). The window between small requests is timed from your
+#: own messages, a turn is credited only with the edits of the reply its
+#: message started (a subagent's, with the turn that launched it; a reply
+#: that began with a line you didn't type, ``Turn.preceding_not_typed``,
+#: is not the message's), a plan is also a message of 2,000 characters or
+#: more or one with five listed items, and a pasted log or code, or a merge
+#: or release request (a verb that opens a sentence), has no steps. A
+#: go-ahead also covers a merge, push, release, commit or run. A resume
+#: note is a ``META`` event of subkind ``resume``, the other lines you
+#: didn't type ``not_typed``.
+#:
+#: Bumped to 38: the tag's ``why`` and ``admit`` ride on the ``shift`` switch
+#: (``found`` and ``fit`` are no longer asked for), and the transcript
+#: settles what the words claim: ``Turn.edit_call_count``,
+#: ``edit_doc_count`` and ``shell_change_count`` say what a reply changed
+#: (edits to your work, those to documentation, and commands that move or
+#: remove files), and ``capture.Cycle.settled`` is a cycle's tag with
+#: ``capture_tags.settle`` applied, as the capture hook grounds Haiku's
+#: words. A cycle with several tags keeps the highest ``level`` and
+#: ``size`` among them.
+#:
+#: Bumped to 39: ``/cg-feedback`` asks new questions (``capture_catalogue.
+#: FEEDBACK_QUESTIONS``) and ``model.Feedback`` gains ``why``, ``missed_in``,
+#: ``plan``, ``tip``, ``tip_hint``, ``from_text``, ``other`` and
+#: ``why_older``. A word Claude picked from a note typed under "Other"
+#: counts only when the AskUserQuestion result shows a non-label answer
+#: for that key, and a ticked answer always wins over the tag
+#: (``capture_tags.settle_feedback``). An older run's ``slow`` gives
+#: ``why``, and a run with no work since the previous one replaces that
+#: run's answers (``capture.feedback_spans``). Also in 39, ``Turn.
+#: plan_check`` holds your answer to the plan check (``model.PlanCheck``:
+#: the id of the plan's ``ExitPlanMode`` call and a word of
+#: ``capture_catalogue.PLAN_CHECK_WORDS``), and ``Turn.coach_reminder``
+#: says a reply carries the /cg-feedback reminder line a hook note asked
+#: for, so ``capture.usage`` prices it.
+#: The facts line a /cg-feedback run starts with (``capture_catalogue.
+#: FEEDBACK_FACTS_MARKER``) is a ``coaching_note`` event of kind
+#: ``feedback_facts``, ClaudeGlass's own hook context, and the plan check's
+#: question is no clarifying round (``Turn.ask_rounds``).
+#:
+#: Bumped to 40: a usage-limit line's reset time (``LIMIT_HIT``'s ``reset_ts``)
+#: is read from its "resets 3pm (Europe/London)" text, as it was meant to
+#: be, when the line has no ``quotaLimits.resetsAt``. A zone that can't be
+#: resolved, which is every named zone on a Windows install with no
+#: ``tzdata``, now gives the machine's own zone (``discovery.from_local``)
+#: instead of no reset at all, and the weekly form's date ("resets Oct 3,
+#: 9am") sets the reset's day. A usage-limit pause ends at the reset when
+#: you came back later (``limits.limit_pause_intervals``). A pre-40 digest
+#: has no reset for those lines, so its pauses run to your return.
+#:
+#: Bumped to 41: a prompt snapshot's detail also records each built-in tool's
+#: definition size by name and each MCP server's total
+#: (``tool_chars``, ``server_chars``). The startup breakdown takes the
+#: first snapshot that lists tools, which a subagent's transcript writes
+#: after its first call, and counts the agent roster and MCP instructions
+#: that arrive before its second call as startup too. A pre-41 digest
+#: has no per-tool sizes, and its subagent startup shows tool
+#: definitions as 0.
+#:
+#: Bumped to 42: a turn also records how each agent call ran
+#: (``agent_launches``: tool_use id to ``"background"`` or ``"foreground"``,
+#: from the call's ``run_in_background`` or an async launch result). A
+#: pre-42 digest has none, and its agent runs count as foreground in the
+#: cost-per-spawn split.
+#:
+#: Bumped to 43: the "short" flag on a brief also catches more ways of asking
+#: for a short report ("up to about 1,000 characters", "<=150 words", "100
+#: words or fewer", "a 50-word summary", "be concise", "keep it short").
+#: A length rule for each sentence or each item ("sentences of 25 words or
+#: fewer", "50 lines per function") is a style rule and isn't flagged.
+#: A pre-43 digest flags only the narrower phrasings, so its share of
+#: briefs that ask for a short report is lower. A ``report_reread`` coaching
+#: note keeps its own hint, as the parser's list of hint words is the
+#: capture catalogue's (``events._KNOWN_HINTS``); a pre-43 digest has such a
+#: note as ``other``. Also in 43, a plan records the time you approved it
+#: (``PlanStats.approved_ts``) and a message that opens with the plan itself,
+#: the wording Claude Code writes when you approve and clear the context, is
+#: flagged (``Turn.human_plan_handoff``). A pre-43 digest has neither, so
+#: its approvals can't be told from builds that started fresh.
+#:
+#: Bumped to 44: a test runner named inside a quoted string (a commit
+#: message's ``"fix parser; pytest green"``, an ``echo``) no longer counts
+#: as a test run. The operators inside quotes are blanked before a shell
+#: line is cut into commands (``testrun``,
+#: ``capture_catalogue.TEST_QUOTED_PATTERN``), so ``Turn.tests_run``
+#: changes for such lines. A string handed to a shell's ``-c``
+#: (``sh -c "cd x && pytest"``) is still commands and still counts. A critique or a
+#: question typed into a plan's dialog now counts as pushing back
+#: (``last_human_challenge``), so an admission in the reply after it is
+#: ``admit_caught == "user"``. A pre-44 digest has such commands as test
+#: runs and such admissions as ``self``.
+PARSER_VERSION = 44
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

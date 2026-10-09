@@ -196,9 +196,11 @@ is detected and used):
   like ``America/Argentina/Buenos_Aires`` is deliberately left as
   ``None`` rather than guessed at), and ``reset_ts`` (``str | None``, UTC
   ISO -- from the line's own ``quotaLimits.resetsAt`` epoch when present,
-  else reconstructed from the parsed local time + zone via
-  ``zoneinfo.ZoneInfo`` when that resolves, else ``None`` when neither
-  source is usable, e.g. missing tzdata on a bare Windows install).
+  else reconstructed from the parsed local time (and, for the weekly form,
+  its "Oct 3," date) in that zone, which falls back to the machine's own
+  zone when the name can't be resolved, e.g. missing tzdata on a bare
+  Windows install; ``None`` when the line has neither source, or names no
+  single-slash zone).
 - ``Event.detail`` additions for ``API_ERROR``: ``source`` (``str |
   None``, the ``system.subtype=api_error`` line's own ``request_retry``/
   ``connection_retry`` value) alongside the existing ``status``/
@@ -321,20 +323,28 @@ a flag, never text:
 
 - ``CaptureTag`` / ``Turn.cap: CaptureTag | None = None`` -- the
   ``[cg: ...]`` tag (and the ``[result: ...]`` extras ``fit``, ``rules``,
-  ``brief``, ``missing``) ending this turn's last text block. Unknown keys
-  and words are dropped; ``skill_name`` survives only when it names a
-  skill the transcript listed or used. ``chars`` is the tag's own length,
-  for pricing the output it cost. While Claude Haiku writes the tags
-  (``[capture] tagger = "haiku"``), the parser finds none; ``haiku_tags``
-  sets ``cap`` on the tagged reply's turn after the parse instead, with
-  ``judged`` set and ``judge_usd`` what the call cost.
+  ``brief``, ``missing``) ending this turn's last text block. ``why``
+  and ``admit`` (``PARSER_VERSION`` 38) ride on ``shift``; ``found`` and
+  ``fit`` are no longer asked for but are still read from older
+  transcripts. Unknown keys and words are dropped; ``skill_name``
+  survives only when it names a skill the transcript listed or used.
+  ``chars`` is the tag's own length, for pricing the output it cost.
+  While Claude Haiku writes the tags (``[capture] tagger = "haiku"``),
+  the parser finds none; ``haiku_tags`` sets ``cap`` on the tagged
+  reply's turn after the parse instead, with ``judged`` set and
+  ``judge_usd`` what the call cost. ``grounded`` (``PARSER_VERSION`` 38)
+  lists what the hook put right in Haiku's words, ``key:from>to``, read
+  from the tag row's ``g`` field; ``capture.Cycle.settled`` adds what the
+  parsed transcript puts right, and leaves ``cap`` as written.
 - ``Turn.cap_note_chars: int = 0`` -- characters of capture notes (a
   ``hook_additional_context`` attachment carrying ``cg-cap v``) put in
   front of the model just before this turn, measured from ``rendered``.
   From ``PARSER_VERSION`` 25 it counts coaching notes (``cg-coach v``)
   too: an ``Event`` of subkind ``coaching_note`` whose ``detail`` holds
-  ``v``, ``kind`` (a ``capture_catalogue.COACHING_HINTS`` word or
-  "other") and ``hook``; a capture note sharing an attachment with one
+  ``v``, ``kind`` (a ``capture_catalogue.COACHING_HINTS``,
+  ``FEEDBACK_HINTS`` or ``RETIRED_COACHING_HINTS`` word; from ``PARSER_VERSION`` 39
+  ``feedback_facts`` for the facts line a /cg-feedback run starts with,
+  ``cg-fb-facts v``; else "other") and ``hook``; a capture note sharing an attachment with one
   carries ``detail["coach"]``/``["coach_chars"]`` and sizes only its own
   part.
 - ``Turn.spawn_marker: str | None = None`` -- on the turn that follows a
@@ -375,6 +385,37 @@ Feedback addition (``PARSER_VERSION`` 16):
 - ``TranscriptMeta.cap_version`` / ``cap_metrics`` / ``cap_injections``
   -- the capture note format version seen, the metric codes the notes
   asked for, and how many notes were injected.
+
+Feedback redesign addition (``PARSER_VERSION`` 39). What ``/cg-feedback``
+asks and keeps. Words from ``capture_catalogue.FEEDBACK_VOCAB`` only; what
+you type under "Other" is read in memory to pick the closest word, then
+dropped:
+
+- ``Feedback.why`` (what your follow-ups were mostly), ``missed_in``,
+  ``plan``, ``tip`` and ``tip_hint`` (the id of the tip rated). All have
+  defaults. ``slow`` stays: older runs asked it, and a run that did gets
+  ``why`` from it (``unclear`` is ``left_out``, ``none`` is ``none``;
+  ``rework`` says nothing about who caused it, so it adds nothing) with
+  ``why_older`` set.
+- ``Feedback.other`` -- the keys you answered with your own words, read
+  from the AskUserQuestion result. ``Feedback.from_text`` -- the keys whose
+  word came from the tag rather than a ticked label. A word counts as
+  picked from your note only when ``other`` shows a non-label answer for
+  that key, and a ticked answer always wins over the tag
+  (``capture_tags.settle_feedback``).
+- A /cg-feedback run with no work since the previous one replaces that
+  run's answers (``capture.feedback_spans``).
+- ``Turn.plan_check`` -- your answer to the plan check, the one question a
+  hook note has Claude ask before it acts on a message that fixes work
+  built from a plan you approved (``PlanCheck``): the id of that plan's
+  ``ExitPlanMode`` call and one word of
+  ``capture_catalogue.PLAN_CHECK_WORDS``, ``""`` when you declined or
+  answered in your own words. It rates no piece of work and cuts none. On
+  the turn that made the call. All defaults.
+- ``Turn.coach_reminder`` -- this reply's last text block carries the
+  /cg-feedback reminder line a hook note asked for
+  (``capture_catalogue.FEEDBACK_REMINDER_LINE``), so ``capture.usage``
+  prices it. Yes or no; the reply's words are never kept.
 
 Your-hooks addition (``PARSER_VERSION`` 22). Hook labels are a
 script's file name (``quarantine-guard.ps1``), or a hook command's first
@@ -450,22 +491,34 @@ counts need about each message you typed and each reply, worked out by
 the words:
 
 - ``Turn.prompt_steps: int = 0`` -- how many separate changes the
-  preceding message asked for (``prompt_shape.request_steps``), when two
-  or more; 0 when it mentions a plan, since it's following one.
+  preceding message asked for (``prompt_shape.plan_steps``), when two or
+  more. They are counted in your own prose, without a fenced block, a
+  quoted line or pasted log lines, and need a change verb: 0 for a message
+  that mentions a plan (it follows one), opens by asking to review or
+  explain, or is a plan already (1,500 characters or more with a heading,
+  or five listed items; since ``PARSER_VERSION`` 37 also 2,000 characters or more
+  whatever its formatting). Since 37 it is 0 too for a message with pasted
+  code or a pasted log, and for one that asks to merge or release.
 - ``Turn.prompt_plan_mode: bool = False`` -- it was sent in plan mode
   (its line's ``permissionMode``).
-- ``Turn.human_vague: bool = False`` -- it was a short fix request that
-  names nothing specific (``prompt_shape.is_vague_fix``).
+- ``Turn.human_vague: bool = False`` -- it was a short correction that
+  names nothing specific (``prompt_shape.is_vague_fix``); since
+  ``PARSER_VERSION`` 37 it needs a correction or bad-outcome phrase and
+  is never a question, a go-ahead, a thank-you or an image message.
 - ``Turn.human_ack: bool = False`` -- it only acknowledged ("thanks").
 - ``Turn.human_repeat: bool = False`` -- it was much the same request as
   one Claude answered earlier in the same transcript, within the
   ``repeat_window_minutes`` threshold (compared in memory while parsing).
+  Since ``PARSER_VERSION`` 37 never a poll, a go-ahead or a thank-you.
 - ``Event.detail["replaced"]`` -- on a message you sent again before
   Claude answered it (you pressed Esc before any reply, and Claude Code
   put it back to edit; the new copy has the same parent line). Its turn
   counts the copy that was answered, not both.
-- ``Turn.reply_asked: bool = False`` -- this reply's last words hold a
-  question mark, so your next message answers it.
+- ``Turn.reply_asked: bool = False`` -- this reply ends on a question, so
+  your next message answers it (since ``PARSER_VERSION`` 37,
+  ``prompt_shape.ends_on_question``: a question mark in one of the last
+  two sentences or in a closing list item, not in code, a URL, a quoted
+  question, a tip, the feedback reminder or a tag).
 - ``Turn.coach_tip: bool = False`` -- this reply showed a ClaudeGlass tip
   (``capture_catalogue.TIP_LABEL``).
 
@@ -533,6 +586,269 @@ The same bump puts ``Turn.edit_kind`` on that temp test: an
 Edit/Write/MultiEdit/NotebookEdit target in any of those forms is
 "scratch". Before it, only the temp dir's own spelling matched, so a
 forward-slash path on Windows counted as a "real" edit.
+
+Parser-signals addition (``PARSER_VERSION`` 37). What the prompting
+counts need about messages the transcript carried but no counter saw, and
+about how each message reads. Counts and yes/no only; the text of a
+message is read in memory and dropped:
+
+- ``Turn.human_adjust``, ``human_go``, ``human_status``, ``human_remind``
+  (all ``bool = False``) -- the preceding message you typed tweaked the
+  work ("rename it", "a bit smaller"), only said to carry on ("continue",
+  "implement the plan"), only asked how it was going, or repeated
+  something you had said ("I told you"). ``prompt_shape.is_adjust``,
+  ``is_go``, ``is_status`` and ``is_remind``, patterns in
+  ``capture_catalogue``, kept apart from ``CORRECTION_PATTERN``.
+- ``Turn.queued_prompts: int = 0`` -- how many messages you typed while
+  Claude was working (Claude Code queues them and attaches each as a
+  ``queued_command``) arrived since the previous reply. ``queued_chars``
+  is their total length. ``queued_steps`` is the most separate changes any
+  of them asked for, when two or more. ``queued_correction``,
+  ``queued_adjust``, ``queued_go`` and ``queued_status`` (``bool =
+  False``) say whether any of them read that way. Only a message with
+  ``commandMode`` "prompt", a human or missing origin and no ``isMeta`` is
+  one; a replayed record (same ``uuid``) and a copy of a message also
+  written as a user line within 60 seconds are dropped. A queued message
+  is a ``QUEUE_OPERATION``, never ``HUMAN_TEXT``, so it never starts a
+  cycle. Its ``Event.detail`` is ``{"origin": "human"}`` with the same
+  flags a typed message gets (``has_paste``, ``correction``, ``adjust``,
+  ``go``, ``status``, ``remind``, ``has_image``, ``steps``, ``vague``,
+  ``ack``, ``flags``), or ``{"origin": "peer"}``; a flag is present only
+  when true. The attachment's own ``timestamp`` is when you typed it.
+- ``Event.detail["has_image"]`` -- the message holds an image block. A
+  desktop image message carries no "[Image #" placeholder, so ``vague``
+  no longer fires on one.
+- Lines you didn't type are one list now
+  (``capture_catalogue.NOT_TYPED_PREFIXES``, shared with the hook and the
+  status line), with ``<cross-session-message``, the desktop app's
+  usage-limit resume and app-quit notes, and a ``turnOrigin`` of
+  ``task_notification``, ``peer`` or ``scheduled`` ruling a line out
+  (``human`` never rules one in). Such a line is a ``META`` event with
+  subkind ``not_typed``, or ``resume`` for the usage-limit resume and
+  app-quit notes, which carry on your last message's work.
+- An ``output_style`` attachment is a ``REMINDER`` unless the style
+  changed from the last one in the transcript, when it is the
+  ``CACHE_SIGNAL`` it was. A ``permission-mode`` line and a system
+  ``informational`` line are ignored.
+
+Live-coaching addition (``PARSER_VERSION`` 37). What the small-requests
+check (``drip_feed``: the live hint and the report's count in
+``prompting.py``) needs to tell a request from what isn't one, and a change
+to your work from one to Claude's own folders. A yes/no and counts only:
+
+- ``Turn.human_question: bool = False`` -- the preceding message you typed
+  only asked something: it ended in a question mark or opened with a
+  question word (``prompt_shape.is_question``). Like ``human_go`` and
+  ``human_status``, a question asks for no change.
+- ``Turn.human_change: bool = False`` -- the preceding message you typed
+  asked Claude to change something: a change verb opened a sentence
+  ("make it bigger", "now move the logo"), and it was no go-ahead,
+  thank-you, status check, question or explain request
+  (``prompt_shape.is_change_request``). Any of the messages you typed
+  before the reply, unlike ``human_go`` and ``human_question``. A
+  statement, a report ("it does not load") and an explain request are
+  none, so none joins a run of small changes.
+- ``Turn.preceding_not_typed: bool = False`` -- a line you didn't type
+  (a ``META`` event of subkind ``not_typed``: a shell command you ran
+  with ``!``, another session's message) came between the previous reply
+  and this one. The reply to it is nobody's answer to the message of yours
+  before it (``prompting._own_reply``), as the hook's ``_untyped_start``
+  reads it. A resume note (subkind ``resume``) carries on that message's
+  work and sets nothing.
+- ``Turn.config_edit_count: int = 0`` -- how many of this turn's edit
+  calls and shell write targets sat inside a ``.claude`` folder
+  (``prompt_shape.is_config_path``): Claude's memory, plans and scripts, or
+  a project's agents and skills. Taken back for an edit that failed and a
+  command that was blocked or denied, as ``shell_write_count`` is. A reply
+  that only changed such files didn't change your work.
+- ``Turn.agent_edit_files: int = 0`` -- the files this turn's subagents
+  changed (``toolUseResult.toolStats.editFileCount`` of each synchronous
+  ``Agent`` result that wasn't an error): their own edits aren't main-chain
+  tool calls. They are credited to the turn whose call launched the agent.
+
+Plan-feedback addition (``PARSER_VERSION`` 37). How each tool call that
+didn't run was answered, and what became of each plan. Closed words and
+counts only; feedback and answer text is read in memory and dropped:
+
+- ``Event.detail["bucket"]`` on every ``TOOL_DENIAL``, a word from
+  ``events.DENIAL_BUCKETS``: ``plan_rejected`` (the plan dialog sent
+  back), ``question_declined`` (an ``AskUserQuestion`` you declined),
+  ``hook_blocked`` (a hook or guard block, also a known token saver's
+  redirect), ``auto_blocked`` / ``auto_unavailable`` (the auto mode
+  classifier), ``aborted`` (a dialog closed or cancelled with no answer)
+  and ``refused`` (a call you or a deny rule turned down). Only
+  ``refused`` is a denial in the habits, waste, quality and prompting
+  counts. ``events.denial_bucket_of`` reads it, falling back to the
+  ``toolDenialKind`` for an event built without one.
+- ``INTERRUPT`` keeps its kind and gains a subkind: ``tool_refusal`` (the
+  "for tool use" line after a call turned down) or ``shutdown`` (the
+  session's end). A refusal carries ``detail["after"]``, the bucket of the
+  denial before it. ``events.is_stop`` is true for you stopping a reply:
+  not a shutdown, and not a refusal after a plan or question you
+  answered or a call a hook or the classifier blocked.
+  ``capture.py``'s exclusion of interrupts from the typed-message count
+  still holds, as the kind is unchanged.
+- ``EventKind.PLAN_FEEDBACK`` -- the answer to a rejected plan had
+  feedback in it. ``size_chars`` is its length and ``subkind`` one word
+  from ``capture_catalogue.PLAN_FEEDBACK_CLASSES`` (``question``,
+  ``critique``, ``unsure``, ``other``; ``prompt_shape.plan_feedback_class``).
+  It never opens a cycle and ranks below ``HUMAN_TEXT`` in
+  ``events.PRECEDENCE``. A plan or question answer is not a tool error:
+  ``ExitPlanMode`` results add nothing to ``Turn.tool_error_count``,
+  unless a hook or auto mode blocked the call.
+- ``PlanStats.outcome`` is ``approved`` (the dialog), ``approved_by_message``
+  (the dialog sent it back, then a go-ahead message came before the next
+  ``ExitPlanMode`` call, or ``permissionMode`` left ``plan``) or
+  ``rejected``. ``PlanStats.rejected`` stays True once you sent a plan back,
+  and ``feedback_chars`` / ``feedback_class`` hold the feedback's length
+  and word. ``handoff._approved`` and the hook's ``plan_before`` and
+  ``plan_fresh`` read the first two.
+- ``Turn.ask_rounds: int = 0`` -- clarifying ``AskUserQuestion`` round
+  trips you answered in the turn's own calls. A declined one is not a
+  round. ``Turn.preceding_denials: dict[str, int]`` -- the denial buckets
+  among the events folded into the turn (``waste`` reads it to tell a
+  stop from a plan answer), empty when there were none.
+- ``capture.Cycle`` adds ``plan_rounds`` (plans), ``rejected_rounds``
+  (plans you sent back), ``feedback_rounds`` and the class of each
+  (``plan_feedback_classes``), and ``ask_rounds``.
+
+Assistant-and-tool-signals addition (``PARSER_VERSION`` 37). What a reply
+said about its own work, and what its tool calls read and ran. Yes/no,
+closed words and counts only; a reply's text and a command are read in
+memory and dropped:
+
+- ``Turn.admit_candidate: bool = False`` -- a text block of the reply owns
+  a mistake ("I was wrong", "my mistake", "I misread", "I should have
+  checked", "you're right"; ``capture_catalogue.ADMIT_PATTERN``, read in
+  the block's first characters, outside code, URLs and a ClaudeGlass quote
+  block). "Good catch" counts only through an admission that follows it. A
+  candidate, not a verdict: the capture tag's ``admit`` word confirms one.
+  ``Turn.admit_caught: str = ""`` is, with a candidate, ``user`` when the
+  message you typed last was a correction, an adjustment, a reminder or a
+  question (words typed into a plan's dialog count, when a critique or a
+  question), else ``self``; empty without one.
+- ``Turn.tip_disowned: bool = False`` -- the reply carries a ClaudeGlass
+  tip and says, near "ClaudeGlass" and outside the tip's quote block, that
+  it misfired, was a false positive or doesn't apply
+  (``capture_catalogue.MISFIRE_PATTERN``).
+- ``Turn.read_target_chars: tuple[int, ...] = ()`` -- the size of each
+  ``Read`` result, in the order of ``read_target_hashes``; 0 for a read
+  that failed. A result Claude Code saved to a file and answered with a
+  ``<persisted-output>`` note counts as that note's preview: what stayed
+  in context.
+- ``Turn.shell_read_count: int = 0`` and ``shell_read_chars: int = 0`` --
+  the commands of the turn's shell calls that read files and the size of
+  their results (``shell_reads``: grep, rg, ``sed -n``, cat, head, tail,
+  find, git log/show/diff, Get-Content, Select-String; not a heredoc
+  write, ``sed -i``, ls, wc or git status). A call that was blocked or
+  denied is taken back, like ``shell_write_count``.
+- ``Turn.tests_run: str = ""`` -- ``full`` when a shell call ran a whole
+  test suite, ``targeted`` when it ran chosen tests only, else empty
+  (``testrun.run_scope``, the one matcher the parser, the purpose rules
+  and the capture hook share). A call that was blocked or denied is taken
+  back. ``classify._matches_test_tool`` asks the same matcher.
+- ``Turn.reply_asked`` reads the reply's closing sentences instead of any
+  question mark in its last 300 characters (see above).
+
+Cost-centres addition (``PARSER_VERSION`` 42). How each agent call ran,
+for the cost-per-spawn split into background, foreground and workflow. A
+workflow agent's ``.meta.json`` always says foreground (relative to its
+script), so it is never read for this:
+
+- ``Turn.agent_launches: dict[str, str] = {}`` -- ``Agent``/``Task``
+  tool_use id -> ``"background"`` when the call set ``run_in_background``
+  or its result was an async launch message, else ``"foreground"``.
+  ``topology`` joins a direct agent to its parent call by
+  ``TranscriptMeta.tool_use_id``; one with no such call is counted as
+  foreground, the way a call with no flag runs.
+
+Plan-approval addition (``PARSER_VERSION`` 43). When a plan was approved,
+and whether a message opened with the plan itself, so a build that started
+fresh can be told from one that carried the planning on. A time and a
+yes/no only; the message is read in memory and dropped:
+
+- ``PlanStats.approved_ts: str = ""`` -- the time of the line that approved
+  the plan: the dialog's answer, the go-ahead message you typed, or the
+  line that left plan mode. ``""`` for a plan nobody approved, and for a
+  digest from before 43.
+- ``Turn.human_plan_handoff: bool = False`` -- the preceding message you
+  typed opened with the wording Claude Code writes when you approve a plan
+  and clear the context ("Implement the following plan:", then the plan):
+  ``prompt_shape.is_plan_handoff``, a pattern in ``capture_catalogue``. Any
+  of the messages you typed before the reply, unlike ``human_go``. It
+  reads the opening only; the plan after it is never kept.
+
+Workflow-agents addition (``PARSER_VERSION`` 37). A workflow agent's
+``.meta.json`` has no ``toolUseId`` or ``parentAgentId`` (none of 682 did),
+so nothing tied it to the message that started its run. Ids only:
+
+- ``Turn.workflow_runs: dict[str, tuple[str, str]] = {}`` -- ``Workflow``
+  tool_use id -> ``(runId, taskId)`` of the run the call launched, read
+  from its result (``toolUseResult.taskType == "local_workflow"``). The
+  ``runId`` is the run's directory name, so it joins to
+  ``TranscriptMeta.workflow_run_id``; the ``taskId`` is what the run's
+  task notification names. A resumed run keeps its ``runId`` (and its
+  directory), so one ``runId`` can have several calls. A call that failed
+  or whose result has no ``runId`` records nothing.
+  ``capture.WorkflowLaunches`` joins each workflow agent (keyed on
+  ``TranscriptMeta.kind == "workflow-agent"``, never on its agent type) to
+  the latest call for its ``runId`` at or before its first priced reply,
+  else to the reply before ``WorkflowRun.started``, else to none.
+  ``capture.prompt_cycles`` and ``habits`` use it for the cycle and the
+  spawning reply.
+- ``capture.Cycle`` takes the tag of a reply to a background agent's (or
+  workflow's) report from the cycle whose call launched it, not the cycle
+  that happened to be open when the report arrived (``Cycle.late_turns``,
+  ``Cycle.handed_off``). The reply is the turn that read the report and
+  the turns that follow its tool calls, and its cost goes to that cycle
+  too (``capture.cycle_spend``). Hand-offs carry through: an agent or
+  workflow such a reply starts, and the reply to its report, go to that
+  cycle as well. The turns stay where they ran, so the timeline is
+  unchanged. ``Cycle.running`` holds the earlier cycles that still had an
+  agent or workflow running when the cycle's first reply ran (times only).
+
+Grounding addition (``PARSER_VERSION`` 38). What the transcript says about
+what a reply changed, so ``capture_tags.settle`` can put right the words
+a tag claims. Counts only; no path or command is kept:
+
+- ``Turn.edit_call_count: int = 0`` -- how many of this turn's edit calls
+  (``Edit``, ``Write``, ``MultiEdit``, ``NotebookEdit``) aimed outside a
+  ``.claude`` folder: changes to your work. Taken back for an edit that
+  failed, as ``edit_target_hashes`` is.
+- ``Turn.edit_doc_count: int = 0`` -- how many of those were aimed at a
+  documentation file (``capture_catalogue.DOC_SUFFIXES``: ``.md``,
+  ``.rst``, ``.txt``, ``.adoc``). All of them, and at least one, means the
+  edits were to documentation only.
+- ``Turn.shell_change_count: int = 0`` -- how many of this turn's
+  Bash/PowerShell commands changed files without authoring their content
+  (``shell_writes.changes_files``: ``git merge``, ``mv``, ``rm``; not
+  ``git commit``, not a redirection to ``/dev/null``). A command is one,
+  however many files it moves. Taken back for a command that was blocked
+  or denied. A write the command authored is ``shell_write_count``.
+
+``capture.Cycle`` carries the facts these counts, ``tests_run``,
+``skills_invoked``, ``tool_error_count``, ``admit_candidate`` and the
+messages' ``human_correction``/``human_adjust`` add up to (``Cycle.facts``),
+and ``Cycle.settled`` is the cycle's tag with ``capture_tags.settle``
+applied. The tag fields stay as written.
+
+Startup-sizes addition (``PARSER_VERSION`` 41). What a ``prompt_snapshot``
+says each tool costs, for the startup breakdown's tool definitions and
+the list of tools an agent type is offered and never uses. No new model
+field: ``Event.detail`` of the ``prompt_snapshot`` event gains three keys,
+all lengths keyed by a plain identifier and never a description or schema:
+
+- ``tools_chars: int`` -- characters of every tool definition in the
+  snapshot together.
+- ``tool_chars: dict`` -- a built-in tool's name (one ``events.tool_server``
+  puts in the built-in bucket) -> the characters of its definition.
+- ``server_chars: dict`` -- an MCP server's name -> the characters of all
+  its tools' definitions together.
+
+A subagent's transcript writes this snapshot after its first call, so
+``context_budget`` takes the first snapshot that lists tools wherever it
+sits. A header-only snapshot later on has no ``tools_chars`` and changes
+nothing.
 
 Parser-signals addition (``PARSER_VERSION`` 19 -- plan SURV-4/5/6/7, see
 ``events.py``/``parse.py``'s own module docstrings). Every new value is a
@@ -640,6 +956,10 @@ class EventKind(StrEnum):
     LIMIT_HIT = "limit_hit"
     LIMIT_RESUME = "limit_resume"
     AGENT_TERMINATED = "agent_terminated"
+    #: Parser-signals addition (``PARSER_VERSION`` 37, see module
+    #: docstring): your answer to a plan Claude put up. Its length and one
+    #: class word only; it never opens a cycle.
+    PLAN_FEEDBACK = "plan_feedback"
 
 
 @dataclass(slots=True)
@@ -681,11 +1001,18 @@ class CaptureTag:
     brief: str | None = None
     level: str | None = None
     shift: str | None = None
+    #: Why work was redone or fixed (``left_out|missed|changed|tools``),
+    #: and whether the reply admits an earlier mistake of Claude's
+    #: (``claim|change|instruction``). Both ride on ``shift``.
+    why: str | None = None
+    admit: str | None = None
     size: str | None = None
     missing: tuple[str, ...] = ()
     plan: str | None = None
     skill: str | None = None
     skill_name: str | None = None
+    #: ``found`` and ``fit`` are no longer asked for: only a transcript
+    #: from before they were dropped carries them.
     found: str | None = None
     fit: str | None = None
     rules: str | None = None
@@ -703,12 +1030,18 @@ class CaptureTag:
     #: that call cost, in USD. Its ``chars`` are 0: no reply carried it.
     judged: bool = False
     judge_usd: float = 0.0
+    #: What grounding put right in this tag, ``key:from>to`` (``to`` empty
+    #: for a word dropped): the hook's changes to Haiku's words (the tag
+    #: row's ``g`` field), then what ``capture_tags.settle`` changed.
+    grounded: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
 class Feedback:
     """Your /cg-feedback answers (see the module docstring). Every value is
-    a word from ``capture_catalogue.FEEDBACK_VOCAB``."""
+    a word from ``capture_catalogue.FEEDBACK_VOCAB``, except ``from_text``
+    and ``other``, which are keys. ``slow`` is the older run's question,
+    read but no longer asked."""
 
     outcome: str | None = None
     slow: tuple[str, ...] = ()
@@ -719,6 +1052,40 @@ class Feedback:
     handoff: str | None = None
     #: "tag" | "answers" | "skipped".
     source: str = "tag"
+    #: Feedback redesign addition (``PARSER_VERSION`` 39, see module
+    #: docstring). What your follow-up messages were mostly: words from
+    #: ``capture_catalogue.FEEDBACK_VOCAB["why"]``.
+    why: tuple[str, ...] = ()
+    #: Where the thing Claude missed was: asked only when ``why`` has
+    #: ``missed``.
+    missed_in: str | None = None
+    #: After an approved plan: whether it covered what you then fixed.
+    plan: str | None = None
+    #: Whether a tip ClaudeGlass showed was right, and the id of that tip
+    #: (``capture_catalogue.TIP_HINT_TITLES``).
+    tip: str | None = None
+    tip_hint: str | None = None
+    #: The keys whose word Claude picked from a note you typed under
+    #: "Other", and the keys you answered that way. Keys only: the note
+    #: itself is read in memory and dropped.
+    from_text: tuple[str, ...] = ()
+    other: tuple[str, ...] = ()
+    #: ``why`` was read from an older run's ``slow`` answer.
+    why_older: bool = False
+
+
+@dataclass(slots=True)
+class PlanCheck:
+    """Your answer to the plan check (see the module docstring):
+    ``plan_tool_use_id`` is the id of the ``ExitPlanMode`` call of the
+    plan you had approved (an id only), ``word`` one of
+    ``capture_catalogue.PLAN_CHECK_WORDS``: ``covered`` (the plan said it),
+    ``gap`` (the plan left it out), ``new`` (you thought of it later) or
+    ``none`` (not a fix). ``""`` when you declined the question or
+    answered in your own words, which are read in memory and dropped."""
+
+    plan_tool_use_id: str = ""
+    word: str = ""
 
 
 @dataclass(slots=True)
@@ -728,8 +1095,24 @@ class PlanStats:
     steps: int = 0
     files: int = 0
     chars: int = 0
-    #: "approved" | "rejected" | None (no answer seen).
+    #: "approved" | "approved_by_message" | "rejected" | None (no answer
+    #: seen). Approved by message: you typed a go-ahead, or left plan
+    #: mode, instead of answering the dialog.
     outcome: str | None = None
+    #: Parser-signals addition (see module docstring): you rejected this
+    #: plan in the dialog. It stays True when a go-ahead message later
+    #: turns ``outcome`` into "approved_by_message".
+    rejected: bool = False
+    #: Length of the feedback you gave a rejected plan, 0 when you gave
+    #: none.
+    feedback_chars: int = 0
+    #: Parser-signals addition: how that feedback reads, a word from
+    #: ``capture_catalogue.PLAN_FEEDBACK_CLASSES``; None when none given.
+    feedback_class: str | None = None
+    #: Plan-approval addition (``PARSER_VERSION`` 43): when the plan was
+    #: approved, the time of the line that approved it (see the module
+    #: docstring); "" when it wasn't.
+    approved_ts: str = ""
 
 
 @dataclass(slots=True)
@@ -784,7 +1167,8 @@ class Turn:
     preceding_primary: EventKind = EventKind.UNKNOWN
 
     is_recache: bool = False
-    #: "full-expiry" | "prefix-invalidated" | None
+    #: "full-expiry" | "prefix-invalidated" | "post-compaction" |
+    #: "limit-expiry" | None
     recache_signature: str | None = None
 
     #: WP1 addition (plan deviation, see module docstring): from
@@ -901,6 +1285,11 @@ class Turn:
     commands_run: tuple[str, ...] = ()
     #: Feedback addition (see module docstring): your /cg-feedback answers.
     feedback: Feedback | None = None
+    #: Feedback redesign addition (``PARSER_VERSION`` 39, see module
+    #: docstring): your answer to the plan check, and whether this reply
+    #: carries the /cg-feedback reminder line.
+    plan_check: PlanCheck | None = None
+    coach_reminder: bool = False
     #: Your-hooks addition (see module docstring): hook label -> characters
     #: of context your hooks added just before this turn.
     hook_context_chars: dict = field(default_factory=dict)
@@ -949,6 +1338,65 @@ class Turn:
     #: whether it showed a ClaudeGlass tip.
     reply_asked: bool = False
     coach_tip: bool = False
+    #: Parser-signals addition (see module docstring): how the preceding
+    #: message you typed reads, and the messages you typed while Claude
+    #: was working since the previous reply.
+    human_adjust: bool = False
+    human_go: bool = False
+    human_status: bool = False
+    human_remind: bool = False
+    #: Plan-approval addition (``PARSER_VERSION`` 43): the preceding message
+    #: opened with the wording of a plan handed to a fresh session.
+    human_plan_handoff: bool = False
+    #: Live-coaching addition (see module docstring): the preceding message
+    #: only asked something, and whether it asked for a change.
+    human_question: bool = False
+    human_change: bool = False
+    #: A line you didn't type (a ``META`` event of subkind ``not_typed``)
+    #: came between the previous reply and this one.
+    preceding_not_typed: bool = False
+    queued_prompts: int = 0
+    queued_chars: int = 0
+    queued_steps: int = 0
+    queued_correction: bool = False
+    queued_adjust: bool = False
+    queued_go: bool = False
+    queued_status: bool = False
+    #: Parser-signals addition (see module docstring): clarifying
+    #: ``AskUserQuestion`` round trips this turn made.
+    ask_rounds: int = 0
+    #: Parser-signals addition: denial bucket word -> tool calls turned
+    #: away since the previous reply (see ``events.DENIAL_BUCKETS``).
+    preceding_denials: dict = field(default_factory=dict)
+    #: Parser-signals addition (see module docstring): what Claude said
+    #: about its own mistakes and a tip, and what its tool calls read and
+    #: ran. Yes/no, closed words and counts only.
+    admit_candidate: bool = False
+    admit_caught: str = ""
+    tip_disowned: bool = False
+    read_target_chars: tuple[int, ...] = ()
+    shell_read_count: int = 0
+    shell_read_chars: int = 0
+    tests_run: str = ""
+    #: Live-coaching addition (see module docstring): the edit calls and
+    #: shell writes inside a ``.claude`` folder, and the files this turn's
+    #: subagents changed.
+    config_edit_count: int = 0
+    agent_edit_files: int = 0
+    #: Grounding addition (``PARSER_VERSION`` 38): see the module docstring.
+    edit_call_count: int = 0
+    edit_doc_count: int = 0
+    shell_change_count: int = 0
+    #: Workflow-agents addition (``PARSER_VERSION`` 37): ``Workflow``
+    #: tool_use id -> ``(runId, taskId)`` of the run the call launched. Ids
+    #: only. A resumed run keeps its ``runId``, so one id can have several
+    #: calls.
+    workflow_runs: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: Cost-centres addition (``PARSER_VERSION`` 42): ``Agent``/``Task``
+    #: tool_use id -> ``"background"`` or ``"foreground"``, from the call's
+    #: ``run_in_background`` and then from a result that says it went to
+    #: the background. A word per call, never the call.
+    agent_launches: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)
@@ -1264,7 +1712,8 @@ class Table:
     render time).
 
     Readability additions (all defaulted): ``help``, ``value_labels``,
-    ``row_groups``, ``row_kinds``, ``lead_columns`` and ``dashboard``.
+    ``row_groups``, ``row_kinds``, ``lead_columns``, ``dashboard`` and
+    ``empty_variant``.
     ``value_labels`` maps a raw string cell value (a row
     key such as ``"full-expiry"``) to its display label; it is display
     only -- ``rows`` keep their raw values, which ``recommend.py``'s
@@ -1294,6 +1743,11 @@ class Table:
     lead_columns: list[str] = field(default_factory=list)
     #: One of :data:`DASHBOARD_PLACEMENTS`.
     dashboard: str = "keep"
+    #: Display only: a word the dashboard keys a different empty-table
+    #: sentence on (``name:variant`` in ``grid.js``'s ``EMPTY_TEXT``), for a
+    #: table that is empty for a reason its builder knows. Empty means the
+    #: table's usual sentence.
+    empty_variant: str = ""
 
 
 @dataclass(slots=True)
@@ -1514,6 +1968,7 @@ __all__ = [
     "EventKind",
     "Event",
     "CaptureTag",
+    "PlanCheck",
     "PlanStats",
     "PROMPT_FLAGS",
     "Turn",

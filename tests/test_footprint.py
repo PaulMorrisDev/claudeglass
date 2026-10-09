@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 
 import pytest
 
-from claudeglass import cli, footprint, hook_health, installer, setup_flow
+from claudeglass import capture_catalogue as cat, cli, footprint, hook_health, installer, setup_flow
 from claudeglass.profiles import apply as apply_mod
 
 NOW = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
@@ -318,3 +318,203 @@ def test_uninstall_claude_root_flag(tmp_path, monkeypatch):
     data, _decoy = _elsewhere(tmp_path)
     assert cli.main(["uninstall", "--config-dir", str(data), "--claude-root", str(other), "--yes"]) == 0
     assert "statusLine" not in json.loads((other / "settings.json").read_text(encoding="utf-8"))
+
+
+# -- every hook that can return output runs in the foreground ------------------
+
+
+def _registered(tmp_path, ids) -> list[tuple[str, dict]]:
+    """``(event, entry)`` for every hook entry settings.json would hold
+    for the capture metrics in ``ids``."""
+    config_dir = tmp_path / "claude" / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    plan = hook_health.plan_capture(hook_health.capture_specs(ids), cli._capture_hook_commands(config_dir))
+    after = json.loads(plan.new_text)
+    return [
+        (event, entry) for event, groups in after["hooks"].items() for group in groups for entry in group["hooks"]
+    ]
+
+
+_EVERYTHING = (*cat.LEVEL_METRIC_IDS, *cat.FEEDBACK_IDS, *cat.COACHING_IDS, cat.HAIKU_TAGGER_HOOK)
+_ID_SETS = {
+    **{level: (*cat.level_metrics(level), "coaching_notes") for level in cat.LEVELS[1:]},
+    "everything": _EVERYTHING,
+    "coaching alone": ("coaching_notes",),
+    "haiku tagger": (*cat.level_metrics("deep"), cat.HAIKU_TAGGER_HOOK),
+}
+
+
+@pytest.mark.parametrize("name", list(_ID_SETS))
+def test_every_hook_entry_that_can_return_output_is_registered_in_the_foreground(tmp_path, name):
+    # An async hook's additionalContext and systemMessage only arrive on the
+    # next turn: a tip written for this message would reach Claude, and the
+    # user, a whole reply late.
+    ids = _ID_SETS[name]
+    specs = cat.hook_specs(ids)
+    assert not [spec for spec in specs if spec[1] in cat.OUTPUT_EVENTS and spec[3]], specs
+    for event, entry in _registered(tmp_path, ids):
+        if event in cat.OUTPUT_EVENTS:
+            assert "async" not in entry, (event, entry)
+        else:
+            # What runs in the background is only ever a free signal.
+            assert not entry.get("async") or event in cat.SIGNAL_EVENTS, (event, entry)
+
+
+def test_the_output_events_are_all_registered_by_some_metric_set_and_none_is_a_signal(tmp_path):
+    seen = {event for name in _ID_SETS for event, _entry in _registered(tmp_path, _ID_SETS[name])}
+    assert {"SessionStart", "UserPromptSubmit", "PostToolUse"} <= seen
+    assert not set(cat.OUTPUT_EVENTS) & set(cat.SIGNAL_EVENTS)
+    # The signals really are background hooks, so the check above can fail.
+    async_events = {
+        event for name in _ID_SETS for event, entry in _registered(tmp_path, _ID_SETS[name])
+        if entry.get("async")
+    }
+    assert async_events and async_events <= set(cat.SIGNAL_EVENTS)
+
+
+@pytest.mark.parametrize("name", list(_ID_SETS))
+def test_no_hook_entry_waits_on_a_shell_or_mcp_tool(tmp_path, name):
+    # Claude Code waits for a PostToolUse hook after every call that matches,
+    # and the shell and MCP tools are most of a session's calls: the replay of
+    # real sessions found a size note after them wrong too often to pay for it.
+    config_dir = tmp_path / "claude" / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+    plan = hook_health.plan_capture(hook_health.capture_specs(_ID_SETS[name]), cli._capture_hook_commands(config_dir))
+    groups = json.loads(plan.new_text)["hooks"].get("PostToolUse", [])
+    for group in groups:
+        tools = group["matcher"].split("|")
+        assert tools and set(tools) <= set(cat.COACHING_TOOLS), tools
+        assert not [tool for tool in tools if tool in ("Bash", "PowerShell") or tool.startswith("mcp__")], tools
+
+
+def test_coaching_notes_write_the_matcher_with_the_agent_and_workflow_tools_the_other_sets_leave_out(tmp_path):
+    config_dir = tmp_path / "claude" / "claudeglass"
+    config_dir.mkdir(parents=True, exist_ok=True)
+
+    def written(ids) -> str:
+        plan = hook_health.plan_capture(hook_health.capture_specs(ids), cli._capture_hook_commands(config_dir))
+        (group,) = json.loads(plan.new_text)["hooks"]["PostToolUse"]
+        return group["matcher"]
+
+    assert written(("coaching_notes",)) == "Read|WebFetch|WebSearch|ExitPlanMode|Agent|Workflow"
+    assert written((*cat.level_metrics("deep"), "coaching_notes")) == written(("coaching_notes",))
+    # Without coaching notes nothing waits on an agent's report or a launch message.
+    assert written(cat.level_metrics("deep")) == "Read|WebFetch|WebSearch"
+
+
+def test_the_capture_hooks_item_says_the_agent_and_workflow_calls_wait_for_coaching_notes_only(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=False)}["capture_hooks"]
+    assert "With coaching notes on, it also waits after an approved plan and an agent or workflow call." in item.what_it_does
+    assert (
+        "It waits after a finished subagent while coaching notes are on or Claude Haiku judges agent runs."
+        in item.what_it_does
+    )
+    assert "never after a shell command" in item.what_it_does
+
+
+def test_the_launcher_its_module_and_the_word_list_are_all_one_part_of_the_footprint(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    hook_health.connect(
+        hook_health.plan_capture(hook_health.capture_specs(cat.level_metrics("essentials")), cli._capture_hook_commands(config_dir)),
+        now=NOW,
+    )
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=False)}["capture_hooks"]
+    assert "launcher" in item.what_it_does and "data folder" in item.what_it_does
+    assert "never after a shell command" in item.what_it_does
+    # Removing the settings entries and then the data folder leaves nothing behind,
+    # the launcher's cached bytecode included.
+    plan = footprint.plan_uninstall(config_dir)
+    assert plan.settings_changes and all("capture-hook.py" in line for line in plan.settings_changes)
+    footprint.remove_settings_entries(plan, now=NOW)
+    hooks_dir = config_dir / "hooks"
+    (hooks_dir / "__pycache__").mkdir()
+    (hooks_dir / "__pycache__" / "capture_hook.cpython-311.pyc").write_bytes(b"pyc")
+    assert {p.name for p in hooks_dir.iterdir()} >= {cat.HOOK_SCRIPT, cat.HOOK_MODULE, cat.CATALOGUE_FILE, "__pycache__"}
+    assert footprint.delete_data(config_dir) == []
+    assert not config_dir.exists()
+
+
+def test_the_capture_hooks_show_while_only_a_feedback_item_runs_them(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    (config_dir / "config.toml").write_text('[capture]\nlevel = "off"\nfeedback = ["feedback_skill"]\n', encoding="utf-8")
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=False)}["capture_hooks"]
+    assert item.status == "not installed" and "/cg-feedback" in item.what_it_does
+
+
+# -- Phase 7: what a change costs, and what capture's start note says --------
+
+_CACHE_COST = (
+    "None by itself. Each session writes its own part of the prompt cache, and a change to the tool set "
+    "rewrites the shared part once."
+)
+
+
+def test_an_applied_change_costs_nothing_by_itself_and_says_why_in_cache_terms(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _fake_backup(config_dir, "20260920T000000Z")
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=None)}["apply:20260920T000000Z"]
+    assert item.token_cost == _CACHE_COST
+    # The old line said every session builds its cache from scratch, and that a change then saves or costs more.
+    assert "from scratch" not in item.token_cost and "estimate" not in item.token_cost
+
+
+def test_the_settings_expectation_says_the_same_about_the_cache():
+    (text,) = [text for title, text in footprint.EXPECTATIONS if title == "A change takes effect in new sessions"]
+    assert "Each session writes its own part of the prompt cache" in text
+    assert "a change to the tool set rewrites the shared part once" in text
+    assert "from scratch" not in text and "costs nothing extra" not in text
+    assert "(/model) does rebuild that session's cache once" in text
+
+
+def _expect_text(**capture_args) -> str:
+    from claudeglass.config import CaptureConfig
+
+    (first, *_) = footprint.expectations(CaptureConfig(**capture_args))
+    assert first[0] == "It uses a few of your Claude tokens while capture is on"
+    return first[1]
+
+
+def test_the_expectation_for_capture_is_the_warning_for_what_is_on():
+    from claudeglass import capture_view
+    from claudeglass.config import CaptureConfig
+
+    config = CaptureConfig(level="standard")
+    text = _expect_text(level="standard")
+    assert text.startswith("Metrics capture is on (Standard). Claude reads a short note at the start of a session")
+    assert capture_view.warning_text(config.active_metrics(), config.tagger).removeprefix(
+        "Metrics capture uses your tokens. "
+    ) in text
+    # Claude reads no note when a subagent starts, and the line no longer says it does.
+    assert "subagent starts" not in text and "or subagent" not in text
+    assert "subagents and workflow agents are asked for nothing" in text
+    assert text.endswith("shows how many. Turn it off with 'claudeglass capture off'.")
+
+
+def test_the_expectation_for_capture_follows_the_tagger():
+    text = _expect_text(level="essentials", tagger="haiku")
+    assert "Claude Haiku writes the tags in the background" in text
+    assert "Claude reads" not in text and "one-line tag you will see" not in text
+
+
+def test_the_expectation_for_capture_names_the_tool_note_at_deep_only():
+    assert "after a large read, search or web result" in _expect_text(level="deep")
+    assert "after a large read" not in _expect_text(level="essentials")
+
+
+def test_the_capture_hooks_item_says_what_the_start_note_and_the_agents_get(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    hook_health.install_hook_files(config_dir, hook_health.CAPTURE_FILES[cat.HOOK_SCRIPT])
+    hook_health.connect(
+        hook_health.plan_capture(hook_health.capture_specs(cat.level_metrics("essentials")), cli._capture_hook_commands(config_dir)),
+        now=NOW,
+    )
+    item = {item.key: item for item in footprint.inventory(config_dir, service_registered=False)}["capture_hooks"]
+    text = item.what_it_does
+    assert "adds a short note when a session starts (and after /clear or a compaction)" in text
+    assert "adds no start note" in text and "Claude Haiku writing the tags" in text
+    assert "Subagents and the agents a workflow starts are asked for nothing" in text
+    assert "Claude Haiku judges each agent run in the background" in text
+    assert "session or subagent starts" not in text

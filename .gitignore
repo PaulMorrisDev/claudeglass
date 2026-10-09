@@ -29,3 +29,7 @@ tests/fixtures/_private/
 
 # Playwright MCP screenshots and snapshots
 .playwright-mcp/
+
+# A design tool's cache (it turns up under service/static/ too): may hold
+# local paths, never committed
+.impeccable/

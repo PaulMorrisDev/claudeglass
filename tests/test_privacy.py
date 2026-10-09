@@ -34,14 +34,17 @@ import json
 import re
 from pathlib import Path
 
+from claudeglass import cache
 from claudeglass.discovery import load_meta
-from claudeglass.model import Column, EventKind, Recommendation, Section, Table, TranscriptMeta
+from claudeglass.model import PROMPT_FLAGS, Column, EventKind, Recommendation, Section, Table, TranscriptMeta
 from claudeglass.parse import parse_transcript
 
 from helpers import (
     assert_privacy,
+    assert_privacy_deep,
     attachment_line,
     ignorable_line,
+    queue_operation_line,
     system_line,
     tool_use_block,
     tool_result_block,
@@ -976,6 +979,43 @@ def test_privacy_mcp_server_fields_hold_only_identifiers_and_numbers(tmp_path: P
     assert_privacy(result)
 
 
+def test_privacy_prompt_snapshot_keeps_tool_sizes_by_identifier_only(tmp_path: Path):
+    """A snapshot's per-tool sizes are keyed by built-in tool name and MCP
+    server name, valued by a length: never a description, a schema, or a name
+    that is not a plain identifier."""
+    hostile = "C:\\Users\\someone\\secret notes " + "x" * 200
+    lines = [
+        attachment_line(
+            "prompt_snapshot",
+            systemPrompt=["Private system prompt for someone@example.com"],
+            tools=[
+                {"name": "Read", "description": "Reads /home/someone/private.txt", "input_schema": {"x": hostile}},
+                {"name": "mcp__figma__get", "description": "https://example.com/private"},
+                {"name": hostile, "description": "Private."},
+                {"name": "t" * 200, "description": "Private."},
+            ],
+        ),
+        turn_line(message_id="msg_1"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path), kind="subagent", session_id="s"))
+    ident = re.compile(r"^[A-Za-z0-9_.-]{1,128}$")
+    snapshots = [e for e in result.events if e.subkind == "prompt_snapshot"]
+    assert snapshots
+    for event in snapshots:
+        for field in ("tool_chars", "server_chars"):
+            for name, size in (event.detail.get(field) or {}).items():
+                assert ident.match(name), name
+                assert isinstance(size, int) and size > 0
+    detail = snapshots[0].detail
+    assert set(detail["tool_chars"]) == {"Read"}
+    assert set(detail["server_chars"]) == {"figma"}
+    text = repr(result)
+    assert "Private" not in text and "secret notes" not in text and "someone" not in text
+    assert_privacy(result)
+
+
 def test_privacy_meta_phase_and_description_leave_only_the_role_word(tmp_path: Path):
     """A workflow agent's phase and description are free text. The meta keeps
     one canonical role word and nothing they said: no sentence, no path, no
@@ -1014,3 +1054,572 @@ def test_privacy_meta_phase_and_description_leave_only_the_role_word(tmp_path: P
     assert meta.description_len == len("impl:/home/someone/private/notes.txt " + sentence)
     _assert_no_violations(result)
     assert_privacy(meta)
+
+
+# -- Parser signals (PARSER_VERSION 37): a message typed while Claude works --
+
+
+_QUEUED_DETAIL_KEYS = {
+    "origin", "chars", "has_paste", "unsized_blocks", "correction", "flags", "has_image", "steps",
+    "vague", "ack", "go", "status", "adjust", "remind", "dup",
+}
+
+
+def test_privacy_queued_message_text_never_reaches_the_digest(tmp_path: Path):
+    # Words, a path, an address and a link in what you typed while Claude
+    # worked: the patterns read them in memory, and only counts and flags
+    # are kept. The same goes for a peer's message, an enqueue line, the
+    # typed copy of a queued message and a line you didn't type.
+    secrets = [
+        "zebrafish", "quokka", "narwhal", "pangolin", "axolotl", "capybara", "wombat", "ocelot",
+        "mongoose", "platypus",
+    ]
+    long_text = f"actually rename {secrets[0]} to {secrets[1]} in C:/Users/someone/private/{secrets[2]}.py " + "x" * 120
+    png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+    lines = [
+        user_str_line("refactor the parser", origin={"kind": "human"}, timestamp="2026-09-18T12:00:00.000Z"),
+        turn_line(content=[tool_use_block("Bash", "tu_q", {"command": "ls"})], timestamp="2026-09-18T12:00:05.000Z"),
+        attachment_line("queued_command", prompt=long_text, commandMode="prompt", origin={"kind": "human"},
+                        timestamp="2026-09-18T12:00:10.000Z"),
+        attachment_line("queued_command", prompt=f"I told you to email {secrets[3]}@example.com", commandMode="prompt"),
+        attachment_line("queued_command", prompt=f"see https://example.com/{secrets[4]}?q=1 and continue",
+                        commandMode="prompt", origin={"kind": "human"}),
+        attachment_line("queued_command",
+                        prompt=[{"type": "text", "text": f"it looks wrong {secrets[5]}"},
+                                {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": png}}],
+                        commandMode="prompt", origin={"kind": "human"}),
+        attachment_line("queued_command", prompt=f"please review {secrets[6]}", commandMode="prompt",
+                        origin={"kind": "peer"}, isMeta=True),
+        attachment_line("queued_command", prompt=f"<task-notification><task-id>t1</task-id>{secrets[7]}</task-notification>",
+                        commandMode="task-notification"),
+        queue_operation_line("enqueue", content=f"also fix {secrets[8]}"),
+        user_str_line(f"The app was quit while you were working {secrets[9]}", origin={"kind": "human"}),
+        user_block_line([tool_result_block("tu_q", "ok")]),
+        turn_line(message_id="msg_q", input_tokens=50, output_tokens=5, timestamp="2026-09-18T12:00:40.000Z"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    queued = [e for e in result.events if e.subkind == "queued_command"]
+    assert [e.detail.get("origin") for e in queued] == ["human", "human", "human", "human", "peer", None]
+    assert result.turns[-1].queued_prompts == 4
+
+    encoded = json.dumps(cache.encode_result(result))
+    blob = encoded + repr(result.events) + repr(result.turns) + repr(result.diagnostics) + repr(result.meta)
+    for word in secrets + ["example.com", "someone", "private", "C:/Users", png]:
+        assert word not in blob, word
+    assert "x" * 20 not in blob
+    for event in queued:
+        assert set(event.detail) <= _QUEUED_DETAIL_KEYS | {"task_id", "status"}, event.detail
+        for value in event.detail.get("flags", ()):
+            assert value in PROMPT_FLAGS
+    _assert_no_violations(result)
+
+
+def test_privacy_message_flag_patterns_keep_a_flag_never_the_words(tmp_path: Path):
+    # The go, status, adjust and remind patterns match words you typed:
+    # what stays is a flag on the event and the turn.
+    typed = [
+        "continue", "how is it going?", "actually, rename the quokka widget", "I already told you about the narwhal",
+    ]
+    lines = []
+    for n, text in enumerate(typed):
+        lines.append(user_str_line(text, origin={"kind": "human"}, timestamp=f"2026-09-18T12:0{n}:00.000Z"))
+        lines.append(turn_line(message_id=f"msg_{n}", timestamp=f"2026-09-18T12:0{n}:30.000Z"))
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    assert [(t.human_go, t.human_status, t.human_adjust, t.human_remind) for t in result.turns] == [
+        (True, False, False, False), (False, True, False, False), (False, False, True, False),
+        (False, False, False, True),
+    ]
+    blob = json.dumps(cache.encode_result(result)) + repr(result.events) + repr(result.turns)
+    for word in ("quokka", "narwhal", "continue", "going", "rename", "already told"):
+        assert word not in blob, word
+    _assert_no_violations(result)
+
+
+def test_privacy_the_change_request_flag_keeps_a_yes_never_the_words(tmp_path: Path):
+    # "Is this a change request" is read from the words you typed, a yes or a no is all that stays,
+    # with the release, paste and plan patterns the plan_first rule reads in memory.
+    typed = [
+        "now tighten the axolotl footer", "the axolotl footer is too small", "merge the axolotl branch and ship it",
+        "[Pasted text #1 +40 lines] add an axolotl page, add a yak page and add a zebra page for the app",
+    ]
+    lines = []
+    for n, text in enumerate(typed):
+        lines.append(user_str_line(text, origin={"kind": "human"}, timestamp=f"2026-09-18T12:0{n}:00.000Z"))
+        lines.append(turn_line(message_id=f"msg_{n}", timestamp=f"2026-09-18T12:0{n}:30.000Z"))
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+    assert [(t.human_change, t.human_go, t.prompt_steps) for t in result.turns] == [
+        (True, False, 0), (False, False, 0), (False, False, 0), (True, False, 0),
+    ]
+    blob = json.dumps(cache.encode_result(result)) + repr(result.events) + repr(result.turns)
+    for word in ("axolotl", "yak", "zebra", "tighten", "footer", "merge", "Pasted"):
+        assert word not in blob, word
+    _assert_no_violations(result)
+
+
+def test_privacy_plan_feedback_and_denial_text_leave_a_length_and_a_word_never_the_words(tmp_path: Path):
+    # What you type into a rejected plan, a declined question or a deny
+    # rule's message, and the text a hook or the classifier answers with,
+    # is read in memory for its bucket and class: only counts, a length
+    # and a closed word are kept.
+    secrets = ["zebrafish", "quokka", "narwhal", "pangolin", "axolotl", "capybara", "wombat", "ocelot", "mongoose"]
+    sent_back = (
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file "
+        "edit, the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+    )
+    feedback = f"why not use {secrets[0]} in C:/Users/someone/private/{secrets[1]}.py? mail {secrets[2]}@example.com"
+    lines = [
+        user_str_line("plan the change", origin={"kind": "human"}, timestamp="2026-09-18T12:00:00.000Z"),
+        turn_line(content=[tool_use_block("ExitPlanMode", "tu_p", {"plan": f"1. edit {secrets[3]}.py"}),
+                           tool_use_block("AskUserQuestion", "tu_q", {"questions": [{"question": secrets[4]}]}),
+                           tool_use_block("Bash", "tu_h", {"command": "make"}),
+                           tool_use_block("Bash", "tu_a", {"command": "make"}),
+                           tool_use_block("Bash", "tu_r", {"command": "make"})],
+                  timestamp="2026-09-18T12:00:05.000Z"),
+        user_block_line([tool_result_block("tu_p", sent_back + feedback, is_error=True)],
+                        toolDenialKind="user-rejected", timestamp="2026-09-18T12:00:10.000Z"),
+        user_block_line([tool_result_block("tu_q", sent_back + f"skip it, {secrets[5]}", is_error=True)],
+                        toolDenialKind="user-rejected", timestamp="2026-09-18T12:00:11.000Z"),
+        user_block_line([tool_result_block("tu_h", f"PreToolUse:Bash hook error: [{secrets[6]}.sh] STOP",
+                                           is_error=True)],
+                        toolDenialKind="permission-rule", timestamp="2026-09-18T12:00:12.000Z"),
+        user_block_line([tool_result_block("tu_a", f"Blocked by the classifier: {secrets[7]}", is_error=True)],
+                        toolDenialKind="automode-blocked", timestamp="2026-09-18T12:00:13.000Z"),
+        user_block_line([tool_result_block("tu_r", f"{secrets[8]}, not now", is_error=True)],
+                        toolDenialKind="permission-rule", timestamp="2026-09-18T12:00:14.000Z"),
+        user_str_line("[Request interrupted by user for tool use]", timestamp="2026-09-18T12:00:15.000Z"),
+        turn_line(message_id="msg_after", input_tokens=50, output_tokens=5, timestamp="2026-09-18T12:00:40.000Z"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+
+    [event] = [e for e in result.events if e.kind == EventKind.PLAN_FEEDBACK]
+    assert (event.size_chars, event.subkind, event.detail) == (len(feedback), "question", {})
+    buckets = [e.detail["bucket"] for e in result.events if e.kind == EventKind.TOOL_DENIAL]
+    assert buckets == ["plan_rejected", "question_declined", "hook_blocked", "auto_blocked", "refused"]
+    assert result.turns[1].preceding_denials == {
+        "plan_rejected": 1, "question_declined": 1, "hook_blocked": 1, "auto_blocked": 1, "refused": 1,
+    }
+
+    encoded = json.dumps(cache.encode_result(result))
+    blob = encoded + repr(result.events) + repr(result.turns) + repr(result.diagnostics) + repr(result.meta)
+    for word in secrets + ["example.com", "someone", "private", "C:/Users", "why not use"]:
+        assert word not in blob, word
+    for e in result.events:
+        if e.kind in (EventKind.TOOL_DENIAL, EventKind.PLAN_FEEDBACK, EventKind.INTERRUPT):
+            assert set(e.detail) <= {"bucket", "after"}, e.detail
+    _assert_no_violations(result)
+
+
+def test_privacy_reply_text_and_shell_reads_leave_yes_no_answers_and_sizes_never_the_words(tmp_path: Path):
+    # A reply that owns a mistake, asks a question and disowns a tip, the
+    # words and paths of a Read, a shell search and a test run, and what
+    # came back from them: read in memory, and only a yes/no, a count, a
+    # size and a closed word are kept.
+    from claudeglass import parse
+
+    parse.set_salt(b"p" * 32)
+    secrets = ["zebrafish", "quokka", "narwhal", "pangolin", "axolotl", "capybara", "wombat", "ocelot"]
+    persisted = (
+        f"<persisted-output>\nOutput too large (90KB). Full output saved to: /tmp/{secrets[5]}/out.txt\n\n"
+        f"Preview (first 2KB):\n{secrets[6]} line\n</persisted-output>"
+    )
+    lines = [
+        user_str_line("why did you change that?", origin={"kind": "human"}, timestamp="2026-09-18T12:00:00.000Z"),
+        turn_line(
+            message_id="msg_a",
+            content=[
+                {"type": "text", "text": f"My mistake, I misread {secrets[0]}. That ClaudeGlass tip was a false positive."},
+                tool_use_block("Read", "tu_r", {"file_path": f"C:/work/{secrets[1]}/notes.txt"}),
+                tool_use_block("Bash", "tu_g", {"command": "git status"}),
+                tool_use_block("Bash", "tu_s", {"command": f"cd C:/work/{secrets[2]} && grep -rn {secrets[3]} src/"}),
+                tool_use_block("Bash", "tu_t", {"command": f"pytest tests/test_{secrets[4]}.py -q"}),
+                {"type": "text", "text": f"Which of {secrets[7]} do you want? [cg: task=bugfix]"},
+            ],
+            timestamp="2026-09-18T12:00:05.000Z",
+        ),
+        user_block_line([tool_result_block("tu_r", persisted)], timestamp="2026-09-18T12:00:06.000Z"),
+        user_block_line([tool_result_block("tu_g", "clean")], timestamp="2026-09-18T12:00:07.000Z"),
+        user_block_line([tool_result_block("tu_s", f"src/a.py:1:{secrets[3]}")], timestamp="2026-09-18T12:00:08.000Z"),
+        user_block_line([tool_result_block("tu_t", "1 passed")], timestamp="2026-09-18T12:00:09.000Z"),
+        turn_line(message_id="msg_b", timestamp="2026-09-18T12:00:40.000Z"),
+    ]
+    path = tmp_path / "session.jsonl"
+    write_jsonl(path, lines)
+    result = parse_transcript(path, TranscriptMeta(path=str(path)))
+
+    turn = result.turns[0]
+    assert (turn.reply_asked, turn.admit_candidate, turn.admit_caught, turn.tip_disowned) == (True, True, "user", False)
+    assert (turn.read_target_chars, turn.shell_read_count, turn.shell_read_chars, turn.tests_run) == (
+        (len(persisted),), 1, len(f"src/a.py:1:{secrets[3]}"), "targeted",
+    )
+
+    encoded = json.dumps(cache.encode_result(result))
+    blob = encoded + repr(result.events) + repr(result.turns) + repr(result.diagnostics) + repr(result.meta)
+    # The persisted output's own path, not "/tmp/": on Linux the transcript itself sits under /tmp.
+    for word in secrets[:3] + secrets[4:] + [f"/tmp/{secrets[5]}", "C:/work", "Preview", "misread", "false positive"]:
+        assert word not in blob, word
+    # Of the commands, only the first one's first words (the existing prefix) are kept.
+    assert result.turns[0].cmd_prefix == "git status"
+    _assert_no_violations(result)
+    for t in result.turns:
+        assert t.admit_caught in ("", "user", "self") and t.tests_run in ("", "targeted", "full")
+
+
+def test_privacy_rework_after_delivery_holds_counts_closed_words_and_amounts_never_the_words(tmp_path: Path):
+    # A request, a correction, and a reply that owns a mistake and carries a
+    # tag, every one full of words: the pieces of work, the causes and the
+    # admitted mistakes are counted from them, and none of the words, nor a
+    # file name, reaches the section, the pieces or their JSON.
+    from types import SimpleNamespace as NS
+
+    from claudeglass import habits, parse, rework
+    from claudeglass.pricing import load_pricing
+    from claudeglass.units import Units
+    from test_capture import _note
+    from test_habits import MODEL, _edit_reply, _said, _ts, _work_session
+
+    parse.set_salt(b"p" * 32)
+    secrets = ["marmoset", "tapir", "lemur", "okapi", "dugong", "gecko", "manatee", "pika"]
+    lines = [
+        _note(0, ["task", "shift", "why", "admit"]),
+        _said(1, f"add the {secrets[0]} form to src/{secrets[1]}.py"),
+        *_edit_reply(1, 0, path=f"src/{secrets[1]}.py"),
+        _said(20, f"no, that's wrong, it's broken: {secrets[2]}"),
+        turn_line(
+            content=[
+                tool_use_block(
+                    "Edit", "tu_e1",
+                    {"file_path": f"src/{secrets[1]}.py", "old_string": secrets[3], "new_string": secrets[4]},
+                ),
+                {"type": "text", "text": f"My mistake, I misread {secrets[5]}."},
+            ],
+            model=MODEL, timestamp=_ts(21), output_tokens=800,
+        ),
+        user_block_line([tool_result_block("tu_e1", f"ok {secrets[6]}")], timestamp=_ts(22)),
+        turn_line(
+            content=[{"type": "text", "text": f"Fixed {secrets[7]}. [cg: task=bugfix shift=fix why=missed admit=claim]"}],
+            model=MODEL, timestamp=_ts(23), output_tokens=800,
+        ),
+    ]
+    pricing = load_pricing(path=Path(__file__).resolve().parent / "fixtures" / "pricing_min.toml")
+    h = habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing, window="last 30 days")
+    (piece,) = h.work_pieces
+    assert (piece.rework, piece.admitted, piece.admitted_user) == (1, 1, 1)
+    section = rework.build_section(h, Units())
+    rows = {table.name: table.rows for table in section.tables}
+    assert rows["rework_causes"] and rows["rework_admitted"] and rows["rework_by_level"]
+
+    blob = repr(section) + repr(h.work_pieces) + json.dumps([dataclasses.asdict(p) for p in h.work_pieces], default=str)
+    for word in [*secrets, "misread", "it's broken"]:
+        assert word not in blob, word
+    assert_privacy(section)
+    # A piece holds numbers, closed words and the salted hashes of what it touched, never text.
+    for name, value in dataclasses.asdict(piece).items():
+        parts = value if isinstance(value, (tuple, list)) else [value]
+        flat = [x for part in parts for x in (part if isinstance(part, (tuple, list)) else [part])]
+        assert all(isinstance(x, (int, float, str, bool, type(None))) for x in flat), name
+        assert all(len(x) <= _MAX_STR_LEN for x in flat if isinstance(x, str)), name
+
+
+def test_privacy_a_read_files_path_and_content_leave_a_hash_a_size_and_a_count_never_the_words(tmp_path: Path, monkeypatch):
+    # Agents read a file whose path and content are full of words. The
+    # context-file stats, the rows built from them and the tuning block keep
+    # the file's salted hash, its size and who read it: no path, no name, no
+    # text. Names are worked out later from disk, in memory.
+    from types import SimpleNamespace
+
+    from claudeglass import context_files, parse, tuning
+    from claudeglass.pricing import load_pricing
+
+    salt = b"q" * 32
+    monkeypatch.setattr(parse, "_SALT", salt)
+    secrets = ["bonobo", "echidna", "kakapo", "numbat", "quoll", "tarsier"]
+    target = f"C:/work/{secrets[0]}/docs/{secrets[1]}-notes.md"
+    content = f"# {secrets[2]}\n" + (f"{secrets[3]} " * 2000)
+    stats = context_files.ContextFileStats()
+    pricing = load_pricing()
+    for number, (reach, is_main) in enumerate((("main", True), *(("Explore", False),) * 3)):
+        lines = []
+        for index in range(3):
+            blocks = [{"type": "text", "text": f"Reading {secrets[4]}."}]
+            if index == 0:
+                blocks.append(tool_use_block("Read", f"tu_{number}", {"file_path": target}))
+            lines.append(turn_line(content=blocks, timestamp=f"2026-09-18T12:0{index}:00.000Z"))
+            if index == 0:
+                lines.append(
+                    user_block_line([tool_result_block(f"tu_{number}", content)], timestamp="2026-09-18T12:00:30.000Z")
+                )
+        path = tmp_path / f"run{number}.jsonl"
+        write_jsonl(path, lines)
+        result = parse_transcript(path, TranscriptMeta(path=str(path), agent_type=None if is_main else reach))
+        assert result.turns[0].read_target_hashes == (parse.path_hash(target, salt),)
+        assert result.turns[0].read_target_chars == (len(content),)
+        blob = json.dumps(cache.encode_result(result)) + repr(result.events) + repr(result.turns)
+        for word in secrets:
+            assert word not in blob, word
+        _assert_no_violations(result)
+        stats.add(result, pricing, is_main=is_main)
+
+    data = stats.to_dict()
+    [row] = data["reads"]
+    assert row["hash"] == parse.path_hash(target, salt) and row["reach"] == {"Explore": 3, "main": 1}
+    rows = context_files.project_files(data)
+    block = tuning._project_files(SimpleNamespace(context_files=data, config_dir=None))
+    for name, value in (("stats", data), ("rows", rows), ("tuning block", block)):
+        blob = json.dumps(value)
+        for word in [*secrets, "C:/work", "docs/", "notes.md"]:
+            assert word not in blob, (name, word)
+        assert_privacy_deep(value)
+    # The row holds only the hash, numbers and closed words: no name field yet.
+    assert [(item["name"], item["ext"], item["project"]) for item in rows] == [("", "", "")]
+
+
+def test_privacy_naming_a_file_changes_a_copy_of_the_rows_never_the_stats(tmp_path: Path):
+    # Naming a file hashes the files under the project folders and keeps the
+    # path from the project folder beside each hash, in memory, for the
+    # dashboard. The context-file stats a report carries are not touched.
+    import copy
+
+    from claudeglass import claude_md_review, parse
+
+    claude_root = tmp_path / ".claude"
+    config_dir = claude_root / "claudeglass"
+    config_dir.mkdir(parents=True)
+    folder = tmp_path / "work" / "ibis-project"
+    (folder / "docs").mkdir(parents=True)
+    notes = folder / "docs" / "dormouse-notes.md"
+    notes.write_text("Words.\n", encoding="utf-8")
+    salt = parse.load_or_create_salt(config_dir)
+    data = {
+        "transcripts": {"main": 5, "Explore": 5},
+        "window_days": 30.0,
+        "newest": "2026-09-30",
+        "files": [],
+        "reads": [
+            {
+                "hash": parse.path_hash(str(notes), salt),
+                "source": "read",
+                "tokens": 6000,
+                "reach": {"Explore": 5},
+                "cost_usd": 3.0,
+                "weekly": {},
+                "last_seen": "2026-09-30T10:00:00.000Z",
+            }
+        ],
+    }
+    before = copy.deepcopy(data)
+    claude_md_review._NAMES.clear()
+    rows, local = claude_md_review.project_file_rows(config_dir, data, projects=[folder])
+
+    assert [row["name"] for row in rows] == ["docs/dormouse-notes.md"]
+    assert data == before
+    assert "dormouse" not in json.dumps(data) and "ibis" not in json.dumps(data)
+    # The names are in memory only: they are not a field of anything a report keeps.
+    assert all("name" not in item for item in data["reads"])
+    assert local.names and not any(isinstance(value, Path) for item in local.names.values() for value in item.values())
+    claude_md_review._NAMES.clear()
+
+
+
+# -- Phase 8: single lookups, agent runs, report turns, plan rounds and approvals, summaries, model choice ---------
+
+
+def _phase_8_world(root: Path, secrets: list[str]) -> Path:
+    """One project whose transcripts are full of words and paths. The main
+    session reads a file, starts a background agent of a type with a private
+    name, is told its report, sends a plan back with feedback, approves one,
+    builds and summarises. The agent reads files of its own. A second session
+    opens with the approved plan's own text. Returns the project folder."""
+    from test_tuning import SENT_BACK, _agent_turn, _at, _edit, _human, _ok, _say, _write_agent
+
+    project = root / "projects" / f"proj-{secrets[0]}"
+    project.mkdir(parents=True)
+
+    def plan(second: int, use_id: str, text: str) -> dict:
+        return turn_line(content=[tool_use_block("ExitPlanMode", use_id, {"plan": text})], timestamp=_at(second))
+
+    feedback = f"what about {secrets[10]}? mail {secrets[11]}@example.com"
+    launch = {
+        "description": secrets[5],
+        "prompt": f"look in C:/work/{secrets[6]}",
+        "subagent_type": f"{secrets[7]}-reviewer",
+        "run_in_background": True,
+    }
+    main = [
+        _human(0, f"plan the {secrets[1]} change in C:/Users/someone/{secrets[2]}/app.py", entrypoint="cli"),
+        turn_line(
+            content=[tool_use_block("Read", "tu_r", {"file_path": f"C:/Users/someone/{secrets[3]}/notes.txt"})],
+            timestamp=_at(2),
+            message_id="m_read",
+        ),
+        user_block_line([tool_result_block("tu_r", f"{secrets[4]} contents")], timestamp=_at(3)),
+        _say(4, "Read it."),
+        turn_line(content=[tool_use_block("Agent", "tu_bg", launch)], timestamp=_at(10)),
+        user_block_line(
+            [tool_result_block("tu_bg", "Async agent launched successfully.")],
+            toolUseResult={"isAsync": True, "status": "async_launched", "agentId": "bg1"},
+            timestamp=_at(11),
+        ),
+        _say(12, "Waiting."),
+        _human(30, "meanwhile"),
+        _say(31, "Ok."),
+        user_str_line(
+            "<task-notification><task-id>bg1</task-id><status>completed</status>"
+            f"<result>{secrets[8]} found</result></task-notification>",
+            origin={"kind": "task-notification"},
+            timestamp=_at(60),
+        ),
+        _say(61, "Thanks."),
+        plan(70, "tu_p1", f"# Plan\n1. edit {secrets[9]}.py"),
+        user_block_line(
+            [tool_result_block("tu_p1", SENT_BACK + feedback, is_error=True)],
+            toolDenialKind="user-rejected",
+            timestamp=_at(74),
+        ),
+        plan(80, "tu_p2", f"# Plan\n1. edit {secrets[9]}.py\n2. test {secrets[12]}"),
+        user_block_line([tool_result_block("tu_p2", "User has approved your plan.")], timestamp=_at(85)),
+        _edit(90, 5, f"src/{secrets[13]}.py"),
+        _ok(91, 5),
+        _say(92, "Built it."),
+        system_line(
+            "compact_boundary",
+            timestamp=_at(100),
+            compactMetadata={"trigger": "auto", "preTokens": 100_000, "postTokens": 20_000},
+        ),
+        user_str_line(
+            f"This session is being continued from a conversation about {secrets[14]}.",
+            isCompactSummary=True,
+            timestamp=_at(101),
+        ),
+        _say(110, "Continuing.", cache_creation_input_tokens=25_000, ephemeral_1h_input_tokens=25_000),
+    ]
+    write_jsonl(project / "s1.jsonl", main)
+    opus = "claude-opus-4-1"
+    reads = [
+        _agent_turn(
+            20 + 2 * n,
+            f"a_{n}",
+            tool_use_block("Read", f"tu_a{n}", {"file_path": f"C:/work/{secrets[15]}/{n}.py"}),
+            model=opus,
+        )
+        for n in range(3)
+    ]
+    ending = _agent_turn(30, "a_end", {"type": "text", "text": f"Done with {secrets[16]}."}, model=opus)
+    _write_agent(
+        project / "s1" / "subagents",
+        "agent-bg1",
+        {"agentType": f"{secrets[7]}-reviewer", "description": secrets[5]},
+        [*reads, ending],
+    )
+    opening = f"Implement the following plan:\n\n# Plan\n1. edit {secrets[9]}.py\n2. test {secrets[12]}"
+    write_jsonl(project / "s2.jsonl", [_human(200, opening), _say(205, "On it.")])
+    return project
+
+
+def test_privacy_phase_8_tables_the_store_and_the_export_hold_counts_and_words_never_the_names(tmp_path: Path):
+    # The Phase 8 tables (single lookups, what agent runs did, replies to
+    # reports, plans sent back, how builds began, model choice, summaries),
+    # the parsed transcripts as the cache stores them, and the tuning
+    # export's new blocks are built from files full of names, paths and
+    # text. None of it, nor the private agent type, reaches any of them.
+    from claudeglass import parse, tuning
+    from claudeglass.config import Config
+    from claudeglass.corpus import load_corpus
+    from claudeglass.pricing import load_pricing
+    from claudeglass.report import build_report
+    from test_tuning import DAYS, TODAY
+
+    parse.set_salt(b"p" * 32)
+    secrets = [
+        "okapi", "dugong", "gecko", "manatee", "pika", "marmoset", "tapir", "lemur", "numbat", "quoll",
+        "tarsier", "kakapo", "echidna", "bonobo", "wombat", "ocelot", "capybara",
+    ]  # fmt: skip
+    project = _phase_8_world(tmp_path, secrets)
+    corpus = load_corpus([project])
+    pricing = load_pricing()
+    report = build_report(corpus, pricing, Config(tz="UTC"), projects=(), window="all time")
+
+    # The world holds what it was made to: each table has a row to check.
+    sections = {section.key: section for section in report.sections}
+    wanted = {
+        "habits": ("habits_probes", "habits_agent_runs", "habits_report_turns", "habits_plan_rounds"),
+        "plan_handoff": ("plan_handoff_approvals",),
+        "agents": ("cost_centres_models",),
+        "compactions": ("compactions_summary",),
+    }
+    for key, names in wanted.items():
+        tables = {table.name: table for table in sections[key].tables}
+        for name in names:
+            assert tables[name].rows, (key, name)
+        assert_privacy(sections[key])
+
+    # The parsed transcripts, as the cache stores them.
+    stored = []
+    for session in corpus.sessions:
+        for result in (session.top, *session.subs):
+            stored.append(json.dumps(cache.encode_result(result)))
+            _assert_no_violations(result)
+    turns = [turn for session in corpus.sessions for turn in session.top.turns]
+    assert any(turn.human_plan_handoff for turn in turns)
+    assert any(turn.plan_stats and turn.plan_stats.approved_ts for turn in turns)
+
+    document = tuning.build(
+        corpus,
+        Config(tz="UTC"),
+        pricing,
+        config_dir=tmp_path / "claudeglass",
+        days=DAYS,
+        today=TODAY,
+        claude_root=tmp_path / "claude",
+    )
+    assert tuning.validate(document) == []
+    assert_privacy_deep(document)
+    assert document["prompting"]["plans"]["builds"] and document["prompting"]["plans"]["asks"]
+    assert document["agents"]["launches"] and document["agents"]["model_choice"]
+    assert {row["agent_type"] for row in document["agents"]["model_choice"]} == {"custom"}
+    assert document["compactions"]["summaries"] == 1
+
+    blobs = {
+        "report": json.dumps(dataclasses.asdict(report), default=str),
+        "store": "\n".join(stored),
+        "export": tuning.dumps(document),
+    }
+    # What the transcripts hold is kept as it is by the store and the report, which list an agent by its type and a
+    # session by its project and file: those names are theirs. The export holds no name at all.
+    own = {secrets[0], secrets[7], f"{secrets[7]}-reviewer", str(tmp_path)}
+    forbidden = [*secrets[1:], f"{secrets[7]}-reviewer", "C:/Users", "C:/work", "example.com", "someone", str(tmp_path)]
+    for name, blob in blobs.items():
+        for word in [secrets[0], *forbidden]:
+            if name != "export" and word in own:
+                continue
+            assert word not in blob, (name, word)
+
+
+def test_privacy_a_split_run_count_is_a_number_under_a_session_never_the_run(tmp_path: Path):
+    # An agent run that began from a long brief, summarised its context,
+    # and has a private type, a path and words in everything it said: the
+    # coach state keeps a count of each reason under the session's key.
+    from test_coaching import CATALOGUE, _SUMMARISED, _agent_run, _agent_stop, _keep_run, _pending, _prompt, _reply, cat
+
+    line = cat.COACHING_THRESHOLDS["split_brief_chars"]
+    secrets = ["narwhal", "axolotl", "pangolin", "mongoose"]
+    brief = f"look in C:/Users/someone/{secrets[0]} for {secrets[1]} " + "x" * line
+    session, path = _agent_run(
+        tmp_path,
+        [_prompt(brief), _reply(1_000), _SUMMARISED, _reply(2_000, message_id="m2")],
+        agent_id=secrets[2],
+    )
+    payload = _agent_stop(session, secrets[2], agent_type=f"{secrets[3]}-reviewer")
+    assert CATALOGUE["coaching"]["thresholds"]["split_brief_chars"] == line
+    assert _keep_run(tmp_path, payload) is True
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1, "brief": 1}]
+    kept = (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).read_text(encoding="utf-8")
+    for word in [*secrets, "C:/Users", "someone", f"{secrets[3]}-reviewer", path.name, "reviewer", brief[:20]]:
+        assert word not in kept, word

@@ -1668,6 +1668,19 @@ def test_run_once_prunes_old_signals_and_capture_log_with_no_retention_days_set(
     assert log[0]["ts"] == (now - timedelta(days=5)).isoformat(timespec="seconds")
 
 
+def test_run_once_prunes_old_habit_log_records_with_no_retention_days_set(tmp_path: Path, store: Store):
+    # A "Trying it" mark is logged like a capture change, so it is pruned
+    # on every tick at the 180-day default too.
+    options = _options(tmp_path)
+    now = datetime.now(timezone.utc)
+    config.append_habit_log(options.config_dir, kind="habit", item="split_large", now=now - timedelta(days=200))
+    config.append_habit_log(options.config_dir, kind="tip", item="drip_feed", now=now - timedelta(days=5))
+
+    FileWatcher(store, options).run_once()
+
+    assert [record["item"] for record in config.load_habit_log(options.config_dir)] == ["drip_feed"]
+
+
 def test_run_once_uses_an_explicit_retention_days_for_signals_and_capture_log(tmp_path: Path, store: Store):
     # An explicit retention_days narrower than the 180-day default must
     # still reach the signal/capture-log path, not just store rows.

@@ -32,17 +32,27 @@ reader" convention -- see that module's docstring):
 - A turn whose only errors are commands that ran and reported failure
   (``failed``: a failing test or build, a timeout) is not wasted: Claude
   reads that output and acts on it. It is counted
-  (``WasteStats.failed_command_turns``) and left out. One whose only
-  errors are denials falls through to ``tool-denial``. A digest from
+  (``WasteStats.failed_command_turns``) and left out; so is the same
+  command failing :data:`LOOP_FAILURES` or more times within one message
+  of yours, in a main session (``WasteStats.failed_command_loops``,
+  :func:`command_loops`), which once had a Work habits card of its own.
+  One whose only errors are denials falls through to ``tool-denial``. A digest from
   before ``tool_errors_by_kind`` existed counts every error as
   ``tool-error``.
 - ``interrupt`` -- a turn immediately followed by ``[Request
   interrupted``: i.e. the *next* priced turn's own
   ``preceding_primary == EventKind.INTERRUPT``. The turn under scrutiny
   is the one the user cut off before letting it finish, not the turn
-  that reports the interruption.
+  that reports the interruption. Not when the only denials in that
+  window are a plan or question the user answered, or a call a hook or
+  the classifier blocked: the line is then only how Claude Code ends the
+  turn (``events.stop_window``).
 - ``tool-denial`` -- same "followed by" framing as ``interrupt``, keyed
-  off the next priced turn's ``preceding_primary == EventKind.TOOL_DENIAL``.
+  off the next priced turn's ``preceding_primary == EventKind.TOOL_DENIAL``
+  and a call the user or a deny rule turned down among its
+  ``preceding_denials`` (bucket ``refused``). A plan the user sent back
+  or a question declined is an answer, not a denial; a plan with
+  feedback is ``PLAN_FEEDBACK``, never this cause.
 - ``max-turns`` -- a subagent transcript's own ``TranscriptMeta.
   stopped_by_user`` is the only truncation signal this codebase can
   observe (``topology.py``'s own module docstring: a true ``maxTurns``
@@ -155,6 +165,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Sequence
 
+from . import events as events_mod
 from .model import Column, EventKind, Recommendation, ReportModel, Section, Table, TranscriptResult, Turn, agent_type_label
 from .parse import load_or_create_salt
 from .pricing import Pricing, price_turn
@@ -207,6 +218,11 @@ CAUSES: tuple[str, ...] = ("tool-error", "blocked", "interrupt", "tool-denial", 
 #: The count-only cause, reported alongside CAUSES but never priced.
 API_ERROR_RETRY_CAUSE = "api-error-retry"
 
+#: The same command failing this many times within one message of yours
+#: is a loop (counted, never priced: see ``WasteStats.failed_command_loops``).
+LOOP_FAILURES = 3
+_SHELL_TOOLS = ("Bash", "PowerShell")
+
 #: A blocked turn whose blocked calls were all a known token saver's own
 #: redirect -- deliberate, not waste (see the module docstring and
 #: ``known_savers.py``). Priced and shown in ``waste_by_cause``, but
@@ -238,6 +254,40 @@ LEVERS: dict[str, str] = {
     "max-turns": (
         "Raise the subagent's maxTurns budget or narrow its brief so it "
         "finishes -- and reports back -- inside the turns it's given."
+    ),
+}
+
+#: The causes the "failed-calls" quick action ("Failed and blocked tool
+#: calls") is about: a tool call that errored, and a call a hook or a Claude
+#: Code guard turned away (shown per blocker, from ``waste_blocked_by``, with
+#: a token saver's on-purpose redirects said apart). The other costed causes
+#: are about how you work with Claude (an interrupt, a denied permission, a
+#: spent turn budget), so they stay with the work habits.
+CALL_FAILURE_CAUSES: tuple[str, ...] = ("tool-error", "blocked")
+
+#: The words of that quick action's own fix, kept beside the causes they
+#: answer (and LEVERS): the explainer parts, as fixes.py words them, and the
+#: prompt before its "where should this apply" question.
+CALL_FAILURE_FIX: dict[str, str] = {
+    "title": "Check first, and ask when a call is blocked",
+    "why": (
+        "A call that fails or is blocked still costs a whole reply. Claude read the context, made the call "
+        "and has to make it again."
+    ),
+    "where": (
+        "Wherever you tell Claude when it asks: this session, this project's CLAUDE.md or your own. For a "
+        "block that keeps coming back, the instructions of the agent that hits it."
+    ),
+    "trade_off": (
+        "Checking that a path exists adds a quick call each time. Asking about a block means a pause "
+        "when you are away from the screen."
+    ),
+    "undo": "Remove the line from that CLAUDE.md. A rule for this session only ends with the session.",
+    "prompt": (
+        "From now on, before a tool call that needs a path or a name, check that it exists. List the "
+        "folder or read the file. When a hook or a guard blocks a call, stop and tell me what it enforces. "
+        "Don't try another way round it. If the same block keeps coming back, offer to put what it "
+        "enforces into the instructions of the agent that hits it."
     ),
 }
 
@@ -454,6 +504,10 @@ class WasteStats:
         #: Turns whose only failed tool calls were commands that ran and
         #: reported failure -- work, not waste (see the module docstring).
         self.failed_command_turns = 0
+        #: Commands that failed again and again within one message of
+        #: yours (:func:`command_loops`), in main sessions. Counted, not
+        #: priced and not waste.
+        self.failed_command_loops = 0
         #: REDIRECT_CAUSE turns: priced and counted, but never folded
         #: into wasted_turns/wasted_cost_usd/wasted_tokens, by_agent_type
         #: or by_session (see the module docstring).
@@ -482,6 +536,8 @@ class WasteStats:
 
         priced = _priced_turns(result)
         n = len(priced)
+        if result.meta.kind == "top-level":
+            self.failed_command_loops += command_loops(priced)
         for i, turn in enumerate(priced):
             resolved = rates.resolve_model(turn.model)
             breakdown = price_turn(turn, resolved)
@@ -507,9 +563,17 @@ class WasteStats:
                     self.failed_command_turns += 1
             if cause is None and not transcript_truncated:
                 next_turn = priced[i + 1] if i + 1 < n else None
-                if next_turn is not None and next_turn.preceding_primary == EventKind.INTERRUPT:
+                if (
+                    next_turn is not None
+                    and next_turn.preceding_primary == EventKind.INTERRUPT
+                    and events_mod.stop_window(next_turn.preceding_denials)
+                ):
                     cause = "interrupt"
-                elif next_turn is not None and next_turn.preceding_primary == EventKind.TOOL_DENIAL:
+                elif (
+                    next_turn is not None
+                    and next_turn.preceding_primary == EventKind.TOOL_DENIAL
+                    and next_turn.preceding_denials.get("refused")
+                ):
                     cause = "tool-denial"
 
             if cause is None:
@@ -565,6 +629,22 @@ class WasteStats:
     @property
     def wasted_tokens(self) -> int:
         return sum(acc.tokens for acc in self._by_cause.values())
+
+
+def command_loops(turns: Sequence[Turn]) -> int:
+    """How many times a command failed :data:`LOOP_FAILURES` or more times
+    within one message of yours: the same ``cmd_prefix`` on a shell call
+    that came back as an error, counted from the reply after your message
+    to the one before your next."""
+    loops = 0
+    failing: dict[str, int] = {}
+    for turn in turns:
+        if turn.human_prompt_chars is not None:
+            loops += sum(1 for n in failing.values() if n >= LOOP_FAILURES)
+            failing = {}
+        if turn.cmd_prefix and any(turn.tool_errors_by_tool.get(tool, 0) for tool in _SHELL_TOOLS):
+            failing[turn.cmd_prefix] = failing.get(turn.cmd_prefix, 0) + 1
+    return loops + sum(1 for n in failing.values() if n >= LOOP_FAILURES)
 
 
 def compute_waste(
@@ -636,6 +716,10 @@ def build_section(stats: WasteStats, thresholds: WasteThresholds | None = None) 
         "output, so they are not counted as wasted."
     )
     notes.append(
+        f"{stats.failed_command_loops} time(s) a command failed {LOOP_FAILURES} or more times within one "
+        "message of yours, in a main session. Counted only: the retries are not priced here."
+    )
+    notes.append(
         f"{stats.redirected_turns} turn(s) were a known token saver redirecting a call to its own "
         "tools on purpose. They have their own cost, but are not counted as wasted -- see the "
         "\"redirected\" row below and waste_blocked_by."
@@ -663,6 +747,7 @@ def _summary_table(stats: WasteStats) -> Table:
             Column(key="limit_pause_excluded_turns", label="Excluded (limit pause)", kind="int"),
             Column(key="api_error_retry_turns", label="API-error-retry turns (count only)", kind="int"),
             Column(key="failed_command_turns", label="Not counted (a command ran and failed)", kind="int"),
+            Column(key="failed_command_loops", label="Commands failing again and again", kind="int"),
             Column(key="redirected_turns", label="Redirected (not wasted)", kind="int"),
             Column(key="redirected_cost_usd", label="Redirected cost (not wasted)", kind="money"),
         ],
@@ -679,6 +764,7 @@ def _summary_table(stats: WasteStats) -> Table:
                 stats.limit_pause_excluded_turns,
                 stats.api_error_retry_turns,
                 stats.failed_command_turns,
+                stats.failed_command_loops,
                 stats.redirected_turns,
                 round(stats.redirected_cost_usd, 6),
             ]
@@ -1040,6 +1126,8 @@ RULES: tuple = (_rule_wasted_turns,)
 
 __all__ = [
     "ASSUMPTIONS",
+    "CALL_FAILURE_CAUSES",
+    "CALL_FAILURE_FIX",
     "CAUSES",
     "API_ERROR_RETRY_CAUSE",
     "REDIRECT_CAUSE",

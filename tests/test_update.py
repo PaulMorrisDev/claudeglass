@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import __version__, capture_catalogue, cli, hook_health, installer, upgrade
+from claudeglass import __version__, capture_catalogue, cli, footprint, hook_health, installer, upgrade
 
 _writable = cli._writable
 
@@ -316,6 +316,104 @@ def test_finish_renames_a_skill_under_an_earlier_name_and_refreshes_an_old_one(t
     assert (skills / "cg-feedback" / "SKILL.md").read_text(encoding="utf-8") == capture_catalogue.feedback_skill_text()
     assert not old.parent.exists()
     assert brief.read_text(encoding="utf-8") == capture_catalogue.brief_skill_text()
+    rc, out = _Finish(tmp_path).run()
+    assert "Up to date: the hooks, statusline and skills" in out
+
+
+#: The first lines of the skill as it was before the feedback redesign: the
+#: description, the older "TL" headers, and the tag with ``slow``.
+_SKILL_BEFORE_THE_REDESIGN = (
+    "---\nname: cg-feedback\n"
+    "description: Rate the piece of work you just finished for ClaudeGlass, with four quick checkbox questions.\n"
+    "disable-model-invocation: true\nallowed-tools: AskUserQuestion\n---\n\n"
+    "The user wants to rate the piece of work just finished, for ClaudeGlass.\n"
+    '1. Call AskUserQuestion once with header "TL outcome", "TL slowdown", "TL worth" and "TL helped".\n'
+    "   [cg-fb: outcome=<word> slow=<words> worth=<word> helped=<words> handoff=<word>]\n"
+)
+
+
+def test_finish_rewrites_a_feedback_skill_from_before_the_redesign(tmp_path):
+    path = tmp_path / "claude" / "skills" / "cg-feedback" / "SKILL.md"
+    path.parent.mkdir(parents=True)
+    path.write_text(_SKILL_BEFORE_THE_REDESIGN, encoding="utf-8")
+    assert footprint.skill_state("cg-feedback", tmp_path / "claude") == "outdated"
+    rc, out = _Finish(tmp_path).run("--dry-run")
+    assert "This updates the /cg-feedback skill" in out
+    assert path.read_text(encoding="utf-8") == _SKILL_BEFORE_THE_REDESIGN
+    rc, out = _Finish(tmp_path).run("--yes")
+    assert rc == 0 and "Up to date" not in out
+    assert path.read_text(encoding="utf-8") == capture_catalogue.feedback_skill_text()
+    assert footprint.skill_state("cg-feedback", tmp_path / "claude") == "installed"
+    rc, out = _Finish(tmp_path).run()
+    assert "Up to date: the hooks, statusline and skills" in out
+
+
+def _coaching_config(tmp_path) -> None:
+    config = tmp_path / "cfg"
+    config.mkdir(exist_ok=True)
+    (config / "config.toml").write_text('[capture]\nlevel = "off"\ncoaching = ["coaching_notes"]\n', encoding="utf-8")
+
+
+def _capture_hooks(tmp_path) -> list[tuple[str, str, bool]]:
+    """``(event, matcher, async)`` of the capture entries in settings.json."""
+    commands = set(cli._capture_hook_commands(tmp_path / "cfg").values())
+    settings = json.loads((tmp_path / "claude" / "settings.json").read_text(encoding="utf-8"))
+    return [
+        (event, group.get("matcher", ""), bool(entry.get("async")))
+        for event, groups in settings.get("hooks", {}).items()
+        for group in groups
+        for entry in group["hooks"]
+        if entry.get("command") in commands
+    ]
+
+
+def test_finish_adds_the_background_stop_entry_and_the_plan_matcher_coaching_needs(tmp_path):
+    _coaching_config(tmp_path)
+    (tmp_path / "claude").mkdir(exist_ok=True)
+    settings = tmp_path / "claude" / "settings.json"
+    # What an earlier version connected: the prompt hook and a matcher without the plan tool, and no Stop hook.
+    command = cli._capture_hook_commands(tmp_path / "cfg")[capture_catalogue.HOOK_SCRIPT]
+    old = {"model": "opus", "hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": command, "timeout": 5}]}],
+        "PostToolUse": [{"matcher": "Read|Grep|Glob|WebFetch|WebSearch", "hooks": [
+            {"type": "command", "command": command, "timeout": 5}]}],
+    }}
+    settings.write_text(json.dumps(old), encoding="utf-8")
+    rc, out = _Finish(tmp_path).run("--dry-run")
+    assert "Add the capture hook" in out and "Up to date" not in out
+    assert json.loads(settings.read_text(encoding="utf-8")) == old
+    rc, out = _Finish(tmp_path).run("--yes")
+    assert rc == 0 and "Up to date" not in out
+    assert sorted(_capture_hooks(tmp_path)) == sorted([
+        ("UserPromptSubmit", "", False),
+        ("PostToolUse", "|".join(capture_catalogue.COACHING_TOOLS), False),
+        ("SubagentStop", "", False),
+        ("Stop", "", True),
+    ])
+    assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in _capture_hooks(tmp_path))["PostToolUse"]
+    assert json.loads(settings.read_text(encoding="utf-8"))["model"] == "opus"
+    # Updated, the next run has nothing left to change.
+    rc, out = _Finish(tmp_path).run()
+    assert "Up to date: the hooks, statusline and skills" in out
+
+
+def test_finish_adds_the_agent_and_workflow_tools_to_a_matcher_written_before_them(tmp_path):
+    _coaching_config(tmp_path)
+    (tmp_path / "claude").mkdir(exist_ok=True)
+    settings = tmp_path / "claude" / "settings.json"
+    command = cli._capture_hook_commands(tmp_path / "cfg")[capture_catalogue.HOOK_SCRIPT]
+    before = "Read|Grep|Glob|WebFetch|WebSearch|ExitPlanMode"
+    old = {"hooks": {
+        "UserPromptSubmit": [{"hooks": [{"type": "command", "command": command, "timeout": 5}]}],
+        "PostToolUse": [{"matcher": before, "hooks": [{"type": "command", "command": command, "timeout": 5}]}],
+        "Stop": [{"hooks": [{"type": "command", "command": command, "timeout": 5, "async": True}]}],
+    }}
+    settings.write_text(json.dumps(old), encoding="utf-8")
+    rc, out = _Finish(tmp_path).run("--yes")
+    assert rc == 0 and "Up to date" not in out
+    post = [matcher for event, matcher, _ in _capture_hooks(tmp_path) if event == "PostToolUse"]
+    # One entry, with the new matcher: the old one is replaced, not left to run beside it.
+    assert post == ["Read|WebFetch|WebSearch|ExitPlanMode|Agent|Workflow"]
     rc, out = _Finish(tmp_path).run()
     assert "Up to date: the hooks, statusline and skills" in out
 

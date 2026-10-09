@@ -36,11 +36,6 @@ required keys):
 - ``transcript_path`` — read incrementally (last 64 KB only, scanned
   backwards) to find the last assistant turn's timestamp, for the TTL
   countdown.
-- ``workspace.project_dir`` (else plain ``cwd``) — the project's root
-  folder, only to check for a tokensave index (:func:`_coach_project_dir`,
-  ``known_savers.indexed``): the ``explore_reads`` coaching hint switches
-  its advice to tokensave's own tools there, since its hook would just
-  turn an Explore agent away.
 
 S1-context-budget addition: when the payload's ``context_window`` object
 also carries a numeric ``used_tokens``, this module appends a *second*,
@@ -271,11 +266,9 @@ printed by :func:`main` after the first and only while ``config.toml``'s
 and single-line. The second is either:
 
 - a live **coaching hint** (``coaching = ["coaching_line"]``) from
-  :func:`coaching_hint`: a large context at the end of a turn (``/clear``
-  before a new task), a large last tool output, many reads and searches
-  in the current message, a warm cache about to go cold, or a prompting
-  habit (small requests sent one at a time, stopping Claude again
-  and again, a huge message). Worked out
+  :func:`coaching_hint`: a large last tool output, a warm cache about to
+  go cold, or a prompting habit (small requests sent one at a time, a
+  huge message). Worked out
   from the payload and the transcript's last :data:`_COACH_TAIL_BYTES`;
   amounts are tokens, since this hot path loads no pricing; or
 - the **feedback note** (``feedback = ["feedback_note"]``),
@@ -338,7 +331,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import installer as installer_mod
-from . import known_savers
 from .model import Column, Table
 from .tools import log_usage
 
@@ -1698,12 +1690,8 @@ def _tag_limit_hit_rows(rows: list[dict]) -> list[dict]:
 #: than :data:`_TAIL_BYTES` so a big tool output fits: Claude Code caps
 #: one at about 100 KB.
 _COACH_TAIL_BYTES = 256 * 1024
-#: A context this large at the end of a turn earns the ``/clear`` hint.
-_COACH_CTX_TOKENS = 100_000
 #: A tool output this large earns the quieter-command hint.
 _COACH_OUTPUT_TOKENS = 8_000
-#: This many reads and searches in one message earns the Explore hint.
-_COACH_READS = 5
 #: The cache hint shows in the last this-many seconds of a warm cache,
 #: for a context of at least :data:`_COACH_COLD_MIN_TOKENS`.
 _COACH_COLD_S = 60
@@ -1711,26 +1699,12 @@ _COACH_COLD_MIN_TOKENS = 20_000
 #: Same rough rate as ``capture.CHARS_PER_TOKEN`` (not imported: see the
 #: v3-limits note on keeping this hot path's dependencies small).
 _CHARS_PER_TOKEN = 4
-_READ_TOOLS = frozenset({"Read", "Grep", "Glob"})
-
-
-def _coach_project_dir(payload: dict) -> str | None:
-    """The project's root folder, for the ``explore_reads`` hint's
-    tokensave check (:func:`known_savers.indexed`): the Status hook
-    payload's ``workspace.project_dir``, else its plain ``cwd``."""
-    workspace = payload.get("workspace")
-    if isinstance(workspace, dict):
-        project = workspace.get("project_dir")
-        if isinstance(project, str) and project:
-            return project
-    cwd = payload.get("cwd")
-    return cwd if isinstance(cwd, str) and cwd else None
 
 
 def _parse_capture_until(value: str) -> datetime | None:
-    """Same small parse as capture-hook.py's own ``_parse_time``: this hot
-    path can't import that hyphenated filename as a module, so it's
-    duplicated here rather than shared."""
+    """Same small parse as capture_hook.py's own ``_parse_time``: the hook
+    module lives in the data folder's hooks/ directory, not on this
+    package's import path, so it's duplicated here rather than shared."""
     try:
         parsed = datetime.fromisoformat(value)
     except (TypeError, ValueError):
@@ -1761,7 +1735,7 @@ def _capture_lines(config_dir: Path | None, now: datetime) -> tuple[bool, bool]:
     """``(feedback note on, coaching line on)`` from ``config.toml``'s
     ``[capture]``; both off when it's missing or malformed, or ``now`` is
     past its ``until`` (UX-5: this used to be the one capture gate that
-    didn't check ``until`` -- capture-hook.py's own ``_capture_for`` has
+    didn't check ``until`` -- capture_hook.py's own ``_capture_for`` has
     always checked it for the note/tag hooks)."""
     capture = _capture_table(config_dir, now)
     if capture is None:
@@ -1808,16 +1782,23 @@ def _content_blocks(d: dict) -> list:
 
 def _is_synthetic(d: dict) -> bool:
     """A line Claude Code wrote in place of a reply: an API error, an
-    overload or a usage limit (as ``capture-hook.py``'s)."""
+    overload or a usage limit (as ``capture_hook.py``'s)."""
     message = d.get("message")
     return bool(d.get("isApiErrorMessage")) or (isinstance(message, dict) and message.get("model") == "<synthetic>")
 
 
 def _is_human_prompt(d: dict) -> bool:
-    """A message you typed: a ``user`` line that isn't meta and carries no
-    tool result."""
+    """A message you typed: a ``user`` line that isn't meta, carries no
+    tool result and has no ``turnOrigin`` that rules it out."""
     if d.get("type") != "user" or d.get("isMeta") or "toolUseResult" in d:
         return False
+    if d.get("turnOrigin") is not None:
+        # Imported here, not at the top: see the FEEDBACK_NOTE import in
+        # :func:`second_line`.
+        from .capture_catalogue import NOT_TYPED_TURN_ORIGINS
+
+        if d["turnOrigin"] in NOT_TYPED_TURN_ORIGINS:
+            return False
     message = d.get("message")
     content = message.get("content") if isinstance(message, dict) else None
     if isinstance(content, str):
@@ -1866,15 +1847,6 @@ def _k(tokens: float) -> str:
     return f"{round(tokens / 1000.0)}k"
 
 
-#: Lines written as your message that you didn't type: a slash command
-#: and its output, a ``!`` shell command, a scheduled task, a background
-#: agent's report (as ``capture-hook.py`` skips them).
-_NOT_TYPED_PREFIXES = (
-    "<command-", "<local-command-", "<bash-", "<scheduled-task", "<<autonomous-loop", "<task-notification",
-    "[SYSTEM NOTIFICATION", "<agent-message", "Another Claude session sent a message",
-)
-
-
 def _line_text(d: dict) -> str:
     message = d.get("message")
     content = message.get("content") if isinstance(message, dict) else None
@@ -1896,31 +1868,67 @@ def _line_time(d: dict) -> datetime | None:
     return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
 
 
-#: How far back from the end of Claude's last words a question mark
-#: makes your next message an answer to it (as ``capture-hook.py``).
-_QUESTION_TAIL_CHARS = 300
+def _untyped_start(d: dict) -> bool:
+    """Whether a ``user`` line is one you didn't type, that Claude answers
+    by itself and that ends the reply to your last message (a background
+    agent's report, a scheduled task, a slash command's output, a message
+    from another session), as ``capture_hook.py``'s ``_untyped_start``
+    reads it: not a resume note, which carries on that message's work."""
+    # Imported here, not at the top: see the FEEDBACK_NOTE import in
+    # :func:`second_line`.
+    from .capture_catalogue import NOT_TYPED_PREFIXES, NOT_TYPED_TURN_ORIGINS, RESUME_PREFIXES
+
+    if d.get("type") != "user" or d.get("isMeta") or d.get("isCompactSummary") or "toolUseResult" in d:
+        return False
+    if any(isinstance(b, dict) and b.get("type") == "tool_result" for b in _content_blocks(d)):
+        return False
+    if d.get("turnOrigin") in NOT_TYPED_TURN_ORIGINS:
+        return True
+    text = _line_text(d).lstrip()
+    return text.startswith(NOT_TYPED_PREFIXES) and not text.startswith(RESUME_PREFIXES)
+
+
+def _is_async_launch(d: dict) -> bool:
+    """Whether a tool result is a background agent's launch message rather
+    than its report."""
+    result = d.get("toolUseResult")
+    return isinstance(result, dict) and (result.get("isAsync") is True or result.get("status") == "async_launched")
 
 
 def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict]:
-    """Your typed messages, oldest first, as ``capture-hook.py``'s
-    ``_exchanges`` reads them: ``text``, ``at``, ``gap`` (seconds since
-    Claude's reply before it), ``answer`` (that reply ended on a
-    question), ``answered`` (Claude replied at all), ``stopped`` (a stop
-    marker followed it), ``failed`` (an API error, an overload or a usage
-    limit came back instead of a reply) and ``edited`` (Claude changed a
-    file in reply to it)."""
+    """Your typed messages, oldest first, as ``capture_hook.py``'s
+    ``_exchanges`` reads them: ``text``, ``at``, ``since`` (seconds since
+    your message before it), ``answer`` (the reply before it ended on a
+    question and changed no file: a question after a change is an offer),
+    ``answered`` (Claude replied at all) and ``edited`` (Claude changed a
+    file in reply to it: an edit call or a shell write outside a
+    ``.claude`` folder, or a subagent it launched that did, less the edit
+    calls that failed; ``edits`` counts them). Only the reply the message
+    started counts: a line you didn't type ends it. A line you didn't type
+    (``capture_catalogue.NOT_TYPED_PREFIXES``, as ``capture_hook.py``
+    skips them) and a stop marker aren't messages."""
+    # Imported here, not at the top: see the FEEDBACK_NOTE import in
+    # :func:`second_line`.
+    from .capture_catalogue import AGENT_TOOLS, NOT_TYPED_PREFIXES
+    from .prompt_shape import agent_edit_files, edits_files, ends_on_question
+
     out: list[dict] = []
-    replied_at = None
+    typed_at = None
     said = ""
+    edit_calls: dict[str, dict] = {}
+    launches: dict[str, dict] = {}
     for d in tail:
         if d.get("isSidechain"):
             continue
         if d.get("type") == "assistant" and _is_synthetic(d):
-            if out:
-                out[-1]["failed"] = True
+            continue
+        if _untyped_start(d):
+            # Before Claude's first reply to the message, the line still
+            # leaves that reply its own.
+            if out and out[-1]["answered"]:
+                out[-1]["closed"] = True
             continue
         if d.get("type") == "assistant":
-            replied_at = _line_time(d) or replied_at
             if out:
                 out[-1]["answered"] = True
             for block in _content_blocks(d):
@@ -1928,103 +1936,77 @@ def _exchanges(tail: list[dict], interrupt_prefix: str, edit_tools) -> list[dict
                     continue
                 if block.get("type") == "text" and isinstance(block.get("text"), str) and block["text"].strip():
                     said = block["text"]
-                elif block.get("type") == "tool_use" and block.get("name") in edit_tools and out:
-                    out[-1]["edited"] = True
+                elif block.get("type") == "tool_use" and out and not out[-1]["closed"]:
+                    if edits_files(block.get("name"), block["input"] if isinstance(block.get("input"), dict) else {}, edit_tools):
+                        out[-1]["edits"] += 1
+                        if block.get("name") in edit_tools:
+                            edit_calls[str(block.get("id"))] = out[-1]
+                    elif block.get("name") in AGENT_TOOLS:
+                        launches[str(block.get("id"))] = out[-1]
+            continue
+        results = [b for b in _content_blocks(d) if isinstance(b, dict) and b.get("type") == "tool_result"]
+        if d.get("type") == "user" and results:
+            for block in results:
+                key = str(block.get("tool_use_id"))
+                call = edit_calls.pop(key, None)
+                launched = launches.pop(key, None)
+                if block.get("is_error"):
+                    if call is not None:
+                        call["edits"] = max(0, call["edits"] - 1)
+                elif launched is not None and not _is_async_launch(d):
+                    launched["edits"] += agent_edit_files(d)
             continue
         if d.get("isCompactSummary") or not _is_human_prompt(d):
             continue
         text = _line_text(d)
-        if text.lstrip().startswith(interrupt_prefix):
-            if out:
-                out[-1]["stopped"] = True
-            continue
-        if text.lstrip().startswith(_NOT_TYPED_PREFIXES):
+        if text.lstrip().startswith((interrupt_prefix, *NOT_TYPED_PREFIXES)):
             continue
         at = _line_time(d)
         out.append({
-            "text": text, "at": at, "edited": False, "answered": False, "stopped": False, "failed": False,
-            "gap": (at - replied_at).total_seconds() if at is not None and replied_at is not None else None,
-            "answer": "?" in said.rstrip()[-_QUESTION_TAIL_CHARS:],
+            "text": text, "at": at, "edits": 0, "edited": False, "answered": False, "closed": False,
+            "since": (at - typed_at).total_seconds() if at is not None and typed_at is not None else None,
+            "asked": ends_on_question(said),
         })
+        typed_at = at or typed_at
         said = ""
+    for i, ex in enumerate(out):
+        ex["edited"] = ex["edits"] > 0
+        ex["answer"] = ex.pop("asked") and not (i > 0 and out[i - 1]["edits"] > 0)
+        del ex["closed"]
     return out
 
 
 def _prompt_habits(tail: list[dict], ctx: int | None, now: datetime) -> list[tuple[float, str, str]]:
-    """How you've been prompting: small requests sent one at a time
-    (``"drip_feed"``), the same request again (``"repeat_ask"``),
-    stopping Claude again and again (``"stop_loop"``), or a huge message
-    (``"big_paste"``). The capture hook's coaching
-    notes use the same rules and default thresholds
+    """How you've been prompting: small change requests sent one at a time
+    (``"drip_feed"``) or a huge message (``"big_paste"``). The capture
+    hook's coaching notes use the same rules and default thresholds
     (``capture_catalogue.COACHING_THRESHOLDS``). Stakes: half the context
-    for the first two (each extra message re-reads it), the message's
-    own size for the paste."""
+    for the first (each extra message re-reads it), the message's own size
+    for the paste. The same request again, stopping Claude again and
+    again and a big job sent outside plan mode are report-only
+    (``prompting.py``), so no hint speaks up."""
     if not any(_is_human_prompt(d) for d in tail if not d.get("isSidechain")):
         return []
     # Imported here, not at the top: the patterns live with the hook's
     # (see the FEEDBACK_NOTE import in :func:`second_line`).
-    from .capture_catalogue import ACK_PATTERN, COACHING_THRESHOLDS as th, EDIT_TOOLS, INTERRUPT_PREFIX
+    from .capture_catalogue import COACHING_THRESHOLDS as th, EDIT_TOOLS, INTERRUPT_PREFIX
+    from .prompt_shape import drip_count
 
     now = now if now.tzinfo is not None else now.replace(tzinfo=timezone.utc)
     hints: list[tuple[float, str, str]] = []
-    stop_window_s = th["stop_window_minutes"] * 60
     typed = _exchanges(tail, INTERRUPT_PREFIX, EDIT_TOOLS)
-
-    def recent(at) -> bool:
-        return at is not None and 0 <= (now - at).total_seconds() <= stop_window_s
-
-    # A stop mid-reply leaves a marker line; a stop before any reply only
-    # an earlier message Claude never answered (the last is still going).
-    stops = sum(
-        1 for d in tail if d.get("type") == "user" and not d.get("isSidechain")
-        and _line_text(d).lstrip().startswith(INTERRUPT_PREFIX) and recent(_line_time(d))
-    )
-    stops += sum(
-        1 for ex in typed[:-1] if not ex["answered"] and not ex["stopped"] and not ex["failed"] and recent(ex["at"])
-    )
-    if stops >= th["stop_loop_count"]:
-        hints.append(((ctx or 0) / 2, f"stopped {stops}x in {th['stop_window_minutes']}m: agree a plan first (Shift+Tab)", "stop_loop"))
     if not typed:
         return hints
-    # The last message is the one being worked on: it counts if it's
-    # small, recent and not an answer; each before it must also have
-    # been answered with a file change (as the hook's ``_drip_count``).
-    window = th["drip_window_minutes"] * 60
+    # The last message is the one being worked on: it counts if it's a
+    # small change request, recent and not an answer; each before it must
+    # also have been answered with a file change (the hook's
+    # ``_drip_count``).
     current = typed[-1]
-
-    def small(text: str) -> bool:
-        return len(text.strip()) <= th["drip_chars"]
-
     count = 0
-    if (
-        small(current["text"]) and not current["answer"] and current["gap"] is not None
-        and current["gap"] <= window and current["at"] is not None and (now - current["at"]).total_seconds() <= window
-        and not re.fullmatch(ACK_PATTERN, current["text"].strip(), re.IGNORECASE)
-    ):
-        count = 1
-        for ex in reversed(typed[:-1]):
-            if ex["answer"] or not ex["answered"]:
-                continue
-            if not (small(ex["text"]) and ex["edited"] and ex["gap"] is not None and ex["gap"] <= window):
-                break
-            count += 1
+    if current["at"] is not None and (now - current["at"]).total_seconds() <= th["drip_window_minutes"] * 60:
+        count = drip_count(typed[:-1], current["text"], current["since"], current["answer"], th)
     if count >= th["drip_count"]:
         hints.append(((ctx or 0) / 2, f"{count} small asks in a row: plan them as one prompt", "drip_feed"))
-    # The same request again (as the hook's ``repeat_ask``).
-    from .prompt_shape import is_ack, similarity, words
-
-    mine = words(current["text"])
-    repeat_window = th["repeat_window_minutes"] * 60
-    if (
-        len(mine) >= th["repeat_min_words"] and not is_ack(current["text"]) and current["at"] is not None
-        and (now - current["at"]).total_seconds() <= repeat_window
-        and any(
-            ex["answered"] and ex["at"] is not None and 0 <= (current["at"] - ex["at"]).total_seconds() <= repeat_window
-            and similarity(mine, words(ex["text"])) >= th["repeat_similarity"]
-            for ex in typed[:-1]
-        )
-    ):
-        hints.append(((ctx or 0) / 2, "same ask again: say what was wrong with the last try", "repeat_ask"))
     last_text, last_at = current["text"], current["at"]
     paste = len(last_text) / _CHARS_PER_TOKEN
     if paste >= th["big_paste_tokens"] and last_at is not None and (now - last_at).total_seconds() <= 3600:
@@ -2051,25 +2033,20 @@ def coaching_hint(payload: dict, tail: list[dict], now: datetime) -> tuple[float
       :data:`_COACH_COLD_S` seconds of a warm cache; the next message
       would write the whole context again at the cache-write price
       instead of reading it.
-    - **large context at the end of a turn** (``"clear_context"``):
-      ``/clear`` before starting something new, or every message
-      re-reads it.
     - **large last tool output** (``"quiet_output"``) in the current
       message: it stays in context for every later message.
-    - **many reads and searches** (``"explore_reads"``) in the current
-      message: an Explore agent reads in its own context and sends back
-      a summary -- or, when the project holds a tokensave index
-      (:func:`_coach_project_dir`, ``known_savers.indexed``), its own
-      tools, since its hook would just turn an Explore agent away.
-    - **how you're prompting** (``"drip_feed"``, ``"repeat_ask"``,
-      ``"stop_loop"``, ``"big_paste"``; :func:`_prompt_habits`): small
-      requests sent one at a time, the same request again, stopping
-      Claude again and again, or a huge message.
+    - **how you're prompting** (``"drip_feed"``, ``"big_paste"``;
+      :func:`_prompt_habits`): small requests sent one at a time, or a
+      huge message.
+
+    A large context, many reads and searches, the same request again,
+    stopping Claude again and again and a big job sent without a plan have
+    no hint: they are counted after the fact on the Work habits page (see
+    ``prompting.py`` and ``habits.py``'s "Explore cost by model").
 
     Stakes are rough token counts, only for picking one hint: the context
-    for the cache, a quarter of it for ``/clear`` (it pays only if you
-    change task), half of it for the prompting habits, the output's size,
-    and the reads' result sizes.
+    for the cache, half of it for the prompting habits, and the output's
+    size.
     """
     hints: list[tuple[float, str, str]] = []
     context_window = payload.get("context_window")
@@ -2080,23 +2057,8 @@ def coaching_hint(payload: dict, tail: list[dict], now: datetime) -> tuple[float
     if ctx is not None and ctx >= _COACH_COLD_MIN_TOKENS and remaining is not None and 0 < remaining <= _COACH_COLD_S:
         hints.append((ctx, f"cache cold in {int(remaining)}s: reply now or re-pay {_k(ctx)}", "cache_cold"))
 
-    last = tail[-1] if tail else None
-    message = last.get("message") if last is not None else None
-    turn_over = (
-        last is not None and last.get("type") == "assistant"
-        and isinstance(message, dict) and message.get("stop_reason") == "end_turn"
-    )
-    if ctx is not None and ctx >= _COACH_CTX_TOKENS and turn_over:
-        hints.append((ctx / 4, f"ctx {_k(ctx)}: new task? /clear first or it re-reads", "clear_context"))
-
     start = max((i for i, d in enumerate(tail) if _is_human_prompt(d)), default=-1)
     current = tail[start + 1 :]
-    reads: set[str] = set()
-    for d in current:
-        if d.get("type") == "assistant":
-            for block in _content_blocks(d):
-                if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") in _READ_TOOLS:
-                    reads.add(str(block.get("id")))
     results = [
         block for d in current if d.get("type") == "user"
         for block in _content_blocks(d) if isinstance(block, dict) and block.get("type") == "tool_result"
@@ -2105,13 +2067,6 @@ def coaching_hint(payload: dict, tail: list[dict], now: datetime) -> tuple[float
         output = _result_chars(results[-1]) / _CHARS_PER_TOKEN
         if output >= _COACH_OUTPUT_TOKENS:
             hints.append((output, f"last output ~{_k(output)}: try quieter cmd or offset read", "quiet_output"))
-    if len(reads) >= _COACH_READS:
-        read_tokens = sum(_result_chars(b) for b in results if str(b.get("tool_use_id")) in reads) / _CHARS_PER_TOKEN
-        advice = (
-            "try tokensave's tools instead" if known_savers.indexed(_coach_project_dir(payload))
-            else "try an Explore agent instead"
-        )
-        hints.append((read_tokens, f"{len(reads)} reads this msg: {advice}", "explore_reads"))
     hints.extend(_prompt_habits(tail, ctx, now))
 
     if not hints:
@@ -2207,7 +2162,7 @@ _SIG4_THROTTLE_S = 60
 def _read_ground_truth_salt(config_dir: Path) -> bytes | None:
     """ClaudeGlass's salt, read-only. SIG-4 never creates it -- like every
     consumer outside ``parse.load_or_create_salt``'s own callers and
-    capture-hook.py's writer, this hot path must never be the thing that
+    capture_hook.py's writer, this hot path must never be the thing that
     brings the salt into existence (see ``report.py``'s
     ``_capture_signals``, the precedent this mirrors). A statusline
     invocation that runs before anything else has created it simply

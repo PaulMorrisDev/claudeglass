@@ -182,11 +182,41 @@ def test_a_rerun_keeps_deep_and_adds_its_hooks_when_connecting(tmp_path):
     assert load_config(config_dir).capture.level == "deep"
     commands = set(cli._capture_hook_commands(config_dir).values())
     entries = [e for groups in _settings(config_dir)["hooks"].values() for g in groups for e in g["hooks"]]
+    # Deep's hooks, and the entry its survey items need to answer a message of yours.
     assert len([e for e in entries if e["command"] in commands]) == len(
-        hook_health.capture_specs(cat.level_metrics("deep"))
+        hook_health.capture_specs((*cat.level_metrics("deep"), *cat.DEEP_FEEDBACK_IDS))
     )
     # Deep turned the survey on, so its skill comes too.
     assert "The /cg-feedback skill: add it." in out and _skill(config_dir).is_file()
+
+
+def test_connecting_adds_the_stop_entry_and_the_plan_matcher_when_coaching_notes_are_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    set_capture(config_dir, coaching=["coaching_notes"], now=NOW)
+    assert load_config(config_dir).capture.level == "off"
+    # A plan; connect; not at logon; go ahead. Capture is off, so there is no tips question.
+    rc, out = _run(config_dir, stdin="1\ny\nn\n\n")
+    assert rc == 0, out
+    commands = set(cli._capture_hook_commands(config_dir).values())
+    hooked = [
+        (event, group.get("matcher", ""), bool(entry.get("async")))
+        for event, groups in _settings(config_dir)["hooks"].items()
+        for group in groups
+        for entry in group["hooks"]
+        if entry["command"] in commands
+    ]
+    assert sorted(hooked) == sorted([
+        ("UserPromptSubmit", "", False),
+        ("PostToolUse", "|".join(cat.COACHING_TOOLS), False),
+        ("SubagentStop", "", False),
+        ("Stop", "", True),
+    ])
+    assert "ExitPlanMode" in dict((event, matcher) for event, matcher, _ in hooked)["PostToolUse"]
+    assert hook_health.check_capture(
+        hook_health.capture_specs(load_config(config_dir).capture.hook_metrics()),
+        claude_root=config_dir.parent,
+        config_dir=config_dir,
+    ).ok
 
 
 def test_a_rerun_skips_what_is_done_and_no_to_tips_turns_essentials_off(tmp_path):
@@ -198,8 +228,25 @@ def test_a_rerun_skips_what_is_done_and_no_to_tips_turns_essentials_off(tmp_path
     assert "Choose 1 or 2 [1]:" in out
     assert "Connect? [Y/n]:" not in out and "Connect to Claude Code: already connected." in out
     assert "Turn on sharper tips? [Y/n]:" in out
-    assert "Sharper tips (metrics capture): turn off, and take their hooks out of settings.json." in out
+    # The survey was added the first time and stays: its facts line needs the entry for your messages.
+    assert ("Sharper tips (metrics capture): turn off, and take their hooks out of settings.json, "
+            "except what your other switches still need.") in out
     assert load_config(config_dir).capture.level == "off"
+    commands = set(cli._capture_hook_commands(config_dir).values())
+    ours = [
+        event for event, groups in _settings(config_dir)["hooks"].items()
+        if any(e["command"] in commands for g in groups for e in g["hooks"])
+    ]
+    assert ours == ["UserPromptSubmit"]
+
+
+def test_no_to_tips_takes_every_hook_out_when_no_survey_switch_is_on(tmp_path):
+    config_dir = _claude(tmp_path, {})
+    _run(config_dir, stdin="1\ny\nn\ny\n\n")
+    set_capture(config_dir, feedback=[], now=NOW)
+    rc, out = _run(config_dir, stdin="\nn\nn\n\n")
+    assert rc == 0, out
+    assert "Sharper tips (metrics capture): turn off, and take their hooks out of settings.json." in out
     commands = set(cli._capture_hook_commands(config_dir).values())
     entries = [e for groups in _settings(config_dir).get("hooks", {}).values() for g in groups for e in g["hooks"]]
     assert not [e for e in entries if e["command"] in commands]

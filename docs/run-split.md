@@ -51,6 +51,18 @@ decides how work is split), and for each interval in
   When the parent transcript isn't in view, its part is left out and a
   note says for how many runs.
 
+**Current settings only.** The auto-compact window now in force
+(`autoCompactWindow`, from the project's newest config snapshot, less any
+`CLAUDE_AUTOCOMPACT_PCT_OVERRIDE`) caps how long a run's context can
+grow. A run whose peak context, the largest of any of its replies, is
+above that window ran under an older, larger setting, and its length
+says nothing about what a run costs now. Such runs are left out of every
+figure here, the agent's run count and cost included, and the summary
+reports how many were left out and what they cost. A card that rested
+only on runs from before a window was set goes quiet. A project
+with no snapshot takes the newest window any snapshot sets, and with no
+window known at all every run counts.
+
 Every split counts, including one near a run's end that costs more than
 it saves, since a run can't know in advance how long it will be. An
 agent type's **best interval** is the one that saves most among those
@@ -63,7 +75,8 @@ run back over work the last one had done.
 `run_split`, always emitted, with three tables:
 
 - `run_split_summary`: one row over every subagent run, counting only
-  agent types where splitting pays.
+  agent types where splitting pays, plus how many runs were left out as
+  older than the current window and what they cost.
 - `run_split_by_agent`: one row per agent type, largest saving first (top
   `run_split_top_n`, default 20), with its best interval, or none.
 - `run_split_sweep`: one row per interval, with the net saving across

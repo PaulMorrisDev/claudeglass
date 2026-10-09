@@ -17,8 +17,9 @@ under subscription billing with usage-log readings, see
 ``ttl``, ``limits``, ``carry``, ``compaction_sim``, ``plan_handoff``,
 ``model_swap``, ``waste``, ``compactions``, ``agent_startup``, ``agents``, ``run_split``,
 ``hooks``, ``quality``,
-``workstyle``, ``habits``, ``prompting`` (how you prompt, from
-``prompting.py``),
+``workstyle``, ``habits``, ``rework`` (rework after delivery, from
+``rework.py``, built from the pieces of work ``habits`` drew),
+``prompting`` (how you prompt, from ``prompting.py``),
 ``workflows``, ``phases`` (only when ``phases=True``), ``config`` (only
 when snapshots are supplied), ``context_budget``, ``tool_search``, ``capture``,
 ``cost_record`` (Claude Code's own cost record against this tool's, from
@@ -144,6 +145,7 @@ from . import (
     compaction_sim,
     context_budget,
     context_files,
+    cost_centres,
     discovery,
     elasticity,
     fixes,
@@ -157,6 +159,7 @@ from . import (
     quality,
     recache,
     reconcile,
+    rework,
     run_split,
     scorecard,
     snapshots as snapshots_mod,
@@ -168,6 +171,7 @@ from . import (
     workflows,
     workstyle,
 )
+from .calibration import Calibration
 from .config import Config
 from .corpus import Corpus, SessionBundle
 from .model import (
@@ -215,6 +219,7 @@ _SECTION_ORDER: tuple[str, ...] = (
     "quality",
     "workstyle",
     "habits",
+    "rework",
     "prompting",
     "workflows",
     "phases",
@@ -440,11 +445,15 @@ def ttl_mix_by_agent_type_metric(sections: list[Section]) -> dict[str, dict[str,
 def session_baseline_size_metric(sections: list[Section]) -> float | None:
     """Mean top-level first-turn cache-creation ("session baseline"),
     from the "agents" section's single-row "topology_session_baseline"
-    table."""
+    table's "written by the session" column. The table's own mean first
+    call also counts the tool definitions read from cache, which differ
+    by model (51.5k tokens on Haiku 4.5, 69.4k on Sonnet 5), so a stored
+    baseline from before that column existed stays comparable only on the
+    session's own write."""
     table = _section_table(sections, "agents", "topology_session_baseline")
     if table is None or not table.rows:
         return None
-    index = _col_index(table, "mean_baseline")
+    index = _col_index(table, "mean_write")
     if index is None:
         return None
     value = table.rows[0][index]
@@ -755,11 +764,22 @@ def _build_baseline_comparison_section(
     )
 
     tables = [overview_table]
+    if baseline_record.get("recache_rules", 1) < recache.RULES:
+        overview_table.notes.append(
+            "This baseline counted cache rebuilds by older rules, which flagged fewer replies. A rise in the "
+            "rebuild share here can come from the new rules."
+        )
     baseline_mode_mix = baseline_record.get("mode_mix") or {}
     if baseline_mode_mix:
-        tables.append(
-            _build_baseline_by_mode_table(baseline_mode_mix, baseline_record.get("by_mode") or {}, current_by_mode)
+        by_mode_table = _build_baseline_by_mode_table(
+            baseline_mode_mix, baseline_record.get("by_mode") or {}, current_by_mode
         )
+        if baseline_record.get("mode_rules", 1) < classify.MODE_RULES:
+            by_mode_table.notes.append(
+                "This baseline sorted its sessions into modes by older rules: overnight then meant a long "
+                "span with a gap, and one-shot did not exist. A mode's change here can come from the new rules."
+            )
+        tables.append(by_mode_table)
 
     return Section(
         key="baseline_comparison",
@@ -879,6 +899,24 @@ def _merge_parser_notes(acc: dict[str, dict[str, int]], notes: dict[str, dict[st
 # TranscriptResult ... directly") -------------------------------------
 
 
+def _direct_spawn_count(subs: list[TranscriptResult]) -> int:
+    """The agents the main session started itself with the Agent tool.
+
+    ``subs`` also holds a workflow's own agents (``meta.kind ==
+    "workflow-agent"``, started by the workflow rather than by anything the
+    session did) and the agents other agents started (``spawn_depth`` of 2
+    or more, or a ``parent_agent_id``). The workstyle archetypes ask how
+    often the session itself delegates, so those are not counted.
+    """
+    return sum(
+        1
+        for sub in subs
+        if sub.meta.kind != "workflow-agent"
+        and (sub.meta.spawn_depth or 1) <= 1
+        and not sub.meta.parent_agent_id
+    )
+
+
 def _extract_workstyle_features(
     top: TranscriptResult, subs: list[TranscriptResult], workflow_runs: list[WorkflowRun]
 ) -> workstyle.SessionFeatures:
@@ -936,7 +974,7 @@ def _extract_workstyle_features(
     return workstyle.SessionFeatures(
         top_level_models=top_level_models,
         subagent_models=tuple(subagent_models),
-        spawn_count=len(subs),
+        spawn_count=_direct_spawn_count(subs),
         has_workflow=bool(workflow_runs),
         effort_turn_counts=effort_turn_counts,
         plan_mode_seen=plan_mode_seen,
@@ -1280,6 +1318,35 @@ def _apply_autocompact_pct_override(configured_window: int, snap: Snapshot) -> i
     return configured_window
 
 
+#: Later than any snapshot, so ``snapshot_for`` finds a project's newest.
+_END_OF_TIME = "9999-12-31T00:00:00Z"
+
+
+def _current_window_of(snapshots: list[Snapshot] | None, keys_by_session: dict[str, tuple[str, ...]]):
+    """A function from a transcript to the auto-compact window now in
+    force for its project: the newest snapshot that project has (the one
+    that sets ``autoCompactWindow``, less any
+    ``CLAUDE_AUTOCOMPACT_PCT_OVERRIDE``), or ``None`` when that snapshot
+    sets none. A project with no snapshot takes the newest window any
+    snapshot sets; with no snapshots at all it is always ``None``, so
+    nothing is taken for an older setting."""
+
+    def window(snap: Snapshot | None) -> int | None:
+        value = snapshots_mod.auto_compact_window(snap)
+        return None if value is None else _apply_autocompact_pct_override(value, snap)
+
+    anywhere = next((w for w in (window(snap) for snap in reversed(snapshots or [])) if w is not None), None)
+
+    def current(tr: TranscriptResult) -> int | None:
+        if not snapshots:
+            return None
+        keys = keys_by_session.get(tr.meta.session_id)
+        snap = snapshots_mod.snapshot_for(_END_OF_TIME, snapshots, keys) if keys else None
+        return window(snap) if snap is not None else anywhere
+
+    return current
+
+
 # -- build_report -----------------------------------------------------------
 
 
@@ -1301,6 +1368,7 @@ def build_report(
     baseline_note: str | None = None,
     config_dir: str | Path | None = None,
     ratings: dict | None = None,
+    tip_feedback: dict | None = None,
     all_projects: bool = False,
     known_slugs: tuple[str, ...] = (),
 ) -> ReportModel:
@@ -1366,7 +1434,12 @@ def build_report(
     billing, the usage log behind :func:`_report_units`. Without it,
     ``profile_id`` comes from the hook captures in ``snapshots``. The
     ``habits`` section also reads the free signals metrics capture logged
-    there (``signals.load``), only when its salt already exists.
+    there (``signals.load``), only when its salt already exists. The
+    ``limits`` section's usage-log cross-check reads the five-hour and
+    weekly rows of ``<config_dir>/usage-log.csv`` for the report's sessions
+    (``limits.read_usage_log_rows``); ``usage_log_rows`` cannot supply them,
+    for it holds context-window rows only. Without ``config_dir`` the
+    cross-check is left out.
 
     ``all_projects`` says the corpus covers every project (the CLI's
     ``--all-projects``, the dashboard with no project picked), so a
@@ -1386,7 +1459,9 @@ def build_report(
 
     ``ratings`` holds your dashboard ratings by session id
     (``Store.all_feedback``), for the ``habits`` section's outcomes; the
-    CLI and the service pass them when the store has any.
+    CLI and the service pass them when the store has any. ``tip_feedback``
+    is what you said about tip cards (``Store.tip_feedback``); it adds to
+    the ``prompting`` section's tip answers.
     """
     from . import usage as usage_mod  # local import: avoids a cycle risk with any future usage<->report coupling
     from . import statusline as statusline_mod  # local import: same rationale as usage_mod above
@@ -1424,6 +1499,9 @@ def build_report(
 
     session_records: list[SessionRecord] = []
     session_cost: dict[str, float] = {}
+    #: What each session's main conversation cost, without its agents: the
+    #: base of the compaction-cost share (``compaction.build_section``).
+    session_main_cost: dict[str, float] = {}
     #: Additive (project-filter work): each *redacted* project slug's
     #: total cost across every session in this corpus, accumulated
     #: alongside ``session_cost`` below from the same per-session totals
@@ -1466,9 +1544,15 @@ def build_report(
     ls = limits.LimitStats()
     ts = ttl.TtlStats()
     cs = compaction.CompactionStats()
-    tp = topology.TopologyStats()
-    cb = context_budget.ContextBudgetStats()
-    cf = context_files.ContextFileStats()
+    # Characters per token, measured on this corpus's own subagent first
+    # calls before any module turns characters into tokens (every
+    # transcript is already in memory, so the pre-pass is one cheap walk).
+    calibration = Calibration.from_calls(
+        call for bundle in corpus.sessions for sub in bundle.subs if (call := context_budget.first_call(sub))
+    )
+    tp = topology.TopologyStats(calibration=calibration)
+    cb = context_budget.ContextBudgetStats(calibration=calibration)
+    cf = context_files.ContextFileStats(calibration=calibration)
     ph = PhaseStats() if phases else None
     # v4 wiring round: waste.WasteStats accumulates per-transcript like
     # ls/ts/cs above (mirrors that shape); carry/model_swap/compaction_sim
@@ -1521,6 +1605,7 @@ def build_report(
         overview.workflow_runs += len(bundle.workflows)
 
         session_cost_total = 0.0
+        session_main_cost_total = 0.0
         session_cc_total_tokens = 0
         session_recache_cc_tokens = 0
 
@@ -1530,7 +1615,7 @@ def build_report(
 
             rs.add(tr, pricing.resolve_model)
             ls.add(tr, pricing.resolve_model)
-            ts.add(tr, pricing.resolve_model, ttl_th)
+            ts.add(recache.apply(tr, recache_th), pricing.resolve_model, ttl_th)
             ws.add(tr, pricing)
             all_results.append(tr)
             cf.add(tr, pricing, is_main=tr is top)
@@ -1576,6 +1661,8 @@ def build_report(
                 cell.cost += breakdown.total
 
                 session_cost_total += breakdown.total
+                if tr is top:
+                    session_main_cost_total += breakdown.total
                 session_cc_total_tokens += turn.cache_creation_tokens
 
         tp.add_session(record.session_id, top, list(subs), pricing)
@@ -1592,6 +1679,7 @@ def build_report(
             )
 
         session_cost[record.session_id] = session_cost_total
+        session_main_cost[record.session_id] = session_main_cost_total
         project_cost[slug] = project_cost.get(slug, 0.0) + session_cost_total
         session_cc_total[record.session_id] = session_cc_total_tokens
         session_recache_cc[record.session_id] = session_recache_cc_tokens
@@ -1710,12 +1798,18 @@ def build_report(
     handoff_stats = handoff.compute_handoff(
         all_results, pricing, handoff_th, compaction_sim_stats.rediscovery_allowance_usd
     )
+    # Delegation figures that depend on long runs count only the runs the
+    # window now in force allows (a longer one ran under an older setting).
     run_split_stats = run_split.compute_run_split(
-        all_results, pricing, run_split_th, compaction_sim_stats.rediscovery_allowance_usd
+        all_results,
+        pricing,
+        run_split_th,
+        compaction_sim_stats.rediscovery_allowance_usd,
+        current_window=_current_window_of(snapshots, session_snapshot_key),
     )
     hook_stats = hook_costs.compute_hook_costs(all_results, pricing, hooks_th)
     tool_search_stats = tool_search.compute_tool_search(
-        all_results, pricing, tool_search_th, snapshots=snapshots, all_projects=all_projects
+        all_results, pricing, tool_search_th, snapshots=snapshots, all_projects=all_projects, calibration=calibration
     )
 
     # How amounts are phrased (billing mode, and under subscription the
@@ -1822,12 +1916,25 @@ def build_report(
     if _want("limits"):
         limits_section = limits.build_section(ls, pricing, limits_th)
         extra_tables = []
-        if usage_log_rows:
+        # The rows come from the log file itself: the status-line reader
+        # behind ``usage_log_rows`` keeps only context-window rows, which carry
+        # no five-hour or weekly window, so they could never show a limit stop.
+        session_ids = {b.session_id for b in corpus.sessions}
+        rate_rows = (
+            [
+                row
+                for row in limits.read_usage_log_rows(Path(config_dir) / "usage-log.csv")
+                if row.get("session_id") in session_ids
+            ]
+            if config_dir is not None
+            else []
+        )
+        if limits.has_rate_limit_rows(rate_rows):
             # Same dataclasses.replace-a-table-on pattern the "usage"
-            # section above uses for cache_ground_truth: csv_cross_check
-            # needs the already-loaded usage-log rows, which this
-            # module doesn't otherwise keep.
-            extra_tables.append(limits.csv_cross_check(usage_log_rows, ls, limits_th))
+            # section above uses for cache_ground_truth. A log with no
+            # five-hour or weekly row (the desktop app runs no status line)
+            # has nothing to compare stops with, so the table is left out.
+            extra_tables.append(limits.csv_cross_check(rate_rows, ls, limits_th))
         if capture_signals:
             # SIG-2: the free "waits"/"turn_signals" signals cross-check
             # the same transcript-derived hit count, independent of the
@@ -1859,13 +1966,37 @@ def build_report(
         sections.append(waste.build_section(ws, waste_th))
 
     if _want("compactions"):
-        sections.append(compaction.build_section(cs))
+        sections.append(compaction.build_section(cs, session_main_cost))
+
+    # Phase 8a: the files agents read by habit, once, for the Agents page's
+    # starting-context stack below and for the report model's own
+    # ``context_files``.
+    cf_data = cf.to_dict()
 
     if _want("agent_startup"):
-        sections.append(context_budget.build_startup_section(cb))
+        startup_section = context_budget.build_startup_section(cb)
+        stack_table = context_files.build_stack_table(
+            cf_data, next((table for table in startup_section.tables if table.name == "agent_startup_breakdown"), None)
+        )
+        if stack_table is not None:
+            startup_section.tables.append(stack_table)
+        sections.append(startup_section)
 
     if _want("agents"):
-        sections.append(topology.build_section(tp))
+        agents_section = topology.build_section(tp)
+        # Phase 8a: where the spend goes by cost centre, beside the
+        # per-agent tables it explains.
+        cost_centre_stats = cost_centres.compute(
+            [(bundle.top, bundle.subs) for bundle in corpus.sessions if bundle.top is not None],
+            pricing,
+            recache_th,
+            calibration=calibration,
+            context_stats=cb,
+            agent_files=_agent_file_models(latest_snapshot),
+            mcp_servers=tool_search_stats.mcp_servers,
+        )
+        agents_section.tables.extend(cost_centres.build_tables(cost_centre_stats))
+        sections.append(agents_section)
 
     if _want("run_split"):
         sections.append(run_split.build_section(run_split_stats, run_split_th))
@@ -1877,23 +2008,36 @@ def build_report(
         sections.append(quality.build_section(quality.corpus_runs(corpus, pricing), units=units))
 
     if _want("workstyle"):
-        sections.append(workstyle.build_section(session_records))
+        sections.append(workstyle.build_section(session_records, session_cost))
 
     # Perf (S5/ROB-P3): collect() walks the whole corpus, so build it once
     # here and pass it to both the "habits" and "capture" sections below
     # instead of each calling habits.build_section()/capture_section()
     # with their own independent collect() pass over the same corpus.
     _habits_built: habits.Habits | None = None
-    if _want("habits"):
+    if _want("habits") or _want("rework"):
         _habits_built = habits.collect(
             corpus, pricing, ratings=ratings, signals=capture_signals,
             effort_share_threshold_pct=_effort_mismatch_share_threshold(config),
-            tz=config.tz, window=window,
+            tz=config.tz, window=window, since=config.capture.enabled_at,
         )
+    if _want("habits"):
         sections.append(habits.section_from(_habits_built, model_swap=model_swap_stats))
 
+    # The pieces of work habits drew: rework is built from them, not from
+    # a second pass over the corpus.
+    if _want("rework"):
+        sections.append(rework.build_section(_habits_built, units=units))
+
     if _want("prompting"):
-        sections.append(prompting.build_section(prompting.collect(corpus, pricing)))
+        sections.append(
+            prompting.build_section(
+                prompting.collect(corpus, pricing, ratings=ratings),
+                card_answers=prompting.card_answers(tip_feedback),
+                window=window,
+                tz=config.tz,
+            )
+        )
 
     if _want("workflows"):
         sections.append(workflows.build_section(all_workflow_runs))
@@ -1957,7 +2101,13 @@ def build_report(
 
     if _want("context_budget"):
         sections.append(
-            context_budget.build_section(cb, snapshots=snapshots, usage_log_rows=usage_log_rows, pricing=pricing)
+            context_budget.build_section(
+                cb,
+                snapshots=snapshots,
+                usage_log_rows=usage_log_rows,
+                pricing=pricing,
+                mcp_servers=tool_search_stats.mcp_servers,
+            )
         )
 
     if _want("tool_search"):
@@ -2093,22 +2243,23 @@ def build_report(
         sections=sections,
         recommendations=[],
         diagnostics=diagnostics,
-        context_files=cf.to_dict(),
+        context_files=cf_data,
         parser_notes=parser_notes,
     )
 
     # WP10b: recommendations are computed from the already-assembled
     # report (see recommend.py's module docstring for why it works from
     # rendered tables rather than the raw accumulators above), using the
-    # corpus's majority archetype and the latest config snapshot (if any)
-    # as of "now" -- a per-session snapshot join is not attempted here,
+    # corpus's archetype (the one whose sessions cost the most,
+    # ``workstyle.corpus_archetype``) and the latest config snapshot (if
+    # any) as of "now" -- a per-session snapshot join is not attempted here,
     # matching how ``_build_config_section``/``_build_scorecard_section``
     # already treat the snapshots as a single input. It is the picked
     # project's (``_settings_snapshots``), so advice never reads another
     # project's settings as in force. Its agents are widened to every
     # project in that set, since the newest snapshot records only the
     # agents of the project it was taken in.
-    corpus_archetype, _archetype_evidence = workstyle.corpus_archetype(session_records)
+    corpus_archetype, _archetype_evidence = workstyle.corpus_archetype(session_records, session_cost)
     report_model.units = units
     report_model.recommendations = recommend(
         report_model,

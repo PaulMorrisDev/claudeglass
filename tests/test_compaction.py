@@ -703,3 +703,116 @@ def test_rediscovery_empty_when_no_compaction(tmp_path):
     write_jsonl(path, lines)
     result = parse_transcript(path, TranscriptMeta(path=str(path), session_id="sess_none"))
     assert compaction.rediscovery(result) == []
+
+
+# -- agent runs: subagent and workflow transcripts ------------------------
+
+
+def _compacting_transcript(
+    tmp_path: Path, name: str, session_id: str, compactions: int, kind: str = "top-level", agent_id: str | None = None
+):
+    """A transcript with ``compactions`` automatic summaries, each followed by a reply."""
+    lines = [turn_line(model="claude-sonnet-5", timestamp="2026-09-18T12:00:00.000Z", ephemeral_5m_input_tokens=1000)]
+    for i in range(compactions):
+        lines.append(
+            system_line(
+                "compact_boundary",
+                timestamp=f"2026-09-18T12:0{i + 1}:00.000Z",
+                compactMetadata={
+                    "trigger": "auto",
+                    "preTokens": 100000,
+                    "postTokens": 20000,
+                    "cumulativeDroppedTokens": 80000 * (i + 1),
+                    "durationMs": 1000,
+                },
+            )
+        )
+        lines.append(
+            turn_line(model="claude-sonnet-5", timestamp=f"2026-09-18T12:0{i + 1}:30.000Z", ephemeral_5m_input_tokens=500)
+        )
+    path = tmp_path / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    write_jsonl(path, lines)
+    return parse_transcript(
+        path, TranscriptMeta(path=str(path), session_id=session_id, kind=kind, agent_id=agent_id)
+    )
+
+
+def test_compactions_in_counts_one_transcript_the_same_whoever_ran_it(tmp_path):
+    for kind in ("top-level", "subagent", "workflow-agent"):
+        result = _compacting_transcript(tmp_path, f"{kind}.jsonl", "s", 3, kind=kind)
+        assert compaction.compactions_in(result) == (3, 3), kind
+    path, meta = _build_fixture_a(tmp_path)
+    assert compaction.compactions_in(parse_transcript(path, meta)) == (2, 1)
+
+
+def test_a_subagent_and_a_workflow_agent_file_are_counted_apart_from_the_main_session(tmp_path, sonnet_rates):
+    main = _compacting_transcript(tmp_path, "main.jsonl", "s1", 1)
+    sub = _compacting_transcript(tmp_path / "s1" / "subagents", "agent-a1.jsonl", "s1", 2, "subagent", "a1")
+    workflow = _compacting_transcript(
+        tmp_path / "s1" / "subagents" / "workflows" / "wf_1", "agent-b1.jsonl", "s1", 4, "workflow-agent", "b1"
+    )
+    stats = compaction.CompactionStats.build([(main, sonnet_rates), (sub, sonnet_rates), (workflow, sonnet_rates)])
+    # Every record says whose it is.
+    assert sorted(r.kind for r in stats.records) == ["subagent"] * 2 + ["top-level"] + ["workflow-agent"] * 4
+    assert stats.agent_compactions == {"subagent": 2, "workflow-agent": 4}
+    # The session's own figures are the main conversation's alone.
+    assert stats.total_sessions == 1 and stats.sessions_with_compaction == 1
+    assert stats.compactions_per_session_mean == pytest.approx(1.0)
+    assert stats.compactions_per_session_max == 1
+    assert [(sid, count) for sid, count, _dropped, _cost in stats.per_session_summary()] == [("s1", 1)]
+    # The section shows the agent counts as rows.
+    metrics = {row[0]: row[1] for row in compaction.build_section(stats).tables[0].rows}
+    assert metrics["Compactions inside subagent runs"] == 2
+    assert metrics["Compactions inside workflow agent runs"] == 4
+    assert metrics["Sessions with >=1 compaction"] == 1
+
+
+def test_a_session_whose_agents_compacted_three_times_is_not_a_heavy_session(tmp_path, sonnet_rates):
+    main = _compacting_transcript(tmp_path, "main.jsonl", "s1", 1)
+    sub = _compacting_transcript(tmp_path / "subagents", "agent-a1.jsonl", "s1", 5, "subagent", "a1")
+    stats = compaction.CompactionStats.build([(main, sonnet_rates), (sub, sonnet_rates)])
+    assert stats.heavy_session_cost_share({"s1": 10.0}) == (0, 0.0, 0.0)
+    assert stats.agent_compactions == {"subagent": 5}
+
+
+def test_the_share_of_main_session_cost_in_sessions_with_three_or_more_compactions(tmp_path, sonnet_rates):
+    stats = compaction.CompactionStats()
+    cost = {"heavy": 30.0, "edge": 20.0, "light": 40.0, "none": 10.0}
+    for name, count in (("heavy", 5), ("edge", 3), ("light", 2), ("none", 0)):
+        stats.add_transcript(_compacting_transcript(tmp_path, f"{name}.jsonl", name, count), sonnet_rates)
+    # An agent run's cost is not in the base: the caller passes the main conversation's only.
+    heavy, heavy_cost, share = stats.heavy_session_cost_share(cost)
+    assert (heavy, heavy_cost) == (2, 50.0)
+    assert share == pytest.approx(50.0)
+    assert compaction.HEAVY_COMPACTIONS == 3
+    section = compaction.build_section(stats, cost)
+    metrics = {row[0]: row[1] for row in section.tables[0].rows}
+    assert metrics["Sessions with 3+ compactions"] == 2
+    assert metrics["Main-session cost in sessions with 3+ compactions (USD)"] == pytest.approx(50.0)
+    assert metrics["Share of main-session cost in sessions with 3+ compactions"] == pytest.approx(50.0)
+    assert any("main conversation only" in note for note in section.notes)
+
+
+def test_the_compaction_cost_rows_are_left_out_when_there_is_no_cost_to_take_a_share_of(tmp_path, sonnet_rates):
+    stats = compaction.CompactionStats()
+    stats.add_transcript(_compacting_transcript(tmp_path, "a.jsonl", "a", 3), sonnet_rates)
+    for given in (None, {}, {"a": 0.0}):
+        metrics = {row[0] for row in compaction.build_section(stats, given).tables[0].rows}
+        assert "Sessions with 3+ compactions" not in metrics, given
+    # With no main session folded in there is nothing to take a share of.
+    assert compaction.CompactionStats().heavy_session_cost_share({"x": 5.0}) is None
+
+
+def test_the_compaction_cost_row_labels_are_in_the_help_copy():
+    from claudeglass import helptext
+
+    copy = helptext.TABLE_COPY["compactions_summary"]
+    for key in (
+        "Compactions inside subagent runs",
+        "Compactions inside workflow agent runs",
+        "Sessions with 3+ compactions",
+        "Main-session cost in sessions with 3+ compactions (USD)",
+        "Share of main-session cost in sessions with 3+ compactions",
+    ):
+        assert key in copy.value_labels and copy.row_kinds[key]

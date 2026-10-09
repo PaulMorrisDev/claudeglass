@@ -265,9 +265,13 @@ def _run_locked(options: ServeOptions, store_path: Path, lock: StoreLock, *, onc
 
         monthly_job = MonthlyReportJob(options)
 
-    # Coaching notes' split points (service/coaching_job.py), from a
+    # Coaching notes' own numbers (service/coaching_job.py), from a
     # 30-day report of every project built from the store.
     from .coaching_job import CoachingJob
+
+    # The job builds the report and then the typical piece of work from one
+    # load of the store: the corpus is kept between the two calls.
+    coaching_corpus: dict = {}
 
     def _coaching_report(days: int):
         from ..config import load_config
@@ -277,7 +281,7 @@ def _run_locked(options: ServeOptions, store_path: Path, lock: StoreLock, *, onc
 
         config = load_config(options.config_dir)
         rates = load_pricing(path=config.pricing_path, config_dir=options.config_dir)
-        corpus = rebuild.corpus_from_store(store, days=days)
+        corpus = coaching_corpus["corpus"] = rebuild.corpus_from_store(store, days=days)
         return build_report(
             corpus,
             rates,
@@ -285,10 +289,20 @@ def _run_locked(options: ServeOptions, store_path: Path, lock: StoreLock, *, onc
             projects=tuple(sorted({bundle.slug for bundle in corpus.sessions if bundle.slug})),
             window=f"last {days} days",
             ratings=store.all_feedback(),
+            tip_feedback=store.tip_feedback(),
             config_dir=options.config_dir,
         )
 
-    coaching_job = CoachingJob(options, _coaching_report, ready=lambda: watcher.last_stats is not None)
+    def _coaching_typical(days: int) -> int:
+        from .. import coaching
+        from . import rebuild
+
+        corpus = coaching_corpus.pop("corpus", None) or rebuild.corpus_from_store(store, days=days)
+        return coaching.typical_piece_tokens(corpus)
+
+    coaching_job = CoachingJob(
+        options, _coaching_report, build_typical=_coaching_typical, ready=lambda: watcher.last_stats is not None
+    )
 
     if once:
         stats = watcher.run_once()

@@ -69,8 +69,11 @@ answered from your own sessions:
   requests, and everything Claude did for it, into habits worth
   changing, with a rough saving for each. How you prompt counts the
   prompting habits that cost extra replies, such as small requests sent
-  one at a time or the same request sent again, and what each cost.
-  Turn on coaching notes and you're told the moment you send one.
+  one at a time, the same request sent again or asking how it's going,
+  and what each cost.
+  Turn on coaching notes and small requests sent one at a time, a huge
+  paste or a check on background work are flagged the moment you send
+  them.
 - **"Did my change work?"** It records your settings as each session
   starts, and compares the sessions before a change with those after
   it: Your changes shows each one's effect on the measures it should
@@ -156,9 +159,10 @@ It asks up to four questions:
    each reply with a short tag, such as `[cg: task=bugfix brief=clear]`,
    so the tips fit how you work. This turns on
    [metrics capture](#metrics-capture) at its Essentials level: about
-   186 tokens when a session starts and 14 per reply, plus a Claude
-   Haiku call of about $0.002 after each subagent run. It switches
-   itself off after 14 days. It also adds the `/cg-feedback` skill, for
+   435 tokens when a session starts and 15 per reply, plus a Claude
+   Haiku call of about $0.002 after each subagent run, and after a
+   reply Claude leaves without its tag. It switches itself off after 14
+   days. It also adds the `/cg-feedback` skill, for
    rating a piece of work when it's done.
 
 Then it lists every change and asks once: **Go ahead? [Y/n/d]**. Type
@@ -418,8 +422,8 @@ and [missing WSL sessions](https://github.com/PaulMorrisDev/claudeglass/blob/mai
 |---|---|---|
 | A SessionStart hook (`snapshot-config.py`) that records your settings as each session starts. It runs in the background. | `init`, when you connect | None |
 | A status line that logs your usage-limit readings, if you have none. Claude Code runs it only in a terminal, not in the desktop app. | `init`, when you connect | None |
-| The capture hook (`capture-hook.py`) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep. | [Metrics capture](#metrics-capture) | See its levels |
-| The same hook on UserPromptSubmit, and on PostToolUse after shell, read, search, web and MCP tools and an approved plan. | [Coaching notes](#live-coaching) | About 50 to 120 tokens a note, only when a hint applies |
+| The capture hook (`capture-hook.py`, a launcher, with its code `capture_hook.py` and word list beside it) on SessionEnd, Stop, StopFailure, Notification and PermissionRequest; also on SessionStart and SubagentStop from Essentials up, and PostToolUse at Deep. | [Metrics capture](#metrics-capture) | See its levels |
+| The same hook on UserPromptSubmit, and on PostToolUse after read, search and web tools, an approved plan and a call that starts an agent or a workflow, never after a shell or MCP tool; also on SubagentStop, where it only notes a run that ended too big. | [Coaching notes](#live-coaching) | About 50 to 140 tokens a note, only when a hint applies |
 | The `/cg-feedback` skill, for rating a piece of work when it's done. | `init`'s sharper tips, `capture feedback on`, or the Deep level | Its name and description, listed at each session start |
 | The `/cg-brief` skill, which checks a request against its checklist. | `capture brief on` | Its name and description, listed at each session start |
 
@@ -438,9 +442,9 @@ one before it:
 |---|---|---|---|---|
 | Off | Nothing. | – | – | – |
 | Free | Signals from hooks, logged to a local file. | – | – | – |
-| Essentials | A tag on each piece of work: what kind it was, how clear the request was, how hard and how big. Haiku judges whether each subagent run finished, and why one was run again. | ~186 tokens | ~14 tokens | ~$0.002 |
-| Standard | What the request lacked, planning, skills and research, and Haiku's view of each subagent's model and brief. | ~304 tokens | ~24 tokens | ~$0.002 |
-| Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` and its reminders. | ~412 tokens | ~30 tokens | ~$0.002 |
+| Essentials | A tag on each message's work: what kind it was, how clear the request was, how hard and how big. Haiku judges whether each subagent run finished, and why one was run again. | ~435 tokens | ~15 tokens | ~$0.002 |
+| Standard | What the request lacked, planning, skills and research, and Haiku's view of each subagent's model and brief. | ~566 tokens | ~24 tokens | ~$0.002 |
+| Deep | How much earlier context was needed, how the change was checked, and a ~56-token rating note after a large tool output. It also turns on `/cg-feedback` with a rating reminder after a large piece of work and a one-question plan check. | ~676 tokens | ~29 tokens | ~$0.002 |
 
 The note is written to the prompt cache once, then read from it on each
 later reply. Capture switches itself off 14 days after you turn it on:
@@ -451,9 +455,11 @@ level before you pick one, and measures the real cost once it's on.
 Scripts that run `claude -p` or the Agent SDK get nothing added.
 
 **Who writes the tags.** By default, Claude writes the tag at the end of
-its reply. `python -m claudeglass capture tagger haiku` has Claude Haiku
-write it after each turn instead, for about $0.002 a turn. Claude's
-replies then carry no tag, and at Essentials and Standard its
+its reply. When it ends a piece of work without one, Claude Haiku writes
+it in the background, for about $0.002 a call. `python -m claudeglass
+capture tagger haiku` has Claude Haiku write every tag after each turn
+instead, for about $0.002 a turn. Claude's replies then carry no tag,
+and at Essentials and Standard its
 session-start note goes too. Either way, Haiku judges each finished
 subagent run, and the subagent itself is asked for nothing.
 
@@ -467,11 +473,11 @@ Live coaching has its own switches, on **Setup › Capture** or with
 and they work at any capture level, Off included:
 
 - **Coaching notes** (`coaching_notes`). When a hint applies, such as a
-  large tool output, an expired cache or several small requests in a
-  row, the hook adds a short note and Claude passes the tip on. For the
-  six prompting habits, you also see a one-line notice the moment you
-  send the message. They're made for the desktop app, where the status
-  line doesn't show.
+  large tool output, a return after the prompt cache expired or several
+  small requests in a row, the hook adds a short note and Claude passes
+  the tip on. Where your app shows hook messages, you also see a
+  one-line notice the moment you send the message. They're made for the
+  desktop app, where the status line doesn't show.
 - **Coaching line** (`coaching_line`). The same kind of hint in the
   status line, in a terminal. It costs no tokens.
 - **Brief templates** (`capture brief on`). Checklists per kind of task
@@ -515,7 +521,9 @@ turns on coaching notes. See
     writes the tags.
   - With `tagger = "haiku"`, the hook also sends Haiku an excerpt of
     each turn, mainly your message and the end of Claude's reply, and
-    Haiku writes the tag.
+    Haiku writes the tag. Otherwise it sends the same excerpt only when
+    Claude ends a piece of work without its tag. Scheduled tasks and
+    turns that answer a line you didn't type are left out.
   - Only Haiku's answer is kept, in a local file: a few words from a
     fixed list, with its cost and token counts. The excerpt isn't
     kept.
@@ -554,6 +562,11 @@ has the detail.
   OpenTelemetry collector. By default it's aggregate-only, with project
   names hashed. See
   [`docs/exports.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/exports.md).
+- **Tuning figures.** `tuning export` writes a small checked file of
+  counts and fixed words, with no names, paths or text, to take to another
+  machine. `tuning summary FILE` reads it back and refuses a file that
+  fails the checks. See
+  [`docs/exports.md`](https://github.com/PaulMorrisDev/claudeglass/blob/main/docs/exports.md#claudeglass-tuning).
 - **Team comparison.** `export --aggregate`, `import` and `team-report`
   compare several people's machines without collecting anyone's
   sessions. Nobody is included unless they export and hand over the
@@ -592,7 +605,7 @@ has the detail.
 The dashboard's Glossary page uses the same words, term for term.
 
 <details>
-<summary>All 40 terms</summary>
+<summary>All 44 terms</summary>
 
 - **Session**: One conversation with Claude Code, from start to exit. Resuming it continues the same session.
 - **Main session**: The conversation you type into, as opposed to the subagents it starts.
@@ -619,7 +632,7 @@ The dashboard's Glossary page uses the same words, term for term.
 - **Managed setting**: A setting your organisation's policy controls. Only your administrator can change it.
 - **Snapshot**: A record of your Claude Code settings at one moment, taken so changes can be compared over time.
 - **Window**: The stretch of time the numbers cover, picked at the top of the dashboard. It can be the last hour, today, the last 24 hours, 7, 30 or 90 days, all time, or since your last change. The 7, 30 and 90 day windows are whole local days, today included, from midnight. A session counts, in full, when it was last active in the window; since your last change, when it started after the change.
-- **Change point**: A moment your settings changed: an apply, its undo, or a change the settings snapshot saw. A model, effort or CLAUDE.md size change that held for 3 sessions in a row is one too. The dashboard compares the sessions before it with those after it.
+- **Change point**: A moment your settings changed: an apply, its undo, or a change the settings snapshot saw. A model, effort or CLAUDE.md size change that held for 3 sessions in a row is one too. So is a habit you marked as Trying it. The dashboard compares the sessions before it with those after it.
 - **Quick action**: One question about a way to spend less, answered from your own sessions with the evidence and a fix you can copy. The dashboard lists them on the Actions page, under Checks.
 - **What-if estimate**: What a change would have saved over the window, worked out from your own sessions. It is an estimate: cheaper settings can change how Claude works, which the estimate can't see.
 - **CLAUDE.md**: Instruction files Claude reads at the start of every session, and of most subagents: yours, each project's, and rule files. Every line is paid for on every reply that re-reads it.
@@ -627,10 +640,14 @@ The dashboard's Glossary page uses the same words, term for term.
 - **Quality signal**: A sign of whether the work went well, not only what it cost: tool calls that failed, agent runs that didn't finish, your corrections. Compared across models and efforts, and before and after each change you make.
 - **Metrics capture**: An opt-in feature, off by default: a one-line tag, written by Claude or Claude Haiku, saying what the work was and how it went. It costs tokens while it's on. `init`'s last questions and `claudeglass capture` turn it on, change what it asks for, or turn it off.
 - **Capture level**: How much metrics capture asks for: `off`, `free`, `essentials`, `standard` or `deep`, each adding more of it. Set at `init` or with `claudeglass capture level`.
-- **Tag**: The one-line, closed-vocabulary note metrics capture keeps about a piece of work, such as `[cg: task=bugfix brief=clear]`. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is.
+- **Tag**: The one-line, closed-vocabulary note metrics capture keeps about the work on one message or one subagent run, such as `[cg: task=bugfix brief=clear]`. Claude adds it to its reply, or Claude Haiku writes it about a turn or a finished subagent run. Only words from a fixed list are kept; nothing written in anyone's own words is.
 - **Prompt cycle**: One message of yours and everything Claude did to answer it, subagents at any depth included. The unit metrics capture and the Work habits page measure by.
+- **Piece of work**: One job, drawn from a session's transcript alone. It runs from a fresh start (the session start, a `/clear`, or a message about something new) to the next. It needs no feedback and no tag.
+- **Rework**: A follow-up that changes work Claude had already delivered: a redo, a fix, a correction you typed, or an adjustment to files it had changed. A message you send that changes no files while background work runs is not rework. Each rework has a cause, and the dashboard says where that cause came from.
+- **Status check**: A short message that only asks how the work is going, or whether it is done. It asks for nothing new, so it is never rework.
+- **Plan round**: A message you send while a plan is being made: you sent the plan back with changes, or wrote in plan mode. It is feedback on the plan, so it is never rework.
 - **Work habits**: The page (and report section) that turns prompt cycles into habits worth trying, with a rough saving for each. Each shows where its evidence came from: reported by Claude, inferred from the transcript, or your own feedback.
-- **Feedback skill**: `/cg-feedback`, a skill you can add and run after a piece of work. It asks whether the work delivered, what slowed it, whether it was worth the tokens, and what would have helped. Works at any capture level, even off; picking `deep` turns it on, with its reminders.
+- **Feedback skill**: `/cg-feedback`, a skill you can add and run after a piece of work. It asks whether the work delivered, what your follow-up messages were, whether it was worth the tokens, and what would have made it cheaper. Works at any capture level, even off; picking `deep` turns it on, with its reminders.
 - **Brief templates**: Checklists per kind of task on the Work habits page, built from what your own requests tend to lack. Turned on, it also adds a `/cg-brief` skill that checks a request against its checklist and asks once for anything missing before Claude starts.
 - **Sampling**: Running metrics capture in only a share of sessions (100, 50, 25 or 10 percent, `[capture] sample`) to spend fewer tokens on it. Picked at random, per session.
 - **Time-box**: The date metrics capture switches itself back off. By default it's 14 days after you turn a level on, whether at `init`, with `capture on` or `level`, or on the Capture page. So turning it on never means it runs unattended forever. `--for` or `--capture-for` sets another length, and `--no-limit` or `--capture-no-limit` turns the limit off. You can also say so when asked.

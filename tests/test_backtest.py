@@ -122,6 +122,49 @@ def test_verdict_opposite_when_signs_disagree_and_it_is_significant():
     assert backtest._verdict(-1.0, 1.0, "lower") == "opposite"
 
 
+# -- the same readings as the Changes page -------------------------------------
+
+
+def _costing(days: float, cost: float) -> impact.SessionFacts:
+    return impact.SessionFacts(start=CHANGE + timedelta(days=days), main=impact._Transcript(cost=cost, turns=10))
+
+
+def test_a_back_test_judges_a_move_on_the_readings_the_changes_page_does():
+    assert backtest._SIGNIFICANT_LABELS == impact.SIGNIFICANT_LABELS
+    for label in impact.SIGNIFICANT_LABELS:
+        assert backtest._verdict(1.0, 1.0, label) == "as_estimated", label
+    for label in ("no_clear_change", "too_little_data"):
+        assert backtest._verdict(1.0, 1.0, label) == "smaller", label
+
+
+def test_a_move_under_the_noise_floor_is_no_clear_change_in_the_back_test_as_on_the_card():
+    # A 2% fall, with no spread at all: the ratio test is sure of it, the card says "about the same".
+    before = [_costing(-d, 100.0) for d in (1, 2, 3)]
+    after = [_costing(d, 98.0) for d in (0.1, 0.2, 0.3)]
+    row = impact._measure_row(impact._COST, before, after, UNITS)
+    impact._label_rows([row])
+    assert row["label_key"] == "lower" and row["direction"] == "same"
+    assert impact._verdict([row], 3, 3, True).startswith("Cost per session: about the same")
+    # An estimate of nothing, and nothing worth the name showed up: as estimated, not "larger".
+    nothing = _prediction(ts="2026-09-01T00:00:00Z", measure_key="effortLevel", predicted_usd=0.0)
+    assert backtest._judge_row(nothing, before, after, UNITS).verdict == "as_estimated"
+    # The same estimate against a real halving is a larger effect than estimated.
+    halved = [_costing(d, 50.0) for d in (0.1, 0.2, 0.3)]
+    assert backtest._judge_row(nothing, before, halved, UNITS).verdict == "larger"
+
+
+def test_a_small_estimated_saving_that_came_in_as_estimated_is_not_called_smaller():
+    # A 3% fall the test is sure of, worth what was estimated: as estimated, though the card says "about the same".
+    before = [_costing(-d, 100.0 + (0.5 if d % 2 else -0.5)) for d in range(1, 21)]
+    after = [_costing(d / 10, 97.0 + (0.5 if d % 2 else -0.5)) for d in range(1, 21)]
+    row = impact._measure_row(impact._COST, before, after, UNITS)
+    impact._label_rows([row])
+    assert row["label_key"] == "lower" and row["direction"] == "same"
+    measured = (row["before_value"] - row["after_value"]) * row["after_n"]
+    estimate = _prediction(ts="2026-09-01T00:00:00Z", measure_key="effortLevel", predicted_usd=measured)
+    assert backtest._judge_row(estimate, before, after, UNITS).verdict == "as_estimated"
+
+
 # -- present: display-ready rows ----------------------------------------------
 
 

@@ -1,11 +1,14 @@
-"""While the service runs, keep ``coaching.json`` (your own split points
-and plan habit, for the capture hook's coaching notes) up to date.
+"""While the service runs, keep ``coaching.json`` (your own plan habit, tip
+thresholds and typical piece of work, for the capture hook's coaching notes
+and feedback items) up to date.
 
 :class:`CoachingJob` checks once the watcher's first scan is done (so
 a first run doesn't work from a half-filled store) and then every
 :data:`CHECK_INTERVAL_S` seconds, on its own daemon thread. It does
-nothing while coaching notes are off (``[capture] coaching`` lacks
-``coaching_notes``). Otherwise, once the file is missing or older than
+nothing while coaching notes (``[capture] coaching`` lacks
+``coaching_notes``) and the feedback items on your messages (the facts
+line, the plan check and the rating reminder: ``[capture] feedback``) are
+all off. Otherwise, once the file is missing or older than
 ``coaching.MAX_AGE_HOURS``, it builds a report of the last
 ``coaching.DAYS`` days across every project from the store (no
 transcript read) and writes the file (``coaching.from_report``). A
@@ -30,21 +33,26 @@ CHECK_INTERVAL_S = 3600.0
 #: How often (seconds) it looks whether the first scan is done.
 READY_POLL_S = 30.0
 
-_LOG_PREFIX = "claudeglass serve: coaching split points"
+_LOG_PREFIX = "claudeglass serve: coaching numbers"
 
 
 class CoachingJob:
-    """Rewrites ``coaching.json`` once a day while coaching notes are on.
+    """Rewrites ``coaching.json`` once a day while coaching notes or a feedback
+    item on your messages are on.
     :meth:`run_once` is one check (tests and ``serve --once`` call it
     directly); :meth:`start`/:meth:`stop` run it on a background thread.
-    ``build_report`` builds a report over ``days`` days from the store;
-    ``ready`` says whether the store is filled enough to start."""
+    ``build_report`` builds a report over ``days`` days from the store,
+    ``build_typical`` the tokens of your typical piece of work over the same
+    days (``coaching.typical_piece_tokens``, the median of the pieces
+    ``pieces.corpus_pieces`` draws; 0 without it); ``ready`` says
+    whether the store is filled enough to start."""
 
     def __init__(
         self,
         options: ServeOptions,
         build_report: Callable[[int], object],
         *,
+        build_typical: Callable[[int], int] | None = None,
         ready: Callable[[], bool] | None = None,
         now_fn: Callable[[], datetime] | None = None,
         check_interval_s: float = CHECK_INTERVAL_S,
@@ -52,6 +60,7 @@ class CoachingJob:
     ) -> None:
         self.options = options
         self._build_report = build_report
+        self._build_typical = build_typical
         self._ready = ready or (lambda: True)
         self._now_fn = now_fn or (lambda: datetime.now(timezone.utc))
         self._check_interval_s = check_interval_s
@@ -69,14 +78,17 @@ class CoachingJob:
         try:
             config_dir = self.options.config_dir
             config = load_config(config_dir)
-            if not config.capture.coaching_notes_on:
+            if not (config.capture.coaching_notes_on or config.capture.feedback_prompts_on):
                 return None
             now = self._now_fn()
             age = coaching.age_hours(config_dir, now)
             if age is not None and 0 <= age < coaching.MAX_AGE_HOURS:
                 return None
             report = self._build_report(coaching.DAYS)
-            written = coaching.write(config_dir, coaching.from_report(report, config_dir, config.thresholds, now=now))
+            typical = self._build_typical(coaching.DAYS) if self._build_typical is not None else 0
+            written = coaching.write(
+                config_dir, coaching.from_report(report, config_dir, config.thresholds, now=now, typical=typical)
+            )
         except Exception as exc:  # noqa: BLE001 -- a background job must never take serve down
             self._log(f"{_LOG_PREFIX} not written: {exc}")
             return None

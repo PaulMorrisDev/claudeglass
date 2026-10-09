@@ -16,11 +16,12 @@
 import { clear, el, goTo, pickProject, state, WINDOW_OPTIONS } from "./core.js";
 import { icon } from "./icons.js";
 import { fetchJson, loadProjects, loadQuickActions, loadRecommendations, loadReport, scopeKey, withWindow } from "./api.js";
-import { COST_CARDS, findPage, GLOSSARY, plainText, termSlug, VIEW_KEYS, viewFor, viewForSection, viewLabel } from "./links.js";
+import { COST_CARDS, findPage, GLOSSARY, goToHabit, plainText, REWORK_ITEM, termSlug, VIEW_KEYS, viewFor, viewForSection, viewLabel } from "./links.js";
 import { evidenceView, openEvidence } from "./evidence.js";
 import { button, copyToClipboard, SEVERITY_LABELS, statusLabel, toast } from "./ui.js";
 import { moneyText, projectName, shortTs } from "./format.js";
 import { openSessionDrawer } from "./page-spend.js";
+import { sessionWord } from "./charts-types.js";
 
 // What app.js lends the palette: setWindow(value) and setTheme(value),
 // which live with the controls they drive.
@@ -32,6 +33,7 @@ var GROUPS = [
   { kind: "command", label: "Commands" },
   { kind: "recommendation", label: "Recommendations" },
   { kind: "check", label: "Checks" },
+  { kind: "habit", label: "Work habits" },
   { kind: "table", label: "Sections and tables" },
   { kind: "term", label: "Glossary" },
   { kind: "session", label: "Recent sessions" },
@@ -257,6 +259,63 @@ function tableEntries(report) {
   return list;
 }
 
+// The Work habits page's cards: a playbook habit, a prompting habit and
+// the rework section each open the page at that card, un-folded and
+// highlighted (links.js goToHabit, ?item=<key>). A habit the window has
+// no card for isn't offered.
+function habitEntries(report) {
+  var list = [];
+  function cards(sectionKey, tableName, detail, words) {
+    var section = ((report && report.sections) || []).filter(function (item) {
+      return item.key === sectionKey;
+    })[0];
+    var table = ((section && section.tables) || []).filter(function (item) {
+      return item.name === tableName;
+    })[0];
+    if (!table) return;
+    var at = (table.columns || []).map(function (column) {
+      return column.key;
+    }).indexOf("habit");
+    if (at < 0) return;
+    var labels = table.value_labels || {};
+    (table.rows || []).forEach(function (row) {
+      var key = String(row[at] || "");
+      if (!key) return;
+      var label = plainText(String(labels[key] || key));
+      list.push(
+        entry(
+          "habit",
+          label,
+          detail,
+          function () {
+            goToHabit(key);
+          },
+          { words: words + " " + key.replace(/[-_]/g, " "), icon: "check", typed: true }
+        )
+      );
+    });
+  }
+  cards("habits", "habits_playbook", "Work habits: a habit worth trying", "habit playbook card");
+  cards("prompting", "prompting_habits", "Work habits: how you prompt", "habit prompting card");
+  var rework = ((report && report.sections) || []).filter(function (item) {
+    return item.key === "rework";
+  })[0];
+  if (rework) {
+    list.push(
+      entry(
+        "habit",
+        "Rework after delivery",
+        "Work habits: changes you asked for after Claude delivered",
+        function () {
+          goToHabit(REWORK_ITEM);
+        },
+        { words: "rework redo changes pieces of work habit", icon: "check", typed: true }
+      )
+    );
+  }
+  return list;
+}
+
 function sessionEntries(rows) {
   return rows.map(function (row) {
     var id = String(row.id || "");
@@ -269,7 +328,13 @@ function sessionEntries(rows) {
       function () {
         openSessionDrawer(id);
       },
-      { words: [id, row.slug, row.mode, row.purpose].filter(Boolean).join(" "), icon: "clock", typed: true }
+      {
+        words: [id, row.slug, row.mode, sessionWord("mode", row.mode), row.purpose, sessionWord("purpose", row.purpose), sessionWord("entrypoint", row.entrypoint)]
+          .filter(Boolean)
+          .join(" "),
+        icon: "clock",
+        typed: true,
+      }
     );
   });
 }
@@ -315,7 +380,7 @@ function loadEntries() {
       return checkEntries(body && body.ok === true && body.data && Array.isArray(body.data.checks) ? body.data.checks : []);
     }),
     safely(loadReport(), function (result) {
-      return tableEntries(result && result.report);
+      return tableEntries(result && result.report).concat(habitEntries(result && result.report));
     }),
     safely(fetchJson(withWindow("/api/sessions?limit=" + RECENT_SESSIONS)), function (result) {
       var body = result.body;

@@ -34,7 +34,7 @@ import {
   statusMark,
   toast,
 } from "./ui.js";
-import { dataGrid, simpleTable } from "./grid.js";
+import { cardRating, dataGrid, simpleTable } from "./grid.js";
 import { modelName, modelNames, projectName } from "./format.js";
 import { formatHash, pageLink, replaceParams, scopeParams, viewIntro } from "./links.js";
 import { evidenceList } from "./evidence.js";
@@ -80,15 +80,17 @@ export var RULE_AREA = {
   "spawn-cost": "agents",
   "spawn-unused-skills": "agents",
   "spawn-unused-mcp": "agents",
-  "spawn-read-only-tools": "agents",
+  "spawn-tools-list": "agents",
   "spawn-task-prompt": "agents",
   "subagent-volume": "agents",
   "agent-report-size": "agents",
+  "agent-batch-probes": "agents",
   "run-split": "agents",
   "discovery-share": "habits",
   "limit-pressure": "habits",
   "window-budget": "habits",
   "wasted-turns": "habits",
+  "plan-rounds": "habits",
   "data-quality": "data",
   "pricing-coverage": "data",
   "env-attribution-deprecated": "data",
@@ -154,9 +156,11 @@ var RULE_MECHANISM = {
   "spawn-cost": "startup",
   "spawn-unused-skills": "startup",
   "spawn-unused-mcp": "startup",
-  "spawn-read-only-tools": "startup",
+  "spawn-tools-list": "startup",
   "spawn-task-prompt": "startup",
   "agent-report-size": "report",
+  "agent-batch-probes": "carried",
+  "plan-rounds": "carried",
 };
 
 // One or two short sentences on what the change does to the price, with
@@ -194,7 +198,9 @@ function mechanismText(group, facts) {
         ? "Everything in the conversation is read again on every later turn: at " + read + " from the cache, and more after a rebuild. Less to carry makes every turn cheaper."
         : "";
     case "startup":
-      return write ? "Each subagent starts with its own context and writes it to the cache at " + write + ", once per spawn. Whatever you trim is saved on every spawn." : "";
+      return write
+        ? "Each subagent starts with its own context and writes it to the cache at " + write + ", once per spawn" + (read ? ", then reads it back at " + read + " on every later call" : "") + ". Whatever you trim is saved on every spawn."
+        : "";
     case "report":
       return "A subagent's report joins the main conversation, which reads it again on every later turn. A shorter report costs less on each of them.";
     default:
@@ -863,6 +869,13 @@ function renderRecommendationDetail(pane, group, memberKey, focusMember, ctx) {
   if (focus.evidence && focus.evidence.length) {
     article.appendChild(detailSection("The numbers behind this", [evidenceList(ctx.report, focus.evidence)], "detail-evidence"));
   }
+
+  article.appendChild(
+    detailSection("Was this useful?", [
+      el("p", { class: "notes", text: "A rating only. It changes no setting, and it tells ClaudeGlass how well its advice fits your work." }),
+      cardRating("recommendation", String(focus.key || focus.id || group.id)),
+    ])
+  );
 
   article.appendChild(ignoreSection(group, ctx));
 

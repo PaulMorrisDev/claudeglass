@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import recommend, report
+from claudeglass import fixes as fixes_mod, recommend, report
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import (
@@ -575,9 +575,27 @@ def test_spawn_cost_suppressed_for_low_sample_via_ttl_cross_reference():
                     columns=[
                         Column(key="agent_type", label="Agent type"),
                         Column(key="spawns", label="Spawns"),
-                        Column(key="mean_write", label="Mean write"),
+                        Column(key="mean_first_call", label="Mean first call"),
                     ],
-                    rows=[["claude-planner", 1, 50_000]],
+                    rows=[["claude-planner", 1, 110_000]],
+                )
+            ],
+        ),
+    )
+    r = _add_section(
+        r,
+        Section(
+            key="agent_startup",
+            title="Agent startup",
+            tables=[
+                Table(
+                    name="agent_startup_breakdown",
+                    title="Startup",
+                    columns=[
+                        Column(key="agent_type", label="Agent type"),
+                        Column(key="removable_tools", label="Tools never used"),
+                    ],
+                    rows=[["claude-planner", 8_000]],
                 )
             ],
         ),
@@ -645,6 +663,83 @@ def test_subagent_volume_fires_above_threshold():
     assert "60.0%" in rec.why
 
 
+def _cost_centres_table(rows: list[list]) -> Table:
+    from claudeglass import cost_centres
+
+    return Table(
+        name="cost_centres",
+        title="Spend by cost centre",
+        columns=[
+            Column(key="centre", label="Cost centre"),
+            *[Column(key=cell, label=cell, kind="money") for cell in cost_centres.CELLS],
+            Column(key="total", label="Total", kind="money"),
+        ],
+        rows=rows,
+    )
+
+
+def test_subagent_volume_names_the_largest_cost_centre_and_cites_its_row():
+    r = _base_report()
+    r = _add_section(
+        r,
+        Section(
+            key="ttl",
+            title="TTL",
+            tables=[
+                _ttl_by_agent_type_table(
+                    [
+                        ["top-level", 40.0, 0.0, "no material difference", "promptCacheTtl"],
+                        ["claude-implementer", 60.0, 0.0, "no material difference", "promptCacheTtl"],
+                    ]
+                )
+            ],
+        ),
+    )
+    r = _add_section(
+        r,
+        Section(
+            key="agents",
+            title="Agents",
+            tables=[
+                _cost_centres_table(
+                    [
+                        ["main", 10.0, 50.0, 5.0, 0.0, 0.0, 5.0, 70.0],
+                        ["direct", 4.0, 6.0, 2.0, 0.0, 0.0, 3.0, 15.0],
+                    ]
+                )
+            ],
+        ),
+    )
+    recs = recommend_fn(r, config=_config(), archetype=None)
+    rec = next(rec for rec in recs if rec.id == "subagent-volume")
+    assert ("Largest cost centre", 70.0, "agents.cost_centres", "main") in rec.evidence
+    assert ("Cost (observed)", 60.0, "ttl.ttl_by_agent_type", "claude-implementer") in rec.evidence
+    # 70 of 85 is 82%, mostly above-base read.
+    assert "the largest cost centre is main session (82%)" in rec.why
+    assert "above-base read" in rec.why
+
+
+def test_subagent_volume_without_a_cost_centre_table_cites_only_the_agent_type():
+    r = _base_report()
+    r = _add_section(
+        r,
+        Section(
+            key="ttl",
+            title="TTL",
+            tables=[
+                _ttl_by_agent_type_table(
+                    [
+                        ["top-level", 40.0, 0.0, "no material difference", "promptCacheTtl"],
+                        ["claude-implementer", 60.0, 0.0, "no material difference", "promptCacheTtl"],
+                    ]
+                )
+            ],
+        ),
+    )
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "subagent-volume")
+    assert len(rec.evidence) == 1 and "cost centre" not in rec.why
+
+
 def test_subagent_volume_does_not_fire_below_threshold():
     r = _base_report()
     r = _add_section(
@@ -685,6 +780,105 @@ def test_subagent_volume_suppressed_for_overseer_fanout():
     )
     recs = recommend_fn(r, config=_config(), archetype="overseer-fanout")
     assert not any(rec.id == "subagent-volume" for rec in recs)
+
+
+def _workstyle_section(rows: list[list]) -> Section:
+    """The workstyle section, with each row ``[archetype, sessions, spend]``."""
+    return Section(
+        key="workstyle",
+        title="Workstyle",
+        tables=[
+            Table(
+                name="workstyle_archetypes",
+                title="Workstyle archetypes",
+                columns=[
+                    Column(key="archetype", label="Archetype"),
+                    Column(key="sessions", label="Sessions", kind="int"),
+                    Column(key="pct", label="Share", kind="pct"),
+                    Column(key="spend", label="Spend", kind="money"),
+                    Column(key="description", label="Description"),
+                ],
+                rows=[[name, sessions, None, spend, ""] for name, sessions, spend in rows],
+            )
+        ],
+    )
+
+
+def _volume_report(workstyle_rows: list[list] | None) -> ReportModel:
+    """A report in which claude-implementer is 60% of the spend, so
+    subagent-volume fires unless the fan-out gate holds it back, with a
+    workstyle section made of ``workstyle_rows`` (none when ``None``)."""
+    r = _add_section(
+        _base_report(),
+        Section(
+            key="ttl",
+            title="TTL",
+            tables=[
+                _ttl_by_agent_type_table(
+                    [
+                        ["top-level", 40.0, 0.0, "no material difference", "promptCacheTtl"],
+                        ["claude-implementer", 60.0, 0.0, "no material difference", "promptCacheTtl"],
+                    ]
+                )
+            ],
+        ),
+    )
+    if workstyle_rows is not None:
+        _add_section(r, _workstyle_section(workstyle_rows))
+    return r
+
+
+def _fires(r: ReportModel, archetype: str | None = None, config: Config | None = None) -> bool:
+    recs = recommend_fn(r, config=config or _config(), archetype=archetype)
+    return any(rec.id == "subagent-volume" for rec in recs)
+
+
+def test_subagent_volume_is_held_back_when_fanout_sessions_are_30_percent_of_the_spend():
+    # 30 of 100 dollars, in 1 session of 11: not the corpus's biggest
+    # archetype by sessions or even by spend, but a third of its money.
+    rows = [["single-model", 6, 50.0], ["overseer-fanout", 1, 30.0], ["chat-only", 4, 20.0]]
+    assert not _fires(_volume_report(rows))
+    assert not _fires(_volume_report(rows), archetype="single-model")
+
+
+def test_subagent_volume_fires_when_fanout_sessions_are_under_30_percent_of_the_spend():
+    rows = [["single-model", 6, 70.1], ["overseer-fanout", 4, 29.9]]
+    assert _fires(_volume_report(rows))
+
+
+def test_the_spend_share_beats_the_corpus_archetype_when_there_is_a_workstyle_table():
+    rows = [["single-model", 6, 90.0], ["overseer-fanout", 4, 10.0]]
+    # The caller says fan-out; the money says otherwise.
+    assert _fires(_volume_report(rows), archetype="overseer-fanout")
+
+
+def test_subagent_volume_falls_back_to_the_archetype_without_a_workstyle_table():
+    assert not _fires(_volume_report(None), archetype="overseer-fanout")
+    assert _fires(_volume_report(None), archetype="single-model")
+    assert _fires(_volume_report(None), archetype=None)
+
+
+def test_subagent_volume_falls_back_to_the_archetype_when_the_workstyle_table_has_no_spend():
+    rows = [["single-model", 6, None], ["overseer-fanout", 4, None]]
+    assert not _fires(_volume_report(rows), archetype="overseer-fanout")
+    assert _fires(_volume_report(rows), archetype="single-model")
+    free = [["single-model", 6, 0.0], ["overseer-fanout", 4, 0.0]]
+    assert not _fires(_volume_report(free), archetype="overseer-fanout")
+
+
+def test_the_fanout_share_threshold_is_30_by_default_and_configurable():
+    assert RecommendThresholds().fanout_spend_share_pct == 30.0
+    rows = [["single-model", 6, 60.0], ["overseer-fanout", 4, 40.0]]
+    assert not _fires(_volume_report(rows))
+    config = Config(thresholds={"recommend": {"fanout_spend_share_pct": 50}})
+    assert _fires(_volume_report(rows), config=config)
+
+
+def test_fanout_spend_share_pct_reads_the_spend_column():
+    rows = [["single-model", 6, 75.0], ["overseer-fanout", 4, 25.0]]
+    assert recommend._fanout_spend_share_pct(_volume_report(rows)) == pytest.approx(25.0)
+    assert recommend._fanout_spend_share_pct(_volume_report([])) is None
+    assert recommend._fanout_spend_share_pct(_volume_report(None)) is None
 
 
 # -- compaction-churn ------------------------------------------------------
@@ -873,27 +1067,41 @@ def test_long_context_share_does_not_fire_below_both():
 # -- baseline-bloat ---------------------------------------------------------
 
 
-def test_baseline_bloat_fires_with_snapshot_evidence():
-    r = _base_report()
-    r = _add_section(
+def _baseline_report(r, *, controllable=35_000, first_call=95_000, project="proj"):
+    """``r`` with the context-budget baseline rows baseline-bloat reads: a
+    project row (and the "all" row built with no config snapshot, so no
+    memory files) sizing the part of the first call a setting can change
+    next to the whole first call, which is mostly Claude Code's own tools."""
+    columns = [
+        Column(key="project", label="Project"),
+        Column(key="sessions", label="Sessions"),
+        Column(key="mean_baseline", label="Mean first call"),
+        Column(key="human_prompt_est", label="Human prompt"),
+        Column(key="skills_listing_est", label="Skills listing"),
+        Column(key="memory_files_est", label="Memory files"),
+        Column(key="mcp_removable_tokens", label="MCP tools you can turn off"),
+        Column(key="controllable_est", label="What you can change"),
+        Column(key="system_prompt_and_tools_est", label="System prompt and tools"),
+    ]
+    split = controllable / 5
+    rows = [
+        ["all", 10, first_call, 300, split, None, split, split * 2, first_call - controllable],
+        [project, 10, first_call, 300, split, split, split * 2, controllable, first_call - controllable - 300],
+    ]
+    return _add_section(
         r,
         Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
+            key="context_budget",
+            title="Context budget",
+            tables=[Table(name="context_budget_baseline", title="Baseline", columns=columns, rows=rows)],
         ),
     )
+
+
+
+def test_baseline_bloat_fires_with_snapshot_evidence():
+    r = _base_report()
+    r = _baseline_report(r)
     # Fix #20: mcp_servers is the fixed three-key dict the hook actually
     # emits (hooks/snapshot-config.py) -- server names live under
     # "names", not as top-level dict keys -- and enabled_plugins is a
@@ -911,85 +1119,71 @@ def test_baseline_bloat_fires_with_snapshot_evidence():
     # No lever: MCP servers aren't a settings key, so --patch-set has
     # nothing to write for it, and no one settings file for a scope chip.
     assert rec.lever is None and rec.scope == ""
+    table = "context_budget.context_budget_baseline"
     assert rec.evidence == [
-        ("Mean session baseline (cache-creation)", 50_000, "agents.topology_session_baseline", "all"),
+        ("What you can change at the start of a session (est)", 35_000, table, "proj"),
+        ("Estimated human prompt (est)", 300, table, "proj"),
+        ("Estimated skills listing (est)", 7_000, table, "proj"),
+        ("Estimated memory files (est)", 7_000, table, "proj"),
+        ("Estimated MCP tools you can turn off (est)", 14_000, table, "proj"),
+        ("Mean first call (measured)", 95_000, table, "proj"),
+        ("Estimated system prompt and tools (est)", 59_700, table, "proj"),
     ]
+    # Only what a setting can change competes for "largest".
+    raw = recommend._rule_baseline_bloat(r, RecommendThresholds(), snapshot, None)[0]
+    assert "largest estimated share of that baseline is MCP tools" in raw.action
 
 
-def test_baseline_bloat_does_not_fire_without_snapshot():
+def test_baseline_bloat_fires_without_snapshot():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _baseline_report(r)
     recs = recommend_fn(r, config=_config(), archetype=None, snapshot=None)
-    assert not any(rec.id == "baseline-bloat" for rec in recs)
+    assert any(rec.id == "baseline-bloat" for rec in recs)
 
 
-def test_baseline_bloat_does_not_fire_with_too_few_mcp_servers():
-    r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
-        ),
+def _baseline_with_custom_agents(custom_agents):
+    r = _baseline_report(_base_report())
+    table = r.sections[-1].tables[0]
+    table.columns.insert(5, Column(key="custom_agents_est", label="Custom agents (est)"))
+    for row in table.rows:
+        row.insert(5, custom_agents)
+    return r
+
+
+def test_baseline_bloat_suggests_trimming_agent_descriptions_only_when_they_are_a_real_share():
+    snapshot = Snapshot(
+        path=Path("s.json"),
+        ts="20260918T000000Z",
+        data={
+            "mcp_servers": {"names": ["a", "b", "c"], "enabled_mcpjson_servers": [], "disabled_mcpjson_servers": []},
+            "enabled_plugins": ["x", "y"],
+        },
     )
+    big = recommend_fn(_baseline_with_custom_agents(1_800.0), config=_config(), archetype=None, snapshot=snapshot)
+    action = next(rec for rec in big if rec.id == "baseline-bloat").action
+    assert "Your own agents' descriptions add about 1,800 tokens to every session" in action
+    assert "Shortening the description line in their agent files trims that" in action
+    small = recommend_fn(_baseline_with_custom_agents(400.0), config=_config(), archetype=None, snapshot=snapshot)
+    action = next(rec for rec in small if rec.id == "baseline-bloat").action
+    assert "descriptions" not in action
+    # Exactly the threshold counts.
+    edge = recommend_fn(_baseline_with_custom_agents(1_000.0), config=_config(), archetype=None, snapshot=snapshot)
+    assert "descriptions add about 1,000 tokens" in next(rec for rec in edge if rec.id == "baseline-bloat").action
+
+
+def test_baseline_bloat_ignores_config_counts():
+    r = _base_report()
+    r = _baseline_report(r)
     snapshot = Snapshot(
         path=Path("s.json"), ts="20260918T000000Z", data={"mcp_servers": {"names": ["a"]}}
     )
     recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
-    assert not any(rec.id == "baseline-bloat" for rec in recs)
+    assert any(rec.id == "baseline-bloat" for rec in recs)
 
 
 def test_baseline_bloat_suppressed_for_chat_only():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _baseline_report(r)
     snapshot = Snapshot(
         path=Path("s.json"),
         ts="20260918T000000Z",
@@ -1213,43 +1407,40 @@ def test_attribution_deprecated_does_not_fire_when_neither_set():
     assert not any(rec.id == "env-attribution-deprecated" for rec in recs)
 
 
-def test_baseline_bloat_prefers_effective_enabled_plugins_when_present():
-    r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_session_baseline",
-                    title="Session baseline",
-                    columns=[
-                        Column(key="metric", label="Metric"),
-                        Column(key="sessions", label="Sessions"),
-                        Column(key="mean_baseline", label="Mean baseline"),
-                    ],
-                    rows=[["all", 10, 50_000]],
-                )
-            ],
-        ),
-    )
-    # baseline_bloat_min_mcp_or_plugins defaults to 5. Schema-1
-    # enabled_plugins names only one plugin (1 MCP + 1 plugin = 2, below
-    # the threshold); effective_enabled_plugins (schema 2, deep-merged)
-    # names four (1 MCP + 4 plugins = 5, which clears it) -- confirms the
-    # rule reads the new field when present rather than the old one.
+def test_baseline_bloat_does_not_fire_on_the_harness_floor_alone():
+    """A 95k first call with 5k of it a setting can change is Claude Code's
+    own tool JSON: the raw size used to fire this card, and says nothing
+    about the user's configuration."""
+    r = _baseline_report(_base_report(), controllable=5_000, first_call=95_000)
     snapshot = Snapshot(
         path=Path("s.json"),
         ts="20260918T000000Z",
-        data={
-            "mcp_servers": {"names": ["a"]},
-            "enabled_plugins": ["only-one"],
-            "effective_enabled_plugins": ["p1", "p2", "p3", "p4"],
-        },
+        data={"mcp_servers": {"names": ["a", "b", "c", "d", "e"]}},
+    )
+    recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
+    assert not any(rec.id == "baseline-bloat" for rec in recs)
+
+
+def test_baseline_bloat_fires_on_the_controllable_part_whatever_the_first_call():
+    r = _baseline_report(_base_report(), controllable=30_000, first_call=40_000)
+    snapshot = Snapshot(
+        path=Path("s.json"),
+        ts="20260918T000000Z",
+        data={"mcp_servers": {"names": ["a", "b", "c", "d", "e"]}},
     )
     recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
     assert any(rec.id == "baseline-bloat" for rec in recs)
+
+
+def test_baseline_bloat_does_not_fire_without_the_context_budget_table():
+    r = _base_report()
+    snapshot = Snapshot(
+        path=Path("s.json"),
+        ts="20260918T000000Z",
+        data={"mcp_servers": {"names": ["a", "b", "c", "d", "e"]}},
+    )
+    recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
+    assert not any(rec.id == "baseline-bloat" for rec in recs)
 
 
 # -- agent-report-size ------------------------------------------------------
@@ -1301,11 +1492,264 @@ def test_agent_report_size_suppressed_for_chat_only():
     assert not any(rec.id == "agent-report-size" for rec in recs)
 
 
+# -- agent-batch-probes ------------------------------------------------------
+
+
+def _probes_section(*rows) -> Section:
+    """The Work habits section's ``habits_probes`` table, each row
+    ``(where, replies, single read-only calls, of them by shell, runs, cache reads of the replies after the first)``."""
+    return Section(
+        key="habits",
+        title="Work habits",
+        tables=[
+            Table(
+                name="habits_probes",
+                title="Single lookups, one call per reply",
+                columns=[
+                    Column(key="agent_type", label="Where"),
+                    Column(key="calls", label="Replies"),
+                    Column(key="probes", label="Single read-only calls"),
+                    Column(key="shell", label="Of them by shell command"),
+                    Column(key="runs", label="Runs of two or more"),
+                    Column(key="batch_cost", label="Re-reads a batch would spare", kind="money"),
+                ],
+                rows=[list(row) for row in rows],
+            )
+        ],
+    )
+
+
+def _batch_probe_recs(*rows, archetype=None):
+    r = _add_section(_base_report(), _probes_section(*rows))
+    return [rec for rec in recommend_fn(r, config=_config(), archetype=archetype) if rec.id == "agent-batch-probes"]
+
+
+def test_agent_batch_probes_fires_per_agent_type_with_half_the_tables_upper_bound():
+    fired = _batch_probe_recs(
+        ["top-level", 900, 500, 50, 120, 90.0],
+        ["Explore", 400, 190, 30, 55, 12.0],
+        ["claude-implementer", 300, 100, 0, 20, 4.0],
+        ["haiku-sweeper", 400, 20, 0, 3, 40.0],
+    )
+    # The main session's row is yours to prompt; a type with few lookups is left alone.
+    assert [(rec.agent_type, rec.severity, rec.category, rec.lever) for rec in fired] == [
+        ("Explore", "advice", "workflow", None),
+        ("claude-implementer", "advice", "workflow", None),
+    ]
+    explore = fired[0]
+    assert explore.saving_usd == pytest.approx(6.0)
+    assert explore.evidence == [
+        ("Replies it made", 400, "habits.habits_probes", "Explore"),
+        ("Single read-only calls", 190, "habits.habits_probes", "Explore"),
+        ("Of them by shell command", 30, "habits.habits_probes", "Explore"),
+        ("Re-reads a batch would spare", 12.0, "habits.habits_probes", "Explore"),
+    ]
+    # The action is the line to paste, word for word.
+    assert "Batch independent Read/Grep/Glob calls into a single message" in explore.action
+    assert fired[1].saving_usd == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize(
+    "row, why",
+    [
+        (["Explore", 99, 90, 0, 20, 50.0], "under 100 replies"),
+        (["Explore", 400, 99, 0, 20, 50.0], "under a quarter of the replies"),
+        (["Explore", 400, 200, 0, 20, 1.9], "under $1 once halved"),
+        (["Explore", 400, 200, 0, 20, "n/a"], "no figure for the cost"),
+        (["Explore", None, 200, 0, 20, 50.0], "no count of replies"),
+    ],
+)
+def test_agent_batch_probes_stays_quiet_below_its_thresholds_or_without_numbers(row, why):
+    assert _batch_probe_recs(row) == [], why
+
+
+def test_agent_batch_probes_fires_at_exactly_its_thresholds():
+    assert len(_batch_probe_recs(["Explore", 100, 25, 0, 4, 2.0])) == 1
+
+
+def test_agent_batch_probes_needs_the_probes_table_and_its_columns():
+    r = _base_report()
+    assert not any(rec.id == "agent-batch-probes" for rec in recommend_fn(r, config=_config(), archetype=None))
+    section = _probes_section(["Explore", 400, 200, 0, 20, 50.0])
+    del section.tables[0].columns[-1]
+    r = _add_section(_base_report(), section)
+    assert not any(rec.id == "agent-batch-probes" for rec in recommend_fn(r, config=_config(), archetype=None))
+
+
+def test_agent_batch_probes_is_suppressed_for_chat_only():
+    assert _batch_probe_recs(["Explore", 400, 200, 0, 20, 50.0], archetype="chat-only") == []
+
+
+def test_agent_batch_probes_thresholds_come_from_the_config():
+    th = RecommendThresholds.from_config(
+        {"agent_batch_probes_min_replies": 20, "agent_batch_probes_share_pct": 10, "agent_batch_probes_saving_factor": 1}
+    )
+    assert (th.agent_batch_probes_min_replies, th.agent_batch_probes_share_pct) == (20, 10.0)
+    r = _add_section(_base_report(), _probes_section(["Explore", 30, 5, 0, 1, 1.5]))
+    config = Config(thresholds={"recommend": {"agent_batch_probes_min_replies": 20, "agent_batch_probes_share_pct": 10,
+                                              "agent_batch_probes_saving_factor": 1}})
+    recs = recommend_fn(r, config=config, archetype=None)
+    (rec,) = [rec for rec in recs if rec.id == "agent-batch-probes"]
+    assert rec.saving_usd == pytest.approx(1.5)
+
+
+def test_agent_batch_probes_halves_the_cache_reads_of_the_spared_replies_not_their_whole_cost(tmp_path):
+    from types import SimpleNamespace as NS
+
+    from claudeglass import habits
+    from claudeglass.model import TranscriptMeta
+    from claudeglass.parse import parse_transcript
+    from claudeglass.pricing import load_pricing, price_turn
+    from helpers import tool_result_block, tool_use_block, user_block_line, user_str_line
+    from test_habits import MODEL, _lookup, _reply, _said, _ts
+
+    def parse(name, lines, **meta):
+        path = tmp_path / name
+        write_jsonl(path, lines)
+        return parse_transcript(path, TranscriptMeta(path=str(path), **meta))
+
+    pricing = load_pricing(path=Path(__file__).parent / "fixtures" / "pricing_min.toml")
+    top = parse("top.jsonl", [
+        _said(0, "find it"),
+        _reply(1, tool_use_block("Agent", "toolu_A", {"prompt": "find it"})),
+        user_block_line([tool_result_block("toolu_A", "found it")], timestamp=_ts(20)),
+        _reply(21, text="Found it."),
+    ], kind="top-level")
+    sub = parse("agent-a1.jsonl", [
+        user_str_line("find it", timestamp=_ts(2)),
+        *_lookup(3, 0), *_lookup(5, 1), *_lookup(7, 2), _reply(9, text="src/f0.py"),
+    ], kind="subagent", agent_id="agent-a1", agent_type="Explore", tool_use_id="toolu_A")
+    bundle = NS(top=top, subs=[sub], session_id="s1", project_dir="p", slug="p")
+    section = habits.section_from(habits.collect(NS(sessions=[bundle]), pricing))
+
+    config = Config(thresholds={"recommend": {
+        "agent_batch_probes_min_replies": 3, "agent_batch_probes_share_pct": 10, "agent_batch_probes_min_saving_usd": 0,
+    }})
+    recs = recommend_fn(_add_section(_base_report(), section), config=config, archetype=None)
+    (rec,) = [rec for rec in recs if rec.id == "agent-batch-probes"]
+    spared = [price_turn(t, pricing.resolve_model(MODEL)) for t in sub.turns[1:3]]
+    # The tool results are written again by a batched message: only the re-reads are spared, and half of those.
+    assert rec.saving_usd == pytest.approx(0.5 * sum(p.cache_read_cost for p in spared))
+    assert rec.saving_usd < 0.5 * sum(p.total for p in spared)
+
+
+# -- plan-rounds -------------------------------------------------------------
+
+
+def _rounds_section(*rows) -> Section:
+    """The Work habits section's ``habits_plan_rounds`` table, each row
+    ``(kind, plans, typed, rounds, asked, cost)``."""
+    return Section(
+        key="habits",
+        title="Work habits",
+        tables=[
+            Table(
+                name="habits_plan_rounds",
+                title="Plans sent back",
+                columns=[
+                    Column(key="kind", label="Which plans"),
+                    Column(key="plans", label="Plans"),
+                    Column(key="typed", label="Approved by typing"),
+                    Column(key="rounds", label="Plans sent back"),
+                    Column(key="asked", label="Sent back with a question or critique"),
+                    Column(key="cost", label="Cost between the first plan and approval", kind="money"),
+                ],
+                rows=[list(row) for row in rows],
+            )
+        ],
+    )
+
+
+def _plan_round_recs(*rows, config=None):
+    r = _add_section(_base_report(), _rounds_section(*rows))
+    return [rec for rec in recommend_fn(r, config=config or _config(), archetype=None) if rec.id == "plan-rounds"]
+
+
+#: Ten approved plans, six sent back at least once (twelve rounds, six a
+#: question or critique), 40.00 spent on the rounds.
+_ROUNDS_ALL = ["all", 10, 3, 12, 6, 40.0]
+_ROUNDS_NONE = ["none", 4, 1, 0, 0, 0.0]
+
+
+def test_plan_rounds_fires_with_a_quarter_of_the_rounds_cost_scaled_to_the_questions_and_critiques():
+    (rec,) = _plan_round_recs(_ROUNDS_ALL, _ROUNDS_NONE)
+    assert (rec.severity, rec.category, rec.lever, rec.agent_type) == ("advice", "workflow", None, None)
+    assert rec.title == "Plans keep being sent back"
+    # 40.00 of rounds, half of them a question or a critique, a quarter of that.
+    assert rec.saving_usd == pytest.approx(5.0)
+    assert rec.evidence == [
+        ("Plans you approved", 10, "habits.habits_plan_rounds", "all"),
+        ("Never sent back", 4, "habits.habits_plan_rounds", "none"),
+        ("Times plans were sent back", 12, "habits.habits_plan_rounds", "all"),
+        ("Sent back with a question or critique", 6, "habits.habits_plan_rounds", "all"),
+        ("Replies between the first plan and approval", 40.0, "habits.habits_plan_rounds", "all"),
+    ]
+    # The action is the line to paste, word for word.
+    assert fixes_mod.CRITIQUE_PLAN_LINE in rec.action
+
+
+def test_plan_rounds_counts_every_plan_as_sent_back_when_none_was_approved_at_once():
+    (rec,) = _plan_round_recs(_ROUNDS_ALL)
+    assert rec.evidence[1] == ("Never sent back", 0, "habits.habits_plan_rounds", "none")
+
+
+@pytest.mark.parametrize(
+    "all_row, none_row, why",
+    [
+        (["all", 4, 1, 12, 6, 40.0], ["none", 1, 0, 0, 0, 0.0], "under five approved plans"),
+        (["all", 10, 3, 12, 6, 40.0], ["none", 8, 2, 0, 0, 0.0], "under 30% of the plans were sent back"),
+        (["all", 10, 3, 12, 3, 40.0], ["none", 4, 1, 0, 0, 0.0], "under 30% of the rounds were a question or critique"),
+        (["all", 10, 3, 12, 6, 3.0], ["none", 4, 1, 0, 0, 0.0], "under $1 once scaled and cut"),
+        (["all", 10, 3, 0, 0, 40.0], ["none", 10, 3, 0, 0, 0.0], "no plan was sent back"),
+        (["all", 10, 3, 12, 6, "n/a"], ["none", 4, 1, 0, 0, 0.0], "no figure for the cost"),
+        (["all", None, 3, 12, 6, 40.0], ["none", 4, 1, 0, 0, 0.0], "no count of plans"),
+    ],
+)
+def test_plan_rounds_stays_quiet_below_its_thresholds_or_without_numbers(all_row, none_row, why):
+    assert _plan_round_recs(all_row, none_row) == [], why
+
+
+def test_plan_rounds_fires_at_exactly_its_thresholds():
+    # Ten plans with seven approved at once is exactly 30% sent back; five plans is the fewest that count.
+    assert len(_plan_round_recs(["all", 10, 0, 10, 3, 14.0], ["none", 7, 0, 0, 0, 0.0])) == 1
+    assert len(_plan_round_recs(["all", 5, 0, 10, 4, 25.0], ["none", 3, 0, 0, 0, 0.0])) == 1
+
+
+def test_plan_rounds_needs_the_table_its_all_row_and_its_columns():
+    r = _base_report()
+    assert not any(rec.id == "plan-rounds" for rec in recommend_fn(r, config=_config(), archetype=None))
+    # No approved plan at all: no "all" row.
+    assert _plan_round_recs(["dropped", 3, 0, 4, 2, 9.0]) == []
+    section = _rounds_section(_ROUNDS_ALL, _ROUNDS_NONE)
+    del section.tables[0].columns[-1]
+    r = _add_section(_base_report(), section)
+    assert not any(rec.id == "plan-rounds" for rec in recommend_fn(r, config=_config(), archetype=None))
+    # A row shorter than its columns is skipped, not a crash.
+    assert _plan_round_recs(["all", 10]) == []
+
+
+def test_plan_rounds_thresholds_come_from_the_config():
+    th = RecommendThresholds.from_config(
+        {"plan_rounds_min_plans": 2, "plan_rounds_min_share_pct": 10, "plan_rounds_min_asked_pct": 10,
+         "plan_rounds_min_saving_usd": 0.1, "plan_rounds_saving_factor": 1}
+    )
+    assert (th.plan_rounds_min_plans, th.plan_rounds_min_share_pct, th.plan_rounds_saving_factor) == (2, 10.0, 1.0)
+    config = Config(thresholds={"recommend": {
+        "plan_rounds_min_plans": 2, "plan_rounds_min_share_pct": 10, "plan_rounds_min_asked_pct": 10,
+        "plan_rounds_min_saving_usd": 0.1, "plan_rounds_saving_factor": 1,
+    }})
+    (rec,) = _plan_round_recs(["all", 3, 0, 2, 1, 4.0], ["none", 2, 0, 0, 0, 0.0], config=config)
+    assert rec.saving_usd == pytest.approx(2.0)
+    # The defaults would have left it alone.
+    assert _plan_round_recs(["all", 3, 0, 2, 1, 4.0], ["none", 2, 0, 0, 0, 0.0]) == []
+
+
 # -- spawn-cost --------------------------------------------------------------
 
 
-def test_spawn_cost_fires_per_agent_type():
-    r = _base_report()
+def _spawn_cost_report(r, *rows):
+    """``r`` with a first call and an unused-tools size per ``(agent type,
+    mean first call, tools never used)`` row: what spawn-cost reads."""
     r = _add_section(
         r,
         Section(
@@ -1315,17 +1759,49 @@ def test_spawn_cost_fires_per_agent_type():
                 Table(
                     name="topology_spawn_write",
                     title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 50_000]],
+                    columns=[
+                        Column(key="agent_type", label="Agent type"),
+                        Column(key="mean_first_call", label="Mean first call"),
+                    ],
+                    rows=[[agent, first_call] for agent, first_call, _removable in rows],
                 )
             ],
         ),
     )
+    return _add_section(
+        r,
+        Section(
+            key="agent_startup",
+            title="Agent startup",
+            tables=[
+                Table(
+                    name="agent_startup_breakdown",
+                    title="Startup",
+                    columns=[
+                        Column(key="agent_type", label="Agent type"),
+                        Column(key="removable_tools", label="Tools never used"),
+                    ],
+                    rows=[[agent, removable] for agent, _first_call, removable in rows],
+                )
+            ],
+        ),
+    )
+
+
+def test_spawn_cost_fires_per_agent_type():
+    r = _base_report()
+    r = _spawn_cost_report(r, ("claude-implementer", 110_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype=None)
     rec = next(rec for rec in recs if rec.id == "spawn-cost")
     assert rec.lever == "omitClaudeMd"
     assert rec.evidence == [
-        ("Mean first-turn write", 50_000, "agents.topology_spawn_write", "claude-implementer"),
+        ("Mean first call", 110_000, "agents.topology_spawn_write", "claude-implementer"),
+        (
+            "Tool definitions it rarely or never uses",
+            8_000,
+            "agent_startup.agent_startup_breakdown",
+            "claude-implementer",
+        ),
     ]
 
 
@@ -1334,42 +1810,14 @@ def test_spawn_cost_not_suppressed_for_overseer_fanout():
     subagent-volume's ('stop spawning so much') -- an overseer-fanout
     session should still be told to trim an expensive spawn briefing."""
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("claude-implementer", 110_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype="overseer-fanout")
     assert any(rec.id == "spawn-cost" for rec in recs)
 
 
 def test_spawn_cost_suppressed_for_chat_only():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("claude-implementer", 110_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype="chat-only")
     assert not any(rec.id == "spawn-cost" for rec in recs)
 
@@ -1380,28 +1828,41 @@ def test_spawn_cost_emits_workflow_advice_with_no_lever_for_builtin_agent_type()
     # for omitClaudeMd to patch, so without a snapshot to say otherwise
     # this must fall back to workflow advice with no lever.
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["general-purpose", 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("general-purpose", 110_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype=None)
     rec = next(rec for rec in recs if rec.id == "spawn-cost")
     assert rec.lever is None
     assert rec.category == "workflow"
-    assert "task prompt you send it" in rec.action
+    # A shorter task prompt does not change a built-in agent's start, so the
+    # card says so and points at a same-named file with a tools list.
+    assert "a shorter task prompt does not change" in rec.action
+    assert "same-named agent file with a tools list" in rec.action
+    assert "Shorten" not in rec.action and "briefing" not in rec.action
     text = render_patch_set([rec])
     assert text == ""
+
+
+def test_spawn_cost_is_not_given_to_the_read_only_helpers():
+    """Explore, Plan and claude-code-guide start with a small tool set of
+    their own, which the tools-list card leaves alone: a built-in one has
+    no file of the user's to put a tools list in, so spawn-cost has no
+    lever for it (it used to fire for Plan, with tools-list advice and no
+    amount)."""
+    for agent in ("Explore", "Plan", "claude-code-guide"):
+        r = _spawn_cost_report(_base_report(), (agent, 110_000, 8_000))
+        recs = recommend_fn(r, config=_config(), archetype=None)
+        assert not any(rec.id == "spawn-cost" for rec in recs), agent
+
+
+def test_spawn_cost_still_names_a_read_only_helper_the_user_gave_a_file():
+    # A Plan.md of the user's is a file omitClaudeMd and a tools list can go in.
+    r = _spawn_cost_report(_base_report(), ("Plan", 110_000, 8_000), ("general-purpose", 110_000, 8_000))
+    snapshot = Snapshot(path=Path("s.json"), ts="20260918T000000Z", data={"agents": {"Plan": {"model": "sonnet"}}})
+    recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
+    spawn_recs = {rec.agent_type: rec for rec in recs if rec.id == "spawn-cost"}
+    assert spawn_recs["Plan"].lever == "omitClaudeMd"
+    # The built-in general-purpose still gets its card beside it.
+    assert spawn_recs["general-purpose"].lever is None
 
 
 def test_spawn_cost_snapshot_agents_map_overrides_builtin_fallback():
@@ -1410,21 +1871,7 @@ def test_spawn_cost_snapshot_agents_map_overrides_builtin_fallback():
     # agent type not on the built-in list, absence from that map means
     # no lever; presence means a lever, regardless of the built-in guess.
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 50_000], ["general-purpose", 50_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("claude-implementer", 110_000, 8_000), ("general-purpose", 110_000, 8_000))
     snapshot = Snapshot(
         path=Path("s.json"),
         ts="20260918T000000Z",
@@ -1440,23 +1887,33 @@ def test_spawn_cost_snapshot_agents_map_overrides_builtin_fallback():
 
 def test_spawn_cost_does_not_fire_below_threshold():
     r = _base_report()
-    r = _add_section(
-        r,
-        Section(
-            key="agents",
-            title="Agents",
-            tables=[
-                Table(
-                    name="topology_spawn_write",
-                    title="Spawn write",
-                    columns=[Column(key="agent_type", label="Agent type"), Column(key="mean_write", label="Mean write")],
-                    rows=[["claude-implementer", 10_000]],
-                )
-            ],
-        ),
-    )
+    r = _spawn_cost_report(r, ("claude-implementer", 30_000, 8_000))
     recs = recommend_fn(r, config=_config(), archetype=None)
     assert not any(rec.id == "spawn-cost" for rec in recs)
+
+
+def test_spawn_cost_does_not_fire_when_the_first_call_is_mostly_claude_codes_own_tools():
+    """A first call of 110k with nothing a tools list could take out is the
+    harness floor: no setting of the user's changes it, so no card."""
+    r = _spawn_cost_report(_base_report(), ("claude-implementer", 110_000, 500))
+    recs = recommend_fn(r, config=_config(), archetype=None)
+    assert not any(rec.id == "spawn-cost" for rec in recs)
+
+
+def test_spawn_cost_does_not_fire_without_the_startup_breakdown():
+    r = _spawn_cost_report(_base_report(), ("claude-implementer", 110_000, 8_000))
+    r = dataclasses.replace(r, sections=[sec for sec in r.sections if sec.key != "agent_startup"])
+    recs = recommend_fn(r, config=_config(), archetype=None)
+    assert not any(rec.id == "spawn-cost" for rec in recs)
+
+
+def test_spawn_cost_ignores_the_cache_write_it_used_to_gate_on():
+    """A big cache write (a long briefing) on a small first call is the
+    spawn-task-prompt rule's, not spawn-cost's."""
+    r = _spawn_cost_report(_base_report(), ("claude-implementer", 30_000, 8_000))
+    recs = recommend_fn(r, config=_config(), archetype=None)
+    assert not any(rec.id == "spawn-cost" for rec in recs)
+
 
 
 # -- effort-mismatch ---------------------------------------------------------
@@ -1981,49 +2438,75 @@ def test_data_quality_does_not_fire_when_all_clean():
 # -- limit-pressure (v3-limits addition) ------------------------------------
 
 
-def _limits_summary_table(hits: int, terminated_rate_limit: int, sessions_affected: int = 1) -> Table:
+def _limits_summary_table(
+    five_hour: int = 0,
+    weekly: int = 0,
+    weekly_stopped_work: int = 0,
+    cut_off: int = 0,
+    days: int = 30,
+    sessions_affected: int = 1,
+) -> Table:
     return Table(
         name="limits_summary",
         title="Usage-limits summary",
         columns=[
             Column(key="metric", label="Metric"),
-            Column(key="limit_hits", label="Limit hits"),
-            Column(key="agents_terminated_rate_limit", label="Agents terminated by rate limit"),
+            Column(key="five_hour_stops", label="5-hour limit stops"),
+            Column(key="weekly_stops", label="Weekly limit stops"),
+            Column(key="weekly_stops_stopped_work", label="Weekly stops that stopped work"),
+            Column(key="window_days", label="Days covered"),
             Column(key="sessions_affected", label="Sessions affected"),
+            Column(key="agents_cut_off", label="Agents cut off"),
         ],
-        rows=[["all", hits, terminated_rate_limit, sessions_affected]],
+        rows=[["all", five_hour, weekly, weekly_stopped_work, days, sessions_affected, cut_off]],
     )
 
 
-def test_limit_pressure_fires_on_hit_count():
-    r = _base_report()
+def _limit_pressure_recs(**counts):
     r = _add_section(
-        r,
-        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(hits=3, terminated_rate_limit=0)]),
+        _base_report(),
+        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(**counts)]),
     )
-    recs = recommend_fn(r, config=_config(), archetype=None)
-    rec = next(rec for rec in recs if rec.id == "limit-pressure")
-    assert ("Usage-cap hits", 3, "limits.limits_summary", "all") in rec.evidence
+    return [rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "limit-pressure"]
 
 
-def test_limit_pressure_fires_on_a_single_rate_limit_termination():
-    r = _base_report()
-    r = _add_section(
-        r,
-        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(hits=0, terminated_rate_limit=1)]),
-    )
-    recs = recommend_fn(r, config=_config(), archetype=None)
-    assert any(rec.id == "limit-pressure" for rec in recs)
+def test_limit_pressure_fires_on_two_five_hour_stops_a_week():
+    # 9 stops in 30 days is 2.1 a week.
+    (rec,) = _limit_pressure_recs(five_hour=9, days=30)
+    assert ("5-hour limit stops", 9, "limits.limits_summary", "all") in rec.evidence
+    assert ("Days covered", 30, "limits.limits_summary", "all") in rec.evidence
+    assert ("Sessions affected", 1, "limits.limits_summary", "all") in rec.evidence
 
 
-def test_limit_pressure_does_not_fire_below_both_thresholds():
-    r = _base_report()
-    r = _add_section(
-        r,
-        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(hits=2, terminated_rate_limit=0)]),
-    )
-    recs = recommend_fn(r, config=_config(), archetype=None)
-    assert not any(rec.id == "limit-pressure" for rec in recs)
+def test_limit_pressure_counts_a_rate_not_a_total():
+    # 8 stops in 30 days is 1.9 a week: below the threshold however long the window.
+    assert not _limit_pressure_recs(five_hour=8, days=30)
+    assert _limit_pressure_recs(five_hour=2, days=7)
+
+
+def test_limit_pressure_reads_a_short_window_as_a_week():
+    # The window floors at 7 days: two stops in a day read as two a week,
+    # and a single stop never does.
+    assert _limit_pressure_recs(five_hour=2, days=1)
+    assert not _limit_pressure_recs(five_hour=1, days=1)
+
+
+def test_limit_pressure_fires_on_a_weekly_stop_that_stopped_work():
+    (rec,) = _limit_pressure_recs(weekly=1, weekly_stopped_work=1)
+    assert ("Weekly stops that stopped work", 1, "limits.limits_summary", "all") in rec.evidence
+
+
+def test_limit_pressure_ignores_a_weekly_stop_you_worked_through():
+    assert not _limit_pressure_recs(weekly=1, weekly_stopped_work=0)
+
+
+def test_limit_pressure_fires_on_a_single_cut_off_agent():
+    (rec,) = _limit_pressure_recs(cut_off=1)
+    assert ("Agents cut off by a limit", 1, "limits.limits_summary", "all") in rec.evidence
+
+
+def test_limit_pressure_does_not_fire_on_one_five_hour_stop():
+    assert not _limit_pressure_recs(five_hour=1, days=30)
 
 
 def test_limit_pressure_absent_without_limits_section():
@@ -2033,10 +2516,9 @@ def test_limit_pressure_absent_without_limits_section():
 
 
 def test_limit_pressure_threshold_is_overridable():
-    r = _base_report()
     r = _add_section(
-        r,
-        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(hits=1, terminated_rate_limit=0)]),
+        _base_report(),
+        Section(key="limits", title="Usage limits", tables=[_limits_summary_table(five_hour=1, days=7)]),
     )
     recs = recommend_fn(r, config=_config(), archetype=None)
     assert not any(rec.id == "limit-pressure" for rec in recs)
@@ -2045,9 +2527,15 @@ def test_limit_pressure_threshold_is_overridable():
         r,
         config=_config(),
         archetype=None,
-        thresholds=RecommendThresholds(limit_pressure_min_hits=1),
+        thresholds=RecommendThresholds(limit_pressure_min_episodes=1),
     )
     assert any(rec.id == "limit-pressure" for rec in recs)
+
+
+def test_limit_pressure_old_message_threshold_is_read_but_ignored():
+    thresholds = RecommendThresholds.from_config({"limit_pressure_min_hits": 1, "limit_pressure_min_episodes": 4})
+    assert thresholds.limit_pressure_min_episodes == 4
+    assert not hasattr(thresholds, "limit_pressure_min_hits")
 
 
 # -- long-tool-waits / notification-invalidation / batch-instructions -------

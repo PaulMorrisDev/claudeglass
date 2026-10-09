@@ -253,6 +253,20 @@ def _file_chose(file_model: object, run_tier: int) -> bool:
     return file_tier != -1 and file_tier == run_tier
 
 
+def model_chosen_by(agent_model_alias: str | None, run_type: str | None, tier: int, agent_files: dict) -> str:
+    """Who chose an agent's model: ``"call"`` (the call that started it
+    named one), ``"file"`` (its agent file names the model it ran on) or
+    ``"inherited"`` (nobody did). Only meaningful for a run whose
+    ``.meta.json`` says whether a model was set
+    (``TranscriptMeta.model_recorded``). A workflow agent's file is never
+    read: the lever is the script's ``agent()`` call."""
+    if agent_model_alias:
+        return "call"
+    if run_type is not None and run_type != WORKFLOW_GROUP and _file_chose(agent_files.get(run_type), tier):
+        return "file"
+    return "inherited"
+
+
 def _analyse(
     result: TranscriptResult,
     agent_files: dict,
@@ -286,12 +300,7 @@ def _analyse(
         role_class is None and write_turns >= th.unknown_min_edit_turns
     )
 
-    if meta.agent_model_alias:
-        chosen_by = "call"
-    elif run_type != WORKFLOW_GROUP and _file_chose(agent_files.get(run_type), tier):
-        chosen_by = "file"
-    else:
-        chosen_by = "inherited"
+    chosen_by = model_chosen_by(meta.agent_model_alias, run_type, tier, agent_files)
 
     verdict = None
     if tier >= _ABOVE_SONNET:
@@ -472,7 +481,8 @@ def build_table(stats: AgentModelStats) -> Table:
                 saving,
                 saving_pct,
                 group.write_turns,
-                len(group.workflow_run_ids),
+                # A workflow agent whose run file named no run still came from one.
+                max(len(group.workflow_run_ids), 1) if group.kind == "workflow" else 0,
                 group.first_seen,
                 group.last_seen,
                 group.later_compliant,
@@ -681,4 +691,5 @@ __all__ = [
     "WORKFLOW_GROUP",
     "build_table",
     "compute_agent_models",
+    "model_chosen_by",
 ]

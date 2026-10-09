@@ -9,7 +9,7 @@
  */
 
 import { clear, el, goTo, state, WINDOW_OPTIONS } from "./core.js";
-import { fraction, money, moneyParts, projectName, shortTs, thousands, windowWhen } from "./format.js";
+import { fraction, money, moneyParts, moneyText, projectName, shortTs, thousands, windowWhen } from "./format.js";
 import { fetchJson, findSection, loadQuickActions, loadRecommendations, loadReport, prefetchActions, withWindow } from "./api.js";
 import {
   button,
@@ -27,7 +27,7 @@ import {
 } from "./ui.js";
 import { dataGrid, headRow, renderTable } from "./grid.js";
 import { icon } from "./icons.js";
-import { pageLink, viewIntro } from "./links.js";
+import { checkLink, costCentresLink, DETAIL_TABLES, habitLink, pageLink, projectFilesLink, REWORK_ITEM, tableLink, viewIntro } from "./links.js";
 import { renderSetupCard } from "./shell.js";
 import { chartError, holdChart } from "./charts.js";
 import { changeDay, dailyChanges, renderChart, savingsLevers, sparkline, tableObjects, windowSpan } from "./charts-types.js";
@@ -447,12 +447,27 @@ var CHECK_NAMES = {
   tools: "Tools, MCP servers and skills",
   skills: "Skills",
   "claude-md": "CLAUDE.md files",
+  "project-files": "Project files agents read",
   "tool-output": "Tool output",
   hooks: "Hooks",
   "tool-search": "MCP tool search",
   habits: "Work habits",
+  "failed-calls": "Failed and blocked tool calls",
+  "agent-reports": "Replies to agent reports",
+  "plan-rounds": "Plans sent back",
+  "plan-approval": "Builds after a plan",
   quality: "Agent quality",
+  "cost-centres": "Where the spend goes",
   "cost-record": "ClaudeGlass's own figures",
+};
+
+// The table behind a check, for the row of a check with something to look at:
+// a table of the figures behind it (links.js DETAIL_TABLES).
+var CHECK_TABLES = {
+  models: DETAIL_TABLES.model_choice,
+  compaction: DETAIL_TABLES.compaction_cost,
+  "agent-reports": DETAIL_TABLES.report_turns,
+  "plan-rounds": DETAIL_TABLES.plan_rounds,
 };
 
 // A row's state, in the icon and word Actions uses for it: fix (a rule
@@ -500,6 +515,10 @@ export function checklistRows(checks, groups) {
       row.saving = row.groups.reduce(function (most, group) {
         return Math.max(most, groupSavingUsd(group));
       }, 0);
+      // The Work habits check works out its own saving: its largest
+      // recommendation and the playbook's habits no recommendation covers
+      // (quick_actions.py). That whole stands in for the largest group's.
+      if (row.check && row.check.saving_usd > 0) row.saving = Math.max(row.saving, row.check.saving_usd);
       row.index = i;
       return row;
     })
@@ -519,19 +538,23 @@ function firstSentence(text) {
 }
 
 // One row: its state, its area and what's wrong, what fixing it saves,
-// and the way to the fix (a prompt to copy when there's one, and a link
-// to the item or the check on Actions).
+// and the way to the fix (a prompt to copy when there's one, a link to
+// the Work habits card the check points at, and a link to the item or the
+// check on Actions). A check can lead with a sentence of its own (the
+// habits check's rework headline) in place of its first finding, and say
+// its own saving, which has the playbook's habits in it.
 function checklistRow(row) {
   var check = row.check;
-  var lead = row.groups[0];
+  var headline = check && check.headline ? check.headline : "";
+  var lead = headline ? null : row.groups[0];
   var name = check ? CHECK_NAMES[check.id] || check.question : "Other";
   // "more findings", not "more": a title that lists hooks or agents
   // would read "(and 2 more)" as two more of those.
   var others = row.groups.length - 1;
-  var finding = lead ? groupTitle(lead) + (others > 0 ? " (and " + countWord(others, "more finding", "more findings") + ")" : "") : firstSentence(check && check.summary);
+  var finding = headline || (lead ? groupTitle(lead) + (others > 0 ? " (and " + countWord(others, "more finding", "more findings") + ")" : "") : firstSentence(check && check.summary));
   var text = el("div", { class: "check-row-text" }, [el("p", { class: "check-row-title" }, [el("strong", { text: name }), el("span", { text: finding })])]);
   if (row.state === "fix" || row.state === "look") {
-    var saving = lead ? listSaving(lead) : "";
+    var saving = (check && check.saving) || (lead ? listSaving(lead) : "");
     text.appendChild(
       el("p", {
         class: "check-row-detail" + (saving ? "" : " is-unestimated"),
@@ -542,6 +565,15 @@ function checklistRow(row) {
   var action = el("div", { class: "check-row-action" });
   var fix = lead && lead.members.length === 1 ? (lead.members[0].fixes || [])[0] : null;
   if (fix && fix.prompt) action.appendChild(copyPromptButton(fix.prompt, groupTitle(lead)));
+  if (check && check.item && (row.state === "look" || row.state === "fix")) {
+    action.appendChild(habitLink(check.item, check.item === REWORK_ITEM ? "See the rework" : "See the habit"));
+  }
+  if (check && check.id === "project-files" && (row.state === "look" || row.state === "fix")) {
+    action.appendChild(projectFilesLink("See the files"));
+  }
+  if (check && CHECK_TABLES[check.id] && (row.state === "look" || row.state === "fix")) {
+    action.appendChild(tableLink(CHECK_TABLES[check.id], "See the figures"));
+  }
   if (lead) action.appendChild(pageLink("actions/recommendations", lead.members.length > 1 ? "See the " + lead.members.length + " prompts" : "See the fix", { id: lead.key }));
   else if (check && (row.state === "look" || row.state === "fix")) action.appendChild(pageLink("actions/checks", "See the check", { id: check.id }));
   return el("li", { class: "check-row is-" + row.state }, [rowBadge(row.state), text, action]);
@@ -631,9 +663,104 @@ function byModelRows(dailyRows) {
     });
 }
 
+// The controllable parts of the base read that cost the most, from the
+// report's cost_centres_parts table (the columns it names), each with the
+// check that covers it: [{centre, part, cost, card}], largest first.
+var COST_CENTRE_PARTS_SHOWN = 5;
+
+function controllableParts(parts) {
+  if (!parts || !parts.rows) return [];
+  var at = {};
+  parts.columns.forEach(function (column, i) {
+    at[column.key] = i;
+  });
+  return parts.rows
+    .filter(function (row) {
+      return row[at.cell] === "base_read" && row[at.lever] === "controllable" && row[at.card] && row[at.cost] > 0;
+    })
+    .map(function (row) {
+      return { centre: row[at.centre], part: row[at.part], cost: row[at.cost], card: row[at.card] };
+    })
+    .sort(function (a, b) {
+      return b.cost - a.cost;
+    })
+    .slice(0, COST_CENTRE_PARTS_SHOWN);
+}
+
+// "By cost centre": the report's spend-by-cost-centre table (agents
+// section), the controllable parts of the base read each with a link to
+// the check that covers it, and a link to the whole of it on Agents. The
+// parts a setting can't change stay on that page, marked "no setting
+// known", and so does the part nothing measured, marked "not measured".
+function costCentrePart(report) {
+  var agents = report ? findSection(report, "agents") : null;
+  var centres = tableNamed(agents, "cost_centres");
+  if (!centres || !centres.rows || !centres.rows.length) return null;
+  var head = headRow(el("h3", { text: "By cost centre" }), null, "By cost centre");
+  var part = el("div", { class: "overview-breakdown-part overview-breakdown-wide overview-cost-centres" }, [
+    head,
+    renderTable(centres, "overview-cost-centres", state.currency, { heading: false, helpInto: head }),
+  ]);
+  var labels = centres.value_labels || {};
+  var levers = controllableParts(tableNamed(agents, "cost_centres_parts"));
+  if (levers.length) {
+    part.appendChild(el("p", { class: "overview-cost-centres-lead", text: "Parts of the base read a setting can change:" }));
+    part.appendChild(
+      el(
+        "ul",
+        { class: "overview-cost-centres-levers" },
+        levers.map(function (lever) {
+          var name = CHECK_NAMES[lever.card] || lever.card;
+          return el("li", {}, [
+            el("span", { text: (labels[lever.centre] || lever.centre) + ", " + lever.part + ": " + moneyText(lever.cost) + ". " }),
+            checkLink(lever.card, "See " + name),
+          ]);
+        })
+      )
+    );
+  }
+  part.appendChild(el("p", { class: "overview-cost-centres-more" }, [costCentresLink("See every cost centre, the parts and the advice")]));
+  return part;
+}
+
+// "More detail": the tables behind the checks that don't show on the Overview,
+// each with what it answers, so a number someone asks about is one click away.
+// A table the report left out, or built with no rows, isn't listed.
+var MORE_DETAIL = [
+  [DETAIL_TABLES.model_choice, "Model choice", "which model each agent type ran on, who chose it, and the most Sonnet could save."],
+  [DETAIL_TABLES.cost_per_spawn, "Cost per subagent run", "what each agent type costs, by how its runs were started."],
+  [DETAIL_TABLES.agent_runs, "What agent runs did", "replies, single lookups and summaries, by how the runs were started."],
+  [DETAIL_TABLES.single_lookups, "Single lookups", "where one reply made one read-only call and nothing else."],
+  [DETAIL_TABLES.report_turns, "Replies to agent reports", "what the main session did after a background agent or a workflow reported back."],
+  [DETAIL_TABLES.plan_rounds, "Plans sent back", "how many times you sent a plan back before approving one, and what those rounds cost."],
+  [DETAIL_TABLES.plan_approvals, "How the build began", "whether the build after an approved plan carried on or started fresh, and what it read."],
+  [DETAIL_TABLES.compaction_cost, "Conversation summaries", "how many were made, how large the context was, and what they cost."],
+];
+
+function detailPart(report) {
+  if (!report) return null;
+  var items = MORE_DETAIL.filter(function (item) {
+    var dot = item[0].indexOf(".");
+    var table = tableNamed(findSection(report, item[0].slice(0, dot)), item[0].slice(dot + 1));
+    return table && table.rows && table.rows.length;
+  });
+  if (!items.length) return null;
+  return el("div", { class: "overview-breakdown-part overview-breakdown-wide overview-detail" }, [
+    el("h3", { text: "More detail" }),
+    el(
+      "ul",
+      { class: "overview-detail-links" },
+      items.map(function (item) {
+        return el("li", {}, [tableLink(item[0], item[1]), el("span", { text: " shows " + item[2] })]);
+      })
+    ),
+  ]);
+}
+
 // "Where do your tokens go?" under the chart: by project (the report's
-// usage table) and by model, each a short ranked list with bars. A list
-// of one says nothing a ranking would, so it isn't drawn.
+// usage table) and by model, each a short ranked list with bars, then by
+// cost centre. A list of one says nothing a ranking would, so it isn't
+// drawn.
 function renderBreakdown(container, report, dailyRows) {
   clear(container);
   var parts = [];
@@ -661,6 +788,10 @@ function renderBreakdown(container, report, dailyRows) {
       ])
     );
   }
+  var centres = costCentrePart(report);
+  if (centres) parts.push(centres);
+  var detail = detailPart(report);
+  if (detail) parts.push(detail);
   parts.forEach(function (part) {
     container.appendChild(part);
   });

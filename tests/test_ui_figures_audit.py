@@ -1031,3 +1031,252 @@ def test_a_tokens_row_and_a_count_row_read_by_which_way_is_better() -> None:
         preamble=_declaration_source(_static_text("page-changes.js"), "READINGS") + ";\n",
     )
     assert tones == ["good", "bad", "good", "bad", "neutral"]
+
+
+# -- the lead measure and the mix of sessions on a change card ------------------
+
+
+def _lead(item: dict) -> object:
+    """``leadMeasure`` from page-changes.js, run in Node: the key it picks, or None."""
+    expression = f"(function (m) {{ return m && m.key; }})(leadMeasure({json.dumps(item)}))"
+    return _node([("page-changes.js", "leadMeasure")], expression)
+
+
+def test_a_change_card_leads_with_the_measure_the_server_names_not_the_first_listed() -> None:
+    measures = [{"key": "tokens_per_session"}, {"key": "cost_per_turn"}, {"key": "cost_per_session"}]
+    assert _lead({"lead": "cost_per_turn", "measures": measures}) == "cost_per_turn"
+    # No lead named (too few sessions, or an older server): the first it lists.
+    assert _lead({"lead": None, "measures": measures}) == "tokens_per_session"
+    assert _lead({"measures": measures}) == "tokens_per_session"
+    # A name no measure has falls back the same way; no measures is no lead.
+    assert _lead({"lead": "nothing_like_it", "measures": measures}) == "tokens_per_session"
+    assert _lead({"lead": "cost_per_turn", "measures": []}) is None
+    assert _lead({}) is None
+
+
+_MIX_PREAMBLE = """
+function el(tag, attrs, children) {
+  return { tag: tag, attrs: attrs || {}, children: (children || []).filter(function (c) { return c !== null && c !== undefined; }) };
+}
+function chip(text, opts) { return { chip: text, opts: opts }; }
+"""
+
+
+def _mix_note(item: dict) -> object:
+    return _node([("page-changes.js", "mixNote")], f"mixNote({json.dumps(item)})", preamble=_MIX_PREAMBLE)
+
+
+def test_the_mix_note_shows_the_servers_sentence_only_when_the_mix_moved() -> None:
+    said = "Scheduled runs were 0% of the sessions before this change and 40% after."
+    note = _mix_note({"mix": {"flagged": True, "text": said}})
+    assert note["attrs"]["class"] == "change-mix"
+    chip_node, text_node = note["children"]
+    assert chip_node["chip"] == "Session mix changed" and chip_node["opts"]["tone"] == "warn"
+    assert chip_node["opts"]["icon"] == "warning"
+    assert text_node["attrs"] == {"class": "change-mix-text", "text": said}
+    for item in ({}, {"mix": None}, {"mix": {"flagged": False, "text": ""}}):
+        assert _mix_note(item) is None, item
+
+
+# -- how a session ran, in words (charts-types.js SESSION_WORDS) ---------------
+
+
+def _session_words(expression: str) -> object:
+    """``expression`` run in Node over the session words: the map, the
+    palette's modes and the functions that read them."""
+    palette = _declaration_source(_static_text("charts.js"), "ENTITY_COLOURS").removeprefix("export ")
+    words = _declaration_source(_static_text("charts-types.js"), "SESSION_WORDS").removeprefix("export ")
+    names = ("sessionWordEntry", "sessionWord", "sessionWordNote", "sessionWordChoices", "hasColour", "modeKey", "modeText")
+    return _node([("charts-types.js", name) for name in names], expression, preamble=palette + ";\n" + words + ";\n")
+
+
+def test_a_mode_a_purpose_and_an_app_are_shown_by_their_names() -> None:
+    shown = _session_words(
+        """[
+        sessionWord("mode", "one-shot"),
+        sessionWord("mode", "overnight"),
+        sessionWord("mode", "long-agentic"),
+        sessionWord("mode", "mixed"),
+        sessionWord("purpose", "docs-or-light-edit"),
+        sessionWord("entrypoint", "claude-desktop"),
+        sessionWord("mode", "a-mode-added-later"),
+        sessionWord("mode", null),
+        sessionWord("mode", ""),
+        sessionWord("nothing", "cli")
+    ]"""
+    )
+    assert shown == [
+        "One-shot",
+        "Overnight (unattended)",
+        "Long autonomous run",
+        "Mixed",
+        "Docs or light edits",
+        "Claude desktop app",
+        "a-mode-added-later",
+        "",
+        "",
+        "cli",
+    ]
+
+
+def test_a_mode_says_what_it_means_and_a_purpose_or_unknown_mode_says_nothing() -> None:
+    notes = _session_words(
+        """[
+        sessionWordNote("mode", "overnight"),
+        sessionWordNote("mode", "one-shot"),
+        sessionWordNote("mode", "unknown"),
+        sessionWordNote("mode", "a-mode-added-later"),
+        sessionWordNote("purpose", "review")
+    ]"""
+    )
+    assert notes == [
+        "Overnight: Claude worked on its own for two hours or more at night while you were away.",
+        "One-shot: one request (yours or a scheduled task's), then Claude worked with no more messages from you.",
+        "",
+        "",
+        "",
+    ]
+
+
+def test_the_override_menus_offer_each_word_that_can_be_set_by_key() -> None:
+    menus = _session_words(
+        """{
+        mode: sessionWordChoices("mode").map(function (word) { return word.key; }),
+        purpose: sessionWordChoices("purpose").map(function (word) { return word.key; }),
+        labels: sessionWordChoices("mode").map(function (word) { return word.label; })
+    }"""
+    )
+    assert menus["mode"] == ["interactive", "long-agentic", "overnight", "one-shot", "mixed"]
+    assert menus["labels"][2] == "Overnight (unattended)"
+    # The key the classifier gives, not the "docs" the old menu saved.
+    assert "docs-or-light-edit" in menus["purpose"] and "docs" not in menus["purpose"]
+    assert "unknown" not in menus["purpose"]
+    assert len(menus["purpose"]) == len(set(menus["purpose"]))
+
+
+def test_a_session_chart_dot_has_a_colour_only_for_a_mode_the_palette_colours() -> None:
+    keys = _session_words(
+        """[
+        modeKey("one-shot"),
+        modeKey("overnight"),
+        modeKey("mixed"),
+        modeKey("unknown"),
+        modeKey("other"),
+        modeKey(undefined),
+        modeKey("toString"),
+        modeKey("__proto__")
+    ]"""
+    )
+    assert keys == ["one-shot", "overnight", "other", "other", "other", "other", "other", "other"]
+    # The tooltip and the chart's table say the session's own word.
+    said = _session_words('[modeText({ mode: "mixed" }), modeText({ mode: "one-shot" }), modeText({})]')
+    assert said == ["Mixed", "One-shot", "Not classified"]
+
+
+# -- Phase 7: the overhead line and the empty status-line table, run in Node ---
+
+
+def _overhead_line(overhead: dict, billing: str) -> str:
+    """``overheadLine`` from page-capture.js, run in Node with the real
+    money formatting of format.js."""
+    preamble = (
+        'var MINUS = "\u2212";\n'
+        'var state = { currency: "USD", units: {} };\n'
+        f"var captureBilling = {json.dumps(billing)};\n"
+    )
+    functions = [
+        ("format.js", "signed"),
+        ("format.js", "moneyNumber"),
+        ("format.js", "currencyAmount"),
+        ("page-capture.js", "billed"),
+        ("page-capture.js", "overheadAmount"),
+        ("page-capture.js", "overheadLine"),
+    ]
+    return _node(functions, f"overheadLine({json.dumps(_as_fetched(overhead))})", preamble=preamble)
+
+
+def _as_the_page_writes_it(text: str) -> str:
+    """The service's text as ``fetchJson`` brings it in line: "0.40 USD" -> "$0.40"."""
+    return re.sub(r"(\d[\d,]*(?:\.\d+)?) USD\b", r"$\1", text)
+
+
+def _as_fetched(value):
+    """``value`` as the page has it after ``fetchJson``: every text in line."""
+    if isinstance(value, str):
+        return _as_the_page_writes_it(value)
+    if isinstance(value, dict):
+        return {key: _as_fetched(item) for key, item in value.items()}
+    return value
+
+
+def _overhead(units: Units, capture_usd, coaching_usd, hooks: str = "ClaudeGlass's hooks ran about 6 times.") -> dict:
+    from claudeglass import capture_view
+    from claudeglass.config import CaptureConfig
+
+    window = capture_view.overhead_window(CaptureConfig(), datetime(2026, 9, 22, 12, 0, tzinfo=timezone.utc))
+    return capture_view.overhead_block(
+        window, hooks_text=hooks, capture_usd=capture_usd, coaching_usd=coaching_usd, units=units
+    )
+
+
+def test_the_overhead_line_reads_the_same_on_the_page_as_in_capture_status_on_the_api() -> None:
+    block = _overhead(Units(billing_mode="api"), 0.4, 0.1)
+    line = _overhead_line(block, "api")
+    assert line == (
+        "Over your last 7 days: ClaudeGlass's hooks ran about 6 times. "
+        "Capture cost about $0.40 and coaching notes cost about $0.10 in the same stretch."
+    )
+    assert line == _as_the_page_writes_it(block["text"])
+
+
+def test_the_overhead_line_keeps_a_tiny_or_zero_amount_as_the_service_words_it() -> None:
+    block = _overhead(Units(billing_mode="api"), 0.001, 0.0)
+    line = _overhead_line(block, "api")
+    assert "Capture cost under $0.01 and coaching notes cost nothing in the same stretch." in line
+    assert "<" not in line
+    assert line == _as_the_page_writes_it(block["text"])
+
+
+def test_the_overhead_line_on_a_plan_uses_the_services_own_phrase() -> None:
+    block = _overhead(Units(billing_mode="subscription"), 0.4, 0.1)
+    line = _overhead_line(block, "subscription")
+    # Not the pay-per-token money formatting: the service's phrase stands.
+    assert line == _as_the_page_writes_it(block["text"])
+    assert block["capture"]["text"].split(" USD")[-1].strip() == "list-price equivalent"
+    assert "list-price equivalent" in line
+
+
+def test_the_overhead_line_says_so_when_no_run_shows_and_leaves_out_unpriced_costs() -> None:
+    block = _overhead(Units(billing_mode="api"), None, None, hooks="")
+    assert block["capture"] is None
+    assert _overhead_line(block, "api") == (
+        "Over your last 7 days: No run of ClaudeGlass's hooks shows in your sessions."
+    )
+
+
+def _empty_text(table: dict, units: dict | None = None) -> list:
+    """``emptyText`` from grid.js, run in Node over the table's JSON."""
+    preamble = _declaration_source(_static_text("grid.js"), "EMPTY_TEXT").removeprefix("export ") + ";\n"
+    preamble += f"var state = {{ units: {json.dumps(units or {})} }};\n"
+    return _node([("grid.js", "emptyText")], f"emptyText({json.dumps(table)})", preamble=preamble)
+
+
+def test_an_empty_status_line_table_reads_by_why_it_is_empty() -> None:
+    from claudeglass import context_budget
+    from claudeglass.render.json_out import to_jsonable
+
+    desktop = to_jsonable(context_budget._build_statusline_table(None, True))
+    assert desktop["empty_variant"] == "desktop"
+    assert _empty_text(desktop) == [
+        "No status line readings in this window.",
+        "The desktop app doesn't run status lines; first-call sizes come from transcripts instead.",
+    ]
+    other = to_jsonable(context_budget._build_statusline_table(None, False))
+    assert other["empty_variant"] == ""
+    assert _empty_text(other) == [
+        "No status line readings in this window.",
+        "This table fills once the status line logger is installed and has logged a session.",
+    ]
+    # A word the grid has no sentence for falls back to the table's plain one, never to nothing.
+    assert _empty_text({"name": "context_budget_statusline", "empty_variant": "elsewhere"}) == _empty_text(other)
+    assert _empty_text({"name": "habits_by_shape", "empty_variant": "desktop"})[0].startswith("No main sessions")

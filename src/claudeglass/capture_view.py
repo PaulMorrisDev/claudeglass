@@ -16,27 +16,43 @@ counted, not quoted (their text can name a script path), and
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
-from . import habits
+from . import habits, hook_health
+from . import ratings as ratings_mod
 from .config import CAPTURE_SAMPLES, CaptureConfig
 from .render.tables import format_cell
 from .units import NO_LIMIT_SHARE_HINT
 
-#: The cost warning, shown before anything that makes Claude use more
-#: tokens (the init question and ``capture on`` say the same).
+#: The cost warning while no level is on, shown before anything that
+#: makes Claude use more tokens. Each level and each metric carries its own
+#: from :func:`warning_text`, so none says more than that choice does.
 WARNING = (
-    "Metrics capture uses your tokens. Claude reads a short note when a session or subagent starts, "
-    "and ends each reply with a one-line tag you will see, such as [cg: task=bugfix brief=clear]. "
-    "The free level only logs a few events to a local file."
+    "Metrics capture uses your tokens above the free level. Each level below says what Claude reads and writes, "
+    "and what that costs. The free level only logs a few events to a local file."
 )
+
+#: What a reply ends with while Claude writes the tags, as the warning shows it.
+TAG_EXAMPLE = "[cg: task=bugfix brief=clear]"
 
 CONNECT_COMMAND = "claudeglass capture connect"
 STATUS_COMMAND = "claudeglass capture status"
 FEEDBACK_COMMAND = "claudeglass capture feedback on"
 BRIEF_COMMAND = "claudeglass capture brief on"
+
+#: The file ``tuning export`` writes in the commands below, and the two
+#: commands the page offers for taking your figures to another machine.
+TUNING_FILE = "claudeglass-tuning.json"
+TUNING_EXPORT_COMMAND = f"claudeglass tuning export --out {TUNING_FILE}"
+TUNING_SUMMARY_COMMAND = f"claudeglass tuning summary {TUNING_FILE}"
+#: The Capture tab's block for it: a title, one sentence on what the file
+#: holds, and the two commands. The dashboard runs and writes nothing.
+TUNING_TITLE = "Take your figures to another machine"
+TUNING_TEXT = (
+    "The file holds counts and words from fixed lists only, never a name, a path or any text of yours or Claude's."
+)
 
 
 def _skill_words(name: str, command: str) -> tuple[dict[str, str], dict[str, str]]:
@@ -81,16 +97,51 @@ STATUSLINE_NOTES = {
     "such as the desktop app, coaching notes bring the same hints into the conversation.",
 }
 
+#: The same when none of your sessions ran in a terminal, whoever's status
+#: line it is: the desktop app doesn't run one, so there is nothing to
+#: set up. ``{total}`` is the number of sessions.
+DESKTOP_STATUSLINE_NOTES = {
+    "feedback_note": "All {total} of your sessions ran outside a terminal, and the desktop app doesn't run status "
+    "lines. This second line never shows; the banner here still does.",
+    "coaching_line": "All {total} of your sessions ran outside a terminal, and the desktop app doesn't run status "
+    "lines. This line never shows. Coaching notes bring the same hints into the conversation.",
+}
+
+
+def statusline_note(metric_id: str, own: bool | None, entrypoints: dict[str, dict] | None) -> str | None:
+    """Why the status-line feature ``metric_id`` (a key of
+    :data:`STATUSLINE_NOTES`) won't show, or ``None`` when it will or this
+    can't be told. ``own`` is whether the status line is this tool's
+    (``footprint.is_own_statusline``; ``None`` when not checked) and
+    ``entrypoints`` is ``Store.entrypoint_counts()``: Claude Code runs a
+    status line in a terminal only (``hook_health.TERMINAL_ENTRYPOINTS``).
+    No session in a terminal says so outright, whoever's line it is. With
+    some, a status line that isn't ours says that, and most sessions
+    outside a terminal adds how few there are."""
+    if metric_id not in STATUSLINE_NOTES:
+        return None
+    terminal, total = hook_health.terminal_sessions(entrypoints)
+    if total and not terminal:
+        return DESKTOP_STATUSLINE_NOTES[metric_id].format(total=f"{total:,}")
+    parts = [STATUSLINE_NOTES[metric_id]] if own is False else []
+    if terminal and terminal * 2 < total:
+        parts.append(
+            f"Only {terminal:,} of your {total:,} sessions ran in a terminal, and the desktop app doesn't run "
+            "status lines, so this shows in few of them."
+        )
+    return " ".join(parts) or None
+
+
 #: What a metric costs when it uses tokens without Claude being asked to
 #: write anything for it, in place of the Capture page's "No tokens."
 COST_NOTES = {
-    "coaching_notes": "About 50 to 120 tokens a note, only when a hint applies.",
+    "coaching_notes": "About 50 to 140 tokens a note, only when a hint applies.",
 }
 
 #: Said when ``coaching_notes`` is turned on, before the yes/no: what the
 #: notes are, when they come and what they cost.
 COACHING_NOTES_ON = (
-    "Coaching notes: when a hint applies, a hook adds a short note (about 50 to 120 tokens) to Claude's context, "
+    "Coaching notes: when a hint applies, a hook adds a short note (about 50 to 140 tokens) to Claude's context, "
     "after a tool result or when you send a message, and Claude acts on it or tells you in one line. "
     "They run at any capture level, at most one of a kind every half hour in a session. "
     "'claudeglass capture status' shows how many there were and what they cost."
@@ -105,7 +156,8 @@ TAGGER_TEXT = {
     f"session no longer carries the tag list. Each call costs about ${catalogue.JUDGE_USD_PER_CALL:.4f} of Haiku, "
     "in the background, so you never wait for it. It takes effect in new sessions.",
     "claude": "Claude now writes the tags again, at the end of its final reply to each of your messages. "
-    "It takes effect in new sessions.",
+    "When it leaves one out, the hook asks Haiku for it in the background, through your own Claude Code login, "
+    f"at about ${catalogue.JUDGE_USD_PER_CALL:.4f} a call. It takes effect in new sessions.",
 }
 
 #: Below this percentage of your messages tagged, once there are
@@ -246,6 +298,54 @@ def _estimate_block(est, units) -> dict:
     }
 
 
+def warning_text(ids, tagger: str = catalogue.DEFAULT_TAGGER) -> str:
+    """The cost warning for the metrics in ``ids`` (a level's, one
+    metric's, or the ones on now), under tags written by ``tagger``: what
+    Claude reads and writes for them and what runs in the background, and
+    nothing the choice doesn't do. Worked out from
+    :func:`capture_catalogue.rough_tokens`, so it moves with the catalogue.
+    Subagents and the agents a workflow starts are asked for nothing at any
+    level: the only hook on them is the Claude Haiku judge after a run."""
+    ids = tuple(ids)
+    if not ids:
+        return "Metrics capture is off, so it uses no tokens."
+    if not any(catalogue.asks_claude(i) for i in ids):
+        return "This level uses none of your Claude tokens: its hooks only log a few events to a local file."
+    rough = catalogue.rough_tokens(ids, tagger)
+    call = f"${catalogue.JUDGE_USD_PER_CALL:.4f}"
+    sentences = ["Metrics capture uses your tokens."]
+    # One sentence for each thing Claude reads: they add up to more than a plain sentence holds.
+    if rough["session_note"]:
+        sentences.append("Claude reads a short note at the start of a session or after /clear or a compaction.")
+    if rough["tool_note"]:
+        sentences.append("Claude reads a short note after a large read, search or web result.")
+    if rough["message_note"]:
+        due = " or ".join(
+            words
+            for words, key in (("the /cg-feedback reminder", "reminder"), ("a plan check", "plan_check"))
+            if rough[key]
+        )
+        sentences.append(
+            "Claude reads a short note on a message of yours now and then" + (f", when {due} is due." if due else ".")
+        )
+    if rough["reply_tag"]:
+        sentences.append(f"Claude ends each reply with a one-line tag you will see, such as {TAG_EXAMPLE}.")
+    elif tagger == "haiku" and catalogue.tagged_keys(ids):
+        sentences.append(
+            f"Claude Haiku writes the tags in the background after each of your messages, at about {call} a call, "
+            "so Claude's replies carry no tag."
+        )
+    if rough["agent_judge"]:
+        sentences.append(
+            f"Claude Haiku judges each agent run in the background, at about {call} a run, so subagents and "
+            "workflow agents are asked for nothing."
+        )
+    if len(sentences) == 1:
+        # Only the opener: saying it uses your tokens would contradict this.
+        return "While Claude Haiku writes the tags, this adds nothing for Claude to read or write."
+    return " ".join(sentences)
+
+
 def _levels(capture: CaptureConfig, past, units) -> list[dict]:
     estimates = (
         capture_mod.level_estimates(past, capture.sample, capture.tagger) if past is not None and past.sessions else {}
@@ -265,6 +365,7 @@ def _levels(capture: CaptureConfig, past, units) -> list[dict]:
                 "asks_claude": any(catalogue.asks_claude(i) for i in ids),
                 "current": capture.level == level,
                 "rough": catalogue.rough_tokens(ids, capture.tagger),
+                "warning": warning_text(ids, capture.tagger),
                 "estimate": _estimate_block(est, units) if est is not None and est.cost > 0 else None,
             }
         )
@@ -284,6 +385,7 @@ def _levels(capture: CaptureConfig, past, units) -> list[dict]:
             "asks_claude": any(catalogue.asks_claude(i) for i in custom_ids),
             "current": capture.level == catalogue.CUSTOM_LEVEL,
             "rough": catalogue.rough_tokens(custom_ids, capture.tagger),
+            "warning": warning_text(custom_ids, capture.tagger),
             "estimate": _estimate_block(custom, units) if custom is not None and custom.cost > 0 else None,
         }
     )
@@ -314,12 +416,19 @@ def _kind(metric) -> str:
 
 
 def _feedback_facts(metric_id: str, feedback: dict) -> tuple[dict | None, int | None, int | None]:
-    """``(actual, answers, target)`` for the skill and the dashboard
-    rating, over the last :data:`capture.HISTORY_DAYS` days."""
+    """``(actual, answers, target)`` for the skill, the plan check and
+    the dashboard rating, over the last :data:`capture.HISTORY_DAYS`
+    days."""
     target = capture_mod.ENOUGH["feedback"]
     if metric_id == "feedback_skill" and feedback.get("use") is not None:
         use = feedback["use"]
         return _money(feedback.get("units"), use.feedback_cost), use.feedback_answered, target
+    if metric_id == "plan_check" and feedback.get("use") is not None:
+        use = feedback["use"]
+        return _money(feedback.get("units"), use.by_metric.get(metric_id, 0.0)), use.plan_checks_answered, target
+    if metric_id == "feedback_reminder" and feedback.get("use") is not None:
+        use = feedback["use"]
+        return _money(feedback.get("units"), use.by_metric.get(metric_id, 0.0)), None, None
     if metric_id == "dashboard_rating" and feedback.get("ratings") is not None:
         return None, feedback["ratings"], target
     return None, None, None
@@ -351,7 +460,7 @@ def _metric_row(
         if kind == "level":
             have, want = capture_mod.enough_data(use, metric.id, signal_sessions.get(metric.id, 0))
     skill = (feedback or {}).get("skill")
-    if on and kind == "feedback" and metric.id in ("feedback_skill", "dashboard_rating"):
+    if on and kind == "feedback" and metric.id in ("feedback_skill", "dashboard_rating", "plan_check", "feedback_reminder"):
         fb_actual, have, want = _feedback_facts(metric.id, {**(feedback or {}), "units": units})
         if fb_actual is not None:
             actual, actual_label = fb_actual, f"Over the last {capture_mod.HISTORY_DAYS} days"
@@ -362,7 +471,19 @@ def _metric_row(
     install = _SKILL_METRICS.get(metric.id)
     skill_now = (feedback or {}).get(install[0]) if install else None
     needs_install = bool(on and install and skill_now not in (None, "installed"))
-    no_statusline = bool(on and metric.id in STATUSLINE_NOTES and (feedback or {}).get("statusline") is False)
+    statusline_text = (
+        statusline_note(metric.id, (feedback or {}).get("statusline"), (feedback or {}).get("entrypoints"))
+        if on
+        else None
+    )
+    # What switching it on makes Claude read and write: its own, with the
+    # metrics it needs, so the confirmation says no more than this row does.
+    warning = (
+        warning_text(catalogue.with_requirements((metric.id,)) if kind == "level" else (metric.id,), capture.tagger)
+        if asks
+        else ""
+    )
+    needs_hook = bool(on and kind != "derived" and set(metric.hooks) & missing_events)
     return {
         "id": metric.id,
         "kind": kind,
@@ -378,11 +499,13 @@ def _metric_row(
         "on": on,
         "toggle": kind != "derived",
         "asks_claude": asks,
-        "needs_hook": bool(on and kind != "derived" and set(metric.hooks) & missing_events),
+        "needs_hook": needs_hook,
+        "hook_command": CONNECT_COMMAND if needs_hook else None,
         "needs_install": needs_install,
         "install_note": install[1].get(skill_now) if needs_install else None,
         "install_command": install[2] if needs_install else None,
-        "statusline_note": STATUSLINE_NOTES[metric.id] if no_statusline else None,
+        "statusline_note": statusline_text,
+        "warning": warning,
         "cost_note": COST_NOTES.get(metric.id),
         "estimate": estimate,
         "actual": actual,
@@ -442,6 +565,12 @@ def _measured(use, units) -> dict | None:
         "tagged_cycles": use.tagged_cycles,
         "coverage_pct": use.coverage,
         "coverage_text": _pct(use.coverage),
+        # While Claude writes the tags: the share it tagged itself and the
+        # share Claude Haiku filled in, each empty until the fallback filled one.
+        "own_coverage_text": (
+            _pct(100.0 * (use.tagged_cycles - use.filled_cycles) / use.cycles) if use.cycles and use.filled_cycles else ""
+        ),
+        "filled_text": _pct(100.0 * use.filled_cycles / use.cycles) if use.cycles and use.filled_cycles else "",
         "reports": use.reports,
         "tagged_reports": use.tagged_reports,
         "judged": use.judged,
@@ -456,6 +585,94 @@ def _measured(use, units) -> dict | None:
         "after_compact": {"notes": use.after_compact_notes, **_money(units, use.after_compact_cost)},
         "daily": [{"day": day, "usd": round(usd, 6)} for day, usd in sorted(use.daily.items())],
     }
+
+
+#: How many days the overhead line counts hook runs and costs over.
+OVERHEAD_DAYS = 7
+
+
+def overhead_window(capture: CaptureConfig, now: datetime | None = None) -> dict:
+    """The stretch the overhead line covers: the last :data:`OVERHEAD_DAYS`
+    days, cut short to when capture was turned on if that was within them
+    (its hooks weren't there before). ``label`` opens the line, ``since``
+    is where costs are counted from and ``corpus`` is the window to load
+    the sessions for (``days`` or ``since``, as the loaders take them);
+    ``recent`` says capture's start cut it short."""
+    now = now or datetime.now(timezone.utc)
+    recent = False
+    if capture.is_on and capture.enabled_at:
+        try:
+            enabled = datetime.fromisoformat(capture.enabled_at)
+        except ValueError:
+            enabled = None
+        if enabled is not None:
+            if enabled.tzinfo is None:
+                enabled = enabled.replace(tzinfo=timezone.utc)
+            recent = enabled > now - timedelta(days=OVERHEAD_DAYS)
+    since = capture.enabled_at if recent else (now - timedelta(days=OVERHEAD_DAYS)).isoformat(timespec="seconds")
+    return {
+        "recent": recent,
+        "days": OVERHEAD_DAYS,
+        "since": since,
+        "label": "Since capture was turned on" if recent else f"Over your last {OVERHEAD_DAYS} days",
+        "corpus": {"since": capture.enabled_at} if recent else {"days": OVERHEAD_DAYS},
+    }
+
+
+def overhead_text(label: str, hooks_text: str, capture_text: str | None, coaching_text: str | None) -> str:
+    """The overhead line: ``label``, then the hook sentence
+    (``hook_health.HookOverhead.summary``, empty when no run was counted),
+    then what capture and coaching notes cost over the same stretch (left
+    out while a cost couldn't be priced)."""
+    hooks = hooks_text or "No run of ClaudeGlass's hooks shows in your sessions."
+    parts = [f"{label}: {hooks}"]
+    if capture_text is not None and coaching_text is not None:
+        parts.append(f"Capture cost {capture_text} and coaching notes cost {coaching_text} in the same stretch.")
+    return " ".join(parts)
+
+
+def overhead_block(
+    window: dict, *, hooks_text: str, capture_usd: float | None, coaching_usd: float | None, units
+) -> dict:
+    """The overhead line for ``/api/capture`` and ``capture status``: what
+    ClaudeGlass's own hooks, capture's notes and tags, and coaching notes
+    cost over ``window`` (:func:`overhead_window`). ``capture_usd`` and
+    ``coaching_usd`` are ``None`` while the rate card can't be read, and
+    the line then gives the hook sentence alone."""
+    priced = capture_usd is not None and coaching_usd is not None
+    capture = _money(units, capture_usd or 0.0, prefix="about ") if priced else None
+    coaching = _money(units, coaching_usd or 0.0, prefix="about ") if priced else None
+    return {
+        "label": window["label"],
+        "days": window["days"],
+        "recent": window["recent"],
+        "hooks": hooks_text,
+        "capture": capture,
+        "coaching": coaching,
+        "text": overhead_text(
+            window["label"], hooks_text, capture["text"] if capture else None, coaching["text"] if coaching else None
+        ),
+    }
+
+
+def build_overhead(corpus, specs, rates, units, window: dict) -> dict | None:
+    """:func:`overhead_block` for the sessions in ``corpus`` (loaded over
+    ``window["corpus"]``): the hook runs from ``window["since"]`` on,
+    counted from their transcripts against ``specs`` (the capture entries
+    settings.json runs), and what capture and coaching notes cost over the
+    same stretch. ``None`` while no ClaudeGlass hook is installed."""
+    if not specs:
+        return None
+    runs = hook_health.measure_hook_overhead(hook_health.corpus_results(corpus), specs, since=window["since"])
+    hooks_text = runs.summary() or ""
+    priced = rates is not None
+    return overhead_block(
+        window,
+        hooks_text=hooks_text,
+        capture_usd=capture_mod.usage(corpus, rates, since=window["since"]).cost if priced else None,
+        coaching_usd=capture_mod.coaching_usage(corpus, rates, since=window["since"]).cost if priced else None,
+        units=units,
+    )
 
 
 def _plural(count: int, word: str) -> str:
@@ -520,12 +737,29 @@ def _step_down_note(capture: CaptureConfig, rows: list[dict]) -> str | None:
     )
 
 
+def _unrated_block(unrated: dict | None) -> dict | None:
+    """The banner's list of pieces of work waiting for a rating: ``unrated``
+    (``api.py``'s ``_capture_unrated``, each piece with its ``label``) with
+    the sentence that introduces it, or ``None`` when there are none."""
+    if not unrated or not unrated["pieces"]:
+        return None
+    total = unrated["total"]
+    return {
+        **unrated,
+        "text": f"{_plural(total, 'piece')} of work used at least {unrated['threshold_text']} tokens and "
+        f"{'has' if total == 1 else 'have'} no rating yet. Rating them makes your savings tips fit how you work.",
+    }
+
+
 def _banner(
-    capture, config, levels, measured, use, rows, hooks, started_since, skill=None, brief_skill=None, roi=None
+    capture, config, levels, measured, use, rows, hooks, started_since, skill=None, brief_skill=None, roi=None,
+    unrated=None,
 ) -> dict:
-    """The banner's lines: a headline, then any notes worth acting on."""
+    """The banner's lines: a headline, then any notes worth acting on, and
+    the sessions waiting for a rating (``unrated``)."""
     notes: list[str] = []
     feedback_note = catalogue.FEEDBACK_NOTE if "feedback_note" in capture.feedback else None
+    waiting = _unrated_block(unrated)
     for metric_id, state, words in (
         ("feedback_skill", skill, SKILL_NOTES),
         ("brief_templates", brief_skill, BRIEF_SKILL_NOTES),
@@ -543,7 +777,7 @@ def _banner(
                 "Metrics capture is off. At Essentials it would have cost about "
                 f"{est['tokens_text']} tokens and {est['text']}{share}, for suggestions that fit how you work."
             )
-        return {"on": False, "headline": invite, "notes": notes, "feedback_note": feedback_note}
+        return {"on": False, "headline": invite, "notes": notes, "feedback_note": feedback_note, "unrated": waiting}
 
     parts = [f"Metrics capture: {config['title']}"]
     if capture.enabled_at:
@@ -607,7 +841,9 @@ def _banner(
             f"Enough collected for {', '.join(r['title'].lower() for r in ready)}: "
             "you could switch them off to save their cost."
         )
-    return {"on": True, "headline": " · ".join(parts), "notes": notes, "feedback_note": feedback_note}
+    return {
+        "on": True, "headline": " · ".join(parts), "notes": notes, "feedback_note": feedback_note, "unrated": waiting,
+    }
 
 
 def view(
@@ -627,6 +863,9 @@ def view(
     weekly_cost: float | None = None,
     dependent_value: float | None = None,
     coaching_use=None,
+    unrated: dict | None = None,
+    entrypoints: dict[str, dict] | None = None,
+    overhead: dict | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Everything the Capture tab and the banner show.
@@ -651,7 +890,13 @@ def view(
     ``habits.capture_dependent_value`` over the same window: together
     they're the capture-pays-for-itself figures in ``roi`` and the
     banner (``None`` while there's no measured cost to weigh anything
-    against).
+    against). ``unrated`` is the sessions big enough for the rating reminder
+    that have no rating (``None`` while the reminder and the dashboard
+    rating are both off): the banner lists them. ``entrypoints`` is
+    ``Store.entrypoint_counts()``, which tells the status-line toggles
+    whether any session ran where Claude Code runs a status line.
+    ``overhead`` is :func:`build_overhead` over :func:`overhead_window`
+    (``None`` while no ClaudeGlass hook is installed).
     """
     signal_sessions = signal_sessions or {}
     config = config_block(capture, now)
@@ -665,6 +910,7 @@ def view(
         "brief_skill": brief_skill,
         "ratings": ratings,
         "statusline": statusline,
+        "entrypoints": entrypoints,
         "coaching_use": coaching_use,
     }
     rows = [
@@ -685,7 +931,9 @@ def view(
     roi = _roi(weekly_cost, dependent_value, units)
     return {
         "config": config,
-        "warning": WARNING,
+        # What the choice now in force makes Claude read and write; each level
+        # and metric row carries its own, for the confirmation before it.
+        "warning": warning_text(active, capture.tagger) if capture.is_on else WARNING,
         "tagger_text": dict(TAGGER_TEXT),
         "samples": list(CAPTURE_SAMPLES),
         "levels": levels,
@@ -702,8 +950,15 @@ def view(
             "basis": units.basis() if units is not None else "",
         },
         "roi": roi,
+        "overhead": overhead,
+        "tuning": {
+            "title": TUNING_TITLE,
+            "text": TUNING_TEXT,
+            "export_command": TUNING_EXPORT_COMMAND,
+            "summary_command": TUNING_SUMMARY_COMMAND,
+        },
         "banner": _banner(
-            capture, config, levels, measured, use, rows, hooks_data, started_since, skill, brief_skill, roi
+            capture, config, levels, measured, use, rows, hooks_data, started_since, skill, brief_skill, roi, unrated
         ),
         "feedback": {
             "skill": skill,
@@ -714,11 +969,11 @@ def view(
             "questions": [
                 {
                     "key": q.key,
-                    "question": q.question,
+                    "question": ratings_mod.fill_question(q),
                     "multi": q.multi,
                     "options": [{"word": word, "label": label} for word, label, _text in q.options],
                 }
-                for q in catalogue.FEEDBACK_QUESTIONS
+                for q in catalogue.RATING_QUESTIONS
             ],
         },
         "commands": {
@@ -726,6 +981,8 @@ def view(
             "connect": CONNECT_COMMAND,
             "feedback": FEEDBACK_COMMAND,
             "brief": BRIEF_COMMAND,
+            "tuning_export": TUNING_EXPORT_COMMAND,
+            "tuning_summary": TUNING_SUMMARY_COMMAND,
         },
     }
 
@@ -770,21 +1027,33 @@ def change_commands(before: CaptureConfig, changes: dict) -> list[str]:
 
 __all__ = [
     "CONNECT_COMMAND",
+    "DESKTOP_STATUSLINE_NOTES",
     "FEEDBACK_COMMAND",
     "BRIEF_COMMAND",
     "BRIEF_SKILL_NOTES",
     "BRIEF_SKILL_STATES",
     "COACHING_NOTES_ON",
+    "OVERHEAD_DAYS",
     "SKILL_NOTES",
     "SKILL_STATES",
     "STATUSLINE_NOTES",
     "STATUS_COMMAND",
+    "TUNING_EXPORT_COMMAND",
+    "TUNING_SUMMARY_COMMAND",
+    "TUNING_TEXT",
+    "TUNING_TITLE",
     "WARNING",
     "amount_text",
+    "build_overhead",
     "change_commands",
     "config_block",
     "describe",
     "hooks_block",
+    "overhead_block",
+    "overhead_text",
+    "overhead_window",
     "share_text",
+    "statusline_note",
     "view",
+    "warning_text",
 ]

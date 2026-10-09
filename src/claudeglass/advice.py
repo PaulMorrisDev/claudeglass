@@ -46,8 +46,9 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Callable
 
-from . import known_savers, model_gate, model_swap, whatif
-from .fixes import already_set
+from . import cost_centres, known_savers, model_gate, model_swap, whatif
+from .fixes import BATCH_PROBES_LINE, CRITIQUE_PLAN_LINE, already_set
+from .limits import BURST_AGENTS, SPEND_SOURCES, burst_stands_out
 from .model import Recommendation, ReportModel, SettingChange
 from .pricing import model_names_in, newer_version_of
 from .snapshots import (
@@ -62,6 +63,11 @@ from .units import NO_LIMIT_SHARE_HINT, Units
 #: Agent types Claude Code starts itself (workflow scripts, forks): no
 #: agent file can change them, so no per-agent change is offered.
 NOT_OVERRIDABLE = frozenset({"workflow-subagent", "fork", "unknown", "(unknown)"})
+
+#: The baseline-bloat card suggests shortening the ``description`` lines of
+#: your own agents only when their listing is at least this many tokens of
+#: a session's start (``context_budget``'s custom agents estimate).
+CUSTOM_AGENTS_TRIM_TOKENS = 1_000.0
 
 _PERIOD = "over the period in this report"
 _UNKNOWN = "unknown (no config snapshot yet)"
@@ -198,7 +204,6 @@ def _model_prose(observed: str) -> str:
 _LEFT_OUT_GROUPS = (
     ("worse", "Did worse on a cheaper model"),
     ("retried", "Edits often redone on a larger model"),
-    ("larger", "Claude said a larger model was needed"),
     ("hard", "Much of the work reported hard"),
     ("retried-model", "Run again because the model wasn't enough"),
 )
@@ -239,9 +244,9 @@ def _merge_model_tier(recs: list[Recommendation], ctx: _Context) -> list[Recomme
         return recs
     rest = [r for r in recs if r.id != "model-tier"]
     tables = whatif._Tables(ctx.report)
-    # Metrics capture: agents whose runs said a larger model would suit,
-    # whose work was mostly reported hard, or that were retried for the
-    # model. A veto only: a "smaller would do" never adds a suggestion.
+    # Metrics capture: agents whose work was mostly reported hard, or that
+    # were retried for the model. A veto only: nothing a run reports adds
+    # a suggestion.
     worse, retried, _unfit = model_gate.raw(tables)
     unfit = model_gate.unfit_kinds(tables)
     # The main session's model is a quality trade that's yours to make, so
@@ -733,7 +738,8 @@ def _explain_run_split(rec: Recommendation, ctx: _Context) -> None:
     rec.estimated_saving = ctx.money(rec.saving_usd, prefix="At most ")
     rec.saving_basis = ctx.basis(
         "This agent's long runs repriced as fresh runs at the interval that saves most, less each split's note, "
-        "cache write and an allowance for re-reading files. At list price."
+        "cache write and an allowance for re-reading files. Only runs your current auto-compact window allows are "
+        "counted. At list price."
     )
 
 
@@ -757,14 +763,29 @@ def _explain_baseline_bloat(rec: Recommendation, ctx: _Context) -> None:
                   if t.name == "topology_session_baseline"), None)
     row_key = table.rows[0][0] if table is not None and table.rows else None
     baseline = ctx.cell("agents", "topology_session_baseline", row_key, "mean_baseline")
+    changeable = _evidence_value(rec, "What you can change at the start of a session (est)")
     rec.title = "Every session starts with a large context"
-    rec.why = (
-        f"Each main session writes about {_tokens(baseline)} tokens to the cache before your first message, "
-        "and MCP servers and plugins you load everywhere add to it."
-        if isinstance(baseline, (int, float))
-        else "MCP servers and plugins you load everywhere add to every session's startup context."
-    )
+    if isinstance(changeable, (int, float)):
+        rec.why = (
+            f"About {_tokens(changeable)} tokens of every session's first call come from settings you control: "
+            "the skills list, your memory files, and the MCP servers and plugins you load everywhere."
+        )
+    elif isinstance(baseline, (int, float)):
+        rec.why = (
+            f"Each main session's first call reads about {_tokens(baseline)} tokens before your first message, "
+            "and MCP servers and plugins you load everywhere add to it."
+        )
+    else:
+        rec.why = "MCP servers and plugins you load everywhere add to every session's startup context."
     rec.action = "Turn off MCP servers and plugins in the projects that don't use them."
+    # Your own agents' descriptions are in every session's start. Shortening
+    # them is worth saying only when they are a real share of it.
+    agents = _evidence_value(rec, "custom agents")
+    if isinstance(agents, (int, float)) and agents >= CUSTOM_AGENTS_TRIM_TOKENS:
+        rec.action += (
+            f" Your own agents' descriptions add about {_tokens(agents)} tokens to every session. Shortening "
+            "the description line in their agent files trims that."
+        )
 
 
 def _explain_mcp_unused_server(rec: Recommendation, ctx: _Context) -> None:
@@ -777,18 +798,36 @@ def _explain_mcp_unused_server(rec: Recommendation, ctx: _Context) -> None:
 
 
 def _explain_spawn_cost(rec: Recommendation, ctx: _Context) -> None:
-    write = _evidence_value(rec, "first-turn write")
+    first_call = _evidence_value(rec, "Mean first call")
+    unused = _evidence_value(rec, "Tool definitions it rarely or never uses")
     agent = rec.agent_type or "this agent"
     rec.title = f"Starting {agent} is expensive before it does any work"
-    rec.action = (
-        f"Check what {agent} is given when it starts: its agent file, the CLAUDE.md files it receives and "
-        "the task prompt you send it. Trim what it doesn't need."
-    )
-    rec.why = (
-        f"Each {agent} spawn writes about {_tokens(write)} tokens to the cache on its first reply."
-        if isinstance(write, (int, float))
-        else f"Each {agent} spawn writes a lot to the cache on its first reply."
-    )
+    if rec.lever is None:
+        # A built-in agent type has no file of its own: most of its start is
+        # Claude Code's system prompt and tool definitions, so a shorter task
+        # prompt does not change it. A same-named agent file with a tools list
+        # does. (The rule gives no card for Explore, Plan or claude-code-guide,
+        # which the tools list card leaves alone, so every one that gets here
+        # can be promised that list.)
+        rec.action = (
+            f"Most of what {agent} reads at startup is Claude Code's own system prompt and tool definitions, "
+            "which a shorter task prompt does not change. A same-named agent file with a tools list leaves out "
+            "the tools it never calls; the tools list card gives that list once enough of its spawns show it."
+        )
+    else:
+        rec.action = (
+            f"Check what {agent} is given when it starts: its agent file and tools list, and the CLAUDE.md "
+            "files it receives. Trim what it doesn't need."
+        )
+    if isinstance(first_call, (int, float)) and isinstance(unused, (int, float)):
+        rec.why = (
+            f"Each {agent} spawn reads about {_tokens(first_call)} tokens on its first reply, and about "
+            f"{_tokens(unused)} of those are tool definitions it rarely or never calls."
+        )
+    elif isinstance(first_call, (int, float)):
+        rec.why = f"Each {agent} spawn reads about {_tokens(first_call)} tokens on its first reply."
+    else:
+        rec.why = f"Each {agent} spawn reads a lot on its first reply."
 
 
 def _explain_agent_report_size(rec: Recommendation, ctx: _Context) -> None:
@@ -804,19 +843,137 @@ def _explain_agent_report_size(rec: Recommendation, ctx: _Context) -> None:
     rec.action = f"Ask {agent} for a short report: the findings and file paths, not the working."
 
 
-def _explain_limit_pressure(rec: Recommendation, ctx: _Context) -> None:
-    hits = _evidence_value(rec, "Usage-cap hits")
-    killed = _evidence_value(rec, "terminated")
-    rec.title = "You keep hitting your usage limit"
-    parts = []
-    if isinstance(hits, (int, float)) and hits:
-        parts.append(f"Sessions stopped at a usage limit {hits:,.0f} times")
-    if isinstance(killed, (int, float)) and killed:
-        parts.append(f"{killed:,.0f} subagents were cut off by it")
-    rec.why = (" and ".join(parts) + ".") if parts else "Sessions keep stopping at a usage limit."
-    rec.action = (
-        "Run fewer agents at once when a limit is close, and check {{page:spend/usage}} for when yours resets."
+def _explain_agent_batch_probes(rec: Recommendation, ctx: _Context) -> None:
+    calls = _evidence_value(rec, "Replies it made")
+    probes = _evidence_value(rec, "Single read-only calls")
+    shell = _evidence_value(rec, "by shell command")
+    agent = rec.agent_type or "this agent"
+    workflow = agent == "workflow-subagent"
+    rec.title = f"{agent} looks things up one call at a time"
+    if isinstance(calls, (int, float)) and isinstance(probes, (int, float)):
+        rec.why = (
+            f"{agent} made one read-only call and nothing else in {_tokens(probes)} of its {_tokens(calls)} replies. "
+            "Each of those replies read its whole context again."
+        )
+        if isinstance(shell, (int, float)) and shell >= 1:
+            rec.why += f" {_tokens(shell)} of the calls were shell commands such as cat or grep."
+    else:
+        rec.why = f"{agent} often makes one read-only call per reply, and each reply reads its whole context again."
+    where = "the prompt in each workflow script that starts it" if workflow else "its agent definition or the prompt that starts it"
+    rec.action = f"Add \"{BATCH_PROBES_LINE}\" to {where}. Lookups that don't depend on each other then share one reply."
+    rec.estimated_saving = ctx.money(rec.saving_usd, prefix="At most ")
+    rec.saving_basis = ctx.basis(
+        "The cache reads of the replies after the first of each run of single lookups, at list price, halved. "
+        "Some lookups need the answer to the one before. The tool results are still written once."
     )
+
+
+def _explain_plan_rounds(rec: Recommendation, ctx: _Context) -> None:
+    plans = _evidence_value(rec, "Plans you approved")
+    rounds = _evidence_value(rec, "Times plans were sent back")
+    asked = _evidence_value(rec, "with a question or critique")
+    rec.title = "Plans keep being sent back"
+    if all(isinstance(v, (int, float)) for v in (plans, rounds, asked)):
+        rec.why = (
+            f"You sent plans back {_tokens(rounds)} times before approving {_tokens(plans)}. "
+            f"{_tokens(asked)} of those rounds were a question, a critique or a doubt. "
+            "Each round reads the whole planning conversation again."
+        )
+    else:
+        rec.why = "You often send a plan back before you approve it, and each round reads the whole planning conversation again."
+    rec.action = (
+        "Put one standing request in your first planning message, in CLAUDE.md or in a plan skill. "
+        f"It reads \"{CRITIQUE_PLAN_LINE}.\" Claude then raises those points itself, and you answer them once."
+    )
+    rec.estimated_saving = ctx.money(rec.saving_usd, prefix="At most ")
+    rec.saving_basis = ctx.basis(
+        "The replies between the first plan and the approval, at list price. Only rounds that were a question, "
+        "a critique or a doubt count, at a quarter of their cost. A critique won't spare every round."
+    )
+
+
+#: The limit-pressure card's evidence label for each ``limits.SPEND_SOURCES``
+#: entry's share, the name the card gives it, and the change it points to
+#: when that source spent the most before your stops.
+_LIMIT_CENTRES: dict[str, tuple[str, str, str]] = {
+    "main": (
+        "Main session share",
+        "main session",
+        "Plan the work before you start, and run /clear when the task changes, so each reply carries less.",
+    ),
+    "direct": ("Direct agents share", "direct agents", "Run fewer agents at once when a limit is close."),
+    "workflow": (
+        "Workflow agents share",
+        "workflow agents",
+        "Lower the concurrency in the workflow script, so fewer agents run at once when a limit is close.",
+    ),
+}
+_FEWER_AGENTS = "Run fewer agents at once when a limit is close."
+
+
+def _limit_centre(rec: Recommendation) -> tuple[str, float] | None:
+    """The ``limits.SPEND_SOURCES`` entry with the biggest share of the
+    spend before your stops (the earlier one on a tie), and that share;
+    ``None`` when the roll-up gave no shares."""
+    shares = {
+        source: value
+        for source in SPEND_SOURCES
+        for value in [_evidence_value(rec, _LIMIT_CENTRES[source][0])]
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    }
+    if not shares:
+        return None
+    best = max(SPEND_SOURCES, key=lambda source: shares.get(source, -1.0))
+    return best, shares[best]
+
+
+def _explain_limit_pressure(rec: Recommendation, ctx: _Context) -> None:
+    five_hour = _evidence_value(rec, "5-hour limit stops")
+    weekly = _evidence_value(rec, "Weekly stops that stopped work")
+    days = _evidence_value(rec, "Days covered")
+    cut_off = _evidence_value(rec, "cut off")
+    counted = _evidence_value(rec, "Stops counted")
+    burst = _evidence_value(rec, "in these stops")
+    overall = _evidence_value(rec, "across all your work")
+    rec.title = "You keep hitting your usage limit"
+
+    def times(count) -> str:
+        return "1 time" if count == 1 else f"{count:,.0f} times"
+
+    span = f" in {days:,.0f} days" if isinstance(days, (int, float)) and days > 1 else ""
+    stops = []
+    if isinstance(five_hour, (int, float)) and five_hour:
+        stops.append(("Your 5-hour limit stopped you ", times(five_hour)))
+    if isinstance(weekly, (int, float)) and weekly:
+        stops.append(("your weekly limit ", times(weekly)) if stops else ("Your weekly limit stopped you ", times(weekly)))
+    sentences = []
+    if stops:
+        sentences.append(" and ".join(lead + count for lead, count in stops) + span + ".")
+    if isinstance(cut_off, (int, float)) and cut_off:
+        sentences.append(f"{cut_off:,.0f} {'subagent was' if cut_off == 1 else 'subagents were'} cut off by a usage limit.")
+    centre = _limit_centre(rec)
+    if centre is not None:
+        source, share = centre
+        sentences.append(
+            f"Before your stops, your {_LIMIT_CENTRES[source][1]} spent the most: {share:.0f}% of list-price spend. "
+            "The limit may weigh models differently."
+        )
+    if (
+        isinstance(counted, (int, float))
+        and isinstance(burst, (int, float))
+        and isinstance(overall, (int, float))
+        and burst_stands_out(burst, overall)
+    ):
+        sentences.append(
+            ("In 1 recent stop, " if counted == 1 else f"In {counted:,.0f} recent stops, ")
+            + f"{burst:.0f}% of the spend ran while {BURST_AGENTS} or more agents "
+            f"worked at once ({overall:.0f}% across all your work)."
+        )
+    rec.why = " ".join(sentences) if sentences else "Your usage limit keeps stopping your work."
+    action = _FEWER_AGENTS if centre is None else _LIMIT_CENTRES[centre[0]][2]
+    if centre is not None and centre[0] == "main" and isinstance(cut_off, (int, float)) and cut_off:
+        action += " " + _FEWER_AGENTS
+    rec.action = action + " {{page:cache/rebuilds}} shows each stop, its reset time and what it cost."
 
 
 def _explain_cache_read_dominance(rec: Recommendation, ctx: _Context) -> None:
@@ -926,6 +1083,14 @@ def _explain_subagent_volume(rec: Recommendation, ctx: _Context) -> None:
         f"Check whether every {agent} run is needed, whether a cheaper model fits, and how long its task "
         "prompts are."
     )
+    # Phase 8a: say where the most spend sits overall, from the cost-centre table.
+    centre = cost_centres.largest_centre(ctx.report)
+    if centre is not None:
+        key, cell, _total, share = centre
+        rec.why += (
+            f" Across all spend, the largest cost centre is {cost_centres.CENTRE_LABELS.get(key, key).lower()}"
+            f" ({share:.0f}%), mostly {cost_centres.CELL_LABELS.get(cell, cell).lower()}."
+        )
 
 
 # -- agent models: code written on a larger model than it needed -----------------
@@ -1004,9 +1169,17 @@ def _agent_model_facts(rec: Recommendation) -> _AgentModelFacts | None:
     )
 
 
-def _agent_noun(agent_type: str | None, count: int) -> str:
+def _started_by_workflow(facts: _AgentModelFacts) -> bool:
+    """Whether a card's agents were started by a workflow script. The table
+    counts them as ``Workflow runs`` from the transcript's kind
+    (``TranscriptMeta.kind == "workflow-agent"``): a workflow agent's agent
+    type is any name its script gave it, so the type never says."""
+    return facts.workflow_runs > 0
+
+
+def _agent_noun(agent_type: str | None, count: int, workflow: bool = False) -> str:
     """``workflow agents`` for the workflow card, else ``<type> agents``."""
-    kind = "workflow" if agent_type == "workflow-subagent" else (agent_type or "")
+    kind = "workflow" if workflow else (agent_type or "")
     return " ".join(part for part in (kind, "agent" if count == 1 else "agents") if part)
 
 
@@ -1066,10 +1239,11 @@ def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:
     if facts is None:
         return
     count = facts.agents
-    noun = _agent_noun(rec.agent_type, count)
+    workflow = _started_by_workflow(facts)
+    noun = _agent_noun(rec.agent_type, count, workflow)
     model = _model_prose(facts.model) if facts.model else "a larger model"
     when = _most_recently(facts.last_seen, ctx.report)
-    if rec.agent_type == "workflow-subagent":
+    if workflow:
         runs = max(facts.workflow_runs, 1)
         started = (
             f"{_roles_phrase(facts, noun)} in {runs} workflow run{'s' if runs != 1 else ''} started with no "
@@ -1090,7 +1264,7 @@ def _explain_agent_model_inherited(rec: Recommendation, ctx: _Context) -> None:
             f"Since then, {facts.later} agent{'s' if facts.later != 1 else ''} that wrote code ran on Sonnet or "
             "a smaller model, so this looks fixed."
         )
-    if rec.agent_type not in (None, "workflow-subagent") and model_gate.build(whatif._Tables(ctx.report)).vetoed(
+    if not workflow and rec.agent_type is not None and model_gate.build(whatif._Tables(ctx.report)).vetoed(
         rec.agent_type, "sonnet"
     ):
         rec.severity = "info"
@@ -1112,7 +1286,7 @@ def _explain_agent_model_asked(rec: Recommendation, ctx: _Context) -> None:
     if facts is None:
         return
     count = facts.agents
-    noun = _agent_noun(rec.agent_type, count)
+    noun = _agent_noun(rec.agent_type, count, _started_by_workflow(facts))
     model = _model_prose(facts.model) if facts.model else "a larger model"
     family = _family_name(facts.model)
     many = count != 1
@@ -1137,7 +1311,7 @@ def _explain_agent_decide_apply(rec: Recommendation, ctx: _Context) -> None:
     if facts is None:
         return
     count = facts.agents
-    noun = _agent_noun(rec.agent_type, count)
+    noun = _agent_noun(rec.agent_type, count, _started_by_workflow(facts))
     model = _model_prose(facts.model) if facts.model else "a larger model"
     family = _family_name(facts.model)
     verbs = []
@@ -1187,6 +1361,8 @@ _EXPLAIN: dict[str, Callable[[Recommendation, _Context], None]] = {
     "mcp-unused-server": _explain_mcp_unused_server,
     "spawn-cost": _explain_spawn_cost,
     "agent-report-size": _explain_agent_report_size,
+    "agent-batch-probes": _explain_agent_batch_probes,
+    "plan-rounds": _explain_plan_rounds,
     "limit-pressure": _explain_limit_pressure,
     "cache-read-dominance": _explain_cache_read_dominance,
     "data-quality": _explain_data_quality,

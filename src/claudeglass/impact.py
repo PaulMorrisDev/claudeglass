@@ -47,7 +47,33 @@ messages Claude tagged. A change to live coaching (``[capture]
 coaching``) is measured by the prompting habits it warns about
 (:mod:`prompting`), per 100 of your messages, and the share of your
 messages that were small requests sent one at a time, as well as what
-its notes add.
+its notes add. Those rates divide by the messages that asked for
+something (:func:`pieces.asks`: not a go-ahead, a status check, a
+thank-you or a reply to a plan; one you typed while Claude worked
+counts), the way the Work habits rates do, and the same count stands
+under both sides of a comparison. A change of model, and a habit you
+started, also get cost per request: a session's cost over its prompt
+cycles that asked for something, so a run of go-aheads or polls
+doesn't pass for cheaper work. A session with none (a scheduled run) has
+no figure of its own there.
+
+The card leads with the measure the ratio test is surest of
+(:func:`lead_row`): a clear difference before a possible one before no
+clear change, then the smaller p-value, then the order above. A change to
+metrics capture, live coaching or the feedback prompts isn't meant to move
+cost, so its cost per session is read last, whatever it says
+(:func:`change_points.affects_capture`). Every change also says whether
+the mix of sessions moved between its two sides (:func:`session_mix`): a
+kind of session (a scheduled run, or a mode) whose share changed by
+:data:`MIX_SHIFT_PTS` points or more makes the per-session figures
+compare different jobs, however the sessions are weighted.
+
+The context at the start (a session's, or an agent's per spawn) is
+compared on one model: the same tools are 51.5k tokens on Haiku 4.5 and
+69.4k on Sonnet 5, so a before and an after on different models would
+read the model as the change (:func:`_held_model`). It uses the model
+family both sides ran on, the one with most transcripts, and has no
+figure when they share none. The row names the model it held.
 
 Each change is also checked for quality (:mod:`quality`): the runs of the
 agent it changed (or the main session, for any other setting) before and
@@ -61,13 +87,16 @@ of the setup comparisons.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from collections import Counter
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta, timezone
 
 from . import capture as capture_mod
 from . import classify as classify_mod
+from . import pieces as pieces_mod
 from . import prompting, quality, recache
-from .change_points import ChangePoint, applies_to
+from .calibration import model_family
+from .change_points import ChangePoint, affects_capture, applies_to
 from .model import EventKind, TranscriptResult, scheduled_main_session
 from .pricing import Pricing, price_turn
 from . import snapshots as snapshots_mod
@@ -85,6 +114,17 @@ NOISE_PCT = 5.0
 TOGETHER = timedelta(minutes=10)
 #: Two-sided significance threshold for the ratio test (see module docstring).
 ALPHA = quality.ALPHA
+#: How far a kind of session's share of one side must move, in percentage
+#: points, between before and after for the mix of sessions to read as
+#: changed (:func:`session_mix`). Assumption: 25 points because it is the
+#: bar the plan sets, and a quarter of the sessions swapping for another
+#: kind is where a per-session figure stops comparing like with like (the
+#: feedback card's $79.03 to $1.69 was 22 of 28 sessions turning into
+#: half-hourly scheduled runs, 79 points).
+MIX_SHIFT_PTS = 25.0
+#: The ratio test's readings that say a difference was judged, clearly or
+#: possibly. ``backtest`` judges a prediction on the same set.
+SIGNIFICANT_LABELS = ("lower", "possibly_lower", "higher", "possibly_higher")
 
 CAVEAT = (
     "Sessions differ in size and kind of work, so read a difference as a signal, not proof. "
@@ -112,6 +152,10 @@ class _Transcript:
     turns: int = 0
     startup_tokens: int = 0
     peak_context: int = 0
+    #: The model family (:func:`calibration.model_family`) of the first
+    #: priced reply, ``""`` when it names none: what a start-of-context
+    #: comparison holds fixed.
+    model: str = ""
     #: Output tokens of the replies ``turns`` counts, so output per reply
     #: divides like by like: a compaction's estimated request
     #: (``Turn.estimated``) is spend, not a reply. The API's
@@ -156,6 +200,15 @@ class SessionFacts:
     #: small requests sent one at a time, for a change to coaching.
     habits: int = 0
     drip_messages: int = 0
+    #: Your messages that asked for something (``pieces.asks``): not a
+    #: go-ahead, a status check, a thank-you or a reply to a plan, and one
+    #: you typed while Claude worked counts. What the habit rates divide by.
+    #: ``None`` when not counted (sessions a test builds by hand), where
+    #: ``messages`` stands in.
+    asks: int | None = None
+    #: The prompt cycles that asked for something (at least one ask in
+    #: them): what cost per request divides by. ``None`` as for ``asks``.
+    substantive: int | None = None
     #: (agent type, facts) per subagent spawn.
     spawns: list[tuple[str, _Transcript]] = field(default_factory=list)
     #: Quality counts per transcript: the main session and each spawn.
@@ -176,6 +229,16 @@ class SessionFacts:
     def tokens(self) -> int:
         return self.main.total_tokens + sum(spawn.total_tokens for _agent, spawn in self.spawns)
 
+    @property
+    def requests(self) -> int:
+        """The messages the habit rates divide by."""
+        return self.messages if self.asks is None else self.asks
+
+    @property
+    def substantive_cycles(self) -> int:
+        """The prompt cycles cost per request divides by."""
+        return self.messages if self.substantive is None else self.substantive
+
 
 def _session_keys(session: SessionFacts) -> tuple[str, ...]:
     return session.keys or (session.project,)
@@ -187,6 +250,7 @@ def _transcript(result: TranscriptResult, pricing: Pricing) -> _Transcript:
     if turns:
         first = turns[0]
         facts.startup_tokens = first.input_tokens + first.cache_creation_tokens + first.cache_read_tokens
+        facts.model = model_family(first.model)
     rebuilt = {t.message_id for t in recache.detect(turns, recache.RecacheThresholds()) if t.message_id}
     for turn in turns:
         resolved = pricing.resolve_model(turn.model)
@@ -225,9 +289,10 @@ def session_facts(corpus, pricing: Pricing) -> list[SessionFacts]:
         if start is None:
             continue
         keys = snapshots_mod.snapshot_project_keys(bundle.slug) if bundle.slug else ()
-        cycles = capture_mod.prompt_cycles(top)
+        cycles = capture_mod.prompt_cycles(top, bundle.subs, bundle.workflows)
         habit_facts = prompting.session_prompting(bundle, prices)
-        habits, drip, _messages = prompting.habit_rates(habit_facts) if habit_facts else (0, 0, 0)
+        habits, drip, _asked = prompting.habit_rates(habit_facts) if habit_facts else (0, 0, 0)
+        asked = [pieces_mod.asks(cycle, cycles[n - 1] if n else None) for n, cycle in enumerate(cycles)]
         task, _tagged = classify_mod.reported_task(top)
         classification = classify_mod.classify_session(
             top, bundle.subs, {}, None, workflows=len(bundle.workflows), entrypoint=top.meta.entrypoint
@@ -249,6 +314,8 @@ def session_facts(corpus, pricing: Pricing) -> list[SessionFacts]:
                 tagged=sum(1 for cycle in cycles if cycle.tag is not None),
                 habits=habits,
                 drip_messages=drip,
+                asks=sum(asked),
+                substantive=sum(1 for n in asked if n),
                 project=keys[0] if keys else "",
                 keys=keys,
             )
@@ -294,6 +361,38 @@ class Measure:
     #: "money" or "tokens" or "pct" or "count".
     kind: str
     agent: str | None = None
+    #: Only the transcripts on this model family count (``None``: all).
+    #: Set by :func:`_measure_row` for the measures in :data:`_MODEL_SENSITIVE`.
+    model: str | None = None
+
+
+#: The measures whose size depends on the model that read them: the tool
+#: definitions alone are a different size on each.
+_MODEL_SENSITIVE = ("startup_tokens", "agent_startup")
+
+#: A model no transcript has (a family never starts with "<"), for a
+#: comparison that shares none.
+_NO_MODEL = "<none>"
+
+
+def _startup_transcripts(measure: Measure, sessions: list[SessionFacts]) -> list[_Transcript]:
+    """The transcripts whose start-of-context ``measure`` reads."""
+    if measure.agent is not None:
+        return [facts for s in sessions for agent, facts in s.spawns if agent == measure.agent]
+    return [s.main for s in sessions]
+
+
+def _held_model(measure: Measure, before: list[SessionFacts], after: list[SessionFacts]) -> str | None:
+    """The model family a start-of-context comparison holds fixed: the one
+    both sides ran on with the most transcripts between them. ``None``
+    when they share none, where there is no figure to give."""
+    counts: list[Counter] = []
+    for side in (before, after):
+        counts.append(Counter(facts.model for facts in _startup_transcripts(measure, side) if facts.startup_tokens))
+    shared = set(counts[0]) & set(counts[1])
+    if not shared:
+        return None
+    return max(sorted(shared), key=lambda family: counts[0][family] + counts[1][family])
 
 
 def _mean(values: list[float]) -> float | None:
@@ -310,9 +409,11 @@ def _pairs(measure: Measure, sessions: list[SessionFacts]) -> list[tuple[float, 
         spawns = [facts for s in sessions for agent, facts in s.spawns if agent == measure.agent]
         if measure.key == "agent_cost":
             return [(f.cost, 1.0) for f in spawns]
-        return [(float(f.startup_tokens), 1.0) for f in spawns]
+        return [(float(f.startup_tokens), 1.0) for f in spawns if measure.model in (None, f.model)]
     if measure.key == "cost_per_session":
         return [(s.cost, 1.0) for s in sessions]
+    if measure.key == "cost_per_substantive_cycle":
+        return [(s.cost, float(s.substantive_cycles)) for s in sessions]
     if measure.key == "cost_per_turn":
         return [(s.main.cost, float(s.main.turns)) for s in sessions]
     if measure.key == "tokens_per_session":
@@ -328,7 +429,7 @@ def _pairs(measure: Measure, sessions: list[SessionFacts]) -> list[tuple[float, 
     if measure.key == "peak_context":
         return [(float(s.main.peak_context), 1.0) for s in sessions]
     if measure.key == "startup_tokens":
-        return [(float(s.main.startup_tokens), 1.0) for s in sessions]
+        return [(float(s.main.startup_tokens), 1.0) for s in sessions if measure.model in (None, s.main.model)]
     if measure.key == "capture_tokens":
         return [
             (
@@ -340,9 +441,9 @@ def _pairs(measure: Measure, sessions: list[SessionFacts]) -> list[tuple[float, 
     if measure.key == "tagged_share":
         return [(100.0 * s.tagged, float(s.messages)) for s in sessions]
     if measure.key == "prompting_habits":
-        return [(100.0 * s.habits, float(s.messages)) for s in sessions]
+        return [(100.0 * s.habits, float(s.requests)) for s in sessions]
     if measure.key == "drip_share":
-        return [(100.0 * s.drip_messages, float(s.messages)) for s in sessions]
+        return [(100.0 * s.drip_messages, float(s.requests)) for s in sessions]
     return []  # pragma: no cover
 
 
@@ -414,6 +515,7 @@ def _value(measure: Measure, sessions: list[SessionFacts]) -> tuple[float | None
 
 
 _COST = Measure("cost_per_session", "Cost per session", "money")
+_CYCLE = Measure("cost_per_substantive_cycle", "Cost per request", "money")
 _TURN = Measure("cost_per_turn", "Cost per reply", "money")
 _TOKENS = Measure("tokens_per_session", "Tokens per session", "tokens")
 _OUTPUT = Measure("output_per_turn", "Output tokens per reply", "tokens")
@@ -440,8 +542,11 @@ def measures_for(point: ChangePoint) -> list[Measure]:
     the changed keys name them, except that the tokens always come
     before cost per reply: a settings edit lists its keys
     alphabetically, so ``effortLevel`` or ``fastMode`` comes before
-    ``model``, and its card would otherwise lead with money."""
+    ``model``, and its card would otherwise lead with money. A model
+    change and a habit you started also get cost per request, just before
+    cost per session, which a run of go-aheads or polls can't move."""
     chosen: list[Measure] = []
+    per_request = False
 
     def add(measure: Measure, ahead_of: tuple[Measure, ...] = ()) -> None:
         # Last, or just before the first of ``ahead_of`` already chosen.
@@ -464,10 +569,23 @@ def measures_for(point: ChangePoint) -> list[Measure]:
         elif key.startswith("capture."):
             add(_CAPTURE)
             add(_TAGGED)
+        elif key.startswith("habit."):
+            # A habit you started: the prompting habits if it is one of
+            # those (and the small-requests share for that habit), else the
+            # tokens a session uses, with the cost check last as always.
+            habit = key[len("habit."):]
+            per_request = True
+            if habit in prompting.HABITS:
+                add(_HABITS)
+                if habit == "drip_feed":
+                    add(_DRIP)
+            else:
+                add(_TOKENS)
         elif agent:
             add(Measure("agent_cost", f"{agent}: cost per spawn", "money", agent))
             add(Measure("agent_startup", f"{agent}: context at the start of each spawn", "tokens", agent))
         elif key == "model":
+            per_request = True
             add(_TOKENS, ahead_of=(_OUTPUT, _TURN))
             add(_OUTPUT, ahead_of=(_TURN,))
             add(_REPLIES, ahead_of=(_TURN,))
@@ -488,6 +606,8 @@ def measures_for(point: ChangePoint) -> list[Measure]:
             add(_STARTUP)
     if not chosen:
         add(_STARTUP)
+    if per_request:
+        add(_CYCLE)
     add(_COST)
     return chosen
 
@@ -516,6 +636,10 @@ def _enough_estimate(est: quality.Estimate) -> bool:
 
 
 def _measure_row(measure: Measure, before: list[SessionFacts], after: list[SessionFacts], units: Units) -> dict:
+    held: str | None = None
+    if measure.key in _MODEL_SENSITIVE:
+        held = _held_model(measure, before, after)
+        measure = replace(measure, model=_NO_MODEL if held is None else held)
     old = _ratio_estimate(_pairs(measure, before))
     new = _stratified_estimate(measure, before, after)
     change_pct = (new.value - old.value) / old.value * 100.0 if old.value and new.value is not None else None
@@ -541,6 +665,9 @@ def _measure_row(measure: Measure, before: list[SessionFacts], after: list[Sessi
         "p": None,
         "label_key": "too_little_data",
     }
+    if measure.key in _MODEL_SENSITIVE:
+        # The model both sides were held to (empty when they shared none).
+        row["model"] = held or None
     if _enough_estimate(old) and _enough_estimate(new):
         variance = (old.variance or 0.0) + (new.variance or 0.0)
         diff = new.value - old.value
@@ -571,6 +698,108 @@ def _label_rows(rows: list[dict]) -> None:
             row["p"] = round(row["p"], 4)
 
 
+#: Where a reading puts a measure in the race to lead a card: a clear
+#: difference, a possible one, no clear change. A measure with too little
+#: data to judge comes after all of them. A demoted one (cost per session of
+#: a change that isn't about cost) comes after every other that has a reading.
+_READING_RANK = {"lower": 0, "higher": 0, "possibly_lower": 1, "possibly_higher": 1, "no_clear_change": 2}
+_DEMOTED_BY = 3
+_NO_READING = 6
+
+
+def _reading(row: dict) -> str:
+    """A row's ratio-test reading, except that a difference under
+    :data:`NOISE_PCT` is "no clear change" however sure the test is of it:
+    with enough sessions any wobble is significant, and a card that led
+    with one would bury the measure that did move."""
+    if row["label_key"] in SIGNIFICANT_LABELS and row.get("direction") == "same":
+        return "no_clear_change"
+    return row["label_key"]
+
+
+def _lead_order(row: dict, index: int) -> tuple[int, float, int]:
+    reading = _reading(row)
+    if reading not in _READING_RANK:
+        rank = _NO_READING
+    else:
+        rank = _READING_RANK[reading] + (_DEMOTED_BY if row.get("demoted") else 0)
+    p = row.get("p")
+    return rank, 1.0 if p is None else p, index
+
+
+def lead_row(rows: list[dict]) -> dict | None:
+    """The measure that leads a card: the one the ratio test is surest of,
+    by its reading (a clear difference before a possible one before no
+    clear change), then its smaller p-value, then its place in
+    :func:`measures_for`'s order. A demoted measure leads only when no
+    other has a reading, and one with too little data only when none has."""
+    if not rows:
+        return None
+    return rows[min(range(len(rows)), key=lambda i: _lead_order(rows[i], i))]
+
+
+def _lead_first(rows: list[dict]) -> list[dict]:
+    lead = lead_row(rows)
+    return rows if lead is None else [lead] + [row for row in rows if row is not lead]
+
+
+# -- the mix of sessions -----------------------------------------------------
+
+#: What a kind of session is called in a sentence about the mix.
+_MIX_SUBJECT = {
+    "scheduled": "Scheduled runs",
+    "interactive": "Interactive sessions",
+    "long-agentic": "Long autonomous runs",
+    "overnight": "Overnight sessions",
+    "one-shot": "One-shot sessions",
+    "mixed": "Mixed sessions",
+}
+
+
+def _kind(session: SessionFacts) -> str:
+    """A session's kind for the mix: a scheduled run, else its mode."""
+    return "scheduled" if session.scheduled else session.mode
+
+
+def _shares(sessions: list[SessionFacts]) -> dict[str, float]:
+    counts = Counter(kind for kind in map(_kind, sessions) if kind)
+    return {kind: 100.0 * n / len(sessions) for kind, n in counts.items()}
+
+
+def session_mix(before: list[SessionFacts], after: list[SessionFacts]) -> dict | None:
+    """Whether the mix of sessions moved between the two sides, which makes
+    cost per session (and any per-session figure) compare different jobs
+    however the sessions are weighted. The kind of session whose share moved
+    most (a scheduled run, or one of the modes) with its share before and
+    after, in percent, and ``flagged`` when that is :data:`MIX_SHIFT_PTS`
+    points or more; ``text`` says so in a sentence, empty when not flagged.
+    ``None`` when a side has no sessions."""
+    if not before or not after:
+        return None
+    old, new = _shares(before), _shares(after)
+    kinds = sorted(old.keys() | new.keys())
+    if not kinds:
+        return {"flagged": False, "kind": "", "before_pct": 0.0, "after_pct": 0.0, "shift_pts": 0.0, "text": ""}
+    kind = max(kinds, key=lambda k: (round(abs(new.get(k, 0.0) - old.get(k, 0.0)), 6), k == "scheduled"))
+    shift = abs(new.get(kind, 0.0) - old.get(kind, 0.0))
+    flagged = round(shift, 6) >= MIX_SHIFT_PTS
+    text = ""
+    if flagged:
+        text = (
+            f"{_MIX_SUBJECT.get(kind, 'Sessions of one kind')} were {old.get(kind, 0.0):.0f}% of the sessions "
+            f"before this change and {new.get(kind, 0.0):.0f}% after. Cost per session compares different "
+            "kinds of work here, so read the other measures first."
+        )
+    return {
+        "flagged": flagged,
+        "kind": kind,
+        "before_pct": round(old.get(kind, 0.0), 1),
+        "after_pct": round(new.get(kind, 0.0), 1),
+        "shift_pts": round(shift, 1),
+        "text": text,
+    }
+
+
 def compare(
     point: ChangePoint,
     sessions: list[SessionFacts],
@@ -586,19 +815,41 @@ def compare(
     :func:`bounds` returns. ``without``, when given, is called with
     ``(point, before, after)`` for what the sessions after the change
     would have cost without it (``counterfactual.for_impact``); its answer
-    is ``"without"``."""
+    is ``"without"``.
+
+    ``measures`` has the lead measure (:func:`lead_row`) first and the rest
+    in :func:`measures_for`'s order; ``lead`` is its key, ``None`` until
+    there are enough sessions. Each row says whether it is ``demoted``.
+    ``mix`` is :func:`session_mix` for the two sides, ``None`` until there
+    are enough sessions."""
     before, after = sides(
         point, sessions, previous=previous, following=following, per_project=per_project, now=now
     )
     enough = len(before) >= MIN_SESSIONS and len(after) >= MIN_SESSIONS
     rows = [_measure_row(measure, before, after, units) for measure in measures_for(point)]
     _label_rows(rows)
+    for row in rows:
+        # The card reads a move under the noise floor as no clear change,
+        # however sure the test is of it (:func:`_reading`): its badge, the
+        # chip by the title and the verdict all say so.
+        reading = _reading(row)
+        if reading != row["label_key"]:
+            row["label_key"], row["label_text"] = reading, quality.LABELS[reading]
+    # A change to what capture, coaching or the feedback prompts add isn't
+    # meant to move cost, so its cost per session, which a shift in the mix
+    # of sessions can swamp, is read last.
+    demote = affects_capture(point)
+    for row in rows:
+        row["demoted"] = demote and row["key"] == _COST.key
+    rows = _lead_first(rows)
     return {
         "change": point.to_dict(),
         "before_sessions": len(before),
         "after_sessions": len(after),
         "enough": enough,
         "verdict": _verdict(rows, len(before), len(after), enough),
+        "lead": rows[0]["key"] if enough and rows else None,
+        "mix": session_mix(before, after) if enough else None,
         "measures": rows,
         "quality": _quality(point, before, after, units),
         "without": without(point, before, after) if without is not None else None,
@@ -746,6 +997,11 @@ def _quality(point: ChangePoint, before: list[SessionFacts], after: list[Session
 
 
 def _verdict(rows: list[dict], before: int, after: int, enough: bool) -> str:
+    """The card's one line: the lead measure (:func:`lead_row`) in the words
+    its ratio-test reading allows. A fall or a rise is said only for a
+    measure the test judged, and over :data:`NOISE_PCT`; a smaller move reads
+    "about the same", one the test couldn't tell from noise "no clear
+    change", whatever the percentage, and one with too little data says so."""
     if not enough:
         if after < MIN_SESSIONS:
             return (
@@ -756,16 +1012,24 @@ def _verdict(rows: list[dict], before: int, after: int, enough: bool) -> str:
             f"Too few sessions before the change to compare: {before} of the {MIN_SESSIONS} needed. "
             "Only sessions started before it count here."
         )
-    lead = next((row for row in rows if row["change_pct"] is not None), None)
-    if lead is None:
+    lead = lead_row(rows)
+    if lead is None or lead["before_value"] is None or lead["after_value"] is None:
         return "No data on the measures this change should move."
-    if lead["direction"] == "same":
-        return f"{lead['label']}: about the same ({lead['before']} before, {lead['after']} after)."
-    word = "fell" if lead["direction"] == "lower" else "rose"
-    return (
-        f"{lead['label']} {word} {abs(lead['change_pct']):.0f}%, from {lead['before']} to {lead['after']} "
-        f"({before} sessions before, {after} after)."
-    )
+    label, reading = lead["label"], _reading(lead)
+    figures = f"{lead['before']} before, {lead['after']} after"
+    if lead["direction"] == "same" and reading == "no_clear_change":
+        return f"{label}: about the same ({figures})."
+    if reading == "no_clear_change":
+        return f"{label}: no clear change ({figures})."
+    if reading not in SIGNIFICANT_LABELS:
+        return f"{label}: too little data to judge yet ({figures})."
+    fell = reading.endswith("lower")
+    if reading.startswith("possibly_"):
+        word = "may have fallen" if fell else "may have risen"
+    else:
+        word = "fell" if fell else "rose"
+    by = "" if lead["change_pct"] is None else f" {abs(lead['change_pct']):.0f}%"
+    return f"{label} {word}{by}, from {lead['before']} to {lead['after']} ({before} sessions before, {after} after)."
 
 
 def impact(
@@ -808,14 +1072,18 @@ __all__ = [
     "CAVEAT",
     "LOOKBACK_DAYS",
     "MIN_SESSIONS",
+    "MIX_SHIFT_PTS",
+    "SIGNIFICANT_LABELS",
     "SessionFacts",
     "bounds",
     "compare",
     "impact",
+    "lead_row",
     "measures_for",
     "neighbours",
     "quality_groups",
     "session_facts",
+    "session_mix",
     "sides",
     "stratum",
 ]

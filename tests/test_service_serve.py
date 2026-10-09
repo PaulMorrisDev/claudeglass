@@ -16,7 +16,7 @@ from claudeglass.service import serve, storelock
 from claudeglass.service.contracts import ServeOptions
 from claudeglass.service.storelock import StoreLock
 
-from helpers import turn_line, write_jsonl
+from helpers import turn_line, user_str_line, write_jsonl
 
 
 def _write_session(root: Path, slug: str, session_id: str, lines: list[dict]) -> Path:
@@ -405,3 +405,65 @@ def test_without_exit_on_code_change_a_code_change_is_only_reported(tmp_path: Pa
         server.shutdown()
         thread.join(timeout=15)
     assert result.get("rc") == 0
+
+
+def _recent(hours_ago: float) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(timezone.utc) - timedelta(hours=hours_ago)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
+def test_once_writes_the_typical_piece_of_work_for_a_survey_that_answers_your_messages(tmp_path: Path):
+    """The service's daily run builds the report and then your typical piece of
+    work from one load of the store (``serve._coaching_typical``): the median
+    piece of work of the last 30 days, here 5 sessions of one message and 3
+    replies each. A feedback-only setup needs no coaching notes on for it to run."""
+    import json
+
+    from claudeglass import coaching
+
+    root = tmp_path / "projects"
+    for index in range(5):
+        _write_session(
+            root,
+            "proj-a",
+            f"sess-{index}",
+            [
+                user_str_line("build it", origin={"kind": "human"}, timestamp=_recent(6 - index * 0.1 + 0.05)),
+                *[
+                    turn_line(
+                        timestamp=_recent(6 - index * 0.1 - reply * 0.01), input_tokens=100 * (index + 1), output_tokens=0
+                    )
+                    for reply in range(3)
+                ],
+            ],
+        )
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('[capture]\nfeedback = ["feedback_skill"]\n', encoding="utf-8")
+    options = ServeOptions(projects_root=root, config_dir=config_dir)
+
+    assert serve.run(options, once=True) == 0
+
+    # 300, 600, 900, 1200 and 1500 tokens: the median is 900. Counts only: nothing else of a session is in the file.
+    data = json.loads(coaching.path(config_dir).read_text(encoding="utf-8"))
+    assert data["typical_piece_tokens"] == 900
+    assert set(data) == {
+        "version", "built_at", "days", "plan_fresh", "thresholds", "typical_piece_tokens", "muted", "once",
+    }
+    # No tip answers yet: no hint is muted or shown once.
+    assert data["muted"] == [] and data["once"] == []
+
+
+def test_once_leaves_coaching_json_alone_while_no_survey_item_or_coaching_note_reads_it(tmp_path: Path):
+    from claudeglass import coaching
+
+    root = tmp_path / "projects"
+    root.mkdir(parents=True)
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    (config_dir / "config.toml").write_text('[capture]\nfeedback = ["feedback_note"]\n', encoding="utf-8")
+
+    assert serve.run(ServeOptions(projects_root=root, config_dir=config_dir), once=True) == 0
+
+    assert not coaching.path(config_dir).exists()

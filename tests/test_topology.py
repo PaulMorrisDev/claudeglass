@@ -605,13 +605,120 @@ def test_spawn_write_table_has_mean_briefing_chars_column(tmp_path):
     assert [c.key for c in table.columns] == [
         "agent_type",
         "spawns",
+        "model",
+        "other_model_spawns",
+        "mean_first_call",
+        "mean_shared_prefix",
         "mean_write",
         "median_write",
+        "mean_first_prompt",
         "mean_briefing_chars",
     ]
+    col = {c.key: i for i, c in enumerate(table.columns)}
     row_by_type = {row[0]: row for row in table.rows}
-    assert row_by_type["claude-implementer"][4] == pytest.approx(25.0)
-    assert row_by_type["general-purpose"][4] == pytest.approx(16.0)
+    assert row_by_type["claude-implementer"][col["mean_briefing_chars"]] == pytest.approx(25.0)
+    assert row_by_type["general-purpose"][col["mean_briefing_chars"]] == pytest.approx(16.0)
+    # The spawn write is still the first call's cache write: 2,000 and 1,000.
+    assert row_by_type["claude-implementer"][col["mean_write"]] == pytest.approx(1500.0)
+
+
+def _spawn(tmp_path, name, agent_type, model, prefix, written=2_000, prompt=100):
+    lines = [
+        turn_line(
+            message_id=f"{name}_1",
+            model=model,
+            input_tokens=prompt,
+            cache_creation_input_tokens=written,
+            cache_read_input_tokens=prefix,
+        ),
+        turn_line(message_id=f"{name}_2", model=model, cache_read_input_tokens=prefix + written),
+    ]
+    return _parse(tmp_path, name, lines, kind="subagent", agent_id=name, agent_type=agent_type, spawn_depth=1)
+
+
+def test_spawn_table_reads_the_first_call_on_one_model_per_agent_type(tmp_path):
+    """The same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5, so
+    a type run on both is averaged on the model most of its spawns used."""
+    top = _parse(tmp_path, "top-m", [turn_line(message_id="t1", cache_creation_input_tokens=5_000)], kind="top-level")
+    subs = [
+        _spawn(tmp_path, "h1", "Explore", "claude-haiku-4-5", 51_500),
+        _spawn(tmp_path, "h2", "Explore", "claude-haiku-4-5", 51_500),
+        _spawn(tmp_path, "s1", "Explore", "claude-sonnet-5", 69_400, written=4_000),
+        _spawn(tmp_path, "s2", "Plan", "claude-sonnet-5", 69_400),
+    ]
+    stats = TopologyStats()
+    stats.add_session("sess-1", top, subs, load_pricing())
+    table = next(t for t in build_section(stats).tables if t.name == "topology_spawn_write")
+    col = {c.key: i for i, c in enumerate(table.columns)}
+    rows = {row[0]: row for row in table.rows}
+
+    explore = rows["Explore"]
+    assert explore[col["model"]] == "claude-haiku-4-5"
+    assert explore[col["spawns"]] == 3 and explore[col["other_model_spawns"]] == 1
+    assert explore[col["mean_first_call"]] == pytest.approx(51_500 + 2_000 + 100)
+    assert explore[col["mean_shared_prefix"]] == pytest.approx(51_500)
+    assert explore[col["mean_write"]] == pytest.approx(2_000)
+    assert explore[col["mean_first_prompt"]] == pytest.approx(100)
+    plan = rows["Plan"]
+    assert plan[col["model"]] == "claude-sonnet-5" and plan[col["other_model_spawns"]] == 0
+    assert plan[col["mean_first_call"]] == pytest.approx(69_400 + 2_000 + 100)
+    assert any("one model" in note for note in table.notes)
+
+
+def test_session_baseline_is_the_whole_first_call_with_its_parts(tmp_path):
+    top = _parse(
+        tmp_path,
+        "top-b",
+        [
+            turn_line(
+                message_id="t1", input_tokens=50, cache_creation_input_tokens=5_000, cache_read_input_tokens=60_000
+            )
+        ],
+        kind="top-level",
+    )
+    stats = TopologyStats()
+    stats.add_session("sess-1", top, [], load_pricing())
+    table = next(t for t in build_section(stats).tables if t.name == "topology_session_baseline")
+    row = dict(zip([c.key for c in table.columns], table.rows[0]))
+    assert row["mean_baseline"] == pytest.approx(65_050)
+    assert row["mean_shared_prefix"] == pytest.approx(60_000)
+    assert row["mean_write"] == pytest.approx(5_000)
+    assert row["mean_first_prompt"] == pytest.approx(50)
+
+
+def test_tool_results_are_sized_at_the_calibrated_characters_per_token(tmp_path):
+    from claudeglass.calibration import Calibration
+
+    top, subs, pricing = _build_scenario(tmp_path)
+    plain = TopologyStats()
+    plain.add_session("sess-1", top, subs, pricing)
+    calibrated = TopologyStats(
+        calibration=Calibration(text={"claude-sonnet-5": 2.0}, default_family="claude-sonnet-5")
+    )
+    calibrated.add_session("sess-1", top, subs, pricing)
+    assert plain.calibration.basis() != calibrated.calibration.basis()
+    a = {k: sum(v) for k, v in plain.composition_tool_result_tokens.items()}
+    b = {k: sum(v) for k, v in calibrated.composition_tool_result_tokens.items()}
+    assert a and a.keys() == b.keys()
+    for key in a:
+        assert b[key] == pytest.approx(a[key] * 2)
+
+
+def test_the_notes_that_size_tokens_from_characters_give_the_basis_as_a_sentence_of_its_own(tmp_path):
+    from claudeglass.calibration import Calibration
+
+    top, subs, pricing = _build_scenario(tmp_path)
+    calibrations = (Calibration(), Calibration(text={"claude-sonnet-5": 2.0}, default_family="claude-sonnet-5"))
+    assert calibrations[0].sentence() != calibrations[1].sentence()
+    for calibration in calibrations:
+        stats = TopologyStats(calibration=calibration)
+        stats.add_session("sess-1", top, subs, pricing)
+        tables = {t.name: t for t in build_section(stats).tables}
+        for name in ("topology_report_proxy", "topology_context_composition"):
+            (note,) = tables[name].notes
+            assert calibration.sentence() in note
+            for sentence in note.replace(". ", ".\n").splitlines():
+                assert len(sentence.split()) <= 25, sentence
 
 
 def test_cost_per_spawn_table_has_mean_tool_wait_column(tmp_path):
@@ -627,13 +734,18 @@ def test_cost_per_spawn_table_has_mean_tool_wait_column(tmp_path):
     table = next(t for t in section.tables if t.name == "topology_cost_per_spawn")
     assert [c.key for c in table.columns] == [
         "agent_type",
-        "spawns",
+        "launch",
+        "runs",
+        "total_cost",
         "mean_cost",
         "median_cost",
         "mean_tool_wait",
     ]
     for row in table.rows:
-        assert row[4] is None
+        assert row[6] is None
+        # One launch word per row, and the total is the runs' cost together.
+        assert row[1] in ("background", "foreground", "workflow")
+        assert row[3] == pytest.approx(row[2] * row[4])
 
 
 def test_build_section_empty_stats_never_raises():

@@ -302,10 +302,11 @@ def _tips_question(current: CaptureConfig, *, now: datetime, stdin, stdout) -> t
         "\nSharper tips (optional)\n"
         "Claude ends each reply with a short tag saying what kind of work it was, such as "
         "[cg: task=bugfix brief=clear], so the tips fit how you work. That costs about "
-        f"{cost['session_note']} tokens when a session starts and {cost['reply_tag']} per reply, plus a Claude "
-        f"Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.3f} after each subagent run, and it switches "
-        f"itself off after {days} days. It also adds the /cg-feedback skill, for rating a piece of work when it's "
-        "done.\n"
+        f"{cost['session_note']} tokens when a session starts and {cost['reply_tag']} per reply. "
+        f"A Claude Haiku call of about ${capture_catalogue.JUDGE_USD_PER_CALL:.3f} also runs after each subagent "
+        "run, and after a reply Claude leaves without its tag. "
+        f"It switches itself off after {days} days. It also adds the /cg-feedback skill, for rating a piece "
+        "of work when it's done.\n"
     )
     yes = _yes_no("Turn on sharper tips?", essentials_on, stdin=stdin, stdout=stdout)
     feedback_on = "feedback_skill" in current.feedback
@@ -356,7 +357,11 @@ def _tips_line(before: CaptureConfig, after: CaptureConfig, setup: _Setup, uncon
         return f"{_TIPS}: off."
     parts = []
     if setup.capture is not None and setup.capture[0] == "off":
-        parts.append("turn off" + (", and take their hooks out of settings.json" if setup.touch_settings else ""))
+        # A survey or coaching switch that stays on keeps the hook entry it needs (CaptureConfig.hooked).
+        left = ", except what your other switches still need" if after.hooked else ""
+        parts.append(
+            "turn off" + (f", and take their hooks out of settings.json{left}" if setup.touch_settings else "")
+        )
     elif setup.capture is not None:
         title = capture_catalogue.LEVEL_TITLES.get(after.level, after.level)
         parts.append(f"turn on {title} " + (f"until {after.until[:10]}" if after.until else "with no end date"))
@@ -421,10 +426,8 @@ def _decide(opts: Options, tools: Tools, detection, health, *, stdin, stdout, no
     capture_line = None
     if setup.touch_settings:
         commands = None
-        if current.is_on or after.is_on or current.coaching_notes_on:
-            setup.capture_specs = (
-                hook_health.capture_specs(after.hook_metrics()) if after.is_on or after.coaching_notes_on else ()
-            )
+        if current.hooked or after.hooked:
+            setup.capture_specs = hook_health.capture_specs(after.hook_metrics()) if after.hooked else ()
             commands = tools.capture_commands
             if any(commands.get(spec.script) is None for spec in setup.capture_specs):
                 commands = None

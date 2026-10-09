@@ -153,9 +153,9 @@ python -m claudeglass init [--advanced] [--answers FILE] [--non-interactive] [--
      Essentials already on, the default is yes, and no turns it off and
      takes its hooks out. Capture already on at another level isn't
      asked about: a re-run never changes a level you chose, and the
-     review says `..., unchanged.` The per-reply reminder to run
-     `/cg-feedback` stays a Deep-only extra, so Essentials stays cheap;
-     the summary mentions the skill instead.
+     review says `..., unchanged.` The rating reminder after a large piece
+     of work and the plan check stay Deep-only extras, so Essentials stays
+     cheap; the summary mentions the skill instead.
    - Under `--advanced` or `--non-interactive`, or with a level from
      `--capture-level` or the answers file, the full
      [metrics capture and feedback questions](#the-full-capture-and-feedback-questions)
@@ -241,7 +241,7 @@ is written before it.
 **Metrics capture** (`onboarding.ask_capture_level`, then
 `onboarding.ask_capture_until`, through `cli.py`'s
 `_init_capture_choice`). It warns that capture uses tokens: Claude reads
-a short note when a session or subagent starts, and ends each reply
+a short note when a session starts, and ends each reply
 with a one-line tag you will see. It then shows what each level would
 have cost over your last 14 days, from every project's sessions
 (`capture.history`, amounts in your billing units; not under
@@ -282,11 +282,12 @@ later with `claudeglass capture connect`.
 **Feedback** (`onboarding.ask_feedback`, through `cli.py`'s
 `_init_feedback_choice`), whatever the capture level (including off):
 whether to add the `/cg-feedback` skill — run it after a piece of work
-to tick four quick questions (did it deliver, what slowed it, was it
-worth the tokens, what would have helped; after an approved plan, a
-fifth: could the build have started fresh from the plan) and get a
-second status-line reminder that it's there. It costs nothing until you
-run it, then about two short turns (three after an approved plan). `--feedback {on,off}` or the answers file's `feedback`
+to tick a few quick questions (did it deliver, what were your follow-up
+messages, was it worth the tokens, what would have made it cheaper; after
+an approved plan, whether it covered what you then fixed and whether the
+build could have started fresh) and get a second status-line reminder
+that it's there. It costs nothing until you run it, then about two short
+turns (three when a second round of questions applies). `--feedback {on,off}` or the answers file's `feedback`
 key answers it without asking. Under `--non-interactive` with neither,
 it stays off and a `(derived) feedback: ...` line says so. Choosing Deep
 turns the survey on, so the question isn't asked then. Feedback already
@@ -382,8 +383,10 @@ only cite the report's own tables" convention `recommend.py`'s
 | Field | Source |
 |---|---|
 | `mode_mix` | `sessions` section's `sessions_by_mode` table |
+| `mode_rules` | `classify.MODE_RULES` when it was saved: which mode rules sorted its sessions (2: unattended overnight, and one-shot) |
+| `recache_rules` | `recache.RULES` when it was saved: which rules flagged and labelled its cache rebuilds (2: the session part and the part beyond the shared start) |
 | `dominant_purposes` | `sessions` section's `sessions_by_purpose` table (top 3) |
-| `archetype` | `workstyle` section's `workstyle_archetypes` table (top row) |
+| `archetype` | `workstyle` section's `workstyle_archetypes` table (top row: the archetype that cost the most) |
 | `scorecard_overall` / `scorecard_label` | `scorecard` section's `overall` table |
 | `projected_saving_usd` | sum of the `ttl` section's `ttl_by_agent_type` table's `saving_usd` column |
 | `suggested_profile` / `suggested_profile_reason` | see below |
@@ -393,8 +396,8 @@ only cite the report's own tables" convention `recommend.py`'s
 | `recache_share_pct` | `recache` section's `recache_summary` table (`report.recache_share_pct_metric`) |
 | `compactions_per_session` | `compactions` section's `compactions_summary` table (`report.compactions_per_session_metric`) |
 | `ttl_mix_top_level` / `ttl_mix_by_agent_type` | `ttl` section's `ttl_by_agent_type` table (`report.ttl_mix_by_agent_type_metric`) |
-| `session_baseline_size` | `agents` section's `topology_session_baseline` table (`report.session_baseline_size_metric`) |
-| `mean_spawn_write_by_agent_type` | `agents` section's `topology_spawn_write` table (`report.mean_spawn_write_by_agent_type_metric`) |
+| `session_baseline_size` | `agents` section's `topology_session_baseline` table, `mean_write` column: what the session wrote itself, so a stored baseline stays comparable across models (`report.session_baseline_size_metric`) |
+| `mean_spawn_write_by_agent_type` | `agents` section's `topology_spawn_write` table, `mean_write` column (`report.mean_spawn_write_by_agent_type_metric`) |
 | `scorecard_dimensions` | `scorecard` section's `dimensions` table (`report.scorecard_dimensions_metric`) |
 | `by_mode` | cost/re-cache/compactions per session, recomputed once per distinct mode over a session-filtered sub-corpus (see below) |
 
@@ -427,10 +430,11 @@ writable surface.
 `UNREACHABLE_BY_SUGGEST`). Since a majority-overnight corpus is exactly
 the case that profile exists for, `baseline._suggested_profile` applies
 the override itself, directly from the corpus's own `sessions_by_mode`
-table: when at least half of the corpus's sessions are classified
-`mode=overnight`, the suggestion is `"overnight-batch"` regardless of
-what `suggest()` would otherwise say, with the reason string citing the
-exact count. Below that share, `catalogue.suggest()` is called
+table: when at least half of the corpus's sessions are overnight runs
+(`mode=overnight`: Claude worked on its own for two hours or more at
+night while you were away), the suggestion is `"overnight-batch"`
+regardless of what `suggest()` would otherwise say, with the reason
+string citing the exact count. Below that share, `catalogue.suggest()` is called
 normally, with `shape="plan-then-build"` when at least half the main
 sessions approved a plan and built it in the same session
 (`habits.habits_by_shape`); the reason then cites those sessions and

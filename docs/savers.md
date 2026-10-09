@@ -54,7 +54,9 @@ against v7.13.0, installed and run in a scratch project:
   subkind `known_savers.REDIRECT_DENIAL_KIND` (`"saver-redirect"`)
   instead, so the Work habits playbook's "Tell Claude up front what not
   to do" and the quality signal "Tool calls you denied" don't count a
-  redirect as a request you turned down.
+  redirect as a request you turned down. Its denial bucket is
+  `hook_blocked`, the same as any other hook's block; only the
+  `refused` bucket counts as you turning a call down.
 - It records every call's own before/after estimate in
   `~/.tokensave/global.db`, table `savings_ledger`
   (`ts`, `project_path`, `tool_name`, `before_tokens`, `after_tokens`),

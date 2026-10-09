@@ -32,7 +32,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import capture_catalogue, discovery, hook_health
+from . import capture_catalogue, capture_view, discovery, hook_health
 from .config import CaptureConfig, ConfigError, load_config
 from .profiles import apply as apply_mod
 
@@ -136,9 +136,9 @@ EXPECTATIONS: tuple[tuple[str, str], ...] = (
     ),
     (
         "A change takes effect in new sessions",
-        "Claude Code reads settings when a session starts, and every session builds its cache from scratch anyway, "
-        "so a change costs nothing extra to switch on. Switching model inside a running session (/model) does "
-        "rebuild that session's cache once.",
+        "Claude Code reads settings when a session starts. Each session writes its own part of the prompt cache, "
+        "and a change to the tool set rewrites the shared part once. Switching model inside a running session "
+        "(/model) does rebuild that session's cache once.",
     ),
     (
         "Cheaper isn't free",
@@ -163,7 +163,7 @@ UNINSTALL_COMMAND = "claudeglass uninstall --revert-changes --delete-data --dry-
 
 #: What coaching notes cost, for :func:`expectations` and the hooks row.
 COACHING_COST = (
-    "Coaching notes are on: when a hint applies, a hook adds a short note (about 50 to 120 tokens) to Claude's "
+    "Coaching notes are on: when a hint applies, a hook adds a short note (about 50 to 140 tokens) to Claude's "
     "context. {{page:setup/capture}} shows what they cost. Turn them off with "
     "'claudeglass capture disable coaching_notes'."
 )
@@ -179,10 +179,13 @@ def expectations(capture: CaptureConfig | None = None) -> tuple[tuple[str, str],
         return (("It uses a few of your Claude tokens while coaching notes are on", COACHING_COST),) + EXPECTATIONS[1:]
     level = capture_catalogue.LEVEL_TITLES.get(capture.level, capture.level)
     if _uses_tokens(capture):
+        # The warning opens with "Metrics capture uses your tokens." and this says that already.
+        detail = capture_view.warning_text(capture.active_metrics(), capture.tagger).removeprefix(
+            "Metrics capture uses your tokens. "
+        )
         text = (
-            f"Metrics capture is on ({level}). Claude reads a short note when a session or subagent starts and "
-            "writes a one-line tag at the end of its replies, so it uses some of your tokens. {{page:setup/capture}} "
-            "shows how many. Turn it off with 'claudeglass capture off'."
+            f"Metrics capture is on ({level}). {detail} {{{{page:setup/capture}}}} shows how many. "
+            "Turn it off with 'claudeglass capture off'."
         )
     else:
         text = (
@@ -204,7 +207,7 @@ def _hooks_token_cost(capture: CaptureConfig, level: str) -> str:
     else:
         text = "None from capture while it's off." if capture.coaching_notes_on else "None while capture is off."
     if capture.coaching_notes_on:
-        text += " Coaching notes: about 50 to 120 tokens each time a hint applies."
+        text += " Coaching notes: about 50 to 140 tokens each time a hint applies."
     if (capture.is_on and _uses_tokens(capture)) or capture.coaching_notes_on:
         text += " {{page:setup/capture}} shows the measured amount."
     return text
@@ -384,7 +387,7 @@ def inventory(
     )
     installed = capture_health.needed + capture_health.extra
     installed = tuple(spec for spec in installed if spec not in capture_health.missing)
-    if installed or capture.is_on or capture.coaching_notes_on:
+    if installed or capture.hooked:
         level = capture_catalogue.LEVEL_TITLES.get(capture.level, capture.level)
         items.append(
             FootprintItem(
@@ -393,12 +396,22 @@ def inventory(
                 status="installed" if installed else "not installed",
                 where=home_label(settings_path),
                 what_it_does=(
-                    "While metrics capture is on, adds a short note when a session or subagent starts asking Claude "
-                    "to end its replies with a one-line tag (task kind, how clear the request was, and so on), so "
-                    "this tool can tell where your tokens go. The free signals (why sessions end, when Claude "
+                    "While metrics capture is on above the free level, adds a short note when a session starts "
+                    "(and after /clear or a compaction) asking Claude to end its replies with a one-line tag (task "
+                    "kind, how clear the request was, and so on), so this tool can tell where your tokens go. "
+                    "With Claude Haiku writing the tags it adds no start note, and Haiku writes them in the "
+                    "background. Subagents and the agents a workflow starts are asked for nothing: Claude Haiku "
+                    "judges each agent run in the background. The free signals (why sessions end, when Claude "
                     "waited for you, which tools asked for permission) go to a file in this tool's data folder. "
                     "With coaching notes on, they also add a short hint to Claude's context when one applies, at "
-                    "any capture level. With capture and coaching notes off the hooks add nothing."
+                    "any capture level. With /cg-feedback on, they add a line of counts when you run it. The plan check "
+                    "and rating reminder add a note when they are on. With all of these off the hooks add nothing. "
+                    "Claude Code runs "
+                    "a small launcher, which runs the hook's code and its word list, all three in this tool's data "
+                    "folder; removing that folder takes them all out. Claude Code waits for the hook after a read, "
+                    "search or web result and each message you send, and never after a shell command. With coaching "
+                    "notes on, it also waits after an approved plan and an agent or workflow call. It waits after a "
+                    "finished subagent while coaching notes are on or Claude Haiku judges agent runs."
                 ),
                 token_cost=_hooks_token_cost(capture, level),
                 undo="claudeglass capture off, then claudeglass capture remove",
@@ -417,13 +430,13 @@ def inventory(
                 status="installed" if own_skill else "not installed",
                 where=home_label(skill_path(old_feedback, claude_root) if old_feedback else feedback_skill_path(claude_root)),
                 what_it_does=(
-                    "A skill you run after a piece of work: four checkbox questions (five after an approved plan) "
+                    "A skill you run after a piece of work: a few checkbox questions (more after an approved plan) "
                     "whose answers ClaudeGlass reads from the transcript, so its suggestions fit how you work. "
                     "Claude never runs it by itself."
                 ),
                 token_cost=(
                     "None until you run it: Claude doesn't see its description. Each run costs about two short "
-                    "turns, three after an approved plan, shown on {{page:setup/capture}}."
+                    "turns, three when a second round of questions applies, shown on {{page:setup/capture}}."
                 ),
                 undo="claudeglass capture feedback off",
             )
@@ -477,8 +490,8 @@ def inventory(
                 where=f"{_scope_label(backup.scope)}; backup in {home_label(config_dir / 'backups' / backup.ts)}",
                 what_it_does="Changed Claude Code settings or agent files. This changes how Claude works from the next session.",
                 token_cost=(
-                    "None by itself: Claude Code reads settings when a session starts, and every session builds "
-                    "its cache from scratch anyway. After that it saves or costs what its estimate said."
+                    "None by itself. Each session writes its own part of the prompt cache, and a change to the "
+                    "tool set rewrites the shared part once."
                 ),
                 undo=f"claudeglass apply --revert {backup.ts}",
             )

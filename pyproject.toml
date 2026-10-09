@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "claudeglass"
-version = "0.14.0"
+version = "0.15.0"
 description = "Are you using Claude Code well? Finds the habits and settings that waste tokens, from the transcripts on your machine."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -40,4 +40,4 @@ claudeglass = "claudeglass.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-claudeglass = ["pricing.toml", "hooks/snapshot-config.py", "hooks/capture-hook.py", "hooks/capture-catalogue.json", "service/static/*", "service/static/vendor/*", "service/static/fonts/*", "profiles/catalogue/*.toml"]
+claudeglass = ["pricing.toml", "hooks/snapshot-config.py", "hooks/capture-hook.py", "hooks/capture_hook.py", "hooks/capture-catalogue.json", "service/static/*", "service/static/vendor/*", "service/static/fonts/*", "profiles/catalogue/*.toml"]

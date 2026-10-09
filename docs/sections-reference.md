@@ -11,7 +11,7 @@ in this order: `overview`, `usage`, `elasticity` (only under
 subscription billing with usage-log readings), `sessions`, `recache`, `ttl`,
 `limits`, `carry`, `compaction_sim`, `plan_handoff`, `model_swap`, `waste`,
 `compactions`, `agent_startup`, `agents`, `run_split`, `hooks`, `quality`, `workstyle`, `habits`,
-`prompting`, `workflows`, `phases` (CLI only with `--phases`; the dashboard always has it), `config` (only when config
+`rework`, `prompting`, `workflows`, `phases` (CLI only with `--phases`; the dashboard always has it), `config` (only when config
 snapshots exist), `context_budget`, `tool_search`, `capture`, `cost_record`, `scorecard`, and
 `baseline_comparison` (only with `--baseline`). `claudeglass
 report` prints it. This file groups sections by topic, so its order
@@ -46,13 +46,13 @@ and it's still useful when you want one section by itself.
 | `overview` | Overview | `report.py` | corpus-wide totals (sessions, transcripts, turns, the four raw token counts, cost, cache-read cost share, cache ROI) plus a per-model breakdown |
 | `usage` | Usage | `usage.py` | day/week/month/project/entrypoint cost and token breakdowns, plus five-hour usage blocks (subscription billing only — see [`reference.md`](reference.md#what-it-reads-and-what-it-cant)) |
 | `elasticity` | Elasticity | `elasticity.py` | how many percentage points of a subscription's 5-hour/7-day/spend-limit window one million tokens (or one list-price dollar) is actually worth, measured from this machine's own usage-log samples — subscription billing only, and only when a usage log exists (see [`elasticity.md`](elasticity.md)) |
-| `sessions` | Sessions | `classify.py` | mode (interactive/long-agentic/overnight/mixed) and purpose (docs/refactor/test-triage/...) per session, with the evidence that produced each classification |
+| `sessions` | Sessions | `classify.py` | mode (interactive/long-agentic/overnight/one-shot/mixed) and purpose (docs/refactor/test-triage/...) per session, with the evidence that produced each classification |
 | `recache` | Re-cache events | `recache.py` | which turns paid to re-write a prefix that should have been a cache hit, why, and what it cost — see [`concepts.md`](concepts.md#3-cache-rebuild-definitions-and-signatures) |
 | `ttl` | Cache TTL break-even | `ttl.py` | per agent type: observed cost vs. simulated 5m-only/1h-only cost, plus the utilisation metrics below |
 | `limits` | Usage limits | `limits.py` | usage-cap pauses (5-hour/weekly), harness-forced subagent terminations, and the desktop app's resume pings, as first-class attributable facts instead of behavioural noise — see [`limits.md`](limits.md) |
 | `carry` | Context carry cost per tool | `carry.py` | cost of a tool result riding along in the cached prefix on every turn after the one it entered on, by tool and by agent type, plus the saving a truncation cap would have made — see [`carry.md`](carry.md) |
 | `compaction_sim` | Compaction-window sweep | `compaction_sim.py` | modelled cost under other `autoCompactWindow` settings, a fidelity check against each session's actually-configured window, and a conservative "at least W" recommendation — see [`compaction-sim.md`](compaction-sim.md) |
-| `plan_handoff` | Building fresh after a plan | `handoff.py` | what the replies after each approved plan would have cost in a fresh session started from the plan alone, and the same build at Sonnet's prices — see [`plan-handoff.md`](plan-handoff.md) |
+| `plan_handoff` | Building fresh after a plan | `handoff.py` | what the replies after each approved plan would have cost in a fresh session started from the plan alone, the same build at Sonnet's prices, and how each approved plan's build began — see [`plan-handoff.md`](plan-handoff.md) |
 | `model_swap` | Model-swap counterfactual | `model_swap.py` | ceiling saving from repricing every already-observed turn one model tier down, per agent type and corpus-wide, and the agents that ran on a larger model than their work needed — see [`model-swap.md`](model-swap.md) |
 | `waste` | Wasted-turn spend | `waste.py` | spend on turns whose output was never used (tool error, interrupt, tool denial, harness-killed subagent), by cause, agent type and top session — see [`waste.md`](waste.md) |
 | `compactions` | Compactions | `compaction.py` | compaction count, trigger mix, pre/post/dropped tokens, and the re-cache cost of the turn right after each compaction |
@@ -61,9 +61,10 @@ and it's still useful when you want one section by itself.
 | `run_split` | Splitting long subagent runs | `run_split.py` | what long subagent runs would have cost as several shorter runs, each starting fresh from a short note, at several split intervals, and the interval that saves most per agent type — see [`run-split.md`](run-split.md) |
 | `hooks` | Your hooks | `hook_costs.py` | whether each hook you set up works (failed runs and why, relative script paths), what the context it adds costs to keep, what the calls it blocks cost and how often Claude sent them again unchanged, and time waited — see [`hooks.md`](hooks.md) |
 | `quality` | Quality signals | `quality.py` | whether the work went well: agent runs that didn't finish or likely ran out of turns, failed tool calls and shell commands, denials, corrections, edits redone, per agent type and per model and effort, with a significance test — see [`concepts.md`](concepts.md#7-quality-signals) |
-| `workstyle` | Workstyle | `workstyle.py` | one archetype per session/corpus: `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
+| `workstyle` | Workstyle | `workstyle.py` | one archetype per session, and the corpus's archetype (the one whose sessions cost the most): `overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`, `effort-varied`, `chat-only`, `single-model`, `mixed` (the fallback when none of the other six match), with the evidence features |
 | `habits` | Work habits | `habits.py` | the "Weekly pace" digest (titled with the window you picked), habits worth trying with a saving estimate and evidence, per-task and per-agent setup comparisons, and (once you rate sessions or use `/cg-feedback`) cost per piece of work that met its goal |
-| `prompting` | How you prompt | `prompting.py` | how often each prompting habit the coaching notes warn about happened (small requests sent one at a time, the same request again, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
+| `rework` | Rework after delivery | `rework.py` | how often Claude had to change work it had already delivered, what that cost and why (your feedback, Claude's tag, Haiku's tag, or inferred from the transcript), the mistakes Claude admitted and who caught them, and the rework by week and by how hard the work was — pieces of work are drawn from the transcripts alone (`pieces.py`) |
+| `prompting` | How you prompt | `prompting.py` | how often each prompting habit happened, whether or not coaching notes were on (small requests sent one at a time, the same request again, asking how it's going, stopping Claude again and again, big tasks without a plan, vague corrections, huge pastes), what each cost, its trend by week, and how often Claude showed the tip a coaching note asked for |
 | `workflows` | Workflows | `workflows.py` | per-run agent count, phase count, duration and cost from `<session>/workflows/wf_*.json` |
 | `phases` | Phases | `phases.py` | cost split across DISCOVERY (read/search only), IMPLEMENTATION (real edits or an ordinary shell command), VERIFICATION (a test/build tool, or a scratch-file edit), OTHER — in the CLI's report only when `--phases` is given; the dashboard always builds it |
 | `config` | Config | `report.py` via `snapshots.py` | one diff table per config key that changed between two snapshots of the same project (capped at 20 keys), then each project's settings in effect and drift — only present when any `snapshot-config` snapshot exists; when none applies to the projects in the report, it has only a note saying so |
@@ -199,12 +200,42 @@ not real invoice lines.
 
 - `sessions_by_mode` — sessions, turns, subagents, median span and
   median human prompts per `mode`. First match wins, in this order:
-  `overnight` (span over 4h once usage-limit pauses are discounted, a
-  human gap over 60min, and real activity in the local 22:00-07:00
-  window), `long-agentic` (a self-chained run, or subagents or at least
-  30 turns with at most 10 human prompts), `interactive` (median human
-  gap under 5min with at most 2 subagents), else `mixed`. A section note
-  states the overnight window in use.
+  `overnight` (Claude worked for two hours or more inside the local
+  22:00-07:00 window while you were away, and at least 30% of its working
+  time was at night), `long-agentic` (a self-chained run, or subagents or
+  at least 30 turns with at most 10 human prompts), `interactive` (median
+  gap between your messages under 5min with at most 2 subagents),
+  `one-shot` (you typed at most one message and Claude replied), else
+  `mixed`. A section note states the overnight window and the work it
+  asks for.
+
+  The stored word stays as it is; the tables and the dashboard show a
+  name: "Interactive", "Long autonomous run", "Overnight (unattended)",
+  "One-shot", "Mixed" and "Not classified". The help reads: "Overnight:
+  Claude worked on its own for two hours or more at night while you were
+  away." and "One-shot: one request (yours or a scheduled task's), then
+  Claude worked with no more messages from you." The dashboard's
+  Sessions list, its override menus and its session chart use the same
+  words (`SESSION_WORDS` in `service/static/charts-types.js`, held to
+  `helptext.py` by `tests/test_service_static.py`).
+
+  *Working time* is the main session's and every subagent's replies, a
+  reply joined to the one before it when they are 10min apart or less
+  (`activity_idle_s`); a lone reply adds none. *Away* is the time between
+  two of your messages more than an hour apart (`away_gap_s`), once any
+  usage-limit pause in the gap is taken out, plus the time after your last
+  message. The messages that count are the ones you typed: lines, answers
+  to a plan, and messages you typed while Claude was working. A silence of
+  4h or more (`dormant_gap_s`) with no work in it is a session you came
+  back to another day: it is left out of the longest gap between your
+  messages and of the `multi_day` flag, and counted in `resumed_gaps`.
+  The thresholds are `overnight_active_s` (7200), `overnight_night_share`
+  (0.3), `activity_idle_s` (600), `away_gap_s` (3600), `dormant_gap_s`
+  (14400), `overnight_night_start_hour` (22), `overnight_night_end_hour`
+  (7) and `multi_day_span_s` (86400), set under `[thresholds.classify.mode]`
+  in `config.toml`. The older `overnight_span_s`, `overnight_gap_s` and
+  `overnight_night_turn_share` are read and ignored. The night is the
+  local one, and a clock change inside it is followed.
 - `sessions_by_purpose` — the same columns by `purpose`. First match
   wins, in this order: `local-llm-pipeline`, `workflow-run`, `review`,
   `test-triage`, `planning`, `docs-or-light-edit`, `refactor`,
@@ -237,8 +268,12 @@ Definitions: [Concepts section 3](concepts.md#3-cache-rebuild-definitions-and-si
   share, cache-creation tokens (re-cache vs. all), avoidable cost, and
   `unavoidable_limit_expiry_cost_usd` (re-cache turns right after a
   usage-limit pause, kept out of avoidable cost).
-- `recache_signature_split` — `full-expiry`, `prefix-invalidated` and
-  `limit-expiry` (the gap spanned a usage-limit pause): turns,
+- `recache_signature_split` — `limit-expiry` (the gap spanned a
+  usage-limit pause), `post-compaction` (the first reply after a
+  conversation summary), `full-expiry` (the wait reached the cache
+  lifetime, or the turn read only the start every session shares) and
+  `prefix-invalidated` (part of the session was read), classified in that
+  order: turns,
   cache-creation tokens, avoidable cost, median ctx, median gap. Every
   cause table below leaves `limit-expiry` turns out.
 - `recache_gap_buckets` — re-cache turns and their control-group share
@@ -323,7 +358,10 @@ Simulation assumptions: [Concepts section 4](concepts.md#4-ttl-simulation-assump
   share split by signature: `full_expiry_*` (TTL-addressable: the entry
   expired, so a longer TTL could have kept it) vs.
   `prefix_invalidated_*` (content-addressable: something upstream of
-  the cached prefix changed, which no TTL choice fixes).
+  the cached prefix changed, which no TTL choice fixes). A `full-expiry`
+  turn whose wait was shorter than the lifetime the previous call wrote
+  (it read only the shared start) counts under `prefix_invalidated_*`,
+  since the clock did not expire it.
 - `ttl_cache_economy` — per agent type plus an `overall` row:
   `tokens_written`, `tokens_read`, `write_usd`, `read_usd`,
   `uncached_equivalent_usd` (every cache token priced as plain input),
@@ -347,27 +385,52 @@ behavioural noise (see `docs/limits.md`'s module-docstring summary for
 why an unattributed pause otherwise misreads as an ordinary long idle
 gap in `recache`/`ttl`/`sessions`).
 
-- `limits_summary` — one "all" row: transcripts, sessions affected,
-  limit hits (session + weekly split), resumes, agents terminated (and
-  by rate limit specifically), pause count/total time, and the
-  cache-creation tokens/write cost paid by the turn immediately
-  following each pause.
-- `limits_hits_by_kind` — `session_limit`/`weekly_limit` hit counts and
-  share.
+The section counts **stops**, not lines: one stop writes a storm of limit
+lines, so lines are kept as "limit messages" (see "Limit stops" in
+`docs/limits.md` for the key that groups them).
+
+- `limits_summary` — one "all" row, leading with 5-hour and weekly
+  stops (and how many weekly stops stopped work), days covered,
+  sessions affected, and agents cut off (direct and workflow, with their
+  spend), then limit messages (session + weekly split), resumes, agents
+  terminated (and by rate limit specifically), pause count/total time,
+  and the cache-creation tokens/write cost paid by the turn immediately
+  following each pause. The dollar figures count runs since
+  `current_since` (18 Sep 2026 by default).
+- `limits_stops_rollup` — one "all" row for the 5-hour stops since
+  `current_since` (weekly stops only when no 5-hour stop counts): the
+  list-price spend in their windows, the main, direct-agent and
+  workflow-agent shares, the largest cost centre, and the share of spend
+  that ran while 3 or more agents were active beside the same share
+  across all work.
+- `limits_stops` — "Your recent limit stops", newest first: kind, reset
+  time, minutes before the reset, list-price spend in the limit's window,
+  the three shares, the burst share, the top two agent type and model
+  family pairs, whether the stop stopped work and the agents it cut off
+  (see "Spend before a stop" in `docs/limits.md`).
+- `limits_hits_by_kind` — `session_limit`/`weekly_limit` message counts
+  and share.
 - `limits_agent_terminated` — `rate_limit`/`other` termination counts
   and share.
 - `limits_pauses` — corpus-wide pause count/total/mean duration.
-- `limits_reset_hour_histogram` — count and share of `LIMIT_HIT` resets
-  by local hour of day (0-23).
-- `limits_by_agent_type` — per-agent-type roll-up: hits, resumes,
-  terminations, pause count/total/median/max, and the post-pause
-  cache-creation tokens/cost.
-- `limits_csv_cross_check` — transcript-derived hit counts vs.
+- `limits_reset_hour_histogram` — count and share of limit stops by
+  local hour of day (0-23), one per stop. Its advice shows only when one
+  hour holds 3 or more stops and 30% or more of them.
+- `limits_wake_gaps` — what lay between consecutive limit lines in main
+  sessions: typed, resume, scheduled, agent notice, only `isMeta` lines,
+  other.
+- `limits_by_agent_type` — "Who got the limit message": per-agent-type
+  roll-up of limit messages received, resumes, terminations, pause
+  count/total/median/max, and the post-pause cache-creation tokens/cost.
+- `limits_csv_cross_check` — transcript-derived stop counts vs.
   `usage-log.csv`'s own exhaustion-row counts for `five_hour`/
   `seven_day`, appended as an extra table on this section only when
-  `report.build_report` is given `usage_log_rows` (same "extra table
-  bolted on" convention `cache_ground_truth` uses for the `usage`
-  section above).
+  `<config_dir>/usage-log.csv` holds at least one `five_hour`/`seven_day`
+  row for a session in the report (same "extra table bolted on"
+  convention `cache_ground_truth` uses for the `usage` section above).
+  `build_report` reads those rows from the log file itself
+  (`limits.read_usage_log_rows`), because the status-line reader behind
+  `usage_log_rows` keeps only context-window rows.
 
 `scorecard.py`'s `cache_efficiency` dimension excludes the portion of
 re-cache share already known to be pause-forced
@@ -381,7 +444,10 @@ rather than their own model's rate
 section's `pricing_closest_match` table above). Neither note changes
 the `pricing_coverage_pct` metric or level itself, which already counts
 a closest-match turn as priced. `recommend.py`'s `limit-pressure` rule
-fires off this section's own `limits_summary` counts.
+fires off this section's own `limits_summary` counts: five-hour stops per
+week (`limit_pressure_min_episodes`, default 2), a weekly stop that
+stopped work, or an agent cut off by a limit. Its card names the largest
+cost centre from `limits_stops_rollup`.
 
 ## `carry` (`carry.py`)
 
@@ -501,6 +567,21 @@ only; scheduled ones are left out.
   plans, the most context any of them would have dropped, replies after
   them, whether any counts, the saving, and its build replies and cost
   at both prices.
+- `plan_handoff_approvals` — one row for each way a build began
+  (`kept`, `cleared`, `handoff`; a row is left out with no approvals):
+  the plans you approved, in the dialog or by typing (a decline you
+  answered with a go-ahead counts), how many by typing, the planning
+  context the builds carried, their replies, the context a typical reply
+  read, the cost per reply and the cost in all. A build is `cleared`
+  when a `/clear` came within 60 seconds of the approval and `handoff`
+  when a new session of the same project, begun within an hour, opens
+  with the plan; any other build is `kept`. Counts and amounts only; the
+  opening message is read in memory and only a flag is kept. The
+  Builds after a plan check reads it. See
+  [`plan-handoff.md`](plan-handoff.md#how-each-build-began). The tuning
+  export's `prompting.plans.builds` holds the same counts and list-price
+  amounts for each way, and the Overview's **More detail** links here
+  as "How the build began".
 
 `recommend.recommend()` runs the `plan-handoff` rule (`handoff.RULES`,
 category `workflow`, no lever, no setting change). It fires when at
@@ -526,9 +607,9 @@ Every figure is a price ceiling at today's usage shape, not a
 prediction: a smaller model may need more turns or fail the task
 outright, and neither possibility is priced here. With metrics capture
 on, the agent type's `habits_agents` row is cited as evidence (the
-share of its work Claude reported easy, and runs that said a smaller
-model would do), and the merged suggestion leaves out an agent whose
-runs said it needed a larger model, whose work was mostly reported
+share of its work Claude reported easy, the share of its calls that
+were a single read-only look, and its calls before the first edit), and
+the merged suggestion leaves out an agent whose work was mostly reported
 hard, or that was retried for the model (`habits.unfit_agents`, used by
 `advice._merge_model_tier` and the Models quick action). None of these
 changes a figure.
@@ -636,8 +717,8 @@ The three thresholds can be set in `config.toml`'s
 Full field-by-field contract: [`docs/waste.md`](waste.md#the-waste-report-section).
 
 Prices the turns whose output the user never actually benefited from —
-a failed tool call, a turn the user interrupted, one stopped by a tool
-denial, or every turn in a subagent transcript the harness killed
+a failed tool call, a turn the user interrupted, one stopped by a call
+the user turned down, or every turn in a subagent transcript the harness killed
 before it could report back — and attributes each to a cause with a
 lever, so a "recoverable spend ceiling" always points at what to change
 to stop paying for it again. Purely a reader of state `parse.py`/
@@ -652,7 +733,12 @@ since `limits.py` already owns that attribution.
   turns and their share of all priced turns, wasted cost (the
   recoverable spend ceiling) and its share of all priced cost, wasted
   tokens, the limit-pause-excluded count, and the api-error-retry count
-  (frequency only, never priced).
+  (frequency only, never priced), the turns not counted because a command
+  ran and failed, and `failed_command_loops`: how many times, in a main
+  session, the same command failed three or more times within one message
+  of yours (`waste.command_loops`). The loops are counted and not
+  priced or wasted, as the failures are work; this is what the old
+  `tool_loops` playbook habit became.
 - `waste_by_cause` — one row per cause (`tool-error`, `interrupt`,
   `tool-denial`, `max-turns`, fixed order) plus an `api-error-retry`
   row: turns, share of all priced turns, cost, share of all priced
@@ -680,11 +766,27 @@ dominant cause and its lever.
   `cache_creation` and of `new_tokens` (`input_tokens +
   cache_creation_tokens`), mean compaction duration, total
   post-compaction write cost, and the part of it on turns flagged as a
-  re-cache.
+  re-cache. Summaries inside agent runs have their own rows
+  (`CompactionStats.agent_compactions`): the transcripts of subagents
+  and workflow agents are searched for `compact_boundary` records like a
+  main session's, and each run's summaries are always automatic. The cost
+  of compaction is three rows: the sessions that summarised
+  `HEAVY_COMPACTIONS` (3) times or more in their main conversation, the
+  cost of those main conversations, and its share of the main-session cost
+  of every session in the window. It counts a main conversation's own cost
+  only; what its agents cost stays in the agent rows. There is no live
+  receipt for it; the compaction check on Actions quotes the sessions and
+  their share.
 - `compactions_trigger_mix` — trigger value (`auto`/`manual`/`unknown`)
   counts and share.
 - `compactions_per_session` — top 20 sessions by dropped tokens:
   session, compaction count, dropped tokens, post-compaction write cost.
+
+The tuning export's `compactions` block holds the summary table's counts and
+list-price amounts, the triggers as `auto`, `manual` or `other`, and the
+cost of the sessions that summarised 3 times or more as an amount beside
+the main-session total (the share is worked out when a summary is read).
+The Overview's **More detail** links to the summary table.
 
 A compaction belongs to the window of its session, not to the moment it
 happened: a session counts, in full, when it was last active in the
@@ -702,13 +804,24 @@ immediate-post-compaction cost).
 Answers "how do tokens, cost and information flow between a session and
 the agents/skills/workflows it spawns" with numbers only:
 
-- `topology_spawn_write` — downward: mean/median first-turn
-  `cache_creation` per agent type (the briefing + system prompt + preloaded
-  skills a new spawn pays for), plus the mean `agent_brief_chars` (mean
-  briefing chars) the spawning turn handed that agent type.
-- `topology_session_baseline` — the top-level session's own first-turn
-  `cache_creation` (system prompt + `CLAUDE.md` + prefix-loaded tool
-  schemas) across sessions, for baseline-bloat comparison.
+- `topology_spawn_write` — downward: what a new spawn of each agent type
+  starts with, read off its first call. `mean_first_call` is the whole
+  first call (P0: uncached input + cache write + cache read), split into
+  `mean_shared_prefix` (read from cache: for a subagent, mostly Claude
+  Code's own tool definitions), `mean_write` (what the spawn wrote itself:
+  the briefing, `CLAUDE.md`, skills list) and `mean_first_prompt` (uncached
+  input). `median_write` and the mean `agent_brief_chars` the spawning turn
+  handed that agent type stay. Each row averages the spawns on one model
+  (`model`, the one most of that agent type's spawns ran on), because the
+  same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5; the
+  spawns on any other model are in `other_model_spawns` and left out. A
+  cache write alone left the shared prefix out, so a warm cache made a big
+  agent look small.
+- `topology_session_baseline` — the top-level session's own first call
+  across sessions, split the same way (`mean_baseline` and
+  `median_baseline` are P0; `mean_shared_prefix`, `mean_write`,
+  `mean_first_prompt`). The same tools measure differently on each
+  model, so a note says to compare it between periods only on one model.
 - `topology_upward_tool_result` — upward: `Agent`/`Workflow` tool_result
   sizes, the report that lands back in the parent's context, by agent
   type.
@@ -719,9 +832,22 @@ the agents/skills/workflows it spawns" with numbers only:
   (and workflow) it spawned, recursively via `parentAgentId`: invocations,
   direct cost, spawned cost, mean spawns per invocation, mean report
   size.
-- `topology_spawn_depth` — spawn-depth histogram.
-- `topology_cost_per_spawn` — cost per spawn by agent type, plus the mean
-  `tool_wait_s` (mean tool wait) across that agent type's priced turns.
+- `topology_spawn_depth` — spawn-depth histogram. Its note gives the
+  sessions seen, the total spawns, the median spawns per session that
+  spawns any (not the mean, which the sessions that spawn none pull down)
+  and how many sessions spawn none.
+- `topology_cost_per_spawn` — cost per run by agent type and how it was
+  started (`launch`): a `background` agent or a `foreground` agent, from
+  the `run_in_background` of the parent call's `Agent` tool use (a
+  tool result that says the agent went to the background also counts as
+  background; a direct agent whose call can't be joined counts as
+  foreground), or a `workflow` agent. A workflow agent is told apart by
+  its transcript kind alone, never by the agent type: its own meta always
+  says foreground. Columns: `runs`, `total_cost`, the mean and median
+  cost, and the mean `tool_wait_s` (mean tool wait) across those runs'
+  priced turns. The tuning export's `agents.launches` holds the agents,
+  replies and cost for each launch, so a cost per run is a division, and the
+  Overview's **More detail** links to this table.
 - `topology_chains_summary` — `stoppedByUser`/`maxTurns` truncation
   signals.
 - `topology_reminder_hook_pressure` — attachment/hook-output counts per
@@ -749,17 +875,82 @@ the agents/skills/workflows it spawns" with numbers only:
   rediscovery window; every count is 0 unless the corpus load wired up a
   hashing salt (see `parse.load_or_create_salt`).
 
+### Spend by cost centre (`cost_centres.py`)
+
+Four more tables on the same section answer "where does the money go, not
+just who spent it". Every priced reply is split into the cells of one
+matrix, so its rows add up to the Overview's total spend (a test holds this).
+Amounts are list-price USD, shown through the dashboard's units like any
+other.
+
+- `cost_centres` — rows: `main` (the main session), `direct` (agents the
+  main session started), `workflow` (agents a workflow started, told apart
+  by transcript kind) and `start` (each main session's first call, the
+  "session start (1-hour write)"). Columns: `base_read` (cache read of the
+  starting prompt, at most the first call's cache write plus cache read per
+  reply), `above_read` (cache read above it, the conversation),
+  `growth_write` (new cache writes and uncached input), `rewrite` (the
+  cache write of a reply `recache.detect` calls a rebuild),
+  `post_compaction` (the write of the reply after a conversation summary,
+  and of the estimated call that wrote it), `output` (output, thinking and
+  any search fee) and `total`. An agent's own first call is in its own row,
+  as growth write.
+- `cost_centres_parts` — what three cells are made of. The base read is
+  split into the system prompt, built-in tool definitions (the three
+  largest by name and always the Artifact tool and PowerShell, the rest
+  together), the built-in tools an agent type
+  rarely uses (its allowlist), MCP servers, CLAUDE.md files, auto memory,
+  skills, hook output, the agent list (`roster`, "Agent list") and what no
+  measurement covers (`other`, "Not itemised"). Each part is counted
+  once, in the lever that removes it: MCP server tools, names and
+  instructions are the connector's even where an allowlist could also drop
+  the tool definitions; in a main session the MCP servers built into the
+  desktop app (`desktop_servers`) are a harness-fixed part of their own;
+  CLAUDE.md and memory are apart. `desktop_servers` applies only to a main
+  session from the desktop app, where the tool search table calls them
+  built in. A controllable part
+  carries the check that covers it (`card`): the agent list shares the
+  `tools` check with an agent's allowlist. A harness-fixed part (the
+  Artifact tool, PowerShell, the system prompt) says "no setting known".
+  `other` has the lever `unmeasured`, shown as "Not measured": it holds
+  what nothing measured, such as an agent's brief or a session's first
+  prompt, and says nothing about a setting.
+  Rewrite and post-compaction cells are split into the starting prompt they
+  wrote again (`prefix`) and the conversation. Sizes are estimates from
+  characters at the characters per token measured on your own sessions.
+- `cost_centres_advice` — each cell with spend, for the whole window and its
+  newest 30 and 7 days (counted back from the newest reply), with the
+  check that covers it or "No advice". It names a check; it does not say
+  that check found a saving.
+- `cost_centres_models` — information only, no card: agent type by model
+  tier by who chose the model (named in the call, named in the agent file
+  or inherited), direct and workflow apart, with runs, cost and a Sonnet
+  ceiling (the most a move to Sonnet could save at the same tokens). The
+  tuning export's `agents.model_choice` keeps the 60 dearest rows as words
+  and list-price amounts: a custom agent type is `custom` and a model is
+  its family. The Models check's row on the Overview links to this table.
+
+The `subagent-volume` card names the largest cost centre and cites its row.
+The `cost-centres` check (`claudeglass check cost-centres`) is information
+and never "worth a look"; it names the largest cell and its covering check.
+The tuning export's `cost_centres` block holds the matrix as list-price
+amounts and nothing else.
+
 ## `run_split` (`run_split.py`)
 
 Full write-up: [`docs/run-split.md`](run-split.md). Subagent runs only;
-workflow agents are left out. Every saving is net of what each split
+workflow agents are left out, and so is a run that grew past the
+auto-compact window now in force. Every saving is net of what each split
 adds back, at list price.
 
 - `run_split_summary` — one row (`subagent runs`): subagent runs, agent
   types where splitting pays, the runs it would split and their splits
   at each such type's best interval, the median context each split
   drops, those runs' cost, the saving and its share of subagent cost, and
-  subagent cost.
+  subagent cost. The last two columns count the runs left out because
+  their peak context was above the auto-compact window now in force (they
+  ran under an older setting) and what they cost; those runs are in no
+  other figure.
 - `run_split_by_agent` — one row per agent type, largest saving first
   (top `run_split_top_n`, default 20): runs, longest run, the best split
   interval (`every_n`, `null` when none pays), the runs it would split,
@@ -822,7 +1013,10 @@ test and privacy are in [concepts](concepts.md#7-quality-signals).
   failed shell commands, denied, stopped by you, corrections, edited
   again and hit the output limit, then replies and cost per run. A
   signal that doesn't apply to the group (corrections for a subagent,
-  say) is blank.
+  say) is blank. Denied counts only calls you or a deny rule turned
+  down: a plan you sent back, a question you declined and a hook's
+  block are not counted, and stopped by you leaves out the line Claude
+  Code writes after them.
 - `quality_by_setup` — per agent type, model and effort (the model and
   effort most of a run's replies used; runs that never replied are left
   out, and so are main sessions a scheduled or looped task started with
@@ -876,18 +1070,59 @@ How the way you work shapes what it costs, and the habits that would
 have saved the most in your own sessions. Built per message of yours (a
 *cycle*: one message you typed and every reply and agent run that
 answered it, `capture.prompt_cycles`) and per subagent run at any
-depth. It reads what metrics capture's tags reported where they are
+depth. A workflow's agents are agent runs of the message whose reply
+started their run (a run that was resumed keeps its run id, so its agents
+are split between the resuming replies by when they started), and a tag
+Claude wrote in reply to a background agent's or a workflow's report
+counts for the message that launched it (and so do the agents and the
+report replies that reply leads to). It reads what metrics capture's
+tags reported where they are
 there, what the parser measures without asking (whether a message
 named a file or pasted an error, a command failing again and again, a
 skill loaded late), and your ratings from Spend › Sessions. Every table
 is always there, empty when there's nothing to show; the notes say when
 capture is off or no feedback has been given.
 
+Each session is also drawn into pieces of work (`pieces.pieces_of`), with
+no feedback and no tag needed. A piece you rated is a `Piece` with its
+outcome; one nothing rated is a `Piece` with no outcome
+(`source` is `transcript`), so the tables that need your answer read only
+the ones with an outcome (`habits_outcomes`, `cost_per_met`). A message is
+*redone* when a redo or fix tag, a correction, or later rework of its piece
+followed it (never an aside: a message you sent while background work ran
+that changed no files, and never a plan-feedback round: a plan you sent back
+or a message in plan mode is planning, whatever its words or tag say), and
+`redo_cost` is what the whole chain of rework cost,
+counted once on the message that delivered the work. Rates per message
+(the trends here and the per-100 rates in `prompting`) divide by the
+messages that asked for something (`CycleFact.asks`, `pieces.asks`): a
+go-ahead, a status check, a thank-you and a reply to a plan don't count,
+and each message you typed while Claude worked does. The percentage
+columns of a table still divide by that table's own messages.
+
 - `habits_digest` — "Weekly pace (last N days)": the three habits worth the most (saving
   a week, `top_1` to `top_3`), what the habits you already picked up
   save (`adopted`), the average cost of a piece of work that met its
   goal (`cost_per_met`), and the share of messages Claude tagged
-  (`tagged`). The monthly report carries the same digest. The title names
+  (`tagged`). The `tagged` share is the Capture banner's: it counts from
+  the day capture was turned on (`config.capture.enabled_at`, as
+  `Habits.since`), only in sessions capture reached (`capture.is_captured`,
+  a capture note or a tag Claude Haiku wrote), and leaves out the messages
+  the banner leaves out (a `/cg-feedback` run, a reply cut off by
+  `max_tokens`, an interrupted message). Its detail reads "N of M since you
+  turned capture on". Every money tile says its period: a habit's saving is
+  per week (a plan shows the period beside the list-price equivalent), and
+  `cost_per_met` is per piece of work. A habit is in `top_1` to `top_3` or
+  in `adopted`, never both (`habits._worth_trying`, `habits._picked_up`).
+  The `plan_hard` row ("Already doing this") shows when at
+  least `MIN_GROUP` asks Claude reported as hard were mostly planned and
+  none of the unplanned ones was redone (`habits.plan_hard_already`): a
+  message is planned when it was written in plan mode, called
+  `ExitPlanMode`, or came after a plan you approved by typing, until its
+  piece of work ends. It is a digest row and not a playbook habit, as
+  there is nothing to save. `cost_per_met` averages only the pieces you
+  gave feedback on. The monthly report carries the same digest. The
+  title names
   the window you picked: `N` is that window's own day count ("last 7
   days" stays 7 even when your messages in it cover 3), and a window with
   no day count reads "Weekly pace (all time)" or "Weekly pace (this
@@ -902,38 +1137,124 @@ capture is off or no feedback has been given.
   sessions show, an example to copy, how the saving is worked out, how
   often it was seen, the source (`reported`, `inferred`, `your
   feedback`), confidence (`high` from 20 cases, `medium` from 8; inferred
-  alone is never `high`), trend (`new`, `falling`, `rising`, `steady`)
-  and the rate per message over the last eight weeks scaled to 0-100
-  (`-` for a week with fewer than three messages), then where trying it
+  alone is never `high`), trend (`new`, `falling`, `rising`, `steady`,
+  `unmeasured`) and the rate per message over the last eight weeks scaled
+  to 0-100 (`-` for a week that can't be measured, drawn as an en dash),
+  then where trying it
   affects things, its trade-off and how to undo it (`where`,
   `trade_off`, `how_to_undo` -- UX-8, the same three-part shape as a
   recommendation's fix explainer), and `covered_by`: the recommendation
   already reporting this same saving, when one fired this report, in
   which case `saving` is blank rather than double-counted (UX-3,
-  `habits.COVERED_BY`/`apply_covered_by`). A fall over at least four
+  `habits.COVERED_BY`/`apply_covered_by`). `saving_total` is the same
+  saving over the whole window, before it is spread into weeks, and is
+  blank when `covered_by` is set. A fall over at least four
   known weeks counts as picked up, and the saving it implies goes into
-  the digest's `adopted` row. The dashboard shows the top 5 habits as
+  the digest's `adopted` row.
+
+  Trends only say what they can measure (`habits.trend`). A week is `-`
+  with fewer than `TREND_MIN_CYCLES` (3) messages that asked for something
+  and, for a habit built from tags, fewer than that many tagged ones: the
+  rate divides by the tagged messages of the week, so a week Claude wasn't
+  tagging reads as unmeasured, not as nothing to fix. A habit whose dollars
+  need capture or your answers also reads `-` for the weeks before the one
+  capture was turned on. The word is `new` until `TREND_MIN_WEEKS` (3) weeks
+  are measured, and `unmeasured` ("Not measured") when every measured week
+  is zero: there is nothing to follow.
+
+  The dashboard shows the top 5 habits as
   cards; the rest collapse into a "more habits worth trying" `<details>`
   (UX-4/7).
+
+  Several habits only show when the comparison behind them holds:
+
+  - `brief_clearly` compares partial and vague asks with clear ones like
+    for like (`habits.brief_comparison`): within one kind of task, with at
+    least `MIN_GROUP` (5) messages on each side, leaving out the messages
+    that carried out a plan (their cost is the plan's build, not the ask).
+    Each partial or vague ask is set against the median clear ask of its
+    level, or of the whole kind of task when fewer than three clear asks
+    share the level, at what its own work cost (its cost less re-reading
+    the context it began with). The saving is the signed sum of half those
+    gaps. The card shows only when a partial or vague ask cost more than a
+    clear one in at least 60% of the comparisons (`BRIEF_MIN_PROBABILITY`)
+    and the sum is positive, or when your own answers say requests left
+    things out. The evidence quotes the median ratio ("the median one cost
+    3.6x a clear ask of the same kind"). The `habits_briefs` table carries a
+    note that says the same, and that its plain averages mix in plan builds
+    and every kind of work, so it never reads the other way unexplained.
+    The `/cg-brief` skill is offered in one place, a note under
+    `habits_brief_templates` (`habits.BRIEF_OFFER`), and on the rework
+    `left_out` card, only while this card shows.
+  - `clear_between` skips a thank-you, a go-ahead and a status check
+    (`CycleFact.quiet`) and a message after a usage-limit pause
+    (`limit_pause`) when it infers a new task from a long break, and a new
+    task Claude reported as needing the earlier work (`prior` of `needed`
+    or `some`) is no reason to clear.
+  - `effort_fit` needs easy work to think at least 10 points more of its
+    output than hard work does at the same effort
+    (`EFFORT_EASY_OVER_HARD_PTS`), a hard baseline of at least five
+    messages, and a saving of at least $1 a week (`MIN_SAVING`).
+  - `skip_plan_easy` needs at least `MIN_GROUP` easy asks that went through
+    plan mode and $1 of planning between them.
+
+  Your /cg-feedback answers change several rows, and so does a dashboard
+  rating of a session no run rated. `brief_clearly`, `name_files` and the
+  other habits about briefing Claude cite "N of M follow-ups were things
+  your request left out" (`why=left_out`), and the first can stand on
+  those answers alone. `check_work` (the "Have Claude check its work
+  against what you asked" habit) counts follow-ups you said fixed
+  something Claude missed (`why=missed`) and fixes the plan check or plan
+  question said the plan already covered; its title and line to paste
+  follow where the miss was (`missed_in`: your message, the plan, CLAUDE.md
+  or memory, or earlier in the chat), and its saving is half what those
+  follow-ups cost. `split_large` takes in large asks you called too costly
+  or said smaller pieces would have helped, and lets go of ones you called
+  worth it. `plan_hard` counts a plan first would have helped, and
+  `plan_first` (prompting) is priced at half the follow-ups' cost where you
+  said so. With most hard asks already planned, `plan_hard` has no row
+  and the digest's "Already doing this" says so. A follow-up you called
+  a change of mind (`why=changed`), new to the plan (`plan=new`), or
+  something you told the plan check was not a fix (`none`), is no rework: it is left out of `redone`
+  and the waste figures at the source (`CycleFact.excused`), so every
+  table below agrees. Answers from `slow` (the older question) count as
+  `why`.
 - `habits_by_task` — per kind of task Claude reported (`task=`), after
   an `all` row: messages, share, cost, per message, and the shares
-  that were clear asks, large asks, redone by your next message (a
-  `shift=redo` or `shift=fix` tag, or a correction), and met their goal.
+  that were clear asks, large asks, redone afterwards (a `shift=redo` or
+  `shift=fix` tag or a correction on the next message, or later rework of
+  the same piece of work), and met their goal.
+  A note says how many messages that looked redone are left out of
+  Redone because you called the next message a change of mind, new to
+  the plan, or not a fix.
 - `habits_briefs` — per brief word (`clear`, `partial`, `vague`):
   messages, per message, redone, met the goal, and the lines most
-  often missing.
+  often missing. The notes give the like-for-like comparison behind the
+  `brief_clearly` card (its median ratio, or how often a partial or vague
+  ask cost more) and say the averages above mix in plan builds and every
+  kind of work.
 - `habits_brief_templates` — per kind of task (the defaults while
   nothing is tagged): the checklist, why those lines (the one most
   often missing from your asks, or a starting point), and the template
   to copy. The `/cg-brief` skill (`capture brief on`) asks for the same
-  lines, from `capture_catalogue.BRIEF_CHECKLISTS`.
+  lines, from `capture_catalogue.BRIEF_CHECKLISTS`; a note offers it only
+  while the `brief_clearly` card shows. A message whose
+  follow-ups you said were things it left out counts twice when the lines
+  are ranked, and the "why" says so.
 - `habits_agents` — per agent type (and `top-level` for how hard the main
   session's work was): runs, cost, typical report size, the share
   asked for a short report, finished, retried and retried for the
-  model, what the runs said about the model (smaller would do, right,
-  needed larger) and CLAUDE.md (used, didn't use), the shares of work
-  reported easy and hard, files read again that the parent had read,
-  and runs started by another agent.
+  model, what the runs did (the share of calls that were a single
+  read-only look: one Read, Grep, Glob or file-reading command in a
+  message and nothing else, and how many of those were a shell command
+  (`probe_shell_pct`); and the typical number of calls before
+  the first edit, among runs that made one), what the runs said about
+  CLAUDE.md (used, didn't use), the shares of work reported easy and
+  hard, files read again that the parent had read, and runs started by
+  another agent. A workflow's agents are counted
+  here (their agent type is whatever the run named them, `workflow-subagent`
+  when it named none) and read "again" against the message that started
+  the workflow.
 - `habits_effort_fit` — per reported level and effort (`easy:high`):
   messages, per message, thinking share of output, redone, met the
   goal, and for easy work at high effort or above, what lower effort
@@ -943,7 +1264,7 @@ capture is off or no feedback has been given.
   together and then by how hard it said the work was (`all`, `easy`,
   `normal`, `hard`): each model family and effort the main session ran
   on, messages, per message, the share that went well (your feedback's
-  `met` where you gave it, otherwise not redone by your next message),
+  `met` where you gave it, otherwise not redone afterwards),
   the messages your feedback covers, and the verdict: `usual` (the most
   used) and `cheaper` (the cheapest with at least 5 messages that cost
   less and went well within 5 points of the usual one), with how much
@@ -954,17 +1275,21 @@ capture is off or no feedback has been given.
   columns stay as measured. Shown on Setup › Profiles; the `tasks` profile
   goal drafts from its `all` rows.
 - `habits_agents_by_task` — `habits_agents`, split by the kind of task
-  Claude reported for the message that spawned each run: per task and
-  agent type, runs, per run, finished, and what the runs said about the
-  model (smaller would do, right, needed larger). Names a cheaper model
-  only when at least `MIN_GROUP` runs support it, the saving clears
-  `CHEAPER_MODEL_MIN_PCT`, and `habits.unfit_agents` doesn't veto the
-  agent type. Shown on Setup › Profiles; the `tasks` profile goal drafts
+  Claude reported for the message that spawned each run (for a workflow
+  agent, the message whose reply started the workflow): per task and
+  agent type, runs, per run, finished, the share of calls that were a
+  single read-only look, and the typical calls before the first edit.
+  Names a cheaper model only when at least `MIN_GROUP` runs support it,
+  the saving clears `CHEAPER_MODEL_MIN_PCT`, `habits.unfit_agents`
+  doesn't veto the agent type, and this task's own runs weren't mostly
+  hard or retried for the model. Shown on Setup › Profiles; the `tasks` profile goal drafts
   agent candidates from it (vetoed again there by the quality check).
 - `habits_outcomes` — per outcome you gave (`met`, `partly`, `missed`,
   ...): pieces of work, messages, cost, per piece, the most common kind
-  of task, what slowed it most, what would have helped most, and where
-  the answers came from (`/cg-feedback` or a dashboard rating).
+  of task, what slowed it most (your follow-up reasons, `why`, or the
+  older `slow` answer), what would have helped most, and where the
+  answers came from (`/cg-feedback` or a dashboard rating). A piece of
+  work the transcripts alone drew has no outcome and is not a row.
 - `habits_by_shape` — main sessions by shape (`handoff.plan_shape`):
   `plan_build` (a plan approved with `ExitPlanMode`, then files edited in
   the same session), `plan_only` (approved, nothing edited after it) and
@@ -972,13 +1297,29 @@ capture is off or no feedback has been given.
   median planning context a fresh start would have dropped
   (`handoff.plan_carried`), the pieces of work rated, the share that met
   its goal, the shares worth it and too costly, and the /cg-feedback
-  handoff answers (`yes`, `partly`, `no`). The `plan-handoff` card and
-  the suggested profile read it.
+  handoff answers (`yes`, `partly`, `no`), and the fixes after a plan:
+  `plan_covered` (the plan said it), `plan_gap` (it left it out) and
+  `plan_new` (you thought of it later), from the plan check and the plan
+  question together. Four columns come from the transcripts and need no
+  feedback: `work_pieces` (every piece of work, rated or
+  not, once, in the shape of the session it began in: the same pieces the
+  Rework section counts), `plans_built` (pieces with an approved plan and work after it),
+  `plans_fixed` (of those, the plans with `habits.PLAN_FIXES_MIN`, three,
+  or more corrections, adjustments or other rework after them) and
+  `plan_fixes` (all of those fixes). Fixes you typed while Claude worked
+  count with the ones you typed as a message (`habits.fixes_after_plan`), a
+  message in plan mode is a reply to the plan and not a fix, and so is one
+  you told the plan check was not a fix, or a message you sent while
+  background work ran that changed no files (an aside, never rework). The
+  last three are blank
+  below `MIN_GROUP` plans. `pieces` stays the pieces you rated. The `plan-handoff`
+  card and the suggested profile read the table by column key, and so does
+  `coaching.json` (see [coaching.md](coaching.md)).
 - `habits_self_report` — Claude's own reports against your feedback: per
   `level` word (`easy`, `normal`, `hard`) and `brief` word (`clear`,
   `partial`, `vague`) it tagged a message with, the messages that carries,
   how many your feedback covers, the shares that met or missed their
-  goal, and the share your next message redid, fixed or corrected. A
+  goal, and the share redone afterwards. A
   note says whether work Claude called easy missed its goal more often
   than normal work, once there is enough rated feedback on both sides to
   tell (`habits.MIN_GROUP`); when it does, the habits built from the
@@ -994,9 +1335,189 @@ capture is off or no feedback has been given.
   the tags said (helped, wasn't needed, would have helped). The
   `/cg-feedback` skill is left out.
 - `habits_tool_output` — per tool with outputs over the large-output
-  threshold: how many, their tokens and what carrying them cost; then a
-  `loops` row for commands that failed three or more times within one
-  message, and what those attempts cost.
+  threshold: how many, their tokens and what carrying them cost. Commands
+  that failed three or more times within one message are no longer a row
+  here or a habit in `habits_playbook`: they are counted as
+  `failed_command_loops` in `waste_summary`.
+- `habits_explore_by_model` — what the Explore agents you started cost,
+  per model family (`unknown` for a run that logged none): runs, cost,
+  cost per run, the context each run read (its replies' context sizes
+  added up) and the share of all Explore cost. It stands in for the
+  dropped `explore_reads` hint: an Explore run's cost is mostly the
+  context it reads again, so the model it runs on matters more than how
+  many files it opens. A workflow's agents are left out
+  (`AgentFact.direct` is false for them).
+- `habits_probes` — per agent type (`top-level` is the main session):
+  replies, the single read-only calls among them (a reply that made one
+  Read, Grep or Glob, or one shell command that reads files, such as
+  `cat`, `head`, `grep` or `git log`, and nothing else; counted by the
+  message the call came in, so calls already sent together count once), how many of
+  those were a shell command, the runs of two or more such replies in a
+  row, and `batch_cost`: the cache reads of the replies after the first of
+  each run, at list price. A batched message still writes the tool results
+  and names the calls, so those are left out. That is an upper bound, since
+  it takes the lookups of a run to be independent. Rows with no single lookups are left out,
+  costliest first. It feeds `research_split`, `explore_research` and
+  `name_files`, "lookups before the first edit", and the
+  `agent-batch-probes` card. The Overview's **More detail** links to it.
+- `habits_agent_runs` — what agent runs did, by how they were started
+  (`background`, `foreground`, `workflow`; a row is left out with no
+  replies). Runs are counted per run (a workflow's agents are all one run,
+  and a resumed workflow shares one run folder, so its agents are placed
+  by their own timestamps); agents, replies, the share of replies that were
+  a single read-only call (`probe_pct`), `start_reads` (what each agent
+  started with times its replies: an upper bound on what the starting
+  context cost over the run, in tokens), `compactions` and
+  `compacted_agents` (summaries made inside the runs, and the agents that
+  made one), and `shared_reads`, `shared_tokens` and `shared_cost`: reads
+  of the one file that several agents of a group read, the plan or spec
+  they were all handed. That file is the most-shared one of the group, so
+  these are upper bounds. They are on this table only, never in a card.
+  The run-split card and its sweep (`run_split`) count only runs under
+  the auto-compact window now in force. The same groups are in the tuning
+  export's `agents.launches`: runs, agents, replies, single read-only
+  calls, `start_reads`, summaries made, the files siblings had already
+  read, and the cost, by launch.
+- `habits_report_turns` — the main session's replies to a background
+  agent's or a workflow's report, by what each did: `acknowledged` (it
+  made no call), `acted` (it made a call of its own) or `respawned` (it
+  started more agents). A reply starts at a task notification and runs
+  through the calls it made, as the capture module finds a reply.
+  Columns: replies, share, cost (all its calls), the typical context its
+  first call read, and the replies that came an hour or more
+  (`WAKE_GAP_S`) after the main-session reply before (`woke`), with the
+  cache-write tokens of those first calls (`woke_tokens`): the context
+  written again because the cache had expired. A workflow agent's report
+  goes back to its script, so it isn't here; the workflow's own report
+  is. A background command finishing isn't a report. A kind with no
+  replies is left out. The
+  Replies to agent reports check reads it, and `agents.report_turns` in
+  the tuning export holds the three counts.
+- `habits_plan_rounds` — the asks where Claude put up a plan
+  (`handoff.plan_groups`; one ask is every plan from the first to the one
+  you approved), as `kind` rows: `all` (every approved plan), `none`
+  (no plan sent back), `once`, `twice`, `more` (three times or
+  more) and `dropped` (asks whose plan you never approved). A row with
+  no plans is left out. Columns: plans, how many approved by typing (a
+  go-ahead or leaving plan mode, and a decline answered with a
+  go-ahead), plans sent back in the dialog (`rounds`), how many of them
+  read as a question, a critique or a doubt (`asked`, from
+  `PlanStats.feedback_class`), the plans put up per ask, the steps and
+  files of the last plan, and the tokens and cost of the replies after
+  the first plan through the approval, which is nothing for an ask with
+  one plan. More than 8 replies that change files between two
+  plans start another ask. The Plans sent back check and the
+  `plan-rounds` card read it, and `prompting.plans` in the tuning export
+  keeps the counts (`rounds`, and `asks` for the same kinds with their
+  plans, rounds, questions, tokens and cost). The cycle's `plan_cost` now
+  runs to the last plan.
+
+## `rework` (`rework.py`)
+
+How often Claude had to change work it had already delivered, why, and what
+to change in how you ask. It reads the pieces of work `habits.collect` drew
+from the transcripts (`pieces.pieces_in`, a session that opens with a
+handoff joined to the piece it carries on only when its first cycle carries
+over a file, or a short first message names a path after an approved plan,
+kept on `Habits.work_pieces`), so
+it needs no `/cg-feedback` answer and no tag: your answers and the tags
+only say *why*. Counts, closed words and amounts only; nothing you wrote
+reaches it. A piece of work is *delivered* once a cycle in it changed
+files, and only a delivered piece can need changes afterwards. Rework, the
+causes and where each came from are defined in
+[`concepts.md`](concepts.md#9-work-habits). A follow-up you called a change
+of mind alone (`why=changed`), or new to the plan (`plan=new`), is no
+rework and is not counted here. Nor is an *aside*, a message you sent that
+asked for something and changed no files while an agent or workflow an
+earlier message of the same piece started was still running
+(`WorkPiece.aside_cycles`; most are side questions, some steer
+the running work): it never starts a piece, is left out of the requests the
+rates divide by, and its cost stays in the piece. Only a settled `redo` or
+`fix`, a correction or an adjustment that re-changes the piece's files makes
+a follow-up rework. A short message that re-changes the last reply's files
+with none of those is not rework, whether or not background work was still
+running.
+
+Every amount goes through `Units.money`, so it follows the billing mode and
+carries its period ("over the last 30 days"; `period` on the rows below).
+Money cells hold list-price USD, and the dashboard phrases them with
+`moneyText`.
+
+- `rework_headline` — "Rework after delivery (last N days)" with the
+  window you picked. Up to four rows. `pieces`: `text` is "{n} of your
+  {total} pieces of work needed changes after Claude delivered them. That
+  rework cost {amount}. {u}% came from requests that left something out,
+  {c}% from Claude's mistakes, {x}% from changes of mind." then "{o}% came
+  from failed tools, plan gaps or a mix of causes." when some rework had one
+  of those causes (the shares are left out when no rework had a cause
+  reported; with nothing to change it reads "None of your {total}
+  pieces of work needed changes after Claude delivered them."), with
+  `count`, `total`, `share`, `cost`, `tokens` (the agents' included) and
+  `period`. `unknown`: "We couldn't tell
+  why for {k}%: run /cg-feedback after a piece of work to say", present
+  when some rework cycle has no cause. `requests`: sessions with no start
+  inside them can't be cut into pieces, so they are counted by the messages
+  that asked for something, in their own sentence with their own cost,
+  never mixed into the piece rate, cost or shares above it. `unknown`
+  counts the rework cycles of those pieces with no cause reported (or, with
+  none reworked, every session's), so it reads beside the shares. `asides`:
+  "Not counted as rework: {n} messages you sent while background work ran
+  ({amount})." present when a delivered piece has any, with `count` the
+  messages and `cost` what they cost (the parenthesis is left out when
+  there is no price), and no `total`, `share` or `tokens`.
+- `rework_causes` — one row per cause and source: `cause` (`left_out`,
+  `missed`, `changed`, `tools`, `plan_gap`, `mixed`, `not_reported`, or
+  `plan_fixes`), `source` (`feedback`, `Claude tag`, `Haiku tag`,
+  `inferred`: no answer or tag gave the cause, so the follow-up was read
+  from your message or the tag's `shift` alone), `pieces` and `sessions` (the pieces with any, and the
+  sessions we couldn't cut into pieces with any, kept apart so a session
+  is never called a piece), `cycles`, `share` (of all rework cycles),
+  `cost`, `tokens`, `detail` (the counts in words; `left_out` also cites "N of M
+  follow-ups were things your request left out" once 3 of your answers
+  say so, and `missed` names where you said Claude missed it),
+  `try` and `paste`. Rows run your feedback first, then Claude's tag,
+  Haiku's tag and inferred, the biggest first. The paste lines: `left_out`
+  "Here is what I want, the files it involves and what done looks like: <say
+  it here>." (`/cg-brief`, with a Try line that names the skill, while Work
+  habits shows its `brief_clearly` card); `missed` "Before you finish, re-read my request, check each
+  point is done, and run the tests for what you changed." (its `try` line
+  is the one `capture_catalogue.MISSED_IN_LINES` gives for where you said
+  Claude missed it: the message restated as a checklist, the plan ticked
+  off step by step, a rule that is buried, or details lost in a long
+  session); `changed` "Plan this first and wait for my go-ahead before
+  changing any files."; `tools` none, a link to the checks;
+  `plan_gap` asks for the files, the decisions and a done-when line.
+  `plan_fixes` ("Fixes after a plan you approved", source `inferred`) is
+  added when `habits.fixes_after_plan` has 5 plans (`MIN_GROUP`) and some
+  needed `PLAN_FIXES_MIN` or more fixes. `not_reported` reads "Cause not
+  reported" and says to run `/cg-feedback`; no row says Claude got it wrong
+  unless your answers or a tag did.
+- `rework_admitted` — Claude's admitted mistakes. `admitted`: "Claude
+  admitted {n} mistakes in {m} pieces: you caught {u}, it caught {s}
+  itself. {i} were instructions it had been given. The rework after the
+  ones you caught cost {amount}." (singular for one; the instructions
+  sentence only when there are some). It counts the settled `admit` words
+  (`claim`, `change`, `instruction`) and who found each
+  (`Turn.admit_caught`, else your message before it); `cost` is the
+  admitting cycle (when it was rework) and the run of rework after it, each
+  cycle once. `fix` and `paste` are the `MISSED_IN_LINES` line for where you
+  said Claude missed things. `possible`: replies that read like an
+  admission nobody tagged (`Cycle.admit_possible`), said apart and never in
+  a total; it says "more" and "above" only when confirmed admissions sit
+  above it.
+- `rework_by_week` — weeks (Monday, in your time zone) from the first piece's
+  to the last, a week with no piece kept: `pieces`, `reworked`, `share`
+  (empty under 5 reworked pieces), `cost`, `caught` (admitted mistakes you
+  caught) and `caught_per_piece` (empty under 5 tagged pieces, and empty
+  rather than 0 for a week before capture was on). Pieces we couldn't cut
+  are left out of `pieces`, `reworked`, `share` and `cost`; `caught` and
+  `caught_per_piece` count every piece, as the admitted-mistakes line does.
+- `rework_by_level` — `easy`, `normal`, `hard` and `unknown` (not tagged):
+  `requests` (messages that asked for something, messages you sent while
+  background work ran that changed no files left out), `rework`, `rate`
+  (rework per request) and
+  `cost`. Per request, not per piece, as a hard piece has more requests;
+  each request counts under its own level.
 
 ## `capture` (`habits.py`)
 
@@ -1039,41 +1560,102 @@ capture is off or no feedback has been given.
 - `workstyle_archetypes` — one row per detected archetype
   (`overseer-fanout`, `plan-high-implement-low`, `workflow-heavy`,
   `effort-varied`, `chat-only`, `single-model`, else `mixed`): sessions,
-  share and a one-sentence description. Each session gets the first
-  archetype whose evidence (model by role, effort spread, spawn counts,
-  plan-mode-then-lower-model-implementer sequences) it matches, in that
-  order. `recommend.py` conditions
-  on this archetype so an overseer session is never told to "stop
-  spawning agents" and a chat-only session is never told about subagent
-  TTLs — see [Recommendations](#recommendations-recommendpy) below.
+  share of sessions, spend (what those sessions cost, subagents
+  included) and a one-sentence description. Rows run by spend, so the
+  first row is the archetype that cost the most; a tie goes to the one
+  with more sessions, then to the first by name. Each session gets the
+  first archetype whose evidence (model by role, effort spread, spawn
+  counts, plan-mode-then-lower-model-implementer sequences) it matches,
+  in that order. The spawn count is the agents the session started with
+  the Agent tool: a workflow's own agents, and agents other agents
+  started, are not counted. `recommend.py` conditions
+  on the first row's archetype so a chat-only session is never told about
+  subagent TTLs, and holds back "stop spawning agents" (`subagent-volume`)
+  when overseer-fanout sessions account for 30% or more of the spend
+  (`fanout_spend_share_pct`) — see
+  [Recommendations](#recommendations-recommendpy) below.
 
 ## `prompting` (`prompting.py`)
 
 Counted from what the parser keeps about each message you typed and each
 reply (`Turn.prompt_steps`, `prompt_plan_mode`, `human_vague`,
-`human_ack`, `human_repeat`, `reply_asked`, `coach_tip`): counts and
-flags, never your words. Each habit uses the live coaching hint's own
-rule and default threshold (`capture_catalogue.COACHING_THRESHOLDS`), so
-it counts whether or not coaching notes were on.
+`human_ack`, `human_go`, `human_status`, `human_repeat`, `reply_asked`,
+`coach_tip`): counts and flags, never your words. `reply_asked` means a
+reply ends on a question to you: a question mark must close one of its
+last two sentences or a list item that ends it, after code, links, a
+ClaudeGlass tip and the tag are cut. `human_go` and `human_status` mark a
+message that only tells Claude to carry on or only asks how it is going;
+neither is a repeat or a vague correction. `human_plan_handoff` marks a
+message that opens with Claude Code's own plan hand-off ("Implement the
+following plan"): only the flag is kept, and it links a build that started
+fresh to the plan approved before it (see
+[`plan-handoff.md`](plan-handoff.md#how-each-build-began)). Habits with a live hint use that
+hint's own rule and default threshold
+(`capture_catalogue.COACHING_THRESHOLDS`), so they count whether or not
+coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
+`stop_loop` no longer have a live hint and use
+`capture_catalogue.REPORT_THRESHOLDS`, which `config.toml` does not change.
+`context_carried` replaces the dropped `clear_context` hint.
 
 - `prompting_habits` — one row per habit seen in the window, the costliest
-  first: `habit` (`drip_feed`, `repeat_ask`, `stop_loop`, `plan_first`,
-  `vague_fix`, `big_paste`), `times`, `per_100` (per 100 of your
-  messages), `cost` (list-price USD; empty for `plan_first`), `basis`
+  first: `habit` (`drip_feed`, `repeat_ask`, `status_poll`, `stop_loop`, `plan_first`,
+  `vague_fix`, `big_paste`, `context_carried`), `times`, `per_100` (per 100 of your
+  messages that asked for something: not a go-ahead, a status check, a
+  thank-you or a reply to a plan, so `status_poll` can pass 100), `cost` (list-price USD; empty for `plan_first` and
+  `vague_fix`, and for any habit with nothing priced, which the page shows
+  as "Not priced", never as a zero), `basis`
   (what the cost counts), `trend` (`falling`, `rising` or `steady` over
-  the last eight weeks, or `new` with fewer than three weeks of three
-  messages or more to go on), `weeks` (the rate per message by week, the
-  worst week as 100, `-` for a week with fewer than three messages) and
-  `try` (what to do instead). Costs: `drip_feed` is what each message after the first in a
-  run paid to take in the context; `repeat_ask` the reply before the
-  repeat; `stop_loop` the replies you stopped (a message stopped before
-  any reply and sent again counts as a stop that cost nothing);
-  `vague_fix` the reply,
-  when it had to ask what was wrong; `big_paste` carrying the pasted text
-  (a cache write, then a cache read by each later reply until a summary).
+  the last eight weeks, `new` with fewer than three weeks of three
+  messages or more to go on, or `unmeasured` when every week is zero),
+  `weeks` (the rate per message by week, the worst week as 100, `-` for a
+  week with fewer than three messages), `try` (what to do instead) and
+  `period` (what `cost` totals over, as the rework section words it: "over
+  the last 30 days"; empty when the caller named no window). Weeks start
+  on the Monday of `config.tz`, as everywhere else, not on a UTC Monday.
+  Costs: `drip_feed` is what each message after the first in a
+  run paid to take in the context (a run is of small change requests,
+  each sent within 20 minutes of your message before it and answered, in
+  the reply it started, with a change to a file of yours: an edit or a
+  shell write outside a `.claude` folder, or a subagent's; a go-ahead, a
+  thank-you, a status check, a question, a statement, a report, an
+  explain request and an answer to Claude's question neither count nor
+  end it); `repeat_ask` the reply before the
+  repeat, when it was an answer with a file change that missed (a poll, a
+  go-ahead or a thank-you is never a repeat); `status_poll` the reply each
+  poll drew, for every message that only asks how the work is going
+  (`Turn.human_status`), whether or not work was running in the
+  background: it took over the poll cost `repeat_ask` used to show;
+  `stop_loop` the replies you
+  stopped, counting only bare stops (Esc on a reply: not the tail of a call
+  you turned down, and a message stopped before any reply and sent again
+  counts as a stop that cost nothing); `vague_fix` counted only, with no
+  cost: it needs a correction or bad-outcome phrase and skips a question,
+  a go-ahead, a thank-you, a status check, an image and a retry after a
+  failed reply; `big_paste` carrying the pasted text (a cache write, then
+  a cache read by each later reply until a summary); `context_carried`
+  what the replies of a new piece of work paid to read the earlier work
+  again (a piece the reply's tag calls new, or one that follows a break of
+  over an hour with no tag saying the work went on), when at least 20,000
+  tokens of earlier work were in context.
 - `prompting_tips` — only once there are coaching notes: one row per hint
-  whose note asks Claude to pass a tip on, with `notes`, `shown` (replies
-  to that message that ended with a ClaudeGlass tip) and `shown_pct`.
+  whose note asks Claude to pass a tip on, hints told to pass it on every
+  time first, with `notes`, `shown` (replies to that message that ended
+  with a ClaudeGlass tip), `shown_pct`, `relay` (`relayed N of M` for a hint
+  whose note orders the tip every time, so a tip left out was missed;
+  `judged relevant N of M` for
+  `big_paste`, where Claude decides whether the message calls for it and
+  a tip left out is no miss), `misfires` (notes whose replies called
+  the tip a misfire, `Turn.tip_disowned`), and your own answers to the
+  tip question: `useful`, `known` (you knew it already) and `wrong`, with
+  `trust_pct`, the share of your answers and Claude's misfire calls that
+  said it was useful (empty with neither). Two wrong answers or misfires
+  raise or mute a hint, and two `known` answers, more than `useful`,
+  show it once a session (`coaching.tip_rules`, written to
+  `coaching.json` by the daily run).
+
+  The habit rows above also leave out what you excused: a drip feed, a
+  repeat or a vague correction you called Claude's miss (`why=missed`)
+  or a change of mind (`why=changed`) is no habit of yours.
 
 ## `workflows` (`workflows.py`)
 
@@ -1305,63 +1887,173 @@ appear in `claudeglass report`'s output — call it directly:
 
 What each subagent type is given before its first turn. Built from each
 subagent transcript's events before its first priced turn
-(`ContextBudgetStats.add_subagent`); sizes are characters / 4. A fork
-(its first turn reads most of the parent's context from cache, or its
+(`ContextBudgetStats.add_subagent`); sizes are characters divided by the
+characters per token measured on your own first calls (the
+`context_budget_calibration` table below; 4.0 until a model has ten). A
+fork (its first turn reads most of the parent's context from cache, or its
 agent type is `fork`) is counted in `fork_spawns` and kept out of every
 average. No tables and one note when nothing was measured.
 
+A subagent transcript writes its tools snapshot (`prompt_snapshot` with
+tools), `agent_listing_delta` and `mcp_instructions_delta` after its first
+call, not before it. The breakdown takes the first snapshot that lists
+tools wherever it sits (a later header-only snapshot does not reset it),
+and counts both deltas as startup parts when they arrive before the second
+call. The snapshot's per-tool sizes are kept for built-in tools by name
+and for MCP tools as a total per server (never a description, a schema or
+any other name). An MCP server's deferred tool names and its instructions
+are sized the same way, per server, from the first two calls.
+
+A tools list (`tools:` in an agent file) leaves out the tool definitions
+an agent type never calls, and the skills list and the agent list go with
+the Skill and Agent tools. `agent_startup_diet` and `agent_startup_servers`
+price that. Tool definitions are the front of a cached prefix that sibling
+spawns share, so only the spawns that wrote it (their first call read
+less than half of it from cache) pay the cache-write price for them; every
+other part is written by each spawn. Each part is then read on every later
+call. The window is the span of the first calls, and at least 7 days, so
+`window_days` scales an amount in the window to 30 days.
+
+Every comparison across agent types reads the first call on one model: the
+same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5. A row
+averages the spawns on the model most of its spawns ran on (`model`),
+counts the others in `other_model_spawns` and leaves them out. What needs a
+tools snapshot (`removable_tools`, `agent_startup_tools`,
+`agent_startup_diet` and `agent_startup_servers`) is read instead on the
+busiest model with 5 or more spawns that recorded one (failing that, the
+model with the most such spawns), since older transcripts have none and
+the busiest model can have no tool data at all. The tools, diet
+and servers tables name that model in their own `model` column;
+`removable_tools` sits in the breakdown, whose `model` stays the busiest
+one.
+
 - `agent_startup_breakdown` — per agent type: `spawns`, `fork_spawns`,
-  `startup_tokens` (the first turn's whole input), the mean per spawn of
-  `task_prompt`, `claude_md`, `skills_listing`, `tool_lists`,
-  `hook_context`, `other_attachments`, `system_prompt` and
-  `tool_definitions` (the last two only when a system-prompt snapshot
-  was recorded), `not_recorded` (the rest), `measured_pct`,
+  `model`, `other_model_spawns`, `startup_tokens` (the first turn's whole
+  input), the mean per spawn of `task_prompt`, `claude_md`,
+  `skills_listing`, `tool_lists`, `hook_context`, `other_attachments`,
+  `system_prompt` and `tool_definitions` (the last two only when a
+  snapshot was recorded), `not_recorded` (the rest; a spawn with no
+  snapshot leaves its tool definitions here, since Claude Code writes the
+  snapshot after the first call), `measured_pct`,
   `write_price` (the first turn's model's 5-minute cache-write list
   price per million tokens, used to price each part), and
   `claude_md_managed` (PROF-11/F13 — the share of `claude_md` that is
   Managed policy CLAUDE.md, which still loads regardless of
   `omitClaudeMd`; `goals._omit_claude_md`, `whatif._omit_claude_md` and
   recommend.py's `spawn-claude-md` rule all subtract it out before
-  pricing what `omitClaudeMd` would save).
+  pricing what `omitClaudeMd` would save), `read_price` (the same model's
+  cache-read list price per million tokens), `later_calls` (the mean number
+  of calls after the first) and `removable_tools` (the size of the tool
+  definitions and MCP servers the agent type was offered and called in
+  fewer than a tenth of the spawns offered them: what a tools list on the
+  agent would leave out. Tools Claude Code adds whatever the list says,
+  `StructuredOutput` and `SubagentHandback`, are not counted).
+- `agent_startup_tools` — per agent type, one row per tool (built-in) or
+  MCP server it was offered and rarely used (called in fewer than a tenth
+  of the spawns offered it): spawns offered, spawns that used it and the
+  definition size, largest first.
+- `agent_startup_diet` — per agent type (report only): what a tools list
+  would take out of a start, on the model with the most spawns that
+  recorded their tools. `keep_tools` are the tools and MCP servers (as `mcp__server__*`) called
+  in at least a tenth of the spawns offered them, whether sent in full or
+  loaded when asked for. `rare_tools` are the rest. `dropped_definitions`,
+  `dropped_deferred` (the deferred tool names of the MCP servers left out),
+  `dropped_skills` (the skills list, when Skill is left out) and
+  `dropped_roster` (the agent list, when Agent is left out) are tokens per
+  spawn; `kept_instructions` are the instructions of MCP servers left out,
+  which stay under a tools list and are not counted in the saving. Then the
+  `later_calls`, `prefix_write_share` (the share of spawns that wrote the
+  tool definitions), the two prices, `saving_usd` across the spawns
+  measured (list prices) and `window_days`. Whether the skills list and the
+  agent list really go with their tools is not in Claude Code's docs, so
+  the `spawn-tools-list` card asks for a before and after check.
+- `agent_startup_servers` — per agent type (report only): one row per MCP
+  server it was offered and called in fewer than a tenth of the spawns
+  offered it, largest first and at most 12: spawns offered and used, per
+  spawn the tool definitions, deferred names and instructions in tokens,
+  the cost across those spawns of the definitions and deferred names
+  (what a tools list leaves out; the instructions stay under it and are
+  not in the cost) and `window_days`.
+- `agent_startup_stack` — per agent type (from `context_files.py`): the
+  mean first call split in the order it arrives. `system_tools` is the
+  first call's whole input less the next two columns (system prompt, tool
+  definitions, skills list, hook output and environment notes),
+  `auto_files` the CLAUDE.md files Claude Code loads for it (`claude_md`
+  above), `standing_reads` the tokens per run of the files this agent type
+  reads by habit, `brief` the task prompt, `total` their sum and
+  `standing_files` how many files that is. A file counts as read by habit
+  when the type read it in 3 or more runs or in 20% or more of them, and
+  at least 3 runs of that type were seen. Reads arrive after the first
+  call and are carried (and paid for) like the loaded files.
 - `agent_startup_unused` — per agent type: spawns measured, the skills
   list size, spawns given it and spawns that called the Skill tool,
   spawns offered MCP tools and spawns that called one, the CLAUDE.md
   size and spawns that only used search and read tools.
 - `agent_startup_shared` — parts (CLAUDE.md by source, and the other
   parts) that at least half the agent types receive at about the same
-  size, with where they come from and the total across spawns.
+  size, with where they come from and the total across spawns. A
+  CLAUDE.md source is averaged over the spawns that loaded it, so spawns
+  that took none in don't pull its size down.
 
 ## `context_budget` (`context_budget.py`)
 
 Answers the owner question "do we track preloaded skills, the system
 prompt, and the autocompact buffer?" A transcript never carries those
 sizes directly, so every column ending `(est)` is a clearly labelled
-*estimate* built from what is captured (first-turn `cache_creation`, a
+*estimate* built from what is captured (the first call's size, a
 HUMAN_TEXT/`skill_listing` attachment's own `size_chars`, a schema-2
-config snapshot's `content_layers`) — Claude Code's own `/context` view
+config snapshot's `content_layers`), converted from characters to tokens
+at the characters per token measured on your own first calls
+(`context_budget_calibration`) — Claude Code's own `/context` view
 remains the authoritative breakdown; treat every `(est)` figure here as a
 rough proxy, never as ground truth. Skipped cleanly (no tables, one note)
 when the corpus has no top-level transcripts at all.
 
 - `context_budget_baseline` — per project, plus one `all` row summing
-  every project: the measured mean/median top-level first-turn
-  `cache_creation` (the same metric `agents`' `topology_session_baseline`
-  reports, computed independently here rather than read back off that
-  table), next to estimated buckets in tokens for `human_prompt` (the
-  first HUMAN_TEXT event's `size_chars`, or the first turn's own
-  `human_prompt_chars`, divided by 4), `skills_listing` (every
-  `skill_listing` attachment's `size_chars` preceding the first turn,
-  divided by 4), `memory_files` (the joined schema-2 snapshot's
-  `content_layers` CLAUDE.md family + rules bytes, divided by 4; `null`
-  without a snapshot), `custom_agents` (the snapshot's agent count times
-  a labelled 60-tokens-per-agent-listing constant; `null` without a
-  snapshot), `mcp_tools` (`"present, size unknown"` when the snapshot
-  names at least one MCP server, else `null` — this module has no way to
-  measure an MCP server's own tool-schema size), and
-  `system_prompt_and_tools` — the residual: mean baseline minus every
+  every project: the measured mean/median top-level first call (P0:
+  uncached input + cache write + cache read; the same metric `agents`'
+  `topology_session_baseline` reports, computed independently here rather
+  than read back off that table), split into `shared_prefix` (read from
+  cache), `session_written` (what the session wrote itself) and
+  `first_prompt` (uncached input). Next to them, estimated buckets in
+  tokens for `human_prompt` (the first HUMAN_TEXT event's `size_chars`, or
+  the first turn's own `human_prompt_chars`, over the calibrated
+  characters per token), `skills_listing` (every `skill_listing`
+  attachment's `size_chars` preceding the first turn), `memory_files` (the
+  joined schema-2 snapshot's `content_layers` CLAUDE.md family + rules
+  bytes; `null` without a snapshot), `custom_agents` (the snapshot's agent
+  count out of the agent types the first calls' agent list named, times
+  that list's size; with no list in the first calls, the count times a
+  labelled 60-tokens-per-agent-listing constant; `null` without a
+  snapshot), `mcp_tools` (the MCP servers the project's sessions
+  were offered, counted by what can be done about them, e.g. `"2 offered:
+  1 you can turn off, 1 built into the desktop app"`, from the rows
+  `tool_search` builds; with none offered, `"present, size unknown"` when
+  the snapshot names at least one MCP server, else `null`: a config
+  snapshot never carries a tool's size) with `mcp_servers_usd` (what
+  offering those servers cost, from the same per-server prices as
+  `tool_search`; a built-in desktop server is counted but never
+  removable) and `mcp_tools_tokens` beside them (the
+  definitions, deferred-tool names and instructions the first call
+  carried, when it recorded them), `mcp_removable_tokens` (the same,
+  leaving out the servers built into the desktop app),
+  `controllable_est` (skills list +
+  memory files + `mcp_removable_tokens`: the part a setting can change; most of P0 is
+  Claude Code's own tool JSON, which none can) and
+  `system_prompt_and_tools` — the residual: mean first call minus every
   other known `(est)` bucket, floored at 0. The `all` row's
   snapshot-derived buckets are always `null` (they can't be meaningfully
   combined across different projects' own snapshots).
+- `context_budget_calibration` — one row per model: the characters per
+  token measured for tool definitions (tool characters over the shared
+  prefix the first call read) and for other text (text characters over
+  what the first call wrote and took in uncached). Only first calls with a
+  shared prefix and a recorded tools snapshot count, and a call whose ratio
+  falls outside 1.5 to 8 characters per token is left out of that figure.
+  A model needs ten such calls to get its own figure (the median of those
+  calls); until then 4.0 stands in and the figure is left empty, and a
+  model with neither figure has no row. Only those two numbers per model
+  are kept.
 - `context_budget_autocompact` — per project: the configured
   `autoCompactWindow` from the latest schema-2 snapshot's effective
   settings (`null` if absent), the model's context window size (from a
@@ -1381,7 +2073,13 @@ when the corpus has no top-level transcripts at all.
   get there — `python -m claudeglass.statusline` appends them to
   the same usage-log CSV `usage_windows` already reads, as three new
   trailing columns old-format rows simply don't have). Empty with a note
-  otherwise. `claudeglass report` (S1-exports) now loads
+  otherwise. When every main session in the report ran in the desktop app
+  (`claude-desktop`), which runs no status line, the empty table's note
+  says so instead of asking for the logger, and the table carries
+  `empty_variant = "desktop"` (`""` otherwise): the dashboard then reads
+  "The desktop app doesn't run status lines; first-call sizes come from
+  transcripts instead." A window with any session of another kind, or one
+  with no recorded entrypoint, keeps the install note. `claudeglass report` (S1-exports) now loads
   `<config_dir>/usage-log.csv`, when present, with a tolerant reader and
   passes the resulting rows into `build_report` as `usage_log_rows` —
   so both this table and `cache_ground_truth` above populate for the
@@ -1393,10 +2091,11 @@ when the corpus has no top-level transcripts at all.
   ground-truth rows logged long before or after the reported period.
 
 `recommend.py`'s `baseline-bloat` rule (see
-[Recommendations](#recommendations-recommendpy) below) cites this
-section's sized buckets as its evidence, and names the largest one in
-its action text, whenever `context_budget` is present in the report —
-falling back to its older single-mean-baseline evidence otherwise.
+[Recommendations](#recommendations-recommendpy) below) fires on the
+`controllable_est` column (30k tokens or more), never on the whole first
+call or on how many MCP servers or plugins a config names, and cites that and this section's sized buckets as its evidence,
+naming the largest one in its action text. Without a `context_budget`
+section it does not fire.
 
 ## `tool_search` (`tool_search.py`)
 
@@ -1585,7 +2284,12 @@ baseline.
 - `baseline_comparison_by_mode` — per mode: sessions in each window, a
   `sample_ok` flag, and baseline, current and delta-% for cost per
   session, re-cache share and compactions per session. A mode with fewer
-  than 5 sessions on either side shows its session counts only.
+  than 5 sessions on either side shows its session counts only. A baseline
+  saved under older mode rules (no `mode_rules`, or one below
+  `classify.MODE_RULES`) gets a note that a mode's change can come from
+  the new rules. A baseline saved under older rebuild rules (no
+  `recache_rules`, or one below `recache.RULES`) gets a note on the overview
+  table that a rise in the re-cache share can come from the new rules.
 
 ## `scorecard` (`scorecard.py`)
 
@@ -1651,9 +2355,11 @@ Rules implemented today, in the order they run. From `recommend.py`'s
 own `_rule_*` functions: `ttl-switch`, `long-tool-waits`,
 `notification-invalidation`, `batch-instructions`, `subagent-volume`,
 `compaction-churn`, `long-context-share`, `cache-read-dominance`,
-`baseline-bloat`, `agent-report-size`, `spawn-cost` (for agent types
-without `agent_startup` data; otherwise the per-part `spawn-claude-md`,
-`spawn-unused-skills`, `spawn-unused-mcp`, `spawn-read-only-tools`,
+`baseline-bloat`, `agent-report-size`, `agent-batch-probes`, `plan-rounds`, `spawn-cost` (for agent types
+without `agent_startup` data, and only when the mean first call is over
+40k tokens and at least 5k tokens of its tool definitions are rarely or
+never used; otherwise the per-part `spawn-tools-list`,
+`spawn-claude-md`, `spawn-unused-skills`, `spawn-unused-mcp`,
 `spawn-task-prompt` and `spawn-shared-claude-md`), `effort-mismatch`,
 `discovery-share` (when the `phases` section is present), `pricing-coverage`,
 `data-quality`, `limit-pressure`. Then each module's own rule:
@@ -1686,6 +2392,65 @@ cites the cell it used:
 - `spawn-claude-md` is held back when more of an agent type's runs said
   they used CLAUDE.md than said they didn't, and cites the ones that
   didn't.
+- `agent-batch-probes` is a card per agent type (not the main session)
+  from `habits_probes`, when the type made 100 replies or more, a
+  quarter or more of them a single read-only call, and half of
+  `batch_cost` is $1 or more (`agent_batch_probes_min_replies`,
+  `_share_pct`, `_min_saving_usd` and `_saving_factor`). `batch_cost` is the
+  re-reads only: the tool results are written once either way. The halving is
+  because some lookups of a run depend on one another. It cites the four
+  cells it used and offers one line to add to the agent's definition or
+  the workflow prompt that starts it: "Batch independent Read/Grep/Glob
+  calls into a single message".
+- `plan-rounds` is one card, from `habits_plan_rounds`, when at least 5
+  plans were approved, 30% or more of them were sent back first, 30% or
+  more of the rounds read as a question, a critique or a doubt, and the
+  saving is $1 or more (`plan_rounds_min_plans`, `_min_share_pct`,
+  `_min_asked_pct`, `_min_saving_usd`). The saving is `plan_rounds_saving_factor`
+  (default a quarter) of the `all` row's cost, scaled to the `asked` share
+  of the rounds. It cites the five cells it used and offers one line for
+  your first planning message, CLAUDE.md or a plan skill: "Before you show
+  me a plan, critique it for gaps and doubts, then fix them".
+
+The subagent start rules read `agent_startup` and give copyable text only;
+none writes a file.
+
+- `spawn-tools-list` gives a `tools:` line for one agent type, from the
+  tools called in at least a tenth of its spawns, and names the rest as
+  rarely used. It fires for at least 5 spawns that recorded their tools
+  and at least 5,000 tokens a start to leave out (`spawn_tools_list_tokens`).
+  `Explore`, `Plan` and `claude-code-guide` are left alone. A built-in
+  type or an agent with no file gets a prompt to create a same-named
+  file; `general-purpose` is warned that a list limits every spawn that
+  names no type. Workflow agents get a workflow-script variant: pass an
+  `agentType` that names an agent file with the list. It says that
+  `StructuredOutput` and `SubagentHandback` are added whatever the list
+  says, and asks for one spawn before and one after on the same model.
+  It replaces the old `spawn-read-only-tools`.
+- `spawn-unused-skills` offers the tools list first (leave Skill off it)
+  and keeps `disallowedTools: Skill` as the narrow alternative. When the
+  tools list card leaves Skill out, its saving is a part of that card's,
+  not on top of it.
+- `spawn-unused-mcp` is one card per agent type, naming each MCP server
+  that at most 2% of the spawns offered it called
+  (`spawn_unused_mcp_use_share_pct`) and that costs at least 5 USD over 30
+  days (`spawn_unused_mcp_min_usd_30d`). Its amount counts each server's tool
+  definitions and deferred names, a breakdown of the tools list card's
+  saving, so it is not added to it. Its `mcpServers` change is marked not
+  verified. ClaudeGlass does not record an agent's
+  `mcpServers`, so the card says to look in the file first.
+- A built-in agent type's `spawn-cost` card no longer says to shorten the
+  task prompt: its start is Claude Code's own system prompt and tool
+  definitions, which a tools list trims. `Explore`, `Plan` and
+  `claude-code-guide`, which the tools list card leaves alone, get no
+  `spawn-cost` card unless an agent file of yours defines them. The
+  baseline card suggests shortening an agent's `description:` only when
+  your own agents add 1,000 tokens or more to every session.
+- `spawn-claude-md`, `spawn-unused-skills` and `spawn-task-prompt` are
+  priced as each spawn writing the part and every later call reading it
+  (`spawn-claude-md` the way the What-if table prices `omitClaudeMd`: the
+  cache write at each spawn, or what the Context files section prices
+  carrying CLAUDE.md across the rest of each spawn, if that is more).
 - `model-tier` cites `habits_agents` (see `model_swap` above).
 - `wasted-turns` cites the share of messages redone by the next one and
   the pieces of work you said missed their goal.
@@ -1763,6 +2528,7 @@ and nothing here is the original session's real identifier.
 |---|---|---|---|---|---|
 | full-expiry | 7 | 1,003,923 | 5.80 USD | 130,555 | 10m 21s |
 | prefix-invalidated | 0 | 0 | 0.00 USD | - | - |
+| post-compaction | 0 | 0 | 0.00 USD | - | - |
 | limit-expiry | 0 | 0 | 0.00 USD | - | - |
 
 Every re-cache turn in this session was a genuine TTL expiry

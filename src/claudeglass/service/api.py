@@ -39,9 +39,9 @@ Contract notes / deviations (reported here rather than silently, per this
 project's convention -- see e.g. ``report.py``'s own module docstring):
 
 - ``GET /api/session/<id>`` returns ``Store.session()``'s dict verbatim,
-  which includes ``mode_source``/``purpose_source`` alongside the fields
-  ``docs/api.md`` lists for ``/api/sessions``, plus (S1-integration fix
-  1.g) ``turn_series``/``markers``/``truncated``, and (v3-limits wiring)
+  which holds every field ``docs/api.md`` lists for ``/api/sessions``,
+  plus (S1-integration fix 1.g)
+  ``turn_series``/``markers``/``truncated``, and (v3-limits wiring)
   ``limit_markers``, all from ``Store.turns_for_session``. This is a
   superset, not a contradiction -- ``docs/api.md`` describes it as "the
   session-summary fields above, plus transcripts ... and tags", not an
@@ -92,6 +92,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import importlib.resources
 import ipaddress
 import json
 import mimetypes
@@ -106,14 +107,23 @@ from collections import OrderedDict
 from concurrent.futures import Future
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
 from .. import __version__ as _TOOL_VERSION
 from .. import baseline as baseline_mod
-from .. import capture_catalogue, discovery, helptext, hook_health, ignores, invocation
+from .. import capture_catalogue, classify, coaching, discovery, helptext, hook_health, ignores, invocation
+from .. import ratings as ratings_mod
 from .. import snapshots as snapshots_mod
-from ..config import CAPTURE_SAMPLES, ConfigError, load_config, load_session_overrides, set_capture
+from ..config import (
+    CAPTURE_SAMPLES,
+    ConfigError,
+    append_habit_log,
+    load_config,
+    load_session_overrides,
+    set_capture,
+)
 from ..pricing import PricingError, cache_read_savings_usd, load_pricing
 from ..profiles import catalogue as profile_catalogue
 from ..profiles import diff as profile_diff_mod
@@ -188,6 +198,8 @@ _IMPACT_CACHE_SIZE = 6
 #: dashboard's picker offers (core.js WINDOW_OPTIONS), so it lists every
 #: change any window does.
 _ALL_TIME_REACH_DAYS = 90
+#: The most project files ``/api/project-files`` returns (the dearest, prose first).
+PROJECT_FILES_SHOWN = 100
 
 _RESTART_ADVICE = "Restart the dashboard: claudeglass install-service, or stop and start serve."
 
@@ -337,6 +349,39 @@ _STATIC_CONTENT_TYPES = {
     ".svg": "image/svg+xml",
 }
 
+
+def _default_static_dir() -> Traversable:
+    """The dashboard's own ``static/`` folder. Read through
+    ``importlib.resources``, so it is found inside a zip (the single-file
+    ``.pyz``) as well as in a folder: a path built from ``__file__``
+    points inside the archive and opens nothing."""
+    return importlib.resources.files("claudeglass.service").joinpath("static")
+
+
+def _static_file(root: Traversable, name: str) -> tuple[Traversable, tuple[str, ...]] | None:
+    """The file that ``name`` (the part of the URL after ``/static/``,
+    already unquoted) names under ``root``, with its parts, or ``None``
+    when it is not one file of the UI: a missing file, a folder, a
+    dot-file or dot-folder (an editor's or a tool's own cache, which may
+    hold local paths), or a name that steps out of ``root``. ``root`` is
+    a folder or a place inside a zip, so a name is checked by its parts
+    and not resolved as a path; in a folder a link pointing outside it
+    is refused too."""
+    parts = tuple(part for part in name.split("/") if part)
+    if not parts or any(part.startswith(".") or "\\" in part or ":" in part or "\x00" in part for part in parts):
+        return None
+    node = root
+    for part in parts:
+        node = node.joinpath(part)
+    if isinstance(root, Path):
+        try:
+            if root.resolve() not in node.resolve().parents:
+                return None
+        except (OSError, ValueError, RuntimeError):
+            return None
+    return (node, parts) if node.is_file() else None
+
+
 #: index.html's placeholder for the command that runs claudeglass
 #: on this install (invocation.py), filled in as the page is served so
 #: the dashboard's own commands read right before any API call returns.
@@ -373,6 +418,10 @@ _REC_KEY_RE = re.compile(r"^[a-z0-9._:-]{1,200}$")
 #: At most this many keys in one ignore request (a rule for many agent
 #: types is one item on the dashboard, and one request).
 _MAX_IGNORE_KEYS = 100
+#: The most plan builds a rating may hold answers for, and the most
+#: recommendation cards that may hold an answer at once.
+_MAX_PLAN_BUILDS = 32
+_MAX_TIP_FEEDBACK = 500
 
 #: ``profiles.diff``'s own ``_VALID_SCOPES`` -- duplicated rather than
 #: imported (that name is private) so a scope query param can be
@@ -881,7 +930,7 @@ def make_handler(
     options: ServeOptions,
     *,
     watcher_stats: Callable[[], WatcherStats] | None = None,
-    static_dir: Path | None = None,
+    static_dir: Traversable | None = None,
     service_registered: Callable[[], bool | None] | None = None,
     watcher_state: Callable[[], WatcherState] | None = None,
     code_watch: "CodeWatch | None" = None,
@@ -932,16 +981,18 @@ def make_handler(
     ``static_dir``, when given, overrides the directory the ``/`` and
     ``/static/*`` routes serve from (default: this package's own
     ``service/static/`` -- the UI package's build output, per
-    ``docs/ui.md``). This is a second additional keyword-only parameter,
-    added purely so tests can point it at a ``tmp_path`` fixture with a
-    real ``index.html``/asset without writing anything into the source
-    tree -- the package's own ``static/`` is empty at S1-api's own
-    delivery time (a sibling work package ships its contents), so this
-    module's own tests exercise only the placeholder-index and
-    traversal-protection paths against the real default directory.
+    ``docs/ui.md`` -- read through ``importlib.resources``, so it is
+    served from inside the single-file ``.pyz`` too). This is a second
+    additional keyword-only parameter, added purely so tests can point
+    it at a ``tmp_path`` fixture with a real ``index.html``/asset
+    without writing anything into the source tree -- the package's own
+    ``static/`` is empty at S1-api's own delivery time (a sibling work
+    package ships its contents), so this module's own tests exercise
+    only the placeholder-index and traversal-protection paths against
+    the real default directory.
     """
 
-    static_dir = (static_dir if static_dir is not None else Path(__file__).resolve().parent / "static")
+    static_dir = static_dir if static_dir is not None else _default_static_dir()
 
     report_lock = threading.Lock()
     #: slot -> the latest report built for it: {"key", "token", "model",
@@ -1226,6 +1277,7 @@ def make_handler(
             usage_log_rows=usage_log_rows,
             # Your Sessions-tab ratings, for the Work habits tab.
             ratings=store.all_feedback(),
+            tip_feedback=store.tip_feedback(),
             # No project picked: every project's sessions, so an MCP
             # server every project loads can be judged unused.
             all_projects=not project,
@@ -1456,6 +1508,12 @@ def make_handler(
     #: report (see _capture_part).
     capture_parts: dict = {}
 
+    #: (session id, its transcripts' latest parse, threshold) -> the pieces
+    #: of work in that session that are due a rating, none for an empty
+    #: list (ratings.unrated_pieces), so the banner reads again only the
+    #: sessions that changed since it was last built.
+    unrated_memo: dict = {}
+
     def _keep_capture_part(name, key, soft, build):
         started = time.monotonic()
         as_of = _now_utc_iso()
@@ -1597,6 +1655,82 @@ def make_handler(
         corpus = rebuild.corpus_from_store(store, days=capture_mod.HISTORY_DAYS)
         return capture_mod.coaching_usage(corpus, _capture_rates(config), since=since)
 
+    def _capture_overhead(config, specs, window):
+        """``capture_view.build_overhead`` over ``window``'s sessions: how
+        often ClaudeGlass's hooks ran, and what capture's notes and the
+        coaching notes cost, in the same stretch."""
+        from .. import capture_view
+        from ..report import _report_units
+        from ..units import Units
+        from . import rebuild
+
+        rates = _capture_rates(config)
+        corpus = rebuild.corpus_from_store(store, **window["corpus"])
+        units = (
+            _report_units(corpus, rates, config, options.config_dir)
+            if rates is not None
+            else Units(billing_mode=config.billing)
+        )
+        return capture_view.build_overhead(corpus, specs, rates, units, window)
+
+    def _reminder_threshold(config) -> int:
+        """How many tokens a piece of work needs for the rating reminder,
+        from the same thresholds and typical piece the hook reads."""
+        return ratings_mod.reminder_tokens(
+            ratings_mod.coaching_thresholds(config.thresholds, coaching.read(options.config_dir)), _typical_piece()
+        )
+
+    def _capture_unrated(threshold: int) -> dict:
+        """The pieces of work, in sessions of the last ``coaching.DAYS``
+        days, of at least ``threshold`` tokens (the rating reminder's size)
+        that you have not rated, on the dashboard or with a /cg-feedback
+        run: newest first, at most ``ratings.BANNER_LIMIT``, with the count
+        of them all. A session holding several pieces lists each one, and a
+        piece is the stretch of a session that ``pieces.pieces_of`` draws:
+        one that carries on from an earlier session counts only what ran in
+        this one. The stored total prefilters (it counts subagents too);
+        the main transcript's own tokens decide."""
+        from . import rebuild
+
+        since = (datetime.now(timezone.utc) - timedelta(days=coaching.DAYS)).isoformat(timespec="seconds")
+        candidates = {row["id"]: row for row in store.unrated_sessions(min_tokens=threshold, since=since)}
+
+        def memo_key(session_id):
+            return (session_id, candidates[session_id]["stamp"], threshold)
+
+        for key in list(unrated_memo):
+            if key[0] not in candidates or key != memo_key(key[0]):
+                unrated_memo.pop(key, None)
+        fresh = [session_id for session_id in candidates if memo_key(session_id) not in unrated_memo]
+        if fresh:
+            found = {
+                bundle.session_id: ratings_mod.unrated_pieces(bundle, threshold)
+                for bundle in rebuild.corpus_from_store(store, session_ids=fresh).sessions
+            }
+            for session_id in fresh:
+                unrated_memo[memo_key(session_id)] = found.get(session_id, [])
+        pieces = []
+        for session_id, row in candidates.items():
+            for piece in unrated_memo.get(memo_key(session_id)) or []:
+                pieces.append(
+                    {
+                        "session_id": session_id,
+                        "slug": row["slug"],
+                        "last_ts": piece["end_ts"] or row["last_ts"],
+                        "tokens": piece["tokens"],
+                        "tokens_text": ratings_mod.tokens_text(piece["tokens"]),
+                        "part": piece["part"],
+                        "label": piece["label"],
+                    }
+                )
+        pieces.sort(key=lambda piece: (piece["last_ts"] or "", piece["part"]), reverse=True)
+        return {
+            "threshold": threshold,
+            "threshold_text": ratings_mod.tokens_text(threshold),
+            "total": len(pieces),
+            "pieces": pieces[: ratings_mod.BANNER_LIMIT],
+        }
+
     def _capture_view(config) -> dict:
         from .. import capture_view
 
@@ -1645,6 +1779,21 @@ def make_handler(
             brief_skill = footprint.skill_state(capture_catalogue.BRIEF_SKILL)
         if "dashboard_rating" in capture.feedback:
             ratings = store.feedback_count()
+        unrated = None
+        if {"dashboard_rating", "feedback_reminder"} & set(capture.feedback):
+            # What the rating reminder would say needs a rating: the
+            # banner lists those sessions, so a rating given there or in
+            # /cg-feedback takes them off it. The key holds the threshold
+            # and the store's change token. It is also the soft key, so a
+            # kept list is never served for a newer store: a session you
+            # have just rated must not stay on it while a new one is built.
+            # The half-hour bucket lets a session that ages out of the window
+            # leave the list even when nothing new is stored.
+            threshold = _reminder_threshold(config)
+            unrated_key = (store.change_token(), threshold, bucket, *soft)
+            unrated = _capture_part(
+                "unrated", unrated_key, unrated_key, lambda: _capture_unrated(threshold), _STALE_REPORT_MAX_AGE_S
+            )
         statusline = None
         if "feedback_note" in capture.feedback or "coaching_line" in capture.coaching:
             from .. import footprint
@@ -1654,6 +1803,20 @@ def make_handler(
             except (OSError, ValueError):
                 settings = None
             statusline = footprint.is_own_statusline(settings if isinstance(settings, dict) else None)
+        # Where your sessions ran decides whether a status line runs at all.
+        entrypoints = store.entrypoint_counts() if statusline is not None else None
+        overhead = None
+        specs = hook_health.installed_specs()
+        if specs:
+            window = capture_view.overhead_window(capture)
+            where = tuple(sorted(window["corpus"].items()))
+            overhead = _capture_part(
+                "overhead",
+                (store.change_token(), bucket, where, specs, *soft),
+                (where, specs, *soft),
+                lambda: _capture_overhead(config, specs, window),
+                _STALE_REPORT_MAX_AGE_S,
+            )
         hooks = hook_health.check_capture(
             hook_health.capture_specs(capture.hook_metrics()), config_dir=options.config_dir
         )
@@ -1661,7 +1824,7 @@ def make_handler(
             capture, past=past, units=units, use=use, hooks=hooks, signal_sessions=signal_sessions,
             started_since=started, feedback_use=feedback_use, skill=skill, brief_skill=brief_skill, ratings=ratings,
             statusline=statusline, weekly_cost=weekly_cost, dependent_value=dependent_value,
-            coaching_use=coaching_use,
+            coaching_use=coaching_use, unrated=unrated, entrypoints=entrypoints, overhead=overhead,
         )
 
     def _capture_conflict(message: str, commands: list[str]) -> tuple[int, dict]:
@@ -1853,6 +2016,37 @@ def make_handler(
             return (None, None, None, "last-reply"), None
         return _window_query(query)
 
+    def _low_confidence(row, tags=None) -> bool:
+        """Whether a session's mode or purpose is the catch-all a rule fell
+        back to, so the dashboard can show a chip on it (additive). A label
+        you set on the dashboard (``tags``) is yours from then on, even
+        before the next scan writes it to the session."""
+        tags = tags or {}
+        return classify.is_low_confidence(
+            row.get("mode") or "",
+            "override" if tags.get("mode") else row.get("mode_source") or "",
+            row.get("purpose") or "",
+            "override" if tags.get("purpose") else row.get("purpose_source") or "",
+        )
+
+    def _typical_piece() -> int:
+        """The median piece of work in ``coaching.json``, or 0 before it
+        is known."""
+        value = coaching.read(options.config_dir).get("typical_piece_tokens")
+        return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+    def _rating_facts(store, session_id):
+        """``(facts, builds)`` for a session's rating questions, worked out
+        from its stored transcripts (``ratings.session_facts``); ``(None,
+        [])`` when no top-level transcript is stored."""
+        from . import rebuild
+
+        corpus = rebuild.corpus_from_store(store, session_ids=[session_id])
+        bundle = next((b for b in corpus.sessions if b.top is not None), None)
+        if bundle is None:
+            return None, []
+        return ratings_mod.session_facts(bundle, _typical_piece()), ratings_mod.session_builds(bundle)
+
     def route_sessions(store, query, body):
         limit, err = _int_query(query, "limit", 50, minimum=0)
         if err is not None:
@@ -1880,9 +2074,11 @@ def make_handler(
         # on, so the day a chart column names filters to the same sessions
         # (null when the session has no timestamp).
         zone = discovery._zone(_config_tz(options.config_dir))
+        tags = store.all_tags()
         for row in rows:
             row["first_day"] = _local_day_or_none(row.get("first_ts"), zone)
             row["last_day"] = _local_day_or_none(row.get("last_ts"), zone)
+            row["low_confidence"] = _low_confidence(row, tags.get(row["id"]))
         return _ok(rows)
 
     def route_session(store, query, body):
@@ -1914,16 +2110,13 @@ def make_handler(
             rating_on = "dashboard_rating" in load_config(options.config_dir).capture.feedback
         except ConfigError:
             rating_on = False
+        result["low_confidence"] = _low_confidence(result, result["tags"])
         if rating_on:
-            result["feedback_questions"] = [
-                {
-                    "key": q.key,
-                    "question": q.question,
-                    "multi": q.multi,
-                    "options": [{"word": word, "label": label} for word, label, _text in q.options],
-                }
-                for q in capture_catalogue.FEEDBACK_QUESTIONS
-            ]
+            # The same questions /cg-feedback asks, filled and left out by
+            # the same facts (ratings.question_rows); counts and ids only.
+            facts, builds = _rating_facts(store, session_id)
+            result["feedback_facts"] = facts
+            result["feedback_questions"] = ratings_mod.question_rows(facts, builds)
         return _ok(result)
 
     def route_recache(store, query, body):
@@ -2126,16 +2319,18 @@ def make_handler(
 
     def route_set_feedback(store, query, body):
         """Your rating of a session (the /cg-feedback questions as
-        checkboxes): words from ``capture_catalogue.RATING_VOCAB`` only.
-        Nothing ticked clears it."""
+        checkboxes): words from ``capture_catalogue.RATING_VOCAB`` only,
+        and ``builds``, the plan and handoff answers for each plan build of
+        a session with two or more. Nothing ticked clears it."""
         session_id = query.get("id", "")
         if store.session(session_id) is None:
             return _not_found("session not found")
         if not isinstance(body, dict):
             return _bad_request("request body must be a JSON object")
-        unknown = sorted(set(body) - set(capture_catalogue.RATING_VOCAB))
+        known = (*capture_catalogue.RATING_VOCAB, "builds")
+        unknown = sorted(set(body) - set(known))
         if unknown:
-            return _bad_request(f"unknown field {', '.join(unknown)}; known: {', '.join(capture_catalogue.RATING_VOCAB)}")
+            return _bad_request(f"unknown field {', '.join(unknown)}; known: {', '.join(known)}")
         values: dict = {}
         for key, words in capture_catalogue.RATING_VOCAB.items():
             value = body.get(key)
@@ -2148,8 +2343,93 @@ def make_handler(
                 if value is not None and value not in words:
                     return _bad_request(f"'{key}' must be one of: {', '.join(words)}, or null")
                 values[key] = value
-        store.set_feedback(session_id, **values)
+        builds, reason = _plan_builds(body.get("builds"))
+        if reason is not None:
+            return _bad_request(reason)
+        store.set_feedback(session_id, builds=builds, **values)
         return _ok({"session_id": session_id, "feedback": store.feedback(session_id)})
+
+    def _plan_builds(value) -> tuple[list[dict], str | None]:
+        """The ``builds`` of a rating, checked: ``[{"build": 1, "plan":
+        word, "handoff": word}, ...]`` with each build once, from 1, and
+        the words those of the plan and handoff questions."""
+        if value is None:
+            return [], None
+        if not isinstance(value, list) or len(value) > _MAX_PLAN_BUILDS:
+            return [], f"'builds' must be a list of at most {_MAX_PLAN_BUILDS} plan builds"
+        out: list[dict] = []
+        for item in value:
+            if not isinstance(item, dict) or set(item) - {"build", "plan", "handoff"}:
+                return [], "each of 'builds' must be an object with build, plan and handoff"
+            number = item.get("build")
+            if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= _MAX_PLAN_BUILDS:
+                return [], f"'build' must be a whole number from 1 to {_MAX_PLAN_BUILDS}"
+            if any(number == held["build"] for held in out):
+                return [], f"plan build {number} is given twice"
+            clean = {"build": number}
+            for key in capture_catalogue.PER_BUILD_KEYS:
+                word = item.get(key)
+                if word is not None and word not in capture_catalogue.RATING_VOCAB[key]:
+                    return [], f"'{key}' must be one of: {', '.join(capture_catalogue.RATING_VOCAB[key])}, or null"
+                clean[key] = word
+            out.append(clean)
+        return out, None
+
+    # -- what you say about a tip, habit or recommendation card ----------------
+
+    def _tip_card_known(kind: str, item: str) -> bool:
+        """Whether ``item`` is a card of that kind: a tip hint or a
+        prompting habit, a playbook item, or a recommendation key (which
+        only needs its shape: the report it came from may be another
+        window's)."""
+        from .. import habits as habits_mod
+        from .. import prompting
+
+        if kind == "tip":
+            return item in capture_catalogue.TIP_HINT_TITLES or item in prompting.HABITS
+        if kind == "habit":
+            return item in habits_mod.ITEMS
+        return bool(_REC_KEY_RE.match(item))
+
+    def route_tip_feedback(store, query, body):
+        """What you said about each card so far, and the answers a card can
+        take."""
+        answers = [
+            {"kind": kind, "item": item, **row} for (kind, item), row in sorted(store.tip_feedback().items())
+        ]
+        options = [
+            {"word": word, "label": label, "description": text}
+            for word, label, text in capture_catalogue.TIP_CARD_OPTIONS
+        ]
+        return _ok({"answers": answers, "options": options})
+
+    def route_set_tip_feedback(store, query, body):
+        """Rate a tip, habit or recommendation card: ``{"kind", "item",
+        "answer"}`` with the answer one of ``capture_catalogue.
+        TIP_CARD_VOCAB``, or ``null`` to take it back. "Trying it" also
+        logs the day you started (``habit-log.jsonl``), which is a change
+        point for that habit. It is something you say: nothing in Claude
+        Code's own settings changes."""
+        if not isinstance(body, dict):
+            return _bad_request("request body must be a JSON object")
+        unknown = sorted(set(body) - {"kind", "item", "answer"})
+        if unknown:
+            return _bad_request(f"unknown field {', '.join(unknown)}; known: kind, item, answer")
+        kind, item, answer = body.get("kind"), body.get("item"), body.get("answer")
+        if kind not in capture_catalogue.TIP_CARD_KINDS:
+            return _bad_request(f"'kind' must be one of: {', '.join(capture_catalogue.TIP_CARD_KINDS)}")
+        if not isinstance(item, str) or not _REC_KEY_RE.match(item) or not _tip_card_known(kind, item):
+            return _bad_request(f"'item' must be the id of a {kind} card")
+        if answer is not None and answer not in capture_catalogue.TIP_CARD_VOCAB:
+            return _bad_request(f"'answer' must be one of: {', '.join(capture_catalogue.TIP_CARD_VOCAB)}, or null")
+        held = store.tip_feedback()
+        before = held.get((kind, item))
+        if answer is not None and before is None and len(held) >= _MAX_TIP_FEEDBACK:
+            return _bad_request(f"at most {_MAX_TIP_FEEDBACK} cards can hold an answer")
+        saved = store.set_tip_feedback(kind, item, answer)
+        if answer == "trying" and (before is None or before["answer"] != "trying"):
+            append_habit_log(options.config_dir, kind=kind, item=item, state="trying")
+        return _ok({"kind": kind, "item": item, "answer": answer, "set_at": saved["set_at"] if saved else None})
 
     # -- v0.3 profile routes -----------------------------------------------
 
@@ -2605,6 +2885,52 @@ def make_handler(
         if item is None:
             return _not_found("unknown CLAUDE.md file")
         return _ok({"period": period, **module.file_detail(item, units, period)})
+
+    def route_project_files(store, query, body):
+        """The project files your agents consume: the CLAUDE.md-family
+        files Claude Code loads, the files they import, and the files agents
+        read by habit, each with its size now, its change over about 30
+        days, who reads it and what it costs a month. Names are worked
+        out now from the project folders on disk and are never stored.
+        Text files come first; only they can be flagged (``reasons``), as
+        the Overview check covers the documents agents take in."""
+        from .. import claude_md_review, context_files
+
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        model = _get_report_model(*window, project)
+        data = model.context_files or {}
+        folders = _project_folders(project)
+        rows, local = claude_md_review.project_file_rows(
+            options.config_dir, data, projects=None if folders is None else list(folders)
+        )
+        flagged = {row["hash"]: row["reasons"] for row in context_files.check_rows(rows)}
+        units = _report_units(model)
+        shown = context_files.dearest(rows, PROJECT_FILES_SHOWN)
+        return _ok(
+            {
+                "period": _period_text(*window, name=query.get("window")),
+                "window_days": data.get("window_days") or context_files.MIN_WINDOW_DAYS,
+                "transcripts": data.get("transcripts") or {},
+                "total": len(rows),
+                "named": sum(1 for row in rows if row["name"]),
+                "truncated": local.truncated,
+                "files": [
+                    {
+                        **row,
+                        "reasons": flagged.get(row["hash"], []),
+                        "fixes": claude_md_review.project_file_fixes(row, units)
+                        if row["hash"] in flagged
+                        else [],
+                    }
+                    for row in shown
+                ],
+            }
+        )
 
     def route_skills(store, query, body):
         """Every skill Claude Code listed in the window: what it is (its
@@ -3307,6 +3633,7 @@ def make_handler(
         "/api/diagnostics": route_diagnostics,
         "/api/profile-schema": route_profile_schema,
         "/api/claude-md": route_claude_md,
+        "/api/project-files": route_project_files,
         "/api/skills": route_skills,
         "/api/impact": route_impact,
         "/api/backtest": route_backtest,
@@ -3315,6 +3642,7 @@ def make_handler(
         "/api/setup": route_setup,
         "/api/setup/status": route_setup_status,
         "/api/capture": route_capture,
+        "/api/tip-feedback": route_tip_feedback,
         "/api/report.json": _render_report("application/json", lambda model: render_json(model)),
         # Finding 22: charset was missing on the two text-ish renderers
         # (application/json has no encoding ambiguity, but text/markdown
@@ -3338,6 +3666,7 @@ def make_handler(
         "/api/whatif": route_whatif,
         "/api/predictions/seen": route_predictions_seen,
         "/api/recommendations/ignore": route_recommendations_ignore,
+        "/api/tip-feedback": route_set_tip_feedback,
     }
     post_patterns: tuple[tuple[re.Pattern, Callable], ...] = (
         (_SESSION_TAGS_RE, route_set_tag),
@@ -3408,39 +3737,25 @@ def make_handler(
         # -- static files --------------------------------------------------
 
         def _serve_index(self, *, head_only: bool = False) -> None:
-            index_path = static_dir / "index.html"
+            index_path = static_dir.joinpath("index.html")
             if static_dir.is_dir() and index_path.is_file():
                 try:
                     page = index_path.read_bytes().replace(_COMMAND_META, _command_meta())
                     self._write_bytes(200, "text/html", page, head_only=head_only)
                     return
-                except OSError:
+                except (OSError, KeyError):
                     pass
             self._write_text(200, "text/html", _PLACEHOLDER_INDEX_HTML, head_only=head_only)
 
         def _serve_static(self, raw_name: str, *, head_only: bool = False) -> None:
-            name = urllib.parse.unquote(raw_name)
-            # A dot-file or dot-folder (an editor's or a tool's own cache,
-            # which may hold local paths) is never part of the UI.
-            if not name or any(part.startswith(".") for part in Path(name).parts):
+            found = _static_file(static_dir, urllib.parse.unquote(raw_name))
+            if found is None:
                 self._write_json(*_not_found(), head_only=head_only)
                 return
-            try:
-                base = static_dir.resolve()
-                candidate = (static_dir / name).resolve()
-            except (OSError, ValueError, RuntimeError):
-                self._write_json(*_not_found(), head_only=head_only)
-                return
-            if candidate != base and base not in candidate.parents:
-                self._write_json(*_not_found(), head_only=head_only)
-                return
-            if not candidate.is_file():
-                self._write_json(*_not_found(), head_only=head_only)
-                return
-            content_type = _STATIC_CONTENT_TYPES.get(candidate.suffix.lower())
+            candidate, parts = found
+            content_type = _STATIC_CONTENT_TYPES.get(os.path.splitext(parts[-1])[1].lower())
             if content_type is None:
-                content_type, _encoding = mimetypes.guess_type(str(candidate))
-            parts = candidate.relative_to(base).parts
+                content_type, _encoding = mimetypes.guess_type(parts[-1])
             pinned = len(parts) > 1 and parts[0] in _PINNED_STATIC_DIRS
             self._write_bytes(
                 200,

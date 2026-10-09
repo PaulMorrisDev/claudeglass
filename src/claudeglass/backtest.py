@@ -88,7 +88,10 @@ _NEGLIGIBLE_USD = 0.01
 _AS_ESTIMATED_LOW = 0.5
 _AS_ESTIMATED_HIGH = 2.0
 
-_SIGNIFICANT_LABELS = ("lower", "possibly_lower", "higher", "possibly_higher")
+#: The ratio test's readings that say the measure moved: ``impact``'s own
+#: set, the one its card's verdict (``impact._verdict``) says a fall or a
+#: rise for.
+_SIGNIFICANT_LABELS = impact.SIGNIFICANT_LABELS
 
 
 def _point_settings_keys(point: ChangePoint) -> list[tuple[str | None, str]]:
@@ -194,7 +197,13 @@ def _judge_row(
     if row["before_value"] is None or row["after_value"] is None or row["label_key"] == "too_little_data":
         return _Judgement(None, None, None, False)
     measured_usd = round((row["before_value"] - row["after_value"]) * row["after_n"], 6)
-    verdict = _verdict(prediction["predicted_usd"], measured_usd, row["label_key"])
+    # An estimate of no real effect is read as the Changes card reads the
+    # row: a move under the noise floor is no clear change however sure the
+    # test is of it, so a wobble isn't a larger effect. Any other estimate is
+    # judged on the test's own reading, so a small saving that came in as
+    # estimated isn't called smaller.
+    reading = impact._reading(row) if abs(prediction["predicted_usd"]) < _NEGLIGIBLE_USD else row["label_key"]
+    verdict = _verdict(prediction["predicted_usd"], measured_usd, reading)
     return _Judgement(verdict, measured_usd, row["change_pct"], True)
 
 

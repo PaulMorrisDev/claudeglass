@@ -100,7 +100,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Callable, Iterable
 
-from . import capture_catalogue, known_savers
+from . import capture_catalogue
+from . import events as events_mod
 from .fixes import _model_family
 from .model import Column, EventKind, Section, Table, TranscriptResult, Turn, scheduled_main_session
 from .pricing import Pricing, effective_rates, price_turn
@@ -162,8 +163,9 @@ RESULT_WORDS = capture_catalogue.RESULT_WORDS
 _SKIPS_CLAUDE_MD = frozenset({"Explore", "Plan"})
 
 _SHELL_TOOLS = ("Bash", "PowerShell")
-#: Tools whose call is the agent's answer: a run that ends on one finished.
-_ANSWER_TOOLS = frozenset({"StructuredOutput"})
+#: Tools whose call is the agent's answer: a run that ends on one finished
+#: (``StructuredOutput``, a workflow agent's; ``SubagentHandback``).
+_ANSWER_TOOLS = frozenset(capture_catalogue.AGENT_ANSWER_TOOLS)
 
 #: Outcome statuses, normalised.
 _OUTCOME = {
@@ -365,21 +367,25 @@ def run_facts(
                 run.cost += price_turn(turn, pricing.resolve_model(turn.model)).total
     run.files_edited = len(edited_before | edited_this_round)
     kinds = Counter(event.kind for event in result.events)
-    # A token saver's redirect is tagged as a denial too, but nobody
-    # turned the call down (known_savers.REDIRECT_DENIAL_KIND).
-    run.denials = kinds[EventKind.TOOL_DENIAL] - sum(
+    # Only a call you or a deny rule turned down is a denial of yours: not
+    # a token saver's redirect, a hook's or the classifier's block, a plan
+    # you sent back, a question you declined or a dialog you closed (see
+    # events.denial_bucket_of). A reply you stopped is an interrupt that
+    # was you stopping it (events.is_stop).
+    run.denials = sum(
         1 for event in result.events
-        if event.kind == EventKind.TOOL_DENIAL and event.subkind == known_savers.REDIRECT_DENIAL_KIND
+        if event.kind == EventKind.TOOL_DENIAL and events_mod.denial_bucket_of(event) == "refused"
     )
-    run.interrupts = kinds[EventKind.INTERRUPT]
+    run.interrupts = sum(1 for event in result.events if events_mod.is_stop(event))
     run.api_errors = kinds[EventKind.API_ERROR]
     run.fallbacks = kinds[EventKind.MODEL_FALLBACK]
     run.compactions = kinds[EventKind.COMPACT_BOUNDARY]
     run.scheduled = scheduled_main_session(result)
     if run.is_agent:
         # Cut off: stopped, never replied, or the last reply asked for a
-        # tool and nothing came after it. A final StructuredOutput call is
-        # a workflow agent's answer, not a cut-off. The last reply's own
+        # tool and nothing came after it. A final answer-tool call
+        # (StructuredOutput, SubagentHandback) is the agent's answer, not
+        # a cut-off. The last reply's own
         # stop_reason is often not recorded, so the tool calls decide.
         last = next((turn for turn in reversed(result.turns) if not turn.is_synthetic), None)
         if meta.stopped_by_user or last is None:

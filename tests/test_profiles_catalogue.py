@@ -5,6 +5,7 @@ profiles and :func:`suggest`'s deterministic archetype/purpose mapping.
 from __future__ import annotations
 
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,24 @@ def test_every_catalogue_profile_round_trips_through_dump_and_load(profile_id):
 
 
 def test_get_returns_none_for_unknown_id():
+    assert get("not-a-real-profile") is None
+
+
+def test_the_catalogue_is_read_from_inside_a_zip(tmp_path, monkeypatch):
+    """The single-file .pyz keeps the catalogue inside a zip, where a path
+    built from ``__file__`` opens nothing: the files are read through
+    ``importlib.resources`` so a zip serves them like a folder."""
+    from claudeglass.profiles import catalogue as catalogue_mod
+
+    on_disk = list_profiles()
+    folder = catalogue_mod._catalogue_dir()
+    archive = tmp_path / "catalogue.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for profile_id in CATALOGUE_IDS:
+            zf.writestr(f"catalogue/{profile_id}.toml", folder.joinpath(f"{profile_id}.toml").read_bytes())
+    monkeypatch.setattr(catalogue_mod, "_catalogue_dir", lambda: zipfile.Path(archive, "catalogue/"))
+    assert list_profiles() == on_disk
+    assert get("plan-then-build") == next(p for p in on_disk if p.id == "plan-then-build")
     assert get("not-a-real-profile") is None
 
 
@@ -212,3 +231,14 @@ def test_a_reported_task_beats_a_guessed_purpose_but_not_a_structural_one():
     # A task no profile covers (not even in the task vocabulary) falls
     # through to the next task, then the purposes.
     assert suggest("chat-only", [], ["not-a-real-task", "chat"]) == "interactive-chat"
+
+
+def test_overnight_batch_notes_describe_the_unattended_night_mode_not_the_old_span_rule():
+    """The profile is justified by the "overnight" mode, which now means
+    Claude worked on its own at night while you were away. The old rule
+    (a long span with a gap over an hour) is gone from its notes."""
+    notes = get("overnight-batch").notes
+    assert "two hours or more at night while you were away" in notes
+    assert "30% of its working time was at night" in notes
+    for old in ("span > 4 hours", "maximum human gap", "60 minutes"):
+        assert old not in notes, old

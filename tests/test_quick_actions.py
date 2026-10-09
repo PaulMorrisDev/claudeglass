@@ -12,7 +12,7 @@ from types import SimpleNamespace as NS
 
 import pytest
 
-from claudeglass import agent_models, capture_catalogue, discovery, known_savers, quality
+from claudeglass import agent_models, capture_catalogue, discovery, known_savers, quality, waste
 from claudeglass import quick_actions as qa
 from claudeglass.fixes import PROMPT_RESTART, SCOPE_NOTE, RESTART_NOTE
 from claudeglass.model import Recommendation
@@ -37,11 +37,14 @@ def _ctx(tmp_path, model=None, **kw):
     (tmp_path / ".claude" / "projects").mkdir(exist_ok=True)
     return qa.Context(
         model=model if model is not None else _full_model(),
-        units=UNITS,
+        units=kw.get("units", UNITS),
         period="over the last 14 days",
         config_dir=config_dir,
         effective=kw.get("effective", {}),
         effective_agents=kw.get("effective_agents", {}),
+        skip_keys=kw.get("skip_keys", frozenset()),
+        since_ts=kw.get("since_ts"),
+        until_ts=kw.get("until_ts"),
     )
 
 
@@ -494,6 +497,26 @@ def test_compaction_says_no_window_is_suggested_when_real_summaries_pass_the_lim
     assert "A larger window can't be tested" in result["summary"]
 
 
+def test_compaction_quotes_the_sessions_that_summarised_three_times_or_more(tmp_path):
+    """The compaction-cost rows of the Compactions summary reach the check's answer."""
+    windows = NS(key="compaction_sim", tables=[_table("compaction_sim_by_window", [
+        {"window": 300000, "compactions_per_session": 2.0, "cost": 75.0, "delta_pct": -25.0},
+        {"window": "none", "compactions_per_session": 1.0, "cost": 100.0, "delta_pct": 0.0},
+    ])])
+    summary = NS(key="compactions", tables=[_table("compactions_summary", [
+        {"metric": "Sessions with 3+ compactions", "value": 4},
+        {"metric": "Main-session cost in sessions with 3+ compactions (USD)", "value": 30.0},
+        {"metric": "Share of main-session cost in sessions with 3+ compactions", "value": 37.4},
+    ])])
+    model = NS(sections=[windows, summary], context_files={}, recommendations=[])
+    result = qa.run("compaction", _ctx(tmp_path, model=model, effective={"autoCompactWindow": 300000}))
+    assert result["status"] == "ok"
+    assert result["summary"].endswith(" 4 sessions summarised 3 times or more, with 37% of the main-session cost.")
+    model.sections = [windows]
+    plain = qa.run("compaction", _ctx(tmp_path, model=model, effective={"autoCompactWindow": 300000}))
+    assert "summarised 3 times or more" not in plain["summary"]
+
+
 def test_habits_are_tips_not_settings(tmp_path):
     """A habit rec with no prompt fix (an informational-only workflow
     id, see fixes._WORKFLOW_EXPLAINER) surfaces as a plain tip."""
@@ -510,18 +533,17 @@ def test_habits_are_tips_not_settings(tmp_path):
 
 
 def test_a_rec_whose_fix_already_has_a_prompt_is_not_also_a_tip(tmp_path):
-    """UX: a rec like wasted-turns already gets a fix card with a prompt
+    """UX: a rec like long-tool-waits already gets a fix card with a prompt
     (fixes._WORKFLOW_PROMPTS) -- listing it as a tip too would say the
     same finding twice."""
     model = _full_model()
     model.recommendations = [
-        Recommendation(id="wasted-turns", title="A material share of spend went to turns with no benefit",
-                        action="10.0% of priced cost went to turns whose output was never used."),
+        Recommendation(id="long-tool-waits", title="Tools often wait on you", action="Pre-approve routine tools."),
     ]
     result = qa.run("habits", _ctx(tmp_path, model=model))
     assert result["tips"] == []
     [fix] = result["fixes"]
-    assert fix["prompt"] and "flag it before you start rather than after" in fix["prompt"]
+    assert fix["prompt"]
 
 
 def test_markdown_carries_the_table_tips_and_fixes(tmp_path):
@@ -830,8 +852,11 @@ def _waste_model(*, recommendations=None, **tables) -> NS:
 
 
 _PLAYBOOK = [
-    {"habit": key, "saving": saving, "evidence": f"{key} evidence.", "example": f"{key} example.", "source": "inferred"}
-    for key, saving in (("tool_loops", 2.0), ("short_reports", 1.0), ("name_files", 0.5), ("quiet_output", 0.25))
+    {
+        "habit": key, "saving": saving, "saving_total": 2 * saving,
+        "evidence": f"{key} evidence.", "example": f"{key} example.", "source": "inferred",
+    }
+    for key, saving in (("targeted_checks", 2.0), ("short_reports", 1.0), ("name_files", 0.5), ("quiet_output", 0.25))
 ]
 
 
@@ -843,10 +868,10 @@ def test_habits_shows_the_top_of_the_playbook_as_tips(tmp_path):
     assert result["status"] == "act" and "{{page:habits}} has the rest." in result["summary"]
     tips = result["tips"][-qa.PLAYBOOK_TIPS:]
     assert [t["title"] for t in tips] == [
-        "Stop retrying a failing command", "Ask agents for short reports", "Name the files you already know",
+        "Check each change, and run the full suite once", "Ask agents for short reports", "Name the files you already know",
     ]
     assert tips[0]["text"] == (
-        f"tool_loops evidence. Try: tool_loops example. About {qa._money(_ctx(tmp_path), 2.0)} a week (inferred)."
+        f"targeted_checks evidence. Try: targeted_checks example. About {qa._money(_ctx(tmp_path), 2.0)} a week (inferred)."
     )
 
 
@@ -858,11 +883,11 @@ def test_playbook_tips_skip_a_habit_already_covered_by_a_fired_recommendation(tm
     model = _full_model()
     model.recommendations = []
     rows = [dict(row, covered_by="") for row in _PLAYBOOK]
-    rows[0]["covered_by"] = "High effort is being spent on easy work"  # tool_loops, the top saving
+    rows[0]["covered_by"] = "High effort is being spent on easy work"  # targeted_checks, the top saving
     model.sections.append(_habits_tables(habits_playbook=rows))
     result = qa.run("habits", _ctx(tmp_path, model=model))
     tips = result["tips"][-qa.PLAYBOOK_TIPS:]
-    # tool_loops is skipped; the next 3 rows take its place.
+    # targeted_checks is skipped; the next 3 rows take its place.
     assert [t["title"] for t in tips] == [
         "Ask agents for short reports", "Name the files you already know", "Keep tool output small",
     ]
@@ -875,7 +900,7 @@ def test_playbook_tips_pick_at_most_one_habit_per_theme(tmp_path):
     model = _full_model()
     model.recommendations = []
     rows = [dict(row) for row in _PLAYBOOK]
-    rows[0]["theme"] = "delegation"  # tool_loops, saving 2.0
+    rows[0]["theme"] = "delegation"  # targeted_checks, saving 2.0
     rows[1]["theme"] = "delegation"  # short_reports, saving 1.0 -- same theme, skipped
     rows[2]["theme"] = "breakdown"  # name_files, saving 0.5
     rows[3]["theme"] = "information"  # quiet_output, saving 0.25
@@ -883,7 +908,7 @@ def test_playbook_tips_pick_at_most_one_habit_per_theme(tmp_path):
     result = qa.run("habits", _ctx(tmp_path, model=model))
     tips = result["tips"][-qa.PLAYBOOK_TIPS:]
     assert [t["title"] for t in tips] == [
-        "Stop retrying a failing command", "Name the files you already know", "Keep tool output small",
+        "Check each change, and run the full suite once", "Name the files you already know", "Keep tool output small",
     ]
 
 
@@ -894,11 +919,21 @@ def test_playbook_tips_use_the_rows_own_title_when_present(tmp_path):
     model = _full_model()
     model.recommendations = []
     rows = [dict(row, title="") for row in _PLAYBOOK]
-    rows[0]["title"] = "A custom title for tool_loops"
+    rows[0]["title"] = "A custom title for targeted_checks"
     model.sections.append(_habits_tables(habits_playbook=rows))
     result = qa.run("habits", _ctx(tmp_path, model=model))
     tips = result["tips"][-qa.PLAYBOOK_TIPS:]
-    assert tips[0]["title"] == "A custom title for tool_loops"
+    assert tips[0]["title"] == "A custom title for targeted_checks"
+
+
+def test_a_playbook_tip_on_a_subscription_says_the_period_on_the_list_price_equivalent(tmp_path):
+    """Without a reading of the weekly limit the amount is a list-price
+    equivalent, and a week's saving still says it is a week's."""
+    model = _full_model()
+    model.recommendations = []
+    model.sections.append(_habits_tables(habits_playbook=_PLAYBOOK))
+    result = qa.run("habits", _ctx(tmp_path, model=model, units=Units(billing_mode="subscription", currency="USD")))
+    assert "2.00 USD list-price equivalent a week" in result["tips"][0]["text"]
 
 
 # -- Habits card: who blocked it, and redirects aren't waste --------------------
@@ -912,21 +947,36 @@ _BLOCKED_BY = [
 ]
 
 
-def test_habits_replaces_the_blocked_row_with_the_blocked_by_breakdown(tmp_path):
-    model = _waste_model(
-        waste_by_cause=[
-            {"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."},
-            {"cause": "blocked", "turns": 5, "cost_usd": 3.0, "lever": "Put the rule a hook enforces..."},
-            {"cause": "redirected", "turns": 4, "cost_usd": 1.0, "lever": "Not waste: a token saver's own hook..."},
-        ],
-        waste_blocked_by=_BLOCKED_BY,
-    )
-    result = qa.run("habits", _ctx(tmp_path, model=model))
+_WASTE_BY_CAUSE = [
+    {"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."},
+    {"cause": "blocked", "turns": 5, "cost_usd": 3.0, "lever": "Put the rule a hook enforces..."},
+    {"cause": "redirected", "turns": 4, "cost_usd": 1.0, "lever": "Not waste: a token saver's own hook..."},
+    {"cause": "interrupt", "turns": 3, "cost_usd": 0.75, "lever": "Batch instructions."},
+    {"cause": "tool-denial", "turns": 0, "cost_usd": 0.0, "lever": "Allow it."},
+]
+
+
+def test_failed_calls_replaces_the_blocked_row_with_the_blocked_by_breakdown(tmp_path):
+    model = _waste_model(waste_by_cause=_WASTE_BY_CAUSE, waste_blocked_by=_BLOCKED_BY)
+    result = qa.run("failed-calls", _ctx(tmp_path, model=model))
     labels = [row[0] for row in result["table"]["rows"]]
     assert "tool-error" in labels
     assert "blocked" not in labels and "redirected" not in labels
     assert "blocked: claude-implementer, by Claude Code's worktree guard" in labels
     assert "redirected by tokensave (not waste)" in labels
+    # The replies that went nowhere for another reason stay with the habits.
+    assert "interrupt" not in labels
+
+
+def test_the_failed_and_blocked_rows_are_not_in_the_habits_check(tmp_path):
+    """The Work habits row on the Overview was built from these rows (the
+    tool errors and every blocker's blocked replies); they have a check of
+    their own, and the habits check keeps the causes that are about how
+    you work."""
+    model = _waste_model(waste_by_cause=_WASTE_BY_CAUSE, waste_blocked_by=_BLOCKED_BY)
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert [row[0] for row in result["table"]["rows"]] == ["interrupt"]
+    assert "interrupt" not in [row[0] for row in qa.run("failed-calls", _ctx(tmp_path, model=model))["table"]["rows"]]
 
 
 def test_a_window_of_only_redirects_reads_as_fine_not_a_problem(tmp_path):
@@ -942,10 +992,17 @@ def test_a_window_of_only_redirects_reads_as_fine_not_a_problem(tmp_path):
              "tokens": 8_000, "lever": "Not waste: tokensave sent these calls..."},
         ],
     )
-    result = qa.run("habits", _ctx(tmp_path, model=model))
+    result = qa.run("failed-calls", _ctx(tmp_path, model=model))
     assert result["status"] == "ok"
     assert "not a problem" in result["summary"]
     assert "tokensave" in result["summary"]
+    assert qa.run("habits", _ctx(tmp_path, model=model))["status"] == "no_data"
+
+
+_WASTED_TURNS = Recommendation(
+    id="wasted-turns", severity="advice", title="A material share of spend went to turns with no benefit",
+    action="10.0% of priced cost went to turns whose output was never used.",
+)
 
 
 def test_the_act_summary_says_the_costliest_cause_found(tmp_path):
@@ -954,14 +1011,13 @@ def test_the_act_summary_says_the_costliest_cause_found(tmp_path):
             Recommendation(id="cache-read-dominance", title="Cache reads dominate cost", action="Batch work."),
         ],
         waste_by_cause=[
-            {"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."},
-            {"cause": "blocked", "turns": 5, "cost_usd": 3.0, "lever": "Put the rule a hook enforces..."},
+            {"cause": "interrupt", "turns": 2, "cost_usd": 0.5, "lever": "Batch instructions."},
+            {"cause": "max-turns", "turns": 5, "cost_usd": 3.0, "lever": "Raise the budget."},
         ],
-        waste_blocked_by=_BLOCKED_BY[:1],
     )
     result = qa.run("habits", _ctx(tmp_path, model=model))
     assert result["status"] == "act"
-    assert "The costliest: blocked: claude-implementer, by Claude Code's worktree guard" in result["summary"]
+    assert "The costliest: max-turns" in result["summary"]
 
 
 def test_a_problem_that_did_not_clear_the_bar_still_says_its_cost(tmp_path):
@@ -969,11 +1025,217 @@ def test_a_problem_that_did_not_clear_the_bar_still_says_its_cost(tmp_path):
     wasted-reply cost, so the "ok" summary should say so instead of a
     blanket "no habit stands out"."""
     model = _waste_model(
-        waste_by_cause=[{"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths first."}],
+        waste_by_cause=[{"cause": "interrupt", "turns": 2, "cost_usd": 0.5, "lever": "Batch instructions."}],
     )
     result = qa.run("habits", _ctx(tmp_path, model=model))
     assert result["status"] == "ok"
     assert "went to replies that went nowhere" in result["summary"]
+
+
+# -- Failed and blocked tool calls ----------------------------------------------
+
+
+def test_failed_calls_is_its_own_check_after_habits_and_claims_the_wasted_turns_finding(tmp_path):
+    ids = list(qa.CHECK_IDS)
+    assert ids.index("failed-calls") == ids.index("habits") + 1
+    check = next(c for c in qa.CHECKS if c.id == "failed-calls")
+    assert check.rule_ids == ("wasted-turns",)
+    # One finding is one check's: the habits check no longer claims it.
+    assert "wasted-turns" not in next(c for c in qa.CHECKS if c.id == "habits").rule_ids
+
+
+def test_failed_calls_says_what_the_failed_and_blocked_calls_cost_and_offers_its_own_fix(tmp_path):
+    model = _waste_model(
+        recommendations=[_WASTED_TURNS],
+        waste_by_cause=_WASTE_BY_CAUSE,
+        waste_blocked_by=_BLOCKED_BY,
+    )
+    result = qa.run("failed-calls", _ctx(tmp_path, model=model))
+    assert result["id"] == "failed-calls" and result["rule_ids"] == ["wasted-turns"]
+    assert result["status"] == "act"
+    # 2 tool errors and the 5 blocked replies; the redirects are on purpose.
+    assert result["summary"].startswith("7 replies went to failed or blocked tool calls over the last 14 days")
+    assert "The costliest: blocked: claude-implementer, by Claude Code's worktree guard" in result["summary"]
+    assert "{{page:spend/savings}}" in result["summary"]
+    own, found = result["fixes"]
+    assert set(own) >= FIX_KEYS and own["key"] is None and own["note"] == "scope"
+    assert own["title"] == waste.CALL_FAILURE_FIX["title"]
+    assert own["prompt"].startswith(waste.CALL_FAILURE_FIX["prompt"]) and "AskUserQuestion" in own["prompt"]
+    assert [heading for heading, _ in own["explainer"]] == [
+        "Why it's suggested", "Where and who it affects", "Trade-off", "How to undo it",
+    ]
+    # The finding's own fix follows it, and is not also a tip.
+    assert "flag it before you start rather than after" in found["prompt"]
+    assert result["tips"] == []
+
+
+def test_failed_calls_is_fine_when_nothing_cleared_the_bar_and_says_so_when_nothing_failed(tmp_path):
+    quiet = _waste_model(waste_by_cause=[{"cause": "tool-error", "turns": 2, "cost_usd": 0.5, "lever": "Check paths."}])
+    result = qa.run("failed-calls", _ctx(tmp_path, model=quiet))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert "went to replies lost to failed or blocked tool calls over the last 14 days, but not enough to flag" in result["summary"]
+    none = _waste_model(waste_by_cause=[{"cause": "interrupt", "turns": 2, "cost_usd": 0.5, "lever": "Batch."}])
+    result = qa.run("failed-calls", _ctx(tmp_path, model=none))
+    assert result["status"] == "ok"
+    assert result["summary"] == "No reply was lost to a failed or blocked tool call over the last 14 days."
+    # No waste section at all: too little to say.
+    empty = NS(sections=[], context_files={}, recommendations=[])
+    assert qa.run("failed-calls", _ctx(tmp_path, model=empty))["status"] == "no_data"
+
+
+def test_failed_calls_does_not_claim_waste_that_was_not_a_failed_call(tmp_path):
+    """``wasted-turns`` fires on every wasted reply, interrupts included, so
+    when the waste is all interrupts the check must not say a call failed."""
+    model = _waste_model(
+        recommendations=[_WASTED_TURNS],
+        waste_by_cause=[{"cause": "interrupt", "turns": 40, "cost_usd": 30.0, "lever": "Batch instructions."}],
+    )
+    result = qa.run("failed-calls", _ctx(tmp_path, model=model))
+    assert result["status"] == "act"
+    assert result["summary"].startswith(
+        "Replies that went nowhere cost a material share of spend over the last 14 days. "
+        "Most of that was not from failed or blocked tool calls."
+    )
+
+
+# -- The Overview's Work habits row: rework lead, playbook saving, item -------------
+
+
+def _rework_model(count, total, *, item="pieces"):
+    model = _full_model()
+    model.recommendations = []
+    text = (
+        f"{count} of your {total} pieces of work needed changes after Claude delivered them. "
+        "That rework cost $1.00 over the last 14 days. 50% came from requests that left something out."
+    )
+    rows = [{
+        "item": item, "text": text, "count": count, "total": total, "share": 100.0 * count / total,
+        "cost": 1.0, "tokens": 1000, "period": "over the last 14 days",
+    }]
+    model.sections.append(NS(key="rework", tables=[_table("rework_headline", rows)]))
+    return model
+
+
+@pytest.mark.parametrize(
+    ("count", "total", "leads"),
+    [
+        (1, 5, True),     # exactly 20% of exactly 5 pieces
+        (2, 10, True),
+        (4, 19, True),    # 21%
+        (3, 4, False),    # 75%, but under 5 pieces
+        (1, 6, False),    # 17% of 6
+        (4, 21, False),   # 19% of 21
+        (0, 5, False),
+    ],
+)
+def test_the_rework_headline_leads_at_a_fifth_of_five_or_more_pieces(tmp_path, count, total, leads):
+    result = qa.run("habits", _ctx(tmp_path, model=_rework_model(count, total)))
+    if not leads:
+        assert result["headline"] is None and result["item"] is None
+        assert result["status"] == "no_data"
+        return
+    sentence = f"{count} of your {total} pieces of work needed changes after Claude delivered them."
+    # The first sentence only: the cost and the causes are on the Work habits page.
+    assert result["headline"] == sentence
+    assert result["item"] == qa.REWORK_ITEM == "rework"
+    assert result["status"] == "act"
+    assert result["summary"].startswith(sentence + " 1 way of working cost tokens over the last 14 days.")
+
+
+def test_requests_in_sessions_that_were_not_cut_into_pieces_never_lead(tmp_path):
+    result = qa.run("habits", _ctx(tmp_path, model=_rework_model(10, 10, item="requests")))
+    assert result["headline"] is None and result["status"] == "no_data"
+
+
+def test_the_row_keeps_its_current_lead_when_too_little_was_reworked(tmp_path):
+    """Under the threshold the check answers as it did: no headline, and
+    the item to open is the top habit worth trying."""
+    model = _rework_model(1, 6)
+    model.sections.append(_habits_tables(habits_playbook=_PLAYBOOK))
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["headline"] is None and result["status"] == "act"
+    assert result["item"] == "targeted_checks"
+    assert result["summary"].startswith("3 ways of working cost tokens")
+    # Over it, the headline leads and the rework section is the item.
+    model = _rework_model(2, 6)
+    model.sections.append(_habits_tables(habits_playbook=_PLAYBOOK))
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["headline"].startswith("2 of your 6 pieces") and result["item"] == "rework"
+    assert result["summary"].startswith("2 of your 6 pieces of work needed changes after Claude delivered them. 4 ways")
+
+
+def test_playbook_tips_carry_their_habit_for_the_link_to_its_card(tmp_path):
+    model = _full_model()
+    model.recommendations = []
+    model.sections.append(_habits_tables(habits_playbook=_PLAYBOOK))
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert [tip["habit"] for tip in result["tips"]] == ["targeted_checks", "short_reports", "name_files"]
+    assert result["item"] == "targeted_checks"
+
+
+_HABIT_REC = Recommendation(
+    id="long-tool-waits", key="long-tool-waits", severity="advice", title="Tools often wait on you",
+    action="Pre-approve routine tools.", saving_usd=4.0,
+)
+
+
+def _saving_model(*, covered=True):
+    """One habit recommendation saving 4.00 over the window, and a playbook
+    of 2.00, 1.00, 0.50 and 0.25 a week: the top one covered by a fired
+    rule, so ``apply_covered_by`` left it with no saving of its own."""
+    model = _full_model()
+    model.recommendations = [_HABIT_REC]
+    rows = [dict(row, covered_by="") for row in _PLAYBOOK]
+    if covered:
+        rows[0].update(covered_by="Tools often wait on you", saving=None, saving_total=None)
+    model.sections.append(_habits_tables(habits_playbook=rows))
+    return model
+
+
+def test_the_habits_saving_includes_the_playbook_saving_over_the_window(tmp_path):
+    two_weeks = dict(since_ts=0.0, until_ts=14 * 86400.0)
+    ctx = _ctx(tmp_path, model=_saving_model(), **two_weeks)
+    result = qa.run("habits", ctx)
+    # The recommendation's 4.00, and the habits it doesn't cover: 3.50 over the window.
+    assert result["saving_usd"] == pytest.approx(4.0 + 1.75 * 2)
+    assert result["saving"] == f"{qa._money(ctx, 7.5, period=True, prefix='About ')} if you change these habits."
+    assert result["saving"] == "About 7.50 USD over the last 14 days if you change these habits."
+    # A covered habit is in the recommendation's saving already: uncovered, it adds its 2.00 a week.
+    both = qa.run("habits", _ctx(tmp_path, model=_saving_model(covered=False), **two_weeks))
+    assert both["saving_usd"] == pytest.approx(4.0 + 3.75 * 2)
+
+
+def test_the_playbook_saving_is_its_own_total_whatever_the_window(tmp_path):
+    """Each habit adds what it would have saved over the window
+    (``saving_total``), so a window longer or shorter than the sessions it
+    holds neither scales it up nor cuts it down."""
+    for window in ({}, dict(since_ts=0.0, until_ts=86400.0), dict(since_ts=0.0, until_ts=90 * 86400.0)):
+        result = qa.run("habits", _ctx(tmp_path, model=_saving_model(), **window))
+        assert result["saving_usd"] == pytest.approx(4.0 + 3.5)
+
+
+def test_an_ignored_recommendation_adds_nothing_to_the_habits_saving(tmp_path):
+    ctx = _ctx(tmp_path, model=_saving_model(), since_ts=0.0, until_ts=7 * 86400.0, skip_keys=frozenset({"long-tool-waits"}))
+    assert qa.run("habits", ctx)["saving_usd"] == pytest.approx(3.5)
+
+
+def test_a_habits_check_with_no_saving_says_none(tmp_path):
+    model = _full_model()
+    model.recommendations = [Recommendation(id="cache-read-dominance", title="Cache reads dominate cost", action="Batch work.")]
+    result = qa.run("habits", _ctx(tmp_path, model=model))
+    assert result["status"] == "act" and result["saving_usd"] is None and result["saving"] == ""
+
+
+def test_the_list_carries_what_the_overview_row_needs(tmp_path):
+    rows = {row["id"]: row for row in qa.run_all(_ctx(tmp_path, model=_saving_model(), since_ts=0.0, until_ts=14 * 86400.0))}
+    habits = rows["habits"]
+    assert habits["saving_usd"] == pytest.approx(7.5) and habits["saving"].startswith("About 7.50 USD over the last 14 days")
+    assert habits["headline"] is None and habits["item"] == "short_reports"
+    # Every other check answers with the four fields empty.
+    for check_id, row in rows.items():
+        assert {"headline", "item", "saving_usd", "saving"} <= set(row), check_id
+        if check_id != "habits":
+            assert (row["headline"], row["item"], row["saving_usd"], row["saving"]) == (None, None, None, ""), check_id
 
 
 def test_skills_late_or_not_needed_become_tips(tmp_path):
@@ -990,11 +1252,20 @@ def test_skills_late_or_not_needed_become_tips(tmp_path):
 
 
 def test_tool_output_says_to_stop_a_failing_command_sooner(tmp_path):
+    """The count comes from the waste summary and is never priced: no amount is quoted."""
     model = _full_model()
-    model.sections.append(_habits_tables(habits_tool_output=[{"tool": "loops", "loops": 4, "cost": 1.2}]))
+    model.sections.append(_waste_tables(waste_summary=[{"metric": "all", "failed_command_loops": 4}]))
     tips = qa.run("tool-output", _ctx(tmp_path, model=model))["tips"]
     tip = next(t for t in tips if t["title"] == "Stop a failing command sooner")
-    assert tip["text"].startswith("4 commands failed three or more times within one message")
+    assert tip["text"].startswith("4 commands failed three or more times within one message.")
+    assert "USD" not in tip["text"] and "$" not in tip["text"]
+
+
+def test_tool_output_has_no_failing_command_tip_without_repeated_failures(tmp_path):
+    model = _full_model()
+    model.sections.append(_waste_tables(waste_summary=[{"metric": "all", "failed_command_loops": 0}]))
+    tips = qa.run("tool-output", _ctx(tmp_path, model=model))["tips"]
+    assert not [t for t in tips if t["title"] == "Stop a failing command sooner"]
 
 
 def test_quality_tells_you_what_came_before_work_you_said_missed(tmp_path):
@@ -1010,16 +1281,16 @@ def test_quality_tells_you_what_came_before_work_you_said_missed(tmp_path):
     )
 
 
-def test_models_check_leaves_out_an_agent_claude_said_needed_a_larger_model(tmp_path):
+def test_models_check_leaves_out_an_agent_whose_work_was_mostly_hard(tmp_path):
     model = _full_model()
     model.sections.append(_habits_tables(habits_agents=[
-        {"agent_type": "Explore", "fit_smaller": 0, "fit_larger": 2, "hard_pct": None, "retried_model": 0},
+        {"agent_type": "Explore", "runs": 6, "hard_pct": 70.0, "retried_model": 0},
     ]))
     result = qa.run("models", _ctx(tmp_path, model=model))
     assert [fix["agent"] for fix in result["fixes"]] == [None]
     [tip] = result["tips"]
     assert tip["title"] == "Explore: haiku not suggested"
-    assert tip["text"].endswith("but Claude said 2 of its runs needed a larger model.")
+    assert tip["text"].endswith("but 70% of its work was reported hard.")
 
 
 def _hooks_report(results):
@@ -1195,3 +1466,650 @@ def test_tools_offers_the_baseline_fix_when_no_subagent_started(tmp_path):
     assert result["status"] == "act" and "No subagents started" in result["summary"]
     assert result["fixes"] and "~/.claude.json" in result["fixes"][0]["prompt"]
     assert qa.run("tools", _ctx(tmp_path, NS(sections=[], recommendations=[])))["status"] == "no_data"
+
+
+def _tools_model(*, diet_rows, recs=()):
+    unused_rows = [
+        {"agent_type": "reviewer", "spawns": 30, "mcp_offered_spawns": 30, "mcp_used_spawns": 0,
+         "skills_listed_spawns": 30, "skills_used_spawns": 0},
+        {"agent_type": "searcher", "spawns": 12, "mcp_offered_spawns": 0, "mcp_used_spawns": 0,
+         "skills_listed_spawns": 12, "skills_used_spawns": 12},
+    ]
+    tables = [_table("agent_startup_unused", unused_rows)]
+    if diet_rows:
+        tables.append(_table("agent_startup_diet", diet_rows))
+    return NS(sections=[NS(key="agent_startup", tables=tables)], recommendations=list(recs))
+
+
+def test_tools_shows_what_a_tools_list_would_leave_out_of_each_agent_and_offers_its_fix(tmp_path):
+    diet = [{"agent_type": "reviewer", "rare_tools": "Bash, NotebookEdit, mcp__playwright__*",
+             "dropped_definitions": 9000.0, "dropped_deferred": 400.0, "dropped_skills": 1200.0,
+             "dropped_roster": 0.0}]
+    rec = Recommendation(
+        id="spawn-tools-list", severity="advice", category="settings", title="reviewer is given tools it rarely calls",
+        action="Limit reviewer's tools: tools: Read, Grep.", lever=None, agent_type="reviewer",
+        fixes=[{"key": "tools", "agent": "reviewer", "explainer": [], "command": None, "prompt": "Set tools."}],
+    )
+    result = qa.run("tools", _ctx(tmp_path, _tools_model(diet_rows=diet, recs=[rec])))
+    assert result["status"] == "act"
+    columns = [c["label"] for c in result["table"]["columns"]]
+    assert columns[-1] == "Tools it rarely calls"
+    by_agent = {row[0]: row[-1] for row in result["table"]["rows"]}
+    assert by_agent["reviewer"] == "3 (about 10,600 tokens)"
+    assert by_agent["searcher"] == "none"
+    assert [f["prompt"] for f in result["fixes"]] == ["Set tools."]
+
+
+def test_tools_has_nothing_to_offer_when_no_tools_list_would_help(tmp_path):
+    result = qa.run("tools", _ctx(tmp_path, _tools_model(diet_rows=[])))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert all(row[-1] == "none" for row in result["table"]["rows"])
+
+
+# -- cost-centres (Phase 8a) ----------------------------------------------------
+
+
+def _centre_model(**extra):
+    centre_rows = [
+        {"centre": "main", "base_read": 6.0, "above_read": 20.0, "growth_write": 4.0, "rewrite": 1.0,
+         "post_compaction": 0.5, "output": 3.0, "total": 34.5},
+        {"centre": "direct", "base_read": 2.0, "above_read": 3.0, "growth_write": 1.0, "rewrite": 0.0,
+         "post_compaction": 0.0, "output": 1.0, "total": 7.0},
+    ]
+    part_rows = [
+        {"centre": "main", "cell": "base_read", "part": "CLAUDE.md files", "lever": "controllable", "cost": 1.5,
+         "share": 25.0, "card": "claude-md", "advice": ""},
+        {"centre": "main", "cell": "base_read", "part": "System prompt", "lever": "fixed", "cost": 3.0,
+         "share": 50.0, "card": "", "advice": "no setting known"},
+        {"centre": "main", "cell": "rewrite", "part": "Conversation", "lever": None, "cost": 0.5, "share": 50.0,
+         "card": "", "advice": ""},
+        {"centre": "direct", "cell": "base_read", "part": "Skills list", "lever": "controllable", "cost": 0.4,
+         "share": 20.0, "card": "skills", "advice": ""},
+    ]
+    return NS(
+        sections=[NS(key="agents", tables=[_table("cost_centres", centre_rows),
+                                            _table("cost_centres_parts", part_rows)])],
+        context_files={}, recommendations=[], **extra,
+    )
+
+
+def test_the_cost_centres_check_names_the_largest_cell_and_the_check_that_covers_it(tmp_path):
+    result = qa.run("cost-centres", _ctx(tmp_path, model=_centre_model()))
+    assert result["status"] == "ok"
+    assert "main session, above-base read" in result["summary"]
+    assert "48%" in result["summary"]  # 20 of 41.5
+    assert "Conversation summaries check covers it" in result["summary"]
+    assert result["rule_ids"] == []
+    labels = [c["label"] for c in result["table"]["columns"]]
+    assert labels[0] == "Cost centre" and labels[-1] == "Total" and "Post-compaction" in labels
+    assert [row[0] for row in result["table"]["rows"]] == ["Main session", "Direct agents"]
+
+
+def test_the_cost_centres_check_tips_name_only_the_controllable_base_parts_and_their_check(tmp_path):
+    result = qa.run("cost-centres", _ctx(tmp_path, model=_centre_model()))
+    titles = [tip["title"] for tip in result["tips"]]
+    assert titles == ["CLAUDE.md files (main session)", "Skills list (direct agents)"]
+    assert "CLAUDE.md files check covers it" in result["tips"][0]["text"]
+    assert "Skills check covers it" in result["tips"][1]["text"]
+
+
+def test_the_cost_centres_check_has_no_data_without_a_table_or_spend(tmp_path):
+    assert qa.run("cost-centres", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))[
+        "status"
+    ] == "no_data"
+    empty = NS(sections=[NS(key="agents", tables=[_table("cost_centres", [])])], context_files={}, recommendations=[])
+    assert qa.run("cost-centres", _ctx(tmp_path, model=empty))["status"] == "no_data"
+
+
+def test_the_cost_centres_check_says_when_no_check_advises_on_the_largest_cell(tmp_path):
+    rows = [{"centre": "start", "base_read": 5.0, "above_read": 0.0, "growth_write": 1.0, "rewrite": 0.0,
+             "post_compaction": 0.0, "output": 0.5, "total": 6.5}]
+    model = NS(sections=[NS(key="agents", tables=[_table("cost_centres", rows)])], context_files={},
+               recommendations=[])
+    result = qa.run("cost-centres", _ctx(tmp_path, model=model))
+    assert "session start (1-hour write), base read" in result["summary"]
+    assert "No check advises on it." in result["summary"]
+    assert result["tips"] == []
+
+
+# -- the project-files check ---------------------------------------------------------------------
+
+_PF_TYPES = ("Explore", "Plan", "Review", "Build", "Test")
+
+
+@pytest.fixture
+def pf_names():
+    """The check reads the local name map, which is kept for a while."""
+    from claudeglass import claude_md_review
+
+    claude_md_review._NAMES.clear()
+    yield
+    claude_md_review._NAMES.clear()
+
+
+def _pf_setup(tmp_path):
+    """A context whose one project folder (found from a transcript's cwd)
+    holds docs/context.md, and the salt the names are hashed with."""
+    from claudeglass import parse
+
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[]))
+    project = tmp_path / "work" / "repo"
+    (project / "docs").mkdir(parents=True)
+    (project / "docs" / "context.md").write_text("Notes for the agents.\n", encoding="utf-8")
+    slug = ctx.config_dir.parent / "projects" / "repo"
+    slug.mkdir()
+    (slug / "s.jsonl").write_text(json.dumps({"cwd": str(project)}) + "\n", encoding="utf-8")
+    return ctx, project, parse.load_or_create_salt(ctx.config_dir)
+
+
+def _pf_amount(units, usd: float, period: str, *, prefix: str = "") -> str:
+    from claudeglass import claude_md_review
+
+    return claude_md_review._amount(units, usd, period, prefix=prefix)
+
+
+def _pf_hash(path: Path, salt: bytes) -> str:
+    from claudeglass import parse
+
+    return parse.path_hash(str(path), salt)
+
+
+def _pf_read(file_hash: str, *, tokens=9000, types=_PF_TYPES, cost=9.0, weekly=None) -> dict:
+    return {
+        "hash": file_hash,
+        "source": "read",
+        "tokens": tokens,
+        "reach": {name: 10 for name in types},
+        "cost_usd": cost,
+        "weekly": {"2026-08-31": 5625, "2026-09-28": 9000} if weekly is None else weekly,
+        "last_seen": "2026-09-30T10:00:00.000Z",
+    }
+
+
+def _pf_data(*reads, files=()) -> dict:
+    return {
+        "transcripts": {"main": 10, **{name: 10 for name in _PF_TYPES}},
+        "window_days": 30.0,
+        "newest": "2026-09-30",
+        "files": list(files),
+        "reads": list(reads),
+    }
+
+
+def _pf_run(ctx, data):
+    ctx.model = NS(sections=[], context_files=data, recommendations=[])
+    return qa.run("project-files", ctx)
+
+
+def test_the_project_files_check_follows_the_claude_md_check():
+    ids = list(qa.CHECK_IDS)
+    assert ids.index("project-files") == ids.index("claude-md") + 1
+    check = next(c for c in qa.CHECKS if c.id == "project-files")
+    assert check.question == "Are project files that agents read big or growing?"
+
+
+def test_with_no_project_files_the_check_has_no_data(tmp_path, pf_names):
+    ctx, _project, _salt = _pf_setup(tmp_path)
+    result = _pf_run(ctx, {})
+    assert result["status"] == "no_data" and "over the last 14 days" in result["summary"]
+    assert result["fixes"] == []
+
+
+def test_a_big_file_many_agent_types_read_that_grew_is_flagged_with_five_prompts(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    file_hash = _pf_hash(project / "docs" / "context.md", salt)
+    result = _pf_run(ctx, _pf_data(_pf_read(file_hash)))
+
+    cost = _pf_amount(UNITS, 9.0, "a month", prefix="about")
+    assert result["status"] == "act"
+    assert result["summary"] == (
+        "docs/context.md is now about 9k tokens, up 60% in 30 days. "
+        f"5 agent types read it on every run: {cost}. {{{{page:agents/subagents}}}} lists every project file."
+    )
+    assert [fix["title"] for fix in result["fixes"]][0] == "Trim what is stale"
+    assert len(result["fixes"]) == 5
+    for fix in result["fixes"]:
+        assert FIX_KEYS <= set(fix) and fix["prompt"] and fix["command"] is None
+    assert [column["label"] for column in result["table"]["columns"]] == [
+        "File", "Tokens", "Change in 30 days", "Read by", "Cost a month",
+    ]
+    [row] = result["table"]["rows"]
+    assert row[:4] == ["docs/context.md", "9,000", "+60%", "5 agent types, on every run"]
+
+
+def test_a_file_that_only_grew_is_flagged_and_one_that_did_not_is_not_worded_as_growing(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    file_hash = _pf_hash(project / "docs" / "context.md", salt)
+    grown = _pf_read(file_hash, tokens=3000, types=("Explore",), weekly={"2026-08-31": 2000, "2026-09-28": 3000})
+    result = _pf_run(ctx, _pf_data(grown))
+    assert result["status"] == "act"
+    assert result["summary"].startswith("docs/context.md is now about 3k tokens, up 50% in 30 days. Explore reads it on")
+
+    wide = _pf_read(file_hash, weekly={"2026-08-31": 8500, "2026-09-28": 9000})
+    summary = _pf_run(ctx, _pf_data(wide))["summary"]
+    assert summary.startswith("docs/context.md is now about 9k tokens. 5 agent types read it")
+
+
+def test_nothing_large_or_growing_is_ok_and_reads_no_disk(tmp_path, pf_names, monkeypatch):
+    from claudeglass import claude_md_review
+
+    def no_disk(*_args, **_kwargs):
+        raise AssertionError("the project folders were read")
+
+    monkeypatch.setattr(claude_md_review, "local_names", no_disk)
+    ctx, _project, _salt = _pf_setup(tmp_path)
+    small = _pf_read("0123456789abcdef", tokens=4000, weekly={"2026-09-28": 4000})
+    narrow = _pf_read("fedcba9876543210", tokens=9000, types=("Explore", "Plan"), weekly={"2026-09-28": 9000})
+    result = _pf_run(ctx, _pf_data(small, narrow))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert "over the last 14 days" in result["summary"]
+
+
+def test_a_file_claude_code_loads_by_itself_is_the_claude_md_checks_unless_a_claude_md_imports_it(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    guide = project / "docs" / "guide.md"
+    guide.write_text("G" * 400, encoding="utf-8")
+    (project / "CLAUDE.md").write_text("# Project\n\nSee @docs/context.md for more.\n", encoding="utf-8")
+
+    def loaded(path):
+        return {
+            "hash": _pf_hash(path, salt),
+            "type": "Project",
+            "scoped": False,
+            "tokens": 9000,
+            "sends": 10,
+            "reach": {name: 10 for name in _PF_TYPES},
+            "cost_usd": 9.0,
+            "weekly": {"2026-09-28": 9000},
+            "last_seen": "2026-09-30T10:00:00.000Z",
+        }
+
+    # guide.md is only loaded for the agents: the CLAUDE.md check's business.
+    assert _pf_run(ctx, _pf_data(files=[loaded(guide)]))["status"] == "ok"
+    # context.md is also pulled in with @path by the project's CLAUDE.md.
+    result = _pf_run(ctx, _pf_data(files=[loaded(project / "docs" / "context.md")]))
+    assert result["status"] == "act" and result["summary"].startswith("docs/context.md is now about 9k tokens.")
+
+
+def test_a_big_file_not_in_any_project_folder_has_no_class_so_it_is_not_flagged(tmp_path, pf_names):
+    ctx, _project, _salt = _pf_setup(tmp_path)
+    result = _pf_run(ctx, _pf_data(_pf_read("0123456789abcdef")))
+    assert result["status"] == "ok" and result["fixes"] == [] and result["table"] is None
+    assert result["summary"].startswith("No text file is both large and read by many agent types")
+
+
+def test_the_check_names_the_dearest_text_file_and_counts_the_others(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    # The dearest file is not on disk and has no class: it is neither named nor counted.
+    reads = [_pf_read("0123456789abcdef", cost=50.0)]
+    for index, cost in enumerate((9.0, 4.0)):
+        path = project / "docs" / f"extra{index}.md"
+        path.write_text("More.\n", encoding="utf-8")
+        reads.append(_pf_read(_pf_hash(path, salt), cost=cost))
+
+    result = _pf_run(ctx, _pf_data(*reads))
+    assert result["status"] == "act" and result["summary"].startswith("docs/extra0.md is now about 9k tokens")
+    assert result["summary"].count("1 more file is flagged.") == 1
+    assert [row[0] for row in result["table"]["rows"]] == ["docs/extra0.md", "docs/extra1.md"]
+    assert len(result["fixes"]) == 5
+    one = _pf_run(ctx, _pf_data(*reads[:2]))
+    assert "more file" not in one["summary"]
+    three = _pf_run(ctx, _pf_data(*reads, _pf_read(_pf_hash(project / "docs" / "context.md", salt), cost=1.0)))
+    assert "2 more files are flagged." in three["summary"]
+
+
+def _pf_one_big_file(tmp_path, ext: str):
+    """The same large file, read by 5 agent types and growing, as code
+    (``src/app.py``) or as text (``docs/spec.<ext>``)."""
+    ctx, project, salt = _pf_setup(tmp_path)
+    (project / "src").mkdir()
+    path = project / "src" / "app.py" if ext == "py" else project / "docs" / f"spec.{ext}"
+    path.write_text("x\n", encoding="utf-8")
+    return ctx, _pf_data(_pf_read(_pf_hash(path, salt)))
+
+
+def test_a_large_code_file_five_agent_types_read_does_not_fire_the_check_but_the_same_as_markdown_does(tmp_path, pf_names):
+    ctx, data = _pf_one_big_file(tmp_path / "code", "py")
+    result = _pf_run(ctx, data)
+    assert result["status"] == "ok" and result["fixes"] == [] and result["table"] is None
+    assert "This check covers .md and .txt files." in result["summary"]
+    assert "app.py" not in result["summary"]
+
+    for ext in ("md", "txt"):
+        ctx, data = _pf_one_big_file(tmp_path / ext, ext)
+        result = _pf_run(ctx, data)
+        assert result["status"] == "act" and result["summary"].startswith(f"docs/spec.{ext} is now about 9k tokens")
+        assert len(result["fixes"]) == 5
+
+
+def test_a_dearer_code_file_neither_leads_nor_counts_toward_the_check(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    (project / "src").mkdir()
+    code = project / "src" / "app.py"
+    code.write_text("x\n", encoding="utf-8")
+    text = project / "docs" / "context.md"
+    result = _pf_run(ctx, _pf_data(_pf_read(_pf_hash(code, salt), cost=90.0), _pf_read(_pf_hash(text, salt), cost=9.0)))
+    assert result["status"] == "act" and result["summary"].startswith("docs/context.md is now about 9k tokens")
+    assert "more file" not in result["summary"]
+    assert [row[0] for row in result["table"]["rows"]] == ["docs/context.md"]
+
+
+def test_the_check_says_what_it_covers_when_it_is_quiet_and_in_its_explanation(tmp_path, pf_names):
+    ctx, _project, _salt = _pf_setup(tmp_path)
+    small = _pf_run(ctx, _pf_data(_pf_read("0123456789abcdef", tokens=900, weekly={"2026-09-28": 900})))
+    assert small["status"] == "ok" and "This check covers .md and .txt files." in small["summary"]
+    assert "{{page:agents/subagents}} lists every project file, code and data too." in small["summary"]
+    check = next(c for c in qa.CHECKS if c.id == "project-files")
+    assert "covers text files (.md and .txt)" in check.why and "Code and data files" in check.why
+
+
+def test_the_check_of_one_project_searches_only_its_folders(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    data = _pf_data(_pf_read(_pf_hash(project / "docs" / "context.md", salt)))
+    ctx.only = ()
+    assert _pf_run(ctx, data)["status"] == "ok"
+    ctx.only = (project,)
+    assert _pf_run(ctx, data)["status"] == "act"
+
+
+def test_the_cost_of_a_flagged_file_goes_through_units_in_every_billing_mode(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    data = _pf_data(_pf_read(_pf_hash(project / "docs" / "context.md", salt)))
+    for units in (UNITS, Units(billing_mode="subscription", currency="USD")):
+        ctx.units = units
+        result = _pf_run(ctx, data)
+        cost = _pf_amount(units, 9.0, "a month", prefix="about")
+        assert f"on every run: {cost}." in result["summary"]
+        assert result["table"]["rows"][0][4] == units.money_cell(9.0)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "text"),
+    [(800, "800"), (1000, "1k"), (1500, "1.5k"), (9000, "9k"), (10_000, "10k"), (24_600, "25k")],
+)
+def test_a_size_in_a_sentence_is_short(tokens, text):
+    assert qa._tokens_text(tokens) == text
+
+
+def test_readers_are_named_by_how_many_there_are_and_how_often_they_read():
+    def reach(*items):
+        return {"reach": [{"reach": name, "share": share, "standing": standing} for name, share, standing in items]}
+
+    every = reach(*((name, 1.0, True) for name in _PF_TYPES))
+    assert qa._readers_parts(every) == ("5 agent types", True, "on every run")
+    assert qa._project_file_readers(every) == "5 agent types read it on every run"
+
+    mixed = reach(("main", 0.4, True), ("Explore", 0.6, True), ("Review", 0.1, False))
+    assert qa._readers_parts(mixed) == ("your main session and Explore", True, "in about 50% of their runs")
+
+    assert qa._readers_parts(reach(("Explore", 0.4, True))) == ("Explore", False, "in about 40% of its runs")
+    assert qa._project_file_readers(reach(("Explore", 0.4, True))) == "Explore reads it in about 40% of its runs"
+    assert qa._readers_parts(reach(("main", 0.4, True), ("Explore", 0.4, True), ("Plan", 0.4, True)))[0] == (
+        "your main session, Explore and Plan"
+    )
+    assert qa._readers_parts(reach(("main", 0.4, True), *((name, 0.4, True) for name in _PF_TYPES)))[0] == (
+        "your main session and 5 agent types"
+    )
+    assert qa._readers_parts(reach(("Explore", 0.1, False))) == ("your agents", True, "sometimes")
+    assert qa._readers_parts({}) == ("your agents", True, "sometimes")
+
+
+# -- Replies to agent reports ---------------------------------------------------
+
+
+def _report_turn_rows(ack=(14, 2.8, 0, 0), acted=(9, 1.35, 0, 0), respawned=(3, 0.6, 0, 0)) -> list[dict]:
+    """``habits_report_turns`` rows; each kind is ``(replies, cost, woke, woke_tokens)``."""
+    rows = []
+    for kind, (replies, cost, woke, woke_tokens) in (("acknowledged", ack), ("acted", acted), ("respawned", respawned)):
+        if replies:
+            rows.append({
+                "kind": kind, "replies": replies, "share_pct": 0.0, "cost": cost, "avg_context": 150_000,
+                "woke": woke, "woke_tokens": woke_tokens,
+            })
+    return rows
+
+
+def _reports_model(rows) -> NS:
+    model = _model()
+    model.recommendations = []
+    model.sections.append(_habits_tables(habits_report_turns=rows))
+    return model
+
+
+def test_the_agent_reports_check_follows_failed_calls_and_has_no_rule_behind_it():
+    ids = list(qa.CHECK_IDS)
+    assert ids.index("agent-reports") == ids.index("failed-calls") + 1
+    check = next(c for c in qa.CHECKS if c.id == "agent-reports")
+    assert check.question == "Do agent reports cost replies that do nothing?"
+    assert check.rule_ids == ()
+
+
+def test_the_habits_check_claims_the_batch_probes_card_and_no_other_check_does():
+    claimed = [c.id for c in qa.CHECKS if "agent-batch-probes" in c.rule_ids]
+    assert claimed == ["habits"]
+
+
+def test_agent_reports_without_the_table_has_no_data(tmp_path):
+    result = qa.run("agent-reports", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))
+    assert result["status"] == "no_data" and result["table"] is None and result["tips"] == []
+
+
+def test_agent_reports_with_no_report_replies_says_none_came_back(tmp_path):
+    result = qa.run("agent-reports", _ctx(tmp_path, model=_reports_model([])))
+    assert result["status"] == "ok" and result["table"] is None
+    assert "No background agent's or workflow's report came back to your main session over the last 14 days." == result["summary"]
+
+
+def test_agent_reports_flags_mostly_acknowledgements_with_the_table_and_a_tip(tmp_path):
+    rows = _report_turn_rows(ack=(14, 2.8, 1, 90_000))
+    result = qa.run("agent-reports", _ctx(tmp_path, model=_reports_model(rows)))
+    assert result["status"] == "act"
+    assert result["summary"].startswith("26 replies to agent reports cost about 4.75 USD over the last 14 days. ")
+    assert "14 only acknowledged the report, for about 2.80 USD." in result["summary"]
+    assert "1 woke a session idle for an hour or more, writing 90,000 tokens to the cache again." in result["summary"]
+    assert result["summary"].endswith("{{page:habits}} has the table.")
+    assert [row[0] for row in result["table"]["rows"]] == ["Only acknowledged it", "Acted on it", "Started more agents"]
+    assert [row[1] for row in result["table"]["rows"]] == [14, 9, 3]
+    assert [tip["title"] for tip in result["tips"]] == ["Fewer, larger agents"]
+    assert result["fixes"] == []
+
+
+@pytest.mark.parametrize(
+    ("ack", "acted", "status"),
+    [
+        ((10, 1.0, 0, 0), (10, 1.0, 0, 0), "act"),  # exactly 10 and exactly half
+        ((9, 1.0, 0, 0), (1, 0.1, 0, 0), "ok"),  # one under the count
+        ((10, 1.0, 0, 0), (11, 1.0, 0, 0), "ok"),  # 10 of 21 is under half
+        ((20, 2.0, 0, 0), (0, 0.0, 0, 0), "act"),
+    ],
+)
+def test_agent_reports_acknowledgement_threshold(tmp_path, ack, acted, status):
+    rows = _report_turn_rows(ack=ack, acted=acted, respawned=(0, 0.0, 0, 0))
+    result = qa.run("agent-reports", _ctx(tmp_path, model=_reports_model(rows)))
+    assert result["status"] == status
+    assert bool(result["tips"]) == (status == "act")
+    assert result["table"] is not None
+
+
+def test_agent_reports_flags_wake_ups_on_their_own_and_says_how_much_was_written_again(tmp_path):
+    rows = _report_turn_rows(ack=(4, 1.0, 1, 100_000), acted=(8, 2.0, 2, 220_000), respawned=(0, 0.0, 0, 0))
+    result = qa.run("agent-reports", _ctx(tmp_path, model=_reports_model(rows)))
+    assert result["status"] == "act"
+    assert "3 woke sessions idle for an hour or more, writing 320,000 tokens to the cache again." in result["summary"]
+    assert [tip["title"] for tip in result["tips"]] == ["Reports that wake an idle session"]
+    below = qa.run(
+        "agent-reports",
+        _ctx(tmp_path, model=_reports_model(_report_turn_rows(ack=(4, 1.0, 1, 1), acted=(8, 2.0, 1, 1), respawned=(0, 0.0, 0, 0)))),
+    )
+    assert below["status"] == "ok" and below["tips"] == []
+
+
+def test_agent_reports_gives_both_tips_when_both_thresholds_are_met(tmp_path):
+    rows = _report_turn_rows(ack=(30, 5.0, 3, 300_000))
+    result = qa.run("agent-reports", _ctx(tmp_path, model=_reports_model(rows)))
+    assert [tip["title"] for tip in result["tips"]] == ["Fewer, larger agents", "Reports that wake an idle session"]
+
+
+# -- Plans sent back, and the build after an approval -----------------------------
+
+
+def _round_row(kind, plans, rounds=0, asked=0, cost=0.0, typed=0) -> dict:
+    return {
+        "kind": kind, "plans": plans, "typed": typed, "rounds": rounds, "asked": asked, "versions": 1.0,
+        "steps": 4.0, "files": 3.0, "tokens": 20_000, "cost": cost,
+    }
+
+
+def _rounds_rows() -> list[dict]:
+    return [
+        _round_row("all", 10, rounds=12, asked=6, cost=40.0, typed=3),
+        _round_row("none", 4, typed=1),
+        _round_row("once", 3, rounds=3, asked=1, cost=6.0),
+        _round_row("more", 3, rounds=9, asked=5, cost=34.0, typed=2),
+        _round_row("dropped", 2, rounds=2, asked=1, cost=2.0),
+    ]
+
+
+def _plan_rounds_model(rows, recommendations=()) -> NS:
+    model = _model()
+    model.recommendations = list(recommendations)
+    model.sections.append(_habits_tables(habits_plan_rounds=rows))
+    return model
+
+
+_PLAN_ROUNDS_REC = Recommendation(
+    id="plan-rounds", severity="advice", category="workflow", title="Plans keep being sent back",
+    action="Put a standing request in your first planning message.", saving_usd=5.0,
+)
+
+
+def _approval_row(start, approvals, build_turns, avg_context, usd_per_reply, typed=0) -> dict:
+    return {
+        "start": start, "approvals": approvals, "typed": typed, "tokens_carried": 60_000, "build_turns": build_turns,
+        "avg_context": avg_context, "usd_per_reply": usd_per_reply, "build_usd": build_turns * usd_per_reply,
+    }
+
+
+def _plan_approval_model(rows) -> NS:
+    model = _model()
+    model.recommendations = []
+    model.sections.append(NS(key="plan_handoff", tables=[_table("plan_handoff_approvals", rows)]))
+    return model
+
+
+def test_the_plan_checks_follow_agent_reports_and_only_one_of_them_has_a_rule_behind_it():
+    ids = list(qa.CHECK_IDS)
+    assert ids.index("plan-rounds") == ids.index("agent-reports") + 1
+    assert ids.index("plan-approval") == ids.index("plan-rounds") + 1
+    assert ids.index("quality") == ids.index("plan-approval") + 1
+    rounds = next(c for c in qa.CHECKS if c.id == "plan-rounds")
+    approval = next(c for c in qa.CHECKS if c.id == "plan-approval")
+    assert (rounds.rule_ids, approval.rule_ids) == (("plan-rounds",), ())
+    # The card is the plan-rounds check's alone: no other check counts it twice.
+    assert [c.id for c in qa.CHECKS if "plan-rounds" in c.rule_ids] == ["plan-rounds"]
+
+
+def test_plan_rounds_without_the_table_has_no_data(tmp_path):
+    result = qa.run("plan-rounds", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))
+    assert result["status"] == "no_data" and result["table"] is None and result["tips"] == []
+
+
+def test_plan_rounds_with_no_plan_says_claude_put_up_none(tmp_path):
+    result = qa.run("plan-rounds", _ctx(tmp_path, model=_plan_rounds_model([])))
+    assert result["status"] == "ok" and result["table"] is None
+    assert result["summary"] == "Claude put up no plan for you to approve over the last 14 days."
+
+
+def test_plan_rounds_counts_the_plans_sent_back_before_an_approval(tmp_path):
+    ctx = _ctx(tmp_path, model=_plan_rounds_model(_rounds_rows()))
+    result = qa.run("plan-rounds", ctx)
+    assert result["status"] == "ok" and result["fixes"] == [] and result["saving_usd"] is None
+    cost = qa._money(ctx, 40.0, prefix="about ")
+    assert result["summary"] == (
+        "You approved 10 plans over the last 14 days. 6 had a plan sent back first, 12 times in all. "
+        f"The replies between the first plan and the approval cost {cost}. "
+        "6 of the 12 rounds were a question, a critique or a doubt. 2 asks never got a plan approved."
+    )
+    assert [row[0] for row in result["table"]["rows"]] == [
+        "Every approved plan", "Never sent back", "Sent back once", "Sent back three times or more",
+        "Never approved",
+    ]
+    assert [row[1:3] for row in result["table"]["rows"]] == [[10, 12], [4, 0], [3, 3], [3, 9], [2, 2]]
+
+
+def test_plan_rounds_says_so_when_no_plan_was_sent_back(tmp_path):
+    rows = [_round_row("all", 6, typed=2), _round_row("none", 6, typed=2)]
+    result = qa.run("plan-rounds", _ctx(tmp_path, model=_plan_rounds_model(rows)))
+    assert result["status"] == "ok"
+    assert result["summary"] == "You approved 6 plans over the last 14 days, and none had a plan sent back first."
+
+
+def test_plan_rounds_reads_a_single_plan_and_round_in_the_singular(tmp_path):
+    rows = [_round_row("all", 1, rounds=1, asked=1, cost=2.0), _round_row("once", 1, rounds=1, asked=1, cost=2.0)]
+    summary = qa.run("plan-rounds", _ctx(tmp_path, model=_plan_rounds_model(rows)))["summary"]
+    assert summary.startswith("You approved 1 plan over the last 14 days. 1 had a plan sent back first, 1 time in all.")
+    assert summary.endswith("That round was a question, a critique or a doubt.")
+
+
+def test_plan_rounds_with_the_card_offers_the_prompt_and_the_saving(tmp_path):
+    ctx = _ctx(tmp_path, model=_plan_rounds_model(_rounds_rows(), [_PLAN_ROUNDS_REC]))
+    result = qa.run("plan-rounds", ctx)
+    assert result["status"] == "act"
+    assert result["summary"].endswith(" {{page:habits}} has the table.")
+    [fix] = result["fixes"]
+    assert fix["title"] == "Plans keep being sent back"
+    assert "critique it" in fix["prompt"] and fix["note"] == "scope"
+    # The prompt is the card's fix, so no tip repeats it.
+    assert result["tips"] == []
+    assert result["saving_usd"] == pytest.approx(5.0)
+    assert result["saving"] == f"{qa._money(ctx, 5.0, period=True, prefix='About ')} with a standing request to critique the plan."
+    # The Overview row is the check's own: no headline and no habit card.
+    assert (result["headline"], result["item"]) == (None, None)
+
+
+def test_plan_approval_without_the_table_has_no_data(tmp_path):
+    result = qa.run("plan-approval", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))
+    assert result["status"] == "no_data" and result["table"] is None
+
+
+def test_plan_approval_with_no_approved_plan_says_so(tmp_path):
+    result = qa.run("plan-approval", _ctx(tmp_path, model=_plan_approval_model([])))
+    assert result["status"] == "ok" and result["table"] is None
+    assert result["summary"] == "You approved no plan over the last 14 days."
+
+
+def test_plan_approval_where_every_build_carried_on_says_what_a_reply_read(tmp_path):
+    rows = [_approval_row("kept", 8, 120, 150_000, 0.12, typed=3)]
+    result = qa.run("plan-approval", _ctx(tmp_path, model=_plan_approval_model(rows)))
+    assert result["status"] == "ok" and result["fixes"] == [] and result["tips"] == []
+    assert result["summary"] == (
+        "You approved 8 plans over the last 14 days, 3 of them by typing. Every build carried on in the planning "
+        "session. A build reply read about 150,000 tokens of context. {{page:spend/savings}} has the saving, if there is one."
+    )
+    [row] = result["table"]["rows"]
+    assert row[:3] == ["Carried on in the same session", 8, 3]
+
+
+def test_plan_approval_sets_the_fresh_builds_beside_those_that_carried_on(tmp_path):
+    rows = [
+        _approval_row("kept", 6, 100, 150_000, 0.12, typed=2),
+        _approval_row("cleared", 2, 30, 50_000, 0.04, typed=1),
+        _approval_row("handoff", 1, 10, 30_000, 0.02),
+    ]
+    result = qa.run("plan-approval", _ctx(tmp_path, model=_plan_approval_model(rows)))
+    assert result["status"] == "ok"
+    # (30 * 50,000 + 10 * 30,000) / 40 replies = 45,000 tokens each.
+    assert result["summary"] == (
+        "You approved 9 plans over the last 14 days, 3 of them by typing. 3 builds started fresh. "
+        "Their replies read about 45,000 tokens each, against 150,000 for the builds that carried on. "
+        "{{page:spend/savings}} has the saving, if there is one."
+    )
+    assert [row[0] for row in result["table"]["rows"]] == [
+        "Carried on in the same session", "Cleared right after the approval", "Started from the plan",
+    ]
+
+
+def test_plan_approval_leaves_the_comparison_out_when_only_fresh_builds_exist(tmp_path):
+    rows = [_approval_row("cleared", 2, 30, 50_000, 0.04)]
+    summary = qa.run("plan-approval", _ctx(tmp_path, model=_plan_approval_model(rows)))["summary"]
+    assert "2 builds started fresh." in summary and "against" not in summary
