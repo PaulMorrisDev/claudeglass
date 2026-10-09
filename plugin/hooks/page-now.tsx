@@ -1,6 +1,6 @@
 import type { Register, RenderElement } from 'claude-code'
 
-import { barAlt, limitBarSvg, partsBarSvg, replyChartSvg, SVG_LIMIT, sparkline, textBar } from './charts'
+import { barAlt, limitBarSvg, MARK_ROW, partsBarSvg, replyChartSvg, SVG_LIMIT, sparkline, textBar } from './charts'
 import { amount, amountOf, localTime, percent } from './fmt'
 import { COPY, GLOSSARY } from './generated/copy.js'
 import { formatTokens } from './lib/units.js'
@@ -85,7 +85,7 @@ async function render(context: PageContext): Promise<RenderElement> {
   const compactNow = reading.state === 'soon' || reading.state === 'next'
   const rows = rowsOf(context)
   const alt = barAlt(parts, percent(reading.pct))
-  const svgBar = Svg !== null ? partsBarSvg(parts, BAR_WIDTH, BAR_HEIGHT, alt) : ''
+  const svgBar = Svg !== null ? partsBarSvg(parts, BAR_WIDTH, BAR_HEIGHT, alt, COPY['now.mark']) : ''
   const hasSvgBar = Svg !== null && svgBar.length <= SVG_LIMIT
 
   const children: RenderElement[] = []
@@ -108,8 +108,8 @@ async function render(context: PageContext): Promise<RenderElement> {
   if (hasSvgBar && Svg !== null) {
     children.push(
       <Box key="bar" flexDirection="column">
-        <Svg source={svgBar} alt={alt} width={BAR_WIDTH} height={BAR_HEIGHT} />
-        <Text dimColor>{`▲ ${COPY['now.mark']}`}</Text>
+        {/* The label sits under the mark inside the drawing: a line of text can't be placed under it. */}
+        <Svg source={svgBar} alt={alt} width={BAR_WIDTH} height={BAR_HEIGHT + MARK_ROW} />
       </Box>,
     )
   } else {

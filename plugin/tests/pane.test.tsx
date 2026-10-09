@@ -65,7 +65,11 @@ test('the Now page first screen: headline, bar, three text rows and a session li
       expect(svg).toBeDefined()
       expect(String(svg?.props.alt)).toMatch(/60% full/)
       expect(String(svg?.props.source).length).toBeLessThanOrEqual(40000)
+      // The mark's label is drawn under the mark inside the drawing, not as a line of text under the bar's left end.
+      expect(String(svg?.props.source)).toMatch(/<text [^>]*text-anchor="end"[^>]*>summarises here<\/text>/)
+      expect(shown.some(text => /summarises here/.test(text))).toBe(false)
     } else {
+      expect(shown.some(text => /▲ summarises here$/.test(text))).toBe(true)
       expect(svg).toBeUndefined()
       expect(shown.some(text => /[█▓▒░]/.test(text))).toBe(true)
     }

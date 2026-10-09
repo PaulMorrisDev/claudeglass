@@ -61,8 +61,14 @@ export function barAlt(parts: Parts, pct: string): string {
   })
 }
 
-/** How full the context is, by part, with a mark where Claude summarises. */
-export function partsBarSvg(parts: Parts, width: number, height: number, title: string): string {
+/** The height a label under the summarising mark adds to the bar (partsBarSvg's `label`). */
+export const MARK_ROW = 20
+
+/**
+ * How full the context is, by part, with a mark where Claude summarises. With `label`, the drawing is
+ * MARK_ROW taller and the label sits under the mark, a small triangle pointing up at it.
+ */
+export function partsBarSvg(parts: Parts, width: number, height: number, title: string, label?: string): string {
   const total = span(parts)
   const x = (tokens: number) => round((tokens / total) * width)
   const startupW = x(parts.startup)
@@ -76,6 +82,7 @@ export function partsBarSvg(parts: Parts, width: number, height: number, title: 
     ou: part('output'),
     fr: part('free'),
     mk: ink('ink-1'),
+    lb: ink('ink-2'),
   })
   const inner =
     rules +
@@ -89,7 +96,15 @@ export function partsBarSvg(parts: Parts, width: number, height: number, title: 
     `<rect x="${round(startupW + convoW)}" width="${outputW}" height="${height}" fill="url(#h)"/>` +
     `</g>` +
     `<rect x="${Math.max(0, mark - 1)}" width="2" height="${height}" class="mk"/>`
-  return svg(width, height, title, inner)
+  if (label === undefined) return svg(width, height, title, inner)
+  // The label ends just past the mark when the mark is in the right half, else starts just before it.
+  const tip = Math.min(Math.max(mark, 4), width - 4)
+  const right = mark > width / 2
+  const at = right ? Math.min(width, mark + 6) : Math.max(0, mark - 6)
+  const under =
+    `<path d="M${round(tip - 4)} ${height + 7}L${tip} ${height + 2}L${round(tip + 4)} ${height + 7}Z" class="lb"/>` +
+    `<text x="${at}" y="${height + 17}" text-anchor="${right ? 'end' : 'start'}" font-size="11" font-family="system-ui,-apple-system,Segoe UI,sans-serif" class="lb">${esc(label)}</text>`
+  return svg(width, height + MARK_ROW, title, inner + under)
 }
 
 /** The cost of each reply as a bar, with the context after it as a line over them. */
