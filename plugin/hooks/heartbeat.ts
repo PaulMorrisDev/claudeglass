@@ -1,6 +1,6 @@
 import type { GlassSnap } from '../types'
 import type { Io } from './io'
-import { live } from './live'
+import { live, touch } from './live'
 import { seconds } from './sensor'
 import { configDir } from './settings'
 
@@ -14,6 +14,10 @@ import { configDir } from './settings'
 // deletes files a day old.
 
 export const BEAT_EVERY_MS = 60 * 1000
+/** Another session counts as running when its file was seen this recently (the capture hook's ten minutes). */
+export const RUNNING_WITHIN_S = 600
+/** The most files read in one look; older files are deleted after a day, so a folder rarely holds more. */
+const MAX_LOOK = 40
 /** The ids the capture hook looks for: letters, digits and hyphens. Anything else writes nothing. */
 const PLAIN_ID = /^[A-Za-z0-9-]{1,64}$/
 
@@ -35,10 +39,46 @@ async function write(io: Io, id: string, seen: number): Promise<void> {
   }
 }
 
+/** When, and for which session, the folder was last looked at. */
+let looked: { id: string; at: number } | null = null
+
+/**
+ * Whether another session's file was seen within ten minutes, put on the snapshot as `parallel` (limit.ts
+ * gives no 5-hour share then). The folder is looked at once a minute at most; true when the snapshot changed.
+ */
+export async function checkParallel(io: Io, snap: GlassSnap): Promise<boolean> {
+  const id = snap.sessionId
+  if (id === null || io.listNames === undefined) return false
+  const now = await io.now()
+  if (looked !== null && looked.id === id && now >= looked.at && now - looked.at < BEAT_EVERY_MS) return false
+  looked = { id, at: now }
+  let others = false
+  try {
+    const dir = `${await configDir(io)}/mod/present`
+    const names = (await io.listNames(dir)).filter(name => name.endsWith('.json') && PLAIN_ID.test(name.slice(0, -5)) && name.slice(0, -5) !== id)
+    for (const name of names.slice(0, MAX_LOOK)) {
+      const text = await io.readFile(`${dir}/${name}`)
+      const raw: unknown = typeof text === 'string' && text !== '' ? JSON.parse(text) : null
+      const seen = raw !== null && typeof raw === 'object' ? (raw as { seen?: unknown }).seen : null
+      if (typeof seen === 'number' && seen > 0 && seconds(now) - seen <= RUNNING_WITHIN_S) {
+        others = true
+        break
+      }
+    }
+  } catch {
+    // Not looked at this time (no folder yet, or a file that isn't ours): the answer stands as it was.
+    return false
+  }
+  const changed = snap.parallel !== others
+  snap.parallel = others
+  return changed
+}
+
 /** Marks the session as seen, at most once a minute unless `force`. */
 export async function beat(io: Io, snap: GlassSnap, force = false): Promise<void> {
   if (snap.sessionId === null) return
   const now = await io.now()
+  await checkParallel(io, snap)
   if (!force && now - snap.lastBeat < BEAT_EVERY_MS) return
   snap.lastBeat = now
   await write(io, snap.sessionId, seconds(now))
@@ -50,7 +90,9 @@ export function keepBeating(io: Io): void {
   timer = io.every(BEAT_EVERY_MS, () => {
     void (async () => {
       try {
-        await beat(io, await live(io), true)
+        const snap = await live(io)
+        await beat(io, snap, true)
+        await touch(io)
       } catch {
         // Tried again in a minute.
       }
@@ -66,5 +108,6 @@ export function stopBeating(): void {
 /** The session is over: the timer stops and the file says it is no longer seen. */
 export async function leave(io: Io, id: string): Promise<void> {
   stopBeating()
+  looked = null
   await write(io, id, 0)
 }

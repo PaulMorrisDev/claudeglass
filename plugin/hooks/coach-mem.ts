@@ -37,7 +37,7 @@ import { mayShow, recordShown } from './lib/rest.js'
 import { fill } from './lib/text.js'
 import { formatTokens } from './lib/units.js'
 import { noteShown, seconds } from './sensor'
-import { coachingApplies, configDir } from './settings'
+import { coachingApplies, configDir, projectInScope } from './settings'
 import type { View } from './view'
 
 // What the coaching that runs before a message is sent keeps in module memory
@@ -79,6 +79,8 @@ type Mem = {
   pieceAt: number | null
   /** The plan the last ExitPlanMode call was refused (a go-ahead typed next approves it). */
   rejectedPlan: PlanTip | null
+  /** The permission mode the message being submitted was sent under (classic.UserPromptSubmit carries it); null until known. */
+  mode: string | null
   clearStatus: (() => void) | null
 }
 
@@ -99,6 +101,7 @@ function fresh(): Mem {
     firstPromptChars: null,
     pieceAt: null,
     rejectedPlan: null,
+    mode: null,
     clearStatus: null,
   }
 }
@@ -359,6 +362,11 @@ export function clearPlanStatus(): void {
   }
 }
 
+/** True while the plan tip is on the status line. */
+export function planStatusShowing(): boolean {
+  return mem.clearStatus !== null
+}
+
 /** Remembers how to clear the status line the plan tip is on. */
 export function planStatusSet(clear: () => void): void {
   mem.clearStatus = clear
@@ -398,6 +406,24 @@ export function planSettled(): void {
   mem.rejectedPlan = null
 }
 
+/** The plan sent back and still waiting for a go-ahead, if any: read before `submitted`, which forgets it. */
+export function refusedPlan(): PlanTip | null {
+  return mem.rejectedPlan
+}
+
+/** The permission mode the message being sent was sent under; null forgets the last one. */
+export function modeSent(mode: string | null): void {
+  mem.mode = mode
+}
+
+/**
+ * Whether the message just sent was sent outside plan mode. A plan sent back keeps the session in plan mode, so a
+ * message sent in any other mode left it, and that approves the plan as a go-ahead does (the hook's left_plan_mode).
+ */
+export function leftPlanMode(): boolean {
+  return mem.mode !== null && mem.mode !== '' && mem.mode !== 'plan'
+}
+
 /**
  * The plan a typed message approves: the refused plan, when the message is a go-ahead ("go ahead",
  * "implement the plan"). Asked before `submitted`, which forgets the refused plan.
@@ -428,12 +454,13 @@ async function remindedAt(io: Io, dir: string): Promise<number | null> {
  * The rating reminder as a turn-end note, when this piece of work is big enough
  * and no reminder has gone out in the last days (the hook's, from the settings
  * file, or the mod's own), the session wasn't rated on the dashboard since the
- * piece began, and the user opted in to it (`feedback_reminder`) with coaching
- * on for this project. The time of the last one is the only thing kept, in
- * <config_dir>/mod/coach.json.
+ * piece began, and the user opted in to it (`feedback_reminder`) for this project.
+ * Coaching notes being off doesn't hold it back (the capture hook's reminder goes
+ * by the opt-in and the project filter alone). The time of the last one is the
+ * only thing kept, in <config_dir>/mod/coach.json.
  */
 export async function ratingCandidate(io: Io, snap: GlassSnap, settings: GlassSettings, now: number): Promise<NoteCandidate | null> {
-  if (!coachingApplies(settings) || !settings.coaching.feedbackReminder) return null
+  if (!settings.coaching.feedbackReminder || !projectInScope(settings)) return null
   const th = thresholdsOf(settings)
   const piece = pieceOf(snap)
   const nowS = seconds(now)

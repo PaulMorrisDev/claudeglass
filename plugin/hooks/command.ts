@@ -25,7 +25,7 @@ const budgetAtom = atom({ plugin: 'claudeglass', key: 'budget' } as const, null 
 // /glass pin <text> adds a pin to the compaction review's keep list. The
 // command is declared in track.ts at session.start. It is immediate, so it
 // works while a reply is still being written. /glass tighten has Haiku rewrite
-// the draft shorter (tighten.tsx); /glass guard turns the question before a
+// the draft shorter (tighten.tsx; /glass tighten <text> tightens that text); /glass guard turns the question before a
 // costly send on or off (draft.ts).
 
 /** The model, the prompt box and the pane, as /glass tighten needs them. */
@@ -71,7 +71,7 @@ export const register: Register = on => {
         await update($, pinsAtom, was => (was.some(have => have.id === one.id) ? was : [...was, one]))
         return { text: COPY['compaction.pin.done'] }
       }
-      if (args === 'tighten') return { text: await runTighten(tightenKit($)) }
+      if (args === 'tighten' || args.startsWith('tighten ')) return { text: await runTighten(tightenKit($), args.slice(8)) }
       if (args === 'guard' || args === 'guard on' || args === 'guard off') {
         const enabled = args === 'guard' ? (await $.store.get('guard')) !== true : args === 'guard on'
         await $.store.set('guard', enabled)

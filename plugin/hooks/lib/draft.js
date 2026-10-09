@@ -5,8 +5,9 @@
  *   draft_topic      a new topic in a large context: the draft shares next to
  *                    nothing with what the session has been about
  *   draft_no_paths   a change asked for with no file or function named, in a
- *                    session that has touched no file yet
- *   draft_read_all   Claude is asked to read the whole codebase
+ *                    session that has touched no file yet and carries little
+ *   draft_read_all   Claude is asked to read the whole codebase (and no file,
+ *                    identifier or "this function" narrows it)
  *
  * The session's "bag" is the set of its content words (the words of the
  * prompts sent and the names of the files touched), kept by the caller in
@@ -30,7 +31,11 @@
  * @property {number} shared    How many of them the session has used.
  */
 
-/** The context, in tokens, past which a new topic is worth starting fresh for (habits.STALE_TOKENS). */
+/**
+ * The tokens a session carries (its context less what every session starts with) past which a new topic is worth
+ * starting fresh for (habits.STALE_TOKENS), and past which a session is no longer one that has done nothing yet:
+ * a resumed one has touched no file this run but carries earlier work, so a missing file name is no hint there.
+ */
 export var STALE_TOKENS = 20000;
 /** Content words a draft needs before it can count as a new topic. */
 export var MIN_TOPIC_WORDS = 6;
@@ -203,6 +208,8 @@ var CONTINUATION = [
   /\byour\s+(?:last|previous|earlier|plan|answer|suggestion|reply|response|proposal|summary)\b/,
   /\b(?:last|previous|earlier|prior)\s+(?:message|reply|answer|step|output|error|result|run|commit|change|one)\b/,
   /\b(?:continue|proceed|carry\s+on|keep\s+going|go\s+ahead|go\s+on|next\s+step|do\s+that|try\s+again|one\s+more|as\s+well|too)\b/,
+  // Version-control and release chores: a message of these continues the work, whatever words it shares.
+  /\b(?:commit|commits|committing|push|pushing|pull\s+requests?|prs?|merge|merging|rebase|release|releases|tag|tagging|bump|bumping|version|changelog|deploy|deploying|deployment|publish|publishing)\b/,
   // A word of agreement or sequence that opens a message.
   /^\s*(?:ok|okay|yes|yep|yeah|sure|thanks|thank\s+you|great|good|nice|cool|now|next|then|and|but|so|actually|wait|hmm|right|alright|fine)\b/,
   // Quoted earlier output.
@@ -236,8 +243,10 @@ export function wordCount(text) {
   return found === null ? 0 : found.length;
 }
 
+// A change is asked for when its verb leads: it opens the message or a clause, or follows the words that ask ("can you",
+// "I need to", "please"). "describing the colour fix" names a fix, it doesn't ask for one.
 var CHANGE_VERB =
-  /\b(fix|fixes|fixing|change|changing|update|updating|add|adding|remove|removing|delete|deleting|refactor|refactoring|rename|renaming|implement|implementing|debug|debugging|rewrite|rewriting|modify|modifying|replace|replacing|move|moving|extract|extracting|optimi[sz]e|optimi[sz]ing|migrate|migrating|convert|converting|patch|patching|wire|hook\s+up)\b/i;
+  /(?:^|[.!?;:\n,]|\b(?:and|then|please|now|also|first|next|can\s+you|could\s+you|would\s+you|will\s+you|let's|lets|i'd\s+like\s+you\s+to|i\s+want\s+you\s+to|i\s+want\s+to|i\s+need\s+you\s+to|i\s+need\s+to|we\s+need\s+to|you\s+should|you\s+need\s+to|need\s+to|should|must|to|go\s+ahead\s+and)\s)\s*(?:please\s+)?(?:fix|fixes|fixing|change|changing|update|updating|add|adding|remove|removing|delete|deleting|refactor|refactoring|rename|renaming|implement|implementing|debug|debugging|rewrite|rewriting|modify|modifying|replace|replacing|move|moving|extract|extracting|optimi[sz]e|optimi[sz]ing|migrate|migrating|convert|converting|patch|patching|wire|hook\s+up)\b/i;
 
 var EXTENSIONS =
   "js|jsx|ts|tsx|mjs|cjs|py|pyi|rb|go|rs|java|kt|swift|c|h|cc|cpp|hpp|cs|php|sh|bash|ps1|sql|md|mdx|txt|json|yaml|yml|toml|ini|cfg|conf|env|xml|html|htm|css|scss|vue|svelte|lock|csv|log|ipynb|gradle|tf";
@@ -293,6 +302,19 @@ var READ_ALL = new RegExp(
   "i",
 );
 var SCOPED = /\b(?:in|under|inside|within)\s+(?:the\s+|my\s+|our\s+)?[`'"]?[\w.-]*[\\/]|\b(?:in|under|inside|within)\s+(?:the\s+|my\s+|our\s+)?[`'"]?[\w.-]+[`'"]?\s+(?:folder|directory|dir|package|module)\b/i;
+// Narrowed to one thing: a file by name, a backticked name, an identifier, or "this function/file/class/method".
+var SCOPED_TO_ONE = new RegExp(
+  [
+    "\\b(?:in|of|inside|within|from|for|to)\\s+(?:the\\s+|my\\s+|our\\s+)?[`'\"]?[\\w./\\\\-]*\\.(?:" + EXTENSIONS + ")\\b",
+    "\\b(?:in|of|inside|within|from|for)\\s+(?:this|that|the|my|our)\\s+(?:file|function|class|method|module|component|script|test|tests|hook|handler|struct|type|snippet|block|diff|patch|commit|branch|change|changes|endpoint|route|query|schema)\\b",
+    "\\b(?:in|of|inside|within|from|for)\\s+`[^`\\n]+`",
+  ].join("|"),
+  "i",
+);
+// An identifier is told by its case (snake_case, camelCase, PascalCase, a call), so no "i" flag.
+var SCOPED_TO_NAME = new RegExp(
+  "\\b(?:[Ii]n|[Oo]f|[Ii]nside|[Ww]ithin|[Ff]rom|[Ff]or)\\s+(?:the\\s+)?[\"']?(?:[a-z][a-z0-9]*_[a-z0-9_]+|[a-z]+[A-Z][A-Za-z0-9]*|[A-Z][a-z0-9]+[A-Z][A-Za-z0-9]*|[A-Za-z_]\\w*\\(\\))",
+);
 
 /**
  * True when the draft asks Claude to read the whole codebase (the whole
@@ -305,7 +327,7 @@ export function asksToReadAll(text) {
   var match = READ_ALL.exec(body);
   if (match === null) return false;
   var after = body.slice(match.index + match[0].length, match.index + match[0].length + 60);
-  if (SCOPED.test(after) || SCOPED.test(match[0])) return false;
+  if (SCOPED.test(after) || SCOPED.test(match[0]) || SCOPED_TO_ONE.test(after) || SCOPED_TO_ONE.test(match[0]) || SCOPED_TO_NAME.test(after) || SCOPED_TO_NAME.test(match[0])) return false;
   return true;
 }
 
@@ -337,22 +359,23 @@ export function draftFacts(text, bag, files) {
 }
 
 /**
- * The one check that applies, in priority order, for a context of `ctx`
- * tokens, or null. A new topic needs a context worth clearing.
+ * The one check that applies, in priority order, for a session that carries `carried` tokens (the context less what
+ * every session starts with, `carriedTokens`), or null. A new topic needs earlier work worth clearing; a missing file
+ * name is a hint only while the session carries little (a resumed one has touched no file this run but holds earlier work).
  * @param {Facts} facts
- * @param {number} ctx
+ * @param {number} carried
  * @returns {"draft_topic"|"draft_no_paths"|"draft_read_all"|null}
  */
-export function pickDraft(facts, ctx) {
-  if (facts.topic && ctx >= STALE_TOKENS) return "draft_topic";
-  if (facts.noPaths) return "draft_no_paths";
+export function pickDraft(facts, carried) {
+  if (facts.topic && carried >= STALE_TOKENS) return "draft_topic";
+  if (facts.noPaths && carried < STALE_TOKENS) return "draft_no_paths";
   if (facts.readAll) return "draft_read_all";
   return null;
 }
 
 /**
- * The draft's check for a context of `ctx` tokens, or null.
- * @param {{ text: string, bag: Bag, files: number, ctx: number }} input
+ * The draft's check for a session carrying `carried` tokens, or null.
+ * @param {{ text: string, bag: Bag, files: number, ctx: number }} input  `ctx` is the tokens carried.
  * @returns {"draft_topic"|"draft_no_paths"|"draft_read_all"|null}
  */
 export function checkDraft(input) {

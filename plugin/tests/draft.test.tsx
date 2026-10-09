@@ -10,6 +10,8 @@ const SENSOR = `/cfg/claudeglass/mod/sensor/${SESSION}.json`
 
 // One reply that leaves the main context at 120k, and one that only reads it again.
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
+// A short first reply: the session carries next to nothing yet (the startup is all of the context).
+const SMALL = { steps: [{ input: 500, cacheRead: 0, cacheWrite: 7500, output: 0 }], usd: 0.05 }
 const AGAIN = { steps: [{ input: 500, cacheRead: 120000, cacheWrite: 500, output: 100 }], usd: 0.1 }
 
 // A message of the session, long enough that the session has a vocabulary to compare a new topic with.
@@ -33,6 +35,8 @@ type Rig = {
   /** What model.complete is asked, and what it answers. */
   completions: { system: string; prompt: string }[]
   rewrite: string | null
+  /** The output tokens model.complete reports (the call's cap is the draft's: a count at the cap is a cut reply). */
+  outputTokens: number
   closed: string[]
   /** How long a dismissed dialog takes to say so, in ms (the mocked clock). */
   dismissAfter: number
@@ -40,7 +44,7 @@ type Rig = {
 
 /** What sits under the mod's events: a prompt box that applies each edit and fill, the dialog, the model and the pane. */
 function rig(on: On, world: World): Rig {
-  const state: Rig = { box: '', submitted: [], filled: [], asked: [], answer: 'Send', completions: [], rewrite: null, closed: [], dismissAfter: 0 }
+  const state: Rig = { box: '', submitted: [], filled: [], asked: [], answer: 'Send', completions: [], rewrite: null, outputTokens: 60, closed: [], dismissAfter: 0 }
   on('prompt.edit', (_$, e) => {
     const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
     return { text, cursor: e.start + e.inputText.length } as never
@@ -66,7 +70,7 @@ function rig(on: On, world: World): Rig {
   })
   on('model.complete', (_$, e) => {
     state.completions.push({ system: String(e.system), prompt: String(e.prompt) })
-    const usage = { input_tokens: 400, output_tokens: 60, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
+    const usage = { input_tokens: 400, output_tokens: state.outputTokens, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     return { value: state.rewrite === null ? { isAnswered: false, reason: 'api-error', usage } : { isAnswered: true, text: state.rewrite, usage } } as never
   })
   on('ui.close', (_$, e) => {
@@ -113,10 +117,10 @@ async function hint($: Engine, world: World, surface: 'terminal' | 'desktop' = '
 }
 
 /** A session with one message sent and one reply, the cache warm. */
-async function started($: Engine, world: World, state: Rig, first = OPENING): Promise<void> {
+async function started($: Engine, world: World, state: Rig, first = OPENING, firstReply: typeof FIRST = FIRST): Promise<void> {
   await $.session.start(START)
   await send($, state, first)
-  await reply($, world, FIRST)
+  await reply($, world, firstReply)
 }
 
 async function tail($: Engine, world: World): Promise<string | undefined> {
@@ -181,7 +185,7 @@ test('the cold-cache warning keeps the line: the draft check waits until nothing
 test('a change asked for with no file named, in a session that has touched none, asks for the file', async ($, on) => {
   const world = prepare(on)
   const state = rig(on, world)
-  await started($, world, state)
+  await started($, world, state, OPENING, SMALL)
 
   await put($, state, NO_PATH)
   expect(await tail($, world)).toBe('No file named yet. Naming the file or function saves Claude a search.')
@@ -189,6 +193,15 @@ test('a change asked for with no file named, in a session that has touched none,
   // A draft that names the file has no use for the line.
   await wipe($, state)
   await put($, state, 'add retry logic with exponential backoff to src/billing/ledger.ts when the ledger export fails')
+  expect(await tail($, world)).toBeUndefined()
+})
+
+test('a session that carries earlier work (a resumed one) has touched no file this run, and the missing file is no hint', async ($, on) => {
+  const world = prepare(on)
+  const state = rig(on, world)
+  await started($, world, state)
+
+  await put($, state, NO_PATH)
   expect(await tail($, world)).toBeUndefined()
 })
 
@@ -215,7 +228,7 @@ test('a request to read the whole codebase says so', async ($, on) => {
 test('a check shows once per draft, then rests', async ($, on) => {
   const world = prepare(on)
   const state = rig(on, world)
-  await started($, world, state)
+  await started($, world, state, OPENING, SMALL)
 
   await put($, state, NO_PATH)
   expect(await tail($, world)).toBeDefined()
@@ -248,7 +261,7 @@ test('a draft check the person muted is left out', async ($, on) => {
 test('a draft check that showed is a note shown, settled by what followed', async ($, on) => {
   const world = prepare(on)
   const state = rig(on, world)
-  await started($, world, state)
+  await started($, world, state, OPENING, SMALL)
 
   await put($, state, NO_PATH)
   expect(await tail($, world)).toBeDefined()
@@ -306,7 +319,9 @@ test('/glass tighten asks Haiku for a shorter draft and shows the two as a diff,
     expect(String(code?.props?.source)).toContain(`+${TIGHT}`)
     const shown = lines(tree).join('\n')
     expect(shown).toMatch(/Your draft is 34 words\. The shorter version is 13\./)
-    expect(shown).toMatch(/Haiku used 460 tokens, about <?\$0\.\d+\./)
+    // Tokens only: the answer names no model, so no amount could be sure of the right price.
+    expect(shown).toMatch(/Haiku used 460 tokens\./)
+    expect(shown).not.toMatch(/about/)
     const buttons = elements(tree).filter(one => one.type === 'Button')
     expect(buttons.map(one => [one.props?.label, one.props?.hotkey])).toEqual([
       ['Use this', 'u'],
@@ -371,6 +386,54 @@ test('the command typed over the draft still tightens the draft that was there',
   await mounted.press({ key: 'keep' } as never)
   expect(state.box).toBe(WORDY)
   await mounted.unmount()
+})
+
+test('a rewrite that used the whole allowance was cut off: it is a failure and never shown', async ($, on) => {
+  const world = prepare(on)
+  const state = rig(on, world)
+  state.rewrite = TIGHT
+  state.outputTokens = 9999
+  await started($, world, state)
+  state.box = WORDY
+
+  const answer = await $.command.run({ command: 'glass', args: 'tighten' } as never)
+  expect(answer.text).toBe("Haiku's rewrite was cut short, so it was not used. Try a shorter draft.")
+  expect(world.opened.filter(one => (one as { id: string }).id === 'glass-tighten')).toHaveLength(0)
+  expect(faults(world)).toEqual(['claudeglass: tighten cut'])
+})
+
+test('/glass tighten <text> tightens that text, whatever the box holds', async ($, on) => {
+  const world = prepare(on)
+  const state = rig(on, world)
+  state.rewrite = TIGHT
+  await started($, world, state)
+  state.box = '/glass tighten'
+
+  const answer = await $.command.run({ command: 'glass', args: `tighten ${WORDY}` } as never)
+  expect(answer.text).toMatch(/^A shorter version of your draft is open/)
+  expect(state.completions).toHaveLength(1)
+  expect(state.completions[0]?.prompt).toContain(WORDY)
+  expect(state.completions[0]?.prompt).not.toContain('/glass')
+  expect(faults(world)).toEqual([])
+})
+
+test('the last draft is kept when the box is emptied, until a message is sent', async ($, on) => {
+  const world = prepare(on)
+  const state = rig(on, world)
+  state.rewrite = TIGHT
+  await started($, world, state)
+  await put($, state, WORDY)
+  await wipe($, state)
+  expect(state.box).toBe('')
+
+  const answer = await $.command.run({ command: 'glass', args: 'tighten' } as never)
+  expect(answer.text).toMatch(/^A shorter version of your draft is open/)
+  expect(state.completions[0]?.prompt).toContain(WORDY)
+
+  // A message sent ends the draft: nothing is left to tighten.
+  await send($, state, FOLLOW_UP)
+  expect((await $.command.run({ command: 'glass', args: 'tighten' } as never)).text).toBe('Your prompt box is empty, so there is nothing to tighten.')
+  expect(faults(world)).toEqual([])
 })
 
 test('/glass tighten with nothing to tighten, an error, or no gain says so and opens nothing', async ($, on) => {
@@ -526,6 +589,79 @@ test('the Now page turns the guard on in Detailed; Simple has no toggle', async 
 
   await gone($, world)
   state.answer = 'Cancel'
+  expect((await send($, state, NO_PATH)).drop).toBeDefined()
+  expect(state.asked).toHaveLength(1)
+  expect(faults(world)).toEqual([])
+})
+
+// -- review fixes 3: C2 (the work carried), C5 (attachments) ------------------------------------
+
+const ANOTHER_TOPIC = 'plan a holiday itinerary for lisbon including restaurants and museums and the evening trains'
+// 30k in the context less an 18k startup is 12k carried: not yet worth a fresh start.
+const LIGHT = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 28000, output: 0 }], usd: 0.2 }
+
+test('a new topic is judged by the work carried, not the whole context: startup is not carried work', async ($, on) => {
+  const world = prepare(on)
+  const state = rig(on, world)
+  await started($, world, state, OPENING, LIGHT)
+
+  await put($, state, NEW_TOPIC)
+  expect(await tail($, world)).toBeUndefined()
+
+  // The guard reads the same carried figure: nothing to ask about.
+  await $.command.run({ command: 'glass', args: 'guard' } as never)
+  state.answer = 'Cancel'
+  const out = await send($, state, NEW_TOPIC)
+  expect(out.drop).toBeUndefined()
+  expect(state.asked).toEqual([])
+  expect(faults(world)).toEqual([])
+})
+
+for (const coaching of [{ muted: ['draft_topic'] }, { enabled: false }]) {
+  test(`the guard asks about a new topic under the hint rules: not with ${JSON.stringify(coaching)}`, async ($, on) => {
+    const world = prepare(on, { settings: settingsFile({ coaching }) })
+    const state = rig(on, world)
+    await started($, world, state)
+    await $.command.run({ command: 'glass', args: 'guard' } as never)
+    state.answer = 'Cancel'
+    const out = await send($, state, NEW_TOPIC)
+    expect(out.drop).toBeUndefined()
+    expect(state.asked).toEqual([])
+    expect(faults(world)).toEqual([])
+  })
+}
+
+test('the guard asks about a new topic once, then the topic question rests like the hint does', async ($, on) => {
+  const world = prepare(on)
+  const state = rig(on, world)
+  await started($, world, state)
+  await $.command.run({ command: 'glass', args: 'guard' } as never)
+
+  state.answer = 'Send'
+  expect((await send($, state, NEW_TOPIC)).drop).toBeUndefined()
+  expect(state.asked).toHaveLength(1)
+
+  // Another new topic a moment later is resting: no question.
+  expect((await send($, state, ANOTHER_TOPIC)).drop).toBeUndefined()
+  expect(state.asked).toHaveLength(1)
+  expect(state.submitted).toEqual([OPENING, NEW_TOPIC, ANOTHER_TOPIC])
+  expect(faults(world)).toEqual([])
+})
+
+test('a send with pasted images is never held by the guard: Cancel and Clear first could not give the images back', async ($, on) => {
+  const world = prepare(on)
+  const state = rig(on, world)
+  await started($, world, state)
+  await $.command.run({ command: 'glass', args: 'guard' } as never)
+  await gone($, world)
+  state.answer = 'Cancel'
+
+  const out = await $.prompt.submit({ text: NO_PATH, wait: false, origin: { kind: 'composer' }, attachments: [{ type: 'image', mediaType: 'image/png' }] } as never)
+  expect((out as { drop?: string }).drop).toBeUndefined()
+  expect(state.asked).toEqual([])
+  expect(state.submitted).toEqual([OPENING, NO_PATH])
+
+  // The same message without the image is still asked about.
   expect((await send($, state, NO_PATH)).drop).toBeDefined()
   expect(state.asked).toHaveLength(1)
   expect(faults(world)).toEqual([])

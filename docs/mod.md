@@ -144,9 +144,9 @@ applies:
 | Large paste | The draft is about 10,000 tokens or more. If it's a log, paste only the part that matters. |
 | Background work | Work is still running in the background and you are about to ask how it's going. Asking re-reads the whole session. |
 | Cache expired | You have been idle past the cache lifetime, and the context is 100,000 tokens or more. It says what this send costs, and what `/clear` first would cost. |
-| New topic | The draft shares no words with the session, and the context is 20,000 tokens or more. It says what each later reply would save after `/clear`. |
-| No file named | You ask for a change in a session that has touched no file, and name none. |
-| Read everything | You ask Claude to read the whole codebase. |
+| New topic | The draft is a new request that shares no words with the session, and the session carries 20,000 tokens or more beyond its startup. It says what each later reply would save after `/clear`. A message that carries on ("commit this", "now run the tests") isn't a new topic. |
+| No file named | You ask for a change in a session that carries under 20,000 tokens and has touched no file, and name none. |
+| Read everything | You ask Claude to read the whole codebase. Asking for one folder or file, such as "read all of src/api", doesn't count. |
 
 In the Detailed view, a warm send says what it costs ("Sending costs about
 $0.07") when nothing else needs saying.
@@ -182,14 +182,22 @@ shows every 5 replies, and each kind rests under the same rules as a hint.
 | Repeated summaries | Claude has summarised the session twice or more. |
 | Cold summary | A conversation summary rebuilt the cache. Compacting while the cache is warm costs less. |
 | Past your budget | The session passed the budget you set with `/glass budget`. |
-| Rating reminder | A piece of work used a lot of tokens and isn't rated. Needs the feedback reminder switched on. |
+| Rating reminder | A piece of work used a lot of tokens and isn't rated. Needs the feedback reminder switched on, in a project it covers. It doesn't need coaching notes. |
 
 The two notes about agents appear on the agent's row when they can, as
 described next. They show here only when there is no row to carry them.
 
 When you approve a plan after a lot of planning, the status line says a
 fresh session would save tokens on every reply. It goes at the
-next reply or summary.
+next reply or summary. Leaving plan mode counts as approving.
+
+### The status line
+
+The status line carries what can't wait. It is set when the 5-hour limit is
+forecast to run out within 15 minutes, or when one reply or none is left
+before Claude summarises. It is cleared when neither holds. The plan tip
+above has the line while it shows, and nothing here overwrites it. It reads
+the same in the Simple and Detailed views.
 
 ### Agent rows
 
@@ -226,6 +234,10 @@ what you said, and writes one line:
   the summary.`
 - `● Glass · Claude summarised the conversation. 2 things you said may be
   missing. Press Review above the prompt to check.`
+
+The Detailed view adds the context before and after, such as "150k tokens
+became 30k tokens", and what the summary cost when Claude Code reports it.
+The Simple view keeps the line as above.
 
 In the second case the band shows a badge, "2 things may be missing from the
 summary", and a `[r]` Review button. The summary row in the conversation
@@ -387,7 +399,7 @@ checked too, and appear in the full list.
 
 The Detailed view adds three more things:
 
-- **Check with Haiku** sends the summary and your list to Haiku and has it
+- **Check with Haiku** (`[z]`) sends the summary and your list to Haiku and has it
   judge each item. It is opt-in: the button shows about how many tokens it
   will send, and it runs only when you press it. The result shows what it
   used.
@@ -425,14 +437,19 @@ request to read everything. See [The hint line](#the-hint-line-before-sending).
    box, and Glass remembers the draft.
 3. A pane shows your draft against the shorter version as a diff. Lines
    marked `-` are yours and lines marked `+` are the rewrite. It shows the
-   word counts and what Haiku used, in tokens, with an amount when your
-   rates price that model.
+   word counts and what Haiku used, in tokens.
 4. Press `[u]` Use this to fill the prompt box with the shorter version, or
    `[e]` Keep mine to put your draft back and close.
 
+You can also type the text after the command, as `/glass tighten <text>`.
+Without text it uses the draft in the box, or the last draft Glass kept when
+the box is empty.
+
 Nothing is sent either way. Haiku is called only when you run the command. If
 the rewrite isn't shorter, Glass says your draft is already tight and
-changes nothing. Drafts over 20,000 characters are too long to tighten.
+changes nothing. A rewrite that was cut short because it used its whole
+allowance is not used, and Glass says so. Drafts over 20,000 characters are
+too long to tighten.
 
 ### The guard
 
@@ -447,9 +464,9 @@ context.
   message back afterwards.
 - **Cancel** keeps your message in the box.
 
-It never asks for a slash command, a queued message or a message you didn't
-type. Turn it on and off with `/glass guard`, or with the switch in the
-Detailed Now tab (`[s]`).
+It never asks for a slash command, a queued message, a message with pasted
+images or a message you didn't type. Turn it on and off with `/glass guard`,
+or with the switch in the Detailed Now tab (`[s]`).
 
 ### The budget
 
@@ -467,7 +484,7 @@ it. A `/clear` starts the spend over.
 | `/glass` | Opens the pane. It works while Claude is replying. |
 | `/glass detail` | Turns the Detailed view on or off. |
 | `/glass pin <text>` | Adds a pin to the keep list. You can keep 20. |
-| `/glass tighten` | Has Haiku rewrite your draft shorter, and shows it as a diff. |
+| `/glass tighten [text]` | Has Haiku rewrite your draft, or the text you give, shorter, and shows it as a diff. |
 | `/glass guard` | Turns the question before a costly send on or off. `guard on` and `guard off` set it. |
 | `/glass budget <amount>` | Sets a budget for this session. `off` clears it, and no argument shows it. |
 
@@ -478,7 +495,7 @@ or `claudeglass` under `CLAUDE_CONFIG_DIR`.
 
 | File | Who writes it | What it holds |
 |---|---|---|
-| `mod/settings.json` | ClaudeGlass: `update --finish`, then the dashboard's service after a report | Your billing mode, rate card, cache lifetime and characters per token. Also the coaching thresholds, your `muted` and `once` lists, whether coaching is on, "your usual", and where the dashboard answers. The mod only reads it. |
+| `mod/settings.json` | ClaudeGlass: `update --finish`, then the dashboard's service after a report, and again at once when you rate a session or change the capture settings | Your billing mode, rate card, cache lifetime and characters per token. Also the coaching thresholds, your `muted` and `once` lists, whether coaching is on, "your usual", and where the dashboard answers. The mod only reads it. |
 | `mod/present/<session id>.json` | The mod | A heartbeat: the session id and the last time seen. It tells the capture hook the mod is running ([how it works](hooks.md#with-the-claudeglass-mod)). |
 | `mod/sensor/<session id>.json` | The mod | What the mod showed and what you did next, as closed words and times. |
 | `mod/coach.json` | The mod | The time of the last rating reminder, and nothing else. |

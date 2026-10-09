@@ -292,3 +292,88 @@ test("words are counted by whitespace", () => {
   assert.equal(tighten.words("  one two\nthree "), 3);
   assert.equal(tighten.words(""), 0);
 });
+
+// -- review fixes 3 (C2, C9) ----------------------------------------------------------
+
+/** A session about drawing charts. */
+function chartSession() {
+  let bag = emptyBag();
+  for (const prompt of [
+    "Draw a line chart of the monthly revenue with a legend and plot the trend",
+    "Add a bar chart with colours per region and a tooltip on hover",
+    "Render the chart as svg with gridlines and a title",
+  ]) {
+    bag = learnPrompt(bag, prompt);
+  }
+  return bag;
+}
+
+for (const text of [
+  "Commit with a sensible message, push the branch, open a pull request",
+  "Bump the package version and tag a release",
+  "Merge the branch, update the changelog and deploy it to staging",
+]) {
+  test(`version-control and release chores are no new topic: ${text.slice(0, 40)}`, () => {
+    assert.equal(draftFacts(text, session(), 3).topic, false);
+    assert.equal(kind(text), null);
+  });
+}
+
+test("a small tweak in a charting session is no new topic: too few content words", () => {
+  const facts = draftFacts("Increase the font size of axis labels", chartSession(), 3);
+  assert.equal(facts.topic, false);
+  assert.ok(facts.words < draft.MIN_TOPIC_WORDS);
+});
+
+test("a new topic still counts when the work carried is large", () => {
+  const text = "Write a haiku about migrating tomatoes onto a trellis in spring weather today";
+  assert.equal(checkDraft({ text, bag: session(), files: 3, ctx: 30000 }), "draft_topic");
+  assert.equal(checkDraft({ text, bag: session(), files: 3, ctx: 1000 }), null);
+});
+
+test("the topic check goes by the work carried, not the whole context", () => {
+  // 30,000 tokens in the context with a 25,000 startup is 5,000 carried: nothing worth clearing.
+  const text = "Write a haiku about migrating tomatoes onto a trellis in spring weather today";
+  assert.equal(checkDraft({ text, bag: session(), files: 3, ctx: carriedTokens(30000, 25000) }), null);
+  assert.equal(checkDraft({ text, bag: session(), files: 3, ctx: carriedTokens(60000, 25000) }), "draft_topic");
+});
+
+for (const text of [
+  "Review all the code in auth.py for injection bugs",
+  "Look at all the code in this function",
+  "Review all the code in the parseConfig() helper",
+  "Go through all the files in `src/auth` and list the exports",
+  "Read all the source in invoice_parser and explain the retry",
+]) {
+  test(`read-everything is no hint when one thing is named: ${text.slice(0, 40)}`, () => {
+    assert.equal(asksToReadAll(text), false);
+  });
+}
+
+test("read-everything still fires for the project, the repo and the codebase", () => {
+  for (const text of ["Go through all the files in the project", "Read all of the source files in this repo", "Read the whole codebase and summarise it"]) {
+    assert.equal(asksToReadAll(text), true, text);
+  }
+});
+
+test("a change is asked for by a leading verb, not any mention of one", () => {
+  const ask = (text) => draftFacts(text + " and tell me what you find in the end please", emptyBag(), 0).noPaths;
+  assert.equal(ask("describing the colour fix"), false);
+  assert.equal(ask("Fix the login bug when users sign in twice"), true);
+  assert.equal(ask("can you update the readme"), true);
+  assert.equal(ask("I need to rename the helper"), true);
+  assert.equal(ask("Please add a retry"), true);
+});
+
+test("no file hint in a resumed session that carries earlier work", () => {
+  const text = "Fix the login bug when users sign in twice on the settings page";
+  assert.equal(checkDraft({ text, bag: emptyBag(), files: 0, ctx: 2000 }), "draft_no_paths");
+  assert.equal(checkDraft({ text, bag: emptyBag(), files: 0, ctx: 90000 }), null);
+});
+
+test("a reply that used the whole allowance was cut off", () => {
+  assert.equal(tighten.wasCut(210, 210), true);
+  assert.equal(tighten.wasCut(4000, 210), true);
+  assert.equal(tighten.wasCut(209, 210), false);
+  assert.equal(tighten.wasCut(0, tighten.tightenMaxTokens("x".repeat(30))), false);
+});

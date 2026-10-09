@@ -140,6 +140,15 @@ export function setProject(cwd: string | null, name: string | null): void {
 export function coachingApplies(settings: GlassSettings, cwd: string | null = project.cwd): boolean {
   const { coaching } = settings
   if (!coaching.enabled) return false
+  return projectInScope(settings, cwd)
+}
+
+/**
+ * Whether `[capture] projects` / `exclude_projects` leave the project in, whatever else is on. The rating
+ * reminder goes by this alone (with `feedback_reminder`): it doesn't need coaching notes to be on.
+ */
+export function projectInScope(settings: GlassSettings, cwd: string | null = project.cwd): boolean {
+  const { coaching } = settings
   return projectApplies(cwd, coaching.projects, coaching.excludeProjects, project.name ?? undefined)
 }
 

@@ -20,6 +20,7 @@ import { register as spinner } from './spinner'
 import { register as hint } from './hint'
 import { register as tighten } from './tighten'
 import { register as track } from './track'
+import { register as urgent } from './urgent'
 
 // ClaudeGlass: one file per feature, one line each here. A new page (compaction
 // review, agents) is a file that calls addPage() from its own register(); add it
@@ -46,4 +47,5 @@ export const register: Register = (on, options) => {
   instructionsPage(on, options)
   tighten(on, options)
   budget(on, options)
+  urgent(on, options)
 }

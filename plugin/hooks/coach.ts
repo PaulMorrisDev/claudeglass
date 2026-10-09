@@ -8,12 +8,15 @@ import {
   editBox,
   editsFile,
   goAheadPlan,
+  leftPlanMode,
   markEdited,
+  modeSent,
   noteBackground,
   planApproved,
   planRefused,
   planSettled,
   planStatusSet,
+  refusedPlan,
   startedInBackground,
   submitted,
   turnEnded,
@@ -36,7 +39,8 @@ const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, f
 //   session.start  the project the session runs in (coaching covers the projects the user's config leaves in)
 //   prompt.edit    the draft's shape (length, and the words while it is short)
 //   prompt.submit  a message sent: the run of small changes, the first message's size;
-//                  a go-ahead typed after a plan was refused approves that plan
+//                  a go-ahead typed after a plan was refused approves that plan, and so does a message sent
+//                  after plan mode was left (classic.UserPromptSubmit carries the mode)
 //   tool.call      a file changed; work sent to the background; a plan approved or refused;
 //                  a workflow started in the background
 //   turn.complete  (through track.ts's onTurnEnd) what the reply said and used
@@ -144,13 +148,17 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('prompt.submit', async ($, e, next) => {
+    let refused: PlanTip | null = null
+    let approved: PlanTip | null = null
     try {
       const io = kit($)
       await rememberProject($, true)
       // Which kinds of origin arrive is worth knowing (what counts as typed is coach-mem.ts's isTypedOrigin). Not a fault, so not worded as one.
       $.ui.log(`claudeglass prompt origin ${e.origin.kind}`, { to: 'debug' })
       // A go-ahead typed after a plan was refused approves it: the tip is asked before the message is counted.
-      const approved = goAheadPlan(e.text, e.origin.kind)
+      modeSent(null)
+      refused = refusedPlan()
+      approved = goAheadPlan(e.text, e.origin.kind)
       const snap = await live(io)
       const settings = await getSettings(io)
       submitted(snap, settings, { text: e.text, origin: e.origin.kind, queued: e.turnId !== undefined }, await $.clock.now())
@@ -159,6 +167,23 @@ export const register: Register = on => {
     } catch (error) {
       debug($, 'prompt.submit', error)
     }
+    const result = await next(e)
+    // The settings hooks ran beneath (classic.UserPromptSubmit below says the mode): a plan sent back and then a message
+    // sent outside plan mode (plan mode left) is approved too, whatever the message says.
+    try {
+      if (approved === null && refused !== null && result.drop === undefined && leftPlanMode()) {
+        planSettled()
+        await planTip($, kit($), refused)
+      }
+    } catch (error) {
+      debug($, 'plan mode', error)
+    }
+    return result
+  }).catch(($, e, next) => next(e))
+
+  // The permission mode a message is sent under. (The only hook of the event.)
+  on('classic.UserPromptSubmit', async ($, e, next) => {
+    modeSent(typeof e.permission_mode === 'string' ? e.permission_mode : null)
     return next(e)
   }).catch(($, e, next) => next(e))
 

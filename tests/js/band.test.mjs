@@ -38,6 +38,15 @@ test("an urgent extra: the spend goes short, then the context, then the spend go
   assert.deepEqual(forms(narrow(pieces, 10, 16)), ["short", "gone", "gone"]);
 });
 
+test("an urgent extra never goes before the spend does: between the short extra and the context alone the spend stays gone", () => {
+  const pieces = [context, spend, extra(true)];
+  // Room for the context and a short spend, but not for the short extra: the spend is not what stays.
+  for (const cells of [room(28, 14), room(28, 14) + 5, room(28, 30) - 1, room(28, 30) - 8]) {
+    assert.deepEqual(forms(narrow(pieces, cells, 16)), ["short", "gone", "gone"], `columns ${cells}`);
+  }
+  assert.deepEqual(forms(narrow(pieces, room(28, 30), 16)), ["short", "gone", "short"]);
+});
+
 test("an urgent extra goes last: with room for the context and the extra, the spend is what leaves", () => {
   const pieces = [context, spend, extra(true)];
   for (let cells = room(28, 55); cells >= room(28, 30); cells -= 3) {

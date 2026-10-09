@@ -1,14 +1,17 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import type { GlassKeepItem, GlassPin, GlassReview } from '../types'
+import type { GlassKeepItem, GlassPin, GlassReview, GlassSettings } from '../types'
 import { drainSensor, emptyReview, forgetMemory, keepList, memory, reviewCompaction, boundaryLine, sound, suggestCount, withSummary } from './compaction-memory'
-import type { MessageLike } from './compaction-memory'
+import type { BoundaryDetail, MessageLike } from './compaction-memory'
+import { amountOfAfterAbout } from './fmt'
 import { COPY } from './generated/copy.js'
 import { holdAfterReply, holdStep, saidTotal } from './lib/coverage.js'
 import { buildKeepList, squash } from './lib/keeplist.js'
+import { priceUsage, ratesFor } from './lib/pricing.js'
 import { fill } from './lib/text.js'
 import { emptySnap } from './live'
+import { fallbackSettings } from './settings'
 import { onTurnEnd } from './track'
 
 // Compaction review, the event side. Before a summary: the keep list follows the
@@ -25,6 +28,8 @@ import { onTurnEnd } from './track'
 const snapAtom = atom({ plugin: 'claudeglass', key: 'snap' } as const, emptySnap())
 const pinsAtom = atom({ plugin: 'claudeglass', key: 'pins' } as const, [] as GlassPin[])
 const reviewAtom = atom({ plugin: 'claudeglass', key: 'review' } as const, emptyReview())
+const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, null as GlassSettings | null)
+const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, false)
 
 /** The two opt-ins live in $.store under these keys; the page turns them on and off. */
 export const HOLD_KEY = 'hold'
@@ -150,7 +155,16 @@ export const register: Register = on => {
         after: result.tokensAfter ?? null,
       })
       await update($, reviewAtom, (was): GlassReview => withSummary(sound(was), done.reviewed, done.row))
-      const line = boundaryLine(done.counts, saidTotal(done.reviewed.items))
+      // The Detailed view says how the context changed and what the summary cost, when Claude Code reported its usage.
+      let detail: BoundaryDetail | null = null
+      if ((await read($, detailedAtom)) === true) {
+        const snap = await read($, snapAtom)
+        const settings = (await read($, settingsAtom)) ?? fallbackSettings()
+        const rates = result.usage === undefined ? null : ratesFor(settings.models, snap.model)
+        const usd = result.usage === undefined || rates === null ? null : priceUsage(rates, result.usage, settings.ttl)
+        detail = { before: result.tokensBefore ?? null, after: result.tokensAfter ?? null, amount: usd === null ? null : amountOfAfterAbout(usd, snap, settings) }
+      }
+      const line = boundaryLine(done.counts, saidTotal(done.reviewed.items), detail)
       if (line !== null) $.ui.log(line)
       memory.outbox.push({ ts: now, kind: e.trigger, counts: done.counts })
       memory.pinnable = null

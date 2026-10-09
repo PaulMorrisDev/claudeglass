@@ -35,7 +35,7 @@ test('the band has two fixed segments and a Glass button; the bar is desktop onl
     expect(texts).toHaveLength(2)
     expect(texts[0]).toMatch(/60% full/)
     expect(texts[0]).toMatch(/summarises at 160k/)
-    expect(texts[1]).toBe('$0.50 this session (+$0.45)')
+    expect(texts[1]).toBe('$0.50 this session (+$0.50)')
 
     const open = await mounted.find({ type: 'Button', key: 'open' })
     expect(open?.props.hotkey).toBe('g')
@@ -111,7 +111,7 @@ test('the band narrows by short forms first, then drops what is not urgent; the 
 
   const wide = await at(200)
   expect(wide.texts).toHaveLength(3)
-  expect(wide.texts[1]).toBe('$0.50 this session (+$0.45)')
+  expect(wide.texts[1]).toBe('$0.50 this session (+$0.50)')
   expect(wide.bar).toBe(true)
 
   // Everything at full length fits (153 cells with the button), the bar does not (it needs 16 more).
@@ -123,13 +123,13 @@ test('the band narrows by short forms first, then drops what is not urgent; the 
   // The spend goes short first.
   const spendShort = await at(145)
   expect(spendShort.texts[0]).toMatch(/Claude summarises at 160k$/)
-  expect(spendShort.texts[1]).toBe('$0.50 (+$0.45)')
+  expect(spendShort.texts[1]).toBe('$0.50 (+$0.50)')
   expect(spendShort.texts[2]).toMatch(/^cache expired \(est\.\): the next send costs about \$\d/)
 
   // Then the context.
   const bothShort = await at(135)
   expect(bothShort.texts[0]).toBe('◕ Compact soon · 60% full · summarises at 160k')
-  expect(bothShort.texts[1]).toBe('$0.50 (+$0.45)')
+  expect(bothShort.texts[1]).toBe('$0.50 (+$0.50)')
   expect(bothShort.texts).toHaveLength(3)
 
   // Then the spend goes, because the cold segment is urgent.
@@ -142,10 +142,10 @@ test('the band narrows by short forms first, then drops what is not urgent; the 
   expect(coldShort.texts).toHaveLength(2)
   expect(coldShort.texts[1]).toMatch(/^cache expired \(est\.\): about \$\d/)
 
-  // Then it goes, and the spend comes back short.
+  // Then it goes, and the spend, which went before it, stays gone: an urgent segment outlasts the spend.
   const tight = await at(80)
-  expect(tight.texts).toHaveLength(2)
-  expect(tight.texts[1]).toBe('$0.50 (+$0.45)')
+  expect(tight.texts).toHaveLength(1)
+  expect(tight.texts[0]).toMatch(/60% full/)
   const tiny = await at(30)
   expect(tiny.texts).toHaveLength(1)
   expect(tiny.texts[0]).toMatch(/60% full/)

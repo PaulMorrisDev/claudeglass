@@ -31,7 +31,9 @@ named by).
 leaves the file alone when only ``written_at`` would change, unless that
 is a day old. ``update --finish`` writes it once, carrying forward what only
 a report knows from the file the service wrote (``previous``), and the
-dashboard's service again after a report build, at most hourly.
+dashboard's service again after a report build, at most hourly, and
+:func:`refresh_coaching` brings just the coaching block up to date when a
+rating or a capture setting changes.
 """
 
 from __future__ import annotations
@@ -320,4 +322,25 @@ def write(config_dir: str | Path | None, data: dict) -> bool:
     return True
 
 
-__all__ = ["SCHEMA", "build", "dashboard_url", "pricing_block", "settings_path", "write"]
+def refresh_coaching(config_dir: str | Path | None, *, now: datetime | None = None) -> bool:
+    """Bring the ``coaching`` block of the file up to date now, leaving the
+    rest of it as it is. A rating given on the dashboard or a change to
+    ``[capture]`` moves what the block says (the ratings, whether coaching
+    and the rating reminder are on, the project filter), and the mod
+    should not wait for the next report to hear of it. Cheap: no report and
+    no store. Nothing is written when there is no file yet (the next report
+    writes it whole) or it can't be read. Never raises; returns whether it
+    wrote."""
+    try:
+        directory = _resolve_config_dir(config_dir)
+        existing = json.loads(settings_path(directory).read_text(encoding="utf-8"))
+        if not isinstance(existing, dict) or existing.get("schema") != SCHEMA:
+            return False
+        stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        data = {**existing, "coaching": _coaching_block(directory, stamp), "written_at": stamp.strftime(_STAMP_FORMAT)}
+        return write(directory, data)
+    except Exception:  # noqa: BLE001 -- a courtesy to the mod: the next report writes the whole file
+        return False
+
+
+__all__ = ["SCHEMA", "build", "dashboard_url", "pricing_block", "refresh_coaching", "settings_path", "write"]

@@ -22,6 +22,7 @@ export function emptySnap(): GlassSnap {
     fiveHour: null,
     limitHit: false,
     calBase: null,
+    parallel: false,
     reqs: [],
     firstCr: null,
     startupFirst: null,
@@ -40,6 +41,7 @@ export function emptySnap(): GlassSnap {
     lastNoteReply: null,
     turnReqs: 0,
     turnAt: null,
+    turnId: null,
     turnUsd: 0,
     turnExact: false,
     turn: emptyTurn(),
@@ -62,7 +64,8 @@ let scheduled = false
 
 /** The snapshot to work on: the copy in memory, or the one in $.state after a reload. */
 export async function live(io: Io): Promise<GlassSnap> {
-  if (work === null) work = await io.getSnap()
+  // What $.state returns is read-only; the event hooks change theirs, so they work on a copy (the snapshot is plain JSON).
+  if (work === null) work = JSON.parse(JSON.stringify(await io.getSnap())) as GlassSnap
   return work
 }
 

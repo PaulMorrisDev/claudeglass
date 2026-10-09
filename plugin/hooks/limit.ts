@@ -12,12 +12,14 @@ export const MIN_RATE_PCT = 1
 /**
  * Percent of the 5-hour limit per list-price dollar, or null when it isn't known:
  * the limit hasn't been reported, no window has been seen yet (a new session or a
- * new window starts over), or too little has been spent or moved to tell. It is an
- * estimate: the percent is rounded by Claude Code, and spend in other sessions that
- * share the window moves the limit too, which reads as a higher rate.
+ * new window starts over), too little has been spent or moved to tell, or another session
+ * is running: the percent is the account's, so it moves with that session's spend too and
+ * would read as a higher rate for this one (heartbeat.ts keeps `parallel`). It is an
+ * estimate: the percent is rounded by Claude Code.
  */
 export function pctPerUsd(snap: GlassSnap): number | null {
   const base = snap.calBase
+  if (snap.parallel === true) return null
   if (base === null || snap.fiveHour === null || snap.cost === null) return null
   const usd = snap.cost - base.usd
   const pct = snap.fiveHour.pct - base.pct

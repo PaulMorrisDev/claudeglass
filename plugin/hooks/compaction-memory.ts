@@ -4,6 +4,7 @@ import { checkCoverage } from './lib/coverage.js'
 import type { HoldState } from './lib/coverage.js'
 import { buildKeepList, exactTokens, itemId, pinText, splitSuggested, squash, trimText } from './lib/keeplist.js'
 import { fill } from './lib/text.js'
+import { formatTokens } from './lib/units.js'
 import { addEvent, seconds } from './sensor'
 
 // The compaction review's plain logic and the little it keeps in module memory.
@@ -162,15 +163,24 @@ export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: G
   }
 }
 
-/** The boundary line in the transcript, or null when nothing the user said was checked (`total` counts the things they said). */
-export function boundaryLine(counts: Counts, total: number): string | null {
+/** What the Detailed view adds to the boundary line: the context before and after, and what the summary cost when that is known (an amount in the user's billing words). */
+export type BoundaryDetail = { before: number | null; after: number | null; amount: string | null }
+
+/**
+ * The boundary line in the transcript, or null when nothing the user said was checked (`total` counts the things
+ * they said). With `detail` (the Detailed view) it also says how the context changed, and what the summary cost.
+ */
+export function boundaryLine(counts: Counts, total: number, detail: BoundaryDetail | null = null): string | null {
   if (total === 0) return null
   const missing = counts.missing
   const text =
     missing === 0
       ? COPY['log.compacted.ok.said']
       : `${missing === 1 ? COPY['log.compacted.missing.one'] : fill(COPY['log.compacted.missing'], { count: missing })} ${COPY['log.compacted.review']}`
-  return `● ${COPY['note.lead']} · ${fill(COPY['log.compacted'], { missing: text })}`
+  const line = `● ${COPY['note.lead']} · ${fill(COPY['log.compacted'], { missing: text })}`
+  if (detail === null || detail.before === null || detail.after === null) return line
+  const figures = { before: `${formatTokens(detail.before)} tokens`, after: `${formatTokens(detail.after)} tokens` }
+  return `${line} ${detail.amount === null ? fill(COPY['log.compacted.tokens.plain'], figures) : fill(COPY['log.compacted.tokens'], { ...figures, amount: detail.amount })}`
 }
 
 /** The pins as keep-list items. */

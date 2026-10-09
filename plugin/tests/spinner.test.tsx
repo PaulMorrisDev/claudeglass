@@ -10,6 +10,11 @@ async function working($: Parameters<typeof reply>[0], world: Parameters<typeof 
   await reply($, world, FIRST)
   // The next turn has started and has cost $0.12 so far.
   await $.turn.start({ text: 'more', turnId: 'turn-next' })
+  // The reply begins at its first request.
+  world.next = { usage: { cacheRead: 120000, cacheWrite: 400, output: 0 }, tools: [] }
+  const stream = $.turn.step({ turnId: 'turn-next', index: 0, model: 'claude-sonnet-4-6', messageCount: 4 })
+  for await (const chunk of stream) void chunk
+  await stream.result
   await $.session.measure(measured(120400, 0.62))
   await world.clock.advance(300)
 }
@@ -63,8 +68,12 @@ test('the spinner shows the reply cost as each request is priced, before Claude 
   await request($, world, 0, { cacheRead: 120000, cacheWrite: 1000, output: 200 })
   expect(await suffix($, world, 'terminal')).toBe('(3s) · 60% full · +$0.04')
 
-  // A subagent's turn starts in the middle of the reply: it does not begin the reply again.
+  // A subagent's turn starts in the middle of the reply and makes requests of its own: it does not begin the reply again.
   await $.turn.start({ text: 'agent', turnId: 'turn-sub' })
+  world.next = { usage: { cacheRead: 5000, cacheWrite: 100, output: 50 }, tools: [] }
+  const sub = $.turn.step({ turnId: 'turn-sub', index: 0, agentId: 'agent-1', model: 'claude-sonnet-4-6', messageCount: 2 } as never)
+  for await (const chunk of sub) void chunk
+  await sub.result
   await world.clock.advance(300)
   expect(await suffix($, world, 'terminal')).toBe('(3s) · 60% full · +$0.04')
 

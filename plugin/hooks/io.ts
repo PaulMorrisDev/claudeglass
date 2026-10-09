@@ -27,4 +27,8 @@ export type Io = {
   getSettings: () => Promise<GlassSettings | null>
   putSettings: (settings: GlassSettings) => Promise<void>
   getDetailed: () => Promise<boolean>
+  /** The names of the files in a folder (track.ts's engine only; absent where a file doesn't need it). */
+  listNames?: (path: string) => Promise<string[]>
+  /** Sets the status line, or clears it with undefined (track.ts's engine only). */
+  status?: (text: string | undefined) => void
 }

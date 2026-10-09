@@ -49,6 +49,14 @@ export type World = {
   shape: { window?: number; point?: number; buffer?: number; startupRows?: { name: string; tokens: number }[] }
   /** The project root session.root reports. */
   root: string
+  /** The session id session.id reports (a test changes it, as a /clear does). */
+  session: string
+  /** How many times a folder was listed (fs.list). */
+  listed: number
+  /** When set, the `context.tokens` session.usage reports, whatever `figures` was given: as right after a summary, when it is still the last request's size. */
+  stale: number | null
+  /** False: session.usage reports no breakdown. */
+  breakdown: boolean
 }
 
 /** The coaching block of a settings file written for a user who turned coaching and the rating reminder on. */
@@ -108,15 +116,19 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
   mock.env(on, { CLAUDE_CONFIG_DIR: '/cfg' })
   const files = new Map<string, string>()
   if (options.settings !== null) files.set(`${CONFIG}/claudeglass/mod/settings.json`, options.settings ?? settingsFile())
-  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {}, root: '/work/project' }
+  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {}, root: '/work/project', session: options.session ?? SESSION, listed: 0, stale: null, breakdown: true }
   let current = usageFor(0, 0)
   world.figures = (tokens, usd) => {
     current = usageFor(tokens, usd, world.shape)
   }
-  on('session.id', () => ({ value: options.session ?? SESSION }) as never)
+  on('session.id', () => ({ value: world.session }) as never)
   on('session.surfaces', () => ({ value: ['terminal'] }) as never)
   on('session.messages', () => ({ value: world.transcript }) as never)
-  on('session.usage', () => ({ value: current }) as never)
+  on('session.usage', () => {
+    const context = { ...current.context, ...(world.stale === null ? {} : { tokens: world.stale }) }
+    if (!world.breakdown) delete (context as { breakdown?: unknown }).breakdown
+    return { value: { ...current, context } } as never
+  })
   on('session.root', () => ({ value: world.root }) as never)
   // The engine makes a path absolute (C:\cfg\... on Windows); the files are kept by the path as the mod wrote it.
   const key = (path: string) => path.replace(/[\\]/g, '/').replace(/^[A-Za-z]:/, '')
@@ -127,6 +139,13 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
   on('fs.write', (_$, e) => {
     files.set(key(e.path), e.text)
     return { value: undefined } as never
+  })
+  // A folder's files: those kept under its path (a test sets other sessions' heartbeats this way).
+  on('fs.list', (_$, e) => {
+    world.listed += 1
+    const dir = key(e.path).replace(/\/+$/, '') + '/'
+    const names = [...files.keys()].map(path => key(path)).filter(path => path.startsWith(dir) && !path.slice(dir.length).includes('/')).map(path => path.slice(dir.length))
+    return { value: names.map(name => ({ name, kind: 'file' as const, size: 0, mtimeMs: 0 })) } as never
   })
   on('ui.log', (_$, e) => {
     world.logs.push(e.text)

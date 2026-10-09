@@ -103,7 +103,7 @@ export async function runBudget(args: string, kit: BudgetKit): Promise<string> {
     return COPY['budget.off']
   }
   const parsed = parseBudget(word, settings)
-  if (!parsed.ok) return COPY['budget.bad']
+  if (!parsed.ok) return COPY[settings.billing.mode === 'subscription' ? 'budget.bad.subscription' : 'budget.bad.api']
   await kit.set(parsed.budget)
   mirrorBudget(parsed.budget)
   return fill(COPY['budget.set'], { budget: budgetLabel(parsed.budget, settings) })

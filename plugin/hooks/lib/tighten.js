@@ -37,6 +37,16 @@ export function tightenMaxTokens(draft) {
 }
 
 /**
+ * Whether a reply was cut off by the cap: it used all the tokens it was allowed. A cut rewrite is not a rewrite.
+ * @param {number} outputTokens
+ * @param {number} maxTokens
+ * @returns {boolean}
+ */
+export function wasCut(outputTokens, maxTokens) {
+  return outputTokens >= maxTokens;
+}
+
+/**
  * The reply with anything around the prompt taken off: the <prompt> marks,
  * a code fence, a pair of quotes.
  * @param {string} reply

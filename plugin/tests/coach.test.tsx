@@ -414,7 +414,8 @@ test('approving a plan after a lot of planning puts the fresh-start tip on the s
   expect(state.statuses[state.statuses.length - 1]).toBe(String(tip[0]))
 
   await reply($, world, { gap: MINUTE, ...AGAIN })
-  expect(state.statuses[state.statuses.length - 1]).toBeUndefined()
+  // The tip goes with the reply. (The big jumps of the planning leave no reply before Claude summarises: the urgent line takes the place.)
+  expect(state.statuses[state.statuses.length - 1]).toBe('Claude summarises on the next reply')
 
   await settle($, world)
   const shown = sensorNotes(world, 'plan_fresh')

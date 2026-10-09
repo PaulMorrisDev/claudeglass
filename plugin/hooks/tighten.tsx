@@ -1,23 +1,16 @@
-import { atom, read } from 'claude-code'
 import type { PaneOpenArgs, Register } from 'claude-code'
 
-import type { GlassSettings } from '../types'
 import { filledDraft } from './draft'
-import { amount, formatTokens } from './fmt'
+import { formatTokens } from './fmt'
 import { COPY } from './generated/copy.js'
-import { cleanRewrite, MAX_DRAFT_CHARS, TIGHTEN_SYSTEM, tightenMaxTokens, tightenPrompt, unifiedDiff, words } from './lib/tighten.js'
-import { priceUsage } from './lib/pricing.js'
+import { cleanRewrite, MAX_DRAFT_CHARS, TIGHTEN_SYSTEM, tightenMaxTokens, tightenPrompt, unifiedDiff, wasCut, words } from './lib/tighten.js'
 import { fill } from './lib/text.js'
-import { fallbackSettings } from './settings'
-
-// Claude Code reads a state reference only where its literal is written, so each file that
-// reads one declares it (the contract is types/index.d.ts).
-const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, null)
 
 // /glass tighten: Haiku rewrites the draft shorter and more specific; a pane of its own shows the
 // draft against the rewrite as a diff, with what the call cost, and two buttons. Use this puts the
 // rewrite in the prompt box (nothing is sent); Keep mine puts the draft back and closes. It is opt-in
-// by being a command: the call is made only when the person types it.
+// by being a command: the call is made only when the person types it. `/glass tighten <text>` tightens
+// that text; bare, it tightens the box or, when the command has taken the box, the last draft typed.
 //
 // The draft and the rewrite are the person's words: they live here, in module memory, for as long as
 // the pane is open, and are never written to $.state, $.store or disk.
@@ -60,24 +53,32 @@ function isOwnCommand(text: string): boolean {
 }
 
 /**
- * Runs /glass tighten: the line the command answers with. The draft is the box's text, or, when the
- * command has taken the box (or the box is empty), the last draft typed before it.
+ * Runs /glass tighten: the line the command answers with. The draft is the text given after the command, or the
+ * box's text, or, when the command has taken the box (or the box is empty), the last draft typed before it.
  */
-export async function runTighten(kit: TightenKit): Promise<string> {
-  let draft = ''
-  try {
-    const box = await kit.box()
-    draft = box.trim() !== '' && !isOwnCommand(box) ? box : kit.remembered()
-  } catch (error) {
-    kit.debug(`claudeglass: tighten box ${String(error)}`)
-    draft = kit.remembered()
+export async function runTighten(kit: TightenKit, given = ''): Promise<string> {
+  let draft = given.trim()
+  if (draft === '') {
+    try {
+      const box = await kit.box()
+      draft = box.trim() !== '' && !isOwnCommand(box) ? box : kit.remembered()
+    } catch (error) {
+      kit.debug(`claudeglass: tighten box ${String(error)}`)
+      draft = kit.remembered()
+    }
   }
   if (draft.trim() === '') return COPY['tighten.empty']
   if (draft.length > MAX_DRAFT_CHARS) return COPY['tighten.long']
-  const answer = await kit.complete(TIGHTEN_SYSTEM, tightenPrompt(draft), tightenMaxTokens(draft))
+  const maxTokens = tightenMaxTokens(draft)
+  const answer = await kit.complete(TIGHTEN_SYSTEM, tightenPrompt(draft), maxTokens)
   if ('reason' in answer) {
     kit.debug(`claudeglass: tighten ${answer.reason}`)
     return answer.reason === 'unavailable' ? COPY['tighten.skip'] : COPY['tighten.failed']
+  }
+  // A reply that used the whole allowance was cut off: never show half a rewrite as if it were one.
+  if (wasCut(answer.output, maxTokens)) {
+    kit.debug('claudeglass: tighten cut')
+    return COPY['tighten.cut']
   }
   const rewrite = cleanRewrite(answer.text)
   if (rewrite === '') return COPY['tighten.failed']
@@ -87,25 +88,16 @@ export async function runTighten(kit: TightenKit): Promise<string> {
   return (await kit.open()) ? COPY['tighten.opened'] : COPY['tighten.failed']
 }
 
-/** The newest Haiku in the rates, to price the call at (the answer does not name the model that gave it). */
-function haikuRates(models: GlassSettings['models']): GlassSettings['models'][string] | null {
-  const ids = Object.keys(models).filter(id => id.toLowerCase().includes('haiku'))
-  ids.sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))
-  const best = ids[0]
-  return best === undefined ? null : (models[best] ?? null)
-}
-
-/** What the call cost, in tokens and, when the rates price the model, in the billing mode's own words. */
-export function costLine(current: { input: number; output: number }, settings: GlassSettings): string {
-  const tokens = formatTokens(current.input + current.output)
-  const rates = haikuRates(settings.models)
-  if (rates === null) return fill(COPY['tighten.cost'], { tokens })
-  return fill(COPY['tighten.cost.amount'], { tokens, amount: amount(priceUsage(rates, { input_tokens: current.input, output_tokens: current.output }, settings.ttl), settings) })
+/**
+ * What the call cost, in tokens. No amount: the answer does not name the model that gave it (the alias 'haiku' may
+ * resolve to a Haiku the rates don't price yet), so a price could be of the wrong one.
+ */
+export function costLine(current: { input: number; output: number }): string {
+  return fill(COPY['tighten.cost'], { tokens: formatTokens(current.input + current.output) })
 }
 
 export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: TIGHTEN_PANE }, async ($, e) => {
-    const settings = (await read($, settingsAtom)) ?? fallbackSettings()
     const { Box, Text, Button, Code } = $.ui.resolve(e)
     const current = shown
     if (current === null) return <Text dimColor>{COPY['tighten.empty']}</Text>
@@ -152,7 +144,7 @@ export const register: Register = on => {
         <Text>{fill(COPY['tighten.counts'], { before: words(current.before), after: words(current.after) })}</Text>
         <Text dimColor>{COPY['tighten.legend']}</Text>
         <Code source={unifiedDiff(current.before, current.after)} format="diff" />
-        <Text dimColor>{costLine(current, settings)}</Text>
+        <Text dimColor>{costLine(current)}</Text>
         {current.note !== null ? <Text>{current.note}</Text> : null}
         <Box flexDirection="row" gap={1}>
           <Button key="use" label={COPY['tighten.use']} hotkey="u" onPress={() => void use()} />

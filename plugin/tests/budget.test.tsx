@@ -38,13 +38,13 @@ test('on API billing a budget shows as progress in the band, and /glass budget s
 
   expect(await budget($, '')).toMatch(/^No session budget is set\./)
   expect(await budget($, '$2')).toBe('Session budget set: $2.00.')
-  expect((await segments($))[1]).toBe('$0.50 of $2.00 budget (+$0.45)')
-  expect((await segments($, 'terminal', { bodyColumns: 90 }))[1]).toBe('$0.50 of $2.00 (+$0.45)')
+  expect((await segments($))[1]).toBe('$0.50 of $2.00 budget (+$0.50)')
+  expect((await segments($, 'terminal', { bodyColumns: 90 }))[1]).toBe('$0.50 of $2.00 (+$0.50)')
   expect(await budget($, '')).toBe('Session budget: $2.00. This session has used $0.50.')
 
   // Off puts the ordinary spend back.
   expect(await budget($, 'off')).toBe('Session budget cleared.')
-  expect((await segments($))[1]).toBe('$0.50 this session (+$0.45)')
+  expect((await segments($))[1]).toBe('$0.50 this session (+$0.50)')
   expect(faults(world)).toEqual([])
 })
 
@@ -54,14 +54,14 @@ test('the budget in the Detailed band keeps the figures it had', async ($, on) =
   await budget($, '2.5')
   await $.command.run({ command: 'glass', args: 'detail' } as never)
   const texts = await segments($)
-  expect(texts[1]).toBe('$0.50 of $2.50 budget (+$0.45)')
+  expect(texts[1]).toBe('$0.50 of $2.50 budget (+$0.50)')
 })
 
 test('an amount that does not fit the billing mode is turned back', async ($, on) => {
   const world = prepare(on)
   await started($, world)
-  for (const bad of ['5%', 'lots', '-3', '0', '1e3']) expect(await budget($, bad)).toBe("That isn't an amount. Try /glass budget 2, /glass budget 5%, or /glass budget off.")
-  expect((await segments($))[1]).toBe('$0.50 this session (+$0.45)')
+  for (const bad of ['5%', 'lots', '-3', '0', '1e3']) expect(await budget($, bad)).toBe("That isn't an amount. Try /glass budget 2 or /glass budget 2.50, or /glass budget off.")
+  expect((await segments($))[1]).toBe('$0.50 this session (+$0.50)')
 })
 
 test('past the budget the band says so, and one note at the end of the reply says it once', async ($, on) => {
@@ -104,7 +104,8 @@ test('on a subscription the budget is a share of the 5-hour limit', async ($, on
   await started($, world)
 
   // Dollars are not what a subscription budget is written in.
-  expect(await budget($, '$2')).toMatch(/^That isn't an amount\./)
+  expect(await budget($, '$2')).toBe("That isn't an amount. Use a share of the 5-hour limit, such as /glass budget 5%, or /glass budget off.")
+  expect(await budget($, '150%')).toMatch(/^That isn't an amount\. Use a share/)
   expect(await budget($, '20%')).toBe('Session budget set: 20%.')
 
   // Until the limit has moved there is no share to measure against: the band stays as it was.

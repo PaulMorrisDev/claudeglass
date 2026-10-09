@@ -125,6 +125,13 @@ export type GlassAgent = {
   notes: { kind: string; text: string }[]
   /** The agent that started it, when another agent did (its row has no Agent call of the main session's under it). */
   parentAgentId?: string
+  /**
+   * Set when a workflow script's `agent()` started it: the run's id and the Workflow call that began the run. The engine's
+   * agent list leaves a workflow's agents out, so a row like this is not finished for being missing from it.
+   */
+  workflow?: { runId: string; call: string }
+  /** When an event of its own last arrived (ms); a workflow's row with none for a long while is finished (agents.ts). */
+  seenAt?: number
 }
 
 export type GlassRebuild = {
@@ -177,6 +184,11 @@ export type GlassSnap = {
   limitHit: boolean
   /** Session dollars and percent when this 5-hour window was first seen. */
   calBase: { usd: number; pct: number; resetsAt: string | null } | null
+  /**
+   * True while another session's heartbeat is fresh: the 5-hour percent moves with every session's spend, so this
+   * session's share of it can't be told (limit.ts gives none). Checked at most once a minute (heartbeat.ts).
+   */
+  parallel: boolean
   reqs: GlassRequest[]
   firstCr: number | null
   startupFirst: number | null
@@ -196,8 +208,10 @@ export type GlassSnap = {
   lastNoteReply: number | null
   /** Requests in the reply being worked on. */
   turnReqs: number
-  /** When the main reply being worked on began (ms); null between replies. Starts from subagents' turns are ignored while it is set. */
+  /** When the main reply being worked on began (ms); null between replies. */
   turnAt: number | null
+  /** The id of the main reply last begun (the `turnId` its first request carried): a request with another id begins the next reply, a subagent's never does. */
+  turnId: string | null
   /** What the reply being worked on has cost so far, in USD: each request priced from its usage, replaced by Claude Code's own figure at each measurement. */
   turnUsd: number
   /** False while `turnUsd` rests on the prices alone, with no measurement from Claude Code since the last request. */

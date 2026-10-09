@@ -636,3 +636,31 @@ def test_a_failure_to_write_never_reaches_the_request(served, monkeypatch, capsy
     assert resp.status == 200 and json.loads(raw)
     assert "the mod's settings were not written: disk on fire" in capsys.readouterr().err
     assert not mod_settings.settings_path(served.options.config_dir).exists()
+
+
+# -- refresh_coaching: a rating or a capture change reaches the mod at once ---------------
+
+
+def test_refresh_coaching_moves_only_the_coaching_block(tmp_path):
+    path = mod_settings.settings_path(tmp_path)
+    data = mod_settings.build(tmp_path, now=NOW)
+    data["usual"] = {"session_cost_usd": 1.5, "end_context_tokens": 90000}
+    assert mod_settings.write(tmp_path, data)
+    (tmp_path / "config.toml").write_text('[capture]\ncoaching = ["coaching_notes"]\nfeedback = ["feedback_reminder"]\n', encoding="utf-8")
+    assert mod_settings.refresh_coaching(tmp_path, now=NOW + timedelta(minutes=5))
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["coaching"]["enabled"] is True and written["coaching"]["feedback_reminder"] is True
+    assert written["usual"] == {"session_cost_usd": 1.5, "end_context_tokens": 90000}
+    assert written["written_at"] == "2026-09-18T12:35:05Z"
+    # Nothing changed since: the file is left alone.
+    assert mod_settings.refresh_coaching(tmp_path, now=NOW + timedelta(minutes=6)) is False
+
+
+@pytest.mark.parametrize("content", [None, "", "not json", "[]", '{"schema": 99}'])
+def test_refresh_coaching_never_raises_and_writes_nothing_without_a_readable_file(tmp_path, content):
+    path = mod_settings.settings_path(tmp_path)
+    if content is not None:
+        path.parent.mkdir(parents=True)
+        path.write_text(content, encoding="utf-8")
+    assert mod_settings.refresh_coaching(tmp_path) is False
+    assert (path.read_text(encoding="utf-8") if content is not None else None) == content

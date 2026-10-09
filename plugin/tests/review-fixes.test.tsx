@@ -30,13 +30,22 @@ type Rig = {
   /** What agent.list reports. */
   listing: { id: string; status: string }[]
   spawned: number
+  /** The permission mode the classic UserPromptSubmit hook is told of at each submit (none: the hook isn't run). */
+  mode?: string
+  /** The engine the test drives, for that hook. */
+  engine?: Engine
 }
 
 /** What sits under the events: a prompt box that applies each edit, tool results, the status line, and agent spawns. */
 function rig(on: On): Rig {
   const state: Rig = { box: '', statuses: [], results: {}, listing: [], spawned: 0 }
   on('prompt.edit', (_$, e) => ({ text: e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end), cursor: e.start + e.inputText.length }) as never)
-  on('prompt.submit', (_$, e) => e as never)
+  // Beneath prompt.submit the engine runs the UserPromptSubmit settings hooks, which carry the permission mode.
+  on('classic.UserPromptSubmit', () => ({}) as never)
+  on('prompt.submit', async (_$, e) => {
+    if (state.mode !== undefined) await state.engine?.classic.UserPromptSubmit({ prompt: e.text, permission_mode: state.mode } as never)
+    return e as never
+  })
   on('tool.call', (_$, e) => (state.results[String(e.tool)] ?? { result: {} }) as never)
   on('ui.status', (_$, e) => {
     state.statuses.push(e.text)
@@ -59,6 +68,7 @@ async function put($: Engine, state: Rig, text: string): Promise<void> {
 }
 
 async function send($: Engine, state: Rig, text: string, origin: string = 'composer'): Promise<void> {
+  state.engine = $
   await $.prompt.submit({ text, wait: false, origin: { kind: origin } } as never)
   state.box = ''
 }
@@ -211,13 +221,27 @@ async function piece($: Engine, world: World, state: Rig): Promise<void> {
   await work($, world, 6)
 }
 
-for (const coaching of [{ enabled: false }, { feedback_reminder: false }]) {
+for (const coaching of [{ feedback_reminder: false }, { exclude_projects: ['work'] }]) {
   test(`no rating reminder with ${JSON.stringify(coaching)}`, async ($, on) => {
     const world = prepare(on, { settings: settingsFile({ coaching }) })
     await piece($, world, rig(on))
     expect(ratingNotes(world)).toEqual([])
   })
 }
+
+test('a project filter that leaves this project in keeps the rating reminder', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ coaching: { exclude_projects: ['elsewhere'] } }) })
+  await piece($, world, rig(on))
+  expect(ratingNotes(world)).toHaveLength(1)
+})
+
+// The capture hook's reminder goes by the opt-in and the project filter alone; coaching notes being off doesn't hold it back.
+test('the rating reminder still comes with coaching notes off, when the feedback reminder is on', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ coaching: { enabled: false, feedback_reminder: true } }) })
+  await piece($, world, rig(on))
+  expect(ratingNotes(world)).toHaveLength(1)
+  expect(faults(world)).toEqual([])
+})
 
 test('the capture hook last reminder holds the next one back', async ($, on) => {
   const world = prepare(on, { settings: settingsFile({ coaching: { reminded_at: NOW_S - 3600 } }) })
@@ -311,6 +335,42 @@ test('a go-ahead typed after the plan was sent back approves it: the fresh-start
   // The plan is spent: another go-ahead tips nothing.
   await send($, state, 'go ahead')
   expect(tips(state)).toHaveLength(1)
+  expect(faults(world)).toEqual([])
+})
+
+test('leaving plan mode approves the plan sent back, whatever the next message says: the fresh-start tip, once', async ($, on) => {
+  const world = prepare(on)
+  const state = rig(on)
+  state.results.ExitPlanMode = { result: PLAN, isError: true }
+  await planned($, world, state)
+  await tool($, 'ExitPlanMode')
+
+  // Still in plan mode: a message that isn't a go-ahead approves nothing.
+  state.mode = 'plan'
+  await send($, state, 'what about the tests?')
+  expect(state.statuses).toEqual([])
+
+  await tool($, 'ExitPlanMode')
+  state.mode = 'default'
+  await send($, state, 'looks fine, I switched out of plan mode')
+  const tip = tips(state)
+  expect(tip).toHaveLength(1)
+  expect(String(tip[0])).toMatch(/^This plan was approved with about \d+k tokens of planning/)
+
+  // The plan is spent: the next message in that mode tips nothing.
+  await send($, state, 'and now the second part')
+  expect(tips(state)).toHaveLength(1)
+  expect(faults(world)).toEqual([])
+})
+
+test('a message sent outside plan mode with no plan sent back tips nothing', async ($, on) => {
+  const world = prepare(on)
+  const state = rig(on)
+  state.results.ExitPlanMode = { result: PLAN, isError: true }
+  state.mode = 'default'
+  await planned($, world, state)
+  await send($, state, 'carry on with the next part')
+  expect(state.statuses).toEqual([])
   expect(faults(world)).toEqual([])
 })
 

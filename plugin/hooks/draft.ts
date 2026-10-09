@@ -50,7 +50,7 @@ type Shown = { kind: string; ts: number; ctx: number }
 type Mem = {
   /** The draft in the box now. */
   text: string
-  /** The last draft that wasn't a slash command: what /glass tighten works on when the command has taken the box's place. */
+  /** The last draft that wasn't a slash command, kept until a message is sent: what /glass tighten works on when the command has taken the box's place. */
   last: string
   /** What the draft was checked for, and a key for it that changes when a hint could. */
   facts: Facts
@@ -147,9 +147,9 @@ function debug($: EngineInterface, where: string, error: unknown): void {
 /** Checks the draft; true when what decides a hint changed, so it should be drawn again. */
 function checkText(text: string): boolean {
   mem.text = text
-  if (text.trim() === '') mem.last = ''
-  // A box that begins with a slash is a command being typed (or a path): the draft before it stands.
-  else if (!text.trimStart().startsWith('/')) mem.last = text
+  // A box that begins with a slash is a command being typed (or a path): the draft before it stands. So does an
+  // emptied box: the last draft is kept until a message is sent, so /glass tighten can still find it.
+  if (text.trim() !== '' && !text.trimStart().startsWith('/')) mem.last = text
   mem.facts = draftFacts(text, mem.bag, mem.files)
   const key = factsKey(mem.facts)
   // A check that leads again after another (or none) was the lead has its rest asked anew.
@@ -170,14 +170,15 @@ function sentText(text: string, typed: boolean): void {
     mem.restore = null
   }
   mem.text = ''
-  mem.last = ''
+  // A slash command sent (/glass tighten itself) leaves the draft before it: that is what it works on.
+  if (!isSlash(text)) mem.last = ''
   mem.facts = draftFacts('', mem.bag, mem.files)
   mem.key = factsKey(mem.facts)
   mem.lead = leadOf(mem.facts)
   mem.episode = null
 }
 
-/** The last draft typed that wasn't a slash command; empty when the box was cleared or the message sent. */
+/** The last draft typed that wasn't a slash command; kept when the box is emptied, and empty once a message is sent. */
 export function rememberedDraft(): string {
   return mem.last
 }
@@ -234,7 +235,7 @@ export function draftLine(view: View): string | null {
     mem.episode = null
     return null
   }
-  const kind = pickDraft(mem.facts, view.tokens)
+  const kind = pickDraft(mem.facts, carriedTokens(view.tokens, startupOf(view)))
   if (kind === null || settings.muted.includes(kind)) {
     mem.episode = null
     return null
@@ -259,6 +260,24 @@ export function draftLine(view: View): string | null {
 
 type Costly = { question: string; cold: boolean }
 
+/**
+ * Whether the guard may ask the topic question: under the hint's own rules (coaching on, not muted, and the rest
+ * rule, unless the hint is on screen already). Asking counts as showing it, so it rests like the hint does.
+ */
+function topicMayAsk(view: View, carried: number): boolean {
+  const { snap, settings, now } = view
+  if (!draftChecksAllowed(settings) || settings.muted.includes('draft_topic')) return false
+  if (mem.episode === 'draft_topic') return true
+  const th = thresholdsOf(settings) as unknown as RestThresholds
+  const nowS = seconds(now)
+  const rest = mergeRest(snap.rest, mem.overlay)
+  if (!mayShow(rest, 'draft_topic', carried, nowS, th)) return false
+  mem.overlay = recordShown(rest, 'draft_topic', carried, nowS, th, settings.once.includes('draft_topic'))
+  mem.episode = 'draft_topic'
+  mem.shown.push({ kind: 'draft_topic', ts: now, ctx: view.tokens })
+  return true
+}
+
 /** The question a costly send is asked with, or null when the send is an ordinary one. */
 function costlySend(view: View, text: string): Costly | null {
   const { snap, settings } = view
@@ -276,8 +295,9 @@ function costlySend(view: View, text: string): Costly | null {
     return { question: fill(COPY['guard.cold.plain'], { minutes: minutes(idle) }), cold: true }
   }
   const facts = draftFacts(text, mem.bag, mem.files)
-  if (facts.topic && view.tokens >= STALE_TOKENS) {
-    const tokens = formatTokens(carriedTokens(view.tokens, startup))
+  const carried = carriedTokens(view.tokens, startup)
+  if (facts.topic && carried >= STALE_TOKENS && topicMayAsk(view, carried)) {
+    const tokens = formatTokens(carried)
     const saved = savedPerReply(view)
     if (saved !== null && saved >= 0.005 && amountHasShare(saved, snap, settings)) {
       return { question: withEst(fill(COPY['guard.topic'], { tokens, amount: amountOfAfterAbout(saved, snap, settings) }), settings), cold: false }
@@ -315,15 +335,18 @@ async function place($: EngineInterface, text: string, checks = FILL_CHECKS): Pr
  * Asks about a costly send when the guard is on. Null lets the message go; anything else stops it:
  * Cancel keeps the draft in the box, Clear first sets /clear in the box and keeps the draft for after.
  */
-async function guard($: EngineInterface, io: Io, e: { text: string; turnId?: string; origin: { kind: string } }): Promise<{ drop: string } | null> {
+async function guard($: EngineInterface, io: Io, e: { text: string; turnId?: string; attachments?: readonly unknown[]; origin: { kind: string } }): Promise<{ drop: string } | null> {
   if ((await $.store.get('guard')) !== true) return null
   // A queued message, a notification and the engine's own are not asked about; a slash command is the person's own cure.
   if (e.turnId !== undefined || (e.origin.kind !== 'composer' && e.origin.kind !== 'sdk')) return null
   if (e.text.trim() === '' || isSlash(e.text)) return null
+  // Cancel and Clear first put the text back in the box and nothing else: a send with pasted images goes as normal.
+  if (e.attachments !== undefined && e.attachments.length > 0) return null
   const snap = await live(io)
   const settings = await getSettings(io)
   const now = await $.clock.now()
   const costly = costlySend(buildView(snap, settings, false, now, false), e.text)
+  await drain(io)
   if (costly === null) return null
   if (costly.cold) flags.coldWarned = true
   let answer: string

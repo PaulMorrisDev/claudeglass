@@ -102,7 +102,8 @@ export function buildView(snap: GlassSnap, settings: GlassSettings, detailed: bo
     rates: ratesFor(settings.models, snap.model),
     cache: snap.lastTs === null ? null : cacheState(snap.lastTs, now, ttl),
     tokens,
-    replies: point > 0 ? runway(snap.history, point) : null,
+    // Right after a summary the history still ends at the old, large context: no count until the next reply.
+    replies: point > 0 && !snap.pendingCompaction ? runway(snap.history, point) : null,
     parts: partsOf(snap),
     pace: paceOf(snap, now),
   }

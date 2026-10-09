@@ -33,8 +33,6 @@ const MAX_REPLIES = 100
 const MAX_REPLY_COSTS = 40
 const MAX_COMPACTIONS = 20
 const MAX_HEAVIEST = 5
-/** A reply that has made no request for this long, and has not been completed, is not still running: a new start is a new reply. */
-const TURN_STALE_MS = 15 * 60 * 1000
 /** A wait this long after a request that hit the usage limit counts as the limit's pause. */
 const LIMIT_PAUSE_MS = 60 * 1000
 /** A tool result this big is worth a note, for the tools whose output Claude isn't already coached on. */
@@ -70,6 +68,13 @@ const compactListeners: Listener[] = []
 /** Runs `listener` after each main-session summary has been recorded (a manual /compact or an automatic one), in the order added. */
 export function onCompaction(listener: Listener): void {
   compactListeners.push(listener)
+}
+
+const measureListeners: Listener[] = []
+
+/** Runs `listener` after each measurement of the main session has been taken in, in the order added. */
+export function onMeasure(listener: Listener): void {
+  measureListeners.push(listener)
 }
 
 const clearListeners: (() => void)[] = []
@@ -118,6 +123,13 @@ function kit($: EngineInterface): Io {
       await update($, settingsAtom, () => settings)
     },
     getDetailed: () => read($, detailedAtom),
+    listNames: async path => {
+      const entries = await $.fs.list(path)
+      return entries.filter(one => one.kind === 'file').map(one => one.name)
+    },
+    status: text => {
+      $.ui.status(text)
+    },
   }
 }
 
@@ -140,7 +152,9 @@ export async function ensure($: EngineInterface): Promise<GlassSnap> {
   const id = await $.session.id()
   if (snap.sessionId === id) return snap
   const surface = snap.surface ?? (await firstSurface($))
-  const fresh = await restart(io, { sessionId: id, surface })
+  // A snapshot no session has claimed yet (the first event of a session, or after a /clear) is claimed where it stands,
+  // so what another hook has put on it since (a message counted) isn't lost to a second start.
+  const fresh = snap.sessionId === null ? Object.assign(snap, { sessionId: id, surface }) : await restart(io, { sessionId: id, surface })
   announcePresent(fresh, await $.clock.now())
   await beat(io, fresh, true)
   keepBeating(io)
@@ -151,10 +165,21 @@ function count(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
-/** The context as Claude Code reports it now (what /context shows). */
-async function refreshReading($: EngineInterface, snap: GlassSnap): Promise<void> {
+/**
+ * The context as Claude Code reports it now (what /context shows). Right after a summary `context.tokens` is still the
+ * last request's size while the breakdown is the new context, so then the tokens come from the breakdown's used total
+ * (what its percentage is of), else from the summary's own `tokensAfter`: the state, the runway and the figures agree.
+ */
+async function refreshReading($: EngineInterface, snap: GlassSnap, summary?: { tokensAfter: number | null }): Promise<void> {
   const usage = await $.session.usage({ breakdown: 'summary' })
-  if (typeof usage.context.tokens === 'number') snap.reading = readContext(usage.context)
+  if (summary === undefined) {
+    if (typeof usage.context.tokens === 'number') snap.reading = readContext(usage.context)
+    return
+  }
+  const fresh = readContext({ ...usage.context, tokens: undefined })
+  if (fresh.tokens > 0) snap.reading = fresh
+  else if (summary.tokensAfter !== null && summary.tokensAfter > 0) snap.reading = readContext({ ...usage.context, tokens: summary.tokensAfter })
+  else if (typeof usage.context.tokens === 'number') snap.reading = readContext(usage.context)
 }
 
 /**
@@ -186,8 +211,10 @@ async function measure($: EngineInterface, snap: GlassSnap, cost: number | undef
   const five = limits.find(one => one.kind === 'five_hour')
   if (five !== undefined) {
     const resetsAt = five.resetsAt ?? null
+    // A fall in the percent is a new window, whether or not Claude Code names when it resets.
+    const dropped = snap.fiveHour !== null && five.percentUsed < snap.fiveHour.pct
     snap.fiveHour = { pct: five.percentUsed, resetsAt }
-    if (snap.calBase === null || snap.calBase.resetsAt !== resetsAt) {
+    if (snap.calBase === null || snap.calBase.resetsAt !== resetsAt || dropped) {
       snap.calBase = { usd: snap.cost ?? 0, pct: five.percentUsed, resetsAt }
     }
   }
@@ -196,6 +223,31 @@ async function measure($: EngineInterface, snap: GlassSnap, cost: number | undef
 
 function toolLabel(name: string): string {
   return name
+}
+
+/**
+ * A new main reply begins: the cold-send check, then the reply's own figures start over. Its cost is measured from
+ * what the session had cost, plus the last reply's estimate when Claude Code hasn't reported that one yet (its
+ * measurement may arrive after this reply has begun, and must not be counted in this one); a session whose first
+ * reply this is has cost nothing before it, so a figure that follows settles it.
+ */
+function beginReply(snap: GlassSnap, settings: GlassSettings, now: number, turnId: string): void {
+  stopCacheClock()
+  const ctx = snap.reading?.tokens ?? snap.reqs[snap.reqs.length - 1]?.ctx ?? 0
+  if (snap.lastTs !== null && ctx >= coldMin(settings) && !cacheState(snap.lastTs, now, settings.ttl).isWarm) {
+    addEvent(snap, { ts: seconds(now), event: 'cold_send', outcome: flags.coldWarned ? 'warned' : 'unwarned' })
+  }
+  flags.coldWarned = false
+  drainShown(snap)
+  const unreported = snap.replies > 0 && !snap.turnExact ? snap.turnUsd : 0
+  snap.turnAt = now
+  snap.turnId = turnId
+  snap.turnStartCost = snap.cost !== null ? snap.cost + unreported : snap.replies === 0 ? 0 : null
+  snap.turnUsd = 0
+  snap.turnExact = false
+  // A summary made between replies (a /compact) is still waiting for its note.
+  snap.turn = { ...emptyTurn(), compacted: snap.turn.compacted, compactedCold: snap.turn.compactedCold }
+  snap.turnReqs = 0
 }
 
 /** Records one main-session model request. */
@@ -312,6 +364,17 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // A message sent makes sure of the session, so its heartbeat is there for the first message after a /clear:
+  // the capture hook looks for it when that message is sent. (A matcher, apart from the other files' hooks on the event.)
+  on('prompt.submit', { text: /[\s\S]*/ }, async ($, e, next) => {
+    try {
+      await ensure($)
+    } catch (error) {
+      $.ui.log(`claudeglass: prompt.submit ${String(error)}`, { to: 'debug' })
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('session.end', async ($, e, next) => {
     const io = kit($)
     try {
@@ -342,8 +405,16 @@ export const register: Register = on => {
     try {
       const snap = await ensure($)
       await measure($, snap, e.cost?.usd, e.rateLimits)
-      await getSettings(io)
+      const settings = await getSettings(io)
       await beat(io, snap)
+      const now = await $.clock.now()
+      for (const listener of measureListeners) {
+        try {
+          await listener({ io, snap, settings, now })
+        } catch (error) {
+          $.ui.log(`claudeglass: measure ${String(error)}`, { to: 'debug' })
+        }
+      }
       await touch(io)
     } catch (error) {
       $.ui.log(`claudeglass: session.measure ${String(error)}`, { to: 'debug' })
@@ -351,31 +422,11 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // turn.start carries no agent id, so it can't say whose turn begins: the reply begins at its first request (turn.step),
+  // which does. Here the session is only made sure of (a new one starts its snapshot, and its heartbeat, at once).
   on('turn.start', async ($, e, next) => {
-    const io = kit($)
     try {
-      const snap = await ensure($)
-      const settings = await getSettings(io)
-      const now = await $.clock.now()
-      // turn.start carries no agent id: a subagent's turn starts too, in the middle of the main reply, and must not begin it again.
-      const running = snap.turnAt !== null && now - Math.max(snap.turnAt, snap.lastTs ?? 0) < TURN_STALE_MS
-      if (!running) {
-        stopCacheClock()
-        const ctx = snap.reading?.tokens ?? snap.reqs[snap.reqs.length - 1]?.ctx ?? 0
-        if (snap.lastTs !== null && ctx >= coldMin(settings) && !cacheState(snap.lastTs, now, settings.ttl).isWarm) {
-          addEvent(snap, { ts: seconds(now), event: 'cold_send', outcome: flags.coldWarned ? 'warned' : 'unwarned' })
-        }
-        flags.coldWarned = false
-        drainShown(snap)
-        snap.turnAt = now
-        snap.turnStartCost = snap.cost
-        snap.turnUsd = 0
-        snap.turnExact = false
-        // A summary made between replies (a /compact) is still waiting for its note.
-        snap.turn = { ...emptyTurn(), compacted: snap.turn.compacted, compactedCold: snap.turn.compactedCold }
-        snap.turnReqs = 0
-        await touch(io)
-      }
+      await ensure($)
     } catch (error) {
       $.ui.log(`claudeglass: turn.start ${String(error)}`, { to: 'debug' })
     }
@@ -383,6 +434,20 @@ export const register: Register = on => {
   })
 
   on('turn.step', async function* ($, e, next) {
+    // A request of the main session whose turn is not the reply being worked on begins the next reply. A subagent's
+    // requests carry its agent id, and a subagent's turn never begins one, however long the reply has run.
+    if (e.agentId === undefined) {
+      try {
+        const io = kit($)
+        const snap = await ensure($)
+        if (snap.turnId !== e.turnId) {
+          beginReply(snap, await getSettings(io), await $.clock.now(), e.turnId)
+          await touch(io)
+        }
+      } catch (error) {
+        $.ui.log(`claudeglass: turn begin ${String(error)}`, { to: 'debug' })
+      }
+    }
     const result = yield* next(e)
     if (e.agentId === undefined && result.usage !== null) {
       const io = kit($)
@@ -447,7 +512,7 @@ export const register: Register = on => {
         recordCompaction(snap, settings, e.trigger, result.tokensBefore ?? null, result.tokensAfter ?? null, now)
         // The band and the pane match /context straight away, not at the next measurement.
         try {
-          await refreshReading($, snap)
+          await refreshReading($, snap, { tokensAfter: result.tokensAfter ?? null })
         } catch (error) {
           $.ui.log(`claudeglass: session.compact reading ${String(error)}`, { to: 'debug' })
         }

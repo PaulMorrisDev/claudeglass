@@ -31,8 +31,10 @@ const JUDGE_ANSWER_TOKENS = 600
 /**
  * Keys for rows: the digits, then letters nothing else on the pane, the band or
  * the transcript uses (a, c, d, e, f, g, h, i, k, l, m, n, o, p, r, s, v, w, x, y are taken).
+ * The last free letter, z, is the Haiku check's, so no row takes it (`i` is the Instructions tab's).
  */
-const ROW_KEYS = '123456789bjqtuz'
+const ROW_KEYS = '123456789bjqtu'
+const HAIKU_KEY = 'z'
 const LABELS = { files: COPY['compaction.label.files'], values: COPY['compaction.label.values'] }
 const EARLIER_SHOWN = 8
 const LABEL_CHARS = 100
@@ -248,7 +250,7 @@ function render(context: PageContext): RenderElement {
         }
         children.push(
           <Box key="haiku" flexDirection="column">
-            <Button key="haiku-check" label={COPY['compaction.haiku']} hotkey="i" onPress={() => void ask()} />
+            <Button key="haiku-check" label={COPY['compaction.haiku']} hotkey={HAIKU_KEY} onPress={() => void ask()} />
             <Box paddingLeft={4}>
               <Text dimColor>{fill(COPY['compaction.haiku.detail'], { tokens: formatTokens(Math.ceil(prompt.length / CHARS_PER_TOKEN)) })}</Text>
             </Box>

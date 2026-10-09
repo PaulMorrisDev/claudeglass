@@ -13,6 +13,7 @@ import { mayShow, noteAllowed, recordShown } from './lib/rest.js'
 import type { RestThresholds } from './lib/rest.js'
 import { fill } from './lib/text.js'
 import { emptySnap, live, touch } from './live'
+import { startedInBackground } from './coach-mem'
 import { NOTE_EVERY } from './notes'
 import { noteShown, seconds } from './sensor'
 import { coachingApplies, getSettings } from './settings'
@@ -61,6 +62,13 @@ const PROMPT_LINES = 12
 
 /** How often the engine's list of agents is asked while one is running. */
 const POLL_MS = 10000
+
+/**
+ * A workflow's agent the engine's list never shows is finished at its own turn.complete or when its Workflow call
+ * returns; one that has raised no event for this long is finished too, so that a run whose end was never seen doesn't
+ * keep the band and the polling going.
+ */
+const WORKFLOW_IDLE_MS = 30 * 60 * 1000
 
 /** How long the events of an agentId no spawn has named are held before they are dropped. */
 const UNCLAIMED_MS = 5000
@@ -311,6 +319,13 @@ async function reconcile($: EngineInterface): Promise<void> {
   for (const row of snap.agents) {
     if (row.status !== 'running') continue
     const info = list.find(one => one.id === row.id)
+    // The list leaves a workflow's agents out: not being in it says nothing of those. Their own turn.complete or
+    // their Workflow call returning ends them, and so does a long silence.
+    if (row.workflow !== undefined) {
+      if (info === undefined && now - (row.seenAt ?? row.startedAt) >= WORKFLOW_IDLE_MS) finish(snap, settings, row, 'done', now)
+      else if (info !== undefined && (info.status === 'completed' || info.status === 'idle')) finish(snap, settings, row, 'done', now)
+      continue
+    }
     // A run the engine no longer lists has ended (the grace is for the list to catch up with a run just started).
     if (info === undefined) {
       if (now - row.startedAt >= POLL_MS) finish(snap, settings, row, 'done', now)
@@ -357,6 +372,8 @@ export const register: Register = on => {
       row.background = e.background
       row.fork = e.fork
       row.briefChars = e.prompt.length
+      if (e.workflow !== undefined) row.workflow = { runId: e.workflow.runId, call: e.tool_use_id }
+      row.seenAt = now
       prompts.set(row.id, promptHead(e.prompt, PROMPT_LINES))
       // Told on the row of the launch: an agent the main session started in the background, while it holds a lot.
       if (e.workflow === undefined && e.parentAgentId === undefined && e.isTeammate === undefined) {
@@ -377,7 +394,9 @@ export const register: Register = on => {
     try {
       const io = kit($)
       const snap = await live(io)
-      const row = rowOf(snap, e.agentId, await $.clock.now())
+      const now = await $.clock.now()
+      const row = rowOf(snap, e.agentId, now)
+      row.seenAt = now
       const name = String(e.tool)
       row.calls += 1
       row.tools[name] = (row.tools[name] ?? 0) + 1
@@ -394,14 +413,23 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   // The main session's Agent call resolving: a foreground run's totals, and the agentId a background launch is linked by.
-  on('tool.call', { tool: /^(Agent|Task)$/ }, async ($, e, next) => {
-    if (e.agentId !== undefined || !isAgentTool(String(e.tool))) return next(e)
+  // A Workflow call returning in the foreground is its run's end: the agents of the run that are still going are finished.
+  on('tool.call', { tool: /^(Agent|Task|Workflow)$/ }, async ($, e, next) => {
+    const name = String(e.tool)
+    if (e.agentId !== undefined || (!isAgentTool(name) && name !== 'Workflow')) return next(e)
     const result = await next(e)
     try {
       const io = kit($)
       const snap = await live(io)
       const settings = await getSettings(io)
       const now = await $.clock.now()
+      if (name === 'Workflow') {
+        if (result.deny === undefined && !startedInBackground(e as unknown as Record<string, unknown>, result.result, result.text)) {
+          for (const row of snap.agents) if (row.workflow !== undefined && row.workflow.call === e.tool_use_id) finish(snap, settings, row, 'done', now)
+          await touch(io)
+        }
+        return result
+      }
       const record: CallRecord = result.deny === undefined && result.result !== null && typeof result.result === 'object' ? (result.result as CallRecord) : {}
       const id = record.agentId
       if (typeof id === 'string' && id !== '') {
@@ -440,6 +468,7 @@ export const register: Register = on => {
         const settings = await getSettings(io)
         const now = await $.clock.now()
         const row = rowOf(snap, e.agentId, now)
+        row.seenAt = now
         const usage = result.usage
         const input = count(usage.input_tokens)
         const output = count(usage.output_tokens)

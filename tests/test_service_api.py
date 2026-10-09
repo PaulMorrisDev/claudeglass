@@ -3973,6 +3973,46 @@ def test_rating_a_session_saves_words_and_an_empty_rating_clears_it(server):
     assert resp.status == 200 and payload["data"]["feedback"] is None
 
 
+def _seed_mod_settings(server):
+    """The mod's settings file as the service wrote it once: coaching off, nobody rated."""
+    from claudeglass import mod_settings
+
+    data = mod_settings.build(server.options.config_dir)
+    assert mod_settings.write(server.options.config_dir, data)
+    assert data["coaching"]["enabled"] is False and data["coaching"]["rated"] == {}
+    return mod_settings.settings_path(server.options.config_dir)
+
+
+def test_rating_a_session_refreshes_the_mods_settings_file_at_once(server, monkeypatch):
+    from claudeglass.hooks import capture_hook
+
+    path = _seed_mod_settings(server)
+    when = datetime.now(timezone.utc).timestamp()
+    monkeypatch.setattr(capture_hook, "dashboard_ratings", lambda config_dir, since, limit=100: {server.session_id: when})
+    resp, _payload = server.post_json(f"/api/sessions/{server.session_id}/feedback", {"outcome": "met"})
+    assert resp.status == 200
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert written["coaching"]["rated"] == {server.session_id: round(when)}
+    # Only the coaching block moved: the rest of the file is as it was.
+    assert written["billing"] and written["pricing"]
+
+
+def test_changing_the_capture_settings_refreshes_the_mods_settings_file_at_once(server):
+    path = _seed_mod_settings(server)
+    resp, _payload = server.post_json("/api/capture", {"coaching": ["coaching_notes"], "feedback": ["feedback_reminder"]})
+    assert resp.status == 200
+    coaching = json.loads(path.read_text(encoding="utf-8"))["coaching"]
+    assert coaching["enabled"] is True and coaching["feedback_reminder"] is True
+
+
+def test_the_mods_settings_file_is_left_alone_when_there_is_none_yet(server):
+    from claudeglass import mod_settings
+
+    resp, _payload = server.post_json(f"/api/sessions/{server.session_id}/feedback", {"outcome": "met"})
+    assert resp.status == 200
+    assert not mod_settings.settings_path(server.options.config_dir).exists()
+
+
 @pytest.mark.parametrize(
     "body",
     [

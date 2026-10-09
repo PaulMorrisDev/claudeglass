@@ -337,7 +337,6 @@ COPY: dict[str, str] = {
     "tighten.use": "Use this",
     "tighten.keep": "Keep mine",
     "tighten.cost": "Haiku used {tokens} tokens.",
-    "tighten.cost.amount": "Haiku used {tokens} tokens, about {amount}.",
     "tighten.opened": "A shorter version of your draft is open in the Glass pane. Nothing is sent.",
     "tighten.empty": "Your prompt box is empty, so there is nothing to tighten.",
     "tighten.long": "That draft is too long to tighten here. Shorten it by hand first.",
@@ -366,7 +365,8 @@ COPY: dict[str, str] = {
     "budget.current": "Session budget: {budget}. This session has used {spent}.",
     "budget.current.plain": "Session budget: {budget}.",
     "budget.none": "No session budget is set. Try /glass budget 2 on API billing, or /glass budget 5% on a subscription.",
-    "budget.bad": "That isn't an amount. Try /glass budget 2, /glass budget 5%, or /glass budget off.",
+    "budget.bad.api": "That isn't an amount. Try /glass budget 2 or /glass budget 2.50, or /glass budget off.",
+    "budget.bad.subscription": "That isn't an amount. Use a share of the 5-hour limit, such as /glass budget 5%, or /glass budget off.",
     "band.budget": "{spent} of {budget} budget",
     "band.budget.short": "{spent} of {budget}",
     "band.budget.over": "{spent} of {budget} budget, over",
@@ -379,6 +379,12 @@ COPY: dict[str, str] = {
     "log.compacted.ok.said": "Everything you said is in the summary.",
     "compaction.headline.ok.said": "Everything you said is in the summary.",
     "instructions.share": "The total is Claude Code's count. Each item is its share of its group's total, by size, so item sizes are estimates.",
+    # -- Review fixes 3 ------------------------------------------------------
+    # The status line when no reply is left before Claude summarises; the Detailed boundary line
+    # when the summary can't be priced; a rewrite that used its whole allowance.
+    "status.compact.now": "Claude summarises on the next reply",
+    "log.compacted.tokens.plain": "{before} became {after}.",
+    "tighten.cut": "Haiku's rewrite was cut short, so it was not used. Try a shorter draft.",
 }
 
 

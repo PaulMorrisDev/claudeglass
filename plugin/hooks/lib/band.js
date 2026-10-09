@@ -11,8 +11,9 @@
  *      5-hour limit will run out before it resets, or a summary may have dropped
  *      something)
  *   4. the extra goes short
- *   5. the extra goes (and the spend comes back, short, if it fits)
- *   6. the spend goes
+ *   5. the extra goes: when it is not urgent the spend comes back, short, if it fits
+ *   6. the spend goes (the only step left after 5 when the extra is urgent: an urgent
+ *      extra never goes before the spend does, so the spend stays gone)
  *
  * The context is always kept. The desktop's bar shows only when every piece fits at
  * full length. Nothing here reads a clock, the disk or the engine; the widths are in
@@ -59,7 +60,8 @@ function plans(urgent) {
   ];
   if (urgent) list.push({ context: "short", spend: "gone", extra: "full" });
   list.push({ context: "short", spend: urgent ? "gone" : "short", extra: "short" });
-  list.push({ context: "short", spend: "short", extra: "gone" });
+  // An urgent extra is what the spend gave way to: the spend does not come back when it goes.
+  if (!urgent) list.push({ context: "short", spend: "short", extra: "gone" });
   list.push({ context: "short", spend: "gone", extra: "gone" });
   return list;
 }

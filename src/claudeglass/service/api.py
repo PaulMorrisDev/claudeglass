@@ -1980,6 +1980,9 @@ def make_handler(
             config = load_config(options.config_dir)
         except ConfigError:
             pass
+        if after != before:
+            # Coaching, the rating reminder and the project filter are in the mod's settings file: say so now.
+            mod_settings.refresh_coaching(options.config_dir)
         data = _capture_view(config)
         data["changed"] = after != before
         return _ok(data)
@@ -2390,6 +2393,8 @@ def make_handler(
         if reason is not None:
             return _bad_request(reason)
         store.set_feedback(session_id, builds=builds, **values)
+        # The mod hears of the rating at once, not with the next hourly report.
+        mod_settings.refresh_coaching(options.config_dir)
         return _ok({"session_id": session_id, "feedback": store.feedback(session_id)})
 
     def _plan_builds(value) -> tuple[list[dict], str | None]:
