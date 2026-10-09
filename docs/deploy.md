@@ -552,7 +552,10 @@ says what to do.
 ## The store's schema version
 
 `service.db` records the schema version it was written under
-(`meta.schema_version`). Version 9 adds the redesigned rating: the
+(`meta.schema_version`). Version 10 adds the `mod_events` table, which
+holds what the ClaudeGlass mod showed (closed words and counts, read from
+its sensor files); upgrading from 9 creates it in place and nothing is
+read again. Version 9 adds the redesigned rating: the
 `why`, `missed_in`, `tip` and `tip_hint` columns on `session_feedback`,
 and the `session_plan_feedback` and `tip_feedback` tables. Upgrading
 from 8 adds them in place in one transaction, keeps every row and reads

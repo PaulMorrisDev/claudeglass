@@ -11,7 +11,8 @@ written here as ES modules, one per topic:
   cover them;
 - ``coaching.js``: the coaching thresholds, tips and how-to words
   (``claudeglass.capture_catalogue``), so the mod says what the capture
-  hook says;
+  hook says, with the hints it delivers itself and the words its sensor
+  file may carry;
 - ``palette.js``: the dashboard's chart, status and surface colours in the
   light and dark themes (``service/static/app.css``) and its colours per
   entity (``service/static/charts.js`` ``ENTITY_COLOURS``);
@@ -188,6 +189,15 @@ def export() -> dict[str, str]:
                 "THRESHOLDS": capture_catalogue.COACHING_THRESHOLDS,
                 "TIPS": capture_catalogue.COACHING_TIP,
                 "HOW": capture_catalogue.COACHING_HOW,
+                # The hints the mod delivers itself, which the capture hook
+                # leaves out while the mod runs (``MOVED_TO_MOD``), and the
+                # words its sensor file may carry (``SENSOR_VOCAB``), as
+                # sorted lists so the output is the same on every run.
+                "MOVED": sorted(capture_catalogue.MOVED_TO_MOD),
+                "NOTE_KINDS": list(capture_catalogue.SENSOR_NOTE_KINDS),
+                "MOD_NOTE_KINDS": list(capture_catalogue.MOD_NOTE_KINDS),
+                "SENSOR_EVENTS": list(capture_catalogue.SENSOR_EVENTS),
+                "SENSOR_VOCAB": capture_catalogue.SENSOR_VOCAB,
             },
         ),
         "palette.js": _module(
@@ -219,7 +229,7 @@ def stale(files: dict[str, str] | None = None) -> list[str]:
     out = []
     for relative, text in (files if files is not None else export()).items():
         path = REPO_ROOT / relative
-        if not path.is_file() or path.read_bytes() != text.encode("utf-8"):
+        if not path.is_file() or path.read_text(encoding="utf-8") != text:
             out.append(relative)
     return out
 

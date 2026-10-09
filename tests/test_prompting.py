@@ -971,10 +971,11 @@ def test_the_tips_table_counts_the_notes_claude_passed_on(tmp_path):
     tips = prompting.build_section([session]).tables[1]
     assert tips.name == "prompting_tips"
     assert [c.key for c in tips.columns] == [
-        "hint", "notes", "shown", "shown_pct", "relay", "misfires", "useful", "known", "wrong", "trust_pct",
+        "hint", "notes", "shown", "shown_pct", "relay", "glass", "where", "total", "misfires", "useful", "known",
+        "wrong", "trust_pct",
     ]
-    # No answers to the tip question and no misfire: no trust figure yet.
-    assert tips.rows == [["drip_feed", 2, 1, 50.0, "relayed 1 of 2", 0, 0, 0, 0, None]]
+    # No answers to the tip question and no misfire: no trust figure yet. No mod either: nothing shown by Glass.
+    assert tips.rows == [["drip_feed", 2, 1, 50.0, "relayed 1 of 2", 0, None, 1, 0, 0, 0, 0, None]]
 
 
 def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_path):
@@ -993,9 +994,9 @@ def test_the_tips_table_splits_relayed_from_judged_and_counts_the_misfires(tmp_p
     assert session.misfires == {"drip_feed": 1}
     table = prompting.build_section([session]).tables[1]
     assert table.rows == [
-        ["drip_feed", 3, 2, 100.0 * 2 / 3, "relayed 2 of 3", 1, 0, 0, 0, 0.0],
-        ["cold_return", 1, 0, 0.0, "relayed 0 of 1", 0, 0, 0, 0, None],
-        ["big_paste", 2, 1, 50.0, "judged relevant 1 of 2", 0, 0, 0, 0, None],
+        ["drip_feed", 3, 2, 100.0 * 2 / 3, "relayed 2 of 3", 0, None, 2, 1, 0, 0, 0, 0.0],
+        ["cold_return", 1, 0, 0.0, "relayed 0 of 1", 0, None, 0, 0, 0, 0, 0, None],
+        ["big_paste", 2, 1, 50.0, "judged relevant 1 of 2", 0, None, 1, 0, 0, 0, 0, None],
     ]
     assert any("Relayed" in note for note in table.notes) and any("Judged relevant" in note for note in table.notes)
     # A reply that disowns a tip with no note behind it is nobody's misfire here.
@@ -1024,6 +1025,8 @@ def test_the_plan_mode_tips_name_the_desktop_way_and_the_terminal_key():
 def test_the_tips_are_relayed_or_judged_by_whether_the_note_leaves_it_to_claude():
     assert prompting.relay_text("drip_feed", 5, 4) == "relayed 4 of 5"
     assert prompting.relay_text("plan_fresh", 1, 0) == "relayed 0 of 1"
+    # A hint the hook wrote no note for has no relay figure: the mod showed it.
+    assert prompting.relay_text("cold_return", 0, 0) is None
     for hint in cat.CONDITIONAL_TIP_HINTS:
         assert prompting.relay_text(hint, 6, 2) == "judged relevant 2 of 6", hint
     # The hints Claude is told to relay come first, the ones it judges last.
@@ -1327,3 +1330,64 @@ def test_a_model_missing_from_the_price_list_prices_nothing_and_breaks_nothing(t
     turns = capture._priced(_parse(tmp_path, lines, "u.jsonl"))
     prices = prompting._Prices(PRICING)
     assert prices.reads(turns, 1_000) == 0.0 and prices.carry(turns, 0, 1_000) == 0.0
+
+
+# -- the tips the ClaudeGlass mod showed itself --------------------------------------------
+
+
+def _glass_note(session_id, kind, surface="hint", minute=2, outcome="none"):
+    return {"session_id": session_id, "ts": _at(minute), "event": "note", "kind": kind, "surface": surface,
+            "outcome": outcome, "kept": None, "missing": None, "added": None}
+
+
+def _glass_present(session_id, surface="desktop", minute=0):
+    return {"session_id": session_id, "ts": _at(minute), "event": "present", "kind": None, "surface": surface,
+            "outcome": None, "kept": None, "missing": None, "added": None}
+
+
+def test_tips_shown_adds_the_ones_glass_showed_to_the_ones_claude_passed_on(tmp_path):
+    session = _session(tmp_path, [
+        *_START,
+        _said("one", 2), _note_line("drip_feed", 2), _reply(3, edit=True, say=f"Done.\n\n{_TIP}"),
+        _said("two", 4), _reply(5, edit=True),
+    ])
+    events = [
+        _glass_note("s.jsonl", "cold_return", "hint"), _glass_note("s.jsonl", "cold_return", "hint", 4),
+        _glass_note("s.jsonl", "cold_return", "note", 6), _glass_note("s.jsonl", "drip_feed", "log", 8),
+        # Not shown by anything this report counts: another session, a hint with no tip, a surface we don't know.
+        _glass_note("other.jsonl", "cold_return"), _glass_note("s.jsonl", "runway"), _glass_note("s.jsonl", "big_paste", "?"),
+    ]
+    tips = prompting.build_section([session], mod_events=events).tables[1]
+    rows = {row[0]: dict(zip([c.key for c in tips.columns], row)) for row in tips.rows}
+    # A hint only the mod showed has a row, with no hook figures; its share and relay are blank, not zero.
+    assert rows["cold_return"]["notes"] == 0 and rows["cold_return"]["shown_pct"] is None and rows["cold_return"]["relay"] is None
+    assert rows["cold_return"]["glass"] == 3 and rows["cold_return"]["total"] == 3
+    assert rows["cold_return"]["where"] == "the hint line 2, the note 1"
+    # A hint both showed counts the tips of both, apart and together.
+    assert rows["drip_feed"]["shown"] == 1 and rows["drip_feed"]["glass"] == 1 and rows["drip_feed"]["total"] == 2
+    assert rows["drip_feed"]["where"] == "the log 1" and rows["drip_feed"]["relay"] == "relayed 1 of 1"
+    assert "big_paste" not in rows and "runway" not in rows
+    assert any("Claude passed on" in note and "ClaudeGlass showed itself" in note for note in tips.notes)
+
+
+def test_the_glass_table_counts_the_sessions_the_mod_ran_in(tmp_path):
+    one = _session(tmp_path, [*_START, _said("one", 2), _reply(3)], "one.jsonl")
+    two = _session(tmp_path, [*_START, _said("one", 2), _reply(3)], "two.jsonl")
+    events = [
+        _glass_present("one.jsonl", "desktop"), _glass_present("one.jsonl", "desktop", 5),
+        _glass_present("one.jsonl", "vscode", 6), _glass_present("elsewhere.jsonl", "mobile"),
+        _glass_note("one.jsonl", "cold_return"),
+    ]
+    section = prompting.build_section([one, two], mod_events=events)
+    glass = next(table for table in section.tables if table.name == "prompting_glass")
+    assert [c.key for c in glass.columns] == ["sessions", "with_glass", "with_glass_pct", "where", "tips"]
+    # One of the two sessions had the mod; it was on two surfaces, each counted once; the session
+    # the report doesn't cover is left out.
+    assert glass.rows == [[2, 1, 50.0, "desktop 1, vscode 1", 1]]
+
+
+def test_without_sensor_events_the_prompting_section_has_no_glass_figures(tmp_path):
+    session = _session(tmp_path, [*_START, _said("one", 2), _note_line("drip_feed", 2), _reply(3)])
+    for events in (None, [], [_glass_present("elsewhere.jsonl")]):
+        section = prompting.build_section([session], mod_events=events)
+        assert [table.name for table in section.tables] == ["prompting_habits", "prompting_tips"]

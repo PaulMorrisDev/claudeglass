@@ -47,7 +47,7 @@ connect``):
   (:func:`prepare_agent_job`). The agent's report is left exactly as it
   was. With coaching notes on, the entry also records, with no output,
   whether the run ended too big (:func:`keep_run`).
-- ``PostToolUse``: a one-line note after a large read, search or web
+- ``PostToolUse``: a one-line note after a large read or web
   result, for the Deep level, in the main session while Claude writes
   the tags. How large is measured on what Claude reads of the result
   (:func:`result_chars`), not on the payload: a picture counts for at
@@ -112,7 +112,11 @@ connect``):
   level and in every session, but not in a project ``[capture]
   projects`` leaves out. A capture note and a coaching note for the same
   call go out as one note, the capture note first, so a tip is the last
-  line.
+  line. While the ClaudeGlass mod is running for the session (its entry
+  in ``<config-dir>/mod/present.json`` is under 10 minutes old:
+  :func:`_mod_present`) it shows the hints in ``mod.moved`` itself, in its
+  own UI, so this hook neither works them out nor stamps them as shown;
+  without the mod, nothing changes.
 - ``UserPromptSubmit``, for the ``/cg-feedback`` survey's items (``[capture]
   feedback``: :func:`feedback_note_for`), at any capture level and in every
   session ``[capture] projects`` leaves in. A message that starts
@@ -871,6 +875,49 @@ def _hint_names(value) -> frozenset:
     """A list of hint ids from ``coaching.json`` (``muted``, ``once``), or
     nothing when it is missing or not a list of strings."""
     return frozenset(item for item in value if isinstance(item, str)) if isinstance(value, list) else frozenset()
+
+
+#: The parsed ``present.json`` of this call, as ``{(path, mtime_ns, size):
+#: sessions}``: a hook call may ask about the mod more than once (the
+#: coaching hints, then the rating reminder), and the file is read and
+#: parsed once for all of them. It holds one entry at most.
+_MOD_PRESENT: dict = {}
+
+
+def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> bool:
+    """Whether the ClaudeGlass mod is running for this session: its entry
+    in ``<config-dir>/mod/present.json`` (``{"schema": 1, "sessions":
+    {<session id>: <epoch seconds last seen>}}``) was refreshed within
+    ``mod.present_window_s`` (10 minutes) of now, either side. A missing,
+    unreadable or half-written file, an unknown schema, another session's
+    entry and a stale one all read as absent. The mod keys its entries by
+    Claude Code's session id, the ``session_id`` of a hook payload
+    (Assumption: they are the same id; a mismatch reads as absent, which
+    leaves every note as it was). Never raises."""
+    try:
+        mod = catalogue["mod"]
+        path = config_dir / mod["dir"] / mod["present_file"]
+        stat = path.stat()
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+        if key not in _MOD_PRESENT:
+            _MOD_PRESENT.clear()
+            data = _read_json(path)
+            sessions = data.get("sessions") if data.get("schema") == 1 else None
+            _MOD_PRESENT[key] = sessions if isinstance(sessions, dict) else {}
+        seen = _number(_MOD_PRESENT[key].get(session_id))
+        return seen is not None and abs(now_ts - seen) <= mod["present_window_s"]
+    except Exception:  # noqa: BLE001 - a presence fault must leave every note as it was
+        return False
+
+
+def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) -> frozenset:
+    """The hints the mod delivers itself for this session
+    (``capture_catalogue.MOVED_TO_MOD``, as the catalogue exports them),
+    which the hook leaves out and does not stamp as shown; none when the
+    mod is not running for it."""
+    if not _mod_present(config_dir, catalogue, session_id, now_ts):
+        return frozenset()
+    return frozenset(catalogue["mod"]["moved"])
 
 
 def _session_key(session_id: str, config_dir: Path) -> str:
@@ -2240,6 +2287,11 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     personal = _read_json(config_dir / coaching["file"])
     if "split_run" in _hint_names(personal.get("muted")):
         return False
+    now = now or datetime.now(timezone.utc)
+    if "split_run" in _moved(config_dir, catalogue, session_id, now.timestamp()):
+        # The mod tells it on the agent's row; recording it here would only
+        # bring it back, late, if the mod stops.
+        return False
     path = _stopped_run(payload)
     if path is None:
         return False
@@ -2250,7 +2302,6 @@ def keep_run(payload: dict, config: dict, catalogue: dict, config_dir: Path, now
     }
     if not any(found.values()):
         return False
-    now = now or datetime.now(timezone.utc)
     state_path = config_dir / coaching["state_file"]
     state = _read_json(state_path)
     state.pop("agents", None)
@@ -2362,6 +2413,10 @@ def coaching_for(
     state_path = config_dir / coaching["state_file"]
     state = _read_json(state_path)
     session = _session_key(session_id, config_dir)
+    # While the mod runs for this session it shows these itself: they are
+    # neither worked out nor stamped here, so the rest the mod keeps is
+    # the only one, and they are all there when the mod stops.
+    moved = _moved(config_dir, catalogue, session_id, now_ts)
     # A run's counts used to be kept by agent id here; they are by session now.
     dirty = state.pop("agents", None) is not None
     candidates: list = []
@@ -2373,7 +2428,7 @@ def coaching_for(
         if not in_agent and isinstance(prompt, str) and prompt.lstrip().startswith(coaching["task_notification_prefix"]):
             # A background task finished: the next main-session hook after an
             # agent or workflow run that ended too big (``keep_run``).
-            candidates = [_split_hint(state, session, coaching, th)]
+            candidates = [None if "split_run" in moved else _split_hint(state, session, coaching, th)]
         elif not in_agent and typed and isinstance(path, str) and path:
             records, replayed = (tail if tail is not None and tail.path == path else _TailReader(path)).get()
             if not _queued(records, coaching["interrupt_prefix"], now, th["queued_minutes"] * 60):
@@ -2382,16 +2437,21 @@ def coaching_for(
                 known = _stored_reply(state, session) is not None
                 ctx = last["ctx"] if last else next((_reply_ctx(r) for r in reversed(records) if _is_reply(r)), 0)
                 candidates = [
-                    *([_typed_plan_hint(payload, records, coaching, th), _planning_hint(payload, records, coaching, th, now)] if fresh else []),
-                    _drip_hint(prompt, records, coaching, th, now, ctx),
-                    _paste_hint(prompt, th),
-                    _poll_hint(prompt, records, replayed, last, known, coaching, now_ts),
-                    _cold_hint(path, records, replayed, last, known, th, now_ts, tuple(coaching["limit_line_prefixes"])),
+                    *([
+                        None if "plan_fresh" in moved else _typed_plan_hint(payload, records, coaching, th),
+                        _planning_hint(payload, records, coaching, th, now),
+                    ] if fresh else []),
+                    None if "drip_feed" in moved else _drip_hint(prompt, records, coaching, th, now, ctx),
+                    None if "big_paste" in moved else _paste_hint(prompt, th),
+                    None if "status_poll" in moved else _poll_hint(prompt, records, replayed, last, known, coaching, now_ts),
+                    None if "cold_return" in moved else _cold_hint(
+                        path, records, replayed, last, known, th, now_ts, tuple(coaching["limit_line_prefixes"])
+                    ),
                 ]
     elif tool == "ExitPlanMode":
         if not in_agent:
             dirty = remember_reply(state, session, payload.get("transcript_path"), now_ts) or dirty
-            if personal.get("plan_fresh", True) is not False:
+            if personal.get("plan_fresh", True) is not False and "plan_fresh" not in moved:
                 candidates = [_plan_hint(payload, th)]
     else:
         if not in_agent:
@@ -2403,8 +2463,10 @@ def coaching_for(
             # big is told here (``split_run``) when the main session
             # called it in the foreground, as it has ended by now.
             if not in_agent:
-                candidates.append(_report_hint(payload, state, session, coaching, th))
-                candidates.append(_split_hint(state, session, coaching, th))
+                if "report_reread" not in moved:
+                    candidates.append(_report_hint(payload, state, session, coaching, th))
+                if "split_run" not in moved:
+                    candidates.append(_split_hint(state, session, coaching, th))
         else:
             if result_len is None:
                 result_len = result_chars(payload, catalogue)
@@ -2416,7 +2478,7 @@ def coaching_for(
             continue
         kind, stake, fields = found
         hint = kind.split(":", 1)[0]
-        if hint in muted or not _gate(state, session, kind, stake, now_ts, th):
+        if hint in moved or hint in muted or not _gate(state, session, kind, stake, now_ts, th):
             continue
         if hint == "cold_return":
             # A receipt for one break: it rests half a day, however the context grows.
@@ -2930,7 +2992,9 @@ def feedback_note_for(
         if plan_id is not None and not _noted_before(state, "plans", session, plan_id):
             _note_made(state, "plans", session, plan_id)
             note = _feedback_note(coaching, "plan_check", feedback["text"]["plan_check"])
-        elif "feedback_reminder" in ids:
+        elif "feedback_reminder" in ids and "rating_reminder" not in _moved(config_dir, catalogue, session_id, now_ts):
+            # The mod shows the reminder at the end of a reply instead, so
+            # it is neither noted nor stamped here while the mod runs.
             note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id)
         dirty = dirty or bool(note)
     if dirty:

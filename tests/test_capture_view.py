@@ -600,7 +600,7 @@ def test_warning_for_a_claude_tagger_level_names_the_note_and_the_tag_and_the_ju
 
 
 def test_warning_names_the_tool_note_at_deep_only():
-    assert "after a large read, search or web result" in _warning("deep")
+    assert "after a large read or web result" in _warning("deep")
     assert "after a large read" not in _warning("essentials")
     assert "after a large read" not in _warning("standard")
 

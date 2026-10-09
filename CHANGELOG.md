@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The mod shows some hints itself.** While the ClaudeGlass mod runs in a
+  session (it says so in `mod/present.json`), the capture hook leaves out
+  `cold_return`, `status_poll`, `drip_feed`, `big_paste`, `report_reread`,
+  `split_run`, `plan_fresh` and the rating reminder, and doesn't mark them
+  as shown, so they return if the mod stops. The mod writes what it showed to
+  `mod/sensor/<session id>.json`; the dashboard reads those files into a new
+  `mod_events` table (store schema 10), keeping closed words and counts only.
+  The Work habits tips table now counts the tips Claude passed on and the
+  ones the mod showed, by where, and a second table counts the sessions the
+  mod ran in.
+
+### Fixed
+
+- The hooks page listed `Grep` and `Glob` among the tools the hook runs after. It
+  doesn't: both are left out because their results can't reach the size a
+  note applies to.
+
 ## [0.15.0] - 2026-10-09
 
 ### Added

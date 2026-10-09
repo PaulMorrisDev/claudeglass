@@ -1591,3 +1591,23 @@ def test_the_prompting_section_gets_your_dashboard_ratings_and_card_answers(tmp_
     seen.clear()
     build_report(corpus, PRICING, Config(), projects=("proj-a",), window="w")
     assert seen["ratings"] is None and seen["cards"] == {}
+
+
+def test_the_prompting_section_gets_what_the_mod_showed(tmp_path, monkeypatch):
+    from claudeglass import prompting
+
+    corpus = _corpus_of(tmp_path, "proj-a")
+    seen = {}
+    real_build = prompting.build_section
+
+    def build_section(sessions, card_answers=None, **kwargs):
+        seen["mod_events"] = kwargs.get("mod_events")
+        return real_build(sessions, card_answers, **kwargs)
+
+    monkeypatch.setattr(prompting, "build_section", build_section)
+    events = [{"session_id": "session-001", "ts": "2026-09-21T10:00:00Z", "event": "present", "surface": "desktop"}]
+    build_report(corpus, PRICING, Config(), projects=("proj-a",), window="w", mod_events=events)
+    assert seen["mod_events"] == events
+    # Without them, none: the section reads as it always did.
+    build_report(corpus, PRICING, Config(), projects=("proj-a",), window="w")
+    assert seen["mod_events"] is None

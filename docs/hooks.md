@@ -97,10 +97,15 @@ module to skip compiling it on every call. Uninstalling removes all
 three, and the compiled copy, with the data folder.
 
 Claude Code waits for a hook each time it runs one. This one is
-registered on UserPromptSubmit and on PostToolUse for `Read`, `Grep`,
-`Glob`, `WebFetch`, `WebSearch` and an approved plan, and never for the
+registered on UserPromptSubmit and on PostToolUse for `Read`,
+`WebFetch`, `WebSearch` and an approved plan, and never for the
 shell or MCP tools: they were about two thirds of the calls, and a size
-note after them was wrong too often to pay for the wait. With coaching
+note after them was wrong too often to pay for the wait. `Grep` and
+`Glob` are left out as well. Claude Code keeps a `Grep` result whole only
+up to about 20,000 characters (about 5,000 tokens), and in 30 days of
+sessions no `Glob` result passed 18,200, so neither could reach the size a
+note applies to, yet `Grep` was the call the hook most often made Claude
+wait on. With coaching
 notes on, it is also registered for the `Agent` and `Workflow` tools, so
 it can tell you what each report from background work will cost to
 answer when you start it in a long session. It reads no size from their
@@ -111,10 +116,46 @@ so. A call takes
 about 44 milliseconds on the author's Windows machine, python's own
 start being about 12, and returns before anything else when a result is
 under the size a note could apply to. A `settings.json` written before
-the shell and MCP tools were dropped keeps starting it after them until
-`claudeglass update --finish` or `capture connect` rewrites the entry;
-it returns at once. The wait and the size measure are on the
+the shell and MCP tools, or `Grep` and `Glob`, were dropped keeps
+starting it after them until `claudeglass update --finish` or
+`capture connect` rewrites the entry; it returns at once. The wait and
+the size measure are on the
 [coaching notes page](coaching.md#what-it-costs).
+
+### With the ClaudeGlass mod
+
+The ClaudeGlass mod, a separate plugin that runs inside Claude Code, shows
+some of the hints itself, in its own panes, so they cost no context. It
+tells the hook which sessions it is running in by refreshing
+`mod/present.json` in ClaudeGlass's data folder, at most once a minute:
+`{"schema": 1, "sessions": {"<session id>": <seconds since 1970 it last
+saw it>}}`. The mod drops an entry after 24 hours. The hook reads the
+file on a call that could draw a note (one file, remembered by its time
+and size, so a repeat call reads it once). A session counts as having the
+mod when its own entry is within the last 10 minutes. Then the hook leaves
+out the hints the mod shows, and doesn't note that it did: `cold_return`,
+`status_poll`, `drip_feed`, `big_paste`, `report_reread`, `split_run`,
+`plan_fresh` and the rating reminder. It doesn't work them out either, so
+a call with the mod present is a little quicker (about 39 milliseconds
+against 43 on the author's machine, with a hint due). A hint the hook
+leaves out is not marked as shown, so it is there again as soon as the mod
+isn't: it was closed, the entry went stale, or the file is missing,
+unreadable or of another schema. `split_run` also records nothing while the mod
+runs, since the mod tells it on the agent's row.
+
+The hook keeps what steers Claude or feeds a skill: `plan_fresh_early`,
+`quiet_output`, the plan check, the facts line and the capture note.
+
+The mod writes the other way too. Once a turn, it rewrites
+`mod/sensor/<session id>.json` with what it showed in that session: the
+newest 500 events, each only a time and closed words or counts, with no
+message, path or summary. The dashboard's watcher reads a file when it
+changes, drops any event with a word outside the lists in
+`capture_catalogue.SENSOR_VOCAB`, and keeps the rest in the store's
+`mod_events` table (see [the API page](api.md)), where the Tips table counts
+the tips the mod showed beside the ones Claude passed on. Sensor files and
+their rows are removed after `retention_days` (180 by default), as the other
+telemetry is.
 
 ## The report section
 

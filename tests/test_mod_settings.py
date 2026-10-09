@@ -3,20 +3,24 @@ dashboard's service writes it."""
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from helpers import assert_privacy_deep
 from test_service_api import _start_server
 
-from claudeglass import __version__, calibration, capture_catalogue, mod_settings
+from claudeglass import __version__, calibration, capture_catalogue, mod_settings, recache
 from claudeglass.config import ConfigError
+from claudeglass.pricing import LongContextRule, ModelRates, Pricing, load_pricing
 from claudeglass.units import Units
 
 NOW = datetime(2026, 9, 18, 12, 30, 5, tzinfo=timezone.utc)
@@ -29,6 +33,7 @@ TOP_KEYS = {
     "currency",
     "pricing",
     "cache",
+    "rebuild",
     "calibration",
     "coaching",
     "usual",
@@ -37,8 +42,15 @@ TOP_KEYS = {
 
 
 class FakeStore:
-    def __init__(self, cost=None, context=None, error=None):
-        self.cost, self.context, self.error = cost, context, error
+    def __init__(self, cost=None, context=None, error=None, writes=(0, 0)):
+        self.cost, self.context, self.error, self.writes = cost, context, error, writes
+        self.asked = None
+
+    def cache_write_split(self, days, now):
+        self.asked = (days, now)
+        if self.error:
+            raise self.error
+        return self.writes
 
     def median_session_cost(self):
         if self.error:
@@ -82,7 +94,8 @@ def test_a_default_config_builds_the_documented_shape(tmp_path):
         "basis": Units(billing_mode="api").basis(),
     }
     assert isinstance(data["currency"], str) and data["currency"]
-    assert data["cache"] == {"ttl_seconds": 300}
+    assert data["cache"] == {"ttl_seconds": 300, "source": "default"}
+    assert data["rebuild"] == {**dataclasses.asdict(recache.RecacheThresholds()), "session_read_margin": 3000}
     assert data["calibration"] == calibration.DEFAULT.to_dict()
     assert data["usual"] == {"session_cost_usd": None, "end_context_tokens": None}
     assert data["dashboard_url"] is None
@@ -105,6 +118,58 @@ def test_the_rate_card_gives_each_model_its_aliases_five_rates_and_window(tmp_pa
         for rate in ("input", "output", "cache_write_5m", "cache_write_1h", "cache_read"):
             assert isinstance(entry[rate], float) and entry[rate] >= 0, (model_id, rate)
         assert isinstance(entry["context_window_tokens"], int) and entry["context_window_tokens"] > 0
+
+
+def test_a_long_context_rule_reaches_the_rate_card_and_a_model_without_one_has_none(tmp_path):
+    models = mod_settings.pricing_block(load_pricing())["models"]
+    assert models and not any("long_context" in entry for entry in models.values())
+    rule_models = {
+        "by-multiplier": ModelRates("by-multiplier", 3.0, 15.0, 3.75, 6.0, 0.3, long_context=LongContextRule(200_000, multiplier=2.0)),
+        "by-rates": ModelRates(
+            "by-rates", 3.0, 15.0, 3.75, 6.0, 0.3, long_context=LongContextRule(100_000, overrides={"input": 6, "cache_read": 0.6})
+        ),
+        "bare": ModelRates("bare", 3.0, 15.0, 3.75, 6.0, 0.3, long_context=LongContextRule(50_000)),
+        "none": ModelRates("none", 3.0, 15.0, 3.75, 6.0, 0.3),
+    }
+    pricing = Pricing("x", "v", "USD", None, None, None, "", models=rule_models)
+    block = mod_settings.pricing_block(pricing)["models"]
+    assert block["by-multiplier"]["long_context"] == {"threshold_tokens": 200_000, "multiplier": 2.0}
+    assert block["by-rates"]["long_context"] == {"threshold_tokens": 100_000, "overrides": {"input": 6.0, "cache_read": 0.6}}
+    assert block["bare"]["long_context"] == {"threshold_tokens": 50_000}
+    assert "long_context" not in block["none"]
+    json.dumps(block)
+
+
+def _assert_every_alias_resolves_under_its_model(pricing):
+    block = mod_settings.pricing_block(pricing)["models"]
+    listed = [alias for entry in block.values() for alias in entry["aliases"]]
+    assert len(listed) == len(set(listed)), "an alias is listed under two models"
+    for model_id, entry in block.items():
+        for alias in entry["aliases"]:
+            resolved = pricing.resolve_model(alias)
+            assert resolved is not None and resolved.canonical_id == model_id, (alias, model_id)
+    return block
+
+
+def test_every_alias_in_the_rate_card_resolves_in_python_to_the_model_it_sits_under():
+    block = _assert_every_alias_resolves_under_its_model(load_pricing())
+    assert any(entry["aliases"] for entry in block.values())
+
+
+def test_an_alias_two_models_claim_is_listed_once_under_the_one_python_resolves_to(tmp_path):
+    rates = 'input = 1\noutput = 2\ncache_write_5m = 1.25\ncache_write_1h = 2\ncache_read = 0.1\n'
+    path = tmp_path / "pricing.toml"
+    path.write_text(
+        'version = "t"\n'
+        f'[models."zeta"]\n{rates}aliases = ["shared", "z"]\n'
+        f'[models."alpha"]\n{rates}aliases = ["shared", "a", "zeta"]\n',
+        encoding="utf-8",
+    )
+    pricing = load_pricing(path=path)
+    assert pricing.resolve_model("shared").canonical_id == "alpha"  # the last to name it
+    block = _assert_every_alias_resolves_under_its_model(pricing)
+    assert block["alpha"]["aliases"] == ["a", "shared"]
+    assert block["zeta"]["aliases"] == ["z"]  # "zeta" is a model's own id: not an alias of alpha
 
 
 def test_a_subscription_config_with_a_report_carries_the_share_and_the_measured_calibration(tmp_path):
@@ -133,7 +198,62 @@ def test_a_report_without_calibration_falls_back_to_the_defaults(tmp_path):
 
 def test_the_cache_lifetime_follows_the_config(tmp_path):
     data = mod_settings.build(_config(tmp_path, 'default_ttl = "1h"\n'), now=NOW)
-    assert data["cache"]["ttl_seconds"] == 3600
+    assert data["cache"] == {"ttl_seconds": 3600, "source": "config"}
+
+
+def test_the_config_wins_over_what_your_history_says(tmp_path):
+    store = FakeStore(writes=(0, 90_000))
+    data = mod_settings.build(_config(tmp_path, 'default_ttl = "5m"\n'), store=store, now=NOW)
+    assert data["cache"] == {"ttl_seconds": 300, "source": "config"}
+    assert store.asked is None
+
+
+def test_mostly_hour_long_writes_make_the_cache_last_an_hour(tmp_path):
+    store = FakeStore(writes=(2_000, 90_000))
+    data = mod_settings.build(_config(tmp_path), store=store, now=NOW)
+    assert data["cache"] == {"ttl_seconds": 3600, "source": "history"}
+    assert store.asked == (14, NOW)
+
+
+@pytest.mark.parametrize("writes", [(90_000, 2_000), (5_000, 5_000)])
+def test_otherwise_your_history_says_five_minutes(tmp_path, writes):
+    data = mod_settings.build(_config(tmp_path), store=FakeStore(writes=writes), now=NOW)
+    assert data["cache"] == {"ttl_seconds": 300, "source": "history"}
+
+
+def test_no_writes_in_the_window_or_no_answer_leaves_the_default(tmp_path):
+    for store in (None, FakeStore(writes=(0, 0)), FakeStore(error=sqlite3.OperationalError("locked"))):
+        data = mod_settings.build(_config(tmp_path), store=store, now=NOW)
+        assert data["cache"] == {"ttl_seconds": 300, "source": "default"}
+
+
+def test_the_cache_lifetime_reads_the_stores_real_writes(tmp_path):
+    from claudeglass.service.store import Store
+
+    store = Store(tmp_path / "store.sqlite")
+    store.open()
+    try:
+        row = {
+            "day": "2026-09-18", "bucket": "2026-09-18T10:00:00Z", "model": "claude-sonnet-5", "turns": 1,
+            "input_tokens": 1, "cache_creation_tokens": 800, "cache_read_tokens": 0, "output_tokens": 1,
+            "thinking_tokens": 0, "cc_5m": 100, "cc_1h": 700, "cost": 1.0,
+        }
+        store.upsert_session(session_id="s", project_slug="p", slug="p", last_ts="2026-09-18T10:00:00Z")
+        store.upsert_transcript(session_id="s", path="/x/s.jsonl", kind="top-level", digest_json="{}", turns_agg=[row])
+        assert mod_settings.build(_config(tmp_path), store=store, now=NOW)["cache"] == {"ttl_seconds": 3600, "source": "history"}
+        # Weeks later the same writes are out of the window.
+        later = NOW + timedelta(days=30)
+        assert mod_settings.build(_config(tmp_path), store=store, now=later)["cache"] == {"ttl_seconds": 300, "source": "default"}
+    finally:
+        store.close()
+
+
+def test_the_rebuild_thresholds_follow_the_config_and_are_named_as_the_mod_names_them(tmp_path):
+    data = mod_settings.build(_config(tmp_path, "[thresholds]\nctx_floor = 50000\ncr_ratio = 0.35\n"), now=NOW)
+    assert data["rebuild"]["ctx_floor"] == 50_000 and data["rebuild"]["cr_ratio"] == 0.35
+    js = (Path(__file__).resolve().parent.parent / "plugin" / "hooks" / "lib" / "rebuild.js").read_text(encoding="utf-8")
+    block = re.search(r"REBUILD_DEFAULTS = \{(.*?)\};", js, flags=re.S).group(1)
+    assert set(re.findall(r"^\s*(\w+):", block, flags=re.M)) == set(data["rebuild"])
 
 
 def test_your_usual_comes_from_the_store_as_plain_numbers(tmp_path):
@@ -204,6 +324,48 @@ def test_the_file_holds_no_path_prompt_or_address(tmp_path):
     assert str(tmp_path) not in json.dumps(data)
 
 
+def _service_written(folder):
+    """What the dashboard's service would have written: a report's share,
+    basis, measured calibration and the address it really answers on."""
+    units = {"share_per_usd": 0.0125, "basis": "Amounts are shares of your weekly usage limit."}
+    measured = {"tool": {"opus": 3.2}, "text": {"opus": 3.9}, "default_family": "opus"}
+    return mod_settings.build(folder, report=_report(units, measured), dashboard_url="http://127.0.0.1:8787/", now=NOW)
+
+
+def test_without_a_report_the_previous_files_figures_carry_forward_in_the_same_billing_mode(tmp_path):
+    folder = _config(tmp_path, 'billing = "subscription"\n')
+    previous = _service_written(folder)
+    data = mod_settings.build(folder, dashboard_url="http://127.0.0.1:8765/", previous=previous, now=NOW)
+    assert data["billing"] == previous["billing"]
+    assert data["billing"]["share_per_usd"] == 0.0125
+    assert data["calibration"] == previous["calibration"]
+    assert data["dashboard_url"] == "http://127.0.0.1:8787/"
+
+
+def test_a_change_of_billing_mode_carries_no_share_or_basis_forward(tmp_path):
+    previous = _service_written(_config(tmp_path, 'billing = "subscription"\n'))
+    data = mod_settings.build(_config(tmp_path, 'billing = "api"\n'), previous=previous, now=NOW)
+    assert data["billing"]["mode"] == "api"
+    assert data["billing"]["share_per_usd"] is None
+    assert data["billing"]["basis"] != previous["billing"]["basis"]
+    # What does not depend on the mode still carries.
+    assert data["calibration"] == previous["calibration"]
+
+
+def test_a_report_wins_over_the_previous_file(tmp_path):
+    folder = _config(tmp_path, 'billing = "subscription"\n')
+    report = _report({"share_per_usd": 0.5, "basis": "new"}, {"default_family": "sonnet"})
+    data = mod_settings.build(folder, report=report, previous=_service_written(folder), now=NOW)
+    assert data["billing"]["share_per_usd"] == 0.5 and data["billing"]["basis"] == "new"
+    assert data["calibration"] == {"default_family": "sonnet"}
+
+
+@pytest.mark.parametrize("previous", [None, [], "text", {}, {"billing": 3, "calibration": [], "dashboard_url": 7}, {"billing": {"mode": "api", "share_per_usd": True}}])
+def test_a_previous_file_that_is_not_a_settings_file_changes_nothing(tmp_path, previous):
+    folder = _config(tmp_path, 'billing = "api"\n')
+    assert mod_settings.build(folder, previous=previous, now=NOW) == mod_settings.build(folder, now=NOW)
+
+
 # -- write ----------------------------------------------------------------------
 
 
@@ -234,6 +396,28 @@ def test_writing_what_is_already_there_apart_from_the_time_leaves_the_file_alone
     assert later["written_at"] != first["written_at"]
     assert mod_settings.write(folder, later) is False
     assert path.read_bytes() == before and path.stat().st_mtime_ns == mtime
+
+
+def test_the_same_content_is_written_again_once_its_stamp_is_over_a_day_old(tmp_path):
+    folder = _config(tmp_path)
+    assert mod_settings.write(folder, mod_settings.build(folder, now=NOW)) is True
+    path = mod_settings.settings_path(folder)
+    day = timedelta(hours=24)
+    assert mod_settings.write(folder, mod_settings.build(folder, now=NOW + day)) is False
+    again = mod_settings.build(folder, now=NOW + day + timedelta(seconds=1))
+    assert mod_settings.write(folder, again) is True
+    assert json.loads(path.read_text(encoding="utf-8"))["written_at"] == again["written_at"]
+    # The new stamp is the one later builds are measured from.
+    assert mod_settings.write(folder, mod_settings.build(folder, now=NOW + day + timedelta(hours=2))) is False
+
+
+@pytest.mark.parametrize("stamp", [None, "", "yesterday", 12])
+def test_a_stamp_that_cannot_be_read_is_rewritten(tmp_path, stamp):
+    folder = _config(tmp_path)
+    data = mod_settings.build(folder, now=NOW)
+    mod_settings.write(folder, {**data, "written_at": stamp})
+    assert mod_settings.write(folder, data) is True
+    assert json.loads(mod_settings.settings_path(folder).read_text(encoding="utf-8"))["written_at"] == data["written_at"]
 
 
 def test_a_changed_value_is_written(tmp_path):

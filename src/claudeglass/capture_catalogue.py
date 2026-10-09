@@ -693,6 +693,87 @@ FEEDBACK_HINTS = ("plan_check", "rating_reminder")
 #: showed" counts the two differently).
 CONDITIONAL_TIP_HINTS = ("big_paste",)
 
+#: The hints the ClaudeGlass mod delivers itself, in its own UI, while it
+#: is running for a session (``capture_hook._mod_present``): the capture
+#: hook leaves their notes out then, so Claude is not asked to pass on a
+#: tip you are already shown, and nothing is stamped as shown. The first
+#: four are what you do before sending (the mod's hint line shows them
+#: before the cost is paid); ``report_reread`` and ``split_run`` become a
+#: line on the agent's row; ``plan_fresh`` a status line at plan approval;
+#: ``rating_reminder`` a note at the end of a reply. ``plan_fresh_early``
+#: (Claude writes it inside the plan), ``quiet_output``, ``plan_check``,
+#: the facts line and the capture note steer Claude or feed a skill, so
+#: they stay with the hook. Every name is a hint of
+#: :data:`COACHING_HINTS` or :data:`FEEDBACK_HINTS`.
+MOVED_TO_MOD = frozenset(
+    {
+        "cold_return",
+        "status_poll",
+        "drip_feed",
+        "big_paste",
+        "report_reread",
+        "split_run",
+        "plan_fresh",
+        "rating_reminder",
+    }
+)
+
+#: The mod's folder under the data folder, and the two things the mod
+#: writes there for the hook and the watcher to read. ``present.json`` is
+#: ``{"schema": 1, "sessions": {<session id>: <epoch seconds last seen>}}``,
+#: refreshed at most once a minute and pruned after 24 hours. The sensor
+#: folder holds one ``<session id>.json`` per session, ``{"schema": 1,
+#: "session_id", "version", "events": [...]}``, rewritten whole at each
+#: turn's end with the newest :data:`MOD_SENSOR_MAX_EVENTS` events.
+#: ``mod_settings.MOD_DIRNAME`` is the same folder name (a test holds them
+#: together).
+MOD_DIR = "mod"
+MOD_PRESENT_FILE = "present.json"
+MOD_SENSOR_DIR = "sensor"
+MOD_SENSOR_MAX_EVENTS = 500
+
+#: The mod counts as running for a session when its entry in
+#: ``present.json`` was refreshed within this many seconds: ten times the
+#: refresh interval, so a missed write or two does not bring the notes back.
+MOD_PRESENT_WINDOW_S = 600
+
+#: The notes only the mod writes, beside the hints above: the context
+#: runway, the cost of a result, a model switch, the effort level, how
+#: often the session was summarised, and a summary made after the cache
+#: went cold.
+MOD_NOTE_KINDS = ("runway", "result", "switch", "effort", "compactions", "cold_compaction")
+
+#: What the mod's sensor file may say, as closed words (the watcher drops
+#: any event with a word outside these, ``mod_sensor.clean``). ``event``
+#: names what happened; each event takes the ``kind``, ``surface`` and
+#: ``outcome`` words listed for it, and a ``compaction`` event also counts
+#: ``kept``, ``missing`` and ``added``. ``present``: the mod ran in the
+#: session, on this surface of Claude Code. ``note``: the mod showed a
+#: note (``kind``) in a place (``surface``), and ``outcome`` is what
+#: followed within two replies: sent anyway, ``/clear``, ``/compact`` or
+#: nothing. ``rebuild``: a cache rebuild, whether the mod had said to
+#: expect it. ``cold_send``: a message sent after the cache expired, whether
+#: the hint line had warned. ``compaction``: the review of a summary.
+SENSOR_EVENTS = ("present", "note", "rebuild", "cold_send", "compaction")
+SENSOR_PRESENT_SURFACES = ("desktop", "terminal", "vscode", "mobile")
+SENSOR_NOTE_SURFACES = ("note", "hint", "log", "status", "band", "agent")
+SENSOR_NOTE_KINDS = (*COACHING_HINTS, *FEEDBACK_HINTS, *MOD_NOTE_KINDS)
+SENSOR_NOTE_OUTCOMES = ("sent", "clear", "compact", "none")
+SENSOR_REBUILD_KINDS = ("limit", "compaction", "expiry", "prefix", "unknown")
+SENSOR_REBUILD_OUTCOMES = ("expected", "unexpected")
+SENSOR_COLD_OUTCOMES = ("warned", "unwarned")
+SENSOR_COMPACTION_KINDS = ("auto", "manual")
+#: ``{event: {field: allowed words}}``, the words above by event.
+SENSOR_VOCAB: dict[str, dict[str, tuple[str, ...]]] = {
+    "present": {"surface": SENSOR_PRESENT_SURFACES},
+    "note": {"kind": SENSOR_NOTE_KINDS, "surface": SENSOR_NOTE_SURFACES, "outcome": SENSOR_NOTE_OUTCOMES},
+    "rebuild": {"kind": SENSOR_REBUILD_KINDS, "outcome": SENSOR_REBUILD_OUTCOMES},
+    "cold_send": {"outcome": SENSOR_COLD_OUTCOMES},
+    "compaction": {"kind": SENSOR_COMPACTION_KINDS},
+}
+#: ``{event: counts it carries}``: whole numbers, not words.
+SENSOR_COUNT_FIELDS: dict[str, tuple[str, ...]] = {"compaction": ("kept", "missing", "added")}
+
 #: The hook events whose output reaches Claude or you (``additionalContext``
 #: or ``systemMessage``). Claude Code runs a hook registered async without
 #: waiting, and an async hook's output only arrives on the next turn, so
@@ -1923,11 +2004,11 @@ METRICS: tuple[Metric, ...] = (
         group="deep",
         section="tools",
         title="Large tool outputs",
-        what=f"After a read, search or web result of about {BIG_OUTPUT_TOKENS:,} tokens or more, how much of it "
+        what=f"After a read or web result of about {BIG_OUTPUT_TOKENS:,} tokens or more, how much of it "
         "Claude needed: all, part or none. Only what Claude reads counts. "
         f"A picture counts for at most {RESULT_IMAGE_MAX_TOKENS:,} tokens. A result Claude Code saved to a file "
         "counts for its preview alone. Shell and MCP results are not asked about. Claude Code waits for the hook "
-        "after each read, search or web result. Setup > Capture and 'claudeglass capture status' show how many runs, "
+        "after each read or web result. Setup > Capture and 'claudeglass capture status' show how many runs, "
         "the median time each and the time summed, from your own sessions.",
         why="Quieter commands, offset reads and output caps where big outputs weren't needed.",
         powers=("tool_output",),
@@ -2124,7 +2205,7 @@ METRICS: tuple[Metric, ...] = (
         title="Coaching notes from Claude",
         what="Live hints for where the status line doesn't show, such as the desktop app. When one applies, a "
         "hook adds a short note to Claude's context, and Claude acts on it or writes you a highlighted tip: a large "
-        "read, search or web result, an agent run that ended too big for one task (it had to summarise its own "
+        "read or web result, an agent run that ended too big for one task (it had to summarise its own "
         "context, or began from a very long brief), a plan approved "
         "on top of a lot of planning context, a message sent after a break that outlasted the prompt cache, "
         "asking how background work is going while it still runs, or starting background agents when the session "
@@ -2134,7 +2215,7 @@ METRICS: tuple[Metric, ...] = (
         "task without a plan.",
         why="Advice at the moment it applies, and Claude can often act on it itself. Each note is about 50 to "
         "140 tokens, re-read on every later reply of the session. Claude Code waits for the hook after each "
-        "read, search or web result, each agent or workflow it starts, and each message you send. Setup > Capture and 'claudeglass capture status' show "
+        "read or web result, each agent or workflow it starts, and each message you send. Setup > Capture and 'claudeglass capture status' show "
         "how many runs, the median time each and the time summed, from your own sessions. A hook after each reply "
         "runs in the background and keeps only the time and size of Claude's newest reply, so the cache check is "
         "right after a resume. A hook when an agent run ends keeps only whether it ended too big, as counts.",
@@ -3217,6 +3298,13 @@ def export_json() -> dict:
         "big_output_tokens": BIG_OUTPUT_TOKENS,
         "result_tools": list(COACHING_TOOLS),
         "spawn_tools": list(SPAWN_TOOLS),
+        "mod": {
+            "moved": sorted(MOVED_TO_MOD),
+            "dir": MOD_DIR,
+            "present_file": MOD_PRESENT_FILE,
+            "present_window_s": MOD_PRESENT_WINDOW_S,
+            "sensor_dir": MOD_SENSOR_DIR,
+        },
         "result_image_max_tokens": RESULT_IMAGE_MAX_TOKENS,
         "result_image_patch_px": RESULT_IMAGE_PATCH_PX,
         "result_persist_chars": dict(RESULT_PERSIST_CHARS),

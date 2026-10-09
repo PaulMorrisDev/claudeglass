@@ -62,6 +62,33 @@ function fixed(x, digits) {
 }
 
 /**
+ * `x` to `digits` decimals the way the dashboard's toLocaleString writes
+ * it: from the shortest decimal that reads back as `x` ("1.005"), a tie
+ * rounding up, so 1.005 is "1.01" where toFixed, working from the binary
+ * value, says "1.00". Non-negative, finite `x` only.
+ * @param {number} x
+ * @param {number} digits
+ * @returns {string}
+ */
+function localeFixed(x, digits) {
+  var text = String(x);
+  if (text.indexOf("e") !== -1) return x.toFixed(digits);
+  var dot = text.indexOf(".");
+  var whole = dot === -1 ? text : text.slice(0, dot);
+  var fraction = dot === -1 ? "" : text.slice(dot + 1);
+  while (fraction.length <= digits) fraction += "0";
+  var kept = (whole + fraction.slice(0, digits)).split("");
+  if (fraction.charAt(digits) >= "5") {
+    var i = kept.length - 1;
+    while (i >= 0 && kept[i] === "9") kept[i--] = "0";
+    if (i < 0) kept.unshift("1");
+    else kept[i] = String(Number(kept[i]) + 1);
+  }
+  var all = kept.join("");
+  return digits === 0 ? all : all.slice(0, all.length - digits) + "." + all.slice(all.length - digits);
+}
+
+/**
  * Thousands separators on the whole part of a plain decimal string.
  * @param {string} text
  * @returns {string}
@@ -87,19 +114,21 @@ function moneyCode(value, currency) {
 }
 
 /**
- * The dashboard's money (format.js currencyAmount): "$0.38", "$45.7",
- * "$1,235", "<$0.01".
+ * The dashboard's money, character for character (format.js
+ * currencyAmount over moneyNumber): "$0.38", "$45.7", "$1,235", "<$0.01",
+ * and for a negative "−$3.20" or "<$−0.01" (the dashboard puts the sign
+ * after the "<").
  * @param {number} value
  * @param {string} [currency]
  * @returns {string}
  */
-function moneySymbol(value, currency) {
+export function moneySymbol(value, currency) {
   var abs = Math.abs(value);
   var symbol = !currency || currency === "USD" ? "$" : "";
   var suffix = symbol ? "" : " " + currency;
-  if (abs > 0 && abs < 0.005) return (value > 0 ? "<" : "<" + MINUS) + symbol + "0.01" + suffix;
+  if (abs > 0 && abs < 0.005) return "<" + symbol + (value > 0 ? "" : MINUS) + "0.01" + suffix;
   var digits = abs < 10 ? 2 : abs < 100 ? 1 : 0;
-  var text = grouped(abs.toFixed(digits));
+  var text = grouped(localeFixed(abs, digits));
   var negative = value < 0 && Number(abs.toFixed(digits)) !== 0;
   return (negative ? MINUS : "") + symbol + text + suffix;
 }

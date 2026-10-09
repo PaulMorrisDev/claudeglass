@@ -21,8 +21,10 @@
  *     pause from the gap; the mod is told both (`afterCompaction`,
  *     `afterLimitWait`).
  *   - Python skips synthetic requests and the transcript's first turn; the
- *     mod passes `prev = null` for the first request and never passes
- *     synthetic ones.
+ *     mod marks the first request (`first`) and never passes synthetic ones.
+ *     A reply with no known previous request (the mod started after the first
+ *     turn, say after a resume) is still judged by the read-ratio test, as
+ *     recache.detect does for the first turn of a list that starts later.
  */
 
 /**
@@ -34,6 +36,7 @@
  * @property {number} cacheWrite        Cache write tokens.
  * @property {boolean} afterCompaction  The first reply after a conversation summary.
  * @property {boolean} afterLimitWait   The wait before it spanned a usage-limit pause.
+ * @property {boolean} [first]          The session's first request (never a rebuild).
  * @property {string} [model]
  */
 
@@ -108,7 +111,7 @@ export function expiredByClock(gapSeconds, beforeTtlSeconds) {
  * Whether `cur` paid to write again context that should have been read
  * (recache._is_rebuild).
  * @param {RebuildRequest} cur
- * @param {RebuildRequest} prev
+ * @param {RebuildRequest|null} prev
  * @param {number|null} cr0
  * @param {RebuildThresholds} th
  * @returns {boolean}
@@ -116,7 +119,7 @@ export function expiredByClock(gapSeconds, beforeTtlSeconds) {
 function isRebuild(cur, prev, cr0, th) {
   var cr = cur.cacheRead;
   if (cr < th.cr_ratio * cur.ctx) return true;
-  if (cr0 === null) return false;
+  if (cr0 === null || !prev) return false;
   // Shrunk: a compaction or /clear replaced the session part; nothing expired.
   if (cur.ctx < prev.ctx) return false;
   // What a warm cache would have served: everything the previous request
@@ -129,14 +132,15 @@ function isRebuild(cur, prev, cr0, th) {
 }
 
 /**
- * Whether `cur` was a cache rebuild, and why. Null when it was not, when
- * there is no previous request (the first is never a rebuild), or when the
- * context is at or under `ctx_floor`. The cause is the first that applies
+ * Whether `cur` was a cache rebuild, and why. Null when it was not, when it
+ * is the session's first request (`cur.first`), or when the context is at or
+ * under `ctx_floor`. With no previous request (`prev` null) and not first,
+ * only the read-ratio test applies, and the wait is unknown. The cause is the first that applies
  * of: limit (a usage-limit pause), compaction (the first reply after a
  * summary), expiry (the wait reached the previous request's cache
  * lifetime, or the read was no more than the shared start plus the margin,
  * or under `full_expiry_cr`), prefix (anything else).
- * @param {RebuildRequest|null|undefined} prev  The previous main-session request.
+ * @param {RebuildRequest|null|undefined} prev  The previous main-session request; null when none is known.
  * @param {RebuildRequest} cur
  * @param {Partial<RebuildThresholds>|null} [thresholds]  Over REBUILD_DEFAULTS.
  * @param {number|null} [ttlSeconds]  The lifetime `prev`'s cache had; null when unknown.
@@ -144,7 +148,7 @@ function isRebuild(cur, prev, cr0, th) {
  * @returns {Rebuild|null}
  */
 export function detectRebuild(prev, cur, thresholds, ttlSeconds, cr0) {
-  if (!prev || !cur) return null;
+  if (!cur || cur.first) return null;
   var th = withDefaults(thresholds);
   var shared = typeof cr0 === "number" ? cr0 : null;
   if (cur.ctx <= th.ctx_floor) return null;
@@ -155,7 +159,7 @@ export function detectRebuild(prev, cur, thresholds, ttlSeconds, cr0) {
     cause = "limit";
   } else if (cur.afterCompaction) {
     cause = "compaction";
-  } else if (expiredByClock((cur.ts - prev.ts) / 1000, ttlSeconds)) {
+  } else if (prev && expiredByClock((cur.ts - prev.ts) / 1000, ttlSeconds)) {
     cause = "expiry";
   } else if (cur.cacheRead < th.full_expiry_cr || (shared !== null && cur.cacheRead <= shared + th.session_read_margin)) {
     cause = "expiry";

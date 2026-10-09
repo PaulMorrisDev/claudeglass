@@ -26,7 +26,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import recache, statusline
+from claudeglass import mod_settings, recache, statusline
 from claudeglass.capture_catalogue import COACHING_THRESHOLDS
 from claudeglass.hooks import capture_hook
 from claudeglass.model import EventKind, Turn
@@ -60,34 +60,33 @@ def vec(fn: str, args: list, expect, note: str = "") -> dict:
 # -- pricing --------------------------------------------------------------------
 
 
-def _rates_json(rates: ModelRates, aliases: list[str] | None = None) -> dict:
-    out: dict = {
-        "input": rates.input,
-        "output": rates.output,
-        "cache_write_5m": rates.cache_write_5m,
-        "cache_write_1h": rates.cache_write_1h,
-        "cache_read": rates.cache_read,
-        "context_window_tokens": rates.context_window_tokens,
-    }
-    if aliases is not None:
-        out["aliases"] = aliases
-    if rates.long_context is not None:
-        rule: dict = {"threshold_tokens": rates.long_context.threshold_tokens}
-        if rates.long_context.multiplier is not None:
-            rule["multiplier"] = rates.long_context.multiplier
-        if rates.long_context.overrides:
-            rule["overrides"] = dict(rates.long_context.overrides)
-        out["long_context"] = rule
-    return out
-
-
 def _models_json(pricing: Pricing) -> dict:
-    """The settings file's ``pricing.models``: rates by canonical id, each
-    with the aliases that name it."""
-    aliases_by_id: dict[str, list[str]] = {}
-    for alias, canonical in pricing.aliases.items():
-        aliases_by_id.setdefault(canonical, []).append(alias)
-    return {model_id: _rates_json(rates, aliases_by_id.get(model_id, [])) for model_id, rates in pricing.models.items()}
+    """The settings file's ``pricing.models``, as the Python writes it: the
+    JS reads what ``mod_settings.pricing_block`` makes, not a copy built
+    here that could hide what it leaves out."""
+    return mod_settings.pricing_block(pricing)["models"]
+
+
+#: Rate cards the packaged one doesn't have: a long-context rule by
+#: multiplier and by explicit rates, written through the same block.
+SYNTHETIC = Pricing(
+    path="synthetic",
+    version="test",
+    currency="USD",
+    source_url=None,
+    retrieved=None,
+    notes=None,
+    sha256="",
+    models={
+        "multiplier": ModelRates(
+            "multiplier", 3.0, 15.0, 3.75, 6.0, 0.3, long_context=LongContextRule(threshold_tokens=200_000, multiplier=2.0)
+        ),
+        "overrides": ModelRates(
+            "overrides", 3.0, 15.0, 3.75, 6.0, 0.3,
+            long_context=LongContextRule(threshold_tokens=100_000, overrides={"input": 6.0, "cache_write_5m": 7.5, "cache_read": 0.6}),
+        ),
+    },
+)
 
 
 def _resolve_ids(pricing: Pricing) -> list:
@@ -151,24 +150,12 @@ def _price_vectors() -> list[dict]:
         {"input_tokens": 500000, "output_tokens": 64000, "cache_read_input_tokens": 700000, "cache_creation_input_tokens": 120000},
         {"input_tokens": 7},
     ]
-    rate_cards = [(model_id, rates) for model_id, rates in PRICING.models.items()]
-    rate_cards.append(
-        (
-            "multiplier",
-            ModelRates("x", 3.0, 15.0, 3.75, 6.0, 0.3, long_context=LongContextRule(threshold_tokens=200_000, multiplier=2.0)),
-        )
-    )
-    rate_cards.append(
-        (
-            "overrides",
-            ModelRates(
-                "y", 3.0, 15.0, 3.75, 6.0, 0.3,
-                long_context=LongContextRule(threshold_tokens=100_000, overrides={"input": 6.0, "cache_write_5m": 7.5, "cache_read": 0.6}),
-            ),
-        )
-    )
-    for _, rates in rate_cards:
-        rates_json = _rates_json(rates)
+    rate_cards = [
+        (rates, _models_json(pricing)[model_id]) for pricing in (PRICING, SYNTHETIC) for model_id, rates in pricing.models.items()
+    ]
+    # The rule reaches the file, or the JS would price without it.
+    assert sum("long_context" in card for _, card in rate_cards) >= 2
+    for rates, rates_json in rate_cards:
         for usage in usages:
             for ttl in (300, 900, 3600, 7200):
                 write = usage.get("cache_creation_input_tokens", 0)
@@ -281,8 +268,8 @@ def _iso(ms: int) -> str:
     return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def _request(turn: Turn, ms: int, after_compaction: bool, after_limit: bool) -> dict:
-    return {
+def _request(turn: Turn, ms: int, after_compaction: bool, after_limit: bool, first: bool = False) -> dict:
+    out = {
         "ts": ms,
         "ctx": turn.ctx,
         "cacheRead": turn.cache_read_tokens,
@@ -291,6 +278,9 @@ def _request(turn: Turn, ms: int, after_compaction: bool, after_limit: bool) -> 
         "afterLimitWait": after_limit,
         "model": turn.model,
     }
+    if first:
+        out["first"] = True
+    return out
 
 
 def _sequence(rng: random.Random) -> list[tuple[Turn, int, bool, bool]]:
@@ -367,19 +357,22 @@ def _rebuild_vectors() -> list[dict]:
         carried: float | None = None
         shared = steps[0][0].cache_read_tokens if start == 0 else None
         for position, (turn, ms, compacted, limited) in enumerate(steps):
+            signature = detected.get(turn.message_id)
+            expect = None
+            if signature is not None:
+                cause = _SIGNATURE_CAUSE[signature]
+                expect = {"cause": cause, "tokens": turn.cache_creation_tokens, "expected": cause in ("limit", "compaction")}
             if position:
                 prev_turn, prev_ms, prev_compacted, prev_limited = steps[position - 1]
-                signature = detected.get(turn.message_id)
-                expect = None
-                if signature is not None:
-                    cause = _SIGNATURE_CAUSE[signature]
-                    expect = {"cause": cause, "tokens": turn.cache_creation_tokens, "expected": cause in ("limit", "compaction")}
+                prev_request = _request(prev_turn, prev_ms, prev_compacted, prev_limited)
+                vectors.append(vec("detectRebuild", [prev_request, _request(turn, ms, compacted, limited), th_json, carried, shared], expect))
+            else:
+                # No previous request: the session's first reply (never a
+                # rebuild), or the first the mod saw after a resume, which
+                # the read-ratio test still judges.
+                first = start == 0
                 vectors.append(
-                    vec(
-                        "detectRebuild",
-                        [_request(prev_turn, prev_ms, prev_compacted, prev_limited), _request(turn, ms, compacted, limited), th_json, carried, shared],
-                        expect,
-                    )
+                    vec("detectRebuild", [None, _request(turn, ms, compacted, limited, first), th_json, None, shared], expect, f"no previous, first={first}")
                 )
             # The lifetime the previous reply's cache had, carried forward.
             carried = recache.write_ttl_s(turn) or carried
@@ -582,6 +575,12 @@ def test_rebuild_js_agrees_with_recache_detect(vector_run: dict) -> None:
         if v["fn"] == "detectRebuild"
     }
     assert outcomes == {None, "limit", "compaction", "expiry", "prefix"}
+    # So do the replies with no known previous request: the first (never a
+    # rebuild) and the first seen after a resume (judged by the read ratio).
+    unknown_prev = [v for v in vector_run["groups"]["rebuild"] if v["fn"] == "detectRebuild" and v["args"][0] is None]
+    resumed = [v["expect"] for v in unknown_prev if not v["args"][1].get("first")]
+    assert any(resumed) and not all(resumed)
+    assert all(v["expect"] is None for v in unknown_prev if v["args"][1].get("first"))
 
 
 def test_units_js_agrees_with_units_py(vector_run: dict) -> None:

@@ -10,12 +10,13 @@ import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
+const staticDir = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "src", "claudeglass", "service", "static");
 const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks", "lib");
 const load = (name) => import(pathToFileURL(join(lib, name)).href);
 
 const { readContext, runway, toolGrowth } = await load("context.js");
 const { fill, joinParts } = await load("text.js");
-const { formatTokens, formatAmount, formatAmountCell, amountText } = await load("units.js");
+const { formatTokens, formatAmount, formatAmountCell, amountText, moneySymbol } = await load("units.js");
 const { noteAllowed, mayShow, stamp } = await load("rest.js");
 const { cacheState, formatClock, resolveTtl, parseTtl } = await load("cache.js");
 const { resolveModel, ratesFor, priceUsage } = await load("pricing.js");
@@ -215,6 +216,33 @@ test("formatAmount can write the dashboard's dollar sign when asked", () => {
   assert.equal(formatAmount(1234.5, api, { symbol: true }), "$1,235");
   assert.equal(formatAmount(0.001, api, { symbol: true }), "<$0.01");
   assert.equal(formatAmount(5, { mode: "api", currency: "EUR" }, { symbol: true }), "5.00 EUR");
+});
+
+// The dashboard's own formatting (service/static/format.js), imported as the
+// browser runs it, is what the symbol form has to match character for
+// character. format.js needs no DOM to load.
+const dashboard = await import(pathToFileURL(join(staticDir, "format.js")).href);
+const dashboardState = (await import(pathToFileURL(join(staticDir, "core.js")).href)).state;
+
+test("the dollar form is what the dashboard writes, for the same amounts", () => {
+  const amounts = [
+    0, 0.001, 0.0049, 0.005, 0.0051, 0.01, 0.015, 0.125, 0.375, 0.995, 1.005, 1.015, 2.675, 9.995, 9.9949, 10, 10.05, 12.345,
+    45.65, 45.67, 99.95, 99.949, 100, 100.5, 999.5, 1234.5, 1234567.891, 0.1 + 0.2,
+  ];
+  for (const currency of ["USD", "EUR"]) {
+    dashboardState.currency = currency;
+    for (const amount of amounts.flatMap((a) => [a, -a])) {
+      assert.equal(moneySymbol(amount, currency), dashboard.currencyAmount(amount), `${amount} ${currency}`);
+    }
+  }
+  dashboardState.currency = "USD";
+});
+
+test("the dollar form rounds a tie up, as toLocaleString does, and puts a tiny negative's sign where the dashboard does", () => {
+  assert.equal(formatAmount(1.005, { mode: "api" }, { symbol: true }), "$1.01");
+  assert.equal(formatAmount(2.675, { mode: "api" }, { symbol: true }), "$2.68");
+  assert.equal(moneySymbol(-0.001, "USD"), "<$−0.01");
+  assert.equal(moneySymbol(-3.2, "USD"), "−$3.20");
 });
 
 test("noteAllowed keeps notes at least five replies apart", () => {

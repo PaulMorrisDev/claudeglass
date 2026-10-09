@@ -520,13 +520,16 @@ def inventory(
         items.append(
             FootprintItem(
                 key="mod_settings",
-                title="Settings file for the ClaudeGlass mod",
+                title="Files shared with the ClaudeGlass mod",
                 status="installed",
                 where=home_label(mod_dir),
                 what_it_does=(
                     "Holds the prices, billing mode, coaching limits and your usual figures that the ClaudeGlass "
-                    "mod reads inside Claude Code, because the mod can't ask this tool for them. Counts and "
-                    "settings only, never a prompt or a path. The mod itself is a separate plugin that you add."
+                    "mod reads inside Claude Code, because the mod can't ask this tool for them. The mod writes "
+                    "back which sessions it is running in, so the capture hook leaves out the hints the mod shows "
+                    "itself, and a small file per session of what it showed, which the dashboard counts. Counts, "
+                    "settings and closed words only, never a prompt or a path. The mod itself is a separate "
+                    "plugin that you add."
                 ),
                 token_cost="None. The mod shows it to you; Claude never reads it.",
                 undo="Deleted with this tool's data folder.",

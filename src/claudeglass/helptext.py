@@ -178,6 +178,7 @@ PLACEMENT: dict[str, str] = {
     "habits_digest": "keep",
     "prompting_habits": "keep",
     "prompting_tips": "keep",
+    "prompting_glass": "advanced",
     "habits_playbook": "keep",
     "habits_by_task": "keep",
     "habits_briefs": "advanced",
@@ -971,9 +972,10 @@ TABLE_COPY: dict[str, TableCopy] = {
     "prompting_tips": TableCopy(
         title="Tips Claude showed",
         help=Help(
-            shows="For each coaching hint that asks Claude to pass on a tip, how often it did and how often "
-            "it called the tip a misfire. Your own answers about each tip sit beside them. They come from /cg-feedback, "
-            "a session rating, or the rating buttons on a card.",
+            shows="For each coaching hint that asks for a tip, how many tips were shown. Some were passed on by "
+            "Claude in its reply. Others were shown by ClaudeGlass itself inside Claude Code. It also shows how often "
+            "Claude called a tip a misfire. Your own answers about each tip sit beside them. They come from "
+            "/cg-feedback, a session rating, or the rating buttons on a card.",
             read="Most hints ask for the tip every time, so a tip left out is a miss. The paste hint asks only "
             "when your message calls for it, so fewer of those show and that's no miss. A tip you called wrong, "
             "or that Claude called a misfire, twice is raised or muted. One you already knew shows once a session.",
@@ -982,13 +984,19 @@ TABLE_COPY: dict[str, TableCopy] = {
         columns={
             "hint": ("Hint", "The coaching hint."),
             "notes": ("Notes", "How many times the hint's note was added."),
-            "shown": ("Tip shown", "How many of those replies ended with a ClaudeGlass tip."),
-            "shown_pct": ("Shown", "The share of notes that ended with a tip."),
+            "shown": ("Passed on by Claude", "How many of those replies ended with a ClaudeGlass tip."),
+            "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip."),
             "relay": (
-                "Passed on",
+                "Claude's relay",
                 "Relayed means Claude was told to show the tip every time. Judged relevant means Claude chose "
-                "whether your message called for it.",
+                "whether your message called for it. Empty where ClaudeGlass showed the tip itself.",
             ),
+            "glass": (
+                "Shown by Glass",
+                "How many times ClaudeGlass showed the tip itself, in the sessions where it was running.",
+            ),
+            "where": ("Where Glass showed it", "The places ClaudeGlass showed it, with how many times each."),
+            "total": ("Tips shown", "The tips Claude passed on plus the ones ClaudeGlass showed itself."),
             "misfires": ("Called a misfire", "How many times Claude said in its reply that the tip didn't apply."),
             "useful": ("You said useful", "Answers saying the tip was right and you acted on it. Trying it on a card counts here."),
             "known": ("You knew it", "Answers saying the tip was right but you already knew it."),
@@ -1007,6 +1015,24 @@ TABLE_COPY: dict[str, TableCopy] = {
             "cold_return": "Back after a break",
             "report_reread": "Background agents in a long session",
             "split_run": "Agent runs that ended too big",
+        },
+    ),
+    "prompting_glass": TableCopy(
+        title="Sessions with ClaudeGlass running",
+        help=Help(
+            shows="How many of your sessions ran with the ClaudeGlass mod inside Claude Code, where they ran, and "
+            "how many tips it showed itself. Those tips are counted in the tips table beside the ones Claude "
+            "passed on.",
+            read="A session counts when the mod wrote that it was there. The coaching hints it shows itself "
+            "aren't added to Claude's context, so Claude can't pass them on.",
+            act="",
+        ),
+        columns={
+            "sessions": ("Sessions", "Your sessions in the window that had a message of yours."),
+            "with_glass": ("With ClaudeGlass", "How many of them ran with the mod."),
+            "with_glass_pct": ("Share", "The share of sessions that ran with the mod."),
+            "where": ("Where it ran", "The part of Claude Code each session used, with how many sessions."),
+            "tips": ("Tips it showed", "How many tips the mod showed itself in those sessions."),
         },
     ),
     "habits_playbook": TableCopy(

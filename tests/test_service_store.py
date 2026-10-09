@@ -673,7 +673,7 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
 
     db_path = tmp_path / "roundtrip.db"
     store = Store(str(db_path))
-    store.open()  # built fresh at the real, current SCHEMA_VERSION (9)
+    store.open()  # built fresh at the real, current SCHEMA_VERSION (10)
     _seed(store)
     store.set_feedback("session-a", outcome="delivered", slow=("scope",), worth="yes", helped=("clearer-brief",))
     store.set_tag("session-a", "purpose", "refactor")
@@ -683,17 +683,17 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
     )
     store.close()
 
-    # "Downgrade": a build that only knows up to v8 opens this v9 store.
-    # v9 is newer than that build's own SCHEMA_VERSION, so migrate() takes
+    # "Downgrade": a build that only knows up to v9 opens this v10 store.
+    # v10 is newer than that build's own SCHEMA_VERSION, so migrate() takes
     # the backup-then-drop-and-rebuild path (same branch as the test
-    # above), stamping the store back down to "8".
+    # above), stamping the store back down to "9".
     monkeypatch.setattr(schema, "SCHEMA_VERSION", schema.SCHEMA_VERSION - 1)
     downgraded = Store(str(db_path))
     downgraded.open()
-    assert downgraded.schema_version() == 8
+    assert downgraded.schema_version() == schema.SCHEMA_VERSION == 9
     downgraded.close()
 
-    # Upgrade back to the real, current build: v8 -> v9 walks the
+    # Upgrade back to the real, current build: v9 -> v10 walks the
     # additive MIGRATIONS ladder (it never drops a table, and finds the
     # columns the rebuilt tables already carry), so this step alone was
     # never the risk -- the ratings must already have survived the
@@ -702,7 +702,7 @@ def test_a_v8_to_v7_to_v8_round_trip_keeps_the_ratings(tmp_path, monkeypatch) ->
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 9
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION
         assert upgraded.feedback("session-a") == {
             "outcome": "delivered", "slow": ["scope"], "worth": "yes", "helped": ["clearer-brief"],
             "why": [], "missed_in": None, "plan": None, "handoff": None, "tip": None, "tip_hint": None, "builds": [],
@@ -1516,6 +1516,25 @@ def test_median_end_context_looks_only_at_the_most_recent_sessions(store: Store)
     assert store.median_end_context() == 20_000
 
 
+def test_cache_write_split_counts_a_windows_top_level_writes_by_lifetime(store: Store) -> None:
+    now = datetime(2026, 9, 30, 12, tzinfo=timezone.utc)
+
+    def row(day: str, cc_5m: int, cc_1h: int) -> dict:
+        return {**_agg(f"{day}T10:00:00Z"), "cc_5m": cc_5m, "cc_1h": cc_1h}
+
+    assert store.cache_write_split(14, now) == (0, 0)
+    _seed_agg(
+        store,
+        row("2026-09-30", 100, 0),
+        row("2026-09-16", 20, 3000),  # the window's first day counts
+        row("2026-09-15", 7000, 7000),  # one day before it does not
+        {**_agg(None, day="unknown"), "cc_5m": 9000},
+    )
+    _seed_agg(store, row("2026-09-30", 0, 50_000), session_id="sub", kind="subagent")
+    assert store.cache_write_split(14, now) == (120, 3000)
+    assert store.cache_write_split(1, now) == (100, 0)
+
+
 # -- privacy guard ---------------------------------------------------------
 
 
@@ -1850,7 +1869,7 @@ def test_migrate_upgrades_a_v8_store_with_the_redesigned_rating(tmp_path) -> Non
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 9
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION
         # The old rating is kept as it was, with the newer answers empty.
         saved = upgraded.feedback("session-a")
         assert saved["outcome"] == "met" and saved["slow"] == ["tools"] and saved["helped"] == ["context"]
@@ -2011,7 +2030,7 @@ def test_migrate_upgrades_a_v5_store_with_the_feedback_table(tmp_path) -> None:
     store = Store(str(db_path))
     store.open()
     try:
-        assert store.schema_version() == schema.SCHEMA_VERSION == 9
+        assert store.schema_version() == schema.SCHEMA_VERSION
         assert store.session("session-a") is not None
         assert store.tags("session-a") == {"purpose": "refactor-override"}
         store.set_feedback("session-a", outcome="met", worth="yes")
@@ -2452,7 +2471,7 @@ def test_migrate_upgrades_a_v7_store_and_marks_every_transcript_for_a_re_parse(t
     upgraded = Store(str(db_path))
     upgraded.open()
     try:
-        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 9
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION
         assert "bucket" in {row["name"] for row in upgraded._connection().execute("PRAGMA table_info(turns_agg)")}
         # Every row is kept, with no bucket until its transcript is parsed again.
         assert _agg_rows(upgraded) == rows_before
@@ -2502,6 +2521,7 @@ def test_the_migration_ladder_reaches_the_current_version() -> None:
 
     assert set(store_mod.MIGRATIONS) == set(range(4, schema.SCHEMA_VERSION))
     assert store_mod.MIGRATIONS[7] is store_mod._migrate_7_to_8
+    assert store_mod.MIGRATIONS[9] is store_mod._migrate_9_to_10
 
 
 def test_a_windowed_read_of_turns_agg_uses_the_day_index(store: Store) -> None:
@@ -2518,3 +2538,139 @@ def test_a_windowed_read_of_turns_agg_uses_the_day_index(store: Store) -> None:
             row["detail"] for row in conn.execute(f"EXPLAIN QUERY PLAN SELECT a.id FROM turns_agg a WHERE {condition}", params)
         )
         assert "idx_turns_agg_day" in plan, plan
+
+
+# -- the mod's sensor events (schema 10) -------------------------------------------------
+
+
+def _mod_event(ts, event="note", **fields):
+    row = {"ts": ts, "event": event, "kind": None, "surface": None, "outcome": None,
+           "kept": None, "missing": None, "added": None}
+    return {**row, **fields}
+
+
+def _note(ts, kind="cold_return", surface="hint", outcome="none"):
+    return _mod_event(ts, kind=kind, surface=surface, outcome=outcome)
+
+
+def test_migrate_upgrades_a_v9_store_with_the_mod_events_table(tmp_path) -> None:
+    from claudeglass.service import schema
+    from claudeglass.service import store as store_mod
+
+    db_path = tmp_path / "v9.db"
+    store = Store(str(db_path))
+    store.open()
+    _seed(store)
+    conn = store._connection()
+    conn.execute("DROP TABLE mod_events")
+    conn.execute("UPDATE meta SET value = '9' WHERE key = ?", (store_mod._SCHEMA_VERSION_KEY,))
+    conn.commit()
+    store.close()
+
+    upgraded = Store(str(db_path))
+    upgraded.open()
+    try:
+        assert upgraded.schema_version() == schema.SCHEMA_VERSION == 10
+        # What was there stays; the new table works and has its indexes.
+        assert upgraded.summary()["sessions"] == 1
+        assert upgraded.replace_mod_events("session-a", [_note("2026-09-21T10:00:00Z")]) == 1
+        indexes = {
+            row["name"] for row in upgraded._connection().execute("SELECT name FROM sqlite_master WHERE type = 'index'")
+        }
+        assert {"idx_mod_events_session_ts", "idx_mod_events_event"} <= indexes
+    finally:
+        upgraded.close()
+
+
+def test_migrate_9_to_10_is_a_no_op_when_run_again(store: Store) -> None:
+    from claudeglass.service import store as store_mod
+
+    store.replace_mod_events("s1", [_note("2026-09-21T10:00:00Z")])
+    before = store.read_mod_events()
+    store_mod._migrate_9_to_10(store._connection())  # the table and indexes are there already
+    assert store.read_mod_events() == before
+
+
+def test_mod_events_round_trip_every_column(store: Store) -> None:
+    events = [
+        _mod_event("2026-09-21T10:00:00Z", "present", surface="vscode"),
+        _note("2026-09-21T10:01:00Z", "runway", "status", "sent"),
+        _mod_event("2026-09-21T10:02:00Z", "rebuild", kind="expiry", outcome="expected"),
+        _mod_event("2026-09-21T10:03:00Z", "cold_send", outcome="unwarned"),
+        _mod_event("2026-09-21T10:04:00Z", "compaction", kind="auto", kept=12, missing=2, added=1),
+    ]
+    assert store.replace_mod_events("s1", events) == 5
+    assert store.read_mod_events() == [{"session_id": "s1", **event} for event in events]
+    assert store.read_mod_events(event="note") == [{"session_id": "s1", **events[1]}]
+    assert [e["event"] for e in store.read_mod_events(since="2026-09-21T10:03:00Z")] == ["cold_send", "compaction"]
+    assert_privacy(store.read_mod_events())
+
+
+def test_ingesting_the_same_file_again_changes_nothing(store: Store) -> None:
+    events = [_note("2026-09-21T10:00:00Z"), _note("2026-09-21T10:05:00Z", "big_paste", "note", "sent")]
+    store.replace_mod_events("s1", events)
+    first = store.read_mod_events()
+    for _ in range(3):
+        store.replace_mod_events("s1", events)
+    assert store.read_mod_events() == first
+
+
+def test_a_rewritten_file_replaces_from_its_first_event_and_keeps_the_older_ones(store: Store) -> None:
+    store.replace_mod_events("s1", [_note("2026-09-21T09:00:00Z"), _note("2026-09-21T10:00:00Z"), _note("2026-09-21T11:00:00Z")])
+    # The mod's newest-500 file has dropped the 09:00 event and grown a new one.
+    store.replace_mod_events("s1", [_note("2026-09-21T10:00:00Z"), _note("2026-09-21T11:00:00Z"), _note("2026-09-21T12:00:00Z")])
+    assert [e["ts"] for e in store.read_mod_events()] == [
+        "2026-09-21T09:00:00Z", "2026-09-21T10:00:00Z", "2026-09-21T11:00:00Z", "2026-09-21T12:00:00Z",
+    ]
+    # Another session is never touched, and an empty file changes nothing.
+    store.replace_mod_events("s2", [_note("2026-09-21T10:30:00Z")])
+    store.replace_mod_events("s1", [_note("2026-09-21T12:00:00Z")])
+    assert store.replace_mod_events("s1", []) == 0
+    assert len(store.read_mod_events()) == 5
+
+
+def test_a_failed_replace_keeps_the_old_rows(store: Store) -> None:
+    store.replace_mod_events("s1", [_note("2026-09-21T10:00:00Z")])
+    with pytest.raises(Exception):
+        # No "event" key: the insert fails after the delete, and the whole replace rolls back.
+        store.replace_mod_events("s1", [{"ts": "2026-09-21T10:00:00Z"}])
+    assert [e["ts"] for e in store.read_mod_events()] == ["2026-09-21T10:00:00Z"]
+
+
+def test_prune_mod_events_removes_the_old_rows_only(store: Store) -> None:
+    now = datetime.now(timezone.utc)
+    old = (now - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    new = (now - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    store.replace_mod_events("s1", [_note(old), _note(new)])
+    assert store.prune_mod_events(30) == 1
+    assert [e["ts"] for e in store.read_mod_events()] == [new]
+
+
+def test_retention_prune_takes_a_removed_sessions_mod_events_with_it(store: Store) -> None:
+    _seed(store)
+    store.upsert_session(
+        session_id="session-old", project_slug="proj-a", slug="proj-a",
+        first_ts="2000-01-01T00:00:00Z", last_ts="2000-01-01T01:00:00Z",
+    )
+    store.replace_mod_events("session-old", [_note("2026-09-21T10:00:00Z")])
+    store.replace_mod_events("session-a", [_note("2026-09-21T10:00:00Z")])
+    assert store.retention_prune(retention_days=30) == 1
+    assert {e["session_id"] for e in store.read_mod_events()} == {"session-a"}
+
+
+def test_read_mod_events_from_a_file_needs_no_store_and_never_writes(tmp_path) -> None:
+    from claudeglass.service import store as store_mod
+
+    assert store_mod.read_mod_events(tmp_path / "none.db") == []
+    path = tmp_path / "service.db"
+    s = Store(str(path))
+    s.open()
+    s.replace_mod_events("s1", [_note("2026-09-21T10:00:00Z")])
+    s.close()
+    assert [e["session_id"] for e in store_mod.read_mod_events(path)] == ["s1"]
+    # A store from before the table: no events, no error.
+    old = sqlite3.connect(str(tmp_path / "old.db"))
+    old.execute("CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)")
+    old.commit()
+    old.close()
+    assert store_mod.read_mod_events(tmp_path / "old.db") == []

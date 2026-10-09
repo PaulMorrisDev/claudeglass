@@ -52,3 +52,122 @@ export const HOW = {
     "terminal": "Typing /tasks shows what is still running, with no message sent."
   }
 };
+
+export const MOVED = [
+  "big_paste",
+  "cold_return",
+  "drip_feed",
+  "plan_fresh",
+  "rating_reminder",
+  "report_reread",
+  "split_run",
+  "status_poll"
+];
+
+export const NOTE_KINDS = [
+  "plan_fresh",
+  "plan_fresh_early",
+  "split_run",
+  "quiet_output",
+  "report_reread",
+  "drip_feed",
+  "big_paste",
+  "status_poll",
+  "cold_return",
+  "plan_check",
+  "rating_reminder",
+  "runway",
+  "result",
+  "switch",
+  "effort",
+  "compactions",
+  "cold_compaction"
+];
+
+export const MOD_NOTE_KINDS = [
+  "runway",
+  "result",
+  "switch",
+  "effort",
+  "compactions",
+  "cold_compaction"
+];
+
+export const SENSOR_EVENTS = [
+  "present",
+  "note",
+  "rebuild",
+  "cold_send",
+  "compaction"
+];
+
+export const SENSOR_VOCAB = {
+  "cold_send": {
+    "outcome": [
+      "warned",
+      "unwarned"
+    ]
+  },
+  "compaction": {
+    "kind": [
+      "auto",
+      "manual"
+    ]
+  },
+  "note": {
+    "kind": [
+      "plan_fresh",
+      "plan_fresh_early",
+      "split_run",
+      "quiet_output",
+      "report_reread",
+      "drip_feed",
+      "big_paste",
+      "status_poll",
+      "cold_return",
+      "plan_check",
+      "rating_reminder",
+      "runway",
+      "result",
+      "switch",
+      "effort",
+      "compactions",
+      "cold_compaction"
+    ],
+    "outcome": [
+      "sent",
+      "clear",
+      "compact",
+      "none"
+    ],
+    "surface": [
+      "note",
+      "hint",
+      "log",
+      "status",
+      "band",
+      "agent"
+    ]
+  },
+  "present": {
+    "surface": [
+      "desktop",
+      "terminal",
+      "vscode",
+      "mobile"
+    ]
+  },
+  "rebuild": {
+    "kind": [
+      "limit",
+      "compaction",
+      "expiry",
+      "prefix",
+      "unknown"
+    ],
+    "outcome": [
+      "expected",
+      "unexpected"
+    ]
+  }
+};

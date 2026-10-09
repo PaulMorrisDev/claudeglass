@@ -300,6 +300,18 @@ def _migrate_8_to_9(conn: sqlite3.Connection) -> None:
     conn.execute(schema.CREATE_TIP_FEEDBACK)
 
 
+def _migrate_9_to_10(conn: sqlite3.Connection) -> None:
+    """v9 -> v10 (``schema.py``'s "Version 10" paragraph): the ``mod_events``
+    table and its two indexes. Like ``predictions`` it is re-ingestible (from
+    the mod's sensor files, on the watcher's next tick, while the files
+    last), so it is not one of the protected tables. ``CREATE_MOD_EVENTS`` is
+    three statements, run one at a time as in :func:`_migrate_6_to_7`."""
+    for statement in schema.CREATE_MOD_EVENTS.strip().split(";"):
+        statement = statement.strip()
+        if statement:
+            conn.execute(statement)
+
+
 #: Additive migration ladder for :meth:`Store.migrate`, keyed by the
 #: *recorded* version being migrated away from -- ``MIGRATIONS[4]`` takes
 #: a v4 store to v5. Each step may only add columns/indexes/tables, never
@@ -314,6 +326,7 @@ MIGRATIONS: dict[int, Callable[[sqlite3.Connection], None]] = {
     6: _migrate_6_to_7,
     7: _migrate_7_to_8,
     8: _migrate_8_to_9,
+    9: _migrate_9_to_10,
 }
 
 
@@ -1294,8 +1307,78 @@ class Store:
                 conn.execute("DELETE FROM session_tags WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM session_feedback WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM session_plan_feedback WHERE session_id = ?", (session_id,))
+                conn.execute("DELETE FROM mod_events WHERE session_id = ?", (session_id,))
                 conn.execute("DELETE FROM sessions WHERE id = ?", (session_id,))
         return len(session_ids)
+
+    # -- the mod's sensor events (``mod_events``) --------------------------
+
+    def replace_mod_events(self, session_id: str, events: list[dict]) -> int:
+        """Store a session's cleaned sensor events (``mod_sensor.clean``) in
+        place of the rows it already has from the first of them on. The mod
+        rewrites its whole newest-500 file each turn, so the same events
+        arrive again and again: deleting the rows at or after the file's
+        first ``ts`` and inserting the file's events leaves the same rows
+        however often a file is read, while an older event the file has
+        since dropped stays. One transaction, so a failure keeps the old
+        rows. Returns the number of events written (none for an empty list,
+        which changes nothing)."""
+        if not events:
+            return 0
+        conn = self._connection()
+        now = _now()
+        first = min(event["ts"] for event in events)
+        with _transaction(conn):
+            conn.execute("DELETE FROM mod_events WHERE session_id = ? AND ts >= ?", (session_id, first))
+            conn.executemany(
+                "INSERT INTO mod_events (session_id, ts, event, kind, surface, outcome, kept, missing, added, "
+                "updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        session_id,
+                        event["ts"],
+                        event["event"],
+                        event.get("kind"),
+                        event.get("surface"),
+                        event.get("outcome"),
+                        event.get("kept"),
+                        event.get("missing"),
+                        event.get("added"),
+                        now,
+                    )
+                    for event in events
+                ],
+            )
+        return len(events)
+
+    def prune_mod_events(self, retention_days: int) -> int:
+        """Delete the sensor events older than ``retention_days`` days, with
+        the sensor files that held them (``mod_sensor.prune``). Returns the
+        number of rows removed."""
+        cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - retention_days * 86400))
+        conn = self._connection()
+        with _transaction(conn):
+            cursor = conn.execute("DELETE FROM mod_events WHERE ts < ?", (cutoff,))
+        return cursor.rowcount
+
+    def read_mod_events(self, *, event: str | None = None, since: str | None = None) -> list[dict]:
+        """The stored sensor events, oldest first, as dicts of the table's
+        columns without ``id`` and ``updated_at``; only those of one
+        ``event``, or from ``since`` (a UTC time) on, when given."""
+        clauses, params = [], []
+        if event is not None:
+            clauses.append("event = ?")
+            params.append(event)
+        if since is not None:
+            clauses.append("ts >= ?")
+            params.append(since)
+        where = f" WHERE {' AND '.join(clauses)}" if clauses else ""
+        rows = self._connection().execute(
+            "SELECT session_id, ts, event, kind, surface, outcome, kept, missing, added FROM mod_events"
+            f"{where} ORDER BY ts, id",
+            params,
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     def log_usage(self, *, ts: str, window_start: str | None, window_end: str | None,
                   utilization_pct: float | None, raw: dict) -> None:
@@ -1482,6 +1565,20 @@ class Store:
         ends.sort()
         mid = len(ends) // 2
         return ends[mid] if len(ends) % 2 else round((ends[mid - 1] + ends[mid]) / 2)
+
+    def cache_write_split(self, days: int, now: datetime) -> tuple[int, int]:
+        """``(cc_5m, cc_1h)``: the cache-write tokens of top-level
+        transcripts written in the ``days`` days up to ``now`` (UTC
+        dates, both ends included), split by the lifetime they were
+        written at. ``(0, 0)`` when there are none."""
+        today = now.astimezone(timezone.utc).date()
+        row = self._connection().execute(
+            "SELECT COALESCE(SUM(a.cc_5m), 0), COALESCE(SUM(a.cc_1h), 0) "
+            "FROM turns_agg a JOIN transcripts t ON t.id = a.transcript_id "
+            "WHERE t.kind = 'top-level' AND a.day BETWEEN ? AND ?",
+            ((today - timedelta(days=days)).isoformat(), today.isoformat()),
+        ).fetchone()
+        return int(row[0]), int(row[1])
 
     def turns_for_session(self, session_id: str) -> dict | None:
         """Per-turn ``ctx``/cache/marker series for one session's
@@ -2472,6 +2569,34 @@ def read_tip_feedback(path: str | Path) -> dict[tuple[str, str], dict]:
         return {}
 
 
+def read_mod_events(path: str | Path) -> list[dict]:
+    """:meth:`Store.read_mod_events`, read from the store at ``path``
+    without writing to it, for the CLI's own reports. Empty when there is
+    no store, it predates the table, or it can't be read."""
+    path = Path(path)
+    if not path.is_file():
+        return []
+    try:
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=2)
+    except sqlite3.Error:
+        return []
+    conn.row_factory = sqlite3.Row
+    try:
+        with contextlib.closing(conn):
+            tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+            if "mod_events" not in tables:
+                return []
+            return [
+                dict(row)
+                for row in conn.execute(
+                    "SELECT session_id, ts, event, kind, surface, outcome, kept, missing, added "
+                    "FROM mod_events ORDER BY ts, id"
+                )
+            ]
+    except sqlite3.Error:
+        return []
+
+
 def read_predictions(path: str | Path) -> list[dict]:
     """Every row in the ``predictions`` table, newest first, read from
     the store at ``path`` without writing to it (EST-P5/P4) -- the
@@ -2529,6 +2654,7 @@ __all__ = [
     "decode_digest_blob",
     "read_session_marks",
     "read_tip_feedback",
+    "read_mod_events",
     "read_predictions",
     "read_entrypoint_counts",
 ]

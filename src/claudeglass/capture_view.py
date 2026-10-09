@@ -318,7 +318,7 @@ def warning_text(ids, tagger: str = catalogue.DEFAULT_TAGGER) -> str:
     if rough["session_note"]:
         sentences.append("Claude reads a short note at the start of a session or after /clear or a compaction.")
     if rough["tool_note"]:
-        sentences.append("Claude reads a short note after a large read, search or web result.")
+        sentences.append("Claude reads a short note after a large read or web result.")
     if rough["message_note"]:
         due = " or ".join(
             words

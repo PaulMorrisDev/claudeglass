@@ -338,6 +338,22 @@
   "Agent",
   "Workflow"
  ],
+ "mod": {
+  "moved": [
+   "big_paste",
+   "cold_return",
+   "drip_feed",
+   "plan_fresh",
+   "rating_reminder",
+   "report_reread",
+   "split_run",
+   "status_poll"
+  ],
+  "dir": "mod",
+  "present_file": "present.json",
+  "present_window_s": 600,
+  "sensor_dir": "sensor"
+ },
  "result_image_max_tokens": 1600,
  "result_image_patch_px": 28,
  "result_persist_chars": {

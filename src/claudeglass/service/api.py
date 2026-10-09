@@ -1282,6 +1282,7 @@ def make_handler(
             # Your Sessions-tab ratings, for the Work habits tab.
             ratings=store.all_feedback(),
             tip_feedback=store.tip_feedback(),
+            mod_events=store.read_mod_events(),
             # No project picked: every project's sessions, so an MCP
             # server every project loads can be judged unused.
             all_projects=not project,

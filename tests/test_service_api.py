@@ -6028,7 +6028,7 @@ def test_capture_levels_and_rows_carry_the_warning_for_what_they_do(server):
     data = payload["data"]
     levels = {level["id"]: level for level in data["levels"]}
     assert levels["free"]["warning"].startswith("This level uses none of your Claude tokens")
-    assert "after a large read, search or web result" in levels["deep"]["warning"]
+    assert "after a large read or web result" in levels["deep"]["warning"]
     assert "after a large read" not in levels["essentials"]["warning"]
     for level in ("essentials", "standard", "deep"):
         assert "subagents and workflow agents are asked for nothing" in levels[level]["warning"]

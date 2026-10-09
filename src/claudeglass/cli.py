@@ -1472,6 +1472,15 @@ def _dashboard_tip_feedback(config_dir: Path) -> dict:
     return read_tip_feedback(config_dir / STORE_FILENAME)
 
 
+def _dashboard_mod_events(config_dir: Path) -> list[dict]:
+    """What the ClaudeGlass mod's sensor files said, by event, read from
+    ``<config-dir>/service.db`` without writing to it."""
+    from .service.serve import STORE_FILENAME
+    from .service.store import read_mod_events
+
+    return read_mod_events(config_dir / STORE_FILENAME)
+
+
 def _merge_dashboard_marks(config_dir: Path, overrides: dict) -> tuple[dict, dict]:
     """``(overrides, ratings)``: ``overrides`` with the dashboard's
     session tags merged over it, and the dashboard's session ratings,
@@ -1780,6 +1789,7 @@ def _cmd_report_like(args: argparse.Namespace, include: set[str] | None, *, emit
             config_dir=config_dir,
             ratings=ratings,
             tip_feedback=_dashboard_tip_feedback(config_dir),
+            mod_events=_dashboard_mod_events(config_dir),
             all_projects=bool(getattr(args, "all_projects", False)),
         )
     except ScorecardError as exc:
@@ -3251,16 +3261,22 @@ def _write_mod_settings(config_dir: Path, dashboard_url: str | None) -> None:
     """Write the mod's settings file (``mod_settings``) so it exists
     without the dashboard running. "Your usual" comes from the dashboard's
     store when there is one, read without writing to it; the measured
-    figures wait for the dashboard's next report. A config or rate card
-    that can't be read leaves the file as it was: ``update`` reports those
-    elsewhere."""
+    figures wait for the dashboard's next report, so the file as the
+    service wrote it is carried forward (see ``mod_settings.build``). A
+    config or rate card that can't be read leaves the file as it was:
+    ``update`` reports those elsewhere."""
     from .service.serve import STORE_FILENAME
     from .service.store import Store
 
+    try:
+        previous = json.loads(mod_settings_mod.settings_path(config_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        previous = None
     store = Store.open_read_only(config_dir / STORE_FILENAME)
     try:
         mod_settings_mod.write(
-            config_dir, mod_settings_mod.build(config_dir, store=store, dashboard_url=dashboard_url)
+            config_dir,
+            mod_settings_mod.build(config_dir, store=store, dashboard_url=dashboard_url, previous=previous),
         )
     except (ConfigError, PricingError, OSError):
         pass
@@ -3828,6 +3844,7 @@ def _capture_refresh(args, config: Config, config_dir: Path, *, stdout, now: dat
         # Your dashboard ratings and card answers, as the daily run reads them.
         ratings=ratings,
         tip_feedback=_dashboard_tip_feedback(config_dir),
+        mod_events=_dashboard_mod_events(config_dir),
     )
     data = coaching.from_report(
         report, config_dir, config.thresholds, now=now, typical=coaching.typical_piece_tokens(corpus)

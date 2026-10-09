@@ -39,7 +39,7 @@ a command or your words: only token counts, an idle time and a count.
 | `plan_fresh` | You approve a plan, and building it in a fresh session would drop at least 40,000 tokens of planning context. You approve it in the dialog, by typing a go-ahead after the dialog sent it back, or by leaving plan mode. | Tell you in a tip that building it in a fresh session would carry that much less on every reply of the build: next time, pick the approval option that clears the context first (the desktop), or run `/clear`, then ask Claude to carry out the plan in its file. Then carry on. |
 | `plan_fresh_early` | You send a message in plan mode, which Claude Code reports with the message, with at least 40,000 tokens of planning chat in the session since it started: the plan isn't written yet. Not for a message sent while Claude is working, for a session that was compacted since it started, or when the session's start can't be told. It shares its rest with `plan_fresh`, so one plan gets one of the two. | Nothing about the work. End the plan Claude submits for approval with a tip to approve it with a clear context: on the desktop, the approval option that clears the context first (or `/clear`, then asking Claude to carry out the plan in its file, if the dialog has none); in the terminal, `/clear` first, then the same. If the reply doesn't end in a plan, the tip goes on the plan submitted later. |
 | `split_run` | A subagent run ended showing signs of being too big for one task: Claude Code summarised its context part-way through, or it began from a brief of 6,000 characters or more (`coaching_split_brief_chars`). A workflow agent's brief is the task its script computed, not the prompt that relays it. The hook notes this when the run stops and says it at the next call in the main session: after the agent or workflow call returns, for a run that was in the foreground, or with the message that reports a background run. It comes after `report_reread` at an agent call. It never counts numbered lines or replies. | Nothing about the work. End the reply with a tip that an agent run in this session had to summarise its context or began from a long brief, that each reply of a run reads everything the run holds again, and that giving the next agent a smaller piece of the work keeps each run short. |
-| `quiet_output` | A read, search or web result is about 8,000 tokens or more, [as measured below](#how-a-results-size-is-measured). A read already given a line limit is left alone. Never after a shell command, an MCP tool, or an agent or workflow call, whose result is a report or a launch message. | Next time, ask for less: read only the lines needed, narrow a search or a query. |
+| `quiet_output` | A read or web result is about 8,000 tokens or more, [as measured below](#how-a-results-size-is-measured). A read already given a line limit is left alone. Never after a shell command, an MCP tool, or an agent or workflow call, whose result is a report or a launch message. | Next time, ask for less: read only the lines needed, narrow a search or a query. |
 | `report_reread` | The main session starts an agent or a workflow in the background while its newest reply read 150,000 tokens of context or more. The call asked for the background (`run_in_background`), or its result says the work went there, in the same wording `status_poll` reads. A foreground call, a smaller session and a call made from inside a subagent get nothing. It rests 30 minutes like the others, longer on repeats. | Nothing about the work. End the reply with a tip that the session holds about that many tokens and the reply to each report the background work sends back reads all of it again, so fewer, larger pieces of background work mean fewer re-reads. |
 | `drip_feed` | You send your third small change request in a row: short messages, each asking for a change (a change verb opens one of its sentences) and sent within 20 minutes of your message before it, the earlier ones each answered with a change to a file of yours in the reply they started ("make the button bigger", "now move the logo", "and make the footer grey"). A go-ahead, a thank-you, a status check, a question, a statement, an explain request and an answer to Claude's question ask for no change: they neither count nor end the run. A detailed message, a reply that changed nothing, or a longer gap starts the count again. A message sent while Claude is still working gets no hint. | Nothing about the work. End the reply with a tip that working out everything the work still needs and sending it as one message gets it done in one pass. |
 | `big_paste` | You send a message of 10,000 tokens or more, such as a pasted log or file. | If most of it is a log, a file or output, suggest in a tip pasting only the part that matters, or saving it to a file and giving the path. |
@@ -250,7 +250,7 @@ The time of the last reply is not read from the transcript's end alone.
 A usage-limit line, an overload or any other line Claude Code writes in
 place of a reply is no reply, whatever tokens it carries, so a turn that
 ended in one never restarts the clock. And the desktop app can write old
-lines again at the end of a transcript. So `Stop` and each read, search or web result keep
+lines again at the end of a transcript. So `Stop` and each read or web result keep
 the newest real reply's time, the context it left and its cache lifetime
 in `coach-state.json`: three numbers, no text, never moving back to an
 older reply. The receipt is timed from the newer of that and the
@@ -351,8 +351,8 @@ time, with any misfire.
 go by what Claude reads: the result's characters at four to a token,
 worked out in memory from what the hook is handed, and dropped.
 
-- **Words only.** A file's contents, a search's matches or file names,
-  a page, a command's output. A field that only shows you a change (a
+- **Words only.** A file's contents, a web search's results, a page. A
+  field that only shows you a change (a
   diff, the original file, a patch) never reaches Claude, so it isn't
   counted.
 - **A picture counts for its tokens, at most 1,600.** A screenshot's
@@ -360,12 +360,15 @@ worked out in memory from what the hook is handed, and dropped.
   height, at 28 pixels a patch, and never more than 1,600, so a picture
   alone never reaches 8,000 tokens. Words beside it still count.
 - **A result Claude Code saved to a file counts for its preview.** A
-  search past about 20,000 characters, a web page past about 50,000 or
-  a command past about 30,000 is written to a file, and only a preview
-  of about 2,200 characters reaches Claude. Those limits are what real
-  transcripts show; a read is never saved. So a search result is saved
-  before it is large enough, and in practice `quiet_output` follows a
-  large read or web page.
+  web page past about 50,000 characters is written to a file, and only a
+  preview of about 2,200 characters reaches Claude. That limit is what
+  real transcripts show; a read is never saved. So in practice
+  `quiet_output` follows a large read or web page.
+- **Grep and Glob are not watched.** Claude Code keeps a `Grep` result
+  whole only up to about 20,000 characters (about 5,000 tokens), and no
+  `Glob` result in 30 days of sessions passed 18,200, so neither could
+  reach 8,000 tokens, yet `Grep` was the call the hook most often made
+  Claude wait on.
 - **A context rests on its own.** The main session and each subagent
   keep their own rest for `quiet_output` (see below), since one's big
   result is no reason to stay quiet to the other.
@@ -607,6 +610,31 @@ last line of its own note and wins. A plan check wins over the reminder.
 Your own words reach none of it: the notes hold counts and fixed text, and
 what `coach-state.json` keeps is described [below](#what-it-doesnt-do).
 
+## When the ClaudeGlass mod is running
+
+The ClaudeGlass mod, a separate plugin inside Claude Code, shows some hints
+in its own panes instead of through Claude, so they cost no context and
+Claude never has to remember to pass them on. For a session the mod is
+running in (it says so in `mod/present.json`; see
+[Your hooks](hooks.md#with-the-claudeglass-mod)), the hook leaves out
+`cold_return`, `status_poll`, `drip_feed`, `big_paste`, `report_reread`,
+`split_run`, `plan_fresh` and the rating reminder. It keeps `plan_fresh_early`,
+`quiet_output`, the plan check, the facts line and the capture note, since
+those steer Claude or feed a skill.
+
+A hint left out is not marked as shown, so it comes back at once if the mod
+stops. A mod that is missing, closed, or whose file is unreadable or stale
+(no refresh for 10 minutes) changes nothing.
+
+On the dashboard's Work habits tab, the Tips table counts both sources.
+**Passed on by Claude** is the tips in Claude's replies, as before.
+**Shown by Glass** is the tips the mod showed itself, from the file it
+writes after each turn, with **Where Glass showed it** naming the place.
+**Tips shown** is the two added together. A second table counts the
+sessions the mod ran in, and the part of Claude Code each used. A hint that
+only the mod showed has no relay figure: Claude was never asked to pass it
+on.
+
 ## Changing when they apply
 
 Every threshold above can be changed in `config.toml`'s `[thresholds]`
@@ -655,7 +683,7 @@ plus about 25 of output for its line, at most once every three days.
 `capture status` prices both from your own history, as an upper bound.
 
 Claude Code also waits for the hook after each message you send and after
-each read, search or web result, approved plan, and agent or workflow call.
+each read or web result, approved plan, and agent or workflow call.
 Setup > Capture and
 `claudeglass capture status` show how many runs, the median time each and
 the time summed, from your own sessions. It is never run after a shell

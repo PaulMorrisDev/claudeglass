@@ -6,8 +6,11 @@ call, so it reads this file with ``$.fs.read`` and imports the assets
 ClaudeGlass knows on this machine:
 
 - the billing mode and how a dollar reads in it (``report.meta.units``);
-- the rate card in use, with context windows, and the cache lifetime;
+- the rate card in use, with context windows (and any long-context rule),
+  and the cache lifetime, with where it came from: ``config.toml``, your
+  history of cache writes, or the five-minute default;
 - characters per token measured on your sessions (``calibration``);
+- the thresholds a cache rebuild is judged by (``rebuild``);
 - the coaching thresholds in force (the catalogue's, then yours from
   ``coaching.json`` and ``config.toml``, as the capture hook works them
   out), and the tips you muted or want once a session;
@@ -19,20 +22,22 @@ Privacy: numbers, the model ids the rate card names, and closed words.
 No path, prompt or text from a transcript.
 
 :func:`build` makes the dict, :func:`write` puts it on disk atomically and
-leaves the file alone when only ``written_at`` would change. ``update
---finish`` writes it once, and the dashboard's service again after a
-report build, at most hourly.
+leaves the file alone when only ``written_at`` would change, unless that
+is a day old. ``update --finish`` writes it once, carrying forward what only
+a report knows from the file the service wrote (``previous``), and the
+dashboard's service again after a report build, at most hourly.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from . import __version__, calibration as calibration_mod, statusline
+from . import __version__, calibration as calibration_mod, recache, statusline
 from .config import _resolve_config_dir, load_config
 from .hooks import capture_hook
 from .pricing import Pricing, load_pricing
@@ -50,6 +55,18 @@ _WILDCARD_BINDS = frozenset({"0.0.0.0", "::", ""})
 
 #: What the share of the usage limit is "of" (``report.meta.units``).
 PERIOD_LABEL = "weekly usage limit"
+
+#: How far back the cache writes that tell the cache lifetime are counted.
+CACHE_HISTORY_DAYS = 14
+
+#: The cache lifetime when your writes were mostly one-hour ones, in seconds.
+ONE_HOUR_TTL_S = 3600
+
+#: A file holding the same content is rewritten once its ``written_at`` is
+#: this old, so the stamp says when the file was last known to be right.
+STALE_AFTER = timedelta(hours=24)
+
+_STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 
 def settings_path(config_dir: str | Path | None) -> Path:
@@ -69,11 +86,16 @@ def dashboard_url(bind: str, port: int) -> str | None:
 
 def pricing_block(pricing: Pricing) -> dict:
     """The rate card as the mod reads it: the version, and for each
-    canonical model id its aliases, the five per-million-token rates and
-    the context window."""
+    canonical model id its aliases, the five per-million-token rates, the
+    context window and, for a model that has one, its ``long_context``
+    rule. An alias is listed once, under the model ``Pricing.resolve_model``
+    gives it (the last to name it), so the order the file's JSON is read in
+    can't change which model it means; an alias that is also a model's id
+    is that model's, and isn't listed."""
     aliases: dict[str, list[str]] = {}
     for alias, canonical in pricing.aliases.items():
-        aliases.setdefault(canonical, []).append(alias)
+        if alias not in pricing.models:
+            aliases.setdefault(canonical, []).append(alias)
     models = {}
     for model_id, rates in pricing.models.items():
         models[model_id] = {
@@ -85,7 +107,37 @@ def pricing_block(pricing: Pricing) -> dict:
             "cache_read": float(rates.cache_read),
             "context_window_tokens": int(rates.context_window_tokens),
         }
+        if rates.long_context is not None:
+            models[model_id]["long_context"] = _long_context(rates.long_context)
     return {"version": pricing.version, "models": models}
+
+
+def _long_context(rule) -> dict:
+    out: dict = {"threshold_tokens": int(rule.threshold_tokens)}
+    if rule.multiplier is not None:
+        out["multiplier"] = float(rule.multiplier)
+    if rule.overrides:
+        out["overrides"] = {key: float(value) for key, value in rule.overrides.items()}
+    return out
+
+
+def _cache_block(config_dir: Path, store, stamp: datetime) -> dict:
+    """The cache lifetime the mod counts down from, and where it came from:
+    ``config.toml``'s ``default_ttl`` ("config"); else one hour when, over
+    the last :data:`CACHE_HISTORY_DAYS` days, more of your top-level cache
+    writes were one-hour than five-minute, five minutes when not
+    ("history"); else the five-minute default ("default")."""
+    configured = statusline._read_default_ttl_from_config(config_dir)
+    if configured is not None:
+        return {"ttl_seconds": configured, "source": "config"}
+    if store is not None:
+        try:
+            five_minute, one_hour = store.cache_write_split(CACHE_HISTORY_DAYS, stamp)
+        except sqlite3.Error:
+            five_minute = one_hour = 0
+        if five_minute or one_hour:
+            return {"ttl_seconds": ONE_HOUR_TTL_S if one_hour > five_minute else 300, "source": "history"}
+    return {"ttl_seconds": statusline.resolve_effective_ttl({}, config_dir), "source": "default"}
 
 
 def _coaching_block(config_dir: Path) -> dict:
@@ -126,13 +178,17 @@ def build(
     report=None,
     store=None,
     dashboard_url: str | None = None,
+    previous: dict | None = None,
     now: datetime | None = None,
 ) -> dict:
     """The settings file's content. ``report`` (a built ``ReportModel``)
     adds the share of the usage limit a dollar is worth and the measured
     characters per token; without one they stay unknown and the fallbacks
-    stand in. ``store`` adds "your usual". ``dashboard_url`` is where the
-    dashboard answers, when known. Raises ``ConfigError`` or
+    stand in, unless ``previous`` (the file as it was) has them: then its
+    ``calibration`` and ``dashboard_url`` carry forward, and its share and
+    basis too when its billing mode is still this one. ``store`` adds "your
+    usual" and the cache lifetime from your history. ``dashboard_url`` is
+    where the dashboard answers, when known. Raises ``ConfigError`` or
     ``PricingError`` for a config or rate card that can't be read."""
     config_dir = _resolve_config_dir(config_dir)
     config = load_config(config_dir)
@@ -140,35 +196,66 @@ def build(
     units = report.meta.units if report is not None else {}
     share = units.get("share_per_usd")
     stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    billing = {
+        "mode": config.billing,
+        "share_per_usd": None if share is None else float(share),
+        "period_label": PERIOD_LABEL,
+        "basis": units.get("basis") or Units(billing_mode=config.billing).basis(),
+    }
+    measured = report.meta.calibration if report is not None else None
+    if report is None and isinstance(previous, dict):
+        old_billing = previous.get("billing")
+        if isinstance(old_billing, dict) and old_billing.get("mode") == config.billing:
+            old_share = old_billing.get("share_per_usd")
+            if isinstance(old_share, (int, float)) and not isinstance(old_share, bool):
+                billing["share_per_usd"] = float(old_share)
+            if isinstance(old_billing.get("basis"), str) and old_billing["basis"]:
+                billing["basis"] = old_billing["basis"]
+        if isinstance(previous.get("calibration"), dict) and previous["calibration"]:
+            measured = previous["calibration"]
+        if isinstance(previous.get("dashboard_url"), str) and previous["dashboard_url"]:
+            dashboard_url = previous["dashboard_url"]
     return {
         "schema": SCHEMA,
         "written_at": stamp.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "version": __version__,
-        "billing": {
-            "mode": config.billing,
-            "share_per_usd": None if share is None else float(share),
-            "period_label": PERIOD_LABEL,
-            "basis": units.get("basis") or Units(billing_mode=config.billing).basis(),
-        },
+        "billing": billing,
         "currency": pricing.currency,
         "pricing": pricing_block(pricing),
-        "cache": {"ttl_seconds": statusline.resolve_effective_ttl({}, config_dir)},
-        "calibration": (report.meta.calibration if report is not None else None) or calibration_mod.DEFAULT.to_dict(),
+        "cache": _cache_block(config_dir, store, stamp),
+        "rebuild": {
+            **dataclasses.asdict(recache.RecacheThresholds.from_config(config.thresholds)),
+            "session_read_margin": recache.SESSION_READ_MARGIN,
+        },
+        "calibration": measured or calibration_mod.DEFAULT.to_dict(),
         "coaching": _coaching_block(config_dir),
         "usual": _usual_block(store),
         "dashboard_url": dashboard_url,
     }
 
 
+def _stamp(value: object) -> datetime | None:
+    try:
+        return datetime.strptime(value, _STAMP_FORMAT).replace(tzinfo=timezone.utc)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
 def _same_but_for_time(old: object, new: dict) -> bool:
-    return isinstance(old, dict) and {**old, "written_at": None} == {**new, "written_at": None}
+    """Whether ``old`` holds ``new``'s content and a ``written_at`` no more
+    than :data:`STALE_AFTER` before ``new``'s (a stamp that can't be read
+    is not the same)."""
+    if not isinstance(old, dict) or {**old, "written_at": None} != {**new, "written_at": None}:
+        return False
+    was, now = _stamp(old.get("written_at")), _stamp(new.get("written_at"))
+    return was is not None and now is not None and now - was <= STALE_AFTER
 
 
 def write(config_dir: str | Path | None, data: dict) -> bool:
     """Write ``data`` to the settings file through a temporary file and a
     rename, so the mod never reads half a file. Creates ``mod/``. Leaves
     the file alone when it already holds ``data`` apart from
-    ``written_at``. Returns whether it wrote; an ``OSError`` gives
+    ``written_at``, unless that is more than a day old. Returns whether it wrote; an ``OSError`` gives
     ``False``."""
     path = settings_path(config_dir)
     try:

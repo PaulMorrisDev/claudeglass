@@ -33,14 +33,17 @@ Each :meth:`FileWatcher.run_once` tick:
    tag files (``haiku_tags.prune``), old
    ``capture-log.jsonl`` and ``habit-log.jsonl`` records (``config.prune_capture_log``,
    ``config.prune_habit_log``) and old
-   ``usage-log.csv`` rows (SIG-5: ``log_usage.prune_usage_log``) -- at
+   ``usage-log.csv`` rows (SIG-5: ``log_usage.prune_usage_log``), and the
+   ClaudeGlass mod's sensor files and the ``mod_events`` rows read from
+   them (``mod_sensor.prune``, ``Store.prune_mod_events``) -- at
    ``options.retention_days`` when set, else
    ``config.SIGNAL_RETENTION_DEFAULT_DAYS`` (SEC-P8/G7: this telemetry
    must never grow forever just because nobody set a retention window,
    unlike session rows, which are visible report data and are only ever
    pruned on an explicit opt-in) -- and ingests any new config-snapshot
    file under ``options.config_dir/snapshots/`` (see
-   :meth:`_scan_snapshots`).
+   :meth:`_scan_snapshots`) and any changed sensor file under
+   ``options.config_dir/mod/sensor/`` (see :meth:`_scan_mod_sensor`).
 
 Never raises out of :meth:`run_once` for a single bad file or session —
 each is wrapped in its own ``try``/``except`` and recorded in
@@ -93,6 +96,7 @@ from ..pricing import Pricing, load_pricing, price_turn
 from ..profiles import catalogue as profile_catalogue, schema as profile_schema
 from ..report import _dominant_transcript_model, _extract_workstyle_features
 from .. import haiku_tags
+from .. import mod_sensor as mod_sensor_mod
 from .. import signals as signals_mod
 from .. import snapshots as snapshots_mod
 from ..tools import log_usage as log_usage_mod
@@ -462,6 +466,12 @@ class FileWatcher:
         #: changed since the previous tick instead of doing so on every
         #: single poll regardless.
         self._snapshot_file_mtimes: dict[str, int] = {}
+        #: ``{str(path): (mtime_ns, size)}`` of each mod sensor file as of
+        #: the tick that last ingested it, so :meth:`_scan_mod_sensor`
+        #: reads only a file that changed. In-memory only: after a restart
+        #: every file is read once more, which the store's replace makes
+        #: harmless.
+        self._mod_sensor_stats: dict[str, tuple[int, int]] = {}
 
         #: ``{session_id: fingerprint}`` for each session as of the tick
         #: that last folded it (see :meth:`_session_fingerprint`). A
@@ -614,6 +624,7 @@ class FileWatcher:
         self._scan_baselines(stats)
         self._scan_profiles(stats)
         self._scan_predictions(stats)
+        self._scan_mod_sensor(stats)
 
         # Before known_files: a new rate card marks every stored
         # transcript for a fresh parse, which this tick then starts on.
@@ -706,6 +717,10 @@ class FileWatcher:
         signal_retention = self.options.retention_days or config_mod.SIGNAL_RETENTION_DEFAULT_DAYS
         signals_mod.prune(self.options.config_dir, signal_retention)
         haiku_tags.prune(self.options.config_dir, signal_retention)
+        # The mod's sensor files are the same kind of background telemetry;
+        # their rows go at the same age.
+        mod_sensor_mod.prune(self.options.config_dir, signal_retention)
+        self._time_store(stats, self.store.prune_mod_events, signal_retention)
         config_mod.prune_capture_log(self.options.config_dir, signal_retention)
         config_mod.prune_habit_log(self.options.config_dir, signal_retention)
 
@@ -1439,6 +1454,40 @@ class FileWatcher:
             tuple(sorted(ids_by_ts.items())),
             tuple((mark.ts.isoformat(), mark.profile_id, mark.session_id) for mark in self._profile_marks),
         )
+
+    def _scan_mod_sensor(self, stats: WatcherStats) -> None:
+        """Ingest the ClaudeGlass mod's sensor files
+        (``options.config_dir/mod/sensor/<session id>.json``,
+        ``mod_sensor.load``) into ``mod_events``. Only a file whose
+        ``(mtime_ns, size)`` changed since the tick that last ingested it
+        is read, and ``Store.replace_mod_events`` replaces the session's
+        events from the file's first one on, so a repeat read is a no-op.
+        A file that won't load (not ours, another schema, half-written) is
+        skipped and tried again next tick; one bad file never stops the
+        rest. Nothing but ``mod_sensor.clean``'s closed words and counts
+        reaches the store."""
+        seen: dict[str, tuple[int, int]] = {}
+        for path in mod_sensor_mod.files(self.options.config_dir):
+            key = str(path)
+            try:
+                info = path.stat()
+            except OSError:
+                continue
+            fingerprint = (info.st_mtime_ns, info.st_size)
+            if self._mod_sensor_stats.get(key) == fingerprint:
+                seen[key] = fingerprint
+                continue
+            try:
+                loaded = mod_sensor_mod.load(path)
+                if loaded is None:
+                    continue
+                session_id, events = loaded
+                self._time_store(stats, self.store.replace_mod_events, session_id, events)
+                seen[key] = fingerprint
+            except Exception as exc:
+                stats.errors += 1
+                stats.error_messages = stats.error_messages + (f"mod sensor ingest error: {_error_summary(exc)}",)
+        self._mod_sensor_stats = seen
 
     # -- v0.3 baseline / profile ingestion -----------------------------------
 

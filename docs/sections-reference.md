@@ -1640,11 +1640,15 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
 - `prompting_tips` — only once there are coaching notes: one row per hint
   whose note asks Claude to pass a tip on, hints told to pass it on every
   time first, with `notes`, `shown` (replies to that message that ended
-  with a ClaudeGlass tip), `shown_pct`, `relay` (`relayed N of M` for a hint
+  with a ClaudeGlass tip: those Claude passed on), `shown_pct`, `relay`
+  (`relayed N of M` for a hint
   whose note orders the tip every time, so a tip left out was missed;
   `judged relevant N of M` for
   `big_paste`, where Claude decides whether the message calls for it and
-  a tip left out is no miss), `misfires` (notes whose replies called
+  a tip left out is no miss; empty for a hint the hook wrote no note for),
+  `glass` (tips the ClaudeGlass mod showed itself, counted from its sensor
+  files, `mod_events`), `where` (the places it showed them, with counts),
+  `total` (`shown` plus `glass`: the tips shown by both), `misfires` (notes whose replies called
   the tip a misfire, `Turn.tip_disowned`), and your own answers to the
   tip question: `useful`, `known` (you knew it already) and `wrong`, with
   `trust_pct`, the share of your answers and Claude's misfire calls that
@@ -1652,6 +1656,14 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   raise or mute a hint, and two `known` answers, more than `useful`,
   show it once a session (`coaching.tip_rules`, written to
   `coaching.json` by the daily run).
+
+  `prompting_glass` — only once the mod's sensor files hold a session of
+  the report: a single row with `sessions` (your sessions with a message of
+  yours), `with_glass` (those the mod wrote that it was present in),
+  `with_glass_pct`, `where` (the part of Claude Code each used, by count)
+  and `tips` (tips the mod showed). Both tables take the mod's events from
+  `mod_events` (`Store.read_mod_events`, or the CLI's read-only copy of it)
+  for the sessions the report covers.
 
   The habit rows above also leave out what you excused: a drip feed, a
   repeat or a vague correction you called Claude's miss (`why=missed`)
