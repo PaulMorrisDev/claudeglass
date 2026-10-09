@@ -2003,7 +2003,12 @@ one.
   definitions and MCP servers the agent type was offered and called in
   fewer than a tenth of the spawns offered them: what a tools list on the
   agent would leave out. Tools Claude Code adds whatever the list says,
-  `StructuredOutput` and `SubagentHandback`, are not counted).
+  `StructuredOutput` and `SubagentHandback`, are not counted) and
+  `largest_tools` (the three largest tool definitions or MCP servers in the
+  start on the measured model, each with its average size per spawn
+  offered it, like `Bash 4.6k, figma 2.3k` (servers named as above); empty when no spawn
+  recorded its tools). The startup chart's "Tool definitions" tooltip
+  repeats it.
 - `agent_startup_tools` — per agent type, one row per tool (built-in) or
   MCP server it was offered and rarely used (called in fewer than a tenth
   of the spawns offered it): spawns offered, spawns that used it and the
@@ -2100,6 +2105,19 @@ when the corpus has no top-level transcripts at all.
   other known `(est)` bucket, floored at 0. The `all` row's
   snapshot-derived buckets are always `null` (they can't be meaningfully
   combined across different projects' own snapshots).
+- `context_budget_tools` — across every project, one row per built-in
+  tool and MCP server the main sessions started with, largest first, from
+  the tools snapshot Claude Code records (`startup_sizes`; older versions
+  record none): `tool` (the built-in's name, or an MCP server as
+  `tool_search.server_label` names it), `kind` (`Built-in`, `MCP
+  server`, or `Desktop app` for a server the app brings: the tool search
+  rows decide, else a listed name that a session in the app offered), the sessions
+  that started with it, the share of them that called it (any of a
+  server's tools counts) and its size at the start, averaged over the
+  sessions offered it (a server's size is its tool definitions, deferred
+  names and instructions). A session with no tools snapshot is left out;
+  a note says how many of the main sessions recorded theirs. Names and
+  sizes only, never a description or schema. Drawn on the page.
 - `context_budget_calibration` — one row per model: the characters per
   token measured for tool definitions (tool characters over the shared
   prefix the first call read) and for other text (text characters over

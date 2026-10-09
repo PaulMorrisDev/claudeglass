@@ -17,7 +17,7 @@ statusline payload's own ``context_window`` object, once
 :mod:`statusline` has logged it -- see that module's docstring), this
 module surfaces it as a separate, unlabelled-as-"est" table instead.
 
-Four tables (:func:`build_section`, section key ``"context_budget"``):
+Five tables (:func:`build_section`, section key ``"context_budget"``):
 
 - ``context_budget_baseline`` -- per project, plus one "all" row summing
   every project: the measured mean/median top-level first call (P0 =
@@ -34,6 +34,13 @@ Four tables (:func:`build_section`, section key ``"context_budget"``):
   files, MCP tools of servers you can turn off) is summed in its own
   column, since most of P0 is Claude Code's own tool JSON and the desktop
   app's own servers, which no setting removes.
+- ``context_budget_tools`` -- one row per built-in tool and MCP server the
+  main sessions started with, across every project, largest first: the
+  sessions offered it, the share of them that called it and its size at the
+  start (the average over the sessions offered it). Read from the tools
+  snapshot Claude Code records (:func:`startup_sizes`), so a session from
+  before it did is left out and counted in the note. A built-in tool you
+  never use leaves the start by name in ``permissions.deny``.
 - ``context_budget_autocompact`` -- per project: the configured
   ``autoCompactWindow`` from the latest schema-2 snapshot (or
   ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, which overrides it), the model's
@@ -125,6 +132,7 @@ from .capture_catalogue import AGENT_ANSWER_TOOLS
 from .events import BUILT_IN_TOOLS, tool_server
 from .model import Column, Event, EventKind, Section, Table, TranscriptResult, Turn
 from .pricing import Pricing
+from .ratings import tokens_text
 from .snapshots import Snapshot
 from .tools import log_usage
 
@@ -599,6 +607,22 @@ class _ServerOffer:
 
 
 @dataclass(slots=True)
+class _SessionToolOffer:
+    """One built-in tool, or one MCP server, offered to main sessions: the
+    sessions that started with it, the sessions that called it (or one of
+    the server's tools) and its size at the start summed over the sessions
+    offered it, in tokens. An MCP server's size is its tool definitions,
+    deferred names and instructions. ``desktop`` counts the sessions offered
+    it that ran in the desktop app: the fallback for telling the app's own
+    servers from yours when the tool search rows are not at hand."""
+
+    offered: int = 0
+    used: int = 0
+    tokens: float = 0.0
+    desktop: int = 0
+
+
+@dataclass(slots=True)
 class _AgentStartupAcc:
     """Per-agent-type running totals for the subagent startup breakdown.
 
@@ -1003,6 +1027,12 @@ class ContextBudgetStats:
     #: Where each main session ran (its transcript's ``entrypoint``, ``""``
     #: when none was recorded) -> sessions, for :attr:`desktop_only`.
     entrypoints: dict[str, int] = field(default_factory=dict)
+    #: Main sessions whose transcript recorded the tools it started with,
+    #: and -> each built-in tool (by name) and each MCP server (by name)
+    #: those sessions were offered, for ``context_budget_tools``.
+    tool_sessions: int = 0
+    session_tools: dict[str, _SessionToolOffer] = field(default_factory=dict)
+    session_servers: dict[str, _SessionToolOffer] = field(default_factory=dict)
 
     #: Epoch seconds of the oldest and newest first call seen, for
     #: :attr:`window_days`.
@@ -1209,6 +1239,28 @@ class ContextBudgetStats:
             if roster is not None and (roster.size_chars or 0) > 0:
                 acc.roster_tokens.append(self.calibration.text_tokens(roster.size_chars or 0, model))
                 acc.roster_types.append(int(roster.detail.get("added") or 0))
+
+        sizes = startup_sizes(top, self.calibration) if first is not None else None
+        if sizes is not None and sizes.saw_tools:
+            self.tool_sessions += 1
+            tool_names = {name for turn in top.turns for name in turn.tool_names}
+            for name, tokens in sizes.builtin_tools.items():
+                offer = self.session_tools.setdefault(name, _SessionToolOffer())
+                offer.offered += 1
+                offer.tokens += tokens
+                offer.used += name in tool_names
+            for server in (
+                set(sizes.server_definitions) | set(sizes.server_deferred) | set(sizes.server_instructions)
+            ) - {BUILT_IN_TOOLS}:
+                offer = self.session_servers.setdefault(server, _SessionToolOffer())
+                offer.offered += 1
+                offer.tokens += (
+                    sizes.server_definitions.get(server, 0.0)
+                    + sizes.server_deferred.get(server, 0.0)
+                    + sizes.server_instructions.get(server, 0.0)
+                )
+                offer.used += any(tool_server(name) == server for name in tool_names)
+                offer.desktop += entrypoint == DESKTOP_ENTRYPOINT
 
         # rates=None: only trigger/pre_tokens/dropped_tokens are read by
         # this module (all come straight from the COMPACT_BOUNDARY event,
@@ -1494,6 +1546,61 @@ def _build_baseline_table(
     )
 
 
+def _build_main_tools_table(
+    stats: ContextBudgetStats, servers: Sequence[tool_search.McpServerRow] | None = None
+) -> Table:
+    """``context_budget_tools``: every built-in tool and MCP server the main
+    sessions started with, largest first, with how many sessions were
+    offered it and how many called it. A server is the desktop app's own
+    only as :mod:`desktop_servers` says: when the tool search rows
+    (``servers``) call it built in, else when its name is on the app's list
+    and a session that ran in the app offered it. A server is named as the
+    tool search table names it (:func:`tool_search.server_label`)."""
+    columns = [
+        Column(key="tool", label="Tool", kind="str"),
+        Column(key="kind", label="Kind", kind="str"),
+        Column(key="offered_sessions", label="Sessions that started with it", kind="int"),
+        Column(key="used_share", label="Sessions that used it", kind="pct"),
+        Column(key="tokens", label="Size at the start", kind="tokens"),
+    ]
+    found: list[tuple[str, str, _SessionToolOffer]] = [
+        (name, "Built-in", offer) for name, offer in stats.session_tools.items()
+    ]
+    built_in = tool_search.built_in_names(servers) if servers else None
+
+    def own(server: str, offer: _SessionToolOffer) -> bool:
+        if built_in is not None:
+            return server in built_in
+        return desktop_servers.is_built_in(server) and offer.desktop > 0
+
+    found += [
+        (tool_search.server_label(server), "Desktop app" if own(server, offer) else "MCP server", offer)
+        for server, offer in stats.session_servers.items()
+    ]
+    rows = [
+        [name, kind, offer.offered, offer.used / offer.offered * 100, offer.tokens / offer.offered]
+        for name, kind, offer in sorted(found, key=lambda item: (-item[2].tokens / item[2].offered, item[0]))
+        if offer.offered
+    ]
+    total = sum(acc.sessions for acc in stats.projects.values())
+    return Table(
+        name="context_budget_tools",
+        title="Tools every session starts with",
+        columns=columns,
+        rows=rows,
+        notes=[
+            "These are the tool definitions, deferred tool names and server instructions Claude Code sent "
+            "at the start of each main session. They are measured from the snapshot it records. "
+            f"{stats.calibration.sentence()}",
+            "A built-in tool you never use leaves the start when its bare name is in permissions.deny in your settings. "
+            "Turn an MCP server off in /mcp. "
+            "Servers marked Desktop app come with the app.",
+            f"{stats.tool_sessions} of {total} main sessions recorded their tools. "
+            "Sessions with no record of their tools, mostly from older Claude Code versions, are left out.",
+        ],
+    )
+
+
 def _build_autocompact_table(
     stats: ContextBudgetStats,
     latest_snapshots: dict[str, Snapshot],
@@ -1727,6 +1834,7 @@ def build_section(
 
     tables = [
         _build_baseline_table(stats, latest_snapshots, servers=mcp_servers),
+        _build_main_tools_table(stats, mcp_servers),
         _build_autocompact_table(stats, latest_snapshots, usage_log_rows, pricing),
         _build_statusline_table(usage_log_rows, stats.desktop_only),
         _build_calibration_table(stats.calibration),
@@ -1834,6 +1942,29 @@ def _price_inputs(acc: _AgentStartupAcc, family: str, positions: list[int]) -> t
     return (fmean(writes) if writes else None, fmean(reads) if reads else None, later, written_share)
 
 
+def _tool_label(key: str) -> str:
+    """A key of ``_AgentStartupAcc.tools`` as a sentence names it: a
+    built-in tool as it is, an MCP server (:func:`mcp_tool_key`) by its label."""
+    if key.startswith("mcp__") and key.endswith("__*"):
+        return tool_search.server_label(key[len("mcp__") : -len("__*")])
+    return key
+
+
+def _largest_tools(acc: _AgentStartupAcc, family: str, calibration: Calibration) -> str | None:
+    """The three largest built-in tools or MCP servers in this agent type's
+    start on ``family``, with their average size per spawn offered them:
+    ``Artifact 13k, PowerShell 4.6k, Workflow 2.3k``. A server is named as
+    the tool search table names it (:func:`tool_search.server_label`).
+    ``None`` when no spawn on ``family`` recorded its tools."""
+    sized = [
+        (_tool_label(key), calibration.tool_tokens(offer.chars / offer.offered, family or None))
+        for key, offer in acc.tools.get(family, {}).items()
+        if offer.offered
+    ]
+    sized.sort(key=lambda item: (-item[1], item[0]))
+    return ", ".join(f"{key} {tokens_text(round(tokens))}" for key, tokens in sized[:3]) or None
+
+
 def _build_startup_table(stats: ContextBudgetStats) -> Table:
     columns = [
         Column(key="agent_type", label="Agent type", kind="str"),
@@ -1864,6 +1995,7 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             kind="tokens",
         ),
         Column(key="removable_tools", label="Tools never used (can be left out)", kind="tokens"),
+        Column(key="largest_tools", label="Largest tool definitions", kind="str"),
         # A part left out of a start is also not read back on the calls
         # after the first, so a saving is priced with these two (the
         # recommendation rules read them; see ``diet_usd``).
@@ -1892,6 +2024,7 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             [agent_type, acc.spawns, acc.fork_spawns, family or None, count - len(positions), startup]
             + [parts[part] for part in STARTUP_PARTS]
             + [not_recorded, measured_pct, fmean(prices) if prices else None, managed_claude_md, removable]
+            + [_largest_tools(acc, family, stats.calibration)]
             + [read_price, later_calls if acc.later_calls else None]
         )
     return Table(

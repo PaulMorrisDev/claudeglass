@@ -873,6 +873,7 @@ def test_the_notes_under_the_agent_startup_and_cost_centre_tables_keep_to_the_he
             context_budget._build_servers_table(stats),
             context_budget._build_unused_table(stats),
             context_budget._build_baseline_table(stats, {}),
+            context_budget._build_main_tools_table(stats),
         ]
         strings += [(f"{case} ratio", found.sentence()), (f"{case} basis", found.basis())]
         for table in tables:

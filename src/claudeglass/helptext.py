@@ -222,6 +222,7 @@ PLACEMENT: dict[str, str] = {
     "env-levers": "keep",
     # context budget
     "context_budget_baseline": "keep",
+    "context_budget_tools": "keep",
     "context_budget_calibration": "report",
     "context_budget_autocompact": "advanced",
     "context_budget_statusline": "advanced",
@@ -800,6 +801,11 @@ TABLE_COPY: dict[str, TableCopy] = {
             "later_calls": (
                 "",
                 "The average number of replies a spawn made after its first. A saving counts each of them.",
+            ),
+            "largest_tools": (
+                "",
+                "The three biggest tools or MCP servers in this agent type's tool definitions, on the model "
+                "measured. Each size is the average, in tokens, per spawn that recorded its tools.",
             ),
         },
         lead_columns=[
@@ -5626,6 +5632,26 @@ TABLE_COPY: dict[str, TableCopy] = {
             "project", "sessions", "median_baseline", "controllable_est", "memory_files_est", "skills_listing_est",
             "system_prompt_and_tools_est",
         ],
+    ),
+    "context_budget_tools": TableCopy(
+        title="Tools every session starts with",
+        help=Help(
+            shows="One row per built-in tool and MCP server your main sessions started with. Each size is "
+            "averaged over the sessions that started with it, in tokens.",
+            read="Claude Code sends the tool definitions, deferred tool names and server instructions at the "
+            "start of each session. You pay to read them again on every reply. A server's size counts all "
+            "three. A low share in \"Sessions that used it\" means you rarely call it.",
+            act="Remove a built-in tool you never use by adding its bare name to permissions.deny in your "
+            "settings. Turn off an MCP server you don't need in /mcp. Servers marked Desktop app come with the app.",
+        ),
+        columns={
+            "tool": ("", "The built-in tool's name, or the MCP server's name."),
+            "kind": ("", "Built-in is a Claude Code tool. Desktop app is a server the app brings. MCP server is any other server, which you can turn off."),
+            "offered_sessions": ("", "Main sessions that started with it."),
+            "used_share": ("", "The share of those sessions that called it at least once."),
+            "tokens": ("", "Its definition at the start of a session, averaged over the sessions that started with it."),
+        },
+        lead_columns=["tool", "kind", "offered_sessions", "used_share", "tokens"],
     ),
     "context_budget_autocompact": TableCopy(
         title="When conversations get summarised",

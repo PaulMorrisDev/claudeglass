@@ -80,6 +80,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The settings file the mod reads, `mod/settings.json`, is written by
   `update --finish` and kept fresh by the dashboard's service.
 - **The mod's Startup tab breaks the tools down.** Built-in tools are a row under You control. Detailed lists each one and each MCP server's largest tools with their sizes, and says how to drop a built-in tool you never use.
+- **The dashboard lists every tool a session starts with.** Agents & context → Context has a table of each built-in tool and MCP server, its size at the start and how often sessions used it. On Subagents, the chart's tool definitions name their three largest.
 
 ### Fixed
 

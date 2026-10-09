@@ -2462,7 +2462,7 @@ function stackedBars(ctx, data) {
         base += value;
         return piece;
       });
-      return { key: String(row.agent_type), label: String(valueLabel(table, row.agent_type)), spawns: num(row.spawns), total: base, parts: parts };
+      return { key: String(row.agent_type), label: String(valueLabel(table, row.agent_type)), spawns: num(row.spawns), total: base, parts: parts, largest: row.largest_tools ? String(row.largest_tools) : "" };
     })
     .filter(function (d) {
       return d.total > 0;
@@ -2510,6 +2510,7 @@ function stackedBars(ctx, data) {
         label: piece.part.label + ", " + row.label,
         lines: [percentText(piece.value, row.total) + " of its startup context", "Started " + thousands(row.spawns) + " times"],
       };
+      if (piece.part.key === "tool_definitions" && row.largest) piece.tip.lines.push("Largest: " + row.largest);
       piece.open = opener(opts, "open", row.key);
       pieces.push(piece);
     });

@@ -684,7 +684,7 @@ def test_real_fixture_renders_without_error():
     section = context_budget.build_section(stats)
 
     assert section.key == "context_budget"
-    assert len(section.tables) == 4
+    assert len(section.tables) == 5
     assert_privacy(section)
 
 
@@ -1398,3 +1398,253 @@ def test_the_controllable_part_of_the_first_call_is_not_the_whole_of_it(tmp_path
     row = _row(table, "project", "proj-a")
     assert row["mean_baseline"] == pytest.approx(90_100)
     assert row["controllable_est"] == pytest.approx(1_000)
+
+
+# -- the tools every main session starts with --------------------------------
+
+
+def _main(tmp_path, name, lines, *, session_id=None):
+    path = tmp_path / f"{name}.jsonl"
+    write_jsonl(path, lines)
+    return parse_transcript(path, TranscriptMeta(path=str(path), kind="top-level", session_id=session_id or name))
+
+
+def _main_tools_table(stats):
+    return next(t for t in context_budget.build_section(stats).tables if t.name == "context_budget_tools")
+
+
+DESKTOP_TOOLS = [_tool("mcp__terminal__run", 200)]
+
+
+def test_the_main_tools_table_sizes_each_tool_and_server_and_counts_who_used_it(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    # Read is called in the first session only; the figma server in neither.
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(used="Read")))
+    stats.add_session("proj-b", _main(tmp_path, "s2", _sub_lines(used="Bash")))
+    table = _main_tools_table(stats)
+    assert [c.key for c in table.columns] == ["tool", "kind", "offered_sessions", "used_share", "tokens"]
+    rows = {r[0]: dict(zip([c.key for c in table.columns], r)) for r in table.rows}
+
+    assert set(rows) == {"Read", "Grep", "Bash", "figma"}
+    assert rows["Read"]["kind"] == "Built-in" and rows["figma"]["kind"] == "MCP server"
+    assert rows["Read"]["offered_sessions"] == 2
+    assert rows["Read"]["used_share"] == pytest.approx(50.0)
+    assert rows["Bash"]["used_share"] == pytest.approx(50.0)
+    assert rows["Grep"]["used_share"] == 0 and rows["figma"]["used_share"] == 0
+    assert rows["Bash"]["tokens"] == pytest.approx(_tool_chars(TOOLS[2]) / 4.0)
+    assert rows["figma"]["tokens"] == pytest.approx((_tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0)
+    # Largest first, across built-in tools and servers.
+    sizes = [r[4] for r in table.rows]
+    assert sizes == sorted(sizes, reverse=True)
+    assert [r[0] for r in table.rows][:2] == ["Bash", "figma"]
+    # No description reaches the table.
+    assert "ddd" not in repr(table)
+    assert_privacy(table)
+
+
+def test_the_main_tools_table_averages_a_size_over_the_sessions_offered_the_tool(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(tools=[_tool("Read", 300), _tool("Bash", 900)])))
+    stats.add_session("proj-a", _main(tmp_path, "s2", _sub_lines(tools=[_tool("Read", 700)])))
+    table = _main_tools_table(stats)
+    rows = {r[0]: dict(zip([c.key for c in table.columns], r)) for r in table.rows}
+    assert rows["Read"]["offered_sessions"] == 2
+    assert rows["Read"]["tokens"] == pytest.approx((_tool_chars(_tool("Read", 300)) + _tool_chars(_tool("Read", 700))) / 8.0)
+    # Bash was offered to one session: its size is that session's, not halved.
+    assert rows["Bash"]["offered_sessions"] == 1
+    assert rows["Bash"]["tokens"] == pytest.approx(_tool_chars(_tool("Bash", 900)) / 4.0)
+
+
+def test_the_main_tools_table_sizes_a_server_by_its_definitions_deferred_names_and_instructions(tmp_path):
+    top = _main(tmp_path, "s1", _sub_lines(tools=[_tool("Read")] + TOOLS[3:]))
+    first = next(turn for turn in top.turns if turn.turn_index == 1)
+    first.deferred_list_chars_by_server = {"figma": 400, "extra": 800}
+    first.mcp_instruction_chars_by_server = {"figma": 200}
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    rows = {r[0]: r for r in _main_tools_table(stats).rows}
+    definitions = (_tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0
+    assert rows["figma"][4] == pytest.approx(definitions + 400 / 4.0 + 200 / 4.0)
+    # A server known only by its deferred names is a row too.
+    assert rows["extra"][4] == pytest.approx(800 / 4.0)
+
+
+def _main_in(tmp_path, name, entrypoint, tools, **kwargs):
+    top = _main(tmp_path, name, _sub_lines(tools=tools, **kwargs))
+    top.meta.entrypoint = entrypoint
+    return top
+
+
+def _kinds(table):
+    return {r[0]: r[1] for r in table.rows}
+
+
+def test_the_main_tools_table_calls_a_desktop_apps_server_by_its_kind(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session(
+        "proj-a", _main_in(tmp_path, "s1", "claude-desktop", [_tool("Read")] + DESKTOP_TOOLS + TOOLS[3:])
+    )
+    assert _kinds(_main_tools_table(stats)) == {"Read": "Built-in", "terminal": "Desktop app", "figma": "MCP server"}
+
+
+def test_a_server_named_like_a_desktop_one_is_the_apps_only_when_a_session_in_the_app_offered_it(tmp_path):
+    """The name alone does not make a server the desktop app's."""
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main_in(tmp_path, "s1", "cli", DESKTOP_TOOLS))
+    assert _kinds(_main_tools_table(stats)) == {"terminal": "MCP server"}
+    stats.add_session("proj-b", _main_in(tmp_path, "s2", "claude-desktop", DESKTOP_TOOLS))
+    assert _kinds(_main_tools_table(stats)) == {"terminal": "Desktop app"}
+
+
+def test_the_tool_search_rows_decide_which_servers_the_main_tools_table_calls_the_desktop_apps(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main_in(tmp_path, "s1", "cli", DESKTOP_TOOLS + TOOLS[3:]))
+    stats.add_session("proj-b", _main_in(tmp_path, "s2", "claude-desktop", DESKTOP_TOOLS + TOOLS[3:]))
+
+    def kinds(rows):
+        table = next(t for t in context_budget.build_section(stats, mcp_servers=rows).tables if t.name == "context_budget_tools")
+        return _kinds(table)
+
+    yours = [tool_search.McpServerRow(server="terminal", kind=tool_search.KIND_USER)]
+    assert kinds(yours) == {"terminal": "MCP server", "figma": "MCP server"}
+    theirs = [tool_search.McpServerRow(server="terminal", kind=tool_search.KIND_DESKTOP_BUILTIN)]
+    assert kinds(theirs) == {"terminal": "Desktop app", "figma": "MCP server"}
+    # A server the rows call built in under another name, by an alias.
+    aliased = [tool_search.McpServerRow(server="id-1", aliases=("figma",), kind=tool_search.KIND_DESKTOP_BUILTIN)]
+    assert kinds(aliased) == {"terminal": "MCP server", "figma": "Desktop app"}
+
+
+def test_the_main_tools_table_counts_a_session_that_called_a_servers_tool(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(used="mcp__figma__a")))
+    rows = {r[0]: r for r in _main_tools_table(stats).rows}
+    assert rows["figma"][3] == pytest.approx(100.0)
+    assert rows["Read"][3] == 0
+    stats.add_session("proj-a", _main(tmp_path, "s2", _sub_lines(used="Read")))
+    rows = {r[0]: r for r in _main_tools_table(stats).rows}
+    assert rows["figma"][2] == 2 and rows["figma"][3] == pytest.approx(50.0)
+
+
+def test_the_main_tools_table_counts_a_call_to_a_server_known_only_by_its_deferred_names(tmp_path):
+    top = _main(tmp_path, "s1", _sub_lines(tools=[_tool("Read")], used="mcp__extra__lookup"))
+    next(turn for turn in top.turns if turn.turn_index == 1).deferred_list_chars_by_server = {"extra": 800}
+    quiet = _main(tmp_path, "s2", _sub_lines(tools=[_tool("Read")], used="Read"))
+    next(turn for turn in quiet.turns if turn.turn_index == 1).deferred_list_chars_by_server = {"extra": 800}
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", top)
+    stats.add_session("proj-a", quiet)
+    rows = {r[0]: r for r in _main_tools_table(stats).rows}
+    assert rows["extra"][2] == 2 and rows["extra"][3] == pytest.approx(50.0)
+    assert rows["extra"][4] == pytest.approx(800 / 4.0)
+
+
+CONNECTOR = "1a59c906-04da-521d-bda7-7f71b9f9e01c"
+
+
+def test_a_server_is_named_as_the_tool_search_table_names_it(tmp_path):
+    tools = [_tool("Read"), _tool(f"mcp__{CONNECTOR}__a"), _tool("mcp__claude_ai_Team_Notes__b"), _tool("mcp__figma__c")]
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(tools=tools)))
+    stats.add_subagent(_sub(tmp_path, "agent-1", _sub_lines(tools=tools)))
+    assert set(_kinds(_main_tools_table(stats))) == {"Read", "Connector 1a59c906", "Team Notes", "figma"}
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    assert "mcp__" not in row["largest_tools"]
+    assert set(part.rsplit(" ", 1)[0] for part in row["largest_tools"].split(", ")) <= {
+        "Read", "Connector 1a59c906", "Team Notes", "figma",
+    }
+
+
+def test_the_main_tools_table_leaves_out_a_session_with_no_tools_snapshot_and_counts_it(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines()))
+    stats.add_session("proj-a", _main(tmp_path, "s2", _sub_lines(tools=[])))
+    stats.add_session("proj-b", _main(tmp_path, "s3", _sub_lines(tools=[])))
+    table = _main_tools_table(stats)
+    # Only the one session that recorded its tools is offered anything.
+    assert {r[2] for r in table.rows} == {1}
+    assert "1 of 3 main sessions recorded their tools" in " ".join(table.notes)
+    assert "permissions.deny" in " ".join(table.notes)
+
+
+def test_the_main_tools_table_is_empty_when_no_session_recorded_its_tools(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines(tools=[])))
+    table = _main_tools_table(stats)
+    assert table.rows == []
+    assert "0 of 1 main sessions recorded their tools" in " ".join(table.notes)
+
+
+def test_the_main_tools_table_carries_help_and_is_drawn(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-a", _main(tmp_path, "s1", _sub_lines()))
+    section = context_budget.build_section(stats)
+    helptext.annotate_section(section, "api")
+    table = next(t for t in section.tables if t.name == "context_budget_tools")
+    assert table.dashboard == "keep"
+    assert table.title == "Tools every session starts with"
+    assert table.help is not None and table.help.shows and table.help.act
+    assert [c.key for c in table.columns if not c.help] == []
+
+
+def test_the_breakdown_names_the_three_largest_tool_definitions_per_spawn(tmp_path):
+    from claudeglass.ratings import tokens_text
+
+    stats = context_budget.ContextBudgetStats()
+    for n in range(2):
+        stats.add_subagent(_sub(tmp_path, f"agent-{n}", _sub_lines()))
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    # Bash leads the server (two tools); Grep and Read tie for third, Grep by name; Read is left off.
+    def size(*tools):
+        return tokens_text(round(sum(_tool_chars(tool) for tool in tools) / 4.0))
+
+    assert row["largest_tools"] == (
+        f"Bash {size(TOOLS[2])}, figma {size(TOOLS[3], TOOLS[4])}, Grep {size(TOOLS[1])}"
+    )
+    assert "ddd" not in row["largest_tools"]
+
+
+def test_the_largest_tools_are_an_average_per_spawn_offered_them(tmp_path):
+    from claudeglass.ratings import tokens_text
+
+    stats = context_budget.ContextBudgetStats()
+    stats.add_subagent(_sub(tmp_path, "agent-1", _sub_lines(tools=[_tool("Bash", 900)])))
+    stats.add_subagent(_sub(tmp_path, "agent-2", _sub_lines(tools=[_tool("Bash", 1500)])))
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    mean = (_tool_chars(_tool("Bash", 900)) + _tool_chars(_tool("Bash", 1500))) / 2 / 4.0
+    assert row["largest_tools"] == f"Bash {tokens_text(round(mean))}"
+
+
+def test_the_largest_tools_are_empty_when_no_spawn_recorded_its_tools(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_subagent(_sub(tmp_path, "agent-1", _sub_lines(tools=[])))
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    assert row["largest_tools"] is None
+    columns = [c.key for c in _startup_tables(stats)["agent_startup_breakdown"].columns]
+    assert "largest_tools" in columns
+
+
+def test_the_largest_tools_are_read_on_the_agent_types_measured_model(tmp_path):
+    """A mixed-model agent type is measured on the model most of its spawns ran on
+    (not on the model the tools columns fall back to), so a model that recorded
+    tools but ran fewer spawns does not fill the column."""
+    from claudeglass.ratings import tokens_text
+
+    stats = context_budget.ContextBudgetStats()
+    for n in range(3):
+        stats.add_subagent(_sub(tmp_path, f"haiku-{n}", _sub_lines(model="claude-haiku-4-5", tools=[])))
+    for n in range(2):
+        stats.add_subagent(
+            _sub(tmp_path, f"sonnet-{n}", _sub_lines(model="claude-sonnet-5", tools=[_tool("Bash", 5_000)]))
+        )
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    # The tools columns read the model that recorded some; the largest tools stay on the measured one.
+    assert row["model"] == "claude-haiku-4-5" and row["removable_tools"] is not None
+    assert row["largest_tools"] is None
+    # With tools recorded on the measured model, they are that model's.
+    for n in range(3):
+        stats.add_subagent(
+            _sub(tmp_path, f"more-{n}", _sub_lines(model="claude-haiku-4-5", tools=[_tool("Read", 300)]))
+        )
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    assert row["model"] == "claude-haiku-4-5"
+    assert row["largest_tools"] == f"Read {tokens_text(round(_tool_chars(_tool('Read', 300)) / 4.0))}"

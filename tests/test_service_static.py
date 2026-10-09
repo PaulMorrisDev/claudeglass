@@ -4120,6 +4120,25 @@ def test_grid_words_an_empty_status_line_table_for_desktop_sessions() -> None:
     assert empty.index("empty_variant") < empty.index("EMPTY_TEXT[table.name] ||")
 
 
+def test_grid_words_an_empty_main_session_tools_table() -> None:
+    grid_js = _static_text("grid.js")
+    assert (
+        'context_budget_tools: ["No session recorded its tools in this window.", '
+        '"Older Claude Code versions don\'t record them. Sessions that record their tools will fill this table."]'
+    ) in grid_js
+
+
+def test_the_startup_chart_names_the_largest_tools_in_the_tool_definitions_tooltip() -> None:
+    charts_js = _static_text("charts-types.js")
+    stacked = _function_source(charts_js, "stackedBars")
+    assert "largest: row.largest_tools ?" in stacked
+    assert (
+        'if (piece.part.key === "tool_definitions" && row.largest) piece.tip.lines.push("Largest: " + row.largest);'
+    ) in stacked
+    # Only the tool definitions segment gets the line.
+    assert stacked.count("Largest: ") == 1
+
+
 # -- cost centres (Phase 8a) ------------------------------------------------------------------------
 
 
