@@ -789,6 +789,28 @@ def test_a_go_ahead_and_a_status_check_ask_for_nothing_and_are_not_in_the_per_10
     assert prompting.habit_rates(session)[2] == 3
 
 
+def test_asking_how_it_is_going_can_pass_100_per_100_messages_and_the_help_says_so(tmp_path):
+    from claudeglass import helptext
+
+    session = _session(tmp_path, [
+        *_START,
+        _said("make the button bigger", 2), _reply(3, edit=True),
+        _said("how is it going?", 4), _reply(5),
+        _said("any updates?", 6), _reply(7),
+        _said("how is it going now?", 8), _reply(9),
+    ])
+    table = prompting.build_section([session]).tables[0]
+    cols = [c.key for c in table.columns]
+    rows = {row[0]: dict(zip(cols, row)) for row in table.rows}
+    # Three polls over the two messages that asked for something: 150 in every 100.
+    assert sum(m.asks for m in session.messages) == 2
+    assert rows["status_poll"]["times"] == 3 and rows["status_poll"]["per_100"] == pytest.approx(150.0)
+    # The help names the denominator and the polls it leaves out, so that is no surprise.
+    _label, text = helptext.TABLE_COPY["prompting_habits"].columns["per_100"]
+    assert "messages that asked for something" in text
+    assert "status checks" in text and "can pass 100" in text
+
+
 def test_a_message_you_typed_while_claude_worked_asks_unless_it_is_a_go_ahead_or_a_status_check(tmp_path):
     session = _session(tmp_path, [
         *_START,

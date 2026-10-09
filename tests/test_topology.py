@@ -704,6 +704,23 @@ def test_tool_results_are_sized_at_the_calibrated_characters_per_token(tmp_path)
         assert b[key] == pytest.approx(a[key] * 2)
 
 
+def test_the_notes_that_size_tokens_from_characters_give_the_basis_as_a_sentence_of_its_own(tmp_path):
+    from claudeglass.calibration import Calibration
+
+    top, subs, pricing = _build_scenario(tmp_path)
+    calibrations = (Calibration(), Calibration(text={"claude-sonnet-5": 2.0}, default_family="claude-sonnet-5"))
+    assert calibrations[0].sentence() != calibrations[1].sentence()
+    for calibration in calibrations:
+        stats = TopologyStats(calibration=calibration)
+        stats.add_session("sess-1", top, subs, pricing)
+        tables = {t.name: t for t in build_section(stats).tables}
+        for name in ("topology_report_proxy", "topology_context_composition"):
+            (note,) = tables[name].notes
+            assert calibration.sentence() in note
+            for sentence in note.replace(". ", ".\n").splitlines():
+                assert len(sentence.split()) <= 25, sentence
+
+
 def test_cost_per_spawn_table_has_mean_tool_wait_column(tmp_path):
     """Capture-improvements A7. ``_build_scenario``'s subs make no tool
     calls, so the column is None throughout here -- the nonzero-value

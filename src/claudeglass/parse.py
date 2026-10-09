@@ -211,7 +211,8 @@ a yes/no kept. The last one decides ``Turn.reply_asked``
 (``prompt_shape.ends_on_question``); any block may be an admission
 (``admit_candidate``), and ``admit_caught`` says whether the message you
 typed last pushed back (``_is_challenge``, held in ``last_human_challenge``
-by the main loop and copied onto the reply when it starts) or Claude
+by the main loop and copied onto the reply when it starts; a critique or
+a question typed into a plan's dialog counts) or Claude
 caught it itself. A reply with a tip that also says, near "ClaudeGlass",
 that a tip misfired is ``tip_disowned``. A Read result's size lands in
 ``read_target_chars`` beside its hash; the Bash and PowerShell commands
@@ -261,7 +262,7 @@ from . import prompt_shape
 from . import shell_reads
 from . import shell_writes
 from . import testrun
-from .capture_catalogue import DOC_SUFFIXES, REPORT_THRESHOLDS, TIP_TEXT_MARKER
+from .capture_catalogue import DOC_SUFFIXES, ERROR_BLOCKED_PATTERN, REPORT_THRESHOLDS, TIP_TEXT_MARKER
 from .model import (
     PROMPT_FLAGS,
     CaptureTag,
@@ -351,7 +352,7 @@ _LIMIT_GAP_KINDS = (EventKind.LIMIT_HIT, EventKind.LIMIT_RESUME)
 #:
 #: R4 fix: the previous alternatives only caught *absolute* forms
 #: (``\Users\...``, ``/home/...``) — a *relative* Windows path with no
-#: leading separator (``cd Users\paulm\proj``, the shape a shell prints
+#: leading separator (``cd Users\name\proj``, the shape a shell prints
 #: for a path relative to the drive root) survived untouched. The new
 #: last alternative catches just the ``Users``/``home``/``Documents and
 #: Settings`` segment plus its own username component (stopping at the
@@ -1506,12 +1507,9 @@ def _tool_result_length(content, unsized_blocks: dict[str, int]) -> int:
 
 #: How much of an error's text :func:`_tool_error_kind` reads.
 _ERROR_TEXT_CHARS = 600
-#: A hook or a Claude Code guard stopped the call before it ran.
-_ERROR_BLOCKED_RE = re.compile(
-    r"^(?:\w+:\w+ hook error|<tool_use_error>Blocked:|This agent is isolated in the worktree)"
-    r"|blocked by (?:a |the )?hook",
-    re.IGNORECASE,
-)
+#: A hook or a Claude Code guard stopped the call before it ran. The
+#: capture hook reads the same pattern (``capture_catalogue``).
+_ERROR_BLOCKED_RE = re.compile(ERROR_BLOCKED_PATTERN, re.IGNORECASE)
 #: You, or the permission classifier, said no -- or the auto mode
 #: classifier failed to answer, which stops the call the same way and
 #: isn't a mistake in it.
@@ -2692,7 +2690,8 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
     recent_queued: list[dict] = []
     #: Whether the message you typed last was a correction, an adjustment,
     #: a reminder or a question (``Turn.admit_caught``), for the reply
-    #: that follows it.
+    #: that follows it. Words typed into a plan's dialog count too, when
+    #: they are a critique or a question.
     last_human_challenge = False
     #: The last ``output_style`` seen, in memory only: a different one is
     #: a change worth a ``CACHE_SIGNAL``.
@@ -2975,6 +2974,9 @@ def parse_transcript(path: str | Path, meta: TranscriptMeta) -> TranscriptResult
         events_since_current.append(event)
         if notes.plan_feedback is not None:
             feedback_chars, feedback_class = notes.plan_feedback
+            # What you typed into a plan's dialog is your latest word to
+            # Claude: a critique or a question is pushing back.
+            last_human_challenge = feedback_class in ("question", "critique")
             feedback_event = Event(
                 kind=EventKind.PLAN_FEEDBACK, subkind=feedback_class, ts=event.ts, size_chars=feedback_chars
             )

@@ -71,6 +71,12 @@ MAX_RATIO = 8.0
 #: What a table's note says about its character-to-token figures.
 BASIS = "calibrated on your sessions"
 FALLBACK_BASIS = f"assumed at {FALLBACK:g} characters per token, as too few first calls to calibrate on"
+#: The same two, as sentences of their own for a note that has no clause to
+#: hang a basis on.
+SENTENCE = "Characters become tokens at the ratios measured on your sessions."
+FALLBACK_SENTENCE = (
+    f"Characters become tokens at {FALLBACK:g} characters per token, as there are too few first calls to calibrate on."
+)
 
 _DATE_SUFFIX_RE = re.compile(r"-\d{8}$")
 
@@ -190,6 +196,11 @@ class Calibration:
         come from."""
         return BASIS if self.calibrated else FALLBACK_BASIS
 
+    def sentence(self) -> str:
+        """:meth:`basis` as a sentence of its own, for a note that does
+        not say where its figures come from in a clause of its own."""
+        return SENTENCE if self.calibrated else FALLBACK_SENTENCE
+
     def rows(self) -> list[list]:
         """``[family, tool chars per token, text chars per token]`` per
         calibrated family, most common first; ``None`` where only the
@@ -227,9 +238,11 @@ __all__ = [
     "DEFAULT",
     "FALLBACK",
     "FALLBACK_BASIS",
+    "FALLBACK_SENTENCE",
     "MAX_RATIO",
     "MIN_CALLS",
     "MIN_RATIO",
+    "SENTENCE",
     "Calibration",
     "FirstCall",
     "model_family",

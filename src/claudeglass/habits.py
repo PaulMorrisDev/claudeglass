@@ -10,13 +10,16 @@ all count them. /cg-feedback runs are left out: they rate the work, they
 aren't part of it.
 
 A *piece of work* (``pieces.pieces_of``) is drawn from the transcript, so
-``Habits.pieces`` has a row for every one, rated or not: a rated one has an
-``outcome``. A message is *redone* when the cycles straight after it are
+``Habits.pieces`` has a row for every one nothing rated, and one for each
+rating: a rated one has an ``outcome``. ``Habits.work_pieces`` has every piece
+of work once, however it was rated, which is what a count of pieces reads.
+A message is *redone* when the cycles straight after it are
 rework (``pieces``' rule, or your next message was a redo, a fix or a
-correction): ``redo_cost`` is the whole run of them, counted once, and
-the cycles in the run are not themselves redone. The rates per message
-(``trend``) divide by the messages that asked for something
-(``CycleFact.asks``), the ones you typed while Claude worked included.
+correction, but never a plan-feedback round): ``redo_cost`` is the whole run
+of them, counted once, and the cycles in the run are not themselves redone.
+The rates per message (``trend``) divide by the messages that asked for
+something (``CycleFact.asks``), the ones you typed while Claude worked
+included.
 
 Every playbook item says where its evidence came from, so you know how
 far to trust it:
@@ -556,6 +559,12 @@ class _CarryCost:
             carries = i + 1 < n and not _compacted(turns[i + 1])
             self._read_on[i] = self.reads[i] + (self._read_on[i + 1] if carries else 0.0)
 
+    def read_cost(self, i: int) -> float:
+        """What reply ``i`` paid to read the cache, at its own rates (fast
+        mode, long context and data residency included): the part of its
+        cost that one message holding several calls would have paid once."""
+        return self.reads[i] * self.turns[i].cache_read_tokens
+
     def cost(self, i: int, tokens: float) -> float:
         """Carrying ``tokens`` that came back to reply ``i`` (a tool
         result or an agent report)."""
@@ -615,8 +624,8 @@ class CycleFact:
     #: The message's own replies (one per message id), and how many of
     #: them were a single read-only probe (:func:`_is_probe`), how many of
     #: those a shell command, how many runs of two or more such replies in
-    #: a row came, and what the replies after the first of each run cost
-    #: (:func:`_probe_counts`).
+    #: a row came, and what the replies after the first of each run paid to
+    #: read the cache (:func:`_probe_counts`).
     calls: int = 0
     probe_calls: int = 0
     probe_shell_calls: int = 0
@@ -734,8 +743,8 @@ class AgentFact:
     calls: int = 0
     probe_calls: int = 0
     #: How many of those were a shell command, the runs of two or more in a
-    #: row, and what the replies after the first of each run cost
-    #: (:func:`_probe_counts`).
+    #: row, and what the replies after the first of each run paid to read
+    #: the cache (:func:`_probe_counts`).
     probe_shell_calls: int = 0
     probe_runs: int = 0
     probe_batch_cost: float = 0.0
@@ -955,6 +964,9 @@ class SessionShape:
     cost: float
     #: ``handoff.plan_carried``: tokens, or ``None`` without a plan.
     carried: int | None
+    #: The session it is of, so a table can count the pieces of work that
+    #: began in sessions of this shape.
+    session_id: str = ""
 
 
 @dataclass(slots=True)
@@ -1176,6 +1188,7 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
                 shape=shape,
                 cost=sum(capture_mod._cycle_cost(c, rates.pricing) for c in cycles),
                 carried=plan_carried(turns),
+                session_id=bundle.session_id,
             )
         )
 
@@ -1237,7 +1250,11 @@ def _session(bundle, rates: _Rates, out: Habits, rating) -> None:
             # work it ran beside stays the delivery later rework redoes.
             continue
         tag = cycle.settled
-        reads_as_redo = (tag is not None and tag.shift in ("redo", "fix")) or cycle.turns[0].human_correction
+        # A plan-feedback round is planning, whatever its tag or wording says
+        # (pieces' rule), so it never marks the ask before it redone.
+        reads_as_redo = (
+            (tag is not None and tag.shift in ("redo", "fix")) or cycle.turns[0].human_correction
+        ) and not pieces_mod._plan_round(cycle)
         if reads_as_redo and _not_rework(work[anchor], cycle, rated, span_of):
             facts[anchor].excused = True
         elif reads_as_redo or id(cycle) in rework:
@@ -1380,7 +1397,10 @@ def _pieces_of_session(
     ``pauses`` are the session's usage-limit pauses
     (``limits.limit_pause_intervals``), left out of a silence between
     messages."""
-    feedback = session_rating if session_rating is not None and not spans else spans
+    # The dashboard rating stands alone unless a kept answer covers a piece,
+    # as _session decides: a declined run answers nothing.
+    kept = [s for s in spans if s.feedback.source != "skipped" and s.feedback.outcome and s.cycles]
+    feedback = session_rating if session_rating is not None and not kept else spans
     pauses = list(pauses)
     found = pieces_mod.pieces_of(cycles, rates, feedback, session_id=session_id, project=project, pauses=pauses)
     # collect() draws them again across every session, handoffs joined:
@@ -1515,11 +1535,11 @@ def _plan_word(cycle) -> str:
 def _not_rework(cycle, following, rated: dict, span_of: dict) -> bool:
     """Whether what you said about ``following`` rules it out as a redo of
     ``cycle``'s work, though it reads like one: the plan check says it was
-    new, or your feedback on their piece says the plan check missed
-    nothing (``plan=new``) or the follow-ups were a change of mind alone.
-    A mix of reasons rules nothing out: which follow-ups were which isn't
-    known."""
-    if _plan_word(following) == "new":
+    new or not a fix, or your feedback on their piece says the plan check
+    missed nothing (``plan=new``) or the follow-ups were a change of mind
+    alone. A mix of reasons rules nothing out: which follow-ups were which
+    isn't known."""
+    if _plan_word(following) in ("new", "none"):
         return True
     n = span_of.get(id(following))
     fb = rated.get(id(following))
@@ -1658,7 +1678,7 @@ def _cycle_fact(
         fact.planned = True
     fact.calls = len(cycle.turns)
     fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost = _probe_counts(
-        cycle.turns, [carry.costs[i] for i in idx]
+        cycle.turns, [carry.read_cost(i) for i in idx]
     )
     fact.calls_before_edit = _calls_before_edit(cycle.turns)
     return fact
@@ -1751,7 +1771,7 @@ def _agents(bundle, cycles, turns, carry: _CarryCost, first_read, rates: _Rates,
                 fact.missing = fact.missing or tuple(cap.missing)
         fact.calls = len(priced)
         (fact.probe_calls, fact.probe_shell_calls, fact.probe_runs, fact.probe_batch_cost) = _probe_counts(
-            priced, sub_carry.costs
+            priced, [sub_carry.read_cost(k) for k in range(len(priced))]
         )
         fact.calls_before_edit = _calls_before_edit(priced)
         fact.compactions, fact.auto_compactions = compaction_mod.compactions_in(sub)
@@ -1873,18 +1893,21 @@ def _is_shell_probe(turn) -> bool:
     return _is_probe(turn) and not any(turn.tool_calls_by_tool.get(tool) for tool in _READ_TOOLS)
 
 
-def _probe_counts(turns, costs) -> tuple[int, int, int, float]:
+def _probe_counts(turns, read_costs) -> tuple[int, int, int, float]:
     """``(probes, probes by shell command, runs, cost)`` over ``turns``
-    (one per message id, ``costs`` their cost each): how many replies were
-    a single read-only probe, how many of those were a shell command, how
-    many runs of two or more probes in a row came, and what the replies
-    after the first of each run cost. Those are the replies one message
-    holding the calls side by side would not have needed, as far as the
-    calls didn't depend on each other."""
+    (one per message id, ``read_costs`` what each paid to read the cache,
+    :meth:`_CarryCost.read_cost`): how many replies were a single read-only
+    probe, how many of those were a shell command, how many runs of two or
+    more probes in a row came, and the cache reads of the replies after the
+    first of each run. Those are the re-reads one message holding the calls
+    side by side would not have needed, as far as the calls didn't depend on
+    each other. Each reply's cache write and output stay out of it: a
+    batched message still writes the tool results and still names the
+    calls."""
     probes = shell = runs = 0
     cost = 0.0
     run = 0
-    for turn, usd in zip(turns, costs):
+    for turn, usd in zip(turns, read_costs):
         if not _is_probe(turn):
             run = 0
             continue
@@ -3476,14 +3499,14 @@ def _by_task_table(h: Habits) -> Table:
 def _excused_notes(h: Habits) -> list[str]:
     """A note saying how many messages that looked redone are left out of
     every rework figure because your answers say the next message was a
-    change of mind or new to the plan."""
+    change of mind, new to the plan or not a fix."""
     excused = sum(1 for c in h.cycles if c.excused)
     if not excused:
         return []
     return [
         f"{excused} {'message that looked' if excused == 1 else 'messages that looked'} redone "
-        f"{'is' if excused == 1 else 'are'} left out of Redone: you called the next message a change of mind "
-        "or new to the plan."
+        f"{'is' if excused == 1 else 'are'} left out of Redone. You called the next message a change of mind, "
+        "new to the plan, or not a fix."
     ]
 
 
@@ -3773,9 +3796,11 @@ def _probes_table(h: Habits) -> Table:
     """Replies that made one read-only call and nothing else, by where they
     ran (the main session or an agent type, as ``habits_agents`` names
     them). Each such reply re-reads the whole context to look at one
-    thing, so a run of them is the cost batching the calls into one message
-    would take out, as far as they didn't depend on each other. A workflow
-    agent counts under its own type, as in ``habits_agents``."""
+    thing, so a run of them is the re-reads batching the calls into one
+    message would take out, as far as they didn't depend on each other:
+    ``batch_cost`` is the cache reads of the replies after the first of each
+    run, not their whole cost. A workflow agent counts under its own type,
+    as in ``habits_agents``."""
     groups: dict[str, list[AgentFact]] = {}
     for a in h.agents:
         groups.setdefault(a.agent_type, []).append(a)
@@ -3809,7 +3834,7 @@ def _probes_table(h: Habits) -> Table:
             Column(key="probes", label="Single read-only calls", kind="int"),
             Column(key="shell", label="Of them by shell command", kind="int"),
             Column(key="runs", label="Runs of two or more", kind="int"),
-            Column(key="batch_cost", label="Replies a batch would spare", kind="money"),
+            Column(key="batch_cost", label="Re-reads a batch would spare", kind="money"),
         ],
         rows=rows,
     )
@@ -4297,8 +4322,11 @@ def _by_shape_table(h: Habits) -> Table:
         sessions = [s for s in h.shapes if s.shape == shape]
         if not sessions:
             continue
-        work = [p for p in h.pieces if p.shape == shape]
-        pieces = [p for p in work if p.outcome]
+        pieces = [p for p in h.pieces if p.shape == shape and p.outcome]
+        # The pieces of work, each once, in the shape of the session it began
+        # in: h.pieces holds a row for each rating, not for each piece.
+        ids = {s.session_id for s in sessions}
+        work = [p for p in h.work_pieces if p.session_ids and p.session_ids[0] in ids]
         worth = [p for p in pieces if p.worth]
         fixes = fixes_after_plan(h, shape)
         carried = [s.carried for s in sessions if s.carried is not None]

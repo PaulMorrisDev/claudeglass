@@ -725,7 +725,8 @@ memory and dropped:
   candidate, not a verdict: the capture tag's ``admit`` word confirms one.
   ``Turn.admit_caught: str = ""`` is, with a candidate, ``user`` when the
   message you typed last was a correction, an adjustment, a reminder or a
-  question, else ``self``; empty without one.
+  question (words typed into a plan's dialog count, when a critique or a
+  question), else ``self``; empty without one.
 - ``Turn.tip_disowned: bool = False`` -- the reply carries a ClaudeGlass
   tip and says, near "ClaudeGlass" and outside the tip's quote block, that
   it misfired, was a false positive or doesn't apply

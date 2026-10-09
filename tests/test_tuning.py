@@ -2189,6 +2189,17 @@ def test_a_file_from_before_phase_8_still_validates_and_its_summary_has_no_line_
     assert tuning.validate({k: v for k, v in older.items() if k not in ("cost_centres", "project_files")}) == []
 
 
+def test_the_plans_line_counts_pieces_of_work_so_it_does_not_clash_with_the_builds_line():
+    # plans.approved counts pieces of work with an approved plan; the builds line counts approvals, and the
+    # two can differ when a piece of work was approved more than once.
+    doc = _put(_sample(), "prompting.plans.approved", 1)
+    lines = tuning.summary_text(doc).splitlines()
+    assert "Plans: 1 piece of work with an approved plan, 4 rounds declined in the dialog." in lines
+    lines = tuning.summary_text(_sample()).splitlines()
+    assert "Plans: 8 pieces of work with an approved plan, 4 rounds declined in the dialog." in lines
+    assert not any(line.startswith("Plans:") and " approved," in line for line in lines)
+
+
 def test_the_summary_reads_the_phase_8_blocks_in_plain_words():
     lines = tuning.summary_text(_sample()).splitlines()
     assert "Builds after an approved plan: kept 5, cleared 2 and handoff 1, 8 plans in all." in lines

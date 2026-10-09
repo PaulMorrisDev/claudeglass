@@ -11,9 +11,12 @@ removal.
 
 The list is closed and written out here, not matched by pattern, so a
 server of yours that happens to share a word with one of these is never
-taken for a built-in. ``tool_search`` only counts a name from this list
-as built in when a desktop-app transcript offered it and no config
-snapshot lists it as yours.
+taken for a built-in. A name from this list counts as built in only when
+a desktop-app transcript offered it and no config snapshot lists it as
+yours: ``tool_search`` decides that, and the pages that price the base
+(``cost_centres``, ``context_budget``) take its answer
+(``tool_search.built_in_names``). Without it they count the name only in a
+session that ran in the desktop app.
 
 Nothing here imports the rest of ClaudeGlass.
 """
@@ -47,7 +50,8 @@ SWITCHES: dict[str, str] = {
 
 
 def is_built_in(server: str) -> bool:
-    """Whether ``server`` is one the desktop app brings itself."""
+    """Whether ``server``'s name is on the desktop app's list. The name
+    alone does not make it the app's: see the module docstring."""
     return server in BUILT_IN or server.startswith(BUILT_IN_PREFIX)
 
 

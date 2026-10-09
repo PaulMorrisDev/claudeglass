@@ -470,6 +470,16 @@ JUDGE_WRITERS = (JUDGE_WRITER, JUDGE_FALLBACK_WRITER)
 #: holds this to). The hook counts the rounds of feedback a plan got by it.
 PLAN_SAID_PATTERN = r"the user said:\s*"
 
+#: How the first line of a tool error says a hook or a Claude Code guard
+#: stopped the call before it ran (``parse._ERROR_BLOCKED_RE``, read with
+#: ``re.IGNORECASE``). Your answer to a plan, sent back or the dialog
+#: closed, isn't a tool failing, but a hook blocking ``ExitPlanMode`` still
+#: is; the parser and the hook both tell the two by this.
+ERROR_BLOCKED_PATTERN = (
+    r"^(?:\w+:\w+ hook error|<tool_use_error>Blocked:|This agent is isolated in the worktree)"
+    r"|blocked by (?:a |the )?hook"
+)
+
 #: Why a turn got no Haiku tag, as its line in :data:`JUDGE_DIR` says:
 #: no ``claude`` command on the hook's path, it isn't signed in, Haiku took
 #: too long, the call failed otherwise, its answer held no tag, or (an
@@ -605,10 +615,11 @@ COACH_STATE_FILE = "coach-state.json"
 #: large-output note watches, ``ExitPlanMode`` for an approved plan, and
 #: the tools that start an agent or a workflow (:data:`SPAWN_TOOLS`) for
 #: ``report_reread`` and ``split_run``. The matcher is these names joined by ``|``;
-#: ``footprint.py`` rewrites it on ``update --finish``. A settings.json
-#: written before the shell and MCP tools were dropped still runs the hook
-#: after them until ``capture connect``; the hook returns at once for any
-#: tool not named here.
+#: ``update --finish`` and ``capture connect`` rewrite it
+#: (``hook_health.plan_capture``, through ``cli._capture_settings_step``).
+#: A settings.json written before the shell and MCP tools were dropped
+#: still runs the hook after them until then; the hook returns at once for
+#: any tool not named here.
 COACHING_TOOLS = (*BIG_OUTPUT_TOOLS, "ExitPlanMode", *SPAWN_TOOLS)
 
 #: The live hints: after a tool result (the first three, and
@@ -1029,7 +1040,12 @@ RESUME_PREFIXES = (LIMIT_RESUME_PREFIX, APP_QUIT_PREFIX)
 #: parser, the purpose rules) and the capture hook read the same pieces,
 #: so the two always agree on what counts. A heredoc's body is dropped
 #: first (:data:`TEST_HEREDOC_PATTERN`: a script or commit message that
-#: mentions pytest runs nothing); the line is cut into commands at
+#: mentions pytest runs nothing); the operators inside a quoted string are
+#: blanked (:data:`TEST_QUOTED_PATTERN`: "fix parser; pytest passes" in a
+#: commit message is no second command), but a string handed to a shell's
+#: ``-c`` (``sh -c``, ``bash -lc``, ``pwsh -Command``, ``cmd /c``) is
+#: commands, so it loses only its quotes (``docker run img sh -c "cd x &&
+#: pytest"`` runs pytest); the line is cut into commands at
 #: :data:`TEST_COMMAND_SPLIT_PATTERN`; each command loses what comes before
 #: its program (:data:`TEST_PREFIX_PATTERN`: a "(" or "&", a ``VAR=value``,
 #: ``time``, ``timeout 60``, ``uv run``, ``npx``) and the folder and
@@ -1043,6 +1059,13 @@ TEST_COMMAND_SPLIT_PATTERN = r"&&|\|\||;|\||\r?\n|[)}]"
 TEST_HEREDOC_PATTERN = (
     r"(?s)(?<!<)<<(?!<)-?[ \t]*(?P<quote>['\"]?)(?P<tag>[A-Za-z_]\w*)(?P=quote)(?P<rest>[^\n]*)\n"
     r".*?(?:\n[ \t]*(?P=tag)[ \t]*(?=\n|\Z)|\Z)"
+)
+TEST_QUOTED_PATTERN = (
+    r"(?P<shell>(?<![\w.-])(?:ba|z|da)?sh(?:\.exe)?\s+-[A-Za-z]*c\s+"
+    r"|(?<![\w.-])(?:pwsh|powershell)(?:\.exe)?\s+(?:-\w+\s+)*?-[cC](?:ommand)?\s+"
+    r"|(?<![\w.-])cmd(?:\.exe)?\s+/[cCkK]\s+)?"
+    r"(?:'(?P<single>[^']*)'"
+    r'|"(?P<double>(?:[^"\\]|\\[\s\S])*)")'
 )
 TEST_PREFIX_PATTERN = (
     r"(?:[(&{]\s*"
@@ -3254,6 +3277,7 @@ def export_json() -> dict:
             "task_notification_call_pattern": TASK_NOTIFICATION_CALL_PATTERN,
             "scheduled_task_prefix": SCHEDULED_TASK_PREFIX,
             "plan_said_pattern": PLAN_SAID_PATTERN,
+            "error_blocked_pattern": ERROR_BLOCKED_PATTERN,
             "reply_scan_chars": REPLY_SCAN_CHARS,
             "reply_fence_pattern": REPLY_FENCE_PATTERN,
             "reply_tip_block_pattern": REPLY_TIP_BLOCK_PATTERN,
@@ -3267,6 +3291,7 @@ def export_json() -> dict:
             "reply_question_trim": REPLY_QUESTION_TRIM,
             "test_command_split_pattern": TEST_COMMAND_SPLIT_PATTERN,
             "test_heredoc_pattern": TEST_HEREDOC_PATTERN,
+            "test_quoted_pattern": TEST_QUOTED_PATTERN,
             "test_prefix_pattern": TEST_PREFIX_PATTERN,
             "test_program_pattern": TEST_PROGRAM_PATTERN,
             "test_runner_pattern": TEST_RUNNER_PATTERN,

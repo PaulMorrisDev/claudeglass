@@ -272,6 +272,48 @@ def test_a_call_with_no_recorded_ttl_split_counts_as_five_minutes():
     assert _signature([first, second, third], "m3") == "full-expiry"
 
 
+def test_write_ttl_s_is_how_long_the_entry_a_call_wrote_lasts():
+    assert recache.write_ttl_s(_turn(cc_5m=10)) == 300.0
+    assert recache.write_ttl_s(_turn(cc_1h=10)) == 3_600.0
+    assert recache.write_ttl_s(_turn(cc_1h=10, cc_5m=10)) == 300.0
+    assert recache.write_ttl_s(_turn(cache_creation_tokens=10, ttl_split_unknown=True)) == 300.0
+    assert recache.write_ttl_s(_turn()) is None
+
+
+@pytest.mark.parametrize("gap_s,before_ttl,expected", [
+    (299.0, 300.0, False),
+    (300.0, 300.0, True),
+    (60.0, 3_600.0, False),
+    (3_600.0, 3_600.0, True),
+    (None, 300.0, False),
+    (900.0, None, False),
+])
+def test_expired_by_clock_needs_a_known_wait_and_lifetime_and_reaches_the_lifetime(gap_s, before_ttl, expected):
+    assert recache.expired_by_clock(gap_s, before_ttl) is expected
+
+
+def test_a_read_only_expiry_keeps_its_label_but_is_not_expired_by_the_clock():
+    """Rule 4 still calls a 60 s wait that read only the shared start an
+    expiry (the rebuild section and the cold-return advice rely on it), but
+    the clock test is the one ``ttl.py`` uses to tell it from a timed one."""
+    first, second = _warm_session()
+    read_only = _next(3, read=CR0, write=110_000, gap_s=60.0)
+    assert _signature([first, second, read_only], "m3") == "full-expiry"
+    assert not recache.expired_by_clock(read_only.gap_s, recache.write_ttl_s(second))
+    timed = _next(3, read=CR0, write=110_000, gap_s=3_600.0)
+    assert _signature([first, second, timed], "m3") == "full-expiry"
+    assert recache.expired_by_clock(timed.gap_s, recache.write_ttl_s(second))
+
+
+def test_the_session_explainer_does_not_say_every_expired_cache_followed_a_pause():
+    """A read-only expiry is labelled "full-expiry" with a wait well inside
+    the cache lifetime, so the explainer must not claim a pause."""
+    from claudeglass.service.explain import _REBUILD_LABELS
+
+    assert "pause" not in _REBUILD_LABELS["full-expiry"]
+    assert _REBUILD_LABELS["full-expiry"].startswith("the cache had expired")
+
+
 def test_a_read_at_the_shared_start_plus_3k_is_an_expiry_of_the_session_part():
     """The shared start survives an expiry, so the cache read is the start
     plus a little. 46k of a 156k context is over 20% of the whole, which

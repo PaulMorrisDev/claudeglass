@@ -1560,7 +1560,9 @@ def _ends_on_question(text: str) -> bool:
 #: (``capture_catalogue.CONFIG_PATH_PATTERN`` and ``SHELL_WRITE_PATTERN``,
 #: which ``prompt_shape.edits_files`` reads too), and the ones that read a
 #: message as a correction or an adjustment and a reply as owning a
-#: mistake (``CORRECTION_PATTERN``, ``ADJUST_PATTERN``, ``ADMIT_PATTERN``).
+#: mistake (``CORRECTION_PATTERN``, ``ADJUST_PATTERN``, ``ADMIT_PATTERN``),
+#: and the one that reads a tool error as a hook's block
+#: (``ERROR_BLOCKED_PATTERN``, ``parse._ERROR_BLOCKED_RE``).
 _CHANGE: dict = {}
 
 
@@ -1575,6 +1577,7 @@ def _change_patterns() -> dict:
         _CHANGE["correction"] = re.compile(coaching["correction_pattern"], re.IGNORECASE)
         _CHANGE["adjust"] = re.compile(coaching["adjust_pattern"], re.IGNORECASE)
         _CHANGE["correction_scan_chars"] = coaching["correction_scan_chars"]
+        _CHANGE["error_blocked"] = re.compile(coaching["error_blocked_pattern"], re.IGNORECASE)
     return _CHANGE
 
 
@@ -2008,8 +2011,26 @@ def _is_go(text: str, coaching: dict) -> bool:
 
 
 #: How much of a rejected plan's result is read for the feedback you typed
-#: into its dialog (``parse._ERROR_TEXT_CHARS``).
+#: into its dialog, and for telling a hook's block from your answer
+#: (``parse._ERROR_TEXT_CHARS``).
 _PLAN_SAID_CHARS = 600
+
+#: The ``toolDenialKind`` of a call the auto mode classifier stopped, which
+#: is a tool error even for a plan (``parse._denial_bucket``).
+_AUTO_MODE_KINDS = ("automode-blocked", "automode-unavailable")
+
+
+def _answers_a_plan(record: dict, block: dict, plan_calls: set[str]) -> bool:
+    """Whether an erroring ``tool_result`` is your answer to a plan, sent
+    back or the dialog closed, which isn't a tool failing
+    (``parse._PLAN_DIALOG_BUCKETS``). ``plan_calls`` holds the ids of the
+    ``ExitPlanMode`` calls. A hook or the auto mode classifier stopping the
+    call still is a failure: ``ERROR_BLOCKED_PATTERN`` on the first line of
+    the result, or the denial kind of ``record``, the line that holds it."""
+    if str(block.get("tool_use_id")) not in plan_calls or record.get("toolDenialKind") in _AUTO_MODE_KINDS:
+        return False
+    head = _result_head(block, _PLAN_SAID_CHARS).strip()
+    return _change_patterns()["error_blocked"].search(head.split("\n", 1)[0]) is None
 
 
 def _plan_answers(
@@ -2024,8 +2045,10 @@ def _plan_answers(
     mode; ``-1`` while it isn't). A plan is
     approved when its call came back without an error, or, when it didn't,
     when a message of yours that only says to carry on follows before the
-    next call, or the mode leaves ``plan`` (``parse``'s
-    ``approved_by_message``). ``said``: the dialog sent it back with words
+    next call (typed, or queued while Claude worked), or the mode leaves
+    ``plan`` (on a line of yours, or a mode change written as its own
+    line): ``parse``'s ``approved_by_message``, which a test holds this to.
+    ``said``: the dialog sent it back with words
     of yours typed in (``plan_said_pattern``, the feedback the parser
     counts). ``text``: its first ``keep`` characters, ``""`` when ``keep``
     is 0; held in memory for the excerpt, never kept."""
@@ -2037,6 +2060,14 @@ def _plan_answers(
     for index, record in enumerate(records):
         if record.get("isSidechain"):
             continue
+        if record.get("type") in ("user", "permission-mode"):
+            # A user line's mode, or a mode change written as its own line:
+            # leaving plan approves the plan the dialog sent back.
+            now = record.get("permissionMode")
+            if isinstance(now, str) and now:
+                if mode == "plan" and now != "plan" and waiting is not None:
+                    waiting["approved"], waiting["approved_at"], waiting = True, index, None
+                mode = now
         if record.get("type") == "assistant":
             for block in _blocks(record):
                 if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name") == "ExitPlanMode":
@@ -2050,11 +2081,6 @@ def _plan_answers(
                     by_id[str(block.get("id"))] = plan
                     waiting = None
         elif record.get("type") == "user":
-            now = record.get("permissionMode")
-            if isinstance(now, str) and now:
-                if mode == "plan" and now != "plan" and waiting is not None:
-                    waiting["approved"], waiting["approved_at"], waiting = True, index, None
-                mode = now
             for block in _blocks(record):
                 if not isinstance(block, dict) or block.get("type") != "tool_result":
                     continue
@@ -2069,6 +2095,12 @@ def _plan_answers(
                 else:
                     plan["approved"], plan["approved_at"], waiting = True, index, None
             if waiting is not None and _typed(record, prefix) and _is_go(_text_of(record), coaching):
+                waiting["approved"], waiting["approved_at"], waiting = True, index, None
+        elif waiting is not None:
+            # A go-ahead you typed while Claude worked reaches the transcript
+            # as a queued message, not as a line of yours.
+            queued = _queued_text(record)
+            if queued and _is_go(queued, coaching):
                 waiting["approved"], waiting["approved_at"], waiting = True, index, None
     return plans, waiting, mode
 
@@ -2994,8 +3026,8 @@ def _test_patterns() -> dict:
     if not _TEST:
         coaching = load_catalogue()["coaching"]
         for name in (
-            "command_split", "heredoc", "prefix", "program", "no_run", "no_target", "whole_suite", "target",
-            "bare_target", "bare_target_runner",
+            "command_split", "heredoc", "quoted", "prefix", "program", "no_run", "no_target", "whole_suite",
+            "target", "bare_target", "bare_target_runner",
         ):
             _TEST[name] = re.compile(coaching["test_%s_pattern" % name])
         _TEST["runner"] = re.compile(r"(?P<runner>%s)(?=\s|$)(?P<args>.*)" % coaching["test_runner_pattern"])
@@ -3018,10 +3050,19 @@ def _test_scope(command: str) -> str:
 
 def _command_parts(command: str) -> list[str]:
     """The commands of a shell line as ``testrun.command_parts`` reads
-    them: heredoc bodies dropped, the line cut apart, and what comes
-    before each program and its folder and ``.exe`` removed."""
+    them: heredoc bodies dropped, the operators inside quoted strings
+    blanked (a shell's ``-c`` script loses only its quotes), the line cut
+    apart, and what comes before each program and its folder and ``.exe``
+    removed."""
     t = _test_patterns()
-    parts = t["command_split"].split(t["heredoc"].sub(r"\g<rest>", command))
+    text = t["heredoc"].sub(r"\g<rest>", command)
+
+    def quoted(match: re.Match) -> str:
+        if match["shell"]:
+            return match["shell"] + (match["single"] if match["single"] is not None else match["double"])
+        return t["command_split"].sub(" ", match.group())
+
+    parts = t["command_split"].split(t["quoted"].sub(quoted, text))
     out = []
     for part in parts:
         part = part.strip()
@@ -3250,9 +3291,10 @@ def judge_excerpt(
     are read without what a replay wrote again (:func:`_ordered`). All of
     it is counts, ids and short pieces of your words, held in memory and
     handed to Haiku, never kept. ``facts``, when given, gets what the
-    transcript settles for :func:`grounded`: ``plan_now`` (a plan written
-    this turn, by ExitPlanMode or as plan mode's plan file),
-    ``plan_before`` (one approved earlier, in the dialog or by a message),
+    transcript settles for :func:`grounded`: ``plan_now`` (a plan proposed
+    this turn by ExitPlanMode, as ``PlanStats`` has it: a file under
+    ``.claude/plans/`` is not one), ``plan_before`` (one approved
+    earlier, in the dialog or by a message),
     and how many ``skills`` ran, ``files`` of yours changed (not plan
     files or anything in a ``.claude`` folder), shell ``commands`` ran and
     messages came ``earlier``; the files subagents changed
@@ -3262,7 +3304,8 @@ def judge_excerpt(
     widest), whether the edits
     were ``docs_only``, whether your message was a ``correction`` or an
     ``adjust`` (and the ``same_files`` as the reply before changed),
-    ``tool_errors``, whether the reply says it got something wrong
+    ``tool_errors`` (not your answer to a plan, :func:`_answers_a_plan`),
+    whether the reply says it got something wrong
     (``admit_candidate``), and ``judged`` (these are Haiku's words)."""
     prefix = catalogue["coaching"]["interrupt_prefix"]
     edit_tools = set(catalogue["coaching"]["edit_tools"])
@@ -3283,12 +3326,16 @@ def judge_excerpt(
     tests: dict[str, None] = {}
     agents = errors = agent_files = shell_changes = 0
     plan_now = admitted = False
+    plan_calls: set[str] = set()
     said = ""
     config_path = _change_patterns()["config_path"]
     for record in main[start + 1:]:
         if record.get("type") == "user":
             for block in _blocks(record):
-                if isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error"):
+                if (
+                    isinstance(block, dict) and block.get("type") == "tool_result" and block.get("is_error")
+                    and not _answers_a_plan(record, block, plan_calls)
+                ):
                     errors += 1
             agent_files += _agent_edit_files(record)
             if _is_async_launch(record):
@@ -3312,8 +3359,14 @@ def judge_excerpt(
             tools[name] = tools.get(name, 0) + 1
             given = block.get("input") if isinstance(block.get("input"), dict) else {}
             target = given.get("file_path") or given.get("notebook_path")
-            if name == "ExitPlanMode" or (name in edit_tools and _is_plan_file(target)):
-                plan_now = True
+            if name == "ExitPlanMode":
+                plan_calls.add(str(block.get("id")))
+                # A plan is a call that carries one (``parse``'s ``plan_stats``).
+                plan_now = plan_now or (isinstance(given.get("plan"), str) and bool(given["plan"]))
+            elif name in edit_tools and _is_plan_file(target):
+                # A file in plan mode's folder (a progress ledger, say) is
+                # neither a plan nor one of your files.
+                continue
             elif name in edit_tools and isinstance(target, str) and target:
                 shown = _shown_path(target, payload.get("cwd"))
                 files[shown] = None
@@ -3334,8 +3387,8 @@ def judge_excerpt(
     if not reply:
         return "", ""
     # An approved plan earlier, counting the message just typed: a go-ahead
-    # approves a plan the dialog sent back. A rejected plan, or a plan file
-    # nobody approved, is no plan to follow.
+    # approves a plan the dialog sent back. A rejected plan is no plan to
+    # follow.
     plans = _plan_answers(main[:start + 1], prefix, catalogue["coaching"], limits["origin"])[0]
     current = _plan_answers(main[start + 1:], prefix, catalogue["coaching"])[0]
     plan_before = any(plan["approved"] for plan in plans)

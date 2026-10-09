@@ -296,7 +296,8 @@ class RecommendThresholds:
     # agent-batch-probes: "an agent type that made at least 100 replies, a
     # quarter or more of them one read-only call and nothing else, where
     # batching the runs of those would have spared at least $1". The
-    # habits_probes figure takes the lookups of a run to be independent, which
+    # habits_probes figure is the cache reads of the replies after the first
+    # of each run, and takes the lookups of a run to be independent, which
     # some are (a read that needs the name a search just found), so the card
     # quotes this share of it.
     agent_batch_probes_min_replies: int = 100
@@ -1552,7 +1553,9 @@ def _rule_agent_batch_probes(report: ReportModel, th: RecommendThresholds, arche
     left out, since its prompts are yours and the card is for agent
     definitions and workflow prompts. ``saving_usd`` is
     :attr:`~RecommendThresholds.agent_batch_probes_saving_factor` of the
-    row's cost: the table's figure is an upper bound."""
+    row's ``batch_cost``, the cache reads of the replies after the first of
+    each run: the table's figure is an upper bound, and what a batched
+    message still writes is not in it."""
     if archetype in _NO_SUBAGENT_ARCHETYPES:
         return []
     table = _table(report, "habits", "habits_probes")
@@ -1591,7 +1594,7 @@ def _rule_agent_batch_probes(report: ReportModel, th: RecommendThresholds, arche
                     _evidence("Replies it made", calls, "habits", "habits_probes", agent_type),
                     _evidence("Single read-only calls", probes, "habits", "habits_probes", agent_type),
                     _evidence("Of them by shell command", shell, "habits", "habits_probes", agent_type),
-                    _evidence("Replies a batch would spare", cost, "habits", "habits_probes", agent_type),
+                    _evidence("Re-reads a batch would spare", cost, "habits", "habits_probes", agent_type),
                 ],
                 saving_usd=saving,
             )

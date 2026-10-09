@@ -77,6 +77,10 @@ def _cost(turn, pricing) -> float:
     return price_turn(turn, pricing.resolve_model(MODEL)).total
 
 
+def _read_cost(turn, pricing) -> float:
+    return price_turn(turn, pricing.resolve_model(MODEL)).cache_read_cost
+
+
 # -- single lookups, counted by message ----------------------------------------------------------
 
 
@@ -109,8 +113,8 @@ def test_single_lookups_are_counted_by_message_with_the_shell_ones_apart(tmp_pat
     assert (cycle.probe_calls, cycle.probe_shell_calls) == (3, 1)
     # The first two are a run, the third a lookup on its own (the two-call message broke the run).
     assert cycle.probe_runs == 1
-    # What the second one cost is what one message holding both would have spared.
-    assert cycle.probe_batch_cost == pytest.approx(_cost(top.turns[1], pricing))
+    # What the second one paid to read the cache is what one message holding both would have spared.
+    assert cycle.probe_batch_cost == pytest.approx(_read_cost(top.turns[1], pricing))
     assert cycle.calls_before_edit == 4
 
 
@@ -125,7 +129,7 @@ def test_a_run_of_lookups_is_priced_from_its_second_reply(tmp_path, pricing):
     ], kind="top-level")
     (cycle,) = habits.collect(_corpus(top), pricing).cycles
     assert (cycle.probe_calls, cycle.probe_shell_calls, cycle.probe_runs) == (3, 0, 1)
-    assert cycle.probe_batch_cost == pytest.approx(_cost(top.turns[1], pricing) + _cost(top.turns[2], pricing))
+    assert cycle.probe_batch_cost == pytest.approx(_read_cost(top.turns[1], pricing) + _read_cost(top.turns[2], pricing))
 
 
 def test_an_agents_lookups_reach_its_row_and_the_probes_table(tmp_path, pricing):
@@ -144,7 +148,7 @@ def test_an_agents_lookups_reach_its_row_and_the_probes_table(tmp_path, pricing)
     h = habits.collect(_corpus(top, sub), pricing)
     (agent,) = h.agents
     assert (agent.calls, agent.probe_calls, agent.probe_shell_calls, agent.probe_runs) == (3, 2, 1, 1)
-    assert agent.probe_batch_cost == pytest.approx(_cost(sub.turns[1], pricing))
+    assert agent.probe_batch_cost == pytest.approx(_read_cost(sub.turns[1], pricing))
     section = habits.section_from(h)
     row = {r["agent_type"]: r for r in _rows(_table(section, "habits_agents"))}["Explore"]
     assert row["probe_pct"] == pytest.approx(100 * 2 / 3) and row["probe_shell_pct"] == pytest.approx(100 / 3)

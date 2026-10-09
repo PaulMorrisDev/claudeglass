@@ -411,7 +411,19 @@ __version__ = "0.15.0"
 #: the wording Claude Code writes when you approve and clear the context, is
 #: flagged (``Turn.human_plan_handoff``). A pre-43 digest has neither, so
 #: its approvals can't be told from builds that started fresh.
-PARSER_VERSION = 43
+#:
+#: Bumped to 44: a test runner named inside a quoted string (a commit
+#: message's ``"fix parser; pytest green"``, an ``echo``) no longer counts
+#: as a test run. The operators inside quotes are blanked before a shell
+#: line is cut into commands (``testrun``,
+#: ``capture_catalogue.TEST_QUOTED_PATTERN``), so ``Turn.tests_run``
+#: changes for such lines. A string handed to a shell's ``-c``
+#: (``sh -c "cd x && pytest"``) is still commands and still counts. A critique or a
+#: question typed into a plan's dialog now counts as pushing back
+#: (``last_human_challenge``), so an admission in the reply after it is
+#: ``admit_caught == "user"``. A pre-44 digest has such commands as test
+#: runs and such admissions as ``self``.
+PARSER_VERSION = 44
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

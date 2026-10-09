@@ -25,13 +25,15 @@ conversation, and the base-read cell is split into the parts of the
 starting prompt that a setting or the harness decides
 (:func:`compose_base`). Each part is counted once, in the lever that
 removes it: MCP server definitions, deferred names and instructions under
-the connector (but in a main session the servers built into the desktop
-app apart, since no setting removes them there); built-in tools an agent
-type rarely uses under its allowlist; CLAUDE.md and auto memory apart;
-skills and hooks apart. What
-nothing measured covers stays in a "not itemised" part that no setting is
-known to change, as do the system prompt and the built-in tools every
-agent is offered (the Artifact tool, PowerShell).
+the connector (but in a desktop-app main session the servers built into
+the app apart, since no setting removes them there); built-in tools an
+agent type rarely uses under its allowlist; CLAUDE.md and auto memory
+apart; skills and hooks apart; the agent list (the roster) apart. What
+nothing measured covers, among it an agent's brief or a session's first
+prompt, stays in a "not itemised" part marked not measured: it is not
+claimed to be out of reach. The system prompt and the built-in tools every
+agent is offered (the Artifact tool, PowerShell) are harness-fixed, with no
+setting known.
 
 The 30-day and 7-day views count the replies from the newest reply back.
 Each cell names the check that covers it (:func:`hint_for`) or says there
@@ -49,11 +51,11 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
-from typing import Sequence
+from typing import Container, Sequence
 
-from . import agent_models, desktop_servers, recache, workstyle
+from . import agent_models, desktop_servers, recache, tool_search, workstyle
 from .calibration import Calibration
-from .context_budget import ContextBudgetStats, StartupSizes, startup_sizes
+from .context_budget import DESKTOP_ENTRYPOINT, ContextBudgetStats, StartupSizes, startup_sizes
 from .model import Column, EventKind, ReportModel, Table, TranscriptResult, Turn
 from .pricing import Pricing, price_turn
 
@@ -79,10 +81,12 @@ CELL_LABELS = {
 VIEWS = ("window", "30d", "7d")
 VIEW_DAYS = {"30d": 30, "7d": 7}
 
-#: Where a part of the base can be changed.
+#: Where a part of the base can be changed: by a setting, by nobody but the
+#: harness, or not known because nothing measured the part.
 FIXED = "fixed"
 CONTROLLABLE = "controllable"
-LEVER_LABELS = {FIXED: "Harness-fixed", CONTROLLABLE: "Controllable"}
+UNMEASURED = "unmeasured"
+LEVER_LABELS = {FIXED: "Harness-fixed", CONTROLLABLE: "Controllable", UNMEASURED: "Not measured"}
 NO_SETTING = "no setting known"
 
 #: The parts of the base, by id: (label, lever). ``tool:<name>`` parts
@@ -97,7 +101,8 @@ PARTS: dict[str, tuple[str, str]] = {
     "memory": ("Auto memory", CONTROLLABLE),
     "skills": ("Skills list", CONTROLLABLE),
     "hooks": ("Hook output at the start", CONTROLLABLE),
-    "other": ("Not itemised", FIXED),
+    "roster": ("Agent list", CONTROLLABLE),
+    "other": ("Not itemised", UNMEASURED),
 }
 #: How many built-in tools are named on their own in the base split (the
 #: largest by cost); the rest join ``tools_fixed``.
@@ -111,6 +116,7 @@ SPLIT_PARTS = {"prefix": "Starting prompt (prefix)", "conversation": "Conversati
 #: The checks (``quick_actions.CHECKS``) a part links to.
 PART_CARDS = {
     "allowlist": "tools",
+    "roster": "tools",
     "claude_md": "claude-md",
     "memory": "claude-md",
     "skills": "skills",
@@ -212,7 +218,12 @@ class CostCentres:
 
 
 def compose_base(
-    sizes: StartupSizes, base_tokens: float, allowlist: Sequence[str] = (), *, main: bool = False
+    sizes: StartupSizes,
+    base_tokens: float,
+    allowlist: Sequence[str] = (),
+    *,
+    main: bool = False,
+    built_in: Container[str] | None = None,
 ) -> dict[str, float]:
     """The base (``base_tokens``) as tokens per part id, adding up to
     ``base_tokens`` exactly. Every measured token goes in one part only:
@@ -220,15 +231,20 @@ def compose_base(
     - an MCP server's definitions, deferred names and instructions, whatever
       else could also remove its definitions (an allowlist), are the
       ``connector``;
-    - in a main session (``main``), the servers built into the desktop app
-      (:mod:`desktop_servers`) are ``desktop_servers``, harness-fixed, since
-      no setting removes them there; an agent's tools list can leave their
-      tools out, so for an agent they stay the connector's;
+    - in a main session of the desktop app (``main``; the caller says so, a
+      command-line session has no built-in servers), the servers the app
+      brings itself are ``desktop_servers``, harness-fixed, since no setting
+      removes them there. ``built_in`` names them as the tool search table
+      does (:func:`tool_search.built_in_names`); without it a name on
+      :mod:`desktop_servers`'s list counts. An agent's tools list can leave
+      their tools out, so for an agent they stay the connector's;
     - a built-in tool named in ``allowlist`` (the tools an agent type is
       offered and rarely uses) is the ``allowlist``; any other built-in
       tool is harness-fixed, as ``tool:<name>``;
     - CLAUDE.md files and auto memory are apart; so are skills and hooks;
-    - the roster and anything unmeasured are ``other``.
+    - the agent list (the roster) is ``roster``, since an agent without the
+      Agent tool is not given it;
+    - anything unmeasured, such as the brief or first prompt, is ``other``.
 
     A measured total above the base is scaled down to it.
     """
@@ -250,11 +266,13 @@ def compose_base(
             + sizes.server_deferred.get(server, 0.0)
             + sizes.server_instructions.get(server, 0.0)
         )
-        add("desktop_servers" if main and desktop_servers.is_built_in(server) else "connector", tokens)
+        own = main and (desktop_servers.is_built_in(server) if built_in is None else server in built_in)
+        add("desktop_servers" if own else "connector", tokens)
     add("claude_md", sizes.claude_md)
     add("memory", sizes.memory)
     add("skills", sizes.skills)
     add("hooks", sizes.hooks)
+    add("roster", sizes.agent_roster)
     measured = sum(parts.values())
     if measured > base_tokens:
         scale = base_tokens / measured
@@ -449,11 +467,15 @@ def compute(
     calibration: Calibration | None = None,
     context_stats: ContextBudgetStats | None = None,
     agent_files: dict | None = None,
+    mcp_servers: Sequence[tool_search.McpServerRow] | None = None,
 ) -> CostCentres:
     """The cost-centre matrix over ``sessions`` (each a main session and
     its agents). Without a ``calibration`` the base is not split into parts
     and the model-choice rows are left out (the tuning export needs only
-    the matrix)."""
+    the matrix). The servers built into the desktop app are a part of their
+    own only in a main session that ran in the desktop app; with
+    ``mcp_servers`` (the tool search table's rows) only those the table
+    calls built in, so a server of yours with the same name is not."""
     cc = CostCentres(sessions=len(sessions), itemised=calibration is not None)
     newest: datetime | None = None
     for top, subs in sessions:
@@ -463,6 +485,7 @@ def compute(
                 if when is not None and (newest is None or when > newest):
                     newest = when
     collector = _Collector(cc, newest)
+    built_in = tool_search.built_in_names(mcp_servers) if mcp_servers else None
     for top, subs in sessions:
         for result in (top, *subs):
             first = next((t for t in result.turns if t.turn_index == 1), None)
@@ -475,7 +498,8 @@ def compute(
                         sizes,
                         base_tokens,
                         _allowlist_for(result, context_stats, sizes.family),
-                        main=result.meta.kind == "top-level",
+                        main=result.meta.kind == "top-level" and result.meta.entrypoint == DESKTOP_ENTRYPOINT,
+                        built_in=built_in,
                     )
             _walk(result, _centre_of(result), collector, th, pricing, composition, base_tokens)
         if calibration is not None:
@@ -603,8 +627,11 @@ def build_parts_table(cc: CostCentres) -> Table:
         notes=[
             "Each part is counted once, under the setting that removes it. MCP server tools, names and"
             " instructions are one part, even where an allowlist could also drop the tool definitions.",
-            "In the main session, the MCP servers built into the desktop app are a part of their own, since no"
-            " setting removes them there.",
+            "In a main session of the desktop app, the MCP servers built into the app are a part of their own."
+            " No setting removes them there.",
+            "The agent list is a part of its own. An agent without the Agent tool is not given it.",
+            "Not itemised is what no measurement covers, such as an agent's task prompt or a session's first"
+            " prompt. It is marked not measured, not fixed, since you can shorten some of it.",
             "A rewrite or a post-compaction write is split into the starting prompt it wrote again and the"
             " conversation it wrote again.",
             "Sizes are estimates from characters, at the characters per token measured on your own sessions."

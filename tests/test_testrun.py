@@ -95,6 +95,23 @@ COMMANDS = [
     ("grep -r pytest .", ""),
     ("echo pytest", ""),
     ("git commit -m 'run pytest'", ""),
+    # A quoted ; or && is no end of a command, however the string reads
+    ("git commit -m \"Fix parser; pytest passes now\"", ""),
+    ("echo 'done; pytest -q'", ""),
+    ("echo \"ran it && pytest -q\"", ""),
+    ("git commit -m \"it's fixed; pytest -q\"", ""),
+    ("dotnet test --filter \"Name~A|Name~B\" --list-tests", ""),
+    # A string handed to a shell's -c is commands, not a message
+    ("docker run --rm img sh -c \"cd /app && pytest -q\"", "full"),
+    ("bash -lc 'cd sub; npm test'", "full"),
+    ("pwsh -NoProfile -Command \"cd x; python -m pytest tests/test_a.py\"", "targeted"),
+    ("cmd /c \"cd x && dotnet test\"", "full"),
+    ("./run.sh -c \"a; pytest\"", ""),
+    ("ssh host -c aes128-ctr \"echo; pytest\"", ""),
+    # ... but a real run after the quoted string is one, and a quoted path may hold a bracket
+    ("git commit -m \"Fix parser; ok\" && pytest -q", "full"),
+    ("& \"C:\\Program Files (x86)\\Python311\\python.exe\" -m pytest -q", "full"),
+    ("dotnet test --filter \"Name~A|Name~B\"", "targeted"),
     ("pip install pytest", ""),
     ("python -m inventory.cli list stock.csv", ""),
     ("cat tests/test_a.py", ""),
@@ -117,8 +134,8 @@ def test_the_hooks_copy_reads_every_command_as_the_package_does(command, scope):
 
 def test_the_hook_reads_its_patterns_from_the_catalogue():
     coaching = HOOK.load_catalogue()["coaching"]
-    for name in ("command_split", "heredoc", "prefix", "program", "runner", "no_run", "target", "bare_target",
-                 "bare_target_runner", "no_target", "whole_suite"):
+    for name in ("command_split", "heredoc", "quoted", "prefix", "program", "runner", "no_run", "target",
+                 "bare_target", "bare_target_runner", "no_target", "whole_suite"):
         assert coaching[f"test_{name}_pattern"] == getattr(cat, f"TEST_{name.upper()}_PATTERN")
     # The packaged JSON is the one the hook reads, and it is up to date.
     packaged = json.loads(Path(SCRIPT).with_name(cat.CATALOGUE_FILE).read_text(encoding="utf-8"))
@@ -212,6 +229,12 @@ def test_a_command_that_only_mentions_the_tests_runs_none(tmp_path):
     assert turns[0].tests_run == ""
 
 
+def test_a_quoted_message_that_names_a_runner_after_a_semicolon_runs_none_for_the_parser_and_the_rules(tmp_path):
+    message = "git commit -m \"Refactor parser; pytest green\""
+    assert _run(tmp_path, ("Bash", message))[0].tests_run == ""
+    assert classify._matches_test_tool(message) is False
+
+
 @pytest.mark.parametrize("command, scope", COMMANDS)
 def test_the_hooks_copy_cuts_every_command_apart_as_the_package_does(command, scope):
     assert HOOK._command_parts(command) == testrun.command_parts(command)
@@ -222,6 +245,11 @@ def test_the_hooks_copy_cuts_every_command_apart_as_the_package_does(command, sc
     ("FOO=1 timeout 60 uv run pytest", ["pytest"]),
     ("C:\\Python311\\python.exe -m pytest; npm test", ["python -m pytest", "npm test"]),
     ("ls | grep a", ["ls", "grep a"]),
+    # The operators inside a quoted string are blanked; those outside it still cut.
+    ("git commit -m \"a; b\" && pytest", ["git commit -m \"a  b\"", "pytest"]),
+    ("echo 'x | y' | tee out.txt", ["echo 'x   y'", "tee out.txt"]),
+    # ... but a shell's -c script loses only its quotes, so its commands are cut apart.
+    ("docker exec c sh -c \"cd /app && pytest\"", ["docker exec c sh -c cd /app", "pytest"]),
     # A heredoc's body is not a command.
     ("cat > a.txt <<'EOF'\nrm -rf x\nEOF\nnpm test", ["cat > a.txt", "npm test"]),
     ("", [""]),

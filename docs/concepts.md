@@ -198,7 +198,8 @@ this order, the first that applies winning:
 4. **`full-expiry`**, by the read — the turn read no more than `cr0` +
    3,000 tokens (or under `full_expiry_cr`, default 2,000 tokens,
    outright): the session part was gone even though the wait was shorter
-   than the lifetime.
+   than the lifetime. The clock did not do it, so the TTL simulation
+   (section 4) treats it as something no lifetime could have prevented.
 5. **`prefix-invalidated`** — only then: part of the session was read, so
    the cache had *not* expired, but something upstream of the cached
    prefix changed anyway (a notification, an attachment, a model switch,
@@ -229,6 +230,10 @@ themselves where the model might not hold for their own working style:
 - a hit refreshes TTL so survival depends only on `gap_s`
 - prefix-invalidated turns keep their observed split under every policy
   (no double counting)
+- a turn rebuilt after a summary keeps its observed split under every
+  policy, and a turn that read only the shared start although the wait was
+  shorter than the lifetime the previous call wrote keeps it under any
+  policy at least as long as its wait
 - reads are priced at the flat cache_read rate
 - compaction shrink clamps write at 0
 - gap is measured from the start of one request to the start of the next
@@ -703,10 +708,10 @@ of the comparisons. The plain averages in "How clear your asks were" mix in
 plan builds and every kind of work, so that table carries a note saying so.
 
 **Redone and planned.** A message is *redone* when a settled `shift`
-of `redo` or `fix` or a correction followed it (unless you called that a
-change of mind or new to the plan, or the follow-up was an aside), or
-when the piece of work reworked it
-afterwards. The whole chain of rework is charged to the message that
+of `redo` or `fix` or a correction followed it, or when the piece of work
+reworked it afterwards. A follow-up you called a change of mind, new to the
+plan or not a fix doesn't count. Nor does an aside or a plan-feedback round.
+The whole chain of rework is charged to the message that
 delivered the work (`redo_cost`), once, even when a cycle is both a redo and
 rework. A message is *planned* when it was written in plan mode, called
 `ExitPlanMode`, or came after a plan you approved by typing, until its piece
@@ -855,10 +860,12 @@ read), the conversation read from the cache (above-base read), new writes
 (growth write), a cache rebuilt (rewrite), the reply after a conversation
 summary (post-compaction) and output. The cells add up to the total spend.
 Only the base read is mostly a setting's doing, so it is split into parts:
-those a setting can remove (MCP servers, CLAUDE.md files, skills, an agent's
-tool list) each name the check that covers them, and those Claude Code
-itself sends say "no setting known". A part is counted once, in the lever
-that removes it, so two levers never claim the same tokens.
+those a setting can remove (MCP servers, CLAUDE.md files, skills, the agent
+list, an agent's tool list) each name the check that covers them, and those
+Claude Code itself sends say "no setting known". What nothing measured, such
+as an agent's brief or a session's first prompt, is marked Not measured. A
+part is counted once, in the lever that removes it, so two levers never claim
+the same tokens.
 
 **Model choice.** For each agent type and model, the table says who chose
 the model: the call that started the agent, its agent file, or nobody, so
@@ -876,8 +883,9 @@ a resumed workflow, are one run.
 call (a Read, a Grep, a Glob or a shell command that reads files) and
 nothing else. Every reply re-reads the whole context, so lookups sent one
 by one cost one re-read each, where one message holding them all would cost
-one. The saving counts the replies after the first of each stretch, and it
-is an upper bound, since some lookups need the answer to the one before.
+one. The saving counts the cache reads of the replies after the first of each
+stretch. A batched message still writes the tool results. It is an upper
+bound, since some lookups need the answer to the one before.
 
 **Starting context times replies.** What an agent starts with is read again
 on every reply. The product is an upper bound on what the starting context

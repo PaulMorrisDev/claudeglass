@@ -92,6 +92,7 @@ from __future__ import annotations
 
 import hashlib
 import html
+import importlib.resources
 import ipaddress
 import json
 import mimetypes
@@ -106,6 +107,7 @@ from collections import OrderedDict
 from concurrent.futures import Future
 from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
@@ -346,6 +348,39 @@ _STATIC_CONTENT_TYPES = {
     ".woff2": "font/woff2",
     ".svg": "image/svg+xml",
 }
+
+
+def _default_static_dir() -> Traversable:
+    """The dashboard's own ``static/`` folder. Read through
+    ``importlib.resources``, so it is found inside a zip (the single-file
+    ``.pyz``) as well as in a folder: a path built from ``__file__``
+    points inside the archive and opens nothing."""
+    return importlib.resources.files("claudeglass.service").joinpath("static")
+
+
+def _static_file(root: Traversable, name: str) -> tuple[Traversable, tuple[str, ...]] | None:
+    """The file that ``name`` (the part of the URL after ``/static/``,
+    already unquoted) names under ``root``, with its parts, or ``None``
+    when it is not one file of the UI: a missing file, a folder, a
+    dot-file or dot-folder (an editor's or a tool's own cache, which may
+    hold local paths), or a name that steps out of ``root``. ``root`` is
+    a folder or a place inside a zip, so a name is checked by its parts
+    and not resolved as a path; in a folder a link pointing outside it
+    is refused too."""
+    parts = tuple(part for part in name.split("/") if part)
+    if not parts or any(part.startswith(".") or "\\" in part or ":" in part or "\x00" in part for part in parts):
+        return None
+    node = root
+    for part in parts:
+        node = node.joinpath(part)
+    if isinstance(root, Path):
+        try:
+            if root.resolve() not in node.resolve().parents:
+                return None
+        except (OSError, ValueError, RuntimeError):
+            return None
+    return (node, parts) if node.is_file() else None
+
 
 #: index.html's placeholder for the command that runs claudeglass
 #: on this install (invocation.py), filled in as the page is served so
@@ -895,7 +930,7 @@ def make_handler(
     options: ServeOptions,
     *,
     watcher_stats: Callable[[], WatcherStats] | None = None,
-    static_dir: Path | None = None,
+    static_dir: Traversable | None = None,
     service_registered: Callable[[], bool | None] | None = None,
     watcher_state: Callable[[], WatcherState] | None = None,
     code_watch: "CodeWatch | None" = None,
@@ -946,16 +981,18 @@ def make_handler(
     ``static_dir``, when given, overrides the directory the ``/`` and
     ``/static/*`` routes serve from (default: this package's own
     ``service/static/`` -- the UI package's build output, per
-    ``docs/ui.md``). This is a second additional keyword-only parameter,
-    added purely so tests can point it at a ``tmp_path`` fixture with a
-    real ``index.html``/asset without writing anything into the source
-    tree -- the package's own ``static/`` is empty at S1-api's own
-    delivery time (a sibling work package ships its contents), so this
-    module's own tests exercise only the placeholder-index and
-    traversal-protection paths against the real default directory.
+    ``docs/ui.md`` -- read through ``importlib.resources``, so it is
+    served from inside the single-file ``.pyz`` too). This is a second
+    additional keyword-only parameter, added purely so tests can point
+    it at a ``tmp_path`` fixture with a real ``index.html``/asset
+    without writing anything into the source tree -- the package's own
+    ``static/`` is empty at S1-api's own delivery time (a sibling work
+    package ships its contents), so this module's own tests exercise
+    only the placeholder-index and traversal-protection paths against
+    the real default directory.
     """
 
-    static_dir = (static_dir if static_dir is not None else Path(__file__).resolve().parent / "static")
+    static_dir = static_dir if static_dir is not None else _default_static_dir()
 
     report_lock = threading.Lock()
     #: slot -> the latest report built for it: {"key", "token", "model",
@@ -3700,39 +3737,25 @@ def make_handler(
         # -- static files --------------------------------------------------
 
         def _serve_index(self, *, head_only: bool = False) -> None:
-            index_path = static_dir / "index.html"
+            index_path = static_dir.joinpath("index.html")
             if static_dir.is_dir() and index_path.is_file():
                 try:
                     page = index_path.read_bytes().replace(_COMMAND_META, _command_meta())
                     self._write_bytes(200, "text/html", page, head_only=head_only)
                     return
-                except OSError:
+                except (OSError, KeyError):
                     pass
             self._write_text(200, "text/html", _PLACEHOLDER_INDEX_HTML, head_only=head_only)
 
         def _serve_static(self, raw_name: str, *, head_only: bool = False) -> None:
-            name = urllib.parse.unquote(raw_name)
-            # A dot-file or dot-folder (an editor's or a tool's own cache,
-            # which may hold local paths) is never part of the UI.
-            if not name or any(part.startswith(".") for part in Path(name).parts):
+            found = _static_file(static_dir, urllib.parse.unquote(raw_name))
+            if found is None:
                 self._write_json(*_not_found(), head_only=head_only)
                 return
-            try:
-                base = static_dir.resolve()
-                candidate = (static_dir / name).resolve()
-            except (OSError, ValueError, RuntimeError):
-                self._write_json(*_not_found(), head_only=head_only)
-                return
-            if candidate != base and base not in candidate.parents:
-                self._write_json(*_not_found(), head_only=head_only)
-                return
-            if not candidate.is_file():
-                self._write_json(*_not_found(), head_only=head_only)
-                return
-            content_type = _STATIC_CONTENT_TYPES.get(candidate.suffix.lower())
+            candidate, parts = found
+            content_type = _STATIC_CONTENT_TYPES.get(os.path.splitext(parts[-1])[1].lower())
             if content_type is None:
-                content_type, _encoding = mimetypes.guess_type(str(candidate))
-            parts = candidate.relative_to(base).parts
+                content_type, _encoding = mimetypes.guess_type(parts[-1])
             pinned = len(parts) > 1 and parts[0] in _PINNED_STATIC_DIRS
             self._write_bytes(
                 200,

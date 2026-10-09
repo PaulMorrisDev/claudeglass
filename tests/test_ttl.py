@@ -124,6 +124,21 @@ def test_assumptions_cover_every_a4_rule():
         assert fragment in joined
 
 
+def test_assumptions_keep_a_read_only_expiry_s_split_only_under_a_policy_as_long_as_its_wait():
+    """``simulate`` keeps that split while ``gap_s <= policy_s``; a shorter
+    policy lets the clock expire it."""
+    (line,) = (a for a in ASSUMPTIONS if "shared start" in a)
+    assert line.endswith("keeps it under any policy at least as long as its wait")
+    assert "no cache lifetime would have prevented it" not in line
+
+
+def test_the_concepts_doc_prints_the_assumptions_as_they_are():
+    doc = (Path(__file__).parent.parent / "docs" / "concepts.md").read_text(encoding="utf-8")
+    text = " ".join(doc.replace("`", "").split())
+    for line in ASSUMPTIONS:
+        assert " ".join(line.split()) in text, line
+
+
 # --------------------------------------------------------------------
 # simulate(): each Appendix A4 branch
 # --------------------------------------------------------------------
@@ -209,6 +224,153 @@ def test_prefix_invalidated_falls_back_to_minimal_rule_with_and_without_apply():
         result = simulate(updated.turns, SONNET_RATES, policy)
         assert result.write_tokens == 50_000 + 95_000
         assert result.read_tokens == 0 + 5_000
+
+
+def _cold_start_pair(gap_s: float, first_write: str = "cc_5m", **second):
+    """A first call that read a 15k shared start (``cr0``) and wrote 85k
+    more, then a call ``gap_s`` later that read only the 15k again and
+    wrote 85k: the session part was lost. ``first_write`` picks the TTL the
+    first call wrote at, which sets how long its entry lasted."""
+    t1 = _turn(
+        ctx=100_000,
+        cache_read_tokens=15_000,
+        cache_creation_tokens=85_000,
+        **{first_write: 85_000},
+    )
+    fields = dict(
+        turn_index=2,
+        message_id="msg_2",
+        ctx=100_000,
+        cache_read_tokens=15_000,
+        cache_creation_tokens=85_000,
+        cc_5m=85_000,
+        gap_s=gap_s,
+    )
+    fields.update(second)
+    return t1, _turn(**fields)
+
+
+def _best_cost(turns: list[model.Turn]) -> float:
+    return min(simulate(turns, SONNET_RATES, p).cost for p in (POLICY_5M, POLICY_1H))
+
+
+def _applied(turns: list[model.Turn]) -> list[model.Turn]:
+    transcript = TranscriptResult(meta=TranscriptMeta(), turns=turns)
+    return recache.apply(transcript, recache.RecacheThresholds()).turns
+
+
+def test_read_only_expiry_costs_the_same_raw_or_through_recache_apply():
+    """A reply 60 s later that read only the shared start is labelled
+    "full-expiry" by ``recache.detect`` (rule 4: its read alone), though the
+    5-minute entry was still alive. No cache lifetime could have saved it,
+    so the simulation must price it as it does the same turn unlabelled:
+    keeping its observed split, with no phantom saving."""
+    raw = list(_cold_start_pair(60))
+    applied = _applied(raw)
+    assert applied[1].recache_signature == "full-expiry"
+    assert raw[1].recache_signature is None
+
+    for policy in (POLICY_5M, POLICY_1H):
+        sim_raw = simulate(raw, SONNET_RATES, policy)
+        sim_applied = simulate(applied, SONNET_RATES, policy)
+        assert sim_applied.cost == pytest.approx(sim_raw.cost)
+        assert sim_applied.write_tokens == 100_000 + 85_000
+        assert sim_applied.read_tokens == 15_000
+    delta_raw = observed(raw, SONNET_RATES).cost - _best_cost(raw)
+    delta_applied = observed(applied, SONNET_RATES).cost - _best_cost(applied)
+    assert delta_applied == pytest.approx(delta_raw)
+
+
+def test_read_only_expiry_is_content_addressable_in_the_ttl_table():
+    raw = list(_cold_start_pair(60))
+    rows = {}
+    for name, turns in (("raw", raw), ("applied", _applied(raw))):
+        row = _row_for(turns)
+        rows[name] = row
+        assert row.addressable_full_expiry_tokens == 0
+        assert row.addressable_full_expiry_usd == 0.0
+        assert row.addressable_prefix_invalidated_tokens == 85_000
+    assert rows["applied"].cost_observed == pytest.approx(rows["raw"].cost_observed)
+    for field in ("cost_all_5m", "cost_all_1h"):
+        assert getattr(rows["applied"], field) == pytest.approx(getattr(rows["raw"], field))
+    saving = lambda r: r.cost_observed - min(r.cost_all_5m, r.cost_all_1h)  # noqa: E731
+    assert saving(rows["applied"]) == pytest.approx(saving(rows["raw"]))
+
+
+def test_timed_expiry_still_simulates_as_a_lifetime_miss():
+    """The control: the same lost session part after a 400 s wait outlasted
+    the 5-minute entry, so a 1-hour lifetime would have kept it."""
+    applied = _applied(list(_cold_start_pair(400)))
+    assert applied[1].recache_signature == "full-expiry"
+
+    sim_5m = simulate(applied, SONNET_RATES, POLICY_5M)
+    sim_1h = simulate(applied, SONNET_RATES, POLICY_1H)
+    assert sim_5m.write_tokens == 100_000 + 100_000  # expired under 5m: whole prefix again
+    assert sim_1h.write_tokens == 100_000 + 0  # alive under 1h: all read
+    assert sim_1h.cost < sim_5m.cost
+
+    row = _row_for(applied)
+    assert row.addressable_full_expiry_tokens == 85_000
+    assert row.addressable_prefix_invalidated_tokens == 0
+
+
+def test_read_only_expiry_inside_a_one_hour_entry_still_expires_under_a_five_minute_policy():
+    """The first call wrote at 1 hour, so a 400 s wait is inside its
+    lifetime and the loss is not the clock's. Under a 5-minute policy the
+    entry would have expired by then, so that policy takes the full
+    rewrite; the 1-hour policy keeps the observed split."""
+    applied = _applied(list(_cold_start_pair(400, first_write="cc_1h")))
+    assert applied[1].recache_signature == "full-expiry"
+
+    assert simulate(applied, SONNET_RATES, POLICY_1H).write_tokens == 100_000 + 85_000
+    assert simulate(applied, SONNET_RATES, POLICY_5M).write_tokens == 100_000 + 100_000
+
+    row = _row_for(applied)
+    assert row.addressable_full_expiry_tokens == 0
+    assert row.addressable_prefix_invalidated_tokens == 85_000
+
+
+def test_expiry_with_the_lifetime_unknown_is_not_called_read_only():
+    """When the wait is not recorded nothing shows the clock did not do it:
+    the turn keeps its observed split as before (an unknown gap), and is
+    still counted as expired."""
+    t1, t2 = _cold_start_pair(None)
+    t2 = dataclasses.replace(t2, recache_signature="full-expiry")
+    result = simulate([t1, t2], SONNET_RATES, POLICY_5M)
+    assert result.unsimulatable == 1
+    assert _row_for([t1, t2]).addressable_full_expiry_tokens == 85_000
+
+
+@pytest.mark.parametrize("gap_s", [60, 4000])
+def test_post_compaction_rewrite_costs_the_same_raw_or_through_recache_apply(gap_s):
+    """The summary has to be written under any lifetime, so the first reply
+    after a compaction keeps its observed split whatever the wait: without
+    that the simulation prices the rewrite of a shrunk context as a read."""
+    t1 = _turn(ctx=200_000, cache_read_tokens=15_000, cache_creation_tokens=185_000, cc_5m=185_000)
+    t2 = _turn(
+        turn_index=2,
+        message_id="msg_2",
+        ctx=100_000,
+        cache_read_tokens=15_000,
+        cache_creation_tokens=85_000,
+        cc_5m=85_000,
+        gap_s=gap_s,
+        preceding_event_kinds=(model.EventKind.COMPACT_BOUNDARY,),
+    )
+    raw = [t1, t2]
+    applied = _applied(raw)
+    assert applied[1].recache_signature == "post-compaction"
+
+    for policy in (POLICY_5M, POLICY_1H):
+        sim_raw = simulate(raw, SONNET_RATES, policy)
+        sim_applied = simulate(applied, SONNET_RATES, policy)
+        assert sim_applied.cost == pytest.approx(sim_raw.cost)
+        assert sim_applied.write_tokens == 200_000 + 85_000
+        assert sim_applied.read_tokens == 15_000
+    delta_raw = observed(raw, SONNET_RATES).cost - _best_cost(raw)
+    delta_applied = observed(applied, SONNET_RATES).cost - _best_cost(applied)
+    assert delta_applied == pytest.approx(delta_raw)
+    assert _row_for(applied).addressable_full_expiry_tokens == 0
 
 
 def test_unknown_gap_carries_observed_split_and_counts_unsimulatable():
@@ -1376,7 +1538,7 @@ def test_recache_classification_fallback_honors_custom_ctx_floor():
         cache_read_tokens=100,
         cache_creation_tokens=500,
         cc_5m=500,
-        gap_s=200,
+        gap_s=400,
     )
 
     stats_default = TtlStats()
@@ -1631,7 +1793,7 @@ def test_addressable_share_falls_back_to_minimal_rule_when_signatures_none():
         cc_5m=3000,
         cache_read_tokens=500,
         ctx=25_000,
-        gap_s=100,
+        gap_s=400,
     )
     t3 = _turn(
         turn_index=3,
@@ -1662,12 +1824,13 @@ def test_addressable_share_falls_back_to_minimal_rule_when_signatures_none():
 
 
 def test_addressable_share_uses_real_signature_when_set():
-    # gap_s=50 and ctx=0 would NOT satisfy the minimal fallback rule at
-    # all (ctx not > 20_000), yet the real signature still classifies
-    # this turn as full-expiry -- proving the signature is preferred
-    # over the fallback whenever it is actually set.
+    # ctx=0 would NOT satisfy the minimal fallback rule at all (ctx not >
+    # 20_000), yet the real signature still classifies this turn as
+    # full-expiry -- proving the signature is preferred over the fallback
+    # whenever it is actually set. gap_s=400 is past the 5m write's
+    # lifetime, so the clock expired it (a shorter wait would not count).
     t1 = _turn(cache_creation_tokens=1000, cc_5m=1000, cache_read_tokens=0, gap_s=None)
-    t2 = _turn(turn_index=2, message_id="msg_2", cache_creation_tokens=400, cc_5m=400, cache_read_tokens=100, gap_s=50)
+    t2 = _turn(turn_index=2, message_id="msg_2", cache_creation_tokens=400, cc_5m=400, cache_read_tokens=100, gap_s=400)
     t2 = dataclasses.replace(t2, recache_signature="full-expiry")
     row = _row_for([t1, t2])
 
@@ -1835,6 +1998,16 @@ def test_build_section_new_tables_have_expected_notes():
         in " ".join(tables_by_name["ttl_break_even_share"].notes)
     )
     assert "statusline countdown" in " ".join(tables_by_name["ttl_near_miss"].notes)
+
+
+def test_the_addressable_share_note_keeps_each_sentence_short():
+    stats = TtlStats()
+    stats.add(TranscriptResult(meta=TranscriptMeta(kind="top-level"), turns=_rewrite_every_time_turns()), SONNET_RATES)
+    table = next(t for t in build_section(stats, billing_mode="api").tables if t.name == "ttl_addressable_share")
+    note = " ".join(table.notes)
+    assert "counts as broken. The clock didn't expire it." in note
+    for sentence in note.replace(". ", ".\n").splitlines():
+        assert len(sentence.split()) <= 25, sentence
 
 
 def test_build_section_window_start_caveat_note_only_when_subagent_predates_window():

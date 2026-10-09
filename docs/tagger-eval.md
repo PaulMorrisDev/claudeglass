@@ -82,7 +82,9 @@ they came from what the judge was shown and told, not from the model:
 
 - **The excerpt.** It now has the end of Claude's reply to your previous
   message (where a plan written in text usually is), the changed files by
-  name, whether the shell commands ran tests, and plan mode's plan file.
+  name, whether the shell commands ran tests, and whether plan mode is on.
+  Writing a file under `.claude/plans/` is not a plan, so the excerpt leaves
+  it out.
 - **Haiku's key lines.** Haiku now gets its own key lines, spelling out
   each word (`capture_catalogue.JUDGE_LINES`). An example is `check`:
   "targeted = ran the tests for the part changed; full = ran the whole
@@ -92,8 +94,9 @@ they came from what the judge was shown and told, not from the model:
   what it can't judge.
 - **Corrections from facts.** What the transcript settles now overrides
   Haiku:
-  - a plan-mode plan written this turn is `plan=made`, and it reads
-    `following` once a plan was approved earlier;
+  - `plan=made` follows an `ExitPlanMode` call that carries a plan this
+    turn, and it reads `following` once a plan was approved earlier. The
+    excerpt says whether plan mode is on;
   - no file changed is `check=none`. Files a subagent or a workflow agent
     changed, and commands that move or remove files, count as changes;
   - a test run is `targeted` or `full`, by whether the command picked

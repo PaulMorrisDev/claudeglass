@@ -1325,8 +1325,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Compare holds the model fixed for the first-turn write.** `claudeglass
   compare` reads the mean first-turn cache write on the one model both arms
   ran on most, since the same start measures differently on each model.
+- **The cache lifetime table overstated what a longer lifetime saves.** A
+  rebuild after a wait shorter than the lifetime the previous call wrote,
+  where the reply read only the shared start, and the first reply after a
+  conversation summary were priced as warm reads under every lifetime. They
+  now keep what they cost, so the saving for a longer lifetime and the
+  expired share of rebuilds are no longer inflated. The rebuild section
+  keeps its labels. The session explanation no longer says every expired
+  cache followed a pause, and the rebuild help says a longer lifetime helps
+  only when the wait reached it.
+- **What Haiku reads about plans matches the dashboard.** A plan file edit
+  or a plan-mode progress note no longer counts as a plan; only a plan sent
+  for your approval does. A plan you send back or close is no longer a
+  failed tool, though a hook blocking it still is. A go-ahead typed while
+  Claude works, or a mode change written as its own line, approves a waiting
+  plan, as it does for the dashboard.
+- **Test runs named inside quotes.** A runner named in a quoted commit
+  message or `echo` (`"fix parser; pytest green"`) no longer counts as a
+  test run, for the parser, the purpose rules and the hook alike. A string
+  handed to a shell's `-c` (`docker run img sh -c "cd /app && pytest"`) is
+  still read as commands.
+- **Admissions after plan feedback.** A critique or a question typed into a
+  plan's dialog now counts as pushing back, so an admission in the next
+  reply is put down to you catching it, not to Claude.
+- **Work habits and the Rework section agree.** A plan you sent back, or a
+  message in plan mode, no longer counts as the earlier ask redone. A
+  follow-up you called "not a fix" in the plan check is left out of Redone
+  too. A dashboard rating still answers for a session where you declined the
+  /cg-feedback questions, so its cause is kept. "Pieces of work" in the
+  planning table counts each piece once, in the shape of the session it
+  began in.
+- **The batching saving counts what a batch spares.** Batching single
+  lookups into one message saves the cache re-reads of the replies after
+  the first, not whole replies, since a batched message still writes the
+  tool results. The column is now "Re-reads a batch would spare", and the
+  card's basis says so. The "Per 100 messages" help says it counts messages
+  that asked for something, so status checks can pass 100.
+- **Cost-centre parts.** The agent list is now a part of its own, linked
+  to the Tools check. What nothing measured, such as an agent's brief, is
+  marked "Not measured" instead of harness-fixed. Servers built into the
+  desktop app count as the app's only in desktop sessions, and cost centres
+  and the context budget take that list from the tool search table, so a
+  server of yours that shares a built-in name stays yours. The notes under
+  the agent startup tables keep to 25-word sentences and read correctly
+  before there are enough first calls to calibrate on.
+- **The tuning summary's Plans line** now counts pieces of work with an
+  approved plan, so it no longer reads as a different number from the
+  Builds line under it.
+- **The single-file `claudeglass.pyz`** now serves the dashboard and reads
+  the shipped profiles from inside the archive; before, it showed an empty
+  page and found no profiles. It is compressed, and the release runs the
+  built file (`build-pyz.py --smoke`: the dashboard pages, the profiles and
+  every subcommand's help, on Python 3.12 and 3.11) before publishing it.
 
-Parsed sessions are re-read once to pick this up.
+Parsed sessions are re-read once to pick this up (parser 44).
 
 ## [0.14.0] - 2026-10-02
 

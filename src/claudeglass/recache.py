@@ -59,7 +59,10 @@ order, the first that applies winning:
 4. ``full-expiry`` -- the turn read no more than ``cr0`` +
    ``SESSION_READ_MARGIN`` (or under ``full_expiry_cr`` outright): the
    session part had gone even though the gap was shorter than the
-   lifetime, so for this purpose it expired.
+   lifetime, so for this purpose it expired. The clock did not do it, so
+   no cache lifetime could have prevented it: the TTL simulation
+   (``ttl.py``) keeps such a turn's observed split, as it does a
+   ``post-compaction`` one, and counts only rule 3 as TTL-addressable.
 5. ``prefix-invalidated`` -- only then: part of the session was read, so
    it had not expired, but something upstream of the cached prefix
    changed (a notification, an attachment, a model switch, ...) and broke
@@ -258,7 +261,7 @@ class RecacheThresholds:
         ]
 
 
-def _write_ttl_s(turn: Turn) -> float | None:
+def write_ttl_s(turn: Turn) -> float | None:
     """How long the cache entry this call wrote lasts, or ``None`` when it
     wrote nothing. 1 hour when its 1-hour write exceeds its 5-minute
     write, else 5 minutes; a call whose JSONL recorded no TTL split
@@ -271,6 +274,16 @@ def _write_ttl_s(turn: Turn) -> float | None:
     if turn.cache_creation_tokens > 0 and turn.ttl_split_unknown:
         return _TTL_5M_S
     return None
+
+
+def expired_by_clock(gap_s: float | None, before_ttl: float | None) -> bool:
+    """Whether a wait reached the time the previous call's cache lasts
+    (``before_ttl``, from :func:`write_ttl_s` carried forward). ``False``
+    when either is not known. This is the clock test of ``full-expiry``
+    (rule 3); a ``full-expiry`` turn that fails it was labelled by its
+    read alone (rule 4), which no cache lifetime could have prevented --
+    ``ttl.py`` costs the two differently."""
+    return gap_s is not None and before_ttl is not None and gap_s >= before_ttl
 
 
 def _is_rebuild(turn: Turn, prev: Turn | None, cr0: int | None, th: RecacheThresholds) -> bool:
@@ -337,7 +350,7 @@ def detect(turns: Sequence[Turn], th: RecacheThresholds) -> list[Turn]:
         # turn is judged, whichever way it falls.
         before, before_ttl = prev, ttl_s
         prev = turn
-        ttl_s = _write_ttl_s(turn) or ttl_s
+        ttl_s = write_ttl_s(turn) or ttl_s
         if turn.turn_index <= 1:
             continue
         if turn.ctx <= th.ctx_floor:
@@ -354,7 +367,7 @@ def detect(turns: Sequence[Turn], th: RecacheThresholds) -> list[Turn]:
             # real reply and the small read are the compaction's doing, not an
             # expiry of the session part.
             signature = "post-compaction"
-        elif turn.gap_s is not None and before_ttl is not None and turn.gap_s >= before_ttl:
+        elif expired_by_clock(turn.gap_s, before_ttl):
             signature = "full-expiry"
         elif turn.cache_read_tokens < th.full_expiry_cr or (
             cr0 is not None and turn.cache_read_tokens <= cr0 + SESSION_READ_MARGIN
@@ -1136,6 +1149,8 @@ __all__ = [
     "SIGNATURES",
     "ASSUMPTIONS",
     "RecacheThresholds",
+    "write_ttl_s",
+    "expired_by_clock",
     "detect",
     "apply",
     "gap_bucket",

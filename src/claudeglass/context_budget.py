@@ -339,31 +339,55 @@ def _custom_agents_est_tokens(snapshot: Snapshot | None, roster: tuple[float, fl
     return count * _AGENT_LISTING_TOKENS_PER_AGENT
 
 
-def _mcp_tools_tokens(
-    top: TranscriptResult, first: Turn | None, calibration: Calibration, skip_built_in: bool = False
-) -> float | None:
-    """Tokens of the MCP servers' tool definitions sent in full, the
-    deferred-tool names listed for them and their instructions in
-    ``top``'s first call, summed over its servers. ``None`` when no MCP
-    server shows up in it at all. With ``skip_built_in``, the servers built
-    into the desktop app (:mod:`desktop_servers`) are left out."""
+def _mcp_tokens_by_server(top: TranscriptResult, first: Turn | None, calibration: Calibration) -> dict[str, float]:
+    """Tokens of each MCP server's tool definitions sent in full, the
+    deferred-tool names listed for it and its instructions in ``top``'s
+    first call. Empty when no MCP server shows up in it at all."""
     if first is None:
-        return None
+        return {}
     model = first.model
     servers = (
         set(top.upfront_definition_chars_by_server)
         | set(first.deferred_list_chars_by_server)
         | set(first.mcp_instruction_chars_by_server)
     ) - {BUILT_IN_TOOLS}
-    if skip_built_in:
-        servers = {server for server in servers if not desktop_servers.is_built_in(server)}
-    if not servers:
-        return None
-    return sum(
-        calibration.tool_tokens(top.upfront_definition_chars_by_server.get(server, 0), model)
+    return {
+        server: calibration.tool_tokens(top.upfront_definition_chars_by_server.get(server, 0), model)
         + calibration.text_tokens(first.deferred_list_chars_by_server.get(server, 0), model)
         + calibration.text_tokens(first.mcp_instruction_chars_by_server.get(server, 0), model)
         for server in servers
+    }
+
+
+def _mcp_tools_tokens(
+    top: TranscriptResult, first: Turn | None, calibration: Calibration, skip_built_in: bool = False
+) -> float | None:
+    """Tokens of the MCP servers' tool definitions sent in full, the
+    deferred-tool names listed for them and their instructions in
+    ``top``'s first call, summed over its servers. ``None`` when no MCP
+    server shows up in it at all. With ``skip_built_in``, the servers on the
+    desktop app's list (:mod:`desktop_servers`) are left out: the caller
+    says so for a session that ran in the desktop app."""
+    by_server = _mcp_tokens_by_server(top, first, calibration)
+    if skip_built_in:
+        by_server = {server: tokens for server, tokens in by_server.items() if not desktop_servers.is_built_in(server)}
+    return sum(by_server.values()) if by_server else None
+
+
+def _mcp_removable_tokens(acc: "_ProjectAcc", servers: Sequence[tool_search.McpServerRow] | None) -> float | None:
+    """The mean MCP tokens per session that a setting can remove. With the
+    tool search table's rows (``servers``) a server is the desktop app's
+    only when that table calls it built in, so this column and the table
+    never disagree about one server. Without them, the session's own
+    entrypoint decided when it was added."""
+    if not servers:
+        return _mean(acc.mcp_removable_tokens)
+    built_in = tool_search.built_in_names(servers)
+    return _mean(
+        [
+            max(0.0, total - sum(tokens for server, tokens in named.items() if server in built_in))
+            for total, named in zip(acc.mcp_tools_tokens, acc.mcp_listed_tokens)
+        ]
     )
 
 
@@ -438,8 +462,13 @@ class _ProjectAcc:
     #: deferred-tool names the first call carried, per session.
     mcp_tools_tokens: list[float] = field(default_factory=list)
     #: The same without the servers built into the desktop app, which no
-    #: setting removes: the MCP part of what you can change.
+    #: setting removes: the MCP part of what you can change. Counted
+    #: for a desktop-app session only.
     mcp_removable_tokens: list[float] = field(default_factory=list)
+    #: Per session, the tokens of the servers on the desktop app's list
+    #: (:mod:`desktop_servers`, a closed list of the app's own names), by
+    #: name, so the tool search table can say which of them are the app's.
+    mcp_listed_tokens: list[dict[str, float]] = field(default_factory=list)
     #: Per session, the first sibling-agent roster the first calls carried
     #: (tokens) and how many agent types it listed.
     roster_tokens: list[float] = field(default_factory=list)
@@ -1158,7 +1187,16 @@ class ContextBudgetStats:
         mcp_tokens = _mcp_tools_tokens(top, first, self.calibration)
         if mcp_tokens is not None:
             acc.mcp_tools_tokens.append(mcp_tokens)
-            acc.mcp_removable_tokens.append(_mcp_tools_tokens(top, first, self.calibration, skip_built_in=True) or 0.0)
+            acc.mcp_removable_tokens.append(
+                _mcp_tools_tokens(top, first, self.calibration, skip_built_in=entrypoint == DESKTOP_ENTRYPOINT) or 0.0
+            )
+            acc.mcp_listed_tokens.append(
+                {
+                    server: tokens
+                    for server, tokens in _mcp_tokens_by_server(top, first, self.calibration).items()
+                    if desktop_servers.is_built_in(server)
+                }
+            )
         if first is not None:
             roster = next(
                 (
@@ -1305,7 +1343,7 @@ def _baseline_row(
     if mcp_flag is None:
         mcp_flag = _mcp_tools_flag(snapshot)
     mcp_tokens = _mean(acc.mcp_tools_tokens)
-    mcp_removable = _mean(acc.mcp_removable_tokens)
+    mcp_removable = _mcp_removable_tokens(acc, servers)
 
     known_total = human_est + skills_est
     if isinstance(memory_est, (int, float)):
@@ -1404,6 +1442,7 @@ def _build_baseline_table(
             "skills_listing_est_tokens",
             "mcp_tools_tokens",
             "mcp_removable_tokens",
+            "mcp_listed_tokens",
         ):
             getattr(everything, name).extend(getattr(acc, name))
 
@@ -1419,15 +1458,16 @@ def _build_baseline_table(
         rows=rows,
         notes=[
             "The first call is everything the first reply read: new input, cache writes and cache reads. "
-            "It splits into the shared prefix read from cache (mostly Claude Code's own tool definitions), "
-            "what the session wrote itself, and the first prompt that went in uncached. "
+            "It splits into three parts. One is the shared prefix read from cache, mostly Claude Code's own "
+            "tool definitions. The others are what the session wrote itself and the first prompt that went in uncached. "
             "The same tools measure differently on each model, so compare projects that ran on one model.",
             "Human prompt, skills listing, memory files and MCP tools (est) count characters (or bytes) "
-            f"divided by characters per token, {calibration.basis()}: no tokenizer reads your transcripts. "
+            f"and divide them by a ratio of characters per token. {calibration.sentence()} "
+            "No tokenizer reads your transcripts. "
             "Custom agents (est) is your custom agents' share of the agent list the first calls carried. "
             f"With no list recorded, it is {_AGENT_LISTING_TOKENS_PER_AGENT} tokens per agent. "
             "\"MCP tools\" counts the MCP servers the sessions were offered, by what can be done "
-            "about them, with what keeping them cost, from the same per-server prices as the tool search "
+            "about them. It adds what keeping them cost, from the same per-server prices as the tool search "
             "section. A server built into the desktop app is shown with its cost and has nothing to remove. "
             "With none offered it says only whether MCP servers are configured. "
             "\"MCP tools in the first call\" sizes the definitions, "
@@ -1862,13 +1902,13 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
         notes=[
             "Startup size is the first turn's whole input (new, cache-write and cache-read tokens). "
             "Every other column is the average per spawn, in tokens, estimated from what the transcript "
-            f"records for that first turn, at characters per token {stats.calibration.basis()}.",
+            f"records for that first turn. {stats.calibration.sentence()}",
             "Each row averages the spawns on one model, the one most of that agent type's spawns ran on. "
             "The same tools measure differently on each model, as each one counts tokens its own way. "
             "Spawns on any other model are counted apart and left out, so a mix of models never "
             "decides which agent type looks big.",
             "Claude Code writes a subagent's tool definitions after its first call, so they come from the "
-            "snapshot recorded just after it. A spawn with no such snapshot leaves its tool definitions in "
+            "snapshot recorded right after it. A spawn with no such snapshot leaves its tool definitions in "
             "\"Not recorded\".",
             "Forks inherit the parent's conversation and prompt cache, so they are counted but kept "
             "out of the averages.",
@@ -1876,13 +1916,14 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             "the last column). An agent's setting that skips CLAUDE.md files skips only the project's "
             "own ones: a policy CLAUDE.md still loads.",
             "\"Tools never used\" is the size of the tool definitions and MCP servers this agent type was "
-            f"offered and called in fewer than {int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them. "
+            f"offered. Only those called in fewer than {int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them count. "
             "A tools list on the agent would leave them out. Tools Claude Code adds whatever the list says "
             "are not counted. \"Tools never used\" is measured on the busiest model with "
             f"{TOOLS_MODEL_MIN_SPAWNS} or more spawns that recorded their tools. "
             "Older transcripts recorded none, so that model can differ from \"Model measured\".",
-            "A part left out of the start is also not read back on the calls after the first, so the last two "
-            "columns give what a saving needs: the cache-read price and the average number of those calls.",
+            "A part left out of the start is also not read back on the calls after the first. "
+            "So the last two columns give what a saving needs: the cache-read price and the average number "
+            "of those calls.",
         ],
     )
 
@@ -1914,11 +1955,12 @@ def _build_tools_table(stats: ContextBudgetStats) -> Table:
         rows=rows,
         notes=[
             "One row per tool or MCP server an agent type was offered and called in fewer than "
-            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered it, largest first, "
-            f"up to {_TOOL_ROWS_PER_AGENT} per agent type, on the busiest model with {TOOLS_MODEL_MIN_SPAWNS} "
-            "or more spawns that recorded their tools. An MCP server's tools are one row, named as an allowlist names them.",
-            "Sizes are tool definitions only, read from the first snapshot that lists tools, "
-            f"at characters per token {stats.calibration.basis()}. No description is kept.",
+            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered it. "
+            f"They run largest first, up to {_TOOL_ROWS_PER_AGENT} per agent type, on the busiest model with "
+            f"{TOOLS_MODEL_MIN_SPAWNS} or more spawns that recorded their tools. "
+            "An MCP server's tools are one row, named as an allowlist names them.",
+            "Sizes are tool definitions only, read from the first snapshot that lists tools. "
+            f"{stats.calibration.sentence()} No description is kept.",
         ],
     )
 
@@ -2009,17 +2051,17 @@ def _build_diet_table(stats: ContextBudgetStats) -> Table:
         rows=rows,
         notes=[
             "One row per agent type that was offered tools or MCP servers it called in fewer than "
-            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them, on the model with the most spawns "
-            "that recorded their tools. "
+            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them. "
+            "The row uses the model with the most spawns that recorded their tools. "
             "\"Tools to keep\" are the ones called in at least that share of them, including tools loaded when "
             "asked for. Tools Claude Code adds whatever the list says are in neither.",
             "Sizes are per spawn. The skills list goes with the Skill tool and the agent list with the Agent "
             "tool. An MCP server's deferred tool names go with its tools; its instructions stay under a "
             "tools list, so they are not counted in the saving. Deferred built-in tool names are not counted.",
-            "The saving prices tool definitions as a prefix that sibling spawns share: only the spawns that wrote it "
-            "pay the cache-write price for them, the rest pay the cache-read price. The other parts are written "
+            "The saving prices tool definitions as a prefix that sibling spawns share. Only the spawns that wrote it "
+            "pay the cache-write price for them. The rest pay the cache-read price. The other parts are written "
             "by each spawn. Every part is then read on each later call. List prices, over the spawns in this window.",
-            f"Sizes are at characters per token {stats.calibration.basis()}. No description is kept.",
+            f"{stats.calibration.sentence()} No description is kept.",
         ],
     )
 
@@ -2075,13 +2117,13 @@ def _build_servers_table(stats: ContextBudgetStats) -> Table:
         rows=rows,
         notes=[
             "One row per MCP server an agent type was offered and called in fewer than "
-            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered it, largest first, "
-            f"up to {_SERVER_ROWS_PER_AGENT} per agent type, on the model with the most spawns that "
-            "recorded their tools.",
+            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered it. "
+            f"They run largest first, up to {_SERVER_ROWS_PER_AGENT} per agent type, on the model with the "
+            "most spawns that recorded their tools.",
             "Sizes are per spawn offered it: the tool definitions sent in full, the names of its deferred "
             "tools, and its instructions. The cost prices the first two as the tools list table does: a tools "
             "list leaves out those two only. The instructions stay under it and are not in the cost.",
-            f"Sizes are at characters per token {stats.calibration.basis()}. No instruction text is kept.",
+            f"{stats.calibration.sentence()} No instruction text is kept.",
         ],
     )
 

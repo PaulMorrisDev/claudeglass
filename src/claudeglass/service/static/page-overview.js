@@ -691,7 +691,7 @@ function controllableParts(parts) {
 // section), the controllable parts of the base read each with a link to
 // the check that covers it, and a link to the whole of it on Agents. The
 // parts a setting can't change stay on that page, marked "no setting
-// known".
+// known", and so does the part nothing measured, marked "not measured".
 function costCentrePart(report) {
   var agents = report ? findSection(report, "agents") : null;
   var centres = tableNamed(agents, "cost_centres");

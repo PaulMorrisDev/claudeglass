@@ -1899,7 +1899,10 @@ def _prompting_lines(block: dict) -> list[str]:
     )
     plans = block["plans"]
     if plans["approved"] or plans["rejected_rounds"]:
-        lines.append(f"Plans: {plans['approved']:,} approved, {_n(plans['rejected_rounds'], 'round')} declined in the dialog.")
+        lines.append(
+            f"Plans: {_n(plans['approved'], 'piece of work', 'pieces of work')} with an approved plan, "
+            f"{_n(plans['rejected_rounds'], 'round')} declined in the dialog."
+        )
     builds = plans.get("builds")
     if builds:
         total = sum(row["approvals"] for row in builds.values())

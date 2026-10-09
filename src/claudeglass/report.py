@@ -1993,6 +1993,7 @@ def build_report(
             calibration=calibration,
             context_stats=cb,
             agent_files=_agent_file_models(latest_snapshot),
+            mcp_servers=tool_search_stats.mcp_servers,
         )
         agents_section.tables.extend(cost_centres.build_tables(cost_centre_stats))
         sections.append(agents_section)

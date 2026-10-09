@@ -19,13 +19,17 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import cost_centres, quick_actions, topology
+from claudeglass import cost_centres, quick_actions, tool_search, topology
 from claudeglass.calibration import Calibration
+from claudeglass.config import Config
 from claudeglass.context_budget import ContextBudgetStats, StartupSizes, startup_sizes
+from claudeglass.corpus import load_corpus
 from claudeglass.model import ReportModel, Section, TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing, price_turn
 from claudeglass.recache import RecacheThresholds
+from claudeglass.report import build_report
+from claudeglass.snapshots import Snapshot, snapshot_project_key
 
 from helpers import (
     attachment_line,
@@ -356,6 +360,141 @@ def test_the_desktop_apps_own_servers_are_fixed_in_a_main_session():
     assert cost_centres.part_lever("desktop_servers") == cost_centres.FIXED
     agent = cost_centres.compose_base(sizes, 60_000.0)
     assert agent["connector"] == pytest.approx(9_000) and "desktop_servers" not in agent
+
+
+def test_the_desktop_apps_servers_are_the_apps_own_only_where_the_caller_names_them():
+    """``built_in`` is the tool search table's answer: a server of yours that
+    shares a name from the desktop app's list stays the connector's."""
+    sizes = _sizes(server_definitions={"terminal": 5_000.0, "srv": 2_000.0}, server_deferred={}, server_instructions={})
+    by_name = cost_centres.compose_base(sizes, 60_000.0, main=True)
+    assert by_name["desktop_servers"] == pytest.approx(5_000) and by_name["connector"] == pytest.approx(2_000)
+    yours = cost_centres.compose_base(sizes, 60_000.0, main=True, built_in=frozenset())
+    assert "desktop_servers" not in yours and yours["connector"] == pytest.approx(7_000)
+    theirs = cost_centres.compose_base(sizes, 60_000.0, main=True, built_in=frozenset({"terminal"}))
+    assert theirs["desktop_servers"] == pytest.approx(5_000)
+    # Not a main session: the answer never matters.
+    assert "desktop_servers" not in cost_centres.compose_base(sizes, 60_000.0, built_in=frozenset({"terminal"}))
+
+
+def _lone_session(tmp_path, name, **meta):
+    """A main session whose first call writes and reads a 35k base."""
+    return _parse(tmp_path, name, _agent_lines(name), kind="top-level", session_id=name, **meta)
+
+
+def _parts_of_the_base(top, monkeypatch, **kwargs) -> set[str]:
+    sizes = _sizes(server_definitions={"terminal": 5_000.0}, server_deferred={}, server_instructions={})
+    monkeypatch.setattr(cost_centres, "startup_sizes", lambda result, calibration: sizes)
+    cc = _compute(top, [], calibration=Calibration(), **kwargs)
+    return {part for (_centre, cell, part) in cc.parts if cell == "base_read"}
+
+
+def test_the_desktop_servers_part_is_only_for_a_main_session_that_ran_in_the_desktop_app(tmp_path, monkeypatch):
+    desktop = _parts_of_the_base(_lone_session(tmp_path, "a", entrypoint="claude-desktop"), monkeypatch)
+    assert "desktop_servers" in desktop and "connector" not in desktop
+    # A command-line session has no servers built into the app: a server of yours that shares a name is the connector's.
+    for entrypoint in ("cli", None):
+        parts = _parts_of_the_base(_lone_session(tmp_path, f"b-{entrypoint}", entrypoint=entrypoint), monkeypatch)
+        assert "connector" in parts and "desktop_servers" not in parts
+
+
+def test_the_tool_search_rows_decide_which_servers_the_desktop_app_brought(tmp_path, monkeypatch):
+    top = _lone_session(tmp_path, "a", entrypoint="claude-desktop")
+    yours = [tool_search.McpServerRow(server="terminal", kind=tool_search.KIND_USER)]
+    assert "desktop_servers" not in _parts_of_the_base(top, monkeypatch, mcp_servers=yours)
+    theirs = [tool_search.McpServerRow(server="id-1", aliases=("terminal",), kind=tool_search.KIND_DESKTOP_BUILTIN)]
+    assert "desktop_servers" in _parts_of_the_base(top, monkeypatch, mcp_servers=theirs)
+    # No rows to go on: the name on the list decides, in a desktop session.
+    assert "desktop_servers" in _parts_of_the_base(top, monkeypatch, mcp_servers=[])
+
+
+def _desktop_report_parts(tmp_path, snapshots) -> set[str]:
+    """The base's parts the report files a desktop session under, where the
+    session was offered a server named ``terminal`` (a name on the app's
+    list) and ``snapshots`` is what the report read of the config."""
+    project_dir = tmp_path / "proj-desk"
+    project_dir.mkdir(parents=True)
+    lines = [
+        _stamp(user_str_line("please do the thing", entrypoint="claude-desktop"), "2026-09-18T11:59:00.000Z"),
+        _stamp(
+            attachment_line(
+                "mcp_instructions_delta", addedNames=["terminal"], addedBlocks=["Run a command. " * 400], removedNames=[]
+            ),
+            "2026-09-18T11:59:10.000Z",
+        ),
+        _stamp(
+            turn_line(
+                message_id="d_1",
+                input_tokens=100,
+                cache_creation_input_tokens=35_000,
+                ephemeral_1h_input_tokens=35_000,
+                cache_read_input_tokens=5_000,
+                output_tokens=200,
+            ),
+            "2026-09-18T12:00:00.000Z",
+        ),
+    ]
+    write_jsonl(project_dir / "session-1.jsonl", lines)
+    report = build_report(
+        load_corpus([project_dir]), load_pricing(), Config(), projects=("proj-desk",), window="w", snapshots=snapshots
+    )
+    agents = next(section for section in report.sections if section.key == "agents")
+    table = next(t for t in agents.tables if t.name == cost_centres.PARTS_TABLE)
+    keys = [column.key for column in table.columns]
+    rows = [dict(zip(keys, row)) for row in table.rows]
+    return {row["part"] for row in rows if row["cell"] == "base_read"}
+
+
+def test_the_report_files_a_server_of_yours_as_the_connector_even_when_the_app_has_one_by_that_name(tmp_path):
+    """The report hands the cost centres the tool search table's rows, so a
+    server your config lists is not counted as one the desktop app brought."""
+    app_label = cost_centres.part_label("desktop_servers")
+    connector_label = cost_centres.part_label("connector")
+    assert app_label in _desktop_report_parts(tmp_path / "unlisted", None)
+    listed = Snapshot(
+        path=None,
+        ts="2026-09-30T00:00:00Z",
+        data={"project_slug": snapshot_project_key("proj-desk"), "mcp_servers": {"names": ["terminal"]}},
+    )
+    parts = _desktop_report_parts(tmp_path / "listed", [listed])
+    assert connector_label in parts and app_label not in parts
+
+
+def test_the_agent_list_is_a_controllable_part_of_its_own():
+    parts = cost_centres.compose_base(_sizes(agent_roster=1_200.0), 40_000.0)
+    assert parts["roster"] == pytest.approx(1_200)
+    measured = 3_000 + 500 + 13_000 + 4_500 + 800 + 3_000 + 1_500 + 2_500 + 400 + 200 + 1_200
+    assert parts["other"] == pytest.approx(40_000 - measured)
+    assert sum(parts.values()) == pytest.approx(40_000.0)
+    assert "roster" not in cost_centres.compose_base(_sizes(), 40_000.0)
+    assert cost_centres.part_lever("roster") == cost_centres.CONTROLLABLE
+    assert cost_centres.part_label("roster") == "Agent list"
+    for centre in ("main", "start", "direct", "workflow"):
+        assert cost_centres.part_card("roster", centre) in quick_actions.CHECK_IDS
+
+
+def test_what_nothing_measured_covers_is_not_claimed_to_be_out_of_reach():
+    """The brief an agent is given and a session's first prompt are in "not
+    itemised": marked not measured, with neither a check nor "no setting known"."""
+    assert cost_centres.part_lever("other") == cost_centres.UNMEASURED
+    assert cost_centres.LEVER_LABELS[cost_centres.UNMEASURED] == "Not measured"
+    assert set(cost_centres.LEVER_LABELS) == {cost_centres.FIXED, cost_centres.CONTROLLABLE, cost_centres.UNMEASURED}
+    cc = cost_centres.CostCentres(sessions=1)
+    cc.matrix["window"] = {("direct", "base_read"): 10.0}
+    parts = cost_centres.compose_base(_sizes(agent_roster=1_200.0), 40_000.0)
+    cc.parts = {("direct", "base_read", part): 10.0 * tokens / 40_000.0 for part, tokens in parts.items()}
+    table = cost_centres.build_parts_table(cc)
+    keys = [c.key for c in table.columns]
+    by_part = {row[keys.index("part")]: dict(zip(keys, row)) for row in table.rows}
+    other = by_part["Not itemised"]
+    assert other["lever"] == "unmeasured" and other["card"] == "" and other["advice"] == ""
+    assert table.value_labels["unmeasured"] == "Not measured"
+    # The agent list is one the user can change, and links its check.
+    assert by_part["Agent list"]["lever"] == "controllable" and by_part["Agent list"]["card"] == "tools"
+    assert by_part["Agent list"]["advice"] == ""
+    # Only the harness-fixed parts say "no setting known".
+    assert {name for name, row in by_part.items() if row["advice"] == cost_centres.NO_SETTING} == {
+        name for name, row in by_part.items() if row["lever"] == "fixed"
+    }
 
 
 def test_a_measured_total_over_the_base_is_scaled_to_it():

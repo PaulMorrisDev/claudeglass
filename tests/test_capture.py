@@ -631,6 +631,144 @@ def test_each_twin_names_the_other():
     assert "tests/test_capture.py" in HOOK.grounded.__doc__ and "tests/test_capture.py" in capture_tags.settle.__doc__
 
 
+# -- the twins' facts, read from the same lines ---------------------------------------
+
+HOOK_CATALOGUE = HOOK.load_catalogue()
+_SENT_BACK = (
+    "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
+    "the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+)
+
+
+def _records(lines) -> list[dict]:
+    """``lines`` as the hook reads a transcript: JSON, line by line."""
+    return [json.loads(json.dumps(line)) for line in lines]
+
+
+def _twin_facts(tmp_path, lines) -> tuple[dict, dict, str]:
+    """The last message's facts as the hook counts them from the records
+    (what Haiku's tag is grounded on), as the parser counts them (what
+    Claude's tag is settled on), and the excerpt Haiku reads."""
+    hook: dict = {}
+    excerpt, _reply_id = HOOK.judge_excerpt(_records(lines), {"cwd": "C:/Dev/repo"}, HOOK_CATALOGUE, facts=hook)
+    [*_, cycle] = capture.prompt_cycles(_top(tmp_path, lines))
+    return hook, cycle.facts, excerpt
+
+
+def _plan_call(second: int, tool_use_id: str = "tu_p", **given) -> dict:
+    return _reply(second, tool_use_block("ExitPlanMode", tool_use_id, given or {"plan": "1. Edit a.py\n2. Run tests"}))
+
+
+def _plan_answer(second: int, text: str, kind: str | None = "user-rejected", **line) -> dict:
+    extra = {"toolDenialKind": kind} if kind else {}
+    return user_block_line([tool_result_block("tu_p", text, is_error=True)], timestamp=_ts(second), **extra, **line)
+
+
+def test_both_twins_take_a_plan_to_be_an_exit_plan_mode_call_that_carries_one(tmp_path):
+    ledger = [
+        _note(0, TAG_IDS), _ask(1, "build the next phase"),
+        _reply(2, _edit("e1", "C:/Dev/repo/a.py"), _edit("e2", "C:/Users/me/.claude/plans/p-progress.md")),
+        _ok(3, "e1", "e2"), _reply(4, text="Done."),
+    ]
+    hook, parser, excerpt = _twin_facts(tmp_path, ledger)
+    # An edit under .claude/plans/ is no plan, and no file of yours.
+    assert (hook["plan_now"], parser["plan_now"]) == (False, False)
+    assert (hook["files"], parser["files"]) == (1, 1)
+    assert "Claude wrote a plan" not in excerpt
+    hook, parser, excerpt = _twin_facts(tmp_path, [
+        _note(0, TAG_IDS), _ask(1, "plan it"), _plan_call(2), _ok(3, "tu_p"), _reply(4, text="Planned.")
+    ])
+    assert (hook["plan_now"], parser["plan_now"]) == (True, True)
+    assert "Claude wrote a plan in this turn" in excerpt
+    # A call that carries no plan is none.
+    hook, parser, _excerpt = _twin_facts(tmp_path, [
+        _note(0, TAG_IDS), _ask(1, "plan it"), _plan_call(2, plan=""), _ok(3, "tu_p"), _reply(4, text="Planned.")
+    ])
+    assert (hook["plan_now"], parser["plan_now"]) == (False, False)
+
+
+@pytest.mark.parametrize("text, kind, errors", [
+    (_SENT_BACK + "rename the helper", "user-rejected", 0),
+    (_SENT_BACK, "user-rejected", 0),
+    ("The permission request was aborted", "user-rejected", 0),
+    ("cancelled", "interrupted", 0),
+    ("PreToolUse:ExitPlanMode hook error: [check.sh] needs a test step", "permission-rule", 1),
+    ("Blocked by a hook before it ran", None, 1),
+    ("Blocked by the auto mode classifier", "automode-blocked", 1),
+    ("The server-side auto mode classifier gave no verdict", "automode-unavailable", 1),
+])
+def test_both_twins_leave_your_answer_to_a_plan_out_of_the_tool_errors_but_not_a_hook_stopping_it(
+    tmp_path, text, kind, errors
+):
+    hook, parser, excerpt = _twin_facts(tmp_path, [
+        _note(0, TAG_IDS), _ask(1, "plan it"), _plan_call(2), _plan_answer(3, text, kind),
+        _reply(4, text="Rethinking."),
+    ])
+    assert (hook["tool_errors"], parser["tool_errors"]) == (errors, errors)
+    assert f"tool errors: {errors}" in excerpt
+    # What Haiku says of the work follows: a failed tool is a reason, a plan sent back is not.
+    assert HOOK.grounded("shift=redo why=tools", hook) == capture_tags.settle("shift=redo why=tools", parser)
+
+
+def test_both_twins_count_a_failing_tool_whatever_the_plan_did(tmp_path):
+    hook, parser, excerpt = _twin_facts(tmp_path, [
+        _note(0, TAG_IDS), _ask(1, "plan it"), _reply(2, tool_use_block("Bash", "tu_b", {"command": "false"})),
+        user_block_line([tool_result_block("tu_b", "Exit code 1", is_error=True)], timestamp=_ts(3)),
+        _plan_call(4), _plan_answer(5, _SENT_BACK + "smaller"), _reply(6, text="Again."),
+    ])
+    assert (hook["tool_errors"], parser["tool_errors"]) == (1, 1)
+
+
+def _queued_line(second: int, prompt: str, **overrides) -> dict:
+    fields = {"prompt": prompt, "commandMode": "prompt", "origin": {"kind": "human"}, **overrides}
+    line = attachment_line("queued_command", **fields)
+    line["timestamp"] = _ts(second)
+    return line
+
+
+def _ask_in_plan_mode(second: int) -> dict:
+    return user_str_line("plan it", origin={"kind": "human"}, timestamp=_ts(second), permissionMode="plan")
+
+
+_MODE = {"type": "permission-mode", "sessionId": "s"}
+
+
+@pytest.mark.parametrize("after, approved", [
+    ([_queued_line(4, "go ahead")], True),
+    ([_queued_line(4, "continue, but keep the old name")], False),
+    ([_queued_line(4, "also look at the cache layer")], False),
+    ([_queued_line(4, "go ahead", origin={"kind": "peer"}, isMeta=True)], False),
+    ([{**_MODE, "permissionMode": "default"}], True),
+    ([{**_MODE, "permissionMode": "acceptEdits"}], True),
+    ([{**_MODE, "permissionMode": "plan"}], False),
+    ([_ask(4, "go ahead")], True),
+    ([_ask(4, "also look at the cache layer")], False),
+    # The same go-ahead, queued and written as a line of yours.
+    ([_queued_line(4, "go ahead"), _ask(5, "go ahead")], True),
+])
+def test_both_twins_approve_a_plan_sent_back_on_the_same_lines(tmp_path, after, approved):
+    lines = [
+        _note(0, TAG_IDS), _ask_in_plan_mode(1), _plan_call(2),
+        _plan_answer(3, _SENT_BACK + "rename the helper", permissionMode="plan"), *after,
+        _reply(8, text="Building."),
+    ]
+    parsed = [t.plan_stats.outcome in ("approved", "approved_by_message") for t in _top(tmp_path, lines).turns if t.plan_stats]
+    plans, waiting, _mode = HOOK._plan_answers(_records(lines), HOOK_CATALOGUE["coaching"]["interrupt_prefix"], HOOK_CATALOGUE["coaching"])
+    assert parsed == [approved]
+    assert [plan["approved"] for plan in plans] == [approved]
+    assert (waiting is None) == approved
+
+
+def test_a_go_ahead_queued_before_the_plan_approves_nothing_in_either_twin(tmp_path):
+    lines = [
+        _note(0, TAG_IDS), _ask(1, "plan it"), _queued_line(2, "go ahead"), _plan_call(3),
+        _plan_answer(4, _SENT_BACK + "smaller"), _reply(5, text="Again."),
+    ]
+    [plan] = [t.plan_stats for t in _top(tmp_path, lines).turns if t.plan_stats]
+    plans, waiting, _mode = HOOK._plan_answers(_records(lines), HOOK_CATALOGUE["coaching"]["interrupt_prefix"], HOOK_CATALOGUE["coaching"])
+    assert plan.outcome == "rejected" and [p["approved"] for p in plans] == [False] and waiting is not None
+
+
 # -- workflow agents -----------------------------------------------------------------
 
 

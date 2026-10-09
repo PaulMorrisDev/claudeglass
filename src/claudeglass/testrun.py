@@ -10,8 +10,10 @@ a copy of the steps below, which ``tests/test_testrun.py`` holds to this
 one.
 
 A heredoc's body is dropped first: a script or commit message that
-mentions pytest runs nothing. The line is cut into commands at ``&&``,
-``||``, ``;``, ``|``, a closing bracket and line breaks. Each command
+mentions pytest runs nothing. The operators inside a quoted string are
+blanked, so ``git commit -m "Fix parser; pytest passes"`` is one command.
+The line is cut into commands at ``&&``, ``||``, ``;``, ``|``, a closing
+bracket and line breaks. Each command
 loses what comes before its program (a ``(`` or ``&``, ``VAR=value``,
 ``time``, ``timeout 60``, ``uv run``, ``npx``) and the folder and ``.exe``
 of the program word, so ``C:/Python311/python.exe -m pytest`` and
@@ -37,6 +39,7 @@ from .capture_catalogue import (
     TEST_NO_TARGET_PATTERN,
     TEST_PREFIX_PATTERN,
     TEST_PROGRAM_PATTERN,
+    TEST_QUOTED_PATTERN,
     TEST_RUNNER_PATTERN,
     TEST_TARGET_PATTERN,
     TEST_WHOLE_SUITE_PATTERN,
@@ -47,6 +50,7 @@ TARGETED = "targeted"
 
 _HEREDOC_RE = re.compile(TEST_HEREDOC_PATTERN)
 _SPLIT_RE = re.compile(TEST_COMMAND_SPLIT_PATTERN)
+_QUOTED_RE = re.compile(TEST_QUOTED_PATTERN)
 _PREFIX_RE = re.compile(TEST_PREFIX_PATTERN)
 _PROGRAM_RE = re.compile(TEST_PROGRAM_PATTERN)
 _RUNNER_RE = re.compile(rf"(?P<runner>{TEST_RUNNER_PATTERN})(?=\s|$)(?P<args>.*)")
@@ -62,7 +66,7 @@ def run_scope(command: str) -> str:
     """``"full"`` when ``command`` runs a whole suite, ``"targeted"`` when
     it runs only chosen tests, ``""`` when it runs none."""
     scope = ""
-    for part in _SPLIT_RE.split(_HEREDOC_RE.sub(r"\g<rest>", command)):
+    for part in _split(command):
         found = _part_scope(part)
         if found == FULL:
             return FULL
@@ -83,7 +87,25 @@ def command_parts(command: str) -> list[str]:
     program (an assignment, ``timeout 60``, ``uv run``) and the folder and
     ``.exe`` of the program word removed. ``shell_writes.changes_files``
     reads a command's program the same way (:func:`normalize`)."""
-    return [normalize(part) for part in _SPLIT_RE.split(_HEREDOC_RE.sub(r"\g<rest>", command))]
+    return [normalize(part) for part in _split(command)]
+
+
+def _split(command: str) -> list[str]:
+    """``command`` cut into its commands: heredoc bodies dropped and the
+    operators inside quoted strings blanked first, so a ``;`` in a commit
+    message or an echo is no end of a command. A quoted program path,
+    which holds no operator, is kept whole. A string handed to a shell's
+    ``-c`` is commands, so it loses only its quotes."""
+    text = _HEREDOC_RE.sub(r"\g<rest>", command)
+    return _SPLIT_RE.split(_QUOTED_RE.sub(_quoted, text))
+
+
+def _quoted(match: re.Match) -> str:
+    """A quoted string with its operators blanked, or a shell's ``-c``
+    script without its quotes (:data:`TEST_QUOTED_PATTERN`)."""
+    if match["shell"]:
+        return match["shell"] + (match["single"] if match["single"] is not None else match["double"])
+    return _SPLIT_RE.sub(" ", match.group())
 
 
 def normalize(part: str) -> str:

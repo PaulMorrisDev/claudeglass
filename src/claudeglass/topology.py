@@ -933,8 +933,8 @@ def _build_report_proxy_table(stats: TopologyStats) -> Table:
         columns=columns,
         rows=rows,
         notes=[
-            "Report size is the report each subagent handed back, in"
-            f" characters divided by characters per token, {stats.calibration.basis()}. It is measured"
+            "Report size is the report each subagent handed back, in tokens counted from its characters."
+            f" {stats.calibration.sentence()} It is measured"
             " where the report arrived: the Agent tool's result in the parent,"
             " or a background agent's task notification. When the parent side wasn't found,"
             " it falls back to the output tokens of the subagent's own last"
@@ -1206,8 +1206,8 @@ def _build_composition_table(stats: TopologyStats) -> Table:
         columns=columns,
         rows=rows,
         notes=[
-            "Tool result and Claude Code note token counts are approximate:"
-            f" characters divided by characters per token, {stats.calibration.basis()}. No tokenizer"
+            "Tool result and Claude Code note token counts are approximate, worked out from characters."
+            f" {stats.calibration.sentence()} No tokenizer"
             " reads your transcripts, to keep them private.",
         ],
     )

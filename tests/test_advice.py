@@ -843,7 +843,7 @@ def _batch_probes(agent_type: str = "Explore", **kw) -> Recommendation:
             ("Replies it made", 400, "habits.habits_probes", agent_type),
             ("Single read-only calls", 190, "habits.habits_probes", agent_type),
             ("Of them by shell command", kw.pop("shell", 30), "habits.habits_probes", agent_type),
-            ("Replies a batch would spare", 12.0, "habits.habits_probes", agent_type),
+            ("Re-reads a batch would spare", 12.0, "habits.habits_probes", agent_type),
         ],
         **kw,
     )

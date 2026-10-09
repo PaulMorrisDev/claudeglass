@@ -640,7 +640,8 @@ and points at Spend › Savings.
    evidence link's table is). In the table on that page, the `card` column
    of the parts table and the `hint` column of the advice table are links
    to a check too (`withCheckLinks` in grid.js); a harness-fixed part says
-   "no setting known" and a cell no check covers says "No advice". The
+   "no setting known", a not-measured part says nothing, and a cell no check
+   covers says "No advice". The
    Overview's checklist has the matching `cost-centres` row, which is
    information and never "worth a look".
 

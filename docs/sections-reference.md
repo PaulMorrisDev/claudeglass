@@ -358,7 +358,10 @@ Simulation assumptions: [Concepts section 4](concepts.md#4-ttl-simulation-assump
   share split by signature: `full_expiry_*` (TTL-addressable: the entry
   expired, so a longer TTL could have kept it) vs.
   `prefix_invalidated_*` (content-addressable: something upstream of
-  the cached prefix changed, which no TTL choice fixes).
+  the cached prefix changed, which no TTL choice fixes). A `full-expiry`
+  turn whose wait was shorter than the lifetime the previous call wrote
+  (it read only the shared start) counts under `prefix_invalidated_*`,
+  since the clock did not expire it.
 - `ttl_cache_economy` — per agent type plus an `overall` row:
   `tokens_written`, `tokens_read`, `write_usd`, `read_usd`,
   `uncached_equivalent_usd` (every cache token priced as plain input),
@@ -897,14 +900,21 @@ other.
   largest by name and always the Artifact tool and PowerShell, the rest
   together), the built-in tools an agent type
   rarely uses (its allowlist), MCP servers, CLAUDE.md files, auto memory,
-  skills, hook output and what no measurement covers. Each part is counted
+  skills, hook output, the agent list (`roster`, "Agent list") and what no
+  measurement covers (`other`, "Not itemised"). Each part is counted
   once, in the lever that removes it: MCP server tools, names and
   instructions are the connector's even where an allowlist could also drop
   the tool definitions; in a main session the MCP servers built into the
-  desktop app are a harness-fixed part of their own; CLAUDE.md and memory
-  are apart. A controllable part
-  carries the check that covers it (`card`); a harness-fixed part (the
+  desktop app (`desktop_servers`) are a harness-fixed part of their own;
+  CLAUDE.md and memory are apart. `desktop_servers` applies only to a main
+  session from the desktop app, where the tool search table calls them
+  built in. A controllable part
+  carries the check that covers it (`card`): the agent list shares the
+  `tools` check with an agent's allowlist. A harness-fixed part (the
   Artifact tool, PowerShell, the system prompt) says "no setting known".
+  `other` has the lever `unmeasured`, shown as "Not measured": it holds
+  what nothing measured, such as an agent's brief or a session's first
+  prompt, and says nothing about a setting.
   Rewrite and post-compaction cells are split into the starting prompt they
   wrote again (`prefix`) and the conversation. Sizes are estimates from
   characters at the characters per token measured on your own sessions.
@@ -1080,7 +1090,9 @@ outcome; one nothing rated is a `Piece` with no outcome
 the ones with an outcome (`habits_outcomes`, `cost_per_met`). A message is
 *redone* when a redo or fix tag, a correction, or later rework of its piece
 followed it (never an aside: a message you sent while background work ran
-that changed no files), and `redo_cost` is what the whole chain of rework cost,
+that changed no files, and never a plan-feedback round: a plan you sent back
+or a message in plan mode is planning, whatever its words or tag say), and
+`redo_cost` is what the whole chain of rework cost,
 counted once on the message that delivered the work. Rates per message
 (the trends here and the per-100 rates in `prompting`) divide by the
 messages that asked for something (`CycleFact.asks`, `pieces.asks`): a
@@ -1202,8 +1214,8 @@ columns of a table still divide by that table's own messages.
   `plan_first` (prompting) is priced at half the follow-ups' cost where you
   said so. With most hard asks already planned, `plan_hard` has no row
   and the digest's "Already doing this" says so. A follow-up you called
-  a change of mind (`why=changed`), or
-  new to the plan (`plan=new`), is no rework: it is left out of `redone`
+  a change of mind (`why=changed`), new to the plan (`plan=new`), or
+  something you told the plan check was not a fix (`none`), is no rework: it is left out of `redone`
   and the waste figures at the source (`CycleFact.excused`), so every
   table below agrees. Answers from `slow` (the older question) count as
   `why`.
@@ -1213,8 +1225,8 @@ columns of a table still divide by that table's own messages.
   `shift=fix` tag or a correction on the next message, or later rework of
   the same piece of work), and met their goal.
   A note says how many messages that looked redone are left out of
-  Redone because you called the next message a change of mind or new to
-  the plan.
+  Redone because you called the next message a change of mind, new to
+  the plan, or not a fix.
 - `habits_briefs` — per brief word (`clear`, `partial`, `vague`):
   messages, per message, redone, met the goal, and the lines most
   often missing. The notes give the like-for-like comparison behind the
@@ -1289,8 +1301,9 @@ columns of a table still divide by that table's own messages.
   `plan_covered` (the plan said it), `plan_gap` (it left it out) and
   `plan_new` (you thought of it later), from the plan check and the plan
   question together. Four columns come from the transcripts and need no
-  feedback: `work_pieces` (every piece of work in the shape, rated or
-  not), `plans_built` (pieces with an approved plan and work after it),
+  feedback: `work_pieces` (every piece of work, rated or
+  not, once, in the shape of the session it began in: the same pieces the
+  Rework section counts), `plans_built` (pieces with an approved plan and work after it),
   `plans_fixed` (of those, the plans with `habits.PLAN_FIXES_MIN`, three,
   or more corrections, adjustments or other rework after them) and
   `plan_fixes` (all of those fixes). Fixes you typed while Claude worked
@@ -1340,9 +1353,10 @@ columns of a table still divide by that table's own messages.
   `cat`, `head`, `grep` or `git log`, and nothing else; counted by the
   message the call came in, so calls already sent together count once), how many of
   those were a shell command, the runs of two or more such replies in a
-  row, and `batch_cost`: what the replies after the first of each run
-  cost at list price. That is an upper bound, since it takes the lookups
-  of a run to be independent. Rows with no single lookups are left out,
+  row, and `batch_cost`: the cache reads of the replies after the first of
+  each run, at list price. A batched message still writes the tool results
+  and names the calls, so those are left out. That is an upper bound, since
+  it takes the lookups of a run to be independent. Rows with no single lookups are left out,
   costliest first. It feeds `research_split`, `explore_research` and
   `name_files`, "lookups before the first edit", and the
   `agent-batch-probes` card. The Overview's **More detail** links to it.
@@ -1586,7 +1600,8 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
 - `prompting_habits` — one row per habit seen in the window, the costliest
   first: `habit` (`drip_feed`, `repeat_ask`, `status_poll`, `stop_loop`, `plan_first`,
   `vague_fix`, `big_paste`, `context_carried`), `times`, `per_100` (per 100 of your
-  messages), `cost` (list-price USD; empty for `plan_first` and
+  messages that asked for something: not a go-ahead, a status check, a
+  thank-you or a reply to a plan, so `status_poll` can pass 100), `cost` (list-price USD; empty for `plan_first` and
   `vague_fix`, and for any habit with nothing priced, which the page shows
   as "Not priced", never as a zero), `basis`
   (what the cost counts), `trend` (`falling`, `rising` or `steady` over
@@ -2381,7 +2396,8 @@ cites the cell it used:
   from `habits_probes`, when the type made 100 replies or more, a
   quarter or more of them a single read-only call, and half of
   `batch_cost` is $1 or more (`agent_batch_probes_min_replies`,
-  `_share_pct`, `_min_saving_usd` and `_saving_factor`). The halving is
+  `_share_pct`, `_min_saving_usd` and `_saving_factor`). `batch_cost` is the
+  re-reads only: the tool results are written once either way. The halving is
   because some lookups of a run depend on one another. It cites the four
   cells it used and offers one line to add to the agent's definition or
   the workflow prompt that starts it: "Batch independent Read/Grep/Glob

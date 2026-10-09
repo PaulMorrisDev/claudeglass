@@ -64,7 +64,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Callable
+from typing import Callable, Sequence
 
 from . import desktop_servers, known_savers
 from . import snapshots as snapshots_mod
@@ -920,6 +920,16 @@ def is_removable_kind(kind: str) -> bool:
     return kind in _REMOVABLE
 
 
+def built_in_names(servers: Sequence[McpServerRow]) -> frozenset[str]:
+    """Every name (a row's own and its aliases) of the servers that
+    ``servers`` calls built into the desktop app: the names a page that
+    prices the base must also file as the app's own, so that it never
+    disagrees with this table about one server."""
+    return frozenset(
+        name for row in servers if row.kind == KIND_DESKTOP_BUILTIN for name in (row.server, *row.aliases)
+    )
+
+
 def server_label(server: str) -> str:
     """A server's name for a sentence: a claude.ai connector's own name
     ("Team Notes" for ``claude_ai_Team_Notes``), the start of the ID the
@@ -1082,6 +1092,7 @@ __all__ = [
     "ToolSearchStats",
     "ToolSearchThresholds",
     "build_section",
+    "built_in_names",
     "compute_tool_search",
     "is_removable_kind",
     "server_fix",

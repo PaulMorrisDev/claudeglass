@@ -32,7 +32,7 @@ from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing
 from claudeglass.service.coaching_job import CoachingJob
 
-from helpers import attachment_line, turn_line, user_str_line, write_jsonl
+from helpers import attachment_line, tool_result_block, tool_use_block, turn_line, user_block_line, user_str_line, write_jsonl
 
 SCRIPT = Path(str(resources.files("claudeglass") / "hooks" / cat.HOOK_SCRIPT))
 MODULE = SCRIPT.with_name(cat.HOOK_MODULE)
@@ -2884,6 +2884,29 @@ def test_the_reply_after_a_queued_correction_follows_a_push_back(tmp_path):
                              origin={"kind": "human"}, timestamp=_line_at(1))
     result = _session(tmp_path, [_human("rename the helper", 0), queued, _said_back("My mistake.", 2)])
     assert result.turns[0].admit_caught == "user"
+
+
+@pytest.mark.parametrize("feedback, caught", [
+    ("no, you missed the db migration step", "user"),
+    ("why not reuse the cache?", "user"),
+    ("looks fine to me", "self"),
+    ("", "self"),
+])
+def test_words_typed_into_a_plans_dialog_push_back_when_they_critique_or_ask(tmp_path, feedback, caught):
+    sent_back = (
+        "The user doesn't want to proceed with this tool use. The tool use was rejected (eg. if it was a file edit, "
+        "the new_string was NOT written to the file). To tell you how to proceed, the user said:\n"
+    )
+    result = _session(tmp_path, [
+        _human("plan the migration", 0),
+        turn_line(content=[tool_use_block("ExitPlanMode", "tu_p", {"plan": "1. Edit src/a.py\n2. Run tests/test_a.py"})],
+                  model="claude-widget-9", timestamp=_line_at(1), cache_read_input_tokens=5_000),
+        user_block_line([tool_result_block("tu_p", sent_back + feedback, is_error=True)], timestamp=_line_at(2),
+                        toolDenialKind="user-rejected"),
+        _said_back("You're right, I missed the migration step.", 3),
+    ])
+    assert result.turns[-1].admit_candidate is True
+    assert result.turns[-1].admit_caught == caught
 
 
 def test_a_tip_the_reply_disowns_is_marked_and_a_plain_misfire_mention_is_not(tmp_path):

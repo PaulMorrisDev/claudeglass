@@ -851,6 +851,46 @@ def test_the_copy_the_project_files_check_and_the_agent_stack_add_keeps_to_the_h
     claude_md_review._NAMES.clear()
 
 
+def test_the_notes_under_the_agent_startup_and_cost_centre_tables_keep_to_the_help_rules():
+    """The notes the Agents page shows under the startup breakdown, the tools
+    list, the tools-list diet and the servers tables, the unused-at-startup
+    and baseline tables and the four cost-centre tables, both with the
+    characters per token measured and with too few first calls to measure
+    them. A sentence built on the ratio's basis read "at characters per token
+    assumed at 4 characters per token" in the second case."""
+    from claudeglass import calibration, context_budget, cost_centres
+
+    measured = calibration.Calibration(
+        tool={"claude-sonnet-5": 4.5}, text={"claude-sonnet-5": 3.5}, default_family="claude-sonnet-5"
+    )
+    strings = []
+    for case, found in (("assumed", calibration.Calibration()), ("measured", measured)):
+        stats = context_budget.ContextBudgetStats(calibration=found)
+        tables = [
+            context_budget._build_startup_table(stats),
+            context_budget._build_tools_table(stats),
+            context_budget._build_diet_table(stats),
+            context_budget._build_servers_table(stats),
+            context_budget._build_unused_table(stats),
+            context_budget._build_baseline_table(stats, {}),
+        ]
+        strings += [(f"{case} ratio", found.sentence()), (f"{case} basis", found.basis())]
+        for table in tables:
+            assert table.notes, table.name
+            strings += [(f"{case} {table.name} note", note) for note in table.notes]
+    tables = cost_centres.build_tables(cost_centres.CostCentres())
+    assert len(tables) == 4
+    for table in tables:
+        assert table.notes, table.name
+        strings += [(f"{table.name} note", note) for note in table.notes]
+        strings += [(f"{table.name} value {raw}", label) for raw, label in table.value_labels.items()]
+    strings += [(f"lever {lever}", label) for lever, label in cost_centres.LEVER_LABELS.items()]
+    strings += [(f"part {part}", label) for part, (label, _lever) in cost_centres.PARTS.items()]
+    for where, text in strings:
+        _plain(re.sub(r"\{\{page:[a-z/-]+\}\}", "the Checks page", text), where)
+    assert len(strings) > 60
+
+
 def test_the_copy_the_plan_checks_and_the_plan_rounds_card_keep_to_the_help_rules(tmp_path):
     """The "Plans sent back" and "Builds after a plan" checks: their question,
     why and what each says in every case; and the card that asks for a

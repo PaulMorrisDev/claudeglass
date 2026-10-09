@@ -1425,6 +1425,76 @@ def test_a_piece_you_rated_is_not_drawn_a_second_time(tmp_path, pricing):
     assert [(p.source, p.outcome) for p in rated.pieces] == [("dashboard rating", "partly")]
 
 
+def test_the_shape_table_counts_each_piece_of_work_once_however_it_was_rated(tmp_path, pricing):
+    rating = {"outcome": "partly"}
+
+    def pieces_of_work(sessions, ratings):
+        h = habits.collect(NS(sessions=sessions), pricing, ratings=ratings)
+        (row,) = _rows(_table(habits.section_from(h), "habits_by_shape"))
+        assert row["work_pieces"] == len(h.work_pieces)
+        return row["work_pieces"], len(h.pieces)
+
+    # Rated by a /cg-feedback run and again on the dashboard: two rated rows, one piece of work.
+    both = _feedback_session(tmp_path, "both", _say("outcome", "partly"), rate_first_only=True)
+    assert pieces_of_work([both], {"both": rating}) == (1, 2)
+    # A session of two pieces of work (a long silence between them), rated once on the dashboard: one rated row.
+    split = _work_session(tmp_path, "split", limited_session_lines(limit=False))
+    assert pieces_of_work([split], {"split": rating}) == (2, 1)
+    # A piece that carries on in a session opening with a handoff is one piece, counted in the shape it began in.
+    first = _work_session(tmp_path, "s1", [_said(0, "add the login form to src/app.py"), *_edit_reply(0, 0)])
+    second = _work_session(tmp_path, "s2", [_said(600, "Carry on from the plan below. " * 60), *_edit_reply(600, 1)])
+    assert pieces_of_work([first, second], {}) == (1, 2)
+
+
+def _lookup(second: int, n: int, **usage) -> list[dict]:
+    """A reply that makes one Read and nothing else, and its result: it reads 40k
+    cached tokens, writes 2k and says 300 (``usage`` changes that)."""
+    fields = {"cache_read_input_tokens": 40_000, "cache_creation_input_tokens": 2_000, "output_tokens": 300, **usage}
+    return [
+        turn_line(content=[tool_use_block("Read", f"tu_r{n}", {"file_path": f"src/f{n}.py"})], model=MODEL,
+                  timestamp=_ts(second), **fields),
+        user_block_line([tool_result_block(f"tu_r{n}", "ok")], timestamp=_ts(second + 1)),
+    ]
+
+
+def test_a_batch_is_priced_from_the_cache_reads_of_the_replies_after_the_first(tmp_path, pricing):
+    # The second lookup is a plain reply, the third runs in fast mode (twice the rates).
+    top = _parse(tmp_path, "top.jsonl", [
+        _said(0, "find where the cookie is set"),
+        *_lookup(1, 0), *_lookup(3, 1), *_lookup(5, 2, speed="fast"), _reply(7, text="Found it."),
+    ], kind="top-level")
+    bundle = NS(top=top, subs=[], session_id="s1", project_dir="p", slug="p")
+    (cycle,) = habits.collect(NS(sessions=[bundle]), pricing).cycles
+    assert (cycle.probe_calls, cycle.probe_runs) == (3, 1)
+    priced = [price_turn(t, pricing.resolve_model(MODEL)) for t in top.turns[1:3]]
+    reads = sum(p.cache_read_cost for p in priced)
+    # A batched message still writes the tool results and names the calls: only the re-reads are spared.
+    assert cycle.probe_batch_cost == pytest.approx(reads)
+    assert 0 < reads < sum(p.total for p in priced)
+    assert priced[1].fast_applied and priced[1].cache_read_cost == pytest.approx(2 * priced[0].cache_read_cost)
+
+
+def test_an_agents_batch_is_priced_from_its_cache_reads_too(tmp_path, pricing):
+    top = _parse(tmp_path, "top.jsonl", [
+        _said(0, "find it"),
+        _reply(1, tool_use_block("Agent", "toolu_A", {"prompt": "find it"})),
+        user_block_line([tool_result_block("toolu_A", "found it")], timestamp=_ts(20)),
+        _reply(21, text="Found it."),
+    ], kind="top-level")
+    sub = _parse(tmp_path, "agent-a1.jsonl", [
+        user_str_line("find it", timestamp=_ts(2)),
+        *_lookup(3, 0), *_lookup(5, 1), *_lookup(7, 2), _reply(9, text="src/f0.py"),
+    ], kind="subagent", agent_id="agent-a1", agent_type="Explore", tool_use_id="toolu_A")
+    h = habits.collect(NS(sessions=[NS(top=top, subs=[sub], session_id="s1", project_dir="p", slug="p")]), pricing)
+    (agent,) = h.agents
+    assert (agent.probe_calls, agent.probe_runs) == (3, 1)
+    priced = [price_turn(t, pricing.resolve_model(MODEL)) for t in sub.turns[1:3]]
+    assert agent.probe_batch_cost == pytest.approx(sum(p.cache_read_cost for p in priced))
+    assert agent.probe_batch_cost < sum(p.total for p in priced)
+    rows = {r["agent_type"]: r for r in _rows(_table(habits.section_from(h), "habits_probes"))}
+    assert rows["Explore"]["batch_cost"] == pytest.approx(agent.probe_batch_cost)
+
+
 def test_the_whole_chain_of_corrections_is_the_redo_cost_of_the_work_before_it(tmp_path, pricing):
     h = habits.collect(_corrected_session(tmp_path, corrections=3), pricing)
     delivered, *chain = h.cycles
@@ -1828,6 +1898,40 @@ def test_a_correction_you_told_the_plan_check_was_not_a_fix_is_not_counted(tmp_p
 
     assert [p.fixes for p in build("a", "gap").plan_fixes] == [1]
     assert [p.fixes for p in build("b", "none").plan_fixes] == [0]
+
+
+@pytest.mark.parametrize(
+    "text, tag",
+    [
+        # A correction typed in plan mode, and a revised plan Claude tagged as a redo: planning, not rework.
+        (_CORRECTION, ""),
+        ("make step two smaller", "[cg: task=feature shift=redo]"),
+    ],
+)
+def test_a_plan_feedback_round_never_marks_the_planning_ask_redone(tmp_path, pricing, text, tag):
+    tagged = [{"type": "text", "text": tag}] if tag else []
+    lines = [
+        _note(0, ["task", "brief", "level", "shift"]),
+        _said(1, "plan the retry for src/app.py", permissionMode="plan"), _plan_call(2),
+        _said(10, text, permissionMode="plan"),
+        turn_line(content=[tool_use_block("ExitPlanMode", "tu_p", _PLAN_INPUT), *tagged], model=MODEL, timestamp=_ts(11)),
+        user_block_line([tool_result_block("tu_p", "User has approved your plan.")], timestamp=_ts(12)),
+        *_edit_reply(13, 0),
+    ]
+    h = habits.collect(NS(sessions=[_work_session(tmp_path, "s1", lines)]), pricing)
+    planning, revised = h.cycles
+    assert planning.planned and revised.planned
+    assert (planning.redone, planning.redo_cost, planning.excused) == (False, 0.0, False)
+    [piece] = h.work_pieces
+    assert piece.rework == 0
+    # The same words outside plan mode, after the build, make the build redone.
+    after = [
+        _note(0, ["task", "brief", "level", "shift"]),
+        _said(1, "add the login form to src/app.py"), *_edit_reply(1, 0),
+        _said(20, text), turn_line(content=[{"type": "text", "text": f"Fixed.\n{tag}"}], model=MODEL, timestamp=_ts(21)),
+    ]
+    delivered, _fix = habits.collect(NS(sessions=[_work_session(tmp_path, "s2", after)]), pricing).cycles
+    assert delivered.redone
 
 
 def test_cycles_hold_the_messages_that_asked_for_something(tmp_path, pricing):
@@ -2877,8 +2981,8 @@ def test_a_change_of_mind_or_a_fix_new_to_the_plan_is_not_rework(tmp_path, prici
     assert bool(by_task.notes) is (not rework)
     if not rework:
         assert by_task.notes == [
-            "1 message that looked redone is left out of Redone: you called the next message a change of mind "
-            "or new to the plan."
+            "1 message that looked redone is left out of Redone. You called the next message a change of mind, "
+            "new to the plan, or not a fix."
         ]
 
 
@@ -2891,19 +2995,59 @@ def test_rework_stays_when_your_answers_rate_another_piece_than_the_one_redone(t
     assert first.redone and not first.excused and second.outcome is None
 
 
+@pytest.mark.parametrize(
+    "why, causes",
+    [
+        # Said the request left things out: that is the cause of the rework.
+        ("left_out", (("left_out", "feedback", 1),)),
+        # Said it was a change of mind: no rework, as the habits say too.
+        ("changed", ()),
+    ],
+)
+def test_a_dashboard_rating_still_answers_for_a_session_with_a_declined_feedback_run(tmp_path, pricing, why, causes):
+    def collect(name, declined):
+        lines = [
+            _said(0, "add the login form to src/app.py"), *_edit_reply(0, 0),
+            _said(20, _CORRECTION), *_edit_reply(20, 1, output=1000),
+        ]
+        if declined:
+            lines += feedback_run(40, None, declined=True)
+        bundle = _work_session(tmp_path, name, lines)
+        return habits.collect(NS(sessions=[bundle]), pricing, ratings={name: {"outcome": "partly", "why": [why]}})
+
+    # A /cg-feedback run you declined answers nothing, so it changes nothing.
+    for h in (collect("plain", False), collect("declined", True)):
+        [piece] = h.work_pieces
+        assert piece.causes == causes and piece.rework == len(causes)
+        first, _fix = h.cycles
+        assert first.excused is (not causes) and first.redone is bool(causes)
+        assert first.left_out is (why == "left_out")
+
+
 def test_a_building_message_is_not_rework_whatever_your_answers_say(tmp_path, pricing):
     answers = {**_say("outcome", "partly"), **_say("why", "changed")}
     h = habits.collect(NS(sessions=[_feedback_session(tmp_path, "s1", answers, fix=False)]), pricing)
     assert not any(c.redone or c.excused for c in h.cycles)
 
 
-@pytest.mark.parametrize("word, rework", [("new", False), ("covered", True), ("gap", True), ("none", True)])
-def test_a_fix_the_plan_check_calls_new_is_not_rework_and_the_checks_are_counted(tmp_path, pricing, word, rework):
+@pytest.mark.parametrize("word, rework", [("new", False), ("covered", True), ("gap", True), ("none", False)])
+def test_a_fix_the_plan_check_calls_new_or_not_a_fix_is_not_rework_and_the_checks_are_counted(
+    tmp_path, pricing, word, rework
+):
     h = habits.collect(NS(sessions=[_plan_fix_session(tmp_path, "s1", word)]), pricing)
     built, fix = h.cycles
     assert fix.plan_check == word and built.plan_check == ""
     assert built.redone is rework and built.excused is (not rework)
+    assert built.redo_cost == (pytest.approx(fix.cost) if rework else 0.0)
     assert h.plan_checks == (Counter({("plan_build", word): 1}) if word != "none" else Counter())
+    # The Rework section agrees: the pieces' rule excuses the same two answers.
+    [piece] = h.work_pieces
+    assert piece.rework == (1 if rework else 0)
+    by_task = _table(habits.section_from(h), "habits_by_task")
+    assert by_task.notes == ([] if rework else [
+        "1 message that looked redone is left out of Redone. You called the next message a change of mind, "
+        "new to the plan, or not a fix."
+    ])
 
 
 def test_a_piece_keeps_what_its_followups_cost_and_what_you_said_about_them(tmp_path, pricing):

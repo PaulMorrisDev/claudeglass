@@ -863,8 +863,8 @@ def _explain_agent_batch_probes(rec: Recommendation, ctx: _Context) -> None:
     rec.action = f"Add \"{BATCH_PROBES_LINE}\" to {where}. Lookups that don't depend on each other then share one reply."
     rec.estimated_saving = ctx.money(rec.saving_usd, prefix="At most ")
     rec.saving_basis = ctx.basis(
-        "The replies after the first of each run of single lookups, at list price, halved because some lookups "
-        "need the answer to the one before."
+        "The cache reads of the replies after the first of each run of single lookups, at list price, halved. "
+        "Some lookups need the answer to the one before. The tool results are still written once."
     )
 
 

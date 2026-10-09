@@ -67,7 +67,7 @@ from typing import Callable
 
 from .model import Column, CostBreakdown, Section, Table, TranscriptResult, Turn
 from .pricing import ModelRates, ResolvedRates, effective_rates, price_turn
-from .recache import RecacheThresholds
+from .recache import RecacheThresholds, expired_by_clock, write_ttl_s
 
 #: Plan Appendix A4's TTL simulation assumptions, printed verbatim in the
 #: report's "## Assumptions" block (``ReportMeta.assumptions``), plus the
@@ -78,6 +78,9 @@ ASSUMPTIONS: list[str] = [
     "cacheable prefix C_i = cache_read_i + cache_creation_i",
     "a hit refreshes TTL so survival depends only on gap_s",
     "prefix-invalidated turns keep their observed split under every policy (no double counting)",
+    "a turn rebuilt after a summary keeps its observed split under every policy, and a turn that read only the "
+    "shared start although the wait was shorter than the lifetime the previous call wrote keeps it under any "
+    "policy at least as long as its wait",
     "reads are priced at the flat cache_read rate",
     "compaction shrink clamps write at 0",
     "gap is measured from the start of one request to the start of the next",
@@ -336,9 +339,10 @@ def _cache_tokens_at_input_rate(turn: Turn, rates: RatesArg) -> float:
 
 
 def _recache_classification(t: Turn, th: TtlThresholds | None = None) -> str | None:
-    """"full-expiry" | "prefix-invalidated" | ``None`` for one priced
-    turn, for item 5 (TTL-addressable share) and ``simulate``'s own
-    fallback branch.
+    """"full-expiry" | "prefix-invalidated" | "post-compaction" |
+    "limit-expiry" | ``None`` for one priced turn, for item 5
+    (TTL-addressable share) and ``simulate``'s own fallback branch. Only a
+    set ``recache_signature`` can give "post-compaction".
 
     Prefers ``t.recache_signature`` (``recache.py``'s own classification,
     set by ``recache.detect``/``recache.apply``) when set. Falls back,
@@ -376,6 +380,24 @@ def _recache_classification(t: Turn, th: TtlThresholds | None = None) -> str | N
             return "limit-expiry"
         return "full-expiry" if t.cache_read_tokens < th.full_expiry_cr else "prefix-invalidated"
     return None
+
+
+def _read_only_expiry(t: Turn, classification: str | None, before_ttl: float | None) -> bool:
+    """Whether ``t`` is a "full-expiry" turn the clock did not cause: its
+    wait was shorter than the lifetime the previous call wrote
+    (``before_ttl``, carried forward from the last call that wrote), yet
+    it read next to nothing. ``recache.detect`` labels it "full-expiry"
+    by its read alone (its rule 4). Nothing about the cache lifetime
+    explains it, so no lifetime policy could have prevented it: the
+    simulation keeps its observed split and item 5 does not count it as
+    TTL-addressable. ``False`` when the wait or the lifetime is unknown,
+    since then nothing shows the clock did not do it."""
+    return (
+        classification == "full-expiry"
+        and t.gap_s is not None
+        and before_ttl is not None
+        and not expired_by_clock(t.gap_s, before_ttl)
+    )
 
 
 @dataclass(slots=True)
@@ -435,6 +457,13 @@ def simulate(
       double counting the two causes). The fallback means this branch is
       reachable even in a pipeline that never called
       ``recache.apply``/``recache.detect`` on the transcript first.
+    - So does a "post-compaction" turn (the summary has to be written
+      under any TTL), and a "full-expiry" turn the clock did not cause: it
+      read next to nothing although its wait was shorter than the
+      lifetime the previous call wrote (``recache.detect``'s rule 4; see
+      ``_read_only_expiry``). For the latter the split holds only while
+      ``gap_s <= policy_s``: a policy shorter than the wait would have let
+      the clock expire it, so it takes the full rewrite below.
     - A turn with unknown ``gap_s`` also carries its observed split
       (nothing to simulate) and is counted in ``unsimulatable``.
     - Otherwise: ``gap_s <= policy_s`` means the previous write's TTL
@@ -455,6 +484,9 @@ def simulate(
     turns = normalize_ttl_split(turns, th)
     priced = _priced_turns(turns)
     prev_c = 0
+    # How long the last call that wrote a cache entry made it last, carried
+    # forward as ``recache.detect`` does (synthetic turns are skipped there too).
+    prev_ttl: float | None = None
     cost = 0.0
     write_tokens = 0
     read_tokens = 0
@@ -465,7 +497,13 @@ def simulate(
         classification = _recache_classification(t, th) if i > 0 else None
         if i == 0:
             read, write = 0, c
-        elif classification == "prefix-invalidated":
+        elif (
+            classification in ("prefix-invalidated", "post-compaction")
+            # A read-only expiry stays inside the lifetime it was written
+            # for; a policy shorter than the wait still lets the clock
+            # expire it, so only a wait within the policy keeps the split.
+            or (_read_only_expiry(t, classification, prev_ttl) and t.gap_s <= policy_s)
+        ):
             read, write = t.cache_read_tokens, t.cache_creation_tokens
         elif classification == "limit-expiry":
             # Usage-limits addition (see model.py's/parse.py's module
@@ -491,6 +529,8 @@ def simulate(
         write_tokens += write
         read_tokens += read
         prev_c = c
+        if not t.is_synthetic:
+            prev_ttl = write_ttl_s(t) or prev_ttl
 
     return SimResult(
         cost=cost,
@@ -1185,6 +1225,8 @@ class TtlStats:
         near_5m_hit, near_5m_miss, near_1h_hit, near_1h_miss = _near_miss_bounds(th)
         acc.priced_turns += len(priced)
         n = len(priced)
+        # As in simulate: the lifetime the last call that wrote made its entry last.
+        prev_ttl: float | None = None
         for i, t in enumerate(priced):
             turn_rates = lookup(t.model)
             if turn_rates is None:
@@ -1333,16 +1375,20 @@ class TtlStats:
                     acc.premium_5m_would_expire_tokens += w_i
 
             # Item 5: TTL-addressable (full-expiry) vs content-addressable
-            # (prefix-invalidated) re-cache tokens/USD.
+            # (prefix-invalidated) re-cache tokens/USD. A full-expiry turn
+            # the clock did not cause (see _read_only_expiry) is content-
+            # addressable: a longer lifetime would not have saved it.
             classification = _recache_classification(t, th)
             if classification in ("full-expiry", "prefix-invalidated"):
                 write_cost = price_turn(t, turn_rates).cache_write_cost
-                if classification == "full-expiry":
+                if classification == "full-expiry" and not _read_only_expiry(t, classification, prev_ttl):
                     acc.addressable_full_expiry_tokens += t.cache_creation_tokens
                     acc.addressable_full_expiry_usd += write_cost
                 else:
                     acc.addressable_prefix_invalidated_tokens += t.cache_creation_tokens
                     acc.addressable_prefix_invalidated_usd += write_cost
+            if not t.is_synthetic:
+                prev_ttl = write_ttl_s(t) or prev_ttl
 
         # Item 1: wasted writes (needs the whole priced list at once, to
         # look ahead across possibly many turns — see _accumulate_waste).
@@ -1864,11 +1910,14 @@ def build_section(
         notes=[
             "A longer cache lifetime can prevent a rebuild after the cache expired. It"
             " can't prevent one after a change broke the cache: the cached content itself"
-            " changed. Each reply takes the cache-rebuild check's own verdict. When that"
-            " check hasn't run, a reply after the first counts as a rebuild if two things"
-            f" hold. Its context is over {th.ctx_floor:,} tokens, and it read less than"
-            f" {th.cr_ratio:.0%} of it from the cache. It counts as expired when it read"
-            f" under {th.full_expiry_cr:,} tokens."
+            " changed. Each reply takes the cache-rebuild check's own verdict. A reply"
+            " that read only the start every session shares, after a wait shorter"
+            " than the cache lifetime, counts as broken. The clock didn't expire it."
+            " When that check hasn't run, a reply after the first counts as a rebuild if"
+            f" two things hold. Its context is over {th.ctx_floor:,} tokens, and it read"
+            f" less than {th.cr_ratio:.0%} of it from the cache. It counts as expired when"
+            f" it read under {th.full_expiry_cr:,} tokens, unless its wait was shorter than"
+            " the cache lifetime."
         ],
     )
 

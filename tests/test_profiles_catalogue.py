@@ -5,6 +5,7 @@ profiles and :func:`suggest`'s deterministic archetype/purpose mapping.
 from __future__ import annotations
 
 import tomllib
+import zipfile
 from pathlib import Path
 
 import pytest
@@ -74,6 +75,24 @@ def test_every_catalogue_profile_round_trips_through_dump_and_load(profile_id):
 
 
 def test_get_returns_none_for_unknown_id():
+    assert get("not-a-real-profile") is None
+
+
+def test_the_catalogue_is_read_from_inside_a_zip(tmp_path, monkeypatch):
+    """The single-file .pyz keeps the catalogue inside a zip, where a path
+    built from ``__file__`` opens nothing: the files are read through
+    ``importlib.resources`` so a zip serves them like a folder."""
+    from claudeglass.profiles import catalogue as catalogue_mod
+
+    on_disk = list_profiles()
+    folder = catalogue_mod._catalogue_dir()
+    archive = tmp_path / "catalogue.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        for profile_id in CATALOGUE_IDS:
+            zf.writestr(f"catalogue/{profile_id}.toml", folder.joinpath(f"{profile_id}.toml").read_bytes())
+    monkeypatch.setattr(catalogue_mod, "_catalogue_dir", lambda: zipfile.Path(archive, "catalogue/"))
+    assert list_profiles() == on_disk
+    assert get("plan-then-build") == next(p for p in on_disk if p.id == "plan-then-build")
     assert get("not-a-real-profile") is None
 
 

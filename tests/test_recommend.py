@@ -1497,7 +1497,7 @@ def test_agent_report_size_suppressed_for_chat_only():
 
 def _probes_section(*rows) -> Section:
     """The Work habits section's ``habits_probes`` table, each row
-    ``(where, replies, single read-only calls, of them by shell, runs, cost of the replies after the first)``."""
+    ``(where, replies, single read-only calls, of them by shell, runs, cache reads of the replies after the first)``."""
     return Section(
         key="habits",
         title="Work habits",
@@ -1511,7 +1511,7 @@ def _probes_section(*rows) -> Section:
                     Column(key="probes", label="Single read-only calls"),
                     Column(key="shell", label="Of them by shell command"),
                     Column(key="runs", label="Runs of two or more"),
-                    Column(key="batch_cost", label="Replies a batch would spare", kind="money"),
+                    Column(key="batch_cost", label="Re-reads a batch would spare", kind="money"),
                 ],
                 rows=[list(row) for row in rows],
             )
@@ -1542,7 +1542,7 @@ def test_agent_batch_probes_fires_per_agent_type_with_half_the_tables_upper_boun
         ("Replies it made", 400, "habits.habits_probes", "Explore"),
         ("Single read-only calls", 190, "habits.habits_probes", "Explore"),
         ("Of them by shell command", 30, "habits.habits_probes", "Explore"),
-        ("Replies a batch would spare", 12.0, "habits.habits_probes", "Explore"),
+        ("Re-reads a batch would spare", 12.0, "habits.habits_probes", "Explore"),
     ]
     # The action is the line to paste, word for word.
     assert "Batch independent Read/Grep/Glob calls into a single message" in explore.action
@@ -1591,6 +1591,46 @@ def test_agent_batch_probes_thresholds_come_from_the_config():
     recs = recommend_fn(r, config=config, archetype=None)
     (rec,) = [rec for rec in recs if rec.id == "agent-batch-probes"]
     assert rec.saving_usd == pytest.approx(1.5)
+
+
+def test_agent_batch_probes_halves_the_cache_reads_of_the_spared_replies_not_their_whole_cost(tmp_path):
+    from types import SimpleNamespace as NS
+
+    from claudeglass import habits
+    from claudeglass.model import TranscriptMeta
+    from claudeglass.parse import parse_transcript
+    from claudeglass.pricing import load_pricing, price_turn
+    from helpers import tool_result_block, tool_use_block, user_block_line, user_str_line
+    from test_habits import MODEL, _lookup, _reply, _said, _ts
+
+    def parse(name, lines, **meta):
+        path = tmp_path / name
+        write_jsonl(path, lines)
+        return parse_transcript(path, TranscriptMeta(path=str(path), **meta))
+
+    pricing = load_pricing(path=Path(__file__).parent / "fixtures" / "pricing_min.toml")
+    top = parse("top.jsonl", [
+        _said(0, "find it"),
+        _reply(1, tool_use_block("Agent", "toolu_A", {"prompt": "find it"})),
+        user_block_line([tool_result_block("toolu_A", "found it")], timestamp=_ts(20)),
+        _reply(21, text="Found it."),
+    ], kind="top-level")
+    sub = parse("agent-a1.jsonl", [
+        user_str_line("find it", timestamp=_ts(2)),
+        *_lookup(3, 0), *_lookup(5, 1), *_lookup(7, 2), _reply(9, text="src/f0.py"),
+    ], kind="subagent", agent_id="agent-a1", agent_type="Explore", tool_use_id="toolu_A")
+    bundle = NS(top=top, subs=[sub], session_id="s1", project_dir="p", slug="p")
+    section = habits.section_from(habits.collect(NS(sessions=[bundle]), pricing))
+
+    config = Config(thresholds={"recommend": {
+        "agent_batch_probes_min_replies": 3, "agent_batch_probes_share_pct": 10, "agent_batch_probes_min_saving_usd": 0,
+    }})
+    recs = recommend_fn(_add_section(_base_report(), section), config=config, archetype=None)
+    (rec,) = [rec for rec in recs if rec.id == "agent-batch-probes"]
+    spared = [price_turn(t, pricing.resolve_model(MODEL)) for t in sub.turns[1:3]]
+    # The tool results are written again by a batched message: only the re-reads are spared, and half of those.
+    assert rec.saving_usd == pytest.approx(0.5 * sum(p.cache_read_cost for p in spared))
+    assert rec.saving_usd < 0.5 * sum(p.total for p in spared)
 
 
 # -- plan-rounds -------------------------------------------------------------

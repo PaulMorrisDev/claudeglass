@@ -704,6 +704,27 @@ def test_a_name_from_the_built_in_list_is_a_built_in_only_in_the_desktop_app_and
     assert _rows(_unused("ccd", entrypoint=DESKTOP))["ccd"].kind == tool_search.KIND_UNKNOWN
 
 
+def test_the_built_in_names_are_the_servers_this_table_calls_built_in():
+    """What the pages that price the base are given, so that cost centres and
+    the context budget never file a server of yours as the app's: a name on
+    the list that the table calls yours, or saw only outside the desktop app,
+    is not in it."""
+    results = (
+        _unused("terminal", entrypoint=DESKTOP)
+        + _unused("computer-use", entrypoint=DESKTOP)
+        + _unused("visualize", entrypoint="cli")
+        + _unused("github", entrypoint=DESKTOP)
+    )
+    snap = _snapshot(mcp_servers={"names": ["computer-use"]})
+    rows = _stats(results, snapshots=[snap]).mcp_servers
+    assert tool_search.built_in_names(rows) == frozenset({"terminal"})
+    assert tool_search.built_in_names(_stats(results).mcp_servers) == frozenset({"terminal", "computer-use"})
+    assert tool_search.built_in_names([]) == frozenset()
+    # Every name a built-in row goes by counts.
+    row = tool_search.McpServerRow(server="id-1", aliases=("terminal",), kind=tool_search.KIND_DESKTOP_BUILTIN)
+    assert tool_search.built_in_names([row]) == frozenset({"id-1", "terminal"})
+
+
 def test_the_table_says_how_to_turn_a_server_off_only_where_it_is_known():
     results = [
         r for server in ("computer-use", "terminal", "claude_ai_Notes", "mystery")

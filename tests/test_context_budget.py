@@ -173,6 +173,68 @@ def test_the_mcp_part_you_can_change_leaves_out_the_desktop_apps_own_servers():
     assert context_budget._mcp_tools_tokens(top, first, found, skip_built_in=True) == pytest.approx(100)
 
 
+def _session_offered(tmp_path, name, entrypoint, servers):
+    """A main session that ran in ``entrypoint`` and whose first call lists
+    ``servers`` (name -> characters of deferred tool names): at four
+    characters per token, a quarter of those characters in tokens."""
+    top = _build_session(tmp_path, name, session_id=name)
+    top.meta.entrypoint = entrypoint
+    first = next(turn for turn in top.turns if turn.turn_index == 1)
+    first.deferred_list_chars_by_server = dict(servers)
+    return top
+
+
+def _mcp_columns(stats, **kwargs):
+    _, col, rows = _baseline_rows(stats, **kwargs)
+    return {
+        project: (row[col["mcp_tools_tokens"]], row[col["mcp_removable_tokens"]], row[col["controllable_est"]])
+        for project, row in rows.items()
+    }
+
+
+def test_a_server_that_shares_a_desktop_built_in_name_is_removable_outside_the_desktop_app(tmp_path):
+    """The name alone does not make a server the desktop app's: a command-line
+    session that was offered a server called "terminal" was offered yours."""
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-cli", _session_offered(tmp_path, "a", "cli", {"terminal": 4_000, "github": 400}))
+    stats.add_session("proj-none", _session_offered(tmp_path, "b", None, {"terminal": 4_000}))
+    stats.add_session("proj-desktop", _session_offered(tmp_path, "c", "claude-desktop", {"terminal": 4_000, "github": 400}))
+    found = _mcp_columns(stats)
+    assert found["proj-cli"][:2] == (pytest.approx(1_100), pytest.approx(1_100))
+    assert found["proj-none"][:2] == (pytest.approx(1_000), pytest.approx(1_000))
+    assert found["proj-desktop"][:2] == (pytest.approx(1_100), pytest.approx(100))
+    # What you can change counts the removable part of it.
+    assert found["proj-cli"][2] - found["proj-desktop"][2] == pytest.approx(1_000)
+
+
+def test_the_tool_search_rows_decide_which_servers_are_the_desktop_apps_own(tmp_path):
+    """One column, one answer per server: a server the table calls yours is
+    removable even in a desktop session, and one it calls built in is not,
+    whatever the session's entrypoint says."""
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("proj-desktop", _session_offered(tmp_path, "a", "claude-desktop", {"terminal": 4_000, "github": 400}))
+    stats.add_session("proj-cli", _session_offered(tmp_path, "b", "cli", {"terminal": 4_000, "github": 400}))
+    yours = [
+        tool_search.McpServerRow(server="terminal", kind=tool_search.KIND_USER),
+        tool_search.McpServerRow(server="github", kind=tool_search.KIND_USER),
+    ]
+    found = _mcp_columns(stats, mcp_servers=yours)
+    assert found["proj-desktop"][1] == pytest.approx(1_100) and found["proj-cli"][1] == pytest.approx(1_100)
+    # The app's own, by a name it is also known under.
+    theirs = [
+        tool_search.McpServerRow(server="id-1", aliases=("terminal",), kind=tool_search.KIND_DESKTOP_BUILTIN),
+        tool_search.McpServerRow(server="github", kind=tool_search.KIND_USER),
+    ]
+    found = _mcp_columns(stats, mcp_servers=theirs)
+    assert found["proj-desktop"][1] == pytest.approx(100) and found["proj-cli"][1] == pytest.approx(100)
+    # Both sessions are in the "all" row, which agrees.
+    assert found["all"][0] == pytest.approx(1_100) and found["all"][1] == pytest.approx(100)
+    # With no rows, each session's own entrypoint decides.
+    found = _mcp_columns(stats, mcp_servers=[])
+    assert found["proj-desktop"][1] == pytest.approx(100) and found["proj-cli"][1] == pytest.approx(1_100)
+    assert found["all"][1] == pytest.approx(600)
+
+
 def test_baseline_table_residual_is_none_when_est_exceeds_baseline(tmp_path):
     """Fix #24: a baseline smaller than the known (est) buckets must never
     silently report "the system prompt costs 0 tokens" -- that reads as a
@@ -1106,6 +1168,27 @@ def _spawn_many(tmp_path, count, *, used, pricing=PRICING, **kwargs):
 
 def _diet_row(stats, agent_type="Explore"):
     return _row(_startup_tables(stats)["agent_startup_diet"], "agent_type", agent_type)
+
+
+def test_the_startup_notes_say_where_the_token_figures_come_from_in_a_sentence_of_their_own(tmp_path):
+    """The ratio is a sentence of its own, calibrated or not: a clause built
+    on "characters per token" read "at characters per token assumed at 4
+    characters per token" when there were too few first calls to calibrate on."""
+    plain = _spawn_many(tmp_path, 10, used=lambda n: "Read")
+    measured = _spawn_many(tmp_path, 10, used=lambda n: "Read")
+    measured.calibration = calibration.Calibration(
+        tool={"claude-sonnet-5": 4.5}, text={"claude-sonnet-5": 3.5}, default_family="claude-sonnet-5"
+    )
+    for stats, sentence in ((plain, calibration.FALLBACK_SENTENCE), (measured, calibration.SENTENCE)):
+        assert stats.calibration.sentence() == sentence
+        tables = _startup_tables(stats)
+        for name in ("agent_startup_breakdown", "agent_startup_tools", "agent_startup_diet", "agent_startup_servers"):
+            notes = tables[name].notes
+            assert sum(sentence in note for note in notes) == 1, name
+            assert not any("at characters per token" in note for note in notes), name
+    assert calibration.FALLBACK_SENTENCE == (
+        "Characters become tokens at 4 characters per token, as there are too few first calls to calibrate on."
+    )
 
 
 def test_the_diet_row_keeps_the_tools_called_in_a_tenth_of_the_spawns_and_sizes_the_rest(tmp_path):

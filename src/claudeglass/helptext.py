@@ -938,7 +938,11 @@ TABLE_COPY: dict[str, TableCopy] = {
         columns={
             "habit": ("Habit", "The habit."),
             "times": ("Times", "How many times it happened."),
-            "per_100": ("Per 100 messages", "How often it happened for every 100 messages you sent."),
+            "per_100": (
+                "Per 100 messages",
+                "How often it happened for every 100 of your messages that asked for something. "
+                "Go-aheads, status checks and thank-yous aren't counted, so asking how it's going can pass 100.",
+            ),
             "cost": ("What it cost", "A rough figure for what it cost, as \"Worked out from\" says. \"Not priced\" "
                      "for a vague correction, or a big task where you didn't say a plan would have helped."),
             "basis": ("Worked out from", "What the cost counts."),
@@ -1319,10 +1323,11 @@ TABLE_COPY: dict[str, TableCopy] = {
         help=Help(
             shows="Where the main session and each subagent type made one read-only call in a reply and nothing "
             "else. That means a Read, a Grep, a Glob or a file-reading shell command. Stretches of two or more in a "
-            "row are counted, with what the replies after the first cost.",
+            "row are counted, with the cache reads of the replies after the first.",
             read="Every reply re-reads the whole context. Ten lookups sent one at a time cost ten re-reads, where "
             "one message holding them all would cost one. Replies are counted by message, so calls already sent "
-            "together count once. The last column is an upper bound. It takes the lookups to be independent, and "
+            "together count once. The last column prices only those re-reads, because a batched message still "
+            "writes the tool results. It is an upper bound. It takes the lookups to be independent, and "
             "some aren't, such as a read that needs the name a search found first.",
             act="Ask for independent lookups in one message. Add \"Batch independent Read/Grep/Glob calls into a "
             "single message\" to the agent definitions or workflow prompts at the top of the list.",
@@ -1340,9 +1345,10 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "runs": ("Runs of two or more", "Stretches of two or more single read-only calls in a row."),
             "batch_cost": (
-                "Replies a batch would spare",
-                "What the replies after the first of each run cost. These are the re-reads one message holding "
-                "the calls would have saved, if they didn't depend on each other.",
+                "Re-reads a batch would spare",
+                "What the replies after the first of each run paid to read the cache. One message holding the "
+                "calls would have saved these re-reads, if they didn't depend on each other. The tool results "
+                "are still written once.",
             ),
         },
         value_labels={"top-level": "Main session"},
@@ -2398,14 +2404,15 @@ TABLE_COPY: dict[str, TableCopy] = {
         title="What the base read, rewrites and post-compaction writes are made of",
         help=Help(
             shows="The parts of three cells: the starting prompt read on every reply, a rewrite, and a write after a summary.",
-            read="Each part is counted once, under the setting that removes it. A part marked harness-fixed has no setting known.",
+            read="Each part is counted once, under the setting that removes it. A part marked harness-fixed has no setting known. "
+            "A part marked not measured holds what nothing measured, such as an agent's brief.",
             act="Open the check beside a controllable part to see the fix. Parts you cannot change are listed so they are not mistaken for waste.",
         ),
         columns={
             "centre": ("Cost centre", "Who spent it."),
             "cell": ("Cell", "Which cell of the table above this part belongs to."),
             "part": ("Part", "What this part of the cost is made of."),
-            "lever": ("Who decides it", "Whether a setting of yours can change this part, or the harness fixes it."),
+            "lever": ("Who decides it", "Whether a setting of yours can change this part, the harness fixes it, or it was not measured."),
             "cost": ("Cost", "What this part cost in the window."),
             "share": ("Share of cell", "This part's share of its cell."),
             "card": ("Check", "The check that covers this part."),
@@ -3168,8 +3175,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             "was read, but something early in the context changed. \"Rewritten after a summary\" is the first "
             "reply after Claude Code summarised the conversation. \"Expired during a usage-limit pause\" "
             "means you were waiting for a limit to reset.",
-            act="Expired caches respond to a longer cache lifetime. Broken ones don't: check what came right before "
-            "them in the causes table.",
+            act="A longer cache lifetime helps only when the wait reached the lifetime. Broken caches, and expired "
+            "ones after a shorter wait, don't respond to it: check what came right before them in the causes table.",
         ),
         columns={
             "signature": ("Reason", "What had happened to the cache."),

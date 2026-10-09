@@ -185,6 +185,13 @@ def test_fingerprint_is_pinned():
     assert FINGERPRINT == "1b51edd3cea4b3c2a19d137e9d9a76024e6c9050d133fe108fd40278df393080"
 
 
+def test_the_parser_version_has_a_note_saying_what_its_bump_changed():
+    """The fingerprint above covers the vocabularies only: a parser change
+    that alters a digest bumps ``PARSER_VERSION`` by hand, with a note."""
+    source = (Path(__file__).parent.parent / "src" / "claudeglass" / "__init__.py").read_text(encoding="utf-8")
+    assert f"#: Bumped to {PARSER_VERSION}:" in source
+
+
 # -- salt fingerprint (SEC-P8) ----------------------------------------------
 
 

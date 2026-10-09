@@ -785,7 +785,7 @@ def _build_every_rule_fixture() -> "report.ReportModel":
                     Column(key="probes", label="Single read-only calls"),
                     Column(key="shell", label="Of them by shell command"),
                     Column(key="runs", label="Runs of two or more"),
-                    Column(key="batch_cost", label="Replies a batch would spare"),
+                    Column(key="batch_cost", label="Re-reads a batch would spare"),
                 ],
                 rows=[["claude-implementer", 400, 200, 20, 30, 40.0]],
             ),

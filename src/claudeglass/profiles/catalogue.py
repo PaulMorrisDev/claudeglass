@@ -6,7 +6,7 @@ work package's writable paths) will call once it detects a corpus's
 archetype and dominant purposes.
 
 Each ``catalogue/<id>.toml`` is a normal profile document (loaded
-through ``schema.load_profile``, so it is validated the same way any
+through ``schema.load_dict``, so it is validated the same way any
 other profile is) whose ``notes`` field names the actual report
 table/column this project already computes that justifies the profile's
 settings -- never an invented number (see each file's own ``notes``).
@@ -32,11 +32,13 @@ mapping that would never actually fire for a genuinely overnight corpus.
 
 from __future__ import annotations
 
+import importlib.resources
+import tomllib
 from functools import lru_cache
-from pathlib import Path
+from importlib.resources.abc import Traversable
 
 from .. import capture_catalogue
-from .schema import Profile, load_profile
+from .schema import Profile, load_dict
 
 __all__ = ["CATALOGUE_IDS", "FOR_TASKS", "list_profiles", "get", "suggest", "task_profile", "tasks_for"]
 
@@ -55,13 +57,24 @@ CATALOGUE_IDS: tuple[str, ...] = (
 )
 
 
-def _catalogue_dir() -> Path:
-    return Path(__file__).parent / "catalogue"
+def _catalogue_dir() -> Traversable:
+    """The shipped ``catalogue/`` folder. Read through ``importlib.resources``
+    so the files are found inside a zip (the single-file ``.pyz``) as well
+    as in a folder: a path built from ``__file__`` points inside the archive
+    and opens nothing."""
+    return importlib.resources.files("claudeglass.profiles").joinpath("catalogue")
+
+
+def _load(profile_id: str) -> Profile:
+    """The shipped profile ``profile_id``, parsed and validated like any
+    other (:func:`schema.load_profile` takes a path, which a zip lacks)."""
+    resource = _catalogue_dir().joinpath(f"{profile_id}.toml")
+    return load_dict(tomllib.loads(resource.read_text(encoding="utf-8")), source_path=str(resource))
 
 
 def list_profiles() -> list[Profile]:
     """Every shipped catalogue profile, in :data:`CATALOGUE_IDS` order."""
-    return [load_profile(_catalogue_dir() / f"{profile_id}.toml") for profile_id in CATALOGUE_IDS]
+    return [_load(profile_id) for profile_id in CATALOGUE_IDS]
 
 
 def get(profile_id: str) -> Profile | None:
@@ -69,7 +82,7 @@ def get(profile_id: str) -> Profile | None:
     ``profile_id`` is not one of :data:`CATALOGUE_IDS`."""
     if profile_id not in CATALOGUE_IDS:
         return None
-    return load_profile(_catalogue_dir() / f"{profile_id}.toml")
+    return _load(profile_id)
 
 
 # -- suggest(): deterministic archetype/purpose -> catalogue id ------------

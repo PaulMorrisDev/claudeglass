@@ -771,7 +771,7 @@ function drawProjectRows() {
 }
 
 // A long folder name keeps its start and its end, where two folders
-// under one parent differ ("AppData-Local-Te…scratchpad-live-work").
+// under one parent differ ("home-user-projec…-checkout-service-staging").
 var MENU_NAME_CHARS = 42;
 
 function menuName(slug) {

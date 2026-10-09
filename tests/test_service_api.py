@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 import types
+import zipfile
 from datetime import datetime, timedelta, timezone, tzinfo
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -2286,6 +2287,121 @@ def test_static_file_is_served_from_a_real_static_dir(tmp_path, monkeypatch):
     finally:
         handle.close()
         store.close()
+
+
+def test_static_files_are_served_from_inside_a_zip(tmp_path, monkeypatch):
+    # The single-file .pyz keeps the dashboard inside a zip, where a path
+    # built from __file__ opens nothing. static_dir takes what
+    # importlib.resources hands back, so a zipfile.Path stands for it here.
+    corpus = _build_corpus(tmp_path)
+    _install_fake_rebuild(monkeypatch, corpus)
+    store = Store(tmp_path / "service.db")
+    store.open()
+
+    archive = tmp_path / "ui.zip"
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("static/index.html", b'<html><meta name="cg-command" content="claudeglass">hello</html>')
+        zf.writestr("static/app.js", b"console.log('hi');")
+        zf.writestr("static/fonts/face.woff2", b"wOF2")
+        zf.writestr("static/vendor/lib.js", b"var lib = 1;")
+        zf.writestr("static/.tool-cache/state.json", b"{}")
+        zf.writestr("static/.hidden.js", b"var h = 1;")
+        zf.writestr("outside.txt", b"secret")
+
+    config_dir = tmp_path / "config"
+    config_dir.mkdir()
+    options = ServeOptions(projects_root=tmp_path / "projects", config_dir=config_dir)
+    handler_cls = service_api.make_handler(store, options, static_dir=zipfile.Path(archive, "static/"))
+    httpd = ThreadingHTTPServer(("127.0.0.1", 0), handler_cls)
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    handle = _ServerHandle(httpd, thread, corpus=corpus, store=store, options=options)
+    try:
+        resp, raw = handle.request("GET", "/")
+        assert resp.status == 200
+        assert b"hello" in raw
+
+        for path, content_type, cache, body in (
+            ("/static/app.js", "text/javascript", "no-store", b"console.log('hi');"),
+            ("/static/fonts/face.woff2", "font/woff2", "public, max-age=31536000, immutable", b"wOF2"),
+            ("/static/vendor/lib.js", "text/javascript", "public, max-age=31536000, immutable", b"var lib = 1;"),
+        ):
+            resp, raw = handle.request("GET", path)
+            assert resp.status == 200, path
+            assert resp.getheader("Content-Type") == content_type, path
+            assert resp.getheader("Cache-Control") == cache, path
+            assert raw == body, path
+        resp, raw = handle.request("HEAD", "/static/app.js")
+        assert resp.status == 200
+        assert raw == b""
+
+        # A folder, a missing file, a dot-file or dot-folder and a name that
+        # steps out of the folder are all "not found", as in a real folder.
+        for path in (
+            "/static/fonts",
+            "/static/missing.js",
+            "/static/.hidden.js",
+            "/static/.tool-cache/state.json",
+            "/static/..%2foutside.txt",
+            "/static/%2e%2e/outside.txt",
+            "/static/fonts%5c..%5capp.js",
+        ):
+            resp, _raw = handle.request("GET", path)
+            assert resp.status == 404, path
+    finally:
+        handle.close()
+        store.close()
+
+
+def test_the_default_static_dir_is_read_through_importlib_resources():
+    root = service_api._default_static_dir()
+    assert root.joinpath("index.html").is_file()
+    assert root.joinpath("app.js").is_file()
+    found = service_api._static_file(root, "fonts/InterVariable-4.1.woff2")
+    assert found is not None
+    assert found[1] == ("fonts", "InterVariable-4.1.woff2")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "",
+        "/",
+        "..",
+        "../x",
+        "a/../../x",
+        ".hidden",
+        "fonts/.x",
+        "fonts\\..\\app.js",
+        "C:evil",
+        "a:b",
+        "nul\x00.js",
+        "fonts",
+        "missing.js",
+    ],
+)
+def test_static_file_refuses_a_name_that_is_not_one_file_of_the_ui(tmp_path, name):
+    static = tmp_path / "static"
+    (static / "fonts").mkdir(parents=True)
+    (static / "app.js").write_text("1", encoding="utf-8")
+    (tmp_path / "x").write_text("outside", encoding="utf-8")
+    assert service_api._static_file(static, name) is None
+
+
+def test_static_file_finds_a_file_and_refuses_a_link_that_leaves_the_folder(tmp_path):
+    static = tmp_path / "static"
+    (static / "fonts").mkdir(parents=True)
+    (static / "fonts" / "face.woff2").write_bytes(b"wOF2")
+    found = service_api._static_file(static, "fonts//face.woff2")
+    assert found is not None
+    assert found[1] == ("fonts", "face.woff2")
+    assert found[0].read_bytes() == b"wOF2"
+    (tmp_path / "secret.txt").write_text("secret", encoding="utf-8")
+    try:
+        (static / "link.txt").symlink_to(tmp_path / "secret.txt")
+    except (OSError, NotImplementedError):
+        pytest.skip("links cannot be made here")
+    assert service_api._static_file(static, "link.txt") is None
 
 
 # -- 500 on unexpected exceptions --------------------------------------------

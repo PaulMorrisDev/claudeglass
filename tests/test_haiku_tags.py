@@ -965,8 +965,9 @@ def test_a_go_ahead_after_the_next_plan_call_does_not_approve_the_earlier_plan(t
     assert _earlier_plan_text(path) == "Plan mode: a plan was proposed 2 times in this session and not approved."
 
 
-def test_plan_modes_plan_file_counts_as_a_plan_and_isnt_a_changed_file(tmp_path):
-    # Headless plan mode has no ExitPlanMode: the plan goes to a file.
+def test_plan_modes_plan_file_is_neither_a_plan_nor_a_changed_file(tmp_path):
+    # A plan is an ExitPlanMode call, as the parser counts it: a file in plan
+    # mode's folder (the plan so far, or a progress ledger) is not one.
     path = _transcript(tmp_path, [
         user_str_line("Plan the JSON export", timestamp=_at(0), permissionMode="plan"),
         turn_line(timestamp=_at(1), content=[
@@ -974,8 +975,9 @@ def test_plan_modes_plan_file_counts_as_a_plan_and_isnt_a_changed_file(tmp_path)
             {"type": "text", "text": "The plan is in the plan file."}]),
     ])
     job = HOOK.judge_job(_stop(path, permission_mode="plan"), HAIKU, CATALOGUE)
-    assert job["facts"]["plan_now"] and job["facts"]["files"] == 0
-    assert "Plan mode: Claude wrote a plan in this turn." in job["excerpt"] and "files changed: 0;" in job["excerpt"]
+    assert not job["facts"]["plan_now"] and job["facts"]["files"] == 0
+    assert "Plan mode: on, no plan written yet." in job["excerpt"] and "files changed: 0;" in job["excerpt"]
+    assert HOOK.grounded("task=feature plan=none", job["facts"]) == "task=feature plan=none"
 
 
 def test_a_change_to_documentation_only_is_docs_work(tmp_path):
@@ -1214,6 +1216,8 @@ def test_hooks_reading_of_shell_commands_and_admissions_matches_the_parsers(tmp_
         "pytest -q 2>&1 | tail -3", "npm test > /dev/null", "echo hi > out.txt", "cat <<'E'\nrm -rf x\nE",
         "sed -i 's/a/b/' f.py", "FOO=1 timeout 60 git pull", "ls -la", "python -m pytest tests/test_a.py",
         "git commit --amend --no-edit", "cd x && git reset --hard HEAD~1", "touch new.txt",
+        # An operator inside a quoted string is no end of a command.
+        'git commit -m "wip; rm -rf x"', "echo 'a && mv b c'", 'git commit -m "tidy" && rm -rf y',
     ]
     for command in commands:
         assert HOOK._shell_changes(command) == (
@@ -2074,6 +2078,10 @@ def test_the_hook_and_the_parser_read_a_plans_feedback_the_same_way(tmp_path):
 
     assert cat.PLAN_SAID_PATTERN == parse._USER_SAID_RE.pattern and parse._USER_SAID_RE.flags & 2  # IGNORECASE
     assert CATALOGUE["coaching"]["plan_said_pattern"] == cat.PLAN_SAID_PATTERN
+    # A hook's block is told from your answer to a plan by one pattern, in both.
+    assert cat.ERROR_BLOCKED_PATTERN == parse._ERROR_BLOCKED_RE.pattern and parse._ERROR_BLOCKED_RE.flags & 2
+    assert CATALOGUE["coaching"]["error_blocked_pattern"] == cat.ERROR_BLOCKED_PATTERN
+    assert HOOK._change_patterns()["error_blocked"].flags & 2
     assert CATALOGUE["coaching"]["scheduled_task_prefix"] == cat.SCHEDULED_TASK_PREFIX
     assert CATALOGUE["judge"]["limits"] == cat.JUDGE_LIMITS and CATALOGUE["judge"]["fallback_writer"] == cat.JUDGE_FALLBACK_WRITER
     assert cat.JUDGE_WRITERS == (cat.JUDGE_WRITER, cat.JUDGE_FALLBACK_WRITER)
