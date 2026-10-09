@@ -130,8 +130,9 @@ tells the hook which sessions it is running in with one small file per
 session, `mod/present/<session id>.json` in ClaudeGlass's data folder:
 `{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>}`.
 The mod refreshes it every minute on a timer while the session is open, so
-an idle session stays fresh, and deletes it when the session ends if it can;
-the dashboard's watcher removes any left for 24 hours. A file per session
+an idle session stays fresh, and writes it once more with `seen` at 0 when
+the session ends (the engine cannot delete a file, and `0` reads as not
+running); the dashboard's watcher removes any not written for 24 hours. A file per session
 because two sessions writing one shared file would drop each other's entry.
 The hook reads the session's own file on a call that could draw a note
 (remembered by its time and size, so a repeat call reads it once). A

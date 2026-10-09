@@ -185,7 +185,11 @@ export const NOTE_KINDS = [
   "switch",
   "effort",
   "compactions",
-  "cold_compaction"
+  "cold_compaction",
+  "draft_topic",
+  "draft_no_paths",
+  "draft_read_all",
+  "budget"
 ];
 
 export const MOD_NOTE_KINDS = [
@@ -236,7 +240,11 @@ export const SENSOR_VOCAB = {
       "switch",
       "effort",
       "compactions",
-      "cold_compaction"
+      "cold_compaction",
+      "draft_topic",
+      "draft_no_paths",
+      "draft_read_all",
+      "budget"
     ],
     "outcome": [
       "sent",

@@ -5,6 +5,7 @@ import { amountOfAfterAbout, minutes, withEst } from './fmt'
 import { COPY } from './generated/copy.js'
 import { emptySnap, flags } from './live'
 import { chooseHint, hintText } from './coach-mem'
+import { draftLine } from './draft'
 import { drawView, sendCostNow } from './view'
 import type { View } from './view'
 import { sendCost } from './lib/pricing.js'
@@ -41,6 +42,9 @@ export function hintLine(view: View, surface = 'terminal'): string | null {
   const { settings, snap, cache, tokens } = view
   const found = chooseHint(view)
   if (found !== null) return found.kind === 'cold_return' ? coldLine(view) : hintText(found, surface)
+  // The message in the box, when nothing above has anything to say (draft.ts).
+  const drafted = draftLine(view)
+  if (drafted !== null) return drafted
   if (cache === null || snap.lastTs === null || tokens <= 0 || !cache.isWarm || !view.detailed) return null
   return withEst(fill(COPY['hint.send'], { amount: amountOfAfterAbout(sendCostNow(view, true), snap, settings) }), settings)
 }

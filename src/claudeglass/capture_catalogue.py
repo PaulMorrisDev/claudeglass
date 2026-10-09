@@ -751,6 +751,13 @@ MOD_PRESENT_PRUNE_S = 86400
 #: went cold.
 MOD_NOTE_KINDS = ("runway", "result", "switch", "effort", "compactions", "cold_compaction")
 
+#: What the mod's prompt help can show, beside the notes above: the hint
+#: line's checks on a draft (a new topic in a large context, a change
+#: asked for with no file named, "read everything") and the note that a
+#: session passed the budget it was given. The capture hook never shows
+#: these, so they are not in :data:`COACHING_HINTS`.
+MOD_PROMPT_KINDS = ("draft_topic", "draft_no_paths", "draft_read_all", "budget")
+
 #: What the mod's sensor file may say, as closed words (the watcher drops
 #: any event with a word outside these, ``mod_sensor.clean``). ``event``
 #: names what happened; each event takes the ``kind``, ``surface`` and
@@ -765,7 +772,7 @@ MOD_NOTE_KINDS = ("runway", "result", "switch", "effort", "compactions", "cold_c
 SENSOR_EVENTS = ("present", "note", "rebuild", "cold_send", "compaction")
 SENSOR_PRESENT_SURFACES = ("desktop", "terminal", "vscode", "mobile")
 SENSOR_NOTE_SURFACES = ("note", "hint", "log", "status", "band", "agent")
-SENSOR_NOTE_KINDS = (*COACHING_HINTS, *FEEDBACK_HINTS, *MOD_NOTE_KINDS)
+SENSOR_NOTE_KINDS = (*COACHING_HINTS, *FEEDBACK_HINTS, *MOD_NOTE_KINDS, *MOD_PROMPT_KINDS)
 SENSOR_NOTE_OUTCOMES = ("sent", "clear", "compact", "none")
 SENSOR_REBUILD_KINDS = ("limit", "compaction", "expiry", "prefix", "unknown")
 SENSOR_REBUILD_OUTCOMES = ("expected", "unexpected")

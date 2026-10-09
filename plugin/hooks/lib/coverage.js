@@ -51,18 +51,46 @@ import { contentWords, squash, trimText } from "./keeplist.js";
 /**
  * @typedef {Object} Coverage
  * @property {Record<string, Mark>} marks   By item id.
- * @property {{ found: number, partly: number, missing: number, safe: number }} counts
- * @property {number} kept      Items the summary has at least partly, safe ones not counted.
- * @property {number} missing   Items marked missing.
- * @property {number} total     Items checked, safe ones not counted.
+ * @property {{ found: number, partly: number, missing: number, safe: number }} counts  Every kind of item, files and values included.
+ * @property {number} kept      Things the user said (see SAID_KINDS) the summary has at least partly, safe ones not counted.
+ * @property {number} missing   Things the user said that are marked missing.
+ * @property {number} total     Things the user said that were checked, safe ones not counted.
  */
 
 /** Score thresholds of the quick check. */
 export const THRESHOLDS = { found: 0.6, partly: 0.3 };
 /** How far from a mention a negation may sit, in characters. */
 export const NEGATION_WINDOW = 100;
+/**
+ * The kinds of item that are "things you said": what the user told Claude to do or decided, or pinned.
+ * Files, values, tasks and errors are checked too, but only the full list shows them.
+ */
+export const SAID_KINDS = ["instruction", "decision", "pin"];
+
+/**
+ * Whether an item is one of the things the user said.
+ * @param {KeepItem} item
+ * @returns {boolean}
+ */
+export function isSaid(item) {
+  return SAID_KINDS.indexOf(item.kind) >= 0;
+}
+
+/**
+ * How many of the items are things the user said and are not safe: the number a headline counts against.
+ * @param {KeepItem[]} items
+ * @returns {number}
+ */
+export function saidTotal(items) {
+  return (Array.isArray(items) ? items : []).filter(function (item) {
+    return isSaid(item) && !item.safe;
+  }).length;
+}
+
 /** The headroom the model's window must have over the compaction point before a compaction is held. */
 export const HOLD_HEADROOM = 100000;
+/** A compaction is never held when the context is within this many tokens of the window: Claude Code needs the room for the summary and the next request. */
+export const HOLD_MARGIN = 20000;
 /** The longest "Keep:" command, in characters. */
 export const KEEP_MAX = 1500;
 /** The most summary text sent to a model judge. */
@@ -73,7 +101,7 @@ export const MARK_SYMBOL = { found: "✓", partly: "~", missing: "✗", safe: "�
 
 const NEGATION_IN_ITEM = /\b(never|don'?t|do not|dont|not|no|avoid|without|shouldn'?t|should not|mustn'?t|must not|can'?t|cannot|stop)\b/i;
 const NEGATION_IN_SUMMARY =
-  /\b(never|don'?t|do not|dont|not|no|avoid|avoids|avoided|without|shouldn'?t|should not|mustn'?t|must not|can'?t|cannot|stop|skip|forbid|forbidden|prohibit|prohibited|off-limits|instead of|rather than|except)\b|n't\b/i;
+  /\b(never|don'?t|do not|dont|not|no|avoid|avoids|avoided|without|shouldn'?t|should not|mustn'?t|must not|can'?t|cannot|stop|skip|forbid|forbidden|prohibit|prohibited|off-limits|instead|rather than|over|prefer\w*|favou?r\w*|except)\b|n't\b/i;
 const LEADING = /^(?:no|nope|actually|wait|not that|instead)\b[\s,.:;!-]+/i;
 
 /**
@@ -234,21 +262,12 @@ export function checkCoverage(items, summaryText) {
   var summary = prepareSummary(summaryText);
   /** @type {Record<string, Mark>} */
   var marks = {};
-  var counts = { found: 0, partly: 0, missing: 0, safe: 0 };
   var list = Array.isArray(items) ? items : [];
   for (var i = 0; i < list.length; i++) {
     var item = /** @type {KeepItem} */ (list[i]);
-    var mark = markItem(item, summary);
-    marks[item.id] = mark;
-    counts[mark] += 1;
+    marks[item.id] = markItem(item, summary);
   }
-  return {
-    marks: marks,
-    counts: counts,
-    kept: counts.found + counts.partly,
-    missing: counts.missing,
-    total: counts.found + counts.partly + counts.missing,
-  };
+  return tally(list, marks);
 }
 
 /**
@@ -261,6 +280,16 @@ export function missingItems(items, marks) {
   return (Array.isArray(items) ? items : []).filter(function (item) {
     return marks[item.id] === "missing";
   });
+}
+
+/**
+ * The missing items that are things the user said, in list order: what the review's first screen offers to add back.
+ * @param {KeepItem[]} items
+ * @param {Record<string, Mark>} marks
+ * @returns {KeepItem[]}
+ */
+export function missingSaid(items, marks) {
+  return missingItems(items, marks).filter(isSaid);
 }
 
 /**
@@ -352,19 +381,47 @@ export function addBackNote(items, template, labels) {
 }
 
 /**
- * Whether an automatic compaction is held once for review: the opt-in is on,
- * the trigger is automatic, the last automatic compaction was not itself held,
- * and the model's window is at least HOLD_HEADROOM above the compaction point
- * (so never on a 200k window).
- * @param {{ enabled: boolean, trigger: string, window: number|null, point: number|null, heldLast: boolean }} args
- * @returns {boolean}
+ * Where a hold stands. "none": nothing is held. "holding": an automatic compaction was held in the reply now
+ * running, and the rest of the reply holds the ones that come. "release": that reply has ended, so the
+ * first automatic compaction after it goes through.
+ * @typedef {"none"|"holding"|"release"} HoldState
  */
-export function shouldHold(args) {
-  if (args.enabled !== true || args.trigger !== "auto" || args.heldLast === true) return false;
+
+/**
+ * What to do with an automatic compaction attempt. An automatic compaction is asked for again at every step
+ * of a reply that is past the compaction point, so holding one attempt buys one request, not time to review.
+ * A hold lasts the rest of the reply it began in; the first automatic compaction after that reply goes
+ * through. Never held: when the opt-in is off, the trigger is manual, the window is not at least
+ * HOLD_HEADROOM above the compaction point (so never on a 200k window), or the context is within
+ * HOLD_MARGIN of the window (Claude Code could not take another request).
+ * @param {{ enabled: boolean, trigger: string, window: number|null, point: number|null, tokens: number|null, state: HoldState }} args
+ * @returns {{ hold: boolean, next: HoldState, first: boolean }}  `first` is true for the attempt that begins a hold (the one to announce).
+ */
+export function holdStep(args) {
   var win = args.window;
   var point = args.point;
-  if (typeof win !== "number" || typeof point !== "number" || !isFinite(win) || !isFinite(point)) return false;
-  return win - point >= HOLD_HEADROOM;
+  var tokens = args.tokens;
+  var eligible =
+    args.enabled === true &&
+    args.trigger === "auto" &&
+    typeof win === "number" &&
+    typeof point === "number" &&
+    isFinite(win) &&
+    isFinite(point) &&
+    win - point >= HOLD_HEADROOM &&
+    !(typeof tokens === "number" && isFinite(tokens) && tokens >= win - HOLD_MARGIN);
+  if (!eligible) return { hold: false, next: "none", first: false };
+  if (args.state === "release") return { hold: false, next: "none", first: false };
+  return { hold: true, next: "holding", first: args.state !== "holding" };
+}
+
+/**
+ * A reply ended: a hold that was in force is released for the next automatic compaction.
+ * @param {HoldState} state
+ * @returns {HoldState}
+ */
+export function holdAfterReply(state) {
+  return state === "holding" ? "release" : state;
 }
 
 /**
@@ -420,17 +477,20 @@ export function parseJudge(answer, items) {
  */
 export function tally(items, marks) {
   var counts = { found: 0, partly: 0, missing: 0, safe: 0 };
+  var said = { found: 0, partly: 0, missing: 0, safe: 0 };
   var list = Array.isArray(items) ? items : [];
   for (var i = 0; i < list.length; i++) {
-    var mark = marks[/** @type {KeepItem} */ (list[i]).id];
-    if (mark) counts[mark] += 1;
+    var item = /** @type {KeepItem} */ (list[i]);
+    var mark = marks[item.id];
+    if (!mark) continue;
+    counts[mark] += 1;
+    if (isSaid(item)) said[mark] += 1;
   }
   return {
     marks: marks,
     counts: counts,
-    kept: counts.found + counts.partly,
-    missing: counts.missing,
-    total: counts.found + counts.partly + counts.missing,
+    kept: said.found + said.partly,
+    missing: said.missing,
+    total: said.found + said.partly + said.missing,
   };
 }
-

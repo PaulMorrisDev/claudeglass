@@ -5,7 +5,7 @@ import { linkTarget } from './agent-view'
 import { COPY } from './generated/copy.js'
 import { ledger, register as watch } from './instructions'
 import { charsPerToken } from './lib/coach.js'
-import { adviceFor, agentTypesOf, entriesOf, groupsOf, humanize, largest, shortPath, startupChars, tokensOf } from './lib/instructions.js'
+import { adviceFor, agentTypesOf, entriesOf, fitToCategories, groupsOf, humanize, largest, shortPath, startupChars, tokensOf } from './lib/instructions.js'
 import type { Entry } from './lib/instructions.js'
 import { fill } from './lib/text.js'
 import { formatTokens } from './lib/units.js'
@@ -18,8 +18,12 @@ import type { PageContext } from './pane'
 // line of advice; Detailed lists everything grouped by kind, marks the files that
 // loaded later because Claude reached matching paths, and says which agent types
 // received CLAUDE.md. Pressing an item shows what it is, where it came from and
-// its size. The sizes are estimates: characters of text over the calibrated
-// characters per token (the ledger is in instructions.ts).
+// its size. Claude Code's own count of each group (the rows of /context) is the
+// group's total, and an item's size is its share of its group by characters of
+// text, so the startup total agrees with the Now page and the sizes stay estimates.
+// Before Claude Code has counted anything, or for an item no row of /context
+// covers, the size is characters over the calibrated characters per token (the
+// ledger is in instructions.ts).
 
 /** One key per row, as the Agents page has: the digits, then letters the pane's own buttons don't use. */
 const ROW_KEYS = '123456789bdefjoqrstuvwxz'
@@ -50,9 +54,12 @@ function nameOf(entry: Entry): string {
   return entry.count > 1 ? fill(COPY['instructions.times'], { name, count: entry.count }) : name
 }
 
+/** Tokens by row, where Claude Code's count has sized the row (lib/instructions.js fitToCategories). */
+type Sizes = Record<string, number>
+
 /** The size a row is counted at in the startup context (what is in every request), or all of it for a row that is not part of it. */
-function sizeOf(entry: Entry, cpt: number): number {
-  return tokensOf(entry.startupChars > 0 ? entry.startupChars : entry.chars, cpt)
+function sizeOf(entry: Entry, cpt: number, sizes: Sizes): number {
+  return sizes[entry.key] ?? tokensOf(entry.startupChars > 0 ? entry.startupChars : entry.chars, cpt)
 }
 
 function contextLink(settings: GlassSettings): string | null {
@@ -60,17 +67,17 @@ function contextLink(settings: GlassSettings): string | null {
   return base === null ? null : `${base}/#/agents/context`
 }
 
-function headline(count: number, tokens: number): string {
-  return fill(COPY[count === 1 ? 'instructions.headline.one' : 'instructions.headline'], { tokens: est(tokens), count })
+function headline(count: number, tokens: string): string {
+  return fill(COPY[count === 1 ? 'instructions.headline.one' : 'instructions.headline'], { tokens, count })
 }
 
-function adviceLine(entries: Entry[], cpt: number): string | null {
-  const found = adviceFor(entries, cpt)
+function adviceLine(entries: Entry[], cpt: number, sizes: Sizes): string | null {
+  const found = adviceFor(entries, cpt, undefined, sizes)
   if (found === null) return null
   return fill(COPY[found.kind === 'mcp' ? 'instructions.advice.mcp' : 'instructions.advice.file'], { server: found.name, name: found.name, tokens: est(found.tokens) })
 }
 
-function details(context: PageContext, entry: Entry, cpt: number): RenderElement {
+function details(context: PageContext, entry: Entry, cpt: number, sizes: Sizes): RenderElement {
   const { Box, Text, Button, Link } = context.table
   const link = entry.kind === 'instructions' ? contextLink(context.view.settings) : null
   const lines: string[] = [
@@ -79,7 +86,7 @@ function details(context: PageContext, entry: Entry, cpt: number): RenderElement
     fill(COPY['instructions.detail.size'], { tokens: est(tokensOf(entry.chars, cpt)), chars: entry.chars.toLocaleString('en-US') }),
   ]
   if (entry.startupChars > 0 && entry.startupChars !== entry.chars) {
-    lines.push(fill(COPY['instructions.detail.live'], { tokens: est(tokensOf(entry.startupChars, cpt)) }))
+    lines.push(fill(COPY['instructions.detail.live'], { tokens: est(sizeOf(entry, cpt, sizes)) }))
   }
   if (entry.deferred) lines.push(COPY['instructions.detail.deferred'])
   if (entry.scoped) {
@@ -108,8 +115,8 @@ function details(context: PageContext, entry: Entry, cpt: number): RenderElement
 }
 
 /** A row's words after its name: its size, and in the detailed list what makes it special. */
-function figures(entry: Entry, cpt: number, detailed: boolean): string {
-  const parts = [est(sizeOf(entry, cpt))]
+function figures(entry: Entry, cpt: number, detailed: boolean, sizes: Sizes): string {
+  const parts = [est(sizeOf(entry, cpt, sizes))]
   if (detailed && entry.scoped) parts.push(fill(COPY['instructions.scoped.mark'], { reply: entry.reply }))
   if (detailed && entry.deferred) parts.push(COPY['instructions.deferred.mark'])
   return parts.join(' · ')
@@ -123,27 +130,32 @@ async function render(context: PageContext): Promise<RenderElement> {
   if (entries.length === 0) return <Text>{COPY['instructions.none']}</Text>
 
   const cpt = charsPerToken(view.settings.charsPerToken, view.snap.model)
-  const total = tokensOf(startupChars(entries), cpt)
+  // Claude Code's own count of the startup context, split among the rows; the estimate alone when it has none yet.
+  const fit = fitToCategories(entries, await context.kit.categories())
+  const sizes: Sizes = fit.matched ? fit.sizes : {}
+  const total = fit.matched ? fit.total : tokensOf(startupChars(entries), cpt)
+  // Claude Code's figure is not an estimate; the estimate carries its mark.
+  const shownTotal = fit.matched ? formatTokens(total) : est(total)
   const startupCount = entries.filter(one => one.startupChars > 0).length
-  const advice = adviceLine(entries, cpt)
+  const advice = adviceLine(entries, cpt, sizes)
   let used = 0
 
   const row = (entry: Entry): RenderElement => {
     const key = `item:${entry.key}`
     const hotkey = ROW_KEYS.charAt(used)
     used += 1
-    const label = `${nameOf(entry)} · ${figures(entry, cpt, view.detailed)}`
+    const label = `${nameOf(entry)} · ${figures(entry, cpt, view.detailed, sizes)}`
     return (
       <Box key={`row:${entry.key}`} flexDirection="column">
         {hotkey === '' ? <Text>{label}</Text> : <Button key={key} label={label} hotkey={hotkey} onPress={() => context.explain(key)} />}
-        {state.explain === key ? details(context, entry, cpt) : null}
+        {state.explain === key ? details(context, entry, cpt, sizes) : null}
       </Box>
     )
   }
 
   const children: RenderElement[] = [
     <Text key="headline" bold>
-      {headline(startupCount, total)}
+      {headline(startupCount, shownTotal)}
     </Text>,
   ]
   if (advice !== null) children.push(<Text key="advice">{advice}</Text>)
@@ -153,14 +165,22 @@ async function render(context: PageContext): Promise<RenderElement> {
       <Text key="largest" bold>
         {COPY['instructions.largest']}
       </Text>,
-      ...largest(entries, TOP).map(row),
+      ...largest(entries, TOP, one => sizeOf(one, cpt, sizes)).map(row),
     )
   }
-  children.push(<Text key="total">{fill(COPY['instructions.total'], { tokens: est(total) })}</Text>)
+  children.push(<Text key="total">{fill(COPY['instructions.total'], { tokens: shownTotal })}</Text>)
 
   if (view.detailed) {
     const theirs = view.parts?.startup ?? null
-    if (theirs !== null) {
+    if (fit.matched) {
+      // The groups add up to Claude Code's own count: nothing differs to explain.
+      children.push(
+        <Text key="share" dimColor>
+          {COPY['instructions.share']}
+        </Text>,
+      )
+    } else if (theirs !== null && theirs > 0) {
+      // Claude Code has a count but none of its rows fits what loaded, so the estimate stands beside it.
       children.push(
         <Box key="compare" flexDirection="column">
           <Text>{fill(COPY['instructions.compare'], { theirs: formatTokens(theirs), mine: est(total) })}</Text>

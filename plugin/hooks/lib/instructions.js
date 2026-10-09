@@ -282,16 +282,22 @@ export function startupChars(entries) {
 
 /**
  * The `n` largest rows of the startup context, largest first (ties in load order).
+ * `size` gives a row's size in any one unit (tokens when the page has Claude Code's count, else the default:
+ * the characters it keeps in the prompt).
  * @param {Entry[]} entries
  * @param {number} n
+ * @param {(entry: Entry) => number} [size]
  */
-export function largest(entries, n) {
+export function largest(entries, n, size) {
+  var sizeOf = size || /** @param {Entry} one */ function (one) {
+    return one.startupChars;
+  };
   return entries
     .filter(function (one) {
       return one.startupChars > 0;
     })
     .sort(function (a, b) {
-      return b.startupChars - a.startupChars || a.seq - b.seq;
+      return sizeOf(b) - sizeOf(a) || a.seq - b.seq;
     })
     .slice(0, n);
 }
@@ -303,9 +309,11 @@ export function largest(entries, n) {
  * @param {Entry[]} entries
  * @param {number} cpt
  * @param {{mcp?: number, file?: number}} [limits]
+ * @param {Object<string, number>} [sizes]  Tokens by row key where Claude Code's count has sized the row (see fitToCategories).
  * @returns {{kind: "mcp"|"file", name: string, tokens: number}|null}
  */
-export function adviceFor(entries, cpt, limits) {
+export function adviceFor(entries, cpt, limits, sizes) {
+  var fitted = sizes || {};
   var mcpAt = limits && typeof limits.mcp === "number" ? limits.mcp : MCP_TOKENS;
   var fileAt = limits && typeof limits.file === "number" ? limits.file : FILE_TOKENS;
   /** @type {{kind: "mcp"|"file", name: string, tokens: number}|null} */
@@ -315,15 +323,107 @@ export function adviceFor(entries, cpt, limits) {
     /** @type {{kind: "mcp"|"file", name: string, tokens: number}|null} */
     var found = null;
     if (one.kind === "mcp") {
-      var live = tokensOf(one.startupChars, cpt);
+      var live = typeof fitted[one.key] === "number" ? /** @type {number} */ (fitted[one.key]) : tokensOf(one.startupChars, cpt);
       if (live >= mcpAt) found = { kind: "mcp", name: one.server || "", tokens: live };
     } else if (one.kind === "instructions") {
-      var size = tokensOf(one.chars, cpt);
+      var size = typeof fitted[one.key] === "number" ? /** @type {number} */ (fitted[one.key]) : tokensOf(one.chars, cpt);
       if (size >= fileAt) found = { kind: "file", name: one.path !== undefined ? shortPath(one.path) : one.name, tokens: size };
     }
     if (found !== null && (best === null || found.tokens > best.tokens)) best = found;
   }
   return best;
+}
+
+/**
+ * A row of Claude Code's context breakdown (`$.session.usage({ breakdown: "summary" }).context.breakdown.categories`).
+ * @typedef {Object} Category
+ * @property {string} name
+ * @property {number} tokens
+ * @property {string} [kind]       "used", "free", "buffer" or "deferred".
+ * @property {boolean} [isDeferred]
+ */
+
+/**
+ * Which row of /context an entry's tokens are part of: "system", "memory", "skills", "tools", "mcp" or "agents";
+ * "" for a row that is not in the prompt at startup (a deferred tool) or that /context has no row for.
+ * @param {Entry} entry
+ * @returns {string}
+ */
+export function categoryOf(entry) {
+  switch (entry.kind) {
+    case "system":
+    case "context":
+      return "system";
+    case "instructions":
+      return "memory";
+    case "skills":
+      return "skills";
+    case "tools":
+      return "tools";
+    case "mcp":
+      return "mcp";
+    case "attachment":
+      return entry.name === "agent_listing_delta" ? "agents" : entry.name === "mcp_instructions_delta" ? "mcp" : "";
+    default:
+      return "";
+  }
+}
+
+/** @type {Object<string, string>} */
+var CATEGORY_NAMES = {
+  "system prompt": "system",
+  "memory files": "memory",
+  skills: "skills",
+  "system tools": "tools",
+  "mcp tools": "mcp",
+  "custom agents": "agents",
+};
+
+/**
+ * The startup context as Claude Code counts it, split among the rows of the page. The total is the sum of the
+ * breakdown's rows that sit in the window, less the conversation (the same figure the Now page calls startup),
+ * and each category's tokens are shared out among the rows that belong to it by their size in characters, so a
+ * row's figure is still an estimate but the groups add up to Claude Code's own count. A row whose category the
+ * breakdown has no row for gets no size here (the caller keeps its estimate). Without a breakdown, or while it
+ * counts no startup tokens (before the first reply), nothing is matched.
+ * @param {Entry[]} entries
+ * @param {Category[]|null|undefined} categories
+ * @returns {{ matched: boolean, total: number, sizes: Object<string, number> }}
+ */
+export function fitToCategories(entries, categories) {
+  /** @type {Object<string, number>} */
+  var sizes = {};
+  var list = Array.isArray(categories) ? categories : [];
+  var total = 0;
+  /** @type {Object<string, number>} */
+  var bucket = {};
+  for (var i = 0; i < list.length; i++) {
+    var category = list[i];
+    if (!category || typeof category.tokens !== "number" || !isFinite(category.tokens) || category.tokens <= 0) continue;
+    var name = String(category.name).toLowerCase();
+    if (category.kind !== "used" || category.isDeferred === true || name === "messages") continue;
+    total += category.tokens;
+    var key = CATEGORY_NAMES[name];
+    if (key !== undefined) bucket[key] = (bucket[key] || 0) + category.tokens;
+  }
+  if (!(total > 0)) return { matched: false, total: 0, sizes: sizes };
+  /** @type {Object<string, number>} */
+  var chars = {};
+  for (var j = 0; j < entries.length; j++) {
+    var one = /** @type {Entry} */ (entries[j]);
+    var group = categoryOf(one);
+    if (group !== "" && one.startupChars > 0 && bucket[group] !== undefined) chars[group] = (chars[group] || 0) + one.startupChars;
+  }
+  var matched = false;
+  for (var k = 0; k < entries.length; k++) {
+    var row = /** @type {Entry} */ (entries[k]);
+    var share = categoryOf(row);
+    var all = chars[share];
+    if (share === "" || row.startupChars <= 0 || all === undefined || all <= 0) continue;
+    sizes[row.key] = Math.round(/** @type {number} */ (bucket[share]) * (row.startupChars / all));
+    matched = true;
+  }
+  return { matched: matched, total: total, sizes: sizes };
 }
 
 /**

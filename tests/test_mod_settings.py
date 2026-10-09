@@ -19,6 +19,7 @@ from helpers import assert_privacy_deep
 from test_service_api import _start_server
 
 from claudeglass import __version__, calibration, capture_catalogue, mod_settings, recache
+from claudeglass.hooks import capture_hook
 from claudeglass.config import ConfigError
 from claudeglass.pricing import LongContextRule, ModelRates, Pricing, load_pricing
 from claudeglass.units import Units
@@ -270,10 +271,17 @@ def test_a_store_that_cannot_answer_leaves_your_usual_unknown(tmp_path):
 def test_the_coaching_block_is_the_catalogues_until_you_change_it(tmp_path):
     folder = _config(tmp_path)
     assert mod_settings.build(folder, now=NOW)["coaching"] == {
+        "enabled": False,
+        "projects": [],
+        "exclude_projects": [],
+        "feedback_reminder": False,
+        "plan_fresh": True,
         "thresholds": capture_catalogue.COACHING_THRESHOLDS,
         "muted": [],
         "once": [],
         "typical_piece_tokens": 0,
+        "reminded_at": None,
+        "rated": {},
     }
     (folder / "coaching.json").write_text(
         json.dumps({"thresholds": {"cold_min_tokens": 50_000}, "muted": ["b", "a", 3], "once": ["c"], "typical_piece_tokens": 2_500_000}),
@@ -285,6 +293,53 @@ def test_the_coaching_block_is_the_catalogues_until_you_change_it(tmp_path):
     assert coaching["muted"] == ["a", "b"]
     assert coaching["once"] == ["c"]
     assert coaching["typical_piece_tokens"] == 2_500_000
+
+
+def test_coaching_is_off_until_coaching_notes_is_in_capture_coaching(tmp_path):
+    assert mod_settings.build(_config(tmp_path), now=NOW)["coaching"]["enabled"] is False
+    assert mod_settings.build(_config(tmp_path, '[capture]\ncoaching = ["coaching_line"]\n'), now=NOW)["coaching"]["enabled"] is False
+    on = _config(tmp_path, '[capture]\ncoaching = ["coaching_notes"]\n')
+    assert mod_settings.build(on, now=NOW)["coaching"]["enabled"] is True
+
+
+def test_the_project_filter_and_the_feedback_opt_in_are_mirrored_as_written(tmp_path):
+    folder = _config(
+        tmp_path,
+        'exclude_projects = ["scratch"]\n[capture]\ncoaching = ["coaching_notes"]\n'
+        'projects = ["work-", "!private"]\nfeedback = ["feedback_reminder", "plan_check"]\n',
+    )
+    block = mod_settings.build(folder, now=NOW)["coaching"]
+    assert block["projects"] == ["work-", "!private"]
+    assert block["exclude_projects"] == ["scratch"]
+    assert block["feedback_reminder"] is True
+    # The hook's own answer for the same config agrees with what was mirrored.
+    config = capture_hook.load_config(folder)
+    assert capture_hook.feedback_ids(config) == ("plan_check", "feedback_reminder")
+    assert capture_hook.project_allowed("work-api", block["projects"], block["exclude_projects"]) is True
+    assert capture_hook.project_allowed("scratch-work-", block["projects"], block["exclude_projects"]) is False
+
+
+def test_the_plan_tip_opt_out_reaches_the_file(tmp_path):
+    folder = _config(tmp_path)
+    (folder / "coaching.json").write_text(json.dumps({"plan_fresh": False}), encoding="utf-8")
+    assert mod_settings.build(folder, now=NOW)["coaching"]["plan_fresh"] is False
+
+
+def test_the_hooks_last_reminder_and_the_lately_rated_sessions_reach_the_file(tmp_path):
+    folder = _config(tmp_path)
+    (folder / "coach-state.json").write_text(json.dumps({"feedback": {"reminded_at": 1_780_000_000.5}}), encoding="utf-8")
+    store = sqlite3.connect(folder / "service.db")
+    store.execute("CREATE TABLE session_feedback (session_id TEXT, set_at TEXT)")
+    recent, old = NOW - timedelta(days=2), NOW - timedelta(days=40)
+    store.executemany(
+        "INSERT INTO session_feedback VALUES (?, ?)",
+        [("s-recent", recent.strftime("%Y-%m-%dT%H:%M:%SZ")), ("s-old", old.strftime("%Y-%m-%dT%H:%M:%SZ"))],
+    )
+    store.commit()
+    store.close()
+    block = mod_settings.build(folder, now=NOW)["coaching"]
+    assert block["reminded_at"] == 1_780_000_000.5
+    assert block["rated"] == {"s-recent": round(recent.timestamp())}
 
 
 def test_a_threshold_in_config_toml_reaches_the_file(tmp_path):
@@ -322,6 +377,9 @@ def test_the_file_holds_no_path_prompt_or_address(tmp_path):
         store=FakeStore(cost=4.5, context=90_000),
         now=NOW,
     )
+    # ``coaching.projects`` and ``exclude_projects`` mirror the user's own slug patterns as written (a local
+    # config mirror, not an export), so a pattern of theirs isn't scanned; the default config has none.
+    assert data["coaching"]["projects"] == [] and data["coaching"]["exclude_projects"] == []
     assert_privacy_deep(json.loads(json.dumps(data)))
     assert str(tmp_path) not in json.dumps(data)
 

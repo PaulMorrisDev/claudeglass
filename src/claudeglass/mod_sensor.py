@@ -177,8 +177,9 @@ def prune(config_dir: str | Path, retention_days: int, now: float | None = None)
 def prune_present(config_dir: str | Path, now: float | None = None) -> int:
     """Removes the heartbeat files in ``<config_dir>/mod/present`` not
     written for ``capture_catalogue.MOD_PRESENT_PRUNE_S`` (24 hours): the
-    mod refreshes one every minute and removes it when its session ends, so
-    one that old was left by a session that ended without the chance.
+    mod refreshes one every minute and, as the engine cannot delete a file,
+    writes it a last time with ``seen`` at 0 when its session ends, so one
+    that old is a session long over (the dashboard clears them away).
     Returns how many went."""
     cutoff = (time.time() if now is None else now) - MOD_PRESENT_PRUNE_S
     removed = 0

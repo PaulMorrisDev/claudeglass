@@ -13,7 +13,7 @@ import { planted } from "./planted.mjs";
 const root = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks");
 const load = (path) => import(pathToFileURL(join(root, path)).href);
 const { buildKeepList } = await load("lib/keeplist.js");
-const { checkCoverage, markItem, prepareSummary, compactKeep, addBackNote, missingItems, shouldHold, judgePrompt, parseJudge, tally, THRESHOLDS, KEEP_MAX, MARK_SYMBOL } =
+const { checkCoverage, markItem, prepareSummary, compactKeep, addBackNote, missingItems, missingSaid, isSaid, saidTotal, holdStep, holdAfterReply, HOLD_MARGIN, judgePrompt, parseJudge, tally, THRESHOLDS, KEEP_MAX, MARK_SYMBOL } =
   await load("lib/coverage.js");
 const { COPY } = await load("generated/copy.js");
 
@@ -49,9 +49,45 @@ test("a summary that drops two constraints: those two are missing, the rest foun
   assert.equal(coverage.missing, 2);
   // Safe files are not counted either way.
   assert.equal(coverage.counts.safe, 5);
-  assert.equal(coverage.total, coverage.counts.found + coverage.counts.partly + coverage.counts.missing);
-  assert.equal(coverage.kept, coverage.counts.found + coverage.counts.partly);
+  // "Things you said" count the instructions, decisions and pins; files, values, tasks and errors are checked but not counted.
+  const said = items.filter((item) => isSaid(item) && !item.safe);
+  assert.ok(said.length > 0 && said.length < items.filter((item) => !item.safe).length);
+  assert.equal(coverage.total, said.length);
+  assert.equal(saidTotal(items), said.length);
+  assert.equal(coverage.kept, said.length - coverage.missing);
+  assert.ok(coverage.total < coverage.counts.found + coverage.counts.partly + coverage.counts.missing);
+  assert.deepEqual(
+    missingSaid(items, coverage.marks).map((item) => item.id).sort(),
+    [port.id, code.id].sort(),
+  );
   assert.ok(Object.values(MARK_SYMBOL).every((glyph) => glyph.length >= 1));
+});
+
+test("only instructions, decisions and pins are things you said: a dropped file or task does not change the count", () => {
+  const items = buildKeepList(planted());
+  const bare = checkCoverage(items, "This session is being continued from a previous conversation. Nothing else.");
+  const kinds = new Set(items.filter((item) => !item.safe && bare.marks[item.id] === "missing").map((item) => item.kind));
+  assert.ok(kinds.has("task") || kinds.has("file") || kinds.has("value") || kinds.has("error"), "the planted conversation has other kinds to drop");
+  assert.equal(bare.missing, missingSaid(items, bare.marks).length);
+  assert.ok(missingItems(items, bare.marks).length > bare.missing);
+  assert.equal(tally(items, bare.marks).missing, bare.missing);
+  for (const item of missingSaid(items, bare.marks)) assert.ok(["instruction", "decision", "pin"].includes(item.kind));
+});
+
+test("a constraint the summary words as a preference still counts as kept", () => {
+  const items = buildKeepList([{ role: "user", text: "Use pnpm, not npm. Never run the migration against production." }]);
+  const pnpm = items.find((item) => /pnpm/.test(item.text));
+  assert.ok(pnpm);
+  const mark = (text) => markItem(pnpm, prepareSummary(text));
+  assert.equal(mark("The team prefers pnpm over npm for installs."), "found");
+  assert.equal(mark("Installs use pnpm instead."), "found");
+  assert.equal(mark("Installs go through pnpm, favouring it above npm."), "found");
+  assert.equal(mark("The user asked to use pnpm rather than npm."), "found");
+  assert.equal(mark("Installs use pnpm, never npm."), "found");
+  // The subject without any hint of the choice still loses the prohibition.
+  assert.equal(mark("Installs use pnpm and npm."), "missing");
+  assert.equal(mark("Installs use pnpm."), "missing");
+  assert.equal(mark("Unrelated summary about caching."), "missing");
 });
 
 test("paths, ports and numbers need an exact match", () => {
@@ -138,16 +174,24 @@ test("addBackNote: the draft that puts the missing items back", () => {
   assert.match(gathered, /values: .*8080/);
 });
 
-test("the hold rule: once, with 100k of headroom, never twice in a row, never on a 200k window", () => {
-  const base = { enabled: true, trigger: "auto", window: 1000000, point: 300000, heldLast: false };
-  assert.equal(shouldHold(base), true);
-  assert.equal(shouldHold({ ...base, heldLast: true }), false, "never twice in a row");
-  assert.equal(shouldHold({ ...base, enabled: false }), false, "off by default");
-  assert.equal(shouldHold({ ...base, trigger: "manual" }), false);
-  assert.equal(shouldHold({ ...base, window: 200000, point: 160000 }), false, "a 200k window has no headroom");
-  assert.equal(shouldHold({ ...base, window: 400000, point: 300000 }), true, "exactly 100k of headroom holds");
-  assert.equal(shouldHold({ ...base, window: 399999, point: 300000 }), false);
-  assert.equal(shouldHold({ ...base, window: null, point: 300000 }), false);
+test("the hold rule: it lasts the rest of the reply, the next reply's first compaction goes through, never on a 200k window", () => {
+  const base = { enabled: true, trigger: "auto", window: 1000000, point: 300000, tokens: 400000, state: "none" };
+  assert.deepEqual(holdStep(base), { hold: true, next: "holding", first: true });
+  assert.deepEqual(holdStep({ ...base, state: "holding" }), { hold: true, next: "holding", first: false }, "a second attempt in the same reply is held too");
+  assert.deepEqual(holdStep({ ...base, state: "release" }), { hold: false, next: "none", first: false }, "the first one after the reply goes through");
+  assert.equal(holdAfterReply("holding"), "release");
+  assert.equal(holdAfterReply("none"), "none");
+  assert.equal(holdAfterReply("release"), "release");
+  assert.equal(holdStep({ ...base, enabled: false }).hold, false, "off by default");
+  assert.equal(holdStep({ ...base, trigger: "manual" }).hold, false);
+  assert.equal(holdStep({ ...base, window: 200000, point: 160000, tokens: 170000 }).hold, false, "a 200k window has no headroom");
+  assert.equal(holdStep({ ...base, window: 400000, point: 300000, tokens: 310000 }).hold, true, "exactly 100k of headroom holds");
+  assert.equal(holdStep({ ...base, window: 399999, point: 300000 }).hold, false);
+  assert.equal(holdStep({ ...base, window: null, point: 300000 }).hold, false);
+  assert.equal(HOLD_MARGIN, 20000);
+  assert.equal(holdStep({ ...base, tokens: 1000000 - HOLD_MARGIN - 1 }).hold, true);
+  assert.deepEqual(holdStep({ ...base, state: "holding", tokens: 1000000 - HOLD_MARGIN }), { hold: false, next: "none", first: false }, "never held within the margin of the window");
+  assert.equal(holdStep({ ...base, tokens: null }).hold, true, "no reading of the context: the window and point decide");
 });
 
 test("the Haiku judge: a prompt with the list and a parser for its answer", () => {

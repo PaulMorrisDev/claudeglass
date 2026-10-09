@@ -699,3 +699,104 @@ export function launchedInBackground(text, p) {
 export function isNotification(text, p) {
   return typeof text === "string" && text.trimStart().indexOf(p.notificationPrefix) === 0;
 }
+
+// -- who coaching is for -----------------------------------------------------
+
+var SLUG_MAX_CHARS = 200;
+
+/**
+ * A pattern from the user's own `[capture] projects` / `exclude_projects`,
+ * compiled as Python's `re.search(pattern, slug, re.IGNORECASE)` reads it;
+ * null for one that does not compile (it matches nothing, as in the hook).
+ * @param {string} pattern
+ * @returns {RegExp|null}
+ */
+function slugPattern(pattern) {
+  try {
+    return new RegExp(pattern, "i");
+  } catch (e) {
+    return null;
+  }
+}
+
+/**
+ * @param {string} pattern
+ * @param {string} slug
+ */
+function slugMatches(pattern, slug) {
+  var re = slugPattern(pattern);
+  return re !== null && re.test(slug);
+}
+
+/**
+ * The project slug of a folder (capture_hook.slug_for): `name` when Claude
+ * Code names the project itself (CLAUDE_CODE_PROJECT_DIR_NAME), else every
+ * character that is not a letter or digit as "-". A path over 200
+ * characters is cut there and ends "-" and eight hex digits of a hash; the
+ * hash is not reproduced (zeros stand in), so a pattern that depends on
+ * those eight digits does not match here as it does in the hook.
+ * @param {string} cwd
+ * @param {string} [name]
+ * @returns {string}
+ */
+export function projectSlug(cwd, name) {
+  if (typeof name === "string" && name !== "") return name;
+  var slug = cwd.replace(/[^A-Za-z0-9]/g, "-");
+  return slug.length <= SLUG_MAX_CHARS ? slug : slug.slice(0, SLUG_MAX_CHARS) + "-00000000";
+}
+
+/**
+ * Whether the project is one `[capture] projects` and `exclude_projects`
+ * leave in (capture_hook.project_allowed): an excluded pattern, or a
+ * "!pattern" in `projects`, that matches the slug leaves it out; with
+ * ordinary patterns in `projects` it has to match one. Without a folder
+ * there is no filter to apply (the hook lets the call through).
+ * @param {string|null|undefined} cwd
+ * @param {readonly string[]} projects
+ * @param {readonly string[]} excluded
+ * @param {string} [name]  CLAUDE_CODE_PROJECT_DIR_NAME, when set.
+ * @returns {boolean}
+ */
+export function projectApplies(cwd, projects, excluded, name) {
+  if (typeof cwd !== "string" || cwd === "") return true;
+  var slug = projectSlug(cwd, name);
+  if (excluded.some(function (pattern) { return slugMatches(pattern, slug); })) return false;
+  /** @type {string[]} */
+  var includes = [];
+  for (var j = 0; j < projects.length; j++) {
+    var one = String(projects[j]);
+    if (one.charAt(0) === "!") {
+      if (slugMatches(one.slice(1), slug)) return false;
+    } else includes.push(one);
+  }
+  if (includes.length === 0) return true;
+  return includes.some(function (pattern) { return slugMatches(pattern, slug); });
+}
+
+/**
+ * The later of the times a rating reminder last went out, in seconds: the
+ * hook's (from the settings file) and the mod's own (mod/coach.json).
+ * @param {number|null|undefined} hook
+ * @param {number|null|undefined} mod
+ * @returns {number|null}
+ */
+export function latestReminder(hook, mod) {
+  var a = typeof hook === "number" && isFinite(hook) ? hook : null;
+  var b = typeof mod === "number" && isFinite(mod) ? mod : null;
+  if (a === null) return b;
+  if (b === null) return a;
+  return Math.max(a, b);
+}
+
+/**
+ * Whether the session was rated on the dashboard since this piece of work
+ * began (capture_hook._reminder_due): a rating counts when the piece's start
+ * is not known, or the rating came at or after it.
+ * @param {number|null|undefined} ratedAt  Seconds, null for never rated.
+ * @param {number|null|undefined} pieceAt  When the piece began, seconds; null when unknown.
+ * @returns {boolean}
+ */
+export function ratedSince(ratedAt, pieceAt) {
+  if (typeof ratedAt !== "number" || !isFinite(ratedAt)) return false;
+  return typeof pieceAt !== "number" || ratedAt >= pieceAt;
+}

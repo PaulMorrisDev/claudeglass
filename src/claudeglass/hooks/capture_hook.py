@@ -897,9 +897,11 @@ def _mod_present(config_dir: Path, catalogue: dict, session_id: str, now_ts: flo
     ``<config-dir>/mod/present/<session id>.json`` (``{"schema": 1,
     "session_id": <the id>, "seen": <epoch seconds>}``) was refreshed within
     ``mod.present_window_s`` (10 minutes) of now, either side. The mod
-    refreshes it every minute while the session is open and removes it at
-    the session's end. A missing, unreadable or half-written file, an
-    unknown schema, a ``session_id`` that isn't the file's own name and a
+    refreshes it every minute while the session is open and, at the
+    session's end, writes it once more with ``seen`` at 0 (the engine
+    cannot delete a file; the dashboard's watcher removes files a day old).
+    A missing, unreadable or half-written file, an unknown schema, a
+    ``session_id`` that isn't the file's own name, a ``seen`` of 0 and a
     stale ``seen`` all read as absent, and so does a session id that is
     not a plain word of letters, digits and ``-``. The mod names its file
     by Claude Code's session id, the ``session_id`` of a hook payload
@@ -931,6 +933,36 @@ def _moved(config_dir: Path, catalogue: dict, session_id: str, now_ts: float) ->
     if not _mod_present(config_dir, catalogue, session_id, now_ts):
         return frozenset()
     return frozenset(catalogue["mod"]["moved"])
+
+
+#: The mod's own file of when it last gave the rating reminder, in its folder
+#: (``{"schema": 1, "reminded_at": <epoch seconds>}``).
+_MOD_COACH_FILE = "coach.json"
+
+#: That file as the hook last read it, ``{(path, mtime_ns, size): seconds or
+#: None}``; one entry at most, like :data:`_MOD_PRESENT`.
+_MOD_COACH: dict = {}
+
+
+def _mod_reminded_at(config_dir: Path, catalogue: dict) -> float | None:
+    """When the ClaudeGlass mod last gave the rating reminder (``reminded_at``
+    in ``<config-dir>/mod/coach.json``, epoch seconds), so a reminder the mod
+    gave rests the hook's, and the other way round (the mod reads the hook's
+    time from its settings file). ``None`` for a missing, unreadable or
+    odd file. Never raises."""
+    try:
+        mod = catalogue.get("mod") if isinstance(catalogue, dict) else None
+        folder = mod["dir"] if isinstance(mod, dict) and mod.get("dir") else "mod"
+        path = config_dir / folder / _MOD_COACH_FILE
+        stat = path.stat()
+        key = (str(path), stat.st_mtime_ns, stat.st_size)
+        if key not in _MOD_COACH:
+            _MOD_COACH.clear()
+            data = _read_json(path)
+            _MOD_COACH[key] = _number(data.get("reminded_at")) if data.get("schema") == 1 else None
+        return _MOD_COACH[key]
+    except Exception:  # noqa: BLE001 - a fault here must leave the reminder as it was
+        return None
 
 
 def _session_key(session_id: str, config_dir: Path) -> str:
@@ -3056,7 +3088,7 @@ def feedback_note_for(
         elif "feedback_reminder" in ids and "rating_reminder" not in _moved(config_dir, catalogue, session_id, now_ts):
             # The mod shows the reminder at the end of a reply instead, so
             # it is neither noted nor stamped here while the mod runs.
-            note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id)
+            note = _reminder_due(scan, personal, th, coaching, state, session, now_ts, config_dir, session_id, catalogue)
         dirty = dirty or bool(note)
     if dirty:
         _write_json(state_path, state)
@@ -3065,11 +3097,13 @@ def feedback_note_for(
 
 def _reminder_due(
     scan: dict, personal: dict, th: dict, coaching: dict, state: dict, session: str, now_ts: float,
-    config_dir: Path, session_id: str,
+    config_dir: Path, session_id: str, catalogue: dict | None = None,
 ) -> str:
     """The rating-reminder note when this piece of work is big enough and
     hasn't been reminded, and no reminder has gone out in the last
-    ``rating_rest_days`` days; ``""`` otherwise. A piece that was rated
+    ``rating_rest_days`` days (this hook's, or the ClaudeGlass mod's, which
+    :func:`_mod_reminded_at` reads: the later counts); ``""`` otherwise.
+    A piece that was rated
     (a ``/cg-feedback`` run in the transcript, or a rating of the
     session on the dashboard since the piece started,
     :func:`_dashboard_rated_at`) is over: the work after the run is a piece
@@ -3080,6 +3114,9 @@ def _reminder_due(
         return ""
     gate = _feedback_state(state)
     last = _number(gate.get("reminded_at"))
+    modded = _mod_reminded_at(config_dir, catalogue or {})
+    if modded is not None and (last is None or modded > last):
+        last = modded
     if (last is not None and now_ts - last < th["rating_rest_days"] * _SECONDS_PER_DAY
             or _noted_before(state, "pieces", session, scan["piece_key"])):
         return ""
@@ -3118,6 +3155,33 @@ def _dashboard_rated_at(config_dir: Path, session_id: str) -> datetime | None:
     finally:
         conn.close()
     return _parse_time(row[0].replace("Z", "+00:00")) if row and isinstance(row[0], str) else None
+
+
+def dashboard_ratings(config_dir: Path, since: float, limit: int = 100) -> dict[str, float]:
+    """``{session id: epoch seconds}`` of the ratings you gave sessions on the
+    dashboard at or after ``since``, newest first, at most ``limit``; read
+    like :func:`_dashboard_rated_at` and ``{}`` on any trouble. The ClaudeGlass
+    mod's settings file carries it so the mod can tell, as this hook does, that
+    a piece of work was rated."""
+    path = config_dir / _STORE_FILE
+    try:
+        if not path.is_file():
+            return {}
+        import sqlite3
+
+        conn = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.2)
+        try:
+            rows = conn.execute("SELECT session_id, set_at FROM session_feedback ORDER BY set_at DESC LIMIT ?", (int(limit),)).fetchall()
+        finally:
+            conn.close()
+    except Exception:  # noqa: BLE001 - no store, an old one or a locked one: no ratings
+        return {}
+    out: dict[str, float] = {}
+    for sid, set_at in rows:
+        when = _parse_time(set_at.replace("Z", "+00:00")) if isinstance(set_at, str) else None
+        if isinstance(sid, str) and when is not None and when.timestamp() >= since:
+            out[sid] = when.timestamp()
+    return out
 
 
 # -- Haiku writes the tags ------------------------------------------------------

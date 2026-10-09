@@ -1,7 +1,7 @@
 import type { Register, RenderElement } from 'claude-code'
 
 import { barAlt, limitBarSvg, partsBarSvg, replyChartSvg, SVG_LIMIT, sparkline, textBar } from './charts'
-import { amount, localTime, percent } from './fmt'
+import { amount, amountOf, localTime, percent } from './fmt'
 import { COPY, GLOSSARY } from './generated/copy.js'
 import { formatTokens } from './lib/units.js'
 import { fill } from './lib/text.js'
@@ -49,7 +49,8 @@ function advice(context: PageContext): string | null {
 
 function sessionLine(context: PageContext): string {
   const { snap, settings } = context.view
-  const spent = amount(snap.cost ?? 0, settings)
+  // The same rule as the band: on a subscription the 5-hour share when known, else the weekly share, else the list price.
+  const spent = amountOf(snap.cost ?? 0, snap, settings)
   return snap.replies === 1 ? fill(COPY['now.session.one'], { amount: spent }) : fill(COPY['now.session'], { amount: spent, replies: snap.replies })
 }
 
@@ -220,6 +221,21 @@ async function render(context: PageContext): Promise<RenderElement> {
       const key = snap.cost <= usual ? 'band.usual.under' : 'band.usual'
       children.push(<Text key="usual">{fill(COPY[key], { amount: amount(usual, settings) })}</Text>)
     }
+
+    // The opt-in that asks before a costly send (draft.ts).
+    children.push(
+      <Box key="guard" flexDirection="column">
+        <Button
+          key="guard-toggle"
+          label={`${COPY['guard.opt']}: ${context.options.guard ? COPY['guard.opt.on'] : COPY['guard.opt.off']}`}
+          hotkey="s"
+          onPress={() => void context.kit.setOption('guard', !context.options.guard)}
+        />
+        <Box paddingLeft={4}>
+          <Text dimColor>{COPY['guard.opt.detail']}</Text>
+        </Box>
+      </Box>,
+    )
 
     // The summaries so far.
     const known = snap.compactions.filter(one => one.tokensBefore !== null && one.tokensAfter !== null)

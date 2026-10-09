@@ -10,7 +10,7 @@ import { dirname, join } from "node:path";
 import { planted } from "./planted.mjs";
 
 const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks", "lib");
-const { buildKeepList, splitSuggested, contentWords, exactTokens, itemId, trimText, MAX_TEXT, LIMITS } = await import(
+const { buildKeepList, splitSuggested, contentWords, exactTokens, itemId, trimText, MAX_TEXT, MAX_USER_MESSAGE, LIMITS } = await import(
   pathToFileURL(join(lib, "keeplist.js")).href
 );
 
@@ -116,6 +116,34 @@ test("questions, summaries, system notes and tool-only messages are ignored", ()
   assert.deepEqual(items.filter((item) => item.kind !== "value").map((item) => item.text), []);
   // A number in a question is still something the user typed; nothing from the summary or the system note is.
   assert.deepEqual(items.map((item) => item.exact[0]), ["9000"]);
+});
+
+test("pasted text and a skill's or command's own text give no instructions", () => {
+  const pasted = "Never use port 4444. " + "log line with a value 12345 and more words. ".repeat(60);
+  assert.ok(pasted.length > MAX_USER_MESSAGE);
+  const messages = [
+    { role: "user", text: pasted },
+    { role: "user", text: "Base directory for this skill: /home/me/.claude/skills/review\n\nNever skip the tests. Always run the linter." },
+    { role: "user", text: "Launching skill: review. Always run the linter." },
+    { role: "user", text: "Review this.\n<command-name>/review</command-name>\n<command-args>never touch the schema</command-args>" },
+    { role: "user", text: "Never push to main." },
+  ];
+  const items = buildKeepList(messages);
+  assert.deepEqual(items.map((item) => item.text), ["Never push to main."]);
+  // Just under the limit is still the user's own message.
+  const long = ("Always run the linter. " + "x".repeat(40) + " ").repeat(1).padEnd(MAX_USER_MESSAGE, "y");
+  assert.equal(buildKeepList([{ role: "user", text: long }]).filter((item) => item.kind === "instruction").length, 1);
+});
+
+test("file recency counts the files listed, not the repeated edits skipped", () => {
+  const edit = (path) => ({ role: "assistant", text: "", toolUses: [{ tool: "Edit", input: { file_path: path }, text: "ok" }] });
+  // Seven files, each edited twice in a row: the two edits of a file are one item.
+  const messages = [];
+  for (let n = 1; n <= 7; n++) messages.push(edit(`src/f${n}.ts`), edit(`src/f${n}.ts`));
+  const files = kinds(buildKeepList(messages), "file");
+  assert.equal(files.length, 7);
+  assert.equal(files.filter((item) => item.safe).length, 5);
+  assert.deepEqual(files.filter((item) => !item.safe).map((item) => item.text), ["src/f2.ts", "src/f1.ts"]);
 });
 
 test("pins come first and survive; each kind is capped; texts are one short line", () => {

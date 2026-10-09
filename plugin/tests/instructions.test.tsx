@@ -227,6 +227,8 @@ test('a path-scoped file is marked with the reply it loaded in', async ($, on) =
   bottoms(on)
   await $.session.start(START)
   await loadStartup($)
+  // Claude Code counts no startup rows here, so every size on the page is the estimate.
+  world.shape = { startupRows: [] }
   await reply($, world, FIRST)
   await world.clock.advance(1000)
 
@@ -350,20 +352,76 @@ test('agent types that received CLAUDE.md are listed in the detailed view', asyn
   expect(faults(world)).toEqual([])
 })
 
-test('the detailed view sets the estimate beside Claude Code\'s own count and says why they differ', async ($, on) => {
+test('with Claude Code\'s own count the startup total is its figure, and each item is its share of its group', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
   await loadStartup($)
+  // What /context counts for this startup: the rows are shared out among the items that belong to them.
+  world.shape = {
+    startupRows: [
+      { name: 'System prompt', tokens: 4000 },
+      { name: 'Memory files', tokens: 9000 },
+      { name: 'System tools', tokens: 7000 },
+      { name: 'MCP tools', tokens: 15000 },
+      { name: 'Skills', tokens: 2000 },
+    ],
+  }
+  await reply($, world, FIRST)
+
+  let mounted = await pane($)
+  let shown = lines(await mounted.drawn())
+  // The total is Claude Code's, so it carries no estimate mark; the items do.
+  expect(shown).toContain('Startup context is about 37k, from 9 items.')
+  expect(shown).toContain('Startup context: about 37k')
+  expect(shown).toContain('The github MCP server puts about 15k (est.) of tool descriptions in every request. If this work doesn\'t need it, turn it off.')
+  const rows = buttons(await mounted.drawn()).filter(one => String(one.props?.key ?? '').startsWith('item:'))
+  expect(rows.map(textOf).slice(0, 3)).toEqual(['github (1 tool) · 15k (est.)', 'work/CLAUDE.md · 7.2k (est.)', 'Built-in tools (2) · 7k (est.)'])
+  await mounted.unmount()
+
+  // Detailed: the groups add up to the total, so there is no second figure to explain.
+  mounted = await pane($)
+  await mounted.press({ key: 'more' })
+  shown = lines(await mounted.drawn())
+  expect(shown.some(line => /^Claude Code counts/.test(line))).toBe(false)
+  expect(shown.some(line => /estimates from text at a fixed rate/.test(line))).toBe(false)
+  expect(shown).toContain('The total is Claude Code\'s count. Each item is its share of its group\'s total, by size, so item sizes are estimates.')
+  expect(shown).toContain('Skills')
+  expect(shown).toContain('skill listing · 2k (est.)')
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('when none of Claude Code\'s rows fits what loaded, the estimate stands beside its count and says why they differ', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  world.shape = { startupRows: [{ name: 'Slash commands', tokens: 18000 }] }
   await reply($, world, FIRST)
 
   const mounted = await pane($)
   await mounted.press({ key: 'more' })
   const shown = lines(await mounted.drawn())
-  // The support's /context gives 18k for the startup part.
   expect(shown).toContain('Claude Code counts 18k of startup context on the Now page. This list adds up to about 28k (est.).')
   expect(shown).toContain('The list estimates from text at a fixed rate. It leaves out the input schemas of tools, which are most of their size.')
+  expect(shown).toContain('Startup context: about 28k (est.)')
   await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('before Claude Code has counted anything the page shows the estimate alone', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  const mounted = await pane($)
+  await mounted.press({ key: 'more' })
+  const shown = lines(await mounted.drawn())
+  expect(shown).toContain('Startup context: about 28k (est.)')
+  expect(shown.some(line => /^Claude Code counts|^The total is Claude Code/.test(line))).toBe(false)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
 })
 
 test('a new session starts the list over, and nothing about it is written to disk', async ($, on) => {

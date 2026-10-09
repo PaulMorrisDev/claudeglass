@@ -15,8 +15,8 @@ import { fill } from './lib/text.js'
 import { emptySnap, live, touch } from './live'
 import { NOTE_EVERY } from './notes'
 import { noteShown, seconds } from './sensor'
-import { getSettings } from './settings'
-import { onTurnEnd } from './track'
+import { coachingApplies, getSettings } from './settings'
+import { onClear, onTurnEnd } from './track'
 
 // Claude Code reads a state reference only where its literal is written, so each file that
 // reads one declares it (the contract is types/index.d.ts).
@@ -40,6 +40,11 @@ const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, f
 //   agent.list       the engine's own status, asked every few seconds while some
 //                    agent is running, for a run that ended unseen
 //
+// Only a run that has a spawn (or an Agent call naming it) is a row. The engine's
+// own forks (a summary being written, memory work) and a skill's fork carry an
+// agentId too, with no spawn: their events are held aside for a few seconds in case a
+// spawn claims them, and dropped when none does, so they are never counted as agents.
+//
 // The hooks that watch an agent's events are matched on agentId (`/./` only
 // matches an event that has one), apart from track.ts's hooks on the same
 // events, which take the main session's: validate refuses two unmatched hooks
@@ -57,7 +62,12 @@ const PROMPT_LINES = 12
 /** How often the engine's list of agents is asked while one is running. */
 const POLL_MS = 10000
 
+/** How long the events of an agentId no spawn has named are held before they are dropped. */
+const UNCLAIMED_MS = 5000
+
 const prompts = new Map<string, string>()
+/** Rows of agentIds that have raised events but no spawn (yet); not in the snapshot. */
+const unclaimed = new Map<string, GlassAgent>()
 let pendingSplit: Split = newSplit()
 let polling: { cancel: () => void } | null = null
 
@@ -75,6 +85,7 @@ export function promptOf(id: string): string | null {
 export function forgetAgents(): void {
   stopPolling()
   prompts.clear()
+  unclaimed.clear()
   pendingSplit = newSplit()
 }
 
@@ -152,11 +163,38 @@ function blank(id: string, now: number): GlassAgent {
   }
 }
 
-/** The row of agent `id`, made when its first event arrives before its spawn has answered. */
+/** Drops the held rows of agentIds that no spawn claimed in time. */
+function sweep(now: number): void {
+  for (const [id, row] of unclaimed) if (now - row.startedAt > UNCLAIMED_MS) unclaimed.delete(id)
+}
+
+/**
+ * The row of agent `id` for one of its events: the snapshot's if a spawn made it, else one held aside
+ * (see the header); a spawn that answers late claims it with the figures so far.
+ */
 function rowOf(snap: GlassSnap, id: string, now: number): GlassAgent {
-  let row = snap.agents.find(one => one.id === id)
+  const known = snap.agents.find(one => one.id === id)
+  if (known !== undefined) return known
+  sweep(now)
+  let row = unclaimed.get(id)
   if (row === undefined) {
     row = blank(id, now)
+    unclaimed.set(id, row)
+  }
+  return row
+}
+
+/** Whether an agent's row is one of the snapshot's: it has a spawn, or an Agent call, behind it. */
+function isRow(snap: GlassSnap, row: GlassAgent): boolean {
+  return snap.agents.includes(row)
+}
+
+/** The row of agent `id` in the snapshot, made now (from what was held aside, if anything) for a spawn or an Agent call that names it. */
+function claim(snap: GlassSnap, id: string, now: number): GlassAgent {
+  let row = snap.agents.find(one => one.id === id)
+  if (row === undefined) {
+    row = unclaimed.get(id) ?? blank(id, now)
+    unclaimed.delete(id)
     snap.agents.push(row)
     if (snap.agents.length > MAX_ROWS) {
       const old = snap.agents.findIndex(one => one.status !== 'running')
@@ -190,6 +228,8 @@ function tipText(decision: Decision): string {
  */
 function tell(snap: GlassSnap, settings: GlassSettings, decision: Decision | null, surface: string, now: number): string | null {
   if (decision === null) return null
+  // Coaching is for those who turned it on, in the projects it covers.
+  if (!coachingApplies(settings)) return null
   if (settings.muted.includes(decision.kind)) return null
   const th = thresholds(settings)
   const nowS = seconds(now)
@@ -213,8 +253,9 @@ function finish(snap: GlassSnap, settings: GlassSettings, row: GlassAgent, statu
   if (settings.muted.includes('split_run')) return
   const one = splitCounts({ type: row.type, compacted: row.compactions > 0, briefChars: row.briefChars, th: thresholds(settings), skip: SKIP_AGENT_TYPES })
   pendingSplit = addSplit(pendingSplit, one)
-  // A run the main session waited for has its row under the call: tell it there.
-  if (!row.background) {
+  // A run the main session waited for has its row under its Agent call: tell it there. A run with no call
+  // of the main session's (a workflow's, or one an agent started) has no row on screen: its turn-end note.
+  if (!row.background && row.toolUseId !== '' && row.parentAgentId === undefined) {
     const found = splitRun({ compaction: pendingSplit.compaction, brief: pendingSplit.brief, th: thresholds(settings), why: SPLIT_WHY })
     const text = tell(snap, settings, found, 'agent', now)
     if (text !== null) {
@@ -235,11 +276,24 @@ type CallRecord = {
   description?: string
   prompt?: string
   totalToolUseCount?: number
-  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number | null; cache_creation_input_tokens?: number | null }
 }
 
 function isAgentTool(name: string): boolean {
   return name === 'Agent' || name === 'Task'
+}
+
+/**
+ * A Workflow the main session started in the background while it holds a lot: the report_reread note, as a note at
+ * the next free place (a workflow has no Agent call row to carry it). Returns true when it was told. Under the same
+ * rules as the other notes: coaching on, not muted, at most one per NOTE_EVERY replies, the rest rule.
+ */
+export async function workflowLaunched(io: Io, snap: GlassSnap, settings: GlassSettings, background: boolean, now: number): Promise<boolean> {
+  if (!background || !noteAllowed(snap.lastNoteReply, snap.replies, NOTE_EVERY)) return false
+  const text = tell(snap, settings, reportReread({ background, ctx: mainContext(snap), th: thresholds(settings) }), 'log', now)
+  if (text === null) return false
+  snap.lastNoteReply = snap.replies
+  io.note(`● ${COPY['note.lead']} · ${text}`)
+  return true
 }
 
 /** Marks the runs the engine's own list says have ended, though their end wasn't seen; stops asking once none is running. */
@@ -253,10 +307,15 @@ async function reconcile($: EngineInterface): Promise<void> {
   const list = await $.agent.list()
   const settings = await getSettings(io)
   const now = await $.clock.now()
+  sweep(now)
   for (const row of snap.agents) {
     if (row.status !== 'running') continue
     const info = list.find(one => one.id === row.id)
-    if (info === undefined) continue
+    // A run the engine no longer lists has ended (the grace is for the list to catch up with a run just started).
+    if (info === undefined) {
+      if (now - row.startedAt >= POLL_MS) finish(snap, settings, row, 'done', now)
+      continue
+    }
     if (info.status === 'completed' || info.status === 'idle') finish(snap, settings, row, 'done', now)
     else if (info.status === 'failed' || info.status === 'killed') finish(snap, settings, row, 'failed', now)
   }
@@ -275,6 +334,9 @@ function startPolling($: EngineInterface): void {
 }
 
 export const register: Register = on => {
+  // A /clear: the prompts, the runs waiting to be told and the held events are the cleared conversation's.
+  onClear(forgetAgents)
+
   // The spawn: what started the run, and the agentId its events will carry.
   on('agent.spawn', async ($, e, next) => {
     const result = await next(e)
@@ -286,7 +348,8 @@ export const register: Register = on => {
       const now = await $.clock.now()
       // A session with no agents yet holds nothing from an earlier one.
       if (snap.agents.length === 0) forgetAgents()
-      const row = rowOf(snap, result.agentId, now)
+      const row = claim(snap, result.agentId, now)
+      row.parentAgentId = e.parentAgentId
       row.toolUseId = e.workflow === undefined ? e.tool_use_id : ''
       row.type = e.subagentType
       row.desc = e.description
@@ -342,7 +405,7 @@ export const register: Register = on => {
       const record: CallRecord = result.deny === undefined && result.result !== null && typeof result.result === 'object' ? (result.result as CallRecord) : {}
       const id = record.agentId
       if (typeof id === 'string' && id !== '') {
-        const row = rowOf(snap, id, now)
+        const row = claim(snap, id, now)
         if (row.toolUseId === '') row.toolUseId = e.tool_use_id
         const input = e as unknown as { subagent_type?: string; description?: string; prompt?: string }
         if (row.type === '') row.type = input.subagent_type ?? record.description ?? ''
@@ -354,19 +417,8 @@ export const register: Register = on => {
         }
         if (record.status === 'async_launched') row.background = true
         if (record.status === 'completed') {
-          // The call's own totals stand in for requests this module did not see.
-          const usage = record.usage
-          if (row.requests === 0 && usage !== undefined) {
-            row.input = count(usage.input_tokens)
-            row.output = count(usage.output_tokens)
-            row.cacheRead = count(usage.cache_read_input_tokens)
-            row.cacheWrite = count(usage.cache_creation_input_tokens)
-            row.usd = priceUsage(
-              ratesFor(settings.models, row.model),
-              { input_tokens: row.input, output_tokens: row.output, cache_read_input_tokens: row.cacheRead, cache_creation_input_tokens: row.cacheWrite },
-              settings.ttl,
-            )
-          }
+          // The call's `usage` is the run's last request alone, not its total: the row's cost stays the sum of the
+          // requests seen (turn.step), and is left at what was seen for a run whose requests were missed.
           row.calls = Math.max(row.calls, count(record.totalToolUseCount))
           finish(snap, settings, row, 'done', now)
         }
@@ -432,7 +484,10 @@ export const register: Register = on => {
       const snap = await live(io)
       const settings = await getSettings(io)
       const now = await $.clock.now()
-      finish(snap, settings, rowOf(snap, e.agentId, now), e.reason === 'answer' ? 'done' : 'failed', now)
+      const row = rowOf(snap, e.agentId, now)
+      // A fork of the engine's that no spawn named ends here with nothing to show.
+      if (isRow(snap, row)) finish(snap, settings, row, e.reason === 'answer' ? 'done' : 'failed', now)
+      else unclaimed.delete(e.agentId)
       await touch(io)
     } catch (error) {
       debug($, 'turn.complete', error)

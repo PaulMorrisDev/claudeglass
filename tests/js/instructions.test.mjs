@@ -9,7 +9,7 @@ import { dirname, join } from "node:path";
 
 const lib = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "plugin", "hooks", "lib");
 const mod = await import(pathToFileURL(join(lib, "instructions.js")).href);
-const { newLedger, follow, record, addAttachment, tokensOf, mcpServer, humanize, shortPath, entriesOf, startupChars, largest, adviceFor, groupsOf, receivedClaudeMd, agentTypesOf } = mod;
+const { newLedger, follow, record, addAttachment, tokensOf, mcpServer, humanize, shortPath, entriesOf, startupChars, largest, adviceFor, groupsOf, receivedClaudeMd, agentTypesOf, fitToCategories, categoryOf } = mod;
 
 function item(id, kind, chars, extra = {}) {
   return { id, kind, name: id, chars, reply: 1, from: "engine", startup: true, ...extra };
@@ -147,4 +147,48 @@ test("agent types split into those that received CLAUDE.md and those that did no
   assert.deepEqual(agentTypesOf(agents, { 1: true, 2: false, 3: false, 5: true }), { got: ["general-purpose"], skipped: ["Explore"] });
   assert.deepEqual(agentTypesOf(agents, { 2: false, 3: true }), { got: ["Explore"], skipped: [] });
   assert.deepEqual(agentTypesOf(agents, {}), { got: [], skipped: [] });
+});
+
+const USED = (name, tokens) => ({ name, tokens, kind: "used", isDeferred: false });
+
+test("Claude Code's categories become the group totals, and each row is its share of its group", () => {
+  const entries = entriesOf(session().items);
+  const fit = fitToCategories(entries, [
+    USED("System prompt", 3000),
+    USED("System tools", 9000),
+    USED("MCP tools", 20000),
+    USED("Memory files", 4000),
+    USED("Messages", 50000),
+    { name: "Free space", tokens: 100000, kind: "free", isDeferred: false },
+    { name: "System tools (deferred)", tokens: 7000, kind: "deferred", isDeferred: true },
+  ]);
+  assert.equal(fit.matched, true);
+  // The total is what /context calls startup: the used rows less the conversation, deferred rows left out.
+  assert.equal(fit.total, 3000 + 9000 + 20000 + 4000);
+  assert.deepEqual(fit.sizes, { "sys:intro": 3000, "file:a": 4000, tools: 9000, "mcp:g": 20000 });
+  // A group with two rows splits by characters.
+  const split = fitToCategories(entriesOf([item("a", "instructions", 3000, { startup: true }), item("b", "instructions", 1000, { startup: true })]), [USED("Memory files", 800)]);
+  assert.deepEqual(split.sizes, { a: 600, b: 200 });
+  // The ordering and the advice work on the fitted sizes.
+  assert.deepEqual(largest(entries, 2, (one) => fit.sizes[one.key] ?? 0).map((one) => one.key), ["mcp:g", "tools"]);
+  assert.deepEqual(adviceFor(entries, 4, undefined, fit.sizes), { kind: "mcp", name: "g", tokens: 20000 });
+  assert.deepEqual(adviceFor(entries, 4, { mcp: 25000, file: 3000 }, fit.sizes), { kind: "file", name: "work/CLAUDE.md", tokens: 4000 });
+});
+
+test("nothing is matched before Claude Code counts a startup, or when no category fits a row", () => {
+  const entries = entriesOf(session().items);
+  assert.equal(fitToCategories(entries, undefined).matched, false);
+  assert.equal(fitToCategories(entries, []).matched, false);
+  assert.equal(fitToCategories(entries, [USED("System prompt", 0), USED("Messages", 0)]).matched, false);
+  // A category with no row of the page's: counted in the total, shared out to nobody.
+  const odd = fitToCategories(entries, [USED("Slash commands", 500)]);
+  assert.equal(odd.matched, false);
+  assert.equal(odd.total, 500);
+  // A row with no category of its own in the breakdown keeps no fitted size.
+  const partial = fitToCategories(entries, [USED("System tools", 9000)]);
+  assert.deepEqual(partial.sizes, { tools: 9000 });
+  assert.equal(categoryOf({ kind: "deferred", name: "x" }), "");
+  assert.equal(categoryOf({ kind: "attachment", name: "agent_listing_delta" }), "agents");
+  assert.equal(categoryOf({ kind: "attachment", name: "mcp_instructions_delta" }), "mcp");
+  assert.equal(categoryOf({ kind: "attachment", name: "reminder" }), "");
 });

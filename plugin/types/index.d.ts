@@ -36,6 +36,24 @@ export type GlassSettings = {
   charsPerToken: { text: Record<string, number>; family: string }
   /** The tokens in the user's typical piece of work (the rating reminder compares with it); 0 when not known. */
   typicalPiece: number
+  /**
+   * Whether coaching is on for this user, and what the capture hook uses to decide it (the file's `coaching` block).
+   * `enabled` is false unless `coaching_notes` is in `[capture] coaching`, and in the fallback.
+   */
+  coaching: {
+    enabled: boolean
+    /** The slug patterns of `[capture] projects` (a leading `!` leaves a project out) and `exclude_projects`, as the user wrote them. */
+    projects: string[]
+    excludeProjects: string[]
+    /** `feedback_reminder` is opted in under `[capture] feedback`. */
+    feedbackReminder: boolean
+    /** False when `coaching.json` has `plan_fresh: false`. */
+    planFresh: boolean
+    /** When the capture hook last gave the rating reminder, in seconds; null for never. */
+    remindedAt: number | null
+    /** Sessions rated on the dashboard lately: session id to when, in seconds. */
+    rated: Record<string, number>
+  }
   dashboardUrl: string | null
 }
 
@@ -105,6 +123,8 @@ export type GlassAgent = {
   compactions: number
   /** Coaching notes shown on its row (`report_reread`, `split_run`), with the words shown. */
   notes: { kind: string; text: string }[]
+  /** The agent that started it, when another agent did (its row has no Agent call of the main session's under it). */
+  parentAgentId?: string
 }
 
 export type GlassRebuild = {
@@ -202,6 +222,12 @@ export type GlassSnap = {
   piece: { tokens: number; noted: boolean; surveying: boolean }
 }
 
+/**
+ * The session budget (`/glass budget`): money on API billing (list-price dollars), a share of the 5-hour limit on a
+ * subscription. Set by the person; cleared by `/glass budget off`.
+ */
+export type GlassBudget = { kind: 'usd' | 'pct'; value: number }
+
 /** A thing the user pinned to the keep list (compaction review). The text is theirs and lives in $.state only. */
 export type GlassPin = { id: string; text: string }
 
@@ -295,6 +321,8 @@ declare module 'claude-code' {
       /** The keep list's pins (compaction review). */
       pins: GlassPin[]
       review: GlassReview
+      /** The session budget, or null when none is set. */
+      budget: GlassBudget | null
     }
   }
 }

@@ -13,7 +13,8 @@ import { emptySnap } from './live'
 import { OPEN_ARGS } from './pane'
 import { coldMin, drawView, sendCostNow } from './view'
 import type { View } from './view'
-import type { GlassReview } from '../types'
+import type { GlassBudget, GlassReview } from '../types'
+import { budgetProgress, mirrorBudget } from './budget'
 
 // Claude Code reads a state reference only where its literal is written, so each file that
 // reads one declares it (the contract is types/index.d.ts).
@@ -22,6 +23,7 @@ const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, n
 const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, false)
 const reviewAtom = atom({ plugin: 'claudeglass', key: 'review' } as const, emptyReview())
 const pageAtom = atom({ plugin: 'claudeglass', key: 'page' } as const, 'now')
+const budgetAtom = atom({ plugin: 'claudeglass', key: 'budget' } as const, null as GlassBudget | null)
 
 // The band above the prompt: the glance. Two fixed segments (how full the
 // context is and what the session has cost) and at most one that appears only
@@ -82,20 +84,22 @@ function context(view: View): Segment | null {
   }
 }
 
-function spend(view: View, working: boolean): Segment | null {
+function spend(view: View, working: boolean, budget: GlassBudget | null = null): Segment | null {
   const { snap, settings } = view
   if (snap.cost === null) return null
   const subscription = settings.billing.mode === 'subscription'
   const limit = subscription && snap.fiveHour !== null ? percent(snap.fiveHour.pct) : null
+  // A session budget (budget.ts) turns the spend into progress against it, once that can be told.
+  const progress = budget === null ? null : budgetProgress(budget, snap, settings)
   // On a subscription the dollars mean little, and the share of the weekly limit they are worth is
   // often not known: the 5-hour figure is what Claude Code reports, so the simple view shows that.
-  if (limit !== null && !view.detailed) {
+  if (limit !== null && !view.detailed && progress === null) {
     return { key: 'spend', text: fill(COPY['band.limit'], { pct: limit }), short: fill(COPY['band.limit.short'], { pct: limit }) }
   }
 
   const change = working ? snap.turnUsd : snap.lastReplyUsd
   const changeText = !subscription && isVisibleChange(change) ? ` ${fill(COPY['band.change'], { amount: shortAmount(change, settings) })}` : ''
-  const text = `${fill(COPY['band.cost'], { amount: amount(snap.cost, settings) })}${changeText}`
+  const text = `${progress === null ? fill(COPY['band.cost'], { amount: amount(snap.cost, settings) }) : progress.text}${changeText}`
 
   const extra: string[] = []
   if (view.detailed) {
@@ -106,8 +110,13 @@ function spend(view: View, working: boolean): Segment | null {
       extra.push(fill(COPY[key], { amount: amount(usual, settings) }))
     }
   }
-  const short = limit !== null ? fill(COPY['band.limit.short'], { pct: limit }) : `${subscription ? amount(snap.cost, settings) : shortAmount(snap.cost, settings)}${changeText}`
-  return { key: 'spend', text: joinParts([text, ...extra]), short }
+  const short =
+    progress !== null
+      ? `${progress.short}${changeText}`
+      : limit !== null
+        ? fill(COPY['band.limit.short'], { pct: limit })
+        : `${subscription ? amount(snap.cost, settings) : shortAmount(snap.cost, settings)}${changeText}`
+  return { key: 'spend', text: joinParts([text, ...extra]), short, ...(progress?.over === true ? { color: 'warning', bold: true } : {}) }
 }
 
 /**
@@ -183,8 +192,8 @@ function conditional(view: View, working: boolean, review: GlassReview): Segment
 }
 
 /** The segments to draw, at most three, in the order they are drawn. */
-export function segmentsOf(view: View, working: boolean, review: GlassReview = emptyReview()): Segment[] {
-  return [context(view), spend(view, working), conditional(view, working, review)].filter((one): one is Segment => one !== null)
+export function segmentsOf(view: View, working: boolean, review: GlassReview = emptyReview(), budget: GlassBudget | null = null): Segment[] {
+  return [context(view), spend(view, working, budget), conditional(view, working, review)].filter((one): one is Segment => one !== null)
 }
 
 /** The summary check found something and the user has not looked yet. */
@@ -224,7 +233,9 @@ export const register: Register = on => {
     if (e.props.hasSurvey) return base
     const view = drawView(await read($, snapAtom), await read($, settingsAtom), await read($, detailedAtom), await $.clock.now(), e.props.isWorking)
     const review = sound(await read($, reviewAtom))
-    const segments = segmentsOf(view, e.props.isWorking, review)
+    const budget = await read($, budgetAtom)
+    mirrorBudget(budget)
+    const segments = segmentsOf(view, e.props.isWorking, review, budget)
     if (view.snap.reading === null || segments.length === 0) return base
 
     const table = $.ui.resolve(e)

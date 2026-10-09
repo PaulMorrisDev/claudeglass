@@ -45,6 +45,8 @@ export type PageKit = {
   setOption: (key: string, enabled: boolean) => Promise<void>
   /** Asks a model a question: its answer and the tokens it used, or why it could not. */
   ask: (model: string, prompt: string, maxTokens: number) => Promise<{ text: string; input: number; output: number } | { reason: string }>
+  /** The rows of Claude Code's own context breakdown (what /context lists) as of now; empty when it can't say. */
+  categories: () => Promise<{ name: string; tokens: number; kind: string; isDeferred: boolean }[]>
 }
 
 /**
@@ -63,8 +65,8 @@ export type PageContext = {
   /** The pins, and the compaction review as the page was drawn. */
   pins: GlassPin[]
   review: GlassReview
-  /** The two opt-ins of the compaction review. */
-  options: { hold: boolean; readd: boolean }
+  /** The opt-ins: the compaction review's two, and the guard before a costly send (draft.ts). */
+  options: { hold: boolean; readd: boolean; guard: boolean }
   kit: PageKit
 }
 
@@ -170,6 +172,14 @@ export const register: Register = on => {
         await $.store.set(key, enabled)
         await update($, reviewAtom, was => ({ ...sound(was) }))
       },
+      categories: async () => {
+        try {
+          const usage = await $.session.usage({ breakdown: 'summary' })
+          return (usage.context.breakdown?.categories ?? []).map(one => ({ name: one.name, tokens: one.tokens, kind: one.kind, isDeferred: one.isDeferred }))
+        } catch {
+          return []
+        }
+      },
       ask: async (model, prompt, maxTokens) => {
         try {
           const answer = await $.model.complete({ model, prompt, maxTokens, effort: 'low', timeoutMs: 60000 })
@@ -184,7 +194,7 @@ export const register: Register = on => {
     const context: PageContext = {
       pins: await read($, pinsAtom),
       review: sound(await read($, reviewAtom)),
-      options: { hold: (await $.store.get('hold')) === true, readd: (await $.store.get('readd')) === true },
+      options: { hold: (await $.store.get('hold')) === true, readd: (await $.store.get('readd')) === true, guard: (await $.store.get('guard')) === true },
       kit,
       e,
       table,

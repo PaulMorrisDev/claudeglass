@@ -102,7 +102,11 @@ const INSTRUCTION =
 const CORRECTION = /^(?:no|nope|actually|wait|not that|that'?s not|that is not|instead)\b[\s,.:;!-]+\S/i;
 const DECISION =
   /\b(let'?s go with|lets go with|let'?s do|go with|going with|we'?ll go with|we will go with|agreed|i agree|approved?|proceed with|we decided|decided to|the decision is|sounds good,? (?:use|go|do))\b/i;
-const NOISE_START = /^(?:<|this session is being continued|\[request interrupted|caveat:|\[image)/i;
+const NOISE_START = /^(?:<|this session is being continued|\[request interrupted|caveat:|\[image|base directory for this skill|launching skill)/i;
+/** A skill's or command's body arrives as a user message whose header names the command; anywhere in the text counts. */
+const COMMAND_HEADER = /<command-(?:name|message|args)>|<skill-(?:name|format)>/i;
+/** A user message longer than this (characters, whitespace squashed) is pasted text, not an instruction. */
+export const MAX_USER_MESSAGE = 2000;
 const FAILURE_LINE = /\b(FAILED|ERROR|Error:|Traceback|AssertionError|Exception|npm ERR!|error TS\d+|fatal:|panic:)/;
 
 const STOP = new Set(
@@ -260,15 +264,16 @@ function sentences(text) {
 
 /**
  * True for a user message that is the user's own words, not a summary, a
- * system note or a tool answer.
+ * system note, a skill's or command's text, pasted text (over MAX_USER_MESSAGE
+ * characters) or a tool answer.
  * @param {MessageLike} message
  * @returns {boolean}
  */
 function isUserWords(message) {
   if (message.role !== "user") return false;
   var text = squash(message.text);
-  if (text === "" || NOISE_START.test(text)) return false;
-  return true;
+  if (text === "" || NOISE_START.test(text) || COMMAND_HEADER.test(text)) return false;
+  return text.length <= MAX_USER_MESSAGE;
 }
 
 /**
@@ -582,7 +587,8 @@ export function buildKeepList(messages, options) {
       if (kind === "value" && item.exact.length > 0 && covered.has(String(item.exact[0]))) continue;
       seen.add(item.id);
       if (kind === "file") {
-        if (m < recent) {
+        // The newest files kept, counting the ones listed (a file edited again is skipped above and takes no place).
+        if (kept < recent) {
           item.safe = true;
           item.why = "recent";
         }

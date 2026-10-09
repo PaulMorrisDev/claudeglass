@@ -1,7 +1,7 @@
 import { expect, test } from 'claude-code/testing'
 
 import { GLOSSARY } from '../hooks/generated/copy.js'
-import { elements, faults, prepare, reply, SITE, START, textOf } from './support'
+import { elements, faults, prepare, reply, settingsFile, SITE, START, textOf } from './support'
 import type { World } from './support'
 
 const PROPS = { title: 'Glass', isFocused: true, bodyColumns: 110, placement: 'dock', ...SITE } as const
@@ -84,6 +84,42 @@ test('the Now page first screen: headline, bar, three rows and a session line; e
     for (const text of shown) expect(text.length).toBeLessThanOrEqual(110)
     await mounted.unmount()
   }
+  expect(faults(world)).toEqual([])
+})
+
+test('on a subscription the session line gives the 5-hour share once the limit has moved, else the weekly share, else the list price', async ($, on) => {
+  const billing = (share: number | null) => settingsFile({ billing: { mode: 'subscription', share_per_usd: share, period_label: 'weekly', basis: 'list' } })
+
+  // No share known and no limit reading: the list price.
+  const world = prepare(on, { settings: billing(null) })
+  await started($, world)
+  const mounted = await pane($, 'terminal')
+  expect(lines(await mounted.drawn())).toContain('This session 0.50 USD list-price equivalent · 1 reply')
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('on a subscription with a weekly share known, the session line gives it', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ billing: { mode: 'subscription', share_per_usd: 0.02, period_label: 'weekly', basis: 'list' } }) })
+  await started($, world)
+  const mounted = await pane($, 'terminal')
+  expect(lines(await mounted.drawn())).toContain('This session about 0.01% of your weekly · 1 reply')
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('on a subscription the session line gives the 5-hour share when the limit has moved', async ($, on) => {
+  const world = prepare(on, { settings: settingsFile({ billing: { mode: 'subscription', share_per_usd: 0.02, period_label: 'weekly', basis: 'list' } }) })
+  const resetsAt = new Date(world.clock.now() + 4 * 60 * 60 * 1000).toISOString()
+  world.limits = [{ kind: 'five_hour', percentUsed: 10, resetsAt }]
+  await started($, world)
+  world.limits = [{ kind: 'five_hour', percentUsed: 15, resetsAt }]
+  await reply($, world, { ...SECOND, usd: 0.5 })
+  const mounted = await pane($, 'terminal')
+  const line = lines(await mounted.drawn()).find(text => /^This session /.test(text))
+  // $1.00 spent, 5 points of the limit for the last $0.50: 10 points per dollar.
+  expect(line).toBe('This session about 10.0% of your 5-hour limit · 2 replies')
+  await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
 

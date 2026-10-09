@@ -310,7 +310,7 @@ test('/glass pin adds a pin that comes first in the list and survives a summary;
   expect(faults(world)).toEqual([])
 })
 
-test('the hold: an automatic summary waits once when there is room, never twice in a row, never on a 200k window', async ($, on) => {
+test('the hold: an automatic summary waits for the rest of the reply, the next reply lets one through, never on a 200k window or near the window', async ($, on) => {
   const world = prepare(on)
   bottoms(on, world)
   await $.session.start(START)
@@ -323,15 +323,29 @@ test('the hold: an automatic summary waits once when there is room, never twice 
   await turnOn($, 'hold')
   expect((await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)).skip).toBeUndefined()
 
-  // A 1M window with the point at 300k: held once, then let through, then held again.
+  // A 1M window with the point at 300k: the attempts of the reply running are held, the first one after it goes through.
   world.shape = { window: 1000000, point: 300000 }
-  world.figures(280000, 1)
-  await $.session.measure({ context: { tokens: 280000, window: 1000000, percent: 28 }, rateLimits: [], cost: { usd: 1 }, changed: ['context'] } as never)
-  await world.clock.advance(300)
+  const measure = async (tokens: number) => {
+    world.figures(tokens, 1)
+    await $.session.measure({ context: { tokens, window: 1000000, percent: tokens / 10000 }, rateLimits: [], cost: { usd: 1 }, changed: ['context'] } as never)
+    await world.clock.advance(300)
+  }
+  await measure(280000)
   const held = await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)
   expect(held.skip).toMatch(/held this summary/)
   expect(world.logs.filter(line => line.startsWith('● Glass · Claude summarised')).length).toBe(2)
+  // Claude Code asks again at the next step of the same reply: held too, and no second toast.
+  expect((await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)).skip).toMatch(/held this summary/)
+  expect((await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)).skip).toMatch(/held this summary/)
+  // Within 20k of the window there is no room for another request: it goes through, and the hold is over.
+  await measure(985000)
   expect((await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)).skip).toBeUndefined()
+  // A new hold, ended by the reply: the first summary after it goes through, and the one after that is held again.
+  await measure(280000)
+  expect((await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)).skip).toMatch(/held this summary/)
+  await reply($, world, { steps: [{ cacheRead: 270000, cacheWrite: 5000, output: 5000 }], usd: 1 })
+  expect((await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)).skip).toBeUndefined()
+  expect((await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)).skip).toMatch(/held this summary/)
   expect((await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)).skip).toBeUndefined()
   expect(faults(world)).toEqual([])
 })

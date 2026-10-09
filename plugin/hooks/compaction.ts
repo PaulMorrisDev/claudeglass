@@ -5,7 +5,7 @@ import type { GlassKeepItem, GlassPin, GlassReview } from '../types'
 import { drainSensor, emptyReview, forgetMemory, keepList, memory, reviewCompaction, boundaryLine, sound, suggestCount, withSummary } from './compaction-memory'
 import type { MessageLike } from './compaction-memory'
 import { COPY } from './generated/copy.js'
-import { shouldHold } from './lib/coverage.js'
+import { holdAfterReply, holdStep, saidTotal } from './lib/coverage.js'
 import { buildKeepList, squash } from './lib/keeplist.js'
 import { fill } from './lib/text.js'
 import { emptySnap } from './live'
@@ -95,6 +95,8 @@ export const register: Register = on => {
 
   on('turn.complete', { reason: /./ }, async ($, e, next) => {
     if (e.agentId === undefined) {
+      // The reply a summary was held in has ended: the next automatic summary goes through.
+      memory.hold = holdAfterReply(memory.hold)
       try {
         await refresh($)
       } catch (error) {
@@ -110,21 +112,23 @@ export const register: Register = on => {
     try {
       if (e.trigger === 'auto') {
         const reading = (await read($, snapAtom)).reading
-        const hold = shouldHold({
+        const step = holdStep({
           enabled: (await $.store.get(HOLD_KEY)) === true,
           trigger: 'auto',
           window: reading?.window ?? null,
           point: reading?.point ?? null,
-          heldLast: memory.heldLast,
+          tokens: reading?.tokens ?? null,
+          state: memory.hold,
         })
-        memory.heldLast = hold
+        memory.hold = step.next
+        const hold = step.hold
         if (hold) {
           await update($, reviewAtom, (was): GlassReview => ({ ...sound(was), held: true, ui: { ...sound(was).ui, view: 'before' } }))
-          void $.ui.toast(COPY['compaction.held.toast'])
+          if (step.first) void $.ui.toast(COPY['compaction.held.toast'])
           return { skip: COPY['compaction.held.skip'] }
         }
       } else {
-        memory.heldLast = false
+        memory.hold = 'none'
       }
     } catch (error) {
       $.ui.log(`claudeglass: hold ${String(error)}`, { to: 'debug' })
@@ -146,7 +150,7 @@ export const register: Register = on => {
         after: result.tokensAfter ?? null,
       })
       await update($, reviewAtom, (was): GlassReview => withSummary(sound(was), done.reviewed, done.row))
-      const line = boundaryLine(done.counts, done.reviewed.items.filter(item => !item.safe).length)
+      const line = boundaryLine(done.counts, saidTotal(done.reviewed.items))
       if (line !== null) $.ui.log(line)
       memory.outbox.push({ ts: now, kind: e.trigger, counts: done.counts })
       memory.pinnable = null
@@ -159,6 +163,8 @@ export const register: Register = on => {
   // After a summary, tell Claude the pins again (an opt-in).
   on('classic.SessionStart', { source: 'compact' }, async ($, e, next) => {
     const result = await next(e)
+    // A subagent's own summary is not the session's: its context is not given the pins.
+    if (e.agent_id !== undefined) return result
     try {
       if ((await $.store.get(READD_KEY)) !== true) return result
       const pins = await read($, pinsAtom)

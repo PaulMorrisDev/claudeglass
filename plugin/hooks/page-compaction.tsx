@@ -1,13 +1,13 @@
 import type { Register, RenderElement } from 'claude-code'
 
-import type { GlassKeepItem, GlassMark, GlassPin, GlassReviewUi } from '../types'
+import type { GlassKeepItem, GlassMark, GlassPin, GlassReviewUi, GlassSettings } from '../types'
 import { linkTarget } from './agent-view'
 import { listWithPins, MAX_PINS, memory, newPin } from './compaction-memory'
 import { amount, formatTokens, localTime } from './fmt'
 import { COPY } from './generated/copy.js'
-import { addBackNote, compactKeep, judgePrompt, KEEP_MAX, MARK_SYMBOL, missingItems, parseJudge, tally } from './lib/coverage.js'
+import { addBackNote, compactKeep, judgePrompt, KEEP_MAX, MARK_SYMBOL, missingSaid, parseJudge, saidTotal, tally } from './lib/coverage.js'
 import { splitSuggested } from './lib/keeplist.js'
-import { priceUsage, ratesFor } from './lib/pricing.js'
+import { priceUsage } from './lib/pricing.js'
 import { fill } from './lib/text.js'
 import { addPage } from './pane'
 import type { PageContext } from './pane'
@@ -18,8 +18,12 @@ import type { PageContext } from './pane'
 // Before a summary it offers what the summary should keep as a handful of ticks
 // and fills the prompt box with a /compact command. Nothing is ever sent.
 
-/** The model the optional check asks. */
-const HAIKU = 'claude-haiku-5-5'
+/**
+ * The model the optional check asks, by its alias: Claude Code resolves it to the current Haiku and checks it against
+ * the user's allowlist, where a full id may be one they cannot use. The answer does not name the model it came from,
+ * so the cost below is priced at the newest Haiku in the rates (see haikuRates).
+ */
+const HAIKU = 'haiku'
 /** Characters per token the estimate before the check assumes. */
 const CHARS_PER_TOKEN = 4
 /** The check's answer is one short line per item. */
@@ -34,6 +38,17 @@ const EARLIER_SHOWN = 8
 const LABEL_CHARS = 100
 
 type Copy = keyof typeof COPY
+
+/**
+ * The rates of the newest Haiku among the models priced, or null when there is none. The rates carry no alias,
+ * so the 'haiku' alias is matched by name; the highest id (ids sort by their version numbers) is the newest.
+ */
+function haikuRates(models: GlassSettings['models']): GlassSettings['models'][string] | null {
+  const ids = Object.keys(models).filter(id => id.toLowerCase().includes('haiku'))
+  ids.sort((a, b) => b.localeCompare(a, 'en', { numeric: true }))
+  const best = ids[0]
+  return best === undefined ? null : (models[best] ?? null)
+}
 
 function trim(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`
@@ -123,9 +138,10 @@ function render(context: PageContext): RenderElement {
   )
 
   if (showAfter && after !== null) {
-    const missing = missingItems(after.items, after.marks)
-    const total = after.items.filter(item => !item.safe).length
-    const headline = total === 0 ? COPY['compaction.list.none'] : missing.length === 0 ? COPY['compaction.headline.ok'] : missing.length === 1 ? COPY['compaction.headline.missing.one'] : fill(COPY['compaction.headline.missing'], { count: missing.length })
+    // Only what the user said counts here; files, values, tasks and errors are checked too, and the full list shows them.
+    const missing = missingSaid(after.items, after.marks)
+    const total = saidTotal(after.items)
+    const headline = total === 0 ? COPY['compaction.list.none'] : missing.length === 0 ? COPY['compaction.headline.ok.said'] : missing.length === 1 ? COPY['compaction.headline.missing.one'] : fill(COPY['compaction.headline.missing'], { count: missing.length })
     children.push(
       <Text key="headline" bold>
         {headline}
@@ -220,12 +236,12 @@ function render(context: PageContext): RenderElement {
           const marks = { ...after.marks, ...parseJudge(answer.text, judgeable) }
           const counts = tally(judgeable, marks).counts
           const tokens = answer.input + answer.output
-          const rates = ratesFor(settings.models, HAIKU)
+          const rates = haikuRates(settings.models)
           const cost = rates === null ? fill(COPY['compaction.haiku.cost'], { tokens: formatTokens(tokens) }) : fill(COPY['compaction.haiku.cost.amount'], { tokens: formatTokens(tokens), amount: amount(priceUsage(rates, { input_tokens: answer.input, output_tokens: answer.output }, settings.ttl), settings) })
           const note = fill(COPY['compaction.haiku.done'], { count: judgeable.length, found: counts.found, partly: counts.partly, missing: counts.missing, cost })
           await kit.updateReview(was => ({
             ...was,
-            missing: counts.missing,
+            missing: tally(judgeable, marks).missing,
             after: was.after === null ? null : { ...was.after, marks, judged: true },
             ui: { ...was.ui, busy: false, note },
           }))

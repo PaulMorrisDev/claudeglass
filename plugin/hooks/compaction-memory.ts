@@ -1,6 +1,7 @@
 import type { GlassKeepItem, GlassMark, GlassPin, GlassReview, GlassReviewed, GlassReviewRow, GlassSnap } from '../types'
 import { COPY } from './generated/copy.js'
 import { checkCoverage } from './lib/coverage.js'
+import type { HoldState } from './lib/coverage.js'
 import { buildKeepList, exactTokens, itemId, pinText, splitSuggested, squash, trimText } from './lib/keeplist.js'
 import { fill } from './lib/text.js'
 import { addEvent, seconds } from './sensor'
@@ -32,8 +33,8 @@ export type Counts = { kept: number; missing: number; added: number }
 export const memory: {
   /** The sensor counts of summaries, waiting for the next reply (or the summary's own listener) to record them. */
   outbox: { ts: number; kind: 'auto' | 'manual'; counts: Counts }[]
-  /** The last automatic summary was the one this mod held. */
-  heldLast: boolean
+  /** Where the hold of automatic summaries stands (lib/coverage.js holdStep). */
+  hold: HoldState
   /** CLAUDE.md as the mod can read it (project and user level), or null when not read yet. */
   claudeMd: string | null
   cwd: string | null
@@ -41,11 +42,11 @@ export const memory: {
   added: number
   /** The one typed prompt whose row offers [p] pin (a render may not write $.state, so the rows read it from here). */
   pinnable: string | null
-} = { outbox: [], heldLast: false, claudeMd: null, cwd: null, added: 0, pinnable: null }
+} = { outbox: [], hold: 'none', claudeMd: null, cwd: null, added: 0, pinnable: null }
 
 export function forgetMemory(): void {
   memory.outbox = []
-  memory.heldLast = false
+  memory.hold = 'none'
   memory.claudeMd = null
   memory.cwd = null
   memory.added = 0
@@ -161,13 +162,13 @@ export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: G
   }
 }
 
-/** The boundary line in the transcript, or null when the keep list was empty. */
+/** The boundary line in the transcript, or null when nothing the user said was checked (`total` counts the things they said). */
 export function boundaryLine(counts: Counts, total: number): string | null {
   if (total === 0) return null
   const missing = counts.missing
   const text =
     missing === 0
-      ? COPY['log.compacted.ok']
+      ? COPY['log.compacted.ok.said']
       : `${missing === 1 ? COPY['log.compacted.missing.one'] : fill(COPY['log.compacted.missing'], { count: missing })} ${COPY['log.compacted.review']}`
   return `● ${COPY['note.lead']} · ${fill(COPY['log.compacted'], { missing: text })}`
 }

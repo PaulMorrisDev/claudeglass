@@ -2,6 +2,7 @@ import type { GlassSettings } from '../types'
 import { THRESHOLDS } from './generated/coaching.js'
 import { RATES } from './generated/rates.js'
 import { parseTtl } from './lib/cache.js'
+import { projectApplies } from './lib/coach.js'
 import { REBUILD_DEFAULTS } from './lib/rebuild.js'
 import type { Io } from './io'
 
@@ -53,6 +54,8 @@ export function fallbackSettings(): GlassSettings {
     usual: { sessionCostUsd: null, endContextTokens: null },
     charsPerToken: { text: {}, family: '' },
     typicalPiece: 0,
+    // Without the file the mod can't know the user opted in, so it coaches no one.
+    coaching: { enabled: false, projects: [], excludeProjects: [], feedbackReminder: false, planFresh: true, remindedAt: null, rated: {} },
     dashboardUrl: null,
   }
 }
@@ -100,8 +103,44 @@ export function parseSettings(text: string, now: number): GlassSettings | null {
     usual: { sessionCostUsd: finite(usual?.session_cost_usd), endContextTokens: finite(usual?.end_context_tokens) },
     charsPerToken: { text: numbers(calibration?.text), family: typeof calibration?.default_family === 'string' ? calibration.default_family : '' },
     typicalPiece: finite(coaching?.typical_piece_tokens) ?? 0,
+    // Off unless the file says it is on: a file from before the key was written coaches no one until it is written again.
+    coaching: {
+      enabled: coaching?.enabled === true,
+      projects: words(coaching?.projects),
+      excludeProjects: words(coaching?.exclude_projects),
+      feedbackReminder: coaching?.feedback_reminder === true,
+      planFresh: coaching?.plan_fresh !== false,
+      remindedAt: finite(coaching?.reminded_at),
+      rated: numbers(coaching?.rated),
+    },
     dashboardUrl: url,
   }
+}
+
+// -- who coaching is for ---------------------------------------------------------
+
+/**
+ * The folder the session runs in and the project name Claude Code gave it, if it did
+ * (CLAUDE_CODE_PROJECT_DIR_NAME), kept in module memory by coach.ts. The folder is not
+ * known (null) until coach.ts has asked the session, and then no project filter applies.
+ */
+let project: { cwd: string | null; name: string | null } = { cwd: null, name: null }
+
+/** Remembers the project the session runs in. */
+export function setProject(cwd: string | null, name: string | null): void {
+  project = { cwd, name: name === '' ? null : name }
+}
+
+/**
+ * Whether coaching is on for this user and in this project: `coaching_notes` is in
+ * `[capture] coaching`, and `[capture] projects` / `exclude_projects` leave the project in
+ * (the capture hook's _coaching_applies). `cwd` is the session's folder (the one coach.ts
+ * remembered when left out; no folder, no project filter).
+ */
+export function coachingApplies(settings: GlassSettings, cwd: string | null = project.cwd): boolean {
+  const { coaching } = settings
+  if (!coaching.enabled) return false
+  return projectApplies(cwd, coaching.projects, coaching.excludeProjects, project.name ?? undefined)
 }
 
 function trimSlash(path: string): string {

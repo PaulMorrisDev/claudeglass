@@ -72,6 +72,13 @@ export function onCompaction(listener: Listener): void {
   compactListeners.push(listener)
 }
 
+const clearListeners: (() => void)[] = []
+
+/** Runs `listener` when the conversation is cleared (a /clear): what a file keeps in memory about the session goes. */
+export function onClear(listener: () => void): void {
+  clearListeners.push(listener)
+}
+
 /**
  * The engine as the other files see it. Claude Code follows `$` only within the
  * file that holds it, so every call on `$` the mod's work needs is spelled out here.
@@ -298,7 +305,7 @@ export const register: Register = on => {
       await beat(io, snap, true)
       keepBeating(io)
       await touch(io)
-      await $.command.register({ name: 'glass', description: COPY['pane.command'], argumentHint: '[detail | pin <text>]', immediate: true })
+      await $.command.register({ name: 'glass', description: COPY['pane.command'], argumentHint: '[detail | pin <text> | tighten | guard | budget <amount>]', immediate: true })
     } catch (error) {
       $.ui.log(`claudeglass: session.start ${String(error)}`, { to: 'debug' })
     }
@@ -318,8 +325,12 @@ export const register: Register = on => {
       }
       await leave(io, e.sessionId)
       stopCacheClock()
-      if (e.reason === 'clear') await restart(io, { surface: snap.surface })
-      else await flushNow(io)
+      if (e.reason === 'clear') {
+        // The coaching's memory and the agents' prompts are the cleared conversation's.
+        resetCoach()
+        for (const forget of clearListeners) forget()
+        await restart(io, { surface: snap.surface })
+      } else await flushNow(io)
     } catch (error) {
       $.ui.log(`claudeglass: session.end ${String(error)}`, { to: 'debug' })
     }

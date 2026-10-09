@@ -13,13 +13,19 @@ ClaudeGlass knows on this machine:
 - the thresholds a cache rebuild is judged by (``rebuild``);
 - the coaching thresholds in force (the catalogue's, then yours from
   ``coaching.json`` and ``config.toml``, as the capture hook works them
-  out), and the tips you muted or want once a session;
+  out), the tips you muted or want once a session, and whether coaching is
+  on at all with the project filter the hook applies, so the mod coaches
+  only where the hook would;
 - "your usual": the median session cost and the median context a session
   ends on, from the dashboard's store;
 - where the dashboard answers.
 
 Privacy: numbers, the model ids the rate card names, and closed words.
-No path, prompt or text from a transcript.
+No path, prompt or text from a transcript. Two things in ``coaching`` are
+mirrors of your own config rather than exports: the project slug patterns
+of ``[capture] projects`` and ``exclude_projects`` (as you wrote them), and
+the ids of sessions you rated lately (the ids the mod's heartbeat files are
+named by).
 
 :func:`build` makes the dict, :func:`write` puts it on disk atomically and
 leaves the file alone when only ``written_at`` would change, unless that
@@ -61,6 +67,9 @@ CACHE_HISTORY_DAYS = 14
 
 #: The cache lifetime when your writes were mostly one-hour ones, in seconds.
 ONE_HOUR_TTL_S = 3600
+
+#: How far back the dashboard ratings the settings file lists reach, in seconds.
+RATED_WINDOW_S = 30 * 86400
 
 #: A file holding the same content is rewritten once its ``written_at`` is
 #: this old, so the stamp says when the file was last known to be right.
@@ -140,21 +149,52 @@ def _cache_block(config_dir: Path, store, stamp: datetime) -> dict:
     return {"ttl_seconds": statusline.resolve_effective_ttl({}, config_dir), "source": "default"}
 
 
-def _coaching_block(config_dir: Path) -> dict:
-    """The thresholds, muted tips and once-a-session tips the capture
-    hook would use, worked out by the hook's own functions."""
+def _pattern_list(value) -> list[str]:
+    """The slug patterns of ``[capture] projects`` or ``exclude_projects``,
+    as the user wrote them (strings only); nothing for anything else."""
+    return [item for item in value if isinstance(item, str)] if isinstance(value, list) else []
+
+
+def _coaching_block(config_dir: Path, now: datetime) -> dict:
+    """What the capture hook's coaching would use, worked out by the hook's
+    own functions: whether it is on at all (``coaching_notes`` in ``[capture]
+    coaching``), the project filter it applies, the thresholds, the muted and
+    once-a-session tips, the plan tip's opt-out, and what the rating reminder
+    needs (``feedback_reminder`` opted in, when the hook last reminded, and the
+    sessions rated on the dashboard lately).
+
+    ``projects`` and ``exclude_projects`` mirror the user's own config as
+    written (slug patterns): this file is a local mirror of that config, not
+    an export, and the mod applies the same filter to the project it runs in.
+    ``rated`` maps session ids (the ones the mod names its heartbeat files
+    by) to when the rating was given, for the last 30 days."""
     coaching = capture_hook.load_catalogue()["coaching"]
     try:
         config = capture_hook.load_config(config_dir)
     except ValueError:  # tomllib.TOMLDecodeError: load_config already reported it
         config = {}
     personal = capture_hook._read_json(config_dir / coaching["file"])
+    capture = config.get("capture") if isinstance(config.get("capture"), dict) else {}
+    state = capture_hook._read_json(config_dir / coaching["state_file"])
+    gate = state.get("feedback") if isinstance(state.get("feedback"), dict) else {}
     return {
+        "enabled": capture_hook.coaching_on(config),
+        "projects": _pattern_list(capture.get("projects")),
+        "exclude_projects": _pattern_list(config.get("exclude_projects")),
+        "feedback_reminder": "feedback_reminder" in capture_hook.feedback_ids(config),
+        # ``coaching.json``'s ``plan_fresh: false`` switches the plan tip off.
+        "plan_fresh": personal.get("plan_fresh", True) is not False,
         "thresholds": capture_hook.coaching_thresholds(coaching, config, personal),
         "muted": sorted(capture_hook._hint_names(personal.get("muted"))),
         "once": sorted(capture_hook._hint_names(personal.get("once"))),
         # What the rating reminder compares a piece of work with (``coaching.json``).
         "typical_piece_tokens": int(capture_hook._number(personal.get("typical_piece_tokens")) or 0),
+        # When the hook last gave the rating reminder (epoch seconds).
+        "reminded_at": capture_hook._number(gate.get("reminded_at")),
+        "rated": {
+            sid: round(when)
+            for sid, when in capture_hook.dashboard_ratings(config_dir, now.timestamp() - RATED_WINDOW_S).items()
+        },
     }
 
 
@@ -230,7 +270,7 @@ def build(
             "session_read_margin": recache.SESSION_READ_MARGIN,
         },
         "calibration": measured or calibration_mod.DEFAULT.to_dict(),
-        "coaching": _coaching_block(config_dir),
+        "coaching": _coaching_block(config_dir, stamp),
         "usual": _usual_block(store),
         "dashboard_url": dashboard_url,
     }

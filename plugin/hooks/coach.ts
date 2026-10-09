@@ -1,10 +1,26 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
+import { workflowLaunched } from './agents'
 import type { Io } from './io'
-import { clearPlanStatus, editBox, editsFile, markEdited, noteBackground, planApproved, planStatusSet, submitted, turnEnded } from './coach-mem'
+import {
+  clearPlanStatus,
+  editBox,
+  editsFile,
+  goAheadPlan,
+  markEdited,
+  noteBackground,
+  planApproved,
+  planRefused,
+  planSettled,
+  planStatusSet,
+  startedInBackground,
+  submitted,
+  turnEnded,
+} from './coach-mem'
+import type { PlanTip } from './coach-mem'
 import { emptySnap, live, touch } from './live'
-import { getSettings } from './settings'
+import { getSettings, setProject } from './settings'
 import { onCompaction, onTurnEnd } from './track'
 
 // Claude Code reads a state reference only where its literal is written, so each file that
@@ -17,9 +33,12 @@ const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, f
 // file feeds coach-mem.ts from the events; hint.ts shows what it chooses for the
 // draft, notes.ts the rating reminder, and the status line the plan tip.
 //
+//   session.start  the project the session runs in (coaching covers the projects the user's config leaves in)
 //   prompt.edit    the draft's shape (length, and the words while it is short)
-//   prompt.submit  a message sent: the run of small changes, the first message's size
-//   tool.call      a file changed; work sent to the background; a plan approved
+//   prompt.submit  a message sent: the run of small changes, the first message's size;
+//                  a go-ahead typed after a plan was refused approves that plan
+//   tool.call      a file changed; work sent to the background; a plan approved or refused;
+//                  a workflow started in the background
 //   turn.complete  (through track.ts's onTurnEnd) what the reply said and used
 //
 // Nothing of a message or a plan is kept: lengths, counts and yes-or-no only.
@@ -67,13 +86,56 @@ function debug($: EngineInterface, where: string, error: unknown): void {
   $.ui.log(`claudeglass: coach ${where} ${String(error)}`, { to: 'debug' })
 }
 
+/**
+ * Learns the folder the session runs in and the project name Claude Code gave it, for the project filter.
+ * Asked once when not known (a reload mid-session has no session.start) and again at each message, as a
+ * /cd can move it. A session that can't say gets no filter.
+ */
+let looked = false
+async function rememberProject($: EngineInterface, again = false): Promise<void> {
+  if (looked && !again) return
+  looked = true
+  try {
+    const root = await $.session.root()
+    let name: string | null = null
+    try {
+      name = (await $.env.get('CLAUDE_CODE_PROJECT_DIR_NAME')) ?? null
+    } catch {
+      // No name: the folder gives it.
+    }
+    setProject(typeof root === 'string' && root !== '' ? root : null, name)
+  } catch (error) {
+    debug($, 'session.root', error)
+  }
+}
+
+/** Puts the fresh-start tip for `plan` on the status line, if it applies. */
+async function planTip($: EngineInterface, io: Io, plan: PlanTip): Promise<void> {
+  const snap = await live(io)
+  const settings = await getSettings(io)
+  const tip = planApproved(snap, settings, plan, await $.clock.now())
+  if (tip === null) return
+  $.ui.status(tip)
+  planStatusSet(() => {
+    $.ui.status(undefined)
+  })
+  await touch(io)
+}
+
 type PlanOutput = { plan?: string | null; filePath?: string; isAgent?: boolean; awaitingLeaderApproval?: boolean }
 
 export const register: Register = on => {
+  // The project, for the filter coaching goes through. (A matcher, apart from track.ts's hook on the event.)
+  on('session.start', { cwd: /./ }, async ($, e, next) => {
+    await rememberProject($, true)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   // Nothing to do per key but to look at the box; a redraw is asked for only when a hint could change.
   on('prompt.edit', async ($, e, next) => {
     const after = await next(e)
     try {
+      await rememberProject($)
       if (editBox(e, after)) void $.ui.invalidate('ui.render')
     } catch (error) {
       debug($, 'prompt.edit', error)
@@ -84,10 +146,16 @@ export const register: Register = on => {
   on('prompt.submit', async ($, e, next) => {
     try {
       const io = kit($)
+      await rememberProject($, true)
+      // Which kinds of origin arrive is worth knowing (what counts as typed is coach-mem.ts's isTypedOrigin). Not a fault, so not worded as one.
+      $.ui.log(`claudeglass prompt origin ${e.origin.kind}`, { to: 'debug' })
+      // A go-ahead typed after a plan was refused approves it: the tip is asked before the message is counted.
+      const approved = goAheadPlan(e.text, e.origin.kind)
       const snap = await live(io)
       const settings = await getSettings(io)
       submitted(snap, settings, { text: e.text, origin: e.origin.kind, queued: e.turnId !== undefined }, await $.clock.now())
       await touch(io)
+      if (approved !== null) await planTip($, io, approved)
     } catch (error) {
       debug($, 'prompt.submit', error)
     }
@@ -106,21 +174,24 @@ export const register: Register = on => {
       if (!failed && editsFile(name, args)) markEdited()
       if (e.agentId !== undefined) return result
       const io = kit($)
+      await rememberProject($)
+      const output: PlanOutput = result.result !== null && typeof result.result === 'object' ? (result.result as PlanOutput) : {}
       if (!failed && name !== 'ExitPlanMode') noteBackground(result.text, e.tool_use_id, await $.clock.now())
-      if (!failed && name === 'ExitPlanMode') {
-        const output: PlanOutput = result.result !== null && typeof result.result === 'object' ? (result.result as PlanOutput) : {}
-        if (output.isAgent !== true && output.awaitingLeaderApproval !== true) {
-          const snap = await live(io)
-          const settings = await getSettings(io)
-          const file = typeof output.filePath === 'string' && output.filePath !== '' ? output.filePath : null
-          const tip = planApproved(snap, settings, { chars: typeof output.plan === 'string' ? output.plan.length : 0, file }, await $.clock.now())
-          if (tip !== null) {
-            $.ui.status(tip)
-            planStatusSet(() => {
-              $.ui.status(undefined)
-            })
-            await touch(io)
-          }
+      if (!failed && name === 'Workflow' && startedInBackground(args, result.result, result.text)) {
+        // Its reports come back as messages of their own, and each is answered by a reply that reads the whole session.
+        const snap = await live(io)
+        const settings = await getSettings(io)
+        if (await workflowLaunched(io, snap, settings, true, await $.clock.now())) await touch(io)
+      }
+      if (name === 'ExitPlanMode' && output.isAgent !== true && output.awaitingLeaderApproval !== true) {
+        const file = typeof output.filePath === 'string' && output.filePath !== '' ? output.filePath : null
+        const plan = { chars: typeof output.plan === 'string' ? output.plan.length : 0, file }
+        if (failed) {
+          // The plan was sent back: a go-ahead typed next approves it.
+          planRefused(plan)
+        } else {
+          planSettled()
+          await planTip($, io, plan)
         }
       }
     } catch (error) {

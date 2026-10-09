@@ -46,6 +46,10 @@ const {
   startingContext,
   freshHint,
   ratingDue,
+  projectApplies,
+  projectSlug,
+  latestReminder,
+  ratedSince,
   emptyBackground,
   backgroundLaunched,
   backgroundNotified,
@@ -447,7 +451,40 @@ const RUN = {
   backgroundSteps: ([steps]) => backgroundPending(steps),
   freshHint: ([a]) => brief(freshHint(a.ctx, startingContext(a.firstCtx, a.promptChars, 4), a.planChars, a.compacted, 4, a.th)),
   ratingDue: ([a]) => ratingDue(a.tokens, a.typical, a.remindedAt, a.noted, a.nowS, a.th) !== null,
+  projectApplies: ([a]) => projectApplies(a.cwd, a.projects, a.excluded, a.name),
 };
+
+// -- who coaching is for ----------------------------------------------------------
+
+test("a project is left out by an exclude pattern or a !pattern, and left in by none or a match", () => {
+  assert.equal(projectApplies("/work/api", [], []), true);
+  assert.equal(projectApplies("/work/api", ["work"], []), true);
+  assert.equal(projectApplies("/work/api", ["other"], []), false);
+  assert.equal(projectApplies("/work/api", ["work", "!api"], []), false);
+  assert.equal(projectApplies("/work/api", [], ["API"]), false);
+  assert.equal(projectApplies("/work/api", ["(unclosed"], []), false, "a pattern that does not compile matches nothing");
+  assert.equal(projectApplies("/work/api", [], ["(unclosed"]), true);
+  assert.equal(projectApplies(null, ["other"], []), true, "no folder, no filter");
+  assert.equal(projectApplies("/anywhere", ["named"], [], "named-project"), true);
+});
+
+test("the slug is the folder with every other character as a dash, cut at 200", () => {
+  assert.equal(projectSlug("C:\\Dev\\my app"), "C--Dev-my-app");
+  assert.equal(projectSlug("/x", "given"), "given");
+  const long = projectSlug("/" + "a".repeat(300));
+  assert.equal(long.length, 200 + 1 + 8);
+});
+
+test("the later reminder wins, and a rating counts when it is not before the piece began", () => {
+  assert.equal(latestReminder(100, 200), 200);
+  assert.equal(latestReminder(300, 200), 300);
+  assert.equal(latestReminder(null, 200), 200);
+  assert.equal(latestReminder(null, null), null);
+  assert.equal(ratedSince(null, 10), false);
+  assert.equal(ratedSince(50, 10), true);
+  assert.equal(ratedSince(5, 10), false);
+  assert.equal(ratedSince(5, null), true);
+});
 
 test("the decisions match the Python they port, case by case", { skip: process.env.COACH_VECTORS ? false : "COACH_VECTORS isn't set (test_mod_coach.py sets it)" }, () => {
   const vectors = JSON.parse(readFileSync(process.env.COACH_VECTORS, "utf8"));

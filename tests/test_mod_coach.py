@@ -302,6 +302,43 @@ def _rating_vectors(tmp_path: Path) -> list[dict]:
     return out
 
 
+# -- who coaching is for -----------------------------------------------------------------------
+
+
+def _project_vectors() -> list[dict]:
+    """``capture_hook._project_applies`` for a spread of folders and filters, with the project-naming
+    variables unset (the mod learns the folder from the session, and ``CLAUDE_CODE_PROJECT_DIR_NAME``
+    from the environment, and passes it on as ``name``)."""
+    folders = [
+        "C:\\Dev\\claude-token-lens", "C:\\Dev\\RevIXO", "/home/pat/work/api", "/home/pat/scratch/play", "/srv/Private Things/app",
+        "D:\\Work\\Client A\\site", "/a/" + "very-long-folder-name/" * 14 + "tail",
+    ]
+    filters = [
+        ([], []), (["claude"], []), (["!RevIXO"], []), (["work", "!api"], []), ([], ["scratch"]), (["Dev"], ["token"]),
+        (["PRIVATE"], []), (["(unclosed"], []), ([], ["(unclosed"]), (["!(unclosed", "work"], []), (["^C-Dev-"], ["lens$"]),
+        (["very-long"], []), (["^-home"], ["play"]),
+    ]
+    out = []
+    saved = {key: os.environ.pop(key, None) for key in ("CLAUDE_PROJECT_DIR", "CLAUDE_CODE_PROJECT_DIR_NAME")}
+    try:
+        for folder in folders:
+            for projects, excluded in filters:
+                config = {"capture": {"projects": projects}, "exclude_projects": excluded}
+                out.append(vec("projectApplies", [{"cwd": folder, "projects": projects, "excluded": excluded}], capture_hook._project_applies({"cwd": folder}, config)))
+        os.environ["CLAUDE_CODE_PROJECT_DIR_NAME"] = "named-project"
+        for projects, excluded in filters:
+            config = {"capture": {"projects": projects}, "exclude_projects": excluded}
+            args = {"cwd": "/anywhere", "projects": projects, "excluded": excluded, "name": "named-project"}
+            out.append(vec("projectApplies", [args], capture_hook._project_applies({"cwd": "/anywhere"}, config)))
+    finally:
+        os.environ.pop("CLAUDE_CODE_PROJECT_DIR_NAME", None)
+        for key, value in saved.items():
+            if value is not None:
+                os.environ[key] = value
+    assert {v["expect"] for v in out} == {True, False}
+    return out
+
+
 # -- the run --------------------------------------------------------------------------------
 
 
@@ -317,6 +354,7 @@ def vectors(tmp_path_factory) -> dict[str, list[dict]]:
         "background": _background_vectors(),
         "fresh": _fresh_vectors(tmp),
         "rating": _rating_vectors(tmp / "cfg"),
+        "project": _project_vectors(),
     }
 
 
@@ -343,3 +381,60 @@ def test_the_hints_the_mod_decides_are_the_ones_the_hook_leaves_to_it() -> None:
     match = re.search(r'HINT_ORDER = (\[[^\]]*\])', text)
     assert match
     assert json.loads(match.group(1)) == ["drip_feed", "big_paste", "status_poll", "cold_return"]
+
+
+# -- the hook and the mod share what each knows ---------------------------------------------------
+
+
+def _mod_folder(config_dir: Path) -> Path:
+    folder = config_dir / capture_catalogue.MOD_DIR
+    folder.mkdir(parents=True, exist_ok=True)
+    return folder
+
+
+def test_a_heartbeat_rewritten_with_seen_zero_at_the_end_of_a_session_reads_as_absent(tmp_path: Path) -> None:
+    catalogue = capture_hook.load_catalogue()
+    present = _mod_folder(tmp_path) / capture_catalogue.MOD_PRESENT_DIR
+    present.mkdir()
+    now = 1_700_000_000.0
+    (present / "s1.json").write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": now}), encoding="utf-8")
+    assert capture_hook._mod_present(tmp_path, catalogue, "s1", now) is True
+    # The engine cannot delete the file: at the end the mod writes it again with `seen` at 0.
+    (present / "s1.json").write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": 0}), encoding="utf-8")
+    os.utime(present / "s1.json", (now + 5, now + 5))
+    assert capture_hook._mod_present(tmp_path, catalogue, "s1", now) is False
+    assert capture_hook._moved(tmp_path, catalogue, "s1", now) == frozenset()
+
+
+def test_the_mods_reminder_rests_the_hooks_and_the_later_of_the_two_counts(tmp_path: Path) -> None:
+    catalogue = capture_hook.load_catalogue()
+    now = 1_700_000_000.0
+    scan = {"replies": {"m": {"i": 4, "tokens": 3_000_000, "admit": False}}, "piece": 0, "piece_key": "k1", "piece_at": None}
+
+    def due(state: dict) -> str:
+        return capture_hook._reminder_due(scan, {}, dict(TH), COACHING, state, "s1", now, tmp_path, "s1", catalogue)
+
+    assert capture_hook._mod_reminded_at(tmp_path, catalogue) is None
+    assert due({}) != ""
+    coach_file = _mod_folder(tmp_path) / "coach.json"
+
+    def write(text: str) -> None:
+        # Two rewrites of one size inside the clock's tick look unchanged to
+        # the hook's cache (time and size), so start each read afresh.
+        coach_file.write_text(text, encoding="utf-8")
+        capture_hook._MOD_COACH.clear()
+
+    write(json.dumps({"schema": 1, "reminded_at": now - 3600}))
+    assert capture_hook._mod_reminded_at(tmp_path, catalogue) == now - 3600
+    assert due({}) == ""
+    # An old reminder of the mod's, and a newer one of the hook's: the hook's counts.
+    write(json.dumps({"schema": 1, "reminded_at": now - 30 * 86400}))
+    assert due({}) != ""
+    assert due({"feedback": {"reminded_at": now - 3600}}) == ""
+    # A file that says nothing usable changes nothing.
+    for text in ("not json", json.dumps({"schema": 2, "reminded_at": now}), json.dumps({"schema": 1, "reminded_at": "x"})):
+        write(text)
+        assert capture_hook._mod_reminded_at(tmp_path, catalogue) is None
+    coach_file.unlink()
+    coach_file.mkdir()
+    assert capture_hook._mod_reminded_at(tmp_path, catalogue) is None

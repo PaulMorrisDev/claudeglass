@@ -46,10 +46,16 @@ export type World = {
   /** What session.messages reports: the transcript so far (a test fills it). */
   transcript: unknown[]
   /** The window and summarising point session.usage reports (a 200k window and a 160k point when left out). */
-  shape: { window?: number; point?: number; buffer?: number }
+  shape: { window?: number; point?: number; buffer?: number; startupRows?: { name: string; tokens: number }[] }
+  /** The project root session.root reports. */
+  root: string
 }
 
+/** The coaching block of a settings file written for a user who turned coaching and the rating reminder on. */
+const COACHING_ON = { enabled: true, feedback_reminder: true }
+
 export function settingsFile(over: Record<string, unknown> = {}): string {
+  const coaching = typeof over.coaching === 'object' && over.coaching !== null ? (over.coaching as Record<string, unknown>) : {}
   return JSON.stringify({
     schema: 1,
     billing: { mode: 'api', share_per_usd: null, period_label: 'week', basis: 'list' },
@@ -58,6 +64,7 @@ export function settingsFile(over: Record<string, unknown> = {}): string {
     cache: { ttl_seconds: 300, source: 'default' },
     dashboard_url: 'http://127.0.0.1:8792',
     ...over,
+    coaching: { ...COACHING_ON, ...coaching },
   })
 }
 
@@ -66,10 +73,12 @@ export function settingsFile(over: Record<string, unknown> = {}): string {
  * (`autoCompactThreshold`) unless `over.buffer` is given: then it names an "Autocompact buffer" category
  * instead and the point is the window less that, as on a machine whose Claude Code leaves the threshold out.
  */
-export function usageFor(tokens: number, usd: number, over: { point?: number; window?: number; startup?: number; buffer?: number } = {}) {
+export function usageFor(tokens: number, usd: number, over: { point?: number; window?: number; startup?: number; buffer?: number; startupRows?: { name: string; tokens: number }[] } = {}) {
   const window = over.window ?? WINDOW
   const point = over.point ?? POINT
-  const startup = Math.min(over.startup ?? 18000, tokens)
+  // The startup part is one "System prompt" row, or the rows a test names (Memory files, System tools, ...) when it gives them.
+  const rows = over.startupRows ?? [{ name: 'System prompt', tokens: Math.min(over.startup ?? 18000, tokens) }]
+  const startup = rows.reduce((sum, row) => sum + row.tokens, 0)
   return {
     startedAt: 0,
     context: {
@@ -81,7 +90,7 @@ export function usageFor(tokens: number, usd: number, over: { point?: number; wi
         percentage: (tokens / window) * 100,
         ...(over.buffer === undefined ? { autoCompactThreshold: point } : {}),
         categories: [
-          { kind: 'used', name: 'System prompt', tokens: startup },
+          ...rows.map(row => ({ kind: 'used', name: row.name, tokens: row.tokens })),
           { kind: 'used', name: 'Messages', tokens: tokens - startup },
           { kind: 'free', name: 'Free space', tokens: Math.max(0, window - tokens - (over.buffer ?? 0)) },
           ...(over.buffer === undefined ? [] : [{ kind: 'buffer', name: 'Autocompact buffer', tokens: over.buffer }]),
@@ -99,7 +108,7 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
   mock.env(on, { CLAUDE_CONFIG_DIR: '/cfg' })
   const files = new Map<string, string>()
   if (options.settings !== null) files.set(`${CONFIG}/claudeglass/mod/settings.json`, options.settings ?? settingsFile())
-  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {} }
+  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {}, root: '/work/project' }
   let current = usageFor(0, 0)
   world.figures = (tokens, usd) => {
     current = usageFor(tokens, usd, world.shape)
@@ -108,6 +117,7 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
   on('session.surfaces', () => ({ value: ['terminal'] }) as never)
   on('session.messages', () => ({ value: world.transcript }) as never)
   on('session.usage', () => ({ value: current }) as never)
+  on('session.root', () => ({ value: world.root }) as never)
   // The engine makes a path absolute (C:\cfg\... on Windows); the files are kept by the path as the mod wrote it.
   const key = (path: string) => path.replace(/[\\]/g, '/').replace(/^[A-Za-z]:/, '')
   on('fs.read', (_$, e) => {
