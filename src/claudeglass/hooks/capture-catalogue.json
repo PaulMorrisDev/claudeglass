@@ -711,6 +711,7 @@
   "background_launch_pattern": "Command running in background with ID: |was moved to the background \\(ID: |Async agent launched successfully|Workflow launched in background\\. Task ID: ",
   "background_scan_chars": 400,
   "task_notification_prefix": "<task-notification",
+  "task_notification_call_pattern": "<tool-use-id>([^<\\s]+)</tool-use-id>",
   "scheduled_task_prefix": "<scheduled-task",
   "plan_said_pattern": "the user said:\\s*",
   "reply_scan_chars": 1200,

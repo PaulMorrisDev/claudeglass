@@ -311,9 +311,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Asking how it's going, while work runs in the background.** A new
   `status_poll` hint speaks up when a message only asks how the work is
   going and a tool result said work went to the background with no
-  message from that task since. It matches the result's own wording,
-  not `run_in_background`, which an agent or a workflow goes to the
-  background without. The tip says each check makes Claude read the whole
+  message from that task since (a message naming another call, such as
+  a subagent's own background command, doesn't count). It matches the
+  result's own wording, not `run_in_background`, which an agent or a
+  workflow goes to the background without. The tip says each check makes Claude read the whole
   session, about that many tokens, and points to the task panel (the
   desktop) or `/tasks`. It never promises a notification. After a break
   that outlasted the cache, `cold_return` speaks instead. After the fact,

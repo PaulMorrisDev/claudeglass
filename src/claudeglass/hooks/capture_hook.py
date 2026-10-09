@@ -1383,49 +1383,73 @@ def _is_task_notification(record: dict, prefix: str) -> bool:
     """Whether a line is a background task's finishing message, in any of
     the three shapes Claude Code writes it: a user line, a queued command
     and a queue operation."""
+    return _notification_text(record, prefix) is not None
+
+
+def _notification_text(record: dict, prefix: str) -> str | None:
+    """The text of a background task's finishing message
+    (:func:`_is_task_notification`), ``""`` for a user line known only by
+    its origin, or None when the line is no such message. Read in memory
+    for the call it names; nothing of it is kept."""
     kind = record.get("type")
     if kind == "queue-operation":
         content = record.get("content")
-        return isinstance(content, str) and content.lstrip().startswith(prefix)
+        return content if isinstance(content, str) and content.lstrip().startswith(prefix) else None
     if kind == "attachment":
         attachment = record.get("attachment")
         if not isinstance(attachment, dict) or attachment.get("type") != "queued_command":
-            return False
+            return None
         prompt = attachment.get("prompt")
         texts = [prompt] if isinstance(prompt, str) else [
             b.get("text") for b in prompt if isinstance(b, dict)
         ] if isinstance(prompt, list) else []
-        return any(isinstance(t, str) and t.lstrip().startswith(prefix) for t in texts)
+        found = [t for t in texts if isinstance(t, str) and t.lstrip().startswith(prefix)]
+        return "\n".join(found) if found else None
     if kind != "user":
-        return False
+        return None
     origin = record.get("origin")
-    if (isinstance(origin, dict) and origin.get("kind") == "task-notification") or record.get("turnOrigin") == "task_notification":
-        return True
-    return _opens_with(record, prefix)
+    flagged = (isinstance(origin, dict) and origin.get("kind") == "task-notification") or record.get("turnOrigin") == "task_notification"
+    if not flagged and not _opens_with(record, prefix):
+        return None
+    message = record.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    texts = [content] if isinstance(content, str) else [
+        b.get("text") for b in content if isinstance(b, dict) and b.get("type") == "text"
+    ] if isinstance(content, list) else []
+    return "\n".join(t for t in texts if isinstance(t, str))
 
 
 def _background_pending(records: list[dict], coaching: dict) -> bool:
     """Whether a tool's result said that work went to the background and no
-    task notification has come in since: Claude is carrying on without it,
-    and a message asking how it's going is asking about work that is still
-    running, or has finished with nothing sent. The result's own wording is
-    matched in memory (``background_launch_pattern``), not the call's
-    ``run_in_background``: an agent or a workflow goes to the background
-    without it. Nothing of the result is kept."""
+    task notification for it has come in since: Claude is carrying on
+    without it, and a message asking how it's going is asking about work
+    that is still running, or has finished with nothing sent. The result's
+    own wording is matched in memory (``background_launch_pattern``), not
+    the call's ``run_in_background``: an agent or a workflow goes to the
+    background without it. A notification ends the wait for the call it
+    names (``task_notification_call_pattern``), so one from a subagent's
+    own background command, which passes through the session's queue, or
+    from one of two runs leaves the rest waiting; one that names no call
+    ends every wait. Nothing of the result or the notification is kept."""
     launch = re.compile(coaching["background_launch_pattern"])
+    names = re.compile(coaching["task_notification_call_pattern"])
     limit = coaching["background_scan_chars"]
     prefix = coaching["task_notification_prefix"]
-    for record in reversed(records):
+    pending: set[str] = set()
+    for record in records:
         if record.get("isSidechain"):
             continue
-        if _is_task_notification(record, prefix):
-            return False
+        text = _notification_text(record, prefix)
+        if text is not None:
+            called = set(names.findall(text))
+            pending = pending - called if called else set()
+            continue
         if record.get("type") != "user":
             continue
         for block in _blocks(record):
             if isinstance(block, dict) and block.get("type") == "tool_result" and launch.search(_result_head(block, limit)):
-                return True
-    return False
+                pending.add(str(block.get("tool_use_id") or ""))
+    return bool(pending)
 
 
 def _poll_hint(

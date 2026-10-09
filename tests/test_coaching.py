@@ -1832,6 +1832,24 @@ def test_a_finished_background_task_ends_the_status_poll_hint(tmp_path, shape):
     assert _kind(_send(tmp_path, again, "how is it going?", session="c")) == "status_poll"
 
 
+def _finished(call_id: str) -> dict:
+    """A task's finishing message naming the call that started it, as a queue operation."""
+    return {"type": "queue-operation", "operation": "enqueue", "content": (
+        f"<task-notification>\n<task-id>bk1</task-id>\n<tool-use-id>{call_id}</tool-use-id>\n"
+        "<status>completed</status>\n</task-notification>")}
+
+
+def test_a_finished_message_ends_the_wait_only_for_the_call_it_names(tmp_path):
+    started = [_prompt(), *_went_to_background(_LAUNCH_RESULTS["shell"])]
+    # A subagent's own background command passes through the session's queue: the session's run is still out.
+    assert _kind(_send(tmp_path, [*started, _finished("toolu_sub")], "how is it going?", session="a")) == "status_poll"
+    assert _send(tmp_path, [*started, _finished("toolu_bg")], "how is it going?", session="b") == ""
+    # Two runs out: the first finishing leaves the second running, until it finishes too.
+    two = [*started, *_went_to_background(_LAUNCH_RESULTS["workflow"], ago_s=120, call_id="toolu_wf")]
+    assert _kind(_send(tmp_path, [*two, _finished("toolu_bg")], "how is it going?", session="c")) == "status_poll"
+    assert _send(tmp_path, [*two, _finished("toolu_bg"), _finished("toolu_wf")], "how is it going?", session="d") == ""
+
+
 def test_the_status_poll_matches_what_a_result_says_not_what_the_call_asked_for(tmp_path):
     # The call asked for the background, the result says it ran to the end.
     ran = _went_to_background("Command finished with exit code 0.", flag=True)

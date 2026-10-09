@@ -984,6 +984,13 @@ LIMIT_LINE_PREFIXES = (SESSION_LIMIT_PREFIX, WEEKLY_LIMIT_PREFIX)
 #: Code writes it: as a user line, a queued command or a queue operation.
 TASK_NOTIFICATION_PREFIX = "<task-notification"
 
+#: How a task's finishing message names the tool call that started it.
+#: The capture hook matches it to the launch it read (``status_poll``): a
+#: message naming another call, such as a subagent's own background
+#: command passing through the session's queue, doesn't end the wait for
+#: the session's own work. One that names no call ends every wait.
+TASK_NOTIFICATION_CALL_PATTERN = r"<tool-use-id>([^<\s]+)</tool-use-id>"
+
 #: What a scheduled task's prompt starts with, as the message that begins
 #: its session (a queued line, written before the session's first hook
 #: runs). The capture hook adds no note to such a session and judges none
@@ -3244,6 +3251,7 @@ def export_json() -> dict:
             "background_launch_pattern": BACKGROUND_LAUNCH_PATTERN,
             "background_scan_chars": BACKGROUND_SCAN_CHARS,
             "task_notification_prefix": TASK_NOTIFICATION_PREFIX,
+            "task_notification_call_pattern": TASK_NOTIFICATION_CALL_PATTERN,
             "scheduled_task_prefix": SCHEDULED_TASK_PREFIX,
             "plan_said_pattern": PLAN_SAID_PATTERN,
             "reply_scan_chars": REPLY_SCAN_CHARS,
