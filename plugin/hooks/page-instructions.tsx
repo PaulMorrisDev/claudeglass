@@ -98,8 +98,10 @@ async function render(context: PageContext): Promise<RenderElement> {
   const names = await context.kit.mcpNames()
   const groups = startupGroups(entries, one => sizeOf(one, cpt, sizes), names, total)
   const advice = adviceLine(entries, cpt, sizes, names)
-  // Claude Code's figure is not an estimate; the estimate says so in the lead.
-  const lead = fill(COPY[fit.matched ? 'startup.lead' : 'startup.lead.est'], { tokens: formatTokens(total) })
+  // Claude Code's figure is not an estimate; the estimate says so in the lead. A count too small to hold the
+  // rows the page lists (a breakdown that left a part out) gives way to the estimate, so the lead is the groups' sum.
+  const counted = fit.matched && groups.fits
+  const lead = fill(COPY[counted ? 'startup.lead' : 'startup.lead.est'], { tokens: formatTokens(groups.total) })
 
   const children: RenderElement[] = [
     <Box key="lead" flexDirection="column">
@@ -141,11 +143,11 @@ async function render(context: PageContext): Promise<RenderElement> {
 
   if (view.detailed) {
     const theirs = view.parts?.startup ?? null
-    // Claude Code has a count but none of its rows fits what loaded, so the estimate stands beside it.
-    if (!fit.matched && theirs !== null && theirs > 0) {
+    // Claude Code has a count but its rows don't fit what loaded, so the estimate stands beside it.
+    if (!counted && theirs !== null && theirs > 0) {
       children.push(
         <Box key="compare" flexDirection="column">
-          <Text>{fill(COPY['startup.compare'], { theirs: formatTokens(theirs), mine: formatTokens(total) })}</Text>
+          <Text>{fill(COPY['startup.compare'], { theirs: formatTokens(theirs), mine: formatTokens(groups.total) })}</Text>
           <Text dimColor>{COPY['startup.compare.why']}</Text>
         </Box>,
       )

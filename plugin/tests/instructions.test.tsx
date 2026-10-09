@@ -436,6 +436,29 @@ test("when none of Claude Code's rows fits what loaded, the estimate stands besi
   expect(faults(world)).toEqual([])
 })
 
+test("a count too small for the rows it left out gives way to the estimate, so the lead is what the groups add up to", async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  // Claude Code counts the system prompt alone: the servers, files and skills it left out keep their estimates, which it can't hold.
+  world.shape = { startupRows: [{ name: 'System prompt', tokens: 3000 }] }
+  await reply($, world, FIRST)
+
+  const mounted = await pane($)
+  let shown = lines(await mounted.drawn())
+  expect(lead(shown)[0]).toMatch(/^Every request starts with about [\d.]+k tokens of setup \(est\.\)\.$/)
+  const figure = (line: string | undefined) => Number(String(line).replace(/k$/, '')) * (String(line).endsWith('k') ? 1000 : 1)
+  const total = Number(/about ([\d.]+)k/.exec(lead(shown)[0] ?? '')?.[1]) * 1000
+  const groups = figure(run(shown, 'You control', 2)[1]) + figure(run(shown, "Claude Code's own", 2)[1])
+  expect(Math.abs(total - groups)).toBeLessThanOrEqual(1000)
+  await mounted.press({ key: 'more' })
+  shown = lines(await mounted.drawn())
+  expect(shown.some(line => line.startsWith('Claude Code counts 3k of startup context on the Now page.'))).toBe(true)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
 test('before Claude Code has counted anything the page shows the estimate alone', async ($, on) => {
   const world = prepare(on)
   bottoms(on)

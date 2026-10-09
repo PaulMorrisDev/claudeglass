@@ -523,6 +523,8 @@ export function serverLabel(wire, names, toolNames) {
  * @property {{tokens: number, rows: StartupRow[]}} control  What the person can change.
  * @property {{tokens: number}} builtin  Claude Code's own: the rest of the startup context.
  * @property {{tokens: number, rows: StartupRow[]}} later    What is not in the startup context.
+ * @property {number} total  The startup total the first two groups add up to.
+ * @property {boolean} fits  Whether that total is the `total` given: false when none was given or it is less than "You control".
  */
 
 /**
@@ -535,7 +537,9 @@ export function serverLabel(wire, names, toolNames) {
  * waits behind tool search costs nothing: its server is counted and listed
  * without a size, and no other row has it. Rows of no tokens are left out. `total` is
  * the startup total the page shows: given, the built-in part is what is left
- * of it once "You control" is taken out.
+ * of it once "You control" is taken out. A total less than "You control" (a
+ * breakdown that left out a part whose rows keep their estimates) can't hold
+ * the rows, so the built-in part is estimated too and the total is the sum.
  * @param {Entry[]} entries
  * @param {(entry: Entry) => number} sizeOf  Tokens for a row.
  * @param {Object<string, string>|null|undefined} names  /mcp's name for each server (see serverLabel).
@@ -612,10 +616,14 @@ export function startupGroups(entries, sizeOf, names, total) {
   var control = present(["mcp", "files", "skills", "plugin"]);
   var added = present(["files-later", "skills-used", "reminders", "attached"]);
   var yours = sum(control);
+  var fits = typeof total === "number" && total >= yours;
+  var own = fits ? /** @type {number} */ (total) - yours : builtin;
   return {
     control: { tokens: yours, rows: control },
-    builtin: { tokens: typeof total === "number" && total >= yours ? total - yours : builtin },
+    builtin: { tokens: own },
     later: { tokens: sum(added), rows: added },
+    total: yours + own,
+    fits: fits,
   };
 }
 

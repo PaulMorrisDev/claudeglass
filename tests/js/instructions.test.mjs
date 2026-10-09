@@ -265,7 +265,7 @@ test("files and notes added to a message are their own row in the third group, a
 
 test("rows of no tokens are left out, and nothing loaded gives empty groups", () => {
   const empty = startupGroups([], () => 0, {});
-  assert.deepEqual(empty, { control: { tokens: 0, rows: [] }, builtin: { tokens: 0 }, later: { tokens: 0, rows: [] } });
+  assert.deepEqual(empty, { control: { tokens: 0, rows: [] }, builtin: { tokens: 0 }, later: { tokens: 0, rows: [] }, total: 0, fits: false });
   const only = startupGroups(entriesOf([item("a", "instructions", 4000, { path: "/w/CLAUDE.md" })]), (one) => tokensOf(one.startupChars, 4), {});
   assert.deepEqual(only.control.rows.map((row) => row.id), ["files"]);
   assert.deepEqual(only.later.rows, []);
@@ -332,6 +332,15 @@ test("nothing is matched before Claude Code counts a startup, or when no categor
   // A row with no category of its own in the breakdown keeps no fitted size.
   const partial = fitToCategories(entries, [USED("System tools", 9000)]);
   assert.deepEqual(partial.sizes, { tools: 9000 });
+  // A total too small for the rows that keep their estimates can't hold them: the built-in part is estimated too, and the total is the sum.
+  const sizeOf = (one) => partial.sizes[one.key] ?? Math.round(one.startupChars / 4);
+  const short = startupGroups(entries, sizeOf, {}, 1);
+  assert.equal(short.fits, false);
+  assert.equal(short.total, short.control.tokens + short.builtin.tokens);
+  const held = startupGroups(entries, sizeOf, {}, 1000000);
+  assert.equal(held.fits, true);
+  assert.equal(held.total, 1000000);
+  assert.equal(held.builtin.tokens, 1000000 - held.control.tokens);
   assert.equal(categoryOf({ kind: "deferred", name: "x" }), "");
   assert.equal(categoryOf({ kind: "attachment", name: "agent_listing_delta" }), "agents");
   assert.equal(categoryOf({ kind: "attachment", name: "mcp_instructions_delta" }), "mcp");
