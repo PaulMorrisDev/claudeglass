@@ -1665,6 +1665,45 @@ coaching notes were on. `plan_first`, `vague_fix`, `repeat_ask` and
   `mod_events` (`Store.read_mod_events`, or the CLI's read-only copy of it)
   for the sessions the report covers.
 
+  `prompting_effect` (`glass_effect.py`) — only when at least one session of
+  the report has a `present` event: the effect measurement, one row per
+  figure with `with_glass` and `without_glass` (raw values; `row_kinds`
+  gives each row's unit), `with_sessions` and `without_sessions` (the
+  sessions that have the figure), `difference` and `verdict`. The groups
+  are the sessions of the `prompting` section (a message of yours) with and
+  without a `present` event. The rows:
+
+  - `cost_per_reply` — the median over sessions of the session's cost (main
+    session and agents, the report's per-session cost) over its replies
+    (priced main-session turns, not the estimated compaction call).
+  - `end_context` — the median of the last priced main-session turn's
+    context, the figure `Store.median_end_context` takes. A `/clear` starts
+    a new session, so this is how full the context was when you cleared or
+    closed the session.
+  - `cold_per_100` — cold-cache sends per 100 replies, pooled over the
+    sessions: a reply to a message of yours that rebuilt a context of
+    `cold_min_tokens` (coaching threshold, 100,000) or more after the cache
+    lifetime of the reply before had passed (`recache.detect`, signature
+    `full-expiry`, by the clock). Worked out from the transcripts for both
+    groups. The mod's `cold_send` events add a note on how many sends it
+    warned about, for its sessions only.
+  - `compaction_churn` — the share of sessions with two or more
+    compactions in the main session (`compaction.compactions_in`).
+  - `tips_desktop` — tips shown per Desktop session (transcript entrypoint
+    `claude-desktop`, or the mod wrote that it ran on `desktop`): without
+    the mod the tips Claude passed on (`SessionPrompting.tips`), with it
+    those plus the ones the mod showed (`prompting.glass_tips`).
+
+  Either group under 10 sessions with the figure gives `difference` as "Too
+  few sessions with Glass yet to compare" (or "without" when that group is
+  the short one) and no `verdict`. Otherwise `difference` is the relative
+  gap in words ("about 12% lower"), and `verdict` is `Measurable` when the
+  95% interval of a seeded bootstrap of the difference (400 resamples of the
+  sessions, a fixed seed per figure, so the same sessions always read the
+  same) leaves zero, else "No measurable difference yet". The table's notes
+  say the groups may differ in other ways, so a gap is no proof the mod
+  caused it.
+
   The habit rows above also leave out what you excused: a drip feed, a
   repeat or a vague correction you called Claude's miss (`why=missed`)
   or a change of mind (`why=changed`) is no habit of yours.

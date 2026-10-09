@@ -179,6 +179,7 @@ PLACEMENT: dict[str, str] = {
     "prompting_habits": "keep",
     "prompting_tips": "keep",
     "prompting_glass": "advanced",
+    "prompting_effect": "keep",
     "habits_playbook": "keep",
     "habits_by_task": "keep",
     "habits_briefs": "advanced",
@@ -1033,6 +1034,27 @@ TABLE_COPY: dict[str, TableCopy] = {
             "with_glass_pct": ("Share", "The share of sessions that ran with the mod."),
             "where": ("Where it ran", "The part of Claude Code each session used, with how many sessions."),
             "tips": ("Tips it showed", "How many tips the mod showed itself in those sessions."),
+        },
+    ),
+    "prompting_effect": TableCopy(
+        title="Sessions with and without ClaudeGlass",
+        help=Help(
+            shows="Your sessions that ran with the ClaudeGlass mod, set beside the ones that did not, on the "
+            "same figures. Both groups' values and session counts are shown, so you can judge the gap yourself.",
+            read="Each difference is against the sessions without the mod. A row says there are too few sessions "
+            "to compare until each group has 10. Measurable means the gap is larger than chance alone would likely give. Sessions with "
+            "ClaudeGlass may differ in other ways, so a gap does not show the mod caused it. Effects of tools "
+            "like this are usually small.",
+            act="",
+        ),
+        columns={
+            "figure": ("Figure", "What is compared."),
+            "with_glass": ("With ClaudeGlass", "The figure for sessions that ran with the mod."),
+            "without_glass": ("Without", "The figure for sessions that ran without it."),
+            "with_sessions": ("Sessions with", "How many sessions with the mod the figure covers."),
+            "without_sessions": ("Sessions without", "How many sessions without the mod the figure covers."),
+            "difference": ("Difference", "How the figure with the mod compares with the one without it."),
+            "verdict": ("Measurable?", "Whether the gap is clear of chance, or there is no measurable difference yet."),
         },
     ),
     "habits_playbook": TableCopy(

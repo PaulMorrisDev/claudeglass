@@ -149,6 +149,7 @@ from . import (
     discovery,
     elasticity,
     fixes,
+    glass_effect,
     habits,
     handoff,
     helptext,
@@ -2034,15 +2035,19 @@ def build_report(
         sections.append(rework.build_section(_habits_built, units=units))
 
     if _want("prompting"):
-        sections.append(
-            prompting.build_section(
-                prompting.collect(corpus, pricing, ratings=ratings),
-                card_answers=prompting.card_answers(tip_feedback),
-                mod_events=mod_events,
-                window=window,
-                tz=config.tz,
-            )
+        prompting_sessions = prompting.collect(corpus, pricing, ratings=ratings)
+        prompting_section = prompting.build_section(
+            prompting_sessions,
+            card_answers=prompting.card_answers(tip_feedback),
+            mod_events=mod_events,
+            window=window,
+            tz=config.tz,
         )
+        # The mod's effect, beside the table of the sessions it ran in.
+        effect_table = glass_effect.build_table(prompting_sessions, corpus, session_cost, recache_th, mod_events)
+        if effect_table is not None:
+            prompting_section.tables.append(effect_table)
+        sections.append(prompting_section)
 
     if _want("workflows"):
         sections.append(workflows.build_section(all_workflow_runs))

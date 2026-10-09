@@ -1091,7 +1091,17 @@ per 100 messages and a by-week line; then, once there are coaching
 notes, **Coaching tips shown**, with how often Claude passed each tip on
 ("relayed N of M" for a hint Claude is told to show every time, "judged
 relevant N of M" for one it decides on) and how often it called the tip a
-misfire. Nothing here changes a setting.
+misfire. Once the ClaudeGlass mod has run in a session of the window, two
+more tables follow: **Sessions with ClaudeGlass running** and **Sessions with
+and without ClaudeGlass**, a compact comparison of the two groups on cost per
+reply, the context when the session ended, cold-cache sends per 100 replies,
+sessions with two or more conversation summaries and tips per Desktop session.
+Each row shows both groups' values and session counts. It says "Too few
+sessions with Glass yet to compare" until each group has 10, and then
+states the gap in words ("about 12% lower") with "Measurable" or "No
+measurable difference yet"; a note says the groups may differ in other ways,
+so the table does not claim the mod caused the gap. Nothing here changes a
+setting.
 
 **Rework after delivery** answers "How often did Claude have to change
 work it had already delivered, and why?" It opens with two tiles (the

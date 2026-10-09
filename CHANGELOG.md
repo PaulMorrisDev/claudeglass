@@ -24,6 +24,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a time on the hint line, `plan_fresh` on the status line when you approve a
   plan, and the rating reminder as an end-of-reply note. Same thresholds, rest
   rules, `muted` and `once` as the hook.
+- **Does the mod help? A measured comparison.** Once the mod has run in a
+  session of the window, Work habits gets **Sessions with and without
+  ClaudeGlass**: cost per reply, the context when the session ended,
+  cold-cache sends per 100 replies, sessions with two or more conversation
+  summaries and tips per Desktop session, with both groups' values and session
+  counts. Under 10 sessions in a group it says there are too few to compare;
+  otherwise it states the gap in words and says whether a seeded resampling
+  finds it measurable. It makes no claim that the mod caused the gap.
 
 ### Fixed
 
