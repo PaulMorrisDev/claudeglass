@@ -27,11 +27,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Does the mod help? A measured comparison.** Once the mod has run in a
   session of the window, Work habits gets **Sessions with and without
   ClaudeGlass**: cost per reply, the context when the session ended,
-  cold-cache sends per 100 replies, sessions with two or more conversation
-  summaries and tips per Desktop session, with both groups' values and session
-  counts. Under 10 sessions in a group it says there are too few to compare;
-  otherwise it states the gap in words and says whether a seeded resampling
-  finds it measurable. It makes no claim that the mod caused the gap.
+  cold-cache sends per 100 replies to your messages, sessions with two or more
+  conversation summaries and tips per Desktop session, with both groups' values
+  and session counts. Agent SDK runs are left out of both groups. Under 10
+  sessions in a group it says there are too few to compare; otherwise it states
+  the gap in words and says whether a seeded resampling finds it measurable (a
+  99% interval, as five figures are compared). It makes no claim that the mod
+  caused the gap.
+- **A live view inside Claude Code: the ClaudeGlass mod.** A plugin for
+  Claude Code 2.1.286 or later, added with `/plugin install claudeglass
+  --marketplace PaulMorrisDev/claudeglass`. A band above the prompt shows
+  how full the context is, how many replies are left before Claude
+  summarises, and what the session has cost. One more segment appears only
+  when it matters. The spinner shows the same fill and the reply's cost, and the
+  band narrows to short forms as the window does. Details are in
+  [`docs/mod.md`](docs/mod.md).
+- **The `/glass` pane.** `/glass`, or the Glass button on the band, opens a
+  pane with four tabs: Now, Agents, Compaction and Instructions. Now answers
+  what is filling the context. Instructions lists what the session loaded
+  at startup, with sizes marked as estimates. `[m]` or `/glass detail`
+  switches to the Detailed view, and `[h]` explains each figure.
+- **Notes at the end of a reply, and a cache rebuild line.** At most one
+  note every 5 replies, under the same rest rules as the capture hook. The
+  kinds are replies left, a large tool output, a second model switch,
+  repeated summaries and a summary that rebuilt the cache. When a reply
+  rewrote the whole context unexpectedly, a line names the cost and the
+  likely cause.
+- **Agents tab and agent rows.** Each agent shows its model, what it is
+  doing in plain words and its cost, running first. The line also sits under
+  the Agent call in the conversation, with the report re-read and run too big
+  notes. Pressing a row shows its task prompt, tools and biggest results.
+- **A compaction review.** The mod keeps a list of what you said, decided and
+  changed, plus pins from `/glass pin`. It checks the list against each
+  conversation summary. The Compaction tab shows only what may be missing,
+  with an Add back button that drafts a note and sends nothing. Before a
+  summary, Compact with these drafts a `/compact Keep:` command. Opt-in
+  switches hold an automatic summary once and re-add your pins.
+- **Prompt help.** The hint line flags a draft that starts a new topic over a
+  large context, names no file, or asks to read everything. `/glass tighten` has Haiku rewrite a draft shorter, shown as a
+  diff with Use this and Keep mine. `/glass guard` asks before a costly
+  send, and `/glass budget` sets a budget for the session.
+- **The release ships the mod as a zip.** Each release attaches
+  `claudeglass-mod.zip` for people who run the mod from a folder with
+  `CLAUDE_CODE_PLUGIN_DIRS` or `--plugin-dir`. `update --finish` now says how
+  to add the mod and where to read about it, and never installs it itself.
+  The settings file the mod reads, `mod/settings.json`, is written by
+  `update --finish` and kept fresh by the dashboard's service.
 
 ### Fixed
 
