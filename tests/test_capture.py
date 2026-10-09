@@ -436,7 +436,7 @@ def test_a_cycles_settled_tag_is_its_tag_when_nothing_is_known_or_nothing_change
         _ask(1),
         _reply(2, tool_use_block("Bash", "b1", {"command": "pytest -q"})),
         _ok(3, "b1"),
-        _reply(4, text="Done.\n[cg: task=test check=full]"),
+        _reply(4, text="Done.\n[cg: task=test check=none]"),
         _ask(5),
         _reply(6, text="Done."),
     ])
@@ -524,10 +524,14 @@ GROUNDING = [
     ("skill=helped", {"skills": 1, **LATER}, "skill=helped"),
     ("skill=would-help", LATER, "skill=would-help"),
     ("skill=none", LATER, "skill=none"),
-    # check: tests that ran, then nothing changed
+    # check: nothing changed, then tests that ran
     ("check=manual", {"tests": "full", "files": 1, **LATER}, "check=full"),
-    ("check=none", {"tests": "targeted", **LATER}, "check=targeted"),
-    ("check=full", {"tests": "targeted", **LATER}, "check=targeted"),
+    ("check=none", {"tests": "targeted", "files": 1, **LATER}, "check=targeted"),
+    ("check=full", {"tests": "targeted", "files": 1, **LATER}, "check=targeted"),
+    ("check=targeted", {"tests": "targeted", **LATER}, "check=none"),
+    ("check=run", {"tests": "full", "files": 0, **LATER}, "check=none"),
+    ("check=full", {"tests": "full", "agent_files": 1, **LATER}, "check=full"),
+    ("check=none", {"tests": "full", "shell_changes": 1, **LATER}, "check=full"),
     ("check=manual", {"files": 0, **LATER}, "check=none"),
     ("check=build", {"tests": "", **LATER}, "check=none"),
     ("check=manual", {"agent_files": 2, **LATER}, "check=manual"),

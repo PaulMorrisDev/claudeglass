@@ -32,11 +32,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   interpreter path or through PowerShell. Two are held out. `record`
   skips them, the judges are scored on them, and Claude's own figures
   leave them out. Its trimmer now keeps a queued message's text.
-  [docs/tagger-eval.md](docs/tagger-eval.md) describes both. Its tables
-  were measured before this release, and refreshing them needs a
-  signed-in terminal `claude`. A replay set of 50 real runs puts the
-  stored verdicts' "Finished" share at 60% against 100% right
-  ([docs/tagger-eval.md](docs/tagger-eval.md#replaying-real-runs)).
+  [docs/tagger-eval.md](docs/tagger-eval.md) describes both, with live
+  figures for this release. The agent judge gets 102 of 105 known
+  answers. On 89 real runs checked one by one, all of them finished, the
+  verdicts stored before this release said `done` for 53%, and this
+  release's judge says it for 96%
+  ([docs/tagger-eval.md](docs/tagger-eval.md#replaying-real-runs)). The
+  main-session judges score Haiku 87%, Haiku with thinking 92% and Sonnet
+  96% on the held-out sessions, level with 0.14.0's hook on the same set.
 - **Where agent and context tokens go, from the Overview and in the
   tuning export.** Each of the new figures for agents, plans and
   conversation summaries (spend by cost centre, model choice, cost per run by
@@ -952,9 +955,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   has no `shift` but `new`. `build` or `grew` reads `fix` after a
   correction, or a tweak to the files just changed. Haiku's `admit` needs
   a reply that reads like one, and a reply that does but got no word is
-  only a possible admission, never added to a total. `check` follows the
-  tests that ran and is `none` only when no edit, subagent, workflow
-  agent or file-moving command changed anything. `plan` is `made`
+  only a possible admission, never added to a total. `check` is `none`
+  when no edit, subagent, workflow agent or file-moving command changed
+  anything, and otherwise follows the tests that ran. `plan` is `made`
   whenever a plan went up and `following` once one was approved. Reports
   read the settled words and the calibration counts keep Claude's own.
   The parser now counts edit calls, documentation edits and file-moving

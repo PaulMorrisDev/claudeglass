@@ -7,17 +7,16 @@ does, measured by `scripts/eval-tagger.py`: against known right answers,
 with and without thinking, against Sonnet, and against the tags Claude
 writes itself.
 
-Short answer: **Haiku without thinking gets about 90% of the words right
-on work it had never seen, a little ahead of Claude's own tags (85%).**
-Thinking adds 3 points there, costs 3.4 times as much, and takes 12
+Short answer: **Haiku without thinking gets about 87% of the words right
+on work it had never seen. On the recorded sessions, the ones Claude
+tagged itself, it matches Claude's own tags (84% each).**
+Thinking adds 5 points there, costs 3.2 times as much, and takes 13
 seconds a call instead of 2. What made the difference was giving Haiku
 the right facts, not more thought, so the hook runs Haiku without thinking.
 
-Every table on this page was measured before 0.15.0. That release changed
-the excerpt and the corrections the judges are given, and added the
-hand-written sessions and the new agent cases below. None of those has
-been judged live yet, so the tables are a baseline and not the current
-score. [Run it again](#run-it-again) to refresh them.
+[Final results](#final-results) and [Agent runs](#agent-runs) were
+measured live on 0.15.0, on 2026-10-09. The sections before them record
+how the hook got there, with the figures of their time.
 
 ## How it's measured
 
@@ -31,8 +30,8 @@ score. [Run it again](#run-it-again) to refresh them.
   that finds its answer and research that doesn't, and a skill that ran.
   The capture note asked Claude for its own tags as it worked. 14 more
   sessions are written by hand, for what `claude -p` can't record (see
-  [Sessions written by hand](#sessions-written-by-hand)); the figures on
-  this page were measured before they were added.
+  [Sessions written by hand](#sessions-written-by-hand)). They count
+  from 0.15.0's run on; earlier figures cover the 38 recorded ones.
 - **Right answers.** `scripts/tagger-eval/scenarios.json` gives the
   right words for each session's last turn, for the keys with a clear
   answer. Some accept more than one word (a small change is `xs` or `s`),
@@ -119,56 +118,96 @@ they came from what the judge was shown and told, not from the model:
 
 ## Final results
 
-| Judge | Tuning (26) | Held out (12) | Same answer in every run | $ a call | Seconds a call |
+Measured on 0.15.0 on 2026-10-09, 3 runs per judge. The tuning set is 26
+recorded and 12 hand-written sessions. The held-out set is 12 recorded
+and 2 hand-written.
+
+| Judge | Tuning (38) | Held out (14) | Same answer in every run | $ a call | Seconds a call |
 |---|---|---|---|---|---|
-| **Haiku** | **96%** | **90%** | 83% | $0.0019 | 1.7 |
-| Haiku, thinking | 96% | 93% | 82% | $0.0064 | 12.2 |
-| Sonnet | 98% | 94% | 92% | $0.0093* | 2.4 |
-| Claude's own tags | 89% | 85% | – | – | – |
+| **Haiku** | **93%** | **87%** | 82% | $0.0024 | 2.0 |
+| Haiku, thinking | 94% | 92% | 82% | $0.0077 | 13.2 |
+| Sonnet | 98% | 96% | 92% | $0.0077 | 2.8 |
+| Claude's own tags | 87% | 84% | – | – | – |
 
-On the held-out set, the same sessions judged with the hook as first
-written score Haiku 75%, Haiku with thinking 83% and Sonnet 90%. So most
-of the gain holds on work the changes weren't tuned on.
+Claude's own tags cover the recorded sessions only, since a hand-written
+session holds none.
 
-By key, over all 38. This run also scored `found`. That key has since
-been dropped, so the scenarios no longer expect it and a new run won't
-show it.
+The run found one fault in the corrections. A turn that ran tests but
+changed no file had its `check` set from the tests, where the key line
+says `none`. Every judge lost that session 3 times in 3. The rule now
+tests "nothing changed" first. The figures above apply the fixed rule to
+the same answers, which needs no new calls.
+
+**Against 0.14.0.** The held-out sessions were also judged with 0.14.0's
+hook: its excerpt, instructions and corrections, scored against the same
+answer keys.
+
+| Judge | 0.14.0, recorded (12) | 0.15.0, recorded (12) | 0.14.0, by hand (2) | 0.15.0, by hand (2) |
+|---|---|---|---|---|
+| Haiku | 87% | 84% | 92% | 100% |
+| Haiku, thinking | 93% | 89% | 85% | 100% |
+| Sonnet | 96% | 95% | 92% | 100% |
+
+Over all 14, the two are level (0.15.0 first): Haiku 87% against 88%,
+Haiku with thinking 92% against 92%, Sonnet 96% against 95%. The two
+hand-written sessions are what 0.15.0 was built for: a tweak after a
+plan, and a message typed while Claude worked. On the 12 recorded ones
+0.15.0 is 1 to 4 points lower. Most of that is two things. `task` slips
+on a few sessions: `debug` for an empty report to fix, `feature` for
+adding type hints, and with thinking `feature` for a Dockerfile. And
+"Actually, go back to £ but put the symbol after the number" reads as
+`fix` in 6 of 9 runs, where the key says `redo`. 0.15.0's `fix` covers a
+tweak of what Claude just delivered, so the two words overlap there. The
+held-out set is never used to tune, so these are left as they are.
+
+0.14.0's own release figures (90%, 93% and 94% held out) were scored
+against the answer keys of its time, which still had `found`. With the
+hook as first written, the held-out set scored Haiku 75%, Haiku with
+thinking 83% and Sonnet 90%.
+
+By key, over all 52. `why` and `admit` are new in 0.15.0, and only 3 and
+2 sessions score them. `found` is gone.
 
 | Key | Haiku | Haiku, thinking | Sonnet | Claude's own |
 |---|---|---|---|---|
-| task | 96% | 97% | 100% | 100% |
-| brief | 100% | 100% | 100% | 100% |
-| level | 85% | 79% | 91% | 91% |
-| shift | 88% | 93% | 88% | 86% |
-| size | 100% | 90% | 100% | 92% |
-| missing | 100% | 100% | 100% | 100% |
-| plan | 95% | 97% | 97% | 97% |
+| task | 89% | 88% | 99% | 100% |
+| brief | 88% | 97% | 99% | 100% |
+| level | 93% | 79% | 98% | 91% |
+| shift | 92% | 96% | 92% | 86% |
+| why | 100% | 100% | 100% | – |
+| admit | 100% | 100% | 100% | – |
+| size | 100% | 92% | 100% | 92% |
+| missing | 70% | 97% | 94% | 100% |
+| plan | 93% | 97% | 97% | 97% |
 | skill | 100% | 100% | 100% | 100% |
-| found | 97% | 95% | 98% | 97% |
-| prior | 69% | 98% | 92% | 44% |
-| check | 98% | 92% | 94% | 41% |
+| prior | 86% | 92% | 98% | 44% |
+| check | 100% | 97% | 99% | 41% |
 
 ## Does Haiku need thinking?
 
 No:
 
-- **Accuracy.** On the tuning set, thinking scores the same as no
-  thinking (96%). On the held-out set it adds 3 points (93% against 90%).
-- **Cost and speed.** Each call costs 3.4 times as much ($0.0064 against
-  $0.0019) and takes about 12 seconds instead of 2. The answers are no
-  more consistent from run to run (82% against 83%).
-- **Where it helps.** Its one clear gain is `prior`: whether a message
-  relied on the conversation before it. That key is one ClaudeGlass reads
-  least, and it's the one Claude's own tags get most wrong (44%).
-- **Where it hurts.** With thinking, Haiku is worse on `level` and
-  `size`.
+- **Accuracy.** On the tuning set, thinking adds 1 point (94% against
+  93%). On the held-out set it adds 5 (92% against 87%).
+- **Cost and speed.** Each call costs 3.2 times as much ($0.0077 against
+  $0.0024) and takes about 13 seconds instead of 2. The answers are no
+  more consistent from run to run (82% both).
+- **Where it helps.** `missing` (97% against 70%), `brief` and `prior`.
+  `prior` says whether a message relied on the conversation before it.
+  ClaudeGlass reads it least, and Claude's own tags get it most wrong
+  (44%).
+- **Where it hurts.** With thinking, Haiku is worse on `level` (79%
+  against 93%) and `size`.
 
 The first run is where thinking looked worth it (+3 on tuning, +8 on
-held out). The gap closed once the excerpt carried the facts Haiku had
+held out). The gap narrowed once the excerpt carried the facts Haiku had
 been guessing.
 
-Sonnet is the most accurate and the most consistent, but it costs about
-5 times as much as Haiku.
+Sonnet is the most accurate and the most consistent. In 0.15.0's run it
+cost $0.0077 a call, about 3 times Haiku. That is less per token than
+0.14.0's hook paid in the same session ($0.0108 a call), so part of the
+longer prompt was likely read from cache; the one-call-at-a-time measure
+below predates 0.15.0.
 
 ## What a call really costs
 
@@ -193,21 +232,26 @@ each with a new excerpt as in real use:
 
 `scripts/eval-tagger.py` now adds a line unique to each call, so its cost
 column matches real use. The eval's accuracy figures are unaffected:
-cached or not, the model reads the same prompt.
+cached or not, the model reads the same prompt. 0.15.0's longer
+instructions and excerpt put Haiku at $0.0024 a call in its run.
 
 ## What's still wrong
 
-- **`prior`.** Haiku sometimes leaves it out on a follow-up.
+- **`missing` (Haiku 70%).** When a request lacks details, Haiku often
+  says nothing was missing. Thinking fixes most of it.
+- **`prior`.** Haiku sometimes says `some`, both where the message stood
+  on its own and where it needed the conversation before it.
 - **Where the right answer is arguable, every judge disagrees with the
-  answer key:**
-  - After "list the steps", then "implement it, but don't use the csv
-    module", every judge says the plan was `following`. The key says
-    `deviated`.
-  - "Where does it send emails?" in a project that sends none reads as
-    `found=yes` to Sonnet and to Haiku with thinking. The key says `no`.
+  answer key.** After "list the steps", then "implement it, but don't use
+  the csv module", every judge says the plan was `following`. The key
+  says `deviated`.
+- **Redo or fix.** A change of mind about what Claude just delivered
+  reads as `fix`, where the key says `redo` (see
+  [Final results](#final-results)).
 - **Symptom versus fix.** Haiku calls "it prints nothing, fix it"
   `debug` rather than `bugfix`, and "ok fix it" after an investigation
-  `shift=fix` rather than `build`.
+  `shift=fix` rather than `build`. Haiku with thinking gets the second
+  right.
 
 ## Sessions written by hand
 
@@ -253,8 +297,9 @@ line, as a desktop session's lines do, and an Opus model where the
 recorded ones have Sonnet. `tests/test_eval_tagger.py` checks, for free,
 that each session parses and that the excerpt of its last turn shows what
 the case is for: the queued message, both test commands as tests, and the
-plan rounds. These sessions have not been judged yet; the tables above
-are the 38 recorded ones. To judge some, run
+plan rounds. In 0.15.0's run the 12 in the tuning set scored Haiku 88%,
+Haiku with thinking 90% and Sonnet 97%, and the 2 held out 100% for
+every judge. To judge some on their own, run
 `python scripts/eval-tagger.py judge --only claude_wrong desk_replay_block`.
 
 ## Limits
@@ -266,7 +311,7 @@ are the 38 recorded ones. To judge some, run
   (see [capture.md](capture.md#who-writes-the-tags)).
 - **The answer keys are one person's reading.** Some keys are judgment
   calls, which is why several accept more than one word.
-- **Small numbers.** 3 runs per judge and 12 held-out sessions are
+- **Small numbers.** 3 runs per judge and 14 held-out sessions are
   enough to show large gaps (75% against 90%), not to rank judges a
   point or two apart.
 
@@ -295,13 +340,12 @@ One case stays out: a sequence you script yourself ("start an agent with
 a vague brief, then one with a precise brief") reads as your plan, not a
 rerun, and Haiku says `none`.
 
-The figures above were measured on those 8 cases, before the judge
-changed in 0.15.0. It now asks for the brief and what it lacked
-before the result, counts findings, refuted claims and an empty list as
-done, reads a workflow agent's computed task as the brief and its answer
-field by field, and writes `retry=model` itself when the same brief
-reruns on a higher model tier. The script has 13 more cases for this,
-which the table doesn't count yet:
+That table is 0.14.0's judge on those 8 cases. In 0.15.0 the judge asks
+for the brief and what it lacked before the result, counts findings,
+refuted claims and an empty list as done, reads a workflow agent's
+computed task as the brief and its answer field by field, and writes
+`retry=model` itself when the same brief reruns on a higher model tier.
+The script has 13 more cases for this:
 
 - **Workflow agents that are done.** One refutes a claim, one returns an
   empty list, one returns three findings, a validator confirms one claim
@@ -324,11 +368,26 @@ which the table doesn't count yet:
 Each case has an answer shape: `report`, `findings`, `empty`, `verdicts`,
 `concerns`, `risks`, `handback` or `blocked` (a run that says it could not
 do its work, however it says so). The script prints accuracy per key and
-per shape. A miss tends to follow the shape of the answer, not the key:
-a list of concerns read as unfinished work, or a refuted claim read as a
-blocked run. The table above counts the first 8 cases only. Run
-`python scripts/eval-agent-judge.py` to measure all 21, and to see the
-figures per shape, before quoting any.
+per shape. Before 0.15.0 a miss tended to follow the shape of the
+answer, not the key: a list of concerns read as unfinished work, or a
+refuted claim read as a blocked run.
+
+0.15.0's judge on all 21 cases, 3 runs each, on 2026-10-09:
+
+| Key | Right |
+|---|---|
+| `result` (done, partial, blocked) | 57 of 60 |
+| `brief` (clear, vague) | 21 of 21 |
+| `retry` (model, tools, or none) | 24 of 24 |
+| All | 102 of 105 (97%) |
+
+Every shape scored 100% but `blocked`, at 12 of 15. The one miss is the
+first blocked case: asked to list the keys of a settings file that
+doesn't exist, the run says there were no keys to list. Haiku reads that
+as an empty answer, so `done`, 3 times in 3. The hand-back that says it
+could not work, and the blocked run of the shared brief, both read
+`blocked`. A missing input that leaves an empty answer is the case where
+"an empty list is done" and "a missing file is blocked" meet.
 
 ### Replaying real runs
 
@@ -361,44 +420,52 @@ do, and how many labelled runs have no stored verdict. The "Finished"
 share is the figure to watch: the audit that led to the judge's changes
 found about 43 of 46 runs it called unfinished had delivered.
 
-Before 0.15.0, a replay set of 50 real runs on this machine was checked
-one by one by an agent reading each transcript. The mix was 20
-workflow agents that answered through `StructuredOutput`, 10 that wrote
-a report, 10 handbacks and 10 plain reports. The agent labelled each
-run's result and brief without seeing the stored verdict. All 50 runs
-had delivered and all 50 briefs were clear. These figures score the
-verdicts the builds before 0.15.0 stored, so they are the figures to
-beat. Right counts the result and the brief of every run.
+For 0.15.0, 89 finished runs from the last 30 days on this machine were
+checked one by one by agents reading each transcript, blind to the
+stored verdicts: 60 workflow agents and 29 direct ones. An Opus agent
+labelled 52, and a Sonnet agent labelled 50 in an earlier pass. On the
+13 runs both labelled, they agreed on every result and brief. All 89 runs
+had delivered, and every brief was clear. So the set shows how often a
+finished run is called finished. It can't show whether the judge spots a
+partial or blocked run; the known-answer cases cover that.
 
-| Answer shape | Right | `result=done` said | `result=done` right |
-|---|---|---|---|
-| findings | 2/12 (17%) | 0/6 (0%) | 6/6 (100%) |
-| verdicts | 3/4 (75%) | 2/2 (100%) | 2/2 (100%) |
-| concerns | 8/12 (67%) | 3/6 (50%) | 6/6 (100%) |
-| report | 33/50 (66%) | 17/25 (68%) | 25/25 (100%) |
-| empty | 0/2 (0%) | 0/1 (0%) | 1/1 (100%) |
-| handback | 18/20 (90%) | 8/10 (80%) | 10/10 (100%) |
-| All | 64/100 (64%) | 30/50 (60%) | 50/50 (100%) |
+"Stored" is the verdict the builds before 0.15.0 wrote at the time,
+scored with `--stored`. "0.15.0" is the live `--replay`, 3 runs each, on
+2026-10-09.
 
-All 50 runs have a stored verdict, so none were left out. The 0.15.0
-judge's figure needs the live `--replay`, run with a signed-in `claude`.
+| Answer shape | Runs | Stored: `done` | Stored: `clear` | 0.15.0: `done` | 0.15.0: `clear` |
+|---|---|---|---|---|---|
+| report | 34 | 24/34 (71%) | 24/34 (71%) | 93/102 (91%) | 98/102 (96%) |
+| findings | 15 | 3/15 (20%) | 9/15 (60%) | 45/45 (100%) | 45/45 (100%) |
+| handback | 15 | 11/15 (73%) | 15/15 (100%) | 45/45 (100%) | 45/45 (100%) |
+| verdicts | 11 | 4/11 (36%) | 4/11 (36%) | 33/33 (100%) | 33/33 (100%) |
+| concerns | 9 | 4/9 (44%) | 7/9 (78%) | 24/27 (89%) | 27/27 (100%) |
+| risks | 3 | 1/3 (33%) | 2/3 (67%) | 9/9 (100%) | 9/9 (100%) |
+| empty | 2 | 0/2 (0%) | 0/2 (0%) | 6/6 (100%) | 6/6 (100%) |
+| All | 89 | 47/89 (53%) | 61/89 (69%) | 255/267 (96%) | 263/267 (99%) |
+
+The "Finished" share on these runs goes from 53% to 96%. Every run has a
+stored verdict, so none were left out. The 0.15.0 misses are 5 workflow
+runs, 4 reports and a list of concerns, each called `partial` in at least
+one run. The stored verdicts often took a workflow's relay line for the
+brief, which is why `clear` was low.
 
 ## Run it again
 
 It spends real tokens, so it never runs in CI. Judging all 52 sessions
-with the three judges costs about $2.75 and takes about 7 minutes: 3 runs
-each, at the per-call costs and times above.
+with the three judges cost $2.77 and took 8 minutes in 0.15.0's run: 3
+runs each, at the per-call costs and times above. The held-out set on an
+older hook cost $0.82.
 
 Both scripts call `claude -p` through your own Claude Code login, so a
 refresh needs the `claude` command in your terminal to be signed in. Run
 `claude` once and log in if it isn't. The tables on this page come from
 `python scripts/eval-tagger.py judge` (the main session's tags) and
-`python scripts/eval-agent-judge.py` (agent runs). Until both have been
-run again on 0.15.0, the figures above are the earlier ones.
+`python scripts/eval-agent-judge.py` (agent runs).
 
-    python scripts/eval-tagger.py judge                      # judge the recorded sessions
+    python scripts/eval-tagger.py judge                      # judge every session
     python scripts/eval-tagger.py score                      # the report, from the newest results
-    python scripts/eval-tagger.py judge --hook OLD/capture_hook.py --set holdout   # an older hook, to compare
+    python scripts/eval-tagger.py judge --hook OLD/capture-hook.py --set holdout   # an older hook (0.14.0's file name), to compare
     python scripts/eval-tagger.py record --only NEW_ID       # record a new scenario (under a dollar with Sonnet)
     python scripts/eval-tagger.py record                     # skips the 14 written by hand, and says so
 

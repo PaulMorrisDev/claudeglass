@@ -1157,8 +1157,9 @@ def test_a_whole_suite_outranks_chosen_tests_in_one_turn(tmp_path):
             {"type": "text", "text": "Both pass."}]),
     ])
     assert facts["tests"] == "full" and "Tests run: the whole test suite." in excerpt
-    # Tests that ran with no edit are still a check.
-    assert HOOK.grounded("check=none", facts) == "check=full"
+    # Tests check a change; with no edit there was nothing to check.
+    assert HOOK.grounded("check=none", {**facts, "files": 1}) == "check=full"
+    assert HOOK.grounded("check=full", facts) == "check=none"
 
 
 def test_the_message_and_the_reply_before_it_tell_a_correction_an_adjustment_and_an_admission(tmp_path):

@@ -3445,8 +3445,9 @@ def grounded(words: str, facts: dict | None) -> str:
     - ``plan`` is ``made`` when a plan was written, and can't be ``made``
       after one was approved earlier (it reads ``following``).
     - ``skill`` can't be ``helped`` or ``unneeded`` when no skill ran.
-    - ``check`` is ``targeted`` or ``full`` when tests ran (a whole suite
-      outranks chosen tests), else ``none`` only when nothing changed.
+    - ``check`` is ``none`` when nothing changed, tests run or not (there
+      was no change to check), else ``targeted`` or ``full`` when tests
+      ran (a whole suite outranks chosen tests).
     - ``task`` is ``docs`` when only documentation changed.
     - A first message has no ``shift`` but ``new``, and no ``prior`` but
       ``none``. ``build`` and ``grew`` read ``fix`` after a correction, or
@@ -3469,10 +3470,10 @@ def grounded(words: str, facts: dict | None) -> str:
             value = "following"
         elif key == "skill" and not facts.get("skills") and value in ("helped", "unneeded"):
             value = "none"
-        elif key == "check" and facts.get("tests"):
-            value = facts["tests"]
         elif key == "check" and not changed:
             value = "none"
+        elif key == "check" and facts.get("tests"):
+            value = facts["tests"]
         elif key == "task" and docs and value in ("bugfix", "feature", "refactor"):
             value = "docs"
         elif key == "shift" and first and value != "new":

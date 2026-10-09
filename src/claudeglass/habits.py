@@ -650,6 +650,11 @@ class CycleFact:
     #: ``classify_purpose`` uses), whether or not Claude also self-reported
     #: ``check=``.
     checked_by_tool: bool = False
+    #: Something changed in this message (a file of yours, one a subagent or
+    #: workflow agent changed, or a file-changing command), from
+    #: ``Cycle.facts``; true when the facts aren't known. ``check=none`` with
+    #: nothing changed is right (``capture_tags.settle``), not a contradiction.
+    changed: bool = True
     output_cost: float = 0.0
     thinking_cost: float = 0.0
     #: Your feedback on the work this message belongs to, and where it
@@ -1601,6 +1606,8 @@ def _cycle_fact(
         speed=_dominant(t.speed for t in cycle.turns),
         main_cost=sum(rates.cost(t) for t in cycle.tag_turns),
         growth_cost=sum(max(0, t.ctx - first.ctx) * carry.reads[i] for t, i in zip(cycle.turns, idx)),
+        changed=not cycle.facts
+        or bool(cycle.facts.get("files") or cycle.facts.get("agent_files") or cycle.facts.get("shell_changes")),
         explore_agents=sum(
             1 for sub in cycle.subs if sub.meta.agent_type == _EXPLORE_AGENT and sub.meta.kind != "workflow-agent"
         ),
@@ -2661,7 +2668,10 @@ def _item_targeted_checks(h: Habits) -> Item | None:
     checked = list({id(c): c for c in (*reported_checked, *inferred_checked)}.values())
     if len(checked) < MIN_GROUP:
         return None
-    unchecked = [c for c in checked if c.tag is not None and c.tag.check == "none" and not c.checked_by_tool]
+    # A message that changed nothing had no change to check.
+    unchecked = [
+        c for c in checked if c.tag is not None and c.tag.check == "none" and not c.checked_by_tool and c.changed
+    ]
     full = [c for c in checked if c.tag is not None and c.tag.check == "full"]
     redone = [c for c in unchecked if c.redone]
     if not redone and len(full) < MIN_GROUP:
@@ -2671,7 +2681,9 @@ def _item_targeted_checks(h: Habits) -> Item | None:
         parts.append(f"{len(unchecked)} changes weren't checked and {len(redone)} of them were redone")
     if full:
         parts.append(f"{len(full)} ran the full suite")
-    contradicted = sum(1 for c in reported_checked if (c.written or c.tag).check == "none" and c.checked_by_tool)
+    contradicted = sum(
+        1 for c in reported_checked if (c.written or c.tag).check == "none" and c.checked_by_tool and c.changed
+    )
     if contradicted:
         parts.append(f"{contradicted} said unchecked but a test command ran anyway")
     # Every dollar of saving is earned by an *unchecked, redone* cycle,
@@ -3121,7 +3133,9 @@ def contradiction_flags(h: Habits) -> dict[str, int]:
     said ``level=easy`` but cost landed in the priciest quarter of
     same-task messages (``EASY_HIGH_EFFORT_PCT``)."""
     checked_contradicted = sum(
-        1 for c in h.cycles if c.tag is not None and (c.written or c.tag).check == "none" and c.checked_by_tool
+        1
+        for c in h.cycles
+        if c.tag is not None and (c.written or c.tag).check == "none" and c.checked_by_tool and c.changed
     )
     pcts = _effort_percentiles(h)
     easy_high_effort = sum(

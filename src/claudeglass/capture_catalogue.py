@@ -3635,10 +3635,10 @@ def render_markdown() -> str:
         "like one but got no `admit` word is a possible admission, kept out of every total."
     )
     p(
-        "- **`check`:** a test run sets it, `full` when the whole suite ran at any point, `targeted` when only "
-        "chosen tests did. `none` is set only when Claude, its subagents and its workflow agents changed no "
-        "file and no shell command did. A `git commit`, a redirected `2>&1` and `>/dev/null` change nothing; "
-        "a merge, a rebase and `sed -i` do."
+        "- **`check`:** `none` when Claude, its subagents and its workflow agents changed no file and no shell "
+        "command did. Tests that ran then had no change to check. Otherwise a test run sets it, `full` when "
+        "the whole suite ran at any point, `targeted` when only chosen tests did. A `git commit`, a redirected "
+        "`2>&1` and `>/dev/null` change nothing; a merge, a rebase and `sed -i` do."
     )
     p(
         "- **`plan`:** `made` whenever Claude put a plan up in the turn. `following` replaces `made` once "

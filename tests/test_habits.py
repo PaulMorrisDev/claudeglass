@@ -2220,6 +2220,13 @@ def test_targeted_checks_does_not_blame_a_report_a_test_command_contradicts():
     assert habits._item_targeted_checks(h) is None
 
 
+def test_targeted_checks_counts_no_unchecked_change_where_nothing_changed():
+    h = Habits(cycles=[
+        *(_cycle(tag=CaptureTag(check="none"), redone=True, redo_cost=2.0, changed=False) for _ in range(5)),
+    ])
+    assert habits._item_targeted_checks(h) is None
+
+
 # -- EST-P7 + CAP-3: what capture buys in recommend() -----------------------
 
 
@@ -2613,6 +2620,14 @@ def test_contradiction_flags_counts_checked_and_effort_contradictions():
     flags = habits.contradiction_flags(h)
     assert flags["checked_contradicted"] == 3
     assert flags["easy_high_effort"] == 1  # the easy-tagged message is by far the priciest of its task
+
+
+def test_contradiction_flags_leaves_out_none_after_tests_that_had_no_change_to_check():
+    # check=none is right when nothing changed, tests run or not.
+    h = Habits(cycles=[
+        *(_cycle(tag=CaptureTag(check="none"), checked_by_tool=True, changed=False) for _ in range(3)),
+    ])
+    assert habits.contradiction_flags(h)["checked_contradicted"] == 0
 
 
 def test_self_report_calibration_carries_the_cap_6_fields_and_flips_on_a_frequent_contradiction():

@@ -765,8 +765,8 @@ report, empty (with a note saying why) when capture is off or nothing's
 been collected yet — a table never disappears out from under you.
 
 **A tag's words are checked against the transcript.** Claude and Haiku
-can write a word the transcript contradicts: `check=none` after a test
-run, or a `why` with no redo behind it. Before a tag counts, a fixed
+can write a word the transcript contradicts: `check=none` after testing
+a change, or a `why` with no redo behind it. Before a tag counts, a fixed
 rule set (`capture_tags.settle`) puts such words right from the counts
 the parser took: files changed, tests run, plans and how you answered
 them, skills run. The capture hook applies the same rules, written again
