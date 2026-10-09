@@ -1587,17 +1587,23 @@ _MOD_WRITES = [0]
 
 
 def _mod_here(tmp_path: Path, sessions=None, *, text: str | None = None) -> Path:
-    """``mod/present.json`` for ``sessions`` (a session id to the seconds before :data:`FB_NOW` the mod last
-    saw it; default: session ``s1``, just now), or ``text`` as the file."""
-    folder = tmp_path / "claudeglass" / cat.MOD_DIR
+    """``mod/present/<session id>.json`` for each of ``sessions`` (a session id to the seconds before
+    :data:`FB_NOW` the mod last saw it; default: session ``s1``, just now), or ``text`` as session ``s1``'s file.
+    Returns the first file."""
+    folder = tmp_path / "claudeglass" / cat.MOD_DIR / cat.MOD_PRESENT_DIR
     folder.mkdir(parents=True, exist_ok=True)
-    seen = {sid: (FB_NOW - timedelta(seconds=ago)).timestamp() for sid, ago in (sessions or {"s1": 0}).items()}
-    path = folder / cat.MOD_PRESENT_FILE
-    path.write_text(text if text is not None else json.dumps({"schema": 1, "sessions": seen}), encoding="utf-8")
-    # The hook remembers the file by its time and size: give each write its own time (see test_coaching).
-    _MOD_WRITES[0] += 1
-    os.utime(path, (1_700_000_000 + _MOD_WRITES[0], 1_700_000_000 + _MOD_WRITES[0]))
-    return path
+    paths = []
+    for sid, ago in (sessions or {"s1": 0}).items():
+        seen = (FB_NOW - timedelta(seconds=ago)).timestamp()
+        path = folder / f"{sid}.json"
+        path.write_text(
+            text if text is not None else json.dumps({"schema": 1, "session_id": sid, "seen": seen}), encoding="utf-8"
+        )
+        # The hook remembers the file by its time and size: give each write its own time (see test_coaching).
+        _MOD_WRITES[0] += 1
+        os.utime(path, (1_700_000_000 + _MOD_WRITES[0], 1_700_000_000 + _MOD_WRITES[0]))
+        paths.append(path)
+    return paths[0]
 
 
 def _reminded(tmp_path: Path) -> bool:
@@ -1610,11 +1616,11 @@ def _reminded(tmp_path: Path) -> bool:
 
 
 def test_the_rating_reminder_is_left_out_while_the_mod_runs_and_not_stamped(tmp_path):
-    folder = _mod_here(tmp_path)
+    heartbeat = _mod_here(tmp_path)
     assert _fb(tmp_path, _big(1_300_000), NEXT) == ""
     assert not _reminded(tmp_path)
     # When the mod stops, the reminder is all there: the piece was not marked as reminded.
-    folder.unlink()
+    heartbeat.unlink()
     assert _hint(_fb(tmp_path, _big(1_300_000), NEXT)) == "rating_reminder"
     assert _reminded(tmp_path)
 
@@ -1626,9 +1632,9 @@ def test_the_rating_reminder_comes_unchanged_without_the_sessions_own_fresh_hear
     elif how == "another session":
         _mod_here(tmp_path, {"s2": 0})
     elif how == "corrupt":
-        _mod_here(tmp_path, text='{"schema": 1, "sessions": {"s1"')
+        _mod_here(tmp_path, text='{"schema": 1, "session_id": "s1", "seen"')
     elif how == "unknown schema":
-        _mod_here(tmp_path, text=json.dumps({"schema": 9, "sessions": {"s1": FB_NOW.timestamp()}}))
+        _mod_here(tmp_path, text=json.dumps({"schema": 9, "session_id": "s1", "seen": FB_NOW.timestamp()}))
     else:
         _mod_here(tmp_path, text="")
     assert _hint(_fb(tmp_path, _big(1_300_000), NEXT)) == "rating_reminder"
@@ -1647,9 +1653,9 @@ def test_the_hook_adds_no_reminder_note_while_the_mod_runs(tmp_path):
     # The hook runs on the real clock, so the transcript and the heartbeat are dated on it.
     now = datetime.now(timezone.utc)
     payload = _prompt_for(tmp_path, _timeline(_types("Add the importer"), _says("done", tokens=1_300_000), now=now), NEXT)
-    (config_dir / cat.MOD_DIR).mkdir()
-    heartbeat = config_dir / cat.MOD_DIR / cat.MOD_PRESENT_FILE
-    heartbeat.write_text(json.dumps({"schema": 1, "sessions": {"s1": now.timestamp()}}), encoding="utf-8")
+    (config_dir / cat.MOD_DIR / cat.MOD_PRESENT_DIR).mkdir(parents=True)
+    heartbeat = config_dir / cat.MOD_DIR / cat.MOD_PRESENT_DIR / "s1.json"
+    heartbeat.write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": now.timestamp()}), encoding="utf-8")
     assert _run(config_dir, payload) == (0, "", "")
     heartbeat.unlink()
     rc, out, err = _run(config_dir, payload)

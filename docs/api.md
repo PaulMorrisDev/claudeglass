@@ -1910,7 +1910,7 @@ adds a line (`kind`, `item`, the state `trying` and a time, no text) to
 `habit-log.jsonl` in the config folder each time you pick it when it was
 not already your answer, which puts a change point on the Changes page
 from that day so the habit's effect can be measured. Your answer on the
-card of a tip hint also counts in the "Tips Claude showed" table of the
+card of a tip hint also counts in the "Coaching tips shown" table of the
 report (`trying` counts as `useful`).
 
 `data`: `{"kind", "item", "answer", "set_at"}` (`set_at` is `null` when

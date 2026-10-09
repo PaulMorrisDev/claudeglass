@@ -3534,20 +3534,44 @@ def test_the_hook_records_a_run_when_it_stops_and_tells_the_main_session_at_the_
 _HEARTBEAT_WRITES = [0]
 
 
+def _heartbeat_path(base: Path, session: str = "s1") -> Path:
+    return _config_dir(base) / cat.MOD_DIR / cat.MOD_PRESENT_DIR / f"{session}.json"
+
+
 def _heartbeat(base: Path, entries=None, *, schema: int = 1) -> Path:
-    """``<config dir>/mod/present.json`` with ``entries`` (a session id to the seconds before :data:`NOW`
-    the mod last saw it; default: session ``s1``, just now)."""
-    folder = _config_dir(base) / cat.MOD_DIR
-    folder.mkdir(exist_ok=True)
-    seen = {sid: (NOW - timedelta(seconds=ago)).timestamp() for sid, ago in (entries or {"s1": 0}).items()}
-    path = folder / cat.MOD_PRESENT_FILE
-    path.write_text(json.dumps({"schema": schema, "sessions": seen}), encoding="utf-8")
-    # The hook remembers the file by its time and size, and a rewrite of the same length in the same clock
-    # tick can keep both: give each write its own time, as the mod's writes a minute apart have.
+    """One ``<config dir>/mod/present/<session id>.json`` per entry of ``entries`` (a session id to the
+    seconds before :data:`NOW` the mod last saw it; default: session ``s1``, just now). Returns the first."""
+    paths = []
+    for sid, ago in (entries or {"s1": 0}).items():
+        path = _heartbeat_path(base, sid)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        seen = (NOW - timedelta(seconds=ago)).timestamp()
+        path.write_text(json.dumps({"schema": schema, "session_id": sid, "seen": seen}), encoding="utf-8")
+        # The hook remembers the file by its time and size, and a rewrite of the same length in the same clock
+        # tick can keep both: give each write its own time, as the mod's writes a minute apart have.
+        _HEARTBEAT_WRITES[0] += 1
+        stamp = 1_700_000_000 + _HEARTBEAT_WRITES[0]
+        os.utime(path, (stamp, stamp))
+        paths.append(path)
+    return paths[0]
+
+
+def _sensor(base: Path, events, session: str = "s1", *, schema: int = 1, file_session: str | None = None) -> Path:
+    """``<config dir>/mod/sensor/<session id>.json`` holding ``events`` (the mod's own file: ``mod_sensor``)."""
+    path = _config_dir(base) / cat.MOD_DIR / cat.MOD_SENSOR_DIR / f"{session}.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    body = {"schema": schema, "session_id": file_session or session, "version": "0.0.0", "events": events}
+    path.write_text(json.dumps(body), encoding="utf-8")
     _HEARTBEAT_WRITES[0] += 1
     stamp = 1_700_000_000 + _HEARTBEAT_WRITES[0]
     os.utime(path, (stamp, stamp))
     return path
+
+
+def _noted(kind: str, ago_s: float = 0, surface: str = "status") -> dict:
+    """A ``note`` event of the sensor file: the mod showed a tip of ``kind`` ``ago_s`` seconds before :data:`NOW`."""
+    return {"ts": (NOW - timedelta(seconds=ago_s)).timestamp(), "event": "note", "kind": kind, "surface": surface,
+            "outcome": "none"}
 
 
 def _rested(base: Path) -> dict:
@@ -3655,7 +3679,7 @@ def test_a_moved_hint_is_left_out_while_the_mod_runs_for_the_session(tmp_path, s
     assert _coach(tmp_path, payload) == ""
     # Left out is not shown: nothing is stamped, so the note is all there when the mod stops.
     assert _hint_of(scene) not in _rested(tmp_path)
-    (tmp_path / "claudeglass" / cat.MOD_DIR / cat.MOD_PRESENT_FILE).unlink()
+    _heartbeat_path(tmp_path).unlink()
     assert _kind(_coach(tmp_path, payload)) == _hint_of(scene)
 
 
@@ -3672,7 +3696,7 @@ def _unknown_schema(base):
 
 
 def _corrupt(base):
-    _heartbeat(base).write_text('{"schema": 1, "sessions": {"s1": ', encoding="utf-8")
+    _heartbeat(base).write_text('{"schema": 1, "session_id": "s1", "seen": ', encoding="utf-8")
 
 
 def _not_an_object(base):
@@ -3680,11 +3704,22 @@ def _not_an_object(base):
 
 
 def _odd_time(base):
-    _heartbeat(base).write_text(json.dumps({"schema": 1, "sessions": {"s1": "now"}}), encoding="utf-8")
+    _heartbeat(base).write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": "now"}), encoding="utf-8")
 
 
 def _boolean_time(base):
-    _heartbeat(base).write_text(json.dumps({"schema": 1, "sessions": {"s1": True}}), encoding="utf-8")
+    _heartbeat(base).write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": True}), encoding="utf-8")
+
+
+def _other_name(base):
+    """The file for ``s1`` says it is for another session."""
+    _heartbeat(base).write_text(
+        json.dumps({"schema": 1, "session_id": "s2", "seen": NOW.timestamp()}), encoding="utf-8"
+    )
+
+
+def _no_name(base):
+    _heartbeat(base).write_text(json.dumps({"schema": 1, "seen": NOW.timestamp()}), encoding="utf-8")
 
 
 #: Each way the heartbeat can fail to put the mod there, as the file the hook finds.
@@ -3697,6 +3732,8 @@ _NOT_THERE = {
     "not an object": _not_an_object,
     "time not a number": _odd_time,
     "time a boolean": _boolean_time,
+    "named for another session": _other_name,
+    "no session named": _no_name,
 }
 
 
@@ -3727,14 +3764,18 @@ def test_the_hints_the_hook_keeps_are_added_while_the_mod_runs(tmp_path):
     assert _kind(note) == "plan_fresh_early"
 
 
-def test_a_run_that_ended_too_big_is_not_recorded_while_the_mod_runs(tmp_path):
+def test_a_run_that_ended_too_big_is_recorded_while_the_mod_runs_and_told_once_it_stops(tmp_path):
     session, _ = _agent_run(tmp_path, [_prompt(), _SUMMARISED, _reply(1_000, message_id="m1")])
     _heartbeat(tmp_path)
-    assert _keep_run(tmp_path, _agent_stop(session)) is False
-    assert not (tmp_path / "claudeglass" / cat.COACH_STATE_FILE).exists()
-    # Once the mod stops, the next run is.
-    (tmp_path / "claudeglass" / cat.MOD_DIR / cat.MOD_PRESENT_FILE).unlink()
     assert _keep_run(tmp_path, _agent_stop(session)) is True
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
+    # The mod tells it on the agent's row: the hook says nothing, and keeps the count.
+    assert _coach(tmp_path, _after_the_agent(session)) == ""
+    assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
+    # Once the mod stops, the run that ended too big while it ran is told.
+    _heartbeat_path(tmp_path).unlink()
+    assert _kind(_coach(tmp_path, _after_the_agent(session))) == "split_run"
+    assert _pending(tmp_path) == {}
 
 
 def test_runs_recorded_before_the_mod_started_are_kept_for_when_it_stops(tmp_path):
@@ -3742,7 +3783,7 @@ def test_runs_recorded_before_the_mod_started_are_kept_for_when_it_stops(tmp_pat
     _heartbeat(tmp_path)
     assert _coach(tmp_path, payload) == ""
     assert list(_pending(tmp_path).values()) == [{"compaction": 1}]
-    (tmp_path / "claudeglass" / cat.MOD_DIR / cat.MOD_PRESENT_FILE).unlink()
+    _heartbeat_path(tmp_path).unlink()
     assert _kind(_coach(tmp_path, payload)) == "split_run"
 
 
@@ -3755,10 +3796,11 @@ def test_the_hook_reads_the_heartbeat_once_for_all_the_questions_of_a_call(tmp_p
     config_dir = _config_dir(tmp_path)
     assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) and HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts)
     assert HOOK._moved(config_dir, CATALOGUE, "s1", now_ts) == frozenset(cat.MOVED_TO_MOD)
-    assert reads.count(cat.MOD_PRESENT_FILE) == 1
+    assert reads.count("s1.json") == 1
     # A rewrite of the file is read again.
     _heartbeat(tmp_path, {"s1": 0, "s2": 0})
-    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) and reads.count(cat.MOD_PRESENT_FILE) == 2
+    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) and reads.count("s1.json") == 2
+    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) and reads.count("s2.json") == 1
 
 
 def test_the_presence_check_never_raises(tmp_path):
@@ -3767,21 +3809,127 @@ def test_the_presence_check_never_raises(tmp_path):
     assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
     assert HOOK._mod_present(config_dir, {}, "s1", now_ts) is False
     # The file's place is a folder.
-    (config_dir / cat.MOD_DIR / cat.MOD_PRESENT_FILE).mkdir(parents=True)
+    _heartbeat_path(tmp_path).mkdir(parents=True)
     assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
     assert HOOK._moved(config_dir, CATALOGUE, "s1", now_ts) == frozenset()
+    assert HOOK._mod_present(config_dir, CATALOGUE, None, now_ts) is False
+
+
+def test_two_sessions_each_have_their_own_heartbeat(tmp_path):
+    config_dir = _config_dir(tmp_path)
+    now_ts = NOW.timestamp()
+    # One session's heartbeat is stale, the other's is fresh: they do not touch each other.
+    _heartbeat(tmp_path, {"s1": 0, "s2": cat.MOD_PRESENT_WINDOW_S + 1})
+    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is True
+    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) is False
+    # A session's own file going doesn't take the other's.
+    _heartbeat_path(tmp_path).unlink()
+    _heartbeat(tmp_path, {"s2": 0})
+    assert HOOK._mod_present(config_dir, CATALOGUE, "s1", now_ts) is False
+    assert HOOK._mod_present(config_dir, CATALOGUE, "s2", now_ts) is True
+
+
+@pytest.mark.parametrize("session", ["../x", "a/b", "a.b", "s_1", "s 1", "", "s1\n", "..", "\\x"])
+def test_a_session_id_that_is_not_a_plain_word_is_never_present(tmp_path, session):
+    config_dir = _config_dir(tmp_path)
+    # A file that is valid in every way but for the id it is asked for by, in the places a path trick would reach.
+    for place in (config_dir / cat.MOD_DIR, config_dir / cat.MOD_DIR / cat.MOD_PRESENT_DIR):
+        place.mkdir(parents=True, exist_ok=True)
+        for name in ("x.json", "s_1.json", "s 1.json", "a.b.json", ".json", "s1.json"):
+            (place / name).write_text(
+                json.dumps({"schema": 1, "session_id": session, "seen": NOW.timestamp()}), encoding="utf-8"
+            )
+    assert HOOK._mod_present(config_dir, CATALOGUE, session, NOW.timestamp()) is False
+    assert HOOK._moved(config_dir, CATALOGUE, session, NOW.timestamp()) == frozenset()
+
+
+# -- a start-fresh tip the mod showed rests the one the hook still writes ---------------------------
+
+
+def test_a_start_fresh_tip_the_mod_showed_rests_plan_fresh_early_for_the_cooldown(tmp_path):
+    _heartbeat(tmp_path)
+    cooldown = CATALOGUE["coaching"]["thresholds"]["cooldown_minutes"] * 60
+    _sensor(tmp_path, [_noted("plan_fresh", 600)])
+    assert _planning(tmp_path) == ""
+    # Nothing is stamped for the one that was held back, so it is there when the rest is over.
+    assert "plan_fresh_early" not in _rested(tmp_path)
+    _sensor(tmp_path, [_noted("plan_fresh", cooldown + 60)])
+    assert _kind(_planning(tmp_path)) == "plan_fresh_early"
+
+
+@pytest.mark.parametrize("kind", ["plan_fresh", "cold_return"])
+def test_either_start_fresh_tip_of_the_mod_rests_it(tmp_path, kind):
+    _heartbeat(tmp_path)
+    _sensor(tmp_path, [_noted("status_poll", 60), _noted(kind, 300, "hint")])
+    assert _planning(tmp_path) == ""
+
+
+def _sensor_text(text):
+    return lambda base: _sensor(base, []).write_text(text, encoding="utf-8")
+
+
+#: What a sensor file may hold without resting plan_fresh_early.
+_NOT_A_REST = {
+    "no file": lambda base: None,
+    "no events": lambda base: _sensor(base, []),
+    "an old tip": lambda base: _sensor(base, [_noted("plan_fresh", 3 * 3600)]),
+    "other tips": lambda base: _sensor(base, [_noted("drip_feed", 60), _noted("big_paste", 60)]),
+    "not a note": lambda base: _sensor(base, [{**_noted("plan_fresh", 60), "event": "present"}]),
+    "another session's file": lambda base: _sensor(base, [_noted("plan_fresh", 60)], "s2"),
+    "a file named for another": lambda base: _sensor(base, [_noted("plan_fresh", 60)], file_session="s2"),
+    "another schema": lambda base: _sensor(base, [_noted("plan_fresh", 60)], schema=2),
+    "events not a list": lambda base: _sensor(base, {"ts": 1}),
+    "odd events": lambda base: _sensor(base, [None, "plan_fresh", [1], {"event": "note", "kind": "plan_fresh"},
+                                              {"event": "note", "kind": "plan_fresh", "ts": "now"},
+                                              {"event": "note", "kind": "plan_fresh", "ts": True}]),
+    "corrupt": _sensor_text('{"schema": 1, "session_id": "s1", "events": [{"ts": '),
+    "not an object": _sensor_text("[1, 2]"),
+}
+
+
+@pytest.mark.parametrize("how", list(_NOT_A_REST))
+def test_a_sensor_file_with_no_start_fresh_tip_of_the_sessions_own_rests_nothing(tmp_path, how):
+    _heartbeat(tmp_path)
+    _NOT_A_REST[how](tmp_path)
+    assert _kind(_planning(tmp_path)) == "plan_fresh_early"
+
+
+def test_a_start_fresh_tip_the_mod_showed_rests_it_without_the_mod_running_now(tmp_path):
+    # The tip was shown to you whether or not the mod is still there.
+    _sensor(tmp_path, [_noted("plan_fresh", 600)])
+    assert _planning(tmp_path) == ""
+
+
+def test_the_sensor_check_never_raises(tmp_path):
+    config_dir = _config_dir(tmp_path)
+    now_ts = NOW.timestamp()
+    rest = 1_800
+    assert HOOK._mod_showed_fresh_start(config_dir, CATALOGUE, "s1", now_ts, rest) is False
+    assert HOOK._mod_showed_fresh_start(config_dir, {}, "s1", now_ts, rest) is False
+    assert HOOK._mod_showed_fresh_start(config_dir, CATALOGUE, None, now_ts, rest) is False
+    assert HOOK._mod_showed_fresh_start(config_dir, CATALOGUE, "../s1", now_ts, rest) is False
+    # The file's place is a folder.
+    (config_dir / cat.MOD_DIR / cat.MOD_SENSOR_DIR / "s1.json").mkdir(parents=True)
+    assert HOOK._mod_showed_fresh_start(config_dir, CATALOGUE, "s1", now_ts, rest) is False
+    # A file past the size the hook reads.
+    (config_dir / cat.MOD_DIR / cat.MOD_SENSOR_DIR / "s1.json").rmdir()
+    path = _sensor(tmp_path, [_noted("plan_fresh", 60)])
+    assert HOOK._mod_showed_fresh_start(config_dir, CATALOGUE, "s1", now_ts, rest) is True
+    path.write_text(" " * (HOOK._MOD_SENSOR_MAX_BYTES + 1), encoding="utf-8")
+    assert HOOK._mod_showed_fresh_start(config_dir, CATALOGUE, "s1", now_ts, rest) is False
 
 
 def test_the_hook_prints_nothing_for_a_moved_hint_while_the_mod_runs(tmp_path):
     config_dir = _coaching_config(_config_dir(tmp_path))
     payload = _drip_feed_payload(tmp_path)
     # The hook runs on the real clock, so the heartbeat is dated on it.
-    folder = config_dir / cat.MOD_DIR
-    folder.mkdir()
-    (folder / cat.MOD_PRESENT_FILE).write_text(
-        json.dumps({"schema": 1, "sessions": {"s1": datetime.now(timezone.utc).timestamp()}}), encoding="utf-8"
+    folder = config_dir / cat.MOD_DIR / cat.MOD_PRESENT_DIR
+    folder.mkdir(parents=True)
+    heartbeat = folder / "s1.json"
+    heartbeat.write_text(
+        json.dumps({"schema": 1, "session_id": "s1", "seen": datetime.now(timezone.utc).timestamp()}), encoding="utf-8"
     )
     assert _run(config_dir, payload) == (0, "", "")
-    (folder / cat.MOD_PRESENT_FILE).unlink()
+    heartbeat.unlink()
     rc, out, err = _run(config_dir, payload)
     assert rc == 0 and err == "" and _kind(json.loads(out)["hookSpecificOutput"]["additionalContext"]) == "drip_feed"

@@ -350,7 +350,7 @@
    "status_poll"
   ],
   "dir": "mod",
-  "present_file": "present.json",
+  "present_dir": "present",
   "present_window_s": 600,
   "sensor_dir": "sensor"
  },

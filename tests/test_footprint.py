@@ -538,11 +538,13 @@ def test_the_mods_files_are_described_with_what_the_mod_writes_back(tmp_path):
     config_dir = _claude(tmp_path)
     sensor = config_dir / "mod" / "sensor"
     sensor.mkdir(parents=True)
-    (config_dir / "mod" / "present.json").write_text('{"schema": 1, "sessions": {}}', encoding="utf-8")
+    present = config_dir / "mod" / "present"
+    present.mkdir()
+    (present / "s1.json").write_text('{"schema": 1, "session_id": "s1", "seen": 1}', encoding="utf-8")
     (sensor / "s1.json").write_text("{}", encoding="utf-8")
     item = {i.key: i for i in footprint.inventory(config_dir, service_registered=None)}["mod_settings"]
-    # What it says it holds is what is in the folder: the settings, the heartbeat, the sensor files.
-    assert "sessions it is running in" in item.what_it_does and "a small file per session" in item.what_it_does
+    # What it says it holds is what is in the folder: the settings, a heartbeat file and a sensor file per session.
+    assert "a small file per session it is running in" in item.what_it_does and "another per session" in item.what_it_does
     assert "never a prompt or a path" in item.what_it_does
     # All of it goes with the data folder.
     assert footprint.delete_data(config_dir) == []

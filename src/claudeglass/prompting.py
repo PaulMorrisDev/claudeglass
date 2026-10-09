@@ -749,7 +749,7 @@ _TREND_LABELS = {
 GLASS_SURFACES = {
     "note": "the note",
     "hint": "the hint line",
-    "log": "the log",
+    "log": "a note in the conversation",
     "status": "the status line",
     "band": "the band",
     "agent": "the agent row",
@@ -932,13 +932,13 @@ def build_section(
     glass = glass_tips(mod_events, {s.session_id for s in sessions})
     tips_table = Table(
         name="prompting_tips",
-        title="Tips Claude showed",
+        title="Coaching tips shown",
         columns=[
             Column(key="hint", label="Hint", kind="str"),
             Column(key="notes", label="Notes", kind="int"),
             Column(key="shown", label="Passed on by Claude", kind="int"),
             Column(key="shown_pct", label="Passed on (share)", kind="pct"),
-            Column(key="relay", label="Claude's relay", kind="str"),
+            Column(key="relay", label="Passed on, of notes", kind="str"),
             Column(key="glass", label="Shown by Glass", kind="int"),
             Column(key="where", label="Where Glass showed it", kind="str"),
             Column(key="total", label="Tips shown", kind="int"),

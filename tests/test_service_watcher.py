@@ -2012,6 +2012,20 @@ def test_run_once_prunes_old_mod_sensor_files_and_rows_with_no_retention_days_se
     assert [r["session_id"] for r in store.read_mod_events()] == ["recent"]
 
 
+def test_run_once_removes_the_mods_heartbeat_files_after_a_day(tmp_path: Path, store: Store):
+    # Whatever retention_days says: the hook reads only the last ten minutes of one.
+    options = _options(tmp_path, retention_days=30)
+    now = time.time()
+    folder = options.config_dir / "mod" / "present"
+    folder.mkdir(parents=True)
+    old, recent = folder / "old.json", folder / "recent.json"
+    for path, age in ((old, 25 * 3600), (recent, 3600)):
+        path.write_text('{"schema": 1, "session_id": "' + path.stem + '", "seen": 1}', encoding="utf-8")
+        os.utime(path, (now - age, now - age))
+    FileWatcher(store, options).run_once()
+    assert not old.exists() and recent.exists()
+
+
 def test_run_once_uses_an_explicit_retention_days_for_the_mod_sensor_files(tmp_path: Path, store: Store):
     options = _options(tmp_path, retention_days=30)
     now = time.time()

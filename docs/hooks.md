@@ -126,22 +126,31 @@ the size measure are on the
 
 The ClaudeGlass mod, a separate plugin that runs inside Claude Code, shows
 some of the hints itself, in its own panes, so they cost no context. It
-tells the hook which sessions it is running in by refreshing
-`mod/present.json` in ClaudeGlass's data folder, at most once a minute:
-`{"schema": 1, "sessions": {"<session id>": <seconds since 1970 it last
-saw it>}}`. The mod drops an entry after 24 hours. The hook reads the
-file on a call that could draw a note (one file, remembered by its time
-and size, so a repeat call reads it once). A session counts as having the
-mod when its own entry is within the last 10 minutes. Then the hook leaves
+tells the hook which sessions it is running in with one small file per
+session, `mod/present/<session id>.json` in ClaudeGlass's data folder:
+`{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>}`.
+The mod refreshes it every minute on a timer while the session is open, so
+an idle session stays fresh, and deletes it when the session ends if it can;
+the dashboard's watcher removes any left for 24 hours. A file per session
+because two sessions writing one shared file would drop each other's entry.
+The hook reads the session's own file on a call that could draw a note
+(remembered by its time and size, so a repeat call reads it once). A
+session counts as having the mod when the file's `session_id` is its own
+name, its schema is 1 and `seen` is within the last 10 minutes; a session
+id that isn't letters, digits and `-` never counts. Then the hook leaves
 out the hints the mod shows, and doesn't note that it did: `cold_return`,
 `status_poll`, `drip_feed`, `big_paste`, `report_reread`, `split_run`,
 `plan_fresh` and the rating reminder. It doesn't work them out either, so
 a call with the mod present is a little quicker (about 39 milliseconds
 against 43 on the author's machine, with a hint due). A hint the hook
 leaves out is not marked as shown, so it is there again as soon as the mod
-isn't: it was closed, the entry went stale, or the file is missing,
-unreadable or of another schema. `split_run` also records nothing while the mod
-runs, since the mod tells it on the agent's row.
+isn't: it was closed, the file went stale, or it is missing, unreadable or
+of another schema. `split_run` is still recorded when an agent run ends too
+big, so a run from before the mod stopped is told once it has; only
+telling it is left to the mod, on the agent's row. The hook also reads the
+mod's sensor file for the session (`mod/sensor/<session id>.json`): a tip to
+start fresh that the mod showed within the cooldown rests `plan_fresh_early`,
+as one the hook showed itself would.
 
 The hook keeps what steers Claude or feeds a skill: `plan_fresh_early`,
 `quiet_output`, the plan check, the facts line and the capture note.

@@ -56,10 +56,19 @@
  * @property {ContextParts} parts  Null parts when there is no breakdown.
  */
 
+/**
+ * @param {*} value
+ * @returns {value is number}
+ */
 function finite(value) {
   return typeof value === "number" && isFinite(value);
 }
 
+/**
+ * @param {*} name
+ * @param {string} wanted
+ * @returns {boolean}
+ */
 function same(name, wanted) {
   return typeof name === "string" && name.trim().toLowerCase() === wanted;
 }
@@ -173,15 +182,15 @@ export function runway(history, point) {
   if (!Array.isArray(history) || history.length < 2 || !finite(point)) return null;
   var steps = [];
   for (var i = 1; i < history.length; i++) {
-    var step = history[i] - history[i - 1];
+    var step = /** @type {number} */ (history[i]) - /** @type {number} */ (history[i - 1]);
     if (step > 0) steps.push(step);
   }
   if (steps.length < 2) return null;
   var recent = steps.slice(-RUNWAY_STEPS);
   var total = 0;
-  for (var j = 0; j < recent.length; j++) total += recent[j];
+  for (var j = 0; j < recent.length; j++) total += /** @type {number} */ (recent[j]);
   var mean = total / recent.length;
-  return Math.max(0, Math.floor((point - history[history.length - 1]) / mean));
+  return Math.max(0, Math.floor((point - /** @type {number} */ (history[history.length - 1])) / mean));
 }
 
 /**

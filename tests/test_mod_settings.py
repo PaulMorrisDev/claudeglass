@@ -273,9 +273,10 @@ def test_the_coaching_block_is_the_catalogues_until_you_change_it(tmp_path):
         "thresholds": capture_catalogue.COACHING_THRESHOLDS,
         "muted": [],
         "once": [],
+        "typical_piece_tokens": 0,
     }
     (folder / "coaching.json").write_text(
-        json.dumps({"thresholds": {"cold_min_tokens": 50_000}, "muted": ["b", "a", 3], "once": ["c"]}),
+        json.dumps({"thresholds": {"cold_min_tokens": 50_000}, "muted": ["b", "a", 3], "once": ["c"], "typical_piece_tokens": 2_500_000}),
         encoding="utf-8",
     )
     coaching = mod_settings.build(folder, now=NOW)["coaching"]
@@ -283,6 +284,7 @@ def test_the_coaching_block_is_the_catalogues_until_you_change_it(tmp_path):
     assert coaching["thresholds"]["cold_rest_hours"] == capture_catalogue.COACHING_THRESHOLDS["cold_rest_hours"]
     assert coaching["muted"] == ["a", "b"]
     assert coaching["once"] == ["c"]
+    assert coaching["typical_piece_tokens"] == 2_500_000
 
 
 def test_a_threshold_in_config_toml_reaches_the_file(tmp_path):

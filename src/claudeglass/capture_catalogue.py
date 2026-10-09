@@ -689,8 +689,8 @@ FEEDBACK_HINTS = ("plan_check", "rating_reminder")
 #: relevant to what the user asked ("if most of the message is a log").
 #: Every other hint that carries a tip asks for it every time, so Claude
 #: passing it on is a relay; for these, Claude showing it is a judgement,
-#: and a tip it doesn't show is not a miss (``prompting``'s "Tips Claude
-#: showed" counts the two differently).
+#: and a tip it doesn't show is not a miss (``prompting``'s "Coaching tips
+#: shown" counts the two differently).
 CONDITIONAL_TIP_HINTS = ("big_paste",)
 
 #: The hints the ClaudeGlass mod delivers itself, in its own UI, while it
@@ -719,23 +719,31 @@ MOVED_TO_MOD = frozenset(
 )
 
 #: The mod's folder under the data folder, and the two things the mod
-#: writes there for the hook and the watcher to read. ``present.json`` is
-#: ``{"schema": 1, "sessions": {<session id>: <epoch seconds last seen>}}``,
-#: refreshed at most once a minute and pruned after 24 hours. The sensor
+#: writes there for the hook and the watcher to read. The ``present``
 #: folder holds one ``<session id>.json`` per session, ``{"schema": 1,
-#: "session_id", "version", "events": [...]}``, rewritten whole at each
-#: turn's end with the newest :data:`MOD_SENSOR_MAX_EVENTS` events.
-#: ``mod_settings.MOD_DIRNAME`` is the same folder name (a test holds them
-#: together).
+#: "session_id", "seen": <epoch seconds>}``: the mod refreshes it every
+#: minute on a timer while the session is open (so an idle session stays
+#: fresh), deletes it when the session ends if it can, and the watcher
+#: removes any left for :data:`MOD_PRESENT_PRUNE_S`. A file per session
+#: because two sessions writing one shared file would drop each other's
+#: entry. The sensor folder holds one ``<session id>.json`` per session,
+#: ``{"schema": 1, "session_id", "version", "events": [...]}``, rewritten
+#: whole at each turn's end with the newest :data:`MOD_SENSOR_MAX_EVENTS`
+#: events. ``mod_settings.MOD_DIRNAME`` is the same folder name (a test
+#: holds them together).
 MOD_DIR = "mod"
-MOD_PRESENT_FILE = "present.json"
+MOD_PRESENT_DIR = "present"
 MOD_SENSOR_DIR = "sensor"
 MOD_SENSOR_MAX_EVENTS = 500
 
-#: The mod counts as running for a session when its entry in
-#: ``present.json`` was refreshed within this many seconds: ten times the
+#: The mod counts as running for a session when its file in the
+#: ``present`` folder was refreshed within this many seconds: ten times the
 #: refresh interval, so a missed write or two does not bring the notes back.
 MOD_PRESENT_WINDOW_S = 600
+
+#: A ``present`` file not written for this long (24 hours) is removed: the
+#: session it was for is long over, and the mod could not delete it.
+MOD_PRESENT_PRUNE_S = 86400
 
 #: The notes only the mod writes, beside the hints above: the context
 #: runway, the cost of a result, a model switch, the effort level, how
@@ -3301,7 +3309,7 @@ def export_json() -> dict:
         "mod": {
             "moved": sorted(MOVED_TO_MOD),
             "dir": MOD_DIR,
-            "present_file": MOD_PRESENT_FILE,
+            "present_dir": MOD_PRESENT_DIR,
             "present_window_s": MOD_PRESENT_WINDOW_S,
             "sensor_dir": MOD_SENSOR_DIR,
         },

@@ -49,14 +49,28 @@ var CONTEXT_WINDOW_SUFFIX = "[1m]";
 // A cache write lasts an hour from this TTL up; below it, five minutes.
 var ONE_HOUR_S = 3600;
 
+/**
+ * @param {Object} object
+ * @param {string} key
+ * @returns {boolean}
+ */
 function has(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
 }
 
+/**
+ * @param {string} text
+ * @param {string} suffix
+ * @returns {boolean}
+ */
 function endsWith(text, suffix) {
   return text.length >= suffix.length && text.slice(text.length - suffix.length) === suffix;
 }
 
+/**
+ * @param {*} value
+ * @returns {number}
+ */
 function count(value) {
   return typeof value === "number" && isFinite(value) ? value : 0;
 }
@@ -70,8 +84,8 @@ function count(value) {
 function stripCloudProvider(modelId) {
   var stripped = modelId;
   for (var i = 0; i < CLOUD_PREFIXES.length; i++) {
-    if (stripped.indexOf(CLOUD_PREFIXES[i]) === 0) {
-      stripped = stripped.slice(CLOUD_PREFIXES[i].length);
+    if (stripped.indexOf(/** @type {string} */ (CLOUD_PREFIXES[i])) === 0) {
+      stripped = stripped.slice(/** @type {string} */ (CLOUD_PREFIXES[i]).length);
       break;
     }
   }
@@ -88,11 +102,13 @@ function stripCloudProvider(modelId) {
  */
 function lookupExactOrAlias(models, modelId) {
   if (has(models, modelId)) return modelId;
+  /** @type {string|null} */
   var found = null;
   var ids = Object.keys(models);
   for (var i = 0; i < ids.length; i++) {
-    var aliases = models[ids[i]] && models[ids[i]].aliases;
-    if (Array.isArray(aliases) && aliases.indexOf(modelId) !== -1) found = ids[i];
+    var id = /** @type {string} */ (ids[i]);
+    var aliases = models[id] && /** @type {ModelRates} */ (models[id]).aliases;
+    if (Array.isArray(aliases) && aliases.indexOf(modelId) !== -1) found = id;
   }
   return found;
 }
@@ -140,10 +156,12 @@ export function resolveModel(models, modelId) {
     if (unwrapped !== null) return unwrapped;
   }
 
+  /** @type {string|null} */
   var best = null;
   var ids = Object.keys(models);
   for (var i = 0; i < ids.length; i++) {
-    if (prefixBoundaryMatch(cleaned, ids[i]) && (best === null || ids[i].length > best.length)) best = ids[i];
+    var id = /** @type {string} */ (ids[i]);
+    if (prefixBoundaryMatch(cleaned, id) && (best === null || id.length > best.length)) best = id;
   }
   return best;
 }
@@ -156,7 +174,7 @@ export function resolveModel(models, modelId) {
  */
 export function ratesFor(models, modelId) {
   var id = resolveModel(models, modelId);
-  return id === null ? null : models[id];
+  return id === null ? null : /** @type {ModelRates} */ (models[id]);
 }
 
 /**
@@ -192,10 +210,10 @@ export function priceUsage(rates, usage, ttlSeconds) {
     var overrides = rule.overrides;
     if (overrides && Object.keys(overrides).length > 0) {
       var writeKey = long ? "cache_write_1h" : "cache_write_5m";
-      if (has(overrides, "input")) inputRate = overrides.input;
-      if (has(overrides, "output")) outputRate = overrides.output;
-      if (has(overrides, writeKey)) writeRate = overrides[writeKey];
-      if (has(overrides, "cache_read")) readRate = overrides.cache_read;
+      if (has(overrides, "input")) inputRate = /** @type {number} */ (overrides.input);
+      if (has(overrides, "output")) outputRate = /** @type {number} */ (overrides.output);
+      if (has(overrides, writeKey)) writeRate = /** @type {number} */ (overrides[writeKey]);
+      if (has(overrides, "cache_read")) readRate = /** @type {number} */ (overrides.cache_read);
     } else if (typeof rule.multiplier === "number") {
       inputRate *= rule.multiplier;
       outputRate *= rule.multiplier;

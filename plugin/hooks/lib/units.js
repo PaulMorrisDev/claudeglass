@@ -155,10 +155,18 @@ function shareText(share) {
   return share < 1 ? fixed(share, 2) + "%" : fixed(share, 1) + "%";
 }
 
+/**
+ * @param {*} usd
+ * @returns {boolean}
+ */
 function isAmount(usd) {
   return typeof usd === "number" && isFinite(usd) && usd > 0;
 }
 
+/**
+ * @param {Billing|null|undefined} billing
+ * @returns {number|null}
+ */
 function sharePerUsd(billing) {
   var share = billing && billing.mode === "subscription" ? billing.share_per_usd : null;
   return typeof share === "number" && isFinite(share) && share > 0 ? share : null;
@@ -254,6 +262,7 @@ export function formatTokens(n) {
     var whole = Math.round(abs);
     return (negative && whole !== 0 ? MINUS : "") + grouped(String(whole));
   }
+  /** @type {[number, string][]} */
   var units = [
     [1e12, "T"],
     [1e9, "B"],
@@ -261,15 +270,17 @@ export function formatTokens(n) {
     [1e3, "k"],
   ];
   for (var i = 0; i < units.length; i++) {
-    if (abs >= units[i][0] * 0.9995) {
-      var scaled = abs / units[i][0];
+    var unit = /** @type {[number, string]} */ (units[i]);
+    if (abs >= unit[0] * 0.9995) {
+      var scaled = abs / unit[0];
       var digits = scaled < 10 ? 2 : scaled < 100 ? 1 : 0;
       var text = Number(scaled.toFixed(digits)).toString();
       // 999.95k rounds to 1000k: step up to the next unit instead.
       if (Number(text) >= 1000 && i > 0) {
-        return (negative ? MINUS : "") + Number((abs / units[i - 1][0]).toFixed(2)).toString() + units[i - 1][1];
+        var larger = /** @type {[number, string]} */ (units[i - 1]);
+        return (negative ? MINUS : "") + Number((abs / larger[0]).toFixed(2)).toString() + larger[1];
       }
-      return (negative ? MINUS : "") + text + units[i][1];
+      return (negative ? MINUS : "") + text + unit[1];
     }
   }
   return String(n);

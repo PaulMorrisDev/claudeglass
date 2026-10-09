@@ -165,6 +165,32 @@ def test_files_is_empty_without_a_folder(tmp_path):
     assert mod_sensor.files(tmp_path) == []
 
 
+def test_prune_present_removes_only_the_heartbeat_files_older_than_a_day(tmp_path):
+    folder = tmp_path / cat.MOD_DIR / cat.MOD_PRESENT_DIR
+    folder.mkdir(parents=True)
+    now = time.time()
+    made = {}
+    for name, age in (("old", 25 * 3600), ("new", 23 * 3600), ("fresh", 0)):
+        made[name] = folder / f"{name}.json"
+        made[name].write_text(json.dumps({"schema": 1, "session_id": name, "seen": now - age}), encoding="utf-8")
+        os.utime(made[name], (now - age, now - age))
+    other = folder / "notes.txt"
+    other.write_text("not a heartbeat", encoding="utf-8")
+    os.utime(other, (now - 40 * 3600, now - 40 * 3600))
+    assert mod_sensor.prune_present(tmp_path, now) == 1
+    assert not made["old"].exists() and made["new"].exists() and made["fresh"].exists() and other.exists()
+    assert mod_sensor.prune_present(tmp_path, now) == 0
+
+
+def test_prune_present_without_a_folder_removes_nothing(tmp_path):
+    assert mod_sensor.prune_present(tmp_path) == 0
+    # The sensor files are not heartbeats: they go by the retention, not after a day.
+    old = _write(tmp_path, "old", [PRESENT])
+    ago = time.time() - 3 * 86400
+    os.utime(old, (ago, ago))
+    assert mod_sensor.prune_present(tmp_path) == 0 and old.exists()
+
+
 def test_prune_removes_only_the_files_not_written_for_the_retention(tmp_path):
     old = _write(tmp_path, "old", [PRESENT])
     new = _write(tmp_path, "new", [PRESENT])

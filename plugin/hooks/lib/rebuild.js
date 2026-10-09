@@ -75,11 +75,13 @@ export var REBUILD_DEFAULTS = {
  * @returns {RebuildThresholds}
  */
 function withDefaults(thresholds) {
+  /** @type {Partial<RebuildThresholds>} */
   var out = {};
-  var keys = Object.keys(REBUILD_DEFAULTS);
+  var keys = /** @type {(keyof RebuildThresholds)[]} */ (Object.keys(REBUILD_DEFAULTS));
   for (var i = 0; i < keys.length; i++) {
-    var value = thresholds ? thresholds[keys[i]] : undefined;
-    out[keys[i]] = typeof value === "number" && isFinite(value) ? value : REBUILD_DEFAULTS[keys[i]];
+    var key = /** @type {keyof RebuildThresholds} */ (keys[i]);
+    var value = thresholds ? thresholds[key] : undefined;
+    out[key] = typeof value === "number" && isFinite(value) ? value : REBUILD_DEFAULTS[key];
   }
   return /** @type {RebuildThresholds} */ (out);
 }
@@ -111,7 +113,7 @@ export function expiredByClock(gapSeconds, beforeTtlSeconds) {
  * Whether `cur` paid to write again context that should have been read
  * (recache._is_rebuild).
  * @param {RebuildRequest} cur
- * @param {RebuildRequest|null} prev
+ * @param {RebuildRequest|null|undefined} prev
  * @param {number|null} cr0
  * @param {RebuildThresholds} th
  * @returns {boolean}
@@ -154,6 +156,7 @@ export function detectRebuild(prev, cur, thresholds, ttlSeconds, cr0) {
   if (cur.ctx <= th.ctx_floor) return null;
   if (!isRebuild(cur, prev, shared, th)) return null;
 
+  /** @type {"limit"|"compaction"|"expiry"|"prefix"} */
   var cause;
   if (cur.afterLimitWait) {
     cause = "limit";

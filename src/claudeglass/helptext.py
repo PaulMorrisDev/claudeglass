@@ -970,7 +970,7 @@ TABLE_COPY: dict[str, TableCopy] = {
         lead_columns=["habit", "times", "per_100", "cost", "trend", "try"],
     ),
     "prompting_tips": TableCopy(
-        title="Tips Claude showed",
+        title="Coaching tips shown",
         help=Help(
             shows="For each coaching hint that asks for a tip, how many tips were shown. Some were passed on by "
             "Claude in its reply. Others were shown by ClaudeGlass itself inside Claude Code. It also shows how often "
@@ -987,7 +987,7 @@ TABLE_COPY: dict[str, TableCopy] = {
             "shown": ("Passed on by Claude", "How many of those replies ended with a ClaudeGlass tip."),
             "shown_pct": ("Passed on (share)", "The share of notes that ended with a tip."),
             "relay": (
-                "Claude's relay",
+                "Passed on, of notes",
                 "Relayed means Claude was told to show the tip every time. Judged relevant means Claude chose "
                 "whether your message called for it. Empty where ClaudeGlass showed the tip itself.",
             ),

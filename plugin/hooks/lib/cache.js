@@ -19,6 +19,7 @@
 // _DEFAULT_TTL_S).
 export var DEFAULT_TTL_SECONDS = 300;
 
+/** @type {Record<number, string>} */
 var TTL_LABELS = { 300: "5m", 3600: "1h" };
 
 /**
@@ -92,7 +93,7 @@ export function parseTtl(value) {
  * The lifetime to assume for the countdown, in the status line's order
  * (resolve_effective_ttl): the payload's `prompt_cache.cache_ttl`, its
  * top-level `cache_ttl`, the configured default, then 300 seconds.
- * @param {Object|null|undefined} payload
+ * @param {Record<string, any>|null|undefined} payload
  * @param {*} [configDefault]  The settings file's `cache.ttl_seconds`, if any.
  * @returns {number}
  */
@@ -116,5 +117,5 @@ export function resolveTtl(payload, configDefault) {
  * @returns {string}
  */
 export function ttlLabel(ttlSeconds) {
-  return Object.prototype.hasOwnProperty.call(TTL_LABELS, ttlSeconds) ? TTL_LABELS[ttlSeconds] : ttlSeconds + "s";
+  return Object.prototype.hasOwnProperty.call(TTL_LABELS, ttlSeconds) ? /** @type {string} */ (TTL_LABELS[ttlSeconds]) : ttlSeconds + "s";
 }

@@ -42,6 +42,10 @@
  */
 export var FRESH_START_HINTS = ["plan_fresh", "plan_fresh_early", "cold_return"];
 
+/**
+ * @param {*} value
+ * @returns {number|null}
+ */
 function number(value) {
   return typeof value === "number" && isFinite(value) ? value : null;
 }
@@ -53,6 +57,7 @@ function number(value) {
  * @returns {RestState}
  */
 function copyState(state) {
+  /** @type {Object<string, HintRow>} */
   var hints = {};
   var source = state && state.hints && typeof state.hints === "object" ? state.hints : {};
   Object.keys(source).forEach(function (kind) {
@@ -61,6 +66,11 @@ function copyState(state) {
   return Object.assign({}, state, { hints: hints });
 }
 
+/**
+ * @param {RestState|null|undefined} state
+ * @param {string} kind
+ * @returns {HintRow|null}
+ */
 function rowOf(state, kind) {
   var hints = state && state.hints;
   if (!hints || !Object.prototype.hasOwnProperty.call(hints, kind)) return null;
@@ -172,14 +182,14 @@ export function restBeside(state, kind, nowS, th) {
  * @returns {RestState}
  */
 export function recordShown(state, kind, stake, nowS, th, once) {
-  var hint = kind.split(":")[0];
+  var hint = /** @type {string} */ (kind.split(":")[0]);
   var next =
     hint === "cold_return"
       ? stamp(state, kind, 0, nowS, th, (th.cold_rest_hours || 0) * 3600, once)
       : stamp(state, kind, stake, nowS, th, null, once);
   if (FRESH_START_HINTS.indexOf(hint) !== -1) {
     for (var i = 0; i < FRESH_START_HINTS.length; i++) {
-      if (FRESH_START_HINTS[i] !== hint) next = restBeside(next, FRESH_START_HINTS[i], nowS, th);
+      if (FRESH_START_HINTS[i] !== hint) next = restBeside(next, /** @type {string} */ (FRESH_START_HINTS[i]), nowS, th);
     }
   }
   return next;

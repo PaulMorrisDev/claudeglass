@@ -1365,7 +1365,7 @@ def test_tips_shown_adds_the_ones_glass_showed_to_the_ones_claude_passed_on(tmp_
     assert rows["cold_return"]["where"] == "the hint line 2, the note 1"
     # A hint both showed counts the tips of both, apart and together.
     assert rows["drip_feed"]["shown"] == 1 and rows["drip_feed"]["glass"] == 1 and rows["drip_feed"]["total"] == 2
-    assert rows["drip_feed"]["where"] == "the log 1" and rows["drip_feed"]["relay"] == "relayed 1 of 1"
+    assert rows["drip_feed"]["where"] == "a note in the conversation 1" and rows["drip_feed"]["relay"] == "relayed 1 of 1"
     assert "big_paste" not in rows and "runway" not in rows
     assert any("Claude passed on" in note and "ClaudeGlass showed itself" in note for note in tips.notes)
 

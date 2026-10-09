@@ -21,7 +21,9 @@ the file's own name and shaped like a session id. Anything else is dropped
 whole, so a stray message, path or summary can never reach the store.
 
 :func:`load` reads one file, :func:`files` lists them, :func:`prune`
-removes the old ones.
+removes the old ones. The mod's heartbeat files
+(``<config_dir>/mod/present/<session id>.json``, read by the capture hook)
+are not read here; :func:`prune_present` removes the ones left behind.
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ from pathlib import Path
 
 from .capture_catalogue import (
     MOD_DIR,
+    MOD_PRESENT_DIR,
+    MOD_PRESENT_PRUNE_S,
     MOD_SENSOR_DIR,
     MOD_SENSOR_MAX_EVENTS,
     SENSOR_COUNT_FIELDS,
@@ -161,6 +165,28 @@ def prune(config_dir: str | Path, retention_days: int, now: float | None = None)
     cutoff = (time.time() if now is None else now) - retention_days * 86400
     removed = 0
     for path in files(config_dir):
+        try:
+            if path.stat().st_mtime < cutoff:
+                os.unlink(path)
+                removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def prune_present(config_dir: str | Path, now: float | None = None) -> int:
+    """Removes the heartbeat files in ``<config_dir>/mod/present`` not
+    written for ``capture_catalogue.MOD_PRESENT_PRUNE_S`` (24 hours): the
+    mod refreshes one every minute and removes it when its session ends, so
+    one that old was left by a session that ended without the chance.
+    Returns how many went."""
+    cutoff = (time.time() if now is None else now) - MOD_PRESENT_PRUNE_S
+    removed = 0
+    try:
+        found = sorted(p for p in (Path(config_dir) / MOD_DIR / MOD_PRESENT_DIR).glob("*.json") if p.is_file())
+    except OSError:
+        return 0
+    for path in found:
         try:
             if path.stat().st_mtime < cutoff:
                 os.unlink(path)

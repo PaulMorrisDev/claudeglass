@@ -1088,7 +1088,7 @@ going, stopping Claude again and again, big tasks without a plan, vague
 corrections, huge pastes, context carried into new pieces) with what it cost over the
 window ("over the last 30 days", or "Not priced" for a vague correction), what to try instead, how often it happened
 per 100 messages and a by-week line; then, once there are coaching
-notes, **Tips Claude showed**, with how often Claude passed each tip on
+notes, **Coaching tips shown**, with how often Claude passed each tip on
 ("relayed N of M" for a hint Claude is told to show every time, "judged
 relevant N of M" for one it decides on) and how often it called the tip a
 misfire. Nothing here changes a setting.
