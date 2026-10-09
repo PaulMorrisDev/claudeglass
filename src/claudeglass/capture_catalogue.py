@@ -721,10 +721,12 @@ MOVED_TO_MOD = frozenset(
 #: The mod's folder under the data folder, and the two things the mod
 #: writes there for the hook and the watcher to read. The ``present``
 #: folder holds one ``<session id>.json`` per session, ``{"schema": 1,
-#: "session_id", "seen": <epoch seconds>}``: the mod refreshes it every
-#: minute on a timer while the session is open (so an idle session stays
-#: fresh), deletes it when the session ends if it can, and the watcher
-#: removes any left for :data:`MOD_PRESENT_PRUNE_S`. A file per session
+#: "session_id", "seen": <epoch seconds>, "active": <epoch seconds>}``
+#: (``active`` is the session's last request, 0 before its first): the mod
+#: refreshes it every minute on a timer while the session is open (so an
+#: idle session stays fresh), rewrites it with ``seen`` at 0 when the session
+#: ends (it can't delete files), and the watcher removes any left for
+#: :data:`MOD_PRESENT_PRUNE_S`. A file per session
 #: because two sessions writing one shared file would drop each other's
 #: entry. The sensor folder holds one ``<session id>.json`` per session,
 #: ``{"schema": 1, "session_id", "version", "events": [...]}``, rewritten

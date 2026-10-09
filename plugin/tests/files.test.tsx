@@ -42,8 +42,8 @@ test('the heartbeat is one file per session, written at the start, every minute,
   const now = Math.floor(T0 / 1000)
   await $.session.start(START)
 
-  // The shape the capture hook reads: schema, the session's own id, and the seconds it was seen.
-  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: now })
+  // The shape the capture hook reads: schema, the session's own id, the seconds it was seen, and when its last request was (none yet).
+  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: now, active: 0 })
   expect([...world.files.keys()].filter(path => path.includes('/present'))).toEqual([PRESENT])
 
   // A measurement within a minute of the last write leaves the file alone.
@@ -56,7 +56,9 @@ test('the heartbeat is one file per session, written at the start, every minute,
   const first = json(world, PRESENT)
   expect(first.schema).toBe(1)
   expect(first.session_id).toBe(SESSION)
-  expect(Object.keys(first).sort()).toEqual(['schema', 'seen', 'session_id'])
+  expect(Object.keys(first).sort()).toEqual(['active', 'schema', 'seen', 'session_id'])
+  // The first reply's request was at the start, and the file says so.
+  expect(first.active).toBe(now)
   expect(first.seen).toBeGreaterThan(now)
 
   // And again a minute on, for as long as the session is open.
@@ -65,7 +67,7 @@ test('the heartbeat is one file per session, written at the start, every minute,
 
   // The engine can't remove a file: at the end it says the session is no longer seen, and the timer stops.
   await $.session.end({ sessionId: SESSION, reason: 'exit' } as never)
-  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: 0 })
+  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: 0, active: 0 })
   world.files.set(PRESENT, 'after the end')
   await world.clock.advance(5 * 60 * 1000)
   expect(world.files.get(PRESENT)).toBe('after the end')

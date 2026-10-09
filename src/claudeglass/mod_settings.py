@@ -42,6 +42,7 @@ import dataclasses
 import json
 import os
 import sqlite3
+import threading
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -78,6 +79,12 @@ RATED_WINDOW_S = 30 * 86400
 STALE_AFTER = timedelta(hours=24)
 
 _STAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+#: Held while the file is written, and across :func:`refresh_coaching`'s
+#: read-and-write, so two writers in this process (the hourly report's
+#: thread and a rating's refresh) never interleave. Re-entrant: the refresh
+#: writes through :func:`write` while holding it.
+_WRITE_LOCK = threading.RLock()
 
 
 def settings_path(config_dir: str | Path | None) -> Path:
@@ -295,31 +302,44 @@ def _same_but_for_time(old: object, new: dict) -> bool:
     return was is not None and now is not None and now - was <= STALE_AFTER
 
 
-def write(config_dir: str | Path | None, data: dict) -> bool:
+def write(config_dir: str | Path | None, data: dict, *, recompute_coaching: bool = True) -> bool:
     """Write ``data`` to the settings file through a temporary file and a
     rename, so the mod never reads half a file. Creates ``mod/``. Leaves
     the file alone when it already holds ``data`` apart from
     ``written_at``, unless that is more than a day old. Returns whether it wrote; an ``OSError`` gives
-    ``False``."""
+    ``False``.
+
+    One writer at a time (:data:`_WRITE_LOCK`), each through a temporary
+    file of its own. The ``coaching`` block of ``data`` is worked out again
+    inside the lock, just before the write, unless ``recompute_coaching`` is
+    false: a report takes minutes to build, and a rating given in the
+    meantime must not be written over with the block as it stood when the
+    build began. (The block is reckoned as of ``data``'s ``written_at``.)"""
     path = settings_path(config_dir)
-    try:
-        existing = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        existing = None
-    if _same_but_for_time(existing, data):
-        return False
-    tmp = path.with_name(f"{path.name}.{os.getpid()}.tmp")
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-        os.replace(tmp, path)
-    except OSError:
+    with _WRITE_LOCK:
+        if recompute_coaching and isinstance(data.get("coaching"), dict):
+            try:
+                data = {**data, "coaching": _coaching_block(path.parent.parent, _stamp(data.get("written_at")) or datetime.now(timezone.utc))}
+            except Exception:  # noqa: BLE001 -- the block as built stands
+                pass
         try:
-            tmp.unlink()
+            existing = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            existing = None
+        if _same_but_for_time(existing, data):
+            return False
+        tmp = path.with_name(f"{path.name}.{os.getpid()}.{threading.get_ident()}.tmp")
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
         except OSError:
-            pass
-        return False
-    return True
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return False
+        return True
 
 
 def refresh_coaching(config_dir: str | Path | None, *, now: datetime | None = None) -> bool:
@@ -333,12 +353,13 @@ def refresh_coaching(config_dir: str | Path | None, *, now: datetime | None = No
     wrote."""
     try:
         directory = _resolve_config_dir(config_dir)
-        existing = json.loads(settings_path(directory).read_text(encoding="utf-8"))
-        if not isinstance(existing, dict) or existing.get("schema") != SCHEMA:
-            return False
-        stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-        data = {**existing, "coaching": _coaching_block(directory, stamp), "written_at": stamp.strftime(_STAMP_FORMAT)}
-        return write(directory, data)
+        with _WRITE_LOCK:  # the read, the new block and the write are one step
+            existing = json.loads(settings_path(directory).read_text(encoding="utf-8"))
+            if not isinstance(existing, dict) or existing.get("schema") != SCHEMA:
+                return False
+            stamp = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+            data = {**existing, "coaching": _coaching_block(directory, stamp), "written_at": stamp.strftime(_STAMP_FORMAT)}
+            return write(directory, data, recompute_coaching=False)
     except Exception:  # noqa: BLE001 -- a courtesy to the mod: the next report writes the whole file
         return False
 

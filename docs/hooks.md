@@ -128,7 +128,9 @@ The ClaudeGlass mod, a separate plugin that runs inside Claude Code, shows
 some of the hints itself, in its own panes, so they cost no context. It
 tells the hook which sessions it is running in with one small file per
 session, `mod/present/<session id>.json` in ClaudeGlass's data folder:
-`{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>}`.
+`{"schema": 1, "session_id": "<session id>", "seen": <seconds since 1970>, "active": <seconds since 1970>}`.
+`active` is when the session last sent a request (0 before its first); the mod uses it to
+tell another session that is working from one that is only open, and the hook ignores it.
 The mod refreshes it every minute on a timer while the session is open, so
 an idle session stays fresh, and writes it once more with `seen` at 0 when
 the session ends (the engine cannot delete a file, and `0` reads as not

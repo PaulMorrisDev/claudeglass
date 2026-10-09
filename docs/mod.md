@@ -195,9 +195,11 @@ next reply or summary. Leaving plan mode counts as approving.
 
 The status line carries what can't wait. It is set when the 5-hour limit is
 forecast to run out within 15 minutes, or when one reply or none is left
-before Claude summarises. It is cleared when neither holds. The plan tip
-above has the line while it shows, and nothing here overwrites it. It reads
-the same in the Simple and Detailed views.
+before Claude summarises. It is cleared when neither holds, when the session
+ends and on `/clear`. While the limit forecast is on the line it is looked at
+again every minute, so the minutes follow the clock even when you are idle.
+The plan tip above has the line while it shows, and nothing here overwrites
+it. It reads the same in the Simple and Detailed views.
 
 ### Agent rows
 
@@ -496,7 +498,7 @@ or `claudeglass` under `CLAUDE_CONFIG_DIR`.
 | File | Who writes it | What it holds |
 |---|---|---|
 | `mod/settings.json` | ClaudeGlass: `update --finish`, then the dashboard's service after a report, and again at once when you rate a session or change the capture settings | Your billing mode, rate card, cache lifetime and characters per token. Also the coaching thresholds, your `muted` and `once` lists, whether coaching is on, "your usual", and where the dashboard answers. The mod only reads it. |
-| `mod/present/<session id>.json` | The mod | A heartbeat: the session id and the last time seen. It tells the capture hook the mod is running ([how it works](hooks.md#with-the-claudeglass-mod)). |
+| `mod/present/<session id>.json` | The mod | A heartbeat: the session id, the last time seen and the time of the session's last request. It tells the capture hook the mod is running ([how it works](hooks.md#with-the-claudeglass-mod)). |
 | `mod/sensor/<session id>.json` | The mod | What the mod showed and what you did next, as closed words and times. |
 | `mod/coach.json` | The mod | The time of the last rating reminder, and nothing else. |
 

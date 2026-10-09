@@ -3755,6 +3755,21 @@ def test_the_heartbeat_is_fresh_for_ten_minutes_either_side_of_now(tmp_path):
     assert _kind(_coach(tmp_path, payload)) == "cold_return"
 
 
+def test_a_heartbeat_with_the_extra_active_key_still_counts_by_its_seen_time(tmp_path):
+    """The mod adds ``active`` (when the session last sent a request, 0 for none) to the file; schema stays 1 and the
+    hook, which reads ``seen``, counts an idle session (its last request long ago) as running all the same."""
+    payload = _scene_cold_return(tmp_path)
+    path = _heartbeat(tmp_path)
+    for active in (0, NOW.timestamp() - 7200, NOW.timestamp()):
+        path.write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": NOW.timestamp(), "active": active}), encoding="utf-8")
+        os.utime(path, (1_800_000_000 + active % 1000, 1_800_000_000 + active % 1000))
+        assert _coach(tmp_path, payload) == ""
+    # The tombstone the mod leaves at the end still reads as not running.
+    path.write_text(json.dumps({"schema": 1, "session_id": "s1", "seen": 0, "active": 0}), encoding="utf-8")
+    os.utime(path, (1_800_001_234, 1_800_001_234))
+    assert _kind(_coach(tmp_path, payload)) == "cold_return"
+
+
 def test_the_hints_the_hook_keeps_are_added_while_the_mod_runs(tmp_path):
     _heartbeat(tmp_path)
     grep = {"hook_event_name": "PostToolUse", "tool_name": "Grep", "tool_input": {"pattern": "ls"}}

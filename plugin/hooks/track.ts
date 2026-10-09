@@ -188,7 +188,14 @@ async function refreshReading($: EngineInterface, snap: GlassSnap, summary?: { t
  * ended before any figure arrived it settles that reply's cost.
  */
 function settleCost(snap: GlassSnap): void {
-  if (snap.cost === null || snap.turnStartCost === null) return
+  if (snap.cost === null) return
+  if (snap.turnStartCost === null) {
+    // The first figure since a reply began without one: what the session cost before that reply is not known (a resumed
+    // session may start from Claude Code's whole ledger), so the base is what leaves this reply at its estimate. The
+    // estimate stands for the reply; the figures that follow settle the replies after it.
+    if (snap.turnId !== null) snap.turnStartCost = Math.max(0, snap.cost - snap.turnUsd)
+    return
+  }
   const spent = snap.cost - snap.turnStartCost
   if (!(spent > 0)) return
   if (snap.turnAt !== null) {
@@ -227,11 +234,13 @@ function toolLabel(name: string): string {
 
 /**
  * A new main reply begins: the cold-send check, then the reply's own figures start over. Its cost is measured from
- * what the session had cost, plus the last reply's estimate when Claude Code hasn't reported that one yet (its
- * measurement may arrive after this reply has begun, and must not be counted in this one); a session whose first
- * reply this is has cost nothing before it, so a figure that follows settles it.
+ * what the session had cost, or from where the last reply's estimate ends when that is more and Claude Code hasn't
+ * settled that reply yet (its measurement may arrive after this reply has begun, and must not be counted in this one;
+ * a measure made part way through it may hold only part of it). With no figure yet there is no base: the first
+ * figure sets it (settleCost), since a session may have been resumed with a cost already behind it; only the request of
+ * a conversation's very first message (`fresh`) is known to have nothing before it, so a figure that follows settles it.
  */
-function beginReply(snap: GlassSnap, settings: GlassSettings, now: number, turnId: string): void {
+function beginReply(snap: GlassSnap, settings: GlassSettings, now: number, turnId: string, fresh: boolean): void {
   stopCacheClock()
   const ctx = snap.reading?.tokens ?? snap.reqs[snap.reqs.length - 1]?.ctx ?? 0
   if (snap.lastTs !== null && ctx >= coldMin(settings) && !cacheState(snap.lastTs, now, settings.ttl).isWarm) {
@@ -239,10 +248,11 @@ function beginReply(snap: GlassSnap, settings: GlassSettings, now: number, turnI
   }
   flags.coldWarned = false
   drainShown(snap)
-  const unreported = snap.replies > 0 && !snap.turnExact ? snap.turnUsd : 0
+  const unsettled = snap.turnId !== null && !snap.turnExact
+  const lastEnd = unsettled && snap.turnStartCost !== null ? snap.turnStartCost + snap.turnUsd : null
   snap.turnAt = now
   snap.turnId = turnId
-  snap.turnStartCost = snap.cost !== null ? snap.cost + unreported : snap.replies === 0 ? 0 : null
+  snap.turnStartCost = snap.cost === null ? (fresh && snap.replies === 0 ? 0 : null) : lastEnd === null ? snap.cost : Math.max(snap.cost, lastEnd)
   snap.turnUsd = 0
   snap.turnExact = false
   // A summary made between replies (a /compact) is still waiting for its note.
@@ -441,7 +451,7 @@ export const register: Register = on => {
         const io = kit($)
         const snap = await ensure($)
         if (snap.turnId !== e.turnId) {
-          beginReply(snap, await getSettings(io), await $.clock.now(), e.turnId)
+          beginReply(snap, await getSettings(io), await $.clock.now(), e.turnId, e.index === 0 && e.messageCount <= 1)
           await touch(io)
         }
       } catch (error) {
@@ -472,8 +482,12 @@ export const register: Register = on => {
       const settings = await getSettings(io)
       const now = await $.clock.now()
       const last = snap.reqs[snap.reqs.length - 1]
+      // Only a turn that began a reply (its first request did, in turn.step) ends one: Esc before the first request, or a hook
+      // that answers without going on, completes a turn that made none, and the last reply's requests are not another reply.
+      const began = snap.turnAt !== null && snap.turnId === e.turnId
       snap.turnAt = null
-      if (snap.turnReqs > 0 && last !== undefined) {
+      if (!began) snap.turnReqs = 0
+      if (began && snap.turnReqs > 0 && last !== undefined) {
         snap.replies += 1
         snap.history.push(last.ctx)
         if (snap.history.length > MAX_REPLIES) snap.history.splice(0, snap.history.length - MAX_REPLIES)

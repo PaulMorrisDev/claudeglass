@@ -664,3 +664,94 @@ def test_refresh_coaching_never_raises_and_writes_nothing_without_a_readable_fil
         path.write_text(content, encoding="utf-8")
     assert mod_settings.refresh_coaching(tmp_path) is False
     assert (path.read_text(encoding="utf-8") if content is not None else None) == content
+
+
+# -- two writers: the hourly report and a rating's refresh ---------------------------------
+
+
+def test_a_rating_saved_while_the_report_builds_survives_the_hourly_write(tmp_path):
+    folder = _config(tmp_path)
+    assert mod_settings.write(folder, mod_settings.build(folder, now=NOW))
+    path = mod_settings.settings_path(folder)
+
+    class SlowStore(FakeStore):
+        """Takes its time over "your usual": a rating is saved and reaches the file meanwhile."""
+
+        def median_session_cost(self):
+            sqlite = sqlite3.connect(folder / "service.db")
+            sqlite.execute("CREATE TABLE session_feedback (session_id TEXT, set_at TEXT)")
+            sqlite.execute("INSERT INTO session_feedback VALUES (?, ?)", ("s-rated", (NOW + timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")))
+            sqlite.commit()
+            sqlite.close()
+            assert mod_settings.refresh_coaching(folder, now=NOW + timedelta(minutes=2))
+            return super().median_session_cost()
+
+    data = mod_settings.build(folder, store=SlowStore(cost=2.0, context=90000), now=NOW)
+    assert data["coaching"]["rated"] == {}  # the block the build worked out before the rating
+    assert "s-rated" in json.loads(path.read_text(encoding="utf-8"))["coaching"]["rated"]
+
+    assert mod_settings.write(folder, data)
+    written = json.loads(path.read_text(encoding="utf-8"))
+    assert "s-rated" in written["coaching"]["rated"]  # not written over with the older block
+    assert written["usual"]["session_cost_usd"] == 2.0  # the rest of the report's file is what it built
+
+
+def test_the_writers_take_turns_and_each_has_a_temporary_file_of_its_own(tmp_path, monkeypatch):
+    folder = _config(tmp_path)
+    inside = {"now": 0, "most": 0}
+    names: list[tuple[int, str]] = []
+    real_replace = os.replace
+    guard = threading.Lock()
+
+    def replace(source, target):
+        with guard:
+            inside["now"] += 1
+            inside["most"] = max(inside["most"], inside["now"])
+            names.append((threading.get_ident(), Path(source).name))
+        time.sleep(0.01)  # long enough for a second writer to arrive, were nothing holding it back
+        try:
+            return real_replace(source, target)
+        finally:
+            with guard:
+                inside["now"] -= 1
+
+    monkeypatch.setattr(mod_settings.os, "replace", replace)
+    failures: list[BaseException] = []
+
+    def hourly(index):
+        try:
+            for turn in range(6):
+                data = mod_settings.build(folder, store=FakeStore(cost=float(index * 10 + turn), context=1), now=NOW + timedelta(minutes=turn))
+                mod_settings.write(folder, data)
+        except BaseException as exc:  # noqa: BLE001
+            failures.append(exc)
+
+    def rating():
+        try:
+            for turn in range(6):
+                mod_settings.refresh_coaching(folder, now=NOW + timedelta(minutes=turn, seconds=30))
+        except BaseException as exc:  # noqa: BLE001
+            failures.append(exc)
+
+    threads = [threading.Thread(target=hourly, args=(1,)), threading.Thread(target=hourly, args=(2,)), threading.Thread(target=rating)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert failures == []
+    assert inside["most"] == 1
+    assert len({thread for thread, _ in names}) >= 2 and len({name for _, name in names}) >= 2
+    assert json.loads(mod_settings.settings_path(folder).read_text(encoding="utf-8"))["schema"] == 1
+    assert list(mod_settings.settings_path(folder).parent.glob("*.tmp")) == []
+
+
+def test_write_never_raises_when_the_coaching_block_cannot_be_worked_out(tmp_path, monkeypatch):
+    folder = _config(tmp_path)
+    data = mod_settings.build(folder, now=NOW)
+
+    def broken(config_dir, now):
+        raise RuntimeError("config on fire")
+
+    monkeypatch.setattr(mod_settings, "_coaching_block", broken)
+    assert mod_settings.write(folder, data)
+    assert json.loads(mod_settings.settings_path(folder).read_text(encoding="utf-8"))["coaching"] == data["coaching"]

@@ -53,9 +53,9 @@ function presentOf(world: World, id: string): { session_id: string; seen: number
 }
 
 /** A main request of reply `turnId`, as the engine runs one (the `reply` helper does the same for whole replies). */
-async function mainStep($: Engine, world: World, turnId: string, index: number, step: Step, agentId?: string): Promise<void> {
+async function mainStep($: Engine, world: World, turnId: string, index: number, step: Step, agentId?: string, messageCount = 2 + index): Promise<void> {
   world.next = { usage: step, tools: step.tools ?? [] }
-  const stream = $.turn.step({ turnId, index, model: step.model ?? 'claude-sonnet-4-6', messageCount: 2 + index, ...(agentId === undefined ? {} : { agentId }) } as never)
+  const stream = $.turn.step({ turnId, index, model: step.model ?? 'claude-sonnet-4-6', messageCount, ...(agentId === undefined ? {} : { agentId }) } as never)
   for await (const chunk of stream) void chunk
   await stream.result
 }
@@ -204,7 +204,8 @@ test('A3: the first reply of a session, and the first after a /clear, are settle
   world.usd = 0
   await $.session.start(START)
   await $.turn.start({ text: 'again', turnId: 'again' })
-  await mainStep($, world, 'again', 0, PRICED)
+  // A conversation's first message: one message in the request.
+  await mainStep($, world, 'again', 0, PRICED, undefined, 1)
   await measure($, world, 0.4)
   await complete($, world, 'again')
   expect((await band($))[1]).toBe('$0.40 this session (+$0.40)')
@@ -265,7 +266,7 @@ test('A5: the first message after a /clear leaves the new session\'s heartbeat, 
   expect(presentOf(world, 'session-two')).toBeNull()
 
   await $.prompt.submit({ text: 'first after clear', wait: false, origin: { kind: 'composer' } } as never)
-  expect(presentOf(world, 'session-two')).toEqual({ schema: 1, session_id: 'session-two', seen: expect.any(Number) })
+  expect(presentOf(world, 'session-two')).toEqual({ schema: 1, session_id: 'session-two', seen: expect.any(Number), active: 0 })
   expect(presentOf(world, 'session-two')?.seen).toBeGreaterThanOrEqual(NOW_S)
   expect(faults(world)).toEqual([])
 })

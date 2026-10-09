@@ -25,6 +25,7 @@ import type { PlanTip } from './coach-mem'
 import { emptySnap, live, touch } from './live'
 import { getSettings, setProject } from './settings'
 import { onCompaction, onTurnEnd } from './track'
+import { resetUrgent } from './urgent'
 
 // Claude Code reads a state reference only where its literal is written, so each file that
 // reads one declares it (the contract is types/index.d.ts).
@@ -120,6 +121,8 @@ async function planTip($: EngineInterface, io: Io, plan: PlanTip): Promise<void>
   const tip = planApproved(snap, settings, plan, await $.clock.now())
   if (tip === null) return
   $.ui.status(tip)
+  // The tip has taken the line from the urgent one; when the tip is cleared the urgent line is worked out afresh.
+  resetUrgent()
   planStatusSet(() => {
     $.ui.status(undefined)
   })
