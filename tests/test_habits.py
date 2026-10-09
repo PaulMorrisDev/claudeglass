@@ -2416,7 +2416,7 @@ def test_the_self_report_table_only_lists_words_that_were_tagged():
 
 
 def test_feedback_that_contradicts_easy_reports_lowers_effort_fits_confidence():
-    easy, normal = CaptureTag(level="easy"), CaptureTag(level="normal")
+    normal = CaptureTag(level="normal")
     h = Habits(cycles=[
         # thinking_cost/output_cost keep the combined thinking share well
         # over the shared 30% gate (0.5 of 0.6 output = 83%, UX-3), and over

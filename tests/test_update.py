@@ -413,7 +413,7 @@ def test_finish_adds_the_agent_and_workflow_tools_to_a_matcher_written_before_th
     assert rc == 0 and "Up to date" not in out
     post = [matcher for event, matcher, _ in _capture_hooks(tmp_path) if event == "PostToolUse"]
     # One entry, with the new matcher: the old one is replaced, not left to run beside it.
-    assert post == [before + "|Agent|Workflow"]
+    assert post == ["Read|WebFetch|WebSearch|ExitPlanMode|Agent|Workflow"]
     rc, out = _Finish(tmp_path).run()
     assert "Up to date: the hooks, statusline and skills" in out
 

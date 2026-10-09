@@ -2205,9 +2205,9 @@ def test_the_fallback_waits_for_agents_and_never_runs_in_a_call_haiku_makes_or_a
     assert HOOK.judge_job(_stop(path, agent_id="a1"), CLAUDE_STOP, CATALOGUE) is None
     assert HOOK.judge_job({**_stop(path), "hook_event_name": "SubagentStop"}, CLAUDE_STOP, CATALOGUE) is None
     # Capture off or past its end, a session sampled out, and a level with no tag to ask for.
-    for capture in ({"level": "off"}, {"level": "free"}, {"level": "standard", "sample": 0},
+    for setting in ({"level": "off"}, {"level": "free"}, {"level": "standard", "sample": 0},
                     {"level": "standard", "until": "2020-01-01T00:00:00Z"}):
-        assert HOOK.judge_job(_stop(path), {"capture": {"tagger": "claude", **capture}}, CATALOGUE) is None, capture
+        assert HOOK.judge_job(_stop(path), {"capture": {"tagger": "claude", **setting}}, CATALOGUE) is None, setting
     # The call Haiku itself runs in.
     monkeypatch.setenv(cat.JUDGE_ENV, "1")
     assert HOOK.judge_job(_stop(path), CLAUDE_STOP, CATALOGUE) is None

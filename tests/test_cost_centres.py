@@ -16,14 +16,13 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from types import SimpleNamespace as NS
 
 import pytest
 
 from claudeglass import cost_centres, quick_actions, topology
 from claudeglass.calibration import Calibration
 from claudeglass.context_budget import ContextBudgetStats, StartupSizes, startup_sizes
-from claudeglass.model import Column, ReportModel, Section, Table, TranscriptMeta
+from claudeglass.model import ReportModel, Section, TranscriptMeta
 from claudeglass.parse import parse_transcript
 from claudeglass.pricing import load_pricing, price_turn
 from claudeglass.recache import RecacheThresholds

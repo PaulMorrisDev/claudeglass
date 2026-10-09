@@ -328,8 +328,6 @@
  "big_output_tokens": 8000,
  "result_tools": [
   "Read",
-  "Grep",
-  "Glob",
   "WebFetch",
   "WebSearch",
   "ExitPlanMode",
@@ -643,7 +641,7 @@
    "plan_check_declines": 2
   },
   "text": {
-   "cold_return": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user came back to this session after a break. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, the last reply or the task panel already says. For new work, running /clear first skips the rewrite.",
+   "cold_return": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user came back to this session after a break. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, {done_how} For new work, running /clear first skips the rewrite.",
    "status_poll": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user is asking about work that is still running in the background. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** Asking how it's going while work runs in the background makes Claude read the whole session, about {ctx} tokens, to say little that is new. {poll_how}",
    "drip_feed": "Write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. The user has sent {count} small change requests in a row, one message each. Handle the message exactly as you would have without this note: it changes nothing about the work.\n> **ClaudeGlass tip:** That's {count} small changes in a row, each its own message, and each one re-reads the whole session, about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
    "big_paste": "If most of the user's message is a log, a file or command output, write the tip on this note's last line, word for word, at the end of your reply, after a blank line and before any tag. Otherwise don't mention this note.\n> **ClaudeGlass tip:** Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
@@ -670,7 +668,7 @@
    "drip_feed": "⚠️ ClaudeGlass: That's {count} small changes in a row, each its own message, and each one re-reads the whole session, about {ctx} tokens. Working out everything the work still needs and sending it as one message gets it done in one pass, for fewer tokens.",
    "big_paste": "⚠️ ClaudeGlass: Your message is about {tokens} tokens, and every later reply reads it again. Pasting only the part that matters, or saving the rest to a file and giving the path, costs less.",
    "status_poll": "⚠️ ClaudeGlass: Asking how it's going while work runs in the background makes Claude read the whole session, about {ctx} tokens, to say little that is new. {poll_how}",
-   "cold_return": "⚠️ ClaudeGlass: The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, the last reply or the task panel already says. For new work, running /clear first skips the rewrite.",
+   "cold_return": "⚠️ ClaudeGlass: The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens of context again{compacted}. If you came back only to see whether the work is done, {done_how} For new work, running /clear first skips the rewrite.",
    "report_reread": "⚠️ ClaudeGlass: This session holds about {ctx} tokens, and the reply to each report the background work sends back reads all of it again. Fewer, larger pieces of background work mean fewer reports, so fewer of those re-reads.",
    "split_run": "⚠️ ClaudeGlass: In this session {why}. Each reply of a run reads everything the run holds again, so runs that big cost more than the work needs. Giving the next agent a smaller piece of the work keeps each run short."
   },
@@ -755,6 +753,10 @@
    "poll_how": {
     "desktop": "The task panel shows what is still running, with no message sent.",
     "terminal": "Typing /tasks shows what is still running, with no message sent."
+   },
+   "done_how": {
+    "desktop": "the last reply or the task panel already says.",
+    "terminal": "the last reply or /tasks already says."
    }
   },
   "asks_pattern": "\\s*(?:what|which|who|whom|whose|where|when|why|how)\\b",

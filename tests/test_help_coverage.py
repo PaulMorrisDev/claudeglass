@@ -341,7 +341,7 @@ def test_the_copy_the_feedback_answers_add_keeps_to_the_help_rules():
     """What your /cg-feedback answers add to the habits, the tips table,
     the plan-handoff card and the coaching summary: the new strings
     follow the same rules as the help text."""
-    from claudeglass import capture_catalogue, coaching, fixes, habits, prompting
+    from claudeglass import coaching, fixes, habits, prompting
     from claudeglass.capture_catalogue import MISSED_IN_LINES
     from claudeglass.habits import Habits, Piece, SessionShape
 

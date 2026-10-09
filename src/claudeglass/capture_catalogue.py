@@ -306,8 +306,13 @@ WEB_TOOLS = ("WebFetch", "WebSearch")
 #: 30 days of sessions found the shell's note failed both the precision
 #: test and the tokens-against-time test, and the MCP note right a third
 #: of the time (half was needed). Together they were about two thirds of
-#: the spawns this entry caused.
-BIG_OUTPUT_TOOLS = ("Read", "Grep", "Glob", *WEB_TOOLS)
+#: the spawns this entry caused. Grep and Glob are left out too: a Grep
+#: result is kept whole only up to its :data:`RESULT_PERSIST_CHARS` entry
+#: (20,000 characters, about 5,000 tokens), and in 30 days of sessions no
+#: Glob result passed 18,200 characters, so neither can reach
+#: :data:`BIG_OUTPUT_TOKENS`, yet Grep was the call this entry most often
+#: made Claude wait on.
+BIG_OUTPUT_TOOLS = ("Read", *WEB_TOOLS)
 
 #: Tools that start an agent or a workflow, which the coaching entry also
 #: watches (:data:`COACHING_TOOLS`) for ``report_reread``. Their results are
@@ -1389,8 +1394,8 @@ COACHING_TIP = {
     ),
     "cold_return": (
         "The prompt cache expired while this session sat idle for {idle}, so this reply wrote about {ctx} tokens "
-        "of context again{compacted}. If you came back only to see whether the work is done, the last reply or "
-        "the task panel already says. For new work, running /clear first skips the rewrite."
+        "of context again{compacted}. If you came back only to see whether the work is done, {done_how} For new "
+        "work, running /clear first skips the rewrite."
     ),
     "status_poll": (
         "Asking how it's going while work runs in the background makes Claude read the whole session, about "
@@ -1454,10 +1459,11 @@ def _tip_note(hint: str, *, when: str = "", then: str = "", where: str = _AT_END
 #: How to do what a tip suggests, by the app the hook runs in: ``desktop``
 #: is the desktop app's Code tab (``CLAUDE_CODE_ENTRYPOINT`` is
 #: ``claude-desktop``), ``terminal`` is everywhere else. The hook fills the
-#: three placeholders of the tips above from these: ``{fresh_how}`` (after a
+#: four placeholders of the tips above from these: ``{fresh_how}`` (after a
 #: plan was approved: the next time clears the context at approval),
-#: ``{clear_how}`` (before it's approved) and ``{poll_how}`` (where to see
-#: what a background task is doing without asking). The desktop app's
+#: ``{clear_how}`` (before it's approved), ``{poll_how}`` (where to see
+#: what a background task is doing without asking) and ``{done_how}``
+#: (where a return after a break finds whether the work is done). The desktop app's
 #: approval dialog has an option that clears the context; where there's no
 #: such option, ``/clear`` and asking for the saved plan does the same.
 #: ``<file>`` stays as written, in backticks so a markdown view doesn't
@@ -1483,6 +1489,10 @@ COACHING_HOW = {
     "poll_how": {
         "desktop": "The task panel shows what is still running, with no message sent.",
         "terminal": "Typing /tasks shows what is still running, with no message sent.",
+    },
+    "done_how": {
+        "desktop": "the last reply or the task panel already says.",
+        "terminal": "the last reply or /tasks already says.",
     },
 }
 

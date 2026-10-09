@@ -149,12 +149,17 @@ def test_a_return_after_the_cache_expired_gets_the_cold_return_receipt(tmp_path)
     assert _coach(tmp_path, {**_prompt_payload(small), "session_id": "s4"}) == ""
 
 
-def test_the_cold_return_receipt_says_what_to_do_and_names_no_one_of_your_words(tmp_path):
+def test_the_cold_return_receipt_says_what_to_do_and_names_no_one_of_your_words(tmp_path, monkeypatch):
     path = _transcript(tmp_path, [_prompt("secret plan"), _reply(150_000, ago_s=3 * 3600)])
+    monkeypatch.setenv("CLAUDE_CODE_ENTRYPOINT", "claude-desktop")
     note = _coach(tmp_path, _prompt_payload(path))
     assert "idle for 3 hours" in note
-    assert "last reply or the task panel" in note and "/clear" in note
+    assert "last reply or the task panel already says." in note and "/clear" in note
     assert "secret" not in note
+    # The terminal has no task panel: it names /tasks there.
+    monkeypatch.delenv("CLAUDE_CODE_ENTRYPOINT")
+    note = _coach(tmp_path, {**_prompt_payload(path), "session_id": "s2"})
+    assert "last reply or /tasks already says." in note and "task panel" not in note
 
 
 def test_the_cold_return_receipt_rests_half_a_day_however_the_context_grows(tmp_path):

@@ -79,7 +79,7 @@ def test_plan_capture_adds_the_entries_a_level_needs_and_writes_nothing(tmp_path
     assert [(event, matcher) for event, matcher, _ in entries] == [
         ("SessionStart", "startup|clear|compact"),
         ("SubagentStop", ""),
-        ("PostToolUse", "Read|Grep|Glob|WebFetch|WebSearch"),
+        ("PostToolUse", "Read|WebFetch|WebSearch"),
         ("SessionEnd", ""),
         ("Notification", ""),
         ("PermissionRequest", ""),
@@ -121,7 +121,7 @@ def test_an_entry_with_the_matcher_from_before_the_shell_and_mcp_tools_were_drop
     assert any(line.startswith("Remove the capture hook") for line in plan.changes)
     assert any(line.startswith("Update the capture hook") and "read, search and web results" in line for line in plan.changes)
     matchers = [matcher for event, matcher, _ in _entries(json.loads(plan.new_text)) if event == "PostToolUse"]
-    assert matchers == ["Read|Grep|Glob|WebFetch|WebSearch"]
+    assert matchers == ["Read|WebFetch|WebSearch"]
 
 
 def test_a_changed_command_is_updated_in_place_not_duplicated(tmp_path):

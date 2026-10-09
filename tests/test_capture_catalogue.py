@@ -209,25 +209,28 @@ def test_hook_entries_follow_the_metrics():
         ("capture-hook.py", "SubagentStop", "", False),
     ) + signals
     assert cat.hook_specs(cat.level_metrics("deep"))[2] == (
-        "capture-hook.py", "PostToolUse", "Read|Grep|Glob|WebFetch|WebSearch", False,
+        "capture-hook.py", "PostToolUse", "Read|WebFetch|WebSearch", False,
     )
     assert cat.hook_specs(["web"]) == ()
     assert cat.hook_specs(["result"]) == (("capture-hook.py", "SubagentStop", "", False),)
 
 
-def test_the_post_tool_use_matcher_leaves_out_the_shell_and_mcp_tools():
+def test_the_post_tool_use_matcher_leaves_out_the_shell_mcp_and_search_tools():
     """A 30-day replay found the large-output note after a shell or MCP
     result wasn't worth the wait, and those two were about two thirds of
-    the hook's spawns. Whatever metrics are on, the matcher names only
-    tools whose results the hook can use."""
-    assert cat.BIG_OUTPUT_TOOLS == ("Read", "Grep", "Glob", "WebFetch", "WebSearch")
+    the hook's spawns. A Grep or Glob result is kept whole only up to the
+    save cap, below the note's size, so Claude never waits on them either.
+    Whatever metrics are on, the matcher names only tools whose results
+    the hook can use."""
+    assert cat.BIG_OUTPUT_TOOLS == ("Read", "WebFetch", "WebSearch")
+    assert cat.RESULT_PERSIST_CHARS["Grep"] < cat.BIG_OUTPUT_TOKENS * 4
     assert cat.SPAWN_TOOLS == ("Agent", "Workflow")
     assert cat.COACHING_TOOLS == (*cat.BIG_OUTPUT_TOOLS, "ExitPlanMode", "Agent", "Workflow")
     for ids in (cat.level_metrics("deep"), ["coaching_notes"], [*cat.level_metrics("deep"), "coaching_notes"]):
         matchers = [spec[2] for spec in cat.hook_specs(ids) if spec[1] == "PostToolUse"]
         assert len(matchers) == 1
         names = matchers[0].split("|")
-        assert not {"Bash", "PowerShell"} & set(names) and not any("mcp__" in name or "*" in name for name in names)
+        assert not {"Bash", "PowerShell", "Grep", "Glob"} & set(names) and not any("mcp__" in name or "*" in name for name in names)
     exported = cat.export_json()
     assert exported["result_tools"] == list(cat.COACHING_TOOLS)
     assert exported["spawn_tools"] == list(cat.SPAWN_TOOLS)
@@ -243,8 +246,8 @@ def test_the_agent_and_workflow_tools_join_the_matcher_only_for_coaching_notes()
     def matcher(ids):
         return next(spec[2] for spec in cat.hook_specs(ids) if spec[1] == "PostToolUse")
 
-    assert matcher(cat.level_metrics("deep")) == "Read|Grep|Glob|WebFetch|WebSearch"
-    assert matcher(["coaching_notes"]) == "Read|Grep|Glob|WebFetch|WebSearch|ExitPlanMode|Agent|Workflow"
+    assert matcher(cat.level_metrics("deep")) == "Read|WebFetch|WebSearch"
+    assert matcher(["coaching_notes"]) == "Read|WebFetch|WebSearch|ExitPlanMode|Agent|Workflow"
     assert matcher([*cat.level_metrics("deep"), "coaching_notes"]) == matcher(["coaching_notes"])
 
 

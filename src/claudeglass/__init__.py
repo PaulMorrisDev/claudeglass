@@ -343,7 +343,7 @@ __version__ = "0.15.0"
 #: note is a ``META`` event of subkind ``resume``, the other lines you
 #: didn't type ``not_typed``.
 #:
-#: In 38, the tag's ``why`` and ``admit`` ride on the ``shift`` switch
+#: Bumped to 38: the tag's ``why`` and ``admit`` ride on the ``shift`` switch
 #: (``found`` and ``fit`` are no longer asked for), and the transcript
 #: settles what the words claim: ``Turn.edit_call_count``,
 #: ``edit_doc_count`` and ``shell_change_count`` say what a reply changed
@@ -353,7 +353,7 @@ __version__ = "0.15.0"
 #: words. A cycle with several tags keeps the highest ``level`` and
 #: ``size`` among them.
 #:
-#: In 39, ``/cg-feedback`` asks new questions (``capture_catalogue.
+#: Bumped to 39: ``/cg-feedback`` asks new questions (``capture_catalogue.
 #: FEEDBACK_QUESTIONS``) and ``model.Feedback`` gains ``why``, ``missed_in``,
 #: ``plan``, ``tip``, ``tip_hint``, ``from_text``, ``other`` and
 #: ``why_older``. A word Claude picked from a note typed under "Other"
@@ -372,7 +372,7 @@ __version__ = "0.15.0"
 #: ``feedback_facts``, ClaudeGlass's own hook context, and the plan check's
 #: question is no clarifying round (``Turn.ask_rounds``).
 #:
-#: In 40, a usage-limit line's reset time (``LIMIT_HIT``'s ``reset_ts``)
+#: Bumped to 40: a usage-limit line's reset time (``LIMIT_HIT``'s ``reset_ts``)
 #: is read from its "resets 3pm (Europe/London)" text, as it was meant to
 #: be, when the line has no ``quotaLimits.resetsAt``. A zone that can't be
 #: resolved, which is every named zone on a Windows install with no
@@ -382,7 +382,7 @@ __version__ = "0.15.0"
 #: you came back later (``limits.limit_pause_intervals``). A pre-40 digest
 #: has no reset for those lines, so its pauses run to your return.
 #:
-#: In 41, a prompt snapshot's detail also records each built-in tool's
+#: Bumped to 41: a prompt snapshot's detail also records each built-in tool's
 #: definition size by name and each MCP server's total
 #: (``tool_chars``, ``server_chars``). The startup breakdown takes the
 #: first snapshot that lists tools, which a subagent's transcript writes
@@ -391,14 +391,14 @@ __version__ = "0.15.0"
 #: has no per-tool sizes, and its subagent startup shows tool
 #: definitions as 0.
 #:
-#: In 42, a turn also records how each agent call ran (``agent_launches``:
-#: tool_use id to ``"background"`` or ``"foreground"``, from the call's
-#: ``run_in_background`` or an async launch result). A pre-42 digest has
-#: none, and its agent runs count as foreground in the cost-per-spawn
-#: split.
+#: Bumped to 42: a turn also records how each agent call ran
+#: (``agent_launches``: tool_use id to ``"background"`` or ``"foreground"``,
+#: from the call's ``run_in_background`` or an async launch result). A
+#: pre-42 digest has none, and its agent runs count as foreground in the
+#: cost-per-spawn split.
 #:
-#: In 43, the "short" flag on a brief also catches more ways of asking for
-#: a short report ("up to about 1,000 characters", "<=150 words", "100
+#: Bumped to 43: the "short" flag on a brief also catches more ways of asking
+#: for a short report ("up to about 1,000 characters", "<=150 words", "100
 #: words or fewer", "a 50-word summary", "be concise", "keep it short").
 #: A length rule for each sentence or each item ("sentences of 25 words or
 #: fewer", "50 lines per function") is a style rule and isn't flagged.

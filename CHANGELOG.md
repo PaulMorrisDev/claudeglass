@@ -288,8 +288,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and the last reply left 100,000 tokens of context or more, the note
   asks Claude to say how long the session sat idle and how many tokens
   the reply wrote again, less the 42,000 every session starts with, with
-  a compaction count as one clause. It says the last reply or the task
-  panel already answers "is it done?", and that `/clear` first skips the
+  a compaction count as one clause. It says the last reply already
+  answers "is it done?" (or the task panel on the desktop, `/tasks` in
+  the terminal), and that `/clear` first skips the
   rewrite for new work. It is a receipt, so it no longer depends on what
   the message is about. It is quiet after a compaction since the last
   reply, for a message sent while Claude works or one you didn't type,
@@ -891,13 +892,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   no reason to stay quiet to the other. In practice `quiet_output` now
   follows a large read or web page: a search is saved to a file before it
   is large enough.
-- **The hook skips shell and MCP results.** Claude Code waits for the
+- **The hook skips shell, MCP and search results.** Claude Code waits for the
   capture hook after every result it is registered for, and the shell
   and MCP tools were about two thirds of them. A replay over real
   sessions found the large-output note after a shell result failed its
   precision and tokens-against-time checks, and was right 33% of the
-  time after an MCP result (46% with half credit; the bar was 50%). The
-  PostToolUse entry now matches `Read|Grep|Glob|WebFetch|WebSearch`, and
+  time after an MCP result (46% with half credit; the bar was 50%). Grep
+  and Glob results can't reach the note's size at all: Claude Code keeps a
+  Grep result whole only up to 20,000 characters, and in 30 days no Glob
+  result passed 18,200, yet Grep was the call the hook delayed most. The
+  PostToolUse entry now matches `Read|WebFetch|WebSearch`, and
   an approved plan with coaching notes. `update --finish`, `capture
   connect` and Setup › Capture rewrite an older entry after you say yes;
   until then it still starts the hook, which returns at once for those

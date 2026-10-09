@@ -610,7 +610,7 @@ capped at `CAPTURE_TIMEOUT_S` = 5 seconds). An async hook's
 the *next* conversation turn), but that's too late for a note about a
 tool result Claude just saw, so these stay synchronous. At the Deep
 level, the PostToolUse hook that notes an unusually large result or a
-web call (matcher `Read|Grep|Glob|WebFetch|WebSearch`, never the shell or
+web call (matcher `Read|WebFetch|WebSearch`, never the shell, search or
 MCP tools) is foreground too, for the same reason. A settings.json
 written before they were dropped still runs the hook after them until
 the entry is rewritten; it returns at once, before it reads

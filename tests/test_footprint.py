@@ -396,10 +396,10 @@ def test_coaching_notes_write_the_matcher_with_the_agent_and_workflow_tools_the_
         (group,) = json.loads(plan.new_text)["hooks"]["PostToolUse"]
         return group["matcher"]
 
-    assert written(("coaching_notes",)) == "Read|Grep|Glob|WebFetch|WebSearch|ExitPlanMode|Agent|Workflow"
+    assert written(("coaching_notes",)) == "Read|WebFetch|WebSearch|ExitPlanMode|Agent|Workflow"
     assert written((*cat.level_metrics("deep"), "coaching_notes")) == written(("coaching_notes",))
     # Without coaching notes nothing waits on an agent's report or a launch message.
-    assert written(cat.level_metrics("deep")) == "Read|Grep|Glob|WebFetch|WebSearch"
+    assert written(cat.level_metrics("deep")) == "Read|WebFetch|WebSearch"
 
 
 def test_the_capture_hooks_item_says_the_agent_and_workflow_calls_wait_for_coaching_notes_only(tmp_path):
