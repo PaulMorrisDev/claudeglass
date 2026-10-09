@@ -84,6 +84,10 @@ re-cache share, compactions per session, median session span, mean
 first-turn cache-creation write) were already session-count-independent
 and are unchanged.
 
+Mean first-turn cache-creation write is compared on one model only: the
+model family both arms' first calls ran on most. The same start measures
+differently on each model. With no model in both arms the row shows `-`.
+
 ### Stratification and the minimum-sample gate
 
 `--stratify` (default `purpose,mode`) splits `compare_by_stratum` by

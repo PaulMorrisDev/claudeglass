@@ -101,13 +101,17 @@ audit for the CLI's own JSON output (`render/json_out.py`) and is
 reused verbatim here.
 
 The context-file routes are the one deliberate exception.
-`/api/claude-md`, `/api/claude-md/<id>` and `/api/skills` return the
-files' paths with your home folder written as `~`, short excerpts of
-CLAUDE.md text (repeated lines) and skill descriptions. That text is
-read from disk (or, for skill descriptions, the newest transcript's
-skill listing) when the request arrives and is never stored. It is the
-content of your own instruction files, never a message or tool
-result.
+`/api/claude-md`, `/api/claude-md/<id>`, `/api/skills` and
+`/api/project-files` return the files' paths with your home folder
+written as `~` (or, for a project file, its path from the project folder
+and that folder's name), short excerpts of CLAUDE.md text (repeated
+lines) and skill descriptions. That text is read from disk (or, for skill
+descriptions, the newest transcript's skill listing) when the request
+arrives and is never stored. It is the content of your own instruction
+files, never a message or tool result. For `/api/project-files` that
+means the names are worked out by hashing the files under your project
+folders with the same salt the transcripts were hashed with and matching
+the hashes the store holds; the store keeps only the hashes.
 
 ## Local only
 
@@ -1056,10 +1060,17 @@ been captured. `capture_status.summary` is the same one-line status
 ### `GET /api/quick-actions`
 
 One answer per way of saving tokens (`quick_actions.CHECKS`): models,
-effort, compaction, cache, tools, skills, claude-md, tool-output,
-hooks, tool-search, known-savers, habits, failed-calls, quality and cost-record. Each check always answers, including "nothing to
-do". The last, cost-record, checks ClaudeGlass's own figures against the
-cost Claude Code records for a session. failed-calls ("Failed and blocked
+effort, compaction, cache, tools, skills, claude-md, project-files, tool-output,
+hooks, tool-search, known-savers, habits, failed-calls, quality, cost-centres and cost-record. Each check always answers, including "nothing to
+do". project-files flags a file that agents read when it is 5,000 tokens
+or more and 3 or more agent types read it, or when it grew 25% or more in
+about 30 days (and is 2,000 tokens or more now). It names the dearest one
+and offers four prompts to copy, and a fifth for a file agents read. The CLAUDE.md files Claude Code loads by
+itself are the claude-md check's, not this one's. cost-centres says where the spend sits (the main session, direct agents,
+workflow agents and session starts) and which check covers the largest cell;
+it is information, so it is never "worth a look". The last, cost-record,
+checks ClaudeGlass's own figures against the cost Claude Code records for a
+session. failed-calls ("Failed and blocked
 tool calls") holds the replies lost to a tool call that failed or that a hook
 or a guard blocked; habits keeps the other replies that went nowhere.
 
@@ -1133,6 +1144,52 @@ the id of another project's file is `404` while this one is picked.
 `agents`), `imports` (paths, `~`-relative), `duplicates` (`line`,
 `excerpt`, `tokens`, `also_in: [{"file", "line"}]`), `stale` (`line`,
 `reference`, `kind`), `cost_by_reach` and `fixes`.
+
+### `GET /api/project-files`
+
+The project files your agents take in: the CLAUDE.md files Claude Code
+loads, the files a CLAUDE.md pulls in with `@path`, and the files agents
+read by habit. Each has its size now, how it changed over about 30 days,
+who has it in a run and what it costs a month. The managed policy
+CLAUDE.md is left out, because it cannot be changed. A file counts as a
+standing read for a reach (the main session, or one agent type) when it is
+read in 3 or more of that reach's runs, or in 20% or more of them. Names
+are worked out from disk when the request arrives and never stored: the
+route hashes the files under your project folders (skipping `.git`,
+`node_modules` and build folders, up to a cap, and counting a git
+worktree's copy as the same file) with the salt the transcripts were
+hashed with. A file that is not in any project folder on this machine has
+no name.
+
+Query: the windowing params above, and `project` (only that project's
+folders are searched).
+
+`data`: `{"period", "window_days", "transcripts", "total", "named", "truncated", "files": [...]}`.
+`transcripts` is the runs per reach (`main`, or an agent type) the shares
+are of. `total` counts every file, `named` those given a name, and
+`truncated` is `true` when the folders held more files than the cap. `files`
+holds the 100 that cost most a month (text files, `.md` and `.txt`, first).
+Each is `{"hash", "source", "type", "scoped", "tokens", "then",
+"change_pct", "series", "cost_usd", "cost_month_usd", "reach", "types",
+"last_seen", "name", "ext", "project", "reasons", "fixes"}`. `source` is
+`auto` (Claude Code loads it), `import` (a CLAUDE.md pulls it in) or
+`read` (agents read it). `tokens` is its size now, `then` its largest size
+3 to 6 weeks before the newest week and `change_pct` the change, both
+`null` with no such week or when the file was not seen in the newest 2
+weeks. `series` is the size per week, up to 13 weeks. `cost_month_usd` is
+`cost_usd` over the window scaled to 30 days. `reach` is `[{"reach",
+"runs", "share", "standing", "mean_tokens"}]` (`mean_tokens` is the mean
+size of one read by that reach, `null` when it only had the file loaded)
+and `types` the agent types that read it by habit. `name` is the path from the project folder (`""` when not found),
+`ext` its class (`md`, `txt`, `json`, `config`, `code` or `other`) and
+`project` the folder's name. `reasons` is `wide`, `grew`, both or none (the
+Overview check's thresholds) and `fixes` holds the prompts to copy for a
+file with reasons and a name, `[]` for the rest.
+
+An `@import`ed file is assumed to appear as its own entry among the
+instructions Claude Code attached, so it has its own size and cost. If it
+does not, its row is worked out from the file on disk and the file that
+imports it.
 
 ### `GET /api/skills`
 

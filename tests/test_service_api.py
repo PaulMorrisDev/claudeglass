@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
 
-from claudeglass import capture_catalogue, capture_view
+from claudeglass import capture_catalogue, capture_view, parse
 from claudeglass import corpus as corpus_mod
 from claudeglass import discovery
 from claudeglass.config import ConfigError, load_config, load_session_overrides
@@ -4878,6 +4878,7 @@ def test_report_cache_does_not_leak_across_project_filters(two_project_server):
         "/api/diagnostics",
         "/api/claude-md",
         "/api/skills",
+        "/api/project-files",
         "/api/profile-goals",
         "/api/quick-actions",
         "/api/report.json",
@@ -5952,3 +5953,150 @@ def test_capture_status_line_features_follow_where_the_sessions_ran(server):
         note = after[metric_id]["statusline_note"]
         assert note.startswith("All 1 of your sessions ran outside a terminal"), metric_id
         assert "doesn't run status lines" in note
+
+
+# -- project files: /api/project-files ----------------------------------------------------------
+
+_PF_SALT = b"p" * 32
+_PF_TYPES = ("Explore", "Plan", "Review")
+
+
+def _start_project_files_server(tmp_path, monkeypatch):
+    """A server whose corpus has a main session and three runs of each of
+    three agent types reading ``docs/context.md`` in a project folder on
+    disk (the folder is named by the ``cwd`` in the transcripts), 25,000
+    characters in an early week and 40,000 in the newest, and the three
+    Explore runs also reading a file that is no longer on disk."""
+    folder = tmp_path / "work" / "repo"
+    (folder / "docs").mkdir(parents=True)
+    (folder / "docs" / "context.md").write_text("Notes for the agents.\n", encoding="utf-8")
+    context = str(folder / "docs" / "context.md")
+    gone = str(tmp_path / "work" / "gone" / "old-plan.md")
+    monkeypatch.setattr(parse, "load_or_create_salt", lambda config_dir: _PF_SALT)
+
+    project_dir = tmp_path / "projects" / "proj-a"
+    project_dir.mkdir(parents=True)
+
+    def run(path: Path, name: str, day: str, reads: list[tuple[str, int]]) -> None:
+        lines = []
+        for index, (target, chars) in enumerate(reads + [("", 0)] * 2):
+            content = [{"type": "text", "text": "ok"}]
+            if target:
+                content.append(tool_use_block("Read", f"{name}_{index}", {"file_path": target}))
+            lines.append(
+                turn_line(content=content, timestamp=f"{day}T09:0{index}:00.000Z", cache_read_input_tokens=1000, cwd=str(folder))
+            )
+            if target:
+                lines.append(
+                    user_block_line(
+                        [tool_result_block(f"{name}_{index}", "x" * chars)], timestamp=f"{day}T09:0{index}:30.000Z"
+                    )
+                )
+        write_jsonl(path, lines)
+
+    run(project_dir / "session-0.jsonl", "early", "2026-08-31", [(context, 25_000)])
+    run(project_dir / "session-1.jsonl", "late", "2026-09-28", [(context, 40_000)])
+    agents = project_dir / "session-1" / "subagents"
+    agents.mkdir(parents=True)
+    for agent_type in _PF_TYPES:
+        for number in range(3):
+            agent = f"agent-{agent_type.lower()}{number}"
+            reads = [(context, 40_000)] + ([(gone, 8_000)] if agent_type == "Explore" else [])
+            run(agents / f"{agent}.jsonl", agent, "2026-09-28", reads)
+            (agents / f"{agent}.meta.json").write_text(json.dumps({"agentType": agent_type}), encoding="utf-8")
+
+    corpus = corpus_mod.load_corpus([project_dir], salt=_PF_SALT)
+    return _start_server(tmp_path, monkeypatch, corpus=corpus), folder
+
+
+@pytest.fixture
+def project_files_server(tmp_path, monkeypatch):
+    from claudeglass import claude_md_review
+
+    claude_md_review._NAMES.clear()
+    handle, folder = _start_project_files_server(tmp_path, monkeypatch)
+    handle.folder = folder
+    try:
+        yield handle
+    finally:
+        handle.close()
+        handle.store.close()
+        claude_md_review._NAMES.clear()
+
+
+def test_project_files_route_names_the_files_agents_read_and_flags_the_big_growing_one(project_files_server):
+    resp, payload = project_files_server.get_json("/api/project-files")
+    assert resp.status == 200
+    data = payload["data"]
+    assert data["transcripts"] == {"Explore": 3, "Plan": 3, "Review": 3, "main": 2}
+    assert (data["total"], data["named"], data["truncated"]) == (2, 1, False)
+    assert data["period"] == "over the last 30 days"
+
+    context, gone = data["files"]
+    assert (context["name"], context["ext"], context["project"]) == ("docs/context.md", "md", "repo")
+    assert context["source"] == "read" and context["tokens"] == 10_000
+    assert (context["then"], context["change_pct"]) == (6250, 60.0)
+    assert context["series"][0] == 6250 and context["series"][-1] == 10_000
+    assert context["reasons"] == ["wide", "grew"] and context["types"] == 3
+    assert context["cost_month_usd"] > 0
+    shares = {item["reach"]: (item["runs"], item["share"], item["standing"]) for item in context["reach"]}
+    assert shares == {
+        "main": (2, 1.0, False),
+        "Explore": (3, 1.0, True),
+        "Plan": (3, 1.0, True),
+        "Review": (3, 1.0, True),
+    }
+    assert len(context["fixes"]) == 5 and "docs/context.md (in repo)" in context["fixes"][0]["prompt"]
+
+    # The file that is gone has no name, no reasons and nothing to copy.
+    assert (gone["name"], gone["ext"], gone["reasons"], gone["fixes"]) == ("", "", [], [])
+    assert gone["tokens"] == 2000 and gone["types"] == 1
+
+
+def test_project_files_route_keeps_names_out_of_everything_stored_and_out_of_the_report(project_files_server, tmp_path):
+    resp, raw = project_files_server.request("GET", "/api/project-files")
+    assert resp.status == 200
+    text = raw.decode("utf-8")
+    # The route shows the path from the project folder, never the whole path.
+    assert "docs/context.md" in text
+    assert str(tmp_path) not in text and tmp_path.name not in text and "old-plan" not in text
+
+    for route in ("/api/report.json", "/api/summary", "/api/recommendations"):
+        _resp, body = project_files_server.request("GET", route)
+        assert b"context.md" not in body and b"old-plan" not in body, route
+    # The check and the route name the file when asked, and keep none of it.
+    project_files_server.request("GET", "/api/quick-actions")
+    project_files_server.store._connection().commit()
+    for stored in tmp_path.glob("service.db*"):
+        content = stored.read_bytes()
+        assert b"context.md" not in content and b"old-plan" not in content, stored.name
+
+
+def test_project_files_route_of_one_project_searches_only_its_folders(project_files_server):
+    resp, payload = project_files_server.get_json("/api/project-files?project=proj-a")
+    assert resp.status == 200
+    assert payload["data"]["named"] == 1
+    resp, _raw = project_files_server.request("GET", "/api/project-files?project=nope")
+    assert resp.status == 400
+
+
+def test_project_files_route_takes_the_named_windows(project_files_server):
+    resp, payload = project_files_server.get_json("/api/project-files?window=24h")
+    assert resp.status == 200 and payload["data"]["period"] == "in the last 24 hours"
+    resp, _raw = project_files_server.request("GET", "/api/project-files?window=fortnight")
+    assert resp.status == 400
+
+
+def test_project_files_check_reaches_the_overview_with_the_same_file(project_files_server):
+    resp, payload = project_files_server.get_json("/api/quick-actions/project-files")
+    assert resp.status == 200
+    check = payload["data"]
+    assert check["status"] == "act"
+    assert check["summary"].startswith("docs/context.md is now about 10k tokens, up 60% in 30 days. ")
+    assert len(check["fixes"]) == 5
+
+
+def test_project_files_route_is_empty_without_any_read_file(server):
+    resp, payload = server.get_json("/api/project-files")
+    assert resp.status == 200
+    assert payload["data"]["files"] == [] and payload["data"]["total"] == 0 and payload["data"]["named"] == 0

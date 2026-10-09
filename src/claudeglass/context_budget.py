@@ -31,8 +31,9 @@ Four tables (:func:`build_section`, section key ``"context_budget"``):
   prompt, skills listing, memory files, custom agents and MCP tools, then
   a residual "system prompt and tools" bucket (P0 minus every other known
   bucket, floored at 0). The part you can change (skills list, memory
-  files, MCP tools) is summed in its own column, since most of P0 is
-  Claude Code's own tool JSON, which no setting removes.
+  files, MCP tools of servers you can turn off) is summed in its own
+  column, since most of P0 is Claude Code's own tool JSON and the desktop
+  app's own servers, which no setting removes.
 - ``context_budget_autocompact`` -- per project: the configured
   ``autoCompactWindow`` from the latest schema-2 snapshot (or
   ``CLAUDE_CODE_AUTO_COMPACT_WINDOW``, which overrides it), the model's
@@ -71,6 +72,23 @@ call (:func:`_startup_events`). It keeps each built-in tool's definition
 size and each MCP server's total (never a description) to find what an
 agent type is offered and never uses.
 
+:func:`build_startup_section` (section key ``"agent_startup"``) turns that
+into six tables. Two of them price a tools list. ``agent_startup_diet`` is
+one row per agent type: the tools to keep (those called in at least
+:data:`REMOVABLE_USE_SHARE` of the spawns offered them), the ones to leave
+out, and what leaving them out takes from a start: tool definitions, the
+deferred names of MCP tools, the skills list (it goes with the Skill tool)
+and the agent list (with the Agent tool). MCP server instructions stay
+under a tools list, so they are shown apart and not counted.
+``agent_startup_servers`` splits the MCP part a server at a time: each
+server's tool definitions and deferred names are priced as the tools list
+table does, and its instructions are shown apart. :func:`diet_usd` puts
+a list price on both: tool definitions are the front of a cached prefix
+that sibling spawns share, so only the spawns that wrote it pay the write
+price for them; every other part is written by each spawn; each is then
+read on every later call. The roster the custom-agents bucket is sized from
+is the one the first calls carried, split by agent type count.
+
 Accumulator pattern: :class:`ContextBudgetStats` is fed one top-level
 session at a time via :meth:`ContextBudgetStats.add_session` (mirroring
 ``topology.TopologyStats``/``compaction.CompactionStats``), keyed by
@@ -99,6 +117,7 @@ from statistics import fmean, median
 from typing import Sequence
 
 from . import compaction
+from . import desktop_servers
 from . import snapshots as snapshots_mod
 from . import tool_search
 from .calibration import Calibration, FirstCall, model_family
@@ -296,12 +315,16 @@ def _memory_files_est_tokens(snapshot: Snapshot | None, calibration: Calibration
     return (calibration or Calibration()).text_tokens(total_bytes)
 
 
-def _custom_agents_est_tokens(snapshot: Snapshot | None) -> float | None:
-    """``content_layers.agents_summary.count`` custom agents, each priced
-    at :data:`_AGENT_LISTING_TOKENS_PER_AGENT` tokens (a labelled
-    constant, not a measurement -- see the module docstring). ``None``
-    without a snapshot (or a schema-1 one, which predates
-    ``content_layers``)."""
+def _custom_agents_est_tokens(snapshot: Snapshot | None, roster: tuple[float, float] | None = None) -> float | None:
+    """The share of the sibling-agent roster that lists
+    ``content_layers.agents_summary.count`` custom agents. With the roster
+    the sessions' first calls carried (``roster``: its tokens and the
+    number of agent types it listed), that is its custom share by count of
+    types: the parser keeps how many types a roster lists, not the size of
+    each line. Without one, each custom agent is priced at
+    :data:`_AGENT_LISTING_TOKENS_PER_AGENT` tokens (a labelled constant,
+    not a measurement -- see the module docstring). ``None`` without a
+    snapshot (or a schema-1 one, which predates ``content_layers``)."""
     if snapshot is None:
         return None
     content = snapshot.data.get("content_layers")
@@ -311,14 +334,19 @@ def _custom_agents_est_tokens(snapshot: Snapshot | None) -> float | None:
     count = agents_summary.get("count", 0)
     if not isinstance(count, (int, float)):
         count = 0
+    if roster is not None and roster[0] > 0 and roster[1] > 0:
+        return roster[0] * min(count, roster[1]) / roster[1]
     return count * _AGENT_LISTING_TOKENS_PER_AGENT
 
 
-def _mcp_tools_tokens(top: TranscriptResult, first: Turn | None, calibration: Calibration) -> float | None:
+def _mcp_tools_tokens(
+    top: TranscriptResult, first: Turn | None, calibration: Calibration, skip_built_in: bool = False
+) -> float | None:
     """Tokens of the MCP servers' tool definitions sent in full, the
     deferred-tool names listed for them and their instructions in
     ``top``'s first call, summed over its servers. ``None`` when no MCP
-    server shows up in it at all."""
+    server shows up in it at all. With ``skip_built_in``, the servers built
+    into the desktop app (:mod:`desktop_servers`) are left out."""
     if first is None:
         return None
     model = first.model
@@ -327,6 +355,8 @@ def _mcp_tools_tokens(top: TranscriptResult, first: Turn | None, calibration: Ca
         | set(first.deferred_list_chars_by_server)
         | set(first.mcp_instruction_chars_by_server)
     ) - {BUILT_IN_TOOLS}
+    if skip_built_in:
+        servers = {server for server in servers if not desktop_servers.is_built_in(server)}
     if not servers:
         return None
     return sum(
@@ -407,6 +437,13 @@ class _ProjectAcc:
     #: Tokens of the MCP servers' tool definitions, instructions and
     #: deferred-tool names the first call carried, per session.
     mcp_tools_tokens: list[float] = field(default_factory=list)
+    #: The same without the servers built into the desktop app, which no
+    #: setting removes: the MCP part of what you can change.
+    mcp_removable_tokens: list[float] = field(default_factory=list)
+    #: Per session, the first sibling-agent roster the first calls carried
+    #: (tokens) and how many agent types it listed.
+    roster_tokens: list[float] = field(default_factory=list)
+    roster_types: list[int] = field(default_factory=list)
     compaction_records: list[compaction.CompactionRecord] = field(default_factory=list)
     session_ids: list[str] = field(default_factory=list)
     #: The keys this project's config snapshots can be stored under (see
@@ -457,8 +494,9 @@ _FORK_MIN_PARENT_CTX = 40_000
 #: within this fraction of the largest.
 _SHARED_TOLERANCE = 0.15
 
-#: A tool an agent type is offered counts as removable from its ``tools:``
-#: list when at most this share of the spawns offered it called it.
+#: A tool an agent type is offered stays on its ``tools:`` list when at
+#: least this share of the spawns offered it called it; one called in
+#: fewer of them is removable.
 REMOVABLE_USE_SHARE = 0.10
 
 #: The tools Claude Code adds to an agent whatever its ``tools:`` says
@@ -469,11 +507,35 @@ _ALWAYS_OFFERED = frozenset(AGENT_ANSWER_TOOLS)
 #: Rows of ``agent_startup_tools`` kept per agent type, largest first.
 _TOOL_ROWS_PER_AGENT = 12
 
+#: Rows of ``agent_startup_servers`` kept per agent type, largest first.
+_SERVER_ROWS_PER_AGENT = 12
+
+#: Tools whose absence from a ``tools:`` list takes a listing out of the
+#: agent's startup with it: the skills list goes with Skill, the roster of
+#: sibling agents with Agent (named Task in older versions of Claude Code).
+SKILLS_TOOL = "Skill"
+ROSTER_TOOLS = frozenset({"Agent", "Task"})
+
+#: Agent types the diet leaves alone: Claude Code's own read-only helpers,
+#: already started with a small tool set of their own.
+DIET_EXCLUDED = frozenset({"Explore", "Plan", "claude-code-guide"})
+
+#: A report window shorter than this many days is stretched to it before a
+#: saving is scaled to 30 days, so a short window never reads as a rate.
+MIN_WINDOW_DAYS = 7
+
 
 def mcp_tool_key(server: str) -> str:
     """The name an MCP server's tools go under in a tools list or an
     allowlist (``mcp__<server>__*``)."""
     return f"mcp__{server}__*"
+
+
+def rarely_used(used: int, offered: int) -> bool:
+    """Whether a tool called in ``used`` of the ``offered`` spawns that were
+    given it is called in fewer than :data:`REMOVABLE_USE_SHARE` of them.
+    The small tolerance keeps an exact tenth (3 of 30) on the list."""
+    return used < REMOVABLE_USE_SHARE * offered - 1e-9
 
 
 @dataclass(slots=True)
@@ -485,6 +547,21 @@ class _ToolOffer:
     offered: int = 0
     used: int = 0
     chars: int = 0
+
+
+@dataclass(slots=True)
+class _ServerOffer:
+    """One MCP server offered to an agent type on one model: the spawns
+    that were given any of it, the spawns that called one of its tools, and
+    its three costs summed over the spawns offered it, in tokens: tool
+    definitions sent in full, the names of its deferred tools, and its
+    instructions."""
+
+    offered: int = 0
+    used: int = 0
+    definitions: float = 0.0
+    deferred: float = 0.0
+    instructions: float = 0.0
 
 
 @dataclass(slots=True)
@@ -527,11 +604,28 @@ class _AgentStartupAcc:
     #: with the model family it came from beside it.
     write_prices: list[float] = field(default_factory=list)
     write_price_models: list[str] = field(default_factory=list)
+    #: ... and the same model's cache-read price, beside each write price
+    #: (so ``write_price_models`` names the family of both).
+    read_prices: list[float] = field(default_factory=list)
     #: Model family -> spawns that recorded their tools, and -> each
     #: tool's offers (a built-in tool by name, an MCP server as
     #: :func:`mcp_tool_key`).
     tool_spawns: dict[str, int] = field(default_factory=dict)
     tools: dict[str, dict[str, _ToolOffer]] = field(default_factory=dict)
+    #: Model family -> each tool the spawns called (a built-in tool by name,
+    #: an MCP server as :func:`mcp_tool_key`) -> spawns that called it,
+    #: whether it was sent in full or loaded when asked for.
+    tool_uses: dict[str, dict[str, int]] = field(default_factory=dict)
+    #: Model family -> each MCP server's offers, as tokens.
+    servers: dict[str, dict[str, _ServerOffer]] = field(default_factory=dict)
+    #: Model family -> spawns (of those that recorded their tools) whose
+    #: first call wrote the tool definitions to the cache instead of
+    #: reading them: nothing of the shared prefix came from cache.
+    prefix_written: dict[str, int] = field(default_factory=dict)
+    #: Per measured spawn, in step with ``startup_tokens``: the calls after
+    #: the first, and the sibling-agent roster sent at startup (tokens).
+    later_calls: list[int] = field(default_factory=list)
+    roster_tokens: list[float] = field(default_factory=list)
 
     def fixed_model(self) -> tuple[str, list[int]]:
         """The model family most of this agent type's measured spawns ran
@@ -550,7 +644,7 @@ class _AgentStartupAcc:
 
     def removable_chars(self, family: str) -> tuple[float, list[tuple[str, int, int, float]]]:
         """Characters per spawn of the tools and MCP servers offered on
-        ``family`` that at most :data:`REMOVABLE_USE_SHARE` of the spawns
+        ``family`` that fewer than :data:`REMOVABLE_USE_SHARE` of the spawns
         offered them called (never the tools Claude Code adds whatever the
         list says), and each such tool as ``(key, offered, used, chars per
         spawn offered)``, largest first."""
@@ -560,11 +654,47 @@ class _AgentStartupAcc:
         rows = [
             (key, offer.offered, offer.used, offer.chars / offer.offered)
             for key, offer in self.tools.get(family, {}).items()
-            if offer.offered and key not in _ALWAYS_OFFERED and offer.used <= REMOVABLE_USE_SHARE * offer.offered
+            if offer.offered and key not in _ALWAYS_OFFERED and rarely_used(offer.used, offer.offered)
         ]
         rows.sort(key=lambda row: (-row[3], row[0]))
         total = sum(self.tools[family][key].chars for key, _o, _u, _c in rows) / spawns
         return total, rows
+
+    def kept_tools(self, family: str) -> list[str]:
+        """The tools and MCP servers (as :func:`mcp_tool_key`) a ``tools:``
+        list on this agent type needs: every one that at least
+        :data:`REMOVABLE_USE_SHARE` of the spawns given it called, whether
+        it was sent in full or loaded when asked for. Never the tools
+        Claude Code adds whatever the list says. Built-in tools first."""
+        spawns = self.tool_spawns.get(family, 0)
+        offers = self.tools.get(family, {})
+        servers = self.servers.get(family, {})
+        kept: list[str] = []
+        for key, called in self.tool_uses.get(family, {}).items():
+            if key in _ALWAYS_OFFERED:
+                continue
+            if key.startswith("mcp__"):
+                offer = servers.get(key[len("mcp__") : -len("__*")])
+                offered, used = (offer.offered, offer.used) if offer is not None and offer.offered else (spawns, called)
+            else:
+                tool = offers.get(key)
+                offered, used = (tool.offered, tool.used) if tool is not None and tool.offered else (spawns, called)
+            if not rarely_used(used, offered):
+                kept.append(key)
+        return sorted(kept, key=lambda key: (key.startswith("mcp__"), key))
+
+    def rare_servers(self, family: str) -> list[tuple[str, _ServerOffer]]:
+        """The MCP servers offered on ``family`` that fewer than
+        :data:`REMOVABLE_USE_SHARE` of the spawns given them called,
+        largest first by what they cost at startup (definitions, deferred
+        names and instructions)."""
+        rows = [
+            (server, offer)
+            for server, offer in self.servers.get(family, {}).items()
+            if offer.offered and rarely_used(offer.used, offer.offered)
+        ]
+        rows.sort(key=lambda row: (-(row[1].definitions + row[1].deferred + row[1].instructions), row[0]))
+        return rows
 
 
 @dataclass(slots=True)
@@ -691,6 +821,115 @@ def first_call(sub: TranscriptResult) -> FirstCall | None:
 
 
 @dataclass(slots=True)
+class StartupSizes:
+    """What one transcript's first call carried, in approximate tokens, by
+    the part a setting or the harness decides (:func:`startup_sizes`).
+    Sizes only: no text, no description, and no name beyond the built-in
+    tools' and the MCP servers'."""
+
+    model: str | None = None
+    family: str = ""
+    #: A snapshot that lists tools was recorded, so the tool sizes below
+    #: are measured rather than missing.
+    saw_tools: bool = False
+    system: float = 0.0
+    #: Each built-in tool's definition, by name.
+    builtin_tools: dict[str, float] = field(default_factory=dict)
+    #: Per MCP server: its tool definitions sent in full, the names of its
+    #: deferred tools, and its instructions.
+    server_definitions: dict[str, float] = field(default_factory=dict)
+    server_deferred: dict[str, float] = field(default_factory=dict)
+    server_instructions: dict[str, float] = field(default_factory=dict)
+    skills: float = 0.0
+    #: CLAUDE.md files, rules and nested memory (not auto memory).
+    claude_md: float = 0.0
+    #: Auto memory (``AutoMem``), a CLAUDE.md source of its own.
+    memory: float = 0.0
+    hooks: float = 0.0
+    #: The sibling-agent roster Claude Code lists.
+    agent_roster: float = 0.0
+
+    def total(self) -> float:
+        return (
+            self.system
+            + sum(self.builtin_tools.values())
+            + sum(self.server_definitions.values())
+            + sum(self.server_deferred.values())
+            + sum(self.server_instructions.values())
+            + self.skills
+            + self.claude_md
+            + self.memory
+            + self.hooks
+            + self.agent_roster
+        )
+
+
+def startup_sizes(result: TranscriptResult, calibration: Calibration) -> StartupSizes | None:
+    """The first call's startup parts for any transcript (a main session
+    or an agent), in tokens at ``calibration``'s characters per token.
+    Built from the same events as the subagent startup breakdown
+    (:func:`_startup_events`), so a snapshot or roster written after the
+    first call still counts. The MCP deferred names and instructions are
+    the larger of the first two calls' sizes: an agent's instructions can
+    arrive between them. ``None`` for a transcript with no priced call."""
+    first = _first_priced_turn(result)
+    if first is None:
+        return None
+    second = _second_priced_turn(result)
+    events = _startup_events(result, first, second)
+    return _sizes_of(result, first, second, events, _startup_chars(events, first), calibration)
+
+
+def _sizes_of(
+    result: TranscriptResult,
+    first: Turn,
+    second: Turn | None,
+    events: list[Event],
+    startup: _Startup,
+    calibration: Calibration,
+) -> StartupSizes:
+    """:func:`startup_sizes` for a transcript whose startup events and
+    characters are already worked out."""
+    model = first.model
+    parts, by_source = _startup_tokens(startup, calibration, model)
+    sizes = StartupSizes(model=model, family=model_family(model), saw_tools=startup.saw_tools)
+    sizes.system = parts["system_prompt"]
+    if startup.saw_tools:
+        sizes.builtin_tools = {name: calibration.tool_tokens(chars, model) for name, chars in startup.tool_chars.items()}
+        sizes.server_definitions = {
+            server: calibration.tool_tokens(chars, model) for server, chars in startup.server_chars.items()
+        }
+    else:
+        sizes.server_definitions = {
+            server: calibration.tool_tokens(chars, model)
+            for server, chars in result.upfront_definition_chars_by_server.items()
+            if server != BUILT_IN_TOOLS
+        }
+    for turn in (first, second):
+        if turn is None:
+            continue
+        for server, chars in turn.deferred_list_chars_by_server.items():
+            if server != BUILT_IN_TOOLS:
+                sizes.server_deferred[server] = max(sizes.server_deferred.get(server, 0.0), calibration.text_tokens(chars, model))
+        for server, chars in turn.mcp_instruction_chars_by_server.items():
+            if server != BUILT_IN_TOOLS:
+                sizes.server_instructions[server] = max(
+                    sizes.server_instructions.get(server, 0.0), calibration.text_tokens(chars, model)
+                )
+    roster_chars = sum(
+        event.size_chars or 0
+        for event in events
+        if event.kind == EventKind.CACHE_SIGNAL and event.subkind == "agent_listing_delta"
+    )
+    sizes.agent_roster = calibration.text_tokens(roster_chars, model)
+    sizes.skills = parts["skills_listing"]
+    sizes.hooks = parts["hook_context"]
+    sizes.memory = by_source.get("AutoMem", 0.0)
+    sizes.claude_md = max(0.0, parts["claude_md"] - sizes.memory)
+    return sizes
+
+
+@dataclass(slots=True)
 class ContextBudgetStats:
     """Corpus-wide context-budget accumulator, fed one top-level session
     at a time via :meth:`add_session`, and one subagent transcript at a
@@ -704,6 +943,28 @@ class ContextBudgetStats:
     #: Where each main session ran (its transcript's ``entrypoint``, ``""``
     #: when none was recorded) -> sessions, for :attr:`desktop_only`.
     entrypoints: dict[str, int] = field(default_factory=dict)
+
+    #: Epoch seconds of the oldest and newest first call seen, for
+    #: :attr:`window_days`.
+    first_when: float | None = None
+    last_when: float | None = None
+
+    def _note_when(self, ts: str | None) -> None:
+        when = _parse_ts(ts)
+        if when is None:
+            return
+        seconds = when.timestamp()
+        self.first_when = seconds if self.first_when is None else min(self.first_when, seconds)
+        self.last_when = seconds if self.last_when is None else max(self.last_when, seconds)
+
+    @property
+    def window_days(self) -> float:
+        """Days from the oldest to the newest first call seen, at least
+        :data:`MIN_WINDOW_DAYS`: what an amount over this window is scaled
+        by to read as an amount over 30 days."""
+        if self.first_when is None or self.last_when is None:
+            return float(MIN_WINDOW_DAYS)
+        return max(float(MIN_WINDOW_DAYS), (self.last_when - self.first_when) / 86400.0)
 
     @property
     def desktop_only(self) -> bool:
@@ -750,16 +1011,21 @@ class ContextBudgetStats:
             acc.fork_spawns += 1
             return
 
-        events = _startup_events(sub, first, _second_priced_turn(sub))
+        second = _second_priced_turn(sub)
+        events = _startup_events(sub, first, second)
         startup = _startup_chars(events, first)
         family = model_family(first.model)
         parts, claude_md_by_source = _startup_tokens(startup, self.calibration, first.model)
+        sizes = _sizes_of(sub, first, second, events, startup, self.calibration)
+        self._note_when(first.ts)
         measured = len(acc.startup_tokens)
         acc.startup_tokens.append(first.input_tokens + first.cache_creation_tokens + first.cache_read_tokens)
         acc.shared_prefix_tokens.append(first.cache_read_tokens)
         acc.written_tokens.append(first.cache_creation_tokens)
         acc.prompt_tokens.append(first.input_tokens)
         acc.models.append(family)
+        acc.later_calls.append(sum(1 for turn in sub.turns if turn.turn_index > 1))
+        acc.roster_tokens.append(sizes.agent_roster)
         for part, tokens in parts.items():
             acc.parts.setdefault(part, []).append(tokens)
         # One entry per spawn for every source seen so far, so the lists
@@ -772,11 +1038,16 @@ class ContextBudgetStats:
         resolved = pricing.resolve_model(first.model) if pricing is not None else None
         if resolved is not None:
             acc.write_prices.append(resolved.rates.cache_write_5m)
+            acc.read_prices.append(resolved.rates.cache_read)
             acc.write_price_models.append(family)
 
         tool_names = {name for turn in sub.turns for name in turn.tool_names}
         if startup.saw_tools:
             acc.tool_spawns[family] = acc.tool_spawns.get(family, 0) + 1
+            # The tool definitions are the front of the cached prefix: a
+            # spawn that read less than half of them from cache wrote them.
+            if first.cache_read_tokens < 0.5 * parts["tool_definitions"]:
+                acc.prefix_written[family] = acc.prefix_written.get(family, 0) + 1
             offers = acc.tools.setdefault(family, {})
             for name, chars in startup.tool_chars.items():
                 offer = offers.setdefault(name, _ToolOffer())
@@ -788,6 +1059,22 @@ class ContextBudgetStats:
                 offer.offered += 1
                 offer.chars += chars
                 offer.used += any(tool_server(name) == server for name in tool_names)
+            uses = acc.tool_uses.setdefault(family, {})
+            for key in {
+                name if tool_server(name) == BUILT_IN_TOOLS else mcp_tool_key(tool_server(name)) for name in tool_names
+            }:
+                uses[key] = uses.get(key, 0) + 1
+            offered_servers = (
+                set(sizes.server_definitions) | set(sizes.server_deferred) | set(sizes.server_instructions)
+            ) - {BUILT_IN_TOOLS}
+            server_offers = acc.servers.setdefault(family, {})
+            for server in offered_servers:
+                server_offer = server_offers.setdefault(server, _ServerOffer())
+                server_offer.offered += 1
+                server_offer.definitions += sizes.server_definitions.get(server, 0.0)
+                server_offer.deferred += sizes.server_deferred.get(server, 0.0)
+                server_offer.instructions += sizes.server_instructions.get(server, 0.0)
+                server_offer.used += any(tool_server(name) == server for name in tool_names)
         if parts["skills_listing"] > 0:
             acc.skills_listed_spawns += 1
             if "Skill" in tool_names:
@@ -827,6 +1114,7 @@ class ContextBudgetStats:
 
         first = _first_priced_turn(top)
         if first is not None:
+            self._note_when(first.ts)
             acc.baseline_writes.append(first.cache_creation_tokens)
             acc.shared_prefix_tokens.append(first.cache_read_tokens)
             acc.first_prompt_tokens.append(first.input_tokens)
@@ -839,6 +1127,19 @@ class ContextBudgetStats:
         mcp_tokens = _mcp_tools_tokens(top, first, self.calibration)
         if mcp_tokens is not None:
             acc.mcp_tools_tokens.append(mcp_tokens)
+            acc.mcp_removable_tokens.append(_mcp_tools_tokens(top, first, self.calibration, skip_built_in=True) or 0.0)
+        if first is not None:
+            roster = next(
+                (
+                    event
+                    for event in _startup_events(top, first, _second_priced_turn(top))
+                    if event.kind == EventKind.CACHE_SIGNAL and event.subkind == "agent_listing_delta"
+                ),
+                None,
+            )
+            if roster is not None and (roster.size_chars or 0) > 0:
+                acc.roster_tokens.append(self.calibration.text_tokens(roster.size_chars or 0, model))
+                acc.roster_types.append(int(roster.detail.get("added") or 0))
 
         # rates=None: only trigger/pre_tokens/dropped_tokens are read by
         # this module (all come straight from the COMPACT_BOUNDARY event,
@@ -965,13 +1266,15 @@ def _baseline_row(
     human_est = _mean(acc.human_prompt_est_tokens) or 0.0
     skills_est = _mean(acc.skills_listing_est_tokens) or 0.0
     memory_est = _memory_files_est_tokens(snapshot, calibration)
-    agents_est = _custom_agents_est_tokens(snapshot)
+    roster = (_mean(acc.roster_tokens) or 0.0, _mean(acc.roster_types) or 0.0) if acc.roster_tokens else None
+    agents_est = _custom_agents_est_tokens(snapshot, roster)
     # The servers the sessions were offered, priced as tool search prices
     # them; with none known, whether the config snapshot names any.
     mcp_flag, mcp_usd = _mcp_servers_summary(servers, None if project == "all" else project)
     if mcp_flag is None:
         mcp_flag = _mcp_tools_flag(snapshot)
     mcp_tokens = _mean(acc.mcp_tools_tokens)
+    mcp_removable = _mean(acc.mcp_removable_tokens)
 
     known_total = human_est + skills_est
     if isinstance(memory_est, (int, float)):
@@ -982,9 +1285,10 @@ def _baseline_row(
         known_total += mcp_tokens
 
     # What you can change: the skills list, the memory files and the MCP
-    # tools. The rest of the first call is Claude Code's own tool JSON and
-    # system prompt, which no setting removes.
-    controllable = skills_est + (memory_est or 0.0) + (mcp_tokens or 0.0) if acc.first_call_tokens else None
+    # tools of servers you can turn off. The rest of the first call is
+    # Claude Code's own tool JSON and system prompt and the desktop app's
+    # own servers, which no setting removes.
+    controllable = skills_est + (memory_est or 0.0) + (mcp_removable or 0.0) if acc.first_call_tokens else None
 
     # Floored at 0, but the floor is not silently absorbed: when the
     # estimates alone already exceed the measured first call, that is
@@ -1012,6 +1316,7 @@ def _baseline_row(
         agents_est,
         mcp_flag,
         mcp_tokens,
+        mcp_removable,
         mcp_usd,
         controllable,
         residual,
@@ -1047,6 +1352,7 @@ def _build_baseline_table(
         Column(key="custom_agents_est", label="Custom agents (est)", kind="tokens"),
         Column(key="mcp_tools_est", label="MCP tools (est)", kind="str"),
         Column(key="mcp_tools_tokens", label="MCP tools in the first call (est)", kind="tokens"),
+        Column(key="mcp_removable_tokens", label="MCP tools you can turn off (est)", kind="tokens"),
         Column(key="mcp_servers_usd", label="Cost of keeping the MCP servers offered (est)", kind="money"),
         Column(key="controllable_est", label="What you can change (est)", kind="tokens"),
         Column(key="system_prompt_and_tools_est", label="System prompt and tools (est)", kind="tokens"),
@@ -1066,6 +1372,7 @@ def _build_baseline_table(
             "human_prompt_est_tokens",
             "skills_listing_est_tokens",
             "mcp_tools_tokens",
+            "mcp_removable_tokens",
         ):
             getattr(everything, name).extend(getattr(acc, name))
 
@@ -1086,8 +1393,9 @@ def _build_baseline_table(
             "The same tools measure differently on each model, so compare projects that ran on one model.",
             "Human prompt, skills listing, memory files and MCP tools (est) count characters (or bytes) "
             f"divided by characters per token, {calibration.basis()}: no tokenizer reads your transcripts. "
-            f"Custom agents (est) is the number of agents times {_AGENT_LISTING_TOKENS_PER_AGENT} "
-            "tokens. \"MCP tools\" counts the MCP servers the sessions were offered, by what can be done "
+            "Custom agents (est) is your custom agents' share of the agent list the first calls carried. "
+            f"With no list recorded, it is {_AGENT_LISTING_TOKENS_PER_AGENT} tokens per agent. "
+            "\"MCP tools\" counts the MCP servers the sessions were offered, by what can be done "
             "about them, with what keeping them cost, from the same per-server prices as the tool search "
             "section. A server built into the desktop app is shown with its cost and has nothing to remove. "
             "With none offered it says only whether MCP servers are configured. "
@@ -1100,8 +1408,8 @@ def _build_baseline_table(
             "mean and median. Its memory files and custom agents "
             "are left blank. Those figures come from each project's "
             "own config snapshot, which can't be combined across projects.",
-            "\"What you can change\" adds the skills listing, memory files and MCP tools. "
-            "The rest is mostly Claude Code's own tool definitions and system prompt, "
+            "\"What you can change\" adds the skills listing, memory files and the MCP tools of servers you can turn off. "
+            "The rest is mostly Claude Code's own tool definitions and system prompt and the desktop app's own servers, "
             "which no setting removes.",
             "\"System prompt and tools (est)\" is what is left over: the "
             "mean first call minus every other known (est) part, and never "
@@ -1393,6 +1701,60 @@ def _fixed_write_prices(acc: _AgentStartupAcc, family: str) -> list[float]:
     return acc.write_prices
 
 
+def _fixed_read_prices(acc: _AgentStartupAcc, family: str) -> list[float]:
+    """The cache-read prices of the spawns on ``family``, in step with
+    :func:`_fixed_write_prices` (empty for an accumulator without them)."""
+    if len(acc.read_prices) != len(acc.write_prices):
+        return []
+    if family and len(acc.write_price_models) == len(acc.write_prices):
+        return [price for price, model in zip(acc.read_prices, acc.write_price_models) if model == family]
+    return acc.read_prices
+
+
+def diet_usd(
+    spawns: float,
+    prefix_tokens: float,
+    body_tokens: float,
+    *,
+    write: float | None,
+    read: float | None,
+    later_calls: float,
+    written_share: float,
+) -> float:
+    """List-price USD of leaving tokens out of the start of ``spawns``
+    spawns of one agent type, with prices per million tokens.
+
+    ``prefix_tokens`` are tool definitions, the front of a cached prefix
+    that sibling spawns share: only the share ``written_share`` of the
+    spawns wrote it, the rest read it, so a first call costs
+    ``written_share * write + (1 - written_share) * read`` per token.
+    ``body_tokens`` (skills list, agent roster, deferred tool names, MCP
+    instructions) sit after that prefix and every spawn writes its own.
+    Each token is then read on every later call, ``later_calls`` of them
+    on average. Without a read price only the writes are counted."""
+    if not spawns or write is None or write <= 0:
+        return 0.0
+    read_price = read if read is not None and read > 0 else 0.0
+    share = min(1.0, max(0.0, written_share))
+    first_prefix = share * write + (1.0 - share) * read_price
+    per_spawn = prefix_tokens * (first_prefix + later_calls * read_price) + body_tokens * (
+        write + later_calls * read_price
+    )
+    return spawns * per_spawn / 1_000_000
+
+
+def _price_inputs(acc: _AgentStartupAcc, family: str, positions: list[int]) -> tuple[float | None, float | None, float, float]:
+    """The write price, read price, mean later calls and share of spawns
+    that wrote the tool prefix for the spawns of ``acc`` on ``family``."""
+    count = len(acc.startup_tokens)
+    writes = _fixed_write_prices(acc, family)
+    reads = _fixed_read_prices(acc, family)
+    later = _mean_or_zero(_picked(acc.later_calls, positions, count)) if acc.later_calls else 0.0
+    snapped = acc.tool_spawns.get(family, 0)
+    written_share = acc.prefix_written.get(family, 0) / snapped if snapped else 1.0
+    return (fmean(writes) if writes else None, fmean(reads) if reads else None, later, written_share)
+
+
 def _build_startup_table(stats: ContextBudgetStats) -> Table:
     columns = [
         Column(key="agent_type", label="Agent type", kind="str"),
@@ -1423,6 +1785,11 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             kind="tokens",
         ),
         Column(key="removable_tools", label="Tools never used (can be left out)", kind="tokens"),
+        # A part left out of a start is also not read back on the calls
+        # after the first, so a saving is priced with these two (the
+        # recommendation rules read them; see ``diet_usd``).
+        Column(key="read_price", label="Cache-read price per million tokens", kind="money"),
+        Column(key="later_calls", label="Calls after the first", kind="float"),
     ]
     rows: list[list] = []
     for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
@@ -1431,6 +1798,7 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             continue
         count = len(acc.startup_tokens)
         family, positions = acc.fixed_model()
+        _write, read_price, later_calls, _written = _price_inputs(acc, family, positions)
         startup = fmean(_picked(acc.startup_tokens, positions, count))
         parts = {part: _mean_or_zero(_picked(acc.parts.get(part, []), positions, count)) for part in STARTUP_PARTS}
         known = sum(parts.values())
@@ -1444,6 +1812,7 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             [agent_type, acc.spawns, acc.fork_spawns, family or None, count - len(positions), startup]
             + [parts[part] for part in STARTUP_PARTS]
             + [not_recorded, measured_pct, fmean(prices) if prices else None, managed_claude_md, removable]
+            + [read_price, later_calls if acc.later_calls else None]
         )
     return Table(
         name="agent_startup_breakdown",
@@ -1467,9 +1836,11 @@ def _build_startup_table(stats: ContextBudgetStats) -> Table:
             "the last column). An agent's setting that skips CLAUDE.md files skips only the project's "
             "own ones: a policy CLAUDE.md still loads.",
             "\"Tools never used\" is the size of the tool definitions and MCP servers this agent type was "
-            f"offered and called in at most {int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them. "
+            f"offered and called in fewer than {int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them. "
             "A tools list on the agent would leave them out. Tools Claude Code adds whatever the list says "
             "are not counted.",
+            "A part left out of the start is also not read back on the calls after the first, so the last two "
+            "columns give what a saving needs: the cache-read price and the average number of those calls.",
         ],
     )
 
@@ -1500,12 +1871,173 @@ def _build_tools_table(stats: ContextBudgetStats) -> Table:
         columns=columns,
         rows=rows,
         notes=[
-            "One row per tool or MCP server an agent type was offered and called in at most "
+            "One row per tool or MCP server an agent type was offered and called in fewer than "
             f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered it, largest first, "
             f"up to {_TOOL_ROWS_PER_AGENT} per agent type. An MCP server's tools are one row, "
             "named as an allowlist names them.",
             "Sizes are tool definitions only, read from the first snapshot that lists tools, "
             f"at characters per token {stats.calibration.basis()}. No description is kept.",
+        ],
+    )
+
+
+def _build_diet_table(stats: ContextBudgetStats) -> Table:
+    columns = [
+        Column(key="agent_type", label="Agent type", kind="str"),
+        Column(key="model", label="Model measured", kind="str"),
+        Column(key="spawns", label="Spawns with tools recorded", kind="int"),
+        Column(key="keep_tools", label="Tools to keep", kind="str"),
+        Column(key="rare_tools", label="Tools rarely used", kind="str"),
+        Column(key="dropped_definitions", label="Tool definitions left out", kind="tokens"),
+        Column(key="dropped_deferred", label="Deferred tool names left out", kind="tokens"),
+        Column(key="dropped_skills", label="Skills list left out", kind="tokens"),
+        Column(key="dropped_roster", label="Agent list left out", kind="tokens"),
+        Column(key="kept_instructions", label="MCP instructions that stay", kind="tokens"),
+        Column(key="later_calls", label="Calls after the first", kind="float"),
+        Column(key="prefix_write_share", label="Spawns that wrote the tool prefix", kind="pct"),
+        Column(key="write_price", label="Cache-write price per million tokens", kind="money"),
+        Column(key="read_price", label="Cache-read price per million tokens", kind="money"),
+        Column(key="saving_usd", label="Saving across these spawns", kind="money"),
+        Column(key="window_days", label="Days in the window", kind="float"),
+    ]
+    rows: list[list] = []
+    for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
+        acc = stats.agents[agent_type]
+        if not acc.startup_tokens:
+            continue
+        family, positions = acc.fixed_model()
+        snapped = acc.tool_spawns.get(family, 0)
+        if not snapped:
+            continue
+        count = len(acc.startup_tokens)
+        _total, rare_rows = acc.removable_chars(family)
+        builtin = [row for row in rare_rows if not row[0].startswith("mcp__")]
+        servers = acc.rare_servers(family)
+        if not builtin and not servers:
+            continue
+        tools = acc.tools.get(family, {})
+        definition_chars = sum(tools[key].chars for key, _o, _u, _c in builtin) / snapped
+        definitions = stats.calibration.tool_tokens(definition_chars, family or None) + sum(
+            offer.definitions for _name, offer in servers
+        ) / snapped
+        deferred = sum(offer.deferred for _name, offer in servers) / snapped
+        instructions = sum(offer.instructions for _name, offer in servers) / snapped
+        dropped = {key for key, _o, _u, _c in builtin}
+        skills = (
+            _mean_or_zero(_picked(acc.parts.get("skills_listing", []), positions, count))
+            if SKILLS_TOOL in dropped
+            else 0.0
+        )
+        roster = _mean_or_zero(_picked(acc.roster_tokens, positions, count)) if dropped & ROSTER_TOOLS else 0.0
+        write, read, later, written_share = _price_inputs(acc, family, positions)
+        usd = diet_usd(
+            snapped,
+            definitions,
+            deferred + skills + roster,
+            write=write,
+            read=read,
+            later_calls=later,
+            written_share=written_share,
+        )
+        rare_names = [key for key, _o, _u, _c in builtin] + [mcp_tool_key(name) for name, _offer in servers]
+        rows.append(
+            [
+                agent_type,
+                family or None,
+                snapped,
+                ", ".join(acc.kept_tools(family)),
+                ", ".join(rare_names),
+                definitions,
+                deferred,
+                skills,
+                roster,
+                instructions,
+                later,
+                written_share * 100,
+                write,
+                read,
+                usd or None,
+                stats.window_days,
+            ]
+        )
+    return Table(
+        name="agent_startup_diet",
+        title="What a tools list would take out of each agent type's start",
+        columns=columns,
+        rows=rows,
+        notes=[
+            "One row per agent type that was offered tools or MCP servers it called in fewer than "
+            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered them, on the model most of its spawns ran on. "
+            "\"Tools to keep\" are the ones called in at least that share of them, including tools loaded when "
+            "asked for. Tools Claude Code adds whatever the list says are in neither.",
+            "Sizes are per spawn. The skills list goes with the Skill tool and the agent list with the Agent "
+            "tool. An MCP server's deferred tool names go with its tools; its instructions stay under a "
+            "tools list, so they are not counted in the saving. Deferred built-in tool names are not counted.",
+            "The saving prices tool definitions as a prefix that sibling spawns share: only the spawns that wrote it "
+            "pay the cache-write price for them, the rest pay the cache-read price. The other parts are written "
+            "by each spawn. Every part is then read on each later call. List prices, over the spawns in this window.",
+            f"Sizes are at characters per token {stats.calibration.basis()}. No description is kept.",
+        ],
+    )
+
+
+def _build_servers_table(stats: ContextBudgetStats) -> Table:
+    columns = [
+        Column(key="agent_type", label="Agent type", kind="str"),
+        Column(key="model", label="Model measured", kind="str"),
+        Column(key="server", label="MCP server", kind="str"),
+        Column(key="offered_spawns", label="Spawns offered it", kind="int"),
+        Column(key="used_spawns", label="Spawns that used it", kind="int"),
+        Column(key="definition_tokens", label="Tool definitions", kind="tokens"),
+        Column(key="deferred_tokens", label="Deferred tool names", kind="tokens"),
+        Column(key="instruction_tokens", label="Instructions", kind="tokens"),
+        Column(key="saving_usd", label="Cost across these spawns", kind="money"),
+        Column(key="window_days", label="Days in the window", kind="float"),
+    ]
+    rows: list[list] = []
+    for agent_type in sorted(stats.agents, key=lambda key: -stats.agents[key].spawns):
+        acc = stats.agents[agent_type]
+        if not acc.startup_tokens:
+            continue
+        family, positions = acc.fixed_model()
+        write, read, later, written_share = _price_inputs(acc, family, positions)
+        for server, offer in acc.rare_servers(family)[:_SERVER_ROWS_PER_AGENT]:
+            usd = diet_usd(
+                offer.offered,
+                offer.definitions / offer.offered,
+                offer.deferred / offer.offered,
+                write=write,
+                read=read,
+                later_calls=later,
+                written_share=written_share,
+            )
+            rows.append(
+                [
+                    agent_type,
+                    family or None,
+                    server,
+                    offer.offered,
+                    offer.used,
+                    offer.definitions / offer.offered,
+                    offer.deferred / offer.offered,
+                    offer.instructions / offer.offered,
+                    usd or None,
+                    stats.window_days,
+                ]
+            )
+    return Table(
+        name="agent_startup_servers",
+        title="MCP servers offered to a subagent and rarely used",
+        columns=columns,
+        rows=rows,
+        notes=[
+            "One row per MCP server an agent type was offered and called in fewer than "
+            f"{int(REMOVABLE_USE_SHARE * 100)}% of the spawns offered it, largest first, "
+            f"up to {_SERVER_ROWS_PER_AGENT} per agent type.",
+            "Sizes are per spawn offered it: the tool definitions sent in full, the names of its deferred "
+            "tools, and its instructions. The cost prices the first two as the tools list table does: a tools "
+            "list leaves out those two only. The instructions stay under it and are not in the cost.",
+            f"Sizes are at characters per token {stats.calibration.basis()}. No instruction text is kept.",
         ],
     )
 
@@ -1684,6 +2216,8 @@ def build_startup_section(stats: ContextBudgetStats) -> Section:
             _build_unused_table(stats),
             _build_shared_table(stats),
             _build_tools_table(stats),
+            _build_diet_table(stats),
+            _build_servers_table(stats),
         ],
         notes=[],
     )
@@ -1692,11 +2226,19 @@ def build_startup_section(stats: ContextBudgetStats) -> Section:
 __all__ = [
     "CLAUDE_MD_SOURCES",
     "ContextBudgetStats",
+    "DIET_EXCLUDED",
+    "MIN_WINDOW_DAYS",
     "REMOVABLE_USE_SHARE",
+    "ROSTER_TOOLS",
+    "SKILLS_TOOL",
     "STARTUP_PARTS",
+    "StartupSizes",
     "build_section",
     "build_startup_section",
+    "diet_usd",
     "first_call",
     "load_context_window_rows",
     "mcp_tool_key",
+    "rarely_used",
+    "startup_sizes",
 ]

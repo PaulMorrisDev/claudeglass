@@ -145,6 +145,7 @@ from . import (
     compaction_sim,
     context_budget,
     context_files,
+    cost_centres,
     discovery,
     elasticity,
     fixes,
@@ -763,6 +764,11 @@ def _build_baseline_comparison_section(
     )
 
     tables = [overview_table]
+    if baseline_record.get("recache_rules", 1) < recache.RULES:
+        overview_table.notes.append(
+            "This baseline counted cache rebuilds by older rules, which flagged fewer replies. A rise in the "
+            "rebuild share here can come from the new rules."
+        )
     baseline_mode_mix = baseline_record.get("mode_mix") or {}
     if baseline_mode_mix:
         by_mode_table = _build_baseline_by_mode_table(
@@ -1605,7 +1611,7 @@ def build_report(
 
             rs.add(tr, pricing.resolve_model)
             ls.add(tr, pricing.resolve_model)
-            ts.add(tr, pricing.resolve_model, ttl_th)
+            ts.add(recache.apply(tr, recache_th), pricing.resolve_model, ttl_th)
             ws.add(tr, pricing)
             all_results.append(tr)
             cf.add(tr, pricing, is_main=tr is top)
@@ -1955,11 +1961,34 @@ def build_report(
     if _want("compactions"):
         sections.append(compaction.build_section(cs))
 
+    # Phase 8a: the files agents read by habit, once, for the Agents page's
+    # starting-context stack below and for the report model's own
+    # ``context_files``.
+    cf_data = cf.to_dict()
+
     if _want("agent_startup"):
-        sections.append(context_budget.build_startup_section(cb))
+        startup_section = context_budget.build_startup_section(cb)
+        stack_table = context_files.build_stack_table(
+            cf_data, next((table for table in startup_section.tables if table.name == "agent_startup_breakdown"), None)
+        )
+        if stack_table is not None:
+            startup_section.tables.append(stack_table)
+        sections.append(startup_section)
 
     if _want("agents"):
-        sections.append(topology.build_section(tp))
+        agents_section = topology.build_section(tp)
+        # Phase 8a: where the spend goes by cost centre, beside the
+        # per-agent tables it explains.
+        cost_centre_stats = cost_centres.compute(
+            [(bundle.top, bundle.subs) for bundle in corpus.sessions if bundle.top is not None],
+            pricing,
+            recache_th,
+            calibration=calibration,
+            context_stats=cb,
+            agent_files=_agent_file_models(latest_snapshot),
+        )
+        agents_section.tables.extend(cost_centres.build_tables(cost_centre_stats))
+        sections.append(agents_section)
 
     if _want("run_split"):
         sections.append(run_split.build_section(run_split_stats, run_split_th))
@@ -2206,7 +2235,7 @@ def build_report(
         sections=sections,
         recommendations=[],
         diagnostics=diagnostics,
-        context_files=cf.to_dict(),
+        context_files=cf_data,
         parser_notes=parser_notes,
     )
 

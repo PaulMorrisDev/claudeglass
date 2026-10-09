@@ -252,8 +252,15 @@ function modelChoiceRule(facts) {
 function startupContextRule(facts) {
   var main = facts.main;
   var write = main ? priced(main.cache_write_5m_ratio) : "";
+  var read = main ? priced(main.cache_read_ratio) : "";
   if (!write) return "";
-  return "Each subagent starts fresh, and its startup context is written to the cache at " + write + ", once per spawn.";
+  return (
+    "Each subagent starts fresh, and its startup context is written to the cache at " +
+    write +
+    ", once per spawn" +
+    (read ? ", then read back at " + read + " on every later call" : "") +
+    "."
+  );
 }
 
 function toolOutputRule(facts) {

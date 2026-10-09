@@ -18,7 +18,7 @@
 import { clear, cli, el, highlight, listenHighlight, state, storageGet, storageSet } from "./core.js";
 import { cellSortValue, formatCell, fullValue, modelNames, moneyParts, moneyText, moneyUnit, NUMERIC_KINDS, PROJECT_KEYS, projectName, wholeKind } from "./format.js";
 import { actionIndex, fetchJson, findSection, postJson } from "./api.js";
-import { COST_CARDS, pageLink, plainText, viewFor, viewForSection, viewForTable } from "./links.js";
+import { checkLink, COST_CARDS, pageLink, plainText, viewFor, viewForSection, viewForTable } from "./links.js";
 import { button, emptyState, helpButton, motionOK, popoverButton, prose, swatch, tile, tileRow } from "./ui.js";
 import { icon } from "./icons.js";
 
@@ -214,6 +214,25 @@ function proseColumns(columns, rows, labels) {
     });
   });
   return wraps;
+}
+
+// Report columns that name a check (quick_actions.CHECK_IDS), drawn as a
+// link to that check on Actions: "table.column". A blank or "none" cell
+// names no check and reads as plain text (its value label, when it has one).
+var CHECK_LINK_COLUMNS = { "cost_centres_parts.card": true, "cost_centres_advice.hint": true };
+
+function withCheckLinks(table) {
+  return table.columns.map(function (column) {
+    if (!CHECK_LINK_COLUMNS[table.name + "." + column.key]) return column;
+    var labels = table.value_labels || {};
+    return Object.assign({}, column, {
+      render: function (row, value) {
+        var text = typeof value === "string" && Object.prototype.hasOwnProperty.call(labels, value) ? labels[value] : value;
+        if (!value || value === "none") return text || "";
+        return checkLink(value, text);
+      },
+    });
+  });
 }
 
 // Report tables read as a heat grid: agent by quality signal, where the
@@ -1306,7 +1325,7 @@ export function renderTable(table, tableId, currency, options) {
     dataGrid({
       id: tableId,
       caption: table.title || table.name,
-      columns: table.columns,
+      columns: withCheckLinks(table),
       rows: table.rows,
       lead: table.lead_columns || null,
       valueLabels: table.value_labels,

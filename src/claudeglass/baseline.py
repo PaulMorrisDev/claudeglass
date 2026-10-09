@@ -78,7 +78,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import classify, discovery, snapshots
+from . import classify, discovery, recache, snapshots
 from .cache import DigestCache
 from .config import Config
 from .corpus import load_corpus
@@ -458,6 +458,7 @@ def build_baseline(
             "sessions_analysed": 0,
             "mode_mix": {},
             "mode_rules": classify.MODE_RULES,
+            "recache_rules": recache.RULES,
             "dominant_purposes": [],
             "archetype": None,
             "scorecard_overall": None,
@@ -524,6 +525,7 @@ def build_baseline(
         "sessions_analysed": sessions_analysed,
         "mode_mix": mode_mix,
         "mode_rules": classify.MODE_RULES,
+        "recache_rules": recache.RULES,
         "dominant_purposes": purposes,
         "archetype": archetype,
         "scorecard_overall": scorecard[0] if scorecard else None,

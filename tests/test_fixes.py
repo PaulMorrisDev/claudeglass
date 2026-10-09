@@ -155,6 +155,55 @@ def test_scope_ids_get_the_prompt_scope_suffix_and_the_scope_note():
         assert fixes_mod.fix_note(fix) == fixes_mod.SCOPE_NOTE, rec_id
 
 
+def test_tools_list_prompts_for_a_new_agent_file_do_not_say_to_keep_its_tools_the_same():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation, SettingChange
+
+    def prompt(key, value):
+        rec = Recommendation(
+            id="spawn-tools-list" if key == "tools" else "spawn-claude-md",
+            severity="advice",
+            category="settings",
+            title="x",
+            agent_type="statusline-setup",
+            changes=[SettingChange(target="agent", key=key, agent="statusline-setup", value=value, new_agent_file=True)],
+        )
+        (fix,) = fixes_mod.build_fixes(rec)
+        return fix["prompt"]
+
+    tools = prompt("tools", ["Grep", "Read"])
+    assert "same name" in tools and "keep its tools the same" not in tools
+    assert "Claude Code adds StructuredOutput and SubagentHandback" in tools
+    # Any other setting on a new file still carries the original tool list over.
+    assert "keep its tools the same" in prompt("omitClaudeMd", True)
+
+
+def test_the_workflow_script_variant_of_the_tools_list_card_has_its_own_prompt_and_explainer():
+    from claudeglass import fixes as fixes_mod
+    from claudeglass.model import Recommendation
+
+    rec = Recommendation(
+        id="spawn-tools-list",
+        variant="workflow-script",
+        severity="advice",
+        category="workflow",
+        title="Workflow agents are given tools they rarely call",
+        action="In each workflow script that starts agents, pass agentType. tools: Grep, Read.",
+        agent_type="workflow-subagent",
+    )
+    (fix,) = fixes_mod.build_fixes(rec)
+    assert fix["key"] is None and fix["command"] is None
+    assert "agentType" in fix["prompt"]
+    assert "tools: Grep, Read" in fix["prompt"]
+    assert [heading for heading, _ in fix["explainer"]]
+    assert all(text.strip() for _, text in fix["explainer"])
+    # The plain id has no entry of its own: the variant is what selects one.
+    plain = Recommendation(
+        id="spawn-tools-list", severity="advice", category="workflow", title="x", agent_type="workflow-subagent"
+    )
+    assert fixes_mod.build_fixes(plain) == []
+
+
 def test_none_note_ids_get_no_note():
     """limit-pressure, discovery-share and pricing-coverage have a prompt
     but propose nothing a restart would pick back up, so their fix gets

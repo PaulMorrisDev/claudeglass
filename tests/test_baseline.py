@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from claudeglass import baseline, classify
+from claudeglass import baseline, classify, recache
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import Column, ReportModel, Section, Table
@@ -401,6 +401,7 @@ def test_build_baseline_with_no_sessions_is_a_minimal_provisional_record(tmp_pat
     assert record["scorecard_dimensions"] == {}
     assert record["by_mode"] == {}
     assert record["mode_rules"] == classify.MODE_RULES
+    assert record["recache_rules"] == recache.RULES
 
 
 def test_build_baseline_with_sessions_extracts_from_the_real_report(tmp_path):
@@ -445,6 +446,7 @@ def test_build_baseline_by_mode_has_one_bucket_per_distinct_mode(tmp_path):
     assert model is not None
     assert set(record["by_mode"]) == set(record["mode_mix"])
     assert record["mode_rules"] == classify.MODE_RULES
+    assert record["recache_rules"] == recache.RULES
     for mode, count in record["mode_mix"].items():
         assert record["by_mode"][mode]["sessions"] == count
 

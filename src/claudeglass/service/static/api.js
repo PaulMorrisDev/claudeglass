@@ -83,6 +83,7 @@ var LOADING_LABELS = [
   ["/api/claude-md/", "Loading this file"],
   ["/api/claude-md", "Loading your CLAUDE.md files"],
   ["/api/skills", "Loading your skills"],
+  ["/api/project-files", "Loading your project files"],
   ["/api/setup/status", "Checking your setup"],
   ["/api/setup", "Loading your setup"],
   ["/api/health", "Checking the service"],
@@ -362,10 +363,10 @@ var GROUP_TITLES = {
     return n + " agent types are given the skills list but never used a skill";
   },
   "spawn-unused-mcp": function (n) {
-    return n + " agent types are offered MCP tools but never used one";
+    return n + " agent types are offered MCP servers they hardly ever use";
   },
-  "spawn-read-only-tools": function (n) {
-    return n + " agent types only ever searched and read files";
+  "spawn-tools-list": function (n) {
+    return n + " agent types are given tools they rarely call";
   },
   "spawn-task-prompt": function (n) {
     return "The instructions written for " + n + " agent types are long";

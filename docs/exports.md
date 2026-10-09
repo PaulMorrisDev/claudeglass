@@ -322,7 +322,7 @@ python -m claudeglass tuning summary my-figures.json
 
 `tuning export` writes the figures that show how you work with Claude: how
 you prompt, how your replies were tagged, how pieces of work went, what
-agents cost, and what ClaudeGlass itself costs. `tuning summary FILE` reads
+agents cost, where the spend goes, and what ClaudeGlass itself costs. `tuning summary FILE` reads
 a file back in plain words. Use them to take your figures to another
 machine, or to hand them to someone helping you tune your setup. It is not
 the team comparison: for that, see
@@ -357,8 +357,10 @@ written, or figures that failed the checks below.
 ### What the file holds
 
 A header (`kind`, `format`, `tool_version`, `parser_version`,
-`generated_on` and `window_days`) and six blocks. A map lists only the words
-that were counted, so a missing word reads as zero.
+`generated_on` and `window_days`) and eight blocks. A map lists only the words
+that were counted, so a missing word reads as zero. A file made before the
+`cost_centres` block was added has six, one made before `project_files` has
+seven, and both are still valid.
 
 | Block | Holds |
 | --- | --- |
@@ -366,8 +368,10 @@ that were counted, so a missing word reads as zero.
 | `prompting` | Messages you typed, ones you typed while Claude worked, go-aheads, status checks, corrections, adjustments and reminders. Per week: messages and the times each habit showed. Plans approved, rounds sent back and how your feedback to them read. Tool calls that were turned away, by reason |
 | `tags` | Each tag word as written, by who wrote it (Claude, Haiku, or Haiku filling a reply Claude left bare). Words put right by the hook and by the transcript. The shift Claude wrote against corrections, adjustments and rework. Mistakes Claude admitted, by kind and who caught them. Your `/cg-feedback` answers as counts |
 | `pieces` | Pieces of work, how many requests each took, rework by cause, level and week. Sessions by mode, and the unattended night time of those with some. Runs of small requests sent one at a time. Returns after a break and wake-ups by a background task, with the cache tokens they wrote again |
-| `agents` | The result word agents left, by how their last reply answered. Haiku's judge calls, cost and errors. Direct and workflow runs and their cost, by built-in type (everything else counts as `custom`) and model family |
+| `agents` | The result word agents left, by how their last reply answered. Haiku's judge calls, cost and errors. Direct and workflow runs and their cost, by built-in type (everything else counts as `custom`) and model family. When a tools list would help some agent types, the list-price saving over the window, by the same types |
 | `overhead` | How sessions were started. How often each ClaudeGlass hook ran, for the events the transcripts can count, and the median time Claude Code recorded. What capture and coaching notes cost. Hook runs and both costs count from when capture was turned on, if that was inside the window. Usage-limit stops by kind |
+| `cost_centres` | Where the window's spend went: for the main session, direct agents, workflow agents and each session's first call, the list-price amount in each of base read, above-base read, growth write, rewrite, post-compaction and output. A row or cell with no spend is left out. Amounts only: the parts of the base read are not in it |
+| `project_files` | The files that go into agents' runs: the CLAUDE.md files Claude Code loads, the files they import and the files agents read by habit. For each of the 40 that cost most: its extension class (`md`, `txt`, `json`, `config`, `code`, `other`, or `unknown` for a file this machine could not find), how it arrives (`auto`, `import` or `read`), its size now and each recent week's as a bucket (up to 1k, 2k, 5k, 10k and 20k tokens, or over), and, for the main session and each agent type, the share of its runs that had the file. A custom agent's runs count as `custom`. No name, path, hash or cost; `total` counts every file |
 
 Your session ratings and tip-card answers on the dashboard count as they do
 there. They are read from its database without writing to it, and only their

@@ -22,9 +22,10 @@ key path and the check, never the value or the key it found.
 
 The spec tree is the single list of what may appear. A block is a function
 that takes the shared :class:`_Ctx` and returns a dict, registered with
-:func:`_block` beside the spec node that describes it; adding one (the
-cost-centre spend, the project-files block) means adding one registration
-with ``required=False``, so documents made before it still validate.
+:func:`_block` beside the spec node that describes it; adding one means
+adding one registration with ``required=False``, so documents made before
+it still validate. The ``cost_centres`` and ``project_files`` blocks
+(Phase 8a) are such blocks.
 Money keys end in ``_usd`` and hold list-price amounts.
 
 Window: the corpus the caller passes is the window (the callers load it with
@@ -54,7 +55,10 @@ from typing import Any, Callable, Iterable
 from . import PARSER_VERSION, __version__
 from . import capture as capture_mod
 from . import capture_catalogue as catalogue
-from . import classify
+from . import claude_md_review, classify
+from . import context_budget as context_budget_mod
+from . import context_files as context_files_mod
+from . import cost_centres as cost_centres_mod
 from . import discovery
 from . import coaching as coaching_mod
 from . import events as events_mod
@@ -63,8 +67,9 @@ from . import haiku_tags, helptext, hook_health, limits
 from . import pieces as pieces_mod
 from . import prompting as prompting_mod
 from . import ratings as ratings_mod
-from . import recommend
+from . import recache, recommend
 from . import rework as rework_mod
+from .calibration import Calibration
 from .capture_tags import CHANGE_PATTERN, GROUNDED_KEYS
 from .model import EventKind
 
@@ -123,6 +128,16 @@ MODELS = (*catalogue.AGENT_MODEL_TIERS, "other")
 #: Built-in agent types by name; every other type is ``custom``.
 AGENT_TYPES = (*sorted(recommend._BUILTIN_AGENT_TYPES | set(catalogue.SKIP_AGENT_TYPES)), "custom")
 ENTRYPOINTS = (*helptext.TABLE_COPY["by_entrypoint"].value_labels, "other")
+#: What a project file is, by its extension class (``unknown`` when it could
+#: not be found on disk), how it reaches an agent, and its size in tokens.
+FILE_EXTS = (*claude_md_review.EXT_CLASSES, "unknown")
+FILE_SOURCES = context_files_mod.SOURCES
+FILE_SIZES = ("to_1k", "to_2k", "to_5k", "to_10k", "to_20k", "over_20k")
+_FILE_SIZE_BOUNDS = (1000, 2000, 5000, 10000, 20000)
+#: Who has a file in a run: the main session or an agent type.
+FILE_REACHES = ("main", *AGENT_TYPES)
+#: The most files the export keeps.
+FILES_KEPT = 40
 #: The events ClaudeGlass's own hooks run on.
 HOOK_EVENTS = tuple(
     sorted(
@@ -571,6 +586,42 @@ class _Ctx:
     @cached_property
     def transcripts(self) -> list:
         return [result for s in self.sessions for result in (s.top, *s.subs)]
+
+    @cached_property
+    def calibration(self) -> Calibration:
+        """Characters per token, measured on the subagent first calls as the
+        report measures them."""
+        return Calibration.from_calls(
+            call for s in self.sessions for sub in s.subs if (call := context_budget_mod.first_call(sub))
+        )
+
+    @cached_property
+    def startup(self) -> context_budget_mod.ContextBudgetStats:
+        """What each subagent started with, fed as the report feeds it: a
+        spawn that inherited the parent's conversation is told by the
+        parent's context size on the turn that started it."""
+        stats = context_budget_mod.ContextBudgetStats(calibration=self.calibration)
+        for s in self.sessions:
+            spawn_ctx = {
+                tool_use_id: turn.ctx for tr in (s.top, *s.subs) for turn in tr.turns for tool_use_id in turn.tool_use_ids
+            }
+            for sub in s.subs:
+                stats.add_subagent(
+                    sub, spawn_ctx.get(sub.meta.tool_use_id) if sub.meta.tool_use_id else None, self.pricing
+                )
+        return stats
+
+    @cached_property
+    def context_files(self) -> dict:
+        """The files that went into the runs (``context_files``), fed as the
+        report feeds them; empty without a rate card to price them."""
+        if self.pricing is None:
+            return {}
+        stats = context_files_mod.ContextFileStats(calibration=self.calibration)
+        for s in self.sessions:
+            for tr in (s.top, *s.subs):
+                stats.add(tr, self.pricing, is_main=tr is s.top)
+        return stats.to_dict()
 
     @cached_property
     def habits(self) -> habits_mod.Habits:
@@ -1184,6 +1235,7 @@ _RUNS_SIDE = Obj({"runs": Count(), "cost_usd": Num()}, required=("runs", "cost_u
             "runs": Obj({"direct": _RUNS_SIDE, "workflow": _RUNS_SIDE}, required=("direct", "workflow")),
             "types": _count_map(AGENT_TYPES),
             "models": Map(MODELS, _RUNS_SIDE),
+            "startup_diet_usd": Map(AGENT_TYPES, Num()),
         },
         required=("verdicts", "raced", "judge", "runs", "types", "models"),
     ),
@@ -1196,7 +1248,9 @@ def _agents(ctx: _Ctx) -> dict:
     lines of older logs attributed by their reply. ``runs`` split the
     direct ones from a workflow's, with their list-price cost; ``types``
     count them by built-in type (everything else is ``custom``); ``models``
-    by family."""
+    by family. ``startup_diet_usd``, when any agent type would be given a
+    tools list, is what that saves over the window at list prices, by the
+    same types (:func:`_startup_diet_usd`)."""
     shapes: dict[str, Counter] = {shape: Counter() for shape in ANSWER_SHAPES}
     for s in ctx.sessions:
         if not s.replies:
@@ -1233,7 +1287,7 @@ def _agents(ctx: _Ctx) -> dict:
             "cost_usd": _num(seen.usd),
             "errors": _tally(seen.errors, catalogue.JUDGE_ERRORS),
         }
-    return {
+    block = {
         "verdicts": {shape: _tally(counter, VERDICTS) for shape, counter in shapes.items() if counter},
         "raced": judge["agent"]["errors"].get("no_answer", 0),
         "judge": judge,
@@ -1241,6 +1295,28 @@ def _agents(ctx: _Ctx) -> dict:
         "types": _tally(types, AGENT_TYPES),
         "models": {word: {"runs": models[word][0], "cost_usd": _num(models[word][1])} for word in MODELS if word in models},
     }
+    diet = _startup_diet_usd(ctx.startup)
+    if diet:
+        block["startup_diet_usd"] = diet
+    return block
+
+
+def _startup_diet_usd(stats) -> dict[str, float]:
+    """What a tools list is worth over the window, by agent type: the
+    saving of each ``agent_startup_diet`` row the dashboard would give a
+    tools list card for (:func:`recommend.tools_list_offer`), at list
+    prices. Built-in types by name, every other type summed as ``custom``.
+    Amounts only: no agent's name, tool or file is in it."""
+    section = context_budget_mod.build_startup_section(stats)
+    table = next((t for t in section.tables if t.name == "agent_startup_diet"), None)
+    saved: Counter = Counter()
+    for row in table.rows if table is not None else []:
+        values = dict(zip((column.key for column in table.columns), row))
+        usd = values.get("saving_usd")
+        if recommend.tools_list_offer(values["agent_type"], values) is None or not isinstance(usd, (int, float)):
+            continue
+        saved[values["agent_type"] if values["agent_type"] in AGENT_TYPES else "custom"] += usd
+    return {word: _num(saved[word]) for word in AGENT_TYPES if saved.get(word, 0) > 0}
 
 
 # -- overhead ----------------------------------------------------------------------------------
@@ -1345,6 +1421,96 @@ def _overhead(ctx: _Ctx) -> dict:
     }
 
 
+@_block(
+    "cost_centres",
+    Map(
+        cost_centres_mod.CENTRES,
+        Obj({f"{cell}_usd": Num() for cell in cost_centres_mod.CELLS}),
+    ),
+    required=False,
+)
+def _cost_centres(ctx: _Ctx) -> dict:
+    """Where the spend went (the Agents page's cost-centre table): for each
+    cost centre (the main session, direct agents, workflow agents, session
+    starts), its list-price spend in each cell of the matrix (base read,
+    above-base read, growth write, rewrite, post-compaction, output). A
+    cost centre or cell with no spend is left out. Amounts only: no names,
+    and no parts of the base, which are worked out from your own prompts.
+    Without a rate card nothing can be priced, so the block is empty."""
+    if ctx.pricing is None:
+        return {}
+    found = cost_centres_mod.compute(
+        [(s.top, s.subs) for s in ctx.sessions],
+        ctx.pricing,
+        recache.RecacheThresholds.from_config(ctx.config.thresholds),
+    )
+    return {
+        centre: {f"{cell}_usd": _num(usd) for cell, usd in cells.items()}
+        for centre, cells in cost_centres_mod.matrix_usd(found).items()
+    }
+
+
+# -- project files -----------------------------------------------------------------------------
+
+_PROJECT_FILE = Obj(
+    {
+        "ext": Word(FILE_EXTS),
+        "source": Word(FILE_SOURCES),
+        "size": Word(FILE_SIZES),
+        "weekly": Map(Weeks(), Word(FILE_SIZES), limit=context_files_mod.SERIES_WEEKS),
+        "reach": Map(FILE_REACHES, Num()),
+    },
+    required=("ext", "source", "size", "reach"),
+)
+
+
+@_block(
+    "project_files",
+    Obj({"total": Count(), "files": Arr(_PROJECT_FILE, limit=FILES_KEPT)}, required=("total", "files")),
+    required=False,
+)
+def _project_files(ctx: _Ctx) -> dict:
+    """The files that go into agents' runs (the Agents page's project-files
+    table): the CLAUDE.md files Claude Code loads, the files they import and
+    the files agents read by habit. For each of the dearest ``FILES_KEPT``:
+    its extension class, how it arrives (``auto``, ``import`` or ``read``),
+    its size now and each recent week's as a bucket, and, for the main
+    session and each agent type, the share of its runs that had the file.
+    Never a name, a path or a hash: the names the dashboard shows are worked
+    out on disk and only the extension class is kept. A custom agent's runs
+    count as ``custom``. ``total`` counts every file, kept or not."""
+    data = ctx.context_files
+    if not data:
+        return {"total": 0, "files": []}
+    if ctx.config_dir:
+        rows, _local = claude_md_review.project_file_rows(ctx.config_dir, data)
+    else:
+        rows = context_files_mod.project_files(data)
+    newest = context_files_mod.monday_of(data.get("newest") or "")
+    files = []
+    for row in context_files_mod.dearest(rows, FILES_KEPT):
+        series = row["series"]
+        weekly = {}
+        for i, tokens in enumerate(series):
+            week = _iso_week((newest - timedelta(weeks=len(series) - 1 - i)).isoformat()) if newest else ""
+            if week:
+                weekly[week] = _bucket(tokens, _FILE_SIZE_BOUNDS, FILE_SIZES)
+        reach: dict[str, float] = {}
+        for item in row["reach"]:
+            word = item["reach"] if item["reach"] in FILE_REACHES else "custom"
+            reach[word] = max(reach.get(word, 0.0), _num(item["share"]))
+        files.append(
+            {
+                "ext": row["ext"] if row["ext"] in FILE_EXTS else ("md" if row["source"] == "auto" else "unknown"),
+                "source": row["source"],
+                "size": _bucket(row["tokens"], _FILE_SIZE_BOUNDS, FILE_SIZES),
+                "weekly": weekly,
+                "reach": {word: round(reach[word], 2) for word in FILE_REACHES if word in reach},
+            }
+        )
+    return {"total": len(rows), "files": files}
+
+
 # -- the plain-words summary -------------------------------------------------------------------
 
 _VERDICT_LABELS = {"none": "no word"}
@@ -1405,6 +1571,8 @@ def summary_text(doc) -> str:
         (_pieces_lines, "pieces"),
         (_agents_lines, "agents"),
         (_overhead_lines, "overhead"),
+        (_cost_centres_lines, "cost_centres"),
+        (_project_files_lines, "project_files"),
     ):
         if doc.get(name):
             lines += lines_of(doc[name])
@@ -1542,6 +1710,13 @@ def _agents_lines(block: dict) -> list[str]:
         lines.append(f"Agent types: {_top(block['types'])}.")
     if block["models"]:
         lines.append(f"Agent models: {_top({word: row['runs'] for word, row in block['models'].items()})}.")
+    diet = block.get("startup_diet_usd")
+    if diet:
+        ranked = sorted(diet.items(), key=lambda kv: (-kv[1], kv[0]))[:5]
+        lines.append(
+            f"A tools list on your agents would save about {_usd(sum(diet.values()))} over the window at list prices. "
+            f"By type: {_list([f'{_label(word)} {_usd(usd)}' for word, usd in ranked])}."
+        )
     return lines
 
 
@@ -1579,6 +1754,35 @@ def _overhead_lines(block: dict) -> list[str]:
             lines.append(
                 f"Agent runs cut off by a limit: {cut:,}, worth {_usd(sum(row['cut_off_usd'] for row in stops.values()))}."
             )
+    return lines
+
+
+def _cost_centres_lines(block: dict) -> list[str]:
+    totals = {centre: sum(cells.values()) for centre, cells in block.items()}
+    if not totals:
+        return []
+    parts = [
+        f"{cost_centres_mod.CENTRE_LABELS[centre].lower()} {_usd(amount)}"
+        for centre, amount in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+    return [f"Spend by cost centre, at list prices: {_list(parts)}."]
+
+
+def _project_files_lines(block: dict) -> list[str]:
+    files = block["files"]
+    if not files:
+        return []
+    read = sum(1 for item in files if item["source"] == "read")
+    big = sum(1 for item in files if item["size"] in ("to_20k", "over_20k"))
+    wide = sum(1 for item in files if sum(1 for word in item["reach"] if word != "main") >= 3)
+    lines = [f"Project files agents take in: {_n(block['total'], 'file')}, {read:,} of the biggest read by habit."]
+    extras = []
+    if big:
+        extras.append(f"{big:,} over 10,000 tokens")
+    if wide:
+        extras.append(f"{wide:,} used by 3 or more agent types")
+    if extras:
+        lines.append(f"Of those, {_list(extras)}.")
     return lines
 
 

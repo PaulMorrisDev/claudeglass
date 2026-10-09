@@ -9,6 +9,76 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Project files your agents read, and their growth.** Files agents read
+  with the Read tool now count beside the CLAUDE.md files Claude Code loads
+  for them. A read is priced like a loaded file: written once, then read on
+  every later reply until the conversation is summarised. A file read in 3
+  or more runs, or in a fifth of an agent type's runs, is a standing read.
+  Agents gains **What each agent type carries into a run** (system and
+  tools, files loaded for it, files it reads by habit, then its brief) and
+  **Project files your agents read**: each file's size, its change over
+  about 30 days with a weekly sparkline, who reads it, in what share of
+  their runs and with what mean read size, and its cost a month. Names are
+  worked out from your project folders when the page opens, with the same salt as the transcripts, and
+  are never stored; a file this machine cannot find has no name. A new
+  `project-files` check (`GET /api/project-files` for the table) fires when
+  a file read by agents is 5,000 tokens or more and read by 3 or more agent
+  types, or grew 25% or more in 30 days, and gives four prompts to copy:
+  trim what is stale, split the file by who needs it, move rule-like parts
+  into path-scoped `.claude/rules`, and move reference material into a
+  skill. For a file agents read it adds a fifth: put the essential lines in
+  the agent definition and drop the read. The tuning export
+  has a `project_files` block of extension classes, sources, size buckets,
+  weekly size buckets and shares of runs, with no name. An `@import`ed
+  file is assumed to appear as its own entry among the instructions Claude
+  Code attached; no CLAUDE.md on the machine this was built on imports
+  anything, so that is unchecked, and the importing file is read from disk
+  to cover the other case.
+- **Spend by cost centre.** A new table on Agents (and a part of the
+  Overview under "Where do your tokens go?") splits every reply into
+  base read, above-base read, growth write, rewrite, post-compaction and
+  output, for the main session, direct agents, workflow agents and each
+  session's first call (the 1-hour write). The rows add up to your total
+  spend. The base read is split into the parts of the starting prompt, each
+  counted once under the setting that removes it: a part you can change links
+  to its check, and one the harness fixes (the Artifact tool, PowerShell, the
+  system prompt) says no setting is known. In the main session, the MCP
+  servers built into the desktop app are one of those. Rewrite and
+  post-compaction cells are split into the starting prompt written again
+  and the conversation.
+  Another table shows the newest 30 and 7 days and names the check that
+  covers each cell, or says there is no advice. A fourth, for information
+  only, lists agent type by model by who chose it (the call, the agent file
+  or inheritance), with runs, cost and a Sonnet ceiling. The
+  "most of your subagent cost" card now names the largest cost centre, a new
+  `cost-centres` check says where the spend sits, and the tuning export has
+  a `cost_centres` block of list-price amounts.
+- **Cost per subagent run, by how it started.** The table gains Runs and
+  Total, and splits each agent type by background agent, foreground agent
+  (from the parent call's `run_in_background`) and workflow agent, told
+  apart by transcript kind alone. The spawns note gives the median among
+  sessions that spawn, and how many sessions spawn none, in place of a mean
+  that those sessions pulled down. Parser 42 records the launch word on each
+  reply.
+- **A tools list for each agent type.** A new `spawn-tools-list` card gives
+  a `tools:` line for an agent type, built from the tools and MCP servers
+  that at least a tenth of its spawns called, and names the rest as rarely
+  used. It fires at 5,000 tokens or more a start to leave out, and leaves
+  `Explore`, `Plan` and `claude-code-guide` alone. It says Claude Code adds
+  `StructuredOutput` and `SubagentHandback` whatever the list says, and asks
+  for one run before and one after on the same model, because Claude Code's
+  docs do not say whether the skills list and the agent list go with the
+  Skill and Agent tools. A built-in type or an agent with no file gets a
+  prompt to create a same-named file; `general-purpose` is warned that a
+  list limits every spawn that names no type; a workflow agent gets a
+  workflow-script variant that passes `agentType`. It replaces
+  `spawn-read-only-tools`. Two new report tables, `agent_startup_diet` and
+  `agent_startup_servers`, hold what each agent type would shed and what
+  each rarely used MCP server costs per spawn (definitions, deferred names
+  and instructions). The tuning export gains an optional
+  `agents.startup_diet_usd`, list-price amounts by built-in type with
+  `custom` for the rest.
+
 - **Queued messages counted.** A message you typed while Claude was
   working now counts toward the turn it reached, and is never mistaken
   for a new prompt. On the author's machine that added 431 messages
@@ -445,6 +515,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Subagent start savings are priced the way the cache charges.** The
+  tool definitions are the front of a prefix that sibling spawns share, so
+  only the spawns that wrote it pay the write price for it; the skills list,
+  the agent list, CLAUDE.md and the task prompt are written by each spawn,
+  and every part is read again on each later call. The subagent start cards
+  (`spawn-tools-list`, `spawn-claude-md`, `spawn-unused-skills`,
+  `spawn-unused-mcp` and `spawn-task-prompt`) use this price in place of one
+  write plus the later reads for every part, and the report window is
+  stretched to 7 days before a saving is scaled to 30. `spawn-claude-md`
+  takes the What-if table's figure for `omitClaudeMd`, which is the cache
+  write at each spawn or what the Context files section prices carrying
+  CLAUDE.md, if that is more. The custom-agents row is sized from the agent
+  list the first calls recorded (split by agent type) rather than a flat
+  60 tokens each, and the baseline card suggests trimming an agent's
+  `description:` only when your own agents add 1,000 tokens or more.
+- **The MCP and skills cards fit under a tools list.** `spawn-unused-skills`
+  offers the tools list first (leave Skill off it) and keeps
+  `disallowedTools: Skill` as the narrow option. `spawn-unused-mcp` is now
+  per server, fires for a server that at most 2% of the spawns offered it
+  called and that costs at least 5 USD over 30 days, shows its amount as a
+  part of the allowlist saving (never added on top of the tools list card),
+  and marks `mcpServers` as not verified. A server's instructions stay under
+  a `tools:` list, so they are left out of that saving. A built-in agent
+  type's `spawn-cost` card no longer says to shorten the task prompt.
 - **The brief card compares like for like.** Partial and vague asks are
   now set against the median clear ask of the same kind of task and level
   (the whole kind of task when fewer than 3 clear asks share the level),
@@ -958,9 +1052,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   of model as a saving. A stored baseline still compares on what the session
   wrote.
 - **Baseline-bloat looks at what you can change.** The card fires when the
-  skills list, memory files and MCP tools together reach 30,000 tokens, not
-  when the whole first call does: about 43,000 tokens of every first call are
-  Claude Code's own tool definitions, which no setting removes. The spawn-cost
+  skills list, memory files and the MCP tools of servers you can turn off
+  together reach 30,000 tokens, whatever the config's count of servers and
+  plugins, not when the whole first call does: about 43,000 tokens of every
+  first call are Claude Code's own tool definitions, which no setting removes.
+  Servers built into the desktop app are left out of that part. The spawn-cost
   card needs a first call over 40,000 tokens and at least 5,000 tokens of
   tool definitions the agent never or rarely uses, since a large first call
   alone only shows the model's tool set.
@@ -974,9 +1070,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a rebuild that still read the shared start was labelled a changed prefix
   whatever the gap, and a return that read the shared start plus a little
   more was not flagged at all. The cold-return table, the context-files
-  figures and the rebuild breakdown share the corrected labels. The
+  figures, the rebuild breakdown and the cache-lifetime section's expired
+  and changed split share the corrected labels. The
   parser version already moved to 41 for this release, so the stored rows
-  refresh with it.
+  refresh with it. A saved baseline records which rules counted its rebuilds,
+  and the comparison notes when they were older.
 - **MCP cost in the context budget matches the tool search section.**
   The baseline table's MCP column counts the servers the sessions were
   offered, by what you can do about them, with what keeping them cost,
@@ -1041,6 +1139,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   They no longer do.
 - **The step-down tip no longer counts a subagent note.** It said stepping
   down would save "0 per subagent start". It names the session start only.
+- **Compare holds the model fixed for the first-turn write.** `claudeglass
+  compare` reads the mean first-turn cache write on the one model both arms
+  ran on most, since the same start measures differently on each model.
 
 Parsed sessions are re-read once to pick this up.
 

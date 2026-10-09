@@ -101,7 +101,7 @@ SETTING_TEXT: dict[str, tuple[str, str, str]] = {
     "tools": (
         "The only tools this agent may call. Definitions of other tools are not sent to it.",
         "The agent can't use any tool missing from the list, for example to edit a file.",
-        "",
+        "Claude Code adds StructuredOutput and SubagentHandback to every subagent whatever this list says.",
     ),
     "model": (
         "Which Claude model does the work. Smaller models cost less per token.",
@@ -459,10 +459,19 @@ _WORKFLOW_PROMPTS = {
         "of pasting their contents, and leave out background it can look up itself. " + PROMPT_SCOPE
     ),
     "spawn-cost": (
-        "Please check whether {agent} has its own agent file; if it does, propose an omitClaudeMd or "
-        "narrower-skills change to trim what it's sent at startup, and if it's a built-in agent type with no "
-        "file, suggest how to shorten the Agent prompt I write when I spawn it. Show me the change before "
-        "making it."
+        "Please check whether {agent} has its own agent file; if it does, propose a tools list, an "
+        "omitClaudeMd or a narrower-skills change to trim what it's sent at startup. If it's a built-in agent "
+        "type with no file, explain what a same-named agent file with a tools list would leave out, and "
+        "which of its tools my recent runs called. Show me the change before making it."
+    ),
+    # {action} is the card's own tools line and the tools it leaves out.
+    "spawn-tools-list:workflow-script": (
+        "Please find the workflow scripts I start agents from (.claude/workflows in this project, and "
+        "~/.claude/workflows). {action} For each agent() call that names no agentType, say what job it does "
+        "and which tools that job needs, and propose an agent file under .claude/agents that lists only "
+        "those tools in its tools: line, then pass its name as agentType in the call's options. Show me each "
+        "new agent file and each changed call before saving anything. Claude Code will ask my permission "
+        "before editing files under .claude."
     ),
     "effort-mismatch": (
         "Please check the current effortLevel in ~/.claude/settings.json (or the relevant agent's "
@@ -701,12 +710,21 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
         "Move the section back into the shared file (Claude Code shows the diff before saving it).",
     ),
     "spawn-cost": (
-        "The agent's own frontmatter file, if it has one (omitClaudeMd there trims what it's sent at "
-        "spawn); for a built-in agent type with no file, nowhere in the config -- the fix is a shorter "
-        "Agent prompt when you spawn it.",
-        "Trimming what an agent receives at spawn can remove context it actually needed, costing you a "
-        "follow-up message instead.",
-        "Undo the frontmatter change, or go back to briefing it as before.",
+        "The agent's own frontmatter file, if it has one (a tools list or omitClaudeMd there trims what it's "
+        "sent at spawn); for a built-in agent type with no file, a new agent file of the same name, which "
+        "replaces the built-in one.",
+        "Trimming what an agent receives at spawn can remove context or a tool it actually needed, costing "
+        "you a follow-up message instead.",
+        "Undo the frontmatter change, or delete the same-named agent file to get the built-in agent back.",
+    ),
+    "spawn-tools-list:workflow-script": (
+        "Your workflow scripts (.claude/workflows in a project, or ~/.claude/workflows) and the agent files "
+        "under .claude/agents that they name as agentType. Workflow agents have no agent file of their own, "
+        "so a script has to name one.",
+        "An agent can't call a tool missing from its list. The list on this card is the mix across all your "
+        "workflow agents, so a job that needs a tool few jobs use must keep it.",
+        "Take agentType out of the call, or put the tool back in the agent file's list (Claude Code shows the "
+        "change before saving it).",
     ),
     "effort-mismatch": (
         "settings.json's effortLevel (or an agent's own effort frontmatter field), at whichever scope "
@@ -828,6 +846,10 @@ _WORKFLOW_EXPLAINER: dict[str, tuple[str, str, str]] = {
 #: something the agent needs. The prompt asks Claude to do it first; the
 #: command, which only sets the key, carries it as a warning.
 _PREPARE = {
+    "tools": (
+        "First check that {agent}'s prompt never tells it to use a tool that is not on the list, and add "
+        "any that it does."
+    ),
     "omitClaudeMd": (
         "First read the CLAUDE.md files {agent} receives today (~/.claude/CLAUDE.md, the project's CLAUDE.md "
         "and CLAUDE.local.md, and any files they import). List the rules {agent} needs to do its job, show me "
@@ -836,6 +858,10 @@ _PREPARE = {
     ),
 }
 _COMMAND_WARNINGS = {
+    "tools": (
+        "This replaces the agent's whole tools list. Check that its prompt never relies on a tool left off "
+        "the list."
+    ),
     "omitClaudeMd": (
         "This only sets the flag. Move the rules the agent needs into its agent file first, or use the prompt "
         "above, which does both."
@@ -889,6 +915,17 @@ def already_set(key: str, value, now) -> bool:
         return wanted == current
     if isinstance(value, bool) or isinstance(now, bool):
         return value is now
+    if isinstance(value, (list, tuple)) and key in ("tools", "disallowedTools"):
+        # A tools list is a set: the order it is written in, and whether the
+        # file spells it as a list or as "Read, Grep", change nothing.
+        names = (
+            [part.strip() for part in now.split(",") if part.strip()]
+            if isinstance(now, str)
+            else list(now)
+            if isinstance(now, (list, tuple))
+            else None
+        )
+        return names is not None and sorted(map(str, value)) == sorted(map(str, names))
     return value == now
 
 
@@ -1008,11 +1045,12 @@ def prompt_for(rec: Recommendation, change: SettingChange) -> str:
     subject = f"the {change.agent} agent" if change.target == "agent" else "my Claude Code settings"
     prepare = _PREPARE.get(change.key, "").format(agent=change.agent, path=path)
     if change.new_agent_file:
+        # A tools list is the point of the file, so only another key keeps the tools.
+        keep_tools = "" if change.key == "tools" else ", and keep its tools the same"
         ask = (
             f"{change.agent} is a built-in Claude Code agent. Create {path}, a custom agent with the same "
             f"name, that does the same job as the built-in one and sets {change.key}: {_after(change)} in "
-            "its frontmatter. Write its prompt from what you know of the built-in agent, and keep its "
-            "tools the same."
+            f"its frontmatter. Write its prompt from what you know of the built-in agent{keep_tools}."
         )
         if prepare:
             ask += " " + prepare

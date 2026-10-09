@@ -92,8 +92,11 @@ python -m claudeglass check models
 
 Leave the ID out for every check's one-line answer. Give one to see it
 in full: `models`, `effort`, `compaction`, `cache`, `tools`, `skills`,
-`claude-md`, `tool-output`, `hooks`, `tool-search`, `habits`, `failed-calls` (replies lost
-to a failed or blocked tool call), `quality` or `cost-record`
+`claude-md`, `project-files` (project files that agents read and that are
+big, read by many agent types or growing), `tool-output`, `hooks`, `tool-search`,
+`habits`, `failed-calls` (replies lost
+to a failed or blocked tool call), `quality`, `cost-centres` (where the
+spend sits, by cost centre) or `cost-record`
 (whether ClaudeGlass's cost matches Claude Code's own record). The window comes
 from the global `--days`, `--since` and `--until`. Without
 `--all-projects`, a check reads the project you're in, and the settings

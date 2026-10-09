@@ -144,6 +144,11 @@ SIGNATURES: tuple[str, ...] = ("full-expiry", "prefix-invalidated", "limit-expir
 #: the few thousand tokens a re-sent harness block adds to that prefix.
 SESSION_READ_MARGIN: int = 3_000
 
+#: The version of the rules ``detect`` flags and labels rebuilds by,
+#: stored with a baseline (``recache_rules``) so a later comparison can
+#: tell a share counted by older rules. 2: the Phase 8 order.
+RULES = 2
+
 #: How long a cache entry lasts, by the TTL the call wrote it at.
 _TTL_5M_S: float = 300.0
 _TTL_1H_S: float = 3600.0
@@ -190,10 +195,11 @@ class RecacheThresholds:
     #: however low its cache-read ratio — a small early-conversation turn
     #: re-writing a small prefix isn't worth reporting on.
     ctx_floor: int = 20_000
-    #: A turn is flagged when ``cache_read_tokens < cr_ratio * ctx``.
+    #: A turn is flagged when it read under this share of its whole context,
+    #: or of the part beyond ``cr0`` (see the module docstring).
     cr_ratio: float = 0.2
-    #: A flagged turn is signature "full-expiry" when
-    #: ``cache_read_tokens < full_expiry_cr``, else "prefix-invalidated".
+    #: A flagged turn that read under this many tokens is "full-expiry"
+    #: outright; otherwise the signature follows the order in the module docstring.
     full_expiry_cr: int = 2_000
     #: The context-size threshold for the huge-context cache-read-volume
     #: table (plan: "36.5% of recent top-level turns had ctx > 200k" —

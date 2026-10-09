@@ -139,7 +139,8 @@
       "haiku": {"runs": 10, "cost_usd": 0.8},
       "sonnet": {"runs": 15, "cost_usd": 9.4},
       "opus": {"runs": 5, "cost_usd": 10.55}
-    }
+    },
+    "startup_diet_usd": {"general-purpose": 1.25, "workflow-subagent": 3.5, "custom": 0.75}
   },
   "overhead": {
     "entrypoints": {"cli": 40, "claude-desktop": 12, "sdk-cli": 2},
@@ -165,5 +166,43 @@
         "cut_off_usd": 0.0
       }
     }
+  },
+  "cost_centres": {
+    "main": {
+      "base_read_usd": 6.0,
+      "above_read_usd": 20.0,
+      "growth_write_usd": 4.0,
+      "rewrite_usd": 1.0,
+      "post_compaction_usd": 0.5,
+      "output_usd": 3.0
+    },
+    "direct": {
+      "base_read_usd": 2.0,
+      "above_read_usd": 3.0,
+      "growth_write_usd": 1.0,
+      "output_usd": 1.0
+    },
+    "workflow": {"above_read_usd": 1.25, "output_usd": 0.5},
+    "start": {"growth_write_usd": 1.5}
+  },
+  "project_files": {
+    "total": 7,
+    "files": [
+      {
+        "ext": "md",
+        "source": "read",
+        "size": "to_10k",
+        "weekly": {"2026-W29": "to_5k", "2026-W30": "to_5k", "2026-W31": "to_10k"},
+        "reach": {"main": 0.4, "Explore": 0.6, "Plan": 0.5, "general-purpose": 1.0}
+      },
+      {"ext": "md", "source": "auto", "size": "to_2k", "reach": {"main": 1.0, "Explore": 1.0}},
+      {
+        "ext": "code",
+        "source": "read",
+        "size": "over_20k",
+        "weekly": {"2026-W30": "to_20k", "2026-W31": "over_20k"},
+        "reach": {"main": 0.3, "custom": 0.25}
+      }
+    ]
   }
 }

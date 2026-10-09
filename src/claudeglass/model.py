@@ -749,6 +749,18 @@ memory and dropped:
 - ``Turn.reply_asked`` reads the reply's closing sentences instead of any
   question mark in its last 300 characters (see above).
 
+Cost-centres addition (``PARSER_VERSION`` 42). How each agent call ran,
+for the cost-per-spawn split into background, foreground and workflow. A
+workflow agent's ``.meta.json`` always says foreground (relative to its
+script), so it is never read for this:
+
+- ``Turn.agent_launches: dict[str, str] = {}`` -- ``Agent``/``Task``
+  tool_use id -> ``"background"`` when the call set ``run_in_background``
+  or its result was an async launch message, else ``"foreground"``.
+  ``topology`` joins a direct agent to its parent call by
+  ``TranscriptMeta.tool_use_id``; one with no such call is counted as
+  foreground, the way a call with no flag runs.
+
 Workflow-agents addition (``PARSER_VERSION`` 37). A workflow agent's
 ``.meta.json`` has no ``toolUseId`` or ``parentAgentId`` (none of 682 did),
 so nothing tied it to the message that started its run. Ids only:
@@ -1355,6 +1367,11 @@ class Turn:
     #: only. A resumed run keeps its ``runId``, so one id can have several
     #: calls.
     workflow_runs: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: Cost-centres addition (``PARSER_VERSION`` 42): ``Agent``/``Task``
+    #: tool_use id -> ``"background"`` or ``"foreground"``, from the call's
+    #: ``run_in_background`` and then from a result that says it went to
+    #: the background. A word per call, never the call.
+    agent_launches: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(slots=True)

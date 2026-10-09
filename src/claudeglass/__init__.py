@@ -390,7 +390,13 @@ __version__ = "0.14.0"
 #: that arrive before its second call as startup too. A pre-41 digest
 #: has no per-tool sizes, and its subagent startup shows tool
 #: definitions as 0.
-PARSER_VERSION = 41
+#:
+#: In 42, a turn also records how each agent call ran (``agent_launches``:
+#: tool_use id to ``"background"`` or ``"foreground"``, from the call's
+#: ``run_in_background`` or an async launch result). A pre-42 digest has
+#: none, and its agent runs count as foreground in the cost-per-spawn
+#: split.
+PARSER_VERSION = 42
 
 #: Bump when the model.py contract changes in a way that invalidates the
 #: on-disk digest cache (see model.py's module docstring for the contract

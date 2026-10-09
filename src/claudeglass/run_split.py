@@ -534,7 +534,7 @@ def build_section(stats: RunSplitStats, thresholds: RunSplitThresholds | None = 
         window = f"{low:,}" if low == high else f"{low:,} to {high:,}"
         many = stats.older_runs != 1
         notes.append(
-            f"{stats.older_runs} run{'s' if many else ''} (${stats.older_usd:,.2f}) grew past the auto-compact "
+            f"{stats.older_runs} run{'s' if many else ''} grew past the auto-compact "
             f"window now in force ({window} tokens), so {'they' if many else 'it'} ran under an older setting. "
             f"{'They are' if many else 'It is'} left out of every figure here."
         )

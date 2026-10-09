@@ -209,7 +209,7 @@ def test_compare_overview_sample_ok_no_below_min_sessions(tmp_path):
     overview = _table(section, "compare_overview")
     for row in overview.rows:
         assert row[5] == "no"
-    assert "Arm A=1 session(s), Arm B=1 session(s)" in overview.notes[-1]
+    assert any("Arm A=1 session(s), Arm B=1 session(s)" in note for note in overview.notes)
 
 
 def test_compare_overview_means_are_unaffected_by_arm_size(tmp_path):
@@ -274,6 +274,45 @@ def test_compare_overview_means_are_unaffected_by_arm_size(tmp_path):
     ):
         row = rows_by_metric[label]
         assert row[4] == "+100.0%", f"{label}: expected the totals to still show arm-size-driven +100%, got {row[4]!r}"
+
+
+def _first_turn_sessions(first_calls):
+    """One session per ``(first-turn write, model family)`` pair."""
+    return [
+        compare_mod._SessionMetrics(
+            session_id=f"s{i}",
+            slug="p",
+            first_ts=None,
+            span_s=0.0,
+            mode="mixed",
+            purpose="general-dev",
+            profile_id=None,
+            first_turn_write=write,
+            first_turn_family=family,
+        )
+        for i, (write, family) in enumerate(first_calls)
+    ]
+
+
+def test_mean_first_turn_write_is_compared_on_the_model_both_arms_ran():
+    """The same start measures differently on each model, so an arm with
+    more Haiku first calls must not read smaller for that alone."""
+    arm_a = _first_turn_sessions([(10_000, "claude-sonnet-5"), (50_000, "claude-haiku-4-5")])
+    arm_b = _first_turn_sessions([(12_000, "claude-sonnet-5")])
+    assert compare_mod._held_family(arm_a, arm_b) == "claude-sonnet-5"
+    assert compare_mod._aggregate(arm_a, "claude-sonnet-5")["mean_first_turn_write"] == 10_000
+    table = compare_mod._build_overview_table(arm_a, arm_b, 1, "USD")
+    assert any("claude-sonnet-5" in note for note in table.notes)
+    row = next(r for r in table.rows if r[0] == "Mean first-turn cache-creation write")
+    assert row[1] == "10,000" and row[2] == "12,000"
+
+    no_shared_a = _first_turn_sessions([(10_000, "claude-sonnet-5")])
+    no_shared_b = _first_turn_sessions([(9_000, "claude-haiku-4-5")])
+    assert compare_mod._held_family(no_shared_a, no_shared_b) is None
+    table = compare_mod._build_overview_table(no_shared_a, no_shared_b, 1, "USD")
+    row = next(r for r in table.rows if r[0] == "Mean first-turn cache-creation write")
+    assert row[3] == "-"
+    assert any("not compared" in note for note in table.notes)
 
 
 def test_compare_window_arm_excludes_out_of_range_session(tmp_path):

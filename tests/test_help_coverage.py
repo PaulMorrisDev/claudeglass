@@ -721,3 +721,68 @@ def test_the_status_line_table_help_says_the_desktop_app_runs_no_status_line():
     help_ = helptext.TABLE_COPY["context_budget_statusline"].help
     assert "The desktop app doesn't run status lines" in help_.read
     assert "stays empty" not in help_.read or "install the status line logger" in help_.read
+
+
+def test_the_copy_the_project_files_check_and_the_agent_stack_add_keeps_to_the_help_rules(tmp_path):
+    """The check's question and why, what it says in each of its answers,
+    the table it draws, the five prompts to copy and their explainers for a
+    file read by agents and for one a CLAUDE.md pulls in, the starting-context
+    stack's notes and column help, and the lines the tuning summary adds."""
+    from claudeglass import claude_md_review, context_files, tuning
+    from claudeglass import quick_actions as qa
+    from claudeglass.model import Section
+    from test_context_files import _startup
+    from test_quick_actions import UNITS, _pf_data, _pf_hash, _pf_read, _pf_run, _pf_setup
+    from test_tuning import _sample
+
+    claude_md_review._NAMES.clear()
+    ctx, project, salt = _pf_setup(tmp_path)
+    context = project / "docs" / "context.md"
+    check = next(c for c in qa.CHECKS if c.id == "project-files")
+    strings = [("question", check.question), ("why", check.why)]
+
+    found = _pf_run(ctx, _pf_data(_pf_read(_pf_hash(context, salt))))
+    grown = _pf_run(
+        ctx,
+        _pf_data(_pf_read(_pf_hash(context, salt), tokens=3000, types=("Explore",), weekly={"2026-08-31": 2000, "2026-09-28": 3000})),
+    )
+    wide = _pf_run(ctx, _pf_data(_pf_read(_pf_hash(context, salt), weekly={"2026-09-28": 9000})))
+    gone = _pf_run(ctx, _pf_data(_pf_read("0123456789abcdef")))
+    quiet = _pf_run(ctx, _pf_data(_pf_read("0123456789abcdef", tokens=900, weekly={"2026-09-28": 900})))
+    none = _pf_run(ctx, {})
+    assert (found["status"], gone["status"], quiet["status"], none["status"]) == ("act", "ok", "ok", "no_data")
+    for name, result in (("found", found), ("grown", grown), ("wide", wide), ("gone", gone), ("quiet", quiet), ("none", none)):
+        strings.append((f"{name} summary", result["summary"]))
+        if result["table"]:
+            strings += [(f"{name} column", column["label"]) for column in result["table"]["columns"]]
+            strings += [(f"{name} cell", cell) for row in result["table"]["rows"] for cell in row if isinstance(cell, str)]
+
+    row = found["table"]["rows"][0]
+    reads = {
+        "name": "docs/context.md",
+        "project": "repo",
+        "tokens": 9000,
+        "change_pct": 60.0,
+        "cost_month_usd": 12.0,
+        "reach": [{"reach": name, "runs": 9, "share": 0.9, "standing": True} for name in ("Explore", "Plan", "Review")],
+    }
+    for source in ("read", "import"):
+        for fix in claude_md_review.project_file_fixes({**reads, "source": source}, UNITS):
+            strings.append((f"{source} title", fix["title"]))
+            strings += [(f"{source} {heading}", text) for heading, text in fix["explainer"]]
+            assert fix["prompt"].endswith(claude_md_review._PROMPT_TAIL)
+            strings.append((f"{source} prompt", fix["prompt"].removesuffix(" " + claude_md_review._PROMPT_TAIL)))
+    strings.append(("tail", claude_md_review._PROMPT_TAIL.removesuffix(" " + claude_md_review.PROMPT_RESTART)))
+
+    table = context_files.build_stack_table({"standing": {}}, _startup(("Explore", 8, 20000.0, 3000.0, 500.0)))
+    strings += [("stack note", note) for note in table.notes]
+    section = Section(key="agent_startup", title="Agent startup", tables=[table])
+    helptext.annotate_section(section)
+    strings += [(f"stack help {name}", text) for name, text in (("shows", table.help.shows), ("read", table.help.read), ("act", table.help.act))]
+    strings += [(f"stack column {column.key}", column.help) for column in table.columns if column.help]
+
+    strings += [("tuning summary", line) for line in tuning.summary_text(_sample()).splitlines() if "roject file" in line or line.startswith("Of those")]
+    assert row[0] == "docs/context.md" and len(strings) > 60
+    for where, text in strings:
+        _plain(text, where)
+    claude_md_review._NAMES.clear()

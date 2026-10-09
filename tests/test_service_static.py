@@ -1242,6 +1242,52 @@ def _seed_store() -> Store:
     return store
 
 
+def _canned_project_files(units: Units, period: str) -> dict:
+    """``/api/project-files`` for a file agents read in 4 agent types'
+    runs and one that is not on this machine, made by the code the route
+    calls from the shape ``context_files.to_dict`` has."""
+    from claudeglass import claude_md_review, context_files
+
+    def read(file_hash: str, tokens: int, reach: dict, weekly: dict) -> dict:
+        return {
+            "hash": file_hash, "source": "read", "tokens": tokens, "reach": reach, "reads": dict(reach),
+            "read_tokens": {name: tokens * runs for name, runs in reach.items()}, "cost_usd": 4.5,
+            "cost_by_reach": {}, "weekly": weekly, "last_seen": "2026-09-14T10:00:00+00:00",
+        }
+
+    data = {
+        "transcripts": {"main": 10, "Explore": 10, "Plan": 10, "general-purpose": 10},
+        "files": [],
+        "reads": [
+            read("a" * 16, 9000, {"main": 4, "Explore": 6, "Plan": 5, "general-purpose": 10},
+                 {"2026-08-17": 4000, "2026-08-24": 6000, "2026-09-07": 9000}),
+            read("b" * 16, 1200, {"Explore": 5}, {"2026-09-14": 1200}),
+        ],
+        "standing": {},
+        "window_days": 30,
+        "newest": "2026-09-14",
+    }
+    names = {"a" * 16: {"name": "docs/context.md", "ext": "md", "project": "demo"}}
+    rows = context_files.project_files(data, {"names": names})
+    flagged = {row["hash"]: row["reasons"] for row in context_files.check_rows(rows)}
+    return {
+        "period": period,
+        "window_days": 30,
+        "transcripts": data["transcripts"],
+        "total": len(rows),
+        "named": sum(1 for row in rows if row["name"]),
+        "truncated": False,
+        "files": [
+            {
+                **row,
+                "reasons": flagged.get(row["hash"], []),
+                "fixes": claude_md_review.project_file_fixes(row, units) if row["hash"] in flagged else [],
+            }
+            for row in rows
+        ],
+    }
+
+
 def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
     """Build the canned ``/api/*`` payloads: store-backed routes from a
     seeded ``Store``, report-backed routes from a synthetic JSONL corpus
@@ -1336,6 +1382,7 @@ def _build_fixture_data(tmp_path: Path) -> tuple[dict, dict]:
     canned["/api/profile-goals"] = {"goals": goals.goals_list()}
     canned["/api/skills"] = skills_review.review(config_dir, report.context_files or {}, units, period, projects=[])
     canned["/api/claude-md"] = {"period": period, "transcripts": 0, "files": []}
+    canned["/api/project-files"] = _canned_project_files(units, period)
     canned["/api/impact"] = {"changes": [], "caveat": "", "min_sessions": 3, "lookback_days": 30}
     canned["/api/backtest"] = {"predictions": [], "judged_just_now": 0, "verdicts": list(backtest.VERDICTS)}
     canned["/api/setup"] = {
@@ -2609,6 +2656,48 @@ def test_the_context_page_asks_for_the_pickers_project_on_every_list() -> None:
     assert 'loadInto(files, withWindow("/api/claude-md"), renderClaudeMdList' in context
     assert 'loadInto(skills, withWindow("/api/skills"), renderSkills' in context
     assert 'withWindow("/api/claude-md/" + encodeURIComponent(file.id))' in _function_source(agents, "openClaudeMd")
+
+
+def test_the_agents_page_lists_the_project_files_and_the_overview_check_points_at_them() -> None:
+    """Agents > Subagents ends with the project-files table, loaded for the
+    picked window and project; its section carries the table name the
+    check's link scrolls to, and every amount goes through the money
+    formatters."""
+    agents = _static_text("page-agents.js")
+    page = _function_source(agents, "renderAgents")
+    assert 'loadInto(files, withWindow("/api/project-files"), renderProjectFiles' in page
+    assert 'var PROJECT_FILES_NAME = "project_files";' in agents
+    assert '"data-table-name": PROJECT_FILES_NAME' in _function_source(agents, "projectFilesSection")
+    links = _static_text("links.js")
+    match = re.search(r'export var PROJECT_FILES_TABLE = "([a-z_.]+)";', links)
+    assert match and match.group(1) == "agents.project_files"
+    assert 'pageLink("agents/subagents", text || "See every project file", { t: PROJECT_FILES_TABLE })' in links
+    grid = _function_source(agents, "renderProjectFiles")
+    assert '{ key: "cost_month_usd", label: "Cost a month", kind: "money" }' in grid
+    assert "sparkline(row.series" in grid
+    assert "moneyText(row.cost_month_usd" in _function_source(agents, "openProjectFile")
+    assert "renderFixList(row.fixes, body)" in _function_source(agents, "openProjectFile")
+    names = dict(
+        re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*"([^"]*)"', _declaration_source(_static_text("page-overview.js"), "CHECK_NAMES"), re.MULTILINE)
+    )
+    assert names["project-files"] == "Project files agents read"
+    assert 'projectFilesLink("See the files")' in _function_source(_static_text("page-overview.js"), "checklistRow")
+    assert '["/api/project-files", "Loading your project files"]' in _static_text("api.js")
+
+
+def test_the_project_files_copy_keeps_to_the_dashboards_copy_rules() -> None:
+    """The words the table and its drawer show follow the house rules the
+    help text is held to: no internal names, no filler, short sentences."""
+    agents = _static_text("page-agents.js")
+    section = _function_source(agents, "projectFilesSection")
+    texts = re.findall(r'"((?:[^"\\]|\\.)*)"', section + _function_source(agents, "renderProjectFiles"))
+    sentences = [t for t in texts if " " in t and t[:1].isupper()]
+    assert sentences, "found no copy to check"
+    for text in sentences:
+        assert not re.search(r"\b(just|simply)\b", text, re.I), text
+        assert " -- " not in text, text
+        for sentence in re.split(r"(?<=[.?!])\s+", text):
+            assert len(sentence.split()) <= 25, sentence
 
 
 def test_the_compactions_list_says_it_covers_whole_sessions() -> None:
@@ -3972,3 +4061,65 @@ def test_grid_words_an_empty_status_line_table_for_desktop_sessions() -> None:
     empty = _function_source(grid_js, "emptyText")
     assert 'EMPTY_TEXT[table.name + ":" + table.empty_variant]' in empty
     assert empty.index("empty_variant") < empty.index("EMPTY_TEXT[table.name] ||")
+
+
+# -- cost centres (Phase 8a) ------------------------------------------------------------------------
+
+
+def test_the_cost_centre_table_is_reachable_from_the_overview_and_names_a_real_table() -> None:
+    """The Overview's "By cost centre" part links to the cost-centre table on
+    Agents and to the check that covers each controllable part; the link
+    target is the table the report really builds."""
+    from claudeglass import cost_centres
+
+    links = _static_text("links.js")
+    match = re.search(r'export var COST_CENTRES_TABLE = "([a-z_.]+)";', links)
+    assert match and match.group(1) == f"{cost_centres.SECTION}.{cost_centres.CENTRES_TABLE}"
+    assert 'pageLink("agents/subagents", text || "See every cost centre", { t: COST_CENTRES_TABLE })' in links
+    assert 'pageLink("actions/checks", text, { id: id })' in links
+    overview = _static_text("page-overview.js")
+    assert "costCentrePart(report)" in overview and '"By cost centre"' in overview
+    assert "costCentresLink(" in overview and "checkLink(lever.card" in overview
+    names = dict(re.findall(r'^\s*"?([a-z-]+)"?\s*:\s*"([^"]*)"', _declaration_source(overview, "CHECK_NAMES"), re.MULTILINE))
+    assert names["cost-centres"] == "Where the spend goes"
+    order = list(names)
+    assert order.index("cost-centres") == order.index("cost-record") - 1
+
+
+def test_the_columns_that_name_a_check_are_the_report_tables_own() -> None:
+    """grid.js draws these columns as links to a check; each is a column of
+    a table cost_centres builds, and holds check ids."""
+    from claudeglass import cost_centres, quick_actions
+
+    source = _declaration_source(_static_text("grid.js"), "CHECK_LINK_COLUMNS")
+    named = set(re.findall(r'"([a-z_]+\.[a-z_]+)"\s*:\s*true', source))
+    assert named == {"cost_centres_parts.card", "cost_centres_advice.hint"}
+    cc = cost_centres.CostCentres(sessions=1)
+    cc.matrix["window"] = {("main", "rewrite"): 1.0, ("main", "base_read"): 2.0}
+    cc.parts = {("main", "base_read", "claude_md"): 2.0}
+    tables = {table.name: table for table in cost_centres.build_tables(cc)}
+    for ref in named:
+        table_name, column = ref.split(".")
+        keys = [c.key for c in tables[table_name].columns]
+        assert column in keys, ref
+        values = {row[keys.index(column)] for row in tables[table_name].rows} - {"", cost_centres.NO_ADVICE}
+        assert values and values <= set(quick_actions.CHECK_IDS), (ref, values)
+
+
+def test_the_cost_centre_tables_are_in_the_built_report_and_open_on_the_agents_page(tmp_path) -> None:
+    from claudeglass import cost_centres
+
+    project = tmp_path / "projects" / "proj-a"
+    project.mkdir(parents=True)
+    write_jsonl(project / "s1.jsonl", [turn_line(message_id="m1", input_tokens=10, output_tokens=20)])
+    report = build_report(
+        load_corpus([project]), load_pricing(), Config(tz="UTC"), projects=("proj-a",), window="last 7 days"
+    )
+    section = next(s for s in report.sections if s.key == cost_centres.SECTION)
+    names = [t.name for t in section.tables]
+    for name in (cost_centres.CENTRES_TABLE, cost_centres.PARTS_TABLE, cost_centres.ADVICE_TABLE, cost_centres.MODELS_TABLE):
+        assert name in names
+    assert helptext.PLACEMENT[cost_centres.CENTRES_TABLE] == "keep"
+    assert f"{cost_centres.SECTION}.{cost_centres.CENTRES_TABLE}" in {
+        f"{s.key}.{t.name}" for s in report.sections for t in s.tables
+    }

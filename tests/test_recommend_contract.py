@@ -698,7 +698,7 @@ def _build_every_rule_fixture() -> "report.ReportModel":
                     Column(key="mean_baseline", label="Mean first call"),
                     Column(key="skills_listing_est", label="Skills listing"),
                     Column(key="memory_files_est", label="Memory files"),
-                    Column(key="mcp_tools_tokens", label="MCP tools"),
+                    Column(key="mcp_removable_tokens", label="MCP tools you can turn off"),
                     Column(key="controllable_est", label="What you can change"),
                 ],
                 rows=[["proj", 95_000, 7_000, 7_000, 21_000, 35_000]],

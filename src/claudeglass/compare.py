@@ -80,12 +80,14 @@ module docstrings for the same pattern):
 from __future__ import annotations
 
 import statistics
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from . import classify, discovery, recache
 from . import snapshots as snapshots_mod
+from .calibration import model_family
 from .config import Config
 from .corpus import Corpus, SessionBundle
 from .model import Column, EventKind, Section, Table, TranscriptResult, Turn
@@ -253,6 +255,9 @@ class _SessionMetrics:
     recache_cc: int = 0
     compactions: int = 0
     first_turn_write: int | None = None
+    #: The model family of that first call: the same start measures
+    #: differently on each model, so the arms are compared on one.
+    first_turn_family: str = ""
 
 
 def _collect_session_metrics(
@@ -309,6 +314,7 @@ def _collect_session_metrics(
         first_priced = _priced_turns(bundle.top)
         if first_priced:
             sm.first_turn_write = first_priced[0].cache_creation_tokens
+            sm.first_turn_family = model_family(first_priced[0].model)
 
         for tr in _transcripts_of(bundle):
             flagged = recache.detect(tr.turns, recache_th)
@@ -395,7 +401,21 @@ _METRIC_SPECS: tuple[tuple[str, str, str], ...] = (
 )
 
 
-def _aggregate(group: list[_SessionMetrics]) -> dict[str, float | None]:
+def _held_family(group_a: list[_SessionMetrics], group_b: list[_SessionMetrics]) -> str | None:
+    """The model family the first-turn write is compared on: the one both
+    arms' first calls ran on most, ties to the first by name. ``None`` when
+    the arms share none (mirrors ``impact._held_model``)."""
+    counts = [
+        Counter(m.first_turn_family for m in group if m.first_turn_write is not None and m.first_turn_family)
+        for group in (group_a, group_b)
+    ]
+    shared = set(counts[0]) & set(counts[1])
+    if not shared:
+        return None
+    return max(sorted(shared), key=lambda family: counts[0][family] + counts[1][family])
+
+
+def _aggregate(group: list[_SessionMetrics], family: str | None = None) -> dict[str, float | None]:
     sessions = len(group)
     priced_turns = sum(m.priced_turns for m in group)
     cost = sum(m.cost for m in group)
@@ -410,7 +430,11 @@ def _aggregate(group: list[_SessionMetrics]) -> dict[str, float | None]:
     compactions_per_session = (compactions_total / sessions) if sessions > 0 else None
     spans = [m.span_s for m in group]
     median_span_s = statistics.median(spans) if spans else None
-    writes = [m.first_turn_write for m in group if m.first_turn_write is not None]
+    writes = [
+        m.first_turn_write
+        for m in group
+        if m.first_turn_write is not None and (family is None or m.first_turn_family == family)
+    ]
     mean_first_turn_write = statistics.mean(writes) if writes else None
     # S4: per-session means so that a headline delta reflects a behavioural
     # difference rather than one arm simply having more sessions than the
@@ -459,8 +483,11 @@ def _fmt_metric_row(label: str, kind: str, value_a, value_b, currency: str) -> l
 def _build_overview_table(
     group_a: list[_SessionMetrics], group_b: list[_SessionMetrics], min_sessions: int, currency: str
 ) -> Table:
-    agg_a = _aggregate(group_a)
-    agg_b = _aggregate(group_b)
+    family = _held_family(group_a, group_b)
+    agg_a = _aggregate(group_a, family)
+    agg_b = _aggregate(group_b, family)
+    if family is None:
+        agg_a["mean_first_turn_write"] = agg_b["mean_first_turn_write"] = None
     sample_ok = "yes" if (len(group_a) >= min_sessions and len(group_b) >= min_sessions) else "no"
     rows = []
     for field_name, label, kind in _METRIC_SPECS:
@@ -477,6 +504,13 @@ def _build_overview_table(
         f"Sample size: Arm A={len(group_a)} session(s), Arm B={len(group_b)} session(s); "
         f"minimum required per arm={min_sessions}."
     ]
+    if family:
+        notes.append(
+            f"Mean first-turn write compares sessions on {family} only: "
+            "the same start measures differently on each model."
+        )
+    else:
+        notes.append("No model ran first calls in both arms, so mean first-turn write is not compared.")
     return Table(name="compare_overview", title="Overview: Arm A vs Arm B", columns=columns, rows=rows, notes=notes)
 
 

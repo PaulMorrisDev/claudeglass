@@ -614,7 +614,21 @@ that order, each as a heading with a one-line answer beside it.
    reading gives that too and says why. A day opens Spend › Sessions and
    a change Your changes. Under it, spend **by project** (the usage
    section's `by_project` table) and **by model** (the daily rows
-   summed), side by side, each left out when it has one row.
+   summed), side by side, each left out when it has one row. Then, across
+   the page's width, **by cost centre** (the agents section's
+   `cost_centres` table, left out when it has no rows): the main session,
+   direct agents, workflow agents and session starts against base read,
+   above-base read, growth write, rewrite, post-compaction and output. Under
+   it, the controllable parts of the base read that cost the most (from
+   `cost_centres_parts`), each with a link to the check that covers it
+   (`checkLink`, to Actions › Checks), and **See every cost centre**
+   (`costCentresLink`: Agents › Subagents, scrolled to the table as an
+   evidence link's table is). In the table on that page, the `card` column
+   of the parts table and the `hint` column of the advice table are links
+   to a check too (`withCheckLinks` in grid.js); a harness-fixed part says
+   "no setting known" and a cell no check covers says "No advice". The
+   Overview's checklist has the matching `cost-centres` row, which is
+   information and never "worth a look".
 5. **Scores, totals, and how amounts are counted** (folded): the billing
    mode and why (`report.meta`), the scorecard's five areas as a table
    (`scorecard.dimensions`, which a recommendation's evidence can point
@@ -935,10 +949,27 @@ as the CLI's `ttl` command shows them.
 **Answers:** "What do my subagents cost, what are they given, and should long runs be split?"
 
 The `agent_startup`, `agents` and `run_split` sections. `agent_startup`
-draws chart 8. Then cost per run, skills and MCP cost, effort, and what
-each agent never used. `run_split` ([run splits](run-split.md)) gives
-each agent type's best split interval and what splitting its long runs
-there would save.
+draws chart 8. Beside it, **What each agent type carries into a run**
+(`agent_startup_stack`) stacks, per agent type, the system prompt and tools,
+the files loaded for it, the files it reads by habit and the brief it is
+given. Then cost per run, skills and MCP cost, effort, and what each agent
+never used. `run_split` ([run splits](run-split.md)) gives each agent type's
+best split interval and what splitting its long runs there would save.
+
+Last comes **Project files your agents read** (`/api/project-files`): one
+row per file with how it arrives (loaded by Claude Code, imported by a
+CLAUDE.md, or read by agents), its size now, its change over about 30 days
+with a weekly sparkline, who reads it and in what share of their runs, and
+what it costs a month. A row opens a drawer with the shares for every
+reach, the mean size of one read by each, and, for a file the Overview
+check flags, prompts to copy: trim what is stale, split the file by who
+needs it, move rule-like parts into path-scoped `.claude/rules`, move
+reference material into a skill, and, for a file agents read, put the
+essential lines in the agent definition and drop the read. Names are
+worked out from your project folders when the page opens and are never
+stored; a file this machine cannot find shows as not found and has no
+prompts. The section carries the table name `project_files`, so the
+Overview check's link (`projectFilesLink`) scrolls to it and highlights it.
 
 ### Agents & context › Quality
 

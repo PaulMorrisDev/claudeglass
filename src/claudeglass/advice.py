@@ -46,7 +46,8 @@ from dataclasses import dataclass
 from datetime import date
 from typing import Callable
 
-from . import known_savers, model_gate, model_swap, whatif
+from . import cost_centres, known_savers, model_gate, model_swap, whatif
+from .context_budget import DIET_EXCLUDED
 from .fixes import already_set
 from .limits import BURST_AGENTS, SPEND_SOURCES, burst_stands_out
 from .model import Recommendation, ReportModel, SettingChange
@@ -63,6 +64,11 @@ from .units import NO_LIMIT_SHARE_HINT, Units
 #: Agent types Claude Code starts itself (workflow scripts, forks): no
 #: agent file can change them, so no per-agent change is offered.
 NOT_OVERRIDABLE = frozenset({"workflow-subagent", "fork", "unknown", "(unknown)"})
+
+#: The baseline-bloat card suggests shortening the ``description`` lines of
+#: your own agents only when their listing is at least this many tokens of
+#: a session's start (``context_budget``'s custom agents estimate).
+CUSTOM_AGENTS_TRIM_TOKENS = 1_000.0
 
 _PERIOD = "over the period in this report"
 _UNKNOWN = "unknown (no config snapshot yet)"
@@ -773,6 +779,14 @@ def _explain_baseline_bloat(rec: Recommendation, ctx: _Context) -> None:
     else:
         rec.why = "MCP servers and plugins you load everywhere add to every session's startup context."
     rec.action = "Turn off MCP servers and plugins in the projects that don't use them."
+    # Your own agents' descriptions are in every session's start. Shortening
+    # them is worth saying only when they are a real share of it.
+    agents = _evidence_value(rec, "custom agents")
+    if isinstance(agents, (int, float)) and agents >= CUSTOM_AGENTS_TRIM_TOKENS:
+        rec.action += (
+            f" Your own agents' descriptions add about {_tokens(agents)} tokens to every session. Shortening "
+            "the description line in their agent files trims that."
+        )
 
 
 def _explain_mcp_unused_server(rec: Recommendation, ctx: _Context) -> None:
@@ -789,10 +803,25 @@ def _explain_spawn_cost(rec: Recommendation, ctx: _Context) -> None:
     unused = _evidence_value(rec, "Tool definitions it rarely or never uses")
     agent = rec.agent_type or "this agent"
     rec.title = f"Starting {agent} is expensive before it does any work"
-    rec.action = (
-        f"Check what {agent} is given when it starts: its agent file and tools list, the CLAUDE.md files it "
-        "receives and the task prompt you send it. Trim what it doesn't need."
-    )
+    if rec.lever is None:
+        # A built-in agent type has no file of its own: most of its start is
+        # Claude Code's system prompt and tool definitions, so a shorter task
+        # prompt does not change it. A same-named agent file with a tools list does.
+        rec.action = (
+            f"Most of what {agent} reads at startup is Claude Code's own system prompt and tool definitions, "
+            "which a shorter task prompt does not change. A same-named agent file with a tools list leaves out "
+            "the tools it never calls"
+            + (
+                "."
+                if rec.agent_type in DIET_EXCLUDED
+                else "; the tools list card gives that list once enough of its spawns show it."
+            )
+        )
+    else:
+        rec.action = (
+            f"Check what {agent} is given when it starts: its agent file and tools list, and the CLAUDE.md "
+            "files it receives. Trim what it doesn't need."
+        )
     if isinstance(first_call, (int, float)) and isinstance(unused, (int, float)):
         rec.why = (
             f"Each {agent} spawn reads about {_tokens(first_call)} tokens on its first reply, and about "
@@ -1008,6 +1037,14 @@ def _explain_subagent_volume(rec: Recommendation, ctx: _Context) -> None:
         f"Check whether every {agent} run is needed, whether a cheaper model fits, and how long its task "
         "prompts are."
     )
+    # Phase 8a: say where the most spend sits overall, from the cost-centre table.
+    centre = cost_centres.largest_centre(ctx.report)
+    if centre is not None:
+        key, cell, _total, share = centre
+        rec.why += (
+            f" Across all spend, the largest cost centre is {cost_centres.CENTRE_LABELS.get(key, key).lower()}"
+            f" ({share:.0f}%), mostly {cost_centres.CELL_LABELS.get(cell, cell).lower()}."
+        )
 
 
 # -- agent models: code written on a larger model than it needed -----------------

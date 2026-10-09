@@ -1929,6 +1929,22 @@ details.disclosure[open] > summary {
   margin: 0;
 }
 
+/* The cost-centre table has a column per cell, so it takes the whole row. */
+.overview-breakdown-wide {
+  grid-column: 1 / -1;
+}
+
+.overview-cost-centres-lead,
+.overview-cost-centres-more {
+  margin: var(--space-3) 0 0;
+  color: var(--ink-2);
+}
+
+.overview-cost-centres-levers {
+  margin: var(--space-2) 0 0;
+  padding-left: var(--space-5);
+}
+
 .overview-details {
   margin-top: var(--space-10);
 }

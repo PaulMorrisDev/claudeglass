@@ -663,6 +663,83 @@ def test_subagent_volume_fires_above_threshold():
     assert "60.0%" in rec.why
 
 
+def _cost_centres_table(rows: list[list]) -> Table:
+    from claudeglass import cost_centres
+
+    return Table(
+        name="cost_centres",
+        title="Spend by cost centre",
+        columns=[
+            Column(key="centre", label="Cost centre"),
+            *[Column(key=cell, label=cell, kind="money") for cell in cost_centres.CELLS],
+            Column(key="total", label="Total", kind="money"),
+        ],
+        rows=rows,
+    )
+
+
+def test_subagent_volume_names_the_largest_cost_centre_and_cites_its_row():
+    r = _base_report()
+    r = _add_section(
+        r,
+        Section(
+            key="ttl",
+            title="TTL",
+            tables=[
+                _ttl_by_agent_type_table(
+                    [
+                        ["top-level", 40.0, 0.0, "no material difference", "promptCacheTtl"],
+                        ["claude-implementer", 60.0, 0.0, "no material difference", "promptCacheTtl"],
+                    ]
+                )
+            ],
+        ),
+    )
+    r = _add_section(
+        r,
+        Section(
+            key="agents",
+            title="Agents",
+            tables=[
+                _cost_centres_table(
+                    [
+                        ["main", 10.0, 50.0, 5.0, 0.0, 0.0, 5.0, 70.0],
+                        ["direct", 4.0, 6.0, 2.0, 0.0, 0.0, 3.0, 15.0],
+                    ]
+                )
+            ],
+        ),
+    )
+    recs = recommend_fn(r, config=_config(), archetype=None)
+    rec = next(rec for rec in recs if rec.id == "subagent-volume")
+    assert ("Largest cost centre", 70.0, "agents.cost_centres", "main") in rec.evidence
+    assert ("Cost (observed)", 60.0, "ttl.ttl_by_agent_type", "claude-implementer") in rec.evidence
+    # 70 of 85 is 82%, mostly above-base read.
+    assert "the largest cost centre is main session (82%)" in rec.why
+    assert "above-base read" in rec.why
+
+
+def test_subagent_volume_without_a_cost_centre_table_cites_only_the_agent_type():
+    r = _base_report()
+    r = _add_section(
+        r,
+        Section(
+            key="ttl",
+            title="TTL",
+            tables=[
+                _ttl_by_agent_type_table(
+                    [
+                        ["top-level", 40.0, 0.0, "no material difference", "promptCacheTtl"],
+                        ["claude-implementer", 60.0, 0.0, "no material difference", "promptCacheTtl"],
+                    ]
+                )
+            ],
+        ),
+    )
+    rec = next(rec for rec in recommend_fn(r, config=_config(), archetype=None) if rec.id == "subagent-volume")
+    assert len(rec.evidence) == 1 and "cost centre" not in rec.why
+
+
 def test_subagent_volume_does_not_fire_below_threshold():
     r = _base_report()
     r = _add_section(
@@ -1002,7 +1079,7 @@ def _baseline_report(r, *, controllable=35_000, first_call=95_000, project="proj
         Column(key="human_prompt_est", label="Human prompt"),
         Column(key="skills_listing_est", label="Skills listing"),
         Column(key="memory_files_est", label="Memory files"),
-        Column(key="mcp_tools_tokens", label="MCP tools"),
+        Column(key="mcp_removable_tokens", label="MCP tools you can turn off"),
         Column(key="controllable_est", label="What you can change"),
         Column(key="system_prompt_and_tools_est", label="System prompt and tools"),
     ]
@@ -1048,7 +1125,7 @@ def test_baseline_bloat_fires_with_snapshot_evidence():
         ("Estimated human prompt (est)", 300, table, "proj"),
         ("Estimated skills listing (est)", 7_000, table, "proj"),
         ("Estimated memory files (est)", 7_000, table, "proj"),
-        ("Estimated MCP tools (est)", 14_000, table, "proj"),
+        ("Estimated MCP tools you can turn off (est)", 14_000, table, "proj"),
         ("Mean first call (measured)", 95_000, table, "proj"),
         ("Estimated system prompt and tools (est)", 59_700, table, "proj"),
     ]
@@ -1057,21 +1134,51 @@ def test_baseline_bloat_fires_with_snapshot_evidence():
     assert "largest estimated share of that baseline is MCP tools" in raw.action
 
 
-def test_baseline_bloat_does_not_fire_without_snapshot():
+def test_baseline_bloat_fires_without_snapshot():
     r = _base_report()
     r = _baseline_report(r)
     recs = recommend_fn(r, config=_config(), archetype=None, snapshot=None)
-    assert not any(rec.id == "baseline-bloat" for rec in recs)
+    assert any(rec.id == "baseline-bloat" for rec in recs)
 
 
-def test_baseline_bloat_does_not_fire_with_too_few_mcp_servers():
+def _baseline_with_custom_agents(custom_agents):
+    r = _baseline_report(_base_report())
+    table = r.sections[-1].tables[0]
+    table.columns.insert(5, Column(key="custom_agents_est", label="Custom agents (est)"))
+    for row in table.rows:
+        row.insert(5, custom_agents)
+    return r
+
+
+def test_baseline_bloat_suggests_trimming_agent_descriptions_only_when_they_are_a_real_share():
+    snapshot = Snapshot(
+        path=Path("s.json"),
+        ts="20260918T000000Z",
+        data={
+            "mcp_servers": {"names": ["a", "b", "c"], "enabled_mcpjson_servers": [], "disabled_mcpjson_servers": []},
+            "enabled_plugins": ["x", "y"],
+        },
+    )
+    big = recommend_fn(_baseline_with_custom_agents(1_800.0), config=_config(), archetype=None, snapshot=snapshot)
+    action = next(rec for rec in big if rec.id == "baseline-bloat").action
+    assert "Your own agents' descriptions add about 1,800 tokens to every session" in action
+    assert "Shortening the description line in their agent files trims that" in action
+    small = recommend_fn(_baseline_with_custom_agents(400.0), config=_config(), archetype=None, snapshot=snapshot)
+    action = next(rec for rec in small if rec.id == "baseline-bloat").action
+    assert "descriptions" not in action
+    # Exactly the threshold counts.
+    edge = recommend_fn(_baseline_with_custom_agents(1_000.0), config=_config(), archetype=None, snapshot=snapshot)
+    assert "descriptions add about 1,000 tokens" in next(rec for rec in edge if rec.id == "baseline-bloat").action
+
+
+def test_baseline_bloat_ignores_config_counts():
     r = _base_report()
     r = _baseline_report(r)
     snapshot = Snapshot(
         path=Path("s.json"), ts="20260918T000000Z", data={"mcp_servers": {"names": ["a"]}}
     )
     recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
-    assert not any(rec.id == "baseline-bloat" for rec in recs)
+    assert any(rec.id == "baseline-bloat" for rec in recs)
 
 
 def test_baseline_bloat_suppressed_for_chat_only():
@@ -1300,29 +1407,6 @@ def test_attribution_deprecated_does_not_fire_when_neither_set():
     assert not any(rec.id == "env-attribution-deprecated" for rec in recs)
 
 
-def test_baseline_bloat_prefers_effective_enabled_plugins_when_present():
-    r = _base_report()
-    r = _baseline_report(r)
-    # baseline_bloat_min_mcp_or_plugins defaults to 5. Schema-1
-    # enabled_plugins names only one plugin (1 MCP + 1 plugin = 2, below
-    # the threshold); effective_enabled_plugins (schema 2, deep-merged)
-    # names four (1 MCP + 4 plugins = 5, which clears it) -- confirms the
-    # rule reads the new field when present rather than the old one.
-    snapshot = Snapshot(
-        path=Path("s.json"),
-        ts="20260918T000000Z",
-        data={
-            "mcp_servers": {"names": ["a"]},
-            "enabled_plugins": ["only-one"],
-            "effective_enabled_plugins": ["p1", "p2", "p3", "p4"],
-        },
-    )
-    recs = recommend_fn(r, config=_config(), archetype=None, snapshot=snapshot)
-    assert any(rec.id == "baseline-bloat" for rec in recs)
-
-
-
-
 def test_baseline_bloat_does_not_fire_on_the_harness_floor_alone():
     """A 95k first call with 5k of it a setting can change is Claude Code's
     own tool JSON: the raw size used to fire this card, and says nothing
@@ -1497,7 +1581,11 @@ def test_spawn_cost_emits_workflow_advice_with_no_lever_for_builtin_agent_type()
     rec = next(rec for rec in recs if rec.id == "spawn-cost")
     assert rec.lever is None
     assert rec.category == "workflow"
-    assert "task prompt you send it" in rec.action
+    # A shorter task prompt does not change a built-in agent's start, so the
+    # card says so and points at a same-named file with a tools list.
+    assert "a shorter task prompt does not change" in rec.action
+    assert "same-named agent file with a tools list" in rec.action
+    assert "Shorten" not in rec.action and "briefing" not in rec.action
     text = render_patch_set([rec])
     assert text == ""
 

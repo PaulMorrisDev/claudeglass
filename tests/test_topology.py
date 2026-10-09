@@ -717,13 +717,18 @@ def test_cost_per_spawn_table_has_mean_tool_wait_column(tmp_path):
     table = next(t for t in section.tables if t.name == "topology_cost_per_spawn")
     assert [c.key for c in table.columns] == [
         "agent_type",
-        "spawns",
+        "launch",
+        "runs",
+        "total_cost",
         "mean_cost",
         "median_cost",
         "mean_tool_wait",
     ]
     for row in table.rows:
-        assert row[4] is None
+        assert row[6] is None
+        # One launch word per row, and the total is the runs' cost together.
+        assert row[1] in ("background", "foreground", "workflow")
+        assert row[3] == pytest.approx(row[2] * row[4])
 
 
 def test_build_section_empty_stats_never_raises():

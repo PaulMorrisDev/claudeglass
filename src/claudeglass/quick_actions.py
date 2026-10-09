@@ -19,7 +19,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable
 
-from . import capture_catalogue, carry, discovery, habits, known_savers, model_gate, model_swap, pages, quality, waste, whatif
+from . import capture_catalogue, carry, cost_centres, discovery, habits, known_savers, model_gate, model_swap, pages, quality, waste, whatif
 from .compaction_sim import CompactionSimThresholds
 from .fixes import PROMPT_RESTART, PROMPT_SCOPE, _FINDING_OPEN, build_fix, build_fixes, fix_note
 from .model import Recommendation, SettingChange
@@ -499,7 +499,7 @@ def _cache(ctx: Context) -> dict:
 def _tools(ctx: Context) -> dict:
     tables = whatif._Tables(ctx.model)
     rows = tables.rows("agent_startup", "agent_startup_unused")
-    ids = {"spawn-unused-mcp", "spawn-unused-skills", "spawn-read-only-tools", "baseline-bloat"}
+    ids = {"spawn-tools-list", "spawn-unused-mcp", "spawn-unused-skills", "baseline-bloat"}
     # baseline-bloat is about main sessions, so it can fire when no
     # subagent started: look its fix up first.
     fixes = _rec_fixes(_recommendations(ctx, ids))
@@ -508,12 +508,28 @@ def _tools(ctx: Context) -> dict:
             return _result("act", "No subagents started in this window; the fix below is for your main sessions.",
                            fixes=fixes)
         return _result("no_data", "No subagents started in this window.")
+    # What a tools list would leave out of each agent type's start: how many
+    # tools it was offered and rarely calls, and the tokens that comes to.
+    diet = {r.get("agent_type"): r for r in tables.rows("agent_startup", "agent_startup_diet")}
+
+    def rarely_called(agent_type) -> str:
+        row = diet.get(agent_type)
+        if row is None:
+            return "none"
+        count = len([name for name in str(row.get("rare_tools") or "").split(", ") if name])
+        left_out = sum(
+            whatif._num(row.get(key)) or 0.0
+            for key in ("dropped_definitions", "dropped_deferred", "dropped_skills", "dropped_roster")
+        )
+        return f"{count} (about {left_out:,.0f} tokens)" if count else "none"
+
     table = _table(
         [("agent", "Agent"), ("spawns", "Starts"), ("mcp", "Offered MCP / used it"),
-         ("skills", "Listed skills / used one")],
+         ("skills", "Listed skills / used one"), ("tools", "Tools it rarely calls")],
         [[_who(r.get("agent_type")), r.get("spawns"),
           f"{r.get('mcp_offered_spawns') or 0} / {r.get('mcp_used_spawns') or 0}",
-          f"{r.get('skills_listed_spawns') or 0} / {r.get('skills_used_spawns') or 0}"] for r in rows],
+          f"{r.get('skills_listed_spawns') or 0} / {r.get('skills_used_spawns') or 0}",
+          rarely_called(r.get("agent_type"))] for r in rows],
     )
     if not fixes:
         return _result("ok", "Every agent uses the tools, MCP servers and skills it's given, or they cost little.",
@@ -638,6 +654,119 @@ def _claude_md(ctx: Context) -> dict:
         "sections.",
         table=table,
         fixes=fixes,
+    )
+
+
+def _tokens_text(tokens: int) -> str:
+    """9000 as ``9k``, 1500 as ``1.5k``, 800 as ``800``: a size in a sentence."""
+    if tokens >= 10_000:
+        return f"{tokens / 1000:.0f}k"
+    if tokens >= 1_000:
+        return f"{tokens / 1000:.1f}".rstrip("0").rstrip(".") + "k"
+    return f"{tokens:,}"
+
+
+def _readers_parts(row: dict) -> tuple[str, bool, str]:
+    """Who reads a project file by habit, in three parts: the readers
+    ("5 agent types", "your main session and Explore"), whether that is
+    more than one, and how often ("on every run", "in about 40% of their
+    runs")."""
+    readers = [item for item in row.get("reach") or () if item.get("standing")]
+    if not readers:
+        return "your agents", True, "sometimes"
+    types = [item["reach"] for item in readers if item["reach"] != "main"]
+    main = any(item["reach"] == "main" for item in readers)
+    who = [f"{len(types)} agent types"] if len(types) >= 3 else types
+    if main:
+        who.insert(0, "your main session")
+    subject = " and ".join([", ".join(who[:-1]), who[-1]] if len(who) > 2 else who)
+    plural = len(types) + (1 if main else 0) > 1
+    shares = [item["share"] for item in readers]
+    if min(shares) >= 0.95:
+        when = "on every run"
+    else:
+        when = f"in about {round(sum(shares) / len(shares) * 100)}% of {'their' if plural else 'its'} runs"
+    return subject, plural, when
+
+
+def _capital(text: str) -> str:
+    return text[:1].upper() + text[1:]
+
+
+def _project_file_readers(row: dict) -> str:
+    """The start of a sentence about a project file's readers: "5 agent
+    types read it on every run"."""
+    subject, plural, when = _readers_parts(row)
+    return f"{_capital(subject)} {'read' if plural else 'reads'} it {when}"
+
+
+def _project_files(ctx: Context) -> dict:
+    from . import claude_md_review, context_files
+
+    data = getattr(ctx.model, "context_files", None) or {}
+    candidates = context_files.project_files(data)
+    if not candidates:
+        return _result(
+            "no_data",
+            f"No project file stood out {ctx.period}, so what agents read and how big it is isn't known.",
+        )
+    # Disk is read only when something could be flagged: the names come
+    # from the project folders (cached for a few minutes).
+    if not context_files.check_rows(candidates, maybe_imports=True):
+        return _result(
+            "ok",
+            f"No project file is both large and read by many agent types, and none is growing fast {ctx.period}.",
+        )
+    rows, _local = claude_md_review.project_file_rows(
+        ctx.config_dir, data, projects=None if ctx.only is None else list(ctx.only)
+    )
+    flagged = context_files.check_rows(rows)
+    if not flagged:
+        return _result(
+            "ok",
+            f"No project file is both large and read by many agent types, and none is growing fast {ctx.period}.",
+        )
+    table = _table(
+        [
+            ("file", "File"),
+            ("tokens", "Tokens"),
+            ("change", "Change in 30 days"),
+            ("readers", "Read by"),
+            ("cost", "Cost a month"),
+        ],
+        [
+            [
+                row["name"] or "A file not found on this machine",
+                f"{row['tokens']:,}",
+                f"{row['change_pct']:+.0f}%" if row["change_pct"] is not None else "none",
+                _capital("{0}, {2}".format(*_readers_parts(row))),
+                ctx.units.money_cell(row["cost_month_usd"]) if row["cost_month_usd"] else "none",
+            ]
+            for row in flagged[:10]
+        ],
+    )
+    lead = next((row for row in flagged if row["name"]), flagged[0])
+    grew = (
+        f", up {lead['change_pct']:.0f}% in 30 days"
+        if lead["change_pct"] is not None and lead["change_pct"] >= 10
+        else ""
+    )
+    cost = claude_md_review._amount(ctx.units, lead["cost_month_usd"], "a month", prefix="about")
+    sentence = f"{_project_file_readers(lead)}: {cost}."
+    more = f" {len(flagged) - 1} more file{'s' if len(flagged) > 2 else ''} {'are' if len(flagged) > 2 else 'is'} flagged." if len(flagged) > 1 else ""
+    if not lead["name"]:
+        return _result(
+            "ok",
+            f"A file is flagged: about {_tokens_text(lead['tokens'])} tokens{grew}. It is not in any project folder "
+            f"on this machine, so there is nothing to change. {sentence}{more}",
+            table=table,
+        )
+    return _result(
+        "act",
+        f"{lead['name']} is now about {_tokens_text(lead['tokens'])} tokens{grew}. {sentence}{more} "
+        "{{page:agents/subagents}} lists every project file.",
+        table=table,
+        fixes=claude_md_review.project_file_fixes(lead, ctx.units),
     )
 
 
@@ -1103,6 +1232,61 @@ def _savers(ctx: Context) -> dict:
 #: that stopped replies and unlogged requests don't explain, before the
 #: cost-record check says ClaudeGlass's figures may be off.
 _COST_RECORD_LIMIT_PCT = 5.0
+
+
+#: How many controllable parts of the base the cost-centres check names as
+#: tips (the largest by cost, across every cost centre).
+_COST_CENTRE_PARTS_SHOWN = 5
+
+
+def _cost_centres(ctx: Context) -> dict:
+    """Where the window's spend sits, as the cost-centre table has it
+    (information, not a finding): the largest cell and the check that covers
+    it, and the controllable parts of the base read with the check each one
+    links to. Never ``act``: there is nothing to fix here, the checks it
+    names do that."""
+    tables = whatif._Tables(ctx.model)
+    rows = tables.rows(cost_centres.SECTION, cost_centres.CENTRES_TABLE)
+    grand = sum(whatif._num(r.get("total")) or 0.0 for r in rows)
+    if grand <= 0:
+        return _result("no_data", f"No spend {ctx.period} to split into cost centres.")
+    cells = [
+        (whatif._num(r.get(cell)) or 0.0, r["centre"], cell)
+        for r in rows
+        for cell in cost_centres.CELLS
+    ]
+    top_cost, top_centre, top_cell = max(cells)
+    hint = cost_centres.hint_for(top_centre, top_cell)
+    covered = (
+        f"The {cost_centres.CHECK_LABELS[hint]} check covers it."
+        if hint in cost_centres.CHECK_LABELS
+        else "No check advises on it."
+    )
+    summary = (
+        f"The largest cell is {cost_centres.CENTRE_LABELS.get(top_centre, top_centre).lower()}, "
+        f"{cost_centres.CELL_LABELS.get(top_cell, top_cell).lower()}: {_money(ctx, top_cost, period=True)}, "
+        f"{100.0 * top_cost / grand:.0f}% of the spend. {covered}"
+    )
+    table = _table(
+        [("centre", "Cost centre"), *[(cell, cost_centres.CELL_LABELS[cell]) for cell in cost_centres.CELLS],
+         ("total", "Total")],
+        [[cost_centres.CENTRE_LABELS.get(r["centre"], r["centre"]),
+          *[_cell(ctx, r.get(cell)) for cell in cost_centres.CELLS], _cell(ctx, r.get("total"))] for r in rows],
+    )
+    parts = [
+        r for r in tables.rows(cost_centres.SECTION, cost_centres.PARTS_TABLE)
+        if r.get("cell") == "base_read" and r.get("card") and (whatif._num(r.get("cost")) or 0.0) > 0
+    ]
+    parts.sort(key=lambda r: -(whatif._num(r.get("cost")) or 0.0))
+    tips = [
+        {
+            "title": f"{r['part']} ({cost_centres.CENTRE_LABELS.get(r['centre'], r['centre']).lower()})",
+            "text": f"{_money(ctx, r.get('cost'), period=True)} of the base read. "
+                    f"The {cost_centres.CHECK_LABELS.get(r['card'], r['card'])} check covers it.",
+        }
+        for r in parts[:_COST_CENTRE_PARTS_SHOWN]
+    ]
+    return _result("ok", summary, table=table, tips=tips)
 
 
 def _cost_record(ctx: Context) -> dict:
@@ -1808,12 +1992,15 @@ CHECKS: tuple[Check, ...] = (
           ("ttl-switch",)),
     Check("tools", "Do agents carry tools, MCP servers or skills they never use?",
           "Everything an agent is offered is sent each time it starts, used or not.", _tools,
-          ("spawn-unused-mcp", "spawn-unused-skills", "spawn-read-only-tools", "baseline-bloat")),
+          ("spawn-tools-list", "spawn-unused-mcp", "spawn-unused-skills", "baseline-bloat")),
     Check("skills", "Which skills are listed to Claude but never used?",
           "Each skill's name and description is sent at every session and subagent start.", _skills),
     Check("claude-md", "Which CLAUDE.md files cost most?",
           "CLAUDE.md files are sent at the start of every session and most subagents.", _claude_md,
           ("spawn-claude-md", "spawn-shared-claude-md")),
+    Check("project-files", "Are project files that agents read big or growing?",
+          "An agent that reads a file keeps it in context and pays to read it again on every later reply. "
+          "A big or fast-growing file that many agent types read costs on every run.", _project_files),
     Check("tool-output", "Do tool results fill your context?",
           "A tool's output stays in the conversation and is re-read on every later reply.", _tool_output,
           ("tool-output-carry",)),
@@ -1833,6 +2020,9 @@ CHECKS: tuple[Check, ...] = (
           _failed_calls, tuple(sorted(_FAILED_CALL_RECS))),
     Check("quality", "Is any agent struggling?",
           "A cheaper model or a lower effort only saves money if the work still gets done.", _quality),
+    Check("cost-centres", "Where does the spend go?",
+          "Every reply is a cache read of the starting prompt, a read of the conversation, a write, or output. "
+          "Knowing which is largest says which check to open first.", _cost_centres),
     Check("cost-record", "Do ClaudeGlass's figures match Claude Code's own?",
           "Claude Code writes down what it thinks each session cost. Where it does, ClaudeGlass checks its own "
           "figures against it.", _cost_record),

@@ -9,7 +9,7 @@
  */
 
 import { clear, el, goTo, state, WINDOW_OPTIONS } from "./core.js";
-import { fraction, money, moneyParts, projectName, shortTs, thousands, windowWhen } from "./format.js";
+import { fraction, money, moneyParts, moneyText, projectName, shortTs, thousands, windowWhen } from "./format.js";
 import { fetchJson, findSection, loadQuickActions, loadRecommendations, loadReport, prefetchActions, withWindow } from "./api.js";
 import {
   button,
@@ -27,7 +27,7 @@ import {
 } from "./ui.js";
 import { dataGrid, headRow, renderTable } from "./grid.js";
 import { icon } from "./icons.js";
-import { habitLink, pageLink, REWORK_ITEM, viewIntro } from "./links.js";
+import { checkLink, costCentresLink, habitLink, pageLink, projectFilesLink, REWORK_ITEM, viewIntro } from "./links.js";
 import { renderSetupCard } from "./shell.js";
 import { chartError, holdChart } from "./charts.js";
 import { changeDay, dailyChanges, renderChart, savingsLevers, sparkline, tableObjects, windowSpan } from "./charts-types.js";
@@ -447,12 +447,14 @@ var CHECK_NAMES = {
   tools: "Tools, MCP servers and skills",
   skills: "Skills",
   "claude-md": "CLAUDE.md files",
+  "project-files": "Project files agents read",
   "tool-output": "Tool output",
   hooks: "Hooks",
   "tool-search": "MCP tool search",
   habits: "Work habits",
   "failed-calls": "Failed and blocked tool calls",
   quality: "Agent quality",
+  "cost-centres": "Where the spend goes",
   "cost-record": "ClaudeGlass's own figures",
 };
 
@@ -554,6 +556,9 @@ function checklistRow(row) {
   if (check && check.item && (row.state === "look" || row.state === "fix")) {
     action.appendChild(habitLink(check.item, check.item === REWORK_ITEM ? "See the rework" : "See the habit"));
   }
+  if (check && check.id === "project-files" && (row.state === "look" || row.state === "fix")) {
+    action.appendChild(projectFilesLink("See the files"));
+  }
   if (lead) action.appendChild(pageLink("actions/recommendations", lead.members.length > 1 ? "See the " + lead.members.length + " prompts" : "See the fix", { id: lead.key }));
   else if (check && (row.state === "look" || row.state === "fix")) action.appendChild(pageLink("actions/checks", "See the check", { id: check.id }));
   return el("li", { class: "check-row is-" + row.state }, [rowBadge(row.state), text, action]);
@@ -643,9 +648,70 @@ function byModelRows(dailyRows) {
     });
 }
 
+// The controllable parts of the base read that cost the most, from the
+// report's cost_centres_parts table (the columns it names), each with the
+// check that covers it: [{centre, part, cost, card}], largest first.
+var COST_CENTRE_PARTS_SHOWN = 5;
+
+function controllableParts(parts) {
+  if (!parts || !parts.rows) return [];
+  var at = {};
+  parts.columns.forEach(function (column, i) {
+    at[column.key] = i;
+  });
+  return parts.rows
+    .filter(function (row) {
+      return row[at.cell] === "base_read" && row[at.lever] === "controllable" && row[at.card] && row[at.cost] > 0;
+    })
+    .map(function (row) {
+      return { centre: row[at.centre], part: row[at.part], cost: row[at.cost], card: row[at.card] };
+    })
+    .sort(function (a, b) {
+      return b.cost - a.cost;
+    })
+    .slice(0, COST_CENTRE_PARTS_SHOWN);
+}
+
+// "By cost centre": the report's spend-by-cost-centre table (agents
+// section), the controllable parts of the base read each with a link to
+// the check that covers it, and a link to the whole of it on Agents. The
+// parts a setting can't change stay on that page, marked "no setting
+// known".
+function costCentrePart(report) {
+  var agents = report ? findSection(report, "agents") : null;
+  var centres = tableNamed(agents, "cost_centres");
+  if (!centres || !centres.rows || !centres.rows.length) return null;
+  var head = headRow(el("h3", { text: "By cost centre" }), null, "By cost centre");
+  var part = el("div", { class: "overview-breakdown-part overview-breakdown-wide overview-cost-centres" }, [
+    head,
+    renderTable(centres, "overview-cost-centres", state.currency, { heading: false, helpInto: head }),
+  ]);
+  var labels = centres.value_labels || {};
+  var levers = controllableParts(tableNamed(agents, "cost_centres_parts"));
+  if (levers.length) {
+    part.appendChild(el("p", { class: "overview-cost-centres-lead", text: "Parts of the base read a setting can change:" }));
+    part.appendChild(
+      el(
+        "ul",
+        { class: "overview-cost-centres-levers" },
+        levers.map(function (lever) {
+          var name = CHECK_NAMES[lever.card] || lever.card;
+          return el("li", {}, [
+            el("span", { text: (labels[lever.centre] || lever.centre) + ", " + lever.part + ": " + moneyText(lever.cost) + ". " }),
+            checkLink(lever.card, "See " + name),
+          ]);
+        })
+      )
+    );
+  }
+  part.appendChild(el("p", { class: "overview-cost-centres-more" }, [costCentresLink("See every cost centre, the parts and the advice")]));
+  return part;
+}
+
 // "Where do your tokens go?" under the chart: by project (the report's
-// usage table) and by model, each a short ranked list with bars. A list
-// of one says nothing a ranking would, so it isn't drawn.
+// usage table) and by model, each a short ranked list with bars, then by
+// cost centre. A list of one says nothing a ranking would, so it isn't
+// drawn.
 function renderBreakdown(container, report, dailyRows) {
   clear(container);
   var parts = [];
@@ -673,6 +739,8 @@ function renderBreakdown(container, report, dailyRows) {
       ])
     );
   }
+  var centres = costCentrePart(report);
+  if (centres) parts.push(centres);
   parts.forEach(function (part) {
     container.appendChild(part);
   });

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -145,6 +146,7 @@ def test_baseline_table_human_prompt_and_skills_listing_estimates(tmp_path):
     assert proj_row[col["system_prompt_and_tools_est"]] == pytest.approx(39_990.0)
     # No snapshot and no MCP server: nothing to change, apart from the skills list.
     assert proj_row[col["mcp_tools_tokens"]] is None
+    assert proj_row[col["mcp_removable_tokens"]] is None
     assert proj_row[col["controllable_est"]] == pytest.approx(100.0)
 
     every_column_label_ends_est = all(
@@ -157,6 +159,18 @@ def test_baseline_table_human_prompt_and_skills_listing_estimates(tmp_path):
     # Every note documents the characters/4 approximation.
     assert any("characters" in n and "4" in n for n in table.notes)
     assert_privacy(section)
+
+
+def test_the_mcp_part_you_can_change_leaves_out_the_desktop_apps_own_servers():
+    first = SimpleNamespace(
+        model="claude-sonnet-5",
+        deferred_list_chars_by_server={"computer-use": 4_000, "github": 400},
+        mcp_instruction_chars_by_server={"ccd_session": 800},
+    )
+    top = SimpleNamespace(upfront_definition_chars_by_server={})
+    found = calibration.Calibration()
+    assert context_budget._mcp_tools_tokens(top, first, found) == pytest.approx(1_300)
+    assert context_budget._mcp_tools_tokens(top, first, found, skip_built_in=True) == pytest.approx(100)
 
 
 def test_baseline_table_residual_is_none_when_est_exceeds_baseline(tmp_path):
@@ -637,6 +651,47 @@ def _custom_agents_est(stats, snapshots):
     return row[col["custom_agents_est"]]
 
 
+def _session_with_roster(tmp_path, name, *, listed_types, chars, session_id):
+    """A top-level transcript whose first call carries the sibling-agent
+    roster: ``listed_types`` agent types in ``chars`` characters."""
+    roster = attachment_line("agent_listing_delta", rendered="r" * chars, addedTypes=[f"t{n}" for n in range(listed_types)])
+    roster["timestamp"] = "2026-09-18T11:59:00.000Z"
+    lines = [
+        roster,
+        user_str_line("please fix the bug", timestamp="2026-09-18T11:59:30.000Z"),
+        turn_line(model="claude-sonnet-5", timestamp="2026-09-18T12:00:00.000Z", cache_creation_input_tokens=40_000),
+    ]
+    path = tmp_path / f"{name}.jsonl"
+    write_jsonl(path, lines)
+    return parse_transcript(path, TranscriptMeta(path=str(path), session_id=session_id))
+
+
+def test_custom_agents_are_sized_from_the_roster_the_first_call_carried(tmp_path):
+    from claudeglass import snapshots as snap_mod
+
+    top = _session_with_roster(tmp_path, "s1", listed_types=4, chars=2_000, session_id="sess_1")
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("c--Users-<user>-proj", top, raw_slug="c--Users-alice-proj")
+    canonical, _legacy = snap_mod.snapshot_project_keys("c--Users-alice-proj")
+    two = _snapshot(canonical, content_layers={"agents_summary": {"count": 2}})
+    # The roster is 2,000 characters (500 tokens) for 4 types; 2 of them are the user's own.
+    assert _custom_agents_est(stats, [two]) == pytest.approx(500 * 2 / 4)
+    # A count beyond the types the roster lists is capped at the whole roster.
+    many = _snapshot(canonical, content_layers={"agents_summary": {"count": 9}})
+    assert _custom_agents_est(stats, [many]) == pytest.approx(500)
+
+
+def test_custom_agents_fall_back_to_the_per_agent_constant_without_a_roster(tmp_path):
+    from claudeglass import snapshots as snap_mod
+
+    top = _build_session(tmp_path, "s1", session_id="sess_1", baseline_cache_creation=50_000)
+    stats = context_budget.ContextBudgetStats()
+    stats.add_session("c--Users-<user>-proj", top, raw_slug="c--Users-alice-proj")
+    canonical, _legacy = snap_mod.snapshot_project_keys("c--Users-alice-proj")
+    snapshot = _snapshot(canonical, content_layers={"agents_summary": {"count": 3}})
+    assert _custom_agents_est(stats, [snapshot]) == pytest.approx(3 * 60)
+
+
 def test_baseline_table_joins_a_lower_case_drive_folder_to_a_snapshot_under_either_key(tmp_path):
     from claudeglass import snapshots as snap_mod
 
@@ -905,9 +960,21 @@ def test_the_removable_size_counts_tools_offered_and_hardly_used(tmp_path):
     for n in range(10):
         stats.add_subagent(_sub(tmp_path, f"agent-{n}", _sub_lines(used="Read" if n else "Bash")))
     row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
-    # Read is used by 9 of 10, Bash by 1 of 10 (at the line), Grep and the MCP server by none.
+    # Read is used by 9 of 10, Bash by 1 of 10 (exactly a tenth, so it stays), Grep and the MCP server by none.
+    removable = (_tool_chars(TOOLS[1]) + _tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0
+    assert row["removable_tools"] == pytest.approx(removable)
+
+
+def test_a_tool_used_in_fewer_than_a_tenth_of_the_spawns_is_removable(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    for n in range(20):
+        stats.add_subagent(_sub(tmp_path, f"agent-{n}", _sub_lines(used="Bash" if n == 0 else "Read")))
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    # Bash is used by 1 of 20 (5%), so it goes with Grep and the MCP server.
     removable = (_tool_chars(TOOLS[1]) + _tool_chars(TOOLS[2]) + _tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0
     assert row["removable_tools"] == pytest.approx(removable)
+    notes = " ".join(_startup_tables(stats)["agent_startup_tools"].notes)
+    assert "fewer than 10%" in notes
 
 
 def test_a_later_header_only_snapshot_does_not_reset_the_tool_definitions(tmp_path):
@@ -986,6 +1053,186 @@ def test_a_model_is_calibrated_from_its_own_subagent_first_calls(tmp_path):
 def test_a_fork_is_not_a_first_call_to_calibrate_on(tmp_path):
     fork = _sub(tmp_path, "agent-fork", _sub_lines(), agent_type="fork")
     assert context_budget.first_call(fork) is None
+
+
+# -- subagent startup: what a tools list would take out ----------------------------------------------------------------
+
+
+def _spawn_many(tmp_path, count, *, used, pricing=PRICING, **kwargs):
+    """``count`` spawns of Explore; ``used(n)`` is the tool spawn ``n`` calls."""
+    stats = context_budget.ContextBudgetStats()
+    for n in range(count):
+        stats.add_subagent(_sub(tmp_path, f"agent-{n}", _sub_lines(used=used(n), **kwargs)), pricing=pricing)
+    return stats
+
+
+def _diet_row(stats, agent_type="Explore"):
+    return _row(_startup_tables(stats)["agent_startup_diet"], "agent_type", agent_type)
+
+
+def test_the_diet_row_keeps_the_tools_called_in_a_tenth_of_the_spawns_and_sizes_the_rest(tmp_path):
+    # Read in 9 of 10 spawns, Bash in 1 (exactly a tenth): both stay. Grep
+    # and the figma server were never called.
+    stats = _spawn_many(tmp_path, 10, used=lambda n: "Read" if n else "Bash")
+    tables = _startup_tables(stats)
+    row = _row(tables["agent_startup_diet"], "agent_type", "Explore")
+    assert row["keep_tools"] == "Bash, Read"
+    assert row["rare_tools"] == "Grep, mcp__figma__*"
+    assert row["spawns"] == 10 and row["model"] == "claude-sonnet-5"
+    # The same size as the breakdown's "tools never used" column.
+    breakdown = _row(tables["agent_startup_breakdown"], "agent_type", "Explore")
+    assert row["dropped_definitions"] == pytest.approx(breakdown["removable_tools"])
+    assert row["dropped_definitions"] == pytest.approx(
+        (_tool_chars(TOOLS[1]) + _tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0
+    )
+    assert (row["dropped_skills"], row["dropped_roster"], row["dropped_deferred"]) == (0.0, 0.0, 0.0)
+    assert_privacy(tables["agent_startup_diet"])
+    assert "ddd" not in repr(tables["agent_startup_diet"])
+
+
+def test_a_tool_called_in_under_a_tenth_of_the_spawns_moves_from_the_list_to_the_rarely_used(tmp_path):
+    stats = _spawn_many(tmp_path, 20, used=lambda n: "Bash" if n == 0 else "Read")
+    row = _diet_row(stats)
+    assert row["keep_tools"] == "Read"
+    assert row["rare_tools"] == "Bash, Grep, mcp__figma__*"
+
+
+def test_the_tools_claude_code_adds_are_in_neither_list(tmp_path):
+    tools = [*TOOLS, _tool("StructuredOutput", 800), _tool("SubagentHandback", 800)]
+    stats = _spawn_many(tmp_path, 10, used=lambda n: "StructuredOutput", tools=tools)
+    row = _diet_row(stats)
+    for name in ("StructuredOutput", "SubagentHandback"):
+        assert name not in row["keep_tools"] and name not in row["rare_tools"]
+    # Their definitions are not counted as something a list takes out.
+    assert row["dropped_definitions"] == pytest.approx(sum(_tool_chars(t) for t in TOOLS) / 4.0)
+
+
+def test_the_diet_has_no_row_for_a_spawn_that_recorded_no_tools(tmp_path):
+    stats = context_budget.ContextBudgetStats()
+    stats.add_subagent(_sub(tmp_path, "agent-1", _sub_lines(tools=[])), pricing=PRICING)
+    tables = _startup_tables(stats)
+    assert tables["agent_startup_diet"].rows == [] and tables["agent_startup_servers"].rows == []
+
+
+def test_the_agent_list_goes_with_the_agent_tool_and_stays_when_the_agent_tool_is_called(tmp_path):
+    # The roster in _sub_lines is 400 characters, 100 tokens.
+    stats = _spawn_many(tmp_path, 10, used=lambda n: "Read", tools=[*TOOLS, _tool("Agent", 600)])
+    row = _diet_row(stats)
+    assert "Agent" in row["rare_tools"]
+    assert row["dropped_roster"] == pytest.approx(100.0) and row["dropped_skills"] == 0.0
+    stats = _spawn_many(tmp_path, 10, used=lambda n: "Agent", tools=[*TOOLS, _tool("Agent", 600)])
+    row = _diet_row(stats)
+    assert row["dropped_roster"] == 0.0 and "Agent" in row["keep_tools"]
+
+
+def test_the_diet_counts_the_tool_prefix_at_the_write_price_only_for_the_spawns_that_wrote_it(tmp_path):
+    # 1 spawn in 4 wrote the tool definitions (it read none of them from
+    # cache); the other three read them.
+    stats = context_budget.ContextBudgetStats()
+    for n in range(4):
+        lines = _sub_lines(shared_prefix=0, written=70_000) if n == 0 else _sub_lines()
+        stats.add_subagent(_sub(tmp_path, f"agent-{n}", lines), pricing=PRICING)
+    row = _diet_row(stats)
+    assert stats.agents["Explore"].prefix_written == {"claude-sonnet-5": 1}
+    assert row["prefix_write_share"] == pytest.approx(25.0)
+    write, read, later = row["write_price"], row["read_price"], row["later_calls"]
+    assert (write, read, later) == (2.5, pytest.approx(0.2), 2.0)
+    first_call = 0.25 * write + 0.75 * read
+    expected = 4 * row["dropped_definitions"] * (first_call + later * read) / 1_000_000
+    assert row["saving_usd"] == pytest.approx(expected)
+    # Priced as if every spawn wrote it, the saving would be larger.
+    every = 4 * row["dropped_definitions"] * (write + later * read) / 1_000_000
+    assert row["saving_usd"] < every
+
+
+def test_the_startup_breakdown_carries_the_read_price_and_the_calls_after_the_first(tmp_path):
+    stats = _spawn_many(tmp_path, 3, used=lambda n: "Read")
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    # Three calls in each transcript: two come after the first.
+    assert row["later_calls"] == 2.0 and row["read_price"] == pytest.approx(0.2)
+    # Without a rate card there is no read price, and still the calls.
+    stats = _spawn_many(tmp_path, 3, used=lambda n: "Read", pricing=None)
+    row = _row(_startup_tables(stats)["agent_startup_breakdown"], "agent_type", "Explore")
+    assert row["later_calls"] == 2.0 and row["read_price"] is None
+
+
+def test_the_diet_window_is_at_least_a_week_and_follows_the_span_of_the_calls(tmp_path):
+    stats = _spawn_many(tmp_path, 3, used=lambda n: "Read")
+    assert stats.window_days == context_budget.MIN_WINDOW_DAYS == 7
+    assert _diet_row(stats)["window_days"] == 7.0
+    stats.first_when, stats.last_when = 0.0, 20 * 86400.0
+    assert stats.window_days == pytest.approx(20.0)
+    assert _diet_row(stats)["window_days"] == pytest.approx(20.0)
+    assert context_budget.ContextBudgetStats().window_days == 7.0
+
+
+def test_rarely_used_is_under_a_tenth_with_a_tolerance_for_an_exact_tenth():
+    assert not context_budget.rarely_used(3, 30)
+    assert not context_budget.rarely_used(1, 10)
+    assert context_budget.rarely_used(1, 11)
+    assert context_budget.rarely_used(0, 5)
+    assert not context_budget.rarely_used(10, 10)
+
+
+def test_diet_usd_prices_the_prefix_by_who_wrote_it_and_the_body_as_written_by_every_spawn():
+    price = dict(write=3.0, read=0.3, later_calls=4.0)
+    diet_usd = context_budget.diet_usd
+    # The prefix, every spawn wrote it: 10 spawns x 1,000 tokens x (3.0 + 4 x 0.3) per million.
+    assert diet_usd(10, 1_000, 0, written_share=1.0, **price) == pytest.approx(10 * 1_000 * 4.2 / 1e6)
+    # The prefix, none wrote it: the first call reads it too.
+    assert diet_usd(10, 1_000, 0, written_share=0.0, **price) == pytest.approx(10 * 1_000 * 1.5 / 1e6)
+    # A tenth wrote it.
+    assert diet_usd(10, 1_000, 0, written_share=0.1, **price) == pytest.approx(
+        10 * 1_000 * (0.1 * 3.0 + 0.9 * 0.3 + 1.2) / 1e6
+    )
+    # The body is written by every spawn whatever the prefix share.
+    for share in (0.0, 0.5, 1.0):
+        assert diet_usd(10, 0, 500, written_share=share, **price) == pytest.approx(10 * 500 * 4.2 / 1e6)
+    # A share outside 0 to 1 is held to it.
+    assert diet_usd(10, 1_000, 0, written_share=7.0, **price) == diet_usd(10, 1_000, 0, written_share=1.0, **price)
+    # Without a read price only the writes count; without a write price nothing does.
+    assert diet_usd(10, 1_000, 500, write=3.0, read=None, later_calls=4.0, written_share=1.0) == pytest.approx(
+        10 * 1_500 * 3.0 / 1e6
+    )
+    assert diet_usd(10, 1_000, 500, write=None, read=0.3, later_calls=4.0, written_share=1.0) == 0.0
+    assert diet_usd(0, 1_000, 500, written_share=1.0, **price) == 0.0
+
+
+def test_the_servers_table_sizes_each_rarely_used_server_for_one_spawn_offered_it(tmp_path):
+    stats = _spawn_many(tmp_path, 10, used=lambda n: "Read")
+    offers = stats.agents["Explore"].servers["claude-sonnet-5"]
+    # A deferred list and instructions beside the definitions, as the parser leaves them.
+    offers["figma"].deferred, offers["figma"].instructions = 10 * 40.0, 10 * 25.0
+    table = _startup_tables(stats)["agent_startup_servers"]
+    row = _row(table, "agent_type", "Explore")
+    assert row["server"] == "figma" and row["offered_spawns"] == 10 and row["used_spawns"] == 0
+    assert row["definition_tokens"] == pytest.approx((_tool_chars(TOOLS[3]) + _tool_chars(TOOLS[4])) / 4.0)
+    assert (row["deferred_tokens"], row["instruction_tokens"]) == (40.0, 25.0)
+    expected = context_budget.diet_usd(
+        10, row["definition_tokens"], 40.0, write=2.5, read=0.2, later_calls=2.0, written_share=0.0
+    )
+    assert row["saving_usd"] == pytest.approx(expected)
+    assert row["window_days"] == 7.0
+    assert_privacy(table)
+
+
+def test_the_servers_table_leaves_out_a_server_that_is_called_often_enough(tmp_path):
+    stats = _spawn_many(tmp_path, 10, used=lambda n: "mcp__figma__a" if n < 2 else "Read")
+    assert _startup_tables(stats)["agent_startup_servers"].rows == []
+    row = _diet_row(stats)
+    assert "mcp__figma__*" in row["keep_tools"] and "mcp__figma__*" not in row["rare_tools"]
+
+
+def test_the_servers_table_keeps_the_largest_servers_per_agent_type(tmp_path):
+    stats = _spawn_many(tmp_path, 10, used=lambda n: "Read")
+    offers = stats.agents["Explore"].servers["claude-sonnet-5"]
+    for n in range(20):
+        offers[f"srv{n:02d}"] = context_budget._ServerOffer(offered=10, used=0, definitions=10 * (300.0 + n))
+    rows = _startup_tables(stats)["agent_startup_servers"].rows
+    assert len(rows) == context_budget._SERVER_ROWS_PER_AGENT
+    sizes = [r[5] for r in rows]
+    assert sizes == sorted(sizes, reverse=True)
+    assert rows[0][2] == "srv19"
 
 
 def test_the_startup_tables_carry_help_for_every_kept_column(tmp_path):

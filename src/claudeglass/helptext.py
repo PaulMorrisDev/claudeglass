@@ -122,7 +122,10 @@ PLACEMENT: dict[str, str] = {
     "agent_startup_breakdown": "keep",
     "agent_startup_unused": "keep",
     "agent_startup_shared": "keep",
+    "agent_startup_stack": "keep",
     "agent_startup_tools": "report",
+    "agent_startup_diet": "report",
+    "agent_startup_servers": "report",
     # agents
     "topology_spawn_write": "advanced",
     "topology_session_baseline": "advanced",
@@ -141,6 +144,11 @@ PLACEMENT: dict[str, str] = {
     "topology_context_composition": "advanced",
     "topology_redundant_work": "advanced",
     "topology_redundant_reads": "advanced",
+    # spend by cost centre
+    "cost_centres": "keep",
+    "cost_centres_parts": "keep",
+    "cost_centres_advice": "keep",
+    "cost_centres_models": "keep",
     # splitting long subagent runs
     "run_split_summary": "keep",
     "run_split_by_agent": "keep",
@@ -319,7 +327,8 @@ SECTION_COPY: dict[str, SectionCopy] = {
         title="What subagents are given at startup",
         intro=(
             "Every time a subagent starts, Claude Code sends it a set of instructions and lists before it "
-            "does any work. You pay to write all of it into the cache, once per spawn."
+            "does any work. Tool definitions are shared by spawns of one type and mostly read from the cache. "
+            "The rest is written again on every spawn."
         ),
         help=Help(
             shows="What each agent type receives before its first reply, what it received but never used, "
@@ -327,9 +336,9 @@ SECTION_COPY: dict[str, SectionCopy] = {
             read="Sizes are average tokens per spawn. Multiply by the number of spawns to see the total. "
             "\"Not recorded\" is the part Claude Code doesn't log in the transcript, mostly the tool "
             "definitions and system prompt.",
-            act="Look for large parts that an agent never uses, such as a skills list no spawn called, "
-            "or CLAUDE.md sent to agents that only search. {{page:actions/recommendations}} turns these into "
-            "specific changes.",
+            act="Look for large parts that an agent never uses. Examples are tools no spawn called, a skills "
+            "list no spawn used, and CLAUDE.md sent to agents that only search. "
+            "{{page:actions/recommendations}} turns these into specific changes.",
         ),
     ),
     "agents": SectionCopy(
@@ -772,6 +781,15 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "Tool definitions and MCP servers this agent was offered and rarely or never called. A tools "
                 "list on the agent would leave them out.",
             ),
+            "read_price": (
+                "",
+                "List price of reading a million tokens back from the cache for this agent's model. A part of "
+                "the start is read again on every later call.",
+            ),
+            "later_calls": (
+                "",
+                "The average number of replies a spawn made after its first. A saving counts each of them.",
+            ),
         },
         lead_columns=[
             "agent_type", "spawns", "startup_tokens", "claude_md", "skills_listing", "tool_lists", "task_prompt",
@@ -801,6 +819,27 @@ TABLE_COPY: dict[str, TableCopy] = {
             "agent_type", "spawns", "skills_listing_tokens", "skills_used_spawns", "mcp_used_spawns",
             "claude_md_tokens", "read_only_spawns",
         ],
+    ),
+    "agent_startup_stack": TableCopy(
+        title="What each agent type carries into a run",
+        help=Help(
+            shows="One row per agent type. The columns stack in the order they arrive: system and tools, "
+            "files loaded for it, files it reads by habit, then its brief.",
+            read="All parts are tokens per run. The files it reads by habit come after the first reply, "
+            "and are read again on every reply after. A habit is a file read in 3 runs, or in a fifth of the runs.",
+            act="When the files an agent reads by habit outweigh its brief, look at the table of project files "
+            "below. Split the biggest, or put the few lines the agent needs in its own file.",
+        ),
+        columns={
+            "spawns": ("", "How many times this agent type started."),
+            "system_tools": ("", "The system prompt, tool definitions, skills list, hook output and notes. Everything in the first call but the next two."),
+            "auto_files": ("", "CLAUDE.md files and memory that Claude Code loads for this agent type."),
+            "standing_reads": ("", "Files this agent type reads again and again, as tokens per run."),
+            "brief": ("", "The task the main session gave the agent."),
+            "total": ("", "The four parts together."),
+            "standing_files": ("", "How many files this agent type reads by habit."),
+        },
+        lead_columns=["agent_type", "system_tools", "auto_files", "standing_reads", "brief", "total"],
     ),
     "agent_startup_shared": TableCopy(
         title="Sent to most agent types",
@@ -2032,11 +2071,14 @@ TABLE_COPY: dict[str, TableCopy] = {
     "topology_cost_per_spawn": TableCopy(
         title="Cost per subagent run",
         help=Help(
-            shows="What one run of each agent type costs, and how long its tool calls took.",
+            shows="What each agent type costs, and how long its tool calls took, by how its runs were started.",
             read="Compare types doing similar work. The typical run is a fairer guide than the average when a few runs are huge.",
             act="For the most expensive type, check its startup context and whether a cheaper model fits.",
         ),
         columns={
+            "launch": ("Started as", "A background agent runs beside the session. A foreground agent holds it. A workflow agent comes from a workflow."),
+            "runs": ("Runs", "How many runs of this type were started this way."),
+            "total_cost": ("Total cost", "What all those runs cost together."),
             "mean_cost": ("Average cost per run", "Total cost of a run, averaged."),
             "median_cost": ("Typical cost per run", "The middle value."),
             "mean_tool_wait": ("Average tool wait", "How long each of its tool calls took to answer."),
@@ -2155,6 +2197,78 @@ TABLE_COPY: dict[str, TableCopy] = {
             "metric": ("", "What is counted."),
             "mean_per_session": ("Per session", "Average per session."),
             "total": ("Total", "All sessions together."),
+        },
+    ),
+    # -- spend by cost centre ------------------------------------------------
+    "cost_centres": TableCopy(
+        title="Spend by cost centre",
+        help=Help(
+            shows="Where the window's spend went. Rows are the main session, the agents it started, the agents a workflow started, and each session's first call.",
+            read="Base read is the starting prompt, read again on every reply. Above-base read is the conversation on top of it. The rows add up to your total spend.",
+            act="Start with the largest cell. The tables below split the base read into its parts and say which check covers each cell.",
+        ),
+        columns={
+            "centre": ("Cost centre", "Who spent it."),
+            "base_read": ("Base read", "Reading the starting prompt again from the cache, on every reply."),
+            "above_read": ("Above-base read", "Reading the conversation on top of the starting prompt, on every reply."),
+            "growth_write": ("Growth write", "Putting new content into the cache, and input that was not cached."),
+            "rewrite": ("Rewrite", "Writing the cache again after it was rebuilt, for example when it had expired."),
+            "post_compaction": ("Post-compaction", "Writing the cache after a conversation summary, including the call that wrote the summary."),
+            "output": ("Output and thinking", "What Claude wrote and thought, and any search fee."),
+            "total": ("Total", "The row's spend in the window."),
+        },
+        lead_columns=["centre", "base_read", "above_read", "growth_write", "rewrite", "post_compaction", "output"],
+    ),
+    "cost_centres_parts": TableCopy(
+        title="What the base read, rewrites and post-compaction writes are made of",
+        help=Help(
+            shows="The parts of three cells: the starting prompt read on every reply, a rewrite, and a write after a summary.",
+            read="Each part is counted once, under the setting that removes it. A part marked harness-fixed has no setting known.",
+            act="Open the check beside a controllable part to see the fix. Parts you cannot change are listed so they are not mistaken for waste.",
+        ),
+        columns={
+            "centre": ("Cost centre", "Who spent it."),
+            "cell": ("Cell", "Which cell of the table above this part belongs to."),
+            "part": ("Part", "What this part of the cost is made of."),
+            "lever": ("Who decides it", "Whether a setting of yours can change this part, or the harness fixes it."),
+            "cost": ("Cost", "What this part cost in the window."),
+            "share": ("Share of cell", "This part's share of its cell."),
+            "card": ("Check", "The check that covers this part."),
+            "advice": ("Setting", "What to do about it, when there is nothing to change."),
+        },
+        lead_columns=["centre", "cell", "part", "cost", "share", "card"],
+    ),
+    "cost_centres_advice": TableCopy(
+        title="Cost centres in the newest 30 and 7 days, and what advises on each",
+        help=Help(
+            shows="Each cell of the cost-centre table with spend, for the whole window and for its newest 30 and 7 days.",
+            read="The last column names the check that covers the cell, or says there is no advice. It does not mean that check found a saving.",
+            act="Open the named check for the cell that grew in the newest days.",
+        ),
+        columns={
+            "centre": ("Cost centre", "Who spent it."),
+            "cell": ("Cell", "What the spend paid for."),
+            "cost": ("Window", "Spend in the whole window."),
+            "cost_30d": ("Newest 30 days", "Spend in the 30 days before the newest reply."),
+            "cost_7d": ("Newest 7 days", "Spend in the 7 days before the newest reply."),
+            "hint": ("Advice", "The check that covers this cell, or no advice."),
+        },
+    ),
+    "cost_centres_models": TableCopy(
+        title="Model choice by agent type",
+        help=Help(
+            shows="Each agent type by the model tier it ran on and who chose that model, for direct agents and workflow agents apart.",
+            read="The Sonnet ceiling is the most a move to Sonnet could save. It is for information, and Sonnet may need more replies.",
+            act="",
+        ),
+        columns={
+            "centre": ("Started by", "Whether the main session or a workflow started these runs."),
+            "agent_type": ("Agent type", "The agent type, or the workflow agent group."),
+            "tier": ("Model", "The model tier the runs used most."),
+            "chosen": ("Who chose it", "The call that started the agent, its agent file, or nobody."),
+            "runs": ("Runs", "How many runs."),
+            "cost": ("Cost", "What those runs cost."),
+            "ceiling": ("Sonnet ceiling", "The most a move to Sonnet could save, at the same token counts."),
         },
     ),
     # -- workstyle / workflows ---------------------------------------------
@@ -5195,7 +5309,8 @@ TABLE_COPY: dict[str, TableCopy] = {
             ),
             "custom_agents_est": (
                 "Agent list (est.)",
-                "Your custom agents, at about 60 tokens each. Blank without a settings snapshot.",
+                "Your custom agents' share of the agent list, by how many agents it names. Blank without a "
+                "settings snapshot.",
             ),
             "mcp_tools_est": (
                 "MCP servers offered",
@@ -5212,10 +5327,15 @@ TABLE_COPY: dict[str, TableCopy] = {
                 "The definitions, tool names and instructions of your MCP servers that the first reply carried, "
                 "estimated from their length. Blank when no MCP server showed up.",
             ),
+            "mcp_removable_tokens": (
+                "MCP tools you can turn off (est.)",
+                "The MCP tools in the first call from servers you can turn off, estimated from their length. "
+                "Servers built into the desktop app are left out.",
+            ),
             "controllable_est": (
                 "What you can change (est.)",
-                "The skills list, CLAUDE.md and rules, and MCP tools together. The part of the first call a "
-                "setting can shrink.",
+                "The skills list, CLAUDE.md and rules, and the MCP tools of servers you can turn off, together. "
+                "The part of the first call a setting can shrink. Servers built into the desktop app are left out.",
             ),
             "system_prompt_and_tools_est": (
                 "System prompt and tools (rest)",

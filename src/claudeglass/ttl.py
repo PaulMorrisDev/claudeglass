@@ -351,17 +351,10 @@ def _recache_classification(t: Turn, th: TtlThresholds | None = None) -> str | N
     th.full_expiry_cr`` (essentially nothing survived: a clean TTL
     expiry) or otherwise "prefix-invalidated" (a partial read: the
     cache content itself changed upstream of some point, which no TTL
-    policy can prevent). Falling back per turn rather than only when
-    every turn in a transcript is unsigned produces the same result in
-    every case this module can observe today: ``report.py`` feeds
-    ``TtlStats.add`` (and this function, transitively) the raw,
-    un-``apply``'d transcript -- only ``compaction.py`` currently calls
-    ``recache.apply`` before its own turn correlation -- so
-    ``recache_signature`` is uniformly ``None`` on every turn this
-    function actually sees in the report pipeline, and the fallback
-    rule does all the classifying. It stays correct turn-by-turn should
-    a future caller pass turns that already carry a signature, or a
-    transcript where only some turns do.
+    policy can prevent). ``report.py`` feeds ``TtlStats.add`` turns that
+    ``recache.apply`` has signed, so the signature does the classifying
+    there. The fallback serves callers that pass raw turns
+    (``counterfactual.py``).
 
     ``th`` (fix item 6) defaults to :data:`_DEFAULT_THRESHOLDS` --
     ``recache.py``'s own documented defaults — when omitted.
@@ -371,11 +364,9 @@ def _recache_classification(t: Turn, th: TtlThresholds | None = None) -> str | N
     whose ``gap_cause == "limit"`` (the gap spanned a usage-cap pause,
     see model.py's/parse.py's module docstrings) classifies as
     "limit-expiry" rather than full-expiry/prefix-invalidated, checked
-    before the fallback's own cache_read_tokens comparison. Since the
-    real report pipeline feeds this function turns whose
-    ``recache_signature`` is uniformly ``None`` (see above), this
-    fallback branch -- not ``t.recache_signature``'s own value -- is
-    what actually classifies a limit-induced re-cache in practice.
+    before the fallback's own cache_read_tokens comparison. In the report
+    pipeline ``recache.detect`` has already given such a turn its
+    "limit-expiry" signature.
     """
     th = th or _DEFAULT_THRESHOLDS
     if t.recache_signature is not None:

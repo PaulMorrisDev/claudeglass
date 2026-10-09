@@ -41,6 +41,7 @@ from claudeglass.parse import parse_transcript
 
 from helpers import (
     assert_privacy,
+    assert_privacy_deep,
     attachment_line,
     ignorable_line,
     queue_operation_line,
@@ -1324,3 +1325,102 @@ def test_privacy_rework_after_delivery_holds_counts_closed_words_and_amounts_nev
         flat = [x for part in parts for x in (part if isinstance(part, (tuple, list)) else [part])]
         assert all(isinstance(x, (int, float, str, bool, type(None))) for x in flat), name
         assert all(len(x) <= _MAX_STR_LEN for x in flat if isinstance(x, str)), name
+
+
+def test_privacy_a_read_files_path_and_content_leave_a_hash_a_size_and_a_count_never_the_words(tmp_path: Path, monkeypatch):
+    # Agents read a file whose path and content are full of words. The
+    # context-file stats, the rows built from them and the tuning block keep
+    # the file's salted hash, its size and who read it: no path, no name, no
+    # text. Names are worked out later from disk, in memory.
+    from types import SimpleNamespace
+
+    from claudeglass import context_files, parse, tuning
+    from claudeglass.pricing import load_pricing
+
+    salt = b"q" * 32
+    monkeypatch.setattr(parse, "_SALT", salt)
+    secrets = ["bonobo", "echidna", "kakapo", "numbat", "quoll", "tarsier"]
+    target = f"C:/work/{secrets[0]}/docs/{secrets[1]}-notes.md"
+    content = f"# {secrets[2]}\n" + (f"{secrets[3]} " * 2000)
+    stats = context_files.ContextFileStats()
+    pricing = load_pricing()
+    for number, (reach, is_main) in enumerate((("main", True), *(("Explore", False),) * 3)):
+        lines = []
+        for index in range(3):
+            blocks = [{"type": "text", "text": f"Reading {secrets[4]}."}]
+            if index == 0:
+                blocks.append(tool_use_block("Read", f"tu_{number}", {"file_path": target}))
+            lines.append(turn_line(content=blocks, timestamp=f"2026-09-18T12:0{index}:00.000Z"))
+            if index == 0:
+                lines.append(
+                    user_block_line([tool_result_block(f"tu_{number}", content)], timestamp="2026-09-18T12:00:30.000Z")
+                )
+        path = tmp_path / f"run{number}.jsonl"
+        write_jsonl(path, lines)
+        result = parse_transcript(path, TranscriptMeta(path=str(path), agent_type=None if is_main else reach))
+        assert result.turns[0].read_target_hashes == (parse.path_hash(target, salt),)
+        assert result.turns[0].read_target_chars == (len(content),)
+        blob = json.dumps(cache.encode_result(result)) + repr(result.events) + repr(result.turns)
+        for word in secrets:
+            assert word not in blob, word
+        _assert_no_violations(result)
+        stats.add(result, pricing, is_main=is_main)
+
+    data = stats.to_dict()
+    [row] = data["reads"]
+    assert row["hash"] == parse.path_hash(target, salt) and row["reach"] == {"Explore": 3, "main": 1}
+    rows = context_files.project_files(data)
+    block = tuning._project_files(SimpleNamespace(context_files=data, config_dir=None))
+    for name, value in (("stats", data), ("rows", rows), ("tuning block", block)):
+        blob = json.dumps(value)
+        for word in [*secrets, "C:/work", "docs/", "notes.md"]:
+            assert word not in blob, (name, word)
+        assert_privacy_deep(value)
+    # The row holds only the hash, numbers and closed words: no name field yet.
+    assert [(item["name"], item["ext"], item["project"]) for item in rows] == [("", "", "")]
+
+
+def test_privacy_naming_a_file_changes_a_copy_of_the_rows_never_the_stats(tmp_path: Path):
+    # Naming a file hashes the files under the project folders and keeps the
+    # path from the project folder beside each hash, in memory, for the
+    # dashboard. The context-file stats a report carries are not touched.
+    import copy
+
+    from claudeglass import claude_md_review, parse
+
+    claude_root = tmp_path / ".claude"
+    config_dir = claude_root / "claudeglass"
+    config_dir.mkdir(parents=True)
+    folder = tmp_path / "work" / "ibis-project"
+    (folder / "docs").mkdir(parents=True)
+    notes = folder / "docs" / "dormouse-notes.md"
+    notes.write_text("Words.\n", encoding="utf-8")
+    salt = parse.load_or_create_salt(config_dir)
+    data = {
+        "transcripts": {"main": 5, "Explore": 5},
+        "window_days": 30.0,
+        "newest": "2026-09-30",
+        "files": [],
+        "reads": [
+            {
+                "hash": parse.path_hash(str(notes), salt),
+                "source": "read",
+                "tokens": 6000,
+                "reach": {"Explore": 5},
+                "cost_usd": 3.0,
+                "weekly": {},
+                "last_seen": "2026-09-30T10:00:00.000Z",
+            }
+        ],
+    }
+    before = copy.deepcopy(data)
+    claude_md_review._NAMES.clear()
+    rows, local = claude_md_review.project_file_rows(config_dir, data, projects=[folder])
+
+    assert [row["name"] for row in rows] == ["docs/dormouse-notes.md"]
+    assert data == before
+    assert "dormouse" not in json.dumps(data) and "ibis" not in json.dumps(data)
+    # The names are in memory only: they are not a field of anything a report keeps.
+    assert all("name" not in item for item in data["reads"])
+    assert local.names and not any(isinstance(value, Path) for item in local.names.values() for value in item.values())
+    claude_md_review._NAMES.clear()

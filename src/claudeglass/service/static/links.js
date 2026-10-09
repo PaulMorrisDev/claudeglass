@@ -416,6 +416,29 @@ export function captureLink(text) {
   return pageLink("setup/capture", text);
 }
 
+// The spend-by-cost-centre table on Agents (Subagents), scrolled to and
+// highlighted as an evidence link's table is (evidence.js revealEvidence).
+// Reachable from the Overview's "By cost centre" part.
+export var COST_CENTRES_TABLE = "agents.cost_centres";
+
+export function costCentresLink(text) {
+  return pageLink("agents/subagents", text || "See every cost centre", { t: COST_CENTRES_TABLE });
+}
+
+// The project-files table on Agents (Subagents): the files agents read,
+// scrolled to and highlighted the same way. The project-files check points here.
+export var PROJECT_FILES_TABLE = "agents.project_files";
+
+export function projectFilesLink(text) {
+  return pageLink("agents/subagents", text || "See every project file", { t: PROJECT_FILES_TABLE });
+}
+
+// A check on Actions, by its id (quick_actions.CHECK_IDS): the card a
+// cost-centre part or cell points at.
+export function checkLink(id, text) {
+  return pageLink("actions/checks", text, { id: id });
+}
+
 // The page and segment a view key names, as the reader sees it:
 // "Spend › Usage" (the same in the README and docs).
 export function viewLabel(key) {

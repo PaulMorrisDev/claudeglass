@@ -797,9 +797,20 @@ the agents/skills/workflows it spawns" with numbers only:
   (and workflow) it spawned, recursively via `parentAgentId`: invocations,
   direct cost, spawned cost, mean spawns per invocation, mean report
   size.
-- `topology_spawn_depth` — spawn-depth histogram.
-- `topology_cost_per_spawn` — cost per spawn by agent type, plus the mean
-  `tool_wait_s` (mean tool wait) across that agent type's priced turns.
+- `topology_spawn_depth` — spawn-depth histogram. Its note gives the
+  sessions seen, the total spawns, the median spawns per session that
+  spawns any (not the mean, which the sessions that spawn none pull down)
+  and how many sessions spawn none.
+- `topology_cost_per_spawn` — cost per run by agent type and how it was
+  started (`launch`): a `background` agent or a `foreground` agent, from
+  the `run_in_background` of the parent call's `Agent` tool use (a
+  tool result that says the agent went to the background also counts as
+  background; a direct agent whose call can't be joined counts as
+  foreground), or a `workflow` agent. A workflow agent is told apart by
+  its transcript kind alone, never by the agent type: its own meta always
+  says foreground. Columns: `runs`, `total_cost`, the mean and median
+  cost, and the mean `tool_wait_s` (mean tool wait) across those runs'
+  priced turns.
 - `topology_chains_summary` — `stoppedByUser`/`maxTurns` truncation
   signals.
 - `topology_reminder_hook_pressure` — attachment/hook-output counts per
@@ -826,6 +837,57 @@ the agents/skills/workflows it spawns" with numbers only:
   session, and how many of those repeats land within a compaction's
   rediscovery window; every count is 0 unless the corpus load wired up a
   hashing salt (see `parse.load_or_create_salt`).
+
+### Spend by cost centre (`cost_centres.py`)
+
+Four more tables on the same section answer "where does the money go, not
+just who spent it". Every priced reply is split into the cells of one
+matrix, so its rows add up to the Overview's total spend (a test holds this).
+Amounts are list-price USD, shown through the dashboard's units like any
+other.
+
+- `cost_centres` — rows: `main` (the main session), `direct` (agents the
+  main session started), `workflow` (agents a workflow started, told apart
+  by transcript kind) and `start` (each main session's first call, the
+  "session start (1-hour write)"). Columns: `base_read` (cache read of the
+  starting prompt, at most the first call's cache write plus cache read per
+  reply), `above_read` (cache read above it, the conversation),
+  `growth_write` (new cache writes and uncached input), `rewrite` (the
+  cache write of a reply `recache.detect` calls a rebuild),
+  `post_compaction` (the write of the reply after a conversation summary,
+  and of the estimated call that wrote it), `output` (output, thinking and
+  any search fee) and `total`. An agent's own first call is in its own row,
+  as growth write.
+- `cost_centres_parts` — what three cells are made of. The base read is
+  split into the system prompt, built-in tool definitions (the three
+  largest by name and always the Artifact tool and PowerShell, the rest
+  together), the built-in tools an agent type
+  rarely uses (its allowlist), MCP servers, CLAUDE.md files, auto memory,
+  skills, hook output and what no measurement covers. Each part is counted
+  once, in the lever that removes it: MCP server tools, names and
+  instructions are the connector's even where an allowlist could also drop
+  the tool definitions; in a main session the MCP servers built into the
+  desktop app are a harness-fixed part of their own; CLAUDE.md and memory
+  are apart. A controllable part
+  carries the check that covers it (`card`); a harness-fixed part (the
+  Artifact tool, PowerShell, the system prompt) says "no setting known".
+  Rewrite and post-compaction cells are split into the starting prompt they
+  wrote again (`prefix`) and the conversation. Sizes are estimates from
+  characters at the characters per token measured on your own sessions.
+- `cost_centres_advice` — each cell with spend, for the whole window and its
+  newest 30 and 7 days (counted back from the newest reply), with the
+  check that covers it or "No advice". It names a check; it does not say
+  that check found a saving.
+- `cost_centres_models` — information only, no card: agent type by model
+  tier by who chose the model (named in the call, named in the agent file
+  or inherited), direct and workflow apart, with runs, cost and a Sonnet
+  ceiling (the most a move to Sonnet could save at the same tokens).
+
+The `subagent-volume` card names the largest cost centre and cites its row.
+The `cost-centres` check (`claudeglass check cost-centres`) is information
+and never "worth a look"; it names the largest cell and its covering check.
+The tuning export's `cost_centres` block holds the matrix as list-price
+amounts and nothing else.
 
 ## `run_split` (`run_split.py`)
 
@@ -1719,7 +1781,18 @@ tools wherever it sits (a later header-only snapshot does not reset it),
 and counts both deltas as startup parts when they arrive before the second
 call. The snapshot's per-tool sizes are kept for built-in tools by name
 and for MCP tools as a total per server (never a description, a schema or
-any other name).
+any other name). An MCP server's deferred tool names and its instructions
+are sized the same way, per server, from the first two calls.
+
+A tools list (`tools:` in an agent file) leaves out the tool definitions
+an agent type never calls, and the skills list and the agent list go with
+the Skill and Agent tools. `agent_startup_diet` and `agent_startup_servers`
+price that. Tool definitions are the front of a cached prefix that sibling
+spawns share, so only the spawns that wrote it (their first call read
+less than half of it from cache) pay the cache-write price for them; every
+other part is written by each spawn. Each part is then read on every later
+call. The window is the span of the first calls, and at least 7 days, so
+`window_days` scales an amount in the window to 30 days.
 
 Every comparison across agent types reads the first call on one model: the
 same tools are 51.5k tokens on Haiku 4.5 and 69.4k on Sonnet 5. A row
@@ -1740,14 +1813,50 @@ counts the others in `other_model_spawns` and leaves them out.
   Managed policy CLAUDE.md, which still loads regardless of
   `omitClaudeMd`; `goals._omit_claude_md`, `whatif._omit_claude_md` and
   recommend.py's `spawn-claude-md` rule all subtract it out before
-  pricing what `omitClaudeMd` would save) and `removable_tools` (the size
-  of the tool definitions and MCP servers the agent type was offered and
-  called in at most a tenth of the spawns offered them: what a tools list
-  on the agent would leave out. Tools Claude Code adds whatever the list
-  says are not counted).
+  pricing what `omitClaudeMd` would save), `read_price` (the same model's
+  cache-read list price per million tokens), `later_calls` (the mean number
+  of calls after the first) and `removable_tools` (the size of the tool
+  definitions and MCP servers the agent type was offered and called in
+  fewer than a tenth of the spawns offered them: what a tools list on the
+  agent would leave out. Tools Claude Code adds whatever the list says,
+  `StructuredOutput` and `SubagentHandback`, are not counted).
 - `agent_startup_tools` — per agent type, one row per tool (built-in) or
-  MCP server it was offered and rarely used: spawns offered, spawns that
-  used it and the definition size, largest first.
+  MCP server it was offered and rarely used (called in fewer than a tenth
+  of the spawns offered it): spawns offered, spawns that used it and the
+  definition size, largest first.
+- `agent_startup_diet` — per agent type (report only): what a tools list
+  would take out of a start, on the model most of its spawns ran on.
+  `keep_tools` are the tools and MCP servers (as `mcp__server__*`) called
+  in at least a tenth of the spawns offered them, whether sent in full or
+  loaded when asked for. `rare_tools` are the rest. `dropped_definitions`,
+  `dropped_deferred` (the deferred tool names of the MCP servers left out),
+  `dropped_skills` (the skills list, when Skill is left out) and
+  `dropped_roster` (the agent list, when Agent is left out) are tokens per
+  spawn; `kept_instructions` are the instructions of MCP servers left out,
+  which stay under a tools list and are not counted in the saving. Then the
+  `later_calls`, `prefix_write_share` (the share of spawns that wrote the
+  tool definitions), the two prices, `saving_usd` across the spawns
+  measured (list prices) and `window_days`. Whether the skills list and the
+  agent list really go with their tools is not in Claude Code's docs, so
+  the `spawn-tools-list` card asks for a before and after check.
+- `agent_startup_servers` — per agent type (report only): one row per MCP
+  server it was offered and called in fewer than a tenth of the spawns
+  offered it, largest first and at most 12: spawns offered and used, per
+  spawn the tool definitions, deferred names and instructions in tokens,
+  the cost across those spawns of the definitions and deferred names
+  (what a tools list leaves out; the instructions stay under it and are
+  not in the cost) and `window_days`.
+- `agent_startup_stack` — per agent type (from `context_files.py`): the
+  mean first call split in the order it arrives. `system_tools` is the
+  first call's whole input less the next two columns (system prompt, tool
+  definitions, skills list, hook output and environment notes),
+  `auto_files` the CLAUDE.md files Claude Code loads for it (`claude_md`
+  above), `standing_reads` the tokens per run of the files this agent type
+  reads by habit, `brief` the task prompt, `total` their sum and
+  `standing_files` how many files that is. A file counts as read by habit
+  when the type read it in 3 or more runs or in 20% or more of them, and
+  at least 3 runs of that type were seen. Reads arrive after the first
+  call and are carried (and paid for) like the loaded files.
 - `agent_startup_unused` — per agent type: spawns measured, the skills
   list size, spawns given it and spawns that called the Skill tool,
   spawns offered MCP tools and spawns that called one, the CLAUDE.md
@@ -1783,8 +1892,10 @@ when the corpus has no top-level transcripts at all.
   attachment's `size_chars` preceding the first turn), `memory_files` (the
   joined schema-2 snapshot's `content_layers` CLAUDE.md family + rules
   bytes; `null` without a snapshot), `custom_agents` (the snapshot's agent
-  count times a labelled 60-tokens-per-agent-listing constant; `null`
-  without a snapshot), `mcp_tools` (the MCP servers the project's sessions
+  count out of the agent types the first calls' agent list named, times
+  that list's size; with no list in the first calls, the count times a
+  labelled 60-tokens-per-agent-listing constant; `null` without a
+  snapshot), `mcp_tools` (the MCP servers the project's sessions
   were offered, counted by what can be done about them, e.g. `"2 offered:
   1 you can turn off, 1 built into the desktop app"`, from the rows
   `tool_search` builds; with none offered, `"present, size unknown"` when
@@ -1794,8 +1905,10 @@ when the corpus has no top-level transcripts at all.
   `tool_search`; a built-in desktop server is counted but never
   removable) and `mcp_tools_tokens` beside them (the
   definitions, deferred-tool names and instructions the first call
-  carried, when it recorded them), `controllable_est` (skills list +
-  memory files + MCP tools: the part a setting can change; most of P0 is
+  carried, when it recorded them), `mcp_removable_tokens` (the same,
+  leaving out the servers built into the desktop app),
+  `controllable_est` (skills list +
+  memory files + `mcp_removable_tokens`: the part a setting can change; most of P0 is
   Claude Code's own tool JSON, which none can) and
   `system_prompt_and_tools` — the residual: mean first call minus every
   other known `(est)` bucket, floored at 0. The `all` row's
@@ -1847,7 +1960,7 @@ when the corpus has no top-level transcripts at all.
 `recommend.py`'s `baseline-bloat` rule (see
 [Recommendations](#recommendations-recommendpy) below) fires on the
 `controllable_est` column (30k tokens or more), never on the whole first
-call, and cites that and this section's sized buckets as its evidence,
+call or on how many MCP servers or plugins a config names, and cites that and this section's sized buckets as its evidence,
 naming the largest one in its action text. Without a `context_budget`
 section it does not fire.
 
@@ -2041,7 +2154,9 @@ baseline.
   than 5 sessions on either side shows its session counts only. A baseline
   saved under older mode rules (no `mode_rules`, or one below
   `classify.MODE_RULES`) gets a note that a mode's change can come from
-  the new rules.
+  the new rules. A baseline saved under older rebuild rules (no
+  `recache_rules`, or one below `recache.RULES`) gets a note on the overview
+  table that a rise in the re-cache share can come from the new rules.
 
 ## `scorecard` (`scorecard.py`)
 
@@ -2110,8 +2225,8 @@ own `_rule_*` functions: `ttl-switch`, `long-tool-waits`,
 `baseline-bloat`, `agent-report-size`, `spawn-cost` (for agent types
 without `agent_startup` data, and only when the mean first call is over
 40k tokens and at least 5k tokens of its tool definitions are rarely or
-never used; otherwise the per-part `spawn-claude-md`,
-`spawn-unused-skills`, `spawn-unused-mcp`, `spawn-read-only-tools`,
+never used; otherwise the per-part `spawn-tools-list`,
+`spawn-claude-md`, `spawn-unused-skills`, `spawn-unused-mcp`,
 `spawn-task-prompt` and `spawn-shared-claude-md`), `effort-mismatch`,
 `discovery-share` (when the `phases` section is present), `pricing-coverage`,
 `data-quality`, `limit-pressure`. Then each module's own rule:
@@ -2144,6 +2259,44 @@ cites the cell it used:
 - `spawn-claude-md` is held back when more of an agent type's runs said
   they used CLAUDE.md than said they didn't, and cites the ones that
   didn't.
+
+The subagent start rules read `agent_startup` and give copyable text only;
+none writes a file.
+
+- `spawn-tools-list` gives a `tools:` line for one agent type, from the
+  tools called in at least a tenth of its spawns, and names the rest as
+  rarely used. It fires for at least 5 spawns that recorded their tools
+  and at least 5,000 tokens a start to leave out (`spawn_tools_list_tokens`).
+  `Explore`, `Plan` and `claude-code-guide` are left alone. A built-in
+  type or an agent with no file gets a prompt to create a same-named
+  file; `general-purpose` is warned that a list limits every spawn that
+  names no type. Workflow agents get a workflow-script variant: pass an
+  `agentType` that names an agent file with the list. It says that
+  `StructuredOutput` and `SubagentHandback` are added whatever the list
+  says, and asks for one spawn before and one after on the same model.
+  It replaces the old `spawn-read-only-tools`.
+- `spawn-unused-skills` offers the tools list first (leave Skill off it)
+  and keeps `disallowedTools: Skill` as the narrow alternative. When the
+  tools list card leaves Skill out, its saving is a part of that card's,
+  not on top of it.
+- `spawn-unused-mcp` is one card per agent type, naming each MCP server
+  that at most 2% of the spawns offered it called
+  (`spawn_unused_mcp_use_share_pct`) and that costs at least 5 USD over 30
+  days (`spawn_unused_mcp_min_usd_30d`). Its amount counts each server's tool
+  definitions and deferred names, a breakdown of the tools list card's
+  saving, so it is not added to it. Its `mcpServers` change is marked not
+  verified. ClaudeGlass does not record an agent's
+  `mcpServers`, so the card says to look in the file first.
+- A built-in agent type's `spawn-cost` card no longer says to shorten the
+  task prompt: its start is Claude Code's own system prompt and tool
+  definitions, which a tools list trims. The baseline card suggests
+  shortening an agent's `description:` only when your own agents add 1,000
+  tokens or more to every session.
+- `spawn-claude-md`, `spawn-unused-skills` and `spawn-task-prompt` are
+  priced as each spawn writing the part and every later call reading it
+  (`spawn-claude-md` the way the What-if table prices `omitClaudeMd`: the
+  cache write at each spawn, or what the Context files section prices
+  carrying CLAUDE.md across the rest of each spawn, if that is more).
 - `model-tier` cites `habits_agents` (see `model_swap` above).
 - `wasted-turns` cites the share of messages redone by the next one and
   the pieces of work you said missed their goal.

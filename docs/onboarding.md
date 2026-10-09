@@ -384,6 +384,7 @@ only cite the report's own tables" convention `recommend.py`'s
 |---|---|
 | `mode_mix` | `sessions` section's `sessions_by_mode` table |
 | `mode_rules` | `classify.MODE_RULES` when it was saved: which mode rules sorted its sessions (2: unattended overnight, and one-shot) |
+| `recache_rules` | `recache.RULES` when it was saved: which rules flagged and labelled its cache rebuilds (2: the session part and the part beyond the shared start) |
 | `dominant_purposes` | `sessions` section's `sessions_by_purpose` table (top 3) |
 | `archetype` | `workstyle` section's `workstyle_archetypes` table (top row: the archetype that cost the most) |
 | `scorecard_overall` / `scorecard_label` | `scorecard` section's `overall` table |

@@ -196,6 +196,8 @@ _IMPACT_CACHE_SIZE = 6
 #: dashboard's picker offers (core.js WINDOW_OPTIONS), so it lists every
 #: change any window does.
 _ALL_TIME_REACH_DAYS = 90
+#: The most project files ``/api/project-files`` returns (the dearest, prose first).
+PROJECT_FILES_SHOWN = 100
 
 _RESTART_ADVICE = "Restart the dashboard: claudeglass install-service, or stop and start serve."
 
@@ -2847,6 +2849,50 @@ def make_handler(
             return _not_found("unknown CLAUDE.md file")
         return _ok({"period": period, **module.file_detail(item, units, period)})
 
+    def route_project_files(store, query, body):
+        """The project files your agents consume: the CLAUDE.md-family
+        files Claude Code loads, the files they import, and the files agents
+        read by habit, each with its size now, its change over about 30
+        days, who reads it and what it costs a month. Names are worked
+        out now from the project folders on disk and are never stored."""
+        from .. import claude_md_review, context_files
+
+        window, err = _window_query(query)
+        if err is not None:
+            return err
+        project, err = _project_query(query)
+        if err is not None:
+            return err
+        model = _get_report_model(*window, project)
+        data = model.context_files or {}
+        folders = _project_folders(project)
+        rows, local = claude_md_review.project_file_rows(
+            options.config_dir, data, projects=None if folders is None else list(folders)
+        )
+        flagged = {row["hash"]: row["reasons"] for row in context_files.check_rows(rows)}
+        units = _report_units(model)
+        shown = context_files.dearest(rows, PROJECT_FILES_SHOWN)
+        return _ok(
+            {
+                "period": _period_text(*window, name=query.get("window")),
+                "window_days": data.get("window_days") or context_files.MIN_WINDOW_DAYS,
+                "transcripts": data.get("transcripts") or {},
+                "total": len(rows),
+                "named": sum(1 for row in rows if row["name"]),
+                "truncated": local.truncated,
+                "files": [
+                    {
+                        **row,
+                        "reasons": flagged.get(row["hash"], []),
+                        "fixes": claude_md_review.project_file_fixes(row, units)
+                        if row["hash"] in flagged
+                        else [],
+                    }
+                    for row in shown
+                ],
+            }
+        )
+
     def route_skills(store, query, body):
         """Every skill Claude Code listed in the window: what it is (its
         description, read now from the newest listing and never stored),
@@ -3548,6 +3594,7 @@ def make_handler(
         "/api/diagnostics": route_diagnostics,
         "/api/profile-schema": route_profile_schema,
         "/api/claude-md": route_claude_md,
+        "/api/project-files": route_project_files,
         "/api/skills": route_skills,
         "/api/impact": route_impact,
         "/api/backtest": route_backtest,

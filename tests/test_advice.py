@@ -251,6 +251,18 @@ def test_already_set_matches_model_aliases_and_maps():
     assert not fixes.already_set("maxTurns", 1, True)
 
 
+def test_already_set_treats_a_tools_list_as_a_set():
+    # Order does not matter, and a file may spell the list as one string.
+    assert fixes.already_set("tools", ["Read", "Grep"], ["Grep", "Read"])
+    assert fixes.already_set("tools", ["Read", "Grep"], "Grep, Read")
+    assert fixes.already_set("disallowedTools", ["Skill"], ["Skill"])
+    # A longer or shorter list is a different list, and nothing set is not set.
+    assert not fixes.already_set("tools", ["Read", "Grep"], ["Read", "Grep", "Bash"])
+    assert not fixes.already_set("tools", ["Read", "Grep"], ["Read"])
+    assert not fixes.already_set("tools", ["Read", "Grep"], None)
+    assert not fixes.already_set("tools", ["Read", "Grep"], 3)
+
+
 def _compaction(id_, **kw) -> Recommendation:
     return Recommendation(id=id_, severity="advice", category="settings", lever="autoCompactWindow", **kw)
 
@@ -372,6 +384,17 @@ def test_spawn_cost_is_dropped_for_agents_no_file_can_change():
     ]
     out = advice.finish(recs, report, None, None)
     assert [r.agent_type for r in out] == ["reviewer"]
+
+
+def test_spawn_cost_promises_a_tools_list_card_only_where_one_can_come():
+    report = _model_swap_report([])
+    recs = [
+        Recommendation(id="spawn-cost", severity="advice", agent_type="Plan"),
+        Recommendation(id="spawn-cost", severity="advice", agent_type="general-purpose"),
+    ]
+    out = {r.agent_type: r for r in advice.finish(recs, report, None, None)}
+    assert "tools list card" not in out["Plan"].action and out["Plan"].action.endswith("never calls.")
+    assert "tools list card" in out["general-purpose"].action
 
 
 def test_severity_orders_before_saving():

@@ -904,6 +904,8 @@ class _PendingTurn:
     plan_stats: PlanStats | None = None
     #: Workflow-agents addition (see model.py's ``Turn.workflow_runs``).
     workflow_runs: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: Cost-centres addition (see model.py's ``Turn.agent_launches``).
+    agent_launches: dict[str, str] = field(default_factory=dict)
     #: Parser-signals addition (see model.py's ``Turn.ask_rounds``).
     ask_rounds: int = 0
     #: Feedback addition (see model.py's ``Turn.feedback``): this turn's
@@ -1209,6 +1211,11 @@ def _merge_content_blocks(
             prompt = tool_input.get("prompt")
             if isinstance(prompt, str) and prompt:
                 pending.agent_brief_chars = (pending.agent_brief_chars or 0) + len(prompt)
+            # Cost-centres addition: how the call asked to run, as a word.
+            # The result may still say it ran in the background.
+            if isinstance(tool_use_id, str) and tool_use_id:
+                background = tool_input.get("run_in_background") is True
+                pending.agent_launches[tool_use_id] = "background" if background else "foreground"
         encoded_input = json.dumps(tool_input, ensure_ascii=False, default=str)
         input_chars = len(encoded_input)
         pending.tool_input_chars_by_tool[name] = (
@@ -1921,6 +1928,10 @@ def _accumulate_tool_results(
                 # provisional name so it can't self-authorise this same
                 # turn's own tag claim.
                 current.skill_calls_by_tool_use.pop(tool_use_id, None)
+            # Cost-centres addition: a result that says the agent went to
+            # the background, whatever the call asked for.
+            if name in _AGENT_TOOL_NAMES and _is_async_launch(d):
+                current.agent_launches[tool_use_id] = "background"
             # Metrics-capture addition: the report a synchronous agent
             # handed back (a background agent's launch message is not its
             # report; that arrives later as a task notification), and
@@ -2333,6 +2344,7 @@ def _finalize_turn(
         spawn_marker=spawn_marker,
         agent_result_chars=dict(pending.agent_result_chars),
         workflow_runs=dict(pending.workflow_runs),
+        agent_launches=dict(pending.agent_launches),
         prompt_flags=tuple(flag for flag in PROMPT_FLAGS if flag in flags),
         plan_stats=pending.plan_stats,
         commands_run=tuple(commands_run),

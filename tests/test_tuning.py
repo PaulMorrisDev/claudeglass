@@ -27,7 +27,7 @@ from claudeglass import PARSER_VERSION, __version__
 from claudeglass import capture as capture_mod
 from claudeglass import capture_catalogue as catalogue
 from claudeglass import coaching as coaching_mod
-from claudeglass import habits, haiku_tags, hook_health, parse, ratings, rework, tuning
+from claudeglass import context_budget, habits, haiku_tags, hook_health, parse, ratings, rework, tuning
 from claudeglass.capture_tags import GROUNDED_KEYS
 from claudeglass.config import CaptureConfig, Config
 from claudeglass.corpus import load_corpus
@@ -167,6 +167,9 @@ def test_the_sample_document_is_valid_and_holds_every_block():
         ("pieces.modes", {"my-notes-session": 2}, "pieces.modes: has a key that is not in the spec", "my-notes"),
         ("agents.types", {"my-private-reviewer": 3}, "agents.types: has a key that is not in the spec", "private"),
         ("agents.models", {"claude-opus-4-1-20250805": {"runs": 1, "cost_usd": 1.0}}, "agents.models: has a key", "4-1"),
+        ("agents.startup_diet_usd", {"my-private-reviewer": 2.0}, "agents.startup_diet_usd: has a key", "private"),
+        ("agents.startup_diet_usd", {"custom": -1.0}, "agents.startup_diet_usd.custom: must be 0 or more", ""),
+        ("agents.startup_diet_usd", {"custom": "2 USD"}, "agents.startup_diet_usd.custom: must be a number", ""),
         ("overhead.hooks", {"PreToolUse": {"runs": 1, "recorded": 0}}, "overhead.hooks: has a key", "PreToolUse"),
         ("overhead.entrypoints", {"cli": 1, "C": 1}, "overhead.entrypoints: has a key", ""),
         (
@@ -526,34 +529,34 @@ def test_a_tuning_error_shows_five_problems_and_counts_the_rest():
 def test_a_block_is_added_by_one_registration_and_older_documents_still_pass(monkeypatch):
     monkeypatch.setattr(tuning, "_BLOCKS", dict(tuning._BLOCKS))
     node = tuning.Obj(
-        {"centres": tuning.Map(["alpha", "beta"], tuning.Obj({"spend_usd": tuning.Num()}, required=("spend_usd",)))},
-        required=("centres",),
+        {"kinds": tuning.Map(["alpha", "beta"], tuning.Obj({"spend_usd": tuning.Num()}, required=("spend_usd",)))},
+        required=("kinds",),
     )
 
-    @tuning._block("cost_centres", node, required=False)
-    def _centres(ctx):
-        return {"centres": {"alpha": {"spend_usd": 1.5}}}
+    @tuning._block("spend_kinds", node, required=False)
+    def _kinds(ctx):
+        return {"kinds": {"alpha": {"spend_usd": 1.5}}}
 
-    assert list(tuning.spec().fields)[-1] == "cost_centres"
+    assert list(tuning.spec().fields)[-1] == "spend_kinds"
     # A document made before the block was added has no such key, and is valid.
     assert tuning.validate(_sample()) == []
-    doc = {**_sample(), "cost_centres": {"centres": {"beta": {"spend_usd": 2.0}}}}
+    doc = {**_sample(), "spend_kinds": {"kinds": {"beta": {"spend_usd": 2.0}}}}
     assert tuning.validate(doc) == []
     for path, value, check in (
-        ("cost_centres.centres", {"gamma": {"spend_usd": 1.0}}, "cost_centres.centres: has a key"),
-        ("cost_centres.centres", {"alpha": {"spend_usd": -1.0}}, "spend_usd: must be 0 or more"),
-        ("cost_centres.centres", {"alpha": {"spend_usd": "9"}}, "spend_usd: must be a number"),
-        ("cost_centres.centres", {"alpha": {}}, "spend_usd: is missing"),
-        ("cost_centres.centres", [], "cost_centres.centres: must be an object"),
+        ("spend_kinds.kinds", {"gamma": {"spend_usd": 1.0}}, "spend_kinds.kinds: has a key"),
+        ("spend_kinds.kinds", {"alpha": {"spend_usd": -1.0}}, "spend_usd: must be 0 or more"),
+        ("spend_kinds.kinds", {"alpha": {"spend_usd": "9"}}, "spend_usd: must be a number"),
+        ("spend_kinds.kinds", {"alpha": {}}, "spend_usd: is missing"),
+        ("spend_kinds.kinds", [], "spend_kinds.kinds: must be an object"),
     ):
         assert any(check in problem for problem in tuning.validate(_put(copy.deepcopy(doc), path, value)))
     # The block is built beside the others and checked with them.
     built = tuning.build(NS(sessions=[]), Config(), None, config_dir=None, days=7, today=TODAY, claude_root=None)
-    assert built["cost_centres"] == {"centres": {"alpha": {"spend_usd": 1.5}}}
-    assert list(built)[-1] == "cost_centres"
+    assert built["spend_kinds"] == {"kinds": {"alpha": {"spend_usd": 1.5}}}
+    assert list(built)[-1] == "spend_kinds"
     # A block that must be there fails a document without it.
-    monkeypatch.setitem(tuning._BLOCKS, "cost_centres", (node, _centres, True))
-    assert tuning.validate(_sample()) == ["cost_centres: is missing"]
+    monkeypatch.setitem(tuning._BLOCKS, "spend_kinds", (node, _kinds, True))
+    assert tuning.validate(_sample()) == ["spend_kinds: is missing"]
 
 
 def test_a_builder_that_writes_something_the_spec_refuses_stops_the_build(monkeypatch, tmp_path):
@@ -618,6 +621,21 @@ def test_the_summary_is_a_few_plain_lines_a_block_with_the_plans_pieces_line():
     for name in ("Tips:", "Plans:", "Tags:", "Rework:", "Agent answers:", "Hooks:", "Limits:"):
         assert any(line.startswith(name) for line in lines), name
     assert len(lines) < 40
+
+
+def test_the_summary_gives_the_tools_list_saving_by_agent_type_when_the_file_has_one():
+    lines = tuning.summary_text(_sample()).splitlines()
+    assert (
+        "A tools list on your agents would save about $5.50 over the window at list prices. "
+        "By type: workflow-subagent $3.50, general-purpose $1.25 and custom $0.75."
+    ) in lines
+    for line in lines:
+        _plain(line)
+    # A file without it, as an older one is, has no such line and is still valid.
+    doc = _sample()
+    del doc["agents"]["startup_diet_usd"]
+    assert tuning.validate(doc) == []
+    assert "tools list" not in tuning.summary_text(doc)
 
 
 def test_the_summary_keeps_to_the_dashboards_copy_rules():
@@ -1064,7 +1082,10 @@ def _habits(w: World) -> habits.Habits:
 
 def test_the_built_document_is_valid_and_has_the_header_and_every_block(doc):
     assert tuning.validate(doc) == []
-    assert list(doc) == [*tuning._HEADER, "capture", "prompting", "tags", "pieces", "agents", "overhead"]
+    assert list(doc) == [
+        *tuning._HEADER,
+        *("capture", "prompting", "tags", "pieces", "agents", "overhead", "cost_centres", "project_files"),
+    ]
     assert doc["kind"] == "claudeglass-tuning" and doc["format"] == 1
     assert doc["tool_version"] == re.match(r"\d+(?:\.\d+)+", __version__).group(0)
     assert doc["parser_version"] == int(PARSER_VERSION)
@@ -1319,6 +1340,56 @@ def test_agent_runs_are_split_by_how_they_answered_and_by_type_and_model(doc, wo
     assert sum(row["cost_usd"] for row in agents["models"].values()) == pytest.approx(sum(f.cost for f in facts), abs=1e-6)
 
 
+def test_the_tools_list_saving_is_left_out_when_no_agent_recorded_its_tools(doc):
+    # The world's agent runs carry no tools snapshot, so there is nothing to price.
+    assert "startup_diet_usd" not in doc["agents"]
+
+
+def _diet_stats(*accs):
+    stats = context_budget.ContextBudgetStats()
+    for acc in accs:
+        stats.agents[acc.agent_type] = acc
+    return stats
+
+
+def test_the_tools_list_saving_is_summed_by_built_in_type_with_every_other_type_as_custom():
+    from test_spawn_parts import _diet_acc
+
+    stats = _diet_stats(
+        _diet_acc("general-purpose"),
+        _diet_acc("workflow-subagent"),
+        _diet_acc("my-private-reviewer"),
+        _diet_acc("another-private-agent", spawns=10),
+        # Left alone by the diet, and with no file to give a list.
+        _diet_acc("Explore"),
+        _diet_acc("Plan"),
+        _diet_acc("fork"),
+    )
+    saved = tuning._startup_diet_usd(stats)
+    assert set(saved) == {"general-purpose", "workflow-subagent", "custom"}
+    rows = {
+        row[0]: dict(zip((c.key for c in table.columns), row))
+        for table in context_budget.build_startup_section(stats).tables
+        if table.name == "agent_startup_diet"
+        for row in table.rows
+    }
+    assert saved["general-purpose"] == pytest.approx(rows["general-purpose"]["saving_usd"], abs=1e-6)
+    custom = rows["my-private-reviewer"]["saving_usd"] + rows["another-private-agent"]["saving_usd"]
+    assert saved["custom"] == pytest.approx(custom, abs=1e-6)
+    # Amounts under closed words only: no agent's name reaches it.
+    assert "private" not in json.dumps(saved)
+    assert tuning.validate(_put(_sample(), "agents.startup_diet_usd", saved)) == []
+
+
+def test_the_tools_list_saving_follows_the_cards_own_rule_for_when_a_list_is_worth_giving():
+    from test_spawn_parts import _diet_acc
+
+    # Too few spawns, and nothing called to put on the list: no saving.
+    assert tuning._startup_diet_usd(_diet_stats(_diet_acc("reviewer", spawns=3, uses={"Read": 3}))) == {}
+    assert tuning._startup_diet_usd(_diet_stats(_diet_acc("reviewer", uses={}))) == {}
+    assert tuning._startup_diet_usd(_diet_stats()) == {}
+
+
 def test_overhead_counts_sessions_hooks_costs_and_limit_stops(doc, world):
     overhead = doc["overhead"]
     assert overhead["entrypoints"] == {"cli": 3, "claude-desktop": 1, "unknown": 1}
@@ -1455,6 +1526,11 @@ def test_the_window_starts_at_local_midnight_in_the_config_zone():
     assert utc.start == datetime(2026, 8, 21, tzinfo=timezone.utc)
 
 
+def test_the_startup_stats_use_the_corpus_calibration_as_the_report_does():
+    ctx = tuning._Ctx(NS(sessions=[]), Config(tz="UTC"), None, None, 30, TODAY, None)
+    assert ctx.startup.calibration is ctx.calibration
+
+
 def test_an_empty_corpus_builds_a_valid_document_with_a_summary(tmp_path):
     built = tuning.build(
         NS(sessions=[]), Config(tz="UTC"), load_pricing(), config_dir=tmp_path / "nowhere", days=7, today=TODAY,
@@ -1518,3 +1594,199 @@ def test_the_summary_keeps_signed_out_judge_calls_apart_from_failures():
     lines = tuning.summary_text(doc).splitlines()
     assert "Haiku judged 15 replies and 12 agent runs for $0.04, and 4 failed." in lines
     assert "74 calls found the claude command signed out: sign in to the claude command in a terminal." in lines
+
+
+# -- cost_centres (Phase 8a) ----------------------------------------------------------------------
+
+
+def test_the_cost_centres_block_is_the_matrix_in_list_price_amounts_and_nothing_else(doc, world):
+    from claudeglass import cost_centres
+    from claudeglass.recache import RecacheThresholds
+
+    block = doc["cost_centres"]
+    assert block, "the world has spend, so it has a matrix"
+    assert set(block) <= set(cost_centres.CENTRES)
+    for centre, cells in block.items():
+        assert cells and set(cells) <= {f"{cell}_usd" for cell in cost_centres.CELLS}
+    sessions = [(b.top, b.subs) for b in world.corpus.sessions if b.top is not None]
+    found = cost_centres.compute(sessions, world.pricing, RecacheThresholds.from_config(world.config.thresholds))
+    # The rows add up to the whole window's spend, to the six places an amount keeps.
+    assert sum(sum(cells.values()) for cells in block.values()) == pytest.approx(found.total(), abs=1e-4)
+    assert found.total() > 0
+
+
+def test_the_cost_centres_block_rejects_a_name_a_missing_amount_is_fine_and_old_documents_pass():
+    doc = _sample()
+    assert tuning.validate(doc) == []
+    older = _sample()
+    del older["cost_centres"]
+    assert tuning.validate(older) == []
+    for path, value, check in (
+        ("cost_centres", {"my-project": {"base_read_usd": 1.0}}, "cost_centres: has a key that is not in the spec"),
+        ("cost_centres.main", {"base_read": 1.0}, "cost_centres.main: has a key that is not in the spec"),
+        ("cost_centres.main", {"base_read_usd": -1.0}, "cost_centres.main.base_read_usd: must be 0 or more"),
+        ("cost_centres.main", {"base_read_usd": "9"}, "cost_centres.main.base_read_usd: must be a number"),
+        ("cost_centres", [], "cost_centres: must be an object"),
+    ):
+        assert any(check in problem for problem in tuning.validate(_put(_sample(), path, value))), path
+    assert tuning.validate(_put(_sample(), "cost_centres.main", {})) == []
+
+
+def test_the_summary_names_the_cost_centres_by_their_spend():
+    lines = tuning.summary_text(_sample()).splitlines()
+    assert (
+        "Spend by cost centre, at list prices: main session $34.50, direct agents $7.00, "
+        "workflow agents $1.75 and session start (1-hour write) $1.50." in lines
+    )
+    empty = _put(_sample(), "cost_centres", {})
+    assert not any(line.startswith("Spend by cost centre") for line in tuning.summary_text(empty).splitlines())
+
+
+# -- project_files (Phase 8a) ---------------------------------------------------------------------
+
+
+def _file_row(file_hash: str, tokens: int, reach: dict, weekly: dict | None = None, cost: float = 1.0) -> dict:
+    """One ``reads`` row of ``context_files.to_dict`` (a file agents read)."""
+    return {
+        "hash": file_hash,
+        "source": "read",
+        "tokens": tokens,
+        "reach": reach,
+        "reads": dict(reach),
+        "read_tokens": {name: tokens * runs for name, runs in reach.items()},
+        "cost_usd": cost,
+        "cost_by_reach": {},
+        "weekly": weekly or {"2026-09-14": tokens},
+        "last_seen": "2026-09-14T10:00:00+00:00",
+    }
+
+
+def _files_data(rows: list[dict], files: list[dict] | None = None, **transcripts) -> dict:
+    return {
+        "transcripts": transcripts or {"main": 10, "Explore": 10, "Plan": 10, "my-secret-agent": 10},
+        "files": files or [],
+        "reads": rows,
+        "standing": {},
+        "window_days": 30,
+        "newest": "2026-09-14",
+    }
+
+
+def test_the_project_files_block_holds_closed_words_and_shares_and_no_name(tmp_path):
+    from claudeglass import claude_md_review
+
+    claude_root = tmp_path / ".claude"
+    config_dir = claude_root / "claudeglass"
+    config_dir.mkdir(parents=True)
+    repo = tmp_path / "work" / "secret-repo"
+    (repo / "docs").mkdir(parents=True)
+    (repo / "src").mkdir()
+    (repo / "docs" / "context-notes.md").write_text("notes\n", encoding="utf-8")
+    (repo / "src" / "engine.py").write_text("x = 1\n", encoding="utf-8")
+    (claude_root / "projects" / "repo").mkdir(parents=True)
+    (claude_root / "projects" / "repo" / "s.jsonl").write_text(json.dumps({"cwd": str(repo)}) + "\n", encoding="utf-8")
+    salt = parse.load_or_create_salt(config_dir)
+    md = parse.path_hash(str(repo / "docs" / "context-notes.md"), salt)
+    py = parse.path_hash(str(repo / "src" / "engine.py"), salt)
+    gone = parse.path_hash(str(repo / "deleted.md"), salt)
+    data = _files_data(
+        [
+            _file_row(
+                md,
+                9000,
+                {"main": 4, "Explore": 6, "Plan": 5, "my-secret-agent": 10},
+                {"2026-08-17": 4000, "2026-08-24": 6000, "2026-09-07": 9000},
+                cost=3.0,
+            ),
+            _file_row(py, 25000, {"main": 3}, cost=2.0),
+            _file_row(gone, 800, {"Explore": 5}, cost=1.0),
+        ]
+    )
+    block = tuning._project_files(NS(context_files=data, config_dir=config_dir))
+    assert block["total"] == 3
+    by_size = {item["size"]: item for item in block["files"]}
+    notes = by_size["to_10k"]
+    assert (notes["ext"], notes["source"]) == ("md", "read")
+    # A custom agent's runs count as "custom"; shares are of that reach's runs.
+    assert notes["reach"] == {"main": 0.4, "Explore": 0.6, "Plan": 0.5, "custom": 1.0}
+    assert notes["weekly"] == {
+        "2026-W34": "to_5k",
+        "2026-W35": "to_10k",
+        "2026-W36": "to_10k",
+        "2026-W37": "to_10k",
+        "2026-W38": "to_10k",
+    }
+    assert (by_size["over_20k"]["ext"], by_size["over_20k"]["reach"]) == ("code", {"main": 0.3})
+    # A file this machine cannot find has no extension class to give.
+    assert (by_size["to_1k"]["ext"], by_size["to_1k"]["source"]) == ("unknown", "read")
+    doc = {**_sample(), "project_files": block}
+    assert tuning.validate(doc) == []
+    assert_privacy_deep(doc)
+    text = tuning.dumps(doc)
+    for private in (md, py, gone, "context-notes", "engine", "secret-repo", "my-secret-agent", "deleted", str(tmp_path)):
+        assert private not in text, private
+    assert claude_md_review.EXT_CLASSES  # the vocabulary the block draws from
+
+
+def test_the_project_files_block_keeps_the_dearest_files_and_counts_them_all():
+    rows = [_file_row(f"{i:016x}", 1000 + i, {"main": 5}, cost=float(i)) for i in range(1, 61)]
+    block = tuning._project_files(NS(context_files=_files_data(rows), config_dir=None))
+    assert block["total"] == 60
+    assert len(block["files"]) == tuning.FILES_KEPT
+    assert tuning.validate({**_sample(), "project_files": block}) == []
+    # Loaded files are markdown; a file nothing can name says so.
+    auto = {
+        "hash": "a" * 16,
+        "type": "Project",
+        "scoped": False,
+        "tokens": 1500,
+        "reach": {"main": 8},
+        "cost_usd": 1.0,
+        "last_seen": "2026-09-14T10:00:00+00:00",
+        "weekly": {"2026-09-14": 1500},
+    }
+    block = tuning._project_files(NS(context_files=_files_data([], [auto]), config_dir=None))
+    assert block["files"] == [
+        {"ext": "md", "source": "auto", "size": "to_2k", "weekly": {"2026-W38": "to_2k"}, "reach": {"main": 0.8}}
+    ]
+
+
+def test_the_project_files_block_is_empty_without_data_or_a_rate_card(world):
+    assert tuning._project_files(NS(context_files={}, config_dir=None)) == {"total": 0, "files": []}
+    built = _build(world, corpus=NS(sessions=[]))
+    assert built["project_files"] == {"total": 0, "files": []}
+    assert not any(line.startswith("Project files") for line in tuning.summary_text(built).splitlines())
+
+
+def test_the_project_files_block_rejects_a_name_a_bad_word_and_too_many_files():
+    doc = _sample()
+    assert tuning.validate(doc) == []
+    older = _sample()
+    del older["project_files"]
+    assert tuning.validate(older) == []
+    one = "project_files.files.0"
+    at = "project_files.files[0]"
+    for path, value, check in (
+        (one, {**doc["project_files"]["files"][0], "name": "docs/context.md"}, f"{at}: has a key that is not in the spec"),
+        (f"{one}.ext", "context.md", f"{at}.ext: must be one of the words"),
+        (f"{one}.source", "memory", f"{at}.source: must be one of the words"),
+        (f"{one}.size", "9000", f"{at}.size: must be one of the words"),
+        (f"{one}.weekly", {"last-week": "to_5k"}, f"{at}.weekly: has a key that is not in the spec"),
+        (f"{one}.weekly", {"2026-W31": "huge"}, f"{at}.weekly.2026-W31: must be one of the words"),
+        (f"{one}.reach", {"my-agent": 0.5}, f"{at}.reach: has a key that is not in the spec"),
+        (f"{one}.reach", {"main": -0.1}, f"{at}.reach.main: must be 0 or more"),
+        ("project_files.files", doc["project_files"]["files"] * 20, "project_files.files: has more items than"),
+        ("project_files", [], "project_files: must be an object"),
+    ):
+        assert any(check in problem for problem in tuning.validate(_put(copy.deepcopy(doc), path, value))), path
+
+
+def test_the_summary_counts_the_project_files_by_size_and_reach():
+    lines = tuning.summary_text(_sample()).splitlines()
+    assert "Project files agents take in: 7 files, 2 of the biggest read by habit." in lines
+    assert "Of those, 1 over 10,000 tokens and 1 used by 3 or more agent types." in lines
+    quiet = _sample()
+    quiet["project_files"]["files"] = [quiet["project_files"]["files"][1]]
+    lines = tuning.summary_text(quiet).splitlines()
+    assert "Project files agents take in: 7 files, 0 of the biggest read by habit." in lines
+    assert not any(line.startswith("Of those") for line in lines)

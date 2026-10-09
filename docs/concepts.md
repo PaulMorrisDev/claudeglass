@@ -254,6 +254,17 @@ description). The parser keeps, per file, a salted hash of its path, its
 type, whether it is path-scoped and its size; per skill, its name and
 size. No text is kept (`context_files.py`).
 
+Files agents read count too. Each Read tool result is a salted hash of the
+path and the size of what came back (nothing when the read failed). A file
+read becomes part of the conversation from the next reply on, so it is
+priced as a loaded file is: written once, then read on every later reply,
+until the conversation is summarised. A **standing read** is a file read in
+3 or more runs of a reach (the main session, or one agent type), or in 20%
+or more of them. The Agents page lists these with the loaded files, with
+each file's size by week, the change over about 30 days and what it costs a
+month (the cost over the window scaled to 30 days). Names come from your
+project folders on disk when the page opens and are never stored.
+
 - **How often it is sent**: once per main session, once per subagent
   run that receives it (Explore and Plan subagents skip CLAUDE.md), and
   again after each conversation summary.

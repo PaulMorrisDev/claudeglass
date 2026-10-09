@@ -280,6 +280,10 @@ def test_the_section_says_how_many_runs_ran_under_an_older_setting():
     summary = next(t for t in section.tables if t.name == "run_split_summary")
     row = {c.key: v for c, v in zip(summary.columns, summary.rows[0])}
     assert row["runs"] == 1 and row["older_runs"] == 1 and row["older_usd"] == pytest.approx(stats.older_usd)
-    assert any(n.startswith("1 run (") and "300,000" in n and "older setting" in n for n in section.notes)
+    assert any(
+        n.startswith("1 run grew past the auto-compact window") and "300,000" in n and "older setting" in n
+        for n in section.notes
+    )
+    assert not any("$" in n for n in section.notes if "grew past" in n)
     clean = build_section(compute_run_split(runs, PRICING, TEN), TEN)
-    assert not any(re.match(r"\d+ runs? \(", n) for n in clean.notes)
+    assert not any(re.match(r"\d+ runs? grew past", n) for n in clean.notes)

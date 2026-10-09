@@ -29,6 +29,13 @@ Two things this module reads only lengths/counts/ids of, never content:
   spawns themselves started) — so a custom skill that fans out is costed
   as a whole, per the plan.
 
+Phase 8a (cost centres): the cost-per-spawn table splits runs by how they
+were launched -- a background agent, a foreground agent (both from the
+parent call's ``run_in_background``, recorded in ``Turn.agent_launches``)
+or a workflow agent. A workflow agent's own meta always says foreground, so
+``TranscriptMeta.kind`` alone decides that one. The spawns note gives the
+median among sessions that spawn and how many spawn none.
+
 Phase 8a: the spawn-write and session-baseline tables read the whole first
 call (P0 = uncached input + cache write + cache read), shown as the shared
 prefix the call read from cache, what the session wrote itself and the
@@ -99,6 +106,38 @@ def _first_priced_turn(result: TranscriptResult) -> Turn | None:
         if turn.turn_index == 1:
             return turn
     return None
+
+
+#: How an agent run was started, in the order the cost-per-spawn table
+#: lists them.
+LAUNCH_WORDS = ("background", "foreground", "workflow")
+LAUNCH_LABELS = {
+    "background": "Background agent",
+    "foreground": "Foreground agent",
+    "workflow": "Workflow agent",
+}
+
+
+def launches_by_tool_use(results: Sequence[TranscriptResult]) -> dict[str, str]:
+    """Every ``Agent`` call's launch word (``"background"`` or
+    ``"foreground"``) by tool_use id, from whichever transcript made the
+    call: the main session for a direct agent, an agent for the agents it
+    started."""
+    found: dict[str, str] = {}
+    for result in results:
+        for turn in result.turns:
+            found.update(turn.agent_launches)
+    return found
+
+
+def launch_of(sub: TranscriptResult, launches: dict[str, str]) -> str:
+    """How ``sub`` was launched: ``"workflow"`` for a workflow agent (by
+    ``TranscriptMeta.kind`` alone), else the word the parent call recorded
+    for its tool_use id. A direct agent whose call can't be joined is
+    counted as ``"foreground"``, the default of the call."""
+    if sub.meta.kind == "workflow-agent":
+        return "workflow"
+    return launches.get(sub.meta.tool_use_id or "", "foreground")
 
 
 @dataclass(slots=True)
@@ -328,6 +367,10 @@ class TopologyStats:
     #: keyed by agent type -- turns with no tool call (``tool_wait_s is
     #: None``) contribute nothing.
     tool_wait_by_agent_type: dict[str, list[float]] = field(default_factory=dict)
+    #: Phase 8a: the same two, keyed by (agent type, launch word) -- see
+    #: :func:`launch_of`.
+    cost_by_launch: dict[tuple[str, str], list[float]] = field(default_factory=dict)
+    tool_wait_by_launch: dict[tuple[str, str], list[float]] = field(default_factory=dict)
 
     # (e) reminder/hook pressure, CACHE_SIGNAL histogram
     reminder_rate_by_kind: dict[str, list[float]] = field(default_factory=dict)
@@ -386,7 +429,7 @@ class TopologyStats:
         self._add_downward(top, subs)
         self._add_upward(top, subs)
         self._add_skill_rollup(top, subs, rates_lookup)
-        self._add_chains(subs, rates_lookup)
+        self._add_chains(top, subs, rates_lookup)
         self._add_reminder_hook_pressure(top, subs)
         self._add_mcp_cost(top, subs, rates_lookup)
         self._add_effort(top, subs)
@@ -522,17 +565,22 @@ class TopologyStats:
 
     # -- (d) chains --------------------------------------------------------
 
-    def _add_chains(self, subs: list[TranscriptResult], rates_lookup: Pricing) -> None:
+    def _add_chains(self, top: TranscriptResult, subs: list[TranscriptResult], rates_lookup: Pricing) -> None:
         self.total_spawns += len(subs)
         self.spawns_per_session.append(len(subs))
+        launches = launches_by_tool_use([top, *subs])
         for sub in subs:
             depth = sub.meta.spawn_depth
             self.spawn_depth_histogram[depth] = self.spawn_depth_histogram.get(depth, 0) + 1
             label = _agent_type_label(sub)
-            self.cost_by_agent_type.setdefault(label, []).append(_transcript_cost(sub, rates_lookup))
+            launch_key = (label, launch_of(sub, launches))
+            cost = _transcript_cost(sub, rates_lookup)
+            self.cost_by_agent_type.setdefault(label, []).append(cost)
+            self.cost_by_launch.setdefault(launch_key, []).append(cost)
             for turn in _priced_turns(sub):
                 if turn.tool_wait_s is not None:
                     self.tool_wait_by_agent_type.setdefault(label, []).append(turn.tool_wait_s)
+                    self.tool_wait_by_launch.setdefault(launch_key, []).append(turn.tool_wait_s)
             if sub.meta.stopped_by_user:
                 self.stopped_by_user_count += 1
 
@@ -930,12 +978,13 @@ def _build_spawn_depth_table(stats: TopologyStats) -> Table:
         Column(key="count", label="Count", kind="int"),
     ]
     rows = [[str(depth), count] for depth, count in sorted(stats.spawn_depth_histogram.items())]
-    mean_spawns_per_session = _mean(stats.spawns_per_session)
+    spawning = [count for count in stats.spawns_per_session if count > 0]
+    median_spawns = _median(spawning)
+    none_spawned = len(stats.spawns_per_session) - len(spawning)
     note = f"Sessions seen: {stats.sessions_seen}. Total spawns: {stats.total_spawns}"
-    if mean_spawns_per_session is not None:
-        note += f". Average spawns per session: {mean_spawns_per_session:.2f}."
-    else:
-        note += "."
+    if median_spawns is not None:
+        note += f". Median spawns per session that spawns any: {median_spawns:g}"
+    note += f". Sessions that spawn none: {none_spawned}."
     return Table(
         name="topology_spawn_depth",
         title="Chains: spawn depth histogram",
@@ -948,30 +997,40 @@ def _build_spawn_depth_table(stats: TopologyStats) -> Table:
 def _build_cost_per_spawn_table(stats: TopologyStats) -> Table:
     columns = [
         Column(key="agent_type", label="Agent type", kind="str"),
-        Column(key="spawns", label="Spawns", kind="int"),
+        Column(key="launch", label="Started as", kind="str"),
+        Column(key="runs", label="Runs", kind="int"),
+        Column(key="total_cost", label="Total", kind="money"),
         Column(key="mean_cost", label="Mean cost/spawn", kind="money"),
         Column(key="median_cost", label="Median cost/spawn", kind="money"),
         Column(key="mean_tool_wait", label="Mean tool wait", kind="secs"),
     ]
+    rank = {word: i for i, word in enumerate(LAUNCH_WORDS)}
     rows = [
         [
             agent_type,
+            launch,
             len(values),
+            sum(values),
             _mean(values),
             _median(values),
-            _mean(stats.tool_wait_by_agent_type.get(agent_type, [])),
+            _mean(stats.tool_wait_by_launch.get((agent_type, launch), [])),
         ]
-        for agent_type, values in sorted(stats.cost_by_agent_type.items())
+        for (agent_type, launch), values in sorted(
+            stats.cost_by_launch.items(), key=lambda item: (item[0][0], rank.get(item[0][1], len(rank)))
+        )
     ]
     return Table(
         name="topology_cost_per_spawn",
-        title="Chains: cost per spawn, by agent type",
+        title="Chains: cost per spawn, by agent type and how it was started",
         columns=columns,
         rows=rows,
+        value_labels=dict(LAUNCH_LABELS),
         notes=[
             "Average tool wait is how long that agent type's own tool calls"
             " took to answer, averaged over its replies. It is not the"
             " parent's wait on the whole run.",
+            "A background agent runs while the session carries on. A foreground agent holds the session until it"
+            " reports. A workflow agent is started by a workflow script.",
         ],
     )
 
@@ -1240,4 +1299,12 @@ def build_section(stats: TopologyStats) -> Section:
     return Section(key="agents", title="Agents and information flow", tables=tables, notes=[])
 
 
-__all__ = ["TopologyStats", "build_section", "index_tool_use_ids"]
+__all__ = [
+    "LAUNCH_LABELS",
+    "LAUNCH_WORDS",
+    "TopologyStats",
+    "build_section",
+    "index_tool_use_ids",
+    "launch_of",
+    "launches_by_tool_use",
+]

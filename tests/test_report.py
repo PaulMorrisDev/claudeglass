@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from claudeglass import recache, ttl
 from claudeglass.config import Config
 from claudeglass.corpus import load_corpus
 from claudeglass.model import Diagnostics
@@ -1069,6 +1070,25 @@ def test_rework_follows_habits_and_is_built_from_the_same_pass_over_the_corpus(t
     assert_privacy(section)
 
 
+def test_the_ttl_section_is_fed_turns_the_rebuild_rules_have_signed(tmp_path, monkeypatch):
+    """The cache-lifetime section classifies a rebuild by the signature
+    ``recache.apply`` gave it, the same one the rebuild section uses, so it
+    is fed a copy of each transcript, never the parsed one."""
+    seen = []
+    real_add = ttl.TtlStats.add
+
+    def spy(self, tr, *args, **kwargs):
+        seen.append(tr)
+        return real_add(self, tr, *args, **kwargs)
+
+    monkeypatch.setattr(ttl.TtlStats, "add", spy)
+    corpus = _two_session_corpus(tmp_path)
+    build_report(corpus, PRICING, Config(), projects=("proj-two",), window="w")
+    ids = {id(t) for b in corpus.sessions for t in (b.top, *b.subs) if t is not None}
+    assert seen
+    assert not any(id(tr) in ids for tr in seen)
+
+
 # -- v0.3 Task 2: baseline_comparison ---------------------------------------
 
 
@@ -1180,6 +1200,22 @@ def test_baseline_comparison_by_mode_warns_when_the_baseline_used_older_mode_rul
     assert any("older rules" in note for note in by_mode_notes(older))
     current = _minimal_baseline_record(mode_mix={"mixed": 6}, by_mode=by_mode, mode_rules=2)
     assert not any("older rules" in note for note in by_mode_notes(current))
+
+
+def test_baseline_comparison_warns_when_the_baseline_counted_rebuilds_by_older_rules(tmp_path):
+    """A baseline saved before the rebuild rules widened has no
+    ``recache_rules``; its comparison says the share can rise on the new
+    rules, and one saved under the current rules does not."""
+    corpus = _two_session_corpus(tmp_path)
+
+    def overview_notes(record: dict) -> list[str]:
+        report = build_report(corpus, PRICING, Config(), projects=("proj-two",), window="w", baseline_record=record)
+        section = next(s for s in report.sections if s.key == "baseline_comparison")
+        return section.tables[0].notes
+
+    assert any("flagged fewer replies" in note for note in overview_notes(_minimal_baseline_record()))
+    current = _minimal_baseline_record(recache_rules=recache.RULES)
+    assert not any("flagged fewer replies" in note for note in overview_notes(current))
 
 
 def test_no_baseline_record_omits_section_and_no_note_by_default(tmp_path):

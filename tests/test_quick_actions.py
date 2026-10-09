@@ -1446,3 +1446,344 @@ def test_tools_offers_the_baseline_fix_when_no_subagent_started(tmp_path):
     assert result["status"] == "act" and "No subagents started" in result["summary"]
     assert result["fixes"] and "~/.claude.json" in result["fixes"][0]["prompt"]
     assert qa.run("tools", _ctx(tmp_path, NS(sections=[], recommendations=[])))["status"] == "no_data"
+
+
+def _tools_model(*, diet_rows, recs=()):
+    unused_rows = [
+        {"agent_type": "reviewer", "spawns": 30, "mcp_offered_spawns": 30, "mcp_used_spawns": 0,
+         "skills_listed_spawns": 30, "skills_used_spawns": 0},
+        {"agent_type": "searcher", "spawns": 12, "mcp_offered_spawns": 0, "mcp_used_spawns": 0,
+         "skills_listed_spawns": 12, "skills_used_spawns": 12},
+    ]
+    tables = [_table("agent_startup_unused", unused_rows)]
+    if diet_rows:
+        tables.append(_table("agent_startup_diet", diet_rows))
+    return NS(sections=[NS(key="agent_startup", tables=tables)], recommendations=list(recs))
+
+
+def test_tools_shows_what_a_tools_list_would_leave_out_of_each_agent_and_offers_its_fix(tmp_path):
+    diet = [{"agent_type": "reviewer", "rare_tools": "Bash, NotebookEdit, mcp__playwright__*",
+             "dropped_definitions": 9000.0, "dropped_deferred": 400.0, "dropped_skills": 1200.0,
+             "dropped_roster": 0.0}]
+    rec = Recommendation(
+        id="spawn-tools-list", severity="advice", category="settings", title="reviewer is given tools it rarely calls",
+        action="Limit reviewer's tools: tools: Read, Grep.", lever=None, agent_type="reviewer",
+        fixes=[{"key": "tools", "agent": "reviewer", "explainer": [], "command": None, "prompt": "Set tools."}],
+    )
+    result = qa.run("tools", _ctx(tmp_path, _tools_model(diet_rows=diet, recs=[rec])))
+    assert result["status"] == "act"
+    columns = [c["label"] for c in result["table"]["columns"]]
+    assert columns[-1] == "Tools it rarely calls"
+    by_agent = {row[0]: row[-1] for row in result["table"]["rows"]}
+    assert by_agent["reviewer"] == "3 (about 10,600 tokens)"
+    assert by_agent["searcher"] == "none"
+    assert [f["prompt"] for f in result["fixes"]] == ["Set tools."]
+
+
+def test_tools_has_nothing_to_offer_when_no_tools_list_would_help(tmp_path):
+    result = qa.run("tools", _ctx(tmp_path, _tools_model(diet_rows=[])))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert all(row[-1] == "none" for row in result["table"]["rows"])
+
+
+# -- cost-centres (Phase 8a) ----------------------------------------------------
+
+
+def _centre_model(**extra):
+    centre_rows = [
+        {"centre": "main", "base_read": 6.0, "above_read": 20.0, "growth_write": 4.0, "rewrite": 1.0,
+         "post_compaction": 0.5, "output": 3.0, "total": 34.5},
+        {"centre": "direct", "base_read": 2.0, "above_read": 3.0, "growth_write": 1.0, "rewrite": 0.0,
+         "post_compaction": 0.0, "output": 1.0, "total": 7.0},
+    ]
+    part_rows = [
+        {"centre": "main", "cell": "base_read", "part": "CLAUDE.md files", "lever": "controllable", "cost": 1.5,
+         "share": 25.0, "card": "claude-md", "advice": ""},
+        {"centre": "main", "cell": "base_read", "part": "System prompt", "lever": "fixed", "cost": 3.0,
+         "share": 50.0, "card": "", "advice": "no setting known"},
+        {"centre": "main", "cell": "rewrite", "part": "Conversation", "lever": None, "cost": 0.5, "share": 50.0,
+         "card": "", "advice": ""},
+        {"centre": "direct", "cell": "base_read", "part": "Skills list", "lever": "controllable", "cost": 0.4,
+         "share": 20.0, "card": "skills", "advice": ""},
+    ]
+    return NS(
+        sections=[NS(key="agents", tables=[_table("cost_centres", centre_rows),
+                                            _table("cost_centres_parts", part_rows)])],
+        context_files={}, recommendations=[], **extra,
+    )
+
+
+def test_the_cost_centres_check_names_the_largest_cell_and_the_check_that_covers_it(tmp_path):
+    result = qa.run("cost-centres", _ctx(tmp_path, model=_centre_model()))
+    assert result["status"] == "ok"
+    assert "main session, above-base read" in result["summary"]
+    assert "48%" in result["summary"]  # 20 of 41.5
+    assert "Conversation summaries check covers it" in result["summary"]
+    assert result["rule_ids"] == []
+    labels = [c["label"] for c in result["table"]["columns"]]
+    assert labels[0] == "Cost centre" and labels[-1] == "Total" and "Post-compaction" in labels
+    assert [row[0] for row in result["table"]["rows"]] == ["Main session", "Direct agents"]
+
+
+def test_the_cost_centres_check_tips_name_only_the_controllable_base_parts_and_their_check(tmp_path):
+    result = qa.run("cost-centres", _ctx(tmp_path, model=_centre_model()))
+    titles = [tip["title"] for tip in result["tips"]]
+    assert titles == ["CLAUDE.md files (main session)", "Skills list (direct agents)"]
+    assert "CLAUDE.md files check covers it" in result["tips"][0]["text"]
+    assert "Skills check covers it" in result["tips"][1]["text"]
+
+
+def test_the_cost_centres_check_has_no_data_without_a_table_or_spend(tmp_path):
+    assert qa.run("cost-centres", _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[])))[
+        "status"
+    ] == "no_data"
+    empty = NS(sections=[NS(key="agents", tables=[_table("cost_centres", [])])], context_files={}, recommendations=[])
+    assert qa.run("cost-centres", _ctx(tmp_path, model=empty))["status"] == "no_data"
+
+
+def test_the_cost_centres_check_says_when_no_check_advises_on_the_largest_cell(tmp_path):
+    rows = [{"centre": "start", "base_read": 5.0, "above_read": 0.0, "growth_write": 1.0, "rewrite": 0.0,
+             "post_compaction": 0.0, "output": 0.5, "total": 6.5}]
+    model = NS(sections=[NS(key="agents", tables=[_table("cost_centres", rows)])], context_files={},
+               recommendations=[])
+    result = qa.run("cost-centres", _ctx(tmp_path, model=model))
+    assert "session start (1-hour write), base read" in result["summary"]
+    assert "No check advises on it." in result["summary"]
+    assert result["tips"] == []
+
+
+# -- the project-files check ---------------------------------------------------------------------
+
+_PF_TYPES = ("Explore", "Plan", "Review", "Build", "Test")
+
+
+@pytest.fixture
+def pf_names():
+    """The check reads the local name map, which is kept for a while."""
+    from claudeglass import claude_md_review
+
+    claude_md_review._NAMES.clear()
+    yield
+    claude_md_review._NAMES.clear()
+
+
+def _pf_setup(tmp_path):
+    """A context whose one project folder (found from a transcript's cwd)
+    holds docs/context.md, and the salt the names are hashed with."""
+    from claudeglass import parse
+
+    ctx = _ctx(tmp_path, model=NS(sections=[], context_files={}, recommendations=[]))
+    project = tmp_path / "work" / "repo"
+    (project / "docs").mkdir(parents=True)
+    (project / "docs" / "context.md").write_text("Notes for the agents.\n", encoding="utf-8")
+    slug = ctx.config_dir.parent / "projects" / "repo"
+    slug.mkdir()
+    (slug / "s.jsonl").write_text(json.dumps({"cwd": str(project)}) + "\n", encoding="utf-8")
+    return ctx, project, parse.load_or_create_salt(ctx.config_dir)
+
+
+def _pf_amount(units, usd: float, period: str, *, prefix: str = "") -> str:
+    from claudeglass import claude_md_review
+
+    return claude_md_review._amount(units, usd, period, prefix=prefix)
+
+
+def _pf_hash(path: Path, salt: bytes) -> str:
+    from claudeglass import parse
+
+    return parse.path_hash(str(path), salt)
+
+
+def _pf_read(file_hash: str, *, tokens=9000, types=_PF_TYPES, cost=9.0, weekly=None) -> dict:
+    return {
+        "hash": file_hash,
+        "source": "read",
+        "tokens": tokens,
+        "reach": {name: 10 for name in types},
+        "cost_usd": cost,
+        "weekly": {"2026-08-31": 5625, "2026-09-28": 9000} if weekly is None else weekly,
+        "last_seen": "2026-09-30T10:00:00.000Z",
+    }
+
+
+def _pf_data(*reads, files=()) -> dict:
+    return {
+        "transcripts": {"main": 10, **{name: 10 for name in _PF_TYPES}},
+        "window_days": 30.0,
+        "newest": "2026-09-30",
+        "files": list(files),
+        "reads": list(reads),
+    }
+
+
+def _pf_run(ctx, data):
+    ctx.model = NS(sections=[], context_files=data, recommendations=[])
+    return qa.run("project-files", ctx)
+
+
+def test_the_project_files_check_follows_the_claude_md_check():
+    ids = list(qa.CHECK_IDS)
+    assert ids.index("project-files") == ids.index("claude-md") + 1
+    check = next(c for c in qa.CHECKS if c.id == "project-files")
+    assert check.question == "Are project files that agents read big or growing?"
+
+
+def test_with_no_project_files_the_check_has_no_data(tmp_path, pf_names):
+    ctx, _project, _salt = _pf_setup(tmp_path)
+    result = _pf_run(ctx, {})
+    assert result["status"] == "no_data" and "over the last 14 days" in result["summary"]
+    assert result["fixes"] == []
+
+
+def test_a_big_file_many_agent_types_read_that_grew_is_flagged_with_five_prompts(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    file_hash = _pf_hash(project / "docs" / "context.md", salt)
+    result = _pf_run(ctx, _pf_data(_pf_read(file_hash)))
+
+    cost = _pf_amount(UNITS, 9.0, "a month", prefix="about")
+    assert result["status"] == "act"
+    assert result["summary"] == (
+        "docs/context.md is now about 9k tokens, up 60% in 30 days. "
+        f"5 agent types read it on every run: {cost}. {{{{page:agents/subagents}}}} lists every project file."
+    )
+    assert [fix["title"] for fix in result["fixes"]][0] == "Trim what is stale"
+    assert len(result["fixes"]) == 5
+    for fix in result["fixes"]:
+        assert FIX_KEYS <= set(fix) and fix["prompt"] and fix["command"] is None
+    assert [column["label"] for column in result["table"]["columns"]] == [
+        "File", "Tokens", "Change in 30 days", "Read by", "Cost a month",
+    ]
+    [row] = result["table"]["rows"]
+    assert row[:4] == ["docs/context.md", "9,000", "+60%", "5 agent types, on every run"]
+
+
+def test_a_file_that_only_grew_is_flagged_and_one_that_did_not_is_not_worded_as_growing(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    file_hash = _pf_hash(project / "docs" / "context.md", salt)
+    grown = _pf_read(file_hash, tokens=3000, types=("Explore",), weekly={"2026-08-31": 2000, "2026-09-28": 3000})
+    result = _pf_run(ctx, _pf_data(grown))
+    assert result["status"] == "act"
+    assert result["summary"].startswith("docs/context.md is now about 3k tokens, up 50% in 30 days. Explore reads it on")
+
+    wide = _pf_read(file_hash, weekly={"2026-08-31": 8500, "2026-09-28": 9000})
+    summary = _pf_run(ctx, _pf_data(wide))["summary"]
+    assert summary.startswith("docs/context.md is now about 9k tokens. 5 agent types read it")
+
+
+def test_nothing_large_or_growing_is_ok_and_reads_no_disk(tmp_path, pf_names, monkeypatch):
+    from claudeglass import claude_md_review
+
+    def no_disk(*_args, **_kwargs):
+        raise AssertionError("the project folders were read")
+
+    monkeypatch.setattr(claude_md_review, "local_names", no_disk)
+    ctx, _project, _salt = _pf_setup(tmp_path)
+    small = _pf_read("0123456789abcdef", tokens=4000, weekly={"2026-09-28": 4000})
+    narrow = _pf_read("fedcba9876543210", tokens=9000, types=("Explore", "Plan"), weekly={"2026-09-28": 9000})
+    result = _pf_run(ctx, _pf_data(small, narrow))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert "over the last 14 days" in result["summary"]
+
+
+def test_a_file_claude_code_loads_by_itself_is_the_claude_md_checks_unless_a_claude_md_imports_it(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    guide = project / "docs" / "guide.md"
+    guide.write_text("G" * 400, encoding="utf-8")
+    (project / "CLAUDE.md").write_text("# Project\n\nSee @docs/context.md for more.\n", encoding="utf-8")
+
+    def loaded(path):
+        return {
+            "hash": _pf_hash(path, salt),
+            "type": "Project",
+            "scoped": False,
+            "tokens": 9000,
+            "sends": 10,
+            "reach": {name: 10 for name in _PF_TYPES},
+            "cost_usd": 9.0,
+            "weekly": {"2026-09-28": 9000},
+            "last_seen": "2026-09-30T10:00:00.000Z",
+        }
+
+    # guide.md is only loaded for the agents: the CLAUDE.md check's business.
+    assert _pf_run(ctx, _pf_data(files=[loaded(guide)]))["status"] == "ok"
+    # context.md is also pulled in with @path by the project's CLAUDE.md.
+    result = _pf_run(ctx, _pf_data(files=[loaded(project / "docs" / "context.md")]))
+    assert result["status"] == "act" and result["summary"].startswith("docs/context.md is now about 9k tokens.")
+
+
+def test_a_flagged_file_not_in_any_project_folder_is_ok_with_nothing_to_change(tmp_path, pf_names):
+    ctx, _project, _salt = _pf_setup(tmp_path)
+    result = _pf_run(ctx, _pf_data(_pf_read("0123456789abcdef")))
+    assert result["status"] == "ok" and result["fixes"] == []
+    assert "not in any project folder on this machine" in result["summary"]
+    assert "up 60% in 30 days" in result["summary"]
+    assert result["table"]["rows"][0][0] == "A file not found on this machine"
+
+
+def test_the_check_names_the_dearest_found_file_and_counts_the_others(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    reads = [_pf_read("0123456789abcdef", cost=50.0)]
+    for index, cost in enumerate((9.0, 4.0)):
+        path = project / "docs" / f"extra{index}.md"
+        path.write_text("More.\n", encoding="utf-8")
+        reads.append(_pf_read(_pf_hash(path, salt), cost=cost))
+
+    result = _pf_run(ctx, _pf_data(*reads))
+    # The dearest file is not on disk: the dearest one that is leads, and is the one with prompts.
+    assert result["status"] == "act" and result["summary"].startswith("docs/extra0.md is now about 9k tokens")
+    assert result["summary"].count("2 more files are flagged.") == 1
+    assert len(result["table"]["rows"]) == 3
+    assert result["table"]["rows"][0][0] == "A file not found on this machine"
+    one = _pf_run(ctx, _pf_data(*reads[:2]))
+    assert "1 more file is flagged." in one["summary"]
+
+
+def test_the_check_of_one_project_searches_only_its_folders(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    data = _pf_data(_pf_read(_pf_hash(project / "docs" / "context.md", salt)))
+    ctx.only = ()
+    assert _pf_run(ctx, data)["status"] == "ok"
+    ctx.only = (project,)
+    assert _pf_run(ctx, data)["status"] == "act"
+
+
+def test_the_cost_of_a_flagged_file_goes_through_units_in_every_billing_mode(tmp_path, pf_names):
+    ctx, project, salt = _pf_setup(tmp_path)
+    data = _pf_data(_pf_read(_pf_hash(project / "docs" / "context.md", salt)))
+    for units in (UNITS, Units(billing_mode="subscription", currency="USD")):
+        ctx.units = units
+        result = _pf_run(ctx, data)
+        cost = _pf_amount(units, 9.0, "a month", prefix="about")
+        assert f"on every run: {cost}." in result["summary"]
+        assert result["table"]["rows"][0][4] == units.money_cell(9.0)
+
+
+@pytest.mark.parametrize(
+    ("tokens", "text"),
+    [(800, "800"), (1000, "1k"), (1500, "1.5k"), (9000, "9k"), (10_000, "10k"), (24_600, "25k")],
+)
+def test_a_size_in_a_sentence_is_short(tokens, text):
+    assert qa._tokens_text(tokens) == text
+
+
+def test_readers_are_named_by_how_many_there_are_and_how_often_they_read():
+    def reach(*items):
+        return {"reach": [{"reach": name, "share": share, "standing": standing} for name, share, standing in items]}
+
+    every = reach(*((name, 1.0, True) for name in _PF_TYPES))
+    assert qa._readers_parts(every) == ("5 agent types", True, "on every run")
+    assert qa._project_file_readers(every) == "5 agent types read it on every run"
+
+    mixed = reach(("main", 0.4, True), ("Explore", 0.6, True), ("Review", 0.1, False))
+    assert qa._readers_parts(mixed) == ("your main session and Explore", True, "in about 50% of their runs")
+
+    assert qa._readers_parts(reach(("Explore", 0.4, True))) == ("Explore", False, "in about 40% of its runs")
+    assert qa._project_file_readers(reach(("Explore", 0.4, True))) == "Explore reads it in about 40% of its runs"
+    assert qa._readers_parts(reach(("main", 0.4, True), ("Explore", 0.4, True), ("Plan", 0.4, True)))[0] == (
+        "your main session, Explore and Plan"
+    )
+    assert qa._readers_parts(reach(("main", 0.4, True), *((name, 0.4, True) for name in _PF_TYPES)))[0] == (
+        "your main session and 5 agent types"
+    )
+    assert qa._readers_parts(reach(("Explore", 0.1, False))) == ("your agents", True, "sometimes")
+    assert qa._readers_parts({}) == ("your agents", True, "sometimes")
