@@ -367,7 +367,7 @@ export const register: Register = on => {
       await beat(io, snap, true)
       keepBeating(io)
       await touch(io)
-      await $.command.register({ name: 'glass', description: COPY['pane.command'], argumentHint: '[detail | pin <text> | tighten | guard | budget <amount>]', immediate: true })
+      await $.command.register({ name: 'glass', description: COPY['pane.command'], argumentHint: '[detail | pin <text> | unpin <words> | tighten | guard | budget <amount>]', immediate: true })
     } catch (error) {
       $.ui.log(`claudeglass: session.start ${String(error)}`, { to: 'debug' })
     }

@@ -2,7 +2,7 @@ import { atom, read } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import { emptySnap, soundSnap } from './live'
-import { addAttachment, follow, mcpServer, newLedger, receivedClaudeMd, record } from './lib/instructions.js'
+import { addAttachment, compacted, follow, isAttached, mcpServer, newLedger, receivedClaudeMd, record } from './lib/instructions.js'
 import type { Ledger } from './lib/instructions.js'
 
 // Claude Code reads a state reference only where its literal is written, so each file that
@@ -19,7 +19,11 @@ const snapAtom = atom({ plugin: 'claudeglass', key: 'snap' } as const, emptySnap
 //   tool.describe       each tool's description: built in, deferred, or an MCP server's
 //   skill.prompt        a skill's prompt when it ran
 //   prompt.attachment   what Claude Code injects on its own: the skill list, reminders,
-//                       a file that loads when Claude reaches matching paths
+//                       a file that loads when Claude reaches matching paths; told
+//                       apart by who wrote the text (the engine, or a settings hook
+//                       or plugin) and by the type (a file added to a message)
+//   session.compact     the main session's summary: what loaded after the start is
+//                       dropped, as Claude Code counts it again from the summary
 //   classic.InstructionsLoaded
 //                       names a path-scoped file and why it loaded
 //   turn.complete       (an agent's) whether its context opened with CLAUDE.md
@@ -201,7 +205,7 @@ export const register: Register = on => {
       } else if (type === 'skill_listing') {
         record(ledger, { id: 'att:skill_listing', kind: 'skills', name: 'skill listing', chars, reply: now, from: 'skill', startup: now <= 1 })
       } else {
-        addAttachment(ledger, type, chars, now)
+        addAttachment(ledger, type, chars, now, isAttached(type, e.origin?.kind))
       }
       changed($)
     } catch (error) {
@@ -209,6 +213,19 @@ export const register: Register = on => {
     }
     return result
   })
+
+  // The main conversation is summarised: the files, skills and reminders that loaded after the start are
+  // no longer what the context holds. A subagent's own summary is not this session's, and a precompute
+  // installs nothing.
+  on('session.compact', { trigger: /^(manual|auto|plugin)$/ }, async ($, e, next) => {
+    const result = await next(e)
+    try {
+      if (e.agentId === undefined && result.skip === undefined && compacted(ledger)) changed($)
+    } catch (error) {
+      $.ui.log(`claudeglass: instructions ${String(error)}`, { to: 'debug' })
+    }
+    return result
+  }).catch(($, e, next) => next(e))
 
   // A file that loads when Claude reaches matching paths. The files read at the start
   // arrive with prompt.context; this names the ones that come later.

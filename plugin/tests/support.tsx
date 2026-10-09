@@ -1,5 +1,5 @@
-import { mock } from 'claude-code/testing'
-import type { Engine } from 'claude-code/testing'
+import { expect, mock } from 'claude-code/testing'
+import type { Engine, Mounted } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import { RATES } from '../hooks/generated/rates.js'
@@ -46,7 +46,7 @@ export type World = {
   /** What session.messages reports: the transcript so far (a test fills it). */
   transcript: unknown[]
   /** The window and summarising point session.usage reports (a 200k window and a 160k point when left out). */
-  shape: { window?: number; point?: number; buffer?: number; startupRows?: { name: string; tokens: number }[] }
+  shape: { window?: number; point?: number; buffer?: number; startupRows?: { name: string; tokens: number }[]; mcpTools?: { name: string; serverName: string }[] }
   /** The project root session.root reports. */
   root: string
   /** The session id session.id reports (a test changes it, as a /clear does). */
@@ -81,7 +81,7 @@ export function settingsFile(over: Record<string, unknown> = {}): string {
  * (`autoCompactThreshold`) unless `over.buffer` is given: then it names an "Autocompact buffer" category
  * instead and the point is the window less that, as on a machine whose Claude Code leaves the threshold out.
  */
-export function usageFor(tokens: number, usd: number, over: { point?: number; window?: number; startup?: number; buffer?: number; startupRows?: { name: string; tokens: number }[] } = {}) {
+export function usageFor(tokens: number, usd: number, over: { point?: number; window?: number; startup?: number; buffer?: number; startupRows?: { name: string; tokens: number }[]; mcpTools?: { name: string; serverName: string }[] } = {}) {
   const window = over.window ?? WINDOW
   const point = over.point ?? POINT
   // The startup part is one "System prompt" row, or the rows a test names (Memory files, System tools, ...) when it gives them.
@@ -97,6 +97,7 @@ export function usageFor(tokens: number, usd: number, over: { point?: number; wi
         maxTokens: window,
         percentage: (tokens / window) * 100,
         ...(over.buffer === undefined ? { autoCompactThreshold: point } : {}),
+        ...(over.mcpTools === undefined ? {} : { mcpTools: over.mcpTools.map(tool => ({ ...tool, tokens: 100 })) }),
         categories: [
           ...rows.map(row => ({ kind: 'used', name: row.name, tokens: row.tokens })),
           { kind: 'used', name: 'Messages', tokens: tokens - startup },
@@ -254,4 +255,33 @@ export function elements(node: unknown): Exclude<Node, string>[] {
   if (node === null || typeof node !== 'object') return []
   const one = node as Exclude<Node, string>
   return [one, ...(one.children ?? []).flatMap(elements)]
+}
+
+/** The Glass pane's pages, as the page bar labels them. */
+export const PAGES: Record<string, string> = { now: 'Now', agents: 'Agents', compaction: 'Compaction', instructions: 'Startup' }
+
+/**
+ * Shows page `id` of a mounted Glass pane the way the person does: the page's tab is a Button unless it is
+ * the page shown (the choice persists between mounts), so it is pressed when it is there. Afterwards the page
+ * bar draws page `id` as bold, underlined text labelled `label`, and every other page as a tab Button.
+ */
+export async function showPage(mounted: Pick<Mounted, 'find' | 'press' | 'drawn'>, id: string, label: string): Promise<void> {
+  expect(PAGES[id]).toBe(label)
+  const tab = await mounted.find({ type: 'Button', key: `page:${id}` })
+  if (tab !== undefined) {
+    expect(tab.props.label).toBe(label)
+    await mounted.press({ key: `page:${id}` })
+  }
+  const tree = await mounted.drawn()
+  const drawn = elements(tree)
+  // The page shown is the one bold, underlined text of the bar (a Text carries no key in the tree).
+  const current = drawn.filter(one => one.type === 'Text' && one.props?.bold === true && one.props?.underline === true)
+  expect(current.map(textOf)).toEqual([label])
+  expect(drawn.filter(one => one.type === 'Button' && one.props?.key === `page:${id}`)).toHaveLength(0)
+  for (const [other, name] of Object.entries(PAGES)) {
+    if (other === id) continue
+    const button = drawn.filter(one => one.type === 'Button' && one.props?.key === `page:${other}`)
+    expect(button).toHaveLength(1)
+    expect(textOf(button[0])).toBe(name)
+  }
 }

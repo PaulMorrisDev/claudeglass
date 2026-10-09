@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, prepare, reply, SESSION, settingsFile, SITE, START, T0, textOf } from './support'
+import { elements, faults, prepare, reply, SESSION, settingsFile, showPage, SITE, START, T0, textOf } from './support'
 import type { Step, World } from './support'
 
 // The third round of review fixes: the 5-hour share while another session runs, a long reply that a subagent's
@@ -332,7 +332,7 @@ test('A8: no two hotkeys on the Compaction page are the same, and the Haiku chec
   await reply($, world, FIRST)
   await $.command.run({ command: 'glass', args: 'detail' } as never)
   const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
-  await mounted.press({ key: 'page:compaction' } as never)
+  await showPage(mounted, 'compaction', 'Compaction')
   const keys = elements(await mounted.drawn())
     .filter(one => one.type === 'Button' && typeof one.props?.hotkey === 'string')
     .map(one => String(one.props?.hotkey))
@@ -421,7 +421,7 @@ async function workflowAgent($: Engine, world: World): Promise<string> {
 
 async function headline($: Engine): Promise<string> {
   const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
-  await mounted.press({ key: 'page:agents' })
+  await showPage(mounted, 'agents', 'Agents')
   const text = elements(await mounted.drawn()).filter(one => one.type === 'Text').map(textOf).join('\n')
   await mounted.unmount()
   return text

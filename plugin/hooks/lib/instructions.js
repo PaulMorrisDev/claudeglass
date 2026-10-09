@@ -1,12 +1,13 @@
 /* claudeglass mod: lib/instructions.js
  *
- * What the Instructions page works out from the events that load things into
+ * What the Startup page works out from the events that load things into
  * Claude's context: a ledger of items (a system prompt section, a CLAUDE.md
  * or rules file, a skill, a tool's description, an attachment), each with its
  * size in characters, kept in the order it loaded; then the rows the page
  * draws (tool descriptions rolled up into one row for the built-in tools, one
- * for the deferred tools and one per MCP server), the startup total, the
- * largest items, the one line of advice, and which agent runs received
+ * for the deferred tools and one per MCP server), the startup total, the three
+ * groups the page shows it in (what you control, Claude Code's own, what was
+ * added as you work), the one line of advice, and which agent runs received
  * CLAUDE.md. Sizes become tokens only here, at the calibrated characters per
  * token the caller passes in.
  *
@@ -36,6 +37,13 @@ export var FILE_TOKENS = 5000;
  */
 export var STARTUP_ATTACHMENTS = ["mcp_instructions_delta", "agent_listing_delta"];
 
+/**
+ * The attachment types that carry text of the person's or of a file rather
+ * than a reminder from Claude Code, though the engine raises them itself: a
+ * file the person names with an at sign, a file changed since Claude read it.
+ */
+export var ATTACHED_TYPES = ["file", "edited_text_file"];
+
 /** The tools rolled up into the largest-first names a row shows. */
 var BIGGEST = 3;
 
@@ -48,7 +56,7 @@ var BIGGEST = 3;
  * @property {number} chars     Its text, in characters.
  * @property {number} seq       Its place in the load order, from 1.
  * @property {number} reply     The reply that was under way when it loaded (1 is the first); 0 when not known.
- * @property {string} from      Where it came from: engine, managed, user, project, local, memory, imported, scoped, rules, plugin, mcp, skill, attachment.
+ * @property {string} from      Where it came from: engine, managed, user, project, local, memory, imported, scoped, rules, plugin, mcp, skill, attachment (a reminder from Claude Code), attached (a file or a settings hook's note added to a message).
  * @property {boolean} startup  Part of what the session starts with.
  * @property {string} [path]    A file's absolute path.
  * @property {string} [parent]  The file that imported it.
@@ -117,24 +125,53 @@ export function record(ledger, item) {
 }
 
 /**
- * Adds an attachment's text to the item for its type (one item holds every
- * attachment of a type).
+ * Whether an attachment is a file or a note added to the person's message,
+ * not a reminder from Claude Code: a settings hook's or a plugin's text, or a
+ * type that carries a file.
+ * @param {string} type
+ * @param {string|null|undefined} origin  `origin.kind` of the attachment: engine, hook or plugin; none counts as the engine.
+ */
+export function isAttached(type, origin) {
+  return (typeof origin === "string" && origin !== "engine") || ATTACHED_TYPES.indexOf(type) >= 0;
+}
+
+/**
+ * Adds an attachment's text to the item for its type and kind (one item holds
+ * every reminder of a type, and one every attached file or note of it).
  * @param {Ledger} ledger
  * @param {string} type
  * @param {number} chars
  * @param {number} reply
+ * @param {boolean} [attached]  A file or a note added to a message (see isAttached), not a reminder.
  */
-export function addAttachment(ledger, type, chars, reply) {
-  var id = "att:" + type;
+export function addAttachment(ledger, type, chars, reply, attached) {
+  var added = attached === true;
+  var id = "att:" + type + (added ? ":attached" : "");
   var existing = ledger.items.find(function (one) {
     return one.id === id;
   });
   if (existing === undefined) {
-    record(ledger, { id: id, kind: "attachment", name: type, chars: chars, reply: reply, from: "attachment", startup: STARTUP_ATTACHMENTS.indexOf(type) >= 0 && reply <= 1, count: 1 });
+    record(ledger, { id: id, kind: "attachment", name: type, chars: chars, reply: reply, from: added ? "attached" : "attachment", startup: !added && STARTUP_ATTACHMENTS.indexOf(type) >= 0 && reply <= 1, count: 1 });
     return;
   }
   existing.chars += chars;
   existing.count = (existing.count || 1) + 1;
+}
+
+/**
+ * Drops what loaded after the start, as a summary of the conversation does:
+ * the files Claude reached, the skills it ran and the reminders. What the
+ * session starts with stays.
+ * @param {Ledger} ledger
+ * @returns {boolean} True when anything was dropped.
+ */
+export function compacted(ledger) {
+  var kept = ledger.items.filter(function (one) {
+    return one.startup;
+  });
+  var dropped = kept.length !== ledger.items.length;
+  ledger.items = kept;
+  return dropped;
 }
 
 /**
@@ -162,11 +199,12 @@ export function mcpServer(tool, provider) {
 }
 
 /**
- * A section id or attachment type as words ("doing_tasks" is "doing tasks").
- * @param {string} id
+ * Whether an MCP server (by the server part of its tools' names) is one the
+ * Claude Desktop app runs itself (`ccd_session`, `ccd_directory`, ...).
+ * @param {string} server
  */
-export function humanize(id) {
-  return id.replace(/[_-]+/g, " ").trim();
+export function isDesktopServer(server) {
+  return server.indexOf("ccd_") === 0;
 }
 
 /**
@@ -195,6 +233,7 @@ export function shortPath(path) {
  * @property {boolean} deferred Everything in it waits behind tool search.
  * @property {boolean} scoped
  * @property {string} [server]
+ * @property {string[]} [tools] An MCP server's tool names (`mcp__<server>__<tool>`), in load order.
  * @property {string} [path]
  * @property {string} [parent]
  * @property {string[]} [globs]
@@ -202,7 +241,7 @@ export function shortPath(path) {
  */
 
 /**
- * The rows the page draws, in load order.
+ * The rows the page draws, in load order. The tools of one kind roll up into one row, a plugin's tools into a row of their own.
  * @param {Item[]} items
  * @returns {Entry[]}
  */
@@ -214,7 +253,7 @@ export function entriesOf(items) {
   for (var i = 0; i < items.length; i++) {
     var item = /** @type {Item} */ (items[i]);
     var live = item.startup && item.deferred !== true ? item.chars : 0;
-    var group = item.kind === "tools" || item.kind === "deferred" ? item.kind : item.kind === "mcp" ? "mcp:" + (item.server || "") : "";
+    var group = item.kind === "tools" || item.kind === "deferred" ? item.kind + (item.from === "plugin" ? ":plugin" : "") : item.kind === "mcp" ? "mcp:" + (item.server || "") : "";
     if (group !== "") {
       var row = rolled[group];
       if (row === undefined) {
@@ -232,7 +271,10 @@ export function entriesOf(items) {
           scoped: false,
           biggest: [],
         };
-        if (item.kind === "mcp") row.server = item.server || "";
+        if (item.kind === "mcp") {
+          row.server = item.server || "";
+          row.tools = [];
+        }
         rolled[group] = row;
         out.push(row);
       }
@@ -240,6 +282,7 @@ export function entriesOf(items) {
       row.startupChars += live;
       row.count += 1;
       if (item.deferred !== true) row.deferred = false;
+      if (row.tools !== undefined) row.tools.push(item.name);
       row.biggest.push({ name: item.name, chars: item.chars });
       row.biggest.sort(function (a, b) {
         return b.chars - a.chars;
@@ -281,31 +324,10 @@ export function startupChars(entries) {
 }
 
 /**
- * The `n` largest rows of the startup context, largest first (ties in load order).
- * `size` gives a row's size in any one unit (tokens when the page has Claude Code's count, else the default:
- * the characters it keeps in the prompt).
- * @param {Entry[]} entries
- * @param {number} n
- * @param {(entry: Entry) => number} [size]
- */
-export function largest(entries, n, size) {
-  var sizeOf = size || /** @param {Entry} one */ function (one) {
-    return one.startupChars;
-  };
-  return entries
-    .filter(function (one) {
-      return one.startupChars > 0;
-    })
-    .sort(function (a, b) {
-      return sizeOf(b) - sizeOf(a) || a.seq - b.seq;
-    })
-    .slice(0, n);
-}
-
-/**
  * The one thing worth fixing, if something is: an MCP server whose tool
  * descriptions sit in the prompt at `mcpTokens` or more, or a CLAUDE.md or
  * rules file at `fileTokens` or more; the larger of the two kinds' worst.
+ * A server the Desktop app runs itself is never advised against.
  * @param {Entry[]} entries
  * @param {number} cpt
  * @param {{mcp?: number, file?: number}} [limits]
@@ -323,6 +345,8 @@ export function adviceFor(entries, cpt, limits, sizes) {
     /** @type {{kind: "mcp"|"file", name: string, tokens: number}|null} */
     var found = null;
     if (one.kind === "mcp") {
+      // The Desktop app's own servers are not the person's to turn off.
+      if (isDesktopServer(one.server || "")) continue;
       var live = typeof fitted[one.key] === "number" ? /** @type {number} */ (fitted[one.key]) : tokensOf(one.startupChars, cpt);
       if (live >= mcpAt) found = { kind: "mcp", name: one.server || "", tokens: live };
     } else if (one.kind === "instructions") {
@@ -426,33 +450,173 @@ export function fitToCategories(entries, categories) {
   return { matched: matched, total: total, sizes: sizes };
 }
 
+/** A server name that is an identifier, not a name (`5f3a2c1e-9b4d-...`). */
+var UUID_LIKE = /^[0-9a-f]{8}[-_][0-9a-f]{4}[-_]/i;
+
+/** The name Claude Code gives a plugin's server: `plugin:<plugin>:<server>`. */
+var PLUGIN_SERVER = /^plugin:[^:]+:(.+)$/;
+
 /**
- * One group of the Detailed list: a kind.
- * @typedef {Object} Group
- * @property {string} kind
- * @property {Entry[]} entries
+ * A wire name read as words: `_` and `-` as spaces.
+ * @param {string} name
+ * @param {string} fallback  Used when nothing is left.
+ */
+function asWords(name, fallback) {
+  var words = name.replace(/[_-]+/g, " ").trim();
+  return words === "" ? fallback : words;
+}
+
+/**
+ * What an MCP server is called on the page: the name /mcp lists when Claude
+ * Code gave one (a plugin's `plugin:<plugin>:<server>` by its server part, as
+ * words), else its wire name read as words (`plugin_<plugin>_` taken off, `_`
+ * and `-` as spaces); a server that only has an id is "Connector" with its
+ * first three tools, as words.
+ * @param {string} wire  The server part of its tools' names.
+ * @param {Object<string, string>|null|undefined} names  /mcp's name for each wire name.
+ * @param {string[]|null|undefined} toolNames  The server's tools, as `mcp__<server>__<tool>`.
+ * @returns {string}
+ */
+export function serverLabel(wire, names, toolNames) {
+  var listed = names && typeof names[wire] === "string" ? names[wire] : "";
+  var plugged = PLUGIN_SERVER.exec(listed);
+  if (plugged !== null) return asWords(/** @type {string} */ (plugged[1]), listed);
+  if (listed !== "" && !UUID_LIKE.test(listed)) return listed;
+  if (UUID_LIKE.test(wire) || listed !== "") {
+    var tools = Array.isArray(toolNames) ? toolNames : [];
+    var prefix = "mcp__" + wire + "__";
+    var short = tools.slice(0, 3).map(function (tool) {
+      return (tool.indexOf(prefix) === 0 ? tool.slice(prefix.length) : tool.replace(/^mcp__.+?__/, "")).replace(/_/g, " ");
+    });
+    if (short.length === 0) return "Connector";
+    return "Connector (" + short.join(", ") + (tools.length > 3 ? ", \u2026" : "") + ")";
+  }
+  var rest = wire;
+  if (rest.indexOf("plugin_") === 0) {
+    var parts = rest.slice(7).split("_");
+    // The plugin's name comes first; a name with nothing after it is kept whole.
+    rest = parts.length > 1 ? parts.slice(1).join("_") : parts.join("_");
+  }
+  return asWords(rest, wire);
+}
+
+/**
+ * One line under a row of the Startup page: a file or a server.
+ * @typedef {Object} StartupItem
+ * @property {string} label
+ * @property {number} tokens
+ * @property {boolean} deferred  Waits behind tool search, so costs nothing at startup.
+ * @property {boolean} [instructions]  Not a server: the instructions the servers gave Claude, which the label does not name (the page does).
  */
 
 /**
- * The rows grouped by kind, groups in the order their first row loaded, rows in load order.
- * @param {Entry[]} entries
- * @returns {Group[]}
+ * One row of a group on the Startup page.
+ * @typedef {Object} StartupRow
+ * @property {string} id      "mcp", "files", "skills" or "plugin" (you control); "files-later", "skills-used", "reminders" or "attached" (added as you work).
+ * @property {number} tokens
+ * @property {number} count   What the row stands for: servers (every one listed, those behind tool search too), files, skills, tools.
+ * @property {StartupItem[]} items  Largest first for servers; in load order otherwise.
  */
-export function groupsOf(entries) {
-  /** @type {Group[]} */
-  var out = [];
+
+/**
+ * @typedef {Object} StartupGroups
+ * @property {{tokens: number, rows: StartupRow[]}} control  What the person can change.
+ * @property {{tokens: number}} builtin  Claude Code's own: the rest of the startup context.
+ * @property {{tokens: number, rows: StartupRow[]}} later    What is not in the startup context.
+ */
+
+/**
+ * The page's three groups. "You control" is the MCP servers (all but the
+ * Desktop app's own, with the instructions they gave Claude at the start), the
+ * CLAUDE.md and memory files, the skill list and the plugins' tools; "Claude
+ * Code's own" is the rest of the startup context, one total; "Added as you
+ * work" is what loaded after the start (files Claude reached, skills it ran,
+ * Claude Code's reminders, files and notes added to your messages). A tool that
+ * waits behind tool search costs nothing: its server is counted and listed
+ * without a size, and no other row has it. Rows of no tokens are left out. `total` is
+ * the startup total the page shows: given, the built-in part is what is left
+ * of it once "You control" is taken out.
+ * @param {Entry[]} entries
+ * @param {(entry: Entry) => number} sizeOf  Tokens for a row.
+ * @param {Object<string, string>|null|undefined} names  /mcp's name for each server (see serverLabel).
+ * @param {number} [total]
+ * @returns {StartupGroups}
+ */
+export function startupGroups(entries, sizeOf, names, total) {
+  var ids = ["mcp", "files", "skills", "plugin", "files-later", "skills-used", "reminders", "attached"];
+  /** @type {Object<string, StartupRow>} */
+  var rows = {};
+  for (var r = 0; r < ids.length; r++) {
+    var made = /** @type {string} */ (ids[r]);
+    rows[made] = { id: made, tokens: 0, count: 0, items: [] };
+  }
+  var builtin = 0;
   for (var i = 0; i < entries.length; i++) {
     var one = /** @type {Entry} */ (entries[i]);
-    var group = out.find(function (g) {
-      return g.kind === one.kind;
-    });
-    if (group === undefined) {
-      group = { kind: one.kind, entries: [] };
-      out.push(group);
+    var size = sizeOf(one);
+    var label = one.path !== undefined ? shortPath(one.path) : one.name;
+    if (one.startupChars <= 0) {
+      if (one.deferred) {
+        // Behind tool search: a server is listed under its row without a size, so the detailed list is whole.
+        if (one.kind === "mcp" && !isDesktopServer(one.server || "")) {
+          var waiting = /** @type {StartupRow} */ (rows.mcp);
+          waiting.count += 1;
+          waiting.items.push({ label: serverLabel(one.server || "", names, one.tools), tokens: 0, deferred: true });
+        }
+        continue;
+      }
+      var later = one.kind === "instructions" ? "files-later" : one.kind === "attachment" ? (one.from === "attached" ? "attached" : "reminders") : one.name === "skill listing" ? "reminders" : one.kind === "skills" ? "skills-used" : "";
+      if (later === "") continue;
+      var after = /** @type {StartupRow} */ (rows[later]);
+      after.tokens += size;
+      after.count += 1;
+      after.items.push({ label: label, tokens: size, deferred: false });
+      continue;
     }
-    group.entries.push(one);
+    var id = "";
+    // What the servers told Claude at the start is part of the MCP servers' share, not Claude Code's own.
+    var told = one.kind === "attachment" && one.name === "mcp_instructions_delta";
+    if (told || (one.kind === "mcp" && !isDesktopServer(one.server || ""))) id = "mcp";
+    else if (one.kind === "instructions") id = "files";
+    else if (one.kind === "skills") id = "skills";
+    else if ((one.kind === "tools" || one.kind === "deferred") && one.from === "plugin") id = "plugin";
+    if (id === "") {
+      builtin += size;
+      continue;
+    }
+    var row = /** @type {StartupRow} */ (rows[id]);
+    row.tokens += size;
+    row.count += told ? 0 : id === "plugin" ? one.count : 1;
+    if (told) row.items.push({ label: label, tokens: size, deferred: false, instructions: true });
+    else row.items.push({ label: id === "mcp" ? serverLabel(one.server || "", names, one.tools) : label, tokens: size, deferred: false });
   }
-  return out;
+  /** @type {StartupRow} */ (rows.mcp).items.sort(function (a, b) {
+    return b.tokens - a.tokens;
+  });
+  /** @param {string[]} list */
+  var present = function (list) {
+    return list
+      .map(function (id) {
+        return /** @type {StartupRow} */ (rows[id]);
+      })
+      .filter(function (one) {
+        return one.tokens > 0;
+      });
+  };
+  /** @param {StartupRow[]} list */
+  var sum = function (list) {
+    var all = 0;
+    for (var k = 0; k < list.length; k++) all += /** @type {StartupRow} */ (list[k]).tokens;
+    return all;
+  };
+  var control = present(["mcp", "files", "skills", "plugin"]);
+  var added = present(["files-later", "skills-used", "reminders", "attached"]);
+  var yours = sum(control);
+  return {
+    control: { tokens: yours, rows: control },
+    builtin: { tokens: typeof total === "number" && total >= yours ? total - yours : builtin },
+    later: { tokens: sum(added), rows: added },
+  };
 }
 
 /**

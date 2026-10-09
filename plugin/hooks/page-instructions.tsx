@@ -5,53 +5,48 @@ import { linkTarget } from './agent-view'
 import { COPY } from './generated/copy.js'
 import { ledger, register as watch } from './instructions'
 import { charsPerToken } from './lib/coach.js'
-import { adviceFor, agentTypesOf, entriesOf, fitToCategories, groupsOf, humanize, largest, shortPath, startupChars, tokensOf } from './lib/instructions.js'
-import type { Entry } from './lib/instructions.js'
+import { adviceFor, agentTypesOf, entriesOf, fitToCategories, serverLabel, startupChars, startupGroups, tokensOf } from './lib/instructions.js'
+import type { Entry, StartupRow } from './lib/instructions.js'
 import { fill } from './lib/text.js'
 import { formatTokens } from './lib/units.js'
 import { addPage } from './pane'
 import type { PageContext } from './pane'
+import { figureRow, heading } from './rows'
 
-// The Instructions page: what this session loaded into Claude's context, in the
-// order it loaded, with an estimated size for each. The first screen is the
-// startup total, the five largest items and, when one is big enough to fix, one
-// line of advice; Detailed lists everything grouped by kind, marks the files that
-// loaded later because Claude reached matching paths, and says which agent types
-// received CLAUDE.md. Pressing an item shows what it is, where it came from and
-// its size. Claude Code's own count of each group (the rows of /context) is the
-// group's total, and an item's size is its share of its group by characters of
-// text, so the startup total agrees with the Now page and the sizes stay estimates.
-// Before Claude Code has counted anything, or for an item no row of /context
-// covers, the size is characters over the calibrated characters per token (the
-// ledger is in instructions.ts).
+// The Startup page (the page id is still `instructions`, so a stored choice keeps
+// working): what is in every request before the person types, and what they can do
+// about it. It opens with that total in one sentence and, when one thing is big
+// enough to fix, one line of advice. Then three groups: what the person controls
+// (MCP servers, CLAUDE.md and memory, the skills list, plugin tools), Claude Code's
+// own, which is one total because it can't be changed, and what was added as the
+// work went on (files Claude reached, skills it ran, reminders). Claude Code's own
+// count of the startup context is the total when it has one, and the rows are shares
+// of it by characters of text; before it has counted, or for a row no row of /context
+// covers, the size is characters over the calibrated characters per token (the ledger
+// is in instructions.ts). Every size is an estimate, said once in a footnote.
+// Detailed lists each server and file under its row, says which agent types received
+// CLAUDE.md, and links to the CLAUDE.md files in the dashboard.
 
-/** One key per row, as the Agents page has: the digits, then letters the pane's own buttons don't use. */
-const ROW_KEYS = '123456789bdefjoqrstuvwxz'
-const COPY_KEY = 'y'
-const TOP = 5
-
-type Kinds = 'system' | 'instructions' | 'context' | 'skills' | 'tools' | 'deferred' | 'mcp' | 'attachment'
-
-function est(tokens: number): string {
-  return `${formatTokens(tokens)} ${COPY['amount.est']}`
-}
-
-function kindLabel(kind: string): string {
-  return COPY[`instructions.kind.${kind as Kinds}`]
-}
-
-function fromLabel(entry: Entry): string {
-  if (entry.kind === 'mcp') return fill(COPY['instructions.from.mcp'], { server: entry.server ?? '' })
-  return COPY[`instructions.from.${entry.from as 'engine'}`] ?? COPY['instructions.from.engine']
-}
-
-/** What a row is called: a rolled-up group by its kind and count, an item by its own name. */
-function nameOf(entry: Entry): string {
-  if (entry.kind === 'tools' || entry.kind === 'deferred') return fill(COPY[`instructions.name.${entry.kind}`], { count: entry.count })
-  if (entry.kind === 'mcp') return fill(COPY[entry.count === 1 ? 'instructions.name.mcp.one' : 'instructions.name.mcp'], { server: entry.server ?? '', count: entry.count })
-  if (entry.kind === 'instructions') return entry.path !== undefined ? shortPath(entry.path) : entry.name
-  const name = entry.kind === 'system' || entry.kind === 'attachment' ? humanize(entry.name) : entry.name
-  return entry.count > 1 ? fill(COPY['instructions.times'], { name, count: entry.count }) : name
+/** The words that name a row: a server count is part of its name. */
+function rowName(row: StartupRow): string {
+  switch (row.id) {
+    case 'mcp':
+      return fill(COPY['startup.mcp'], { count: row.count })
+    case 'files':
+      return COPY['startup.files']
+    case 'skills':
+      return COPY['startup.skills']
+    case 'plugin':
+      return COPY['startup.plugin']
+    case 'files-later':
+      return COPY['startup.later.files']
+    case 'skills-used':
+      return COPY['startup.later.skills']
+    case 'attached':
+      return COPY['startup.later.attached']
+    default:
+      return COPY['startup.later.reminders']
+  }
 }
 
 /** Tokens by row, where Claude Code's count has sized the row (lib/instructions.js fitToCategories). */
@@ -67,132 +62,91 @@ function contextLink(settings: GlassSettings): string | null {
   return base === null ? null : `${base}/#/agents/context`
 }
 
-function headline(count: number, tokens: string): string {
-  return fill(COPY[count === 1 ? 'instructions.headline.one' : 'instructions.headline'], { tokens, count })
-}
-
-function adviceLine(entries: Entry[], cpt: number, sizes: Sizes): string | null {
+function adviceLine(entries: Entry[], cpt: number, sizes: Sizes, names: Record<string, string>): string | null {
   const found = adviceFor(entries, cpt, undefined, sizes)
   if (found === null) return null
-  return fill(COPY[found.kind === 'mcp' ? 'instructions.advice.mcp' : 'instructions.advice.file'], { server: found.name, name: found.name, tokens: est(found.tokens) })
+  if (found.kind === 'file') return fill(COPY['startup.advice.file'], { name: found.name, tokens: formatTokens(found.tokens) })
+  const server = serverLabel(found.name, names, entries.find(one => one.key === `mcp:${found.name}`)?.tools)
+  return fill(COPY['startup.advice.mcp'], { server, tokens: formatTokens(found.tokens) })
 }
 
-function details(context: PageContext, entry: Entry, cpt: number, sizes: Sizes): RenderElement {
-  const { Box, Text, Button, Link } = context.table
-  const link = entry.kind === 'instructions' ? contextLink(context.view.settings) : null
-  const lines: string[] = [
-    fill(COPY['instructions.detail.kind'], { kind: kindLabel(entry.kind) }),
-    fill(COPY['instructions.detail.from'], { from: fromLabel(entry) }),
-    fill(COPY['instructions.detail.size'], { tokens: est(tokensOf(entry.chars, cpt)), chars: entry.chars.toLocaleString('en-US') }),
-  ]
-  if (entry.startupChars > 0 && entry.startupChars !== entry.chars) {
-    lines.push(fill(COPY['instructions.detail.live'], { tokens: est(sizeOf(entry, cpt, sizes)) }))
-  }
-  if (entry.deferred) lines.push(COPY['instructions.detail.deferred'])
-  if (entry.scoped) {
-    const globs = entry.globs ?? []
-    lines.push(globs.length > 0 ? fill(COPY['instructions.detail.scoped.globs'], { reply: entry.reply, globs: globs.join(', ') }) : fill(COPY['instructions.detail.scoped'], { reply: entry.reply }))
-  }
-  if (entry.parent !== undefined) lines.push(fill(COPY['instructions.detail.parent'], { path: entry.parent }))
-  if (entry.biggest.length > 0) {
-    lines.push(fill(COPY['instructions.detail.biggest'], { names: entry.biggest.map(one => `${one.name} ${formatTokens(tokensOf(one.chars, cpt))}`).join(', ') }))
-  }
-  return (
-    <Box key={`details:${entry.key}`} flexDirection="column" paddingLeft={4}>
-      <Text bold>{nameOf(entry)}</Text>
-      {entry.path !== undefined ? <Text dimColor>{entry.path}</Text> : null}
-      {lines.map(line => (
-        <Text key={line}>{line}</Text>
-      ))}
-      {link !== null ? (
-        <Box key="dashboard" flexDirection="row" gap={1}>
-          <Link key="dashboard-link" href={linkTarget(link)} label={COPY['instructions.dashboard']} />
-          <Button key="dashboard-copy" label={context.state.copied ? COPY['pane.copied'] : COPY['pane.link']} hotkey={COPY_KEY} onPress={press => context.copy(link, press.surface)} />
-        </Box>
-      ) : null}
-    </Box>
-  )
-}
-
-/** A row's words after its name: its size, and in the detailed list what makes it special. */
-function figures(entry: Entry, cpt: number, detailed: boolean, sizes: Sizes): string {
-  const parts = [est(sizeOf(entry, cpt, sizes))]
-  if (detailed && entry.scoped) parts.push(fill(COPY['instructions.scoped.mark'], { reply: entry.reply }))
-  if (detailed && entry.deferred) parts.push(COPY['instructions.deferred.mark'])
-  return parts.join(' · ')
+/** A row's heading line is its figure; in Detailed the servers or files under it follow, indented. */
+function rowLines(context: PageContext, row: StartupRow): RenderElement[] {
+  const { table } = context
+  const lines = [figureRow(table, `row:${row.id}`, rowName(row), formatTokens(row.tokens))]
+  if (!context.view.detailed || !['mcp', 'files', 'files-later'].includes(row.id)) return lines
+  row.items.forEach((item, at) => {
+    const name = item.instructions === true ? COPY['startup.mcp.instructions'] : row.id === 'files-later' ? fill(COPY['startup.later.mark'], { name: item.label }) : item.label
+    const figure = item.deferred ? COPY['startup.deferred'] : formatTokens(item.tokens)
+    lines.push(figureRow(table, `item:${row.id}:${at}`, name, figure, { indent: 2, dim: item.deferred }))
+  })
+  return lines
 }
 
 async function render(context: PageContext): Promise<RenderElement> {
-  const { table, view, state } = context
-  const { Box, Text, Button } = table
+  const { table, view } = context
+  const { Box, Text, Button, Link } = table
   const entries = entriesOf(ledger.items)
 
-  if (entries.length === 0) return <Text>{COPY['instructions.none']}</Text>
+  if (entries.length === 0) return <Text>{COPY['startup.none']}</Text>
 
   const cpt = charsPerToken(view.settings.charsPerToken, view.snap.model)
   // Claude Code's own count of the startup context, split among the rows; the estimate alone when it has none yet.
   const fit = fitToCategories(entries, await context.kit.categories())
   const sizes: Sizes = fit.matched ? fit.sizes : {}
   const total = fit.matched ? fit.total : tokensOf(startupChars(entries), cpt)
-  // Claude Code's figure is not an estimate; the estimate carries its mark.
-  const shownTotal = fit.matched ? formatTokens(total) : est(total)
-  const startupCount = entries.filter(one => one.startupChars > 0).length
-  const advice = adviceLine(entries, cpt, sizes)
-  let used = 0
-
-  const row = (entry: Entry): RenderElement => {
-    const key = `item:${entry.key}`
-    const hotkey = ROW_KEYS.charAt(used)
-    used += 1
-    const label = `${nameOf(entry)} · ${figures(entry, cpt, view.detailed, sizes)}`
-    return (
-      <Box key={`row:${entry.key}`} flexDirection="column">
-        {hotkey === '' ? <Text>{label}</Text> : <Button key={key} label={label} hotkey={hotkey} onPress={() => context.explain(key)} />}
-        {state.explain === key ? details(context, entry, cpt, sizes) : null}
-      </Box>
-    )
-  }
+  const names = await context.kit.mcpNames()
+  const groups = startupGroups(entries, one => sizeOf(one, cpt, sizes), names, total)
+  const advice = adviceLine(entries, cpt, sizes, names)
+  // Claude Code's figure is not an estimate; the estimate says so in the lead.
+  const lead = fill(COPY[fit.matched ? 'startup.lead' : 'startup.lead.est'], { tokens: formatTokens(total) })
 
   const children: RenderElement[] = [
-    <Text key="headline" bold>
-      {headline(startupCount, shownTotal)}
-    </Text>,
+    <Box key="lead" flexDirection="column">
+      <Text bold>{lead}</Text>
+      {advice !== null ? <Text>{advice}</Text> : null}
+    </Box>,
   ]
-  if (advice !== null) children.push(<Text key="advice">{advice}</Text>)
 
-  if (!view.detailed) {
+  if (groups.control.rows.length > 0) {
     children.push(
-      <Text key="largest" bold>
-        {COPY['instructions.largest']}
-      </Text>,
-      ...largest(entries, TOP, one => sizeOf(one, cpt, sizes)).map(row),
+      <Box key="control" flexDirection="column">
+        {heading(table, 'control', COPY['startup.control'], formatTokens(groups.control.tokens))}
+        {groups.control.rows.flatMap(row => rowLines(context, row))}
+      </Box>,
     )
   }
-  children.push(<Text key="total">{fill(COPY['instructions.total'], { tokens: shownTotal })}</Text>)
+  children.push(
+    <Box key="own" flexDirection="column">
+      {heading(table, 'own', COPY['startup.own'], formatTokens(groups.builtin.tokens))}
+      <Text dimColor>{COPY['startup.own.note']}</Text>
+    </Box>,
+  )
+  if (groups.later.rows.length > 0) {
+    children.push(
+      <Box key="later" flexDirection="column">
+        {heading(table, 'later', COPY['startup.later'], formatTokens(groups.later.tokens))}
+        <Text dimColor>{COPY['startup.later.note']}</Text>
+        {groups.later.rows.flatMap(row => rowLines(context, row))}
+      </Box>,
+    )
+  }
+  if (groups.control.rows.length > 0 || groups.later.rows.length > 0) {
+    children.push(
+      <Text key="estimates" dimColor>
+        {COPY['startup.estimates']}
+      </Text>,
+    )
+  }
 
   if (view.detailed) {
     const theirs = view.parts?.startup ?? null
-    if (fit.matched) {
-      // The groups add up to Claude Code's own count: nothing differs to explain.
-      children.push(
-        <Text key="share" dimColor>
-          {COPY['instructions.share']}
-        </Text>,
-      )
-    } else if (theirs !== null && theirs > 0) {
-      // Claude Code has a count but none of its rows fits what loaded, so the estimate stands beside it.
+    // Claude Code has a count but none of its rows fits what loaded, so the estimate stands beside it.
+    if (!fit.matched && theirs !== null && theirs > 0) {
       children.push(
         <Box key="compare" flexDirection="column">
-          <Text>{fill(COPY['instructions.compare'], { theirs: formatTokens(theirs), mine: est(total) })}</Text>
-          <Text dimColor>{COPY['instructions.compare.why']}</Text>
-        </Box>,
-      )
-    }
-    for (const group of groupsOf(entries)) {
-      children.push(
-        <Box key={`group:${group.kind}`} flexDirection="column">
-          <Text bold>{kindLabel(group.kind)}</Text>
-          {group.entries.map(row) as never}
+          <Text>{fill(COPY['startup.compare'], { theirs: formatTokens(theirs), mine: formatTokens(total) })}</Text>
+          <Text dimColor>{COPY['startup.compare.why']}</Text>
         </Box>,
       )
     }
@@ -200,18 +154,31 @@ async function render(context: PageContext): Promise<RenderElement> {
     if (agents.got.length > 0 || agents.skipped.length > 0) {
       children.push(
         <Box key="agents" flexDirection="column">
-          <Text bold>{COPY['instructions.agents']}</Text>
-          {agents.got.length > 0 ? <Text>{fill(COPY['instructions.agents.got'], { types: agents.got.join(', ') })}</Text> : null}
-          {agents.skipped.length > 0 ? <Text>{fill(COPY['instructions.agents.skipped'], { types: agents.skipped.join(', ') })}</Text> : null}
+          <Text bold>{COPY['startup.agents']}</Text>
+          {agents.got.length > 0 ? <Text>{fill(COPY['startup.agents.got'], { types: agents.got.join(', ') })}</Text> : null}
+          {agents.skipped.length > 0 ? <Text>{fill(COPY['startup.agents.skipped'], { types: agents.skipped.join(', ') })}</Text> : null}
+        </Box>,
+      )
+    }
+    const link = contextLink(view.settings)
+    if (link !== null) {
+      children.push(
+        <Box key="dashboard" flexDirection="row" gap={2} alignItems="center">
+          <Link key="dashboard-link" href={linkTarget(link)} label={COPY['startup.dashboard']} />
+          <Button key="dashboard-copy" label={context.state.copied === 'context-link' ? COPY['pane.copied'] : COPY['startup.dashboard.link']} dimColor onPress={press => context.copy(link, press.surface, 'context-link')} />
         </Box>,
       )
     }
   }
 
-  return <Box flexDirection="column">{children as never}</Box>
+  return (
+    <Box flexDirection="column" gap={1}>
+      {children}
+    </Box>
+  )
 }
 
 export const register: Register = (on, options) => {
   watch(on, options)
-  addPage({ id: 'instructions', hotkey: 'i', labelKey: 'pane.instructions', render })
+  addPage({ id: 'instructions', hotkey: 's', labelKey: 'pane.instructions', render })
 }

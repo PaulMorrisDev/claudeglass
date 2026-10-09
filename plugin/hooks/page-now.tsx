@@ -7,10 +7,12 @@ import { formatTokens } from './lib/units.js'
 import { fill } from './lib/text.js'
 import { addPage } from './pane'
 import type { PageContext } from './pane'
+import { figureRow, heading, ROW_CELLS } from './rows'
 
 // The Now page: how full the context is, what is filling it, and what the
-// session has cost. The first screen holds the headline, the advice, the bar,
-// three rows and one line; Detailed adds the charts and the figures behind them.
+// session has cost. The first screen holds the headline, the advice with its one
+// action, the bar, three text rows and a line; Detailed adds an explanation under
+// each row, the charts and the figures behind them.
 
 const COMPACT_COMMAND = '/compact'
 const BAR_WIDTH = 360
@@ -19,16 +21,15 @@ const TERMINAL_BAR_CELLS = 44
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000
 const CHART_REPLIES = 40
 
-type Row = { key: 'startup' | 'conversation' | 'output'; hotkey: string; name: string; tokens: number; estimated: boolean }
+type Row = { key: 'startup' | 'conversation' | 'output'; name: string; tokens: number; estimated: boolean }
 
 function rowsOf(context: PageContext): Row[] {
   const parts = context.view.parts
   if (parts === null) return []
-  const startup = `${COPY['now.part.startup']} (${COPY['now.part.startup.detail']})`
   return [
-    { key: 'startup', hotkey: '1', name: startup, tokens: parts.startup, estimated: false },
-    { key: 'conversation', hotkey: '2', name: COPY['now.part.conversation'], tokens: parts.conversation, estimated: false },
-    { key: 'output', hotkey: '3', name: COPY['now.part.output'], tokens: parts.output, estimated: true },
+    { key: 'startup', name: COPY['now.part.startup'], tokens: parts.startup, estimated: false },
+    { key: 'conversation', name: COPY['now.part.conversation'], tokens: parts.conversation, estimated: false },
+    { key: 'output', name: COPY['now.part.output'], tokens: parts.output, estimated: true },
   ]
 }
 
@@ -95,13 +96,11 @@ async function render(context: PageContext): Promise<RenderElement> {
     </Text>,
   )
 
-  if (tip !== null) {
+  if (tip !== null) children.push(<Text key="advice">{tip}</Text>)
+  if (compactNow) {
     children.push(
-      <Box key="advice" flexDirection="row" gap={1}>
-        <Text>{tip}</Text>
-        {compactNow ? (
-          <Button key="copy" label={state.copied ? COPY['pane.copied'] : `${COPY['pane.copy']} ${COMPACT_COMMAND}`} hotkey="c" onPress={press => context.copy(COMPACT_COMMAND, press.surface)} />
-        ) : null}
+      <Box key="action" flexDirection="row">
+        <Button key="copy" variant="primary" hotkey="c" autoFocus label={state.copied === 'compact' ? COPY['pane.copied'] : `${COPY['pane.copy']} ${COMPACT_COMMAND}`} onPress={press => context.copy(COMPACT_COMMAND, press.surface, 'compact')} />
       </Box>,
     )
   }
@@ -122,25 +121,18 @@ async function render(context: PageContext): Promise<RenderElement> {
     )
   }
 
-  children.push(
-    <Text key="filling" bold>
-      {COPY['now.filling']}
-    </Text>,
-  )
+  children.push(heading(table, 'filling', COPY['now.filling']))
   for (const row of rows) {
-    const tokens = row.estimated ? `${formatTokens(row.tokens)} ${COPY['amount.est']}` : formatTokens(row.tokens)
-    const open = state.explain === row.key
-    children.push(
-      <Box key={`row:${row.key}`} flexDirection="column">
-        <Button key={`explain:${row.key}`} label={`${row.name} · ${tokens}`} hotkey={row.hotkey} onPress={() => context.explain(row.key)} />
-        {open ? (
-          <Box paddingLeft={4}>
-            <Text dimColor>{GLOSSARY[row.key].body}</Text>
-          </Box>
-        ) : null}
-      </Box>,
-    )
+    children.push(figureRow(table, `row:${row.key}`, row.name, formatTokens(row.tokens)))
+    if (view.detailed) {
+      children.push(
+        <Box key={`about:${row.key}`} width={ROW_CELLS} paddingLeft={2}>
+          <Text dimColor>{GLOSSARY[row.key].body}</Text>
+        </Box>,
+      )
+    }
   }
+  if (rows.some(row => row.estimated)) children.push(<Text key="estimate" dimColor>{COPY['now.estimate']}</Text>)
 
   if (snap.cost !== null) {
     children.push(<Text key="session">{sessionLine(context)}</Text>)
@@ -154,7 +146,7 @@ async function render(context: PageContext): Promise<RenderElement> {
       const chart = Svg !== null ? replyChartSvg(replies, BAR_WIDTH, 48, chartAlt, (_, usd, ctx) => `${amount(usd, settings)} · ${formatTokens(ctx)}`) : ''
       children.push(
         <Box key="chart" flexDirection="column">
-          <Text bold>{COPY['now.chart']}</Text>
+          {heading(table, 'chart-title', COPY['now.chart'])}
           {Svg !== null && chart.length <= SVG_LIMIT ? (
             <Svg source={chart} alt={chartAlt} width={BAR_WIDTH} height={48} />
           ) : (
@@ -178,10 +170,8 @@ async function render(context: PageContext): Promise<RenderElement> {
       ]
       children.push(
         <Box key="spend" flexDirection="column">
-          <Text bold>{COPY['now.spend']}</Text>
-          {lines.map(([name, usd]) => (
-            <Text key={name}>{`${name} · ${amount(usd, settings)}`}</Text>
-          ))}
+          {heading(table, 'spend-title', COPY['now.spend'])}
+          {lines.map(([name, usd]) => figureRow(table, name, name, amount(usd, settings)))}
         </Box>,
       )
     }
@@ -190,10 +180,8 @@ async function render(context: PageContext): Promise<RenderElement> {
     if (snap.heaviest.length > 0) {
       children.push(
         <Box key="heaviest" flexDirection="column">
-          <Text bold>{COPY['now.heaviest']}</Text>
-          {snap.heaviest.slice(0, 3).map(item => (
-            <Text key={`${item.name}:${item.tokens}`}>{fill(COPY['now.largest'], { name: item.name.startsWith('mcp__') ? COPY['tool.mcp'] : item.name, tokens: formatTokens(item.tokens) })}</Text>
-          ))}
+          {heading(table, 'heaviest-title', COPY['now.heaviest'])}
+          {snap.heaviest.slice(0, 3).map(item => figureRow(table, `${item.name}:${item.tokens}`, item.name.startsWith('mcp__') ? COPY['tool.mcp'] : item.name, formatTokens(item.tokens)))}
         </Box>,
       )
     }
@@ -208,7 +196,7 @@ async function render(context: PageContext): Promise<RenderElement> {
       const bar = Svg !== null ? limitBarSvg(limit.pct, elapsed, BAR_WIDTH, 10, limitAlt) : ''
       children.push(
         <Box key="limit" flexDirection="column">
-          <Text bold>{COPY['now.limit']}</Text>
+          {heading(table, 'limit-title', COPY['now.limit'])}
           {Svg !== null && bar.length <= SVG_LIMIT ? <Svg source={bar} alt={limitAlt} width={BAR_WIDTH} height={10} /> : <Text>{limitCells(limit.pct, elapsed, TERMINAL_BAR_CELLS)}</Text>}
           <Text dimColor>{label}</Text>
         </Box>,
@@ -222,26 +210,11 @@ async function render(context: PageContext): Promise<RenderElement> {
       children.push(<Text key="usual">{fill(COPY[key], { amount: amount(usual, settings) })}</Text>)
     }
 
-    // The opt-in that asks before a costly send (draft.ts).
-    children.push(
-      <Box key="guard" flexDirection="column">
-        <Button
-          key="guard-toggle"
-          label={`${COPY['guard.opt']}: ${context.options.guard ? COPY['guard.opt.on'] : COPY['guard.opt.off']}`}
-          hotkey="s"
-          onPress={() => void context.kit.setOption('guard', !context.options.guard)}
-        />
-        <Box paddingLeft={4}>
-          <Text dimColor>{COPY['guard.opt.detail']}</Text>
-        </Box>
-      </Box>,
-    )
-
     // The summaries so far.
     const known = snap.compactions.filter(one => one.tokensBefore !== null && one.tokensAfter !== null)
     children.push(
       <Box key="compactions" flexDirection="column">
-        <Text bold>{COPY['now.compactions']}</Text>
+        {heading(table, 'compactions-title', COPY['now.compactions'])}
         {known.length === 0 ? (
           <Text>{COPY['now.compactions.none']}</Text>
         ) : (
@@ -254,6 +227,21 @@ async function render(context: PageContext): Promise<RenderElement> {
             </Text>
           ))
         )}
+      </Box>,
+    )
+
+    // The opt-in that asks before a costly send (draft.ts): a quiet toggle, last.
+    children.push(
+      <Box key="guard" flexDirection="column">
+        <Box flexDirection="row">
+          <Button
+            key="guard-toggle"
+            label={`${COPY['guard.opt']}: ${context.options.guard ? COPY['guard.opt.on'] : COPY['guard.opt.off']}`}
+            dimColor
+            onPress={() => void context.kit.setOption('guard', !context.options.guard)}
+          />
+        </Box>
+        <Text dimColor>{COPY['guard.opt.detail']}</Text>
       </Box>,
     )
   }

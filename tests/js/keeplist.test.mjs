@@ -185,3 +185,80 @@ test("helpers: content words and exact tokens", () => {
   assert.deepEqual(exactTokens("see src/a/b.ts and v1.2.3 on port 8765 at https://x.dev/y."), ["https://x.dev/y", "src/a/b.ts", "v1.2.3", "8765"]);
   assert.ok(trimText("a ".repeat(100), 20).length <= 20);
 });
+
+test("what the user says about what they can see or know is not an instruction", () => {
+  const said = (text) => kinds(buildKeepList([{ role: "user", text }]), "instruction").map((item) => item.text);
+  assert.deepEqual(said("I dont really see anything"), []);
+  assert.deepEqual(said("I don't know why it fails"), []);
+  assert.deepEqual(said("i really can't understand this"), []);
+  assert.deepEqual(said("Why don't you use the cache?"), []);
+  assert.deepEqual(said("What should I never do here?"), []);
+  assert.deepEqual(said("don't read code yet"), ["don't read code yet"]);
+  assert.deepEqual(said("I don't want you to touch the tests"), ["I don't want you to touch the tests"]);
+  assert.deepEqual(said("we never use port 8765"), ["we never use port 8765"]);
+  // Only the "I don't know" clause is dropped: an instruction in the same sentence stays.
+  assert.deepEqual(said("I don't know why it fails, so never touch the config."), ["I don't know why it fails, so never touch the config."]);
+  assert.deepEqual(said("I don't like tabs, always use spaces."), ["I don't like tabs, always use spaces."]);
+  assert.deepEqual(said("I don't think you should touch the tests"), ["I don't think you should touch the tests"]);
+  assert.deepEqual(said("I dont really see anything"), []);
+  // One message can hold both: the talk is dropped, the constraint stays.
+  assert.deepEqual(said("I don't see the button. Never rename the schema."), ["Never rename the schema."]);
+});
+
+test("the error is a shell command that failed, never another tool's error or a refusal", () => {
+  const call = (tool, text, input = {}) => ({ role: "assistant", text: "", toolUses: [{ tool, input, isError: true, text }] });
+  const errors = (messages) => kinds(buildKeepList(messages), "error").map((item) => item.text);
+  // The user's own failing commands count, in either shell.
+  assert.equal(errors([call("Bash", "FAILED tests/a.py::test_x - AssertionError", { command: "pytest" })]).length, 1);
+  assert.equal(errors([call("PowerShell", "npm ERR! missing script: build", { command: "npm run build" })]).length, 1);
+  // Failures without an upper-case marker are the user's too.
+  assert.equal(errors([call("Bash", "FAIL src/a.test.js\n  1 failed, 3 passed", { command: "npx jest" })]).length, 1);
+  assert.equal(errors([call("Bash", "--- FAIL: TestParse (0.00s)\nFAIL", { command: "go test ./..." })]).length, 1);
+  assert.match(errors([call("Bash", "bash: foo: command not found", { command: "foo" })])[0], /command not found/);
+  assert.match(errors([call("PowerShell", "Get-Content : Cannot find path 'C:/x' because it does not exist." + String.fromCharCode(10) + "+ CategoryInfo          : ObjectNotFound", { command: "Get-Content C:/x" })])[0], /CategoryInfo/);
+  assert.equal(errors([call("PowerShell", "foo : The term 'foo' is not recognized as the name of a cmdlet", { command: "foo" })]).length, 1);
+  assert.equal(errors([call("Bash", "exit code 1\nsomething odd happened", { command: "make" })]).length, 1);
+  assert.equal(errors([call("Bash", "bash: ./run.sh: Permission denied", { command: "./run.sh" })]).length, 1);
+  // A refusal (the user said no, a permission rule or a hook stopped it) is not a failure.
+  assert.deepEqual(errors([call("Bash", "Permission to use Bash with command rm -rf build has been denied.", { command: "rm -rf build" })]), []);
+  assert.deepEqual(errors([call("PowerShell", "The user rejected this tool use. The tool use was rejected by the user.", { command: "x" })]), []);
+  assert.deepEqual(errors([call("Bash", "PreToolUse:Bash hook blocked this call: no force pushes", { command: "git push -f" })]), []);
+  // A tool that failed for Claude, not the user: an MCP call, a refusal, a missing tool, a failed edit.
+  assert.deepEqual(errors([call("mcp__computer-use__request_access", "Error: user denied access", { applications: ["Notepad"] })]), []);
+  assert.deepEqual(errors([call("Bash", "The user doesn't want to proceed with this tool use.", { command: "rm -rf build" })]), []);
+  assert.deepEqual(errors([call("Edit", "Error: File has not been read yet.", { file_path: "a.ts" })]), []);
+  assert.deepEqual(errors([call("Read", "Error: no such file", { file_path: "a.ts" })]), []);
+  // A shell failure still wins over a later error of another tool.
+  const both = [call("Bash", "fatal: not a git repository", { command: "git status" }), call("mcp__x__y", "Error: boom")];
+  assert.match(errors(both)[0], /git status/);
+});
+
+test("files in temp or scratch places and plan files are left out; a project file is shown relative", () => {
+  const edit = (path) => ({ role: "assistant", text: "", toolUses: [{ tool: "Edit", input: { file_path: path }, text: "ok" }] });
+  const names = (paths, cwd) => kinds(buildKeepList(paths.map(edit), { cwd }), "file").map((item) => item.text);
+  const scratch = "C:\\Users\\paulm\\AppData\\Local\\Temp\\claude\\proj\\scratchpad\\notes.md";
+  assert.deepEqual(names([scratch]), []);
+  assert.deepEqual(names(["/tmp/run/out.txt", "/home/me/.claude/plans/plan-1.md", "C:/Users/me/AppData/Local/TEMP/x.json"]), []);
+  assert.deepEqual(names(["/work/proj/tmp/cache.ts"]), []);
+  // Under the working directory only the part below it counts, so a project that lives in a temp folder is listed.
+  assert.deepEqual(names(["/tmp/proj/src/a.ts", "/tmp/proj/tmp/b.ts"], "/tmp/proj"), ["src/a.ts"]);
+  // A skipped file takes no place among the recent ones.
+  const many = ["a", "b", "c", "d", "e", "f"].map((n) => `src/${n}.ts`);
+  const files = kinds(buildKeepList([...many.map(edit), edit("/tmp/z.ts")]), "file");
+  assert.equal(files.length, 6);
+  assert.equal(files.filter((item) => item.safe).length, 5);
+
+  // A path under the working directory is shown relative to it (either slash, any case on a drive letter).
+  assert.deepEqual(names(["C:\\Dev\\claude-token-lens\\plugin\\hooks\\band.tsx"], "C:\\Dev\\claude-token-lens"), ["plugin/hooks/band.tsx"]);
+  assert.deepEqual(names(["c:/dev/claude-token-lens/src/a.py"], "C:\\Dev\\claude-token-lens\\"), ["src/a.py"]);
+  assert.deepEqual(names(["/work/proj/src/a.ts"], "/work/proj"), ["src/a.ts"]);
+  // Not under it: as before, the path with forward slashes.
+  assert.deepEqual(names(["/other/place/a.ts"], "/work/proj"), ["/other/place/a.ts"]);
+  assert.deepEqual(names(["/work/projector/a.ts"], "/work/proj"), ["/work/projector/a.ts"]);
+  // The summary is still checked against the full path.
+  const [item] = kinds(buildKeepList([edit("/work/proj/src/a.ts")], { cwd: "/work/proj" }), "file");
+  assert.deepEqual(item.exact, ["/work/proj/src/a.ts", "a.ts"]);
+  // Long paths outside it are cut to their last three segments.
+  const long = "/" + "deep/".repeat(30) + "a/b/c.ts";
+  assert.equal(names([long], "/work/proj")[0], "…/a/b/c.ts");
+});

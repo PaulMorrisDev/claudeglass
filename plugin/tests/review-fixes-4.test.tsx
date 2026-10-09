@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, prepare, reply, SESSION, settingsFile, SITE, START, T0, textOf } from './support'
+import { elements, faults, prepare, reply, SESSION, settingsFile, showPage, SITE, START, T0, textOf } from './support'
 import type { Step, World } from './support'
 
 // The fourth round of review fixes: the 5-hour share while another session is idle or has gone quiet, the cost of the
@@ -53,7 +53,7 @@ async function anAgent($: Engine, world: World): Promise<void> {
 async function repliesCounted($: Engine, world: World): Promise<string> {
   await world.clock.advance(300)
   const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
-  await mounted.press({ key: 'page:agents' })
+  await showPage(mounted, 'agents', 'Agents')
   const text = elements(await mounted.drawn()).filter(one => one.type === 'Text').map(textOf).join(' ')
   await mounted.unmount()
   return /(\d+ repl(?:y|ies))/.exec(text)?.[1] ?? ''

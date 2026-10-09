@@ -580,7 +580,8 @@ test('the Now page turns the guard on in Detailed; Simple has no toggle', async 
 
   await $.command.run({ command: 'glass', args: 'detail' } as never)
   const toggle = await mounted.find({ type: 'Button', key: 'guard-toggle' })
-  expect(toggle?.props.hotkey).toBe('s')
+  expect(toggle?.props.hotkey).toBeUndefined()
+  expect(toggle?.props.dimColor).toBe(true)
   expect(String(toggle?.props.label)).toBe('Ask before a costly send: Off')
 
   await mounted.press({ key: 'guard-toggle' })

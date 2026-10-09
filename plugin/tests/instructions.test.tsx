@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, prepare, reply, SITE, START, textOf } from './support'
+import { elements, faults, prepare, reply, showPage, SITE, START, textOf } from './support'
 
 const PANE = { title: 'Glass', isFocused: true, bodyColumns: 110, placement: 'dock', ...SITE } as const
 
@@ -76,7 +76,7 @@ async function loadStartup($: Engine, over: { github?: number; files?: File[] } 
 
 async function pane($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
   const mounted = await $.ui.mount({ plugin: 'claudeglass', surface, component: 'Pane', requestId: 'glass', props: PANE as never })
-  await mounted.press({ key: 'page:instructions' })
+  await showPage(mounted, 'instructions', 'Startup')
   return mounted
 }
 
@@ -119,7 +119,19 @@ test('each event is observed and answered unchanged', async ($, on) => {
   expect(faults(world)).toEqual([])
 })
 
-test('Simple: the startup total, the five largest items and one line of advice', async ($, on) => {
+/** The lead sentence, which follows the page bar, and the line under it. */
+function lead(shown: string[]): string[] {
+  const at = shown.findIndex(line => line.startsWith('Every request starts'))
+  return at < 0 ? [] : shown.slice(at, at + 2)
+}
+
+/** The lines of `shown` from `from` on, as many as `count`: a heading or a row is its name, then its figure. */
+function run(shown: string[], from: string, count: number): string[] {
+  const at = shown.indexOf(from)
+  return at < 0 ? [] : shown.slice(at, at + count)
+}
+
+test('Simple: the startup total in a sentence, one line of advice, and three groups of plain rows', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
@@ -131,24 +143,41 @@ test('Simple: the startup total, the five largest items and one line of advice',
     const shown = lines(tree)
 
     // 2k + 1k (system) + 1k + 6k + 500 (files) + 10 (date) + 5k (built-in tools) + 11k (github) + 1.5k (skill list), less the deferred tools.
-    expect(shown).toContain('Startup context is about 28k (est.), from 9 items.')
-    expect(shown).toContain('Startup context: about 28k (est.)')
-    expect(shown).toContain('The github MCP server puts about 11k (est.) of tool descriptions in every request. If this work doesn\'t need it, turn it off.')
+    expect(lead(shown)[0]).toBe('Every request starts with about 28k tokens of setup (est.).')
+    expect(lead(shown)[1]).toBe("The github tools add 11k to every request. Turn the server off in /mcp when you don't need it.")
 
-    const rows = buttons(tree).filter(one => String(one.props?.key ?? '').startsWith('item:'))
-    expect(rows.map(textOf)).toEqual([
-      'github (1 tool) · 11k (est.)',
-      'work/CLAUDE.md · 6k (est.)',
-      'Built-in tools (2) · 5k (est.)',
-      'intro · 2k (est.)',
-      'skill listing · 1.5k (est.)',
-    ])
-    expect(rows.map(one => one.props?.hotkey)).toEqual(['1', '2', '3', '4', '5'])
-    // The deferred tools are not part of what the session starts with, and the detail waits for [m].
-    expect(shown.join('\n')).not.toMatch(/Deferred tools|docs/)
-    expect(shown.join('\n')).not.toMatch(/path-scoped/)
+    // You control: 11k + 7.5k + 1.5k. Claude Code's own is what is left of the total, in one line.
+    // Two servers are listed: github, and docs behind tool search.
+    expect(run(shown, 'You control', 8)).toEqual(['You control', '20k', 'MCP servers (2)', '11k', 'CLAUDE.md and memory', '7.5k', 'Skills list', '1.5k'])
+    expect(run(shown, "Claude Code's own", 3)).toEqual(["Claude Code's own", '8.01k', "Claude Code's built-in instructions and tools. You can't change these."])
+    expect(shown).toContain('Sizes are estimates, shared out by size of text.')
+    // Nothing loaded after the start, so there is no third group; and no section, tool or file is named.
+    expect(shown).not.toContain('Added as you work')
+    expect(shown.join('\n')).not.toMatch(/intro|doing|currentDate|skill_listing|Deferred|docs|Built-in tools|CLAUDE\.md ·|path-scoped/)
+    // "(est.)" is said once.
+    expect(shown.filter(line => line.includes('(est.)'))).toHaveLength(1)
+
+    // The only Buttons are the page bar and the pane's own quiet controls: rows are text, and nothing here has a key of its own.
+    for (const button of buttons(tree)) {
+      const key = String(button.props?.key ?? '')
+      if (key.startsWith('page:')) expect(button.props?.hotkey).toMatch(/^[nask]$/)
+      else expect(button.props?.hotkey).toBeUndefined()
+      expect(button.props?.variant).toBeUndefined()
+    }
     await mounted.unmount()
   }
+  expect(faults(world)).toEqual([])
+})
+
+test('the Startup tab has the key s and keeps the id instructions', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
+  const tab = await mounted.find({ type: 'Button', key: 'page:instructions' })
+  expect(tab?.props.label).toBe('Startup')
+  expect(tab?.props.hotkey).toBe('s')
+  await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
 
@@ -160,8 +189,8 @@ test('the advice appears only when a fixable item is large enough, and names the
   await loadStartup($, { github: 39996 })
   let mounted = await pane($)
   let shown = lines(await mounted.drawn())
-  expect(shown).toContain('work/CLAUDE.md is about 6k (est.), and Claude re-reads it with every request. Trimming it makes every reply cheaper.')
-  expect(shown.filter(line => /every request/.test(line))).toHaveLength(1)
+  expect(shown).toContain('work/CLAUDE.md adds 6k to every request. Trim it if parts are out of date.')
+  expect(shown.filter(line => /to every request/.test(line))).toHaveLength(1)
   await mounted.unmount()
 
   // The server reaches 10k: it is the larger of the two.
@@ -169,8 +198,8 @@ test('the advice appears only when a fixable item is large enough, and names the
   await world.clock.advance(1000)
   mounted = await pane($)
   shown = lines(await mounted.drawn())
-  expect(shown).toContain('The github MCP server puts about 10k (est.) of tool descriptions in every request. If this work doesn\'t need it, turn it off.')
-  expect(shown.filter(line => /every request/.test(line))).toHaveLength(1)
+  expect(shown).toContain("The github tools add 10k to every request. Turn the server off in /mcp when you don't need it.")
+  expect(shown.filter(line => /to every request/.test(line))).toHaveLength(1)
   await mounted.unmount()
 
   // Smaller files and a smaller server: nothing to say.
@@ -178,12 +207,62 @@ test('the advice appears only when a fixable item is large enough, and names the
   await loadStartup($, { github: 8000, files: [{ path: PROJECT_MD, kind: 'project', content: text(4000) }] })
   mounted = await pane($)
   shown = lines(await mounted.drawn())
-  expect(shown.some(line => /every request/.test(line))).toBe(false)
+  expect(shown.some(line => /to every request/.test(line))).toBe(false)
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
 
-test('Detailed lists everything in load order, grouped by kind', async ($, on) => {
+test('a server is named as /mcp lists it, and one with only an id is a connector named by its tools', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($)
+  const ID = '5f3a2c1e-9b4d-4e8a-8c3d-1a2b3c4d5e6f'
+  for (const tool of ['batch', 'guide', 'update', 'query']) {
+    await $.tool.describe({ tool: `mcp__${ID}__${tool}`, description: text(2000), provider: { plugin: `mcp:${ID}`, tier: 'user' } } as never)
+  }
+  await $.tool.describe({ tool: 'mcp__plugin_playwright_playwright__click', description: text(1000), provider: { plugin: 'mcp:plugin_playwright_playwright', tier: 'user' } } as never)
+  // /mcp lists a plugin's server as plugin:<plugin>:<server>.
+  world.shape = {
+    mcpTools: [
+      { name: 'mcp__github__create_issue', serverName: 'GitHub' },
+      { name: 'mcp__plugin_playwright_playwright__click', serverName: 'plugin:playwright:playwright' },
+    ],
+  }
+  await reply($, world, FIRST)
+  await world.clock.advance(1000)
+
+  const mounted = await pane($)
+  await mounted.press({ key: 'more' })
+  const shown = lines(await mounted.drawn())
+  // Largest first, each by its name, never its id.
+  // Four are listed: github, the connector, playwright, and docs behind tool search.
+  expect(run(shown, 'MCP servers (4)', 8)).toEqual(['MCP servers (4)', '13.3k', 'GitHub', '11k', 'Connector (batch, guide, update, …)', '2k', 'playwright', '250'])
+  expect(shown.join('\n')).not.toContain(ID)
+  expect(shown.join('\n')).not.toMatch(/mcp__|plugin[_:]/)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test("the Desktop app's own servers are part of Claude Code's own, not a server to turn off", async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($, { github: 8000, files: [{ path: PROJECT_MD, kind: 'project', content: text(4000) }] })
+  await $.tool.describe({ tool: 'mcp__ccd_session__spawn', description: text(120000), provider: { plugin: 'mcp:ccd_session', tier: 'user' } } as never)
+
+  const mounted = await pane($)
+  const shown = lines(await mounted.drawn())
+  expect(shown.join('\n')).not.toMatch(/ccd/)
+  expect(shown.some(line => /to every request/.test(line))).toBe(false)
+  // It still counts in what every request starts with, and the github server is the one server listed.
+  expect(lead(shown)[0]).toBe('Every request starts with about 42.5k tokens of setup (est.).')
+  expect(shown).toContain('MCP servers (2)')
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test("Detailed lists each server and file under its row, and none of Claude Code's own sections", async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
@@ -195,34 +274,20 @@ test('Detailed lists everything in load order, grouped by kind', async ($, on) =
     // The detailed choice persists, so only the first mount turns it on.
     if (surface === 'terminal') await mounted.press({ key: 'more' })
     const shown = lines(await mounted.drawn())
-    const at = (line: string) => shown.indexOf(line)
 
-    // Groups in the order their first item loaded: system prompt, instructions, session details, tools, skills.
-    const order = ['System prompt', 'CLAUDE.md and rules', 'Session details', 'Built-in tools', 'MCP tools', 'Deferred tools', 'Skills'].map(at)
-    expect(order.map(index => index >= 0)).toEqual([true, true, true, true, true, true, true])
-    expect(at('System prompt')).toBeLessThan(at('CLAUDE.md and rules'))
-    expect(at('CLAUDE.md and rules')).toBeLessThan(at('Session details'))
-    expect(at('Session details')).toBeLessThan(at('Built-in tools'))
-    expect(at('Built-in tools')).toBeLessThan(at('MCP tools'))
-    expect(at('MCP tools')).toBeLessThan(at('Deferred tools'))
-    expect(at('Deferred tools')).toBeLessThan(at('Skills'))
-
-    // Within a group, in load order, and with every item: the files, the deferred server, the skill that ran.
-    expect(shown.indexOf('.claude/CLAUDE.md · 1k (est.)')).toBeLessThan(shown.indexOf('work/CLAUDE.md · 6k (est.)'))
-    expect(shown.indexOf('work/CLAUDE.md · 6k (est.)')).toBeLessThan(shown.indexOf('rules/style.md · 500 (est.)'))
-    expect(shown).toContain('doing tasks · 1k (est.)')
-    expect(shown).toContain('currentDate · 10 (est.)')
-    expect(shown).toContain('docs (1 tool) · 5k (est.) · loads when asked for')
-    expect(shown).toContain('Deferred tools (1) · 1k (est.) · loads when asked for')
-    expect(shown).toContain('commit · 500 (est.)')
-    // The simple list is replaced by this one.
-    expect(shown).not.toContain('Largest items')
+    // Servers largest first, the one that waits behind tool search last and without a size.
+    expect(run(shown, 'MCP servers (2)', 6)).toEqual(['MCP servers (2)', '11k', 'github', '11k', 'docs', 'loads when asked for'])
+    // Files in the order they loaded, shortened as the page always has.
+    expect(run(shown, 'CLAUDE.md and memory', 8)).toEqual(['CLAUDE.md and memory', '7.5k', '.claude/CLAUDE.md', '1k', 'work/CLAUDE.md', '6k', 'rules/style.md', '500'])
+    // The skill that ran loaded after the start: it is in the third group, as one line.
+    expect(run(shown, 'Added as you work', 5)).toEqual(['Added as you work', '500', '/clear and /compact empty these.', 'Skills Claude used', '500'])
+    expect(shown.join('\n')).not.toMatch(/intro|doing|currentDate|skill_listing|Deferred|Built-in tools|System prompt/)
     await mounted.unmount()
   }
   expect(faults(world)).toEqual([])
 })
 
-test('a path-scoped file is marked with the reply it loaded in', async ($, on) => {
+test('a path-scoped file is in the third group and does not move the startup total', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
@@ -239,79 +304,41 @@ test('a path-scoped file is marked with the reply it loaded in', async ($, on) =
   await world.clock.advance(1000)
 
   const mounted = await pane($)
-  // Simple: not part of the startup context, so not among the five largest.
-  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/src\/CLAUDE\.md/)
+  let shown = lines(await mounted.drawn())
+  expect(lead(shown)[0]).toBe('Every request starts with about 28k tokens of setup (est.).')
+  expect(run(shown, 'Added as you work', 5)).toEqual(['Added as you work', '2k', '/clear and /compact empty these.', 'Files loaded as Claude reached them', '2k'])
+  // The file itself waits for Detailed, marked as loading later.
+  expect(shown.join('\n')).not.toMatch(/src\/CLAUDE\.md/)
   await mounted.press({ key: 'more' })
-  const row = buttons(await mounted.drawn()).find(one => /^src\/CLAUDE\.md/.test(textOf(one)))
-  expect(row).toBeDefined()
-  expect(textOf(row)).toBe('src/CLAUDE.md · 2k (est.) · path-scoped, reply 2')
-  // The startup total did not move.
-  expect(lines(await mounted.drawn())).toContain('Startup context: about 28k (est.)')
-
-  // Pressing it says what it is, where it came from, how big, and why it loaded.
-  await mounted.press({ key: String(row?.props?.key) } as never)
-  const shown = lines(await mounted.drawn())
-  expect(shown).toContain(SCOPED_MD)
-  expect(shown).toContain('Kind: CLAUDE.md and rules')
-  expect(shown).toContain('From: Loaded when Claude reached matching paths')
-  expect(shown).toContain('Size: about 2k (est.), 8,000 characters')
-  expect(shown).toContain('Loaded in reply 2 because Claude reached a path matching src/**.')
+  shown = lines(await mounted.drawn())
+  expect(run(shown, 'Files loaded as Claude reached them', 3)).toEqual(['Files loaded as Claude reached them', '2k', 'src/CLAUDE.md (loads later)'])
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
 
-test('pressing a CLAUDE.md file shows where it came from and a dashboard link with a copy button', async ($, on) => {
+test('Detailed ends with the dashboard link and a quiet Copy link, and no row is pressable', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
   await loadStartup($)
 
   const mounted = await pane($)
-  await mounted.press({ key: 'item:file:/work/claude.md' } as never)
+  await mounted.press({ key: 'more' })
   const tree = await mounted.drawn()
-  const shown = lines(tree)
-  expect(shown).toContain(PROJECT_MD)
-  expect(shown).toContain('Kind: CLAUDE.md and rules')
-  expect(shown).toContain("From: The project's instructions")
-  expect(shown).toContain('Size: about 6k (est.), 24,000 characters')
-
-  const link = elements(tree).find(one => one.type === 'Link')
+  const link = elements(tree).find(one => one.type === 'Link' && one.props?.label === 'CLAUDE.md files in the dashboard')
   expect(link?.props?.href).toBe('http://localhost:8792/#/agents/context')
-  expect(link?.props?.label).toBe('CLAUDE.md files in the dashboard')
-  const copy = buttons(tree).find(one => one.props?.label === 'Copy link' && String(one.props?.key) === 'dashboard-copy')
-  expect(copy?.props?.hotkey).toBe('y')
+  const copy = buttons(tree).find(one => String(one.props?.key) === 'dashboard-copy')
+  expect(copy?.props?.label).toBe('Copy the CLAUDE.md files link')
+  expect(copy?.props?.hotkey).toBeUndefined()
+  expect(copy?.props?.dimColor).toBe(true)
   await mounted.press({ key: 'dashboard-copy' })
   expect(world.copied).toContain('http://127.0.0.1:8792/#/agents/context')
 
-  // A tool group shows no dashboard link, but names its largest tools.
-  await mounted.press({ key: 'item:tools' } as never)
-  const group = lines(await mounted.drawn())
-  expect(group).toContain('Kind: Built-in tools')
-  expect(group).toContain('Largest: Bash 3k, Read 2k')
-  expect(elements(await mounted.drawn()).some(one => one.type === 'Link' && one.props?.label === 'CLAUDE.md files in the dashboard')).toBe(false)
-  await mounted.unmount()
-  expect(faults(world)).toEqual([])
-})
-
-test('every Button has a hotkey and none is used twice', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await loadStartup($)
-
-  const mounted = await pane($)
-  const check = async () => {
-    const keys = buttons(await mounted.drawn()).map(one => String(one.props?.hotkey ?? ''))
-    expect(keys.every(key => key !== '')).toBe(true)
-    expect(new Set(keys).size).toBe(keys.length)
-  }
-  await check()
-  await mounted.press({ key: 'item:file:/work/claude.md' } as never)
-  await check()
-  await mounted.press({ key: 'more' })
-  await check()
-  await mounted.press({ key: 'item:file:/work/claude.md' } as never)
-  await check()
+  // Rows are text: the Buttons are the page bar, the pane's footer and this link's copy button, and the page bar alone has keys.
+  const keys = buttons(tree).filter(one => one.props?.hotkey !== undefined).map(one => String(one.props?.key))
+  expect(keys.every(key => key.startsWith('page:'))).toBe(true)
+  expect(buttons(tree).some(one => /^(item|row|explain)/.test(String(one.props?.key)))).toBe(false)
+  expect(buttons(tree).some(one => one.props?.variant === 'primary')).toBe(false)
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
@@ -352,7 +379,7 @@ test('agent types that received CLAUDE.md are listed in the detailed view', asyn
   expect(faults(world)).toEqual([])
 })
 
-test('with Claude Code\'s own count the startup total is its figure, and each item is its share of its group', async ($, on) => {
+test("with Claude Code's own count the total is its figure, and each row is its share", async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
@@ -371,12 +398,14 @@ test('with Claude Code\'s own count the startup total is its figure, and each it
 
   let mounted = await pane($)
   let shown = lines(await mounted.drawn())
-  // The total is Claude Code's, so it carries no estimate mark; the items do.
-  expect(shown).toContain('Startup context is about 37k, from 9 items.')
-  expect(shown).toContain('Startup context: about 37k')
-  expect(shown).toContain('The github MCP server puts about 15k (est.) of tool descriptions in every request. If this work doesn\'t need it, turn it off.')
-  const rows = buttons(await mounted.drawn()).filter(one => String(one.props?.key ?? '').startsWith('item:'))
-  expect(rows.map(textOf).slice(0, 3)).toEqual(['github (1 tool) · 15k (est.)', 'work/CLAUDE.md · 7.2k (est.)', 'Built-in tools (2) · 7k (est.)'])
+  // The total is Claude Code's, so the lead carries no estimate mark and no "about"; the rows are shares, said once in the footnote.
+  expect(lead(shown)[0]).toBe('Every request starts with 37k tokens of setup.')
+  expect(lead(shown)[1]).toBe("The github tools add 15k to every request. Turn the server off in /mcp when you don't need it.")
+  // You control: 15k + 9k + 2k; Claude Code's own is the rest of the 37k.
+  expect(run(shown, 'You control', 8)).toEqual(['You control', '26k', 'MCP servers (2)', '15k', 'CLAUDE.md and memory', '9k', 'Skills list', '2k'])
+  expect(run(shown, "Claude Code's own", 2)).toEqual(["Claude Code's own", '11k'])
+  expect(shown).toContain('Sizes are estimates, shared out by size of text.')
+  expect(shown.some(line => line.includes('(est.)'))).toBe(false)
   await mounted.unmount()
 
   // Detailed: the groups add up to the total, so there is no second figure to explain.
@@ -384,15 +413,12 @@ test('with Claude Code\'s own count the startup total is its figure, and each it
   await mounted.press({ key: 'more' })
   shown = lines(await mounted.drawn())
   expect(shown.some(line => /^Claude Code counts/.test(line))).toBe(false)
-  expect(shown.some(line => /estimates from text at a fixed rate/.test(line))).toBe(false)
-  expect(shown).toContain('The total is Claude Code\'s count. Each item is its share of its group\'s total, by size, so item sizes are estimates.')
-  expect(shown).toContain('Skills')
-  expect(shown).toContain('skill listing · 2k (est.)')
+  expect(run(shown, 'CLAUDE.md and memory', 8)).toEqual(['CLAUDE.md and memory', '9k', '.claude/CLAUDE.md', '1.2k', 'work/CLAUDE.md', '7.2k', 'rules/style.md', '600'])
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
 
-test('when none of Claude Code\'s rows fits what loaded, the estimate stands beside its count and says why they differ', async ($, on) => {
+test("when none of Claude Code's rows fits what loaded, the estimate stands beside its count and says why they differ", async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
@@ -403,9 +429,9 @@ test('when none of Claude Code\'s rows fits what loaded, the estimate stands bes
   const mounted = await pane($)
   await mounted.press({ key: 'more' })
   const shown = lines(await mounted.drawn())
-  expect(shown).toContain('Claude Code counts 18k of startup context on the Now page. This list adds up to about 28k (est.).')
+  expect(shown).toContain('Claude Code counts 18k of startup context on the Now page. This list adds up to about 28k.')
   expect(shown).toContain('The list estimates from text at a fixed rate. It leaves out the input schemas of tools, which are most of their size.')
-  expect(shown).toContain('Startup context: about 28k (est.)')
+  expect(lead(shown)[0]).toBe('Every request starts with about 28k tokens of setup (est.).')
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
@@ -418,8 +444,105 @@ test('before Claude Code has counted anything the page shows the estimate alone'
   const mounted = await pane($)
   await mounted.press({ key: 'more' })
   const shown = lines(await mounted.drawn())
-  expect(shown).toContain('Startup context: about 28k (est.)')
-  expect(shown.some(line => /^Claude Code counts|^The total is Claude Code/.test(line))).toBe(false)
+  expect(lead(shown)[0]).toBe('Every request starts with about 28k tokens of setup (est.).')
+  expect(shown.some(line => /^Claude Code counts/.test(line))).toBe(false)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test("the instructions your servers gave Claude at the start are part of the MCP servers row, not Claude Code's own", async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await loadStartup($, { github: 8000, files: [{ path: PROJECT_MD, kind: 'project', content: text(4000) }] })
+  await $.prompt.attachment({ type: 'mcp_instructions_delta', text: text(8000), origin: { kind: 'engine' } } as never)
+
+  const mounted = await pane($)
+  await mounted.press({ key: 'more' })
+  const shown = lines(await mounted.drawn())
+  // github 2k + the servers' instructions 2k; Claude Code's own stays the system prompt and its tools (3k + 10 + 5k).
+  expect(run(shown, 'You control', 4)).toEqual(['You control', '6.5k', 'MCP servers (2)', '4k'])
+  expect(run(shown, "Claude Code's own", 2)).toEqual(["Claude Code's own", '8.01k'])
+  expect(run(shown, 'MCP servers (2)', 8)).toEqual(['MCP servers (2)', '4k', 'github', '2k', 'Instructions the servers gave Claude', '2k', 'docs', 'loads when asked for'])
+  expect(shown.some(line => /mcp_instructions/.test(line))).toBe(false)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+/** What a summary of the main conversation answers: the new messages. */
+function summarising(on: On, answer: { skip: boolean }): void {
+  on('session.compact', () => (answer.skip ? { skip: 'Not now.' } : { messages: [{ role: 'user', text: 'Summary of the conversation.', toolUses: [] }], tokensBefore: 150000, tokensAfter: 30000 }) as never)
+}
+
+const SAID = [{ role: 'user', text: 'Thanks.', toolUses: [] }]
+
+test("files and hook notes added to your messages are apart from Claude Code's reminders, and a summary empties the third group", async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  const answer = { skip: false }
+  summarising(on, answer)
+  await $.session.start(START)
+  await loadStartup($)
+  await reply($, world, FIRST)
+  await world.clock.advance(1000)
+
+  // Reply 2: a reminder from Claude Code, a file the person @-mentioned, a settings hook's note, a skill, a scoped CLAUDE.md.
+  await $.prompt.attachment({ type: 'todo_reminder', text: text(400), origin: { kind: 'engine' } } as never)
+  await $.prompt.attachment({ type: 'file', text: text(2000), origin: { kind: 'engine' } } as never)
+  await $.prompt.attachment({ type: 'hook_additional_context', text: text(800), origin: { kind: 'hook', event: 'UserPromptSubmit' } } as never)
+  await $.skill.prompt({ skill: 'commit', text: text(2000) } as never)
+  await $.classic.InstructionsLoaded({ file_path: SCOPED_MD, memory_type: 'Project', load_reason: 'path_glob_match', globs: ['src/**'] } as never)
+  await $.prompt.attachment({ type: 'nested_memory', text: nested(8000), origin: { kind: 'engine' } } as never)
+  await reply($, world, SECOND)
+  await world.clock.advance(1000)
+
+  let mounted = await pane($)
+  let shown = lines(await mounted.drawn())
+  const total = lead(shown)[0]
+  // Reminders are one row; the file and the hook's note are another. Neither is called a reminder when it is not.
+  expect(run(shown, 'Added as you work', 9)).toEqual([
+    'Added as you work',
+    '3.3k',
+    '/clear and /compact empty these.',
+    'Files loaded as Claude reached them',
+    '2k',
+    'Skills Claude used',
+    '500',
+    'Reminders from Claude Code',
+    '100',
+  ])
+  expect(run(shown, 'Files and hook notes added to your messages', 2)).toEqual(['Files and hook notes added to your messages', '700'])
+  await mounted.unmount()
+
+  // A subagent's summary and a summary that was skipped change nothing.
+  await $.session.compact({ trigger: 'auto', agentId: 'agent-7', messages: SAID } as never)
+  answer.skip = true
+  await $.session.compact({ trigger: 'manual', messages: SAID } as never)
+  await world.clock.advance(1000)
+  mounted = await pane($)
+  shown = lines(await mounted.drawn())
+  expect(shown).toContain('Added as you work')
+  expect(shown).toContain('Files and hook notes added to your messages')
+  await mounted.unmount()
+
+  // The main conversation is summarised: what loaded after the start is gone, what the session starts with is not.
+  answer.skip = false
+  await $.session.compact({ trigger: 'manual', messages: SAID } as never)
+  await world.clock.advance(1000)
+  mounted = await pane($)
+  shown = lines(await mounted.drawn())
+  expect(shown).not.toContain('Added as you work')
+  expect(shown.some(line => /Reminders from Claude Code|Files and hook notes|Skills Claude used|reached them/.test(line))).toBe(false)
+  expect(lead(shown)[0]).toBe(total)
+  expect(shown).toContain('MCP servers (2)')
+  await mounted.unmount()
+
+  // What comes after the summary is counted from nothing.
+  await $.prompt.attachment({ type: 'todo_reminder', text: text(40), origin: { kind: 'engine' } } as never)
+  await world.clock.advance(1000)
+  mounted = await pane($)
+  shown = lines(await mounted.drawn())
+  expect(run(shown, 'Added as you work', 5)).toEqual(['Added as you work', '10', '/clear and /compact empty these.', 'Reminders from Claude Code', '10'])
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })

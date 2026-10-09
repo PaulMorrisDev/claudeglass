@@ -56,7 +56,7 @@ mod falls back on the rate card built into the plugin, labels its amounts
 ## What you see
 
 Each surface answers one question you would act on. Anything that wouldn't
-change a decision sits behind `[m]` More detail, or on the dashboard.
+change a decision sits behind More detail, or on the dashboard.
 
 Amounts follow your billing mode:
 
@@ -119,7 +119,7 @@ button also appears when the compaction review has something to offer.
 
 **Detailed view** adds the tokens (`178k of 300k`) and the 5-hour limit. It
 adds the median cost of your own sessions ("your usual") and a cache
-countdown while the cache is warm. Turn it on with `/glass detail`, or `[m]` in the
+countdown while the cache is warm. Turn it on with `/glass detail`, or More detail in the
 pane.
 
 **When the band gets narrow**, each segment takes a shorter form first. If
@@ -251,23 +251,27 @@ keeping. A summary a subagent runs for itself is left alone.
 Type `/glass`, or press `[g]` Glass on the band. It works while Claude is
 still replying, and `Esc` closes it. It never opens by itself.
 
-A bar of tabs runs along the top. Press the key in brackets, or the tab.
+A bar of tabs runs along the top; the tab you are on is underlined. Press
+the key in brackets, or the tab. Each tab opens with one plain sentence that
+answers its question. Its rows are text, not buttons, and at most one button
+on a tab has a key of its own: the main thing to do there.
 
 | Key | Tab | What it answers |
 |---|---|---|
 | `[n]` | Now | How full is the context, what is filling it, and what has it cost? |
 | `[a]` | Agents | Who is working, on what, and what does it cost? |
 | `[k]` | Compaction | What did the summary keep, and what can I add back? |
-| `[i]` | Instructions | What did this session load before my first message? |
+| `[s]` | Startup | What is in every request before I type, and what can I change? |
 
-Along the bottom, on every tab:
+Along the bottom, on every tab, are quiet buttons with no keys. Move to
+them with the focus keys, or click them:
 
-- `[m]` More detail switches to the Detailed view, and back. It is the same
+- **More detail** switches to the Detailed view, and back. It is the same
   switch as `/glass detail`, and Glass remembers it.
-- **Open in dashboard** is a link to this session in the dashboard. `[l]`
-  Copy link copies it, for when your app doesn't open links.
-- `[h]` What these mean explains each figure: what it is, why it is that
-  size and what to do.
+- **Open in dashboard** is a link to this session in the dashboard. **Copy
+  link** copies it, for when your app doesn't open links.
+- **What these mean** explains each figure: what it is, why it is that size
+  and what to do.
 
 ### Now
 
@@ -277,11 +281,10 @@ The first screen fits without scrolling:
   Claude summarises." Below it is one piece of advice. When Claude summarises
   soon, `[c]` copies `/compact` for you.
 - A bar of the context with a mark where Claude summarises.
-- **What's filling it**, in three rows: Startup context (Claude Code and
-  your instructions), Conversation so far, and Tool output kept in context.
-  The last is an estimate, from how much each tool call added, and says
-  "(est.)". Press a row (`[1]` to `[3]`) for one sentence on what it is and
-  what to do.
+- **What's filling it**, in three rows: Startup context, Conversation so
+  far, and Tool output kept in context. The last is an estimate, from how
+  much each tool call added, and a note under the rows says so. The Detailed
+  view adds one sentence under each row on what it is and what to do.
 - The session so far: the amount and the number of replies.
 
 The Detailed view adds more:
@@ -302,8 +305,9 @@ the agent's name, its model and its cost. It also says what the agent is
 doing in plain words: searching, reading files, editing files, running
 commands or reading the web.
 
-Press a row to see its task prompt, the tools it used and its biggest
-results. The prompt shows its first 12 lines, and the mod doesn't keep it
+At most six rows show; the Detailed view lists every agent. Press
+**Details** at the end of a row to see its task prompt, the tools it used
+and its biggest results. The prompt shows its first 12 lines, and the mod doesn't keep it
 after a reload. A link
 opens subagent runs in the dashboard. The Detailed view adds the tokens, the
 calls and the share re-read from the cache, and a row for the main session.
@@ -312,24 +316,38 @@ calls and the share re-read from the cache, and a row for the main session.
 
 See [The compaction review](#the-compaction-review).
 
-### Instructions
+### Startup
 
-This tab lists what the session loaded into Claude's context, with the size
-of each item. The first screen gives the startup context total and the five
-largest items. A line of advice appears when one MCP server or one
-instructions file stands out.
+This tab answers what is in every request before you type, and what you can
+do about it. It opens with one sentence, such as "Every request starts with
+69k tokens of setup." When one MCP server or one instructions file stands
+out, a line under it says which and what to do: turn the server off in
+`/mcp`, or trim the file.
 
-Press an item to see what kind it is, where it came from, and its size.
-Files that load only when Claude reaches matching paths show the reply they
-loaded in. The Detailed view groups the items by kind. The kinds are system prompt,
-CLAUDE.md and rules, session details, skills, built-in tools, deferred tools,
-MCP tools, and what Claude Code added during the session. It also lists which agent
-types received your CLAUDE.md.
+Three groups follow:
 
-The total is Claude Code's own count when it can give one. Item sizes are
-estimates from the text's length. They are shown as shares of their group's
-total, and they leave out the input schemas of tools, which are most of a
-tool's size.
+- **You control**: your MCP servers, CLAUDE.md and memory files, the skills
+  list, and tools from plugins. Servers are named as `/mcp` lists them, and
+  the count includes any that wait behind tool search. The instructions your
+  servers gave Claude at the start are part of the servers' figure. Turn off a
+  server you don't need, or trim a file, to make every request smaller.
+- **Claude Code's own**: its built-in instructions and tools, as one total.
+  You can't change these, so the tab doesn't list them.
+- **Added as you work**: files that loaded when Claude reached matching
+  paths, skills Claude used, Claude Code's reminders, and files and hook
+  notes added to your messages. `/clear` and `/compact` empty these, so
+  after a summary the group counts only what has been added since. The group
+  is left out when nothing has been added.
+
+The Detailed view lists each server and each CLAUDE.md file under its row,
+and which agent types received your CLAUDE.md. It also links to your
+CLAUDE.md files in the dashboard.
+
+The total is Claude Code's own count when it can give one. Row sizes are
+shares of that count, worked out from the length of each item's text, and
+a note on the tab says they are estimates. Before Claude Code has counted,
+the sizes come from text alone and leave out the input schemas of tools,
+which are most of a tool's size, so the lead says "(est.)".
 
 ## The compaction review
 
@@ -344,10 +362,16 @@ It runs locally, with no model. The kinds are:
 
 - **Pinned**, which you chose.
 - **What you asked**: your messages with "never", "don't", "always", "must"
-  or "only", and corrections such as "no," or "actually".
+  or "only", and corrections such as "no," or "actually". A remark about
+  yourself ("I don't see anything", "I don't know why") and a question are
+  not instructions.
 - **Decisions**: "let's go with…", "agreed", and a plan you approved.
-- **Last error**, **Open tasks**, **Files changed** and **Values you typed**
-  (ports, versions, IDs, URLs and numbers).
+- **Last failed command** (a shell command or test that failed and wasn't
+  run again with success; Claude's other tool errors don't count), **Open
+  tasks**, **Files changed** and **Values you typed** (ports, versions, IDs,
+  URLs and numbers). Files in temporary or scratch folders and the plan file
+  are left out, and files in your project show their path from the project
+  folder.
 
 Some items are marked "safe anyway", because they survive any summary. They
 are files among the last five Claude changed, the approved plan, and
@@ -359,9 +383,12 @@ disk to know this, in memory only.
 - Type `/glass pin never use port 8765`.
 - Press `[p]` Pin under your newest message that holds an instruction or a
   decision.
-- Press an item in the full list.
+- Tick it in the before view: a pin is an item you want kept.
 
-You can keep 20 pins. They survive a summary and clear with `/clear`.
+You can keep 20 pins. They survive a summary and clear with `/clear`. Remove
+one with `/glass unpin port 8765` (every pin that holds those words),
+`/glass unpin all`, or the quiet **Unpin** button at the end of its row in
+the before view.
 
 ### Before a summary
 
@@ -369,29 +396,32 @@ When the context is within reach of the summary point, a `[r]` Review before
 compacting button appears on the band. It opens the Compaction tab on the
 **before** view:
 
-- Up to seven suggested items, pins first, as ticks. Press an item to tick
-  or untick it. `[o]` More items shows the rest: files, values, tasks and
-  errors.
-- `[c]` Compact with these puts `/compact Keep: …` in the prompt box, with
+- One sentence: "Claude will summarise this conversation soon. Tick what
+  it must keep."
+- Up to five suggested items, pins first, as ticks. Press an item to tick
+  or untick it. **More to choose from** shows the rest: files, values, tasks
+  and errors.
+- `[c]` **Fill in /compact** puts `/compact Keep: …` in the prompt box, with
   the ticked items in at most 1,500 characters. You send it at a good
   stopping point. Nothing is sent for you.
-- `[w]` switches to the after view when a summary exists.
+- **Back to the review** switches to the after view when a summary exists.
 
 ### After a summary
 
-The tab opens on the **after** view and shows only what may be missing:
-things you said that the summary doesn't seem to carry. Each has an Add back
-button. It puts a short note in the prompt box, such as "Before compaction
-we agreed: never use port 8765." Edit it and send it. Add all
-back (`[d]`) puts them all in one draft.
+The tab opens on the **after** view. It says when Claude summarised and
+then either that everything you asked to keep is in the summary, or how
+many things may be missing, listed one to a line (four at most, then "and N
+more"). `[b]` **Add these back** puts one short note in the prompt box, such
+as "Before compaction we agreed: never use port 8765." Edit it and send it.
 
-The other buttons:
+The quiet buttons below it:
 
-- `[s]` Show the summary shows the text Claude Code wrote.
-- `[f]` Full list shows every item with a mark: ✓ in the summary, a tilde
-  for partly, ✗ not in the summary, ⓘ safe anyway. Press an item to pin it.
-- `[e]` Earlier messages lists your messages from before the summary. Press
-  one to put its text in a draft.
+- **Show the summary** shows the text Claude Code wrote.
+- **Everything checked** lists every item with its mark first: ✓ in the
+  summary, a tilde for partly, ✗ not in the summary. Items that survive any
+  summary are counted in one line at the end rather than listed.
+- **Earlier messages** lists your messages from before the summary. **Use
+  this** puts one in a draft.
 
 The check is a **quick check (est.)**. It looks for exact paths, numbers,
 ports and IDs, and for the overlap of key words in your instructions. It can
@@ -401,25 +431,26 @@ checked too, and appear in the full list.
 
 The Detailed view adds three more things:
 
-- **Check with Haiku** (`[z]`) sends the summary and your list to Haiku and has it
+- **Check with Haiku** sends the summary and your list to Haiku and has it
   judge each item. It is opt-in: the button shows about how many tokens it
   will send, and it runs only when you press it. The result shows what it
   used.
 - **History** lists each summary in the session. A row has the time, whether
   it ran on its own or you ran `/compact`, tokens before and after, and items
   kept and missing. A link opens compactions on the dashboard.
-- **Options** holds two switches, both off until you turn them on.
+- **Options** holds two switches, both off until you turn them on, and
+  **Choose what to keep next time** opens the before view.
 
 ### The two options
 
-- **Hold auto-compact for review** (`[x]`). When Claude is about to
+- **Hold auto-compact for review**. When Claude is about to
   summarise on its own, the mod waits once, so you can review and compact at
   a good moment. It holds only with real room to spare. The model's window
   must be at least 100,000 tokens above the summary point, as with a summary
   point of 300,000 on a 1 million window. It never holds twice in a row, and
   never on a 200,000 window. If you ignore it, the next automatic summary
   runs as normal.
-- **Re-add pins after compaction** (`[y]`). After each summary, the mod
+- **Re-add pins after compaction**. After each summary, the mod
   tells Claude your pins again, so they are in its context.
 
 ## Prompt help
@@ -468,7 +499,7 @@ context.
 
 It never asks for a slash command, a queued message, a message with pasted
 images or a message you didn't type. Turn it on and off with `/glass guard`,
-or with the switch in the Detailed Now tab (`[s]`).
+or with the switch at the end of the Detailed Now tab.
 
 ### The budget
 
@@ -486,6 +517,7 @@ it. A `/clear` starts the spend over.
 | `/glass` | Opens the pane. It works while Claude is replying. |
 | `/glass detail` | Turns the Detailed view on or off. |
 | `/glass pin <text>` | Adds a pin to the keep list. You can keep 20. |
+| `/glass unpin <words>` | Removes the pins that hold those words. `unpin all` removes them all. |
 | `/glass tighten [text]` | Has Haiku rewrite your draft, or the text you give, shorter, and shows it as a diff. |
 | `/glass guard` | Turns the question before a costly send on or off. `guard on` and `guard off` set it. |
 | `/glass budget <amount>` | Sets a budget for this session. `off` clears it, and no argument shows it. |
@@ -572,7 +604,7 @@ table says "no measurable difference yet" when that is the case.
 
 - **Estimates are labelled.** A figure that rests on a guess says "(est.)".
   Examples are the cache state, tool output kept in context, item sizes on
-  the Instructions tab, and amounts worked out from the built-in rate card.
+  the Startup tab, and amounts worked out from the built-in rate card.
 - **The cache state is inferred.** Claude Code doesn't tell the mod whether
   the cache is warm. The mod works it out from the time since the last reply
   and your cache lifetime, 5 minutes or 1 hour.
@@ -582,7 +614,8 @@ table says "no measurable difference yet" when that is the case.
 - **The quick check can be wrong.** It matches words and exact values. A
   summary that rephrases an instruction may look missing, and one that keeps
   the words but drops the meaning may look fine.
-- **Instructions sizes are rough.** They count text, not tool schemas.
+- **Startup sizes are rough.** Row sizes are shares of Claude Code's count,
+  or, before it has counted, text alone without tool schemas.
 - **A hold is only as good as the headroom.** On a 200,000 window it never
   holds.
 - **Some pieces need the desktop app.** The bar in the band is drawn on the

@@ -331,7 +331,8 @@ declare module 'claude-code' {
       /** The glossary entry the pane is explaining, if any. */
       explain: string | null
       help: boolean
-      copied: boolean
+      /** Which copy button was pressed a moment ago (its key), so only that one says it copied; null when none. */
+      copied: string | null
       /** The keep list's pins (compaction review). */
       pins: GlassPin[]
       review: GlassReview

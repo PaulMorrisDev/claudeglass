@@ -279,7 +279,7 @@ export const register: Register = on => {
         {base}
         <Box flexDirection="row" gap={1}>
           {row as never}
-          {showBadge ? <Button key="review" label={COPY['band.review']} hotkey="r" onPress={() => void openReview('after')} /> : null}
+          {showBadge ? <Button key="review" label={COPY['band.review']} hotkey="r" variant="primary" onPress={() => void openReview('after')} /> : null}
           {showOffer ? <Button key="review-before" label={COPY['band.review.before']} hotkey="r" onPress={() => void openReview('before')} /> : null}
           <Button key="open" label={COPY['band.open']} hotkey="g" onPress={() => void $.ui.open(OPEN_ARGS)} />
         </Box>

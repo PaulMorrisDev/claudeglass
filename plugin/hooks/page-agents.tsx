@@ -10,17 +10,12 @@ import { addPage } from './pane'
 import type { PageContext } from './pane'
 
 // The Agents page: who is working, on what, and what it costs. The first
-// screen is one sentence and a row per agent, running first; Detailed adds the
-// tokens, calls and cache per row and the main session's row; pressing a row
-// shows its task prompt, the tools it used and its biggest results.
+// screen is one sentence and a text row per agent, running first; Detailed adds
+// the tokens, calls and cache per row and the main session's row. A row's quiet
+// Details button shows its task prompt, the tools it used and its biggest results.
+// No hotkeys: the page bar has the keys.
 
-/**
- * One key per row: the digits, then letters the pane's own buttons don't use
- * (a, c, i and n are page keys, g opens the pane, h, l and m are the footer's, k is held back
- * for a page, and y copies the dashboard link).
- */
-const ROW_KEYS = '123456789bdefjoqrstuvwxz'
-const COPY_KEY = 'y'
+const FIRST_SCREEN_ROWS = 6
 const NAME_CELLS = 24
 const MODEL_CELLS = 8
 const ACTIVITY_CELLS = 24
@@ -85,7 +80,7 @@ function details(context: PageContext, agent: ReturnType<typeof ordered>[number]
     children.push(
       <Box key="dashboard" flexDirection="row" gap={1}>
         <Link key="dashboard-link" href={linkTarget(link)} label={COPY['agents.dashboard']} />
-        <Button key="dashboard-copy" label={context.state.copied ? COPY['pane.copied'] : COPY['pane.link']} hotkey={COPY_KEY} onPress={press => context.copy(link, press.surface)} />
+        <Button key="dashboard-copy" label={context.state.copied === 'agents-link' ? COPY['pane.copied'] : COPY['agents.dashboard.link']} dimColor onPress={press => context.copy(link, press.surface, 'agents-link')} />
       </Box>,
     )
   }
@@ -105,29 +100,31 @@ async function render(context: PageContext): Promise<RenderElement> {
 
   if (list.length === 0) return <Text>{COPY['agents.none']}</Text>
 
-  const shown = list.slice(0, ROW_KEYS.length)
+  const shown = view.detailed ? list : list.slice(0, FIRST_SCREEN_ROWS)
   const children: RenderElement[] = [
     <Text key="headline" bold>
       {headline(context)}
     </Text>,
   ]
 
-  shown.forEach((agent, index) => {
+  for (const agent of shown) {
     const key = `agent:${agent.id}`
     const open = state.explain === key
     children.push(
       <Box key={`row:${agent.id}`} flexDirection="column">
         <Box flexDirection="row" gap={1}>
           <Box width={NAME_CELLS}>
-            <Button key={key} label={nameOf(agent)} hotkey={ROW_KEYS.charAt(index)} onPress={() => context.explain(key)} />
+            <Text wrap="truncate">{`${ICONS[agent.status]} ${nameOf(agent)}`}</Text>
           </Box>
           <Box width={MODEL_CELLS}>
             <Text color={modelColor(agent)}>{modelName(agent)}</Text>
           </Box>
           <Box width={ACTIVITY_CELLS}>
-            <Text>{`${ICONS[agent.status]} ${activityWords(agent)}`}</Text>
+            <Text wrap="truncate">{activityWords(agent)}</Text>
           </Box>
+          {/* The last column is not boxed: an amount on a subscription ("12.34 USD") is wider than any width worth fixing, and a box would wrap it. */}
           <Text>{costText(agent, settings)}</Text>
+          <Button key={key} label={open ? COPY['agents.hide'] : COPY['agents.show']} dimColor onPress={() => context.explain(key)} />
         </Box>
         {view.detailed ? (
           <Box paddingLeft={4}>
@@ -137,7 +134,7 @@ async function render(context: PageContext): Promise<RenderElement> {
         {open ? details(context, agent) : null}
       </Box>,
     )
-  })
+  }
 
   if (list.length > shown.length) {
     children.push(<Text key="more-rows" dimColor>{fill(COPY['agents.more.rows'], { count: list.length - shown.length })}</Text>)

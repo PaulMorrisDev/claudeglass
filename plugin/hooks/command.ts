@@ -3,7 +3,7 @@ import type { EngineInterface, Register } from 'claude-code'
 
 import type { GlassBudget, GlassPin } from '../types'
 import { runBudget } from './budget'
-import { MAX_PINS, newPin } from './compaction-memory'
+import { MAX_PINS, newPin, pinsMatching } from './compaction-memory'
 import { rememberedDraft } from './draft'
 import { COPY } from './generated/copy.js'
 import { emptySnap, soundSnap } from './live'
@@ -22,7 +22,8 @@ const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, n
 const budgetAtom = atom({ plugin: 'claudeglass', key: 'budget' } as const, null as GlassBudget | null)
 
 // /glass opens the pane; /glass detail turns the Detailed view on or off;
-// /glass pin <text> adds a pin to the compaction review's keep list. The
+// /glass pin <text> adds a pin to the compaction review's keep list and
+// /glass unpin <words> (or "all") removes the pins that hold those words. The
 // command is declared in track.ts at session.start. It is immediate, so it
 // works while a reply is still being written. /glass tighten has Haiku rewrite
 // the draft shorter (tighten.tsx; /glass tighten <text> tightens that text); /glass guard turns the question before a
@@ -70,6 +71,16 @@ export const register: Register = on => {
         if (pins.length >= MAX_PINS && !pins.some(have => have.id === one.id)) return { text: fill(COPY['compaction.pin.full'], { count: pins.length }) }
         await update($, pinsAtom, was => (was.some(have => have.id === one.id) ? was : [...was, one]))
         return { text: COPY['compaction.pin.done'] }
+      }
+      if (args === 'unpin' || args.startsWith('unpin ')) {
+        const words = args.slice(5).trim()
+        if (words === '') return { text: COPY['compaction.unpin.empty'] }
+        const pins = await read($, pinsAtom)
+        if (pins.length === 0) return { text: COPY['compaction.unpin.nopins'] }
+        const gone = new Set(pinsMatching(pins, words).map(one => one.id))
+        if (gone.size === 0) return { text: COPY['compaction.unpin.none'] }
+        await update($, pinsAtom, was => was.filter(one => !gone.has(one.id)))
+        return { text: gone.size === 1 ? COPY['compaction.unpin.one'] : fill(COPY['compaction.unpin.many'], { count: gone.size }) }
       }
       if (args === 'tighten' || args.startsWith('tighten ')) return { text: await runTighten(tightenKit($), args.slice(8)) }
       if (args === 'guard' || args === 'guard on' || args === 'guard off') {

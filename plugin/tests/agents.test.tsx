@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, notes, prepare, reply, settingsFile, SITE, START, textOf } from './support'
+import { elements, faults, notes, prepare, reply, settingsFile, showPage, SITE, START, textOf } from './support'
 import type { Step, World } from './support'
 
 const PANE = { title: 'Glass', isFocused: true, bodyColumns: 110, placement: 'dock', ...SITE } as const
@@ -80,7 +80,7 @@ async function foreground($: Engine, world: World, one: Spawn = {}): Promise<str
 
 async function pane($: Engine, surface: 'terminal' | 'desktop' = 'terminal') {
   const mounted = await $.ui.mount({ plugin: 'claudeglass', surface, component: 'Pane', requestId: 'glass', props: PANE as never })
-  await mounted.press({ key: 'page:agents' })
+  await showPage(mounted, 'agents', 'Agents')
   return mounted
 }
 
@@ -133,19 +133,53 @@ test('the Agents page first screen: a sentence and a row for the run', async ($,
     const mounted = await pane($, surface)
     const shown = lines(await mounted.drawn())
     expect(shown.some(text => /^No agents working · agents are \d+% of this session's cost$/.test(text))).toBe(true)
-    expect(shown).toContain('Explore')
+    expect(shown).toContain('✓ Explore')
     expect(shown).toContain('haiku')
     expect(shown.some(text => /done/.test(text))).toBe(true)
     expect(shown.some(text => /^\$0\.\d+$/.test(text))).toBe(true)
     // Simple shows no token figures and no main session row.
     expect(shown.some(text => /in · .* out/.test(text))).toBe(false)
     expect(shown).not.toContain('Main session')
-    const row = await mounted.find({ type: 'Button', key: 'agent:agent-1' })
-    expect(row?.props.hotkey).toBe('1')
+    // The row is text; its Details button is quiet and has no hotkey.
+    const details = await mounted.find({ type: 'Button', key: 'agent:agent-1' })
+    expect(details?.props.label).toBe('Details')
+    expect(details?.props.dimColor).toBe(true)
+    expect(details?.props.hotkey).toBeUndefined()
+    // The only hotkeys on the page are the page bar's.
+    for (const button of elements(await mounted.drawn()).filter(one => one.type === 'Button' && one.props?.hotkey !== undefined)) expect(String(button.props?.key)).toMatch(/^page:/)
     await mounted.unmount()
   }
   expect(faults(world)).toEqual([])
 })
+
+const BILLINGS = [
+  { mode: 'subscription', share_per_usd: null, period_label: 'weekly', basis: 'list' },
+  { mode: 'unknown', share_per_usd: null, period_label: 'weekly', basis: 'list' },
+]
+
+for (const billing of BILLINGS) {
+  test(`on ${billing.mode} billing an amount like "0.12 USD" is not boxed, so the row does not wrap`, async ($, on) => {
+    const world = prepare(on, { settings: settingsFile({ billing }) })
+    bottoms(on)
+    await $.session.start(START)
+    await reply($, world, FIRST)
+    await foreground($, world)
+
+    for (const surface of ['terminal', 'desktop'] as const) {
+      const mounted = await pane($, surface)
+      const tree = await mounted.drawn()
+      const amount = lines(tree).find(text => / USD$/.test(text) || /^\$\d/.test(text))
+      expect(amount).toBeDefined()
+      // The fixed-width cells are the name, the model and the activity; the amount is a Text of its own after them, with no width.
+      const boxed = elements(tree).filter(one => one.type === 'Box' && one.props?.width !== undefined)
+      expect(boxed.length).toBeGreaterThanOrEqual(3)
+      expect(boxed.some(one => textOf(one).includes(String(amount)))).toBe(false)
+      expect(elements(tree).some(one => one.type === 'Text' && textOf(one) === amount)).toBe(true)
+      await mounted.unmount()
+    }
+    expect(faults(world)).toEqual([])
+  })
+}
 
 test('Detailed adds the tokens, calls and cache share of each run, and the main session', async ($, on) => {
   const world = prepare(on)
@@ -185,7 +219,7 @@ test('a running run is listed first and counted in the headline, with what it is
   expect(faults(world)).toEqual([])
 })
 
-test('pressing a row shows the task prompt, the tools and the dashboard link; the prompt stays off disk', async ($, on) => {
+test('pressing Details shows the task prompt, the tools and the dashboard link; the prompt stays off disk', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
@@ -200,10 +234,14 @@ test('pressing a row shows the task prompt, the tools and the dashboard link; th
   expect(shown).toContain('Grep x1 · Read x1')
   const link = (elements(await mounted.drawn()).find(one => one.type === 'Link' && one.props?.label === 'Subagent runs in the dashboard'))
   expect(String(link?.props.href)).toBe('http://localhost:8792/#/agents/subagents?t=habits.habits_agent_runs')
+  const copy = await mounted.find({ type: 'Button', key: 'dashboard-copy' })
+  expect(copy?.props.hotkey).toBeUndefined()
+  expect(copy?.props.dimColor).toBe(true)
   await mounted.press({ key: 'dashboard-copy' })
   expect(world.copied).toContain('http://127.0.0.1:8792/#/agents/subagents?t=habits.habits_agent_runs')
   expect([...world.files.values()].join('\n')).not.toMatch(/parseConfig/)
 
+  expect((await mounted.find({ type: 'Button', key: 'agent:agent-1' }))?.props.label).toBe('Hide')
   await mounted.press({ key: 'agent:agent-1' })
   expect(lines(await mounted.drawn())).not.toContain('Find every caller of parseConfig.')
   await mounted.unmount()
@@ -411,6 +449,24 @@ test('many agents at once draw at most four times a second', async ($, on) => {
   const drawn = (world.draws.AbovePrompt ?? 0) - before
   expect(drawn).toBeGreaterThanOrEqual(1)
   expect(drawn).toBeLessThanOrEqual(4 * 2)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('the first screen shows six agents and says how many more there are; Detailed lists them all', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on)
+  await $.session.start(START)
+  await reply($, world, FIRST)
+  for (let i = 0; i < 8; i += 1) await spawn($, world, { desc: `Task ${i}`, background: true })
+
+  const mounted = await pane($)
+  const rows = async () => elements(await mounted.drawn()).filter(one => one.type === 'Button' && String(one.props?.key).startsWith('agent:'))
+  expect(await rows()).toHaveLength(6)
+  expect(lines(await mounted.drawn())).toContain('and 2 more')
+  await mounted.press({ key: 'more' })
+  expect(await rows()).toHaveLength(8)
+  expect(lines(await mounted.drawn()).some(text => /^and \d+ more$/.test(text))).toBe(false)
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })

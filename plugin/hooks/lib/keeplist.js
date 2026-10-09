@@ -9,9 +9,9 @@
  *   pin          the user pinned it (/glass pin, [p] pin, a press on an item)
  *   instruction  a constraint or a correction the user typed: "never use port 8765"
  *   decision     "let's go with ...", "agreed", or a plan the user approved
- *   error        the last tool call that failed and was not run again with success
+ *   error        the last shell command (Bash, PowerShell) that failed and was not run again with success
  *   task         an open item of the last TodoWrite list
- *   file         a file Edit / Write / NotebookEdit changed
+ *   file         a file Edit / Write / NotebookEdit changed (not one in a temp or scratch place, or a plan file)
  *   value        a port, version, id, URL or number the user typed
  *
  * What survives a compaction whatever the summary says ("safe anyway"):
@@ -73,6 +73,7 @@
  * @property {PinLike[]} [pins]
  * @property {string|null} [claudeMd]   Text of the CLAUDE.md files the mod can read, joined.
  * @property {number} [recentFiles]     Files this recent are safe (default 5).
+ * @property {string|null} [cwd]        The session's working directory: a file under it is shown relative to it.
  */
 
 /** The kinds in the order a review lists them. */
@@ -99,6 +100,16 @@ const EDIT_TOOLS = ["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
 const INSTRUCTION =
   /\b(don'?t|do not|dont|never|always|must(?:n'?t| not)?|only|should(?:n'?t| not)|avoid|make sure|be sure|ensure|without|no more|stop (?:using|doing)|not allowed)\b|\buse\b.+\b(?:not|instead of|rather than)\b/i;
+/**
+ * "I don't really see anything", "I don't know why it fails": the user talking about what they can see or know, not
+ * telling Claude what to do. Only this clause is dropped; what is left of the sentence is tested again, so
+ * "I don't know why it fails, so never touch the config." is still an instruction. (A question is skipped for
+ * ending in "?".)
+ */
+const SELF_TALK =
+  /\bI\s+(?:really\s+|actually\s+|even\s+|just\s+)?(?:don['’]?t|dont|do not|can['’]?t|cannot|never)\s+(?:really\s+|actually\s+|even\s+|quite\s+)?(?:see|know|understand|think|get|follow|remember|recall|notice|believe|feel|mind|care|like)\b/i;
+/** "I don't think you should touch the tests" says "you shouldn't", so it stays an instruction. */
+const THINK_SHOULD = /\bI\s+(?:really\s+|actually\s+)?(?:don['’]?t|dont|do not)\s+think\s+(?:you|we)\s+should\b/i;
 const CORRECTION = /^(?:no|nope|actually|wait|not that|that'?s not|that is not|instead)\b[\s,.:;!-]+\S/i;
 const DECISION =
   /\b(let'?s go with|lets go with|let'?s do|go with|going with|we'?ll go with|we will go with|agreed|i agree|approved?|proceed with|we decided|decided to|the decision is|sounds good,? (?:use|go|do))\b/i;
@@ -107,7 +118,20 @@ const NOISE_START = /^(?:<|this session is being continued|\[request interrupted
 const COMMAND_HEADER = /<command-(?:name|message|args)>|<skill-(?:name|format)>/i;
 /** A user message longer than this (characters, whitespace squashed) is pasted text, not an instruction. */
 export const MAX_USER_MESSAGE = 2000;
-const FAILURE_LINE = /\b(FAILED|ERROR|Error:|Traceback|AssertionError|Exception|npm ERR!|error TS\d+|fatal:|panic:)/;
+/** The tools whose failure is the user's own command failing; any other tool's error is Claude's or the host's. */
+const SHELL_TOOLS = ["Bash", "PowerShell"];
+/** A path segment that marks a temp or scratch place. */
+const SCRATCH_SEGMENT = /(?:^|\/)(?:temp|tmp|scratchpad)(?:\/|$)/i;
+/** Claude Code's plan files; the approved plan is its own item. */
+const PLAN_FILE = /(?:^|\/)\.claude\/plans\//i;
+const FAILURE_LINE =
+  /\b(FAILED|FAIL|ERROR|Error:|Traceback|AssertionError|Exception|npm ERR!|error TS\d+|fatal:|panic:)|\bfailed\b|not found|CategoryInfo|is not recognized/;
+/**
+ * A shell tool's result that is Claude Code refusing the call, not the command failing: the user said no, a
+ * permission rule or a hook stopped it. (A shell's own "Permission denied" is a failure and is not matched.)
+ */
+const REFUSAL =
+  /doesn'?t want to proceed|rejected by the user|the user rejected|user denied|permission to use|permission for this|has been denied|blocked by (?:a |the )?hook|hook .{0,60}(?:blocked|denied)/i;
 
 const STOP = new Set(
   (
@@ -144,15 +168,48 @@ export function trimText(text, max) {
 }
 
 /**
- * Cuts a path to its last three segments when it is long.
+ * The part of `path` below `cwd`, or null when it is not under it. The comparison ignores case when the folder
+ * starts with a drive letter, as Windows paths do.
+ * @param {string} path  With forward slashes.
+ * @param {string|null|undefined} cwd
+ * @returns {string|null}
+ */
+function underCwd(path, cwd) {
+  if (typeof cwd !== "string" || cwd === "") return null;
+  var base = cwd.replace(/\\/g, "/").replace(/\/+$/, "");
+  if (base === "") return null;
+  var head = path.slice(0, base.length + 1);
+  var same = /^[A-Za-z]:/.test(base) ? head.toLowerCase() === (base + "/").toLowerCase() : head === base + "/";
+  return same && path.length > base.length + 1 ? path.slice(base.length + 1) : null;
+}
+
+/**
+ * A path as the list shows it: relative to the working directory when it is under it, otherwise as it is,
+ * cut to its last three segments when it is long.
  * @param {string} path
+ * @param {string|null} [cwd]
  * @returns {string}
  */
-function shortPath(path) {
+function shortPath(path, cwd) {
   var clean = path.replace(/\\/g, "/");
+  var inside = underCwd(clean, cwd);
+  if (inside !== null) clean = inside;
   if (clean.length <= MAX_TEXT) return clean;
   var parts = clean.split("/");
   return "…/" + parts.slice(-3).join("/");
+}
+
+/**
+ * Whether the list leaves an edited path out: a temp or scratch place (checked below the working directory when
+ * the path is under it, so a project that lives in one is still listed) or one of Claude Code's plan files.
+ * @param {string} path
+ * @param {string|null} [cwd]
+ * @returns {boolean}
+ */
+function isScratch(path, cwd) {
+  var clean = path.replace(/\\/g, "/");
+  var inside = underCwd(clean, cwd);
+  return PLAN_FILE.test(clean) || SCRATCH_SEGMENT.test(inside === null ? clean : inside);
 }
 
 /**
@@ -350,6 +407,16 @@ function callKey(use) {
 }
 
 /**
+ * Whether a result is Claude Code refusing the call (the user said no, or a permission rule or hook stopped it)
+ * rather than the command failing.
+ * @param {string} text
+ * @returns {boolean}
+ */
+function isRefusal(text) {
+  return REFUSAL.test(String(text || ""));
+}
+
+/**
  * The line of a failing result worth keeping.
  * @param {string} text
  * @returns {string}
@@ -364,7 +431,9 @@ function failureLine(text) {
 }
 
 /**
- * The last tool call that failed and was not later run again with success.
+ * The last shell command that failed and was not later run again with success. Only a shell command's failure
+ * counts, whatever its output looks like: another tool's error, or a call the user or a permission rule refused,
+ * is not something the user ran.
  * @param {MessageLike[]} messages
  * @returns {KeepItem|null}
  */
@@ -377,6 +446,7 @@ function lastError(messages) {
       var use = /** @type {ToolUseLike} */ (uses[j]);
       var key = callKey(use);
       if (use.isError === true) {
+        if (SHELL_TOOLS.indexOf(String(use.tool)) < 0 || isRefusal(use.text || "")) continue;
         if (later.has(key)) continue;
         var command = use.input && typeof use.input.command === "string" ? squash(use.input.command) : String(use.tool);
         var detail = failureLine(use.text || "");
@@ -418,18 +488,19 @@ function openTasks(messages) {
 }
 
 /**
- * Files changed, newest change last.
+ * Files changed, newest change last; scratch and plan files are left out.
  * @param {MessageLike[]} messages
+ * @param {string|null} [cwd]
  * @returns {KeepItem[]}
  */
-function changedFiles(messages) {
+function changedFiles(messages, cwd) {
   /** @type {Map<string, number>} */
   var last = new Map();
   for (var i = 0; i < messages.length; i++) {
     var uses = (messages[i] || {}).toolUses || [];
     for (var j = 0; j < uses.length; j++) {
       var path = editedPath(/** @type {ToolUseLike} */ (uses[j]));
-      if (path === null) continue;
+      if (path === null || isScratch(path, cwd)) continue;
       last.delete(path);
       last.set(path, i + (j + 1) / 1000);
     }
@@ -439,7 +510,7 @@ function changedFiles(messages) {
   last.forEach(function (at, path) {
     var clean = path.replace(/\\/g, "/");
     var base = clean.slice(clean.lastIndexOf("/") + 1);
-    var item = make("file", shortPath(path), at, [clean, base]);
+    var item = make("file", shortPath(path, cwd), at, [clean, base]);
     out.push(item);
   });
   return out;
@@ -527,8 +598,12 @@ export function buildKeepList(messages, options) {
     for (var s = 0; s < parts.length; s++) {
       var sentence = /** @type {string} */ (parts[s]);
       var isQuestion = /\?$/.test(sentence);
-      var correction = CORRECTION.test(sentence);
-      if (!isQuestion && taken < PER_MESSAGE && (INSTRUCTION.test(sentence) || correction)) {
+      // Drop the "I don't know" clause and test what is left, so "I don't know why, so never touch it" counts.
+      var selfTalk = SELF_TALK.test(sentence);
+      var rest = selfTalk ? sentence.replace(SELF_TALK, " ") : sentence;
+      var correction = !selfTalk && CORRECTION.test(sentence);
+      var told = INSTRUCTION.test(rest) || (selfTalk && THINK_SHOULD.test(sentence));
+      if (!isQuestion && taken < PER_MESSAGE && (told || correction)) {
         instructions.push(make("instruction", sentence, i));
         taken += 1;
       } else if (!isQuestion && sentence.split(" ").length >= 4 && DECISION.test(sentence)) {
@@ -552,7 +627,7 @@ export function buildKeepList(messages, options) {
     decision: decisions,
     error: [],
     task: openTasks(list),
-    file: changedFiles(list),
+    file: changedFiles(list, typeof opts.cwd === "string" ? opts.cwd : null),
     value: values,
   };
   var error = lastError(list);

@@ -45,10 +45,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   band narrows to short forms as the window does. Details are in
   [`docs/mod.md`](docs/mod.md).
 - **The `/glass` pane.** `/glass`, or the Glass button on the band, opens a
-  pane with four tabs: Now, Agents, Compaction and Instructions. Now answers
-  what is filling the context. Instructions lists what the session loaded
-  at startup, with sizes marked as estimates. `[m]` or `/glass detail`
-  switches to the Detailed view, and `[h]` explains each figure.
+  pane with four tabs: Now, Agents, Compaction and Startup. Each opens with
+  one plain sentence, lists its rows as text and offers at most one main
+  action with a key. Now answers what is filling the context. Startup shows
+  what every request carries before you type, split into what you control
+  (MCP servers by name, CLAUDE.md and memory, skills), Claude Code's own, and
+  what was added as you work. More detail or `/glass detail` switches to the
+  Detailed view, and What these mean explains each figure.
 - **Notes at the end of a reply, and a cache rebuild line.** At most one
   note every 5 replies, under the same rest rules as the capture hook. The
   kinds are replies left, a large tool output, a second model switch,
@@ -58,12 +61,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Agents tab and agent rows.** Each agent shows its model, what it is
   doing in plain words and its cost, running first. The line also sits under
   the Agent call in the conversation, with the report re-read and run too big
-  notes. Pressing a row shows its task prompt, tools and biggest results.
+  notes. A row's Details button shows its task prompt, tools and biggest results.
 - **A compaction review.** The mod keeps a list of what you said, decided and
   changed, plus pins from `/glass pin`. It checks the list against each
-  conversation summary. The Compaction tab shows only what may be missing,
-  with an Add back button that drafts a note and sends nothing. Before a
-  summary, Compact with these drafts a `/compact Keep:` command. Opt-in
+  conversation summary. The Compaction tab says when Claude summarised and
+  lists only what may be missing, with one Add these back button that
+  drafts a note and sends nothing. Before a summary, Fill in /compact drafts
+  a `/compact Keep:` command from the items you tick. Opt-in
   switches hold an automatic summary once and re-add your pins.
 - **Prompt help.** The hint line flags a draft that starts a new topic over a
   large context, names no file, or asks to read everything. `/glass tighten` has Haiku rewrite a draft shorter, shown as a

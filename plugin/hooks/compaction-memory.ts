@@ -110,9 +110,9 @@ export function earlierPrompts(messages: readonly MessageLike[]): { id: string; 
   return out
 }
 
-/** The keep list for the conversation so far. */
-export function keepList(messages: readonly MessageLike[], pins: readonly GlassPin[], claudeMd: string | null): GlassKeepItem[] {
-  return buildKeepList(messages as MessageLike[], { pins: pins as GlassPin[], claudeMd }) as GlassKeepItem[]
+/** The keep list for the conversation so far; files under `cwd`, the session's folder, are listed relative to it. */
+export function keepList(messages: readonly MessageLike[], pins: readonly GlassPin[], claudeMd: string | null, cwd: string | null = null): GlassKeepItem[] {
+  return buildKeepList(messages as MessageLike[], { pins: pins as GlassPin[], claudeMd, cwd }) as GlassKeepItem[]
 }
 
 /** How many items the before view suggests. */
@@ -126,12 +126,13 @@ export function reviewCompaction(args: {
   summary: string
   pins: readonly GlassPin[]
   claudeMd: string | null
+  cwd?: string | null
   trigger: 'auto' | 'manual'
   now: number
   before: number | null
   after: number | null
 }): { reviewed: GlassReviewed; row: GlassReviewRow; counts: Counts } {
-  const items = keepList(args.messages, args.pins, args.claudeMd)
+  const items = keepList(args.messages, args.pins, args.claudeMd, args.cwd ?? null)
   const coverage = checkCoverage(items, args.summary)
   const reviewed: GlassReviewed = {
     ts: args.now,
@@ -191,6 +192,13 @@ export function pinItems(pins: readonly GlassPin[]): GlassKeepItem[] {
 /** The keep list with the pins as they stand now (the list in state is as of the last reply). */
 export function listWithPins(list: readonly GlassKeepItem[], pins: readonly GlassPin[]): GlassKeepItem[] {
   return [...pinItems(pins), ...list.filter(item => item.kind !== 'pin')]
+}
+
+/** The pins whose text holds all of `words` (case does not matter); every pin when `words` is "all". */
+export function pinsMatching(pins: readonly GlassPin[], words: string): GlassPin[] {
+  const wanted = squash(words).toLowerCase()
+  if (wanted === '') return []
+  return wanted === 'all' ? [...pins] : pins.filter(pin => squash(pin.text).toLowerCase().includes(wanted))
 }
 
 /** A pin for some text, or null when there is nothing to pin. */

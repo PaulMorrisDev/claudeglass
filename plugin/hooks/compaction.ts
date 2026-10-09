@@ -83,7 +83,7 @@ function pinnableOf(messages: readonly MessageLike[]): string | null {
 async function refresh($: EngineInterface): Promise<void> {
   const messages = (await $.session.messages()) as readonly MessageLike[]
   const pins = await read($, pinsAtom)
-  const items = keepList(messages, pins, await claudeMdOf($))
+  const items = keepList(messages, pins, await claudeMdOf($), memory.cwd)
   memory.pinnable = pinnableOf(messages)
   const review = sound(await read($, reviewAtom))
   const suggest = suggestCount(items)
@@ -149,6 +149,7 @@ export const register: Register = on => {
         summary,
         pins: await read($, pinsAtom),
         claudeMd: await claudeMdOf($),
+        cwd: memory.cwd,
         trigger: e.trigger,
         now,
         before: result.tokensBefore ?? null,

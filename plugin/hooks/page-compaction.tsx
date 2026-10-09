@@ -1,22 +1,22 @@
 import type { Register, RenderElement } from 'claude-code'
 
-import type { GlassKeepItem, GlassMark, GlassPin, GlassReviewUi, GlassSettings } from '../types'
+import type { GlassKeepItem, GlassMark, GlassReviewUi, GlassSettings } from '../types'
 import { linkTarget } from './agent-view'
-import { listWithPins, MAX_PINS, memory, newPin } from './compaction-memory'
+import { listWithPins, memory } from './compaction-memory'
 import { amount, formatTokens, localTime } from './fmt'
 import { COPY } from './generated/copy.js'
 import { addBackNote, compactKeep, judgePrompt, KEEP_MAX, MARK_SYMBOL, missingSaid, parseJudge, saidTotal, tally } from './lib/coverage.js'
 import { splitSuggested } from './lib/keeplist.js'
 import { priceUsage } from './lib/pricing.js'
-import { fill } from './lib/text.js'
+import { fill, joinParts } from './lib/text.js'
 import { addPage } from './pane'
 import type { PageContext } from './pane'
+import { figureRow, heading, ROW_CELLS } from './rows'
 
-// The Compaction page. After a summary it opens on only what the summary may
-// have dropped, each with a draft that puts it back; the summary, the full list,
-// the earlier messages and (Detailed) the history and options sit behind a press.
-// Before a summary it offers what the summary should keep as a handful of ticks
-// and fills the prompt box with a /compact command. Nothing is ever sent.
+// The Compaction page. After a summary it says what the summary may have dropped and offers one note that puts it
+// back; the summary, the full list and the earlier messages sit behind quiet buttons, and the history and options
+// behind "More detail". Before a summary it offers what the summary should keep as a handful of ticks and fills
+// the prompt box with a /compact command. Nothing is ever sent.
 
 /**
  * The model the optional check asks, by its alias: Claude Code resolves it to the current Haiku and checks it against
@@ -28,14 +28,10 @@ const HAIKU = 'haiku'
 const CHARS_PER_TOKEN = 4
 /** The check's answer is one short line per item. */
 const JUDGE_ANSWER_TOKENS = 600
-/**
- * Keys for rows: the digits, then letters nothing else on the pane, the band or
- * the transcript uses (a, c, d, e, f, g, h, i, k, l, m, n, o, p, r, s, v, w, x, y are taken).
- * The last free letter, z, is the Haiku check's, so no row takes it (`i` is the Instructions tab's).
- */
-const ROW_KEYS = '123456789bjqtu'
-const HAIKU_KEY = 'z'
 const LABELS = { files: COPY['compaction.label.files'], values: COPY['compaction.label.values'] }
+/** What the first screen lists: the missing items after a summary, the suggested ticks before one. */
+const MISSING_SHOWN = 4
+const SUGGESTED_SHOWN = 5
 const EARLIER_SHOWN = 8
 const LABEL_CHARS = 100
 
@@ -56,19 +52,9 @@ function trim(text: string, max: number): string {
   return text.length <= max ? text : `${text.slice(0, max - 1).trimEnd()}…`
 }
 
-function kindName(item: GlassKeepItem): string {
-  return COPY[`compaction.kind.${item.kind}` as Copy]
-}
-
-function markWord(mark: GlassMark, item: GlassKeepItem): string {
-  if (mark === 'safe') return COPY[`compaction.safe.${item.why === '' ? 'rules' : item.why === 'claude-md' ? 'rules' : item.why}` as Copy]
-  return COPY[`compaction.mark.${mark}` as Copy]
-}
-
-/** Hands out the row keys, one to a Button, so no key is used twice on the screen. */
-function keyGiver(): () => string | null {
-  let next = 0
-  return () => (next < ROW_KEYS.length ? ROW_KEYS.charAt(next++) : null)
+/** The words for a checked item's mark; an item that is safe anyway is never listed, so it reads as found. */
+function markWord(mark: GlassMark): string {
+  return COPY[`compaction.mark.${mark === 'safe' ? 'found' : mark}` as Copy]
 }
 
 function isOn(ui: GlassReviewUi, item: GlassKeepItem, suggested: boolean): boolean {
@@ -90,7 +76,6 @@ function render(context: PageContext): RenderElement {
   const after = review.after
   const showAfter = after !== null && ui.view === 'after'
   const children: RenderElement[] = []
-  const nextKey = keyGiver()
 
   /** Changes what the page remembers; reads the state as it is when pressed. */
   const patch = (change: Partial<GlassReviewUi>) => kit.updateReview(was => ({ ...was, seen: true, ui: { ...was.ui, ...change } }))
@@ -102,35 +87,20 @@ function render(context: PageContext): RenderElement {
     if (filled) memory.added += added
     await say(COPY[filled ? done : 'compaction.draft.failed'])
   }
-  const pin = async (item: GlassKeepItem) => {
-    if (pins.some(one => one.id === item.id || one.text === item.text)) {
-      await kit.updatePins(was => was.filter(one => one.id !== item.id && one.text !== item.text))
-      await say(null)
-      return
-    }
-    const one = newPin(item.text)
-    if (one === null) return
-    if (pins.length >= MAX_PINS) {
-      await say(fill(COPY['compaction.pin.full'], { count: pins.length }))
-      return
-    }
-    await kit.updatePins(was => (was.some(have => have.id === one.id) ? was : [...was, one]))
-    await say(COPY['compaction.pin.done'])
-  }
-  const isPinned = (item: GlassKeepItem, list: readonly GlassPin[]) => list.some(one => one.id === item.id || one.text === item.text)
 
-  const button = (label: string, key: string | null, onPress: () => Promise<void>, id: string): RenderElement | null =>
-    key === null ? null : <Button key={id} label={label} hotkey={key} onPress={() => void onPress()} />
+  /** A quiet control: no hotkey, drawn dim. */
+  const quiet = (id: string, label: string, onPress: () => Promise<void>): RenderElement => <Button key={id} label={label} dimColor onPress={() => void onPress()} />
 
+  /** The two opt-ins, as quiet toggles each with its detail line. */
   const options = (): RenderElement => (
     <Box key="options" flexDirection="column">
-      <Text bold>{COPY['compaction.options']}</Text>
+      {heading(table, 'options-title', COPY['compaction.options'])}
       {[
-        { id: 'hold', key: 'x', label: COPY['compaction.opt.hold'], detail: COPY['compaction.opt.hold.detail'], on: context.options.hold },
-        { id: 'readd', key: 'y', label: COPY['compaction.opt.readd'], detail: COPY['compaction.opt.readd.detail'], on: context.options.readd },
+        { id: 'hold', label: COPY['compaction.opt.hold'], detail: COPY['compaction.opt.hold.detail'], on: context.options.hold },
+        { id: 'readd', label: COPY['compaction.opt.readd'], detail: COPY['compaction.opt.readd.detail'], on: context.options.readd },
       ].map(one => (
         <Box key={one.id} flexDirection="column">
-          <Button key={`opt:${one.id}`} label={`${one.label}: ${one.on ? COPY['compaction.on'] : COPY['compaction.off']}`} hotkey={one.key} onPress={() => void kit.setOption(one.id, !one.on)} />
+          <Button key={`opt:${one.id}`} label={`${one.label}: ${one.on ? COPY['compaction.on'] : COPY['compaction.off']}`} dimColor onPress={() => void kit.setOption(one.id, !one.on)} />
           <Box paddingLeft={4}>
             <Text dimColor>{one.detail}</Text>
           </Box>
@@ -143,34 +113,39 @@ function render(context: PageContext): RenderElement {
     // Only what the user said counts here; files, values, tasks and errors are checked too, and the full list shows them.
     const missing = missingSaid(after.items, after.marks)
     const total = saidTotal(after.items)
-    const headline = total === 0 ? COPY['compaction.list.none'] : missing.length === 0 ? COPY['compaction.headline.ok.said'] : missing.length === 1 ? COPY['compaction.headline.missing.one'] : fill(COPY['compaction.headline.missing'], { count: missing.length })
+    const time = localTime(review.history[review.history.length - 1]?.ts ?? after.ts)
+    const status = total === 0 ? COPY['compaction.none'] : missing.length === 0 ? COPY['compaction.ok'] : missing.length === 1 ? COPY['compaction.missing.one'] : fill(COPY['compaction.missing'], { count: missing.length })
     children.push(
       <Text key="headline" bold>
-        {headline}
+        {time === null ? COPY['compaction.lead.plain'] : fill(COPY['compaction.lead'], { time })}
       </Text>,
+      <Text key="status">{status}</Text>,
     )
-    if (ui.note !== null) children.push(<Text key="note">{ui.note}</Text>)
 
-    // First screen: only what may be missing, each with its draft.
-    for (const item of missing) {
-      const key = nextKey()
-      if (key === null) break
+    // First screen: only what may be missing, and one note that puts it all back.
+    for (const item of missing.slice(0, MISSING_SHOWN)) children.push(<Text key={`missing:${item.id}`}>{`• ${trim(item.text, LABEL_CHARS)}`}</Text>)
+    if (missing.length > MISSING_SHOWN) children.push(<Text key="missing-more" dimColor>{fill(COPY['compaction.more'], { count: missing.length - MISSING_SHOWN })}</Text>)
+    if (missing.length > 0) {
       children.push(
-        <Box key={`missing:${item.id}`} flexDirection="row" gap={1}>
-          <Button key={`add:${item.id}`} label={`${COPY['compaction.add']} · ${trim(item.text, LABEL_CHARS)}`} hotkey={key} onPress={() => void draft(addBackNote([item], COPY['compaction.addback'], LABELS), 'compaction.drafted', 1)} />
-          <Text dimColor>{kindName(item)}</Text>
+        <Box key="action" flexDirection="row">
+          <Button
+            key="add-back"
+            variant="primary"
+            hotkey="b"
+            autoFocus
+            label={missing.length === 1 ? COPY['compaction.add.one'] : COPY['compaction.add.many']}
+            onPress={() => void draft(addBackNote(missing, COPY['compaction.addback'], LABELS), 'compaction.drafted', missing.length)}
+          />
         </Box>,
       )
     }
+    if (ui.note !== null) children.push(<Text key="note">{ui.note}</Text>)
 
-    const row: (RenderElement | null)[] = []
-    if (missing.length > 1) row.push(button(COPY['compaction.add.all'], 'd', () => draft(addBackNote(missing, COPY['compaction.addback'], LABELS), 'compaction.drafted', missing.length), 'add-all'))
-    row.push(button(ui.summary ? COPY['compaction.summary.hide'] : COPY['compaction.summary'], 's', () => patch({ summary: !ui.summary }), 'summary'))
-    row.push(button(COPY['compaction.list'], 'f', () => patch({ list: !ui.list }), 'list'))
-    row.push(button(COPY['compaction.earlier'], 'e', () => patch({ earlier: !ui.earlier }), 'earlier'))
     children.push(
-      <Box key="actions" flexDirection="row" gap={1}>
-        {row.filter(one => one !== null) as never}
+      <Box key="actions" flexDirection="row" gap={2}>
+        {quiet('summary', ui.summary ? COPY['compaction.summary.hide'] : COPY['compaction.summary'], () => patch({ summary: !ui.summary }))}
+        {quiet('list', ui.list ? COPY['compaction.list.hide'] : COPY['compaction.list'], () => patch({ list: !ui.list }))}
+        {quiet('earlier', ui.earlier ? COPY['compaction.earlier.hide'] : COPY['compaction.earlier'], () => patch({ earlier: !ui.earlier }))}
       </Box>,
     )
 
@@ -180,11 +155,7 @@ function render(context: PageContext): RenderElement {
     }
 
     if (ui.list) {
-      children.push(
-        <Text key="list-title" bold>
-          {COPY['compaction.list']}
-        </Text>,
-      )
+      children.push(heading(table, 'list-title', COPY['compaction.list']))
       if (!after.judged) {
         children.push(
           <Text key="quick" dimColor>
@@ -192,34 +163,38 @@ function render(context: PageContext): RenderElement {
           </Text>,
         )
       }
-      if (after.items.length === 0) children.push(<Text key="list-none">{COPY['compaction.list.none']}</Text>)
-      for (const item of after.items) {
+      if (after.items.length === 0) children.push(<Text key="list-none">{COPY['compaction.none']}</Text>)
+      // The mark's word comes first, so a long item can never push it into a column that wraps.
+      for (const item of after.items.filter(one => !one.safe)) {
         const mark = after.marks[item.id] ?? 'found'
-        const key = nextKey()
-        const label = `${MARK_SYMBOL[mark]} ${trim(item.text, LABEL_CHARS)}`
-        const word = `${isPinned(item, pins) ? `${COPY['compaction.pinned']} · ` : ''}${markWord(mark, item)}`
         children.push(
-          <Box key={`item:${item.id}`} flexDirection="row" gap={1}>
-            {key === null ? <Text>{label}</Text> : <Button key={`pin:${item.id}`} label={label} hotkey={key} onPress={() => void pin(item)} />}
-            <Text dimColor>{word}</Text>
-          </Box>,
+          <Text key={`item:${item.id}`} dimColor={mark === 'found'}>
+            {`${MARK_SYMBOL[mark]} ${markWord(mark)} · ${trim(item.text, LABEL_CHARS)}`}
+          </Text>,
         )
       }
+      const safe = after.items.filter(one => one.safe).length
+      if (safe > 0) children.push(<Text key="list-safe" dimColor>{fill(COPY['compaction.safe.anyway'], { count: safe })}</Text>)
     }
 
     if (ui.earlier) {
       children.push(
-        <Text key="earlier-title" bold>
-          {COPY['compaction.earlier']}
-        </Text>,
+        heading(table, 'earlier-title', COPY['compaction.earlier']),
         <Text key="earlier-headline" dimColor>
           {after.earlier.length === 0 ? COPY['compaction.earlier.none'] : COPY['compaction.earlier.headline']}
         </Text>,
       )
       for (const one of after.earlier.slice(0, EARLIER_SHOWN)) {
-        const key = nextKey()
-        if (key === null) break
-        children.push(<Button key={`earlier:${one.id}`} label={trim(one.text, LABEL_CHARS)} hotkey={key} onPress={() => void draft(one.text, 'compaction.drafted', 0)} />)
+        children.push(
+          <Box key={`earlier-row:${one.id}`} flexDirection="row" justifyContent="space-between" gap={2} width={ROW_CELLS}>
+            <Box flexShrink={1}>
+              <Text dimColor wrap="truncate">
+                {trim(one.text, LABEL_CHARS)}
+              </Text>
+            </Box>
+            <Button key={`earlier:${one.id}`} label={COPY['compaction.earlier.use']} dimColor onPress={() => void draft(one.text, 'compaction.drafted', 0)} />
+          </Box>,
+        )
       }
     }
 
@@ -250,7 +225,7 @@ function render(context: PageContext): RenderElement {
         }
         children.push(
           <Box key="haiku" flexDirection="column">
-            <Button key="haiku-check" label={COPY['compaction.haiku']} hotkey={HAIKU_KEY} onPress={() => void ask()} />
+            {quiet('haiku-check', COPY['compaction.haiku'], ask)}
             <Box paddingLeft={4}>
               <Text dimColor>{fill(COPY['compaction.haiku.detail'], { tokens: formatTokens(Math.ceil(prompt.length / CHARS_PER_TOKEN)) })}</Text>
             </Box>
@@ -258,79 +233,86 @@ function render(context: PageContext): RenderElement {
         )
       }
 
-      children.push(
-        <Text key="history-title" bold>
-          {COPY['compaction.history']}
-        </Text>,
-      )
+      children.push(heading(table, 'history-title', COPY['compaction.history']))
       for (const row of [...review.history].reverse()) {
-        const time = localTime(row.ts) ?? ''
-        const figures = { time, trigger: trigger(row), before: row.before === null ? '?' : formatTokens(row.before), after: row.after === null ? '?' : formatTokens(row.after), kept: row.kept, missing: row.missing }
-        children.push(<Text key={`history:${row.ts}`}>{fill(COPY[row.kept + row.missing > 0 ? 'compaction.history.row' : 'compaction.history.row.plain'], figures)}</Text>)
+        const checked = row.kept + row.missing > 0 ? fill(COPY['compaction.history.checked'], { kept: row.kept, missing: row.missing }) : ''
+        const size = (tokens: number | null) => (tokens === null ? COPY['compaction.history.unknown'] : formatTokens(tokens))
+        const figure = fill(COPY['compaction.history.figure'], { before: size(row.before), after: size(row.after) })
+        children.push(figureRow(table, `history:${row.ts}`, joinParts([localTime(row.ts), trigger(row), checked]), figure))
       }
       const link = dashboardAddress(view.settings.dashboardUrl)
       if (link !== null) {
         const { Link } = table
         children.push(
-          <Box key="dashboard" flexDirection="row" gap={1}>
+          <Box key="dashboard" flexDirection="row" gap={2}>
             <Link key="dashboard-link" href={linkTarget(link)} label={COPY['compaction.dashboard']} />
-            <Button key="dashboard-copy" label={context.state.copied ? COPY['pane.copied'] : COPY['compaction.dashboard.link']} hotkey="c" onPress={press => context.copy(link, press.surface)} />
+            <Button key="dashboard-copy" label={context.state.copied === 'compactions-link' ? COPY['pane.copied'] : COPY['compaction.dashboard.link']} dimColor onPress={press => context.copy(link, press.surface, 'compactions-link')} />
           </Box>,
         )
       }
-      children.push(options(), <Box key="to-before"><Button key="to-before-button" label={COPY['compaction.before']} hotkey="w" onPress={() => void patch({ view: 'before', note: null })} /></Box>)
+      children.push(options(), <Box key="to-before">{quiet('to-before', COPY['compaction.before'], () => patch({ view: 'before', note: null }))}</Box>)
     }
     return <Box flexDirection="column">{children as never}</Box>
   }
 
   // Before a summary: what it should keep, as ticks.
   const items = listWithPins(review.list, pins)
-  const { suggested, more } = splitSuggested(items)
+  const { suggested, more } = splitSuggested(items, SUGGESTED_SHOWN)
   const ticked = (list: readonly GlassKeepItem[], isSuggested: boolean) => list.filter(item => isOn(ui, item, isSuggested))
   const chosen = [...ticked(suggested, true), ...ticked(more, false)]
   const order = new Map(items.map((item, index) => [item.id, index]))
   chosen.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
+  const nothing = suggested.length === 0 && more.length === 0
 
   children.push(
     <Text key="headline" bold>
-      {suggested.length === 0 && more.length === 0 ? COPY['compaction.before.none'] : COPY['compaction.before.headline']}
+      {nothing ? COPY['compaction.before.none'] : COPY['compaction.before.headline']}
     </Text>,
   )
   if (review.held) children.push(<Text key="held" dimColor>{COPY['compaction.held.skip']}</Text>)
-  if (ui.note !== null) children.push(<Text key="note">{ui.note}</Text>)
 
-  const tick = (item: GlassKeepItem, isSuggested: boolean): RenderElement | null => {
-    const key = nextKey()
-    const label = `${isOn(ui, item, isSuggested) ? '[x]' : '[ ]'} ${trim(item.text, LABEL_CHARS)}`
+  // The ticks are real controls, so they are Buttons; they carry no hotkey. A pinned one also has a quiet Unpin at its row's end.
+  const tick = (item: GlassKeepItem, isSuggested: boolean): RenderElement => {
+    const on = isOn(ui, item, isSuggested)
+    const button = <Button key={`tick:${item.id}`} label={`${on ? '[x]' : '[ ]'} ${trim(item.text, LABEL_CHARS)}`} dimColor={!on} onPress={() => void toggle(item.id)} />
+    if (item.kind !== 'pin') return button
     return (
-      <Box key={`pick:${item.id}`} flexDirection="row" gap={1}>
-        {key === null ? <Text>{label}</Text> : <Button key={`tick:${item.id}`} label={label} hotkey={key} onPress={() => void toggle(item.id)} />}
-        <Text dimColor>{item.kind === 'pin' ? COPY['compaction.pinned'] : kindName(item)}</Text>
+      <Box key={`row:${item.id}`} flexDirection="row" gap={2}>
+        {button}
+        {quiet(`unpin:${item.id}`, COPY['compaction.unpin'], () => kit.updatePins(was => was.filter(one => one.id !== item.id)))}
       </Box>
     )
   }
-  for (const item of suggested) children.push(tick(item, true) as RenderElement)
-  if (ui.list) {
-    children.push(
-      <Text key="more-title" bold>
-        {COPY['compaction.list.more']}
-      </Text>,
-    )
-    if (more.length === 0) children.push(<Text key="more-none" dimColor>{COPY['compaction.list.none']}</Text>)
-    for (const item of more) children.push(tick(item, false) as RenderElement)
-  }
+  for (const item of suggested) children.push(tick(item, true))
+  if (ui.list) for (const item of more) children.push(tick(item, false))
 
-  const command = compactKeep(chosen, COPY['compaction.keep'], KEEP_MAX, LABELS)
-  const row: (RenderElement | null)[] = [
-    button(COPY['compaction.before.use'], 'c', async () => (command === '' ? say(COPY['compaction.before.none.checked']) : draft(command, 'compaction.before.drafted', 0)), 'use'),
-  ]
-  if (more.length > 0) row.push(button(COPY['compaction.list.more'], 'o', () => patch({ list: !ui.list }), 'more'))
-  if (after !== null) row.push(button(COPY['compaction.review'], 'w', () => patch({ view: 'after', note: null }), 'to-after'))
-  children.push(
-    <Box key="actions" flexDirection="row" gap={1}>
-      {row.filter(one => one !== null) as never}
-    </Box>,
-  )
+  if (!nothing) {
+    const command = compactKeep(chosen, COPY['compaction.keep'], KEEP_MAX, LABELS)
+    children.push(
+      <Box key="action" flexDirection="row">
+        <Button
+          key="use"
+          variant="primary"
+          hotkey="c"
+          autoFocus
+          label={COPY['compaction.before.use']}
+          onPress={() => void (command === '' ? say(COPY['compaction.before.none.checked']) : draft(command, 'compaction.before.drafted', 0))}
+        />
+      </Box>,
+    )
+  }
+  if (ui.note !== null) children.push(<Text key="note">{ui.note}</Text>)
+
+  const row: RenderElement[] = []
+  if (more.length > 0) row.push(quiet('more', ui.list ? COPY['compaction.fewer'] : fill(COPY['compaction.list.more'], { count: more.length }), () => patch({ list: !ui.list })))
+  if (after !== null) row.push(quiet('to-after', COPY['compaction.back'], () => patch({ view: 'after', note: null })))
+  if (row.length > 0) {
+    children.push(
+      <Box key="actions" flexDirection="row" gap={2}>
+        {row as never}
+      </Box>,
+    )
+  }
   if (view.detailed) children.push(options())
   return <Box flexDirection="column">{children as never}</Box>
 }

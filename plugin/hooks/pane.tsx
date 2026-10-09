@@ -11,6 +11,8 @@ import type { View } from './view'
 // The Glass pane: one pane, a bar of pages, and a footer every page shares. A
 // page is a file that calls addPage() from its own register(); the pane draws
 // whichever is selected. The selected page and the detailed view persist in $.store.
+// Hotkeys go on the page bar and on each page's one main action; every other
+// control is a quiet Button the focus ring still reaches, and rows are text.
 
 // Claude Code reads a state reference only where its literal is written, so each file that
 // reads one declares it (the contract is types/index.d.ts).
@@ -20,7 +22,7 @@ const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, f
 const pageAtom = atom({ plugin: 'claudeglass', key: 'page' } as const, 'now')
 const explainAtom = atom({ plugin: 'claudeglass', key: 'explain' } as const, null)
 const helpAtom = atom({ plugin: 'claudeglass', key: 'help' } as const, false)
-const copiedAtom = atom({ plugin: 'claudeglass', key: 'copied' } as const, false)
+const copiedAtom = atom({ plugin: 'claudeglass', key: 'copied' } as const, null as string | null)
 const pinsAtom = atom({ plugin: 'claudeglass', key: 'pins' } as const, [] as GlassPin[])
 const reviewAtom = atom({ plugin: 'claudeglass', key: 'review' } as const, emptyReview())
 
@@ -28,7 +30,12 @@ export const PANE_ID = 'glass'
 
 export type PaneInput = RenderInput<'Pane'>
 
-export type PageState = { explain: string | null; help: boolean; copied: boolean }
+export type PageState = {
+  explain: string | null
+  help: boolean
+  /** The key of the copy button pressed a moment ago, so only that one says it copied. */
+  copied: string | null
+}
 
 /**
  * What a page can do beyond drawing, spelled out here because Claude Code follows
@@ -47,6 +54,11 @@ export type PageKit = {
   ask: (model: string, prompt: string, maxTokens: number) => Promise<{ text: string; input: number; output: number } | { reason: string }>
   /** The rows of Claude Code's own context breakdown (what /context lists) as of now; empty when it can't say. */
   categories: () => Promise<{ name: string; tokens: number; kind: string; isDeferred: boolean }[]>
+  /**
+   * Each MCP server's name as /mcp lists it, keyed by the server part of its tools' names
+   * (`mcp__<server>__tool`); empty when Claude Code can't say.
+   */
+  mcpNames: () => Promise<Record<string, string>>
 }
 
 /**
@@ -61,7 +73,7 @@ export type PageContext = {
   /** Opens or closes the explanation under a row. */
   explain: (key: string) => void
   /** Copies `text` to the surface the press came from. */
-  copy: (text: string, surface: PaneInput['surface']) => void
+  copy: (text: string, surface: PaneInput['surface'], key: string) => void
   /** The pins, and the compaction review as the page was drawn. */
   pins: GlassPin[]
   review: GlassReview
@@ -122,14 +134,20 @@ async function selectPage($: EngineInterface, id: string): Promise<void> {
   }
 }
 
-/** Shows `copied` for a few seconds after a copy. */
-async function copyText($: EngineInterface, text: string, surface: PaneInput['surface']): Promise<void> {
+/** Marks the copy button `key` as copied for a few seconds after a copy. */
+async function copyText($: EngineInterface, text: string, surface: PaneInput['surface'], key: string): Promise<void> {
   const done = await $.ui.copy({ text, surface })
   if (!done.isCopied) return
-  await update($, copiedAtom, () => true)
+  await update($, copiedAtom, () => key)
   $.clock.after(3000, () => {
-    void update($, copiedAtom, () => false)
+    // A later copy owns the mark now.
+    void update($, copiedAtom, was => (was === key ? null : was))
   })
+}
+
+/** The copied mark as kept in state; an older version kept a boolean, which marks no button. */
+function copiedKey(value: unknown): string | null {
+  return typeof value === 'string' ? value : null
 }
 
 /** Where the dashboard shows this session, or null when the dashboard's address isn't known. */
@@ -149,7 +167,7 @@ export const register: Register = on => {
   on('ui.render', { component: 'Pane', requestId: PANE_ID }, async ($, e) => {
     const view = drawView(await read($, snapAtom), await read($, settingsAtom), await read($, detailedAtom), await $.clock.now(), false)
     const selected = await read($, pageAtom)
-    const state: PageState = { explain: await read($, explainAtom), help: await read($, helpAtom), copied: await read($, copiedAtom) }
+    const state: PageState = { explain: await read($, explainAtom), help: await read($, helpAtom), copied: copiedKey(await read($, copiedAtom)) }
     const page = pages.find(one => one.id === selected) ?? pages[0]
     const table = $.ui.resolve(e)
     const { Box, Text, Button, Link } = table
@@ -180,6 +198,19 @@ export const register: Register = on => {
           return []
         }
       },
+      mcpNames: async () => {
+        try {
+          const usage = await $.session.usage({ breakdown: 'summary' })
+          const names: Record<string, string> = {}
+          for (const tool of usage.context.breakdown?.mcpTools ?? []) {
+            const wire = /^mcp__(.+?)__/.exec(tool.name)?.[1]
+            if (wire !== undefined && tool.serverName !== '') names[wire] = tool.serverName
+          }
+          return names
+        } catch {
+          return {}
+        }
+      },
       ask: async (model, prompt, maxTokens) => {
         try {
           const answer = await $.model.complete({ model, prompt, maxTokens, effort: 'low', timeoutMs: 60000 })
@@ -201,18 +232,24 @@ export const register: Register = on => {
       view,
       state,
       explain: key => void update($, explainAtom, was => (was === key ? null : key)),
-      copy: (text, surface) => void copyText($, text, surface),
+      copy: (text, surface, key) => void copyText($, text, surface, key),
     }
     const body = page === undefined ? null : state.help ? null : await page.render(context)
     const link = dashboardLink(view)
 
     return (
-      <Box flexDirection="column">
-        <Box flexDirection="row" gap={1}>
-          <Text bold>{COPY['pane.title']}</Text>
-          {pages.map(one => (
-            <Button key={`page:${one.id}`} label={COPY[one.labelKey]} hotkey={one.hotkey} onPress={() => selectPage($, one.id)} />
-          ))}
+      <Box flexDirection="column" gap={1}>
+        {/* The pane's own title already says Glass. The page shown is marked as text; the others are its keys. */}
+        <Box flexDirection="row" gap={2} alignItems="center">
+          {pages.map(one =>
+            one.id === page?.id ? (
+              <Text key={`page:${one.id}`} bold underline>
+                {COPY[one.labelKey]}
+              </Text>
+            ) : (
+              <Button key={`page:${one.id}`} label={COPY[one.labelKey]} hotkey={one.hotkey} dimColor onPress={() => selectPage($, one.id)} />
+            ),
+          )}
         </Box>
         {state.help ? (
           <Box flexDirection="column">
@@ -226,13 +263,14 @@ export const register: Register = on => {
         ) : (
           body
         )}
-        <Box flexDirection="row" gap={1}>
-          <Button key="more" label={view.detailed ? COPY['pane.less'] : COPY['pane.more']} hotkey="m" onPress={() => void toggleDetailed($)} />
+        {/* Quiet controls every page shares: no hotkeys, which belong to the pages and each page's one main action. */}
+        <Box flexDirection="row" gap={2} alignItems="center">
+          <Button key="more" label={view.detailed ? COPY['pane.less'] : COPY['pane.more']} dimColor onPress={() => void toggleDetailed($)} />
           {link !== null ? <Link key="dashboard" href={linkTarget(link)} label={COPY['pane.dashboard']} /> : null}
           {link !== null ? (
-            <Button key="link" label={COPY['pane.link']} hotkey="l" onPress={press => void copyText($, link, press.surface)} />
+            <Button key="link" label={state.copied === 'link' ? COPY['pane.copied'] : COPY['pane.link']} dimColor onPress={press => void copyText($, link, press.surface, 'link')} />
           ) : null}
-          <Button key="help" label={COPY['pane.help']} hotkey="h" onPress={() => void update($, helpAtom, shown => !shown)} />
+          <Button key="help" label={state.help ? COPY['pane.help.hide'] : COPY['pane.help']} dimColor onPress={() => void update($, helpAtom, shown => !shown)} />
         </Box>
       </Box>
     )

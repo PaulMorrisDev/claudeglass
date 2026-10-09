@@ -2,7 +2,7 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
-import { elements, faults, notes, prepare, reply, SESSION, settingsFile, SITE, START, T0, textOf } from './support'
+import { elements, faults, notes, prepare, reply, SESSION, settingsFile, showPage, SITE, START, T0, textOf } from './support'
 import type { Step, World } from './support'
 
 // The second round of review fixes: who coaching is for, the notes that reached nobody, what counts as
@@ -135,7 +135,7 @@ async function finish($: Engine, world: World, id: string): Promise<void> {
 
 async function agentsPage($: Engine) {
   const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'Pane', requestId: 'glass', props: PANE as never })
-  await mounted.press({ key: 'page:agents' })
+  await showPage(mounted, 'agents', 'Agents')
   return mounted
 }
 

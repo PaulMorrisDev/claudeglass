@@ -50,7 +50,7 @@ test('before the first figures the Now page says it is waiting', async ($, on) =
   expect(faults(world)).toEqual([])
 })
 
-test('the Now page first screen: headline, bar, three rows and a session line; every Button has a hotkey', async ($, on) => {
+test('the Now page first screen: headline, bar, three text rows and a session line; hotkeys only on the page bar and the main action', async ($, on) => {
   const world = prepare(on)
   await started($, world)
 
@@ -70,15 +70,23 @@ test('the Now page first screen: headline, bar, three rows and a session line; e
       expect(shown.some(text => /[█▓▒░]/.test(text))).toBe(true)
     }
 
-    const rows = elements(tree).filter(one => one.type === 'Button' && String(one.props?.key ?? '').startsWith('explain:'))
-    expect(rows).toHaveLength(3)
-    expect(rows.map(row => row.props?.hotkey)).toEqual(['1', '2', '3'])
+    // The rows are text with the figure at the right edge, never Buttons; the estimate is said once.
+    expect(elements(tree).filter(one => one.type === 'Button' && String(one.props?.key ?? '').startsWith('explain:'))).toHaveLength(0)
+    expect(shown).toContain('Startup context')
+    expect(shown).toContain('Conversation so far')
+    expect(shown).toContain('Tool output kept in context')
+    expect(shown.filter(text => text === 'Tool output is an estimate.')).toHaveLength(1)
+    expect(shown.some(text => /\(est\.\)/.test(text))).toBe(false)
     expect(shown.some(text => /^This session \$0\.50 · 1 reply$/.test(text))).toBe(true)
 
-    // Every Button, in the page bar, the rows and the footer, can be pressed from the keyboard.
+    // Hotkeys: the page bar's keys only (the footer has none), and at most one primary action.
     const buttons = elements(tree).filter(one => one.type === 'Button')
-    expect(buttons.length).toBeGreaterThanOrEqual(6)
-    for (const button of buttons) expect(String(button.props?.hotkey ?? '')).toMatch(/^[a-z0-9]$/)
+    expect(buttons.length).toBeGreaterThanOrEqual(5)
+    const keyed = buttons.filter(button => button.props?.hotkey !== undefined)
+    expect(keyed.map(button => String(button.props?.key))).toEqual(expect.arrayContaining(['page:agents']))
+    for (const button of keyed) expect(String(button.props?.key)).toMatch(/^(page:|copy$)/)
+    for (const button of keyed) expect(['n', 'a', 'k', 's', 'c']).toContain(button.props?.hotkey)
+    expect(buttons.filter(button => button.props?.variant === 'primary').map(button => String(button.props?.key))).toEqual(['copy'])
 
     // The first screen is five lines of content at a docked width of 110 columns.
     for (const text of shown) expect(text.length).toBeLessThanOrEqual(110)
@@ -123,15 +131,18 @@ test('on a subscription the session line gives the 5-hour share when the limit h
   expect(faults(world)).toEqual([])
 })
 
-test('pressing a row explains it in words, and again closes it', async ($, on) => {
+test('Detailed explains each row in words under it, and a row is not pressable', async ($, on) => {
   const world = prepare(on)
   await started($, world)
   const mounted = await pane($, 'terminal')
-
-  await mounted.press({ key: 'explain:conversation' })
-  expect(lines(await mounted.drawn()).join('\n')).toContain(GLOSSARY.conversation.body)
-  await mounted.press({ key: 'explain:conversation' })
   expect(lines(await mounted.drawn()).join('\n')).not.toContain(GLOSSARY.conversation.body)
+  expect(await mounted.find({ type: 'Button', key: 'explain:conversation' })).toBeUndefined()
+
+  await $.command.run({ command: 'glass', args: 'detail' })
+  const shown = lines(await mounted.drawn()).join('\n')
+  expect(shown).toContain(GLOSSARY.startup.body)
+  expect(shown).toContain(GLOSSARY.conversation.body)
+  expect(shown).toContain(GLOSSARY.output.body)
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
@@ -154,13 +165,14 @@ test('/glass detail adds the Detailed sections, and More detail does the same', 
   expect(faults(world)).toEqual([])
 })
 
-test('the page bar names Now with its key, and the footer has help and the dashboard link', async ($, on) => {
+test('the page bar marks Now and keys the others, and the footer has help and the dashboard link', async ($, on) => {
   const world = prepare(on)
   await started($, world)
   const mounted = await pane($, 'desktop')
 
-  const now = await mounted.find({ type: 'Button', key: 'page:now' })
-  expect(now?.props.hotkey).toBe('n')
+  // The page shown is marked as text; the others are the bar's keys.
+  expect(await mounted.find({ type: 'Button', key: 'page:now' })).toBeUndefined()
+  expect((await mounted.find({ type: 'Button', key: 'page:agents' }))?.props.hotkey).toBe('a')
   expect(String((await mounted.find({ type: 'Link' }))?.props.href)).toMatch(/^http:\/\/localhost:8792\//)
 
   await mounted.press({ key: 'link' })
@@ -186,8 +198,41 @@ test('the compact command is offered as a copy button only when summarising is n
   mounted = await pane($, 'terminal')
   const copy = await mounted.find({ type: 'Button', key: 'copy' })
   expect(copy?.props.hotkey).toBe('c')
+  expect(copy?.props.variant).toBe('primary')
+  expect(copy?.props.autoFocus).toBe(true)
+  expect(String(copy?.props.label)).toBe('Copy /compact')
+  expect(elements(await mounted.drawn()).filter(one => one.type === 'Button' && one.props?.variant === 'primary')).toHaveLength(1)
   await mounted.press({ key: 'copy' })
   expect(world.copied).toEqual(['/compact'])
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('a press of one copy button relabels only that button "Copied.", whichever it is', async ($, on) => {
+  const world = prepare(on)
+  await $.session.start(START)
+  await reply($, world, { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 58000, output: 0 }], usd: 0.2 })
+  // 150k of a 160k point: the soon state, which offers Copy /compact beside the footer's Copy link.
+  await reply($, world, { steps: [{ cacheRead: 100000, cacheWrite: 50000, output: 200 }], usd: 0.2 })
+  const mounted = await pane($, 'terminal')
+  const labels = async () => [String((await mounted.find({ type: 'Button', key: 'copy' }))?.props.label), String((await mounted.find({ type: 'Button', key: 'link' }))?.props.label)]
+  expect(await labels()).toEqual(['Copy /compact', 'Copy link'])
+
+  // The footer's Copy link: it says Copied.; Copy /compact is as it was.
+  await mounted.press({ key: 'link' })
+  expect(await labels()).toEqual(['Copy /compact', 'Copied.'])
+  expect(world.copied).toHaveLength(1)
+
+  // The other way round, on a fresh mark (it goes after a few seconds): Copy /compact says Copied.; Copy link is as it was.
+  await world.clock.advance(3500)
+  expect(await labels()).toEqual(['Copy /compact', 'Copy link'])
+  await mounted.press({ key: 'copy' })
+  expect(await labels()).toEqual(['Copied.', 'Copy link'])
+  expect(world.copied.at(-1)).toBe('/compact')
+
+  // A press of the other while the first still shows moves the mark: only one button says Copied. at a time.
+  await mounted.press({ key: 'link' })
+  expect(await labels()).toEqual(['Copy /compact', 'Copied.'])
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
