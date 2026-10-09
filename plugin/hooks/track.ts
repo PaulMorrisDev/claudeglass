@@ -4,6 +4,8 @@ import type { EngineInterface, Register, TurnUsage } from 'claude-code'
 import type { GlassCompaction, GlassRequest, GlassSettings, GlassSnap } from '../types'
 import { armCacheClock, stopCacheClock } from './cacheclock'
 import { COPY } from './generated/copy.js'
+import { drainSensor } from './compaction-memory'
+import { drainShown, endCoach, resetCoach } from './coach-mem'
 import { beat } from './heartbeat'
 import type { Io } from './io'
 import { emptySnap, emptyTurn, flags, flushNow, forget, live, restart, touch } from './live'
@@ -47,6 +49,9 @@ export type TurnEnd = {
   snap: GlassSnap
   settings: GlassSettings
   now: number
+  /** The reply's text and why it ended; for a turn end only. Looked at, never kept. */
+  answer?: string
+  reason?: string
 }
 
 type Listener = (end: TurnEnd) => Promise<void>
@@ -56,6 +61,13 @@ const listeners: Listener[] = []
 /** Runs `listener` at the end of each main-session reply, after the bookkeeping, in the order added. */
 export function onTurnEnd(listener: Listener): void {
   listeners.push(listener)
+}
+
+const compactListeners: Listener[] = []
+
+/** Runs `listener` after each main-session summary has been recorded (a manual /compact or an automatic one), in the order added. */
+export function onCompaction(listener: Listener): void {
+  compactListeners.push(listener)
 }
 
 /**
@@ -253,6 +265,7 @@ export const register: Register = on => {
     const io = kit($)
     try {
       forget()
+      resetCoach()
       await reloadSettings(io)
       const detailed = await $.store.get('detailed')
       await update($, detailedAtom, () => detailed === true)
@@ -265,7 +278,7 @@ export const register: Register = on => {
       }
       await beat(io, snap, true)
       await touch(io)
-      await $.command.register({ name: 'glass', description: COPY['pane.command'], argumentHint: '[detail]', immediate: true })
+      await $.command.register({ name: 'glass', description: COPY['pane.command'], argumentHint: '[detail | pin <text>]', immediate: true })
     } catch (error) {
       $.ui.log(`claudeglass: session.start ${String(error)}`, { to: 'debug' })
     }
@@ -277,7 +290,9 @@ export const register: Register = on => {
     try {
       const snap = await live(io)
       if (snap.sessionId === e.sessionId) {
+        endCoach(snap)
         settleAtEnd(snap, e.reason)
+        drainSensor(snap)
         await writeSensor(io, snap)
       }
       stopCacheClock()
@@ -315,6 +330,7 @@ export const register: Register = on => {
         addEvent(snap, { ts: seconds(now), event: 'cold_send', outcome: flags.coldWarned ? 'warned' : 'unwarned' })
       }
       flags.coldWarned = false
+      drainShown(snap)
       snap.turnStartCost = snap.cost
       // A summary made between replies (a /compact) is still waiting for its note.
       snap.turn = { ...emptyTurn(), compacted: snap.turn.compacted, compactedCold: snap.turn.compactedCold }
@@ -362,7 +378,7 @@ export const register: Register = on => {
         settleAfterReply(snap, last.ctx)
         for (const listener of listeners) {
           try {
-            await listener({ io, snap, settings, now })
+            await listener({ io, snap, settings, now, answer: e.answer, reason: e.reason })
           } catch (error) {
             $.ui.log(`claudeglass: turn end ${String(error)}`, { to: 'debug' })
           }
@@ -385,7 +401,15 @@ export const register: Register = on => {
       try {
         const snap = await ensure($)
         const settings = await getSettings(io)
-        recordCompaction(snap, settings, e.trigger, result.tokensBefore ?? null, result.tokensAfter ?? null, await $.clock.now())
+        const now = await $.clock.now()
+        recordCompaction(snap, settings, e.trigger, result.tokensBefore ?? null, result.tokensAfter ?? null, now)
+        for (const listener of compactListeners) {
+          try {
+            await listener({ io, snap, settings, now })
+          } catch (error) {
+            $.ui.log(`claudeglass: compaction ${String(error)}`, { to: 'debug' })
+          }
+        }
         await touch(io)
       } catch (error) {
         $.ui.log(`claudeglass: session.compact ${String(error)}`, { to: 'debug' })

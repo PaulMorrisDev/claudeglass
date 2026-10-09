@@ -10,7 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - **The mod shows some hints itself.** While the ClaudeGlass mod runs in a
-  session (it says so in `mod/present.json`), the capture hook leaves out
+  session (it says so in `mod/present/<session id>.json`), the capture hook leaves out
   `cold_return`, `status_poll`, `drip_feed`, `big_paste`, `report_reread`,
   `split_run`, `plan_fresh` and the rating reminder, and doesn't mark them
   as shown, so they return if the mod stops. The mod writes what it showed to
@@ -19,6 +19,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   The Work habits tips table now counts the tips Claude passed on and the
   ones the mod showed, by where, and a second table counts the sessions the
   mod ran in.
+- **Those hints now come before you send.** The mod decides `drip_feed`,
+  `big_paste`, `status_poll` and `cold_return` from your draft and shows one at
+  a time on the hint line, `plan_fresh` on the status line when you approve a
+  plan, and the rating reminder as an end-of-reply note. Same thresholds, rest
+  rules, `muted` and `once` as the hook.
 
 ### Fixed
 

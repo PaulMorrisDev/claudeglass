@@ -1,5 +1,6 @@
 import type { Register } from 'claude-code'
 
+import { ratingCandidate } from './coach-mem'
 import { amountAfterAbout, formatTokens, withEst } from './fmt'
 import { COPY } from './generated/copy.js'
 import { THRESHOLDS } from './generated/coaching.js'
@@ -25,7 +26,7 @@ export const SWITCH_NOTE_TOKENS = 50000
 /** At most one note per this many replies. */
 export const NOTE_EVERY = 5
 
-type Candidate = { kind: string; stake: number; text: string }
+type Candidate = { kind: string; stake: number; text: string; shown?: () => Promise<void> }
 
 function candidates(end: TurnEnd): Candidate[] {
   const { snap, settings, now } = end
@@ -66,13 +67,18 @@ async function deliver(end: TurnEnd): Promise<void> {
   if (!noteAllowed(snap.lastNoteReply, snap.replies, NOTE_EVERY)) return
   const th = { ...THRESHOLDS, ...settings.thresholds } as unknown as RestThresholds
   const nowS = seconds(now)
-  for (const one of candidates(end)) {
+  const found = candidates(end)
+  // The rating reminder (coach-mem.ts) comes last: it is not about this reply.
+  const rating = await ratingCandidate(io, snap, settings, now)
+  if (rating !== null) found.push(rating)
+  for (const one of found) {
     if (settings.muted.includes(one.kind)) continue
     if (!mayShow(snap.rest, one.kind, one.stake, nowS, th)) continue
     snap.rest = recordShown(snap.rest, one.kind, one.stake, nowS, th, settings.once.includes(one.kind))
     snap.lastNoteReply = snap.replies
     io.note(`● ${COPY['note.lead']} · ${one.text}`)
     noteShown(snap, one.kind, 'log', now, snap.reading?.tokens ?? 0)
+    await one.shown?.()
     return
   }
 }

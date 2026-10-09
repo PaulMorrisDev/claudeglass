@@ -44,6 +44,8 @@ export function emptySnap(): GlassSnap {
     pending: [],
     eventsDirty: false,
     lastBeat: 0,
+    agents: [],
+    piece: { tokens: 0, noted: false, surveying: false },
   }
 }
 

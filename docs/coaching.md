@@ -341,7 +341,7 @@ tighter rule (see above and below), the same replay fired it 0 times:
 but no run got past one request. 23 stopped there, because there was no
 earlier request (14), the earlier one had no file change behind it (7)
 or the earlier one was too long (2). So it now speaks only on a clear
-run of small change requests, and **Tips Claude showed** counts each
+run of small change requests, and **Coaching tips shown** counts each
 time, with any misfire.
 
 ## How a result's size is measured
@@ -476,7 +476,7 @@ the fact only.
 
 The thresholds for these five are fixed, not set in `config.toml`.
 Once there are coaching
-notes, **Tips Claude showed** says, for each hint, how many notes there
+notes, **Coaching tips shown** says, for each hint, how many notes there
 were and how many tips showed: "relayed 4 of 5" for a hint whose note
 tells Claude to write the tip every time, so a tip left out was missed,
 and "judged relevant 2 of 6" for one Claude decides on, where a tip left
@@ -528,7 +528,7 @@ runs under the context window now in force, is [its own tip](run-split.md).
   in `coaching.json` as hint names, and raised numbers sit beside
   `plan_fresh_tokens` in `thresholds`. `capture status` names them.
   Useful answers count toward the tip's figure on the dashboard's
-  **Tips Claude showed**.
+  **Coaching tips shown**.
 - **Your typical piece of work** (`typical_piece_tokens`). The tokens in the
   median piece of work of the last 30 days, counting only pieces with at
   least three replies and only once there are five of them; `0` until
@@ -615,16 +615,33 @@ what `coach-state.json` keeps is described [below](#what-it-doesnt-do).
 The ClaudeGlass mod, a separate plugin inside Claude Code, shows some hints
 in its own panes instead of through Claude, so they cost no context and
 Claude never has to remember to pass them on. For a session the mod is
-running in (it says so in `mod/present.json`; see
+running in (it says so in `mod/present/<session id>.json`; see
 [Your hooks](hooks.md#with-the-claudeglass-mod)), the hook leaves out
 `cold_return`, `status_poll`, `drip_feed`, `big_paste`, `report_reread`,
 `split_run`, `plan_fresh` and the rating reminder. It keeps `plan_fresh_early`,
 `quiet_output`, the plan check, the facts line and the capture note, since
 those steer Claude or feed a skill.
 
+The mod decides four of them from your draft, before you send it, and shows
+one at a time on the hint line under the prompt: `drip_feed`, `big_paste`,
+`status_poll`, then `cold_return` (the cold-cache warning, with its cost and
+what `/clear` first would cost), the first that applies and isn't muted or
+resting. Same thresholds, rest rules and `muted` and `once` lists as above;
+a draft's length counts in tokens at the rate your sessions measured, 4
+characters to a token before any. It keeps a draft's length and word shape,
+never its words. `status_poll` also needs background work still running,
+which the mod knows from the result that said it was launched. `plan_fresh`
+shows on the status line when you approve the plan, until the next reply or a
+summary. The rating reminder is an end-of-reply note, at most one note every
+five replies; the mod keeps when it last asked in `mod/coach.json`.
+
 A hint left out is not marked as shown, so it comes back at once if the mod
 stops. A mod that is missing, closed, or whose file is unreadable or stale
-(no refresh for 10 minutes) changes nothing.
+(no refresh for 10 minutes) changes nothing. An agent run that ended too big
+is still noted while the mod runs, so it is told once the mod stops. And
+because the hook doesn't mark what the mod showed, it asks the mod's file of
+what it showed: a tip to start fresh the mod showed within the cooldown
+holds back `plan_fresh_early`.
 
 On the dashboard's Work habits tab, the Tips table counts both sources.
 **Passed on by Claude** is the tips in Claude's replies, as before.

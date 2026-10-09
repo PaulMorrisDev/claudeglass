@@ -32,6 +32,10 @@ export type GlassSettings = {
   muted: string[]
   once: string[]
   usual: { sessionCostUsd: number | null; endContextTokens: number | null }
+  /** Characters per token of text, by model family (the calibration), and the family a session on an unknown model counts as. */
+  charsPerToken: { text: Record<string, number>; family: string }
+  /** The tokens in the user's typical piece of work (the rating reminder compares with it); 0 when not known. */
+  typicalPiece: number
   dashboardUrl: string | null
 }
 
@@ -62,6 +66,47 @@ export type GlassCompaction = {
 
 export type GlassItem = { name: string; tokens: number }
 
+/** One agent run of this session. The task prompt is never kept here (agents.ts holds it in memory). */
+export type GlassAgent = {
+  /** The id its loop's events carry (`agentId`). */
+  id: string
+  /** The Agent tool call that started it; empty for a workflow's agent that has none. */
+  toolUseId: string
+  /** The agent type (`Explore`, `general-purpose`); empty until known. */
+  type: string
+  /** The task's short description. */
+  desc: string
+  model: string
+  background: boolean
+  fork: boolean
+  status: 'running' | 'done' | 'failed'
+  startedAt: number
+  endedAt: number | null
+  requests: number
+  input: number
+  output: number
+  cacheRead: number
+  cacheWrite: number
+  /** Estimated from the rates in the settings; 0 for a model with no price. */
+  usd: number
+  /** Tool calls, and how many of each tool. */
+  calls: number
+  tools: Record<string, number>
+  /** What its latest tool call was doing: a COPY key's last word (`agent.<activity>`). */
+  activity: 'searching' | 'reading' | 'editing' | 'running' | 'fetching' | 'working'
+  /** Context and output of its latest request, and the tools it asked for, to work out what they added. */
+  lastCtx: number
+  lastOutput: number
+  lastTools: string[]
+  /** The biggest tool results, by what they added to its context. */
+  heaviest: GlassItem[]
+  /** Characters of the task prompt, and times it summarised its own context. */
+  briefChars: number
+  compactions: number
+  /** Coaching notes shown on its row (`report_reread`, `split_run`), with the words shown. */
+  notes: { kind: string; text: string }[]
+}
+
 export type GlassRebuild = {
   cause: 'limit' | 'compaction' | 'expiry' | 'prefix' | 'unknown'
   tokens: number
@@ -74,6 +119,7 @@ export type GlassSensorEvent =
   | { ts: number; event: 'note'; kind: string; surface: string; outcome: string }
   | { ts: number; event: 'rebuild'; kind: string; outcome: 'expected' | 'unexpected' }
   | { ts: number; event: 'cold_send'; outcome: 'warned' | 'unwarned' }
+  | { ts: number; event: 'compaction'; kind: 'auto' | 'manual'; kept: number; missing: number; added: number }
 
 export type GlassPendingNote = {
   ts: number
@@ -144,6 +190,89 @@ export type GlassSnap = {
   eventsDirty: boolean
   /** When the heartbeat was last written, in ms. */
   lastBeat: number
+  /** The agents that ran in this session, oldest first. */
+  agents: GlassAgent[]
+  /** The piece of work the rating reminder counts: tokens the replies since it began have used, and whether it was reminded or is a /cg-feedback run's own. */
+  piece: { tokens: number; noted: boolean; surveying: boolean }
+}
+
+/** A thing the user pinned to the keep list (compaction review). The text is theirs and lives in $.state only. */
+export type GlassPin = { id: string; text: string }
+
+/** One thing a summary must not lose (compaction review). Built from the session's messages, in memory and in $.state only. */
+export type GlassKeepItem = {
+  id: string
+  kind: 'pin' | 'instruction' | 'decision' | 'error' | 'task' | 'file' | 'value'
+  text: string
+  /** Claude Code keeps it whatever the summary says. */
+  safe: boolean
+  why: '' | 'recent' | 'plan' | 'claude-md'
+  /** Strings the summary must hold word for word (paths, ports, ids). */
+  exact: string[]
+  at: number
+}
+
+export type GlassMark = 'found' | 'partly' | 'missing' | 'safe'
+
+/** The check of the last summary against the keep list. */
+export type GlassReviewed = {
+  ts: number
+  trigger: 'auto' | 'manual'
+  /** The summary Claude Code wrote (held in memory for the page; never written to disk). */
+  summary: string
+  items: GlassKeepItem[]
+  marks: Record<string, GlassMark>
+  /** True once Haiku's check replaced the quick check's marks. */
+  judged: boolean
+  /** Prompts from before the summary, newest first. */
+  earlier: { id: string; text: string }[]
+}
+
+/** One summary of this session, as the history lists it. */
+export type GlassReviewRow = {
+  ts: number
+  trigger: 'auto' | 'manual'
+  before: number | null
+  after: number | null
+  kept: number
+  missing: number
+}
+
+/** What the page remembers between presses. */
+export type GlassReviewUi = {
+  /** Which view the page opens on: the one before a summary or the one after. */
+  view: 'before' | 'after'
+  /** Ids of the items whose tick differs from the default (suggested items start ticked, the rest not). */
+  toggled: string[]
+  /** The summary text is shown. */
+  summary: boolean
+  /** The full list (after) or the more items (before) are shown. */
+  list: boolean
+  /** The earlier messages are shown. */
+  earlier: boolean
+  /** The Haiku check is running. */
+  busy: boolean
+  /** One line under the headline: what the last press did. */
+  note: string | null
+}
+
+/** The compaction review: counts the band needs, and what the page draws from. */
+export type GlassReview = {
+  /** When the last reviewed summary was made, in ms; null before one. */
+  ts: number | null
+  /** Items the summary may have dropped. */
+  missing: number
+  /** True once the user has opened the review for that summary. */
+  seen: boolean
+  /** True while an automatic summary is being held for review. */
+  held: boolean
+  /** Items worth reviewing before a summary (pins, instructions and decisions). */
+  suggest: number
+  /** The keep list as of the last reply. */
+  list: GlassKeepItem[]
+  after: GlassReviewed | null
+  history: GlassReviewRow[]
+  ui: GlassReviewUi
 }
 
 declare module 'claude-code' {
@@ -157,6 +286,9 @@ declare module 'claude-code' {
       explain: string | null
       help: boolean
       copied: boolean
+      /** The keep list's pins (compaction review). */
+      pins: GlassPin[]
+      review: GlassReview
     }
   }
 }

@@ -153,6 +153,8 @@ def _coaching_block(config_dir: Path) -> dict:
         "thresholds": capture_hook.coaching_thresholds(coaching, config, personal),
         "muted": sorted(capture_hook._hint_names(personal.get("muted"))),
         "once": sorted(capture_hook._hint_names(personal.get("once"))),
+        # What the rating reminder compares a piece of work with (``coaching.json``).
+        "typical_piece_tokens": int(capture_hook._number(personal.get("typical_piece_tokens")) or 0),
     }
 
 

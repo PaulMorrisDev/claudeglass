@@ -1,0 +1,384 @@
+import type { GlassRestState, GlassSettings, GlassSnap } from '../types'
+import { HOW, PATTERNS, THRESHOLDS, TIPS } from './generated/coaching.js'
+import { COPY } from './generated/copy.js'
+import type { Io } from './io'
+import {
+  BACKGROUND_FORGET_S,
+  backgroundLaunched,
+  backgroundNotified,
+  changesFile,
+  charsPerToken,
+  coldHint,
+  compilePatterns,
+  draftShape,
+  dripHint,
+  editDraft,
+  emptyBackground,
+  emptyDraft,
+  endsOnQuestion,
+  freshHint,
+  isChangeRequest,
+  isFeedbackPrompt,
+  isNotification,
+  launchedInBackground,
+  marksNewPiece,
+  mergeRest,
+  pasteHint,
+  pickHint,
+  pollHint,
+  ratingDue,
+  startingContext,
+} from './lib/coach.js'
+import type { Background, Draft, Exchange, Found, LastReply, Patterns, RawPatterns, Thresholds } from './lib/coach.js'
+import { mayShow, recordShown } from './lib/rest.js'
+import { fill } from './lib/text.js'
+import { formatTokens } from './lib/units.js'
+import { noteShown, seconds } from './sensor'
+import { configDir } from './settings'
+import type { View } from './view'
+
+// What the coaching that runs before a message is sent keeps in module memory
+// (a render hook may not write $.state, and none of this is worth keeping past a
+// reload): the draft's shape, the messages sent so far with what each came to,
+// the background work still out, and the hint now on screen. Only lengths,
+// counts and yes-or-no answers are kept: the words of a message are looked at
+// where they arrive and dropped. coach.ts feeds this from the events; hint.ts
+// and notes.ts ask it what to say. The decisions are lib/coach.js.
+
+const MAX_EXCHANGES = 12
+const patterns: Patterns = compilePatterns(PATTERNS as unknown as RawPatterns)
+
+/** A hint the screen showed, waiting for the next event hook to put it in the snapshot's sensor list. */
+type Shown = { kind: string; ts: number; ctx: number }
+
+type Mem = {
+  th: Thresholds
+  cpt: number
+  draft: Draft
+  shape: string
+  /** The kind of hint now on screen; it stays while it applies, without asking the rest rule again. */
+  episode: string | null
+  /** The rest rows the render hooks stamped, laid over the snapshot's. */
+  overlay: GlassRestState
+  shown: Shown[]
+  exchanges: Exchange[]
+  /** When the last typed message was sent, in ms. */
+  submitAt: number | null
+  /** Whether the last reply ended on a question. */
+  asked: boolean
+  background: Background
+  /** Characters of the session's first message, for what a fresh start would carry. */
+  firstPromptChars: number | null
+  clearStatus: (() => void) | null
+}
+
+function fresh(): Mem {
+  const th = THRESHOLDS as unknown as Thresholds
+  return {
+    th,
+    cpt: charsPerToken(null, null),
+    draft: emptyDraft(),
+    shape: '',
+    episode: null,
+    overlay: { hints: {} },
+    shown: [],
+    exchanges: [],
+    submitAt: null,
+    asked: false,
+    background: emptyBackground(),
+    firstPromptChars: null,
+    clearStatus: null,
+  }
+}
+
+let mem = fresh()
+mem.shape = draftShape(mem.draft, mem.cpt, mem.th.big_paste_tokens)
+
+/** Forgets everything (a new session, or a test). */
+export function resetCoach(): void {
+  clearPlanStatus()
+  mem = fresh()
+  mem.shape = draftShape(mem.draft, mem.cpt, mem.th.big_paste_tokens)
+}
+
+export function thresholdsOf(settings: GlassSettings): Thresholds {
+  return { ...THRESHOLDS, ...settings.thresholds } as unknown as Thresholds
+}
+
+/** Takes the thresholds and the characters-per-token the settings call for. */
+function learn(settings: GlassSettings, model: string | null): void {
+  mem.th = thresholdsOf(settings)
+  mem.cpt = charsPerToken(settings.charsPerToken, model)
+}
+
+function pieceOf(snap: GlassSnap): GlassSnap['piece'] {
+  // A snapshot saved before the piece was kept has none.
+  const held = snap.piece as GlassSnap['piece'] | undefined
+  if (held === undefined) snap.piece = { tokens: 0, noted: false, surveying: false }
+  return snap.piece
+}
+
+// -- the draft ---------------------------------------------------------------
+
+/** Notes an edit of the prompt box; true when what decides a hint changed, so it should be drawn again. */
+export function editBox(edit: { text: string; start: number; end: number; inputText: string }, after: { text: string }): boolean {
+  mem.draft = editDraft(mem.draft, edit, after, patterns, mem.th.drip_chars)
+  const shape = draftShape(mem.draft, mem.cpt, mem.th.big_paste_tokens)
+  if (shape === mem.shape) return false
+  mem.shape = shape
+  return true
+}
+
+// -- messages sent -----------------------------------------------------------
+
+const SLASH_COMMAND = /^\/[A-Za-z][\w:-]*(\s|$)/
+
+/**
+ * A message went in. A typed one (the composer, or the phone) joins the run of
+ * messages drip_feed counts; a /cg-feedback run starts the rating reminder's
+ * count over; a background task's notification ends the wait for that work.
+ */
+export function submitted(snap: GlassSnap, settings: GlassSettings, input: { text: string; origin: string; queued: boolean }, now: number): void {
+  learn(settings, snap.model)
+  mem.episode = null
+  mem.draft = emptyDraft()
+  mem.shape = draftShape(mem.draft, mem.cpt, mem.th.big_paste_tokens)
+  const { text } = input
+  if (input.origin === 'task-notification' || isNotification(text, patterns)) {
+    mem.background = backgroundNotified(mem.background, text, patterns)
+    return
+  }
+  if (input.origin !== 'composer' && input.origin !== 'bridge') return
+  const trimmed = text.trim()
+  if (trimmed === '') return
+  if (isFeedbackPrompt(text, patterns.feedbackSkill)) {
+    snap.piece = { tokens: 0, noted: false, surveying: true }
+    return
+  }
+  if (SLASH_COMMAND.test(trimmed.slice(0, 80))) return
+  pieceOf(snap).surveying = false
+  if (mem.firstPromptChars === null && snap.replies === 0) mem.firstPromptChars = text.length
+  if (input.queued) return
+  const prev = mem.exchanges[mem.exchanges.length - 1]
+  mem.exchanges.push({
+    answer: mem.asked && !(prev?.edited ?? false),
+    answered: false,
+    change: isChangeRequest(text, patterns),
+    small: trimmed.length <= mem.th.drip_chars,
+    edited: false,
+    since: mem.submitAt === null ? null : (now - mem.submitAt) / 1000,
+  })
+  if (mem.exchanges.length > MAX_EXCHANGES) mem.exchanges.splice(0, mem.exchanges.length - MAX_EXCHANGES)
+  mem.submitAt = now
+  mem.asked = false
+}
+
+/** Whether a tool call changes a file of yours (an edit tool, or a shell command that writes one). */
+export function editsFile(name: string, input: Record<string, unknown>): boolean {
+  return changesFile(name, input, patterns)
+}
+
+/** Marks the reply now running as one that changed a file. */
+export function markEdited(): void {
+  const last = mem.exchanges[mem.exchanges.length - 1]
+  if (last !== undefined) last.edited = true
+}
+
+/** A tool's result said its work went to the background. */
+export function noteBackground(text: string | undefined, callId: string, now: number): void {
+  if (launchedInBackground(text, patterns)) mem.background = backgroundLaunched(mem.background, callId, seconds(now))
+}
+
+function hasBackground(snap: GlassSnap, nowS: number): boolean {
+  if (mem.background.items.some(one => nowS - one.at < BACKGROUND_FORGET_S)) return true
+  return snap.agents.some(one => one.background && one.status === 'running')
+}
+
+// -- the end of a reply ------------------------------------------------------
+
+/**
+ * A reply of the main session ended: what it said (a question to you, a new
+ * piece of work) and what it used, for the next message's hint and the rating
+ * reminder. The plan_fresh line on the status bar has had its reply.
+ */
+export function turnEnded(snap: GlassSnap, settings: GlassSettings, end: { answer?: string; reason?: string }): void {
+  learn(settings, snap.model)
+  const last = mem.exchanges[mem.exchanges.length - 1]
+  if (last !== undefined && (end.reason === undefined || end.reason === 'answer')) last.answered = true
+  const answer = end.answer ?? ''
+  mem.asked = answer !== '' && endsOnQuestion(answer, patterns)
+  const piece = pieceOf(snap)
+  const used = snap.reqs.slice(snap.reqs.length - snap.turnReqs).reduce((sum, one) => sum + one.input + one.cacheRead + one.cacheWrite + one.output, 0)
+  if (answer !== '' && marksNewPiece(answer)) {
+    snap.piece = { tokens: used, noted: false, surveying: false }
+  } else if (!piece.surveying) {
+    piece.tokens += used
+  }
+  clearPlanStatus()
+}
+
+// -- the hint line -----------------------------------------------------------
+
+function limitOf(snap: GlassSnap): { stopped: boolean; reset: number | null } {
+  const resetsAt = snap.fiveHour?.resetsAt ?? null
+  const reset = resetsAt === null ? Number.NaN : Date.parse(resetsAt)
+  return { stopped: snap.limitHit, reset: Number.isFinite(reset) ? reset / 1000 : null }
+}
+
+/**
+ * The one hint for the draft in the box now, or null. In the capture hook's
+ * order (drip_feed, big_paste, status_poll, cold_return) the first that
+ * applies, isn't muted and isn't resting. A hint that was on screen stays
+ * while it applies. When a new one is chosen it is stamped for the rest rule
+ * and queued for the sensor (drainShown).
+ */
+export function chooseHint(view: View): Found | null {
+  const { snap, settings, now } = view
+  learn(settings, snap.model)
+  const th = mem.th
+  const nowS = seconds(now)
+  const draft = mem.draft
+  const last: LastReply | null = snap.lastTs === null || view.tokens <= 0 ? null : { ctx: view.tokens, at: snap.lastTs / 1000, ttl: settings.ttl }
+  const since = mem.submitAt === null ? null : (now - mem.submitAt) / 1000
+  const previous = mem.exchanges[mem.exchanges.length - 1]
+  const answer = mem.asked && !(previous?.edited ?? false)
+  const compacted = snap.pendingCompaction || (snap.lastTs !== null && snap.compactions.some(one => one.ts >= (snap.lastTs ?? 0)))
+  const rest = mergeRest(snap.rest, mem.overlay)
+  const picked = pickHint(
+    [
+      dripHint(mem.exchanges, draft, since, answer, view.tokens, th),
+      pasteHint(draft.len + draft.hidden, mem.cpt, th),
+      pollHint(draft.status, last, nowS, hasBackground(snap, nowS)),
+      coldHint(last, nowS, compacted, limitOf(snap), th),
+    ],
+    settings.muted,
+    rest,
+    nowS,
+    th,
+    mem.episode,
+  )
+  if (picked === null) {
+    mem.episode = null
+    return null
+  }
+  if (picked.kind !== mem.episode) {
+    mem.overlay = recordShown(rest, picked.kind, picked.stake, nowS, th, settings.once.includes(picked.kind))
+    mem.episode = picked.kind
+    mem.shown.push({ kind: picked.kind, ts: now, ctx: view.tokens })
+  }
+  return picked
+}
+
+/** The words of a hint (not the cold-cache warning, which hint.ts writes with its costs). */
+export function hintText(found: Found, surface: string): string {
+  const variant = surface === 'terminal' ? 'terminal' : 'desktop'
+  const tokens = (name: string) => formatTokens(found.fields[name] ?? 0)
+  switch (found.kind) {
+    case 'big_paste':
+      return fill(COPY['hint.paste'], { tokens: tokens('tokens') })
+    case 'drip_feed':
+      return fill(COPY['hint.drip'], { count: found.fields.count ?? 0, tokens: tokens('ctx') })
+    case 'status_poll':
+      return fill(COPY['hint.poll'], { tokens: tokens('ctx'), how: HOW.poll_how[variant] })
+    default:
+      return ''
+  }
+}
+
+/** Puts the hints the screen showed into the snapshot: the sensor list and the rest rows. */
+export function drainShown(snap: GlassSnap): void {
+  for (const one of mem.shown) noteShown(snap, one.kind, 'hint', one.ts, one.ctx)
+  mem.shown = []
+  snap.rest = mergeRest(snap.rest, mem.overlay)
+}
+
+/** The session is ending: what the screen showed goes into the snapshot first, and the status line is cleared. */
+export function endCoach(snap: GlassSnap): void {
+  drainShown(snap)
+  clearPlanStatus()
+}
+
+// -- plan_fresh --------------------------------------------------------------
+
+/** Clears the status line the plan tip is on, if it is. */
+export function clearPlanStatus(): void {
+  const clear = mem.clearStatus
+  mem.clearStatus = null
+  if (clear === null) return
+  try {
+    clear()
+  } catch {
+    // The line goes with the session.
+  }
+}
+
+/** Remembers how to clear the status line the plan tip is on. */
+export function planStatusSet(clear: () => void): void {
+  mem.clearStatus = clear
+}
+
+/**
+ * The plan was approved: the tip for the status line when it carries enough
+ * planning that building in a fresh session would save it, else null. Under
+ * the same rest, mute and once rules as the other hints.
+ */
+export function planApproved(snap: GlassSnap, settings: GlassSettings, plan: { chars: number; file: string | null }, now: number): string | null {
+  learn(settings, snap.model)
+  const th = mem.th
+  const nowS = seconds(now)
+  const ctx = snap.reqs[snap.reqs.length - 1]?.ctx ?? snap.reading?.tokens ?? null
+  const start = snap.startupFirst === null || mem.firstPromptChars === null ? null : startingContext(snap.startupFirst, mem.firstPromptChars, mem.cpt)
+  const found = freshHint(ctx, start, plan.chars, snap.compactions.length > 0, mem.cpt, th)
+  if (found === null || settings.muted.includes(found.kind)) return null
+  const rest = mergeRest(snap.rest, mem.overlay)
+  if (!mayShow(rest, found.kind, found.stake, nowS, th)) return null
+  snap.rest = recordShown(rest, found.kind, found.stake, nowS, th, settings.once.includes(found.kind))
+  noteShown(snap, found.kind, 'status', now, ctx ?? 0)
+  const how = HOW.fresh_how[snap.surface === 'terminal' ? 'terminal' : 'desktop'].replace('`<file>`', plan.file === null ? 'the plan file' : `\`${plan.file}\``)
+  return fill(TIPS.plan_fresh, { kept: formatTokens(found.fields.kept ?? 0), fresh_how: how })
+}
+
+// -- rating_reminder ---------------------------------------------------------
+
+export type NoteCandidate = { kind: string; stake: number; text: string; shown?: () => Promise<void> }
+
+const COACH_FILE = 'mod/coach.json'
+
+async function remindedAt(io: Io, dir: string): Promise<number | null> {
+  try {
+    const text = await io.readFile(`${dir}/${COACH_FILE}`)
+    const raw: unknown = typeof text === 'string' && text !== '' ? JSON.parse(text) : null
+    const value = raw !== null && typeof raw === 'object' ? (raw as { reminded_at?: unknown }).reminded_at : null
+    return typeof value === 'number' && Number.isFinite(value) ? value : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * The rating reminder as a turn-end note, when this piece of work is big enough
+ * and no reminder has gone out in the last days. The time of the last one is
+ * the only thing kept, in <config_dir>/mod/coach.json.
+ */
+export async function ratingCandidate(io: Io, snap: GlassSnap, settings: GlassSettings, now: number): Promise<NoteCandidate | null> {
+  const th = thresholdsOf(settings)
+  const piece = pieceOf(snap)
+  const nowS = seconds(now)
+  if (ratingDue(piece.tokens, settings.typicalPiece, null, piece.noted, nowS, th) === null) return null
+  const dir = await configDir(io)
+  const found = ratingDue(piece.tokens, settings.typicalPiece, await remindedAt(io, dir), piece.noted, nowS, th)
+  if (found === null) return null
+  return {
+    kind: found.kind,
+    stake: found.stake,
+    text: fill(COPY['note.rating'], { tokens: formatTokens(found.fields.tokens ?? piece.tokens) }),
+    shown: async () => {
+      piece.noted = true
+      try {
+        await io.writeFile(`${dir}/${COACH_FILE}`, JSON.stringify({ schema: 1, reminded_at: nowS }))
+      } catch {
+        // The piece is marked, so it isn't told again this session; the days' rest starts at the next one.
+      }
+    },
+  }
+}

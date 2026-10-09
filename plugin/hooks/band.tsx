@@ -1,7 +1,9 @@
-import { atom, read } from 'claude-code'
+import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
+import { runningCount } from './agent-view'
 import { barAlt, partsBarSvg, SVG_LIMIT } from './charts'
+import { emptyReview, sound } from './compaction-memory'
 import { amount, amountAfterAbout, clock, isVisibleChange, localTime, percent, shortAmount } from './fmt'
 import { COPY } from './generated/copy.js'
 import { formatTokens } from './lib/units.js'
@@ -10,12 +12,15 @@ import { emptySnap } from './live'
 import { OPEN_ARGS } from './pane'
 import { coldMin, drawView, sendCostNow } from './view'
 import type { View } from './view'
+import type { GlassReview } from '../types'
 
 // Claude Code reads a state reference only where its literal is written, so each file that
 // reads one declares it (the contract is types/index.d.ts).
 const snapAtom = atom({ plugin: 'claudeglass', key: 'snap' } as const, emptySnap())
 const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, null)
 const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, false)
+const reviewAtom = atom({ plugin: 'claudeglass', key: 'review' } as const, emptyReview())
+const pageAtom = atom({ plugin: 'claudeglass', key: 'page' } as const, 'now')
 
 // The band above the prompt: the glance. Two fixed segments (how full the
 // context is and what the session has cost) and at most one that appears only
@@ -74,8 +79,12 @@ function spend(view: View, working: boolean): Segment | null {
 }
 
 /** The one segment that appears only when it matters, the most urgent first. */
-function conditional(view: View, working: boolean): Segment | null {
+function conditional(view: View, working: boolean, review: GlassReview): Segment | null {
   const { cache, settings, tokens } = view
+  // A summary that may have dropped something the user said comes first, until they have looked.
+  if (hasBadge(review)) {
+    return { key: 'review', text: review.missing === 1 ? COPY['band.missing.one'] : fill(COPY['band.missing'], { count: review.missing }), color: 'warning' }
+  }
   if (!working && cache !== null) {
     if (!cache.isWarm && tokens >= coldMin(settings)) {
       const cost = amountAfterAbout(sendCostNow(view, false), settings)
@@ -90,6 +99,9 @@ function conditional(view: View, working: boolean): Segment | null {
     const time = localTime(pace.runsOutAt)
     if (time !== null) return { key: 'pace', text: fill(COPY['band.pace'], { pct: percent(pace.pct), time }), color: 'warning' }
   }
+  // Agents at work: the lowest of the segments that appear only when they matter (it gives way to the cache and the limit).
+  const agents = runningCount(view.snap)
+  if (agents > 0) return { key: 'agents', text: agents === 1 ? COPY['band.agents.one'] : fill(COPY['band.agents'], { count: agents }) }
   if (view.detailed && !working && cache !== null && cache.isWarm) {
     return { key: 'cache', text: fill(COPY['band.cache.warm'], { time: clock(cache.remainingMs) }) }
   }
@@ -97,8 +109,19 @@ function conditional(view: View, working: boolean): Segment | null {
 }
 
 /** The segments to draw, at most three, in the order they are drawn. */
-export function segmentsOf(view: View, working: boolean): Segment[] {
-  return [context(view), spend(view, working), conditional(view, working)].filter((one): one is Segment => one !== null)
+export function segmentsOf(view: View, working: boolean, review: GlassReview = emptyReview()): Segment[] {
+  return [context(view), spend(view, working), conditional(view, working, review)].filter((one): one is Segment => one !== null)
+}
+
+/** The summary check found something and the user has not looked yet. */
+export function hasBadge(review: GlassReview): boolean {
+  return review.after !== null && review.missing > 0 && !review.seen
+}
+
+/** The offer to review before a summary: the context is near the point (or a summary was held) and there is something to pick. */
+export function hasOffer(view: View, review: GlassReview): boolean {
+  const state = view.snap.reading?.state
+  return review.suggest > 0 && !hasBadge(review) && (state === 'soon' || state === 'next' || review.held)
 }
 
 /** Which segments, and whether the bar, fit in `columns` cells. Segments drop from the right; the bar only takes what is left over. */
@@ -115,7 +138,8 @@ export const register: Register = on => {
     const base = await next(e)
     if (e.props.hasSurvey) return base
     const view = drawView(await read($, snapAtom), await read($, settingsAtom), await read($, detailedAtom), await $.clock.now(), e.props.isWorking)
-    const segments = segmentsOf(view, e.props.isWorking)
+    const review = sound(await read($, reviewAtom))
+    const segments = segmentsOf(view, e.props.isWorking, review)
     if (view.snap.reading === null || segments.length === 0) return base
 
     const table = $.ui.resolve(e)
@@ -123,13 +147,24 @@ export const register: Register = on => {
     const Svg = e.surface !== 'terminal' && 'Svg' in table ? table.Svg : null
     const { Box, Text, Button } = table
     const parts = view.parts
-    const shown = fit(segments, e.props.bodyColumns, Svg !== null && parts !== null)
+    // The review buttons take room beside the Glass button.
+    const extra = (hasBadge(review) ? COPY['band.review'].length + 4 : 0) + (hasOffer(view, review) ? COPY['band.review.before'].length + 4 : 0)
+    const shown = fit(segments, e.props.bodyColumns - extra, Svg !== null && parts !== null)
 
     let bar = null
     if (shown.bar && Svg !== null && parts !== null && view.snap.reading !== null) {
       const alt = barAlt(parts, percent(view.snap.reading.pct))
       const source = partsBarSvg(parts, BAR_PIXELS, 10, alt)
       if (source.length <= SVG_LIMIT) bar = <Svg key="bar" source={source} alt={alt} width={BAR_PIXELS} height={10} isInteractive />
+    }
+
+    const showBadge = shown.segments.some(one => one.key === 'review')
+    const showOffer = hasOffer(view, review)
+    const openReview = async (which: 'before' | 'after') => {
+      await update($, reviewAtom, was => ({ ...sound(was), seen: which === 'after' ? true : sound(was).seen, ui: { ...sound(was).ui, view: which, note: null } }))
+      await update($, pageAtom, () => 'compaction')
+      await $.store.set('page', 'compaction')
+      void $.ui.open(OPEN_ARGS)
     }
 
     const row: unknown[] = []
@@ -148,6 +183,8 @@ export const register: Register = on => {
         {base}
         <Box flexDirection="row" gap={1}>
           {row as never}
+          {showBadge ? <Button key="review" label={COPY['band.review']} hotkey="r" onPress={() => void openReview('after')} /> : null}
+          {showOffer ? <Button key="review-before" label={COPY['band.review.before']} hotkey="r" onPress={() => void openReview('before')} /> : null}
           <Button key="open" label={COPY['band.open']} hotkey="g" onPress={() => void $.ui.open(OPEN_ARGS)} />
         </Box>
       </Box>

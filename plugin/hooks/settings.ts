@@ -51,6 +51,8 @@ export function fallbackSettings(): GlassSettings {
     muted: [],
     once: [],
     usual: { sessionCostUsd: null, endContextTokens: null },
+    charsPerToken: { text: {}, family: '' },
+    typicalPiece: 0,
     dashboardUrl: null,
   }
 }
@@ -74,6 +76,7 @@ export function parseSettings(text: string, now: number): GlassSettings | null {
   const cache = record(file.cache)
   const coaching = record(file.coaching)
   const usual = record(file.usual)
+  const calibration = record(file.calibration)
   const ttl = parseTtl(cache?.ttl_seconds)
   const source = cache?.source
   const url = typeof file.dashboard_url === 'string' && file.dashboard_url !== '' ? file.dashboard_url.replace(/\/+$/, '') : null
@@ -95,6 +98,8 @@ export function parseSettings(text: string, now: number): GlassSettings | null {
     muted: words(coaching?.muted),
     once: words(coaching?.once),
     usual: { sessionCostUsd: finite(usual?.session_cost_usd), endContextTokens: finite(usual?.end_context_tokens) },
+    charsPerToken: { text: numbers(calibration?.text), family: typeof calibration?.default_family === 'string' ? calibration.default_family : '' },
+    typicalPiece: finite(coaching?.typical_piece_tokens) ?? 0,
     dashboardUrl: url,
   }
 }

@@ -170,6 +170,68 @@ def entity_colours() -> dict[str, dict[str, dict[str, str]]]:
     return out
 
 
+# -- the capture hook's patterns, for the coaching the mod runs ------------------
+
+#: The inline flags Python allows at the start of a pattern, as JavaScript's.
+_INLINE_FLAGS = {"i": "i", "m": "m", "s": "s"}
+_UNICODE_ESCAPE = re.compile(r"\\U([0-9a-fA-F]{8})")
+
+
+def _js_escape(match: re.Match) -> str:
+    r"""``\UXXXXXXXX`` as JavaScript writes the same character without the
+    ``u`` flag: ``\uXXXX``, or a surrogate pair for one past 0xFFFF."""
+    code = int(match.group(1), 16)
+    if code <= 0xFFFF:
+        return "\\u%04X" % code
+    code -= 0x10000
+    return "\\u%04X\\u%04X" % (0xD800 + (code >> 10), 0xDC00 + (code & 0x3FF))
+
+
+def js_pattern(pattern: str) -> dict[str, str]:
+    r"""A catalogue pattern as ``{source, flags}`` for ``new RegExp``: the
+    inline flags it opens with moved to the flags, ``\U`` escapes and
+    ``\Z`` rewritten. Nothing else differs between the two dialects for
+    the patterns the mod reads (a test compiles each and holds it to the
+    Python on a spread of text)."""
+    flags = ""
+    while True:
+        found = re.match(r"\(\?([ims]+)\)", pattern)
+        if found is None:
+            break
+        flags += "".join(_INLINE_FLAGS[letter] for letter in found.group(1) if _INLINE_FLAGS[letter] not in flags)
+        pattern = pattern[found.end():]
+    pattern = _UNICODE_ESCAPE.sub(_js_escape, pattern).replace("\\Z", "(?![\\s\\S])")
+    return {"source": pattern, "flags": flags}
+
+
+def coach_patterns() -> dict[str, object]:
+    """What ``plugin/hooks/lib/coach.js`` reads to decide the hints the
+    capture hook decides by text: a status check, a change request, a reply
+    that asks, a tool call that changes a file, a background launch.
+    Pattern names are the catalogue's, lower-cased, less ``_PATTERN``."""
+    c = capture_catalogue
+    names = (
+        "STATUS", "GO", "ASKS", "REVIEW", "ACK", "CHANGE", "CONFIG_PATH", "SHELL_WRITE", "BACKGROUND_LAUNCH",
+        "TASK_NOTIFICATION_CALL", "REPLY_FENCE", "REPLY_TIP_BLOCK", "REPLY_INLINE_CODE", "REPLY_URL",
+        "REPLY_QUOTED", "REPLY_REMINDER_LINE", "REPLY_TAGS", "REPLY_LIST_START", "REPLY_UNIT",
+    )
+    out: dict[str, object] = {name.lower(): js_pattern(getattr(c, f"{name}_PATTERN")) for name in names}
+    out.update(
+        {
+            "status_max_chars": c.STATUS_MAX_CHARS,
+            "go_max_chars": c.GO_MAX_CHARS,
+            "change_scan_chars": c.CHANGE_SCAN_CHARS,
+            "background_scan_chars": c.BACKGROUND_SCAN_CHARS,
+            "reply_scan_chars": c.REPLY_SCAN_CHARS,
+            "reply_question_trim": c.REPLY_QUESTION_TRIM,
+            "task_notification_prefix": c.TASK_NOTIFICATION_PREFIX,
+            "edit_tools": list(c.EDIT_TOOLS),
+            "feedback_skill": c.FEEDBACK_SKILL,
+        }
+    )
+    return out
+
+
 # -- the files ------------------------------------------------------------------
 
 
@@ -189,6 +251,12 @@ def export() -> dict[str, str]:
                 "THRESHOLDS": capture_catalogue.COACHING_THRESHOLDS,
                 "TIPS": capture_catalogue.COACHING_TIP,
                 "HOW": capture_catalogue.COACHING_HOW,
+                # What ``split_run`` says an agent run did, and the agent
+                # types the coaching never covers (the agents feature).
+                "SPLIT_WHY": capture_catalogue.COACHING_SPLIT_WHY,
+                "SKIP_AGENT_TYPES": list(capture_catalogue.SKIP_AGENT_TYPES),
+                # The patterns the hints decided by text read (``coach.js``).
+                "PATTERNS": coach_patterns(),
                 # The hints the mod delivers itself, which the capture hook
                 # leaves out while the mod runs (``MOVED_TO_MOD``), and the
                 # words its sensor file may carry (``SENSOR_VOCAB``), as

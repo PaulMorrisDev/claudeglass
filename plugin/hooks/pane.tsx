@@ -1,6 +1,8 @@
 import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, PaneOpenArgs, Register, RenderElement, RenderInput } from 'claude-code'
 
+import type { GlassPin, GlassReview } from '../types'
+import { emptyReview, sound } from './compaction-memory'
 import { COPY, GLOSSARY } from './generated/copy.js'
 import { emptySnap } from './live'
 import { drawView } from './view'
@@ -19,12 +21,31 @@ const pageAtom = atom({ plugin: 'claudeglass', key: 'page' } as const, 'now')
 const explainAtom = atom({ plugin: 'claudeglass', key: 'explain' } as const, null)
 const helpAtom = atom({ plugin: 'claudeglass', key: 'help' } as const, false)
 const copiedAtom = atom({ plugin: 'claudeglass', key: 'copied' } as const, false)
+const pinsAtom = atom({ plugin: 'claudeglass', key: 'pins' } as const, [] as GlassPin[])
+const reviewAtom = atom({ plugin: 'claudeglass', key: 'review' } as const, emptyReview())
 
 export const PANE_ID = 'glass'
 
 export type PaneInput = RenderInput<'Pane'>
 
 export type PageState = { explain: string | null; help: boolean; copied: boolean }
+
+/**
+ * What a page can do beyond drawing, spelled out here because Claude Code follows
+ * `$` only within the file that holds it. The compaction page uses these.
+ */
+export type PageKit = {
+  /** Puts `text` in the prompt box as the person's draft; false when the box can't take it. */
+  fill: (text: string) => Promise<boolean>
+  /** Changes the pins. */
+  updatePins: (change: (pins: GlassPin[]) => GlassPin[]) => Promise<void>
+  /** Changes the compaction review's state. */
+  updateReview: (change: (review: GlassReview) => GlassReview) => Promise<void>
+  /** Turns an opt-in on or off and keeps the choice. */
+  setOption: (key: string, enabled: boolean) => Promise<void>
+  /** Asks a model a question: its answer and the tokens it used, or why it could not. */
+  ask: (model: string, prompt: string, maxTokens: number) => Promise<{ text: string; input: number; output: number } | { reason: string }>
+}
 
 /**
  * What a page draws from. Claude Code follows `$` only within the file that
@@ -39,6 +60,12 @@ export type PageContext = {
   explain: (key: string) => void
   /** Copies `text` to the surface the press came from. */
   copy: (text: string, surface: PaneInput['surface']) => void
+  /** The pins, and the compaction review as the page was drawn. */
+  pins: GlassPin[]
+  review: GlassReview
+  /** The two opt-ins of the compaction review. */
+  options: { hold: boolean; readd: boolean }
+  kit: PageKit
 }
 
 export type CopyKey = keyof typeof COPY
@@ -125,7 +152,40 @@ export const register: Register = on => {
     const table = $.ui.resolve(e)
     const { Box, Text, Button, Link } = table
 
+    const kit: PageKit = {
+      fill: async text => {
+        try {
+          return (await $.prompt.fill({ text, mode: 'replace' })).isFilled
+        } catch {
+          return false
+        }
+      },
+      updatePins: async change => {
+        await update($, pinsAtom, was => change(was))
+      },
+      updateReview: async change => {
+        await update($, reviewAtom, was => change(sound(was)))
+      },
+      setOption: async (key, enabled) => {
+        await $.store.set(key, enabled)
+        await update($, reviewAtom, was => ({ ...sound(was) }))
+      },
+      ask: async (model, prompt, maxTokens) => {
+        try {
+          const answer = await $.model.complete({ model, prompt, maxTokens, effort: 'low', timeoutMs: 60000 })
+          if (!answer.isAnswered) return { reason: answer.reason }
+          return { text: answer.text, input: answer.usage.input_tokens, output: answer.usage.output_tokens }
+        } catch {
+          // No model call in this Claude Code, or it refused the request.
+          return { reason: 'unavailable' }
+        }
+      },
+    }
     const context: PageContext = {
+      pins: await read($, pinsAtom),
+      review: sound(await read($, reviewAtom)),
+      options: { hold: (await $.store.get('hold')) === true, readd: (await $.store.get('readd')) === true },
+      kit,
       e,
       table,
       view,

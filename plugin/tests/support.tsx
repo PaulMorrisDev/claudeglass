@@ -41,6 +41,12 @@ export type World = {
   seen: Record<string, Record<string, unknown>>
   /** The rate-limit windows session.measure reports. */
   limits: Limit[]
+  /** How many times each component reached the bottom of the render chain: once for every draw of it. */
+  draws: Record<string, number>
+  /** What session.messages reports: the transcript so far (a test fills it). */
+  transcript: unknown[]
+  /** The window and summarising point session.usage reports (a 200k window and a 160k point when left out). */
+  shape: { window?: number; point?: number }
 }
 
 export function settingsFile(over: Record<string, unknown> = {}): string {
@@ -87,13 +93,14 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
   mock.env(on, { CLAUDE_CONFIG_DIR: '/cfg' })
   const files = new Map<string, string>()
   if (options.settings !== null) files.set(`${CONFIG}/claudeglass/mod/settings.json`, options.settings ?? settingsFile())
-  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [] }
+  const world: World = { clock, files, logs: [], figures: () => {}, opened: [], copied: [], next: { usage: { cacheRead: 0, cacheWrite: 0, output: 0 }, tools: [] }, usd: 0, turns: 0, seen: {}, limits: [], draws: {}, transcript: [], shape: {} }
   let current = usageFor(0, 0)
   world.figures = (tokens, usd) => {
-    current = usageFor(tokens, usd)
+    current = usageFor(tokens, usd, world.shape)
   }
   on('session.id', () => ({ value: options.session ?? SESSION }) as never)
   on('session.surfaces', () => ({ value: ['terminal'] }) as never)
+  on('session.messages', () => ({ value: world.transcript }) as never)
   on('session.usage', () => ({ value: current }) as never)
   // The engine makes a path absolute (C:\cfg\... on Windows); the files are kept by the path as the mod wrote it.
   const key = (path: string) => path.replace(/[\\]/g, '/').replace(/^[A-Za-z]:/, '')
@@ -122,12 +129,13 @@ export function prepare(on: On, options: { settings?: string | null; now?: numbe
   // What sits under the mod's hooks: an empty Box, as the host's own drawing stands.
   on('ui.render', ($, e) => {
     world.seen[e.component] = e.props as Record<string, unknown>
+    world.draws[e.component] = (world.draws[e.component] ?? 0) + 1
     const { Box } = $.ui.resolve(e)
     return <Box />
   })
   on('session.start', (_$, e) => ({ cwd: e.cwd }))
   on('session.measure', (_$, e) => ({ changed: e.changed }))
-  on('session.end', (_$, e) => ({ reason: e.reason }) as never)
+  on('session.end', (_$, e) => ({ sessionId: e.sessionId, reason: e.reason }) as never)
   on('turn.start', (_$, e) => ({ turnId: e.turnId }))
   on('turn.complete', () => ({ text: 'done' }))
   on('turn.step', async function* (_$, e) {

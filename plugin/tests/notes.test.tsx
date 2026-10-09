@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { faults, notes, prepare, reply, START } from './support'
+import { faults, notes, prepare, reply, settingsFile, START } from './support'
 import type { Step, World } from './support'
 
 const MINUTE = 60 * 1000
@@ -50,7 +50,8 @@ test('the rest rule holds the same note back for half an hour', async ($, on) =>
 })
 
 test('a context close to the summary point earns the replies-left note', async ($, on) => {
-  const world = prepare(on)
+  // Eight replies at this size also add up to a piece of work big enough to ask for a rating: muted, to see the other note.
+  const world = prepare(on, { settings: settingsFile({ coaching: { muted: ['rating_reminder'] } }) })
   const at = await run($, world, 8, MINUTE, 6000, 100000)
   expect(at.length).toBeGreaterThanOrEqual(1)
   expect(notes(world)[0]).toMatch(/^● Glass · About \d+ repl(?:y|ies) before Claude summarises\. If this task is done, \/compact or \/clear now\.$/)

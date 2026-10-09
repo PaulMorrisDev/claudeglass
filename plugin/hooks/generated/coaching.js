@@ -53,6 +53,110 @@ export const HOW = {
   }
 };
 
+export const SPLIT_WHY = {
+  "both": "agent runs had to summarise their own context part-way through or began from a brief of {brief_chars} characters or more",
+  "brief": "an agent run began from a brief of {brief_chars} characters or more",
+  "compaction": "an agent run had to summarise its own context part-way through"
+};
+
+export const SKIP_AGENT_TYPES = [
+  "statusline-setup",
+  "output-style-setup"
+];
+
+export const PATTERNS = {
+  "ack": {
+    "flags": "",
+    "source": "(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no)(?:[\\s!.,]+(?:thanks?|thank you|thx|ty|ok(?:ay)?|great|perfect|nice|cool|awesome|lgtm|looks good|all good|good|done|yes|yep|no))*[\\s!.,]*"
+  },
+  "asks": {
+    "flags": "",
+    "source": "\\s*(?:what|which|who|whom|whose|where|when|why|how)\\b"
+  },
+  "background_launch": {
+    "flags": "",
+    "source": "Command running in background with ID: |was moved to the background \\(ID: |Async agent launched successfully|Workflow launched in background\\. Task ID: "
+  },
+  "background_scan_chars": 400,
+  "change": {
+    "flags": "",
+    "source": "(?:^|[.!?;:,\\n])\\s*(?:(?:so|now|also|and|then|next|ok|okay|yes|yep|yeah|sure|right|great|nice|good|cool|thanks|thank you|perfect|plus|finally|first|lastly)[\\s,.!:;\\-\\u2013\\u2014]+)*(?:(?:(?:can|could|would|will) (?:you|we)(?: please)?|please|let'?s|let us|(?:we|you) (?:should|need to|have to|must|can|could)|(?:i|we) (?:want|need|would like|would love) (?:you |us |it |this |that )?to|i'?d (?:like|love) (?:you |us |it )?to)\\s+)?(?:add|create|build|implement|make|move|migrate|refactor|rename|remove|delete|update|change|replace|write|fix|set|convert|integrate|split|extract|port|upgrade|wire up|introduce|drop|rewrite|redesign|clean up|support|improve|tweak|adjust|enable|disable|increase|decrease|reduce|hide|use|switch|swap|put|ensure|apply|align|resize|restyle|polish|simplify|shorten|lengthen|expand|center|centre|style|colou?r|highlight|trim|tidy|reorder|sort|group|wrap|turn|bump|revert|undo|install|configure|rebuild|regenerate|reword|rephrase|relocate|tighten|loosen|darken|lighten|enlarge|shrink|widen|narrow|rotate|flip)\\b(?!\\s*:|\\s+(?:[\\w'-]+\\s+)?(?:is|isn'?t|was|wasn'?t|are|were|has|had|failed|fails|broke|breaks|works|worked|looks|seems|still|doesn'?t|didn'?t|won'?t)\\b|\\s+(?:for|of)\\b)"
+  },
+  "change_scan_chars": 600,
+  "config_path": {
+    "flags": "",
+    "source": "(?:^|[\\\\/])\\.claude(?:[\\\\/]|$)"
+  },
+  "edit_tools": [
+    "Edit",
+    "Write",
+    "MultiEdit",
+    "NotebookEdit"
+  ],
+  "feedback_skill": "cg-feedback",
+  "go": {
+    "flags": "",
+    "source": "(?:please\\s+)?(?:(?:once|when|after) (?:that'?s |it'?s |this is |everything is )?(?:done|complete|completed|finished|ready)[\\s,\\-–—:]+)?(?:(?:yes|yep|yeah|yup|ok(?:ay)?|sure|agreed?|approved?|lgtm|looks good|sounds good)(?:[\\s,.!]+(?:(?:continue|keep going|carry on|proceed|go ahead|go on|go)(?:[\\s,]+(?:and|then))?[\\s,]+(?:(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*)|continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan|(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*|(?:do|go with|pick|take)\\s+(?:option\\s+|number\\s+|step\\s+)?(?:\\d{1,2}|one|two|three|a|b|c)(?:\\s*(?:,|and|&)\\s*(?:\\d{1,2}|one|two|three|a|b|c))*(?:\\s+first)?))?|(?:(?:continue|keep going|carry on|proceed|go ahead|go on|go)(?:[\\s,]+(?:and|then))?[\\s,]+(?:(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*)|continue|keep going|carry on|proceed|go ahead|go on|go|do it|do that|go for it|(?:implement|execute|apply|carry out|run|start|begin)(?: (?:the|this|that|my|your))? plan|(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run)(?:[\\s,]+(?:merge|push|ship|deploy|release|publish|commit|tag|run|rerun|re-run|it|that|this|them|these|those|everything|all|all of it|again|up|out|in|into|to|on|now|then|and|too|as well|also|the (?:tests?|test suite|suite|changes|lot|build|release|branch|pr|pull request|fix|work|script|app)|tests?|(?:a )?new (?:version|release)|a release|main|master|origin|prod|production|github|remote))*|(?:do|go with|pick|take)\\s+(?:option\\s+|number\\s+|step\\s+)?(?:\\d{1,2}|one|two|three|a|b|c)(?:\\s*(?:,|and|&)\\s*(?:\\d{1,2}|one|two|three|a|b|c))*(?:\\s+first)?))(?:[\\s,.!]+(?:please|now|thanks|thank you))*[\\s!.,]*"
+  },
+  "go_max_chars": 60,
+  "reply_fence": {
+    "flags": "s",
+    "source": "```.*?(?:```|(?![\\s\\S]))"
+  },
+  "reply_inline_code": {
+    "flags": "",
+    "source": "`[^`\\n]*`"
+  },
+  "reply_list_start": {
+    "flags": "",
+    "source": "^\\s*(?:[-*+\\u2022]|\\d{1,3}[.)])\\s+"
+  },
+  "reply_question_trim": "*_`\"')]>~”’",
+  "reply_quoted": {
+    "flags": "",
+    "source": "[\\\"\\u201C][^\\\"\\u201C\\u201D\\n]{0,120}[\\\"\\u201D]"
+  },
+  "reply_reminder_line": {
+    "flags": "m",
+    "source": "^.*Finished\\? Run /(?:cg|tl)-feedback.*\\n?"
+  },
+  "reply_scan_chars": 1200,
+  "reply_tags": {
+    "flags": "i",
+    "source": "(?:\\[(?:cg|tl|result|cg-fb|tl-fb):[^\\[\\]\\n]{0,400}\\][`*_.\\s]*){1,3}\\s*$"
+  },
+  "reply_tip_block": {
+    "flags": "m",
+    "source": "^[ \\t]*>[ \\t]*(?:\\uD83D\\uDCA1\\uFE0F?[ \\t]*)?[*_]*ClaudeGlass(?: tip)?:.*(?:\\n[ \\t]*>.*)*\\n?"
+  },
+  "reply_unit": {
+    "flags": "",
+    "source": "(?<=[.!?])\\s+|\\n+"
+  },
+  "reply_url": {
+    "flags": "",
+    "source": "https?://\\S+|www\\.\\S+"
+  },
+  "review": {
+    "flags": "",
+    "source": "\\s*(?:please\\s+)?(?:(?:can|could|would) you\\s+(?:please\\s+)?)?(?:review|audit|check|look (?:at|over|through|into)|read|explain|summari[sz]e|analy[sz]e|investigate|inspect|explore|compare|assess|evaluate|critique|list|show|tell me|describe|walk me through|go through|examine|proofread|verify)\\b"
+  },
+  "shell_write": {
+    "flags": "",
+    "source": "(?:\\b(?:sed|perl)\\b[^\\n|;&]*?\\s-(?:[A-Za-z]*i[A-Za-z]*(?=[\\s.]|$)|-in-place\\b)|\\b(?:Set|Add)-Content\\b|\\[(?:System\\.)?IO\\.File\\]::(?:WriteAll(?:Text|Lines|Bytes)|AppendAll(?:Text|Lines))|\\b(?:cat|echo|printf)\\b[^\\n|;&]*?(?<![\\d&])>>?(?!&)[ \\t]*(?!/dev/null|nul\\b|\\$null)[^\\s&|;>]|\\b(?:cat|echo|printf)\\b[^\\n]*\\|[ \\t]*tee\\b[ \\t]+(?:-a[ \\t]+)?(?!/dev/null|nul\\b)[^\\s&|;>-]|(?:^|[;\\n(&|])[ \\t]*(?:[\\\"'$@]|(?:echo|write-output|write|get-content|gc|cat|type)\\b)[^\\n;]*\\|[ \\t]*(?:out-file|tee-object)\\b)"
+  },
+  "status": {
+    "flags": "",
+    "source": "(?:(?:hi|hey|ok|okay|so|and|well)[\\s,.!]+)?(?:how(?:'?s| is| are)(?: it| this| that| everything| things| the [a-z]+(?: [a-z]+)?)? (?:going|progressing|looking|coming(?: along)?|doing)|what(?:'?s| is)(?: the)? (?:status|progress|state|remaining|left|happening|going on)|(?:is|are)(?: it| this| that| everything| they| we)? (?:all )?(?:done|finished|complete|completed|merged|running|ready|working|still (?:running|working|going))|are you (?:still )?(?:working|running|there|done|finished)|any (?:updates?|progress|news|findings|results?)|where are we(?: at| now)?|status|progress|updates?|how (?:long|much) (?:is )?(?:left|remaining|to go))(?:[\\s,.!?]+(?:now|yet|so far|please|there|at the moment|currently))*[\\s!.,?]*"
+  },
+  "status_max_chars": 120,
+  "task_notification_call": {
+    "flags": "",
+    "source": "<tool-use-id>([^<\\s]+)</tool-use-id>"
+  },
+  "task_notification_prefix": "<task-notification"
+};
+
 export const MOVED = [
   "big_paste",
   "cold_return",
