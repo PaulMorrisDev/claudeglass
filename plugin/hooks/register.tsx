@@ -11,6 +11,7 @@ import { register as now } from './page-now'
 import { register as agentsPage } from './page-agents'
 import { register as pane } from './pane'
 import { register as compactionPage } from './page-compaction'
+import { register as instructionsPage } from './page-instructions'
 import { register as pins } from './pins'
 import { register as rebuildLog } from './rebuild-log'
 import { register as spinner } from './spinner'
@@ -38,4 +39,5 @@ export const register: Register = (on, options) => {
   compaction(on, options)
   pins(on, options)
   compactionPage(on, options)
+  instructionsPage(on, options)
 }

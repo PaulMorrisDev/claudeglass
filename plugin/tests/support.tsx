@@ -46,7 +46,7 @@ export type World = {
   /** What session.messages reports: the transcript so far (a test fills it). */
   transcript: unknown[]
   /** The window and summarising point session.usage reports (a 200k window and a 160k point when left out). */
-  shape: { window?: number; point?: number }
+  shape: { window?: number; point?: number; buffer?: number }
 }
 
 export function settingsFile(over: Record<string, unknown> = {}): string {
@@ -61,7 +61,12 @@ export function settingsFile(over: Record<string, unknown> = {}): string {
   })
 }
 
-export function usageFor(tokens: number, usd: number, over: { point?: number; window?: number; startup?: number } = {}) {
+/**
+ * Claude Code's context figures for `tokens` in use. The breakdown names the summarising point
+ * (`autoCompactThreshold`) unless `over.buffer` is given: then it names an "Autocompact buffer" category
+ * instead and the point is the window less that, as on a machine whose Claude Code leaves the threshold out.
+ */
+export function usageFor(tokens: number, usd: number, over: { point?: number; window?: number; startup?: number; buffer?: number } = {}) {
   const window = over.window ?? WINDOW
   const point = over.point ?? POINT
   const startup = Math.min(over.startup ?? 18000, tokens)
@@ -74,11 +79,12 @@ export function usageFor(tokens: number, usd: number, over: { point?: number; wi
       breakdown: {
         maxTokens: window,
         percentage: (tokens / window) * 100,
-        autoCompactThreshold: point,
+        ...(over.buffer === undefined ? { autoCompactThreshold: point } : {}),
         categories: [
           { kind: 'used', name: 'System prompt', tokens: startup },
           { kind: 'used', name: 'Messages', tokens: tokens - startup },
-          { kind: 'free', name: 'Free space', tokens: Math.max(0, window - tokens) },
+          { kind: 'free', name: 'Free space', tokens: Math.max(0, window - tokens - (over.buffer ?? 0)) },
+          ...(over.buffer === undefined ? [] : [{ kind: 'buffer', name: 'Autocompact buffer', tokens: over.buffer }]),
         ],
       },
     },

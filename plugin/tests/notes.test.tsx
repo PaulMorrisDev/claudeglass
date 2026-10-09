@@ -57,3 +57,12 @@ test('a context close to the summary point earns the replies-left note', async (
   expect(notes(world)[0]).toMatch(/^● Glass · About \d+ repl(?:y|ies) before Claude summarises\. If this task is done, \/compact or \/clear now\.$/)
   expect(faults(world)).toEqual([])
 })
+
+test('with no room for another reply the note says Claude summarises after the next one, not "about 1 reply"', async ($, on) => {
+  // The big-result note would come first, at the first reply.
+  const world = prepare(on, { settings: settingsFile({ coaching: { muted: ['rating_reminder', 'result'] } }) })
+  const at = await run($, world, 3, MINUTE, 9000, 140000)
+  expect(at).toEqual([3])
+  expect(notes(world)[0]).toBe('● Glass · Claude summarises after the next reply. If this task is done, /compact or /clear now.')
+  expect(faults(world)).toEqual([])
+})

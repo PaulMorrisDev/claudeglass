@@ -1,7 +1,7 @@
 import type { Register } from 'claude-code'
 
 import { ratingCandidate } from './coach-mem'
-import { amountAfterAbout, formatTokens, withEst } from './fmt'
+import { amountOfAfterAbout, formatTokens, withEst } from './fmt'
 import { COPY } from './generated/copy.js'
 import { THRESHOLDS } from './generated/coaching.js'
 import { mayShow, noteAllowed, recordShown } from './lib/rest.js'
@@ -37,17 +37,17 @@ function candidates(end: TurnEnd): Candidate[] {
   if (cold !== null) {
     const tokens = cold.tokensAfter ?? view.tokens
     const usd = sendCost(view.rates, tokens, false, view.ttl)
-    found.push({ kind: 'cold_compaction', stake: usd, text: fill(COPY['note.cold.compaction'], { amount: withEst(amountAfterAbout(usd, settings), settings) }) })
+    found.push({ kind: 'cold_compaction', stake: usd, text: fill(COPY['note.cold.compaction'], { amount: withEst(amountOfAfterAbout(usd, snap, settings), settings) }) })
   }
 
   const left = view.replies
   if (left !== null && left <= RUNWAY_NOTE_REPLIES) {
-    found.push({ kind: 'runway', stake: view.tokens, text: left <= 1 ? COPY['note.runway.one'] : fill(COPY['note.runway'], { replies: left }) })
+    found.push({ kind: 'runway', stake: view.tokens, text: left < 1 ? COPY['note.runway.none'] : left === 1 ? COPY['note.runway.one'] : fill(COPY['note.runway'], { replies: left }) })
   }
 
   if (snap.turn.switched && snap.switches >= 2 && view.tokens > SWITCH_NOTE_TOKENS) {
     const usd = snap.turn.switchUsd
-    found.push({ kind: 'switch', stake: usd, text: fill(COPY['note.switch'], { amount: withEst(amountAfterAbout(usd, settings), settings) }) })
+    found.push({ kind: 'switch', stake: usd, text: fill(COPY['note.switch'], { amount: withEst(amountOfAfterAbout(usd, snap, settings), settings) }) })
   }
 
   const big = snap.turn.big

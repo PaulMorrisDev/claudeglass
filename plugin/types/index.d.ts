@@ -176,6 +176,12 @@ export type GlassSnap = {
   lastNoteReply: number | null
   /** Requests in the reply being worked on. */
   turnReqs: number
+  /** When the main reply being worked on began (ms); null between replies. Starts from subagents' turns are ignored while it is set. */
+  turnAt: number | null
+  /** What the reply being worked on has cost so far, in USD: each request priced from its usage, replaced by Claude Code's own figure at each measurement. */
+  turnUsd: number
+  /** False while `turnUsd` rests on the prices alone, with no measurement from Claude Code since the last request. */
+  turnExact: boolean
   turn: {
     rebuilds: GlassRebuild[]
     big: GlassItem | null

@@ -27,6 +27,7 @@ from __future__ import annotations
 COPY: dict[str, str] = {
     # -- Amounts, for the billing mode ------------------------------------
     "amount.share": "about {share} of your weekly limit",
+    "amount.share.limit": "about {share} of your 5-hour limit",
     "amount.list": "{dollars} list-price equivalent",
     "amount.est": "(est.)",
     # -- How full the context is, by state ---------------------------------
@@ -58,6 +59,21 @@ COPY: dict[str, str] = {
     "band.open": "Glass",
     "band.review": "Review",
     "band.review.before": "Review before compacting",
+    # The short forms the band uses when it narrows, one per segment that has a long one.
+    "band.limit.short": "5-hour limit {pct}%",
+    "band.runway.short": "{replies} replies left",
+    "band.runway.one.short": "1 reply left",
+    "band.point.short": "summarises at {tokens}",
+    "band.cache.ending.short": "resend within {time}",
+    "band.cache.cold.short": "cache expired (est.): about {amount}",
+    "band.cache.cold.plain": "cache expired (est.): the next send rewrites the context",
+    "band.cache.cold.plain.short": "cache expired (est.)",
+    "band.cache.warm.short": "warm for {time} more",
+    "band.pace.short": "limit runs out about {time}",
+    "band.agents.short": "{count} agents",
+    "band.agents.one.short": "1 agent",
+    "band.missing.short": "{count} may be missing",
+    "band.missing.one.short": "1 may be missing",
     # -- The spinner while Claude works -------------------------------------
     "spinner.suffix": "{pct}% full · +{amount}",
     # -- The hint line under the prompt -------------------------------------
@@ -69,6 +85,7 @@ COPY: dict[str, str] = {
     "note.lead": "Glass",
     "note.runway": "About {replies} replies before Claude summarises. If this task is done, /compact or /clear now.",
     "note.runway.one": "About 1 reply before Claude summarises. If this task is done, /compact or /clear now.",
+    "note.runway.none": "Claude summarises after the next reply. If this task is done, /compact or /clear now.",
     "note.result": "That {tool} output was about {tokens}, and every later reply re-reads it. Next time, ask for only the part you need.",
     "note.switch": "Switching model made that reply cost about {amount} extra. Pick one model per session where you can.",
     "note.effort": "Thinking was {pct}% of output over the last {replies} replies. For simple edits, a lower effort costs less.",
@@ -253,6 +270,59 @@ COPY: dict[str, str] = {
     "compaction.haiku.cost.amount": "{tokens} tokens, about {amount}",
     "compaction.haiku.skip": "Check with Haiku isn't available in this version of Claude Code.",
     "compaction.haiku.failed": "Haiku could not check, so the quick check stands.",
+    # -- Instructions page: what this session loaded into Claude's context ---
+    # Sizes are estimates (characters over the calibrated characters per
+    # token), so every figure arrives with "(est.)" already on it.
+    "instructions.none": "Nothing has loaded yet. What Claude reads for this session shows here once it starts.",
+    "instructions.headline": "Startup context is about {tokens}, from {count} items.",
+    "instructions.headline.one": "Startup context is about {tokens}, from 1 item.",
+    "instructions.largest": "Largest items",
+    "instructions.total": "Startup context: about {tokens}",
+    "instructions.advice.mcp": "The {server} MCP server puts about {tokens} of tool descriptions in every request. If this work doesn't need it, turn it off.",
+    "instructions.advice.file": "{name} is about {tokens}, and Claude re-reads it with every request. Trimming it makes every reply cheaper.",
+    "instructions.kind.system": "System prompt",
+    "instructions.kind.instructions": "CLAUDE.md and rules",
+    "instructions.kind.context": "Session details",
+    "instructions.kind.skills": "Skills",
+    "instructions.kind.tools": "Built-in tools",
+    "instructions.kind.deferred": "Deferred tools",
+    "instructions.kind.mcp": "MCP tools",
+    "instructions.kind.attachment": "Added during the session",
+    "instructions.name.tools": "Built-in tools ({count})",
+    "instructions.name.deferred": "Deferred tools ({count})",
+    "instructions.name.mcp": "{server} ({count} tools)",
+    "instructions.name.mcp.one": "{server} (1 tool)",
+    "instructions.times": "{name} x{count}",
+    "instructions.from.engine": "Claude Code itself",
+    "instructions.from.managed": "Your organisation's managed instructions",
+    "instructions.from.user": "Your user-level instructions",
+    "instructions.from.project": "The project's instructions",
+    "instructions.from.local": "Your private instructions for this project",
+    "instructions.from.memory": "Auto memory",
+    "instructions.from.imported": "Imported by another instructions file",
+    "instructions.from.scoped": "Loaded when Claude reached matching paths",
+    "instructions.from.rules": "A rules file",
+    "instructions.from.plugin": "A plugin",
+    "instructions.from.mcp": "The {server} MCP server",
+    "instructions.from.skill": "A skill",
+    "instructions.from.attachment": "Added by Claude Code during the session",
+    "instructions.detail.kind": "Kind: {kind}",
+    "instructions.detail.from": "From: {from}",
+    "instructions.detail.size": "Size: about {tokens}, {chars} characters",
+    "instructions.detail.live": "In every request: about {tokens}",
+    "instructions.detail.deferred": "These wait behind tool search until Claude asks for them.",
+    "instructions.detail.scoped": "Loaded in reply {reply}, when Claude reached a matching path.",
+    "instructions.detail.scoped.globs": "Loaded in reply {reply} because Claude reached a path matching {globs}.",
+    "instructions.detail.parent": "Imported by {path}",
+    "instructions.detail.biggest": "Largest: {names}",
+    "instructions.scoped.mark": "path-scoped, reply {reply}",
+    "instructions.deferred.mark": "loads when asked for",
+    "instructions.dashboard": "CLAUDE.md files in the dashboard",
+    "instructions.compare": "Claude Code counts {theirs} of startup context on the Now page. This list adds up to about {mine}.",
+    "instructions.compare.why": "The list estimates from text at a fixed rate. It leaves out the input schemas of tools, which are most of their size.",
+    "instructions.agents": "Agents and CLAUDE.md",
+    "instructions.agents.got": "Received it: {types}",
+    "instructions.agents.skipped": "Did not receive it: {types}",
 }
 
 
@@ -261,7 +331,8 @@ COPY: dict[str, str] = {
 GLOSSARY: dict[str, dict[str, str]] = {
     "full": {
         "title": "How full the context is",
-        "body": "The share of the room Claude Code allows before it summarises the conversation. It's the figure /context shows.",
+        "body": "The share of the context Claude Code allows, as /context shows it. "
+        "Claude summarises a little before 100%, at the mark on the bar.",
     },
     "runway": {
         "title": "Replies before Claude summarises",
@@ -284,7 +355,7 @@ GLOSSARY: dict[str, dict[str, str]] = {
     "cost": {
         "title": "Cost this session",
         "body": "What this session's requests cost at list price, from Claude Code's own figures. "
-        "On a subscription it's shown as a share of your weekly limit.",
+        "On a subscription it's shown as a share of your 5-hour limit when Claude Code reports it, else at list price.",
     },
     "cache": {
         "title": "Cache lifetime (TTL)",

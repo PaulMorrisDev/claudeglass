@@ -1,7 +1,7 @@
 import { atom, read } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import { amountAfterAbout, minutes, withEst } from './fmt'
+import { amountOfAfterAbout, minutes, withEst } from './fmt'
 import { COPY } from './generated/copy.js'
 import { emptySnap, flags } from './live'
 import { chooseHint, hintText } from './coach-mem'
@@ -27,11 +27,11 @@ const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, f
 function coldLine(view: View): string {
   const { settings, snap } = view
   flags.coldWarned = true
-  const cold = fill(COPY['hint.cold'], { minutes: minutes(view.now - (snap.lastTs ?? view.now)), amount: amountAfterAbout(sendCostNow(view, false), settings) })
+  const cold = fill(COPY['hint.cold'], { minutes: minutes(view.now - (snap.lastTs ?? view.now)), amount: amountOfAfterAbout(sendCostNow(view, false), snap, settings) })
   const startup = view.parts?.startup ?? snap.startupFirst
   const fresh =
     startup !== null && startup > 0
-      ? fill(COPY['hint.cold.clear'], { amount: amountAfterAbout(sendCost(view.rates, startup, false, view.ttl), settings) })
+      ? fill(COPY['hint.cold.clear'], { amount: amountOfAfterAbout(sendCost(view.rates, startup, false, view.ttl), snap, settings) })
       : ''
   return joinParts([cold, fresh])
 }
@@ -42,7 +42,7 @@ export function hintLine(view: View, surface = 'terminal'): string | null {
   const found = chooseHint(view)
   if (found !== null) return found.kind === 'cold_return' ? coldLine(view) : hintText(found, surface)
   if (cache === null || snap.lastTs === null || tokens <= 0 || !cache.isWarm || !view.detailed) return null
-  return withEst(fill(COPY['hint.send'], { amount: amountAfterAbout(sendCostNow(view, true), settings) }), settings)
+  return withEst(fill(COPY['hint.send'], { amount: amountOfAfterAbout(sendCostNow(view, true), snap, settings) }), settings)
 }
 
 export const register: Register = on => {

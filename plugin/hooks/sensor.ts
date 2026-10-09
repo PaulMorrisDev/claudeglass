@@ -25,9 +25,20 @@ export function isSurface(word: string | null): word is string {
   return word !== null && SURFACES.includes(word)
 }
 
+/**
+ * The events in time order, the newest MAX_EVENTS of them. A settled note carries the time it was
+ * shown, so it can arrive after events that are newer; the Python side replaces the rows from the
+ * file's first time on, so the file must start at the oldest row it keeps, and a row is dropped for
+ * being old, not for having been added early.
+ */
+export function newestEvents(events: readonly GlassSensorEvent[]): GlassSensorEvent[] {
+  const ordered = events.map((event, index) => ({ event, index })).sort((a, b) => a.event.ts - b.event.ts || a.index - b.index)
+  return ordered.slice(-MAX_EVENTS).map(one => one.event)
+}
+
 export function addEvent(snap: GlassSnap, event: GlassSensorEvent): void {
   snap.events.push(event)
-  if (snap.events.length > MAX_EVENTS) snap.events.splice(0, snap.events.length - MAX_EVENTS)
+  if (snap.events.length > MAX_EVENTS) snap.events = newestEvents(snap.events)
   snap.eventsDirty = true
 }
 
@@ -71,7 +82,7 @@ export function settleAtEnd(snap: GlassSnap, reason: string): void {
 
 export function sensorFile(snap: GlassSnap): string | null {
   if (snap.sessionId === null || !SESSION_ID.test(snap.sessionId)) return null
-  return JSON.stringify({ schema: 1, session_id: snap.sessionId, version: VERSION, events: snap.events.slice(-MAX_EVENTS) })
+  return JSON.stringify({ schema: 1, session_id: snap.sessionId, version: VERSION, events: newestEvents(snap.events) })
 }
 
 /** Rewrites the session's sensor file when its events changed. A failed write is tried again at the next turn. */

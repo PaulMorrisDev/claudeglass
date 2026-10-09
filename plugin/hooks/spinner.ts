@@ -13,8 +13,9 @@ const snapAtom = atom({ plugin: 'claudeglass', key: 'snap' } as const, emptySnap
 const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, null)
 const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, false)
 
-// While Claude works: how full the context is, and what this turn has cost so
-// far. On a subscription only the first, since a dollar change means little there.
+// While Claude works: how full the context is, and what this reply has cost so
+// far (snap.turnUsd). On a subscription only the first, since a dollar change
+// means little there.
 
 export const register: Register = on => {
   on('ui.render', { component: 'Spinner' }, async ($, e, next) => {
@@ -23,7 +24,8 @@ export const register: Register = on => {
     if (snap.reading === null) return next(e)
 
     const pct = percent(snap.reading.pct)
-    const spent = snap.cost !== null && snap.turnStartCost !== null ? snap.cost - snap.turnStartCost : null
+    // What this reply has cost so far: each request priced as it finishes, and Claude Code's own figure once it reports one.
+    const spent = snap.turnAt === null ? null : snap.turnUsd
     const text =
       settings.billing.mode === 'subscription' || !isVisibleChange(spent)
         ? fill(COPY['band.full'], { pct })

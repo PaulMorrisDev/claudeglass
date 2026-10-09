@@ -1,34 +1,38 @@
 import type { GlassSnap } from '../types'
 import type { Io } from './io'
+import { live } from './live'
 import { seconds } from './sensor'
 import { configDir } from './settings'
 
-// present.json: {"schema": 1, "sessions": {"<session id>": <epoch seconds>}},
-// read and written whole when a session starts and at most once a minute
-// after, so the capture hook can tell the mod is running for this session and
-// leave the notes the mod delivers to it. Entries older than a day are dropped.
+// <config dir>/mod/present/<session id>.json:
+//   {"schema": 1, "session_id": "<id>", "seen": <epoch seconds>}
+// One file per session, written whole when the session starts and again every
+// minute while it runs, so the capture hook can tell the mod is running for this
+// session and leave the notes the mod delivers to it (it counts a file seen within
+// ten minutes). The engine can't remove a file, so when the session ends the file
+// is written once more with `seen` at 0, which reads as not running; ClaudeGlass
+// deletes files a day old.
 
 export const BEAT_EVERY_MS = 60 * 1000
-export const KEEP_MS = 24 * 60 * 60 * 1000
+/** The ids the capture hook looks for: letters, digits and hyphens. Anything else writes nothing. */
+const PLAIN_ID = /^[A-Za-z0-9-]{1,64}$/
 
-/** present.json's content after `id` was seen at `now`, from the file's text as it was (or null). */
-export function presentFile(text: string | null, id: string, now: number): string {
-  const sessions: Record<string, number> = {}
-  if (text !== null) {
-    try {
-      const raw: unknown = JSON.parse(text)
-      const old = raw !== null && typeof raw === 'object' ? (raw as { sessions?: unknown }).sessions : null
-      if (old !== null && typeof old === 'object') {
-        for (const [key, value] of Object.entries(old as Record<string, unknown>)) {
-          if (typeof value === 'number' && Number.isFinite(value) && now - value * 1000 <= KEEP_MS) sessions[key] = value
-        }
-      }
-    } catch {
-      // A file that doesn't parse is started over.
-    }
+type Handle = { cancel: () => void }
+
+let timer: Handle | null = null
+
+/** The file's content for a session seen at `seen` (epoch seconds). */
+export function presentFile(id: string, seen: number): string {
+  return JSON.stringify({ schema: 1, session_id: id, seen })
+}
+
+async function write(io: Io, id: string, seen: number): Promise<void> {
+  if (!PLAIN_ID.test(id)) return
+  try {
+    await io.writeFile(`${await configDir(io)}/mod/present/${id}.json`, presentFile(id, seen))
+  } catch {
+    // The heartbeat is a courtesy; a failed write is tried again in a minute.
   }
-  sessions[id] = seconds(now)
-  return JSON.stringify({ schema: 1, sessions })
 }
 
 /** Marks the session as seen, at most once a minute unless `force`. */
@@ -37,16 +41,30 @@ export async function beat(io: Io, snap: GlassSnap, force = false): Promise<void
   const now = await io.now()
   if (!force && now - snap.lastBeat < BEAT_EVERY_MS) return
   snap.lastBeat = now
-  try {
-    const path = `${await configDir(io)}/mod/present.json`
-    let text: string | null = null
-    try {
-      text = await io.readFile(path)
-    } catch {
-      text = null
-    }
-    await io.writeFile(path, presentFile(text, snap.sessionId, now))
-  } catch {
-    // The heartbeat is a courtesy; a failed write is tried again in a minute.
-  }
+  await write(io, snap.sessionId, seconds(now))
+}
+
+/** Writes the heartbeat every minute from now on, for whichever session is current, until `leave`. Starts over if already running. */
+export function keepBeating(io: Io): void {
+  stopBeating()
+  timer = io.every(BEAT_EVERY_MS, () => {
+    void (async () => {
+      try {
+        await beat(io, await live(io), true)
+      } catch {
+        // Tried again in a minute.
+      }
+    })()
+  })
+}
+
+export function stopBeating(): void {
+  timer?.cancel()
+  timer = null
+}
+
+/** The session is over: the timer stops and the file says it is no longer seen. */
+export async function leave(io: Io, id: string): Promise<void> {
+  stopBeating()
+  await write(io, id, 0)
 }

@@ -2,11 +2,13 @@ import { expect, test } from 'claude-code/testing'
 
 import { SENSOR_VOCAB } from '../hooks/generated/coaching.js'
 import { VERSION } from '../hooks/generated/version.js'
+import { emptySnap } from '../hooks/live'
+import { addEvent, MAX_EVENTS, sensorFile } from '../hooks/sensor'
 import { faults, prepare, reply, SESSION, START, T0 } from './support'
 import type { Step, World } from './support'
 
 const MINUTE = 60 * 1000
-const PRESENT = '/cfg/claudeglass/mod/present.json'
+const PRESENT = `/cfg/claudeglass/mod/present/${SESSION}.json`
 const SENSOR = `/cfg/claudeglass/mod/sensor/${SESSION}.json`
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
 const COLD = { steps: [{ input: 1000, cacheRead: 0, cacheWrite: 120000, output: 200 }], usd: 0.45 }
@@ -35,27 +37,49 @@ async function hint($: Dollar): Promise<void> {
   await mounted.unmount()
 }
 
-test('present.json: written when a session starts, then at most once a minute, with old entries dropped', async ($, on) => {
+test('the heartbeat is one file per session, written at the start, every minute, and zeroed at the end', async ($, on) => {
   const world = prepare(on)
   const now = Math.floor(T0 / 1000)
-  world.files.set(PRESENT, JSON.stringify({ schema: 1, sessions: { 'old-one': now - 25 * 3600, 'recent-one': now - 3600 } }))
   await $.session.start(START)
 
-  expect(json(world, PRESENT)).toEqual({ schema: 1, sessions: { 'recent-one': now - 3600, [SESSION]: now } })
+  // The shape the capture hook reads: schema, the session's own id, and the seconds it was seen.
+  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: now })
+  expect([...world.files.keys()].filter(path => path.includes('/present'))).toEqual([PRESENT])
 
-  // Within a minute of the last write, a measurement leaves the file alone.
+  // A measurement within a minute of the last write leaves the file alone.
   world.files.set(PRESENT, 'kept')
   await reply($, world, FIRST)
   expect(world.files.get(PRESENT)).toBe('kept')
 
-  // After it, the next measurement writes it again, from whatever was there.
+  // After a minute the timer writes it again, with nothing else going on.
   await world.clock.advance(61 * 1000)
-  await reply($, world, { steps: [{ cacheRead: 120000, cacheWrite: 1000, output: 200 }], usd: 0.05 })
-  const beat = json(world, PRESENT)
-  expect(beat.schema).toBe(1)
-  expect(Object.keys(beat.sessions as object)).toEqual([SESSION])
-  expect((beat.sessions as { [id: string]: number })[SESSION]).toBeGreaterThan(now)
+  const first = json(world, PRESENT)
+  expect(first.schema).toBe(1)
+  expect(first.session_id).toBe(SESSION)
+  expect(Object.keys(first).sort()).toEqual(['schema', 'seen', 'session_id'])
+  expect(first.seen).toBeGreaterThan(now)
+
+  // And again a minute on, for as long as the session is open.
+  await world.clock.advance(60 * 1000)
+  expect(json(world, PRESENT).seen).toBeGreaterThan(first.seen as number)
+
+  // The engine can't remove a file: at the end it says the session is no longer seen, and the timer stops.
+  await $.session.end({ sessionId: SESSION, reason: 'exit' } as never)
+  expect(json(world, PRESENT)).toEqual({ schema: 1, session_id: SESSION, seen: 0 })
+  world.files.set(PRESENT, 'after the end')
+  await world.clock.advance(5 * 60 * 1000)
+  expect(world.files.get(PRESENT)).toBe('after the end')
   expect(faults(world)).toEqual([])
+})
+
+test('a session id the capture hook would not look for (an underscore) gets a sensor file but no heartbeat', async ($, on) => {
+  const world = prepare(on, { session: 'with_underscore' })
+  await $.session.start(START)
+  await world.clock.advance(61 * 1000)
+  await reply($, world, COLD)
+  await $.session.end({ sessionId: 'with_underscore', reason: 'exit' } as never)
+  expect([...world.files.keys()].filter(path => path.includes('/present'))).toEqual([])
+  expect([...world.files.keys()].filter(path => path.includes('/sensor/'))).toEqual(['/cfg/claudeglass/mod/sensor/with_underscore.json'])
 })
 
 test('the sensor file holds closed words and times only, in the shape the Python side reads', async ($, on) => {
@@ -118,5 +142,33 @@ test('a session id that is not a plain word writes no sensor file', async ($, on
   const world = prepare(on, { session: '../escape' })
   await $.session.start(START)
   await reply($, world, COLD)
+  await $.session.end({ sessionId: '../escape', reason: 'exit' } as never)
   expect([...world.files.keys()].filter(path => path.includes('/sensor/'))).toEqual([])
+  expect([...world.files.keys()].filter(path => path.includes('/present'))).toEqual([])
+})
+
+test('the sensor file keeps the newest events by time, oldest first, whatever order they were added in', async () => {
+  const snap = emptySnap()
+  snap.sessionId = SESSION
+  // A run of events, then a settled note that was shown long before them: it is the oldest row.
+  for (let i = 0; i < MAX_EVENTS; i += 1) addEvent(snap, { ts: 1000 + i, event: 'cold_send', outcome: 'warned' })
+  addEvent(snap, { ts: 10, event: 'note', kind: 'runway', surface: 'log', outcome: 'sent' })
+  addEvent(snap, { ts: 5000, event: 'cold_send', outcome: 'unwarned' })
+
+  // The old note is the row dropped, not the oldest of the run; the file starts at the oldest row kept.
+  expect(snap.events).toHaveLength(MAX_EVENTS)
+  expect(snap.events[0]?.ts).toBe(1001)
+  expect(snap.events.some(one => one.ts === 10)).toBe(false)
+  const file = JSON.parse(String(sensorFile(snap))) as { events: Event[] }
+  expect(file.events).toHaveLength(MAX_EVENTS)
+  expect(file.events.map(one => one.ts)).toEqual([...file.events.map(one => one.ts)].sort((a, b) => a - b))
+  expect(file.events[file.events.length - 1]?.ts).toBe(5000)
+
+  // Under the limit nothing is dropped, and a late note is written in its place in time.
+  const few = emptySnap()
+  few.sessionId = SESSION
+  addEvent(few, { ts: 300, event: 'cold_send', outcome: 'warned' })
+  addEvent(few, { ts: 100, event: 'note', kind: 'runway', surface: 'log', outcome: 'sent' })
+  const written = JSON.parse(String(sensorFile(few))) as { events: Event[] }
+  expect(written.events.map(one => one.ts)).toEqual([100, 300])
 })

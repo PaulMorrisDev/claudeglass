@@ -1,9 +1,10 @@
 import type { Register } from 'claude-code'
 
-import { amountAfterAbout, formatTokens, withEst } from './fmt'
+import { amountOfAfterAbout, formatTokens, withEst } from './fmt'
 import { COPY } from './generated/copy.js'
 import { fill } from './lib/text.js'
-import { limitShare, onTurnEnd } from './track'
+import { limitShare } from './limit'
+import { onTurnEnd } from './track'
 import type { TurnEnd } from './track'
 
 // The rebuild line: one line in the transcript when a reply paid to write the
@@ -36,7 +37,7 @@ async function write(end: TurnEnd): Promise<void> {
   if (pick === null) return
 
   const cause = COPY[`cause.${pick.cause}` as keyof typeof COPY]
-  const amount = withEst(amountAfterAbout(pick.usd, settings), settings)
+  const amount = withEst(amountOfAfterAbout(pick.usd, snap, settings), settings)
   const line = pick.expected
     ? fill(COPY['log.rebuild.expected'], { cause, amount })
     : fill(COPY['log.rebuild'], { tokens: formatTokens(pick.tokens), amount, cause })

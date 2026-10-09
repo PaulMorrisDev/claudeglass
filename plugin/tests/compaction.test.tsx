@@ -385,3 +385,24 @@ test('a prompt row can carry [p] pin, and the summary row [v] review', async ($,
   await mounted.unmount()
   expect(faults(world)).toEqual([])
 })
+
+test('straight after a summary the band reads the context as Claude Code reports it then, not as it was', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  await started($, world)
+
+  let mounted = await band($)
+  expect(elements(await mounted.drawn()).map(textOf).join(' ')).toMatch(/60% full/)
+  await mounted.unmount()
+
+  // The summary leaves 30k in the context; no measurement has come yet.
+  world.figures(30000, 0.5)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  await world.clock.advance(300)
+  mounted = await band($)
+  const text = elements(await mounted.drawn()).map(textOf).join(' ')
+  await mounted.unmount()
+  expect(text).toMatch(/15% full/)
+  expect(text).not.toMatch(/60% full/)
+  expect(faults(world)).toEqual([])
+})

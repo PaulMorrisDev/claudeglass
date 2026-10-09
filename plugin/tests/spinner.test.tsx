@@ -1,6 +1,6 @@
 import { expect, test } from 'claude-code/testing'
 
-import { faults, measured, prepare, reply, settingsFile, START } from './support'
+import { elements, faults, measured, prepare, reply, settingsFile, START, textOf } from './support'
 
 const SPINNER = { word: 'Thinking', message: null, suffix: '(3s)', mode: 'responding' } as const
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
@@ -40,4 +40,64 @@ test('the spinner leaves the suffix alone before there are figures', async ($, o
   const world = prepare(on)
   await $.session.start(START)
   expect(await suffix($, world, 'terminal')).toBe('(3s)')
+})
+
+/** Runs one model request of the reply in progress, with no measurement from Claude Code after it. */
+async function request($: Parameters<typeof reply>[0], world: Parameters<typeof reply>[1], index: number, step: { cacheRead: number; cacheWrite: number; output: number }): Promise<void> {
+  world.next = { usage: step, tools: [] }
+  const stream = $.turn.step({ turnId: 'turn-live', index, model: 'claude-sonnet-4-6', messageCount: 2 + index })
+  for await (const chunk of stream) void chunk
+  await stream.result
+  await world.clock.advance(300)
+}
+
+test('the spinner shows the reply cost as each request is priced, before Claude Code reports any cost, and keeps its own figure once it does', async ($, on) => {
+  const world = prepare(on)
+  await $.session.start(START)
+  await reply($, world, FIRST)
+
+  await $.turn.start({ text: 'more', turnId: 'turn-live' })
+  expect(await suffix($, world, 'terminal')).toBe('(3s) · 60% full')
+
+  // 120k read from the cache, 1k written, 200 out: $0.036 + $0.0038 + $0.003 = $0.04.
+  await request($, world, 0, { cacheRead: 120000, cacheWrite: 1000, output: 200 })
+  expect(await suffix($, world, 'terminal')).toBe('(3s) · 60% full · +$0.04')
+
+  // A subagent's turn starts in the middle of the reply: it does not begin the reply again.
+  await $.turn.start({ text: 'agent', turnId: 'turn-sub' })
+  await world.clock.advance(300)
+  expect(await suffix($, world, 'terminal')).toBe('(3s) · 60% full · +$0.04')
+
+  // Claude Code's number for the reply so far replaces the estimate, and the next request adds to it.
+  await $.session.measure(measured(121200, 0.6))
+  await world.clock.advance(300)
+  expect(await suffix($, world, 'terminal')).toBe('(3s) · 60% full · +$0.10')
+  await request($, world, 1, { cacheRead: 121000, cacheWrite: 1000, output: 200 })
+  expect(await suffix($, world, 'terminal')).toBe('(3s) · 60% full · +$0.14')
+  expect(faults(world)).toEqual([])
+})
+
+test('a reply that ends before Claude Code reports its cost is settled by the cost that follows', async ($, on) => {
+  const world = prepare(on)
+  await $.session.start(START)
+  await reply($, world, FIRST)
+
+  await $.turn.start({ text: 'more', turnId: 'turn-live' })
+  await request($, world, 0, { cacheRead: 120000, cacheWrite: 1000, output: 200 })
+  await $.turn.complete({ turnId: 'turn-live', reason: 'answer', answer: 'done', isAborted: false, durationMs: 1000 })
+  await world.clock.advance(300)
+
+  const change = async () => {
+    const mounted = await $.ui.mount({ plugin: 'claudeglass', surface: 'terminal', component: 'AbovePrompt', props: { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 200, scroll: undefined, view: undefined } as never })
+    const spend = elements(await mounted.drawn()).filter(one => one.type === 'Text').map(textOf).find(text => text.includes('this session'))
+    await mounted.unmount()
+    return spend
+  }
+  expect(await change()).toBe('$0.50 this session (+$0.04)')
+
+  world.figures(121200, 0.62)
+  await $.session.measure(measured(121200, 0.62))
+  await world.clock.advance(300)
+  expect(await change()).toBe('$0.62 this session (+$0.12)')
+  expect(faults(world)).toEqual([])
 })

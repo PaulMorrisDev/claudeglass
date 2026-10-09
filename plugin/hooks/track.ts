@@ -6,7 +6,7 @@ import { armCacheClock, stopCacheClock } from './cacheclock'
 import { COPY } from './generated/copy.js'
 import { drainSensor } from './compaction-memory'
 import { drainShown, endCoach, resetCoach } from './coach-mem'
-import { beat } from './heartbeat'
+import { beat, keepBeating, leave } from './heartbeat'
 import type { Io } from './io'
 import { emptySnap, emptyTurn, flags, flushNow, forget, live, restart, touch } from './live'
 import { cacheState } from './lib/cache.js'
@@ -33,6 +33,8 @@ const MAX_REPLIES = 100
 const MAX_REPLY_COSTS = 40
 const MAX_COMPACTIONS = 20
 const MAX_HEAVIEST = 5
+/** A reply that has made no request for this long, and has not been completed, is not still running: a new start is a new reply. */
+const TURN_STALE_MS = 15 * 60 * 1000
 /** A wait this long after a request that hit the usage limit counts as the limit's pause. */
 const LIMIT_PAUSE_MS = 60 * 1000
 /** A tool result this big is worth a note, for the tools whose output Claude isn't already coached on. */
@@ -134,6 +136,7 @@ export async function ensure($: EngineInterface): Promise<GlassSnap> {
   const fresh = await restart(io, { sessionId: id, surface })
   announcePresent(fresh, await $.clock.now())
   await beat(io, fresh, true)
+  keepBeating(io)
   return fresh
 }
 
@@ -141,24 +144,38 @@ function count(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
 }
 
-function pctPerUsd(snap: GlassSnap): number | null {
-  const base = snap.calBase
-  if (base === null || snap.fiveHour === null || snap.cost === null) return null
-  const usd = snap.cost - base.usd
-  const pct = snap.fiveHour.pct - base.pct
-  return usd >= 0.1 && pct >= 1 ? pct / usd : null
+/** The context as Claude Code reports it now (what /context shows). */
+async function refreshReading($: EngineInterface, snap: GlassSnap): Promise<void> {
+  const usage = await $.session.usage({ breakdown: 'summary' })
+  if (typeof usage.context.tokens === 'number') snap.reading = readContext(usage.context)
 }
 
-/** Percent of the 5-hour limit that `usd` of this session's spend has been worth in this window, or null when not known yet. */
-export function limitShare(snap: GlassSnap, usd: number): number | null {
-  const rate = pctPerUsd(snap)
-  return rate === null ? null : usd * rate
+/**
+ * Claude Code's cost figure, when it moves, is the reply's cost: during a reply it replaces
+ * the estimate from the requests priced so far (later requests add to it); after a reply that
+ * ended before any figure arrived it settles that reply's cost.
+ */
+function settleCost(snap: GlassSnap): void {
+  if (snap.cost === null || snap.turnStartCost === null) return
+  const spent = snap.cost - snap.turnStartCost
+  if (!(spent > 0)) return
+  if (snap.turnAt !== null) {
+    snap.turnUsd = spent
+    snap.turnExact = true
+  } else if (!snap.turnExact) {
+    snap.turnExact = true
+    snap.lastReplyUsd = spent
+    const last = snap.replyCosts[snap.replyCosts.length - 1]
+    if (last !== undefined) last.usd = spent
+  }
 }
 
 async function measure($: EngineInterface, snap: GlassSnap, cost: number | undefined, limits: readonly { kind: string; percentUsed: number; resetsAt?: string }[]): Promise<void> {
-  const usage = await $.session.usage({ breakdown: 'summary' })
-  if (typeof usage.context.tokens === 'number') snap.reading = readContext(usage.context)
-  if (typeof cost === 'number') snap.cost = cost
+  await refreshReading($, snap)
+  if (typeof cost === 'number') {
+    snap.cost = cost
+    settleCost(snap)
+  }
   const five = limits.find(one => one.kind === 'five_hour')
   if (five !== undefined) {
     const resetsAt = five.resetsAt ?? null
@@ -233,6 +250,8 @@ async function recordRequest(
     }
   }
 
+  snap.turnUsd += priceUsage(rates, usage, ttl)
+  snap.turnExact = false
   snap.mix.read += priceUsage(rates, { cache_read_input_tokens: cacheRead }, ttl)
   snap.mix.write += priceUsage(rates, { cache_creation_input_tokens: cacheWrite }, ttl)
   snap.mix.input += priceUsage(rates, { input_tokens: input }, ttl)
@@ -277,6 +296,7 @@ export const register: Register = on => {
         announcePresent(snap, await $.clock.now())
       }
       await beat(io, snap, true)
+      keepBeating(io)
       await touch(io)
       await $.command.register({ name: 'glass', description: COPY['pane.command'], argumentHint: '[detail | pin <text>]', immediate: true })
     } catch (error) {
@@ -294,7 +314,9 @@ export const register: Register = on => {
         settleAtEnd(snap, e.reason)
         drainSensor(snap)
         await writeSensor(io, snap)
+        snap.turnAt = null
       }
+      await leave(io, e.sessionId)
       stopCacheClock()
       if (e.reason === 'clear') await restart(io, { surface: snap.surface })
       else await flushNow(io)
@@ -324,18 +346,25 @@ export const register: Register = on => {
       const snap = await ensure($)
       const settings = await getSettings(io)
       const now = await $.clock.now()
-      stopCacheClock()
-      const ctx = snap.reading?.tokens ?? snap.reqs[snap.reqs.length - 1]?.ctx ?? 0
-      if (snap.lastTs !== null && ctx >= coldMin(settings) && !cacheState(snap.lastTs, now, settings.ttl).isWarm) {
-        addEvent(snap, { ts: seconds(now), event: 'cold_send', outcome: flags.coldWarned ? 'warned' : 'unwarned' })
+      // turn.start carries no agent id: a subagent's turn starts too, in the middle of the main reply, and must not begin it again.
+      const running = snap.turnAt !== null && now - Math.max(snap.turnAt, snap.lastTs ?? 0) < TURN_STALE_MS
+      if (!running) {
+        stopCacheClock()
+        const ctx = snap.reading?.tokens ?? snap.reqs[snap.reqs.length - 1]?.ctx ?? 0
+        if (snap.lastTs !== null && ctx >= coldMin(settings) && !cacheState(snap.lastTs, now, settings.ttl).isWarm) {
+          addEvent(snap, { ts: seconds(now), event: 'cold_send', outcome: flags.coldWarned ? 'warned' : 'unwarned' })
+        }
+        flags.coldWarned = false
+        drainShown(snap)
+        snap.turnAt = now
+        snap.turnStartCost = snap.cost
+        snap.turnUsd = 0
+        snap.turnExact = false
+        // A summary made between replies (a /compact) is still waiting for its note.
+        snap.turn = { ...emptyTurn(), compacted: snap.turn.compacted, compactedCold: snap.turn.compactedCold }
+        snap.turnReqs = 0
+        await touch(io)
       }
-      flags.coldWarned = false
-      drainShown(snap)
-      snap.turnStartCost = snap.cost
-      // A summary made between replies (a /compact) is still waiting for its note.
-      snap.turn = { ...emptyTurn(), compacted: snap.turn.compacted, compactedCold: snap.turn.compactedCold }
-      snap.turnReqs = 0
-      await touch(io)
     } catch (error) {
       $.ui.log(`claudeglass: turn.start ${String(error)}`, { to: 'debug' })
     }
@@ -367,11 +396,13 @@ export const register: Register = on => {
       const settings = await getSettings(io)
       const now = await $.clock.now()
       const last = snap.reqs[snap.reqs.length - 1]
+      snap.turnAt = null
       if (snap.turnReqs > 0 && last !== undefined) {
         snap.replies += 1
         snap.history.push(last.ctx)
         if (snap.history.length > MAX_REPLIES) snap.history.splice(0, snap.history.length - MAX_REPLIES)
-        const spent = snap.cost !== null && snap.turnStartCost !== null ? Math.max(0, snap.cost - snap.turnStartCost) : null
+        const known = snap.cost !== null && snap.turnStartCost !== null ? Math.max(0, snap.cost - snap.turnStartCost) : null
+        const spent = snap.turnUsd > 0 ? snap.turnUsd : known
         snap.lastReplyUsd = spent
         snap.replyCosts.push({ usd: spent ?? 0, ctx: last.ctx })
         if (snap.replyCosts.length > MAX_REPLY_COSTS) snap.replyCosts.splice(0, snap.replyCosts.length - MAX_REPLY_COSTS)
@@ -403,6 +434,12 @@ export const register: Register = on => {
         const settings = await getSettings(io)
         const now = await $.clock.now()
         recordCompaction(snap, settings, e.trigger, result.tokensBefore ?? null, result.tokensAfter ?? null, now)
+        // The band and the pane match /context straight away, not at the next measurement.
+        try {
+          await refreshReading($, snap)
+        } catch (error) {
+          $.ui.log(`claudeglass: session.compact reading ${String(error)}`, { to: 'debug' })
+        }
         for (const listener of compactListeners) {
           try {
             await listener({ io, snap, settings, now })

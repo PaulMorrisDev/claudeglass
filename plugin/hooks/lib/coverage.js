@@ -32,7 +32,17 @@
 
 import { contentWords, squash, trimText } from "./keeplist.js";
 
-/** @typedef {import("./keeplist.js").KeepItem} KeepItem */
+/**
+ * An item of the keep list (keeplist.js builds them).
+ * @typedef {Object} KeepItem
+ * @property {string} id
+ * @property {"pin"|"instruction"|"decision"|"error"|"task"|"file"|"value"} kind
+ * @property {string} text
+ * @property {boolean} safe
+ * @property {"recent"|"plan"|"claude-md"|""} why
+ * @property {string[]} exact
+ * @property {number} at
+ */
 
 /**
  * @typedef {"found"|"partly"|"missing"|"safe"} Mark
