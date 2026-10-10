@@ -62,6 +62,14 @@ def test_an_event_of_every_kind_is_kept_with_a_utc_time(raw):
         assert kept[field] == raw.get(field)
 
 
+@pytest.mark.parametrize("kind", ["auto", "manual", "plugin"])
+def test_a_compaction_of_every_trigger_that_is_reviewed_is_kept(kind):
+    # A summary a plugin starts is reviewed like the others; one made ahead (precompute) never reaches the sensor.
+    kept = mod_sensor.clean_event(_event("compaction", kind=kind, kept=3, missing=1, added=0))
+    assert kept is not None and kept["kind"] == kind
+    assert mod_sensor.clean_event(_event("compaction", kind="precompute", kept=3, missing=1, added=0)) is None
+
+
 def test_a_note_of_every_hint_and_every_mod_kind_is_kept():
     for kind in cat.SENSOR_NOTE_KINDS:
         assert mod_sensor.clean_event(_event("note", kind=kind, surface="note", outcome="sent")) is not None, kind

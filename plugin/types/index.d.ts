@@ -143,7 +143,7 @@ export type GlassSensorEvent =
   | { ts: number; event: 'note'; kind: string; surface: string; outcome: string }
   | { ts: number; event: 'rebuild'; kind: string; outcome: 'expected' | 'unexpected' }
   | { ts: number; event: 'cold_send'; outcome: 'warned' | 'unwarned' }
-  | { ts: number; event: 'compaction'; kind: 'auto' | 'manual'; kept: number; missing: number; added: number }
+  | { ts: number; event: 'compaction'; kind: GlassReviewTrigger; kept: number; missing: number; added: number }
 
 export type GlassPendingNote = {
   ts: number
@@ -261,10 +261,13 @@ export type GlassKeepItem = {
 
 export type GlassMark = 'found' | 'partly' | 'missing' | 'safe'
 
+/** What made a reviewed summary: the user's /compact, Claude Code at its threshold, or a plugin (a summary made ahead, `precompute`, is never reviewed). */
+export type GlassReviewTrigger = 'auto' | 'manual' | 'plugin'
+
 /** The check of the last summary against the keep list. */
 export type GlassReviewed = {
   ts: number
-  trigger: 'auto' | 'manual'
+  trigger: GlassReviewTrigger
   /** The summary Claude Code wrote (held in memory for the page; never written to disk). */
   summary: string
   items: GlassKeepItem[]
@@ -278,7 +281,7 @@ export type GlassReviewed = {
 /** One summary of this session, as the history lists it. */
 export type GlassReviewRow = {
   ts: number
-  trigger: 'auto' | 'manual'
+  trigger: GlassReviewTrigger
   before: number | null
   after: number | null
   kept: number
@@ -317,6 +320,8 @@ export type GlassReview = {
   suggest: number
   /** The keep list as of the last reply. */
   list: GlassKeepItem[]
+  /** Items the user put back after a summary lost them: kept in the list and sent to the summariser until a summary holds them. */
+  readded: GlassKeepItem[]
   after: GlassReviewed | null
   history: GlassReviewRow[]
   ui: GlassReviewUi

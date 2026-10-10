@@ -2,14 +2,13 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { GlassKeepItem, GlassPin, GlassReview, GlassSettings } from '../types'
-import { drainSensor, emptyReview, forgetMemory, keepList, memory, reviewCompaction, boundaryLine, sound, suggestCount, withSummary } from './compaction-memory'
+import { drainSensor, emptyReview, forgetMemory, INSTRUCT_LEAD, keepInstruction, keepList, memory, reviewCompaction, boundaryLine, sound, suggestCount, tickedItems, withReadded, withSummary } from './compaction-memory'
 import type { BoundaryDetail, MessageLike } from './compaction-memory'
 import { amountOfAfterAbout } from './fmt'
 import { COPY } from './generated/copy.js'
 import { holdAfterReply, holdStep, saidTotal } from './lib/coverage.js'
 import { buildKeepList, squash } from './lib/keeplist.js'
 import { priceUsage, ratesFor } from './lib/pricing.js'
-import { fill } from './lib/text.js'
 import { emptySnap, soundSnap } from './live'
 import { soundSettings } from './settings'
 import { onTurnEnd } from './track'
@@ -18,8 +17,9 @@ import { onTurnEnd } from './track'
 // conversation (in $.state, for the page and the band). At a summary of the main
 // session: the list as it stood is checked against the summary Claude Code wrote,
 // the result goes to $.state, one line to the transcript, and counts to the sensor.
-// Two opt-ins, both off until the user turns them on in the page: hold an automatic
-// summary once for review, and tell Claude the pins again after a summary.
+// Every summary (a /compact, an automatic one, a plugin's and one made ahead) is told
+// the ticked keep list as instructions for the summariser. One opt-in, off until the
+// user turns it on in the page: hold an automatic summary once for review.
 // Nothing the user or Claude wrote is written to disk: the keep list and the
 // summary live in $.state and module memory only.
 
@@ -31,9 +31,8 @@ const reviewAtom = atom({ plugin: 'claudeglass', key: 'review' } as const, empty
 const settingsAtom = atom({ plugin: 'claudeglass', key: 'settings' } as const, null as GlassSettings | null)
 const detailedAtom = atom({ plugin: 'claudeglass', key: 'detailed' } as const, false)
 
-/** The two opt-ins live in $.store under these keys; the page turns them on and off. */
+/** The opt-in lives in $.store under this key; the page turns it on and off. */
 export const HOLD_KEY = 'hold'
-export const READD_KEY = 'readd'
 const MAX_CLAUDE_MD = 200000
 
 function joinPath(base: string, name: string): string {
@@ -83,12 +82,23 @@ function pinnableOf(messages: readonly MessageLike[]): string | null {
 async function refresh($: EngineInterface): Promise<void> {
   const messages = (await $.session.messages()) as readonly MessageLike[]
   const pins = await read($, pinsAtom)
-  const items = keepList(messages, pins, await claudeMdOf($), memory.cwd)
-  memory.pinnable = pinnableOf(messages)
   const review = sound(await read($, reviewAtom))
-  const suggest = suggestCount(items)
+  // Items put back after a summary lost them are no longer in the messages, so they are merged in.
+  const items = withReadded(keepList(messages, pins, await claudeMdOf($), memory.cwd), review.readded)
+  memory.pinnable = pinnableOf(messages)
+  const suggest = suggestCount(items, review.readded)
   if (same(review.list, items) && review.suggest === suggest) return
   await update($, reviewAtom, (was): GlassReview => ({ ...sound(was), list: items, suggest }))
+}
+
+/** What the summariser is told to keep: the ticked items of the keep list, or of a rescan of the messages when the list is empty. */
+async function keepFor($: EngineInterface, messages: readonly MessageLike[]): Promise<string> {
+  const review = sound(await read($, reviewAtom))
+  const pins = await read($, pinsAtom)
+  const empty = review.list.length === 0 && review.readded.length === 0 && pins.length === 0
+  // The list is as of the last reply; a rescan costs time the hook has little of, so it waits for an empty list.
+  const now = empty ? { ...review, list: keepList(messages, pins, await claudeMdOf($), memory.cwd) } : review
+  return keepInstruction(tickedItems(now, pins))
 }
 
 export const register: Register = on => {
@@ -112,10 +122,11 @@ export const register: Register = on => {
   })
 
   // The summary of the main session. A subagent's own summary has an agentId and is left alone.
-  on('session.compact', { trigger: /^(manual|auto)$/ }, async ($, e, next) => {
-    if (e.agentId !== undefined || (e.trigger !== 'manual' && e.trigger !== 'auto')) return next(e)
+  on('session.compact', { trigger: /^(manual|auto|plugin|precompute)$/ }, async ($, e, next) => {
+    if (e.agentId !== undefined) return next(e)
+    const trigger = e.trigger
     try {
-      if (e.trigger === 'auto') {
+      if (trigger === 'auto') {
         const reading = (await read($, snapAtom)).reading
         const step = holdStep({
           enabled: (await $.store.get(HOLD_KEY)) === true,
@@ -132,15 +143,26 @@ export const register: Register = on => {
           if (step.first) void $.ui.toast(COPY['compaction.held.toast'])
           return { skip: COPY['compaction.held.skip'] }
         }
-      } else {
+      } else if (trigger !== 'precompute') {
         memory.hold = 'none'
       }
     } catch (error) {
       $.ui.log(`claudeglass: hold ${String(error)}`, { to: 'debug' })
     }
 
-    const result = await next(e)
-    if (result.skip !== undefined) return result
+    // The keep list goes to the summariser on every summary, after whatever the user typed after /compact.
+    let given = e
+    try {
+      // A /compact the page drafted already carries the list, so it is not sent twice.
+      const drafted = INSTRUCT_LEAD !== '' && (e.instructions ?? '').trimStart().startsWith(INSTRUCT_LEAD)
+      const keep = drafted ? '' : await keepFor($, e.messages)
+      if (keep !== '') given = { ...e, instructions: [e.instructions, keep].filter(Boolean).join('\n\n') }
+    } catch (error) {
+      $.ui.log(`claudeglass: keep instructions ${String(error)}`, { to: 'debug' })
+    }
+    const result = await next(given)
+    // A summary made ahead installs nothing yet: there is nothing to check, record or say.
+    if (trigger === 'precompute' || result.skip !== undefined) return result
     try {
       const summary = result.messages.find(message => message.role === 'user' && message.text.trimStart().startsWith('This session is being continued'))?.text ?? result.messages[0]?.text ?? ''
       const now = await $.clock.now()
@@ -150,7 +172,8 @@ export const register: Register = on => {
         pins: await read($, pinsAtom),
         claudeMd: await claudeMdOf($),
         cwd: memory.cwd,
-        trigger: e.trigger,
+        readded: sound(await read($, reviewAtom)).readded,
+        trigger,
         now,
         before: result.tokensBefore ?? null,
         after: result.tokensAfter ?? null,
@@ -167,29 +190,12 @@ export const register: Register = on => {
       }
       const line = boundaryLine(done.counts, saidTotal(done.reviewed.items), detail)
       if (line !== null) $.ui.log(line)
-      memory.outbox.push({ ts: now, kind: e.trigger, counts: done.counts })
+      memory.outbox.push({ ts: now, kind: trigger, counts: done.counts })
       memory.pinnable = null
     } catch (error) {
       $.ui.log(`claudeglass: compaction review ${String(error)}`, { to: 'debug' })
     }
     return result
-  }).catch(($, e, next) => next(e))
-
-  // After a summary, tell Claude the pins again (an opt-in).
-  on('classic.SessionStart', { source: 'compact' }, async ($, e, next) => {
-    const result = await next(e)
-    // A subagent's own summary is not the session's: its context is not given the pins.
-    if (e.agent_id !== undefined) return result
-    try {
-      if ((await $.store.get(READD_KEY)) !== true) return result
-      const pins = await read($, pinsAtom)
-      if (pins.length === 0) return result
-      const text = fill(COPY['compaction.readd'], { items: pins.map(pin => pin.text).join('; ') })
-      return { ...result, additionalContext: [...(result.additionalContext ?? []), text] }
-    } catch (error) {
-      $.ui.log(`claudeglass: re-add pins ${String(error)}`, { to: 'debug' })
-      return result
-    }
   }).catch(($, e, next) => next(e))
 
   // A /clear starts the keep list over; pins do not survive it.

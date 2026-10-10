@@ -529,7 +529,8 @@ export const register: Register = on => {
   on('session.compact', async ($, e, next) => {
     const io = kit($)
     const result = await next(e)
-    if (e.agentId === undefined && result.skip === undefined && (e.trigger === 'manual' || e.trigger === 'auto')) {
+    // A summary made ahead (precompute) installs nothing, so it is not recorded.
+    if (e.agentId === undefined && result.skip === undefined && e.trigger !== 'precompute') {
       try {
         const snap = await ensure($)
         const settings = await getSettings(io)

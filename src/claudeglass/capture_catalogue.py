@@ -779,7 +779,7 @@ SENSOR_NOTE_OUTCOMES = ("sent", "clear", "compact", "none")
 SENSOR_REBUILD_KINDS = ("limit", "compaction", "expiry", "prefix", "unknown")
 SENSOR_REBUILD_OUTCOMES = ("expected", "unexpected")
 SENSOR_COLD_OUTCOMES = ("warned", "unwarned")
-SENSOR_COMPACTION_KINDS = ("auto", "manual")
+SENSOR_COMPACTION_KINDS = ("auto", "manual", "plugin")
 #: ``{event: {field: allowed words}}``, the words above by event.
 SENSOR_VOCAB: dict[str, dict[str, tuple[str, ...]]] = {
     "present": {"surface": SENSOR_PRESENT_SURFACES},

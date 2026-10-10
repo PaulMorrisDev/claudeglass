@@ -400,12 +400,11 @@ which are most of a tool's size, so the lead says "(est.)".
 
 ### Settings
 
-The three on/off options sit in one place. In the Detailed view, press
+The two on/off options sit in one place. In the Detailed view, press
 **Settings** in the footer and the page shows them below its content, each
 with its one-line detail directly under it: **Ask before a costly send** (the
-[guard](#the-guard)), **Hold auto-compact for review** and **Re-add pins after
-compaction** (see [The two options](#the-two-options)). Press **Hide
-settings** to close them. They also close when you leave the Detailed view
+[guard](#the-guard)) and **Hold auto-compact for review** (see
+[The option](#the-option)). Press **Hide settings** to close them. They also close when you leave the Detailed view
 or open What these mean, and don't come back until you press Settings again.
 No page holds a switch of its own, and the Simple view has no Settings
 button; `/glass guard` still works there.
@@ -499,12 +498,15 @@ The Detailed view adds three more things:
 - **History** lists each summary in the session. A row has the time, whether
   it ran on its own or you ran `/compact`, tokens before and after, and items
   kept and missing. A link opens compactions on the dashboard.
-- **Choose what to keep next time** opens the before view. The two
-  switches that go with the review are under [Settings](#settings).
+- **Choose what to keep next time** opens the before view. The
+  switch that goes with the review is under [Settings](#settings).
 
-### The two options
+### The option
 
-Both are off until you turn them on, in [Settings](#settings).
+Every summary, whether you ran `/compact`, Claude summarised on its own or a
+plugin started it, is told your ticked keep list as instructions for the
+summariser. Anything you typed after `/compact` comes first. This needs no
+switch. The one option is off until you turn it on, in [Settings](#settings).
 
 - **Hold auto-compact for review**. When Claude is about to
   summarise on its own, the mod waits once, so you can review and compact at
@@ -513,8 +515,6 @@ Both are off until you turn them on, in [Settings](#settings).
   point of 300,000 on a 1 million window. It never holds twice in a row, and
   never on a 200,000 window. If you ignore it, the next automatic summary
   runs as normal.
-- **Re-add pins after compaction**. After each summary, the mod
-  tells Claude your pins again, so they are in its context.
 
 ## Prompt help
 
@@ -640,7 +640,7 @@ the mod.
 ## What it never does
 
 - It never changes a setting of Claude Code or ClaudeGlass for you. The
-  switches in Settings (the guard, hold and re-add) change only the mod's
+  switches in Settings (the guard and hold) change only the mod's
   own behaviour, and only when you press them.
 - It never sends a message for you. Every draft it makes, an Add back note, a
   `/compact` command, a shorter prompt, goes into the prompt box for you to

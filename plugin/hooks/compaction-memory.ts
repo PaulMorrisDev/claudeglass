@@ -1,6 +1,6 @@
-import type { GlassKeepItem, GlassMark, GlassPin, GlassReview, GlassReviewed, GlassReviewRow, GlassSnap } from '../types'
+import type { GlassKeepItem, GlassMark, GlassPin, GlassReview, GlassReviewed, GlassReviewRow, GlassReviewTrigger, GlassSnap } from '../types'
 import { COPY } from './generated/copy.js'
-import { checkCoverage } from './lib/coverage.js'
+import { checkCoverage, compactKeep, KEEP_MAX } from './lib/coverage.js'
 import type { HoldState } from './lib/coverage.js'
 import { buildKeepList, exactTokens, itemId, pinText, splitSuggested, squash, trimText } from './lib/keeplist.js'
 import { fill } from './lib/text.js'
@@ -25,6 +25,8 @@ export const MAX_PINS = 20
 export const MAX_EARLIER = 12
 const EARLIER_CHARS = 300
 const MAX_HISTORY = 20
+/** Items the keep list suggests (ticked from the start) before the rest sit behind "more". */
+export const SUGGESTED_SHOWN = 5
 /** The summary Claude Code puts first after a compaction starts with this. */
 export const SUMMARY_LEAD = 'This session is being continued'
 
@@ -33,7 +35,7 @@ export type Counts = { kept: number; missing: number; added: number }
 /** What a render hook or another file leaves for the event hooks (a render may not write $.state). */
 export const memory: {
   /** The sensor counts of summaries, waiting for the next reply (or the summary's own listener) to record them. */
-  outbox: { ts: number; kind: 'auto' | 'manual'; counts: Counts }[]
+  outbox: { ts: number; kind: GlassReviewTrigger; counts: Counts }[]
   /** Where the hold of automatic summaries stands (lib/coverage.js holdStep). */
   hold: HoldState
   /** CLAUDE.md as the mod can read it (project and user level), or null when not read yet. */
@@ -75,6 +77,7 @@ export function emptyReview(): GlassReview {
     held: false,
     suggest: 0,
     list: [],
+    readded: [],
     after: null,
     history: [],
     ui: { view: 'before', toggled: [], summary: false, list: false, earlier: false, busy: false, note: null },
@@ -83,7 +86,9 @@ export function emptyReview(): GlassReview {
 
 /** A review state from the host, whatever it holds (an older shape, or nothing). */
 export function sound(review: GlassReview | null | undefined): GlassReview {
-  return review === null || review === undefined || !Array.isArray(review.list) ? emptyReview() : review
+  if (review === null || review === undefined || !Array.isArray(review.list)) return emptyReview()
+  // A state kept from before items could be put back has no `readded`.
+  return Array.isArray(review.readded) ? review : { ...review, readded: [] }
 }
 
 /** Whether a message is the summary Claude Code puts first, not something the user typed. */
@@ -115,10 +120,53 @@ export function keepList(messages: readonly MessageLike[], pins: readonly GlassP
   return buildKeepList(messages as MessageLike[], { pins: pins as GlassPin[], claudeMd, cwd }) as GlassKeepItem[]
 }
 
-/** How many items the before view suggests. */
-export function suggestCount(items: readonly GlassKeepItem[]): number {
-  return splitSuggested(items as GlassKeepItem[]).suggested.length
+/** The rebuilt keep list with the items put back after a summary lost them: after the pins, and none twice. */
+export function withReadded(items: readonly GlassKeepItem[], readded: readonly GlassKeepItem[]): GlassKeepItem[] {
+  const held = new Set(items.map(item => item.id))
+  const back = readded.filter(item => !held.has(item.id))
+  const pins = items.filter(item => item.kind === 'pin')
+  return [...pins, ...back, ...items.filter(item => item.kind !== 'pin')]
 }
+
+/** What the keep list offers now: the pins as they stand, then the list as of the last reply with the put-back items in it. */
+export function keepCandidates(review: GlassReview, pins: readonly GlassPin[]): GlassKeepItem[] {
+  return withReadded(listWithPins(review.list, pins), review.readded)
+}
+
+/** The items suggested (ticked from the start) and the rest; put-back items count as suggested, whatever their kind, and come right after the pins. */
+export function splitKeep(items: readonly GlassKeepItem[], readded: readonly GlassKeepItem[], limit: number = SUGGESTED_SHOWN): { suggested: GlassKeepItem[]; more: GlassKeepItem[] } {
+  const back = new Set(readded.map(item => item.id))
+  const { suggested, more } = splitSuggested(items.filter(item => !back.has(item.id)) as GlassKeepItem[], limit)
+  const pinned = suggested.filter(item => item.kind === 'pin')
+  return { suggested: [...pinned, ...items.filter(item => back.has(item.id)), ...suggested.filter(item => item.kind !== 'pin')], more }
+}
+
+/** Whether an item's tick is on: suggested items start on, the rest off, and an id in `toggled` is the other way round. */
+export function isTicked(toggled: readonly string[], id: string, suggested: boolean): boolean {
+  return toggled.includes(id) ? !suggested : suggested
+}
+
+/** The items the keep list has ticked, in list order: what the page's command and the summariser's instructions carry. */
+export function tickedItems(review: GlassReview, pins: readonly GlassPin[]): GlassKeepItem[] {
+  const items = keepCandidates(review, pins)
+  const { suggested, more } = splitKeep(items, review.readded)
+  const order = new Map(items.map((item, index) => [item.id, index]))
+  const chosen = [...suggested.filter(item => isTicked(review.ui.toggled, item.id, true)), ...more.filter(item => isTicked(review.ui.toggled, item.id, false))]
+  return chosen.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
+}
+
+/** The text that tells the summariser what to keep: the ticked items in the words of `compaction.instruct`, or "" when there are none. */
+export function keepInstruction(chosen: readonly GlassKeepItem[]): string {
+  return compactKeep(chosen as GlassKeepItem[], COPY['compaction.instruct'], KEEP_MAX, { files: COPY['compaction.label.files'], values: COPY['compaction.label.values'] })
+}
+
+/** How many items the before view suggests: the put-back items count, whatever their kind, as the ticks show them. */
+export function suggestCount(items: readonly GlassKeepItem[], readded: readonly GlassKeepItem[]): number {
+  return splitKeep(items, readded).suggested.length
+}
+
+/** The start of the summariser's keep instruction ("Keep: "), as `compaction.instruct` words it. */
+export const INSTRUCT_LEAD = COPY['compaction.instruct'].split('{items}')[0] ?? ''
 
 /** What to say when the summary has just been written, or null when there was nothing to check. */
 export function reviewCompaction(args: {
@@ -127,12 +175,14 @@ export function reviewCompaction(args: {
   pins: readonly GlassPin[]
   claudeMd: string | null
   cwd?: string | null
-  trigger: 'auto' | 'manual'
+  /** Items put back after an earlier summary lost them; they are no longer in `messages`, so they are checked from here. */
+  readded?: readonly GlassKeepItem[]
+  trigger: GlassReviewTrigger
   now: number
   before: number | null
   after: number | null
 }): { reviewed: GlassReviewed; row: GlassReviewRow; counts: Counts } {
-  const items = keepList(args.messages, args.pins, args.claudeMd, args.cwd ?? null)
+  const items = withReadded(keepList(args.messages, args.pins, args.claudeMd, args.cwd ?? null), args.readded ?? [])
   const coverage = checkCoverage(items, args.summary)
   const reviewed: GlassReviewed = {
     ts: args.now,
@@ -158,6 +208,8 @@ export function withSummary(review: GlassReview, reviewed: GlassReviewed, row: G
     seen: row.missing === 0,
     held: false,
     list: reviewed.items,
+    // An item the summary now holds is no longer sent to the summariser as put back.
+    readded: review.readded.filter(item => !['found', 'safe'].includes(reviewed.marks[item.id] ?? '')),
     after: reviewed,
     history,
     ui: { ...review.ui, view: 'after', toggled: [], summary: false, list: false, earlier: false, busy: false, note: null },

@@ -15,7 +15,7 @@ import type { View } from './view'
 // Hotkeys go on the page bar and on each page's one main action; every other
 // control is a quiet Button the focus ring still reaches, and rows are text.
 // The footer's dashboard link is the page's own (its `dashboard`), and Detailed's
-// Settings button opens the three on/off options under whichever page is open:
+// Settings button opens the two on/off options under whichever page is open:
 // no page holds an option of its own.
 
 // Claude Code reads a state reference only where its literal is written, so each file that
@@ -266,13 +266,12 @@ export const register: Register = on => {
     }
     const body = page === undefined ? null : state.help ? null : await page.render(context)
     const link = (page?.dashboard ?? dashboardLink)(view)
-    // The three on/off options, in one place: each a toggle with its one-line detail directly under it.
+    // The two on/off options, in one place: each a toggle with its one-line detail directly under it.
     const settingsOpen = view.detailed && !state.help && state.explain === 'settings'
-    const stored = { guard: (await $.store.get('guard')) === true, hold: (await $.store.get('hold')) === true, readd: (await $.store.get('readd')) === true }
+    const stored = { guard: (await $.store.get('guard')) === true, hold: (await $.store.get('hold')) === true }
     const options = [
       { id: 'guard', label: COPY['guard.opt'], detail: COPY['guard.opt.detail'], on: stored.guard, words: [COPY['guard.opt.on'], COPY['guard.opt.off']] },
       { id: 'hold', label: COPY['compaction.opt.hold'], detail: COPY['compaction.opt.hold.detail'], on: stored.hold, words: [COPY['compaction.on'], COPY['compaction.off']] },
-      { id: 'readd', label: COPY['compaction.opt.readd'], detail: COPY['compaction.opt.readd.detail'], on: stored.readd, words: [COPY['compaction.on'], COPY['compaction.off']] },
     ]
 
     return (

@@ -1,11 +1,10 @@
 import type { Register, RenderElement } from 'claude-code'
 
-import type { GlassKeepItem, GlassMark, GlassReviewUi, GlassSettings } from '../types'
-import { listWithPins, memory } from './compaction-memory'
+import type { GlassKeepItem, GlassMark, GlassReviewed, GlassReviewUi, GlassSettings } from '../types'
+import { isTicked, keepCandidates, memory, splitKeep, SUGGESTED_SHOWN, tickedItems } from './compaction-memory'
 import { amount, formatTokens, localTime } from './fmt'
 import { COPY } from './generated/copy.js'
 import { addBackNote, compactKeep, judgePrompt, KEEP_MAX, MARK_SYMBOL, missingSaid, parseJudge, saidTotal, tally } from './lib/coverage.js'
-import { splitSuggested } from './lib/keeplist.js'
 import { priceUsage } from './lib/pricing.js'
 import { fill, joinParts } from './lib/text.js'
 import { addPage } from './pane'
@@ -30,7 +29,6 @@ const JUDGE_ANSWER_TOKENS = 600
 const LABELS = { files: COPY['compaction.label.files'], values: COPY['compaction.label.values'] }
 /** What the first screen lists: the missing items after a summary, the suggested ticks before one. */
 const MISSING_SHOWN = 4
-const SUGGESTED_SHOWN = 5
 const EARLIER_SHOWN = 8
 const LABEL_CHARS = 100
 
@@ -57,11 +55,11 @@ function markWord(mark: GlassMark): string {
 }
 
 function isOn(ui: GlassReviewUi, item: GlassKeepItem, suggested: boolean): boolean {
-  return ui.toggled.includes(item.id) ? !suggested : suggested
+  return isTicked(ui.toggled, item.id, suggested)
 }
 
-function trigger(reviewed: { trigger: 'auto' | 'manual' }): string {
-  return reviewed.trigger === 'auto' ? COPY['compaction.trigger.auto'] : COPY['compaction.trigger.manual']
+function trigger(reviewed: { trigger: GlassReviewed['trigger'] }): string {
+  return COPY[`compaction.trigger.${reviewed.trigger}` as Copy]
 }
 
 export function dashboardAddress(base: string | null): string | null {
@@ -238,12 +236,10 @@ function render(context: PageContext): RenderElement {
   }
 
   // Before a summary: what it should keep, as ticks.
-  const items = listWithPins(review.list, pins)
-  const { suggested, more } = splitSuggested(items, SUGGESTED_SHOWN)
-  const ticked = (list: readonly GlassKeepItem[], isSuggested: boolean) => list.filter(item => isOn(ui, item, isSuggested))
-  const chosen = [...ticked(suggested, true), ...ticked(more, false)]
-  const order = new Map(items.map((item, index) => [item.id, index]))
-  chosen.sort((a, b) => (order.get(a.id) ?? 0) - (order.get(b.id) ?? 0))
+  const items = keepCandidates(review, pins)
+  const { suggested, more } = splitKeep(items, review.readded, SUGGESTED_SHOWN)
+  // The same choice the summariser is told at the next summary (compaction-memory.ts), so the page and the hook agree.
+  const chosen = tickedItems(review, pins)
   const nothing = suggested.length === 0 && more.length === 0
 
   children.push(

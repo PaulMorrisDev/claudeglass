@@ -412,12 +412,12 @@ test('Simple has no Settings button; Detailed has one quiet button that opens al
   expect(settings?.props.label).toBe('Settings')
   expect(settings?.props.dimColor).toBe(true)
   expect(settings?.props.hotkey).toBeUndefined()
-  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/Ask before a costly send|Hold auto-compact|Re-add pins/)
+  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/Ask before a costly send|Hold auto-compact/)
 
   await mounted.press({ key: 'settings' })
   const tree = await mounted.drawn()
   const options = elements(tree).filter(one => one.type === 'Button' && String(one.props?.key).startsWith('opt:'))
-  expect(options.map(one => String(one.props?.label))).toEqual(['Ask before a costly send: Off', 'Hold auto-compact for review: Off', 'Re-add pins after compaction: Off'])
+  expect(options.map(one => String(one.props?.label))).toEqual(['Ask before a costly send: Off', 'Hold auto-compact for review: Off'])
   expect(options.every(one => one.props?.dimColor === true && one.props?.hotkey === undefined)).toBe(true)
   // Each option's detail is a dim Text in the same Box, directly under it, with no padding.
   for (const option of options) {

@@ -2,6 +2,8 @@ import { expect, test } from 'claude-code/testing'
 import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
+import { emptyReview } from '../hooks/compaction-memory'
+import type { GlassKeepItem, GlassReview } from '../types'
 import { elements, faults, prepare, reply, SESSION, SITE, START, textOf, usageFor } from './support'
 import type { World } from './support'
 
@@ -31,13 +33,16 @@ const SUMMARY_MESSAGE = { role: 'user', text: SUMMARY, toolUses: [] }
 
 type Dollar = Engine
 
-type Bottoms = { filled: string[]; submitted: string[] }
+type Bottoms = { filled: string[]; submitted: string[]; compacts: { trigger: string; agentId?: string; instructions?: string; messages: readonly unknown[] }[] }
 
 /** What sits under the review: the transcript, the summary a compaction writes, and a prompt box that records its drafts. */
 function bottoms(on: On, world: World): Bottoms {
-  const seen: Bottoms = { filled: [], submitted: [] }
+  const seen: Bottoms = { filled: [], submitted: [], compacts: [] }
   world.transcript = [...MESSAGES]
-  on('session.compact', () => ({ messages: [SUMMARY_MESSAGE], tokensBefore: 150000, tokensAfter: 30000 }) as never)
+  on('session.compact', (_$, e) => {
+    seen.compacts.push(e)
+    return { messages: [SUMMARY_MESSAGE], tokensBefore: 150000, tokensAfter: 30000 } as never
+  })
   on('prompt.fill', (_$, e) => {
     seen.filled.push(e.text)
     return { isFilled: true }
@@ -46,7 +51,6 @@ function bottoms(on: On, world: World): Bottoms {
     seen.submitted.push(String(e.text))
     return e as never
   })
-  on('classic.SessionStart', () => ({}) as never)
   return seen
 }
 
@@ -83,8 +87,8 @@ function showsPage(tree: unknown, name: string): boolean {
   return elements(tree).some(one => one.type === 'Text' && one.props?.bold === true && textOf(one) === name)
 }
 
-/** Turns an opt-in on the way a person does: the Detailed view of the Compaction page. */
-async function turnOn($: Dollar, key: 'hold' | 'readd'): Promise<void> {
+/** Turns the hold on the way a person does: the Detailed view of the Compaction page. */
+async function turnOn($: Dollar, key: 'hold'): Promise<void> {
   await $.command.run({ command: 'glass', args: 'detail' } as never)
   const mounted = await pane($)
   // The page showing is drawn as bold text; any other page has its tab on the bar, and that is what gets pressed.
@@ -94,10 +98,10 @@ async function turnOn($: Dollar, key: 'hold' | 'readd'): Promise<void> {
   }
   expect(showsPage(await mounted.drawn(), 'Compaction')).toBe(true)
   // The options are on the pane's Settings view, not on this page.
-  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/Hold auto-compact|Re-add pins/)
+  expect(lines(await mounted.drawn()).join('\n')).not.toMatch(/Hold auto-compact/)
   await mounted.press({ key: 'settings' } as never)
   await mounted.press({ key: `opt:${key}` } as never)
-  expect(lines(await mounted.drawn()).join('\n')).toMatch(key === 'hold' ? /Hold auto-compact for review: On/ : /Re-add pins after compaction: On/)
+  expect(lines(await mounted.drawn()).join('\n')).toMatch(/Hold auto-compact for review: On/)
   await mounted.unmount()
 }
 
@@ -218,7 +222,7 @@ test('the review page opens on what may be missing and one note that puts it bac
 
 test('the second line says everything is in the summary, or that nothing needed keeping; one missing item reads in the singular; more than four are counted', async ($, on) => {
   const world = prepare(on)
-  const seen: Bottoms = { filled: [], submitted: [] }
+  const seen: Bottoms = { filled: [], submitted: [], compacts: [] }
   const written = { summary: '' }
   world.transcript = [...MESSAGES]
   // The summary each compaction writes is set before it.
@@ -227,7 +231,6 @@ test('the second line says everything is in the summary, or that nothing needed 
     seen.filled.push(e.text)
     return { isFilled: true }
   })
-  on('classic.SessionStart', () => ({}) as never)
   await started($, world)
 
   // The summary carries both constraints, so nothing is missing.
@@ -321,7 +324,7 @@ test('the summary, the full list with marks, the earlier messages and the histor
   const more = lines(await detailed.drawn()).join('\n')
   expect(more).toMatch(/you ran \/compact|on its own/)
   expect(more).toMatch(/150k to 30k/)
-  expect(more).not.toMatch(/Hold auto-compact|Re-add pins/)
+  expect(more).not.toMatch(/Hold auto-compact/)
   expect(more).toMatch(/Choose what to keep next time/)
   const links = elements(await detailed.drawn()).filter(one => one.type === 'Link')
   expect(links).toHaveLength(1)
@@ -434,13 +437,6 @@ test('/glass pin adds a pin that comes first in the list and survives a summary;
   mounted = await pane($)
   expect(lines(await mounted.drawn()).join('\n')).toMatch(/3 things you asked for may be missing:/)
   await mounted.unmount()
-
-  // Re-adding pins is an opt-in: off, the session start after a summary adds nothing; on, it adds the pin.
-  expect(await $.classic.SessionStart({ source: 'compact' } as never)).not.toHaveProperty('additionalContext')
-  await turnOn($, 'readd')
-  const result = (await $.classic.SessionStart({ source: 'compact' } as never)) as { additionalContext?: string[] }
-  expect(result.additionalContext).toEqual(['Before the summary, you pinned: rotate the staging key before friday.'])
-  expect(await $.classic.SessionStart({ source: 'startup' } as never)).not.toHaveProperty('additionalContext')
 
   await $.session.end({ sessionId: SESSION, reason: 'clear' } as never)
   mounted = await pane($)
@@ -603,5 +599,179 @@ test('straight after a summary the band reads the context as Claude Code reports
   await mounted.unmount()
   expect(text).toMatch(/15% full/)
   expect(text).not.toMatch(/60% full/)
+  expect(faults(world)).toEqual([])
+})
+
+/** What the test sees of the review state: the last value written, and a way to seed the items put back (no press does that yet). */
+type Watch = { readonly latest: GlassReview; seed: (items: GlassKeepItem[]) => void }
+
+function watchReview(on: On): Watch {
+  let latest = emptyReview()
+  let seeded: GlassKeepItem[] | null = null
+  on('state.set', async (_$, e, next) => {
+    if (e.plugin === 'claudeglass' && e.key === 'review') {
+      latest = e.value as GlassReview
+      // What the mod wrote back is the put-back items as they stand now.
+      if (seeded !== null) seeded = latest.readded
+    }
+    return next(e)
+  })
+  on('state.get', async (_$, e, next) => {
+    const got = await next(e)
+    if (seeded === null || e.plugin !== 'claudeglass' || e.key !== 'review') return got
+    const held = got.value as { value?: Record<string, unknown>; version: number } | undefined
+    return { value: { version: held?.version ?? 0, value: { ...(held?.value ?? emptyReview()), readded: seeded } } } as never
+  })
+  return {
+    get latest() {
+      return seeded === null ? latest : { ...latest, readded: seeded }
+    },
+    seed: items => {
+      seeded = items
+    },
+  }
+}
+
+test('every summary is told the keep list as instructions, after whatever the user typed, on every trigger', async ($, on) => {
+  const world = prepare(on)
+  const seen = bottoms(on, world)
+  await started($, world)
+
+  await $.session.compact({ trigger: 'manual', instructions: 'Focus on the API.', messages: MESSAGES } as never)
+  const manual = seen.compacts.at(-1)
+  expect(manual?.trigger).toBe('manual')
+  expect(manual?.messages).toEqual(MESSAGES)
+  expect(manual?.instructions?.startsWith('Focus on the API.\n\nKeep: ')).toBe(true)
+  expect(manual?.instructions).toMatch(/Never use port 8765/)
+  expect(manual?.instructions).toMatch(/pnpm, not npm/)
+  expect(manual?.instructions).not.toMatch(/\/compact/)
+
+  // Nothing typed after /compact: the instructions are the keep list alone.
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)
+  expect(seen.compacts.at(-1)?.instructions?.startsWith('Keep: ')).toBe(true)
+
+  // A subagent's summary is left as it came.
+  await $.session.compact({ trigger: 'auto', agentId: 'agent-7', messages: MESSAGES } as never)
+  expect(seen.compacts.at(-1)?.instructions).toBeUndefined()
+  expect(faults(world)).toEqual([])
+})
+
+test('before any reply the keep list is rebuilt from the messages the summary runs over; with nothing to keep the instructions are left alone', async ($, on) => {
+  const world = prepare(on)
+  const seen = bottoms(on, world)
+  await $.session.start(START)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  expect(seen.compacts.at(-1)?.instructions).toMatch(/^Keep: .*Never use port 8765/)
+
+  // A conversation with nothing worth keeping, in a session that has not had a reply yet.
+  await $.session.end({ sessionId: SESSION, reason: 'clear' } as never)
+  await $.session.compact({ trigger: 'manual', instructions: 'Be brief.', messages: [{ role: 'user', text: 'Thanks, that looks right.', toolUses: [] }] } as never)
+  expect(seen.compacts.at(-1)?.instructions).toBe('Be brief.')
+  expect(faults(world)).toEqual([])
+})
+
+test('a summary a plugin starts is reviewed like a manual one', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'plugin', messages: MESSAGES } as never)
+  expect(boundary(world)).toHaveLength(1)
+  const mounted = await band($)
+  expect(await mounted.find({ type: 'Button', key: 'review' })).toBeDefined()
+  await mounted.unmount()
+  await reply($, world, SECOND)
+  const found = sensor(world).filter(one => one.event === 'compaction')
+  expect(found).toHaveLength(1)
+  expect(found[0]).toMatchObject({ kind: 'plugin', missing: 2 })
+  expect(watch.latest.history).toHaveLength(1)
+  expect(watch.latest.history[0]).toMatchObject({ trigger: 'plugin', before: 150000, after: 30000 })
+  expect(faults(world)).toEqual([])
+})
+
+test('a summary made ahead is told the keep list and nothing else happens: no history, no line, no sensor event', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
+  const seen = bottoms(on, world)
+  await started($, world)
+  const before = world.logs.length
+  await $.session.compact({ trigger: 'precompute', messages: MESSAGES } as never)
+  expect(seen.compacts.at(-1)).toMatchObject({ trigger: 'precompute' })
+  expect(seen.compacts.at(-1)?.instructions).toMatch(/^Keep: .*Never use port 8765/)
+  expect(world.logs.slice(before)).toEqual([])
+  expect(watch.latest.history).toEqual([])
+  expect(watch.latest.after).toBeNull()
+  const mounted = await band($)
+  expect(await mounted.find({ type: 'Button', key: 'review' })).toBeUndefined()
+  await mounted.unmount()
+  await reply($, world, SECOND)
+  expect(sensor(world).filter(one => one.event === 'compaction')).toEqual([])
+  expect(faults(world)).toEqual([])
+})
+
+test('items put back are kept in the list and told to the summariser until a summary holds them', async ($, on) => {
+  const world = prepare(on)
+  const watch = watchReview(on)
+  const written = { summary: '' }
+  const told: (string | undefined)[] = []
+  world.transcript = [...MESSAGES]
+  on('session.compact', (_$, e) => {
+    told.push(e.instructions)
+    return { messages: [{ role: 'user', text: written.summary, toolUses: [] }], tokensBefore: 150000, tokensAfter: 30000 } as never
+  })
+  await started($, world)
+
+  // The first summary drops two things the user said; they are put back (what a press will do).
+  written.summary = 'This session is being continued. The team uses pnpm, not npm, and chose option B, the queue-based design.'
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const lost = (watch.latest.after?.items ?? []).filter(one => /8765|read any code/.test(one.text))
+  expect(lost).toHaveLength(2)
+  watch.seed(lost)
+
+  // The messages no longer hold them, but the next reply's list still does, once each.
+  world.transcript = [{ role: 'user', text: 'Thanks, that looks right.', toolUses: [] }]
+  await reply($, world, SECOND)
+  const listed = watch.latest.list.map(one => one.id)
+  expect(listed).toEqual(expect.arrayContaining(lost.map(one => one.id)))
+  expect(new Set(listed).size).toBe(listed.length)
+  expect(watch.latest.readded).toHaveLength(2)
+
+  // The next summary is told them, and holds one: that one is dropped from the put-back items, the other stays.
+  written.summary = 'This session is being continued. Never use port 8765 for the dev server.'
+  await $.session.compact({ trigger: 'manual', messages: world.transcript } as never)
+  expect(told.at(-1)).toMatch(/^Keep: .*8765.*read any code|^Keep: .*read any code.*8765/)
+  expect(watch.latest.readded.map(one => one.text)).toEqual(lost.filter(one => /read any code/.test(one.text)).map(one => one.text))
+  expect(watch.latest.missing).toBe(1)
+  expect(faults(world)).toEqual([])
+})
+
+test('a review state from before items could be put back still draws', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  let aged = false
+  on('state.get', async (_$, e, next) => {
+    const got = await next(e)
+    const held = got.value as { value?: Record<string, unknown>; version: number } | undefined
+    if (!aged || e.plugin !== 'claudeglass' || e.key !== 'review' || held?.value === undefined) return got
+    const old = { ...held.value }
+    delete old.readded
+    return { value: { ...held, value: old } } as never
+  })
+  await started($, world)
+  aged = true
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  await reply($, world, SECOND)
+  const mounted = await pane($)
+  expect(lines(await mounted.drawn()).length).toBeGreaterThan(0)
+  await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+test('a /compact drafted from the page already carries the list, so the summary is not told it twice', async ($, on) => {
+  const world = prepare(on)
+  const seen = bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', instructions: 'Keep: Never use port 8765.', messages: MESSAGES } as never)
+  expect(seen.compacts.at(-1)?.instructions).toBe('Keep: Never use port 8765.')
   expect(faults(world)).toEqual([])
 })

@@ -219,7 +219,8 @@ export const SENSOR_VOCAB = {
   "compaction": {
     "kind": [
       "auto",
-      "manual"
+      "manual",
+      "plugin"
     ]
   },
   "note": {
