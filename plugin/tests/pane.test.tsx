@@ -158,11 +158,11 @@ test('What these mean shows the glossary in place of the page, in the pane it wa
   await started($, world)
   const mounted = await pane($)
   const other = await pane($, 'glass-startup')
-  expect(lines(await mounted.drawn()).join('\n')).not.toContain(GLOSSARY.conversation.body)
+  expect(lines(await mounted.drawn()).join('\n')).not.toContain(GLOSSARY.keep.body)
 
   await mounted.press({ key: 'help' })
   const help = lines(await mounted.drawn())
-  for (const entry of [GLOSSARY.startup, GLOSSARY.conversation, GLOSSARY.output]) {
+  for (const entry of [GLOSSARY.startup, GLOSSARY.keep, GLOSSARY.receipt]) {
     expect(help).toContain(entry.title)
     expect(help).toContain(entry.body)
   }
@@ -170,7 +170,7 @@ test('What these mean shows the glossary in place of the page, in the pane it wa
   expect(help).not.toContain('Keep through the next summary')
   expect(help).toContain('Hide the meanings')
   // The other pane is as it was.
-  expect(lines(await other.drawn()).join('\n')).not.toContain(GLOSSARY.conversation.body)
+  expect(lines(await other.drawn()).join('\n')).not.toContain(GLOSSARY.keep.body)
 
   await mounted.press({ key: 'help' })
   expect(lines(await mounted.drawn())).toContain('Keep through the next summary')

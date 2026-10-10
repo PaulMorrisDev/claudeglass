@@ -775,8 +775,9 @@ MOD_PROMPT_KINDS = ("draft_topic", "draft_no_paths", "draft_read_all", "budget")
 #: reply referenced, as far as the mod has settled them (both may be absent:
 #: an older mod, or nothing settled yet). ``tweak``: a button the mod
 #: offered was pressed; ``kind`` says which, ``before`` is the count it
-#: acted on (items to keep, items lost, items checked, the summaries held)
-#: and ``after`` the count that came out of it, absent until the mod knows.
+#: acted on (items to keep, items lost, items checked; for the hold
+#: switch, 1 for on and 0 for off) and ``after`` the count that came out of
+#: it, absent until the mod knows (and always absent for the hold switch).
 SENSOR_EVENTS = ("present", "note", "rebuild", "cold_send", "compaction", "tweak")
 SENSOR_PRESENT_SURFACES = ("desktop", "terminal", "vscode", "mobile")
 SENSOR_NOTE_SURFACES = ("note", "hint", "log", "status", "band", "agent")

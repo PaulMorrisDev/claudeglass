@@ -1,4 +1,4 @@
-import type { GlassKeepItem, GlassMark, GlassPin, GlassReceipt, GlassReview, GlassReviewed, GlassReviewRow, GlassReviewTrigger, GlassSnap } from '../types'
+import type { GlassKeepItem, GlassMark, GlassPin, GlassReceipt, GlassReview, GlassReviewed, GlassReviewRow, GlassReviewTrigger, GlassSnap, GlassTweakKind } from '../types'
 import { COPY } from './generated/copy.js'
 import { checkCoverage, compactKeep, isSaid, KEEP_MAX } from './lib/coverage.js'
 import type { HoldState } from './lib/coverage.js'
@@ -21,6 +21,8 @@ export type MessageLike = {
 
 /** Pins the keep list may hold. */
 export const MAX_PINS = 20
+/** Re-adds followed at once for their receipts. */
+const MAX_WATCHED = 10
 /** Earlier prompts the page lists, and how many characters of each it keeps. */
 export const MAX_EARLIER = 12
 const EARLIER_CHARS = 300
@@ -32,10 +34,25 @@ export const SUMMARY_LEAD = 'This session is being continued'
 
 export type Counts = { kept: number; missing: number; added: number }
 
+/** A press the sensor counts, waiting for the next reply to record it: counts only, never any text. `after` is filled in when it is known. */
+export type Tweak = { ts: number; kind: GlassTweakKind; before: number; after?: number }
+
 /** What a render hook or another file leaves for the event hooks (a render may not write $.state). */
 export const memory: {
-  /** The sensor counts of summaries, waiting for the next reply (or the summary's own listener) to record them. */
-  outbox: { ts: number; kind: GlassReviewTrigger; counts: Counts }[]
+  /**
+   * The sensor counts of summaries, waiting for the next reply (or the summary's own listener) to record them: whether
+   * the summariser was told what to keep (`instructed`) and how many put-back items still in the review the replies had
+   * referenced when the summary was written.
+   */
+  outbox: { ts: number; kind: GlassReviewTrigger; counts: Counts; instructed: 0 | 1; referenced: number }[]
+  /** The button presses waiting for the next reply to record them. */
+  tweaks: Tweak[]
+  /** The Summarise press whose summary has not been recorded yet: the summary's kept count becomes its `after`. */
+  summarising: Tweak | null
+  /** Re-adds whose receipts are not all settled yet: the press, and the items it put back. */
+  readds: { tweak: Tweak; ids: string[] }[]
+  /** Re-adds that settled after their press was recorded: the press's time (seconds), the items it put back and the referenced count to add to it. */
+  settled: { ts: number; before: number; after: number }[]
   /** Where the hold of automatic summaries stands (lib/coverage.js holdStep). */
   hold: HoldState
   /** CLAUDE.md as the mod can read it (project and user level), or null when not read yet. */
@@ -45,10 +62,14 @@ export const memory: {
   added: number
   /** The one typed prompt whose row offers [p] pin (a render may not write $.state, so the rows read it from here). */
   pinnable: string | null
-} = { outbox: [], hold: 'none', claudeMd: null, cwd: null, added: 0, pinnable: null }
+} = { outbox: [], tweaks: [], summarising: null, readds: [], settled: [], hold: 'none', claudeMd: null, cwd: null, added: 0, pinnable: null }
 
 export function forgetMemory(): void {
   memory.outbox = []
+  memory.tweaks = []
+  memory.summarising = null
+  memory.readds = []
+  memory.settled = []
   memory.hold = 'none'
   memory.claudeMd = null
   memory.cwd = null
@@ -56,17 +77,86 @@ export function forgetMemory(): void {
   memory.pinnable = null
 }
 
-/** Records the waiting `compaction` events: counts only, never any text. Returns whether any were recorded. */
+/**
+ * Notes a press for the sensor: the button, the count it acted on and, when known, the count that came out of it.
+ * Counts only, never any text. Recorded when the next reply ends (drainSensor); the returned press can still be given
+ * its `after` until then.
+ */
+export function noteTweak(kind: GlassTweakKind, before: number, after?: number, now: number = Date.now()): Tweak {
+  const one: Tweak = after === undefined ? { ts: now, kind, before } : { ts: now, kind, before, after }
+  memory.tweaks.push(one)
+  return one
+}
+
+/** A Summarise press: the summary it starts fills in `after` (the count it kept) when the summary is recorded. */
+export function noteSummarise(before: number, now: number = Date.now()): Tweak {
+  const mine = noteTweak('summarise', before, undefined, now)
+  memory.summarising = mine
+  return mine
+}
+
+/** A Summarise press is done waiting for its summary (it was recorded, held, refused or skipped); a later press's slot is left alone. */
+export function endSummarise(mine: Tweak): void {
+  if (memory.summarising === mine) memory.summarising = null
+}
+
+/** A Re-add press: `after` is the count the replies referenced, filled in once every item's receipt is settled. */
+export function noteReadd(ids: readonly string[], now: number = Date.now()): void {
+  if (ids.length === 0) return
+  memory.readds.push({ tweak: noteTweak('readd', ids.length, undefined, now), ids: [...ids] })
+  // Only the newest few are followed: a re-add whose receipts never settle must not pile up.
+  if (memory.readds.length > MAX_WATCHED) memory.readds.splice(0, memory.readds.length - MAX_WATCHED)
+}
+
+/** How many put-back items the replies have referenced, by their receipts. */
+export function referencedCount(review: GlassReview): number {
+  return Object.values(review.receipts).filter(receipt => receipt.referenced === true).length
+}
+
+/**
+ * Called after the receipts are settled by a reply: a re-add whose receipts are all settled gets its referenced count;
+ * one whose items left the review (a summary held them) can no longer say and is let go.
+ */
+export function settleReadds(review: GlassReview): void {
+  memory.readds = memory.readds.filter(watch => {
+    const receipts = watch.ids.map(id => review.receipts[id])
+    if (receipts.some(receipt => receipt === undefined)) return false
+    if (receipts.some(receipt => receipt?.referenced === null)) return true
+    const after = receipts.filter(receipt => receipt?.referenced === true).length
+    // Still waiting to be recorded, it takes the count itself; already recorded, the next drain adds it to the event.
+    if (memory.tweaks.includes(watch.tweak)) watch.tweak.after = after
+    else memory.settled.push({ ts: seconds(watch.tweak.ts), before: watch.ids.length, after })
+    return false
+  })
+}
+
+/** Records the waiting `compaction` and `tweak` events: counts only, never any text. Returns whether any were recorded. */
 export function drainSensor(snap: GlassSnap): boolean {
-  if (memory.outbox.length === 0) return false
+  let recorded = false
+  // A re-add that settled after its press was recorded: the event gets its `after` now.
+  for (const one of memory.settled) {
+    const event = snap.events.find(found => found.event === 'tweak' && found.kind === 'readd' && found.ts === one.ts && found.before === one.before && found.after === undefined)
+    if (event?.event === 'tweak') {
+      event.after = one.after
+      snap.eventsDirty = true
+      recorded = true
+    }
+  }
+  memory.settled = []
+  for (const one of memory.tweaks) {
+    addEvent(snap, one.after === undefined ? { ts: seconds(one.ts), event: 'tweak', kind: one.kind, before: one.before } : { ts: seconds(one.ts), event: 'tweak', kind: one.kind, before: one.before, after: one.after })
+    recorded = true
+  }
+  memory.tweaks = []
   for (const one of memory.outbox) {
     // "Added back" is what the user drafted back in before this reply (counted in memory.added).
     const added = one === memory.outbox[memory.outbox.length - 1] ? one.counts.added + memory.added : one.counts.added
-    addEvent(snap, { ts: seconds(one.ts), event: 'compaction', kind: one.kind, kept: one.counts.kept, missing: one.counts.missing, added })
+    addEvent(snap, { ts: seconds(one.ts), event: 'compaction', kind: one.kind, kept: one.counts.kept, missing: one.counts.missing, added, instructed: one.instructed, referenced: one.referenced })
+    recorded = true
   }
+  if (memory.outbox.length > 0) memory.added = 0
   memory.outbox = []
-  memory.added = 0
-  return true
+  return recorded
 }
 
 export function emptyReview(): GlassReview {

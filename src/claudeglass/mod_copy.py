@@ -139,7 +139,7 @@ COPY: dict[str, str] = {
     "hint.paste": "Large paste, about {tokens} tokens, and every later reply reads it again. If it's a log, paste only the part that matters, or give the path to a file.",
     "hint.drip": "{count} small changes in a row, each its own message. Each one re-reads the whole session, about {tokens} tokens. Listing the rest in one message costs less.",
     # -- Compaction review: the keep list, the summary check, the drafts -----
-    "log.compacted.review": "Press Review above the prompt to check.",
+    "log.compacted.review": "Press Re-add above the prompt to put them back.",
     "compaction.more": "and {count} more",
     "compaction.addback": "Before compaction we agreed: {items}.",
     "compaction.keep": "/compact Keep: {items}",
@@ -194,7 +194,7 @@ COPY: dict[str, str] = {
     "startup.later.attached": "Files and hook notes added to your messages",
     "startup.later.mark": "{name} (loads later)",
     "startup.estimates": "Sizes are estimates, shared out by size of text.",
-    "startup.compare": "Claude Code counts {theirs} of startup context on the Now page. This list adds up to about {mine}.",
+    "startup.compare": "Claude Code counts {theirs} of startup context in /context. This list adds up to about {mine}.",
     "startup.compare.why": "The list estimates from text at a fixed rate. It leaves out the input schemas of tools, which are most of their size.",
     "startup.agents": "Agents and CLAUDE.md",
     "startup.agents.got": "Received it: {types}",
@@ -252,20 +252,11 @@ GLOSSARY: dict[str, dict[str, str]] = {
     "full": {
         "title": "How full the context is",
         "body": "The share of the context Claude Code allows, as /context shows it. "
-        "Claude summarises a little before 100%, at the mark on the bar.",
+        "Claude summarises a little before 100%.",
     },
     "runway": {
         "title": "Replies before Claude summarises",
         "body": "The room left, divided by how much each recent reply added. Finish the task, or /compact with a focus, before it runs out.",
-    },
-    "conversation": {
-        "title": "Conversation so far",
-        "body": "Your messages and Claude's replies. It grows with every reply until Claude summarises it or you /clear.",
-    },
-    "output": {
-        "title": "Tool output kept in context",
-        "body": "Command output, search results and files Claude read stay in the conversation, and every later reply re-reads them. "
-        "It's estimated from how much each tool call added. Ask for only the part you need.",
     },
     "startup": {
         "title": "Startup context",
@@ -281,6 +272,11 @@ GLOSSARY: dict[str, dict[str, str]] = {
         "title": "Keep list",
         "body": "The instructions, decisions, files and values the next summary is told to carry. "
         "Untick an item to leave it out. Pin a line to keep it until you /clear.",
+    },
+    "receipt": {
+        "title": "Re-add receipt",
+        "body": "After you re-add lost items, Glass watches the next ten replies. "
+        "Referenced means a reply used the item; not referenced means none did.",
     },
 }
 

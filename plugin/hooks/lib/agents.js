@@ -2,11 +2,9 @@
  *
  * What the Agents page and the agent rows work out from the agents' own
  * events: the words for what an agent is doing, a model's short name and
- * tier, the order of the rows, an agent's share of the session's cost, and
- * the two coaching notes that belong to agent runs, report_reread and
- * split_run. The two notes are ports of capture_hook._report_hint and
- * capture_hook._split_hint / keep_run (tests/test_mod_agents.py runs both
- * over the same cases); the rest has no Python twin.
+ * tier, the order of the rows, and an agent's share of the session's cost.
+ * None of it has a Python twin except the skip list (tests/test_mod_agents.py
+ * holds that to the catalogue's).
  *
  * Plain functions over plain values: no clock, no state, no I/O.
  */
@@ -151,92 +149,4 @@ export function kText(tokens) {
   var diff = thousands - floor;
   var rounded = diff < 0.5 ? floor : diff > 0.5 ? floor + 1 : floor % 2 === 0 ? floor : floor + 1;
   return String(rounded).replace(/\B(?=(\d{3})+(?!\d))/g, ",") + "k";
-}
-
-/**
- * @typedef {Object} Decision
- * @property {string} kind
- * @property {number} stake
- * @property {Object<string, string>} fields  Fills the tip's {placeholders}.
- */
-
-/**
- * report_reread: an agent started in the background while the main session
- * holds `report_reread_tokens` or more. Each report it sends back is
- * answered by a reply that reads the whole session again. Only an agent
- * the main session started counts (a workflow's agents have no row of
- * their own to show it on).
- * @param {{background: boolean, ctx: number|null, th: {report_reread_tokens: number}}} input
- * @returns {Decision|null}
- */
-export function reportReread(input) {
-  if (!input.background) return null;
-  var ctx = input.ctx;
-  if (typeof ctx !== "number" || !isFinite(ctx) || ctx < input.th.report_reread_tokens) return null;
-  return { kind: "report_reread", stake: Math.trunc(ctx), fields: { ctx: kText(Math.trunc(ctx)) } };
-}
-
-/**
- * What one finished run adds to the split_run count (keep_run): a run
- * counts when it summarised its own context part-way through, or began
- * from a brief of `split_brief_chars` characters or more. Types in
- * `skip` are never coached on.
- * @param {{type: string, compacted: boolean, briefChars: number, th: {split_brief_chars: number}, skip?: string[]}} input
- * @returns {{compaction: number, brief: number}}
- */
-export function splitCounts(input) {
-  var skip = input.skip || SKIP_AGENT_TYPES;
-  if (skip.indexOf(input.type) !== -1) return { compaction: 0, brief: 0 };
-  return {
-    compaction: input.compacted ? 1 : 0,
-    brief: input.briefChars >= input.th.split_brief_chars ? 1 : 0,
-  };
-}
-
-/**
- * The runs that ended too big and have not been told yet.
- * @typedef {Object} Split
- * @property {number} compaction
- * @property {number} brief
- */
-
-/** @returns {Split} */
-export function newSplit() {
-  return { compaction: 0, brief: 0 };
-}
-
-/**
- * `total` and one more run's counts.
- * @param {Split} total
- * @param {Split} one
- * @returns {Split}
- */
-export function addSplit(total, one) {
-  return { compaction: total.compaction + one.compaction, brief: total.brief + one.brief };
-}
-
-/**
- * Groups thousands the way Python's "{:,}" does.
- * @param {number} n
- * @returns {string}
- */
-function grouped(n) {
-  return String(Math.trunc(n)).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
-}
-
-/**
- * split_run (_split_hint): the runs counted since it was last told. The
- * stake is how many there are.
- * @param {{compaction: number, brief: number, th: {split_brief_chars: number}, why: Object<string, string>}} input
- *   `why` is capture_catalogue.COACHING_SPLIT_WHY.
- * @returns {Decision|null}
- */
-export function splitRun(input) {
-  var compaction = Math.trunc(input.compaction || 0);
-  var brief = Math.trunc(input.brief || 0);
-  if (compaction <= 0 && brief <= 0) return null;
-  var word = compaction > 0 && brief > 0 ? "both" : compaction > 0 ? "compaction" : "brief";
-  var template = input.why[word] || "";
-  var text = template.replace(/\{brief_chars\}/g, grouped(input.th.split_brief_chars));
-  return { kind: "split_run", stake: compaction + brief, fields: { why: text } };
 }

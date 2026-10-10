@@ -3,14 +3,14 @@ import type { Engine } from 'claude-code/testing'
 import type { On } from 'claude-code'
 
 import type { GlassAgent, GlassSnap } from '../types'
-import { faults, notes, prepare, reply, settingsFile, SITE, START } from './support'
+import { faults, notes, prepare, reply, SESSION, SITE, START } from './support'
 import type { Step, World } from './support'
 
 const BAND = { hasSurvey: false, isWorking: false, maxRows: 3, bodyColumns: 160, ...SITE }
 
 // One reply that leaves the main context at 120k of a 160k summarising point, $0.50 spent.
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
-// A main context past the 150k that earns report_reread.
+// A main context past the 150k that once earned report_reread.
 const BIG = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 158000, output: 0 }], usd: 0.9 }
 
 const PROMPT = ['Find every caller of parseConfig.', 'Report the file and line of each.', 'Do not change any file.'].join('\n')
@@ -90,11 +90,6 @@ function runs(): GlassAgent[] {
   return latest?.agents ?? []
 }
 
-/** The coaching notes kept on run `id`, as the words they were given in. */
-function noted(id: string): string[] {
-  return (runs().find(one => one.id === id)?.notes ?? []).map(note => note.text)
-}
-
 test('a run is followed from its spawn to its end: requests, tools, calls, cost and the Agent call', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
@@ -156,92 +151,26 @@ test('every tool a run called is counted, MCP tools by their own names', async (
   expect(faults(world)).toEqual([])
 })
 
-test('report_reread: a background agent started over a big context is told, once', async ($, on) => {
+test('agent runs earn no coaching notes: the capture hook tells report_reread and split_run, the mod does not', async ($, on) => {
   const world = prepare(on)
   bottoms(on)
   await $.session.start(START)
   await reply($, world, BIG)
-  const first = await spawn($, world, { background: true })
-  const shown = noted(first)
-  expect(shown).toHaveLength(1)
-  expect(shown[0]).toMatch(/^This session holds about 160k tokens, and the reply to each report/)
-
-  // The rest rule holds the same note back for half an hour.
-  const second = await spawn($, world, { background: true, type: 'Plan' })
-  expect(noted(second)).toEqual([])
-  expect(faults(world)).toEqual([])
-})
-
-test('report_reread is not told when the agent is muted in the settings', async ($, on) => {
-  const world = prepare(on, { settings: settingsFile({ coaching: { muted: ['report_reread'] } }) })
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, BIG)
-  const id = await spawn($, world, { background: true })
-  expect(noted(id)).toEqual([])
-  expect(faults(world)).toEqual([])
-})
-
-test('report_reread is not told for a foreground agent', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, BIG)
-  const id = await spawn($, world, { background: false })
-  expect(noted(id)).toEqual([])
-  expect(faults(world)).toEqual([])
-})
-
-test('report_reread stays quiet while the context is below the threshold', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-  const id = await spawn($, world, { background: true })
-  expect(noted(id)).toEqual([])
-  expect(faults(world)).toEqual([])
-})
-
-test('split_run: a foreground run that began from a long brief is told', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
+  // A background agent over a big context, a foreground run from a long brief, and a background run that ends too big.
+  const background = await spawn($, world, { background: true })
   const long = `${'Study this in depth. '.repeat(400)}\nEnd.`
-  const id = await foreground($, world, { prompt: long })
+  await foreground($, world, { prompt: long })
+  const big = await spawn($, world, { background: true, prompt: 'y'.repeat(7000) })
+  await work($, world, big, HAIKU, 0)
+  await end($, world, big)
+  await reply($, world, { gap: 40 * 60 * 1000, steps: [{ cacheRead: 160000, cacheWrite: 1000, output: 200 }], usd: 0.05 })
 
-  const shown = noted(id)
-  expect(shown).toHaveLength(1)
-  expect(shown[0]).toMatch(/^In this session .*6,000 characters/)
-  expect(faults(world)).toEqual([])
-})
-
-test('split_run: a short brief earns nothing, and a skipped agent type earns nothing', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-  const short = await foreground($, world)
-  expect(noted(short)).toEqual([])
-  const skipped = await foreground($, world, { type: 'statusline-setup', prompt: 'x'.repeat(9000) })
-  expect(noted(skipped)).toEqual([])
+  // The runs are followed all the same, with no notes on a row, in the transcript or in the sensor.
+  expect(runs().map(one => one.id)).toContain(background)
+  expect(runs().every(one => !('notes' in one))).toBe(true)
   expect(notes(world)).toEqual([])
-  expect(faults(world)).toEqual([])
-})
-
-test('split_run: a background run that ended too big is told at the end of a later reply, as a note in the transcript', async ($, on) => {
-  const world = prepare(on)
-  bottoms(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
-  const id = await spawn($, world, { background: true, prompt: 'y'.repeat(7000) })
-  await work($, world, id, HAIKU, 0)
-  await end($, world, id)
-  expect(notes(world)).toEqual([])
-
-  await reply($, world, { gap: 40 * 60 * 1000, steps: [{ cacheRead: 120000, cacheWrite: 1000, output: 200 }], usd: 0.05 })
-  expect(notes(world)).toHaveLength(1)
-  expect(notes(world)[0]).toMatch(/^● Glass · In this session .*6,000 characters/)
+  const sensor = JSON.parse(String(world.files.get(`/cfg/claudeglass/mod/sensor/${SESSION}.json`))) as { events: { event: string; kind?: string; surface?: string }[] }
+  expect(sensor.events.filter(one => one.event === 'note' && (one.surface === 'agent' || one.kind === 'report_reread' || one.kind === 'split_run'))).toEqual([])
   expect(faults(world)).toEqual([])
 })
 

@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Elements, EngineInterface, PaneOpenArgs, Register, RenderElement, RenderInput } from 'claude-code'
 
 import type { GlassPin, GlassReview } from '../types'
-import { emptyReview, memory, readdMissing, sound } from './compaction-memory'
+import { emptyReview, endSummarise, memory, noteReadd, noteSummarise, noteTweak, readdMissing, sound, tickedItems } from './compaction-memory'
 import { COPY, GLOSSARY } from './generated/copy.js'
 import { fill } from './lib/text.js'
 import { emptySnap } from './live'
@@ -126,31 +126,42 @@ function buildKit($: EngineInterface): PageKit {
     readd: async () => {
       const now = await $.clock.now()
       let added = 0
+      let ids: string[] = []
       await update($, reviewAtom, was => {
         const review = sound(was)
         const next = readdMissing(review, now)
         added = next.readded.length - review.readded.length
+        ids = next.readded.slice(review.readded.length).map(item => item.id)
         return next
       })
       // The sensor counts these as added back when the next reply ends (drainSensor).
       memory.added += added
+      noteReadd(ids, now)
       return added
     },
     summarise: async () => {
       if (summarising) return
       summarising = true
       try {
+        // Another press (the band's Summarise, a Check) is already working: this one does nothing.
+        if (sound(await read($, reviewAtom)).ui.action !== null) return
         const say = (action: 'summarise' | null) => update($, reviewAtom, was => ({ ...sound(was), ui: { ...sound(was).ui, action, note: null, noteFor: null } }))
         await say('summarise')
+        // The sensor counts the press, with the items the summary is told to keep; the summary it starts fills in what was kept (compaction.ts).
+        const mine = noteSummarise(tickedItems(sound(await read($, reviewAtom)), await read($, pinsAtom)).length, await $.clock.now())
         let note: string | null = null
         try {
           const result = await $.session.compact()
           // A hook held the summary: say why, as the hook gave it.
-          if (result.skip !== undefined) note = fill(COPY['checkpoint.summarise.skipped'], { reason: result.skip })
+          if (result.skip !== undefined) {
+            note = fill(COPY['checkpoint.summarise.skipped'], { reason: result.skip })
+          }
         } catch {
           // Claude Code refuses while a reply is running.
           note = COPY['health.busy.reply']
         } finally {
+          // A summary that went through filled in the press's `after` during compact() (compaction.ts); none is coming otherwise.
+          endSummarise(mine)
           // A summary that went through already cleared the note when it was recorded (compaction.ts); a held or refused one says why.
           await update($, reviewAtom, was => ({
             ...sound(was),
@@ -163,6 +174,8 @@ function buildKit($: EngineInterface): PageKit {
     },
     setOption: async (key, enabled) => {
       await $.store.set(key, enabled)
+      // The sensor counts the switch: 1 for off to on, 0 for on to off.
+      if (key === 'hold') noteTweak('hold', enabled ? 1 : 0, undefined, await $.clock.now())
       await update($, reviewAtom, was => ({ ...sound(was) }))
     },
     categories: async () => {

@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
 import type { GlassKeepItem, GlassPin, GlassReview, GlassSettings } from '../types'
-import { drainSensor, emptyReview, forgetMemory, INSTRUCT_LEAD, keepInstruction, keepList, memory, reviewCompaction, boundaryLine, sound, suggestCount, tickedItems, withReadded, withSummary } from './compaction-memory'
+import { drainSensor, emptyReview, forgetMemory, INSTRUCT_LEAD, keepInstruction, keepList, memory, referencedCount, reviewCompaction, boundaryLine, sound, suggestCount, tickedItems, withReadded, withSummary } from './compaction-memory'
 import type { BoundaryDetail, MessageLike } from './compaction-memory'
 import { amountOfAfterAbout } from './fmt'
 import { COPY } from './generated/copy.js'
@@ -152,10 +152,13 @@ export const register: Register = on => {
 
     // The keep list goes to the summariser on every summary, after whatever the user typed after /compact.
     let given = e
+    // Whether the summariser was told what to keep, by this hook or by a /compact that already carried the list.
+    let instructed: 0 | 1 = 0
     try {
       // A /compact the page drafted already carries the list, so it is not sent twice.
       const drafted = INSTRUCT_LEAD !== '' && (e.instructions ?? '').trimStart().startsWith(INSTRUCT_LEAD)
       const keep = drafted ? '' : await keepFor($, e.messages)
+      if (drafted || keep !== '') instructed = 1
       if (keep !== '') given = { ...e, instructions: [e.instructions, keep].filter(Boolean).join('\n\n') }
     } catch (error) {
       $.ui.log(`claudeglass: keep instructions ${String(error)}`, { to: 'debug' })
@@ -166,13 +169,14 @@ export const register: Register = on => {
     try {
       const summary = result.messages.find(message => message.role === 'user' && message.text.trimStart().startsWith('This session is being continued'))?.text ?? result.messages[0]?.text ?? ''
       const now = await $.clock.now()
+      const was = sound(await read($, reviewAtom))
       const done = reviewCompaction({
         messages: e.messages,
         summary,
         pins: await read($, pinsAtom),
         claudeMd: await claudeMdOf($),
         cwd: memory.cwd,
-        readded: sound(await read($, reviewAtom)).readded,
+        readded: was.readded,
         trigger,
         now,
         before: result.tokensBefore ?? null,
@@ -192,7 +196,11 @@ export const register: Register = on => {
       }
       const line = boundaryLine(done.counts, saidTotal(done.reviewed.items), detail)
       if (line !== null) $.ui.log(line)
-      memory.outbox.push({ ts: now, kind: trigger, counts: done.counts })
+      // `referenced` is the receipts still in the review that are settled as referenced, as of this summary.
+      memory.outbox.push({ ts: now, kind: trigger, counts: done.counts, instructed, referenced: referencedCount(was) })
+      // The Summarise press that asked for this summary learns what it kept.
+      if (memory.summarising !== null) memory.summarising.after = done.counts.kept
+      memory.summarising = null
       memory.pinnable = null
     } catch (error) {
       $.ui.log(`claudeglass: compaction review ${String(error)}`, { to: 'debug' })
@@ -203,10 +211,13 @@ export const register: Register = on => {
   // A /clear starts the keep list over; pins do not survive it.
   on('session.end', { reason: 'clear' }, async ($, e, next) => {
     try {
-      const { cwd, outbox } = memory
+      const { cwd, outbox, tweaks, settled } = memory
       forgetMemory()
       memory.cwd = cwd
       memory.outbox = outbox
+      memory.tweaks = tweaks
+      // A re-add that settled on the last reply before the /clear still gives its press the `after` at the next drain.
+      memory.settled = settled
       await update($, pinsAtom, () => [])
       await update($, reviewAtom, () => emptyReview())
     } catch (error) {

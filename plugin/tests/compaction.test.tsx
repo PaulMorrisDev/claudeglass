@@ -89,7 +89,7 @@ function boundary(world: World): string[] {
   return world.logs.filter(line => line.startsWith('● Glass · Claude summarised'))
 }
 
-type Event = { event: string; kind?: string; kept?: number; missing?: number; added?: number }
+type Event = { ts?: number; event: string; kind?: string; kept?: number; missing?: number; added?: number; instructed?: number; referenced?: number; before?: number; after?: number }
 
 function sensor(world: World): Event[] {
   return (JSON.parse(String(world.files.get(SENSOR))) as { events: Event[] }).events
@@ -121,7 +121,9 @@ test('a summary of the main session: a boundary line, the counts in state, and a
   const found = sensor(world).filter(one => one.event === 'compaction')
   expect(found).toHaveLength(1)
   expect(found[0]).toMatchObject({ kind: 'auto', missing: 2, added: 0 })
-  expect(Object.keys(found[0] as object).sort()).toEqual(['added', 'event', 'kept', 'kind', 'missing', 'ts'])
+  expect(Object.keys(found[0] as object).sort()).toEqual(['added', 'event', 'instructed', 'kept', 'kind', 'missing', 'referenced', 'ts'])
+  // The keep list was told to the summariser, and no put-back item has been referenced yet.
+  expect(found[0]).toMatchObject({ instructed: 1, referenced: 0 })
   expect(faults(world)).toEqual([])
 })
 
@@ -1123,5 +1125,265 @@ test('while Re-add is offered Summarise steps back to secondary; a note sits und
   expect(watch.latest.ui).toMatchObject({ note: null, noteFor: null })
   expect(lines(await mounted.drawn())).not.toContain('Claude is told these again with its next reply.')
   await mounted.unmount()
+  expect(faults(world)).toEqual([])
+})
+
+// -- the sensor: what the summaries were told, and what each press did -------------------------
+
+/** The `tweak` events the sensor file holds, in the order they were written. */
+function tweaks(world: World): Event[] {
+  return sensor(world).filter(one => one.event === 'tweak')
+}
+
+test('a summary the hook gave the keep list writes instructed 1, and one with nothing to keep writes 0', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  await reply($, world, SECOND)
+  expect(sensor(world).filter(one => one.event === 'compaction')[0]).toMatchObject({ kind: 'manual', instructed: 1 })
+  expect(faults(world)).toEqual([])
+})
+
+test('a summary with nothing to keep writes instructed 0, not a missing field', async ($, on) => {
+  const world = prepare(on)
+  const quiet = [{ role: 'user', text: 'Thanks, that looks right.', toolUses: [] }]
+  bottoms(on, world)
+  world.transcript = quiet
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: quiet } as never)
+  await reply($, world, SECOND)
+  const found = sensor(world).filter(one => one.event === 'compaction')
+  expect(found).toHaveLength(1)
+  expect(found[0]?.instructed).toBe(0)
+  expect(faults(world)).toEqual([])
+})
+
+test('a summary counts the put-back items the replies have referenced by then', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'readd' } as never)
+  await mounted.unmount()
+
+  // The next reply names the port: one of the two put-back items is referenced.
+  const step = { cacheRead: 120000, cacheWrite: 1000, output: 200 }
+  await reply($, world, { usd: 0.05, steps: [{ ...step, answer: 'I will not use port 8765 for the dev server.' }] })
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  await reply($, world, SECOND)
+  const found = sensor(world).filter(one => one.event === 'compaction')
+  expect(found).toHaveLength(2)
+  expect(found[0]).toMatchObject({ referenced: 0 })
+  expect(found[1]).toMatchObject({ referenced: 1 })
+  expect(faults(world)).toEqual([])
+})
+
+test('Summarise now writes a tweak with the ticked count, and the summary it starts fills in the kept count', async ($, on) => {
+  const world = prepare(on)
+  let open: () => void = () => {}
+  const gate = new Promise<void>(resolve => (open = resolve))
+  world.transcript = [...MESSAGES]
+  // The test engine runs the press's own call with no trigger, so the hook sees the summary that is made while the press waits.
+  on('session.compact', async (_$, e) => {
+    if (e.trigger === undefined) await gate
+    return { messages: [SUMMARY_MESSAGE], tokensBefore: 150000, tokensAfter: 30000 } as never
+  })
+  await started($, world)
+  const mounted = await pane($)
+  expect(buttons(await mounted.drawn()).find(one => one.key === 'summarise')?.label).toBe('Summarise now, keeping 4 items')
+  const pressed = mounted.press({ key: 'summarise' } as never)
+  await world.clock.advance(10)
+  await $.session.compact({ trigger: 'plugin', messages: MESSAGES } as never)
+  open()
+  await pressed
+  await mounted.unmount()
+  await reply($, world, SECOND)
+
+  expect(tweaks(world)).toHaveLength(1)
+  expect(tweaks(world)[0]).toMatchObject({ kind: 'summarise', before: 4, after: 2 })
+  expect(Object.keys(tweaks(world)[0] as object).sort()).toEqual(['after', 'before', 'event', 'kind', 'ts'])
+  expect(faults(world)).toEqual([])
+})
+
+test('a Summarise press that gets no summary writes its tweak with no after, and a later summary does not fill it in', async ($, on) => {
+  const world = prepare(on)
+  world.transcript = [...MESSAGES]
+  let skip = true
+  on('session.compact', () => (skip ? { skip: 'Held for review' } : { messages: [SUMMARY_MESSAGE], tokensBefore: 150000, tokensAfter: 30000 }) as never)
+  await started($, world)
+  const mounted = await pane($)
+  await mounted.press({ key: 'summarise' } as never)
+  await mounted.unmount()
+  skip = false
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)
+  await reply($, world, SECOND)
+
+  expect(tweaks(world)).toHaveLength(1)
+  expect(tweaks(world)[0]).toMatchObject({ kind: 'summarise', before: 4 })
+  expect('after' in (tweaks(world)[0] as object)).toBe(false)
+  expect(faults(world)).toEqual([])
+})
+
+test('a Summarise press that is over does not wait for a summary: a later one does not fill in its after', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  await started($, world)
+  const mounted = await pane($)
+  // The press's own call goes through but the hook never reviews it (no trigger), so no summary is coming for the press.
+  await mounted.press({ key: 'summarise' } as never)
+  await mounted.unmount()
+  await $.session.compact({ trigger: 'auto', messages: MESSAGES } as never)
+  await reply($, world, SECOND)
+
+  expect(tweaks(world)).toHaveLength(1)
+  expect('after' in (tweaks(world)[0] as object)).toBe(false)
+  expect(faults(world)).toEqual([])
+})
+
+test('a Summarise press while another press is working does nothing: no summary, no tweak', async ($, on) => {
+  const world = prepare(on)
+  let open: () => void = () => {}
+  const gate = new Promise<void>(resolve => (open = resolve))
+  judging(on, { word: 'yes', fail: false, gate })
+  let compactCalls = 0
+  world.transcript = [...MESSAGES]
+  on('session.compact', () => {
+    compactCalls += 1
+    return { messages: [SUMMARY_MESSAGE], tokensBefore: 150000, tokensAfter: 30000 } as never
+  })
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const calls = compactCalls
+  const mounted = await reviewPane($, world)
+  const checking = mounted.press({ key: 'check' } as never)
+  await world.clock.advance(10)
+  await mounted.press({ key: 'summarise' } as never)
+  expect(compactCalls).toBe(calls)
+  open()
+  await checking
+  await mounted.unmount()
+  await reply($, world, SECOND)
+  expect(tweaks(world).map(one => one.kind)).toEqual(['check'])
+  expect(faults(world)).toEqual([])
+})
+
+test('Re-add writes a tweak with the items put back, and its referenced count once every receipt is settled', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'readd' } as never)
+  await mounted.unmount()
+
+  // The first reply records the press; one item waits on the replies, so there is no count yet.
+  const step = { cacheRead: 120000, cacheWrite: 1000, output: 200 }
+  await reply($, world, { usd: 0.05, steps: [{ ...step, answer: 'I will not use port 8765 for the dev server.' }] })
+  expect(tweaks(world)).toHaveLength(1)
+  expect(tweaks(world)[0]).toMatchObject({ kind: 'readd', before: 2 })
+  expect('after' in (tweaks(world)[0] as object)).toBe(false)
+
+  // The tenth reply settles the other as not referenced; the count reaches the event with the next reply's.
+  for (let count = 0; count < 10; count++) await reply($, world, { usd: 0.05, steps: [{ ...step, answer: 'Formatted the file.' }] })
+  expect(tweaks(world)).toHaveLength(1)
+  expect(tweaks(world)[0]).toMatchObject({ kind: 'readd', before: 2, after: 1 })
+  expect(faults(world)).toEqual([])
+})
+
+test('a /clear before the next reply keeps the referenced count of a settled re-add for its tweak', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'readd' } as never)
+  await mounted.unmount()
+
+  const step = { cacheRead: 120000, cacheWrite: 1000, output: 200 }
+  await reply($, world, { usd: 0.05, steps: [{ ...step, answer: 'I will not use port 8765 for the dev server.' }] })
+  // The tenth reply settles the other item, and the /clear comes before the reply that would record the count.
+  for (let count = 0; count < 9; count++) await reply($, world, { usd: 0.05, steps: [{ ...step, answer: 'Formatted the file.' }] })
+  expect(tweaks(world)[0]).toMatchObject({ kind: 'readd', before: 2 })
+  expect('after' in (tweaks(world)[0] as object)).toBe(false)
+  await $.session.end({ sessionId: SESSION, reason: 'clear' } as never)
+  expect(tweaks(world)).toHaveLength(1)
+  expect(tweaks(world)[0]).toMatchObject({ kind: 'readd', before: 2, after: 1 })
+  expect(faults(world)).toEqual([])
+})
+
+test('Check with a model writes a tweak with the missing count before and after', async ($, on) => {
+  const world = prepare(on)
+  judging(on, { word: 'yes', fail: false, gate: null })
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'check' } as never)
+  await mounted.unmount()
+  await reply($, world, SECOND)
+  expect(tweaks(world)).toHaveLength(1)
+  expect(tweaks(world)[0]).toMatchObject({ kind: 'check', before: 2, after: 0 })
+  expect(faults(world)).toEqual([])
+})
+
+test('a Check press the model could not answer writes its tweak with no after', async ($, on) => {
+  const world = prepare(on)
+  judging(on, { word: 'no', fail: true, gate: null })
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'check' } as never)
+  await mounted.unmount()
+  await reply($, world, SECOND)
+  expect(tweaks(world)).toHaveLength(1)
+  expect(tweaks(world)[0]).toMatchObject({ kind: 'check', before: 2 })
+  expect('after' in (tweaks(world)[0] as object)).toBe(false)
+  expect(faults(world)).toEqual([])
+})
+
+test('the Hold switch writes a tweak: 1 when it goes on, 0 when it goes off, never an after', async ($, on) => {
+  const world = prepare(on)
+  bottoms(on, world)
+  await started($, world)
+  const mounted = await pane($)
+  await mounted.press({ key: 'hold' } as never)
+  await mounted.press({ key: 'hold' } as never)
+  await mounted.unmount()
+  await reply($, world, SECOND)
+
+  expect(tweaks(world).map(one => [one.kind, one.before])).toEqual([
+    ['hold', 1],
+    ['hold', 0],
+  ])
+  for (const one of tweaks(world)) expect(Object.keys(one).sort()).toEqual(['before', 'event', 'kind', 'ts'])
+  expect(faults(world)).toEqual([])
+})
+
+test('the sensor file holds counts and words from the vocabulary only: no text from a press either', async ($, on) => {
+  const world = prepare(on)
+  judging(on, { word: 'yes', fail: false, gate: null })
+  bottoms(on, world)
+  await started($, world)
+  await $.session.compact({ trigger: 'manual', messages: MESSAGES } as never)
+  const mounted = await reviewPane($, world)
+  await mounted.press({ key: 'readd' } as never)
+  await mounted.press({ key: 'check' } as never)
+  await mounted.press({ key: 'hold' } as never)
+  await mounted.press({ key: 'summarise' } as never)
+  await mounted.unmount()
+  await reply($, world, SECOND)
+
+  const text = String(world.files.get(SENSOR))
+  expect(text).not.toMatch(/8765|pnpm|option B|queue-based|limiter|continued from a previous|rate limiting|Held for review/)
+  expect(tweaks(world).map(one => one.kind).sort()).toEqual(['check', 'hold', 'readd', 'summarise'])
+  for (const one of tweaks(world)) {
+    for (const [key, value] of Object.entries(one)) {
+      if (key === 'event' || key === 'kind') expect(typeof value).toBe('string')
+      else expect(Number.isInteger(value)).toBe(true)
+    }
+  }
   expect(faults(world)).toEqual([])
 })

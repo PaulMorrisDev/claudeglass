@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
-import { emptyReview, lostCount, memory, readdMissing, sound, tickedItems } from './compaction-memory'
+import { emptyReview, endSummarise, lostCount, memory, noteReadd, noteSummarise, readdMissing, sound, tickedItems } from './compaction-memory'
 import { percent } from './fmt'
 import { COPY } from './generated/copy.js'
 import { saidTotal } from './lib/coverage.js'
@@ -95,18 +95,25 @@ export const register: Register = on => {
       void $.ui.open(OPEN_ARGS)
     }
 
+    // The items the next summary is told to keep: what the Summarise Button says it keeps.
+    const count = tickedItems(review, pins).length
+
     // Summarise: a compaction from this press. It throws while a reply runs, so say so then.
     const summarise = async () => {
       if (busy || summarising) return
       summarising = true
       try {
         await update($, reviewAtom, was => ({ ...sound(was), ui: { ...sound(was).ui, action: 'summarise' as const, note: null, noteFor: null } }))
+        // The sensor counts the press; the summary it starts fills in what was kept (compaction.ts).
+        const mine = noteSummarise(count, await $.clock.now())
         try {
           const done = await $.session.compact()
           if ('skip' in done && done.skip) $.ui.toast(fill(COPY['checkpoint.summarise.skipped'], { reason: done.skip }))
         } catch {
           $.ui.toast(COPY['health.busy.reply'])
         } finally {
+          // A summary that went through filled in the press's `after` during compact() (compaction.ts); none is coming now.
+          endSummarise(mine)
           await update($, reviewAtom, was => ({ ...sound(was), ui: { ...sound(was).ui, action: null } }))
         }
       } finally {
@@ -118,14 +125,17 @@ export const register: Register = on => {
     const readd = async () => {
       const now = await $.clock.now()
       let added = 0
+      let ids: string[] = []
       await update($, reviewAtom, was => {
         const current = sound(was)
         const put = readdMissing(current, now)
         added = put.readded.length - current.readded.length
+        ids = put.readded.slice(current.readded.length).map(item => item.id)
         return { ...put, seen: true, ui: { ...put.ui, note: null, noteFor: null } }
       })
       // The sensor counts these as added back when the next reply ends (drainSensor).
       memory.added += added
+      noteReadd(ids, now)
       if (added > 0) $.ui.toast(COPY['checkpoint.readd.done'])
     }
 
@@ -133,7 +143,6 @@ export const register: Register = on => {
     const { Box, Text, Button } = table
 
     // The one Button: what to do about the state.
-    const count = tickedItems(review, pins).length
     const action =
       state === 'review'
         ? { key: 'readd', label: running === 'readd' ? COPY['checkpoint.readd.busy'] : readdLabel(lostCount(review)), hotkey: 'r', primary: true, dim: running === 'readd', press: () => void readd() }

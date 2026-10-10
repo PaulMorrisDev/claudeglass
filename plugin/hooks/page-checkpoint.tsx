@@ -1,7 +1,7 @@
 import type { RenderElement } from 'claude-code'
 
 import type { GlassKeepItem, GlassMark, GlassReviewed, GlassReviewUi } from '../types'
-import { isTicked, keepCandidates, lostItems, lostSaid, MAX_PINS, memory, newPin, splitKeep, SUGGESTED_SHOWN, tickedItems } from './compaction-memory'
+import { isTicked, keepCandidates, lostItems, lostSaid, MAX_PINS, memory, newPin, noteTweak, splitKeep, SUGGESTED_SHOWN, tickedItems } from './compaction-memory'
 import { formatTokens, localTime, percent } from './fmt'
 import { COPY } from './generated/copy.js'
 import { judgePrompt, MARK_SYMBOL, parseJudge, saidTotal, tally } from './lib/coverage.js'
@@ -205,7 +205,7 @@ function last(
   patch: (change: Partial<GlassReviewUi>) => Promise<void>,
   noteAt: NonNullable<GlassReviewUi['noteFor']> | null,
 ): RenderElement {
-  const { table, review, kit } = context
+  const { table, review, kit, view } = context
   const { Box, Text, Button } = table
   const after = review.after as GlassReviewed
   const ui = review.ui
@@ -249,11 +249,14 @@ function last(
     try {
       const answer = await kit.ask(HAIKU, prompt, JUDGE_ANSWER_TOKENS)
       if ('reason' in answer) {
+        noteTweak('check', lost.length, undefined, view.now)
         await patch({ note: COPY['checkpoint.check.failed'], noteFor: 'check' })
         return
       }
       const marks = { ...after.marks, ...parseJudge(answer.text, judgeable) }
       const done = tally(judgeable, marks).counts
+      // The sensor counts the press: what the quick check had missing, and what the model's marks leave missing (counts only).
+      noteTweak('check', lost.length, lostSaid({ ...after, marks }).length, view.now)
       const note = fill(COPY['checkpoint.check.done'], { count: judgeable.length, found: done.found, partly: done.partly, missing: done.missing })
       await kit.updateReview(was => {
         const judged = was.after === null ? null : { ...was.after, marks, judged: true, judgedTokens: answer.input + answer.output }

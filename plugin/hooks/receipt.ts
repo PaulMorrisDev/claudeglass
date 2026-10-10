@@ -2,7 +2,7 @@ import { atom, read, update } from 'claude-code'
 import type { Register } from 'claude-code'
 
 import type { GlassReview } from '../types'
-import { emptyReview, sound } from './compaction-memory'
+import { emptyReview, settleReadds, sound } from './compaction-memory'
 import { settleReceipts } from './lib/receipt.js'
 import { onTurnEnd } from './track'
 
@@ -33,7 +33,12 @@ export const register: Register = on => {
     if (texts === null) return result
     try {
       const review = sound(await read($, reviewAtom))
-      if (settleReceipts(review, texts) !== review) await update($, reviewAtom, (was): GlassReview => settleReceipts(sound(was), texts))
+      const settled = settleReceipts(review, texts)
+      if (settled !== review) {
+        await update($, reviewAtom, (was): GlassReview => settleReceipts(sound(was), texts))
+        // A re-add whose items are all settled now has its referenced count for the sensor (counts only).
+        settleReadds(settled)
+      }
     } catch (error) {
       $.ui.log(`claudeglass: receipt ${String(error)}`, { to: 'debug' })
     }

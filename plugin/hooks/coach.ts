@@ -1,7 +1,6 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register } from 'claude-code'
 
-import { workflowLaunched } from './agents'
 import type { Io } from './io'
 import {
   clearPlanStatus,
@@ -17,7 +16,6 @@ import {
   planSettled,
   planStatusSet,
   refusedPlan,
-  startedInBackground,
   submitted,
   turnEnded,
 } from './coach-mem'
@@ -205,12 +203,6 @@ export const register: Register = on => {
       await rememberProject($)
       const output: PlanOutput = result.result !== null && typeof result.result === 'object' ? (result.result as PlanOutput) : {}
       if (!failed && name !== 'ExitPlanMode') noteBackground(result.text, e.tool_use_id, await $.clock.now())
-      if (!failed && name === 'Workflow' && startedInBackground(args, result.result, result.text)) {
-        // Its reports come back as messages of their own, and each is answered by a reply that reads the whole session.
-        const snap = await live(io)
-        const settings = await getSettings(io)
-        if (await workflowLaunched(io, snap, settings, true, await $.clock.now())) await touch(io)
-      }
       if (name === 'ExitPlanMode' && output.isAgent !== true && output.awaitingLeaderApproval !== true) {
         const file = typeof output.filePath === 'string' && output.filePath !== '' ? output.filePath : null
         const plan = { chars: typeof output.plan === 'string' ? output.plan.length : 0, file }

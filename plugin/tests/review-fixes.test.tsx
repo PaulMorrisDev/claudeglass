@@ -13,7 +13,7 @@ const MINUTE = 60 * 1000
 
 const FIRST = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 118000, output: 0 }], usd: 0.5 }
 const AGAIN = { steps: [{ input: 500, cacheRead: 120000, cacheWrite: 500, output: 100 }], usd: 0.1 }
-// A main context past the 150k that earns report_reread.
+// A main context past the 150k that once earned report_reread.
 const BIG = { steps: [{ input: 2000, cacheRead: 0, cacheWrite: 158000, output: 0 }], usd: 0.9 }
 const PLAN = { plan: 'p'.repeat(4000), isAgent: false, filePath: '/work/plan.md' }
 const HAIKU: Step = { input: 1000, cacheRead: 4000, cacheWrite: 0, output: 300, model: 'claude-haiku-4-5', tools: ['Grep'] }
@@ -202,17 +202,14 @@ test('plan_fresh switched off in the coaching file gives no plan tip', async ($,
 
 // -- notes that reached nobody -----------------------------------------------------------
 
-test('report_reread for a Workflow started in the background over a big context is a note, once', async ($, on) => {
+test('a Workflow started in the background over a big context says nothing: report_reread is the capture hook\'s', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   await $.session.start(START)
   await reply($, world, BIG)
   await tool($, 'Workflow', { run_in_background: true })
-  expect(notes(world)).toHaveLength(1)
-  expect(notes(world)[0]).toMatch(/^● Glass · This session holds about 160k tokens, and the reply to each report/)
-  // The same note rests.
   await tool($, 'Workflow', { run_in_background: true })
-  expect(notes(world)).toHaveLength(1)
+  expect(notes(world)).toEqual([])
   expect(state.statuses).toEqual([])
   expect(faults(world)).toEqual([])
 })
@@ -245,14 +242,14 @@ test('a Workflow started in the background with coaching off says nothing', asyn
   expect(faults(world)).toEqual([])
 })
 
-test('a Workflow whose result says it launched in the background counts as one', async ($, on) => {
+test('a Workflow whose result says it launched in the background says nothing either', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   state.results.Workflow = { result: {}, text: 'Workflow launched in background. Task ID: wf1' }
   await $.session.start(START)
   await reply($, world, BIG)
   await tool($, 'Workflow')
-  expect(notes(world)).toHaveLength(1)
+  expect(notes(world)).toEqual([])
 })
 
 test('a go-ahead typed after the plan was sent back approves it: the fresh-start tip, once', async ($, on) => {
@@ -415,40 +412,27 @@ test('a run the engine\'s list no longer names has ended, and the polling stops'
   expect(faults(world)).toEqual([])
 })
 
-test('split_run is kept on the run only when it has an Agent call of the main session\'s; any other waits for the turn-end note', async ($, on) => {
+test('a long brief or a run that ended too big earns no split_run note, on the run or at a later reply', async ($, on) => {
   const long = `${'Study this in depth. '.repeat(400)}\nEnd.`
   const world = prepare(on)
   rig(on)
   await $.session.start(START)
   await reply($, world, FIRST)
 
-  // A workflow's agent: foreground, but with no Agent call behind it, so no note on the run.
+  // A workflow's agent, and a run another agent started: followed, with nothing said.
   const id = await spawn($, world, { prompt: long, workflow: true })
   await step($, world, id, HAIKU, 0)
   await finish($, world, id)
-  expect(runs().find(one => one.id === id)?.notes).toEqual([])
-  expect(notes(world)).toEqual([])
-
-  // It is told once at the end of a later reply.
-  await reply($, world, { gap: 40 * MINUTE, steps: [{ cacheRead: 120000, cacheWrite: 1000, output: 200 }], usd: 0.05 })
-  expect(notes(world)).toHaveLength(1)
-  expect(notes(world)[0]).toMatch(/^● Glass · In this session .*6,000 characters/)
-  expect(faults(world)).toEqual([])
-})
-
-test('a run another agent started has no Agent call of the main session\'s either: split_run waits for the turn-end note', async ($, on) => {
-  const long = `${'Study this in depth. '.repeat(400)}\nEnd.`
-  const world = prepare(on)
-  rig(on)
-  await $.session.start(START)
-  await reply($, world, FIRST)
   const parent = await spawn($, world, { background: true })
   const child = await spawn($, world, { prompt: long, parent })
   await step($, world, child, HAIKU, 0)
   await finish($, world, child)
+  expect(runs().map(one => one.id)).toEqual(expect.arrayContaining([id, child]))
+  expect(runs().every(one => !('notes' in one))).toBe(true)
   expect(notes(world)).toEqual([])
+
   await reply($, world, { gap: 40 * MINUTE, steps: [{ cacheRead: 120000, cacheWrite: 1000, output: 200 }], usd: 0.05 })
-  expect(notes(world)).toHaveLength(1)
+  expect(notes(world)).toEqual([])
   expect(faults(world)).toEqual([])
 })
 
@@ -475,23 +459,17 @@ test('an Agent call\'s own usage is not taken for the run\'s cost: the run keeps
 
 // -- /clear ------------------------------------------------------------------------------
 
-test('a /clear leaves no plan sent back and no waiting split_run behind', async ($, on) => {
-  const long = `${'Study this in depth. '.repeat(400)}\nEnd.`
+test('a /clear leaves no plan sent back behind', async ($, on) => {
   const world = prepare(on)
   const state = rig(on)
   state.results.ExitPlanMode = { result: PLAN, isError: true }
   await planned($, world, state)
   await tool($, 'ExitPlanMode')
-  const id = await spawn($, world, { prompt: long, background: true })
-  await step($, world, id, HAIKU, 0)
-  await finish($, world, id)
 
   await $.session.end({ sessionId: SESSION, reason: 'clear' } as never)
   await $.session.start(START)
   await reply($, world, FIRST)
   await send($, state, 'go ahead')
   expect(state.statuses.filter(one => one !== undefined)).toEqual([])
-  await reply($, world, { gap: 40 * MINUTE, steps: [{ cacheRead: 120000, cacheWrite: 1000, output: 200 }], usd: 0.05 })
-  expect(notes(world).filter(line => /6,000 characters/.test(line))).toEqual([])
   expect(faults(world)).toEqual([])
 })

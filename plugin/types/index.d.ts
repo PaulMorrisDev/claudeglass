@@ -109,8 +109,6 @@ export type GlassAgent = {
   /** Characters of the task prompt, and times it summarised its own context. */
   briefChars: number
   compactions: number
-  /** Coaching notes shown on its row (`report_reread`, `split_run`), with the words shown. */
-  notes: { kind: string; text: string }[]
   /** The agent that started it, when another agent did (its row has no Agent call of the main session's under it). */
   parentAgentId?: string
   /**
@@ -127,7 +125,22 @@ export type GlassSensorEvent =
   | { ts: number; event: 'note'; kind: string; surface: string; outcome: string }
   | { ts: number; event: 'rebuild'; kind: string; outcome: 'expected' | 'unexpected' }
   | { ts: number; event: 'cold_send'; outcome: 'warned' | 'unwarned' }
-  | { ts: number; event: 'compaction'; kind: GlassReviewTrigger; kept: number; missing: number; added: number }
+  | {
+      ts: number
+      event: 'compaction'
+      kind: GlassReviewTrigger
+      kept: number
+      missing: number
+      added: number
+      /** 1 when the hook gave the summariser a keep instruction, 0 when it did not. */
+      instructed?: 0 | 1
+      /** Put-back items the replies since have referenced, as of the summary. */
+      referenced?: number
+    }
+  | { ts: number; event: 'tweak'; kind: GlassTweakKind; before: number; after?: number }
+
+/** The buttons the mod offers whose press the sensor counts: summarise with the keep list, re-add, check with a model, hold. */
+export type GlassTweakKind = 'summarise' | 'readd' | 'check' | 'hold'
 
 export type GlassPendingNote = {
   ts: number

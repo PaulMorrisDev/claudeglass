@@ -121,7 +121,7 @@ export const COPY = {
   "log.compacted.missing": "{count} things you said may be missing.",
   "log.compacted.missing.one": "1 thing you said may be missing.",
   "log.compacted.ok.said": "Everything you said is in the summary.",
-  "log.compacted.review": "Press Review above the prompt to check.",
+  "log.compacted.review": "Press Re-add above the prompt to put them back.",
   "log.compacted.tokens": "{before} became {after}, about {amount}.",
   "log.compacted.tokens.plain": "{before} became {after}.",
   "note.lead": "Glass",
@@ -139,7 +139,7 @@ export const COPY = {
   "startup.agents": "Agents and CLAUDE.md",
   "startup.agents.got": "Received it: {types}",
   "startup.agents.skipped": "Did not receive it: {types}",
-  "startup.compare": "Claude Code counts {theirs} of startup context on the Now page. This list adds up to about {mine}.",
+  "startup.compare": "Claude Code counts {theirs} of startup context in /context. This list adds up to about {mine}.",
   "startup.compare.why": "The list estimates from text at a fixed rate. It leaves out the input schemas of tools, which are most of their size.",
   "startup.control": "You control",
   "startup.deferred.servers": "{count} more servers load only when asked for: {names}",
@@ -191,21 +191,17 @@ export const COPY = {
 };
 
 export const GLOSSARY = {
-  "conversation": {
-    "body": "Your messages and Claude's replies. It grows with every reply until Claude summarises it or you /clear.",
-    "title": "Conversation so far"
-  },
   "full": {
-    "body": "The share of the context Claude Code allows, as /context shows it. Claude summarises a little before 100%, at the mark on the bar.",
+    "body": "The share of the context Claude Code allows, as /context shows it. Claude summarises a little before 100%.",
     "title": "How full the context is"
   },
   "keep": {
     "body": "The instructions, decisions, files and values the next summary is told to carry. Untick an item to leave it out. Pin a line to keep it until you /clear.",
     "title": "Keep list"
   },
-  "output": {
-    "body": "Command output, search results and files Claude read stay in the conversation, and every later reply re-reads them. It's estimated from how much each tool call added. Ask for only the part you need.",
-    "title": "Tool output kept in context"
+  "receipt": {
+    "body": "After you re-add lost items, Glass watches the next ten replies. Referenced means a reply used the item; not referenced means none did.",
+    "title": "Re-add receipt"
   },
   "runway": {
     "body": "The room left, divided by how much each recent reply added. Finish the task, or /compact with a focus, before it runs out.",
